@@ -64,8 +64,11 @@ FEIR_SIGNING_SEED=$(openssl rand -hex 32) docker compose -f deploy/docker-compos
 ```
 
 Every claim is bounded by [`docs/coverage-limits.md`](docs/coverage-limits.md) (Level 1 / 2 / 3).
-Deferred to Phase 2 (documented): Postgres + content-store swaps, per-project authz/RBAC,
-OTel ingest, selective-disclosure exports, the credential broker (Level 3).
+
+**Phase 2 in progress** (enforcement + production-readiness, each commit adversarially reviewed):
+- ☑ **Authority verification** — `evidence_sig` checked under pinned authority keys (#4 *declared → verified*), record_id-bound so an evidence triple can't be replayed.
+- ☑ **Project API-key auth** (`auth`), **OTel/OpenInference ingest** (`/v2/otel/traces`), **content-addressed blob store** (`content`), **append-only checkpoint witness + RFC 3161 TSA client** (`witness`) — four packages built in parallel via a workflow, wired into the server.
+- ☐ Remaining: Postgres store swap, content commitments + selective-disclosure export, the credential broker (Level 3 — the moat).
 
 ## Verify an export offline
 
