@@ -1,0 +1,16 @@
+{
+  "name": "@feir/sdk",
+  "version": "0.1.0",
+  "description": "Flight recorder SDK for AI agents — tamper-evident, authority-bound decision evidence.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

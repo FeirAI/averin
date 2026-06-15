@@ -7,21 +7,41 @@ import (
 
 func TestRedactsCommonSecrets(t *testing.T) {
 	cases := []struct {
-		in   string
-		kind string
+		secret string
+		kind   string
 	}{
-		{"my key is sk-abcdefghijklmnop1234 ok", "openai"},
-		{"Authorization: Bearer abcdefghij1234567890", "bearer"},
-		{"AKIAIOSFODNN7EXAMPLE here", "aws-akid"},
-		{"ghp_aBcDeFgHiJkLmNoPqRsT12345 token", "github"},
+		{"sk-abcdefghijklmnop1234", "openai"},
+		{"sk-ant-abcdefghijklmnop1234", "anthropic"},
+		{"AKIAIOSFODNN7EXAMPLE", "aws-akid"},
+		{"ghp_aBcDeFgHiJkLmNoPqRsT12345", "github"},
+		{"github_pat_aBcDeFgHiJkLmNoPqRsT12345", "github"},
+		{"AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456", "google"},
+		{"sk_live_abcdefghijklmnop1234", "stripe"},
+		{"hf_abcdefghijklmnop1234", "huggingface"},
+		{"eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0NQ.SflKxwRJSMeKKF2QT4", "jwt"},
+		{"Bearer abcdefghij1234567890", "bearer"},
 	}
 	for _, c := range cases {
-		out := Redact(c.in)
-		if strings.Contains(out, "sk-abc") || strings.Contains(out, "AKIAIOSFODNN7EXAMPLE") {
-			t.Fatalf("secret leaked: %s", out)
+		in := "context " + c.secret + " more"
+		out := Redact(in)
+		if strings.Contains(out, c.secret) {
+			t.Fatalf("secret %q leaked: %s", c.secret, out)
 		}
 		if !strings.Contains(out, "[REDACTED:"+c.kind+"]") {
-			t.Fatalf("expected %s marker, got: %s", c.kind, out)
+			t.Fatalf("expected %s marker for %q, got: %s", c.kind, c.secret, out)
+		}
+	}
+}
+
+func TestRedactsPemAndGenericKeyValue(t *testing.T) {
+	pem := "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqh\nkiG9w0BAQEFAASCBKcw\n-----END PRIVATE KEY-----"
+	if out := Redact(pem); strings.Contains(out, "MIIEvQ") {
+		t.Fatalf("PEM body leaked: %s", out)
+	}
+	for _, kv := range []string{`"api_key":"sup3rsecretvalue123"`, `password = hunter2hunter2`, `access_token: abcdef123456`} {
+		out := Redact(kv)
+		if strings.Contains(out, "sup3rsecret") || strings.Contains(out, "hunter2hunter2") || strings.Contains(out, "abcdef123456") {
+			t.Fatalf("kv secret leaked: %s", out)
 		}
 	}
 }
