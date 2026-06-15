@@ -1,29 +1,31 @@
 //! Offline bundle verification (RCP §10.1) — the capstone the CLI and WASM verifier call.
 //!
-//! Given an export bundle (records + full checkpoint history + public keys [+ anchors, piece 6]),
-//! produce a [`VerifyReport`]: per-record trust annotations, DAG validity, and checkpoint-chain
-//! soundness (omission #1 / fork #2 detection). Never panics on attacker-controlled input.
+//! Given an export bundle (records + full checkpoint history + public keys + anchors), produce a
+//! [`VerifyReport`]: per-record trust annotations, DAG validity, and checkpoint-chain soundness
+//! (omission #1 / fork #2 detection), plus external-anchor checks (backdating #3, key-compromise
+//! #9). Never panics on attacker-controlled input.
 //!
-//! **Trust root.** The bundle's `keys` list is *attacker-supplied*. Pass externally-pinned keys via
-//! [`VerifyOptions::trusted_keys`] (obtained out-of-band: the customer's published key, a key-
-//! transparency record, etc.) to get authenticity. Without pinning, the report sets
-//! `keys_externally_pinned = false` and proves only *internal consistency under the bundle's own
-//! key claims* — the verifier never implies authenticity it cannot back. A `revoked`/`compromised`
-//! status from EITHER the record's key block OR the bundle key entry (whichever is worse)
-//! downgrades affected records to `Untrusted` (anchored-before rule: M1 piece 6).
+//! **Trust roots.** The bundle's `keys` list and `anchor` tokens are *attacker-supplied*. Pass
+//! externally-pinned signing keys via [`VerifyOptions::trusted_keys`] and trusted TSA keys via
+//! [`VerifyOptions::trusted_tsa_keys`] (both obtained out-of-band). Without signing-key pinning the
+//! report sets `keys_externally_pinned = false` and proves only *internal consistency under the
+//! bundle's own key claims*. A `revoked`/`compromised` status (worst of record-asserted and bundle-
+//! asserted) downgrades a record to `Untrusted` **unless** an anchored checkpoint with anchor-time
+//! `≤ status_changed_at` transitively commits it (RCP §10.2, threat #9).
 
+use crate::anchor::verify_anchor;
 use crate::canon::CanonValue;
 use crate::checkpoint::{validate_chain, verify_checkpoint_sealed};
 use crate::dag;
-use crate::record::verify_sealed;
+use crate::record::{validate_record_shape, verify_content_hash, verify_sealed};
 use crate::sign::decode_pubkey;
 use ed25519_dalek::VerifyingKey;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustLevel {
     /// L1: bytes sealed by a valid (and, if pinning is in effect, externally-trusted) key and
-    /// unchanged since.
+    /// unchanged since — or sealed by a later-compromised key but anchored before the compromise.
     IntegrityProven,
     /// Integrity/signature failed, key unavailable/unpinned, or key revoked/compromised without a
     /// qualifying anchor — provenance is not trustworthy.
@@ -62,26 +64,60 @@ pub struct VerifyReport {
     pub first_broken_link: Option<String>,
 }
 
+/// An out-of-band pinned key. Beyond the public-key bytes it may carry the *authoritative* key
+/// status and compromise time (e.g. from a key-transparency record) — which the verifier trusts
+/// over the bundle's self-asserted claims, closing the future-dated-compromise escalation.
+pub struct TrustedKey {
+    pub vk: VerifyingKey,
+    pub status: Option<String>,
+    pub status_changed_at: Option<String>,
+}
+
+impl From<VerifyingKey> for TrustedKey {
+    fn from(vk: VerifyingKey) -> Self {
+        TrustedKey {
+            vk,
+            status: None,
+            status_changed_at: None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct VerifyOptions {
-    /// If `Some`, a record is only `IntegrityProven` when its resolved key is in this set
-    /// (out-of-band trust root). If `None`, trust rests on the bundle's self-asserted key list.
-    pub trusted_keys: Option<Vec<VerifyingKey>>,
+    /// If `Some`, a record is only `IntegrityProven` when its resolved key is in this set. When a
+    /// pinned key carries `status`/`status_changed_at`, those authoritative values override the
+    /// bundle's self-asserted claims (so an attacker cannot future-date a compromise to upgrade).
+    pub trusted_keys: Option<Vec<TrustedKey>>,
+    /// Trusted TSA public keys (out-of-band) used to verify external-anchor tokens.
+    pub trusted_tsa_keys: Vec<VerifyingKey>,
 }
 
 struct KeyEntry {
     vk: VerifyingKey,
     status: String,
-    #[allow(dead_code)] // consumed by the anchored-before rule in piece 6
     status_changed_at: Option<String>,
+}
+
+/// Provisional per-record state from pass 1, finalized in pass 2 after anchors are known.
+struct Pending {
+    index: usize,
+    record_id: String,
+    content_hash: String,
+    observed_via: String,
+    integrity_ok: bool,
+    signature_ok: bool,
+    pinned: bool,
+    project_ok: bool,
+    eff_status: String,
+    status_changed_at: Option<String>,
+    notes: Vec<String>,
 }
 
 fn s(v: &CanonValue, k: &str) -> Option<String> {
     v.get(k).and_then(|x| x.as_str()).map(|x| x.to_string())
 }
 
-/// A present `keys`/`records`/`checkpoints` field MUST be an array — never silently coerce a
-/// wrong-typed field to empty (#8); flag it and fall back to `empty`.
 fn arr<'a>(
     bundle: &'a CanonValue,
     k: &str,
@@ -102,7 +138,6 @@ fn arr<'a>(
     }
 }
 
-/// Severity rank of a key status (higher = less trustworthy). Unknown ranks worst.
 fn status_rank(s: &str) -> u8 {
     match s {
         "active" => 0,
@@ -121,6 +156,35 @@ fn worst_status(a: &str, b: &str) -> String {
     .to_string()
 }
 
+/// All content_hashes reachable as causal ancestors of `frontier` (inclusive) — the set a
+/// checkpoint commits to (RCP §10.2 "transitively commits").
+fn committed_set(
+    records: &[CanonValue],
+    by_hash: &BTreeMap<String, usize>,
+    frontier: &[String],
+) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut stack: Vec<String> = frontier.to_vec();
+    while let Some(h) = stack.pop() {
+        if !seen.insert(h.clone()) {
+            continue;
+        }
+        if let Some(&idx) = by_hash.get(&h) {
+            if let Some(parents) = records[idx]
+                .get("causal_prev_hashes")
+                .and_then(|v| v.as_array())
+            {
+                for p in parents {
+                    if let Some(ps) = p.as_str() {
+                        stack.push(ps.to_string());
+                    }
+                }
+            }
+        }
+    }
+    seen
+}
+
 pub fn verify_bundle_json(text: &str) -> Result<VerifyReport, crate::canon::CanonError> {
     Ok(verify_bundle(&CanonValue::parse(text)?))
 }
@@ -131,11 +195,9 @@ pub fn verify_bundle(bundle: &CanonValue) -> VerifyReport {
 
 pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
     let mut issues: Vec<String> = Vec::new();
-
     let project_id = s(bundle, "project_id");
     let keys_externally_pinned = opts.trusted_keys.is_some();
 
-    // ---- strict shape: a present keys/records/checkpoints field MUST be an array (#8) ----
     let empty: Vec<CanonValue> = Vec::new();
     let key_entries = arr(bundle, "keys", &empty, &mut issues);
     let records = arr(bundle, "records", &empty, &mut issues);
@@ -150,56 +212,51 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // ---- 1. key store ----
     let mut keys: BTreeMap<(String, i64), KeyEntry> = BTreeMap::new();
     for e in key_entries {
-        let (id, epoch, pk) = match (
+        match (
             s(e, "signing_key_id"),
             e.get("key_epoch").and_then(|v| v.as_int()),
             s(e, "public_key"),
         ) {
-            (Some(a), Some(b), Some(c)) => (a, b, c),
-            _ => {
-                issues.push("key entry missing signing_key_id/key_epoch/public_key".into());
-                continue;
-            }
-        };
-        match decode_pubkey(&pk) {
-            Ok(vk) => {
-                keys.insert(
-                    (id, epoch),
-                    KeyEntry {
-                        vk,
-                        status: s(e, "key_status").unwrap_or_else(|| "active".into()),
-                        status_changed_at: s(e, "status_changed_at"),
-                    },
-                );
-            }
-            Err(err) => issues.push(format!("key {id}/{epoch} has bad public_key: {err}")),
+            (Some(id), Some(epoch), Some(pk)) => match decode_pubkey(&pk) {
+                Ok(vk) => {
+                    keys.insert(
+                        (id, epoch),
+                        KeyEntry {
+                            vk,
+                            status: s(e, "key_status").unwrap_or_else(|| "active".into()),
+                            status_changed_at: s(e, "status_changed_at"),
+                        },
+                    );
+                }
+                Err(err) => issues.push(format!("key {id}/{epoch} bad public_key: {err}")),
+            },
+            _ => issues.push("key entry missing signing_key_id/key_epoch/public_key".into()),
         }
     }
-
-    let is_trusted = |vk: &VerifyingKey| -> bool {
-        match &opts.trusted_keys {
-            Some(set) => set.contains(vk),
-            None => true, // no pinning: bundle's key list is the (self-asserted) root
-        }
+    let pinned_for = |vk: &VerifyingKey| -> Option<&TrustedKey> {
+        opts.trusted_keys
+            .as_ref()
+            .and_then(|set| set.iter().find(|t| &t.vk == vk))
+    };
+    let is_trusted = |vk: &VerifyingKey| match &opts.trusted_keys {
+        Some(_) => pinned_for(vk).is_some(),
+        None => true,
     };
 
-    // ---- 2. per-record verification + trust annotation ----
-    let mut record_trust = Vec::with_capacity(records.len());
-    let mut records_proven = 0usize;
-
+    // ---- 2. per-record pass 1 (provisional) ----
+    let mut pending: Vec<Pending> = Vec::with_capacity(records.len());
     for (i, rec) in records.iter().enumerate() {
-        let record_id = s(rec, "record_id").unwrap_or_default();
-        let content_hash = s(rec, "content_hash").unwrap_or_default();
-        let observed_via = s(rec, "observed_via").unwrap_or_else(|| "unknown".into());
         let mut notes = Vec::new();
-
-        // project_id consistency (#6)
-        if let Some(pid) = &project_id {
-            if s(rec, "project_id").as_deref() != Some(pid.as_str()) {
-                notes.push("project_id does not match bundle".into());
+        let project_ok = match &project_id {
+            Some(pid) => {
+                let m = s(rec, "project_id").as_deref() == Some(pid.as_str());
+                if !m {
+                    notes.push("project_id does not match bundle".into());
+                }
+                m
             }
-        }
-
+            None => true,
+        };
         let rec_key_status = rec
             .get("key")
             .and_then(|k| s(k, "key_status"))
@@ -209,7 +266,6 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             .get("key")
             .and_then(|k| k.get("key_epoch"))
             .and_then(|v| v.as_int());
-
         let resolved = match (key_id, key_epoch) {
             (Some(id), Some(ep)) => keys.get(&(id, ep)),
             _ => {
@@ -218,73 +274,56 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             }
         };
 
-        let integ = crate::record::validate_record_shape(rec)
-            .and_then(|()| crate::record::verify_content_hash(rec))
+        let integrity_ok = validate_record_shape(rec)
+            .and_then(|()| verify_content_hash(rec))
             .is_ok();
 
-        let (integrity_ok, signature_ok, key_status, pinned) = match resolved {
+        let (signature_ok, eff_status, pinned, status_changed_at) = match resolved {
             Some(entry) => {
-                let sig_ok = verify_sealed(rec, &entry.vk).is_ok() && integ;
+                let sig_ok = integrity_ok && verify_sealed(rec, &entry.vk).is_ok();
                 if !sig_ok {
                     if let Err(e) = verify_sealed(rec, &entry.vk) {
                         notes.push(format!("verify failed: {e}"));
                     }
                 }
-                // effective status = worst of record-asserted and bundle-asserted (fail-safe, #4)
-                let eff = worst_status(&rec_key_status, &entry.status);
-                (integ, sig_ok, eff, is_trusted(&entry.vk))
+                let pin = pinned_for(&entry.vk);
+                // worst of record-asserted, bundle-asserted, and (if pinned) the authoritative
+                // pinned status — fail-safe in all directions.
+                let mut eff = worst_status(&rec_key_status, &entry.status);
+                if let Some(ps) = pin.and_then(|t| t.status.as_deref()) {
+                    eff = worst_status(&eff, ps);
+                }
+                // Compromise time used for the anchored-before upgrade: under pinning ONLY the
+                // auditor-supplied (authoritative) time is trusted; the bundle's self-asserted
+                // time is ignored so an attacker cannot future-date a compromise to upgrade. Without
+                // pinning (evidence-for-yourself), the bundle's self-asserted time is best-effort.
+                let changed_at = if keys_externally_pinned {
+                    pin.and_then(|t| t.status_changed_at.clone())
+                } else {
+                    entry.status_changed_at.clone()
+                };
+                (sig_ok, eff, is_trusted(&entry.vk), changed_at)
             }
             None => {
                 notes.push("no public key available — signature unverifiable".into());
-                (
-                    integ,
-                    false,
-                    worst_status(&rec_key_status, "unknown"),
-                    false,
-                )
+                (false, worst_status(&rec_key_status, "unknown"), false, None)
             }
         };
-
         if keys_externally_pinned && !pinned && signature_ok {
             notes.push("signed by a key that is NOT externally pinned".into());
         }
 
-        let pin_ok = if keys_externally_pinned { pinned } else { true };
-        let project_ok = notes
-            .iter()
-            .all(|n| !n.contains("project_id does not match"));
-        let trust = if integrity_ok
-            && signature_ok
-            && pin_ok
-            && project_ok
-            && matches!(key_status.as_str(), "active" | "retired")
-        {
-            records_proven += 1;
-            TrustLevel::IntegrityProven
-        } else {
-            if matches!(key_status.as_str(), "revoked" | "compromised") {
-                notes.push(format!(
-                    "key status '{key_status}': trustworthy only if anchored before status change (anchor check: piece 6)"
-                ));
-            }
-            TrustLevel::Untrusted
-        };
-        if trust == TrustLevel::Untrusted {
-            issues.push(format!(
-                "record {i} ({record_id}) untrusted: {}",
-                notes.last().cloned().unwrap_or_default()
-            ));
-        }
-
-        record_trust.push(RecordTrust {
+        pending.push(Pending {
             index: i,
-            record_id,
-            content_hash,
+            record_id: s(rec, "record_id").unwrap_or_default(),
+            content_hash: s(rec, "content_hash").unwrap_or_default(),
+            observed_via: s(rec, "observed_via").unwrap_or_else(|| "unknown".into()),
             integrity_ok,
             signature_ok,
-            key_status,
-            observed_via,
-            trust,
+            pinned,
+            project_ok,
+            eff_status,
+            status_changed_at,
             notes,
         });
     }
@@ -298,13 +337,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
     };
 
-    // ---- 4. checkpoint chain ----
+    // ---- 4. checkpoints + anchors ----
     let mut checkpoints_verified = 0usize;
     let mut checkpoints_anchored = 0usize;
+    // (seq, anchored_ts, frontier) for each checkpoint with a verified anchor
+    let mut anchored: Vec<(i64, String, Vec<String>)> = Vec::new();
     for (i, cp) in checkpoints.iter().enumerate() {
-        if cp.get("anchor").is_some() {
-            checkpoints_anchored += 1;
-        }
         if let Some(pid) = &project_id {
             if s(cp, "project_id").as_deref() != Some(pid.as_str()) {
                 issues.push(format!("checkpoint {i} project_id does not match bundle"));
@@ -328,11 +366,50 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             },
             None => issues.push(format!("checkpoint {i}: no trusted public key to verify")),
         }
+        if let Some(anchor) = cp.get("anchor") {
+            checkpoints_anchored += 1;
+            if !opts.trusted_tsa_keys.is_empty() {
+                let cph = s(cp, "checkpoint_hash").unwrap_or_default();
+                match verify_anchor(&cph, anchor, &opts.trusted_tsa_keys) {
+                    Ok(ts) => {
+                        let seq = cp
+                            .get("checkpoint_seq")
+                            .and_then(|v| v.as_int())
+                            .unwrap_or(0);
+                        let frontier: Vec<String> = cp
+                            .get("frontier")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|h| h.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        anchored.push((seq, ts, frontier));
+                    }
+                    Err(e) => issues.push(format!("checkpoint {i} anchor invalid: {e}")),
+                }
+            }
+        }
     }
-
-    // require at least one checkpoint for any non-empty record set (#6)
     if !records.is_empty() && checkpoints.is_empty() {
         issues.push("no checkpoints: a non-empty run must be checkpoint-committed".into());
+    }
+
+    // anchored times must be non-decreasing with seq (RCP §10.1 step 5 — backdating #3).
+    // NOTE: this compares only checkpoints that carry a *verified* anchor. Partial anchoring does
+    // not enable a meaningful backdate: the latest anchored checkpoint cryptographically bounds the
+    // existence time of all its causal ancestors, and `agent_ts` is untrusted regardless. Anchoring
+    // every checkpoint is the exporter's responsibility, not a verifier PASS invariant.
+    let mut sorted_anchored = anchored.clone();
+    sorted_anchored.sort_by_key(|(seq, _, _)| *seq);
+    for w in sorted_anchored.windows(2) {
+        if w[1].1 < w[0].1 {
+            issues.push(format!(
+                "anchor time decreased across checkpoints {} -> {} (backdating, threat #3)",
+                w[0].0, w[1].0
+            ));
+        }
     }
 
     let mut chain_ok = true;
@@ -347,7 +424,75 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         _ => {}
     }
 
-    // issues are pushed in verification order, so the first is the first broken link.
+    // ---- 5. finalize per-record trust (pass 2) ----
+    // Precompute the committed set ONCE per anchored checkpoint (not per record×checkpoint) to
+    // avoid quadratic blowup on large bundles.
+    let anchored_committed: Vec<(String, BTreeSet<String>)> = match dag_opt.as_ref() {
+        Some(d) => anchored
+            .iter()
+            .map(|(_, ts, frontier)| (ts.clone(), committed_set(records, &d.by_hash, frontier)))
+            .collect(),
+        None => Vec::new(),
+    };
+    let anchored_before = |content_hash: &str, changed_at: &str| -> bool {
+        anchored_committed
+            .iter()
+            .any(|(ts, committed)| ts.as_str() <= changed_at && committed.contains(content_hash))
+    };
+
+    let mut record_trust = Vec::with_capacity(pending.len());
+    let mut records_proven = 0usize;
+    for mut p in pending {
+        let base_ok = p.integrity_ok && p.signature_ok && p.project_ok && p.pinned;
+        let trust = if !base_ok {
+            TrustLevel::Untrusted
+        } else if matches!(p.eff_status.as_str(), "active" | "retired") {
+            TrustLevel::IntegrityProven
+        } else if matches!(p.eff_status.as_str(), "revoked" | "compromised") {
+            match &p.status_changed_at {
+                Some(changed) if anchored_before(&p.content_hash, changed) => {
+                    p.notes.push(format!(
+                        "key {}: record anchored before status change — trustworthy",
+                        p.eff_status
+                    ));
+                    TrustLevel::IntegrityProven
+                }
+                _ => {
+                    p.notes.push(format!(
+                        "key {}: NOT anchored before status change — untrusted (threat #9)",
+                        p.eff_status
+                    ));
+                    TrustLevel::Untrusted
+                }
+            }
+        } else {
+            TrustLevel::Untrusted
+        };
+
+        if trust == TrustLevel::IntegrityProven {
+            records_proven += 1;
+        } else {
+            issues.push(format!(
+                "record {} ({}) untrusted: {}",
+                p.index,
+                p.record_id,
+                p.notes.last().cloned().unwrap_or_default()
+            ));
+        }
+
+        record_trust.push(RecordTrust {
+            index: p.index,
+            record_id: p.record_id,
+            content_hash: p.content_hash,
+            integrity_ok: p.integrity_ok,
+            signature_ok: p.signature_ok,
+            key_status: p.eff_status,
+            observed_via: p.observed_via,
+            trust,
+            notes: p.notes,
+        });
+    }
+
     let first_broken_link = issues.first().cloned();
     let ok = issues.is_empty()
         && records_proven == records.len()

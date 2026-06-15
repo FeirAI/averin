@@ -183,6 +183,12 @@ fn set_field(obj: &CanonValue, key: &str, value: CanonValue) -> CanonValue {
     CanonValue::Object(members)
 }
 
+/// Attach an `anchor` block to a sealed checkpoint (after signing — the anchor is excluded from
+/// the `checkpoint_hash`/`sig` preimage, so this does not invalidate them).
+pub fn attach_anchor(cp: &CanonValue, anchor: CanonValue) -> CanonValue {
+    set_field(cp, "anchor", anchor)
+}
+
 /// Verify a single sealed checkpoint: domain, recomputed `checkpoint_hash`, and `sig`.
 pub fn verify_checkpoint_sealed(cp: &CanonValue, vk: &VerifyingKey) -> Result<(), CheckpointError> {
     let domain = str_field(cp, "domain")?;

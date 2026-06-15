@@ -5,6 +5,7 @@
 //! (`--features wasm`). The golden vectors in `/spec/golden-vectors` are the cross-target
 //! byte-for-byte contract (threat #10).
 
+pub mod anchor;
 pub mod b64;
 pub mod canon;
 pub mod checkpoint;
