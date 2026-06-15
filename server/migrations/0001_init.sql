@@ -52,6 +52,20 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     PRIMARY KEY (project_id, seq)
 );
 
+-- disclosures: the secret needed to reveal one committed low-entropy field on a selective_disclosure
+-- export — the content-store digest of the raw value + the nonce that opens its hiding commitment.
+-- Bound to (project_id, record_id, field); the signed record body carries only the commitment.
+-- Insert-only (the commitment for a field is immutable once sealed).
+CREATE TABLE IF NOT EXISTS disclosures (
+    project_id   text NOT NULL,
+    record_id    text NOT NULL,
+    field        text NOT NULL,
+    value_digest text NOT NULL,
+    nonce_hex    text NOT NULL,
+    inserted_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_id, record_id, field)
+);
+
 -- display_seq: per-(project, session) counter starting at 0. This is the one mutable cell in the
 -- store; the application only ever increments it (UPSERT ... next = next + 1). UPDATE is retained
 -- here (the counter must increment) and DELETE is revoked below. NOTE: display_seq is NOT
@@ -79,9 +93,11 @@ DO $$
 BEGIN
     EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON records     FROM PUBLIC';
     EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON checkpoints FROM PUBLIC';
+    EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON disclosures FROM PUBLIC';
     EXECUTE 'REVOKE         DELETE, TRUNCATE ON display_seq FROM PUBLIC';
     EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON records     FROM %I', CURRENT_USER);
     EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON checkpoints FROM %I', CURRENT_USER);
+    EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON disclosures FROM %I', CURRENT_USER);
     EXECUTE format('REVOKE         DELETE, TRUNCATE ON display_seq FROM %I', CURRENT_USER);
     IF (SELECT rolsuper FROM pg_roles WHERE rolname = CURRENT_USER) THEN
         RAISE NOTICE 'feir: migrating role % is a SUPERUSER, so REVOKE is a no-op and append-only is NOT database-enforced. Run the application under a dedicated least-privilege, non-owner role.', CURRENT_USER;

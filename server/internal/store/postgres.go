@@ -438,6 +438,52 @@ func (p *Postgres) NextCheckpointSeq(projectID string) (int64, error) {
 	return n, nil
 }
 
+// PutDisclosure records the secret that opens one committed field. Insert-only and idempotent on
+// (project_id, record_id, field): ON CONFLICT DO NOTHING, since the commitment for a field is
+// immutable once sealed (re-ingesting the same record must not change or duplicate its disclosure).
+func (p *Postgres) PutDisclosure(projectID string, d DisclosureSecret) error {
+	ctx := background()
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO disclosures (project_id, record_id, field, value_digest, nonce_hex)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (project_id, record_id, field) DO NOTHING
+	`, projectID, d.RecordID, d.Field, d.ValueDigest, d.NonceHex)
+	if err != nil {
+		return fmt.Errorf("store: put disclosure: %w", err)
+	}
+	return nil
+}
+
+// Disclosures returns every disclosure secret for the project, ordered by insertion. Never nil.
+func (p *Postgres) Disclosures(projectID string) ([]DisclosureSecret, error) {
+	ctx := background()
+	// Order canonically by the (record_id, field) key — unique within a project, so the result is
+	// fully deterministic and identical to Mem regardless of insertion timing (a same-timestamp tie
+	// must not reorder the export vs. the in-memory store).
+	rows, err := p.pool.Query(ctx, `
+		SELECT record_id, field, value_digest, nonce_hex
+		FROM disclosures
+		WHERE project_id = $1
+		ORDER BY record_id, field
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("store: disclosures: %w", err)
+	}
+	defer rows.Close()
+	out := []DisclosureSecret{}
+	for rows.Next() {
+		var d DisclosureSecret
+		if err := rows.Scan(&d.RecordID, &d.Field, &d.ValueDigest, &d.NonceHex); err != nil {
+			return nil, fmt.Errorf("store: scan disclosure: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate disclosures: %w", err)
+	}
+	return out, nil
+}
+
 // LatestCheckpointHash returns the highest-seq checkpoint hash for the project, ok=false if there
 // are no checkpoints yet. (Mem returns its last-appended checkpoint; with monotonic seq that is the
 // max-seq row.)

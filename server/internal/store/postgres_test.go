@@ -151,7 +151,7 @@ func TestPostgresAppendOnlyRejectsMutation(t *testing.T) {
 		_, _ = p.pool.Exec(bg, "DROP ROLE IF EXISTS "+role)
 	}()
 	mustExec(fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", schema, role))
-	mustExec("GRANT INSERT, SELECT ON records, checkpoints TO " + role)
+	mustExec("GRANT INSERT, SELECT ON records, checkpoints, disclosures TO " + role)
 
 	// A dedicated connection we SET ROLE on, then RESET before returning it to the pool.
 	conn, err := p.pool.Acquire(ctx)
@@ -184,6 +184,14 @@ func TestPostgresAppendOnlyRejectsMutation(t *testing.T) {
 	denied("DELETE records", "DELETE FROM records WHERE content_hash='sha256:ao'")
 	denied("DELETE checkpoints", "DELETE FROM checkpoints")
 	denied("TRUNCATE records", "TRUNCATE records")
+	denied("UPDATE disclosures", "UPDATE disclosures SET nonce_hex='x'")
+	denied("DELETE disclosures", "DELETE FROM disclosures")
+}
+
+func TestPostgresDisclosures(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseDisclosures(t, p)
 }
 
 func TestPostgresDuplicateContentHashCollapse(t *testing.T) {

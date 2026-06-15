@@ -6,6 +6,7 @@ package store
 
 import (
 	"errors"
+	"sort"
 	"sync"
 )
 
@@ -22,6 +23,16 @@ type Checkpoint struct {
 	JSON           string
 	CheckpointHash string
 	Seq            int64
+}
+
+// DisclosureSecret is what a `selective_disclosure` export needs to reveal one committed low-entropy
+// field: the content-store digest of the raw value plus the nonce that opens its hiding commitment.
+// It is bound to (record_id, field); the record body carries only the commitment.
+type DisclosureSecret struct {
+	RecordID    string
+	Field       string // input | output | rationale
+	ValueDigest string // content-store digest (sha256:...) of the raw value bytes
+	NonceHex    string // 64 lowercase hex chars
 }
 
 var ErrNotFound = errors.New("not found")
@@ -46,6 +57,12 @@ type Store interface {
 	Checkpoints(projectID string) ([]Checkpoint, error)
 	NextCheckpointSeq(projectID string) (int64, error)
 	LatestCheckpointHash(projectID string) (string, bool, error)
+
+	// PutDisclosure records the secret that opens one committed field, keyed by (record_id, field).
+	// Idempotent: re-recording the same (record_id, field) is a no-op (the commitment is immutable).
+	PutDisclosure(projectID string, d DisclosureSecret) error
+	// Disclosures returns every disclosure secret for the project (for selective_disclosure export).
+	Disclosures(projectID string) ([]DisclosureSecret, error)
 }
 
 // Mem is an in-memory Store for tests and single-node dev.
@@ -55,11 +72,13 @@ type Mem struct {
 }
 
 type project struct {
-	records   []Record
-	idem      map[string]int // idempotency key -> record index
-	byHash    map[string]struct{}
-	checks    []Checkpoint
-	seqBySess map[string]int64
+	records    []Record
+	idem       map[string]int // idempotency key -> record index
+	byHash     map[string]struct{}
+	checks     []Checkpoint
+	seqBySess  map[string]int64
+	disclosure []DisclosureSecret
+	discSeen   map[string]struct{} // record_id\x00field -> present (dedupe)
 }
 
 func NewMem() *Mem { return &Mem{projects: map[string]*project{}} }
@@ -67,7 +86,12 @@ func NewMem() *Mem { return &Mem{projects: map[string]*project{}} }
 func (m *Mem) proj(id string) *project {
 	p := m.projects[id]
 	if p == nil {
-		p = &project{idem: map[string]int{}, byHash: map[string]struct{}{}, seqBySess: map[string]int64{}}
+		p = &project{
+			idem:      map[string]int{},
+			byHash:    map[string]struct{}{},
+			seqBySess: map[string]int64{},
+			discSeen:  map[string]struct{}{},
+		}
 		m.projects[id] = p
 	}
 	return p
@@ -212,6 +236,35 @@ func (m *Mem) LatestCheckpointHash(projectID string) (string, bool, error) {
 		return "", false, nil
 	}
 	return p.checks[len(p.checks)-1].CheckpointHash, true, nil
+}
+
+func (m *Mem) PutDisclosure(projectID string, d DisclosureSecret) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.proj(projectID)
+	key := d.RecordID + "\x00" + d.Field
+	if _, ok := p.discSeen[key]; ok {
+		return nil // idempotent: the commitment for (record_id, field) is immutable
+	}
+	p.discSeen[key] = struct{}{}
+	p.disclosure = append(p.disclosure, d)
+	return nil
+}
+
+func (m *Mem) Disclosures(projectID string) ([]DisclosureSecret, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Non-nil empty (not nil) to match Postgres and so the export layer marshals [] not null.
+	out := append([]DisclosureSecret{}, m.proj(projectID).disclosure...)
+	// Canonical (record_id, field) order — identical to the Postgres query, so a Mem-backed and a
+	// Postgres-backed export of the same data serialize to the same bytes.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].RecordID != out[j].RecordID {
+			return out[i].RecordID < out[j].RecordID
+		}
+		return out[i].Field < out[j].Field
+	})
+	return out, nil
 }
 
 func sortedUnique(in []string) []string {
