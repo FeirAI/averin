@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["core"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/feir-dev/feir"
+rust-version = "1.85"

@@ -57,6 +57,8 @@ A canonical body is a JSON object restricted to these value kinds:
 * Canonical integer text: optional leading `-` for negatives, then the shortest decimal digit
   string with **no leading zeros** (`0` is `0`, never `-0` or `00`), **no `+`**, **no decimal
   point**, **no exponent**.
+* Non-canonical integer spellings are **rejected on parse** (fail-closed), not silently
+  re-normalized: `00`, `01`, `-01`, **and `-0`** are all parse errors. (Zero is written `0`.)
 
 ## 4. Strings
 

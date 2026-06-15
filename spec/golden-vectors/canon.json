@@ -1,0 +1,62 @@
+{
+  "profile": "rcp-1",
+  "description": "RCP v1 canonicalization golden vectors. Any implementation MUST reproduce `canonical` byte-for-byte from `input`.",
+  "cases": [
+    {
+      "name": "key-sort-ascii",
+      "note": "object keys sort by UTF-16 code unit; ASCII is straightforward",
+      "input": "{\"b\":1,\"a\":2,\"A\":3,\"0\":4}",
+      "input_hex": "7b2262223a312c2261223a322c2241223a332c2230223a347d",
+      "canonical": "{\"0\":4,\"A\":3,\"a\":2,\"b\":1}",
+      "canonical_hex": "7b2230223a342c2241223a332c2261223a322c2262223a317d"
+    },
+    {
+      "name": "key-sort-supplementary-plane",
+      "note": "U+10000 (surrogate pair D800 DC00) sorts BEFORE U+FFFF in UTF-16 order, opposite of code-point order",
+      "input": "{\"\uffff\":1,\"\ud800\udc00\":2}",
+      "input_hex": "7b22efbfbf223a312c22f0908080223a327d",
+      "canonical": "{\"\ud800\udc00\":2,\"\uffff\":1}",
+      "canonical_hex": "7b22f0908080223a322c22efbfbf223a317d"
+    },
+    {
+      "name": "integers-boundaries",
+      "note": "i64 min/max and zero; no leading zeros, no plus, no -0",
+      "input": "{\"min\":-9223372036854775808,\"max\":9223372036854775807,\"zero\":0,\"neg\":-5}",
+      "input_hex": "7b226d696e223a2d393232333337323033363835343737353830382c226d6178223a393232333337323033363835343737353830372c227a65726f223a302c226e6567223a2d357d",
+      "canonical": "{\"max\":9223372036854775807,\"min\":-9223372036854775808,\"neg\":-5,\"zero\":0}",
+      "canonical_hex": "7b226d6178223a393232333337323033363835343737353830372c226d696e223a2d393232333337323033363835343737353830382c226e6567223a2d352c227a65726f223a307d"
+    },
+    {
+      "name": "null-vs-present",
+      "note": "explicit null is retained and distinct from an omitted field",
+      "input": "{\"a\":null,\"b\":false}",
+      "input_hex": "7b2261223a6e756c6c2c2262223a66616c73657d",
+      "canonical": "{\"a\":null,\"b\":false}",
+      "canonical_hex": "7b2261223a6e756c6c2c2262223a66616c73657d"
+    },
+    {
+      "name": "string-escaping",
+      "note": "only \", \\, and C0 controls are escaped; non-ASCII emitted literally; no / escaping",
+      "input": "{\"q\":\"a\\\"b\\\\c/\\n\\t\u00e9\ud83d\ude00\"}",
+      "input_hex": "7b2271223a22615c22625c5c632f5c6e5c74c3a9f09f9880227d",
+      "canonical": "{\"q\":\"a\\\"b\\\\c/\\n\\t\u00e9\ud83d\ude00\"}",
+      "canonical_hex": "7b2271223a22615c22625c5c632f5c6e5c74c3a9f09f9880227d"
+    },
+    {
+      "name": "nfc-normalization",
+      "note": "decomposed e+combining-acute normalizes to precomposed U+00E9 (NFC)",
+      "input": "{\"k\":\"e\u0301\"}",
+      "input_hex": "7b226b223a2265cc81227d",
+      "canonical": "{\"k\":\"\u00e9\"}",
+      "canonical_hex": "7b226b223a22c3a9227d"
+    },
+    {
+      "name": "nested-extensions",
+      "note": "extensions is the only place arbitrary keys live; still canonicalized",
+      "input": "{\"extensions\":{\"z\":1,\"a\":[3,2,1]},\"a\":true}",
+      "input_hex": "7b22657874656e73696f6e73223a7b227a223a312c2261223a5b332c322c315d7d2c2261223a747275657d",
+      "canonical": "{\"a\":true,\"extensions\":{\"a\":[3,2,1],\"z\":1}}",
+      "canonical_hex": "7b2261223a747275652c22657874656e73696f6e73223a7b2261223a5b332c322c315d2c227a223a317d7d"
+    }
+  ]
+}

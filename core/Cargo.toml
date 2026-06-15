@@ -1,0 +1,39 @@
+[package]
+name = "feir-decision-core"
+version = "0.1.0"
+description = "feir integrity core: canonicalize -> commit -> hash -> sign -> DAG-link -> checkpoint -> verify. Single source of truth (lib + verify CLI + WASM)."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "feir_decision_core"
+# rlib: bin + tests; cdylib/staticlib: cgo FFI + wasm
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "feir-verify"
+path = "src/bin/feir_verify.rs"
+
+[features]
+default = ["std"]
+std = ["dep:getrandom"]
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies]
+sha2 = "0.10"
+ed25519-dalek = "2"
+unicode-normalization = "0.1"
+getrandom = { version = "0.2", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
