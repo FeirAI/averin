@@ -44,3 +44,52 @@ func TestCanonicalize(t *testing.T) {
 		t.Fatalf("expected float rejection: %s", got)
 	}
 }
+
+func TestCommitmentRoundTripThroughFFI(t *testing.T) {
+	c, _ := New(seed)
+
+	nonce, err := c.RandomNonce()
+	if err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+	if len(nonce) != 64 {
+		t.Fatalf("nonce should be 64 hex chars, got %d: %q", len(nonce), nonce)
+	}
+
+	value := []byte("SELECT balance FROM accounts WHERE id=42")
+	commitment, err := c.Commit("input", value, nonce)
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if !strings.HasPrefix(commitment, "sha256:") {
+		t.Fatalf("commitment should be sha256:..., got %q", commitment)
+	}
+
+	// The disclosed (value, nonce) opens the commitment...
+	ok, err := c.VerifyCommitment(commitment, "input", value, nonce)
+	if err != nil || !ok {
+		t.Fatalf("verify: ok=%v err=%v; want true", ok, err)
+	}
+	// ...but a different value, domain, or nonce does not (binding holds).
+	if ok, _ := c.VerifyCommitment(commitment, "input", []byte("tampered"), nonce); ok {
+		t.Fatal("wrong value verified true")
+	}
+	if ok, _ := c.VerifyCommitment(commitment, "output", value, nonce); ok {
+		t.Fatal("wrong domain verified true")
+	}
+	other, _ := c.RandomNonce()
+	if ok, _ := c.VerifyCommitment(commitment, "input", value, other); ok {
+		t.Fatal("wrong nonce verified true")
+	}
+}
+
+func TestCommitRejectsBadInput(t *testing.T) {
+	c, _ := New(seed)
+	nonce, _ := c.RandomNonce()
+	if _, err := c.Commit("bogus-domain", []byte("x"), nonce); err == nil {
+		t.Fatal("expected error for bad domain")
+	}
+	if _, err := c.Commit("input", []byte("x"), "short-nonce"); err == nil {
+		t.Fatal("expected error for bad nonce")
+	}
+}
