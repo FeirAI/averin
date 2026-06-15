@@ -1,6 +1,10 @@
 # ADR 0002 — The credential broker (Level 3: complete action accountability)
 
-**Status:** Proposed (design only — build gated on a design-partner pull, ADR 0001 / spec §12)
+**Status:** Accepted — the **Tier-A grant-verification prototype is built** (the `broker` package,
+`POST /v2/grants` record-before-issue issuance, `feir_sign_evidence`, and the verifier's
+`grant_accountability` under a pinned broker key); the **Tier-B (Level 3) demonstrator** — resource
+use-receipts, attestation evaluation, and the broker-TCB reduction — remains gated on a design-partner
+pull (ADR 0001 / spec §12).
 **Date:** 2026-06-15
 **Builds on:** ADR 0001 (who the evidence is for), P2.3 (authority `evidence_sig` verification),
 the append-only witness + RFC 3161 anchoring spine.
@@ -321,15 +325,24 @@ is the broker recording key), additive outputs:
 
 ## Build scope (when pulled)
 
-**Tier-A prototype (grant-verification — honestly labeled, NOT Level 3):**
-1. `event_type: "credential_grant"` + `observed_via: "broker"` schema additions (additive; golden
-   vectors updated).
-2. `feir-broker` `POST /v2/grants`: agent auth (mTLS) → forbidden-scope check → transactional
-   record-before-issue (reuse seal/DAG/checkpoint) → broker-signed, **sender-constrained, single-use**
-   capability (`cnf` = agent key, `jti = grant_id`, tight scope, short TTL) → `issuance_status`.
-3. Broker recording key pinned by the verifier; grants verify to `gateway_enforced`.
-4. Verifier `grant_total/verified`, `coverage_manifest` echo, `attestation_status: unevaluated`,
-   `broker_trust: assumed`, and the **Tier-A** verdict only.
+**Tier-A prototype (grant-verification — honestly labeled, NOT Level 3) — ☑ BUILT:**
+1. ☑ `event_type: "credential_grant"` + `observed_via: "broker"` schema additions (additive; SDK
+   allowlists updated in lockstep). Broker-only fields live under `extensions.broker`.
+2. ☑ `POST /v2/grants`: **proof-of-possession** of the `cnf` key (agent signs a domain-separated
+   challenge) → forbidden-scope check → **idempotent** (deterministic `grant_id`) record-before-issue
+   (reuse seal/DAG/store) → broker-signed **sender-constrained, single-use** capability (`cnf` = agent
+   key, `jti = grant_id`, max-TTL-capped) → `issuance_status` under `extensions.broker`. (Agent auth
+   is the PoP; mTLS/agent-JWT transport is a deployment concern.)
+3. ☑ Broker recording key pinned by the verifier (`feir_verify_bundle_with`); grants verify to
+   `gateway_enforced` only when the record is ALSO integrity-proven.
+4. ☑ Verifier `grant_total`/`grant_verified`, `grant_accountability`, `coverage_manifest` echo,
+   `attestation_status: unevaluated`, `broker_trust: assumed`, and the **Tier-A** verdict only.
+
+*Built-but-noted Tier-A residuals (honest, documented in code):* the evidence preimage is not
+disclosed (so `evidence_hash` is the broker-TCB-assumed opaque value, not auditor-re-derivable); the
+`credential_binding`/`evidence_hash` use Go-`json.Marshal` canonicalization, not the Rust RCP
+canonicalizer; the forbidden-scope filter is a coarse pre-filter (the signed taxonomy is
+authoritative); the descriptor reuses the `input` commit domain.
 
 **Tier-B (Level 3) demonstrator — the real claim, fail-closed:**
 5. A locked-down runtime: no standing credentials, enforced egress policy, sender-bound credentials —
