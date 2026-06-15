@@ -18,6 +18,7 @@ EVENT_TYPES = {
     "handoff",
     "spawn_child",
     "incomplete",
+    "credential_grant",  # credential-broker grant record (Level 3, ADR 0002)
 }
 
 

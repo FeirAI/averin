@@ -31,9 +31,14 @@ body becomes bytes. Field reference (grouped as in spec §6):
   hash-links + the anchored checkpoint, never from `agent_ts`.
 
 ## Observed event (observed, not necessarily complete)
-- `event_type`: `llm_call|tool_call|decision|approval_gate|handoff|spawn_child|incomplete`.
+- `event_type`: `llm_call|tool_call|decision|approval_gate|handoff|spawn_child|incomplete|credential_grant`.
+  `credential_grant` is a credential-broker grant record (Level 3 — see ADR 0002): the broker recorded
+  that it issued a scoped, short-lived credential under `gateway_enforced` authority. Its grant-specific
+  fields (`issuance_status`, `scope_class`, `conformance_level`, `credential_binding`) live under
+  `extensions.broker` — NOT as new top-level keys — so the closed record schema is unchanged.
 - `action`, `status`: `ok|error|blocked|pending_approval|incomplete`.
-- `observed_via`: `proxy|sdk|otel` — provenance of the observation itself (Level-2 honesty).
+- `observed_via`: `proxy|sdk|otel|broker` — provenance of the observation itself (Level-2 honesty).
+  `broker` marks a record produced by the credential broker (a grant) or a resource use-receipt.
 - `input_commit` / `output_commit` / `rationale_commit`: `{alg, commitment, low_entropy}`
   hiding commitments (RCP §8.3).
 - `tokens`: `{in:int, out:int}`. `cost_micros_usd`: **integer micro-USD — NO floats**.

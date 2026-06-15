@@ -13,7 +13,8 @@ export type EventType =
   | "approval_gate"
   | "handoff"
   | "spawn_child"
-  | "incomplete";
+  | "incomplete"
+  | "credential_grant"; // credential-broker grant record (Level 3, ADR 0002)
 
 const EVENT_TYPES: ReadonlySet<string> = new Set([
   "llm_call",
@@ -23,6 +24,7 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   "handoff",
   "spawn_child",
   "incomplete",
+  "credential_grant",
 ]);
 
 export interface RecordOpts {

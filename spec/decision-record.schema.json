@@ -33,9 +33,9 @@
     "received_ts": { "$ref": "#/$defs/ts" },
     "anchored_ts": { "$ref": "#/$defs/ts" },
 
-    "event_type": { "enum": ["llm_call","tool_call","decision","approval_gate","handoff","spawn_child","incomplete"] },
+    "event_type": { "enum": ["llm_call","tool_call","decision","approval_gate","handoff","spawn_child","incomplete","credential_grant"] },
     "action": { "type": "string" },
-    "observed_via": { "enum": ["proxy","sdk","otel"] },
+    "observed_via": { "enum": ["proxy","sdk","otel","broker"] },
     "input_commit": { "$ref": "#/$defs/commit" },
     "output_commit": { "$ref": "#/$defs/commit" },
     "rationale_commit": { "$ref": "#/$defs/commit" },

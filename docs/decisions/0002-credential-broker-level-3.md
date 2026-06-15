@@ -207,10 +207,9 @@ Tier A only.**
 
 ### The grant Decision Record + exact credential binding
 
-A grant is an ordinary sealed Decision Record (so the *same verifier* validates it) with
-`event_type: "credential_grant"`, `observed_via: "broker"` (both additive enum values), `action` =
-stable operation id, an `issuance_status` field (`recorded|minted|delivered|mint_failed`, updated
-append-only via a follow-on record — a status is never an in-place mutation), and:
+A grant is an ordinary sealed Decision Record (so the *same verifier* validates it under the
+**unchanged** record schema — only the two enum values are added) with `event_type:
+"credential_grant"`, `observed_via: "broker"`, `action` = stable operation id, and:
 
 - `authority`: `source=gateway_enforced`, `enforcement_point=credential_broker`,
   `grant_type=id-jag` (default), `grant_id` (also the credential `jti`), `authorizing_principal`,
@@ -220,6 +219,13 @@ append-only via a follow-on record — a status is never an in-place mutation), 
   `evaluated_at`, `expires_at`.
 - `input_commit` (RCP §9.3): a hiding commitment to the **full canonical credential artifact** (not a
   live secret in the body); selective disclosure reveals it to an auditor to prove the binding.
+- `extensions.broker` (the schema's open `extensions` object — broker-only fields do **not** become
+  new top-level keys, which the closed record schema / `ALLOWED_TOP_KEYS` would reject): the grant
+  lifecycle and Tier-B inputs the verifier reads — `issuance_status`
+  (`recorded|minted|delivered|mint_failed`, advanced **append-only** via a follow-on grant record
+  that cites the same `grant_id`, never an in-place mutation), `scope_class`, `conformance_level`,
+  and the `credential_binding` value. (The first review iteration mistakenly placed `issuance_status`
+  at the top level; routing broker metadata through `extensions` keeps the core record schema stable.)
 
 **Exact credential binding (Finding 5).** `evidence_hash` covers
 `{ grant_id, grant_type, principal, delegation_chain, resource, scope, scope_class, conformance_level,
