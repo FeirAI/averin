@@ -579,6 +579,33 @@ fn error_report(msg: &str) -> String {
     .serialize()
 }
 
+/// Re-derive a broker record's `evidence_hash` from the canonical evidence payload it embeds at
+/// `extensions.broker.<payload_key>` and confirm it equals the signed `authority.evidence_hash`
+/// (ADR 0003 R1). `verify_authority` only proves a signature over the opaque `evidence_hash`, so a
+/// `Verified` authority alone does NOT prove the signer committed to the semantic match fields. Unless
+/// the verifier reads those fields from a payload whose RCP hash equals the signed hash, the match
+/// would fire on unverified values. Returns false if the payload or the signed hash is absent, or the
+/// two differ. The embedded payload is part of the signed body, so this binds it to the seal.
+fn evidence_rederivable(rec: &CanonValue, payload_key: &str) -> bool {
+    let signed = match rec
+        .get("authority")
+        .and_then(|a| a.get("evidence_hash"))
+        .and_then(|v| v.as_str())
+    {
+        Some(h) => h,
+        None => return false,
+    };
+    let payload = match rec
+        .get("extensions")
+        .and_then(|e| e.get("broker"))
+        .and_then(|b| b.get(payload_key))
+    {
+        Some(p) => p,
+        None => return false,
+    };
+    crate::hashx::sha256_prefixed(payload.serialize().as_bytes()) == signed
+}
+
 pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
     let mut issues: Vec<String> = Vec::new();
     let project_id = s(bundle, "project_id");
@@ -929,21 +956,33 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
 
     // Level 3 Tier-A: count credential-broker grants and how many are fully accountable. A grant only
-    // counts as VERIFIED when the record is BOTH integrity-proven (its own seal is valid — event_type
-    // and action are part of the signed body) AND its authority verified to gateway_enforced under a
-    // pinned key. Gating on authority alone would count a body-tampered grant (a valid evidence triple
-    // binds only source/record_id/evidence_hash, not the body) — so a forged action would read as
-    // "complete". Grants are deduped by content_hash so a verbatim-replayed grant isn't double-counted.
+    // counts as VERIFIED when ALL of: the record is integrity-proven (its own seal is valid —
+    // event_type and action are part of the signed body); its authority verified to gateway_enforced
+    // under a pinned key; AND its signed authority.evidence_hash re-derives from the embedded
+    // extensions.broker.grant_evidence (ADR 0003 R1) — so the hash actually commits to the canonical
+    // match fields, not an opaque value. Gating on authority alone would count a body-tampered grant
+    // (a valid evidence triple binds only source/record_id/evidence_hash); skipping re-derivation would
+    // let a grant whose grant_evidence diverges from the signed hash read as "complete". A mismatch is
+    // surfaced (fails the bundle, fail-closed). Grants are deduped by content_hash so a verbatim-
+    // replayed grant isn't double-counted.
     let mut grant_total = 0usize;
     let mut grant_verified = 0usize;
     let mut seen_grants: BTreeSet<&str> = BTreeSet::new();
     for rt in &record_trust {
-        if s(&records[rt.index], "event_type").as_deref() == Some("credential_grant")
+        let rec = &records[rt.index];
+        if s(rec, "event_type").as_deref() == Some("credential_grant")
             && seen_grants.insert(rt.content_hash.as_str())
         {
             grant_total += 1;
             if rt.trust == TrustLevel::IntegrityProven && rt.authority == AuthorityTrust::Verified {
-                grant_verified += 1;
+                if evidence_rederivable(rec, "grant_evidence") {
+                    grant_verified += 1;
+                } else {
+                    issues.push(format!(
+                        "grant {} ({}): authority.evidence_hash is not re-derivable from extensions.broker.grant_evidence (payload absent or divergent — R1, threat #4)",
+                        rt.index, rt.record_id
+                    ));
+                }
             }
         }
     }

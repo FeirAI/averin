@@ -24,6 +24,12 @@ char *feir_verify_bundle_with(const char *bundle, const char *opts_json);
  * begins with "ERROR:" on a parse error; NULL on NULL/invalid-UTF-8 input. */
 char *feir_rcp_canonicalize(const char *input);
 
+/* Compute the canonical evidence hash over a JSON payload: RCP-v1 canonicalize, then SHA-256 the
+ * canonical bytes. Returns "sha256:<64 lowercase hex>" (caller frees), or {"error":"..."} on a parse
+ * error; NULL on NULL/invalid-UTF-8 input. The single source of truth for evidence_hash so the
+ * offline verifier can re-derive it from the embedded evidence payload (ADR 0003 R1). */
+char *feir_rcp_evidence_hash(const char *input);
+
 /* Seal a Decision Record / checkpoint body (UTF-8 JSON) with an Ed25519 key (64 hex chars = 32
  * bytes). Returns sealed JSON with content_hash/checkpoint_hash + sig set, or {"error":"..."}.
  * NULL on NULL/invalid-UTF-8. Self-host signing key; production backs signing with a KMS. */

@@ -122,19 +122,33 @@ func TestPrepareDeterministicAndBound(t *testing.T) {
 	if p.Descriptor["exp"].(int64)-p.Descriptor["iat"].(int64) != 60 {
 		t.Fatalf("exp-iat = %v, want 60", p.Descriptor["exp"].(int64)-p.Descriptor["iat"].(int64))
 	}
-	// the evidence binds the operation + the credential binding
+	// the canonical grant_evidence (ADR 0003) binds the match fields + the credential binding
+	if p.Evidence["kind"] != "grant" {
+		t.Fatalf("grant_evidence.kind must be \"grant\", got %v", p.Evidence["kind"])
+	}
 	if p.Evidence["action"] != "db.query:orders-ro" {
 		t.Fatalf("evidence must bind the action, got %v", p.Evidence["action"])
+	}
+	if p.Evidence["resource_id"] != validRequest().Resource {
+		t.Fatalf("evidence must carry resource_id, got %v", p.Evidence["resource_id"])
+	}
+	if p.Evidence["cnf_kid"] != KeyID(agentKey().Public().(ed25519.PublicKey)) {
+		t.Fatalf("evidence cnf_kid not bound to the agent key, got %v", p.Evidence["cnf_kid"])
+	}
+	// times are unix-second integers (RCP integers), not millis strings
+	if p.Evidence["exp"].(int64)-p.Evidence["issued_at"].(int64) != 60 {
+		t.Fatalf("exp-issued_at = %v, want 60", p.Evidence["exp"].(int64)-p.Evidence["issued_at"].(int64))
 	}
 	if p.Evidence["credential_binding"] != p.CredentialBinding {
 		t.Fatalf("evidence does not commit the credential binding")
 	}
-	if !strings.HasPrefix(p.CredentialBinding, "sha256:") || !strings.HasPrefix(p.EvidenceHash, "sha256:") {
-		t.Fatalf("binding/evidence hash not sha256")
+	if !strings.HasPrefix(p.CredentialBinding, "sha256:") {
+		t.Fatalf("credential binding not sha256")
 	}
-	// deterministic: identical inputs -> identical artifacts
+	// deterministic: identical inputs -> identical artifacts. (evidence_hash is derived from
+	// Evidence by the cgo-capable api layer via RCP; Evidence itself being deterministic suffices.)
 	p2, _ := Prepare(validRequest(), "grant-abc", now, issuingKey())
-	if p.CredentialBinding != p2.CredentialBinding || p.EvidenceHash != p2.EvidenceHash || p.Capability != p2.Capability {
+	if p.CredentialBinding != p2.CredentialBinding || p.Capability != p2.Capability {
 		t.Fatalf("Prepare is not deterministic")
 	}
 }

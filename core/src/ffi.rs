@@ -100,6 +100,29 @@ pub unsafe extern "C" fn feir_rcp_canonicalize(input: *const c_char) -> *mut c_c
     }
 }
 
+/// Compute the canonical evidence hash `sha256:<64 lowercase hex>` over a JSON payload: RCP-v1
+/// canonicalize, then SHA-256 the canonical bytes. This is the single source of truth for an
+/// `evidence_hash` (ADR 0003 R1) — the broker/resource computes it here (NOT via Go `json.Marshal`)
+/// so the offline verifier can re-derive the SAME hash from the evidence payload embedded in the
+/// record (`extensions.broker.grant_evidence` / `use_evidence`) and confirm the signed `evidence_hash`
+/// actually commits to the semantic match fields. Returns `{"error":...}` on a parse error; null if
+/// `input` is null or not UTF-8.
+///
+/// # Safety
+/// `input` must be a valid null-terminated C string for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn feir_rcp_evidence_hash(input: *const c_char) -> *mut c_char {
+    let text = match cstr(input) {
+        Some(t) => t,
+        None => return std::ptr::null_mut(),
+    };
+    let out = match crate::canon::CanonValue::parse(text) {
+        Ok(v) => crate::hashx::sha256_prefixed(v.serialize().as_bytes()),
+        Err(e) => json_error(&format!("payload parse error: {e}")),
+    };
+    into_cstring(out)
+}
+
 /// Seal a Decision Record body (UTF-8 JSON) with an Ed25519 signing key (32-byte seed, 64 hex
 /// chars). Returns the sealed record JSON (content_hash + sig set), or `{"error":"..."}`. Null on
 /// null/invalid-UTF-8 input. The seed is the self-host signing key; production deployments back
@@ -425,6 +448,26 @@ mod tests {
         assert!(call(feir_rcp_canonicalize, r#"{"a":1.5}"#)
             .unwrap()
             .starts_with("ERROR:"));
+    }
+
+    #[test]
+    fn rcp_evidence_hash_is_canonical_and_order_independent() {
+        // The same evidence in different key order hashes identically — this is what lets the offline
+        // verifier re-derive the broker/resource-computed evidence_hash regardless of serialization.
+        let a = call(feir_rcp_evidence_hash, r#"{"b":1,"a":2}"#).unwrap();
+        let b = call(feir_rcp_evidence_hash, r#"{"a":2,"b":1}"#).unwrap();
+        assert_eq!(a, b, "evidence hash must be key-order independent");
+        assert!(
+            a.starts_with("sha256:") && a.len() == "sha256:".len() + 64,
+            "{a}"
+        );
+        // It equals SHA-256 over the RCP canonical bytes (the verifier's own re-derivation path).
+        let canon = call(feir_rcp_canonicalize, r#"{"a":2,"b":1}"#).unwrap();
+        assert_eq!(a, crate::hashx::sha256_prefixed(canon.as_bytes()));
+        // RCP forbids floats — a parse error is surfaced as an error object, never a silent hash.
+        assert!(call(feir_rcp_evidence_hash, r#"{"a":1.5}"#)
+            .unwrap()
+            .contains("error"));
     }
 
     #[test]

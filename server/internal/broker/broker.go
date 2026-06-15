@@ -5,12 +5,14 @@
 // canonical grant evidence. The HTTP handler and the record-before-issue ingest live in the api
 // package, which signs the evidence (core.SignEvidence) and seals the grant record.
 //
-// Canonical form: hashes (credential_binding, evidence_hash) and the minted capability payload are
-// taken over `json.Marshal` of a `map[string]any`, which Go emits with keys sorted bytewise — so the
-// bytes are deterministic and, for ASCII keys, align with RCP key ordering. Full RCP canonicalization
-// (a Rust round-trip) is a follow-up needed only when an auditor must re-derive evidence_hash from a
-// disclosed evidence (a Tier-B / broker-TCB-reduction concern); Tier A treats evidence_hash as an
-// opaque value the broker commits to and signs (see ADR broker_trust: assumed).
+// Canonical form: the credential_binding hash and the minted capability payload are taken over
+// `json.Marshal` of a `map[string]any`, which Go emits with keys sorted bytewise — deterministic, and
+// for ASCII keys aligned with RCP key ordering. These are broker-internal bindings the resource reads
+// back, not values the offline verifier re-derives. The grant's `evidence_hash`, by contrast, IS
+// re-derivable: the api layer computes it as sha256(RCP-canonicalize(Evidence)) via the Rust core
+// (ADR 0003 R1) so an auditor can confirm the signed hash commits to the canonical grant_evidence
+// embedded in the record. This package therefore returns the grant_evidence map and leaves the RCP
+// hashing to the cgo-capable api layer (keeping this package pure Go, testable without cgo).
 package broker
 
 import (
@@ -200,8 +202,7 @@ type Prepared struct {
 	Descriptor        map[string]any // the canonical credential claim set
 	DescriptorBytes   []byte         // canonical bytes (committed via input_commit; == capability payload)
 	CredentialBinding string         // sha256:<hex> of DescriptorBytes
-	Evidence          map[string]any // the canonical grant evidence
-	EvidenceHash      string         // sha256:<hex> of canonical Evidence (the api layer signs this)
+	Evidence          map[string]any // canonical grant_evidence (ADR 0003); the api layer derives evidence_hash
 	Capability        string         // the minted single-use sender-constrained token ("<payload>.<sig>")
 }
 
@@ -260,21 +261,35 @@ func Prepare(req Request, grantID string, now time.Time, issuingKey ed25519.Priv
 	if delegation == nil {
 		delegation = []string{}
 	}
+	// cnf_kid identifies the agent's sender-constraint (cnf) key — a Tier-B use's PoP must verify
+	// under it (ADR 0003 R4/R5). req.Validate has already checked the pubkey shape; re-decode
+	// fail-closed rather than assume.
+	cnfPub, err := base64.RawURLEncoding.DecodeString(req.AgentPubKey)
+	if err != nil || len(cnfPub) != ed25519.PublicKeySize {
+		return Prepared{}, errors.New("agent_pubkey is not a valid ed25519 public key")
+	}
+	// Canonical grant_evidence (ADR 0003 §"Canonical evidence schemas"): the ONLY payload the offline
+	// verifier reads match inputs from. evidence_hash = sha256(RCP-canonicalize(grant_evidence)) is
+	// computed by the api layer via the Rust core (R1) — NOT here — so the broker stays pure Go with
+	// no cgo dependency. Times are unix seconds (RCP integers); resource is `resource_id`; `kind` and
+	// `cnf_kid` are the role discriminator + the PoP key id Tier-B requires.
 	evidence := map[string]any{
+		"kind":                  "grant",
 		"grant_id":              grantID,
 		"grant_type":            GrantTypeIDJAG,
 		"authorizing_principal": req.Principal,
 		"delegation_chain":      delegation,
+		"agent_id":              req.AgentID,
 		"action":                req.Action, // the operation this grant authorizes (use↔grant match)
-		"resource":              req.Resource,
+		"resource_id":           req.Resource,
 		"scope":                 req.Scope,
 		"scope_class":           string(scopeClass),
 		"conformance_level":     ConformanceL1GrantOnly,
-		"evaluated_at":          tsMillis(evaluatedAt),
-		"expires_at":            tsMillis(expiresAt),
+		"cnf_kid":               KeyID(ed25519.PublicKey(cnfPub)),
 		"credential_binding":    credentialBinding,
+		"issued_at":             evaluatedAt.Unix(),
+		"exp":                   expiresAt.Unix(),
 	}
-	evidenceHash, _ := canonHash(evidence)
 
 	// Mint the capability: payload = the canonical descriptor bytes, signed by the issuing key. Only
 	// the holder of the cnf key can USE it (sender-constrained); single_use is declared for the
@@ -291,7 +306,6 @@ func Prepare(req Request, grantID string, now time.Time, issuingKey ed25519.Priv
 		DescriptorBytes:   descriptorBytes,
 		CredentialBinding: credentialBinding,
 		Evidence:          evidence,
-		EvidenceHash:      evidenceHash,
 		Capability:        capability,
 	}, nil
 }

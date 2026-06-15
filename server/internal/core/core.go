@@ -48,6 +48,17 @@ func (c *Core) RcpCanonicalize(jsonDoc string) string {
 	return goStrFree(C.feir_rcp_canonicalize(cs))
 }
 
+// RcpEvidenceHash returns "sha256:<hex>" over the RCP-v1 canonical form of payloadJSON — the single
+// source of truth for an evidence_hash. The broker/resource computes evidence_hash this way (NOT via
+// Go json.Marshal) so the offline verifier can re-derive the SAME hash from the evidence payload it
+// embeds in the record (ADR 0003 R1). Errors fail-closed (a parse error is surfaced, never a silent
+// empty hash).
+func (c *Core) RcpEvidenceHash(payloadJSON string) (string, error) {
+	cs := C.CString(payloadJSON)
+	defer C.free(unsafe.Pointer(cs))
+	return checkValue(goStrFree(C.feir_rcp_evidence_hash(cs)))
+}
+
 // SealRecord seals a Decision Record body, returning the sealed JSON.
 func (c *Core) SealRecord(bodyJSON string) (string, error) {
 	cb := C.CString(bodyJSON)

@@ -45,6 +45,29 @@ func TestCanonicalize(t *testing.T) {
 	}
 }
 
+func TestRcpEvidenceHash(t *testing.T) {
+	c, _ := New(seed)
+	// key order doesn't matter (canonical) — the verifier re-derives the same hash regardless.
+	a, err := c.RcpEvidenceHash(`{"b":1,"a":2}`)
+	if err != nil {
+		t.Fatalf("evidence hash: %v", err)
+	}
+	b, err := c.RcpEvidenceHash(`{"a":2,"b":1}`)
+	if err != nil {
+		t.Fatalf("evidence hash: %v", err)
+	}
+	if a != b {
+		t.Fatalf("evidence hash must be key-order independent: %s != %s", a, b)
+	}
+	if !strings.HasPrefix(a, "sha256:") || len(a) != len("sha256:")+64 {
+		t.Fatalf("evidence hash shape: %s", a)
+	}
+	// a parse error fails closed (surfaced as an error), never a silent empty hash.
+	if _, err := c.RcpEvidenceHash(`{"a":1.5}`); err == nil {
+		t.Fatalf("expected float to be a fail-closed error")
+	}
+}
+
 func TestCommitmentRoundTripThroughFFI(t *testing.T) {
 	c, _ := New(seed)
 

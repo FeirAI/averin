@@ -77,18 +77,39 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
     let sk = signing_key_from_seed(&[0u8; 32]); // the broker recording key == the record signing key
     let vk = sk.verifying_key();
     let record_id = "grant-1";
-    let evidence_hash = sha256_prefixed(b"canonical-grant-evidence");
+    // Canonical grant_evidence (ADR 0003 R1): evidence_hash is re-derived from THIS payload. The
+    // record embeds it at extensions.broker.grant_evidence; the verifier confirms the signed
+    // evidence_hash == sha256(RCP-canonicalize(grant_evidence)) before counting the grant verified.
+    let grant_evidence = CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("grant")),
+        ("grant_id".into(), CanonValue::string(record_id)),
+        ("action".into(), CanonValue::string("db.query:orders-ro")),
+        ("resource_id".into(), CanonValue::string("orders-db")),
+        ("scope_class".into(), CanonValue::string("single_operation")),
+        ("agent_id".into(), CanonValue::string("agent")),
+        ("cnf_kid".into(), CanonValue::string("ed25519-AgentKid0")),
+        ("issued_at".into(), CanonValue::Int(1_718_445_600)),
+        ("exp".into(), CanonValue::Int(1_718_445_660)),
+    ])
+    .unwrap();
+    let evidence_hash = sha256_prefixed(grant_evidence.serialize().as_bytes());
     let evidence_sig = sign_evidence("gateway_enforced", record_id, &evidence_hash, &sk);
-    let body = format!(
-        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+    // Build a grant body with a given extensions.broker inner body + authority (evidence_hash/sig).
+    let mk_body = |broker_inner: &str, eh: &str, esig: &str| {
+        format!(
+            r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
         "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"feir-broker",
         "session_id":"s","span_id":"sp","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
         "agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z",
         "event_type":"credential_grant","action":"db.query:orders-ro","observed_via":"broker","status":"ok",
         "authority":{{"source":"gateway_enforced","enforcement_point":"credential_broker","grant_type":"id-jag",
-            "grant_id":"{record_id}","evidence_hash":"{evidence_hash}","evidence_sig":"{evidence_sig}"}},
+            "grant_id":"{record_id}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "extensions":{{"broker":{{{broker_inner}}}}},
         "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#
-    );
+        )
+    };
+    let ge_inner = |ge: &CanonValue| format!(r#""grant_evidence":{}"#, ge.serialize());
+    let body = mk_body(&ge_inner(&grant_evidence), &evidence_hash, &evidence_sig);
     let grant = seal(&CanonValue::parse(&body).unwrap(), &sk).unwrap();
     let key_entry = CanonValue::object(vec![
         ("signing_key_id".into(), CanonValue::string("k0")),
@@ -150,6 +171,49 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
     );
     assert!(json.contains(r#""broker_trust":"assumed""#));
     assert!(json.contains(r#""action_completeness":"not_claimed""#)); // no coverage_manifest here
+
+    // R1 (ADR 0003): a grant whose embedded grant_evidence DIVERGES from the signed evidence_hash must
+    // NOT verify, even though the record seals correctly and the evidence_sig is valid. The authority
+    // commits to the real evidence (hash(E1)); the embedded payload is E2 (action swapped). The
+    // verifier re-derives hash(E2) != hash(E1) and refuses to count it, surfacing a fail-closed issue —
+    // closing the "AuthorityTrust::Verified proves the signer committed to the match fields" gap.
+    let e2 = change_field(
+        &grant_evidence,
+        "action",
+        CanonValue::string("db.delete:everything"),
+    );
+    let diverged_body = mk_body(&ge_inner(&e2), &evidence_hash, &evidence_sig);
+    let diverged = seal(&CanonValue::parse(&diverged_body).unwrap(), &sk).unwrap();
+    let diverged_bundle = change_field(&bundle, "records", CanonValue::Array(vec![diverged]));
+    let r1 = verify_bundle_with(&diverged_bundle, &pinned());
+    assert_eq!(r1.grant_total, 1);
+    assert_eq!(
+        r1.grant_verified, 0,
+        "a grant whose grant_evidence does not re-derive its signed evidence_hash must not verify (R1)"
+    );
+    assert!(
+        r1.issues.iter().any(|i| i.contains("not re-derivable")),
+        "expected an R1 re-derivation issue, got: {:?}",
+        r1.issues
+    );
+
+    // R1 fail-closed on ABSENT payload: a grant with valid (pinned) authority but NO embedded
+    // grant_evidence is as unacceptable as a divergent one — the verifier cannot confirm the signed
+    // evidence_hash commits to any match fields, so it must NOT count and must surface the issue.
+    let no_ge_body = mk_body(r#""issuance_status":"recorded""#, &evidence_hash, &evidence_sig);
+    let no_ge = seal(&CanonValue::parse(&no_ge_body).unwrap(), &sk).unwrap();
+    let no_ge_bundle = change_field(&bundle, "records", CanonValue::Array(vec![no_ge]));
+    let r_absent = verify_bundle_with(&no_ge_bundle, &pinned());
+    assert_eq!(r_absent.grant_total, 1);
+    assert_eq!(
+        r_absent.grant_verified, 0,
+        "a grant with no embedded grant_evidence must not verify (R1 fail-closed)"
+    );
+    assert!(
+        r_absent.issues.iter().any(|i| i.contains("not re-derivable")),
+        "expected an R1 absent-payload issue, got: {:?}",
+        r_absent.issues
+    );
 
     // A forged gateway_enforced grant (agent-claimed, no real broker key) does NOT elevate: re-sign
     // the evidence with a DIFFERENT key, pin only the real broker key.

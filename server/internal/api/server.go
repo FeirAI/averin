@@ -41,6 +41,9 @@ type Sealer interface {
 	Commit(domain string, value []byte, nonceHex string) (string, error)
 	// authority evidence: the credential broker signs a gateway_enforced grant (RCP §11).
 	SignEvidence(source, recordID, evidenceHash string) (string, error)
+	// RcpEvidenceHash derives evidence_hash = sha256(RCP-canonicalize(payload)) so the verifier can
+	// re-derive it from the embedded grant_evidence (ADR 0003 R1).
+	RcpEvidenceHash(payloadJSON string) (string, error)
 }
 
 type Server struct {
@@ -506,12 +509,20 @@ func (s *Server) reconstructCapability(projectID, grantID string) (string, error
 // broker-signed evidence_sig, a hiding commitment over the credential descriptor (revealable via
 // selective disclosure), and the broker lifecycle fields under extensions.broker.
 func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Request, p broker.Prepared) (map[string]any, []store.DisclosureSecret, error) {
+	// Derive evidence_hash = sha256(RCP-canonicalize(grant_evidence)) via the Rust core (ADR 0003 R1),
+	// NOT Go json.Marshal — so the offline verifier re-derives the SAME hash from the grant_evidence
+	// embedded below and confirms the signed hash commits to the canonical match fields. The
+	// grant_evidence payload is carried verbatim under extensions.broker.grant_evidence.
+	evidenceJSON, err := json.Marshal(p.Evidence)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal grant evidence: %w", err)
+	}
+	evidenceHash, err := s.core.RcpEvidenceHash(string(evidenceJSON))
+	if err != nil {
+		return nil, nil, fmt.Errorf("derive grant evidence_hash: %w", err)
+	}
 	// Sign the gateway_enforced evidence (record_id-bound) — this is what the verifier elevates.
-	// Tier-A boundary (broker TCB, ADR 0002 / commit-2 review): only `evidence_hash` is signed and
-	// stored, not the canonical evidence preimage, so a bundle auditor cannot independently re-derive
-	// `evidence_hash == sha256(evidence)`. Disclosing the evidence + computing the hash via the Rust
-	// RCP canonicalizer (not Go json.Marshal) so the verifier can re-derive it is a Tier-B follow-up.
-	evidenceSig, err := s.core.SignEvidence("gateway_enforced", grantID, p.EvidenceHash)
+	evidenceSig, err := s.core.SignEvidence("gateway_enforced", grantID, evidenceHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sign grant evidence: %w", err)
 	}
@@ -556,7 +567,7 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 			"grant_id":              grantID,
 			"authorizing_principal": req.Principal,
 			"delegation_chain":      delegation,
-			"evidence_hash":         p.EvidenceHash,
+			"evidence_hash":         evidenceHash,
 			"evidence_sig":          evidenceSig,
 			"evaluated_at":          p.EvaluatedAt,
 			"expires_at":            p.ExpiresAt,
@@ -572,6 +583,8 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 				"scope_class":        string(p.ScopeClass),
 				"conformance_level":  p.ConformanceLevel,
 				"credential_binding": p.CredentialBinding,
+				// The canonical grant_evidence the verifier re-derives evidence_hash from (ADR 0003 R1).
+				"grant_evidence": p.Evidence,
 			},
 		},
 	}
