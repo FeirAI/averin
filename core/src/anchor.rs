@@ -4,9 +4,10 @@
 //! trustworthy (#9).
 //!
 //! Two schemes:
-//! * `rfc3161` — a real RFC 3161 TimeStampToken (DER/CMS). Production path; the Go anchoring job
-//!   obtains it from a third-party TSA. Wire-format verification is feature-gated (`rfc3161`,
-//!   landing with the server) to keep the WASM verifier lean — until then it reports `Unsupported`.
+//! * `rfc3161` — a real RFC 3161 TimeStampToken (DER/CMS), verified by [`crate::rfc3161`]. Production
+//!   path; the Go anchoring job obtains the token from a third-party TSA. Verification is
+//!   **feature-gated** (`rfc3161`) so the default + WASM verifier bundles stay lean; when the
+//!   feature is off, `rfc3161` anchors report `Unsupported` (never a silent pass).
 //! * `test-anchor` — a hermetic, deterministic scheme used by fixtures/dev: an independent TSA key
 //!   (distinct from the customer signing key) signs `LP(tag) ‖ LP(checkpoint_hash) ‖ LP(anchored_ts)`.
 //!   It exercises the *exact* detection logic (bind hash→time under a non-customer key) without a
@@ -74,12 +75,20 @@ pub fn make_test_anchor(
     .expect("anchor object")
 }
 
-/// Verify an anchor block binds `checkpoint_hash` and return the attested `anchored_ts`.
-/// `trusted_tsa` are TSA public keys supplied out-of-band (the anchor's trust root).
+/// Out-of-band trust roots for anchor verification. `test_anchor_keys` are Ed25519 keys for the
+/// hermetic `test-anchor` scheme; `rfc3161_tsa_spki` are DER `SubjectPublicKeyInfo`s for real RFC
+/// 3161 TSAs (used only when the `rfc3161` feature is built).
+#[derive(Default)]
+pub struct AnchorTrust {
+    pub test_anchor_keys: Vec<VerifyingKey>,
+    pub rfc3161_tsa_spki: Vec<Vec<u8>>,
+}
+
+/// Verify an anchor block binds `checkpoint_hash` and return the attested anchor time.
 pub fn verify_anchor(
     checkpoint_hash: &str,
     anchor: &CanonValue,
-    trusted_tsa: &[VerifyingKey],
+    trust: &AnchorTrust,
 ) -> Result<String, AnchorError> {
     let scheme = anchor
         .get("scheme")
@@ -98,16 +107,46 @@ pub fn verify_anchor(
             let sig_bytes = b64::decode_fixed::<64>(token).map_err(AnchorError::BadToken)?;
             let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
             let pre = anchor_preimage(checkpoint_hash, anchored_ts);
-            for vk in trusted_tsa {
+            for vk in &trust.test_anchor_keys {
                 if vk.verify_strict(&pre, &signature).is_ok() {
                     return Ok(anchored_ts.to_string());
                 }
             }
             Err(AnchorError::Untrusted)
         }
-        "rfc3161" => Err(AnchorError::Unsupported("rfc3161".into())),
+        "rfc3161" => verify_rfc3161(checkpoint_hash, anchor, trust),
         other => Err(AnchorError::BadScheme(other.to_string())),
     }
+}
+
+#[cfg(feature = "rfc3161")]
+fn verify_rfc3161(
+    checkpoint_hash: &str,
+    anchor: &CanonValue,
+    trust: &AnchorTrust,
+) -> Result<String, AnchorError> {
+    // The anchored message is the checkpoint_hash string; the TSA's messageImprint is its SHA-256.
+    let token = anchor
+        .get("token_b64")
+        .and_then(|v| v.as_str())
+        .ok_or(AnchorError::MissingField("token_b64"))?;
+    let der = b64::decode(token).map_err(AnchorError::BadToken)?;
+    for spki in &trust.rfc3161_tsa_spki {
+        if let Ok(gen_time) = crate::rfc3161::verify_binding(&der, spki, checkpoint_hash.as_bytes())
+        {
+            return Ok(gen_time);
+        }
+    }
+    Err(AnchorError::Untrusted)
+}
+
+#[cfg(not(feature = "rfc3161"))]
+fn verify_rfc3161(
+    _checkpoint_hash: &str,
+    _anchor: &CanonValue,
+    _trust: &AnchorTrust,
+) -> Result<String, AnchorError> {
+    Err(AnchorError::Unsupported("rfc3161".into()))
 }
 
 /// Convenience: a TSA "authority" for tests/dev (deterministic key from seed).
@@ -119,13 +158,20 @@ pub fn test_tsa_key(seed: &[u8; 32]) -> SigningKey {
 mod tests {
     use super::*;
 
+    fn trust(keys: Vec<VerifyingKey>) -> AnchorTrust {
+        AnchorTrust {
+            test_anchor_keys: keys,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_anchor_binds_hash_and_time() {
         let tsa = test_tsa_key(&[200u8; 32]);
         let ch = "sha256:abababababababababababababababababababababababababababababababab";
         let ts = "2026-06-15T10:05:00.000Z";
         let anchor = make_test_anchor(ch, ts, &tsa, "tsa-1");
-        let trusted = vec![tsa.verifying_key()];
+        let trusted = trust(vec![tsa.verifying_key()]);
 
         assert_eq!(verify_anchor(ch, &anchor, &trusted).unwrap(), ts);
         // wrong checkpoint_hash -> fails (token is bound to the hash)
@@ -135,7 +181,7 @@ mod tests {
             Err(AnchorError::Untrusted)
         );
         // untrusted TSA key -> fails
-        let other = vec![test_tsa_key(&[1u8; 32]).verifying_key()];
+        let other = trust(vec![test_tsa_key(&[1u8; 32]).verifying_key()]);
         assert_eq!(
             verify_anchor(ch, &anchor, &other),
             Err(AnchorError::Untrusted)
@@ -143,14 +189,12 @@ mod tests {
     }
 
     #[test]
-    fn rfc3161_is_explicitly_unsupported_not_silently_passed() {
+    fn rfc3161_no_trusted_tsa_is_an_error_not_a_pass() {
         let anchor = CanonValue::parse(
             r#"{"scheme":"rfc3161","anchored_ts":"2026-06-15T10:05:00.000Z","token_b64":"AAAA"}"#,
         )
         .unwrap();
-        assert!(matches!(
-            verify_anchor("sha256:00", &anchor, &[]),
-            Err(AnchorError::Unsupported(_))
-        ));
+        // With no trusted TSA SPKI (and/or the feature off), this must be an error, never a pass.
+        assert!(verify_anchor("sha256:00", &anchor, &AnchorTrust::default()).is_err());
     }
 }

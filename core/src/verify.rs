@@ -89,8 +89,10 @@ pub struct VerifyOptions {
     /// pinned key carries `status`/`status_changed_at`, those authoritative values override the
     /// bundle's self-asserted claims (so an attacker cannot future-date a compromise to upgrade).
     pub trusted_keys: Option<Vec<TrustedKey>>,
-    /// Trusted TSA public keys (out-of-band) used to verify external-anchor tokens.
+    /// Trusted Ed25519 TSA keys for the hermetic `test-anchor` scheme (out-of-band).
     pub trusted_tsa_keys: Vec<VerifyingKey>,
+    /// Trusted DER `SubjectPublicKeyInfo`s for real RFC 3161 TSAs (used with the `rfc3161` feature).
+    pub trusted_tsa_spki: Vec<Vec<u8>>,
 }
 
 struct KeyEntry {
@@ -154,6 +156,37 @@ fn worst_status(a: &str, b: &str) -> String {
         b
     }
     .to_string()
+}
+
+/// True iff `s` is exactly `YYYY-MM-DDThh:mm:ss.mmmZ` (fixed-ms UTC). Lexical `<=` on two such
+/// strings equals chronological order; we only compare anchor vs status-change times that pass this.
+fn is_canonical_ts(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 24 {
+        return false;
+    }
+    let digit = |i: usize| b[i].is_ascii_digit();
+    (0..4).all(digit)
+        && b[4] == b'-'
+        && digit(5)
+        && digit(6)
+        && b[7] == b'-'
+        && digit(8)
+        && digit(9)
+        && b[10] == b'T'
+        && digit(11)
+        && digit(12)
+        && b[13] == b':'
+        && digit(14)
+        && digit(15)
+        && b[16] == b':'
+        && digit(17)
+        && digit(18)
+        && b[19] == b'.'
+        && digit(20)
+        && digit(21)
+        && digit(22)
+        && b[23] == b'Z'
 }
 
 /// All content_hashes reachable as causal ancestors of `frontier` (inclusive) — the set a
@@ -447,18 +480,35 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             .and_then(|(id, ep)| keys.get(&(id, ep)))
             .filter(|e| !keys_externally_pinned || is_trusted(&e.vk))
             .map(|e| e.vk);
-        match vk {
+        let cp_verified = match vk {
             Some(vk) => match verify_checkpoint_sealed(cp, &vk) {
-                Ok(()) => checkpoints_verified += 1,
-                Err(e) => issues.push(format!("checkpoint {i} invalid: {e}")),
+                Ok(()) => {
+                    checkpoints_verified += 1;
+                    true
+                }
+                Err(e) => {
+                    issues.push(format!("checkpoint {i} invalid: {e}"));
+                    false
+                }
             },
-            None => issues.push(format!("checkpoint {i}: no trusted public key to verify")),
-        }
+            None => {
+                issues.push(format!("checkpoint {i}: no trusted public key to verify"));
+                false
+            }
+        };
         if let Some(anchor) = cp.get("anchor") {
             checkpoints_anchored += 1;
-            if !opts.trusted_tsa_keys.is_empty() {
+            let any_tsa_trust =
+                !opts.trusted_tsa_keys.is_empty() || !opts.trusted_tsa_spki.is_empty();
+            // Only an anchor on a *verified* checkpoint can contribute to trust — otherwise an
+            // attacker pairs an unsigned checkpoint (arbitrary frontier) with a valid TSA token.
+            if cp_verified && any_tsa_trust {
+                let anchor_trust = crate::anchor::AnchorTrust {
+                    test_anchor_keys: opts.trusted_tsa_keys.clone(),
+                    rfc3161_tsa_spki: opts.trusted_tsa_spki.clone(),
+                };
                 let cph = s(cp, "checkpoint_hash").unwrap_or_default();
-                match verify_anchor(&cph, anchor, &opts.trusted_tsa_keys) {
+                match verify_anchor(&cph, anchor, &anchor_trust) {
                     Ok(ts) => {
                         let seq = cp
                             .get("checkpoint_seq")
@@ -523,9 +573,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         None => Vec::new(),
     };
     let anchored_before = |content_hash: &str, changed_at: &str| -> bool {
-        anchored_committed
-            .iter()
-            .any(|(ts, committed)| ts.as_str() <= changed_at && committed.contains(content_hash))
+        // Lexical `<=` is only valid between two canonical fixed-precision UTC timestamps; a
+        // malformed `changed_at` (or anchor time) must NOT silently skew the ordering — fail closed.
+        if !is_canonical_ts(changed_at) {
+            return false;
+        }
+        anchored_committed.iter().any(|(ts, committed)| {
+            is_canonical_ts(ts) && ts.as_str() <= changed_at && committed.contains(content_hash)
+        })
     };
 
     let mut record_trust = Vec::with_capacity(pending.len());

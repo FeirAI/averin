@@ -22,7 +22,9 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: test (golden vectors are the acceptance gate)
-        run: cargo test --all-features
+        run: cargo test
+      - name: test rfc3161 + mini-TSA (real RFC 3161 token verify)
+        run: cargo test --features test-tsa
       - name: build verify CLI
         run: cargo build --release --bin feir-verify
 

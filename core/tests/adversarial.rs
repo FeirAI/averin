@@ -300,6 +300,7 @@ fn compromised_key_anchored_before_compromise_stays_trusted() {
         &VerifyOptions {
             trusted_keys: Some(vec![pinned_compromised("2026-06-15T10:10:00.000Z")]),
             trusted_tsa_keys: vec![tsa_vk],
+            ..Default::default()
         },
     );
     assert!(
@@ -324,6 +325,7 @@ fn compromised_key_not_anchored_before_compromise_is_untrusted() {
         &VerifyOptions {
             trusted_keys: Some(vec![pinned_compromised("2026-06-15T10:01:00.000Z")]),
             trusted_tsa_keys: vec![tsa_vk],
+            ..Default::default()
         },
     );
     assert!(!r.ok);
@@ -347,6 +349,7 @@ fn future_dated_bundle_compromise_cannot_upgrade_under_pinning() {
         &VerifyOptions {
             trusted_keys: Some(vec![correct.into()]), // no authoritative compromise time
             trusted_tsa_keys: vec![tsa_vk],
+            ..Default::default()
         },
     );
     assert!(!r.ok, "bundle's future-dated compromise must not upgrade");
@@ -381,6 +384,7 @@ fn backdated_anchor_time_is_detected() {
         &VerifyOptions {
             trusted_keys: None,
             trusted_tsa_keys: vec![tsa.verifying_key()],
+            ..Default::default()
         },
     );
     assert!(!r.ok);
@@ -388,5 +392,123 @@ fn backdated_anchor_time_is_detected() {
     assert!(
         broken.contains("backdating"),
         "expected backdating detection, got: {broken}"
+    );
+}
+
+/// End-to-end: a REAL RFC 3161 TimeStampToken (CMS/DER, ECDSA P-256) anchoring the latest
+/// checkpoint flows through the bundle verifier and salvages a later-compromised key (#9).
+/// Requires the `test-tsa` feature (exposes the in-Rust mini-TSA token builder).
+#[cfg(feature = "test-tsa")]
+#[test]
+fn real_rfc3161_anchor_salvages_compromised_key_in_bundle() {
+    use feir_decision_core::b64;
+    use feir_decision_core::rfc3161::make_test_token;
+
+    let b = fixture();
+    let mut checkpoints = arr(&b, "checkpoints");
+    let cp1h = checkpoint_hash(&checkpoints[1]);
+    // The TSA stamps a token over the checkpoint_hash string at 10:02 (before the 10:10 compromise).
+    let (token_der, tsa_spki) =
+        make_test_token(cp1h.as_bytes(), "2026-06-15T10:02:00.000Z", &[5u8; 32]);
+    let anchor = CanonValue::object(vec![
+        ("scheme".into(), CanonValue::string("rfc3161")),
+        (
+            "token_b64".into(),
+            CanonValue::string(b64::encode(&token_der)),
+        ),
+    ])
+    .unwrap();
+    checkpoints[1] = attach_anchor(&checkpoints[1], anchor);
+
+    let mut keys = arr(&b, "keys");
+    keys[0] = change_field(&keys[0], "key_status", CanonValue::string("compromised"));
+    keys[0] = change_field(
+        &keys[0],
+        "status_changed_at",
+        CanonValue::string("2020-01-01T00:00:00.000Z"), // bundle lie, ignored under pinning
+    );
+    let bundle = rebuild(keys, arr(&b, "records"), checkpoints);
+
+    let r = verify_bundle_with(
+        &bundle,
+        &VerifyOptions {
+            trusted_keys: Some(vec![pinned_compromised("2026-06-15T10:10:00.000Z")]),
+            trusted_tsa_spki: vec![tsa_spki],
+            ..Default::default()
+        },
+    );
+    assert!(
+        r.ok,
+        "real rfc3161 anchored-before-compromise should pass; issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.records_proven, 3);
+    assert!(r.checkpoints_anchored >= 1);
+
+    // An UNtrusted TSA SPKI must not salvage anything.
+    let (_t, other_spki) = make_test_token(b"x", "2026-06-15T10:02:00.000Z", &[6u8; 32]);
+    let r2 = verify_bundle_with(
+        &bundle,
+        &VerifyOptions {
+            trusted_keys: Some(vec![pinned_compromised("2026-06-15T10:10:00.000Z")]),
+            trusted_tsa_spki: vec![other_spki],
+            ..Default::default()
+        },
+    );
+    assert!(!r2.ok, "untrusted TSA must not salvage the compromised key");
+}
+
+#[cfg(feature = "test-tsa")]
+#[test]
+fn valid_anchor_on_unverified_checkpoint_does_not_upgrade() {
+    // Threat: pair a valid TSA token with a checkpoint whose OWN signature fails. The anchor binds
+    // the (unchanged) checkpoint_hash, but because the checkpoint isn't authenticated its frontier
+    // is attacker-controlled — so it must NOT contribute to the #9 anchored-before upgrade.
+    use feir_decision_core::b64;
+    use feir_decision_core::rfc3161::make_test_token;
+
+    let b = fixture();
+    let mut checkpoints = arr(&b, "checkpoints");
+    let cp1h = checkpoint_hash(&checkpoints[1]);
+    let (token_der, tsa_spki) =
+        make_test_token(cp1h.as_bytes(), "2026-06-15T10:02:00.000Z", &[5u8; 32]);
+    let anchor = CanonValue::object(vec![
+        ("scheme".into(), CanonValue::string("rfc3161")),
+        (
+            "token_b64".into(),
+            CanonValue::string(b64::encode(&token_der)),
+        ),
+    ])
+    .unwrap();
+    let mut cp1 = attach_anchor(&checkpoints[1], anchor);
+    // corrupt the checkpoint signature (hash unchanged -> anchor still binds, but sig fails)
+    cp1 = change_field(
+        &cp1,
+        "sig",
+        CanonValue::string(format!("ed25519:{}", "A".repeat(86))),
+    );
+    checkpoints[1] = cp1;
+
+    let mut keys = arr(&b, "keys");
+    keys[0] = change_field(&keys[0], "key_status", CanonValue::string("compromised"));
+    keys[0] = change_field(
+        &keys[0],
+        "status_changed_at",
+        CanonValue::string("2020-01-01T00:00:00.000Z"),
+    );
+    let bundle = rebuild(keys, arr(&b, "records"), checkpoints);
+
+    let r = verify_bundle_with(
+        &bundle,
+        &VerifyOptions {
+            trusted_keys: Some(vec![pinned_compromised("2026-06-15T10:10:00.000Z")]),
+            trusted_tsa_spki: vec![tsa_spki],
+            ..Default::default()
+        },
+    );
+    assert!(!r.ok, "unverified checkpoint must not pass");
+    assert_eq!(
+        r.records_proven, 0,
+        "anchor on an unverified checkpoint must not upgrade compromised records"
     );
 }
