@@ -212,3 +212,31 @@ func TestForbiddenScopeBlocksPrepare(t *testing.T) {
 		t.Fatal("Prepare must reject a forbidden single_operation scope")
 	}
 }
+
+func TestPrepareCanonicalizesAgentPubkey(t *testing.T) {
+	// Go's base64 decode is non-strict (accepts non-canonical), but the Rust offline verifier rejects
+	// non-canonical base64url (ADR 0004 D2). Prepare must canonicalize the descriptor cnf so a genuine
+	// receipt doesn't false-fail PoP re-verification.
+	ak := agentKey()
+	pub := ak.Public().(ed25519.PublicKey)
+	canon := base64.RawURLEncoding.EncodeToString(pub)
+	const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	idx := strings.IndexByte(alpha, canon[len(canon)-1])
+	nonCanon := canon[:len(canon)-1] + string(alpha[idx^1]) // same 32 bytes, non-canonical padding bit
+	if nonCanon == canon {
+		t.Fatal("failed to construct a non-canonical encoding")
+	}
+	r := Request{AgentID: "a", Action: "x", Resource: "r", Scope: "read:x", AgentPubKey: nonCanon, TTL: time.Minute}
+	r.AgentSig = b64(ed25519.Sign(ak, r.Challenge()))
+	p, err := Prepare(r, "g", time.Now().UTC(), issuingKey())
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if p.Descriptor["cnf"] != canon {
+		t.Fatalf("descriptor cnf not canonicalized: got %v, want %s", p.Descriptor["cnf"], canon)
+	}
+	// and the grant_evidence cnf_kid is derived from the canonical key bytes (stable either way)
+	if p.Evidence["cnf_kid"] != KeyID(pub) {
+		t.Fatalf("cnf_kid drift: %v", p.Evidence["cnf_kid"])
+	}
+}

@@ -13,7 +13,7 @@ use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use feir_decision_core::verify::{
     verify_bundle, verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions,
 };
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::path::PathBuf;
 
 fn fixture() -> CanonValue {
@@ -932,6 +932,13 @@ fn grant_evidence(
         ("resource_id".into(), CanonValue::string(resource)),
         ("scope_class".into(), CanonValue::string(scope)),
         ("cnf_kid".into(), CanonValue::string(cnf_kid)),
+        // credential_binding binds the grant to the minted capability descriptor + (D2) is read by the
+        // verifier to reconstruct the use PoP challenge. The real broker carries it; the fixed test
+        // value below is fine for non-D2 cases (uses without cnf_pub/use_sig stay shim_asserted).
+        (
+            "credential_binding".into(),
+            CanonValue::string(sha256_prefixed(b"test-credential-binding")),
+        ),
         ("issued_at".into(), CanonValue::Int(issued)),
         ("exp".into(), CanonValue::Int(exp)),
     ])
@@ -1118,6 +1125,9 @@ fn tier_b_use_matches_closed_grant() {
     assert_eq!(r.uses_total, 1);
     assert_eq!(r.uses_matched, 1);
     assert_eq!(r.uses_action_unverified, 1); // R6: no taxonomy -> demonstrator artifact
+    // this fixture's use carries no cnf_pub/use_sig, so it stays `shim_asserted` (D2): matched but the
+    // PoP is NOT independently re-run.
+    assert_eq!(r.uses_pop_reverified, 0);
     assert_eq!(r.unmatched_violation, 0);
     assert_eq!(r.unmatched_pending, 0);
     assert_eq!(r.grants_unused, 0);
@@ -1530,4 +1540,169 @@ fn ledger_commitment_golden_vector() {
         feir_decision_core::verify::ledger_commitment("jti-x", "nonce-y", 1_718_445_700),
         "sha256:b4566365dae04faf6e17e3ab8ab7183f7236b812fd1b957ef3fcd966ad6a163b"
     );
+}
+
+// ---- D2: offline PoP re-verification fixtures (ADR 0004) ----
+use feir_decision_core::b64::encode as b64enc;
+use feir_decision_core::hashx::hex_lower;
+use feir_decision_core::verify::{cnf_kid as vk_cnf_kid, use_pop_challenge};
+
+// the credential_binding the grant_evidence helper carries (so a D2 use's PoP challenge matches it)
+fn test_credential_binding() -> String {
+    sha256_prefixed(b"test-credential-binding")
+}
+
+// seal_d2_use builds a resource-role use receipt carrying cnf_pub + use_sig so the verifier RE-RUNS
+// the Ed25519 PoP. Parameterized so negatives can desync one input: `bound_commitment` is what the PoP
+// is signed over, `record_commitment` is the receipt's input_commit (== bound for a valid receipt),
+// `cnf_pub_carried` is the carried key, `sign_with` actually signs.
+#[allow(clippy::too_many_arguments)]
+fn seal_d2_use(
+    rec_sk: &SigningKey,
+    res_sk: &SigningKey,
+    record_id: &str,
+    prev: &[String],
+    used_at: i64,
+    bound_commitment: &str,
+    record_commitment: &str,
+    cnf_kid_str: &str,
+    cnf_pub_carried: &VerifyingKey,
+    sign_with: &SigningKey,
+) -> CanonValue {
+    let nonce = format!("nonce-{used_at}");
+    let cb = test_credential_binding();
+    let challenge = use_pop_challenge(GID, RESOURCE, ACTION, bound_commitment, &cb, &nonce);
+    let use_sig = b64enc(&sign_with.sign(&challenge).to_bytes());
+    let pch = format!("sha256:{}", hex_lower(&challenge));
+    let ue = CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("use")),
+        ("grant_id".into(), CanonValue::string(GID)),
+        ("action".into(), CanonValue::string(ACTION)),
+        ("resource_id".into(), CanonValue::string(RESOURCE)),
+        ("jti".into(), CanonValue::string(GID)),
+        ("nonce".into(), CanonValue::string(&nonce)),
+        ("pop_challenge_hash".into(), CanonValue::string(pch)),
+        ("cnf_kid".into(), CanonValue::string(cnf_kid_str)),
+        (
+            "ledger_commitment".into(),
+            CanonValue::string(feir_decision_core::verify::ledger_commitment(GID, &nonce, used_at)),
+        ),
+        ("used_at".into(), CanonValue::Int(used_at)),
+        ("cnf_pub".into(), CanonValue::string(b64enc(cnf_pub_carried.as_bytes()))),
+        ("use_sig".into(), CanonValue::string(use_sig)),
+    ])
+    .unwrap();
+    let eh = sha256_prefixed(ue.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", record_id, &eh, res_sk);
+    let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"feir-resource","agent_version":"feir-resource",
+        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
+        "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
+        "event_type":"tool_call","action":"{ACTION}","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"tool_gateway","grant_id":"{GID}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "input_commit":{{"alg":"sha256","commitment":"{record_commitment}","low_entropy":true}},
+        "extensions":{{"broker":{{"kind":"use","grant_id":"{GID}","resource_id":"{RESOURCE}","use_evidence":{ue}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ue = ue.serialize(),
+    );
+    seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
+// d2_grant builds a grant whose grant_evidence.cnf_kid matches the cnf key (so the predicate passes).
+fn d2_grant(rec: &SigningKey, cnf_vk: &VerifyingKey) -> CanonValue {
+    seal_grant(rec, rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", &vk_cnf_kid(cnf_vk), ISSUED, EXP))
+}
+
+#[test]
+fn tier_b_pop_reverified_under_carried_cnf() {
+    // D2: a use carrying the cnf pubkey + a valid use_sig has its Ed25519 PoP RE-RUN offline.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let pc = sha256_prefixed(b"params-commit");
+    let grant = d2_grant(&rec, &cnf.verifying_key());
+    let use_rec = seal_d2_use(&rec, &res, "use-1", &[content_hash_of(&grant)], USED, &pc, &pc, &vk_cnf_kid(&cnf.verifying_key()), &cnf.verifying_key(), &cnf);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.uses_pop_reverified, 1, "the PoP should be independently re-run offline");
+    assert!(feir_decision_core::verify::report_to_json(&r).contains(r#""uses_pop_reverified":1"#));
+}
+
+#[test]
+fn tier_b_pop_reverify_forged_use_sig_is_a_violation() {
+    // A receipt carrying the real cnf_pub but a use_sig signed by a DIFFERENT key fails the re-check.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let imposter = signing_key_from_seed(&[9u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let pc = sha256_prefixed(b"params-commit");
+    let grant = d2_grant(&rec, &cnf.verifying_key());
+    // sign_with = imposter, but carry cnf's pubkey + cnf's kid
+    let use_rec = seal_d2_use(&rec, &res, "use-1", &[content_hash_of(&grant)], USED, &pc, &pc, &vk_cnf_kid(&cnf.verifying_key()), &cnf.verifying_key(), &imposter);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert_eq!(r.uses_pop_reverified, 0);
+    assert!(r.issues.iter().any(|i| i.contains("PoP re-verification")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_pop_reverify_challenge_mismatch_is_a_violation() {
+    // The receipt's input_commit differs from the params_commitment the PoP was signed over -> the
+    // reconstructed challenge != pop_challenge_hash.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let bound = sha256_prefixed(b"params-A");
+    let in_record = sha256_prefixed(b"params-B"); // != bound
+    let grant = d2_grant(&rec, &cnf.verifying_key());
+    let use_rec = seal_d2_use(&rec, &res, "use-1", &[content_hash_of(&grant)], USED, &bound, &in_record, &vk_cnf_kid(&cnf.verifying_key()), &cnf.verifying_key(), &cnf);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("reconstructed PoP challenge")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_pop_reverify_wrong_cnf_pub_is_a_violation() {
+    // The carried cnf_pub does not match the receipt's cnf_kid (which matches the grant) -> violation.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let other = signing_key_from_seed(&[9u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let pc = sha256_prefixed(b"params-commit");
+    let grant = d2_grant(&rec, &cnf.verifying_key());
+    // cnf_kid = cnf's (matches grant), but carry OTHER's pubkey and sign with OTHER
+    let use_rec = seal_d2_use(&rec, &res, "use-1", &[content_hash_of(&grant)], USED, &pc, &pc, &vk_cnf_kid(&cnf.verifying_key()), &other.verifying_key(), &other);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("cnf_pub does not match")), "{:?}", r.issues);
+}
+
+#[test]
+fn use_pop_challenge_and_cnf_kid_golden_vectors() {
+    // Cross-language pinned vectors — MUST equal Go resourceshim.usePoPChallenge + broker.KeyID.
+    let ch = use_pop_challenge("g", "r", "a", "pc", "cb", "n");
+    assert_eq!(hex_lower(&ch), "6e5f46c15724b1fa4af4c7e462d62a08fde27943e389171ff3e88993cdc1b4b5");
+    // multibyte UTF-8 fields must length-prefix by BYTE count identically in both languages
+    let mb = use_pop_challenge("café", "資源", "🔑", "pc", "cb", "n");
+    assert_eq!(hex_lower(&mb), "a7dec20864a4b5b0c0bdcc79c9f8176100661498c763f04fa7106f88663073ce");
+    let cnf = signing_key_from_seed(&[5u8; 32]).verifying_key();
+    assert_eq!(vk_cnf_kid(&cnf), "ed25519-dZl3bDCF4_k");
 }

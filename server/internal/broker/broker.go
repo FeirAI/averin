@@ -234,6 +234,15 @@ func Prepare(req Request, grantID string, now time.Time, issuingKey ed25519.Priv
 	// single_use only for a genuine single_operation grant; a session/batch coarsening is multi-use
 	// by definition, so the credential must not assert single_use (it would be a false claim).
 	singleUse := scopeClass == ScopeSingleOperation
+	// Decode + CANONICALLY re-encode the agent cnf pubkey before it enters the descriptor (req.Validate
+	// already checked the shape). Go's base64.RawURLEncoding decode is non-strict but the Rust offline
+	// verifier rejects non-canonical base64url, so a caller-supplied non-canonical agent_pubkey would
+	// false-fail D2 PoP re-verification; normalize here so the carried cnf is always canonical.
+	cnfPub, err := base64.RawURLEncoding.DecodeString(req.AgentPubKey)
+	if err != nil || len(cnfPub) != ed25519.PublicKeySize {
+		return Prepared{}, errors.New("agent_pubkey is not a valid ed25519 public key")
+	}
+	cnfCanonical := base64.RawURLEncoding.EncodeToString(cnfPub)
 
 	// Canonical credential descriptor — the exact claim set credential_binding commits to and the
 	// capability carries (ADR "Exact credential binding": typ/alg/kid/iss/sub/aud/act/jti/scope/cnf/
@@ -248,7 +257,7 @@ func Prepare(req Request, grantID string, now time.Time, issuingKey ed25519.Priv
 		"act":        req.Action,
 		"jti":        grantID,
 		"scope":      req.Scope,
-		"cnf":        req.AgentPubKey, // sender constraint: only the holder of this key may use it
+		"cnf":        cnfCanonical, // sender constraint: only the holder of this key may use it (canonical b64url)
 		"mode":       "capability",
 		"nbf":        evaluatedAt.Unix(),
 		"iat":        evaluatedAt.Unix(),
@@ -261,13 +270,8 @@ func Prepare(req Request, grantID string, now time.Time, issuingKey ed25519.Priv
 	if delegation == nil {
 		delegation = []string{}
 	}
-	// cnf_kid identifies the agent's sender-constraint (cnf) key — a Tier-B use's PoP must verify
-	// under it (ADR 0003 R4/R5). req.Validate has already checked the pubkey shape; re-decode
-	// fail-closed rather than assume.
-	cnfPub, err := base64.RawURLEncoding.DecodeString(req.AgentPubKey)
-	if err != nil || len(cnfPub) != ed25519.PublicKeySize {
-		return Prepared{}, errors.New("agent_pubkey is not a valid ed25519 public key")
-	}
+	// cnf_kid identifies the agent's sender-constraint (cnf) key — a Tier-B use's PoP must verify under
+	// it (ADR 0003 R4/R5). cnfPub was decoded + canonicalized above.
 	// Canonical grant_evidence (ADR 0003 §"Canonical evidence schemas"): the ONLY payload the offline
 	// verifier reads match inputs from. evidence_hash = sha256(RCP-canonicalize(grant_evidence)) is
 	// computed by the api layer via the Rust core (R1) — NOT here — so the broker stays pure Go with

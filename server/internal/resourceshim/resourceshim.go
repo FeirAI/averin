@@ -114,6 +114,9 @@ type UseEvidence struct {
 	CnfKid           string `json:"cnf_kid"`            // == grant_evidence.cnf_kid (the cnf key id)
 	LedgerCommitment string `json:"ledger_commitment"`  // sha256:<hex> of the consumed ledger entry (R5)
 	UsedAt           int64  `json:"used_at"`            // unix seconds; must lie in [issued_at, exp]
+	// ADR 0004 D2 — carried so the offline verifier can RE-RUN the Ed25519 PoP (off the shim TCB):
+	CnfPub string `json:"cnf_pub"` // base64url agent cnf public key (id == cnf_kid)
+	UseSig string `json:"use_sig"` // base64url PoP signature over the use_pop_challenge digest
 }
 
 // Shim is the resource-side gateway, configured once with the broker's capability-issuing public key,
@@ -204,15 +207,23 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 		CnfKid:           broker.KeyID(ed25519.PublicKey(cnfPub)),
 		LedgerCommitment: ledgerCommitment(claims.Jti, nonce, usedAt),
 		UsedAt:           usedAt,
+		// D2: the cnf pubkey (from the capability descriptor) + the verified use_sig, so the offline
+		// verifier can reconstruct this exact challenge and re-run the Ed25519 PoP check itself. Both are
+		// canonically re-encoded from their decoded bytes — Go's base64 decode is non-strict but the Rust
+		// verifier rejects non-canonical base64url, so a non-canonical agent value would otherwise
+		// false-fail re-verification.
+		CnfPub: base64.RawURLEncoding.EncodeToString(cnfPub),
+		UseSig: base64.RawURLEncoding.EncodeToString(useSig),
 	}, nil
 }
 
 // usePoPChallenge is the 32-byte digest the holder signs with the cnf key (R4):
 // sha256( LP(tag) ‖ LP(grant_id) ‖ LP(resource_id) ‖ LP(action) ‖ LP(params_commitment) ‖
 // LP(credential_binding) ‖ LP(nonce) ), where LP is a 4-byte big-endian length prefix. Length-prefixing
-// makes the concatenation unambiguous (no field-boundary confusion). Agent and shim both compute it,
-// so the encoding only needs to agree between them; the offline verifier checks the carried
-// pop_challenge_hash for presence/integrity, not by re-running this (MUST-FIX 4).
+// makes the concatenation unambiguous (no field-boundary confusion). The agent, the shim, AND the
+// offline verifier all compute it identically (ADR 0004 D2): the verifier reconstructs this challenge
+// from the receipt and RE-RUNS the Ed25519 PoP under the carried cnf pubkey, so the encoding is a
+// cross-language binding kept in sync via a shared golden vector.
 func usePoPChallenge(grantID, resourceID, action, paramsCommitment, credentialBinding, nonce string) []byte {
 	h := sha256.New()
 	for _, part := range []string{usePoPTag, grantID, resourceID, action, paramsCommitment, credentialBinding, nonce} {

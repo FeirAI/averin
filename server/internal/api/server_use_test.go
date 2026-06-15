@@ -2,9 +2,7 @@ package api_test
 
 import (
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -36,15 +34,24 @@ func newBrokerResourceServer(t *testing.T) http.Handler {
 		Routes()
 }
 
-// useBody builds a /v2/use request: the agent signs the fully-bound PoP challenge with its cnf key.
+// useBody builds a /v2/use request (ADR 0004 D2 flow): the agent commits the params under a hiding
+// params_nonce, signs the PoP over THAT commitment with its cnf key, and sends (params, params_nonce,
+// use_sig) so the offline verifier can re-run the PoP.
 func useBody(t *testing.T, idem, capability, grantID string, ak ed25519.PrivateKey, params, nonce string) string {
 	t.Helper()
 	binding, err := resourceshim.CredentialBinding(capability)
 	if err != nil {
 		t.Fatalf("binding: %v", err)
 	}
-	sum := sha256.Sum256([]byte(params))
-	paramsCommitment := "sha256:" + hex.EncodeToString(sum[:])
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	paramsNonce := strings.Repeat("ab", 32) // 64-hex params hiding-commitment nonce (commit is keyless)
+	paramsCommitment, err := c.Commit("input", []byte(params), paramsNonce)
+	if err != nil {
+		t.Fatalf("commit params: %v", err)
+	}
 	ch := resourceshim.UsePoPChallenge(grantID, "orders-db", "db.query:orders-ro", paramsCommitment, binding, nonce)
 	useSig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, ch))
 	b, _ := json.Marshal(map[string]any{
@@ -52,6 +59,7 @@ func useBody(t *testing.T, idem, capability, grantID string, ak ed25519.PrivateK
 		"project_id":      "p1", "session_id": "s1",
 		"capability": capability, "use_sig": useSig,
 		"action": "db.query:orders-ro", "params": params, "nonce": nonce,
+		"params_nonce": paramsNonce,
 	})
 	return string(b)
 }

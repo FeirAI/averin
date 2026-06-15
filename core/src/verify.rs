@@ -20,7 +20,7 @@ use crate::checkpoint::{validate_chain, verify_checkpoint_sealed};
 use crate::dag;
 use crate::record::{validate_record_shape, verify_content_hash, verify_sealed};
 use crate::sign::decode_pubkey;
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Signature, VerifyingKey};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +84,10 @@ pub struct VerifyReport {
     pub uses_total: usize,
     pub uses_matched: usize,
     pub uses_action_unverified: usize,
+    /// Matched uses whose Ed25519 PoP the verifier independently RE-RAN offline (ADR 0004 D2 — PoP off
+    /// the shim TCB). A matched use that only carries the shim-asserted `pop_challenge_hash` (no
+    /// cnf/use_sig) is counted in `uses_matched` but NOT here.
+    pub uses_pop_reverified: usize,
     pub unmatched_violation: usize,
     pub unmatched_pending: usize,
     pub grants_unused: usize,
@@ -503,6 +507,10 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             count(r.uses_action_unverified),
         ),
         (
+            "uses_pop_reverified".into(),
+            count(r.uses_pop_reverified),
+        ),
+        (
             "unmatched_violation".into(),
             count(r.unmatched_violation),
         ),
@@ -698,6 +706,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         uses_total: 0,
         uses_matched: 0,
         uses_action_unverified: 0,
+        uses_pop_reverified: 0,
         unmatched_violation: 0,
         unmatched_pending: 0,
         grants_unused: 0,
@@ -758,6 +767,87 @@ pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
     }
     pre.extend_from_slice(&(used_at as u64).to_be_bytes());
     crate::hashx::sha256_prefixed(&pre)
+}
+
+/// Re-derive the use-time PoP challenge digest the resource shim signs over (ADR 0003 R4 / ADR 0004
+/// D2), byte-identically to Go `resourceshim.usePoPChallenge`: `sha256( LP4(tag) ‖ LP4(grant_id) ‖
+/// LP4(resource_id) ‖ LP4(action) ‖ LP4(params_commitment) ‖ LP4(credential_binding) ‖ LP4(nonce) )`,
+/// tag = "feir.broker.use.pop.v1". Returns the 32-byte digest the agent signs. Kept in sync with Go via
+/// a shared golden vector.
+pub fn use_pop_challenge(
+    grant_id: &str,
+    resource_id: &str,
+    action: &str,
+    params_commitment: &str,
+    credential_binding: &str,
+    nonce: &str,
+) -> [u8; 32] {
+    let mut pre = Vec::new();
+    for part in [
+        "feir.broker.use.pop.v1",
+        grant_id,
+        resource_id,
+        action,
+        params_commitment,
+        credential_binding,
+        nonce,
+    ] {
+        pre.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        pre.extend_from_slice(part.as_bytes());
+    }
+    crate::hashx::sha256(&pre)
+}
+
+/// Re-derive the cnf key id (Go `broker.KeyID`): `"ed25519-" + base64url-nopad(sha256(pubkey)[..8])`.
+/// Used to confirm a carried cnf public key matches the receipt's `cnf_kid` (ADR 0004 D2).
+pub fn cnf_kid(cnf_pub: &VerifyingKey) -> String {
+    let sum = crate::hashx::sha256(cnf_pub.as_bytes());
+    format!("ed25519-{}", crate::b64::encode(&sum[..8]))
+}
+
+/// Offline PoP re-verification (ADR 0004 D2). Returns `Ok(true)` if the receipt carried the agent
+/// cnf pubkey + use_sig and the Ed25519 PoP RE-RAN successfully (the verifier independently proved
+/// PoP — off the shim TCB); `Ok(false)` if it carries neither (legacy ADR-0003 `shim_asserted` path,
+/// not re-run); `Err(reason)` if it CLAIMS re-verification but the re-check fails (a violation). The
+/// challenge is reconstructed from the proven use_evidence fields + the matched grant's
+/// credential_binding + the record's input_commit.commitment.
+fn pop_reverify(rec: &CanonValue, credential_binding: &str) -> Result<bool, String> {
+    let (cnf_b64, sig_b64) = match (
+        ev_str(rec, "use_evidence", "cnf_pub"),
+        ev_str(rec, "use_evidence", "use_sig"),
+    ) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return Ok(false), // shim_asserted: nothing to re-run
+    };
+    let cnf_bytes = crate::b64::decode_fixed::<32>(&cnf_b64)
+        .map_err(|_| "use_evidence.cnf_pub is not a base64url ed25519 public key".to_string())?;
+    let cnf_pub = VerifyingKey::from_bytes(&cnf_bytes)
+        .map_err(|_| "use_evidence.cnf_pub is not a valid ed25519 public key".to_string())?;
+    if ev_str(rec, "use_evidence", "cnf_kid").as_deref() != Some(&cnf_kid(&cnf_pub)) {
+        return Err("carried cnf_pub does not match use_evidence.cnf_kid".into());
+    }
+    let challenge = use_pop_challenge(
+        &ev_str(rec, "use_evidence", "grant_id").unwrap_or_default(),
+        &ev_str(rec, "use_evidence", "resource_id").unwrap_or_default(),
+        &ev_str(rec, "use_evidence", "action").unwrap_or_default(),
+        rec.get("input_commit")
+            .and_then(|c| c.get("commitment"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+        credential_binding,
+        &ev_str(rec, "use_evidence", "nonce").unwrap_or_default(),
+    );
+    let expected = format!("sha256:{}", crate::hashx::hex_lower(&challenge));
+    if ev_str(rec, "use_evidence", "pop_challenge_hash").as_deref() != Some(&expected) {
+        return Err("reconstructed PoP challenge != use_evidence.pop_challenge_hash".into());
+    }
+    let sig_bytes = crate::b64::decode_fixed::<64>(&sig_b64)
+        .map_err(|_| "use_evidence.use_sig is not a base64url 64-byte signature".to_string())?;
+    let sig = Signature::from_bytes(&sig_bytes);
+    cnf_pub
+        .verify_strict(&challenge, &sig)
+        .map_err(|_| "use_sig does not verify under cnf_pub (offline PoP re-check failed)".to_string())?;
+    Ok(true)
 }
 
 /// Read an integer field from a record's canonical evidence payload (used for issued_at/exp/used_at).
@@ -1236,6 +1326,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         resource_id: String,
         scope_class: String,
         cnf_kid: String,
+        credential_binding: String,
         issued_at: i64,
         exp: i64,
         used: usize,
@@ -1257,15 +1348,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_str(rec, "grant_evidence", "resource_id"),
             ev_str(rec, "grant_evidence", "scope_class"),
             ev_str(rec, "grant_evidence", "cnf_kid"),
+            ev_str(rec, "grant_evidence", "credential_binding"),
             ev_int(rec, "grant_evidence", "issued_at"),
             ev_int(rec, "grant_evidence", "exp"),
         ) {
-            (Some(gid), Some(action), Some(resource_id), Some(scope_class), Some(cnf_kid), Some(issued_at), Some(exp)) => {
+            (Some(gid), Some(action), Some(resource_id), Some(scope_class), Some(cnf_kid), Some(credential_binding), Some(issued_at), Some(exp)) => {
                 grants_by_id.entry(gid).or_insert(GrantInfo {
                     action,
                     resource_id,
                     scope_class,
                     cnf_kid,
+                    credential_binding,
                     issued_at,
                     exp,
                     used: 0,
@@ -1284,6 +1377,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut uses_total = 0usize;
     let mut uses_matched = 0usize;
     let mut uses_action_unverified = 0usize;
+    let mut uses_pop_reverified = 0usize;
     let mut unmatched_violation = 0usize;
     let mut unmatched_pending = 0usize;
     let mut seen_uses: BTreeSet<&str> = BTreeSet::new();
@@ -1419,6 +1513,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             violation(&mut issues, format!("single-use grant '{gid}' exercised more than once — double-spend (R5)"));
             continue;
         }
+        // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
+        // reconstructing the challenge from the proven fields + this grant's credential_binding + the
+        // record's input_commit. A claimed re-verification that FAILS is a violation; a receipt that
+        // carries neither stays `shim_asserted` (legacy ADR-0003 path).
+        match pop_reverify(rec, &g.credential_binding) {
+            Ok(true) => uses_pop_reverified += 1,
+            Ok(false) => {}
+            Err(msg) => {
+                unmatched_violation += 1;
+                violation(&mut issues, format!("offline PoP re-verification: {msg}"));
+                continue;
+            }
+        }
         g.used += 1;
         uses_matched += 1;
         // R6: no signed operation taxonomy validates scope_class==single_operation, so a matched use is
@@ -1460,6 +1567,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         uses_total,
         uses_matched,
         uses_action_unverified,
+        uses_pop_reverified,
         unmatched_violation,
         unmatched_pending,
         grants_unused,

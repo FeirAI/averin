@@ -636,22 +636,16 @@ type useRequest struct {
 	SessionID      string `json:"session_id"`
 	Capability     string `json:"capability"` // the minted, sender-constrained token
 	UseSig         string `json:"use_sig"`    // base64url ed25519 PoP signature (signed with the cnf key)
-	Action         string `json:"action"`     // the operation to perform (must equal the grant's action)
-	Params         string `json:"params"`     // raw operation parameters (committed + PoP-bound)
-	Nonce          string `json:"nonce"`      // the one-time PoP nonce
+	Action         string `json:"action"`       // the operation to perform (must equal the grant's action)
+	Params         string `json:"params"`       // raw operation parameters (committed + PoP-bound)
+	Nonce          string `json:"nonce"`        // the one-time PoP freshness nonce
+	ParamsNonce    string `json:"params_nonce"` // 64-hex nonce hiding the params commitment the PoP binds (D2)
 }
 
 // deterministicUseID derives a stable use-receipt id from (project, idempotency_key), so an honest
 // retry collapses in the store rather than sealing a second receipt (and re-consuming the credential).
 func deterministicUseID(projectID, idem string) string {
 	return "use-" + uuidV5Shaped("feir.use.id.v1", projectID, idem)
-}
-
-// sha256Prefixed returns "sha256:<hex>" over b (a deterministic digest used to bind the PoP to the
-// operation params — both the agent and the resource compute it the same way).
-func sha256Prefixed(b []byte) string {
-	sum := sha256.Sum256(b)
-	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // handleUse records a Tier-B USE RECEIPT: the resource validates a presented capability + PoP at use
@@ -692,10 +686,17 @@ func (s *Server) handleUse(w http.ResponseWriter, r *http.Request) {
 	}
 	useID := deterministicUseID(ur.ProjectID, idem)
 
-	// params_commitment binds the PoP to the exact operation parameters (a deterministic digest both
-	// the agent and the resource compute, so a captured use_sig can't be replayed against other params).
+	// D2 (ADR 0004): the PoP binds a HIDING params commitment (the agent's params_nonce) which is ALSO
+	// the receipt's input_commit — so the offline verifier reconstructs the PoP challenge from
+	// input_commit.commitment and re-runs Ed25519 without the raw params leaking. The resource RECOMPUTES
+	// the commitment from (params, params_nonce); the PoP only verifies if the agent signed over THIS
+	// exact value, so the agent cannot bind params different from those it sends (MF4 recompute-or-reject).
 	rawParams := []byte(ur.Params)
-	paramsCommitment := sha256Prefixed(rawParams)
+	paramsCommitment, err := s.core.Commit("input", rawParams, ur.ParamsNonce)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid params/params_nonce (need a 64-hex nonce): "+err.Error())
+		return
+	}
 	shim := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, s.ledger)
 
 	// The idempotency check, the capability validation+consume, and the seal run as ONE critical
@@ -720,7 +721,7 @@ func (s *Server) handleUse(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		grantID = ev.GrantID
-		rec, disclosures, e := s.buildUseRecord(useID, ur, ev, rawParams)
+		rec, disclosures, e := s.buildUseRecord(useID, ur, ev, rawParams, paramsCommitment)
 		if e != nil {
 			return e
 		}
@@ -768,7 +769,7 @@ func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, st
 // buildUseRecord assembles the unsealed use-receipt Decision Record: a tool_gateway-role authority
 // with a RESOURCE-signed evidence_sig over the re-derivable use_evidence (R1/R2), a hiding commitment
 // over the operation params, and the use lifecycle under extensions.broker (kind=use → resource role).
-func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.UseEvidence, rawParams []byte) (map[string]any, []store.DisclosureSecret, error) {
+func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.UseEvidence, rawParams []byte, commitment string) (map[string]any, []store.DisclosureSecret, error) {
 	// evidence_hash = sha256(RCP-canonicalize(use_evidence)) via the core (R1), signed by the RESOURCE
 	// key (R2) and record_id-bound to this receipt.
 	evidenceJSON, err := json.Marshal(ev)
@@ -783,19 +784,14 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 	if err != nil {
 		return nil, nil, fmt.Errorf("sign use evidence (resource key): %w", err)
 	}
-	// Commit the operation params (hiding), revealable via selective disclosure.
+	// Store the raw params content-addressed for selective disclosure. D2: input_commit IS the agent's
+	// PoP-bound hiding commitment (over (params, params_nonce)) — the SAME value the offline verifier
+	// reconstructs the PoP challenge from. The disclosure opens it with the agent's params_nonce.
 	addr, err := s.content.Put(context.Background(), rawParams)
 	if err != nil {
 		return nil, nil, fmt.Errorf("store use params: %w", err)
 	}
-	nonce, err := s.core.RandomNonce()
-	if err != nil {
-		return nil, nil, fmt.Errorf("nonce: %w", err)
-	}
-	commitment, err := s.core.Commit("input", rawParams, nonce)
-	if err != nil {
-		return nil, nil, fmt.Errorf("commit use params: %w", err)
-	}
+	nonce := ur.ParamsNonce
 
 	// use_evidence is carried verbatim (the verifier re-derives evidence_hash from it). Round-trip the
 	// typed struct through JSON into a generic map so it embeds as a JSON object in the record body.

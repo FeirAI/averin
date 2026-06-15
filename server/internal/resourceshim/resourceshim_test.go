@@ -3,6 +3,7 @@ package resourceshim
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -311,5 +312,26 @@ func TestLedgerCommitmentGoldenVector(t *testing.T) {
 	want := "sha256:b4566365dae04faf6e17e3ab8ab7183f7236b812fd1b957ef3fcd966ad6a163b"
 	if got != want {
 		t.Fatalf("ledger_commitment golden vector drifted from Rust: got %s want %s", got, want)
+	}
+}
+
+func TestUsePoPChallengeAndKeyIDGoldenVectors(t *testing.T) {
+	// Cross-language pinned vectors — MUST equal Rust verify::use_pop_challenge + verify::cnf_kid (ADR
+	// 0004 D2). If these drift, the offline verifier's PoP re-verification rejects genuine receipts.
+	ch := usePoPChallenge("g", "r", "a", "pc", "cb", "n")
+	if got := hex.EncodeToString(ch); got != "6e5f46c15724b1fa4af4c7e462d62a08fde27943e389171ff3e88993cdc1b4b5" {
+		t.Fatalf("usePoPChallenge golden vector drifted from Rust: %s", got)
+	}
+	// multibyte UTF-8 fields must length-prefix by BYTE count identically to Rust
+	if got := hex.EncodeToString(usePoPChallenge("café", "資源", "🔑", "pc", "cb", "n")); got != "a7dec20864a4b5b0c0bdcc79c9f8176100661498c763f04fa7106f88663073ce" {
+		t.Fatalf("usePoPChallenge multibyte golden vector drifted from Rust: %s", got)
+	}
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = 5
+	}
+	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	if got := broker.KeyID(pub); got != "ed25519-dZl3bDCF4_k" {
+		t.Fatalf("KeyID golden vector drifted from Rust: %s", got)
 	}
 }
