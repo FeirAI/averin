@@ -44,8 +44,12 @@ pub struct RecordTrust {
     pub observed_via: String,
     pub trust: TrustLevel,
     /// Authority gradient (threat #4): none|declared|verified|failed. `verified` = an evidence_sig
-    /// checked out under a pinned authority key, not just the agent's claim.
+    /// checked out under a pinned authority key (for a broker/resource record, the ROLE-specific key
+    /// set — ADR 0003 R2), not just the agent's claim.
     pub authority: AuthorityTrust,
+    /// Broker/resource role (ADR 0003 R2): broker|resource|none. Surfaces which role's key set the
+    /// authority was checked under, so an auditor sees broker-signed vs resource-signed provenance.
+    pub broker_role: String,
     pub notes: Vec<String>,
 }
 
@@ -107,9 +111,17 @@ pub struct VerifyOptions {
     pub trusted_tsa_keys: Vec<VerifyingKey>,
     /// Trusted DER `SubjectPublicKeyInfo`s for real RFC 3161 TSAs (used with the `rfc3161` feature).
     pub trusted_tsa_spki: Vec<Vec<u8>>,
-    /// Trusted authority-system public keys (policy engine / approval service). An `evidence_sig`
-    /// that verifies under one of these elevates a record's authority to `verified` (threat #4).
+    /// Trusted authority-system public keys (policy engine / approval service) for NON-broker records.
+    /// An `evidence_sig` that verifies under one of these elevates a record's authority to `verified`
+    /// (threat #4). Broker/resource records are NOT elevated by this set — they use the role-specific
+    /// sets below (ADR 0003 R2 role separation).
     pub trusted_authority_keys: Vec<VerifyingKey>,
+    /// Trusted CREDENTIAL-BROKER recording keys. Only a `credential_broker`-role record (a grant)
+    /// elevates under one of these (ADR 0003 R2). Must be disjoint from `resource_authority_keys`.
+    pub broker_authority_keys: Vec<VerifyingKey>,
+    /// Trusted RESOURCE recording keys. Only a `tool_gateway`-role record (a use receipt) elevates
+    /// under one of these (ADR 0003 R2). Must be disjoint from `broker_authority_keys`.
+    pub resource_authority_keys: Vec<VerifyingKey>,
 }
 
 struct KeyEntry {
@@ -131,7 +143,52 @@ struct Pending {
     eff_status: String,
     status_changed_at: Option<String>,
     authority: AuthorityTrust,
+    broker_role: BrokerRole,
     notes: Vec<String>,
+}
+
+/// A record's broker/resource role (ADR 0003 R2), classified fail-closed from the
+/// `(extensions.broker.kind, authority.enforcement_point)` discriminator. `None` means the record
+/// does not claim a recognized Tier-B role (a plain record, or a fail-closed misclassification).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrokerRole {
+    Broker,
+    Resource,
+    None,
+}
+
+impl BrokerRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            BrokerRole::Broker => "broker",
+            BrokerRole::Resource => "resource",
+            BrokerRole::None => "none",
+        }
+    }
+}
+
+/// Classify a record's role from `(extensions.broker.kind, authority.enforcement_point)` — fail-closed:
+/// EXACTLY one recognized tuple maps to each role, and a `kind`/`enforcement_point` that point at
+/// different roles (ambiguous), an unrecognized value, or an absent component all map to `None`
+/// (ADR 0003 R2). `claims_role` is true iff the record carries a broker `kind` at all (so an
+/// unclassifiable record that nonetheless *claims* a Tier-B role can be surfaced, not silently
+/// dropped).
+fn classify_role(rec: &CanonValue) -> (BrokerRole, bool) {
+    let kind = rec
+        .get("extensions")
+        .and_then(|e| e.get("broker"))
+        .and_then(|b| b.get("kind"))
+        .and_then(|v| v.as_str());
+    let ep = rec
+        .get("authority")
+        .and_then(|a| a.get("enforcement_point"))
+        .and_then(|v| v.as_str());
+    let role = match (kind, ep) {
+        (Some("grant"), Some("credential_broker")) => BrokerRole::Broker,
+        (Some("use"), Some("tool_gateway")) => BrokerRole::Resource,
+        _ => BrokerRole::None,
+    };
+    (role, kind.is_some())
 }
 
 fn s(v: &CanonValue, k: &str) -> Option<String> {
@@ -398,6 +455,10 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
                     }),
                 ),
                 ("authority".into(), CanonValue::string(t.authority.as_str())),
+                (
+                    "broker_role".into(),
+                    CanonValue::string(t.broker_role.clone()),
+                ),
                 ("notes".into(), str_array(&t.notes)),
             ])
             .unwrap()
@@ -504,6 +565,14 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
+    let broker_authority = match parse_pubkeys(&opts_val, "broker_authority_keys") {
+        Ok(k) => k,
+        Err(e) => return error_report(&e),
+    };
+    let resource_authority = match parse_pubkeys(&opts_val, "resource_authority_keys") {
+        Ok(k) => k,
+        Err(e) => return error_report(&e),
+    };
     let tsa_keys = match parse_pubkeys(&opts_val, "tsa_keys") {
         Ok(k) => k,
         Err(e) => return error_report(&e),
@@ -518,6 +587,8 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
     };
     let mut opts = VerifyOptions {
         trusted_authority_keys: authority,
+        broker_authority_keys: broker_authority,
+        resource_authority_keys: resource_authority,
         trusted_tsa_keys: tsa_keys,
         trusted_tsa_spki: tsa_spki,
         ..Default::default()
@@ -579,6 +650,33 @@ fn error_report(msg: &str) -> String {
     .serialize()
 }
 
+/// A fatal-configuration `VerifyReport` (ok=false) returned BEFORE any record is evaluated — used for
+/// the R2 disjoint-key-set check, so an ambiguous key universe never proceeds to a "clean" verdict.
+fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
+    VerifyReport {
+        ok: false,
+        project_id,
+        keys_externally_pinned: false,
+        records_total: 0,
+        records_proven: 0,
+        record_trust: Vec::new(),
+        dag_ok: false,
+        dag_heads: 0,
+        collapsed_duplicates: 0,
+        checkpoints_total: 0,
+        checkpoints_verified: 0,
+        checkpoints_anchored: 0,
+        chain_ok: false,
+        disclosures_total: 0,
+        disclosures_verified: 0,
+        grant_total: 0,
+        grant_verified: 0,
+        coverage_manifest: None,
+        issues: vec![msg.to_string()],
+        first_broken_link: Some(msg.to_string()),
+    }
+}
+
 /// Re-derive a broker record's `evidence_hash` from the canonical evidence payload it embeds at
 /// `extensions.broker.<payload_key>` and confirm it equals the signed `authority.evidence_hash`
 /// (ADR 0003 R1). `verify_authority` only proves a signature over the opaque `evidence_hash`, so a
@@ -609,6 +707,22 @@ fn evidence_rederivable(rec: &CanonValue, payload_key: &str) -> bool {
 pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
     let mut issues: Vec<String> = Vec::new();
     let project_id = s(bundle, "project_id");
+
+    // R2 (ADR 0003): broker and resource authority key sets MUST be disjoint. A key present in both
+    // could sign either a grant or a use and pass role separation, so this is a FATAL configuration
+    // error — abort before evaluating any record (VerifyingKey equality is raw-bytes, which also
+    // settles the derived key id). Never proceed on an ambiguous key universe.
+    if opts
+        .broker_authority_keys
+        .iter()
+        .any(|bk| opts.resource_authority_keys.contains(bk))
+    {
+        return fatal_config_report(
+            project_id,
+            "broker_authority_keys and resource_authority_keys must be disjoint (a key in both breaks R2 role separation) — fatal configuration error",
+        );
+    }
+
     let keys_externally_pinned = opts.trusted_keys.is_some();
 
     let empty: Vec<CanonValue> = Vec::new();
@@ -726,9 +840,32 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             notes.push("signed by a key that is NOT externally pinned".into());
         }
 
-        let authority = verify_authority(rec, &opts.trusted_authority_keys);
+        // R2 (ADR 0003): verify the authority evidence under the record's ROLE-specific key set — a
+        // broker-role record (grant) only elevates under broker keys, a resource-role record (use)
+        // only under resource keys, and any other record under the generic authority keys. This makes
+        // role confusion (a resource key signing a grant, or vice versa) fail to elevate.
+        let (broker_role, claims_role) = classify_role(rec);
+        let auth_keys: &[VerifyingKey] = match broker_role {
+            BrokerRole::Broker => &opts.broker_authority_keys,
+            BrokerRole::Resource => &opts.resource_authority_keys,
+            BrokerRole::None => &opts.trusted_authority_keys,
+        };
+        let authority = verify_authority(rec, auth_keys);
         if authority == AuthorityTrust::Failed {
-            notes.push("authority claims a verified source but its evidence_sig did not verify under a trusted authority key".into());
+            notes.push(format!(
+                "authority claims a verified source but its evidence_sig did not verify under a trusted {} authority key",
+                broker_role.as_str()
+            ));
+        }
+        // R2 rule 4: a record that CLAIMS a Tier-B role (carries extensions.broker.kind) but does not
+        // classify to a recognized (kind, enforcement_point) role is a fail-closed verification
+        // failure — surfaced as an issue, never a silent drop that could let a mislabeled use escape.
+        if claims_role && broker_role == BrokerRole::None {
+            let msg = format!(
+                "record {i}: extensions.broker.kind set but (kind, enforcement_point) is not a recognized broker/resource role (R2 fail-closed)"
+            );
+            notes.push(msg.clone());
+            issues.push(msg);
         }
 
         pending.push(Pending {
@@ -743,6 +880,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             eff_status,
             status_changed_at,
             authority,
+            broker_role,
             notes,
         });
     }
@@ -951,20 +1089,20 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             observed_via: p.observed_via,
             trust,
             authority: p.authority,
+            broker_role: p.broker_role.as_str().to_string(),
             notes: p.notes,
         });
     }
 
     // Level 3 Tier-A: count credential-broker grants and how many are fully accountable. A grant only
     // counts as VERIFIED when ALL of: the record is integrity-proven (its own seal is valid —
-    // event_type and action are part of the signed body); its authority verified to gateway_enforced
-    // under a pinned key; AND its signed authority.evidence_hash re-derives from the embedded
-    // extensions.broker.grant_evidence (ADR 0003 R1) — so the hash actually commits to the canonical
-    // match fields, not an opaque value. Gating on authority alone would count a body-tampered grant
-    // (a valid evidence triple binds only source/record_id/evidence_hash); skipping re-derivation would
-    // let a grant whose grant_evidence diverges from the signed hash read as "complete". A mismatch is
-    // surfaced (fails the bundle, fail-closed). Grants are deduped by content_hash so a verbatim-
-    // replayed grant isn't double-counted.
+    // event_type and action are part of the signed body); it classifies to the BROKER role and its
+    // authority verified under a pinned BROKER key (ADR 0003 R2 — a resource key, or the generic
+    // authority set, can NOT elevate a grant); AND its signed authority.evidence_hash re-derives from
+    // the embedded extensions.broker.grant_evidence (R1) — so the hash actually commits to the
+    // canonical match fields, not an opaque value. A credential_grant that does NOT classify as broker
+    // is a fail-closed verification failure (surfaced, never silently uncounted). Grants are deduped by
+    // content_hash so a verbatim-replayed grant isn't double-counted.
     let mut grant_total = 0usize;
     let mut grant_verified = 0usize;
     let mut seen_grants: BTreeSet<&str> = BTreeSet::new();
@@ -974,6 +1112,34 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             && seen_grants.insert(rt.content_hash.as_str())
         {
             grant_total += 1;
+            // R2: a credential_grant MUST carry the broker role discriminator (kind=grant +
+            // enforcement_point=credential_broker). A grant that doesn't is mislabeled/misrouted — its
+            // authority was checked under the wrong (or no) role key set; fail closed.
+            if rt.broker_role != BrokerRole::Broker.as_str() {
+                issues.push(format!(
+                    "grant {} ({}): credential_grant does not classify to the broker role (kind/enforcement_point) — R2 fail-closed",
+                    rt.index, rt.record_id
+                ));
+                continue;
+            }
+            // MUST-FIX 1 divergence guard: `kind` is duplicated at extensions.broker.kind (the role
+            // discriminator that made this a broker record) and inside the canonical grant_evidence. If
+            // the embedded payload's kind disagrees, fail closed — the signed evidence and the role
+            // label disagree on what this record is. (An absent grant_evidence is caught by the
+            // re-derivation check below; this only fires on a present-but-divergent kind.)
+            let ge_kind = rec
+                .get("extensions")
+                .and_then(|e| e.get("broker"))
+                .and_then(|b| b.get("grant_evidence"))
+                .and_then(|g| g.get("kind"))
+                .and_then(|v| v.as_str());
+            if matches!(ge_kind, Some(k) if k != "grant") {
+                issues.push(format!(
+                    "grant {} ({}): grant_evidence.kind diverges from the extensions.broker.kind role discriminator (MUST-FIX 1 fail-closed)",
+                    rt.index, rt.record_id
+                ));
+                continue;
+            }
             if rt.trust == TrustLevel::IntegrityProven && rt.authority == AuthorityTrust::Verified {
                 if evidence_rederivable(rec, "grant_evidence") {
                     grant_verified += 1;

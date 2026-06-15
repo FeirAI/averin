@@ -108,7 +108,9 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
         "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#
         )
     };
-    let ge_inner = |ge: &CanonValue| format!(r#""grant_evidence":{}"#, ge.serialize());
+    // The broker role discriminator (kind=grant) + enforcement_point=credential_broker classify this
+    // record to the BROKER role (R2); grant_evidence carries the R1 re-derivable payload.
+    let ge_inner = |ge: &CanonValue| format!(r#""kind":"grant","grant_evidence":{}"#, ge.serialize());
     let body = mk_body(&ge_inner(&grant_evidence), &evidence_hash, &evidence_sig);
     let grant = seal(&CanonValue::parse(&body).unwrap(), &sk).unwrap();
     let key_entry = CanonValue::object(vec![
@@ -126,8 +128,9 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
         ("checkpoints".into(), CanonValue::Array(vec![])),
     ])
     .unwrap();
+    // R2: a grant elevates ONLY under the BROKER authority key set, not the generic or resource sets.
     let pinned = || VerifyOptions {
-        trusted_authority_keys: vec![vk],
+        broker_authority_keys: vec![vk],
         ..Default::default()
     };
 
@@ -197,10 +200,10 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
         r1.issues
     );
 
-    // R1 fail-closed on ABSENT payload: a grant with valid (pinned) authority but NO embedded
-    // grant_evidence is as unacceptable as a divergent one — the verifier cannot confirm the signed
-    // evidence_hash commits to any match fields, so it must NOT count and must surface the issue.
-    let no_ge_body = mk_body(r#""issuance_status":"recorded""#, &evidence_hash, &evidence_sig);
+    // R1 fail-closed on ABSENT payload: a broker-role grant (kind=grant) with valid (pinned) authority
+    // but NO embedded grant_evidence is as unacceptable as a divergent one — the verifier cannot
+    // confirm the signed evidence_hash commits to any match fields, so it must NOT count + surface it.
+    let no_ge_body = mk_body(r#""kind":"grant""#, &evidence_hash, &evidence_sig);
     let no_ge = seal(&CanonValue::parse(&no_ge_body).unwrap(), &sk).unwrap();
     let no_ge_bundle = change_field(&bundle, "records", CanonValue::Array(vec![no_ge]));
     let r_absent = verify_bundle_with(&no_ge_bundle, &pinned());
@@ -213,6 +216,85 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
         r_absent.issues.iter().any(|i| i.contains("not re-derivable")),
         "expected an R1 absent-payload issue, got: {:?}",
         r_absent.issues
+    );
+
+    // MUST-FIX 1 divergence: a grant whose embedded grant_evidence.kind says "use" while the record's
+    // extensions.broker.kind says "grant" must fail closed — even though the evidence_hash re-derives
+    // (the broker signed the "use"-kinded payload), the role label and the signed payload disagree.
+    let ge_use = change_field(&grant_evidence, "kind", CanonValue::string("use"));
+    let eh_use = sha256_prefixed(ge_use.serialize().as_bytes());
+    let esig_use = sign_evidence("gateway_enforced", record_id, &eh_use, &sk);
+    let kind_div_body = mk_body(
+        &format!(r#""kind":"grant","grant_evidence":{}"#, ge_use.serialize()),
+        &eh_use,
+        &esig_use,
+    );
+    let kind_div = seal(&CanonValue::parse(&kind_div_body).unwrap(), &sk).unwrap();
+    let kind_div_bundle = change_field(&bundle, "records", CanonValue::Array(vec![kind_div]));
+    let r_kind = verify_bundle_with(&kind_div_bundle, &pinned());
+    assert_eq!(r_kind.grant_total, 1);
+    assert_eq!(
+        r_kind.grant_verified, 0,
+        "a grant whose grant_evidence.kind diverges from the role discriminator must not verify"
+    );
+    assert!(
+        r_kind.issues.iter().any(|i| i.contains("diverges from the extensions.broker.kind")),
+        "expected a kind-divergence issue, got: {:?}",
+        r_kind.issues
+    );
+
+    // R2 role separation: the SAME broker key pinned in the WRONG role (resource, not broker) must NOT
+    // elevate the grant — a grant only verifies under broker_authority_keys.
+    let as_resource = VerifyOptions {
+        resource_authority_keys: vec![vk],
+        ..Default::default()
+    };
+    let r_wrongrole = verify_bundle_with(&bundle, &as_resource);
+    assert_eq!(r_wrongrole.grant_total, 1);
+    assert_eq!(
+        r_wrongrole.grant_verified, 0,
+        "a grant must not elevate under a key pinned only in the resource role (R2)"
+    );
+
+    // R2 rule 4: a credential_grant whose (kind, enforcement_point) does NOT classify to the broker
+    // role (here kind is an unrecognized value) is a fail-closed verification failure, not counted.
+    let mislabeled_body = mk_body(r#""kind":"bogus""#, &evidence_hash, &evidence_sig);
+    let mislabeled = seal(&CanonValue::parse(&mislabeled_body).unwrap(), &sk).unwrap();
+    let mislabeled_bundle = change_field(&bundle, "records", CanonValue::Array(vec![mislabeled]));
+    let r_mis = verify_bundle_with(&mislabeled_bundle, &pinned());
+    assert_eq!(r_mis.grant_total, 1);
+    assert_eq!(r_mis.grant_verified, 0, "a mislabeled grant must not verify (R2)");
+    assert!(
+        r_mis
+            .issues
+            .iter()
+            .any(|i| i.contains("not a recognized broker/resource role")
+                || i.contains("does not classify to the broker role")),
+        "expected an R2 role-classification issue, got: {:?}",
+        r_mis.issues
+    );
+
+    // R2 disjointness: a key pinned in BOTH broker and resource sets is a fatal config error — the
+    // verifier aborts before evaluating any record (no "clean" verdict on an ambiguous key universe).
+    let conflicting = VerifyOptions {
+        broker_authority_keys: vec![vk],
+        resource_authority_keys: vec![vk],
+        ..Default::default()
+    };
+    let r_conflict = verify_bundle_with(&bundle, &conflicting);
+    assert!(!r_conflict.ok);
+    assert_eq!(
+        r_conflict.grant_total, 0,
+        "a fatal config error must abort before counting any grant"
+    );
+    assert_eq!(
+        r_conflict.records_total, 0,
+        "the disjointness abort must happen BEFORE any record is evaluated"
+    );
+    assert!(
+        r_conflict.issues.iter().any(|i| i.contains("must be disjoint")),
+        "expected a disjointness fatal-config issue, got: {:?}",
+        r_conflict.issues
     );
 
     // A forged gateway_enforced grant (agent-claimed, no real broker key) does NOT elevate: re-sign

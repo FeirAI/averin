@@ -94,10 +94,17 @@ func (c *Core) VerifyBundleWith(bundleJSON, optsJSON string) string {
 	return goStrFree(C.feir_verify_bundle_with(cb, co))
 }
 
-// VerifyBundleWithAuthority verifies a bundle pinning the given authority public keys (the broker
-// recording key), so credential-broker grants elevate to gateway_enforced (grant_verified).
+// VerifyBundleWithAuthority verifies a bundle pinning the given recording keys (in self-host, the
+// single server signing key) as BOTH the broker authority set and the generic authority set, so a
+// credential-broker grant elevates under the BROKER role (ADR 0003 R2) while any generic
+// policy_engine_signed/human_signed record still elevates under the generic set. The keys are NOT
+// pinned as resource keys (those use a separate WithResource recording key), so the R2 disjointness
+// invariant (broker ∩ resource = ∅) holds.
 func (c *Core) VerifyBundleWithAuthority(bundleJSON string, authorityPubKeys []string) string {
-	opts, _ := json.Marshal(map[string]any{"authority_keys": authorityPubKeys})
+	opts, _ := json.Marshal(map[string]any{
+		"authority_keys":        authorityPubKeys,
+		"broker_authority_keys": authorityPubKeys,
+	})
 	return c.VerifyBundleWith(bundleJSON, string(opts))
 }
 

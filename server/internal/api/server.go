@@ -509,10 +509,12 @@ func (s *Server) reconstructCapability(projectID, grantID string) (string, error
 // broker-signed evidence_sig, a hiding commitment over the credential descriptor (revealable via
 // selective disclosure), and the broker lifecycle fields under extensions.broker.
 func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Request, p broker.Prepared) (map[string]any, []store.DisclosureSecret, error) {
-	// Derive evidence_hash = sha256(RCP-canonicalize(grant_evidence)) via the Rust core (ADR 0003 R1),
-	// NOT Go json.Marshal — so the offline verifier re-derives the SAME hash from the grant_evidence
-	// embedded below and confirms the signed hash commits to the canonical match fields. The
-	// grant_evidence payload is carried verbatim under extensions.broker.grant_evidence.
+	// Derive evidence_hash = sha256(RCP-canonicalize(grant_evidence)) via the Rust core (ADR 0003 R1).
+	// json.Marshal here only produces the bytes we hand to the core; the canonical hash is computed by
+	// RCP inside RcpEvidenceHash (NOT from these Go-marshaled bytes), so the offline verifier re-derives
+	// the SAME hash from the grant_evidence embedded below and confirms the signed hash commits to the
+	// canonical match fields. The grant_evidence payload is carried verbatim under
+	// extensions.broker.grant_evidence.
 	evidenceJSON, err := json.Marshal(p.Evidence)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal grant evidence: %w", err)
@@ -579,6 +581,9 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 		},
 		"extensions": map[string]any{
 			"broker": map[string]any{
+				// kind is the R2 role discriminator (with authority.enforcement_point=credential_broker
+				// it classifies this record to the BROKER role; ADR 0003 R2).
+				"kind":               "grant",
 				"issuance_status":    "recorded",
 				"scope_class":        string(p.ScopeClass),
 				"conformance_level":  p.ConformanceLevel,
