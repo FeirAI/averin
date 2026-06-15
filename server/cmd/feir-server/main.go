@@ -83,13 +83,40 @@ func main() {
 	}
 	// credential broker (Level 3 Tier-A): POST /v2/grants. The issuing key signs the capabilities;
 	// the recording key (the server signing key) signs the gateway_enforced evidence. Unset = off.
+	brokerEnabled := false
 	if seed := os.Getenv("FEIR_BROKER_ISSUING_SEED"); seed != "" {
 		raw, err := hex.DecodeString(seed)
 		if err != nil || len(raw) != ed25519.SeedSize {
 			log.Fatal("FEIR_BROKER_ISSUING_SEED must be 64 hex chars (32-byte Ed25519 seed)")
 		}
 		srv.WithBroker(ed25519.NewKeyFromSeed(raw))
+		brokerEnabled = true
 		log.Printf("credential broker enabled (POST /v2/grants)")
+	}
+	// resource gateway (Level 3 Tier-B): POST /v2/use. The resource recording key signs use-receipt
+	// evidence and MUST be DISTINCT from the server signing key and the broker key (R2 role separation;
+	// the verifier rejects a broker/resource key overlap). Requires the broker (capabilities are
+	// verified under the broker issuing key). Unset = off.
+	if rseed := os.Getenv("FEIR_RESOURCE_SEED"); rseed != "" {
+		if !brokerEnabled {
+			log.Fatal("FEIR_RESOURCE_SEED requires FEIR_BROKER_ISSUING_SEED (the resource verifies capabilities under the broker issuing key)")
+		}
+		rid := os.Getenv("FEIR_RESOURCE_ID")
+		if rid == "" {
+			log.Fatal("FEIR_RESOURCE_ID is required when FEIR_RESOURCE_SEED is set")
+		}
+		rc, err := core.New(rseed)
+		if err != nil {
+			log.Fatalf("FEIR_RESOURCE_SEED: %v", err)
+		}
+		if rc.PubKey() == c.PubKey() {
+			log.Fatal("FEIR_RESOURCE_SEED must differ from FEIR_SIGNING_SEED (R2: broker and resource recording keys must be disjoint)")
+		}
+		if rseed == os.Getenv("FEIR_BROKER_ISSUING_SEED") {
+			log.Fatal("FEIR_RESOURCE_SEED must differ from FEIR_BROKER_ISSUING_SEED (keep the capability-issuing and use-recording key roles distinct)")
+		}
+		srv.WithResource(rc, rid)
+		log.Printf("resource gateway enabled (POST /v2/use) for resource %q", rid)
 	}
 
 	log.Printf("feir-server listening on %s (pubkey %s)", addr, c.PubKey())

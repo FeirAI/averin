@@ -108,6 +108,19 @@ func (c *Core) VerifyBundleWithAuthority(bundleJSON string, authorityPubKeys []s
 	return c.VerifyBundleWith(bundleJSON, string(opts))
 }
 
+// VerifyBundleWithRoles pins the BROKER recording keys and the RESOURCE recording keys separately
+// (ADR 0003 R2), so a grant elevates only under a broker key and a use receipt only under a resource
+// key. The two sets MUST be disjoint (the verifier rejects an intersection as a fatal config error).
+// brokerKeys are also pinned as the generic authority set for any non-broker authority record.
+func (c *Core) VerifyBundleWithRoles(bundleJSON string, brokerKeys, resourceKeys []string) string {
+	opts, _ := json.Marshal(map[string]any{
+		"authority_keys":          brokerKeys,
+		"broker_authority_keys":   brokerKeys,
+		"resource_authority_keys": resourceKeys,
+	})
+	return c.VerifyBundleWith(bundleJSON, string(opts))
+}
+
 // ---- content commitments (RCP §9.3, threat #6) ----
 //
 // Low-entropy fields (input/output/rationale) are committed (hiding) rather than stored in clear in

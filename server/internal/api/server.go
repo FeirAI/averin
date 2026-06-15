@@ -23,6 +23,7 @@ import (
 	"github.com/feir-dev/feir/server/internal/content"
 	"github.com/feir-dev/feir/server/internal/meter"
 	"github.com/feir-dev/feir/server/internal/otel"
+	"github.com/feir-dev/feir/server/internal/resourceshim"
 	"github.com/feir-dev/feir/server/internal/store"
 	"github.com/feir-dev/feir/server/internal/witness"
 )
@@ -35,6 +36,9 @@ type Sealer interface {
 	// VerifyBundleWithAuthority pins authority keys (the broker recording key) so credential-broker
 	// grants elevate to gateway_enforced (Level 3 Tier-A grant accountability).
 	VerifyBundleWithAuthority(bundleJSON string, authorityPubKeys []string) string
+	// VerifyBundleWithRoles pins broker + resource recording keys separately (ADR 0003 R2), so a
+	// grant elevates only under a broker key and a use receipt only under a resource key.
+	VerifyBundleWithRoles(bundleJSON string, brokerKeys, resourceKeys []string) string
 	PubKey() string
 	// content commitments (RCP §9.3): mint a nonce and commit a low-entropy field at ingest.
 	RandomNonce() (string, error)
@@ -55,6 +59,12 @@ type Server struct {
 	witness      witness.Witness    // nil = no external witness configured
 	tsa          witness.TSA        // nil = no external timestamp anchoring configured
 	brokerKey    ed25519.PrivateKey // nil = credential broker (/v2/grants) disabled
+	// Tier-B resource side (ADR 0003): the resource recording key signs use-receipt authority evidence
+	// (role-separated from the broker key, R2); resourceID is this resource's audience; ledger is the
+	// consume-before-act jti/nonce store. nil resourceCore = /v2/use disabled.
+	resourceCore Sealer
+	resourceID   string
+	ledger       resourceshim.Ledger
 	signingKeyID string
 	keyValidFrom string
 	now          func() time.Time // injectable clock for tests
@@ -114,6 +124,19 @@ func (s *Server) WithBroker(issuingKey ed25519.PrivateKey) *Server {
 	return s
 }
 
+// WithResource enables the Tier-B resource gateway (POST /v2/use) for resourceID, signing use-receipt
+// authority evidence with resourceCore's key — which MUST be DISTINCT from the server signing key and
+// the broker key (R2 role separation; the verifier rejects a broker/resource key-set overlap). It
+// requires the broker to be enabled (the resource verifies capabilities under the broker issuing
+// key). The ledger is an in-memory consume-before-act store for the demonstrator; production injects a
+// durable one. Nil resourceCore (unset) disables /v2/use.
+func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
+	s.resourceCore = resourceCore
+	s.resourceID = resourceID
+	s.ledger = resourceshim.NewMemLedger()
+	return s
+}
+
 // WithTSA anchors every sealed checkpoint to a third-party RFC 3161 timestamp authority, attaching
 // the returned token so a verifier can prove the checkpoint (and its causal ancestors) existed by
 // the TSA-attested time (threat #3 backdating). Best-effort: a TSA failure stores the checkpoint
@@ -130,6 +153,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("POST /v2/records", s.handleRecords)
 	mux.HandleFunc("POST /v2/grants", s.handleGrant)
+	mux.HandleFunc("POST /v2/use", s.handleUse)
 	mux.HandleFunc("POST /v2/otel/traces", s.handleOTel)
 	mux.HandleFunc("POST /v2/checkpoints", s.handleCheckpoint)
 	mux.HandleFunc("GET /v2/sessions", s.handleSessions)
@@ -367,16 +391,22 @@ type grantRequest struct {
 	TTLSeconds      int      `json:"ttl_seconds"`
 }
 
-// grantID derives a DETERMINISTIC grant id (UUIDv5-shaped) from (project, idempotency_key), so an
-// honest retry of a lost-response grant re-derives the SAME id, collapses in the store, and returns
-// the original capability — never a second live credential (ADR 0002 idempotency).
-func deterministicGrantID(projectID, idem string) string {
-	sum := sha256.Sum256([]byte("feir.grant.id.v1\x00" + projectID + "\x00" + idem))
+// uuidV5Shaped derives a DETERMINISTIC, UUIDv5-shaped id from (namespace, project, idempotency_key),
+// so an honest retry re-derives the SAME id and collapses in the store. namespace domain-separates id
+// spaces (grants vs uses) so they can never collide.
+func uuidV5Shaped(namespace, projectID, idem string) string {
+	sum := sha256.Sum256([]byte(namespace + "\x00" + projectID + "\x00" + idem))
 	var b [16]byte
 	copy(b[:], sum[:16])
 	b[6] = (b[6] & 0x0f) | 0x50 // version 5 (name-based)
 	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// deterministicGrantID is the grant's UUIDv5-shaped id — re-derived on retry so a lost-response grant
+// never mints a second live credential (ADR 0002 idempotency).
+func deterministicGrantID(projectID, idem string) string {
+	return uuidV5Shaped("feir.grant.id.v1", projectID, idem)
 }
 
 // handleGrant issues a credential-broker grant: it RECORDS a signed gateway_enforced grant (sealed
@@ -595,6 +625,223 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 	}
 	disclosures := []store.DisclosureSecret{
 		{RecordID: grantID, Field: "input", ValueDigest: addr.Digest, NonceHex: nonce},
+	}
+	return rec, disclosures, nil
+}
+
+// ---- credential broker (Level 3 Tier-B: resource use receipts, ADR 0003) ----
+
+// useRequest is the POST /v2/use wire shape: the agent presents the minted capability + a
+// proof-of-possession (use_sig over the resource-bound PoP challenge) for an operation.
+type useRequest struct {
+	IdempotencyKey string `json:"idempotency_key"`
+	ProjectID      string `json:"project_id"`
+	SessionID      string `json:"session_id"`
+	Capability     string `json:"capability"` // the minted, sender-constrained token
+	UseSig         string `json:"use_sig"`    // base64url ed25519 PoP signature (signed with the cnf key)
+	Action         string `json:"action"`     // the operation to perform (must equal the grant's action)
+	Params         string `json:"params"`     // raw operation parameters (committed + PoP-bound)
+	Nonce          string `json:"nonce"`      // the one-time PoP nonce
+}
+
+// deterministicUseID derives a stable use-receipt id from (project, idempotency_key), so an honest
+// retry collapses in the store rather than sealing a second receipt (and re-consuming the credential).
+func deterministicUseID(projectID, idem string) string {
+	return "use-" + uuidV5Shaped("feir.use.id.v1", projectID, idem)
+}
+
+// sha256Prefixed returns "sha256:<hex>" over b (a deterministic digest used to bind the PoP to the
+// operation params — both the agent and the resource compute it the same way).
+func sha256Prefixed(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// handleUse records a Tier-B USE RECEIPT: the resource validates a presented capability + PoP at use
+// time (resourceshim: capability sig, validity window, audience/action, PoP, consume-before-act), then
+// seals a resource-signed receipt whose authority evidence the offline verifier joins to the grant.
+func (s *Server) handleUse(w http.ResponseWriter, r *http.Request) {
+	if s.resourceCore == nil || s.brokerKey == nil {
+		writeErr(w, http.StatusNotImplemented, "resource gateway not enabled (set the resource recording key + broker issuing key)")
+		return
+	}
+	body, err := readBody(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var ur useRequest
+	if err := decode(body, &ur); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid use request: "+err.Error())
+		return
+	}
+	if qp := r.URL.Query().Get("project"); qp != "" && ur.ProjectID != qp {
+		writeErr(w, http.StatusForbidden, "project_id does not match the authorized ?project=")
+		return
+	}
+	if ur.ProjectID == "" || ur.SessionID == "" {
+		// A use must land in the grant's session DAG; an unknown/empty session is malformed (ADR 0003
+		// resolved open question 2).
+		writeErr(w, http.StatusBadRequest, "project_id and session_id are required")
+		return
+	}
+	idem := ur.IdempotencyKey
+	if idem == "" {
+		idem = r.Header.Get("Idempotency-Key")
+	}
+	if idem == "" {
+		writeErr(w, http.StatusBadRequest, "idempotency_key is required (field or Idempotency-Key header) so a retry cannot re-consume the credential")
+		return
+	}
+	useID := deterministicUseID(ur.ProjectID, idem)
+
+	// params_commitment binds the PoP to the exact operation parameters (a deterministic digest both
+	// the agent and the resource compute, so a captured use_sig can't be replayed against other params).
+	rawParams := []byte(ur.Params)
+	paramsCommitment := sha256Prefixed(rawParams)
+	shim := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, s.ledger)
+
+	// The idempotency check, the capability validation+consume, and the seal run as ONE critical
+	// section. Critically, validation (which consumes the credential, a side effect) MUST be skipped on
+	// a retry whose receipt already exists — re-running ValidateUse would re-consume the now-spent
+	// nonce/jti and spuriously 400 an honest lost-response retry. Doing the existence check inside the
+	// lock also makes concurrent retries safe: the second sees the stored receipt, not a consumed
+	// credential. validateErr (caller's 400) is distinguished from a store/build error (500).
+	var sealed, grantID string
+	var idempotent bool
+	var validateErr error
+	storeErr := func() error {
+		s.ingestMu.Lock()
+		defer s.ingestMu.Unlock()
+		if existing, gid, ok := s.existingReceipt(ur.ProjectID, ur.SessionID, useID); ok {
+			sealed, grantID, idempotent = existing, gid, true
+			return nil
+		}
+		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, resourceshim.Op{Action: ur.Action, ParamsCommitment: paramsCommitment}, ur.Nonce, s.now())
+		if e != nil {
+			validateErr = e // a forged/expired/replayed/wrong-scope use — the caller's fault
+			return nil
+		}
+		grantID = ev.GrantID
+		rec, disclosures, e := s.buildUseRecord(useID, ur, ev, rawParams)
+		if e != nil {
+			return e
+		}
+		sealed, _, e = s.sealAndStore(ur.ProjectID, ur.SessionID, idem, rec, disclosures)
+		return e
+	}()
+	if validateErr != nil {
+		writeErr(w, http.StatusBadRequest, "use rejected: "+validateErr.Error())
+		return
+	}
+	if storeErr != nil {
+		writeErr(w, http.StatusInternalServerError, "store use receipt: "+storeErr.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"use_id":     useID,
+		"grant_id":   grantID,
+		"record":     json.RawMessage(sealed),
+		"idempotent": idempotent,
+	})
+}
+
+// existingReceipt returns the sealed record (and its authority.grant_id) for a use already recorded
+// under useID in the session, so an idempotent retry returns the original instead of re-running
+// ValidateUse (which would re-consume the now-spent credential). Caller holds ingestMu.
+func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, string, bool) {
+	recs, err := s.st.SessionRecords(projectID, sessionID)
+	if err != nil {
+		return "", "", false
+	}
+	for _, rec := range recs {
+		var probe struct {
+			RecordID  string `json:"record_id"`
+			Authority struct {
+				GrantID string `json:"grant_id"`
+			} `json:"authority"`
+		}
+		if json.Unmarshal([]byte(rec.JSON), &probe) == nil && probe.RecordID == useID {
+			return rec.JSON, probe.Authority.GrantID, true
+		}
+	}
+	return "", "", false
+}
+
+// buildUseRecord assembles the unsealed use-receipt Decision Record: a tool_gateway-role authority
+// with a RESOURCE-signed evidence_sig over the re-derivable use_evidence (R1/R2), a hiding commitment
+// over the operation params, and the use lifecycle under extensions.broker (kind=use → resource role).
+func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.UseEvidence, rawParams []byte) (map[string]any, []store.DisclosureSecret, error) {
+	// evidence_hash = sha256(RCP-canonicalize(use_evidence)) via the core (R1), signed by the RESOURCE
+	// key (R2) and record_id-bound to this receipt.
+	evidenceJSON, err := json.Marshal(ev)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal use evidence: %w", err)
+	}
+	evidenceHash, err := s.core.RcpEvidenceHash(string(evidenceJSON))
+	if err != nil {
+		return nil, nil, fmt.Errorf("derive use evidence_hash: %w", err)
+	}
+	evidenceSig, err := s.resourceCore.SignEvidence("gateway_enforced", useID, evidenceHash)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sign use evidence (resource key): %w", err)
+	}
+	// Commit the operation params (hiding), revealable via selective disclosure.
+	addr, err := s.content.Put(context.Background(), rawParams)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store use params: %w", err)
+	}
+	nonce, err := s.core.RandomNonce()
+	if err != nil {
+		return nil, nil, fmt.Errorf("nonce: %w", err)
+	}
+	commitment, err := s.core.Commit("input", rawParams, nonce)
+	if err != nil {
+		return nil, nil, fmt.Errorf("commit use params: %w", err)
+	}
+
+	// use_evidence is carried verbatim (the verifier re-derives evidence_hash from it). Round-trip the
+	// typed struct through JSON into a generic map so it embeds as a JSON object in the record body.
+	var useEvidence map[string]any
+	if err := json.Unmarshal(evidenceJSON, &useEvidence); err != nil {
+		return nil, nil, fmt.Errorf("use evidence to map: %w", err)
+	}
+
+	rec := map[string]any{
+		"record_id":     useID,
+		"project_id":    ur.ProjectID,
+		"session_id":    ur.SessionID,
+		"agent_id":      "feir-resource",
+		"agent_version": "feir-resource",
+		"event_type":    "tool_call",
+		"observed_via":  "broker",
+		"action":        ev.Action,
+		"status":        "ok",
+		"authority": map[string]any{
+			"source":            "gateway_enforced",
+			"enforcement_point": "tool_gateway",
+			"grant_id":          ev.GrantID,
+			"evidence_hash":     evidenceHash,
+			"evidence_sig":      evidenceSig,
+			"evaluated_at":      ts(s.now()),
+		},
+		"input_commit": map[string]any{
+			"alg":         "sha256",
+			"commitment":  commitment,
+			"low_entropy": true,
+		},
+		"extensions": map[string]any{
+			"broker": map[string]any{
+				// kind=use + enforcement_point=tool_gateway classifies this to the RESOURCE role (R2).
+				"kind":         "use",
+				"grant_id":     ev.GrantID,
+				"resource_id":  ev.ResourceID,
+				"use_evidence": useEvidence,
+			},
+		},
+	}
+	disclosures := []store.DisclosureSecret{
+		{RecordID: useID, Field: "input", ValueDigest: addr.Digest, NonceHex: nonce},
 	}
 	return rec, disclosures, nil
 }
@@ -884,8 +1131,15 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	// Pin the broker recording key (== this server's signing key; broker_trust: assumed) so any
 	// credential-broker grants in the bundle elevate to gateway_enforced (Tier-A grant accountability).
-	// An EXTERNAL auditor pins the broker key out-of-band instead of trusting the server's self-view.
-	report := s.core.VerifyBundleWithAuthority(bundle, []string{s.core.PubKey()})
+	// When the resource gateway is enabled, ALSO pin its (distinct) recording key as the resource role,
+	// so use receipts elevate under the resource role (ADR 0003 R2). An EXTERNAL auditor pins both keys
+	// out-of-band instead of trusting the server's self-view.
+	var report string
+	if s.resourceCore != nil {
+		report = s.core.VerifyBundleWithRoles(bundle, []string{s.core.PubKey()}, []string{s.resourceCore.PubKey()})
+	} else {
+		report = s.core.VerifyBundleWithAuthority(bundle, []string{s.core.PubKey()})
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(report))
 }

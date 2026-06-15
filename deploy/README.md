@@ -36,6 +36,9 @@ cargo run -p feir-decision-core --bin feir-verify -- bundle bundle.json
 |-----|---------|---------|-------|
 | `FEIR_SIGNING_SEED` | server | dev seed (**override!**) | 64 hex chars. Production: KMS-backed signing. |
 | `FEIR_SIGNING_KEY_ID` | server | `k0` | published in the bundle key list |
+| `FEIR_BROKER_ISSUING_SEED` | server | (none) | 64 hex chars. Enables the credential broker (`POST /v2/grants`); signs minted capabilities. Unset = off. |
+| `FEIR_RESOURCE_SEED` | server | (none) | 64 hex chars. Enables the resource gateway (`POST /v2/use`, Tier-B); signs use-receipt evidence. MUST differ from `FEIR_SIGNING_SEED` and `FEIR_BROKER_ISSUING_SEED` (R2 role separation). Requires the broker. Unset = off. |
+| `FEIR_RESOURCE_ID` | server | (none) | the resource's audience id; required when `FEIR_RESOURCE_SEED` is set. |
 | `STRIPE_API_KEY` | server | (none) | enables usage-based metering reporting; no key = local counting only |
 | `FEIR_UPSTREAM` | proxy | `https://api.openai.com` | upstream LLM |
 | `FEIR_PROJECT_ID` | proxy | `default` | project the proxy records under |
