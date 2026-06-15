@@ -42,9 +42,21 @@ Three honest trust levels (used verbatim in product copy):
 
 ## Status
 
-Phase 1 build in progress — see [`docs/PHASE1-TASKS.md`](docs/PHASE1-TASKS.md). The integrity
-core (M0 + M1) is the current focus: frozen schema/RCP, golden vectors, and a tested offline
-verify CLI. Downstream components (Go services, SDKs, web app) are scaffolded.
+Phase 1 — see [`docs/PHASE1-TASKS.md`](docs/PHASE1-TASKS.md).
+
+**M0 + M1 (the integrity core) are feature-complete and reviewed.** Frozen schema v2 + RCP v1,
+golden vectors, and `decision-core` building to all three targets (CLI + WASM + FFI) from one
+crate. The offline verifier defends the adversarial matrix #1, #2, #3, #4, #6, #7, #8, #9, #10
+plus tamper — **52 tests, each piece Codex-reviewed before commit**. Try it:
+
+```
+cargo test --workspace
+cargo run -p feir-decision-core --bin feir-verify -- bundle spec/fixtures/bundle-valid.json
+```
+
+Honest scope: every claim is bounded by [`docs/coverage-limits.md`](docs/coverage-limits.md)
+(Level 1 / 2 / 3). **Next:** M2 (Go proxy + ingestion + SDKs, wiring the FFI), then M3 (Svelte
+trace-waterfall web app + export), then M4 (Stripe + OSS launch). Those directories are scaffolded.
 
 ## Verify an export offline
 

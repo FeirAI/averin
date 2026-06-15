@@ -34,8 +34,15 @@ The **adversarial tests are the acceptance gates** (spec §15, §17). A mileston
 | M1.9 | Build target: FFI lib (cdylib + C header) | ☑ |
 | M1.10 | Build target: **verify CLI** (offline) | ☑ |
 | M1.11 | Build target: **WASM** (wasm-bindgen) | ☑ |
-| M1.12 | RFC 3161 anchoring — token parse/verify in core; Go job stub | ◔ (core verify ☑; Go job stub ☑) |
-| **Acceptance (adversarial)** | defends #1 omitted session, #2 forked history, #3 backdated, #9 key compromise, #10 verifier skew on fixtures; CLI verifies offline with checkpoint history + TSA tokens, emits per-record trust-levels | ☑ #1,2,3,9,10 |
+| M1.12 | External anchoring — verify in core (test-anchor ☑; rfc3161 = `Unsupported` until feature-gated DER/CMS parser ships with the Go job) | ◔ |
+| M1.13 | FFI lib + C header + cgo-style smoke test | ☑ |
+| M1.14 | WASM build target (`--no-default-features --features wasm`) | ☑ |
+| M1.15 | Parser nesting-depth cap (DoS hardening) | ☑ |
+| **Acceptance (adversarial)** | defends #1 omitted session, #2 forked history, #3 backdated, #9 key compromise, #10 verifier skew on fixtures; CLI verifies offline + per-record trust-levels | ☑ **#1,2,3,9,10** (52 tests, all Codex-reviewed) |
+
+> **M1 status:** the integrity core is feature-complete and reviewed for Phase 1. Remaining
+> within M1 = the real RFC 3161 DER/CMS wire-format parser (test-anchor proves the detection
+> logic now; production uses a third-party TSA via the Go anchoring job).
 
 ## M2 — Ingestion + storage + SDKs  (~4–6 wks)  — *scaffolded*
 
@@ -80,18 +87,18 @@ The **adversarial tests are the acceptance gates** (spec §15, §17). A mileston
 
 | # | Attack | Milestone | Defended in this build |
 |---|--------|-----------|------------------------|
-| 1 | Omitted session + rewrite latest checkpoint | M1 | ☑ (checkpoint history + anchor) |
-| 2 | Forked history | M1 | ☑ (frontier single-commit detect) |
-| 3 | Backdated records | M1 | ☑ (RFC 3161 token verify) |
-| 4 | Authority lie | M2 | ☐ (schema fields ☑) |
-| 5 | Blob substitution | M2 | ☐ (schema fields ☑) |
-| 6 | Hash dictionary | M2 | ☑ (hiding commitments in core) |
-| 7 | Partial SSE stream | M2 | ☐ (incomplete event_type ☑) |
-| 8 | Retry duplication | M2 | ☐ (idempotency in DAG collapse ☑) |
-| 9 | Key compromise | M1 | ☑ (key-epoch + anchor-before) |
-| 10 | Verifier skew | M1 | ☑ (one core + golden vectors) |
-| 11 | Clock skew | M2 | ☑ (three clocks in schema) |
+| 1 | Omitted session + rewrite latest checkpoint | M1 | ☑ frontier omission + latest-frontier==heads + anchor; **tested** |
+| 2 | Forked history | M1 | ☑ same-seq + shared-prev fork detect; **tested** |
+| 3 | Backdated records | M1 | ☑ anchored-time monotonic; **tested** (test-anchor) |
+| 4 | Authority lie | M2 | ◑ key-pinning + worst-status done; authority `evidence_sig` UI = M2 |
+| 5 | Blob substitution | M2 | ☐ (schema digest+object_version ☑) |
+| 6 | Hash dictionary | M1 | ☑ hiding commitments; **tested** |
+| 7 | Partial SSE stream | M2 | ☐ (incomplete event_type in schema ☑) |
+| 8 | Retry duplication | M1 | ☑ DAG duplicate-collapse; **tested** (ingest idempotency = M2) |
+| 9 | Key compromise | M1 | ☑ key-epoch + anchored-before + TrustedKey pinning; **tested** |
+| 10 | Verifier skew | M1 | ☑ one Rust core → CLI+WASM+FFI + golden vectors; **tested** |
+| 11 | Clock skew | M2 | ◑ three clocks in schema; divergence flag = M2 ingest |
 | 12 | Offline export w/o blobs | M3 | ⏸ |
-| 13 | Uninstrumented action | (limit) | documented limit |
-| 14 | Policy version drift | M2 | ☑ (resolve-by-hash in schema) |
-| 15 | Malicious customer | M1+(limit) | partial (anchor) + documented |
+| 13 | Uninstrumented action | (limit) | documented limit (needs credential broker) |
+| 14 | Policy version drift | M2 | ◑ resolve-by-hash in schema; integration = M2 |
+| 15 | Malicious customer | M1+(limit) | partial: anchor + out-of-band key/TSA pinning; fork-suppression limit documented |
