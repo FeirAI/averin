@@ -59,6 +59,19 @@ func (p *Postgres) Close() {
 	}
 }
 
+// Migrate applies the schema SQL (migrations.Schema). The schema is idempotent (CREATE ... IF NOT
+// EXISTS), so this is safe to call on every startup. NOTE: the migration's append-only REVOKE only
+// constrains a non-owner, non-superuser role; when the server connects as the role that owns the
+// tables (e.g. auto-migrate in single-credential self-host), the REVOKE is a no-op and the migration
+// RAISE NOTICEs — see the migration header. For DB-enforced append-only, run migrations as a
+// privileged role and the server as a separate least-privilege role.
+func (p *Postgres) Migrate(ctx context.Context, schemaSQL string) error {
+	if _, err := p.pool.Exec(ctx, schemaSQL); err != nil {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
+	return nil
+}
+
 // background returns a context for the internal queries. The Store interface predates context
 // plumbing; we use context.Background so the implementation stays drop-in compatible with Mem. Query
 // runtime is bounded by the connection-level statement_timeout set in NewPostgres.

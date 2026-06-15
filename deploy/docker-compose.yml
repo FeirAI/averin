@@ -7,6 +7,22 @@
 name: feir
 
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: feir
+      POSTGRES_PASSWORD: ${FEIR_DB_PASSWORD:-feir}
+      POSTGRES_DB: feir
+    volumes:
+      - feir-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feir -d feir"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    # No published port by default — reachable only on the compose network. Uncomment to inspect:
+    # ports: ["5432:5432"]
+
   server:
     build:
       context: ..
@@ -17,8 +33,15 @@ services:
       FEIR_SIGNING_SEED: ${FEIR_SIGNING_SEED:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
       FEIR_SIGNING_KEY_ID: k0
       FEIR_ADDR: ":8080"
+      # Durable append-only store. The server auto-applies the (idempotent) schema on startup. NOTE:
+      # it connects as the table-owning role here, so the append-only REVOKE is a no-op (owner bypass)
+      # — fine for self-host; DB-enforced append-only needs a separate least-privilege role.
+      FEIR_DATABASE_URL: postgres://feir:${FEIR_DB_PASSWORD:-feir}@db:5432/feir?sslmode=disable
     ports:
       - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
 
   proxy:
     build:
@@ -43,3 +66,6 @@ services:
       - "8088:80"
     depends_on:
       - server
+
+volumes:
+  feir-pgdata:
