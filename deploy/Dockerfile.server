@@ -1,0 +1,26 @@
+# feir server + proxy. Multi-stage: build the Rust integrity core (staticlib), then the cgo Go
+# binaries, then a slim runtime. The Go services link the SAME Rust core the CLI/WASM use.
+FROM rust:1-bookworm AS rustbuild
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY core ./core
+# debug profile path matches the cgo LDFLAGS (${SRCDIR}/../../../target/debug)
+RUN cargo build -p feir-decision-core
+
+FROM golang:1.25-bookworm AS gobuild
+WORKDIR /src
+COPY . .
+COPY --from=rustbuild /src/target/debug/libfeir_decision_core.a ./target/debug/libfeir_decision_core.a
+WORKDIR /src/server
+RUN CGO_ENABLED=1 go build -o /out/feir-server ./cmd/feir-server \
+ && CGO_ENABLED=1 go build -o /out/feir-proxy  ./cmd/feir-proxy
+
+FROM debian:bookworm-slim
+RUN useradd -m feir
+COPY --from=gobuild /out/feir-server /usr/local/bin/feir-server
+COPY --from=gobuild /out/feir-proxy  /usr/local/bin/feir-proxy
+COPY spec/fixtures /opt/feir/fixtures
+USER feir
+EXPOSE 8080 8081
+ENV FEIR_ADDR=:8080
+CMD ["feir-server"]

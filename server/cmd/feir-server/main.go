@@ -9,6 +9,7 @@ import (
 
 	"github.com/feir-dev/feir/server/internal/api"
 	"github.com/feir-dev/feir/server/internal/core"
+	"github.com/feir-dev/feir/server/internal/meter"
 	"github.com/feir-dev/feir/server/internal/store"
 )
 
@@ -25,6 +26,10 @@ func main() {
 	addr := envOr("FEIR_ADDR", ":8080")
 
 	srv := api.New(c, store.NewMem(), keyID)
+	// usage metering -> Stripe (the real revenue path). No key = local counting only.
+	srv.WithMeter(meter.NewStripeReporter(meter.NewMem(), meter.StripeConfig{
+		APIKey: os.Getenv("STRIPE_API_KEY"),
+	}))
 	log.Printf("feir-server listening on %s (pubkey %s)", addr, c.PubKey())
 	log.Fatal(http.ListenAndServe(addr, srv.Routes()))
 }

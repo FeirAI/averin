@@ -1,0 +1,45 @@
+# feir — full self-host stack. From the repo root:
+#
+#   FEIR_SIGNING_SEED=$(openssl rand -hex 32) docker compose -f deploy/docker-compose.yml up --build
+#
+# Then: web app at http://localhost:8088, offline verifier at /verifier/, ingestion API at :8080,
+# OpenAI-compatible proxy at :8081 (point your agent's base_url there).
+name: feir
+
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    command: ["feir-server"]
+    environment:
+      # DEV DEFAULT — override with a real secret. Production backs signing with a KMS, not a seed.
+      FEIR_SIGNING_SEED: ${FEIR_SIGNING_SEED:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
+      FEIR_SIGNING_KEY_ID: k0
+      FEIR_ADDR: ":8080"
+    ports:
+      - "8080:8080"
+
+  proxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    command: ["feir-proxy"]
+    environment:
+      FEIR_UPSTREAM: ${FEIR_UPSTREAM:-https://api.openai.com}
+      FEIR_SERVER_URL: http://server:8080
+      FEIR_PROJECT_ID: ${FEIR_PROJECT_ID:-default}
+      FEIR_PROXY_ADDR: ":8081"
+    ports:
+      - "8081:8081"
+    depends_on:
+      - server
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    ports:
+      - "8088:80"
+    depends_on:
+      - server

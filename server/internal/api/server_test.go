@@ -134,6 +134,32 @@ func TestEmptyBatchRejected(t *testing.T) {
 	}
 }
 
+func TestUsageMetering(t *testing.T) {
+	h := newSrv(t)
+	postRecord(t, h, `{"idempotency_key":"u1","project_id":"p1","session_id":"s1","action":"a"}`)
+	postRecord(t, h, `{"idempotency_key":"u1","project_id":"p1","session_id":"s1","action":"a"}`) // retry, not billed
+	postRecord(t, h, `{"idempotency_key":"u2","project_id":"p1","session_id":"s1","action":"b"}`)
+	do(t, h, "GET", "/v2/export?project=p1", "")
+
+	code, resp := do(t, h, "GET", "/v2/usage?project=p1", "")
+	if code != http.StatusOK {
+		t.Fatalf("usage %d: %s", code, resp)
+	}
+	var out struct {
+		Usage struct {
+			Records int64 `json:"records"`
+			Exports int64 `json:"exports"`
+		} `json:"usage"`
+	}
+	json.Unmarshal([]byte(resp), &out)
+	if out.Usage.Records != 2 { // 2 unique records (the retry collapsed, not metered)
+		t.Fatalf("expected 2 metered records, got %d", out.Usage.Records)
+	}
+	if out.Usage.Exports != 1 {
+		t.Fatalf("expected 1 export, got %d", out.Usage.Exports)
+	}
+}
+
 func TestClockSkewServerTimestampWins(t *testing.T) {
 	h := newSrv(t)
 	rec, _ := postRecord(t, h,

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/feir-dev/feir/server/internal/meter"
 	"github.com/feir-dev/feir/server/internal/store"
 )
 
@@ -26,6 +27,7 @@ type Sealer interface {
 type Server struct {
 	core         Sealer
 	st           store.Store
+	meter        meter.Meter
 	signingKeyID string
 	keyValidFrom string
 	now          func() time.Time // injectable clock for tests
@@ -38,10 +40,17 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 	return &Server{
 		core:         core,
 		st:           st,
+		meter:        meter.NewMem(),
 		signingKeyID: signingKeyID,
 		keyValidFrom: "2026-01-01T00:00:00.000Z",
 		now:          time.Now,
 	}
+}
+
+// WithMeter swaps in a usage meter (e.g. a Stripe reporter). Returns the server for chaining.
+func (s *Server) WithMeter(m meter.Meter) *Server {
+	s.meter = m
+	return s
 }
 
 func (s *Server) Routes() *http.ServeMux {
@@ -53,6 +62,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /v2/dag", s.handleDAG)
 	mux.HandleFunc("GET /v2/verify", s.handleVerify)
 	mux.HandleFunc("GET /v2/export", s.handleExport)
+	mux.HandleFunc("GET /v2/usage", s.handleUsage)
 	return mux
 }
 
@@ -209,6 +219,9 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	if err != nil {
 		return "", false, err
 	}
+	if created {
+		s.meter.RecordsIngested(projectID, 1) // billable per record beyond the free tier
+	}
 	return stored.JSON, created, nil
 }
 
@@ -297,6 +310,18 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	projectID := r.URL.Query().Get("project")
+	u := s.meter.Usage(projectID)
+	billRecords, billExports := meter.Billable(u)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"usage":            u,
+		"free_tier":        meter.FreeTierRecords,
+		"billable_records": billRecords,
+		"billable_exports": billExports,
+	})
+}
+
 // handleDAG returns a session's sealed records (the causal DAG) for the trace-waterfall view.
 //
 // PHASE-1 AUTHZ LIMIT: the app API has NO per-project authentication/authorization yet (RBAC/SSO is
@@ -341,6 +366,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.meter.ExportIssued(projectID) // billable per export
 	// attach an honest gap_report + mode (selective_disclosure / full_evidence raw blobs are stored
 	// on customer infra; this dev store keeps commitments only — stated, not implied).
 	var obj map[string]json.RawMessage
