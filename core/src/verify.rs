@@ -67,6 +67,13 @@ pub struct VerifyReport {
     /// Selective-disclosure entries in the bundle, and how many matched their record's commitment.
     pub disclosures_total: usize,
     pub disclosures_verified: usize,
+    /// Credential-broker grants (`event_type=credential_grant`) and how many verified to
+    /// `gateway_enforced` under a pinned authority key (Level 3 Tier-A grant accountability).
+    pub grant_total: usize,
+    pub grant_verified: usize,
+    /// The bundle's `coverage_manifest` echoed verbatim (the verifier does NOT trust it; it surfaces
+    /// it so an auditor can evaluate the out-of-band attestations). `None` if absent.
+    pub coverage_manifest: Option<CanonValue>,
     pub issues: Vec<String>,
     pub first_broken_link: Option<String>,
 }
@@ -414,6 +421,40 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("chain_ok".into(), CanonValue::Bool(r.chain_ok)),
         ("disclosures_total".into(), count(r.disclosures_total)),
         ("disclosures_verified".into(), count(r.disclosures_verified)),
+        ("grant_total".into(), count(r.grant_total)),
+        ("grant_verified".into(), count(r.grant_verified)),
+        // Tier-A grant accountability: every grant verified to gateway_enforced under a pinned key.
+        (
+            "grant_accountability".into(),
+            CanonValue::string(if r.grant_total == 0 {
+                "not_applicable"
+            } else if r.grant_verified == r.grant_total {
+                "complete"
+            } else {
+                "incomplete"
+            }),
+        ),
+        // Tier-A is grant accountability only; action completeness (Tier B / Level 3) additionally
+        // needs use receipts + attestations and is NOT claimed here (ADR 0002). broker_trust is
+        // `assumed` (the bundle cannot prove the broker did not mint without recording);
+        // attestation_status is `unevaluated` (this verifier does not evaluate the manifest).
+        ("broker_trust".into(), CanonValue::string("assumed")),
+        (
+            "attestation_status".into(),
+            CanonValue::string("unevaluated"),
+        ),
+        (
+            "action_completeness".into(),
+            CanonValue::string(if r.coverage_manifest.is_some() {
+                "claimed_over_manifest"
+            } else {
+                "not_claimed"
+            }),
+        ),
+        (
+            "coverage_manifest".into(),
+            r.coverage_manifest.clone().unwrap_or(CanonValue::Null),
+        ),
         ("issues".into(), str_array(&r.issues)),
         ("first_broken_link".into(), opt_str(&r.first_broken_link)),
         ("record_trust".into(), CanonValue::Array(records)),
@@ -440,6 +481,102 @@ pub fn verify_bundle_to_json(text: &str) -> String {
 
 pub fn verify_bundle(bundle: &CanonValue) -> VerifyReport {
     verify_bundle_with(bundle, &VerifyOptions::default())
+}
+
+/// Verify a bundle (JSON) with out-of-band pinned trust roots supplied as a JSON options object, and
+/// return the report JSON — the shape the FFI/CLI use to pass pinned keys for authority elevation
+/// (the broker recording key for `gateway_enforced` grants) and key/TSA pinning. All option keys are
+/// optional arrays: `authority_keys`/`signing_keys`/`tsa_keys` are `ed25519pub:` strings;
+/// `tsa_spki_b64` are base64url-no-pad DER SubjectPublicKeyInfos.
+pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
+    let bundle = match CanonValue::parse(bundle_text) {
+        Ok(b) => b,
+        Err(e) => return error_report(&format!("bundle parse: {e}")),
+    };
+    let opts_val = match CanonValue::parse(opts_text) {
+        Ok(o) => o,
+        Err(e) => return error_report(&format!("options parse: {e}")),
+    };
+    // Parse pinned keys FAIL-CLOSED: any malformed entry is an error, never a silent drop — a caller
+    // who supplied keys must not be downgraded to unpinned verification (signing keys) or get a
+    // confusing grant_verified:0 (authority keys) because a key was pasted in the wrong encoding.
+    let authority = match parse_pubkeys(&opts_val, "authority_keys") {
+        Ok(k) => k,
+        Err(e) => return error_report(&e),
+    };
+    let tsa_keys = match parse_pubkeys(&opts_val, "tsa_keys") {
+        Ok(k) => k,
+        Err(e) => return error_report(&e),
+    };
+    let tsa_spki = match parse_spki(&opts_val, "tsa_spki_b64") {
+        Ok(k) => k,
+        Err(e) => return error_report(&e),
+    };
+    let signing = match parse_pubkeys(&opts_val, "signing_keys") {
+        Ok(k) => k,
+        Err(e) => return error_report(&e),
+    };
+    let mut opts = VerifyOptions {
+        trusted_authority_keys: authority,
+        trusted_tsa_keys: tsa_keys,
+        trusted_tsa_spki: tsa_spki,
+        ..Default::default()
+    };
+    if !signing.is_empty() {
+        // No out-of-band status/compromise override here — that is the richer Rust API's job.
+        opts.trusted_keys = Some(signing.into_iter().map(TrustedKey::from).collect());
+    }
+    report_to_json(&verify_bundle_with(&bundle, &opts))
+}
+
+/// Parse an optional array of `ed25519pub:` strings. Absent ⇒ empty; present-but-malformed ⇒ Err
+/// (fail-closed, with the offending index + reason — never a silent drop).
+fn parse_pubkeys(opts: &CanonValue, key: &str) -> Result<Vec<VerifyingKey>, String> {
+    let arr = match opts.get(key) {
+        None | Some(CanonValue::Null) => return Ok(Vec::new()),
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| format!("{key} must be an array of ed25519pub: strings"))?,
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        let s = v
+            .as_str()
+            .ok_or_else(|| format!("{key}[{i}] must be a string"))?;
+        let vk = decode_pubkey(s)
+            .map_err(|e| format!("{key}[{i}] is not a valid ed25519pub key: {e}"))?;
+        out.push(vk);
+    }
+    Ok(out)
+}
+
+/// Parse an optional array of base64url DER SPKIs. Absent ⇒ empty; present-but-malformed ⇒ Err.
+fn parse_spki(opts: &CanonValue, key: &str) -> Result<Vec<Vec<u8>>, String> {
+    let arr = match opts.get(key) {
+        None | Some(CanonValue::Null) => return Ok(Vec::new()),
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| format!("{key} must be an array of base64url DER strings"))?,
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        let s = v
+            .as_str()
+            .ok_or_else(|| format!("{key}[{i}] must be a string"))?;
+        let der =
+            crate::b64::decode(s).map_err(|e| format!("{key}[{i}] is not valid base64url: {e}"))?;
+        out.push(der);
+    }
+    Ok(out)
+}
+
+fn error_report(msg: &str) -> String {
+    CanonValue::object(vec![
+        ("ok".into(), CanonValue::Bool(false)),
+        ("error".into(), CanonValue::string(msg)),
+    ])
+    .unwrap()
+    .serialize()
 }
 
 pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
@@ -791,6 +928,27 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         });
     }
 
+    // Level 3 Tier-A: count credential-broker grants and how many are fully accountable. A grant only
+    // counts as VERIFIED when the record is BOTH integrity-proven (its own seal is valid — event_type
+    // and action are part of the signed body) AND its authority verified to gateway_enforced under a
+    // pinned key. Gating on authority alone would count a body-tampered grant (a valid evidence triple
+    // binds only source/record_id/evidence_hash, not the body) — so a forged action would read as
+    // "complete". Grants are deduped by content_hash so a verbatim-replayed grant isn't double-counted.
+    let mut grant_total = 0usize;
+    let mut grant_verified = 0usize;
+    let mut seen_grants: BTreeSet<&str> = BTreeSet::new();
+    for rt in &record_trust {
+        if s(&records[rt.index], "event_type").as_deref() == Some("credential_grant")
+            && seen_grants.insert(rt.content_hash.as_str())
+        {
+            grant_total += 1;
+            if rt.trust == TrustLevel::IntegrityProven && rt.authority == AuthorityTrust::Verified {
+                grant_verified += 1;
+            }
+        }
+    }
+    let coverage_manifest = bundle.get("coverage_manifest").cloned();
+
     let first_broken_link = issues.first().cloned();
     let ok = issues.is_empty()
         && records_proven == records.len()
@@ -816,6 +974,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         chain_ok,
         disclosures_total,
         disclosures_verified,
+        grant_total,
+        grant_verified,
+        coverage_manifest,
         issues,
         first_broken_link,
     }

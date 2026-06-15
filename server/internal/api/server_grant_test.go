@@ -119,14 +119,20 @@ func TestCredentialGrantRecordedBeforeIssue(t *testing.T) {
 		t.Fatalf("extensions.broker wrong: %+v", ext.Broker)
 	}
 
-	// the grant is durably stored and the bundle still verifies (integrity); Tier-A authority
-	// elevation is wired in the next commit.
+	// the grant is durably stored, the bundle verifies, and the grant elevates to gateway_enforced
+	// under the pinned broker recording key (Tier-A grant accountability).
 	if c, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); c != http.StatusCreated {
 		t.Fatalf("checkpoint: %d %s", c, resp)
 	}
 	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
 	if !strings.Contains(report, `"ok":true`) || !strings.Contains(report, `"records_proven":1`) {
 		t.Fatalf("grant bundle should verify: %s", report)
+	}
+	if !strings.Contains(report, `"grant_total":1`) || !strings.Contains(report, `"grant_verified":1`) {
+		t.Fatalf("the grant should verify to gateway_enforced under the pinned broker key: %s", report)
+	}
+	if !strings.Contains(report, `"grant_accountability":"complete"`) {
+		t.Fatalf("expected complete grant accountability: %s", report)
 	}
 }
 

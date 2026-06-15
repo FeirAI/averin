@@ -73,6 +73,23 @@ func (c *Core) VerifyBundle(bundleJSON string) string {
 	return goStrFree(C.feir_verify_bundle_json(cb))
 }
 
+// VerifyBundleWith verifies a bundle with out-of-band pinned trust roots (optsJSON: arrays of
+// authority_keys/signing_keys/tsa_keys as "ed25519pub:" + tsa_spki_b64). Returns the JSON report.
+func (c *Core) VerifyBundleWith(bundleJSON, optsJSON string) string {
+	cb := C.CString(bundleJSON)
+	co := C.CString(optsJSON)
+	defer C.free(unsafe.Pointer(cb))
+	defer C.free(unsafe.Pointer(co))
+	return goStrFree(C.feir_verify_bundle_with(cb, co))
+}
+
+// VerifyBundleWithAuthority verifies a bundle pinning the given authority public keys (the broker
+// recording key), so credential-broker grants elevate to gateway_enforced (grant_verified).
+func (c *Core) VerifyBundleWithAuthority(bundleJSON string, authorityPubKeys []string) string {
+	opts, _ := json.Marshal(map[string]any{"authority_keys": authorityPubKeys})
+	return c.VerifyBundleWith(bundleJSON, string(opts))
+}
+
 // ---- content commitments (RCP §9.3, threat #6) ----
 //
 // Low-entropy fields (input/output/rationale) are committed (hiding) rather than stored in clear in

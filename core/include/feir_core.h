@@ -13,6 +13,13 @@ extern "C" {
  * NULL/invalid-UTF-8 input. The report always parses; check its "ok" field. */
 char *feir_verify_bundle_json(const char *input);
 
+/* Verify a bundle with out-of-band pinned trust roots. opts_json is a JSON object with optional
+ * arrays: authority_keys/signing_keys/tsa_keys ("ed25519pub:" strings), tsa_spki_b64 (base64url DER).
+ * Pin the broker recording key as authority_keys to elevate credential_grant records to
+ * gateway_enforced (grant_verified). Same report shape as feir_verify_bundle_json (a malformed
+ * opts key yields {"ok":false,"error":...}); NULL on NULL/invalid-UTF-8 input. */
+char *feir_verify_bundle_with(const char *bundle, const char *opts_json);
+
 /* Canonicalize a JSON document under RCP v1. Returns the canonical string (caller frees), which
  * begins with "ERROR:" on a parse error; NULL on NULL/invalid-UTF-8 input. */
 char *feir_rcp_canonicalize(const char *input);

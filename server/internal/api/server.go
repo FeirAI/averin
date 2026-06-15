@@ -32,6 +32,9 @@ type Sealer interface {
 	SealRecord(bodyJSON string) (string, error)
 	SealCheckpoint(bodyJSON string) (string, error)
 	VerifyBundle(bundleJSON string) string
+	// VerifyBundleWithAuthority pins authority keys (the broker recording key) so credential-broker
+	// grants elevate to gateway_enforced (Level 3 Tier-A grant accountability).
+	VerifyBundleWithAuthority(bundleJSON string, authorityPubKeys []string) string
 	PubKey() string
 	// content commitments (RCP §9.3): mint a nonce and commit a low-entropy field at ingest.
 	RandomNonce() (string, error)
@@ -861,7 +864,10 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	report := s.core.VerifyBundle(bundle)
+	// Pin the broker recording key (== this server's signing key; broker_trust: assumed) so any
+	// credential-broker grants in the bundle elevate to gateway_enforced (Tier-A grant accountability).
+	// An EXTERNAL auditor pins the broker key out-of-band instead of trusting the server's self-view.
+	report := s.core.VerifyBundleWithAuthority(bundle, []string{s.core.PubKey()})
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(report))
 }

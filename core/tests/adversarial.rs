@@ -68,6 +68,115 @@ fn checkpoint_hash(cp: &CanonValue) -> String {
 }
 
 #[test]
+fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
+    use feir_decision_core::authority::sign_evidence;
+    use feir_decision_core::hashx::sha256_prefixed;
+    use feir_decision_core::record::seal;
+    use feir_decision_core::sign::encode_pubkey;
+
+    let sk = signing_key_from_seed(&[0u8; 32]); // the broker recording key == the record signing key
+    let vk = sk.verifying_key();
+    let record_id = "grant-1";
+    let evidence_hash = sha256_prefixed(b"canonical-grant-evidence");
+    let evidence_sig = sign_evidence("gateway_enforced", record_id, &evidence_hash, &sk);
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"feir-broker",
+        "session_id":"s","span_id":"sp","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
+        "agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z",
+        "event_type":"credential_grant","action":"db.query:orders-ro","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"credential_broker","grant_type":"id-jag",
+            "grant_id":"{record_id}","evidence_hash":"{evidence_hash}","evidence_sig":"{evidence_sig}"}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#
+    );
+    let grant = seal(&CanonValue::parse(&body).unwrap(), &sk).unwrap();
+    let key_entry = CanonValue::object(vec![
+        ("signing_key_id".into(), CanonValue::string("k0")),
+        ("key_epoch".into(), CanonValue::Int(0)),
+        ("public_key".into(), CanonValue::string(encode_pubkey(&vk))),
+        ("key_status".into(), CanonValue::string("active")),
+    ])
+    .unwrap();
+    let bundle = CanonValue::object(vec![
+        ("bundle_version".into(), CanonValue::string("1")),
+        ("project_id".into(), CanonValue::string("proj-001")),
+        ("keys".into(), CanonValue::Array(vec![key_entry])),
+        ("records".into(), CanonValue::Array(vec![grant.clone()])),
+        ("checkpoints".into(), CanonValue::Array(vec![])),
+    ])
+    .unwrap();
+    let pinned = || VerifyOptions {
+        trusted_authority_keys: vec![vk],
+        ..Default::default()
+    };
+
+    // Without pinning the authority key, the grant is counted but NOT verified (declared/unverifiable).
+    let r = verify_bundle(&bundle);
+    assert_eq!(r.grant_total, 1);
+    assert_eq!(r.grant_verified, 0);
+
+    // A body-tampered grant must NOT count as verified even though its authority evidence is intact:
+    // changing `action` after sealing breaks content_hash (Untrusted), and grant_verified is gated on
+    // the record being integrity-proven, not just authority-verified.
+    let tampered = change_field(&grant, "action", CanonValue::string("db.delete:everything"));
+    let tampered_bundle = change_field(&bundle, "records", CanonValue::Array(vec![tampered]));
+    let rt = verify_bundle_with(&tampered_bundle, &pinned());
+    assert_eq!(rt.grant_total, 1);
+    assert_eq!(
+        rt.grant_verified, 0,
+        "a body-tampered grant must not be 'verified' just because its evidence_sig is intact"
+    );
+
+    // A verbatim-duplicated grant is counted ONCE (deduped by content_hash), not double-counted.
+    let dup_bundle = change_field(
+        &bundle,
+        "records",
+        CanonValue::Array(vec![grant.clone(), grant.clone()]),
+    );
+    let rd = verify_bundle_with(&dup_bundle, &pinned());
+    assert_eq!(rd.grant_total, 1, "a duplicated grant must be deduped");
+    assert_eq!(rd.grant_verified, 1);
+
+    // Pinning the broker recording key elevates the grant to gateway_enforced (Tier-A complete).
+    let r2 = verify_bundle_with(&bundle, &pinned());
+    assert_eq!(r2.grant_total, 1);
+    assert_eq!(r2.grant_verified, 1);
+
+    // The report JSON surfaces the Tier-A verdict.
+    let json = feir_decision_core::verify::report_to_json(&r2);
+    assert!(
+        json.contains(r#""grant_accountability":"complete""#),
+        "{json}"
+    );
+    assert!(json.contains(r#""broker_trust":"assumed""#));
+    assert!(json.contains(r#""action_completeness":"not_claimed""#)); // no coverage_manifest here
+
+    // A forged gateway_enforced grant (agent-claimed, no real broker key) does NOT elevate: re-sign
+    // the evidence with a DIFFERENT key, pin only the real broker key.
+    let imposter = signing_key_from_seed(&[7u8; 32]);
+    let bad_sig = sign_evidence("gateway_enforced", record_id, &evidence_hash, &imposter);
+    let bad_body = body.replace(&evidence_sig, &bad_sig);
+    let bad_grant = seal(&CanonValue::parse(&bad_body).unwrap(), &sk).unwrap();
+    let bad_bundle = change_field(&bundle, "records", CanonValue::Array(vec![bad_grant]));
+    let r3 = verify_bundle_with(&bad_bundle, &pinned());
+    assert_eq!(r3.grant_total, 1);
+    assert_eq!(
+        r3.grant_verified, 0,
+        "a grant not signed by the pinned broker key must not verify"
+    );
+
+    // verify_bundle_with_json fails CLOSED on a malformed pinned key (no silent drop to unpinned).
+    let report = feir_decision_core::verify::verify_bundle_with_json(
+        &bundle.serialize(),
+        r#"{"authority_keys":["not-a-key"]}"#,
+    );
+    assert!(
+        report.contains(r#""ok":false"#) && report.contains("authority_keys[0]"),
+        "malformed pinned key should be a fail-closed error: {report}"
+    );
+}
+
+#[test]
 fn valid_bundle_verifies_clean() {
     let b = fixture();
     let r = verify_bundle(&b);

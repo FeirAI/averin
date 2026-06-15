@@ -51,6 +51,30 @@ pub unsafe extern "C" fn feir_verify_bundle_json(input: *const c_char) -> *mut c
     }
 }
 
+/// Verify an export bundle with out-of-band pinned trust roots. `opts_json` is a JSON object whose
+/// optional arrays pin keys: `authority_keys`/`signing_keys`/`tsa_keys` (`ed25519pub:` strings) and
+/// `tsa_spki_b64` (base64url DER). Used to elevate a credential-broker grant to `gateway_enforced`
+/// (pin the broker recording key as `authority_keys`). Returns the same JSON report as
+/// [`feir_verify_bundle_json`]; null if either pointer is null or not UTF-8.
+///
+/// # Safety
+/// `bundle` and `opts_json` must be valid null-terminated C strings for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn feir_verify_bundle_with(
+    bundle: *const c_char,
+    opts_json: *const c_char,
+) -> *mut c_char {
+    let bundle = match cstr(bundle) {
+        Some(b) => b,
+        None => return std::ptr::null_mut(),
+    };
+    let opts = match cstr(opts_json) {
+        Some(o) => o,
+        None => return std::ptr::null_mut(),
+    };
+    into_cstring(crate::verify::verify_bundle_with_json(bundle, opts))
+}
+
 /// Canonicalize a JSON document under RCP v1. Returns a newly-allocated string (free with
 /// [`feir_string_free`]); the result begins with `ERROR:` on a parse error. Null if input is null
 /// or not UTF-8.
