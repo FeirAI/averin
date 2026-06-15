@@ -73,7 +73,7 @@ Every claim is bounded by [`docs/coverage-limits.md`](docs/coverage-limits.md) (
 - ☑ **Production Postgres store** — append-only at the database (REVOKE UPDATE/DELETE/TRUNCATE, verified under a least-privilege role), idempotency + content-hash collapse + DAG-derived frontier in SQL; auto-migrates; `docker compose up` is turnkey. Validated against real Postgres 16.
 - ☑ **Content commitments + selective-disclosure export** (#6) — low-entropy `input`/`output`/`rationale` are hiding-committed at ingest (plaintext → content store, never the signed body); a `selective_disclosure` export reveals `(value, nonce)` the offline verifier checks against each record's commitment. Disclosure secrets are written atomically with the record.
 - ☑ **RFC 3161 checkpoint anchoring** (#3) — checkpoints are timestamp-anchored to a third-party TSA, decoupled (out of the checkpoint lock, back-anchorable) and joined into the bundle at export.
-- ☐ Remaining: the credential broker (Level 3 — the moat). *Built when a design partner pulls* (per spec §scope).
+- ◐ **Credential broker (Level 3 — the moat)** — **design recorded** in [`docs/decisions/0002-credential-broker-level-3.md`](docs/decisions/0002-credential-broker-level-3.md), hardened across three adversarial-review rounds (Tier A grant-accountability vs Tier B action-accountability; honest, surfaced trust boundaries). *Built when a design partner pulls* (per spec §scope).
 
 ## Verify an export offline
 
