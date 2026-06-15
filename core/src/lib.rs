@@ -6,6 +6,7 @@
 //! byte-for-byte contract (threat #10).
 
 pub mod anchor;
+pub mod authority;
 pub mod b64;
 pub mod canon;
 pub mod checkpoint;

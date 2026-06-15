@@ -14,6 +14,7 @@
 //! `≤ status_changed_at` transitively commits it (RCP §10.2, threat #9).
 
 use crate::anchor::verify_anchor;
+use crate::authority::{verify_authority, AuthorityTrust};
 use crate::canon::CanonValue;
 use crate::checkpoint::{validate_chain, verify_checkpoint_sealed};
 use crate::dag;
@@ -42,6 +43,9 @@ pub struct RecordTrust {
     pub key_status: String,
     pub observed_via: String,
     pub trust: TrustLevel,
+    /// Authority gradient (threat #4): none|declared|verified|failed. `verified` = an evidence_sig
+    /// checked out under a pinned authority key, not just the agent's claim.
+    pub authority: AuthorityTrust,
     pub notes: Vec<String>,
 }
 
@@ -93,6 +97,9 @@ pub struct VerifyOptions {
     pub trusted_tsa_keys: Vec<VerifyingKey>,
     /// Trusted DER `SubjectPublicKeyInfo`s for real RFC 3161 TSAs (used with the `rfc3161` feature).
     pub trusted_tsa_spki: Vec<Vec<u8>>,
+    /// Trusted authority-system public keys (policy engine / approval service). An `evidence_sig`
+    /// that verifies under one of these elevates a record's authority to `verified` (threat #4).
+    pub trusted_authority_keys: Vec<VerifyingKey>,
 }
 
 struct KeyEntry {
@@ -113,6 +120,7 @@ struct Pending {
     project_ok: bool,
     eff_status: String,
     status_changed_at: Option<String>,
+    authority: AuthorityTrust,
     notes: Vec<String>,
 }
 
@@ -265,6 +273,7 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
                         TrustLevel::Untrusted => "untrusted",
                     }),
                 ),
+                ("authority".into(), CanonValue::string(t.authority.as_str())),
                 ("notes".into(), str_array(&t.notes)),
             ])
             .unwrap()
@@ -434,6 +443,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             notes.push("signed by a key that is NOT externally pinned".into());
         }
 
+        let authority = verify_authority(rec, &opts.trusted_authority_keys);
+        if authority == AuthorityTrust::Failed {
+            notes.push("authority claims a verified source but its evidence_sig did not verify under a trusted authority key".into());
+        }
+
         pending.push(Pending {
             index: i,
             record_id: s(rec, "record_id").unwrap_or_default(),
@@ -445,8 +459,25 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             project_ok,
             eff_status,
             status_changed_at,
+            authority,
             notes,
         });
+    }
+
+    // record_ids must be unique (two distinct records may not share a record_id). This keeps
+    // `record_id` a sound binding handle for authority evidence (a verified evidence triple bound to
+    // a record_id cannot be copied onto a different record without colliding here).
+    {
+        let mut by_id: BTreeMap<String, String> = BTreeMap::new();
+        for rec in records.iter() {
+            if let (Some(id), Some(ch)) = (s(rec, "record_id"), s(rec, "content_hash")) {
+                if let Some(prev) = by_id.insert(id.clone(), ch.clone()) {
+                    if prev != ch {
+                        issues.push(format!("duplicate record_id '{id}' on distinct records"));
+                    }
+                }
+            }
+        }
     }
 
     // ---- 3. DAG ----
@@ -632,6 +663,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             key_status: p.eff_status,
             observed_via: p.observed_via,
             trust,
+            authority: p.authority,
             notes: p.notes,
         });
     }
