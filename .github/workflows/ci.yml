@@ -56,6 +56,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: build wasm
-        # --no-default-features drops getrandom (the verifier needs no RNG) -> lean, RNG-free bundle
-        run: cargo build --release --target wasm32-unknown-unknown --lib --no-default-features --features wasm
+      - name: build wasm (same C ABI as cgo; no wasm-bindgen, RNG-free)
+        run: cargo build --release --target wasm32-unknown-unknown --lib --no-default-features

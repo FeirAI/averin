@@ -2,12 +2,33 @@
 //! cgo FFI"). Same core as the CLI and WASM. Header: `core/include/feir_core.h`.
 //!
 //! Memory contract: every non-null `*mut c_char` returned MUST be freed by the caller with
-//! [`feir_string_free`]. Compiled into the `cdylib`/`staticlib` targets; excluded from WASM.
-
-#![cfg(not(target_arch = "wasm32"))]
+//! [`feir_string_free`]. This same C-ABI serves BOTH cgo (native staticlib/cdylib) and the browser
+//! (wasm32 cdylib): the standalone verifier writes a null-terminated JSON string into wasm memory
+//! via [`feir_alloc`], calls [`feir_verify_bundle_json`], reads the result, then frees both.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+
+/// Allocate `size` bytes of wasm/native memory and return the pointer (for the browser verifier to
+/// write an input string into). Pair with [`feir_dealloc`].
+#[no_mangle]
+pub extern "C" fn feir_alloc(size: usize) -> *mut u8 {
+    let mut buf = Vec::<u8>::with_capacity(size);
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr
+}
+
+/// Free memory allocated by [`feir_alloc`].
+///
+/// # Safety
+/// `ptr`/`size` must come from a prior [`feir_alloc`] call and not be used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn feir_dealloc(ptr: *mut u8, size: usize) {
+    if !ptr.is_null() && size > 0 {
+        drop(Vec::from_raw_parts(ptr, 0, size));
+    }
+}
 
 /// Verify an export bundle (null-terminated UTF-8 JSON). Returns a newly-allocated, null-terminated
 /// JSON report string (free with [`feir_string_free`]), or null if `input` is null or not UTF-8.

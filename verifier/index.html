@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>feir — offline verifier</title>
+    <style>
+      :root {
+        --bg: #0f1115; --panel: #171a21; --ink: #e6e9ef; --mut: #9aa4b2;
+        --ok: #34d399; --bad: #f87171; --line: #262b35; --accent: #7c9cff;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--ink);
+        font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+      .wrap { max-width: 920px; margin: 0 auto; padding: 32px 20px 80px; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      .sub { color: var(--mut); margin: 0 0 24px; }
+      .sub code { color: var(--accent); }
+      textarea { width: 100%; height: 200px; background: var(--panel); color: var(--ink);
+        border: 1px solid var(--line); border-radius: 10px; padding: 12px; font-family: ui-monospace, monospace;
+        font-size: 13px; resize: vertical; }
+      .row { display: flex; gap: 12px; align-items: center; margin: 12px 0 0; flex-wrap: wrap; }
+      button { background: var(--accent); color: #0b0d12; border: 0; border-radius: 8px;
+        padding: 10px 18px; font-weight: 600; cursor: pointer; }
+      button:disabled { opacity: .5; cursor: default; }
+      input[type=file] { color: var(--mut); }
+      .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+        padding: 18px; margin-top: 22px; }
+      .verdict { font-size: 26px; font-weight: 700; }
+      .pass { color: var(--ok); } .fail { color: var(--bad); }
+      .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 16px 0; }
+      .stat { background: #0e1117; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+      .stat b { display: block; font-size: 18px; } .stat span { color: var(--mut); font-size: 12px; }
+      .rec { display: flex; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); font-family: ui-monospace, monospace; font-size: 13px; }
+      .mark.ok { color: var(--ok); } .mark.bad { color: var(--bad); }
+      .issues { color: var(--bad); font-family: ui-monospace, monospace; font-size: 13px; white-space: pre-wrap; }
+      .note { color: var(--mut); font-size: 13px; margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 12px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>feir — offline verifier</h1>
+      <p class="sub">
+        Verify an exported evidence bundle <b>entirely in your browser</b>: no network, no trust in
+        the vendor. Runs the same Rust integrity core as the CLI, compiled to WebAssembly — you can
+        read every line of <code>feir.js</code>.
+      </p>
+
+      <textarea id="bundle" placeholder="Paste an export bundle (JSON) here, or choose a file below…"></textarea>
+      <div class="row">
+        <input type="file" id="file" accept="application/json,.json" />
+        <button id="verify" disabled>Verify offline</button>
+        <span id="status" class="sub" style="margin:0"></span>
+      </div>
+
+      <div id="out"></div>
+    </div>
+
+    <script type="module">
+      import { initFeir } from "./feir.js";
+
+      const $ = (id) => document.getElementById(id);
+      let feir = null;
+
+      initFeir("./feir_decision_core.wasm")
+        .then((v) => { feir = v; $("verify").disabled = false; $("status").textContent = "core loaded"; })
+        .catch((e) => { $("status").textContent = "failed to load wasm: " + e; });
+
+      $("file").addEventListener("change", async (e) => {
+        const f = e.target.files[0];
+        if (f) $("bundle").value = await f.text();
+      });
+
+      $("verify").addEventListener("click", () => {
+        const text = $("bundle").value.trim();
+        if (!text) return;
+        let report;
+        try { report = feir.verifyBundle(text); }
+        catch (err) { $("out").innerHTML = `<div class="panel"><span class="fail">verify error: ${esc(String(err))}</span></div>`; return; }
+        render(report);
+      });
+
+      function esc(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+      function render(r) {
+        if (r.error) { $("out").innerHTML = `<div class="panel"><span class="fail">${esc(r.error)}</span></div>`; return; }
+        const recs = (r.record_trust || []).map((t) => {
+          const ok = t.trust === "integrity_proven";
+          return `<div class="rec"><span class="mark ${ok ? "ok" : "bad"}">${ok ? "✓" : "✗"}</span>
+            <span>${esc(t.record_id || t.content_hash)}</span>
+            <span style="color:var(--mut)">via ${esc(t.observed_via)} · key ${esc(t.key_status)}</span>
+            ${t.notes && t.notes[0] ? `<span style="color:var(--bad)">${esc(t.notes[0])}</span>` : ""}</div>`;
+        }).join("");
+        const stat = (b, s) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`;
+        $("out").innerHTML = `<div class="panel">
+          <div class="verdict ${r.ok ? "pass" : "fail"}">${r.ok ? "PASS" : "FAIL"}</div>
+          <div class="stats">
+            ${stat(`${r.records_proven}/${r.records_total}`, "records integrity-proven")}
+            ${stat(r.dag_ok ? "valid" : "INVALID", `DAG · ${r.dag_heads} heads`)}
+            ${stat(`${r.checkpoints_verified}/${r.checkpoints_total}`, `checkpoints · ${r.checkpoints_anchored} anchored`)}
+            ${stat(r.chain_ok ? "ok" : "BROKEN", "checkpoint chain")}
+            ${stat(r.keys_externally_pinned ? "pinned" : "bundle-supplied", "trust root")}
+          </div>
+          ${recs}
+          ${r.first_broken_link ? `<div class="issues">first broken link:\n${esc(r.first_broken_link)}</div>` : ""}
+          <div class="note">
+            ${r.keys_externally_pinned ? "" : "Keys came from the bundle (not externally pinned): this proves internal consistency under the bundle's own key claims, not authenticity against an out-of-band trust root.<br/>"}
+            A PASS proves <b>integrity &amp; provenance</b> (Level 1) — not that the records are a <b>complete</b> account of everything the agent did (Level 3).
+          </div>
+        </div>`;
+      }
+    </script>
+  </body>
+</html>

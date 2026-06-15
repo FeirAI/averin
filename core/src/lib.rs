@@ -19,9 +19,6 @@ pub mod rfc3161;
 pub mod sign;
 pub mod verify;
 
-#[cfg(feature = "wasm")]
-pub mod wasm;
-
 pub use canon::{CanonError, CanonValue};
 pub use commit::{commit, verify_commitment, FieldDomain};
 pub use record::{compute_content_hash, seal, verify_content_hash, verify_sealed, RecordError};

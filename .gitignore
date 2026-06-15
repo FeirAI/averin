@@ -32,3 +32,4 @@ __pycache__/
 .idea
 .vscode
 *.swp
+verifier/*.wasm
