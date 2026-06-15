@@ -40,6 +40,13 @@ char *feir_commit(const char *domain, const char *value_b64, const char *nonce_h
 char *feir_verify_commitment(const char *commitment, const char *domain, const char *value_b64,
                              const char *nonce_hex);
 
+/* Sign an authority evidence statement (RCP §11): the policy engine / approval service / credential
+ * broker signs (source, record_id, evidence_hash) so the verifier can elevate a record from
+ * "declared" to "verified" under the pinned authority key. evidence_hash must be "sha256:<64 hex>".
+ * Returns "ed25519:<base64url>" or {"error":"..."}. seed_hex is the authority system's signing key. */
+char *feir_sign_evidence(const char *source, const char *record_id, const char *evidence_hash,
+                         const char *seed_hex);
+
 /* Free a string returned by this library. */
 void feir_string_free(char *ptr);
 

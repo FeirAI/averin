@@ -83,6 +83,25 @@ func TestCommitmentRoundTripThroughFFI(t *testing.T) {
 	}
 }
 
+func TestSignEvidence(t *testing.T) {
+	c, _ := New(seed)
+	eh := "sha256:" + strings.Repeat("ab", 32) // a well-formed sha256:<64 lowercase hex>
+	sig, err := c.SignEvidence("gateway_enforced", "rec-1", eh)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if !strings.HasPrefix(sig, "ed25519:") {
+		t.Fatalf("evidence sig should be ed25519:..., got %q", sig)
+	}
+	// malformed evidence_hash and empty record_id are rejected (verify_authority would reject them too)
+	if _, err := c.SignEvidence("gateway_enforced", "rec-1", "not-a-hash"); err == nil {
+		t.Fatal("expected error for malformed evidence_hash")
+	}
+	if _, err := c.SignEvidence("gateway_enforced", "", eh); err == nil {
+		t.Fatal("expected error for empty record_id")
+	}
+}
+
 func TestCommitRejectsBadInput(t *testing.T) {
 	c, _ := New(seed)
 	nonce, _ := c.RandomNonce()

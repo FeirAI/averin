@@ -227,6 +227,69 @@ pub unsafe extern "C" fn feir_verify_commitment(
     }
 }
 
+/// Sign an authority evidence statement (RCP §11): the policy engine / approval service / credential
+/// broker signs `LP(tag)‖LP(source)‖LP(record_id)‖utf8(evidence_hash)` so the verifier can elevate a
+/// `gateway_enforced`/`policy_engine_signed`/`human_signed` record from `declared` to `verified`
+/// under the pinned authority key. `evidence_hash` must be `sha256:<64 lowercase hex>`. Returns
+/// `ed25519:<base64url>` or `{"error":...}`. The seed is the authority system's signing key.
+///
+/// Trust boundary: this signs `evidence_hash` as an opaque value — it does NOT (and cannot) check
+/// that `evidence_hash == sha256(the real canonical evidence)`. Guaranteeing that binding is the
+/// authority system's responsibility (the broker TCB; see ADR 0002 `broker_trust: assumed`).
+///
+/// # Safety
+/// All four pointers must be valid null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn feir_sign_evidence(
+    source: *const c_char,
+    record_id: *const c_char,
+    evidence_hash: *const c_char,
+    seed_hex: *const c_char,
+) -> *mut c_char {
+    let (source, record_id, evidence_hash) =
+        match (cstr(source), cstr(record_id), cstr(evidence_hash)) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => {
+                return into_cstring(json_error(
+                    "source/record_id/evidence_hash must be non-null UTF-8",
+                ))
+            }
+        };
+    // Only sign sources verify_authority can actually elevate to `verified` (mirror authority.rs).
+    // Signing any other source mints an inert signature that can never verify — the same
+    // can-never-verify class the empty-record_id guard below refuses; fail fast instead.
+    if !matches!(
+        source,
+        "policy_engine_signed" | "human_signed" | "gateway_enforced"
+    ) {
+        return into_cstring(json_error(
+            "source must be policy_engine_signed|human_signed|gateway_enforced",
+        ));
+    }
+    if record_id.is_empty() {
+        // record_id binds the evidence to a specific record; an empty one is unbindable (and
+        // verify_authority rejects it), so refuse to mint a signature that can never verify.
+        return into_cstring(json_error("record_id must be non-empty"));
+    }
+    // Bind only a well-formed evidence_hash — the verifier requires sha256:<hex> to elevate.
+    if crate::hashx::parse_sha256(evidence_hash).is_none() {
+        return into_cstring(json_error(
+            "evidence_hash must be sha256:<64 lowercase hex>",
+        ));
+    }
+    let seed = match cstr(seed_hex).and_then(crate::hashx::hex32) {
+        Some(s) => s,
+        None => return into_cstring(json_error("seed must be 64 lowercase hex chars (32 bytes)")),
+    };
+    let sk = crate::sign::signing_key_from_seed(&seed);
+    into_cstring(crate::authority::sign_evidence(
+        source,
+        record_id,
+        evidence_hash,
+        &sk,
+    ))
+}
+
 /// Borrow a C string as `&str` (None if null or non-UTF-8).
 ///
 /// # Safety
@@ -465,6 +528,82 @@ mod tests {
             feir_string_free(out);
             s
         }
+    }
+
+    #[test]
+    fn sign_evidence_roundtrips_under_pinned_key() {
+        use crate::authority::{verify_authority, AuthorityTrust};
+        use crate::sign::signing_key_from_seed;
+        let eh = crate::hashx::sha256_prefixed(b"grant-evidence-bytes");
+        let sig = call4(feir_sign_evidence, "gateway_enforced", "rec-1", &eh, SEED);
+        assert!(sig.starts_with("ed25519:"), "{sig}");
+
+        // A record carrying this authority block verifies to `gateway_enforced` under the broker key.
+        let vk = signing_key_from_seed(&decode_seed(SEED).unwrap()).verifying_key();
+        let mk = |rid: &str, src: &str, h: &str| {
+            crate::canon::CanonValue::parse(&format!(
+                r#"{{"record_id":"{rid}","authority":{{"source":"{src}","evidence_hash":"{h}","evidence_sig":"{sig}"}}}}"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            verify_authority(&mk("rec-1", "gateway_enforced", &eh), &[vk]),
+            AuthorityTrust::Verified
+        );
+        // Binding holds: a different record_id, source, or evidence_hash fails.
+        assert_eq!(
+            verify_authority(&mk("OTHER", "gateway_enforced", &eh), &[vk]),
+            AuthorityTrust::Failed
+        );
+        assert_eq!(
+            verify_authority(&mk("rec-1", "human_signed", &eh), &[vk]),
+            AuthorityTrust::Failed
+        );
+        let eh2 = crate::hashx::sha256_prefixed(b"different");
+        assert_eq!(
+            verify_authority(&mk("rec-1", "gateway_enforced", &eh2), &[vk]),
+            AuthorityTrust::Failed
+        );
+    }
+
+    #[test]
+    fn sign_evidence_rejects_malformed() {
+        let eh = crate::hashx::sha256_prefixed(b"x");
+        assert!(call4(
+            feir_sign_evidence,
+            "gateway_enforced",
+            "rec-1",
+            "not-a-hash",
+            SEED
+        )
+        .contains("error"));
+        assert!(call4(feir_sign_evidence, "gateway_enforced", "", &eh, SEED).contains("error"));
+        assert!(call4(
+            feir_sign_evidence,
+            "gateway_enforced",
+            "rec-1",
+            &eh,
+            "shortseed"
+        )
+        .contains("error"));
+        // Refuse to mint an inert signature for a source verify_authority can never elevate.
+        assert!(call4(feir_sign_evidence, "caller_declared", "rec-1", &eh, SEED).contains("error"));
+        assert!(
+            call4(feir_sign_evidence, "gateway-enforced", "rec-1", &eh, SEED).contains("error")
+        ); // typo
+        assert!(call4(feir_sign_evidence, "", "rec-1", &eh, SEED).contains("error"));
+        // policy_engine_signed / human_signed are valid elevating sources.
+        assert!(call4(
+            feir_sign_evidence,
+            "policy_engine_signed",
+            "rec-1",
+            &eh,
+            SEED
+        )
+        .starts_with("ed25519:"));
+        assert!(
+            call4(feir_sign_evidence, "human_signed", "rec-1", &eh, SEED).starts_with("ed25519:")
+        );
     }
 
     fn call4(
