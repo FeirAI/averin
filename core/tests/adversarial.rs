@@ -946,21 +946,36 @@ fn use_evidence(
     cnf_kid: &str,
     used_at: i64,
 ) -> CanonValue {
+    // a distinct nonce per use (keyed on used_at) so multi-use fixtures don't trip the D3 nonce-replay
+    // check; tests that WANT a replay reuse the same used_at.
+    use_evidence_n(gid, action, resource, jti, cnf_kid, used_at, &format!("nonce-{used_at}"))
+}
+
+fn use_evidence_n(
+    gid: &str,
+    action: &str,
+    resource: &str,
+    jti: &str,
+    cnf_kid: &str,
+    used_at: i64,
+    nonce: &str,
+) -> CanonValue {
     CanonValue::object(vec![
         ("kind".into(), CanonValue::string("use")),
         ("grant_id".into(), CanonValue::string(gid)),
         ("action".into(), CanonValue::string(action)),
         ("resource_id".into(), CanonValue::string(resource)),
         ("jti".into(), CanonValue::string(jti)),
-        ("nonce".into(), CanonValue::string("nonce-1")),
+        ("nonce".into(), CanonValue::string(nonce)),
         (
             "pop_challenge_hash".into(),
             CanonValue::string(sha256_prefixed(b"pop")),
         ),
         ("cnf_kid".into(), CanonValue::string(cnf_kid)),
         (
+            // the real re-derivable ledger_commitment (D3): sha256(LP(tag)‖LP(jti)‖LP(nonce)‖BE8(used_at))
             "ledger_commitment".into(),
-            CanonValue::string(sha256_prefixed(b"ledger")),
+            CanonValue::string(feir_decision_core::verify::ledger_commitment(jti, nonce, used_at)),
         ),
         ("used_at".into(), CanonValue::Int(used_at)),
     ])
@@ -1476,4 +1491,43 @@ fn tier_b_use_evidence_kind_divergence_is_a_violation() {
     assert!(!r.ok);
     assert_eq!(r.unmatched_violation, 1);
     assert!(r.issues.iter().any(|i| i.contains("use_evidence.kind")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_replayed_nonce_across_receipts_is_a_violation() {
+    // D3: two closed receipts for the same resource with the SAME PoP nonce — a replay/duplicate
+    // submission caught independently of the per-grant_id rule (here a reusable grant, no per-id cap).
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "session_grant", CNF, ISSUED, EXP));
+    let gch = content_hash_of(&grant);
+    let u1 = seal_use(&rec, &res, "use-1", std::slice::from_ref(&gch), ACTION, &use_evidence_n(GID, ACTION, RESOURCE, GID, CNF, USED, "dup-nonce"));
+    let u2 = seal_use(&rec, &res, "use-2", std::slice::from_ref(&gch), ACTION, &use_evidence_n(GID, ACTION, RESOURCE, GID, CNF, USED + 1, "dup-nonce"));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&u1), content_hash_of(&u2)], 3, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, u1, u2], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert_eq!(r.uses_matched, 1);
+    assert!(r.issues.iter().any(|i| i.contains("replayed across closed receipts")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_ledger_commitment_mismatch_is_a_violation() {
+    // D3: a use whose ledger_commitment is a VALID sha256 but does NOT re-derive from (jti, nonce,
+    // used_at) — caught by the re-derivation check (distinct from the well-formed-format gate).
+    let r = verify_mangled_use(|ue| change_field(ue, "ledger_commitment", CanonValue::string(sha256_prefixed(b"wrong-ledger"))));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("does not re-derive")), "{:?}", r.issues);
+}
+
+#[test]
+fn ledger_commitment_golden_vector() {
+    // Cross-language pinned vector — MUST equal Go resourceshim.ledgerCommitment (golden test there).
+    assert_eq!(
+        feir_decision_core::verify::ledger_commitment("jti-x", "nonce-y", 1_718_445_700),
+        "sha256:b4566365dae04faf6e17e3ab8ab7183f7236b812fd1b957ef3fcd966ad6a163b"
+    );
 }

@@ -303,3 +303,13 @@ func TestNonceUniqueAcrossDifferentCredentials(t *testing.T) {
 		t.Fatalf("the same nonce reused on a different credential must be rejected, got: %v", err)
 	}
 }
+
+func TestLedgerCommitmentGoldenVector(t *testing.T) {
+	// Cross-language pinned vector — MUST equal Rust verify::ledger_commitment (golden test there).
+	// If this drifts, the offline verifier's D3 ledger_commitment re-derivation rejects real receipts.
+	got := ledgerCommitment("jti-x", "nonce-y", 1718445700)
+	want := "sha256:b4566365dae04faf6e17e3ab8ab7183f7236b812fd1b957ef3fcd966ad6a163b"
+	if got != want {
+		t.Fatalf("ledger_commitment golden vector drifted from Rust: got %s want %s", got, want)
+	}
+}

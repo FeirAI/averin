@@ -745,6 +745,21 @@ fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Re-derive the resource ledger_commitment (ADR 0003 R5 / ADR 0004 D3) the SAME way the resource
+/// shim does: `sha256( LP4("feir.broker.use.ledger.v1") ‖ LP4(jti) ‖ LP4(nonce) ‖ BE8(used_at) )`,
+/// where LP4 is a 4-byte big-endian length prefix and BE8 an 8-byte big-endian integer. Returns
+/// `sha256:<lowercase hex>`. Kept byte-identical to `resourceshim.ledgerCommitment` via a shared
+/// golden vector (Go `TestLedgerCommitmentGoldenVector` + Rust `ledger_commitment_golden_vector`).
+pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
+    let mut pre = Vec::new();
+    for part in ["feir.broker.use.ledger.v1", jti, nonce] {
+        pre.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        pre.extend_from_slice(part.as_bytes());
+    }
+    pre.extend_from_slice(&(used_at as u64).to_be_bytes());
+    crate::hashx::sha256_prefixed(&pre)
+}
+
 /// Read an integer field from a record's canonical evidence payload (used for issued_at/exp/used_at).
 fn ev_int(rec: &CanonValue, payload_key: &str, field: &str) -> Option<i64> {
     rec.get("extensions")
@@ -1272,6 +1287,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut unmatched_violation = 0usize;
     let mut unmatched_pending = 0usize;
     let mut seen_uses: BTreeSet<&str> = BTreeSet::new();
+    // D3 (ADR 0004): a (resource_id, PoP nonce) pair seen on two CLOSED receipts is a replay/duplicate
+    // submission over the visible set — independent of the per-grant_id single-use rule.
+    let mut seen_nonces: BTreeSet<(String, String)> = BTreeSet::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str() {
@@ -1351,6 +1369,22 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 continue;
             }
         };
+        // D3 (ADR 0004): the carried ledger_commitment must re-derive from (jti, nonce, used_at) the
+        // same way the resource shim computed it, and a (resource_id, nonce) must not repeat across
+        // closed receipts. nonce is already present + non-empty and ledger_commitment is well-formed
+        // sha256 (checked above).
+        let nonce = ev_str(rec, "use_evidence", "nonce").unwrap_or_default();
+        let carried_lc = ev_str(rec, "use_evidence", "ledger_commitment").unwrap_or_default();
+        if ledger_commitment(&jti, &nonce, used_at) != carried_lc {
+            unmatched_violation += 1;
+            violation(&mut issues, "use_evidence.ledger_commitment does not re-derive from (jti, nonce, used_at) — R5/D3 violation".into());
+            continue;
+        }
+        if !seen_nonces.insert((resource_id.clone(), nonce.clone())) {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("PoP nonce '{nonce}' replayed across closed receipts for resource '{resource_id}' (duplicate submission) — D3"));
+            continue;
+        }
         let g = match grants_by_id.get_mut(&gid) {
             Some(g) => g,
             None => {
