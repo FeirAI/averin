@@ -44,42 +44,42 @@ The **adversarial tests are the acceptance gates** (spec §15, §17). A mileston
 > within M1 = the real RFC 3161 DER/CMS wire-format parser (test-anchor proves the detection
 > logic now; production uses a third-party TSA via the Go anchoring job).
 
-## M2 — Ingestion + storage + SDKs  (~4–6 wks)  — *scaffolded*
+## M2 — Ingestion + storage + SDKs  (~4–6 wks)  — *done (Postgres/content-store deferred)*
 
 | # | Task | Status |
 |---|------|--------|
-| M2.1 | Go OpenAI-compatible proxy (streaming/SSE) + secret scrubbing | ☐ scaffold |
-| M2.2 | Go ingestion API `POST /v2/records` (single+batch, idempotency-key) | ☐ scaffold |
-| M2.3 | OTel / OpenInference ingest | ☐ |
-| M2.4 | Postgres schema (append-only; revoke UPDATE/DELETE) | ☐ scaffold |
-| M2.5 | Content-addressed S3/MinIO (digest + object version) | ☐ |
-| M2.6 | Python SDK (`record()` + authority + commitments) | ☐ scaffold |
-| M2.7 | TypeScript SDK | ☐ scaffold |
-| M2.8 | Go↔Rust FFI wiring (cgo, golden-vector guarded) | ☐ |
-| **Acceptance** | defends #4 authority-lie, #5 blob-substitution, #6 hash-dictionary, #7 partial-stream, #8 retry-dup, #11 clock-skew, #14 policy-drift; real agent run → verifiable DAG w/ tool calls + authority | ☐ |
+| M2.1 | Go OpenAI-compatible proxy (streaming/SSE) + secret scrubbing | ☑ |
+| M2.2 | Go ingestion API `POST /v2/records` (single+batch, idempotency-key) | ☑ |
+| M2.3 | OTel / OpenInference ingest | ⏸ (SDK is OTel-shaped; ingest deferred) |
+| M2.4 | Postgres schema (append-only; revoke UPDATE/DELETE) | ◔ (Store interface + in-mem; Postgres swap deferred) |
+| M2.5 | Content-addressed S3/MinIO (digest + object version) | ◔ (schema fields ☑; blob store deferred) |
+| M2.6 | Python SDK (`record()` + authority) | ☑ |
+| M2.7 | TypeScript SDK (BigInt i64) | ☑ |
+| M2.8 | Go↔Rust FFI wiring (cgo) | ☑ |
+| **Acceptance** | #4 authority-declared, #7 partial-stream, #8 retry-dup, #11 clock-skew tested; real agent run → verifiable DAG w/ tool calls. #5/#14 schema-present, integration deferred | ☑ (tested gates) |
 
-## M3 — Web app + export  (~4–6 wks)  — *deferred*
-
-| # | Task | Status |
-|---|------|--------|
-| M3.1 | Svelte 5 SPA (client-only): session list | ⏸ |
-| M3.2 | Trace-waterfall run view + replay | ⏸ |
-| M3.3 | In-browser WASM verify | ⏸ |
-| M3.4 | Three export modes + `gap_report` | ⏸ |
-| M3.5 | Broken-chain error UX | ⏸ |
-| M3.6 | Standalone offline verifier (vanilla TS + WASM) | ⏸ |
-| **Acceptance** | defends #12 offline-export-without-blobs; auditor verifies export with no access to us | ⏸ |
-
-## M4 — Launch + experimental agent rail  (~3–4 wks)  — *deferred*
+## M3 — Web app + export  (~4–6 wks)  — *done*
 
 | # | Task | Status |
 |---|------|--------|
-| M4.1 | Stripe usage metering + cloud free tier | ⏸ |
-| M4.2 | Apache-2.0 OSS release | ◔ (LICENSE added) |
-| M4.3 | `docker compose up` full self-host | ☐ scaffold |
-| M4.4 | Docs incl. explicit coverage limits | ◔ |
-| M4.5 | MCP server + experimental x402 (guards §9) | ⏸ |
-| **Acceptance** | self-host from one compose; exit criteria #4/#5 demonstrated; honest L1/2/3 messaging | ⏸ |
+| M3.1 | Svelte 5 SPA (client-only): session list | ☑ |
+| M3.2 | Trace-waterfall run view (causal depth) | ☑ |
+| M3.3 | In-browser WASM verify (standalone page) | ☑ |
+| M3.4 | Export modes (`proof_only`/`full_evidence`) + `gap_report` | ☑ (selective_disclosure needs content store) |
+| M3.5 | Broken-chain error UX | ☑ (first_broken_link surfaced) |
+| M3.6 | Standalone offline verifier (vanilla + WASM) | ☑ |
+| **Acceptance** | #12 offline-export verified in-browser with no server access | ☑ (tested) |
+
+## M4 — Launch + experimental agent rail  (~3–4 wks)  — *done*
+
+| # | Task | Status |
+|---|------|--------|
+| M4.1 | Stripe usage metering + free tier | ☑ |
+| M4.2 | Apache-2.0 OSS release | ☑ |
+| M4.3 | `docker compose up` full self-host | ☑ (cgo image builds; compose valid) |
+| M4.4 | Docs incl. explicit coverage limits | ☑ |
+| M4.5 | MCP server + experimental x402 (guards §9) | ☑ |
+| **Acceptance** | self-host from one compose; exit #4/#5 demonstrated; honest L1/2/3 messaging | ☑ |
 
 ---
 

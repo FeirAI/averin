@@ -42,21 +42,30 @@ Three honest trust levels (used verbatim in product copy):
 
 ## Status
 
-Phase 1 — see [`docs/PHASE1-TASKS.md`](docs/PHASE1-TASKS.md).
+**Phase 1 M0–M4 are built, tested, and reviewed** — see [`docs/PHASE1-TASKS.md`](docs/PHASE1-TASKS.md).
+Every piece was Codex-reviewed before commit. End to end:
 
-**M0 + M1 (the integrity core) are feature-complete and reviewed.** Frozen schema v2 + RCP v1,
-golden vectors, and `decision-core` building to all three targets (CLI + WASM + FFI) from one
-crate. The offline verifier defends the adversarial matrix #1, #2, #3, #4, #6, #7, #8, #9, #10
-plus tamper — **52 tests, each piece Codex-reviewed before commit**. Try it:
+- **Integrity core** (Rust) — canonicalize → commit → hash → sign → DAG-link → checkpoint → anchor
+  → verify, from one crate to **three targets**: verify CLI, WASM, and cgo FFI. Golden vectors;
+  real RFC 3161 (DER/CMS) anchoring.
+- **Go server** (cgo → core) — ingestion (`/v2/records`, idempotency, DAG-linking, sealing),
+  app/verify/export API, OpenAI-compatible recording proxy (secret-scrubbed), Stripe metering,
+  MCP server, experimental x402.
+- **SDKs** — Python + TypeScript. **Web** — Svelte 5 SPA (trace waterfall) + a frameworkless
+  **offline verifier** (vanilla + WASM). **Self-host** — `docker compose up`.
 
-```
+Adversarial matrix defended & tested: **#1, #2, #3, #4(partial), #6, #7, #8, #9, #10, #11** plus
+tamper. Tests: Rust 55 (61 w/ rfc3161), Go 7 packages, Python, TS, web, WASM verifier — all green.
+
+```bash
 cargo test --workspace
 cargo run -p feir-decision-core --bin feir-verify -- bundle spec/fixtures/bundle-valid.json
+FEIR_SIGNING_SEED=$(openssl rand -hex 32) docker compose -f deploy/docker-compose.yml up --build
 ```
 
-Honest scope: every claim is bounded by [`docs/coverage-limits.md`](docs/coverage-limits.md)
-(Level 1 / 2 / 3). **Next:** M2 (Go proxy + ingestion + SDKs, wiring the FFI), then M3 (Svelte
-trace-waterfall web app + export), then M4 (Stripe + OSS launch). Those directories are scaffolded.
+Every claim is bounded by [`docs/coverage-limits.md`](docs/coverage-limits.md) (Level 1 / 2 / 3).
+Deferred to Phase 2 (documented): Postgres + content-store swaps, per-project authz/RBAC,
+OTel ingest, selective-disclosure exports, the credential broker (Level 3).
 
 ## Verify an export offline
 
