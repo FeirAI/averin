@@ -52,6 +52,19 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     PRIMARY KEY (project_id, seq)
 );
 
+-- anchors: the third-party RFC 3161 timestamp token for one checkpoint (by seq), stored SEPARATELY
+-- from the checkpoint row so anchoring is decoupled from checkpoint creation — the TSA network call
+-- happens out of the checkpoint critical section, and a checkpoint that failed to anchor (TSA down)
+-- can be back-anchored later by inserting here (the checkpoints table is append-only, never UPDATEd).
+-- The export joins this token into the checkpoint's `anchor` block. Insert-only/idempotent per seq.
+CREATE TABLE IF NOT EXISTS anchors (
+    project_id text   NOT NULL,
+    seq        bigint NOT NULL,
+    token_b64  text   NOT NULL,
+    inserted_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_id, seq)
+);
+
 -- disclosures: the secret needed to reveal one committed low-entropy field on a selective_disclosure
 -- export — the content-store digest of the raw value + the nonce that opens its hiding commitment.
 -- Bound to (project_id, record_id, field); the signed record body carries only the commitment.
@@ -94,10 +107,12 @@ BEGIN
     EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON records     FROM PUBLIC';
     EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON checkpoints FROM PUBLIC';
     EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON disclosures FROM PUBLIC';
+    EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON anchors     FROM PUBLIC';
     EXECUTE 'REVOKE         DELETE, TRUNCATE ON display_seq FROM PUBLIC';
     EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON records     FROM %I', CURRENT_USER);
     EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON checkpoints FROM %I', CURRENT_USER);
     EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON disclosures FROM %I', CURRENT_USER);
+    EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON anchors     FROM %I', CURRENT_USER);
     EXECUTE format('REVOKE         DELETE, TRUNCATE ON display_seq FROM %I', CURRENT_USER);
     IF (SELECT rolsuper FROM pg_roles WHERE rolname = CURRENT_USER) THEN
         RAISE NOTICE 'feir: migrating role % is a SUPERUSER, so REVOKE is a no-op and append-only is NOT database-enforced. Run the application under a dedicated least-privilege, non-owner role.', CURRENT_USER;

@@ -67,6 +67,14 @@ type Store interface {
 	// in canonical (record_id, field) order. Disclosure secrets are written atomically with their
 	// record via PutRecord (Record.Disclosures); there is no separate write path.
 	Disclosures(projectID string) ([]DisclosureSecret, error)
+
+	// PutAnchor records the RFC 3161 timestamp token (base64url) for a checkpoint seq, decoupled from
+	// the checkpoint row so the TSA call happens out of the checkpoint critical section and a failed
+	// anchor can be backfilled. Insert-only/idempotent per (project, seq).
+	PutAnchor(projectID string, seq int64, tokenB64 string) error
+	// Anchors returns seq -> token_b64 for the project, so the export can join each checkpoint with
+	// its anchor. Never nil.
+	Anchors(projectID string) (map[int64]string, error)
 }
 
 // Mem is an in-memory Store for tests and single-node dev.
@@ -83,6 +91,7 @@ type project struct {
 	seqBySess  map[string]int64
 	disclosure []DisclosureSecret
 	discSeen   map[string]struct{} // record_id\x00field -> present (dedupe)
+	anchors    map[int64]string    // checkpoint seq -> token_b64
 }
 
 func NewMem() *Mem { return &Mem{projects: map[string]*project{}} }
@@ -95,6 +104,7 @@ func (m *Mem) proj(id string) *project {
 			byHash:    map[string]struct{}{},
 			seqBySess: map[string]int64{},
 			discSeen:  map[string]struct{}{},
+			anchors:   map[int64]string{},
 		}
 		m.projects[id] = p
 	}
@@ -250,6 +260,28 @@ func (m *Mem) LatestCheckpointHash(projectID string) (string, bool, error) {
 		return "", false, nil
 	}
 	return p.checks[len(p.checks)-1].CheckpointHash, true, nil
+}
+
+func (m *Mem) PutAnchor(projectID string, seq int64, tokenB64 string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a := m.proj(projectID).anchors
+	if _, ok := a[seq]; ok {
+		return nil // idempotent: the anchor for a seq is immutable once set
+	}
+	a[seq] = tokenB64
+	return nil
+}
+
+func (m *Mem) Anchors(projectID string) (map[int64]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	src := m.proj(projectID).anchors
+	out := make(map[int64]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out, nil
 }
 
 func (m *Mem) Disclosures(projectID string) ([]DisclosureSecret, error) {

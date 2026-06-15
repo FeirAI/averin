@@ -136,6 +136,9 @@ func TestPostgresAppendOnlyRejectsMutation(t *testing.T) {
 	if err := p.PutCheckpoint("p", Checkpoint{JSON: "{}", CheckpointHash: "sha256:c", Seq: 0}); err != nil {
 		t.Fatalf("seed checkpoint: %v", err)
 	}
+	if err := p.PutAnchor("p", 0, "tok"); err != nil {
+		t.Fatalf("seed anchor: %v", err)
+	}
 
 	var schema string
 	if err := p.pool.QueryRow(ctx, "SELECT current_schema()").Scan(&schema); err != nil {
@@ -154,7 +157,7 @@ func TestPostgresAppendOnlyRejectsMutation(t *testing.T) {
 		_, _ = p.pool.Exec(bg, "DROP ROLE IF EXISTS "+role)
 	}()
 	mustExec(fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", schema, role))
-	mustExec("GRANT INSERT, SELECT ON records, checkpoints, disclosures TO " + role)
+	mustExec("GRANT INSERT, SELECT ON records, checkpoints, disclosures, anchors TO " + role)
 
 	// A dedicated connection we SET ROLE on, then RESET before returning it to the pool.
 	conn, err := p.pool.Acquire(ctx)
@@ -189,12 +192,20 @@ func TestPostgresAppendOnlyRejectsMutation(t *testing.T) {
 	denied("TRUNCATE records", "TRUNCATE records")
 	denied("UPDATE disclosures", "UPDATE disclosures SET nonce_hex='x'")
 	denied("DELETE disclosures", "DELETE FROM disclosures")
+	denied("UPDATE anchors", "UPDATE anchors SET token_b64='x'")
+	denied("DELETE anchors", "DELETE FROM anchors")
 }
 
 func TestPostgresDisclosures(t *testing.T) {
 	p, done := newTestStore(t)
 	defer done()
 	exerciseDisclosures(t, p)
+}
+
+func TestPostgresAnchors(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseAnchors(t, p)
 }
 
 func TestPostgresDuplicateContentHashCollapse(t *testing.T) {

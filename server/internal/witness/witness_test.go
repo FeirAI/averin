@@ -270,6 +270,41 @@ func TestStubTSADeterministic(t *testing.T) {
 	}
 }
 
+func TestExtractTimeStampToken(t *testing.T) {
+	// A bare timeStampToken (ContentInfo): SEQUENCE whose first element is the signedData OID.
+	oid := []byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02}
+	bareToken := derSeq(concat(oid, []byte{0x05, 0x00})) // SEQUENCE { OID, NULL }
+	if got, err := extractTimeStampToken(bareToken); err != nil || !bytes.Equal(got, bareToken) {
+		t.Fatalf("a bare ContentInfo must pass through unchanged: err=%v equal=%v", err, bytes.Equal(got, bareToken))
+	}
+
+	// A TimeStampResp: SEQUENCE { PKIStatusInfo=SEQUENCE{INTEGER 0}, timeStampToken=bareToken }.
+	statusInfo := derSeq([]byte{0x02, 0x01, 0x00}) // SEQUENCE { INTEGER 0 (granted) }
+	resp := derSeq(concat(statusInfo, bareToken))
+	got, err := extractTimeStampToken(resp)
+	if err != nil {
+		t.Fatalf("extract from TimeStampResp: %v", err)
+	}
+	if !bytes.Equal(got, bareToken) {
+		t.Fatalf("extracted token != bare token:\n got=%x\nwant=%x", got, bareToken)
+	}
+
+	// Long-form length (token > 127 bytes) parses correctly.
+	big := derSeq(concat(oid, derSeq(bytes.Repeat([]byte{0}, 200))))
+	respBig := derSeq(concat(statusInfo, big))
+	if got, err := extractTimeStampToken(respBig); err != nil || !bytes.Equal(got, big) {
+		t.Fatalf("long-form extract failed: err=%v equal=%v", err, bytes.Equal(got, big))
+	}
+
+	// A non-SEQUENCE (or a status-only response with no token) is rejected, not silently empty.
+	if _, err := extractTimeStampToken([]byte{0x02, 0x01, 0x00}); err == nil {
+		t.Fatal("a non-SEQUENCE response must be rejected")
+	}
+	if _, err := extractTimeStampToken(derSeq(statusInfo)); err == nil {
+		t.Fatal("a status-only TimeStampResp (no token) must be rejected")
+	}
+}
+
 func TestBuildTimeStampReqShape(t *testing.T) {
 	der, err := BuildTimeStampReq(imprint("checkpoint-hash"))
 	if err != nil {
@@ -303,7 +338,11 @@ func TestBuildTimeStampReqShape(t *testing.T) {
 func TestHTTPTSAPostsTSQAndReturnsToken(t *testing.T) {
 	ctx := context.Background()
 	imp := imprint("anchor-me")
-	wantToken := []byte("DER-TIMESTAMP-TOKEN")
+	// A bare timeStampToken (ContentInfo): SEQUENCE whose first inner element is the signedData OID.
+	oid := []byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02}
+	wantToken := derSeq(concat(oid, []byte{0x05, 0x00}))
+	// A real TSA wraps it in a TimeStampResp { PKIStatusInfo, timeStampToken }; Stamp must unwrap it.
+	resp := derSeq(concat(derSeq([]byte{0x02, 0x01, 0x00}), wantToken))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -322,7 +361,7 @@ func TestHTTPTSAPostsTSQAndReturnsToken(t *testing.T) {
 			t.Errorf("posted body is not a DER SEQUENCE")
 		}
 		w.Header().Set("Content-Type", "application/timestamp-reply")
-		w.Write(wantToken)
+		w.Write(resp)
 	}))
 	defer srv.Close()
 
@@ -331,8 +370,9 @@ func TestHTTPTSAPostsTSQAndReturnsToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
+	// Stamp returns the unwrapped bare timeStampToken, not the TimeStampResp envelope.
 	if !bytes.Equal(tok, wantToken) {
-		t.Fatalf("token mismatch: got %q", tok)
+		t.Fatalf("token mismatch: got %x want %x", tok, wantToken)
 	}
 }
 

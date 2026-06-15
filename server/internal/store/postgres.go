@@ -458,6 +458,44 @@ func insertDisclosures(ctx context.Context, tx pgx.Tx, projectID string, ds []Di
 	return nil
 }
 
+// PutAnchor records a checkpoint's RFC 3161 token (base64url) by seq. Insert-only and idempotent on
+// (project_id, seq): ON CONFLICT DO NOTHING (the anchor for a seq is immutable once set).
+func (p *Postgres) PutAnchor(projectID string, seq int64, tokenB64 string) error {
+	ctx := background()
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO anchors (project_id, seq, token_b64)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (project_id, seq) DO NOTHING
+	`, projectID, seq, tokenB64)
+	if err != nil {
+		return fmt.Errorf("store: put anchor: %w", err)
+	}
+	return nil
+}
+
+// Anchors returns seq -> token_b64 for the project. Never nil.
+func (p *Postgres) Anchors(projectID string) (map[int64]string, error) {
+	ctx := background()
+	rows, err := p.pool.Query(ctx, `SELECT seq, token_b64 FROM anchors WHERE project_id = $1`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("store: anchors: %w", err)
+	}
+	defer rows.Close()
+	out := map[int64]string{}
+	for rows.Next() {
+		var seq int64
+		var tok string
+		if err := rows.Scan(&seq, &tok); err != nil {
+			return nil, fmt.Errorf("store: scan anchor: %w", err)
+		}
+		out[seq] = tok
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate anchors: %w", err)
+	}
+	return out, nil
+}
+
 // Disclosures returns every disclosure secret for the project, ordered by insertion. Never nil.
 func (p *Postgres) Disclosures(projectID string) ([]DisclosureSecret, error) {
 	ctx := background()

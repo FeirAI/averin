@@ -73,6 +73,12 @@ func main() {
 		srv.WithWitness(w)
 		log.Printf("checkpoint witness -> %s", dir)
 	}
+	// third-party RFC 3161 timestamp anchoring for sealed checkpoints (threat #3 backdating). The
+	// verifier must pin this TSA's cert out-of-band to trust the anchor.
+	if url := os.Getenv("FEIR_TSA_URL"); url != "" {
+		srv.WithTSA(&witness.HTTPTSA{URL: url})
+		log.Printf("checkpoint anchoring -> RFC 3161 TSA %s", url)
+	}
 
 	log.Printf("feir-server listening on %s (pubkey %s)", addr, c.PubKey())
 	log.Fatal(http.ListenAndServe(addr, srv.Routes()))

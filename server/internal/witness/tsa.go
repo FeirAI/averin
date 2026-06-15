@@ -167,7 +167,89 @@ func (t *HTTPTSA) Stamp(ctx context.Context, imprintSHA256 []byte) ([]byte, erro
 	if len(body) == 0 {
 		return nil, errors.New("witness: TSA returned empty token")
 	}
-	return body, nil
+	// A real TSA returns a TimeStampResp { status PKIStatusInfo, timeStampToken ContentInfo }, but
+	// the verifier (and our anchor block) wants the bare timeStampToken (a CMS ContentInfo). Unwrap
+	// the envelope; if the body is already a bare token, return it unchanged.
+	return extractTimeStampToken(body)
+}
+
+// extractTimeStampToken returns the DER timeStampToken (a CMS ContentInfo) from a TSA response. If
+// `der` is a TimeStampResp (outer SEQUENCE whose first element is the PKIStatusInfo SEQUENCE), it
+// returns the second element; if `der` is already a ContentInfo (first element is the signedData
+// OID), it returns `der` unchanged. This is what the offline verifier parses with ContentInfo::from_der.
+func extractTimeStampToken(der []byte) ([]byte, error) {
+	tag, content, _, err := readTLV(der)
+	if err != nil {
+		return nil, fmt.Errorf("witness: parse TSA response: %w", err)
+	}
+	if tag != 0x30 { // SEQUENCE
+		return nil, fmt.Errorf("witness: TSA response is not a DER SEQUENCE (tag 0x%02x)", tag)
+	}
+	// Peek the first inner element's tag to tell a TimeStampResp from a bare ContentInfo.
+	firstTag, _, rest, err := readTLV(content)
+	if err != nil {
+		return nil, fmt.Errorf("witness: parse TSA response body: %w", err)
+	}
+	switch firstTag {
+	case 0x06: // OID -> the outer SEQUENCE is already a ContentInfo (bare timeStampToken).
+		return der, nil
+	case 0x30: // SEQUENCE -> PKIStatusInfo; the timeStampToken is the next element.
+		tokTag, _, _, err := readTLV(rest)
+		if err != nil {
+			return nil, fmt.Errorf("witness: TimeStampResp has no timeStampToken: %w", err)
+		}
+		if tokTag != 0x30 {
+			return nil, fmt.Errorf("witness: timeStampToken is not a ContentInfo SEQUENCE (tag 0x%02x)", tokTag)
+		}
+		// readTLV already validated the element's bounds; return its full TLV bytes.
+		full, _, err := tlvBytes(rest)
+		if err != nil {
+			return nil, err
+		}
+		return full, nil
+	default:
+		return nil, fmt.Errorf("witness: unexpected first element in TSA response (tag 0x%02x)", firstTag)
+	}
+}
+
+// readTLV parses one DER TLV at the front of b, returning its tag, content bytes, and the remaining
+// bytes after this element. Supports definite-length short and long form (up to 4 length octets).
+func readTLV(b []byte) (tag byte, content, rest []byte, err error) {
+	if len(b) < 2 {
+		return 0, nil, nil, errors.New("truncated TLV")
+	}
+	tag = b[0]
+	n := int(b[1])
+	i := 2
+	if n&0x80 != 0 { // long form: low 7 bits = number of length octets
+		nbytes := n & 0x7f
+		if nbytes == 0 || nbytes > 4 {
+			return 0, nil, nil, fmt.Errorf("unsupported DER length (%d octets)", nbytes)
+		}
+		if len(b) < i+nbytes {
+			return 0, nil, nil, errors.New("truncated DER length")
+		}
+		n = 0
+		for j := 0; j < nbytes; j++ {
+			n = (n << 8) | int(b[i+j])
+		}
+		i += nbytes
+	}
+	if n < 0 || len(b) < i+n {
+		return 0, nil, nil, errors.New("DER content exceeds buffer")
+	}
+	return tag, b[i : i+n], b[i+n:], nil
+}
+
+// tlvBytes returns the full TLV (tag+length+content) at the front of b, and the remaining bytes.
+func tlvBytes(b []byte) (full, rest []byte, err error) {
+	_, content, after, err := readTLV(b)
+	if err != nil {
+		return nil, nil, err
+	}
+	n := len(b) - len(after)
+	_ = content
+	return b[:n], after, nil
 }
 
 // StubTSA is a deterministic fake TSA for tests. It returns reproducible bytes derived from the

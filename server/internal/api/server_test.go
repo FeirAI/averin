@@ -264,6 +264,74 @@ func TestCheckpointWrittenToWitness(t *testing.T) {
 	}
 }
 
+func TestCheckpointAnchoredWithTSA(t *testing.T) {
+	srv := newServer(t).WithTSA(witness.StubTSA{})
+	h := srv.Routes()
+	postRecord(t, h, `{"idempotency_key":"a1","project_id":"p1","session_id":"s1","action":"a"}`)
+	code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", "")
+	if code != http.StatusCreated {
+		t.Fatalf("checkpoint failed (%d): %s", code, resp)
+	}
+	if strings.Contains(resp, "un-anchored") {
+		t.Fatalf("unexpected anchor warning: %s", resp)
+	}
+
+	// The anchor is decoupled — joined into the checkpoint at export. (The StubTSA token is not
+	// crypto-valid; full anchor verification is covered in the Rust core — here we assert the wiring
+	// attaches a well-formed rfc3161 anchor block and that it does not disturb the sealed hash/sig.)
+	_, exp := do(t, h, "GET", "/v2/export?project=p1&mode=proof_only", "")
+	var bundle struct {
+		Checkpoints []map[string]json.RawMessage `json:"checkpoints"`
+	}
+	if err := json.Unmarshal([]byte(exp), &bundle); err != nil || len(bundle.Checkpoints) == 0 {
+		t.Fatalf("decode export: %v\n%s", err, exp)
+	}
+	anchorRaw, ok := bundle.Checkpoints[0]["anchor"]
+	if !ok {
+		t.Fatalf("exported checkpoint missing anchor block: %s", exp)
+	}
+	var anchor struct {
+		Scheme   string `json:"scheme"`
+		TokenB64 string `json:"token_b64"`
+	}
+	if err := json.Unmarshal(anchorRaw, &anchor); err != nil {
+		t.Fatalf("decode anchor: %v", err)
+	}
+	if anchor.Scheme != "rfc3161" || anchor.TokenB64 == "" {
+		t.Fatalf("bad anchor block: %+v", anchor)
+	}
+	if _, report := do(t, h, "GET", "/v2/verify?project=p1", ""); !strings.Contains(report, `"ok":true`) {
+		t.Fatalf("anchored checkpoint should still verify (anchor excluded from hash): %s", report)
+	}
+}
+
+// failTSA always fails, so the checkpoint is stored un-anchored with a warning (best-effort anchor).
+type failTSA struct{}
+
+func (failTSA) Stamp(context.Context, []byte) ([]byte, error) {
+	return nil, errors.New("TSA unreachable")
+}
+
+func TestCheckpointSurvivesTSAFailure(t *testing.T) {
+	h := newServer(t).WithTSA(failTSA{}).Routes()
+	postRecord(t, h, `{"idempotency_key":"t1","project_id":"p1","session_id":"s1","action":"a"}`)
+	code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", "")
+	if code != http.StatusCreated {
+		t.Fatalf("a TSA failure must not fail checkpoint creation (%d): %s", code, resp)
+	}
+	if !strings.Contains(resp, "un-anchored") {
+		t.Fatalf("expected an un-anchored warning, got: %s", resp)
+	}
+	// No anchor joined at export, but the checkpoint is sealed, chained, and verifiable.
+	_, exp := do(t, h, "GET", "/v2/export?project=p1&mode=proof_only", "")
+	if strings.Contains(exp, `"anchor"`) {
+		t.Fatalf("a failed TSA must not produce an anchor: %s", exp)
+	}
+	if _, report := do(t, h, "GET", "/v2/verify?project=p1", ""); !strings.Contains(report, `"ok":true`) {
+		t.Fatalf("un-anchored checkpoint should still verify: %s", report)
+	}
+}
+
 // failOnceWitness fails the first Append, then delegates to a real MemWitness.
 type failOnceWitness struct {
 	inner  *witness.MemWitness

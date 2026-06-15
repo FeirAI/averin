@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,7 @@ type Server struct {
 	meter        meter.Meter
 	auth         auth.KeyStore   // nil = no per-project auth (dev/single-tenant)
 	witness      witness.Witness // nil = no external witness configured
+	tsa          witness.TSA     // nil = no external timestamp anchoring configured
 	signingKeyID string
 	keyValidFrom string
 	now          func() time.Time // injectable clock for tests
@@ -88,6 +90,15 @@ func (s *Server) WithAuth(ks auth.KeyStore) *Server {
 // (out-of-vendor-control) so omitting/rewriting it later is detectable (threats #1/#15).
 func (s *Server) WithWitness(w witness.Witness) *Server {
 	s.witness = w
+	return s
+}
+
+// WithTSA anchors every sealed checkpoint to a third-party RFC 3161 timestamp authority, attaching
+// the returned token so a verifier can prove the checkpoint (and its causal ancestors) existed by
+// the TSA-attested time (threat #3 backdating). Best-effort: a TSA failure stores the checkpoint
+// un-anchored (reported), never wedging the chain.
+func (s *Server) WithTSA(t witness.TSA) *Server {
+	s.tsa = t
 	return s
 }
 
@@ -435,7 +446,12 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 // backfillable. A deterministic checkpoint_id keeps the body reproducible for a given seq.
 func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string, error, error) {
 	s.checkpointMu.Lock()
-	defer s.checkpointMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			s.checkpointMu.Unlock()
+		}
+	}()
 
 	heads, _ := s.st.ProjectHeads(projectID)
 	if heads == nil {
@@ -476,20 +492,56 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 		Seq            int64  `json:"checkpoint_seq"`
 	}
 	_ = json.Unmarshal([]byte(sealed), &cp)
+
+	// Store the sealed checkpoint (un-anchored). Anchoring is DECOUPLED: the token is stored
+	// separately (anchors table) and joined into the checkpoint's `anchor` block at export time, so
+	// the third-party TSA network call happens OUTSIDE this global checkpoint lock and a checkpoint
+	// that failed to anchor can be back-anchored later (the checkpoints table is append-only).
 	if err := s.st.PutCheckpoint(projectID, store.Checkpoint{JSON: sealed, CheckpointHash: cp.CheckpointHash, Seq: cp.Seq}); err != nil {
 		return "", nil, err
 	}
+	var warns []string
 	// best-effort witness append (bounded so a hung witness can't block); a failure leaves the
 	// checkpoint stored-but-un-witnessed (reported, backfillable) rather than wedging the chain.
-	var witnessWarn error
 	if s.witness != nil {
 		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
 		if err := s.witness.Append(wctx, projectID, []byte(sealed)); err != nil {
-			witnessWarn = fmt.Errorf("checkpoint stored but witness append failed (backfill needed): %w", err)
+			warns = append(warns, fmt.Sprintf("witness append failed (backfill needed): %v", err))
+		}
+		cancel()
+	}
+
+	// Release the checkpoint lock BEFORE the TSA round-trip so a slow/hung TSA cannot stall other
+	// projects' checkpointing. Seq is already committed, so anchoring out-of-lock is race-free.
+	s.checkpointMu.Unlock()
+	locked = false
+
+	if s.tsa != nil {
+		if err := s.anchorCheckpoint(ctx, projectID, cp.Seq, cp.CheckpointHash); err != nil {
+			warns = append(warns, fmt.Sprintf("checkpoint stored un-anchored (TSA failed, backfillable): %v", err))
 		}
 	}
-	return sealed, witnessWarn, nil
+
+	var warn error
+	if len(warns) > 0 {
+		warn = fmt.Errorf("checkpoint created; %s", strings.Join(warns, "; "))
+	}
+	return sealed, warn, nil
+}
+
+// anchorCheckpoint stamps a checkpoint_hash at a third-party RFC 3161 TSA and stores the returned
+// token (keyed by seq) for the export to join. The TSA timestamps the SHA-256 of the checkpoint_hash
+// STRING (what the verifier re-imprints). Runs OUT of the checkpoint critical section.
+func (s *Server) anchorCheckpoint(ctx context.Context, projectID string, seq int64, checkpointHash string) error {
+	imprint := sha256.Sum256([]byte(checkpointHash))
+	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	der, err := s.tsa.Stamp(tctx, imprint[:])
+	if err != nil {
+		return err
+	}
+	// base64url-no-pad to match the Rust verifier's token decoder.
+	return s.st.PutAnchor(projectID, seq, base64.RawURLEncoding.EncodeToString(der))
 }
 
 // ---- app / verify / export ----
@@ -618,13 +670,27 @@ func (s *Server) buildDisclosures(projectID string) ([]map[string]any, error) {
 func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 	recs, _ := s.st.AllRecords(projectID)
 	checks, _ := s.st.Checkpoints(projectID)
+	anchors, err := s.st.Anchors(projectID)
+	if err != nil {
+		return "", err
+	}
 	records := make([]json.RawMessage, len(recs))
 	for i, r := range recs {
 		records[i] = json.RawMessage(r.JSON)
 	}
 	checkpoints := make([]json.RawMessage, len(checks))
 	for i, c := range checks {
-		checkpoints[i] = json.RawMessage(c.JSON)
+		// Join the decoupled anchor (if any) into the checkpoint's `anchor` block. The anchor is
+		// excluded from the checkpoint_hash/sig, so attaching it here does not affect verification.
+		if tok, ok := anchors[c.Seq]; ok {
+			withAnchor, err := attachAnchor(c.JSON, tok)
+			if err != nil {
+				return "", fmt.Errorf("attach anchor to checkpoint %d: %w", c.Seq, err)
+			}
+			checkpoints[i] = json.RawMessage(withAnchor)
+		} else {
+			checkpoints[i] = json.RawMessage(c.JSON)
+		}
 	}
 	keyEntry := map[string]any{
 		"signing_key_id": s.signingKeyID,
@@ -641,6 +707,26 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 	}
 	out, err := json.Marshal(bundle)
 	return string(out), err
+}
+
+// attachAnchor adds an `anchor` block to a sealed checkpoint JSON. The anchor is excluded from the
+// checkpoint_hash/sig (the verifier strips it and re-canonicalizes the body), so re-serializing here
+// is safe — the body's RawMessage fields are preserved byte-for-byte.
+func attachAnchor(checkpointJSON, tokenB64 string) (string, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(checkpointJSON), &obj); err != nil {
+		return "", fmt.Errorf("parse checkpoint: %w", err)
+	}
+	anchor, err := json.Marshal(map[string]any{"scheme": "rfc3161", "token_b64": tokenB64})
+	if err != nil {
+		return "", err
+	}
+	obj["anchor"] = anchor
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 // ---- helpers ----

@@ -73,3 +73,36 @@ func exerciseDisclosures(t *testing.T, s Store) {
 func TestMemDisclosures(t *testing.T) {
 	exerciseDisclosures(t, NewMem())
 }
+
+// exerciseAnchors runs the anchor-store contract against any Store implementation.
+func exerciseAnchors(t *testing.T, s Store) {
+	t.Helper()
+
+	if a, err := s.Anchors("p"); err != nil || a == nil || len(a) != 0 {
+		t.Fatalf("empty anchors = %v (nil=%v) err=%v; want non-nil empty", a, a == nil, err)
+	}
+	if err := s.PutAnchor("p", 0, "tok0"); err != nil {
+		t.Fatalf("put anchor 0: %v", err)
+	}
+	if err := s.PutAnchor("p", 1, "tok1"); err != nil {
+		t.Fatalf("put anchor 1: %v", err)
+	}
+	// Idempotent per seq: a second PutAnchor for the same seq with a different token keeps the first.
+	if err := s.PutAnchor("p", 0, "DIFFERENT"); err != nil {
+		t.Fatalf("re-put anchor 0: %v", err)
+	}
+	got, err := s.Anchors("p")
+	if err != nil {
+		t.Fatalf("anchors: %v", err)
+	}
+	if len(got) != 2 || got[0] != "tok0" || got[1] != "tok1" {
+		t.Fatalf("anchors = %v; want {0:tok0, 1:tok1} (idempotent, original kept)", got)
+	}
+	if a, err := s.Anchors("other"); err != nil || len(a) != 0 {
+		t.Fatalf("project isolation: other anchors = %v err=%v; want empty", a, err)
+	}
+}
+
+func TestMemAnchors(t *testing.T) {
+	exerciseAnchors(t, NewMem())
+}
