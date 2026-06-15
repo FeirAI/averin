@@ -985,18 +985,20 @@ fn seal_grant(rec_sk: &SigningKey, broker_sk: &SigningKey, record_id: &str, ge: 
     seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
 }
 
-// seal_use seals a resource-role use receipt; top_action is the (human-echo) top-level action — set it
-// EQUAL to use_evidence.action for a well-formed use, or DIFFERENT to exercise MUST-FIX 1 divergence.
-fn seal_use(
+// seal_use_full seals a resource-role use receipt with explicit enforcement_point + signed
+// evidence_hash, so tests can exercise role-mislabel (enforcement_point) and R1 tamper (eh != hash(ue)).
+#[allow(clippy::too_many_arguments)]
+fn seal_use_full(
     rec_sk: &SigningKey,
     res_sk: &SigningKey,
     record_id: &str,
     prev: &[String],
     top_action: &str,
+    enforcement_point: &str,
     ue: &CanonValue,
+    eh: &str,
 ) -> CanonValue {
-    let eh = sha256_prefixed(ue.serialize().as_bytes());
-    let esig = sign_evidence("gateway_enforced", record_id, &eh, res_sk);
+    let esig = sign_evidence("gateway_enforced", record_id, eh, res_sk);
     let gid = ue.get("grant_id").unwrap().as_str().unwrap();
     let resource = ue.get("resource_id").unwrap().as_str().unwrap();
     let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
@@ -1006,12 +1008,27 @@ fn seal_use(
         "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
         "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
         "event_type":"tool_call","action":"{top_action}","observed_via":"broker","status":"ok",
-        "authority":{{"source":"gateway_enforced","enforcement_point":"tool_gateway","grant_id":"{gid}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "authority":{{"source":"gateway_enforced","enforcement_point":"{enforcement_point}","grant_id":"{gid}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
         "extensions":{{"broker":{{"kind":"use","grant_id":"{gid}","resource_id":"{resource}","use_evidence":{ue}}}}},
         "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
         ue = ue.serialize(),
     );
     seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
+// seal_use is the well-formed wrapper: tool_gateway enforcement_point + evidence_hash == hash(ue).
+// top_action is the (human-echo) action — EQUAL to use_evidence.action for a well-formed use, or
+// DIFFERENT to exercise MUST-FIX 1 divergence.
+fn seal_use(
+    rec_sk: &SigningKey,
+    res_sk: &SigningKey,
+    record_id: &str,
+    prev: &[String],
+    top_action: &str,
+    ue: &CanonValue,
+) -> CanonValue {
+    let eh = sha256_prefixed(ue.serialize().as_bytes());
+    seal_use_full(rec_sk, res_sk, record_id, prev, top_action, "tool_gateway", ue, &eh)
 }
 
 fn checkpoint_over(rec_sk: &SigningKey, frontier: &[String], record_count: i64, anchor_with: Option<&SigningKey>) -> CanonValue {
@@ -1347,4 +1364,116 @@ fn tier_b_incomplete_grant_evidence_fails_closed() {
     let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
     assert!(!r.ok);
     assert!(r.issues.iter().any(|i| i.contains("incomplete grant_evidence")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_tampered_use_evidence_is_a_violation() {
+    // R1 (use side): a use whose authority.evidence_hash does NOT re-derive from the embedded
+    // use_evidence is not validatable — even though it seals and its authority verifies.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let real_ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let eh_real = sha256_prefixed(real_ue.serialize().as_bytes());
+    // embed a DIFFERENT use_evidence (used_at changed) but sign/authority the REAL eh -> divergence
+    let embedded = change_field(&real_ue, "used_at", CanonValue::Int(USED + 99));
+    let use_rec = seal_use_full(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, "tool_gateway", &embedded, &eh_real);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("not validatable")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_use_signed_by_broker_key_does_not_elevate() {
+    // R2 (use side of role confusion): a use whose evidence is signed by the BROKER/record key (not the
+    // resource key) does not elevate — a resource-role record only verifies under resource keys.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    // sign the use evidence with `rec` (the broker/record key), NOT `res`
+    let use_rec = seal_use(&rec, &rec, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    // pin the REAL resource key as the resource role; the broker-signed use must fail to elevate
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert_eq!(r.uses_matched, 0);
+    assert!(r.issues.iter().any(|i| i.contains("not validatable")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_use_side_mislabel_fails_closed() {
+    // R2 rule 4 (use direction): a record carrying extensions.broker.kind="use" but enforcement_point
+    // "credential_broker" classifies to NO role — a fail-closed verification failure surfaced as an
+    // issue, never a silent drop.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let eh = sha256_prefixed(ue.serialize().as_bytes());
+    let mislabeled = seal_use_full(&rec, &res, "use-1", &[], ACTION, "credential_broker", &ue, &eh);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&mislabeled)], 1, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![mislabeled], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert!(
+        r.issues.iter().any(|i| i.contains("not a recognized broker/resource role")),
+        "expected a use-side role-classification issue, got: {:?}",
+        r.issues
+    );
+}
+
+// verify_mangled_use builds a closed, re-derivable use (so it reaches the carried-field gates) whose
+// use_evidence is mutated by `mutate`, and returns the report — for testing the MUST-FIX 4 field gates.
+fn verify_mangled_use(
+    mutate: impl Fn(&CanonValue) -> CanonValue,
+) -> feir_decision_core::verify::VerifyReport {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = mutate(&use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()))
+}
+
+#[test]
+fn tier_b_malformed_pop_challenge_hash_is_a_violation() {
+    let r = verify_mangled_use(|ue| change_field(ue, "pop_challenge_hash", CanonValue::string("not-a-hash")));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("pop_challenge_hash")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_malformed_ledger_commitment_is_a_violation() {
+    let r = verify_mangled_use(|ue| change_field(ue, "ledger_commitment", CanonValue::string("nope")));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("ledger_commitment")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_empty_nonce_is_a_violation() {
+    let r = verify_mangled_use(|ue| change_field(ue, "nonce", CanonValue::string("")));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("nonce")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_use_evidence_kind_divergence_is_a_violation() {
+    let r = verify_mangled_use(|ue| change_field(ue, "kind", CanonValue::string("grant")));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("use_evidence.kind")), "{:?}", r.issues);
 }

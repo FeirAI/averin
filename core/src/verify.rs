@@ -1308,6 +1308,34 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 continue;
             }
         }
+        // MUST-FIX 1 (mirror of the grant-side kind guard): `kind` is duplicated at extensions.broker.kind
+        // (the role discriminator that made this a resource record) and inside use_evidence. The payload
+        // MUST say kind="use"; absence or divergence is a hard failure.
+        if ev_str(rec, "use_evidence", "kind").as_deref() != Some("use") {
+            unmatched_violation += 1;
+            violation(&mut issues, "use_evidence.kind is absent or diverges from the extensions.broker.kind discriminator (MUST-FIX 1)".into());
+            continue;
+        }
+        // MUST-FIX 4: the receipt must CARRY well-formed audit fields the verifier surfaces for offline
+        // inspection — pop_challenge_hash + ledger_commitment as sha256:<hex>, and a non-empty nonce.
+        // (The verifier does NOT re-run PoP or prove ledger ordering — that is the resource-shim TCB —
+        // but a use that simply omits or mangles these fields must not read as a clean match.)
+        let well_formed_sha = |key: &str| {
+            ev_str(rec, "use_evidence", key)
+                .as_deref()
+                .and_then(crate::hashx::parse_sha256)
+                .is_some()
+        };
+        if !well_formed_sha("pop_challenge_hash") || !well_formed_sha("ledger_commitment") {
+            unmatched_violation += 1;
+            violation(&mut issues, "use_evidence is missing or malformed pop_challenge_hash / ledger_commitment (must be sha256:<hex>) — MUST-FIX 4".into());
+            continue;
+        }
+        if ev_str(rec, "use_evidence", "nonce").is_none_or(|n| n.is_empty()) {
+            unmatched_violation += 1;
+            violation(&mut issues, "use_evidence is missing the PoP nonce (R4) — violation".into());
+            continue;
+        }
         let (gid, action, resource_id, jti, cnf_kid, used_at) = match (
             ev_str(rec, "use_evidence", "grant_id"),
             u_action,

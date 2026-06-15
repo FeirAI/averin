@@ -286,8 +286,9 @@ rejection it errors (a real deployment also records the denied attempt, B11).
 
 Enabled by `WithResource(recordingKey, resourceID)`. Validates + signs the use evidence with the
 **resource** key (R1/R2), commits params, seals+stores the receipt in the grant's session DAG.
-Idempotent on a caller-supplied key. A use whose `session_id` is unknown/empty is a 400 (the agent
-must pass the session — open question 2 resolved: malformed otherwise).
+Idempotent on a caller-supplied key. An **empty** `project_id`/`session_id` is a 400 (the agent must
+pass a session). The use↔grant join is keyed by `grant_id`, NOT by session, so a use may legitimately
+land in any session branch — a novel session id starts a fresh DAG branch rather than being rejected.
 
 ### Verifier — use↔grant join, closed-set, `action_completeness`
 
@@ -307,11 +308,15 @@ unmatched_violation==0 ∧ no unexplained pending in the closed set.
 - **action without a credential / forged use without a grant** → `unmatched_violation` (hard fail).
 - **credential reuse (same jti)** → shim rejects the 2nd use (ledger); if two receipts are
   nonetheless visible and closed, the verifier flags the 2nd as a double-spend `unmatched_violation`.
-- **single-use double-spend with distinct jti** → two closed matched uses for the SAME
-  `single_operation` `grant_id` but different `jti` values → flagged as a double-spend
-  `unmatched_violation` by the per-`grant_id` rule (R5); a `jti`-only check would miss this.
-- **single-use jti rebinding** (use matched to a `single_operation` grant with `jti ≠ grant_id`) →
-  hard verification failure (R5 canonical binding).
+- **single-use double-spend (same jti == grant_id)** → two closed matched uses for the SAME
+  `single_operation` `grant_id` → the 2nd is flagged a double-spend `unmatched_violation` by the
+  per-`grant_id` rule (R5, regardless of jti) — the invariant a `jti`-only check would miss.
+- **single-use jti rebinding** (a `single_operation` use with `jti ≠ grant_id`) → hard verification
+  failure (R5 canonical binding). *Implementation note:* because `jti == grant_id` is REQUIRED for
+  single-use, a second receipt carrying a *distinct* jti is caught here (jti-rebinding) BEFORE the
+  per-`grant_id` cap — so the demonstrator catches the distinct-jti double-spend too, just via the
+  binding rather than the cap. Both same-jti (cap) and distinct-jti (binding) are violations; tests
+  cover both.
 - **expired credential** → shim rejects after `exp`.
 - **token theft (use without the cnf key)** → PoP-at-use fails.
 - **replayed use_sig** → rejected (nonce ledger; challenge bound to nonce+op).
@@ -342,7 +347,8 @@ unmatched_violation==0 ∧ no unexplained pending in the closed set.
 1. Watermark → replaced by the verified checkpoint frontier (R3); the **watermark-specific**
    suppression path is closed (anchored receipts can't be hidden behind a moved boundary). Suppression
    of a never-anchored use stays an accepted residual (F4/F5), not a closed gap.
-2. Use without a session → required; unknown/empty session is a 400.
+2. Use without a session → an empty project/session is a 400; the join is by `grant_id`, so a novel
+   session id is accepted (a fresh DAG branch), not rejected.
 3. Single-use double-spend → resource nonce/jti ledger (R5) + the stated #15 suppression residual.
 4. Resource key conflation → role-separated key sets + per-record signer-role report (R2).
 
