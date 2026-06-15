@@ -145,8 +145,10 @@ prevents a `content_hash` from being replayed as some other signed message.
 
 ```
 nonce       = exactly 32 random bytes (revealed only on selective disclosure)
-field_domain ∈ { "input", "output", "rationale" }      // CLOSED registry; derived from the
-                                                        // containing field (input_commit→"input")
+field_domain ∈ { "input", "output", "rationale", "credential" } // CLOSED registry; derived from the
+                                                        // containing field (input_commit→"input";
+                                                        // "credential" is the broker grant descriptor,
+                                                        // ADR 0004 D1)
 value_bytes = the exact octet sequence of the field content as stored in the content store;
               for an inline text value, NFC-normalized UTF-8 of the string
 commitment  = "sha256:" ‖ lowerhex( SHA-256(

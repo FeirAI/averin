@@ -39,8 +39,9 @@ body becomes bytes. Field reference (grouped as in spec §6):
 - `action`, `status`: `ok|error|blocked|pending_approval|incomplete`.
 - `observed_via`: `proxy|sdk|otel|broker` — provenance of the observation itself (Level-2 honesty).
   `broker` marks a record produced by the credential broker (a grant) or a resource use-receipt.
-- `input_commit` / `output_commit` / `rationale_commit`: `{alg, commitment, low_entropy}`
-  hiding commitments (RCP §8.3).
+- `input_commit` / `output_commit` / `rationale_commit` / `credential_commit`: `{alg, commitment,
+  low_entropy}` hiding commitments (RCP §8.3). `credential_commit` is the credential-broker grant's
+  descriptor under its dedicated domain (ADR 0004 D1; a grant no longer overloads `input_commit`).
 - `tokens`: `{in:int, out:int}`. `cost_micros_usd`: **integer micro-USD — NO floats**.
 
 ## Authority (the moat — gradient, not annotation)
