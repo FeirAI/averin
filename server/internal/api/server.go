@@ -6,6 +6,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/feir-dev/feir/server/internal/auth"
+	"github.com/feir-dev/feir/server/internal/broker"
 	"github.com/feir-dev/feir/server/internal/content"
 	"github.com/feir-dev/feir/server/internal/meter"
 	"github.com/feir-dev/feir/server/internal/otel"
@@ -34,6 +36,8 @@ type Sealer interface {
 	// content commitments (RCP §9.3): mint a nonce and commit a low-entropy field at ingest.
 	RandomNonce() (string, error)
 	Commit(domain string, value []byte, nonceHex string) (string, error)
+	// authority evidence: the credential broker signs a gateway_enforced grant (RCP §11).
+	SignEvidence(source, recordID, evidenceHash string) (string, error)
 }
 
 type Server struct {
@@ -41,9 +45,10 @@ type Server struct {
 	st           store.Store
 	content      content.Store // raw low-entropy values (committed at ingest, revealed on disclosure)
 	meter        meter.Meter
-	auth         auth.KeyStore   // nil = no per-project auth (dev/single-tenant)
-	witness      witness.Witness // nil = no external witness configured
-	tsa          witness.TSA     // nil = no external timestamp anchoring configured
+	auth         auth.KeyStore      // nil = no per-project auth (dev/single-tenant)
+	witness      witness.Witness    // nil = no external witness configured
+	tsa          witness.TSA        // nil = no external timestamp anchoring configured
+	brokerKey    ed25519.PrivateKey // nil = credential broker (/v2/grants) disabled
 	signingKeyID string
 	keyValidFrom string
 	now          func() time.Time // injectable clock for tests
@@ -93,6 +98,16 @@ func (s *Server) WithWitness(w witness.Witness) *Server {
 	return s
 }
 
+// WithBroker enables the credential broker (POST /v2/grants) with the given Ed25519 issuing key
+// (which signs the capabilities it mints; its public half is the descriptor kid). The recording key
+// that signs the grant's gateway_enforced evidence is the server's own signing key (core). For the
+// Tier-A prototype that is broker_trust: assumed — issuing and recording keys are NOT split into a
+// reduced TCB (ADR 0002). Nil/unset disables the endpoint.
+func (s *Server) WithBroker(issuingKey ed25519.PrivateKey) *Server {
+	s.brokerKey = issuingKey
+	return s
+}
+
 // WithTSA anchors every sealed checkpoint to a third-party RFC 3161 timestamp authority, attaching
 // the returned token so a verifier can prove the checkpoint (and its causal ancestors) existed by
 // the TSA-attested time (threat #3 backdating). Best-effort: a TSA failure stores the checkpoint
@@ -108,6 +123,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("POST /v2/records", s.handleRecords)
+	mux.HandleFunc("POST /v2/grants", s.handleGrant)
 	mux.HandleFunc("POST /v2/otel/traces", s.handleOTel)
 	mux.HandleFunc("POST /v2/checkpoints", s.handleCheckpoint)
 	mux.HandleFunc("GET /v2/sessions", s.handleSessions)
@@ -229,8 +245,36 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 		return "", false, fmt.Errorf("project_id and session_id are required")
 	}
 
+	// record_id must be assigned before commit-on-ingest binds disclosure secrets to it.
+	if stringField(rec, "record_id") == "" {
+		rec["record_id"] = newUUID()
+	}
+
+	// authority is declared by default — never silently presented as verified (threat #4).
+	normalizeAuthority(rec)
+
+	// Replace any raw input/output/rationale with a hiding commitment (RCP §9.3, threat #6); the
+	// plaintext goes to the content store and never enters the signed body. The disclosure secrets
+	// ride along on the Record so PutRecord persists them ATOMICALLY with the record (and only when
+	// it creates it), so a committed field can never be sealed with no way to disclose it.
+	disclosures, err := s.commitLowEntropyFields(rec, stringField(rec, "record_id"))
+	if err != nil {
+		return "", false, fmt.Errorf("commit fields: %w", err)
+	}
+
+	return s.sealAndStore(projectID, sessionID, idem, rec, disclosures)
+}
+
+// sealAndStore stamps the server-controlled fields, links the record into the session DAG (heads +
+// display_seq), stamps the signing-key block, seals the record, and stores it (with any disclosure
+// secrets, atomically). The caller MUST hold s.ingestMu (the frontier-read → seal → put critical
+// section) and is responsible for any authority handling and commitments BEFORE calling — so both
+// the generic ingest path (normalizeAuthority + commitLowEntropyFields) and the credential broker
+// (its own gateway_enforced authority + input_commit) share these DAG/seal/store mechanics without
+// the broker's verified authority being clobbered back to caller_declared.
+func (s *Server) sealAndStore(projectID, sessionID, idem string, rec map[string]any, disclosures []store.DisclosureSecret) (string, bool, error) {
 	now := s.now()
-	// server-controlled fields (override anything the client sent)
+	// server-controlled fields (override anything the caller sent)
 	rec["schema_version"] = "2"
 	rec["canon_version"] = "rcp-1"
 	rec["domain"] = "flightrecorder.record.v2"
@@ -239,7 +283,7 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 		rec["agent_ts"] = ts(now) // agent clock untrusted; default to receipt if absent
 	}
 	if stringField(rec, "record_id") == "" {
-		rec["record_id"] = newUUID()
+		rec["record_id"] = newUUID() // safety net; callers normally set it before committing fields
 	}
 	if stringField(rec, "span_id") == "" {
 		rec["span_id"] = "span-" + newUUID()
@@ -250,7 +294,7 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	seq, _ := s.st.NextDisplaySeq(projectID, sessionID)
 	rec["display_seq"] = seq
 
-	// sensible defaults for required semantic fields so a minimal POST is still a valid record
+	// sensible defaults for required semantic fields so a minimal record is still valid
 	setDefault(rec, "agent_id", "unknown")
 	setDefault(rec, "agent_version", "unknown")
 	setDefault(rec, "event_type", "decision")
@@ -266,18 +310,6 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 		heads = []string{} // marshal as [] not null (RCP arrays are not nullable here)
 	}
 	rec["causal_prev_hashes"] = heads
-
-	// authority is declared by default — never silently presented as verified (threat #4).
-	normalizeAuthority(rec)
-
-	// Replace any raw input/output/rationale with a hiding commitment (RCP §9.3, threat #6); the
-	// plaintext goes to the content store and never enters the signed body. The disclosure secrets
-	// ride along on the Record so PutRecord persists them ATOMICALLY with the record (and only when
-	// it creates it), so a committed field can never be sealed with no way to disclose it.
-	disclosures, err := s.commitLowEntropyFields(rec, stringField(rec, "record_id"))
-	if err != nil {
-		return "", false, fmt.Errorf("commit fields: %w", err)
-	}
 
 	// signing key block
 	rec["key"] = map[string]any{
@@ -307,6 +339,243 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 		s.meter.RecordsIngested(projectID, 1) // billable per record beyond the free tier
 	}
 	return stored.JSON, created, nil
+}
+
+// ---- credential broker (Level 3 Tier-A: gateway_enforced grants, ADR 0002) ----
+
+// grantRequest is the POST /v2/grants wire shape.
+type grantRequest struct {
+	IdempotencyKey  string   `json:"idempotency_key"`
+	ProjectID       string   `json:"project_id"`
+	SessionID       string   `json:"session_id"`
+	AgentID         string   `json:"agent_id"`
+	Action          string   `json:"action"`
+	Resource        string   `json:"resource"`
+	Scope           string   `json:"scope"`
+	ScopeClass      string   `json:"scope_class"`
+	AgentPubKey     string   `json:"agent_pubkey"`
+	AgentSig        string   `json:"agent_sig"`
+	Principal       string   `json:"authorizing_principal"`
+	DelegationChain []string `json:"delegation_chain"`
+	Justification   string   `json:"justification"`
+	TTLSeconds      int      `json:"ttl_seconds"`
+}
+
+// grantID derives a DETERMINISTIC grant id (UUIDv5-shaped) from (project, idempotency_key), so an
+// honest retry of a lost-response grant re-derives the SAME id, collapses in the store, and returns
+// the original capability — never a second live credential (ADR 0002 idempotency).
+func deterministicGrantID(projectID, idem string) string {
+	sum := sha256.Sum256([]byte("feir.grant.id.v1\x00" + projectID + "\x00" + idem))
+	var b [16]byte
+	copy(b[:], sum[:16])
+	b[6] = (b[6] & 0x0f) | 0x50 // version 5 (name-based)
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// handleGrant issues a credential-broker grant: it RECORDS a signed gateway_enforced grant (sealed
+// into the agent's session DAG) BEFORE returning the minted, sender-constrained, single-use
+// capability — so a credential never exists without a durable, anchored grant (record-before-issue).
+func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
+	if s.brokerKey == nil {
+		writeErr(w, http.StatusNotImplemented, "credential broker not enabled (set FEIR_BROKER_ISSUING_SEED)")
+		return
+	}
+	body, err := readBody(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var gr grantRequest
+	if err := decode(body, &gr); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid grant request: "+err.Error())
+		return
+	}
+	// With auth enabled the project is bound by ?project= (middleware); a body project_id must match.
+	if qp := r.URL.Query().Get("project"); qp != "" && gr.ProjectID != qp {
+		writeErr(w, http.StatusForbidden, "project_id does not match the authorized ?project=")
+		return
+	}
+	if gr.ProjectID == "" || gr.SessionID == "" {
+		writeErr(w, http.StatusBadRequest, "project_id and session_id are required")
+		return
+	}
+	// Idempotency is REQUIRED for issuance: without it a lost-response retry would mint a SECOND live
+	// single-use credential. The key (body or Idempotency-Key header) deterministically fixes the
+	// grant_id, so a retry collapses to the original grant + capability.
+	idem := gr.IdempotencyKey
+	if idem == "" {
+		idem = r.Header.Get("Idempotency-Key")
+	}
+	if idem == "" {
+		writeErr(w, http.StatusBadRequest, "idempotency_key is required (field or Idempotency-Key header) so a retry cannot double-issue a credential")
+		return
+	}
+	grantID := deterministicGrantID(gr.ProjectID, idem) // also the credential jti + record_id
+
+	req := broker.Request{
+		AgentID:         gr.AgentID,
+		Action:          gr.Action,
+		Resource:        gr.Resource,
+		Scope:           gr.Scope,
+		ScopeClass:      broker.ScopeClass(gr.ScopeClass),
+		AgentPubKey:     gr.AgentPubKey,
+		AgentSig:        gr.AgentSig,
+		Principal:       gr.Principal,
+		DelegationChain: gr.DelegationChain,
+		Justification:   gr.Justification,
+		TTL:             time.Duration(gr.TTLSeconds) * time.Second,
+	}
+	// broker.Prepare validates the request (incl. proof-of-possession + forbidden scopes) and mints
+	// the capability + the canonical evidence; a validation failure is the caller's (400). On an
+	// idempotent retry this freshly-timed capability is DISCARDED in favour of the stored original.
+	prepared, err := broker.Prepare(req, grantID, s.now(), s.brokerKey)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	rec, disclosures, err := s.buildGrantRecord(grantID, gr, req, prepared)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Record-before-issue: seal + store the grant under the DAG lock; only on success do we return
+	// the capability. The lock is released via defer (panic-safe) so a core/store panic can't leak
+	// the global ingest mutex and wedge all ingestion.
+	var sealed string
+	var created bool
+	err = func() error {
+		s.ingestMu.Lock()
+		defer s.ingestMu.Unlock()
+		var e error
+		sealed, created, e = s.sealAndStore(gr.ProjectID, gr.SessionID, idem, rec, disclosures)
+		return e
+	}()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store grant: "+err.Error())
+		return
+	}
+
+	capability := prepared.Capability
+	if !created {
+		// Idempotent retry: the grant already exists. Return the ORIGINAL capability, reconstructed
+		// deterministically from the stored descriptor, NOT this call's freshly-timed one.
+		capability, err = s.reconstructCapability(gr.ProjectID, grantID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "reconstruct capability: "+err.Error())
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"grant_id":    grantID,
+		"capability":  capability, // the agent presents this to the resource
+		"expires_at":  prepared.ExpiresAt,
+		"scope_class": string(prepared.ScopeClass),
+		"created":     created,
+		"record":      json.RawMessage(sealed),
+	})
+}
+
+// reconstructCapability re-mints the original capability for an existing grant from its stored
+// credential descriptor (the bytes committed at issue), so an idempotent retry returns the SAME
+// token rather than a new one. ed25519 signing is deterministic, so the re-mint is byte-identical.
+func (s *Server) reconstructCapability(projectID, grantID string) (string, error) {
+	secrets, err := s.st.Disclosures(projectID)
+	if err != nil {
+		return "", err
+	}
+	for _, d := range secrets {
+		if d.RecordID == grantID && d.Field == "input" {
+			raw, err := s.content.Get(context.Background(), d.ValueDigest)
+			if err != nil {
+				return "", err
+			}
+			return broker.MintCapability(raw, s.brokerKey), nil
+		}
+	}
+	return "", fmt.Errorf("no stored credential descriptor for grant %s", grantID)
+}
+
+// buildGrantRecord assembles the unsealed grant Decision Record: gateway_enforced authority with a
+// broker-signed evidence_sig, a hiding commitment over the credential descriptor (revealable via
+// selective disclosure), and the broker lifecycle fields under extensions.broker.
+func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Request, p broker.Prepared) (map[string]any, []store.DisclosureSecret, error) {
+	// Sign the gateway_enforced evidence (record_id-bound) — this is what the verifier elevates.
+	// Tier-A boundary (broker TCB, ADR 0002 / commit-2 review): only `evidence_hash` is signed and
+	// stored, not the canonical evidence preimage, so a bundle auditor cannot independently re-derive
+	// `evidence_hash == sha256(evidence)`. Disclosing the evidence + computing the hash via the Rust
+	// RCP canonicalizer (not Go json.Marshal) so the verifier can re-derive it is a Tier-B follow-up.
+	evidenceSig, err := s.core.SignEvidence("gateway_enforced", grantID, p.EvidenceHash)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sign grant evidence: %w", err)
+	}
+	// Commit the credential descriptor (hiding): store the bytes content-addressed, mint a nonce, and
+	// commit — selective disclosure can later reveal the descriptor to prove the grant↔credential
+	// binding without publishing it in the signed body. NOTE: a credential_grant record overloads the
+	// `input` commit domain for the credential descriptor (the closed RCP domain registry —
+	// input/output/rationale — has no dedicated `credential` slot); it is cryptographically sound, and
+	// a grant has no agent "input" of its own, but consumers must read `input` on a grant as "the
+	// issued credential descriptor", not agent input. A dedicated domain is a future cleanup.
+	addr, err := s.content.Put(context.Background(), p.DescriptorBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store credential descriptor: %w", err)
+	}
+	nonce, err := s.core.RandomNonce()
+	if err != nil {
+		return nil, nil, fmt.Errorf("nonce: %w", err)
+	}
+	commitment, err := s.core.Commit("input", p.DescriptorBytes, nonce)
+	if err != nil {
+		return nil, nil, fmt.Errorf("commit credential descriptor: %w", err)
+	}
+
+	delegation := gr.DelegationChain
+	if delegation == nil {
+		delegation = []string{}
+	}
+	rec := map[string]any{
+		"record_id":     grantID,
+		"project_id":    gr.ProjectID,
+		"session_id":    gr.SessionID,
+		"agent_id":      req.AgentID,
+		"agent_version": "feir-broker",
+		"event_type":    "credential_grant",
+		"observed_via":  "broker",
+		"action":        req.Action,
+		"status":        "ok",
+		"authority": map[string]any{
+			"source":                "gateway_enforced",
+			"enforcement_point":     "credential_broker",
+			"grant_type":            broker.GrantTypeIDJAG,
+			"grant_id":              grantID,
+			"authorizing_principal": req.Principal,
+			"delegation_chain":      delegation,
+			"evidence_hash":         p.EvidenceHash,
+			"evidence_sig":          evidenceSig,
+			"evaluated_at":          p.EvaluatedAt,
+			"expires_at":            p.ExpiresAt,
+		},
+		"input_commit": map[string]any{
+			"alg":         "sha256",
+			"commitment":  commitment,
+			"low_entropy": true,
+		},
+		"extensions": map[string]any{
+			"broker": map[string]any{
+				"issuance_status":    "recorded",
+				"scope_class":        string(p.ScopeClass),
+				"conformance_level":  p.ConformanceLevel,
+				"credential_binding": p.CredentialBinding,
+			},
+		},
+	}
+	disclosures := []store.DisclosureSecret{
+		{RecordID: grantID, Field: "input", ValueDigest: addr.Digest, NonceHex: nonce},
+	}
+	return rec, disclosures, nil
 }
 
 // commitLowEntropyFields replaces each raw input/output/rationale field in rec with a hiding

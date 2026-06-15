@@ -303,6 +303,13 @@ func mint(payload []byte, issuingKey ed25519.PrivateKey) string {
 	return enc + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
+// MintCapability re-mints the capability from already-canonical descriptor bytes. ed25519 signing is
+// deterministic, so given the stored descriptor this reproduces the EXACT original token — used to
+// return the original capability on an idempotent retry (never minting a second live credential).
+func MintCapability(descriptorBytes []byte, issuingKey ed25519.PrivateKey) string {
+	return mint(descriptorBytes, issuingKey)
+}
+
 // Claims is the typed credential descriptor a resource reads back from a capability. Numeric times
 // are int64 (a typed struct avoids the float64 footgun of decoding into map[string]any).
 type Claims struct {

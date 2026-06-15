@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"log"
 	"net/http"
 	"os"
@@ -78,6 +80,16 @@ func main() {
 	if url := os.Getenv("FEIR_TSA_URL"); url != "" {
 		srv.WithTSA(&witness.HTTPTSA{URL: url})
 		log.Printf("checkpoint anchoring -> RFC 3161 TSA %s", url)
+	}
+	// credential broker (Level 3 Tier-A): POST /v2/grants. The issuing key signs the capabilities;
+	// the recording key (the server signing key) signs the gateway_enforced evidence. Unset = off.
+	if seed := os.Getenv("FEIR_BROKER_ISSUING_SEED"); seed != "" {
+		raw, err := hex.DecodeString(seed)
+		if err != nil || len(raw) != ed25519.SeedSize {
+			log.Fatal("FEIR_BROKER_ISSUING_SEED must be 64 hex chars (32-byte Ed25519 seed)")
+		}
+		srv.WithBroker(ed25519.NewKeyFromSeed(raw))
+		log.Printf("credential broker enabled (POST /v2/grants)")
 	}
 
 	log.Printf("feir-server listening on %s (pubkey %s)", addr, c.PubKey())
