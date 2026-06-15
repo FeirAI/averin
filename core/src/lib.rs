@@ -7,10 +7,13 @@
 
 pub mod b64;
 pub mod canon;
+pub mod checkpoint;
 pub mod commit;
+pub mod dag;
 pub mod hashx;
 pub mod record;
 pub mod sign;
+pub mod verify;
 
 pub use canon::{CanonError, CanonValue};
 pub use commit::{commit, verify_commitment, FieldDomain};

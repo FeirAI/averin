@@ -142,20 +142,19 @@ fn str_field<'a>(obj: &'a CanonValue, key: &'static str) -> Result<&'a str, Reco
         .ok_or(RecordError::FieldNotString(key))
 }
 
-/// Compute the canonical `content_hash` of a record body (RCP §9.1):
-/// `sha256:hex( SHA-256( LP(domain) ‖ LP(canon_version) ‖ RCP-serialize(body \ {content_hash,sig}) ) )`.
-///
-/// The `domain` / `canon_version` are read from the body and re-bound into the preimage; callers
-/// verifying a record should additionally confirm they equal the expected constants (see
-/// [`verify_content_hash`]).
-pub fn compute_content_hash(record: &CanonValue) -> Result<String, RecordError> {
-    if record.as_object().is_none() {
+/// Generic domain-separated body hash (RCP §9.1): reads `domain`/`canon_version` from the body,
+/// strips `strip` keys, and returns
+/// `sha256:hex( SHA-256( LP(domain) ‖ LP(canon_version) ‖ RCP-serialize(body \ strip) ) )`.
+/// Shared by records (`strip = [content_hash, sig]`) and checkpoints
+/// (`strip = [anchor, checkpoint_hash, sig]`).
+pub fn hash_body(value: &CanonValue, strip: &[&str]) -> Result<String, RecordError> {
+    if value.as_object().is_none() {
         return Err(RecordError::NotObject);
     }
-    let domain = str_field(record, "domain")?.to_string();
-    let canon_version = str_field(record, "canon_version")?.to_string();
+    let domain = str_field(value, "domain")?.to_string();
+    let canon_version = str_field(value, "canon_version")?.to_string();
 
-    let body = record.without_keys(&["content_hash", "sig"]);
+    let body = value.without_keys(strip);
     let canon = body.serialize();
 
     let mut preimage = Vec::with_capacity(8 + domain.len() + canon_version.len() + canon.len());
@@ -164,6 +163,15 @@ pub fn compute_content_hash(record: &CanonValue) -> Result<String, RecordError> 
     }
     preimage.extend_from_slice(canon.as_bytes());
     Ok(sha256_prefixed(&preimage))
+}
+
+/// Compute the canonical record `content_hash` (RCP §9.1).
+///
+/// The `domain` / `canon_version` are read from the body and re-bound into the preimage; callers
+/// verifying a record should additionally confirm they equal the expected constants (see
+/// [`verify_content_hash`]).
+pub fn compute_content_hash(record: &CanonValue) -> Result<String, RecordError> {
+    hash_body(record, &["content_hash", "sig"])
 }
 
 /// Verify a record's stored `content_hash` and that its declared domain/canon_version match
