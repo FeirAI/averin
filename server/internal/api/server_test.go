@@ -109,6 +109,24 @@ func TestAuthorityIsDeclaredNotSilentlyVerified(t *testing.T) {
 	}
 }
 
+func TestDAGEndpointReturnsSessionRecords(t *testing.T) {
+	h := newSrv(t)
+	postRecord(t, h, `{"idempotency_key":"d1","project_id":"p1","session_id":"s1","action":"a"}`)
+	postRecord(t, h, `{"idempotency_key":"d2","project_id":"p1","session_id":"s1","action":"b"}`)
+	postRecord(t, h, `{"idempotency_key":"d3","project_id":"p1","session_id":"other","action":"c"}`)
+	code, resp := do(t, h, "GET", "/v2/dag?project=p1&session=s1", "")
+	if code != http.StatusOK {
+		t.Fatalf("dag %d: %s", code, resp)
+	}
+	var out struct {
+		Records []map[string]any `json:"records"`
+	}
+	json.Unmarshal([]byte(resp), &out)
+	if len(out.Records) != 2 {
+		t.Fatalf("expected 2 records in session s1, got %d", len(out.Records))
+	}
+}
+
 func TestEmptyBatchRejected(t *testing.T) {
 	h := newSrv(t)
 	if code, _ := do(t, h, "POST", "/v2/records", `[]`); code != http.StatusBadRequest {

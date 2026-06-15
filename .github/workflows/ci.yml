@@ -45,6 +45,19 @@ jobs:
           go vet ./...
           go test ./...
 
+  web:
+    name: web app (svelte build + trace unit tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+      - run: bun run build
+
   wasm:
     name: wasm build (verifier skew gate — same core, byte-for-byte)
     runs-on: ubuntu-latest

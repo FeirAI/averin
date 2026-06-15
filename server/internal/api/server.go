@@ -50,6 +50,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /v2/records", s.handleRecords)
 	mux.HandleFunc("POST /v2/checkpoints", s.handleCheckpoint)
 	mux.HandleFunc("GET /v2/sessions", s.handleSessions)
+	mux.HandleFunc("GET /v2/dag", s.handleDAG)
 	mux.HandleFunc("GET /v2/verify", s.handleVerify)
 	mux.HandleFunc("GET /v2/export", s.handleExport)
 	return mux
@@ -294,6 +295,27 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
 	sessions, _ := s.st.Sessions(projectID)
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+}
+
+// handleDAG returns a session's sealed records (the causal DAG) for the trace-waterfall view.
+//
+// PHASE-1 AUTHZ LIMIT: the app API has NO per-project authentication/authorization yet (RBAC/SSO is
+// explicitly Phase 2, spec §3). A deployment MUST put feir behind its own auth (or run it single-
+// tenant) until the authz layer lands — any caller who can reach this endpoint can read any
+// project's data. Documented in docs/coverage-limits.md.
+func (s *Server) handleDAG(w http.ResponseWriter, r *http.Request) {
+	projectID := r.URL.Query().Get("project")
+	sessionID := r.URL.Query().Get("session")
+	if projectID == "" || sessionID == "" {
+		writeErr(w, http.StatusBadRequest, "project and session query params are required")
+		return
+	}
+	recs, _ := s.st.SessionRecords(projectID, sessionID)
+	out := make([]json.RawMessage, len(recs))
+	for i, rec := range recs {
+		out[i] = json.RawMessage(rec.JSON)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"records": out})
 }
 
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {

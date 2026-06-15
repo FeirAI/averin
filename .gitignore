@@ -33,3 +33,5 @@ __pycache__/
 .vscode
 *.swp
 verifier/*.wasm
+web/dist
+web/node_modules

@@ -49,6 +49,11 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   anchored* session detectable, and out-of-band key/TSA pinning lets a third party refuse the
   customer's self-asserted keys. But **suppressing a parallel chain that was never anchored is not
   detectable from a single bundle** — that needs the witness store, and ultimately Level 3.
+- **No per-project authz yet (Phase-1 limit).** The app API (`/v2/sessions`, `/v2/dag`,
+  `/v2/verify`, `/v2/export`) has **no authentication/authorization** — RBAC/SSO/SAML is explicitly
+  Phase 2 (spec §3). Any caller who can reach the API can read any project's data. Deploy feir
+  behind your own auth (or single-tenant) until the authz layer lands. (This does not affect the
+  cryptographic guarantees — offline verification needs no server trust.)
 - **Uninstrumented actions (#13).** See above — a Level-2 limit by construction.
 - **Authority is *declared* by default.** `authority.source: caller_declared` is forgeable. Only
   `policy_engine_signed` / `human_signed` (with `evidence_sig` from the authority system) is
