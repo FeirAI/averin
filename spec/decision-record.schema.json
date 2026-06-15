@@ -39,6 +39,7 @@
     "input_commit": { "$ref": "#/$defs/commit" },
     "output_commit": { "$ref": "#/$defs/commit" },
     "rationale_commit": { "$ref": "#/$defs/commit" },
+    "credential_commit": { "$ref": "#/$defs/commit" },
     "status": { "enum": ["ok","error","blocked","pending_approval","incomplete"] },
     "tokens": {
       "type": "object", "additionalProperties": false,

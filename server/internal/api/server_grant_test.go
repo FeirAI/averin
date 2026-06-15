@@ -136,6 +136,38 @@ func TestCredentialGrantRecordedBeforeIssue(t *testing.T) {
 	}
 }
 
+func TestGrantDescriptorDisclosesUnderCredentialDomain(t *testing.T) {
+	// ADR 0004 D1: the grant's credential descriptor commits under the dedicated `credential` domain
+	// (not the overloaded `input`), and the offline verifier opens the disclosure against
+	// credential_commit.
+	h := newBrokerServer(t)
+	ak := grantAgentKey()
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-1", "read:orders", ak, ak)); code != http.StatusCreated {
+		t.Fatalf("grant failed (%d): %s", code, resp)
+	}
+	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, resp)
+	}
+	code, exp := do(t, h, "GET", "/v2/export?project=p1&mode=selective_disclosure", "")
+	if code != http.StatusOK {
+		t.Fatalf("export (%d): %s", code, exp)
+	}
+	if !strings.Contains(exp, `"field":"credential"`) {
+		t.Fatalf("the grant descriptor should disclose under the credential domain: %s", exp)
+	}
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	report := c.VerifyBundle(exp)
+	if !strings.Contains(report, `"ok":true`) {
+		t.Fatalf("disclosing grant bundle should verify ok: %s", report)
+	}
+	if !strings.Contains(report, `"disclosures_total":1`) || !strings.Contains(report, `"disclosures_verified":1`) {
+		t.Fatalf("the credential disclosure should open against credential_commit: %s", report)
+	}
+}
+
 func TestGrantIsIdempotent(t *testing.T) {
 	h := newBrokerServer(t)
 	ak := grantAgentKey()

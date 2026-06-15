@@ -367,7 +367,7 @@ fn verify_disclosures(
             Some(dm) => dm,
             None => {
                 issues.push(format!(
-                    "disclosure {i}: field '{field}' not in input|output|rationale"
+                    "disclosure {i}: field '{field}' not in input|output|rationale|credential"
                 ));
                 continue;
             }

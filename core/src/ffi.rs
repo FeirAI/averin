@@ -358,7 +358,7 @@ unsafe fn commit_inputs(
 ) -> Result<(crate::commit::FieldDomain, Vec<u8>, [u8; 32]), &'static str> {
     use crate::commit::FieldDomain;
     let domain = cstr(domain).ok_or("bad domain")?;
-    let d = FieldDomain::parse(domain).ok_or("domain must be input|output|rationale")?;
+    let d = FieldDomain::parse(domain).ok_or("domain must be input|output|rationale|credential")?;
     let value = crate::b64::decode(cstr(value_b64).ok_or("bad value_b64")?)
         .map_err(|_| "value_b64 is not valid base64url")?;
     let nonce_hex = cstr(nonce_hex).ok_or("bad nonce_hex")?;

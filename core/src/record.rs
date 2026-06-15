@@ -80,6 +80,7 @@ pub const ALLOWED_TOP_KEYS: &[&str] = &[
     "input_commit",
     "output_commit",
     "rationale_commit",
+    "credential_commit",
     "status",
     "tokens",
     "cost_micros_usd",

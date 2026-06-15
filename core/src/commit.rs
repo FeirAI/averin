@@ -18,6 +18,9 @@ pub enum FieldDomain {
     Input,
     Output,
     Rationale,
+    /// `credential_commit` — the credential-broker grant's descriptor (ADR 0004 D1). A dedicated slot
+    /// so a grant no longer overloads `input` to mean "the issued credential descriptor".
+    Credential,
 }
 
 impl FieldDomain {
@@ -26,6 +29,7 @@ impl FieldDomain {
             FieldDomain::Input => "input",
             FieldDomain::Output => "output",
             FieldDomain::Rationale => "rationale",
+            FieldDomain::Credential => "credential",
         }
     }
 
@@ -36,6 +40,7 @@ impl FieldDomain {
             "input" => Some(FieldDomain::Input),
             "output" => Some(FieldDomain::Output),
             "rationale" => Some(FieldDomain::Rationale),
+            "credential" => Some(FieldDomain::Credential),
             _ => None,
         }
     }
@@ -174,6 +179,20 @@ mod tests {
         let nonce = [3u8; NONCE_LEN];
         let a = commit(FieldDomain::Input, b"same", &nonce).unwrap();
         let b = commit(FieldDomain::Output, b"same", &nonce).unwrap();
+        let c = commit(FieldDomain::Credential, b"same", &nonce).unwrap();
         assert_ne!(a, b, "same value+nonce under different domains must differ");
+        assert_ne!(a, c, "credential domain must be distinct from input (ADR 0004 D1)");
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn credential_domain_round_trips_and_parses() {
+        assert_eq!(FieldDomain::parse("credential"), Some(FieldDomain::Credential));
+        assert_eq!(FieldDomain::Credential.as_str(), "credential");
+        let nonce = [7u8; NONCE_LEN];
+        let c = commit(FieldDomain::Credential, b"descriptor", &nonce).unwrap();
+        assert!(verify_commitment(&c, FieldDomain::Credential, b"descriptor", &nonce));
+        // wrong domain does not open it (binding holds)
+        assert!(!verify_commitment(&c, FieldDomain::Input, b"descriptor", &nonce));
     }
 }

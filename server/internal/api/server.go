@@ -524,7 +524,7 @@ func (s *Server) reconstructCapability(projectID, grantID string) (string, error
 		return "", err
 	}
 	for _, d := range secrets {
-		if d.RecordID == grantID && d.Field == "input" {
+		if d.RecordID == grantID && d.Field == "credential" {
 			raw, err := s.content.Get(context.Background(), d.ValueDigest)
 			if err != nil {
 				return "", err
@@ -558,13 +558,10 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 	if err != nil {
 		return nil, nil, fmt.Errorf("sign grant evidence: %w", err)
 	}
-	// Commit the credential descriptor (hiding): store the bytes content-addressed, mint a nonce, and
-	// commit — selective disclosure can later reveal the descriptor to prove the grant↔credential
-	// binding without publishing it in the signed body. NOTE: a credential_grant record overloads the
-	// `input` commit domain for the credential descriptor (the closed RCP domain registry —
-	// input/output/rationale — has no dedicated `credential` slot); it is cryptographically sound, and
-	// a grant has no agent "input" of its own, but consumers must read `input` on a grant as "the
-	// issued credential descriptor", not agent input. A dedicated domain is a future cleanup.
+	// Commit the credential descriptor (hiding) under the dedicated `credential` domain (ADR 0004 D1 —
+	// a grant no longer overloads `input`): store the bytes content-addressed, mint a nonce, and commit.
+	// Selective disclosure can later reveal the descriptor to prove the grant↔credential binding
+	// without publishing it in the signed body.
 	addr, err := s.content.Put(context.Background(), p.DescriptorBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("store credential descriptor: %w", err)
@@ -573,7 +570,7 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 	if err != nil {
 		return nil, nil, fmt.Errorf("nonce: %w", err)
 	}
-	commitment, err := s.core.Commit("input", p.DescriptorBytes, nonce)
+	commitment, err := s.core.Commit("credential", p.DescriptorBytes, nonce)
 	if err != nil {
 		return nil, nil, fmt.Errorf("commit credential descriptor: %w", err)
 	}
@@ -604,7 +601,7 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 			"evaluated_at":          p.EvaluatedAt,
 			"expires_at":            p.ExpiresAt,
 		},
-		"input_commit": map[string]any{
+		"credential_commit": map[string]any{
 			"alg":         "sha256",
 			"commitment":  commitment,
 			"low_entropy": true,
@@ -624,7 +621,7 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 		},
 	}
 	disclosures := []store.DisclosureSecret{
-		{RecordID: grantID, Field: "input", ValueDigest: addr.Digest, NonceHex: nonce},
+		{RecordID: grantID, Field: "credential", ValueDigest: addr.Digest, NonceHex: nonce},
 	}
 	return rec, disclosures, nil
 }
