@@ -7,3 +7,11 @@ edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/feir-dev/feir"
 rust-version = "1.85"
+
+# Small, self-contained release artifacts (lean WASM verifier bundle + static FFI lib).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

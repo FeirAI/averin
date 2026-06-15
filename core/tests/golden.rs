@@ -160,6 +160,28 @@ fn rcp_rejects_trailing_data() {
 }
 
 #[test]
+fn rcp_rejects_excessive_nesting_no_stack_overflow() {
+    // Deeply nested untrusted input must error, not overflow the stack (DoS under panic=abort).
+    let deep_arr = format!("{}{}", "[".repeat(5000), "]".repeat(5000));
+    assert!(
+        CanonValue::parse(&deep_arr).is_err(),
+        "deep array must be rejected"
+    );
+    let deep_obj = format!(
+        "{}{}",
+        r#"{"a":"#.repeat(5000),
+        "1".to_string() + &"}".repeat(5000)
+    );
+    assert!(
+        CanonValue::parse(&deep_obj).is_err(),
+        "deep object must be rejected"
+    );
+    // a modestly nested doc (well under the limit) still parses
+    let ok = format!("{}{}", "[".repeat(50), "]".repeat(50));
+    assert!(CanonValue::parse(&ok).is_ok());
+}
+
+#[test]
 fn nfc_equivalent_inputs_have_equal_content_hash() {
     // Two byte-different inputs that are NFC-equivalent must canonicalize and hash identically.
     let composed = "{\"domain\":\"flightrecorder.record.v2\",\"canon_version\":\"rcp-1\",\"note\":\"\u{00e9}\"}";

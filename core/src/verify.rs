@@ -189,6 +189,94 @@ pub fn verify_bundle_json(text: &str) -> Result<VerifyReport, crate::canon::Cano
     Ok(verify_bundle(&CanonValue::parse(text)?))
 }
 
+fn opt_str(o: &Option<String>) -> CanonValue {
+    match o {
+        Some(s) => CanonValue::string(s.clone()),
+        None => CanonValue::Null,
+    }
+}
+fn str_array(v: &[String]) -> CanonValue {
+    CanonValue::Array(v.iter().map(|s| CanonValue::string(s.clone())).collect())
+}
+fn count(n: usize) -> CanonValue {
+    CanonValue::Int(i64::try_from(n).unwrap_or(i64::MAX))
+}
+
+/// Serialize a [`VerifyReport`] to a canonical JSON object (reuses the RCP serializer). Used by the
+/// WASM and FFI surfaces so all three targets emit identical report bytes.
+pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
+    let records: Vec<CanonValue> = r
+        .record_trust
+        .iter()
+        .map(|t| {
+            CanonValue::object(vec![
+                ("record_id".into(), CanonValue::string(t.record_id.clone())),
+                (
+                    "content_hash".into(),
+                    CanonValue::string(t.content_hash.clone()),
+                ),
+                ("integrity_ok".into(), CanonValue::Bool(t.integrity_ok)),
+                ("signature_ok".into(), CanonValue::Bool(t.signature_ok)),
+                (
+                    "key_status".into(),
+                    CanonValue::string(t.key_status.clone()),
+                ),
+                (
+                    "observed_via".into(),
+                    CanonValue::string(t.observed_via.clone()),
+                ),
+                (
+                    "trust".into(),
+                    CanonValue::string(match t.trust {
+                        TrustLevel::IntegrityProven => "integrity_proven",
+                        TrustLevel::Untrusted => "untrusted",
+                    }),
+                ),
+                ("notes".into(), str_array(&t.notes)),
+            ])
+            .unwrap()
+        })
+        .collect();
+    CanonValue::object(vec![
+        ("ok".into(), CanonValue::Bool(r.ok)),
+        ("project_id".into(), opt_str(&r.project_id)),
+        (
+            "keys_externally_pinned".into(),
+            CanonValue::Bool(r.keys_externally_pinned),
+        ),
+        ("records_total".into(), count(r.records_total)),
+        ("records_proven".into(), count(r.records_proven)),
+        ("dag_ok".into(), CanonValue::Bool(r.dag_ok)),
+        ("dag_heads".into(), count(r.dag_heads)),
+        ("collapsed_duplicates".into(), count(r.collapsed_duplicates)),
+        ("checkpoints_total".into(), count(r.checkpoints_total)),
+        ("checkpoints_verified".into(), count(r.checkpoints_verified)),
+        ("checkpoints_anchored".into(), count(r.checkpoints_anchored)),
+        ("chain_ok".into(), CanonValue::Bool(r.chain_ok)),
+        ("issues".into(), str_array(&r.issues)),
+        ("first_broken_link".into(), opt_str(&r.first_broken_link)),
+        ("record_trust".into(), CanonValue::Array(records)),
+    ])
+    .unwrap()
+}
+
+pub fn report_to_json(r: &VerifyReport) -> String {
+    report_to_canon(r).serialize()
+}
+
+/// Verify a bundle JSON string and return the report as a JSON string (the shape WASM/FFI return).
+pub fn verify_bundle_to_json(text: &str) -> String {
+    match verify_bundle_json(text) {
+        Ok(r) => report_to_json(&r),
+        Err(e) => CanonValue::object(vec![
+            ("ok".into(), CanonValue::Bool(false)),
+            ("error".into(), CanonValue::string(e.to_string())),
+        ])
+        .unwrap()
+        .serialize(),
+    }
+}
+
 pub fn verify_bundle(bundle: &CanonValue) -> VerifyReport {
     verify_bundle_with(bundle, &VerifyOptions::default())
 }

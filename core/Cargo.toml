@@ -30,10 +30,3 @@ wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]
 ed25519-dalek = "2"
-
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true

@@ -45,6 +45,7 @@ impl CanonValue {
         let mut p = Parser {
             s: input.as_bytes(),
             i: 0,
+            depth: 0,
         };
         p.skip_ws();
         let v = p.parse_value()?;
@@ -223,9 +224,15 @@ fn hex_digit(n: u8) -> char {
     }
 }
 
+/// Maximum array/object nesting depth. Bounds recursion so deeply-nested untrusted input cannot
+/// overflow the stack (which, under `panic="abort"`, would kill the process — a DoS reachable from
+/// the FFI/WASM/CLI entry points). 256 is far beyond any real record/checkpoint shape.
+const MAX_DEPTH: usize = 256;
+
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -339,12 +346,22 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn enter(&mut self) -> Result<(), CanonError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.err("nesting depth limit exceeded"));
+        }
+        Ok(())
+    }
+
     fn parse_array(&mut self) -> Result<CanonValue, CanonError> {
         self.expect(b'[')?;
+        self.enter()?;
         let mut items = Vec::new();
         self.skip_ws();
         if self.peek() == Some(b']') {
             self.i += 1;
+            self.depth -= 1;
             return Ok(CanonValue::Array(items));
         }
         loop {
@@ -362,15 +379,18 @@ impl<'a> Parser<'a> {
                 _ => return Err(self.err("expected ',' or ']' in array")),
             }
         }
+        self.depth -= 1;
         Ok(CanonValue::Array(items))
     }
 
     fn parse_object(&mut self) -> Result<CanonValue, CanonError> {
         self.expect(b'{')?;
+        self.enter()?;
         let mut members: Vec<(String, CanonValue)> = Vec::new();
         self.skip_ws();
         if self.peek() == Some(b'}') {
             self.i += 1;
+            self.depth -= 1;
             return Ok(CanonValue::Object(members));
         }
         loop {
@@ -404,6 +424,7 @@ impl<'a> Parser<'a> {
                 _ => return Err(self.err("expected ',' or '}' in object")),
             }
         }
+        self.depth -= 1;
         Ok(CanonValue::Object(members))
     }
 

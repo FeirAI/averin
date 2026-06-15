@@ -11,10 +11,14 @@ pub mod canon;
 pub mod checkpoint;
 pub mod commit;
 pub mod dag;
+pub mod ffi;
 pub mod hashx;
 pub mod record;
 pub mod sign;
 pub mod verify;
+
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 pub use canon::{CanonError, CanonValue};
 pub use commit::{commit, verify_commitment, FieldDomain};
