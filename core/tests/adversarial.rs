@@ -4,12 +4,16 @@
 //! #9 key compromise, plus integrity tamper.
 
 use feir_decision_core::anchor::{make_test_anchor, test_tsa_key};
+use feir_decision_core::authority::sign_evidence;
 use feir_decision_core::canon::CanonValue;
 use feir_decision_core::checkpoint::{attach_anchor, checkpoint_body, seal_checkpoint};
-use feir_decision_core::sign::signing_key_from_seed;
+use feir_decision_core::hashx::sha256_prefixed;
+use feir_decision_core::record::seal;
+use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use feir_decision_core::verify::{
     verify_bundle, verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions,
 };
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::path::PathBuf;
 
 fn fixture() -> CanonValue {
@@ -69,11 +73,6 @@ fn checkpoint_hash(cp: &CanonValue) -> String {
 
 #[test]
 fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
-    use feir_decision_core::authority::sign_evidence;
-    use feir_decision_core::hashx::sha256_prefixed;
-    use feir_decision_core::record::seal;
-    use feir_decision_core::sign::encode_pubkey;
-
     let sk = signing_key_from_seed(&[0u8; 32]); // the broker recording key == the record signing key
     let vk = sk.verifying_key();
     let record_id = "grant-1";
@@ -904,4 +903,448 @@ fn valid_anchor_on_unverified_checkpoint_does_not_upgrade() {
         r.records_proven, 0,
         "anchor on an unverified checkpoint must not upgrade compromised records"
     );
+}
+
+// ---- Tier-B use<->grant join fixtures (ADR 0003 step 5) ----
+//
+// A grant + use + ANCHORED checkpoint, so both records are CLOSED (committed by a verified anchored
+// checkpoint, R3). The record key (k0) seals all records; the broker authority is that same key
+// (self-host); the resource authority is a DISTINCT key (R2). Negative variants drop/duplicate/diverge
+// to exercise the match predicate.
+
+fn content_hash_of(rec: &CanonValue) -> String {
+    rec.get("content_hash").unwrap().as_str().unwrap().to_string()
+}
+
+fn grant_evidence(
+    gid: &str,
+    action: &str,
+    resource: &str,
+    scope: &str,
+    cnf_kid: &str,
+    issued: i64,
+    exp: i64,
+) -> CanonValue {
+    CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("grant")),
+        ("grant_id".into(), CanonValue::string(gid)),
+        ("action".into(), CanonValue::string(action)),
+        ("resource_id".into(), CanonValue::string(resource)),
+        ("scope_class".into(), CanonValue::string(scope)),
+        ("cnf_kid".into(), CanonValue::string(cnf_kid)),
+        ("issued_at".into(), CanonValue::Int(issued)),
+        ("exp".into(), CanonValue::Int(exp)),
+    ])
+    .unwrap()
+}
+
+fn use_evidence(
+    gid: &str,
+    action: &str,
+    resource: &str,
+    jti: &str,
+    cnf_kid: &str,
+    used_at: i64,
+) -> CanonValue {
+    CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("use")),
+        ("grant_id".into(), CanonValue::string(gid)),
+        ("action".into(), CanonValue::string(action)),
+        ("resource_id".into(), CanonValue::string(resource)),
+        ("jti".into(), CanonValue::string(jti)),
+        ("nonce".into(), CanonValue::string("nonce-1")),
+        (
+            "pop_challenge_hash".into(),
+            CanonValue::string(sha256_prefixed(b"pop")),
+        ),
+        ("cnf_kid".into(), CanonValue::string(cnf_kid)),
+        (
+            "ledger_commitment".into(),
+            CanonValue::string(sha256_prefixed(b"ledger")),
+        ),
+        ("used_at".into(), CanonValue::Int(used_at)),
+    ])
+    .unwrap()
+}
+
+fn seal_grant(rec_sk: &SigningKey, broker_sk: &SigningKey, record_id: &str, ge: &CanonValue) -> CanonValue {
+    let eh = sha256_prefixed(ge.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", record_id, &eh, broker_sk);
+    let action = ge.get("action").unwrap().as_str().unwrap();
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"feir-broker",
+        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
+        "agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z",
+        "event_type":"credential_grant","action":"{action}","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"credential_broker","grant_type":"id-jag","grant_id":"{record_id}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "extensions":{{"broker":{{"kind":"grant","grant_evidence":{ge}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ge = ge.serialize(),
+    );
+    seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
+// seal_use seals a resource-role use receipt; top_action is the (human-echo) top-level action — set it
+// EQUAL to use_evidence.action for a well-formed use, or DIFFERENT to exercise MUST-FIX 1 divergence.
+fn seal_use(
+    rec_sk: &SigningKey,
+    res_sk: &SigningKey,
+    record_id: &str,
+    prev: &[String],
+    top_action: &str,
+    ue: &CanonValue,
+) -> CanonValue {
+    let eh = sha256_prefixed(ue.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", record_id, &eh, res_sk);
+    let gid = ue.get("grant_id").unwrap().as_str().unwrap();
+    let resource = ue.get("resource_id").unwrap().as_str().unwrap();
+    let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"feir-resource","agent_version":"feir-resource",
+        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
+        "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
+        "event_type":"tool_call","action":"{top_action}","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"tool_gateway","grant_id":"{gid}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "extensions":{{"broker":{{"kind":"use","grant_id":"{gid}","resource_id":"{resource}","use_evidence":{ue}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ue = ue.serialize(),
+    );
+    seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
+fn checkpoint_over(rec_sk: &SigningKey, frontier: &[String], record_count: i64, anchor_with: Option<&SigningKey>) -> CanonValue {
+    let key_block =
+        CanonValue::parse(r#"{"signing_key_id":"k0","key_epoch":0,"key_status":"active"}"#).unwrap();
+    let body = checkpoint_body(
+        "cp0",
+        "proj-001",
+        0,
+        None,
+        frontier,
+        record_count,
+        "2026-06-15T10:10:00.000Z",
+        key_block,
+    )
+    .unwrap();
+    let cp = seal_checkpoint(&body, rec_sk).unwrap();
+    match anchor_with {
+        Some(tsa) => {
+            let anchor = make_test_anchor(&checkpoint_hash(&cp), "2026-06-15T10:10:01.000Z", tsa, "tsa-1");
+            attach_anchor(&cp, anchor)
+        }
+        None => cp,
+    }
+}
+
+fn tier_b_bundle(rec_vk: &VerifyingKey, records: Vec<CanonValue>, checkpoints: Vec<CanonValue>) -> CanonValue {
+    let key_entry = CanonValue::object(vec![
+        ("signing_key_id".into(), CanonValue::string("k0")),
+        ("key_epoch".into(), CanonValue::Int(0)),
+        ("public_key".into(), CanonValue::string(encode_pubkey(rec_vk))),
+        ("key_status".into(), CanonValue::string("active")),
+    ])
+    .unwrap();
+    rebuild(vec![key_entry], records, checkpoints)
+}
+
+fn pinned_roles(broker_vk: VerifyingKey, resource_vk: VerifyingKey, tsa_vk: VerifyingKey) -> VerifyOptions {
+    VerifyOptions {
+        broker_authority_keys: vec![broker_vk],
+        resource_authority_keys: vec![resource_vk],
+        trusted_tsa_keys: vec![tsa_vk],
+        ..Default::default()
+    }
+}
+
+const GID: &str = "grant-1";
+const CNF: &str = "ed25519-AgentKid0";
+const ACTION: &str = "db.query:orders-ro";
+const RESOURCE: &str = "orders-db";
+const ISSUED: i64 = 1_718_445_600;
+const EXP: i64 = 1_718_449_200;
+const USED: i64 = 1_718_445_700;
+
+#[test]
+fn tier_b_use_matches_closed_grant() {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED); // jti == grant_id (single-use)
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(
+        &bundle,
+        &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()),
+    );
+    assert!(r.ok, "happy path should verify; issues: {:?}", r.issues);
+    assert_eq!(r.grant_verified, 1);
+    assert_eq!(r.uses_total, 1);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.uses_action_unverified, 1); // R6: no taxonomy -> demonstrator artifact
+    assert_eq!(r.unmatched_violation, 0);
+    assert_eq!(r.unmatched_pending, 0);
+    assert_eq!(r.grants_unused, 0);
+    // the new Tier-B fields are present in the canonical report JSON (WASM/Go consumers read these).
+    let json = feir_decision_core::verify::report_to_json(&r);
+    assert!(json.contains(r#""action_completeness":"not_claimed""#)); // no coverage_manifest
+    for field in [
+        r#""uses_total":1"#,
+        r#""uses_matched":1"#,
+        r#""uses_action_unverified":1"#,
+        r#""unmatched_violation":0"#,
+        r#""unmatched_pending":0"#,
+        r#""grants_unused":0"#,
+    ] {
+        assert!(json.contains(field), "report JSON missing {field}: {json}");
+    }
+}
+
+#[test]
+fn tier_b_action_without_credential_is_a_violation() {
+    // A closed use receipt with NO matching closed grant — action without a credential.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[], ACTION, &ue); // no causal parent (no grant)
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 1, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![use_rec], vec![cp]);
+    let r = verify_bundle_with(
+        &bundle,
+        &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()),
+    );
+    assert!(!r.ok);
+    assert_eq!(r.uses_total, 1);
+    assert_eq!(r.unmatched_violation, 1);
+    assert_eq!(r.uses_matched, 0);
+    assert!(r.issues.iter().any(|i| i.contains("action without a credential")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_single_use_double_spend_is_a_violation() {
+    // Two closed receipts for the SAME single-use grant_id (both jti == grant_id) — the second is a
+    // double-spend caught by the per-grant_id rule (R5 rev 4), regardless of jti.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let gch = content_hash_of(&grant);
+    let u1 = seal_use(&rec, &res, "use-1", std::slice::from_ref(&gch), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let u2 = seal_use(&rec, &res, "use-2", std::slice::from_ref(&gch), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED + 1));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&u1), content_hash_of(&u2)], 3, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, u1, u2], vec![cp]);
+    let r = verify_bundle_with(
+        &bundle,
+        &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()),
+    );
+    assert!(!r.ok);
+    assert_eq!(r.uses_total, 2);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("double-spend")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_jti_rebinding_is_a_violation() {
+    // A single_operation use whose jti != grant_id (R5 canonical binding) is rejected.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = use_evidence(GID, ACTION, RESOURCE, "some-other-jti", CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(
+        &bundle,
+        &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()),
+    );
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("jti == grant_id")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_action_substitution_is_a_violation() {
+    // The use's evidence action (consistently top + payload) does not match the grant's action.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = use_evidence(GID, "db.delete:everything", RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], "db.delete:everything", &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(
+        &bundle,
+        &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()),
+    );
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("does not match grant")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_top_level_action_divergence_is_a_violation() {
+    // MUST-FIX 1: a use whose top-level action echo diverges from use_evidence.action is a hard failure.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    // payload action is ACTION, but the top-level echo lies as something else
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], "db.delete:everything", &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(
+        &bundle,
+        &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()),
+    );
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("diverges from use_evidence.action")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_unanchored_use_is_pending_not_a_violation() {
+    // R3: a use NOT committed by a verified ANCHORED checkpoint is in-flight (pending), never a
+    // violation — the bundle is still clean.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, None); // NOT anchored
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(
+        &bundle,
+        &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()),
+    );
+    assert!(r.ok, "an unanchored (pending) use must not fail the bundle; issues: {:?}", r.issues);
+    assert_eq!(r.uses_total, 1);
+    assert_eq!(r.unmatched_pending, 1);
+    assert_eq!(r.uses_matched, 0);
+    assert_eq!(r.unmatched_violation, 0);
+}
+
+#[test]
+fn tier_b_cnf_kid_mismatch_is_a_violation() {
+    // The use's cnf_kid (the PoP key id) must equal the grant's — a use bound to a different key fails.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, "ed25519-DifferentKid", USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert!(r.issues.iter().any(|i| i.contains("does not match grant")), "{:?}", r.issues);
+}
+
+#[test]
+fn tier_b_resource_mismatch_is_a_violation() {
+    // A use whose resource_id is not the grant's resource is a violation.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = use_evidence(GID, ACTION, "payments-db", GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+}
+
+#[test]
+fn tier_b_use_at_expiry_is_a_violation() {
+    // The window is [issued_at, exp): a use AT exp is expired (matches the resource shim's rejection).
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, EXP); // used_at == exp
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert_eq!(r.unmatched_violation, 1);
+    assert_eq!(r.uses_matched, 0);
+}
+
+#[test]
+fn tier_b_unused_grant_is_counted() {
+    // Two closed single-use grants, one use against grant-1 → grant-2 is grants_unused.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let g1 = seal_grant(&rec, &rec, "grant-1", &grant_evidence("grant-1", ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let g2 = seal_grant(&rec, &rec, "grant-2", &grant_evidence("grant-2", ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = use_evidence("grant-1", ACTION, RESOURCE, "grant-1", CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&g1)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&g2), content_hash_of(&use_rec)], 3, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g1, g2, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.grants_unused, 1);
+}
+
+#[test]
+fn tier_b_reusable_grant_permits_multiple_uses() {
+    // A session_grant (not single_operation) is exercised by multiple uses with NO per-grant_id cap —
+    // each is a matched (taxonomy-unverified, R6) use, not a double-spend.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "session_grant", CNF, ISSUED, EXP));
+    let gch = content_hash_of(&grant);
+    let u1 = seal_use(&rec, &res, "use-1", std::slice::from_ref(&gch), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let u2 = seal_use(&rec, &res, "use-2", std::slice::from_ref(&gch), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED + 1));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&u1), content_hash_of(&u2)], 3, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, u1, u2], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "a reusable grant's multiple uses must not be a violation; issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 2);
+    assert_eq!(r.uses_action_unverified, 2);
+    assert_eq!(r.unmatched_violation, 0);
+    assert_eq!(r.grants_unused, 0);
+}
+
+#[test]
+fn tier_b_incomplete_grant_evidence_fails_closed() {
+    // A verified, closed broker grant whose grant_evidence omits a match field (here cnf_kid) is
+    // surfaced as a fail-closed issue — NOT silently skipped (which would mask its use as "no grant").
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    // grant_evidence WITHOUT cnf_kid
+    let ge = CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("grant")),
+        ("grant_id".into(), CanonValue::string(GID)),
+        ("action".into(), CanonValue::string(ACTION)),
+        ("resource_id".into(), CanonValue::string(RESOURCE)),
+        ("scope_class".into(), CanonValue::string("single_operation")),
+        ("issued_at".into(), CanonValue::Int(ISSUED)),
+        ("exp".into(), CanonValue::Int(EXP)),
+    ])
+    .unwrap();
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&grant)], 1, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert!(r.issues.iter().any(|i| i.contains("incomplete grant_evidence")), "{:?}", r.issues);
 }

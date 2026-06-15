@@ -75,6 +75,18 @@ pub struct VerifyReport {
     /// `gateway_enforced` under a pinned authority key (Level 3 Tier-A grant accountability).
     pub grant_total: usize,
     pub grant_verified: usize,
+    /// Tier-B use↔grant join (ADR 0003 step 5), computed over the CLOSED set (records committed by a
+    /// verified, anchored checkpoint, R3). `uses_total` = resource-role use receipts; `uses_matched` =
+    /// closed uses bound to a closed grant under the full predicate; `uses_action_unverified` = matched
+    /// uses against a taxonomy-unvalidated grant (R6, all of them in the demonstrator);
+    /// `unmatched_violation` = a closed use with no/again a matching grant (hard fail); `unmatched_pending`
+    /// = a use not yet closed (in-flight); `grants_unused` = closed grants with no matching use.
+    pub uses_total: usize,
+    pub uses_matched: usize,
+    pub uses_action_unverified: usize,
+    pub unmatched_violation: usize,
+    pub unmatched_pending: usize,
+    pub grants_unused: usize,
     /// The bundle's `coverage_manifest` echoed verbatim (the verifier does NOT trust it; it surfaces
     /// it so an auditor can evaluate the out-of-band attestations). `None` if absent.
     pub coverage_manifest: Option<CanonValue>,
@@ -484,6 +496,18 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("disclosures_verified".into(), count(r.disclosures_verified)),
         ("grant_total".into(), count(r.grant_total)),
         ("grant_verified".into(), count(r.grant_verified)),
+        ("uses_total".into(), count(r.uses_total)),
+        ("uses_matched".into(), count(r.uses_matched)),
+        (
+            "uses_action_unverified".into(),
+            count(r.uses_action_unverified),
+        ),
+        (
+            "unmatched_violation".into(),
+            count(r.unmatched_violation),
+        ),
+        ("unmatched_pending".into(), count(r.unmatched_pending)),
+        ("grants_unused".into(), count(r.grants_unused)),
         // Tier-A grant accountability: every grant verified to gateway_enforced under a pinned key.
         (
             "grant_accountability".into(),
@@ -671,6 +695,12 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         disclosures_verified: 0,
         grant_total: 0,
         grant_verified: 0,
+        uses_total: 0,
+        uses_matched: 0,
+        uses_action_unverified: 0,
+        unmatched_violation: 0,
+        unmatched_pending: 0,
+        grants_unused: 0,
         coverage_manifest: None,
         issues: vec![msg.to_string()],
         first_broken_link: Some(msg.to_string()),
@@ -702,6 +732,26 @@ fn evidence_rederivable(rec: &CanonValue, payload_key: &str) -> bool {
         None => return false,
     };
     crate::hashx::sha256_prefixed(payload.serialize().as_bytes()) == signed
+}
+
+/// Read a string field from a record's canonical evidence payload at `extensions.broker.<payload_key>`
+/// (ADR 0003 — the verifier reads match inputs ONLY from the proven payload).
+fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
+    rec.get("extensions")
+        .and_then(|e| e.get("broker"))
+        .and_then(|b| b.get(payload_key))
+        .and_then(|p| p.get(field))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// Read an integer field from a record's canonical evidence payload (used for issued_at/exp/used_at).
+fn ev_int(rec: &CanonValue, payload_key: &str, field: &str) -> Option<i64> {
+    rec.get("extensions")
+        .and_then(|e| e.get("broker"))
+        .and_then(|b| b.get(payload_key))
+        .and_then(|p| p.get(field))
+        .and_then(|v| v.as_int())
 }
 
 pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
@@ -1152,6 +1202,170 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             }
         }
     }
+
+    // ---- Tier-B (ADR 0003 step 5): use↔grant join over the CLOSED set (R3) ----
+    // CLOSED = a record's content_hash is transitively committed by a verified, ANCHORED checkpoint
+    // (the union of the anchored committed sets). Tier-B outcomes are computed over closed records
+    // only; a use not yet closed is `unmatched_pending` (in-flight), never a violation. Replacing an
+    // exporter watermark with this cryptographic boundary closes the watermark-specific suppression
+    // path (MUST-FIX 2); never-anchored use suppression remains an accepted residual.
+    let closed: BTreeSet<&str> = anchored_committed
+        .iter()
+        .flat_map(|(_, set)| set.iter().map(String::as_str))
+        .collect();
+
+    // Index closed, fully-verified grants by grant_id, reading match fields ONLY from the proven
+    // grant_evidence (R1). `used` tracks matched uses (single-use ≤1 per grant_id, and grants_unused).
+    struct GrantInfo {
+        action: String,
+        resource_id: String,
+        scope_class: String,
+        cnf_kid: String,
+        issued_at: i64,
+        exp: i64,
+        used: usize,
+    }
+    let mut grants_by_id: BTreeMap<String, GrantInfo> = BTreeMap::new();
+    for rt in &record_trust {
+        let rec = &records[rt.index];
+        let qualifies = rt.broker_role == BrokerRole::Broker.as_str()
+            && rt.trust == TrustLevel::IntegrityProven
+            && rt.authority == AuthorityTrust::Verified
+            && evidence_rederivable(rec, "grant_evidence")
+            && closed.contains(rt.content_hash.as_str());
+        if !qualifies {
+            continue;
+        }
+        match (
+            ev_str(rec, "grant_evidence", "grant_id"),
+            ev_str(rec, "grant_evidence", "action"),
+            ev_str(rec, "grant_evidence", "resource_id"),
+            ev_str(rec, "grant_evidence", "scope_class"),
+            ev_str(rec, "grant_evidence", "cnf_kid"),
+            ev_int(rec, "grant_evidence", "issued_at"),
+            ev_int(rec, "grant_evidence", "exp"),
+        ) {
+            (Some(gid), Some(action), Some(resource_id), Some(scope_class), Some(cnf_kid), Some(issued_at), Some(exp)) => {
+                grants_by_id.entry(gid).or_insert(GrantInfo {
+                    action,
+                    resource_id,
+                    scope_class,
+                    cnf_kid,
+                    issued_at,
+                    exp,
+                    used: 0,
+                });
+            }
+            // A verified, closed broker grant whose grant_evidence is missing a required match field is
+            // a fail-closed failure surfaced as an issue — NOT a silent skip (which would let a use
+            // against it read as "action without a credential" and mask the real cause).
+            _ => issues.push(format!(
+                "grant {} ({}): closed broker grant has incomplete grant_evidence (missing a required match field) — fail-closed",
+                rt.index, rt.record_id
+            )),
+        }
+    }
+
+    let mut uses_total = 0usize;
+    let mut uses_matched = 0usize;
+    let mut uses_action_unverified = 0usize;
+    let mut unmatched_violation = 0usize;
+    let mut unmatched_pending = 0usize;
+    let mut seen_uses: BTreeSet<&str> = BTreeSet::new();
+    for rt in &record_trust {
+        let rec = &records[rt.index];
+        if rt.broker_role != BrokerRole::Resource.as_str() {
+            continue;
+        }
+        if !seen_uses.insert(rt.content_hash.as_str()) {
+            continue; // verbatim-duplicate use deduped (not double-counted)
+        }
+        uses_total += 1;
+        if !closed.contains(rt.content_hash.as_str()) {
+            unmatched_pending += 1; // in-flight: not yet committed by a verified anchored checkpoint
+            continue;
+        }
+        // A CLOSED use must be cryptographically validatable (integrity + resource-role authority +
+        // re-derivable use_evidence) before its match fields can be trusted — otherwise fail closed.
+        let violation = |issues: &mut Vec<String>, msg: String| {
+            issues.push(format!("use {} ({}): {msg}", rt.index, rt.record_id));
+        };
+        if rt.trust != TrustLevel::IntegrityProven
+            || rt.authority != AuthorityTrust::Verified
+            || !evidence_rederivable(rec, "use_evidence")
+        {
+            unmatched_violation += 1;
+            violation(&mut issues, "closed but not validatable (integrity / resource authority / re-derivable evidence) — Tier-B violation".into());
+            continue;
+        }
+        // MUST-FIX 1: read match inputs ONLY from use_evidence; a divergent top-level `action` echo is a
+        // hard failure, not a silent non-match.
+        let u_action = ev_str(rec, "use_evidence", "action");
+        if let (Some(top), Some(ua)) = (s(rec, "action"), &u_action) {
+            if &top != ua {
+                unmatched_violation += 1;
+                violation(&mut issues, "top-level action diverges from use_evidence.action (MUST-FIX 1)".into());
+                continue;
+            }
+        }
+        let (gid, action, resource_id, jti, cnf_kid, used_at) = match (
+            ev_str(rec, "use_evidence", "grant_id"),
+            u_action,
+            ev_str(rec, "use_evidence", "resource_id"),
+            ev_str(rec, "use_evidence", "jti"),
+            ev_str(rec, "use_evidence", "cnf_kid"),
+            ev_int(rec, "use_evidence", "used_at"),
+        ) {
+            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)) => (a, b, c, d, e, f),
+            _ => {
+                unmatched_violation += 1;
+                violation(&mut issues, "use_evidence is missing a required match field — violation".into());
+                continue;
+            }
+        };
+        let g = match grants_by_id.get_mut(&gid) {
+            Some(g) => g,
+            None => {
+                unmatched_violation += 1;
+                violation(&mut issues, format!("no matching closed grant '{gid}' — action without a credential (Tier-B violation)"));
+                continue;
+            }
+        };
+        // Full predicate: action / resource / temporal-window / cnf_kid equality, read from the proven
+        // payloads on both sides.
+        // The temporal window is [issued_at, exp) — used_at >= exp is expired, matching the resource
+        // shim's `now >= exp` rejection (so the verifier is not more lenient than the gateway).
+        if action != g.action
+            || resource_id != g.resource_id
+            || cnf_kid != g.cnf_kid
+            || used_at < g.issued_at
+            || used_at >= g.exp
+        {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("action/resource/cnf/window does not match grant '{gid}' — violation"));
+            continue;
+        }
+        // Single-use (R5 rev 4): per-grant_id at most once, regardless of jti; jti must equal grant_id.
+        let single = g.scope_class == "single_operation";
+        if single && jti != gid {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("single_operation grant '{gid}' requires use_evidence.jti == grant_id (R5) — violation"));
+            continue;
+        }
+        if single && g.used >= 1 {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("single-use grant '{gid}' exercised more than once — double-spend (R5)"));
+            continue;
+        }
+        g.used += 1;
+        uses_matched += 1;
+        // R6: no signed operation taxonomy validates scope_class==single_operation, so a matched use is
+        // a demonstrator artifact (action_unverified) and never contributes to an attested_complete
+        // upgrade.
+        uses_action_unverified += 1;
+    }
+    let grants_unused = grants_by_id.values().filter(|g| g.used == 0).count();
+
     let coverage_manifest = bundle.get("coverage_manifest").cloned();
 
     let first_broken_link = issues.first().cloned();
@@ -1181,6 +1395,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         disclosures_verified,
         grant_total,
         grant_verified,
+        uses_total,
+        uses_matched,
+        uses_action_unverified,
+        unmatched_violation,
+        unmatched_pending,
+        grants_unused,
         coverage_manifest,
         issues,
         first_broken_link,
