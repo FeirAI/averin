@@ -16,6 +16,11 @@ type Record struct {
 	ContentHash string // sha256:...
 	SessionID   string
 	Parents     []string // causal_prev_hashes
+	// Disclosures are the secrets that open this record's committed low-entropy fields. They are
+	// persisted ATOMICALLY with the record (and only when the record is freshly created), so a
+	// committed field can never end up in a sealed record with no way to disclose it. Empty for
+	// records without committed fields. Ignored on an idempotent/collapsed PutRecord.
+	Disclosures []DisclosureSecret
 }
 
 // Checkpoint is a sealed (and possibly anchored) checkpoint.
@@ -58,10 +63,9 @@ type Store interface {
 	NextCheckpointSeq(projectID string) (int64, error)
 	LatestCheckpointHash(projectID string) (string, bool, error)
 
-	// PutDisclosure records the secret that opens one committed field, keyed by (record_id, field).
-	// Idempotent: re-recording the same (record_id, field) is a no-op (the commitment is immutable).
-	PutDisclosure(projectID string, d DisclosureSecret) error
-	// Disclosures returns every disclosure secret for the project (for selective_disclosure export).
+	// Disclosures returns every disclosure secret for the project (for selective_disclosure export),
+	// in canonical (record_id, field) order. Disclosure secrets are written atomically with their
+	// record via PutRecord (Record.Disclosures); there is no separate write path.
 	Disclosures(projectID string) ([]DisclosureSecret, error)
 }
 
@@ -122,6 +126,16 @@ func (m *Mem) PutRecord(projectID, idemKey string, rec Record) (Record, bool, er
 	p.byHash[rec.ContentHash] = struct{}{}
 	if idemKey != "" {
 		p.idem[idemKey] = idx
+	}
+	// Persist this record's disclosure secrets atomically with it (same lock). Dedup on
+	// (record_id, field) so a malformed slice can't double-record.
+	for _, d := range rec.Disclosures {
+		key := d.RecordID + "\x00" + d.Field
+		if _, ok := p.discSeen[key]; ok {
+			continue
+		}
+		p.discSeen[key] = struct{}{}
+		p.disclosure = append(p.disclosure, d)
 	}
 	return rec, true, nil
 }
@@ -236,19 +250,6 @@ func (m *Mem) LatestCheckpointHash(projectID string) (string, bool, error) {
 		return "", false, nil
 	}
 	return p.checks[len(p.checks)-1].CheckpointHash, true, nil
-}
-
-func (m *Mem) PutDisclosure(projectID string, d DisclosureSecret) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p := m.proj(projectID)
-	key := d.RecordID + "\x00" + d.Field
-	if _, ok := p.discSeen[key]; ok {
-		return nil // idempotent: the commitment for (record_id, field) is immutable
-	}
-	p.discSeen[key] = struct{}{}
-	p.disclosure = append(p.disclosure, d)
-	return nil
 }
 
 func (m *Mem) Disclosures(projectID string) ([]DisclosureSecret, error) {

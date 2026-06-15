@@ -11,6 +11,7 @@ import (
 
 	"github.com/feir-dev/feir/server/internal/api"
 	"github.com/feir-dev/feir/server/internal/auth"
+	"github.com/feir-dev/feir/server/internal/content"
 	"github.com/feir-dev/feir/server/internal/core"
 	"github.com/feir-dev/feir/server/internal/meter"
 	"github.com/feir-dev/feir/server/internal/store"
@@ -50,6 +51,18 @@ func main() {
 		log.Printf("per-project API-key auth enabled (%d projects)", n)
 	} else {
 		log.Printf("WARNING: no FEIR_API_KEYS set — the app API is UNAUTHENTICATED (dev/single-tenant only)")
+	}
+	// durable content store for committed low-entropy values (raw input/output/rationale). No dir =
+	// in-memory (NOT durable; disclosures won't survive a restart).
+	if dir := os.Getenv("FEIR_CONTENT_DIR"); dir != "" {
+		cs, err := content.NewFSStore(dir)
+		if err != nil {
+			log.Fatalf("content store: %v", err)
+		}
+		srv.WithContent(cs)
+		log.Printf("content store -> %s", dir)
+	} else {
+		log.Printf("WARNING: no FEIR_CONTENT_DIR set — committed raw values are in-memory (not durable)")
 	}
 	// customer witness for sealed checkpoints (append-only).
 	if dir := os.Getenv("FEIR_WITNESS_DIR"); dir != "" {

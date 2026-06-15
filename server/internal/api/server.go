@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/feir-dev/feir/server/internal/auth"
+	"github.com/feir-dev/feir/server/internal/content"
 	"github.com/feir-dev/feir/server/internal/meter"
 	"github.com/feir-dev/feir/server/internal/otel"
 	"github.com/feir-dev/feir/server/internal/store"
@@ -28,13 +30,17 @@ type Sealer interface {
 	SealCheckpoint(bodyJSON string) (string, error)
 	VerifyBundle(bundleJSON string) string
 	PubKey() string
+	// content commitments (RCP §9.3): mint a nonce and commit a low-entropy field at ingest.
+	RandomNonce() (string, error)
+	Commit(domain string, value []byte, nonceHex string) (string, error)
 }
 
 type Server struct {
 	core         Sealer
 	st           store.Store
+	content      content.Store // raw low-entropy values (committed at ingest, revealed on disclosure)
 	meter        meter.Meter
-	auth         auth.KeyStore  // nil = no per-project auth (dev/single-tenant)
+	auth         auth.KeyStore   // nil = no per-project auth (dev/single-tenant)
 	witness      witness.Witness // nil = no external witness configured
 	signingKeyID string
 	keyValidFrom string
@@ -51,11 +57,19 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 	return &Server{
 		core:         core,
 		st:           st,
+		content:      content.NewMemStore(), // in-memory by default; WithContent for a durable store
 		meter:        meter.NewMem(),
 		signingKeyID: signingKeyID,
 		keyValidFrom: "2026-01-01T00:00:00.000Z",
 		now:          time.Now,
 	}
+}
+
+// WithContent swaps in a durable content store (e.g. content.NewFSStore) for the raw low-entropy
+// values committed at ingest. Defaults to in-memory.
+func (s *Server) WithContent(c content.Store) *Server {
+	s.content = c
+	return s
 }
 
 // WithMeter swaps in a usage meter (e.g. a Stripe reporter). Returns the server for chaining.
@@ -245,6 +259,15 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	// authority is declared by default — never silently presented as verified (threat #4).
 	normalizeAuthority(rec)
 
+	// Replace any raw input/output/rationale with a hiding commitment (RCP §9.3, threat #6); the
+	// plaintext goes to the content store and never enters the signed body. The disclosure secrets
+	// ride along on the Record so PutRecord persists them ATOMICALLY with the record (and only when
+	// it creates it), so a committed field can never be sealed with no way to disclose it.
+	disclosures, err := s.commitLowEntropyFields(rec, stringField(rec, "record_id"))
+	if err != nil {
+		return "", false, fmt.Errorf("commit fields: %w", err)
+	}
+
 	// signing key block
 	rec["key"] = map[string]any{
 		"signing_key_id": s.signingKeyID,
@@ -264,7 +287,7 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 
 	ch, parents, sess := recordMeta(sealed)
 	stored, created, err := s.st.PutRecord(projectID, idem, store.Record{
-		JSON: sealed, ContentHash: ch, SessionID: sess, Parents: parents,
+		JSON: sealed, ContentHash: ch, SessionID: sess, Parents: parents, Disclosures: disclosures,
 	})
 	if err != nil {
 		return "", false, err
@@ -273,6 +296,56 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 		s.meter.RecordsIngested(projectID, 1) // billable per record beyond the free tier
 	}
 	return stored.JSON, created, nil
+}
+
+// commitLowEntropyFields replaces each raw input/output/rationale field in rec with a hiding
+// commitment {alg, commitment, low_entropy}, storing the raw value content-addressed and minting a
+// fresh nonce. It returns the disclosure secrets (bound to recordID) to persist atomically with the
+// record. The plaintext is deleted from rec so it never enters the signed body (and would otherwise
+// be rejected by the closed schema).
+func (s *Server) commitLowEntropyFields(rec map[string]any, recordID string) ([]store.DisclosureSecret, error) {
+	var out []store.DisclosureSecret
+	for _, field := range []string{"input", "output", "rationale"} {
+		v, ok := rec[field]
+		if !ok {
+			continue
+		}
+		raw, err := rawValueBytes(v)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", field, err)
+		}
+		addr, err := s.content.Put(context.Background(), raw)
+		if err != nil {
+			return nil, fmt.Errorf("store %s content: %w", field, err)
+		}
+		nonce, err := s.core.RandomNonce()
+		if err != nil {
+			return nil, fmt.Errorf("nonce: %w", err)
+		}
+		commitment, err := s.core.Commit(field, raw, nonce)
+		if err != nil {
+			return nil, fmt.Errorf("commit %s: %w", field, err)
+		}
+		rec[field+"_commit"] = map[string]any{
+			"alg":         "sha256",
+			"commitment":  commitment,
+			"low_entropy": true,
+		}
+		delete(rec, field)
+		out = append(out, store.DisclosureSecret{
+			RecordID: recordID, Field: field, ValueDigest: addr.Digest, NonceHex: nonce,
+		})
+	}
+	return out, nil
+}
+
+// rawValueBytes is the byte form of a low-entropy field that gets committed: a string verbatim, any
+// other JSON value as its marshaled bytes (so the disclosed value round-trips exactly what was sent).
+func rawValueBytes(v any) ([]byte, error) {
+	if s, ok := v.(string); ok {
+		return []byte(s), nil
+	}
+	return json.Marshal(v)
 }
 
 // normalizeAuthority enforces honest authority labeling. In Phase 1 the server does not yet verify
@@ -484,27 +557,60 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.meter.ExportIssued(projectID) // billable per export
-	// attach an honest gap_report + mode (selective_disclosure / full_evidence raw blobs are stored
-	// on customer infra; this dev store keeps commitments only — stated, not implied).
 	var obj map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(bundle), &obj)
-	// Honest gap_report: this deployment bundles commitments only; raw blobs live in the customer
-	// content store and are NOT in the bundle (so raw_content_available is false until that store is
-	// wired — we never claim disclosure we don't ship). spec §10.
 	obj["mode"], _ = jsonRaw(mode)
+
+	// For a disclosing mode, attach the (value, nonce) for every committed field so an offline
+	// verifier can confirm each disclosure against its record's commitment (RCP §9.3). proof_only
+	// ships commitments only.
+	rawAvailable := false
 	gaps := []string{"Level-2 observation scope is per-record; Level-3 completeness not claimed"}
-	if mode != "proof_only" {
-		gaps = append(gaps, "raw content (selective_disclosure/full_evidence) requires the customer content store, not configured in this deployment")
+	if mode == "selective_disclosure" || mode == "full_evidence" {
+		disclosures, err := s.buildDisclosures(projectID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		obj["disclosures"], _ = jsonRaw(disclosures)
+		rawAvailable = len(disclosures) > 0
+		if !rawAvailable {
+			gaps = append(gaps, "no committed low-entropy fields were recorded for this project, so there is nothing to disclose")
+		}
 	}
 	obj["gap_report"], _ = jsonRaw(map[string]any{
 		"mapped_fields":         []string{"record integrity", "checkpoint chain", "declared authority"},
 		"customer_supplied":     []string{"raw input/output/rationale blobs (content store)"},
 		"gaps":                  gaps,
-		"raw_content_available": false,
+		"raw_content_available": rawAvailable,
 	})
 	out, _ := json.Marshal(obj)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(out)
+}
+
+// buildDisclosures turns the project's stored disclosure secrets into the bundle's `disclosures`
+// array: {record_id, field, value_b64, nonce_hex}. The raw value is fetched from the content store
+// (which re-verifies its digest on read) and re-encoded base64url-no-pad for the verifier. Never nil.
+func (s *Server) buildDisclosures(projectID string) ([]map[string]any, error) {
+	secrets, err := s.st.Disclosures(projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(secrets))
+	for _, d := range secrets {
+		raw, err := s.content.Get(context.Background(), d.ValueDigest)
+		if err != nil {
+			return nil, fmt.Errorf("disclose %s/%s: %w", d.RecordID, d.Field, err)
+		}
+		out = append(out, map[string]any{
+			"record_id": d.RecordID,
+			"field":     d.Field,
+			"value_b64": base64.RawURLEncoding.EncodeToString(raw),
+			"nonce_hex": d.NonceHex,
+		})
+	}
+	return out, nil
 }
 
 // buildBundle assembles the export/verify bundle: published key, all sealed records, and the full

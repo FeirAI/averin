@@ -133,7 +133,11 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 	`, projectID, idemKey, rec.ContentHash, rec.SessionID, parents, rec.JSON).Scan(&inserted)
 	switch {
 	case err == nil:
-		// Inserted a fresh row.
+		// Inserted a fresh row. Persist its disclosure secrets in the SAME transaction so a committed
+		// field can never end up durably sealed with no way to disclose it (atomic with the record).
+		if err := insertDisclosures(ctx, tx, projectID, rec.Disclosures); err != nil {
+			return Record{}, false, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return Record{}, false, fmt.Errorf("store: commit: %w", err)
 		}
@@ -438,18 +442,18 @@ func (p *Postgres) NextCheckpointSeq(projectID string) (int64, error) {
 	return n, nil
 }
 
-// PutDisclosure records the secret that opens one committed field. Insert-only and idempotent on
-// (project_id, record_id, field): ON CONFLICT DO NOTHING, since the commitment for a field is
-// immutable once sealed (re-ingesting the same record must not change or duplicate its disclosure).
-func (p *Postgres) PutDisclosure(projectID string, d DisclosureSecret) error {
-	ctx := background()
-	_, err := p.pool.Exec(ctx, `
-		INSERT INTO disclosures (project_id, record_id, field, value_digest, nonce_hex)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (project_id, record_id, field) DO NOTHING
-	`, projectID, d.RecordID, d.Field, d.ValueDigest, d.NonceHex)
-	if err != nil {
-		return fmt.Errorf("store: put disclosure: %w", err)
+// insertDisclosures writes a record's disclosure secrets inside the caller's transaction. Insert-only
+// and idempotent on (project_id, record_id, field): ON CONFLICT DO NOTHING, since the commitment for
+// a field is immutable once sealed.
+func insertDisclosures(ctx context.Context, tx pgx.Tx, projectID string, ds []DisclosureSecret) error {
+	for _, d := range ds {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO disclosures (project_id, record_id, field, value_digest, nonce_hex)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (project_id, record_id, field) DO NOTHING
+		`, projectID, d.RecordID, d.Field, d.ValueDigest, d.NonceHex); err != nil {
+			return fmt.Errorf("store: insert disclosure: %w", err)
+		}
 	}
 	return nil
 }

@@ -126,8 +126,11 @@ func TestPostgresAppendOnlyRejectsMutation(t *testing.T) {
 	defer done()
 	ctx := context.Background()
 
-	// Seed one record + checkpoint as the owner so there is a row to attempt to mutate.
-	if _, _, err := p.PutRecord("p", "k", rec("sha256:ao", "s")); err != nil {
+	// Seed one record (carrying a disclosure) + checkpoint as the owner so each history table has a
+	// row to attempt to mutate.
+	seed := rec("sha256:ao", "s")
+	seed.Disclosures = []DisclosureSecret{{RecordID: "ao", Field: "input", ValueDigest: "sha256:dv", NonceHex: "aa"}}
+	if _, _, err := p.PutRecord("p", "k", seed); err != nil {
 		t.Fatalf("seed record: %v", err)
 	}
 	if err := p.PutCheckpoint("p", Checkpoint{JSON: "{}", CheckpointHash: "sha256:c", Seq: 0}); err != nil {

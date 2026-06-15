@@ -95,6 +95,96 @@ func TestIngestSealCheckpointVerifyExport(t *testing.T) {
 	}
 }
 
+func TestContentCommitmentAndSelectiveDisclosure(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	srv := api.New(c, store.NewMem(), "k0")
+	h := srv.Routes()
+
+	// Ingest a record carrying raw low-entropy fields (input + output).
+	rec, _ := postRecord(t, h, `{"idempotency_key":"k1","project_id":"p1","session_id":"s1","action":"db.query","input":"SELECT balance FROM accounts WHERE id=42","output":"balance=1204"}`)
+
+	// The sealed record must carry commitments, NOT the plaintext.
+	if _, leaked := rec["input"]; leaked {
+		t.Fatalf("raw input leaked into the signed record: %v", rec)
+	}
+	if _, leaked := rec["output"]; leaked {
+		t.Fatalf("raw output leaked into the signed record: %v", rec)
+	}
+	ic, _ := rec["input_commit"].(map[string]any)
+	if ic == nil || !strings.HasPrefix(asString(ic["commitment"]), "sha256:") {
+		t.Fatalf("no input_commit: %v", rec)
+	}
+	if _, ok := rec["output_commit"]; !ok {
+		t.Fatalf("no output_commit: %v", rec)
+	}
+
+	// A retry under the same idempotency key must NOT create a second set of disclosures.
+	if _, created := postRecord(t, h, `{"idempotency_key":"k1","project_id":"p1","session_id":"s1","action":"db.query","input":"SELECT balance FROM accounts WHERE id=42","output":"balance=1204"}`); created {
+		t.Fatal("retry under the same idempotency key created a new record")
+	}
+
+	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint (%d): %s", code, resp)
+	}
+
+	// proof_only: commitments only, nothing disclosed.
+	_, proof := do(t, h, "GET", "/v2/export?project=p1&mode=proof_only", "")
+	if strings.Contains(proof, `"disclosures"`) {
+		t.Fatalf("proof_only must not disclose raw values: %s", proof)
+	}
+	if !strings.Contains(proof, `"raw_content_available":false`) {
+		t.Fatalf("proof_only should report raw_content_available:false: %s", proof)
+	}
+
+	// selective_disclosure: both fields disclosed, and the offline verifier confirms both against the
+	// sealed commitments (still a single retry => exactly 2 disclosures, not 4).
+	code, exp := do(t, h, "GET", "/v2/export?project=p1&mode=selective_disclosure", "")
+	if code != http.StatusOK {
+		t.Fatalf("export (%d): %s", code, exp)
+	}
+	if !strings.Contains(exp, `"raw_content_available":true`) {
+		t.Fatalf("selective_disclosure should report raw_content_available:true: %s", exp)
+	}
+	report := c.VerifyBundle(exp)
+	if !strings.Contains(report, `"ok":true`) {
+		t.Fatalf("disclosing bundle should verify ok:\nbundle=%s\nreport=%s", exp, report)
+	}
+	if !strings.Contains(report, `"disclosures_total":2`) || !strings.Contains(report, `"disclosures_verified":2`) {
+		t.Fatalf("both disclosures should verify: %s", report)
+	}
+
+	// Tamper: substitute a disclosed value -> the verifier must reject the bundle.
+	tampered := tamperFirstDisclosure(t, exp)
+	if rep := c.VerifyBundle(tampered); strings.Contains(rep, `"ok":true`) {
+		t.Fatalf("a tampered disclosure must fail the bundle, got ok:true: %s", rep)
+	} else if !strings.Contains(rep, "does not match") {
+		t.Fatalf("expected a commitment-mismatch issue, got: %s", rep)
+	}
+}
+
+func asString(v any) string { s, _ := v.(string); return s }
+
+// tamperFirstDisclosure replaces disclosures[0].value_b64 with a different value, returning the
+// re-serialized bundle.
+func tamperFirstDisclosure(t *testing.T, bundle string) string {
+	t.Helper()
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(bundle), &obj); err != nil {
+		t.Fatalf("unmarshal bundle: %v", err)
+	}
+	var disc []map[string]any
+	if err := json.Unmarshal(obj["disclosures"], &disc); err != nil || len(disc) == 0 {
+		t.Fatalf("unmarshal disclosures: %v (%s)", err, obj["disclosures"])
+	}
+	disc[0]["value_b64"] = "ZG9jdG9yZWQ" // base64url("doctored"), not the committed value
+	obj["disclosures"], _ = json.Marshal(disc)
+	out, _ := json.Marshal(obj)
+	return string(out)
+}
+
 func TestIdempotencyCollapsesRetries(t *testing.T) {
 	h := newSrv(t)
 	a, createdA := postRecord(t, h, `{"idempotency_key":"dup","project_id":"p1","session_id":"s1","action":"charge"}`)
