@@ -28,6 +28,23 @@ jobs:
       - name: build verify CLI
         run: cargo build --release --bin feir-verify
 
+  server:
+    name: go server (cgo -> rust core; ingestion + verify pipeline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: build rust staticlib (cgo links it)
+        run: cargo build -p feir-decision-core
+      - name: go vet + test
+        working-directory: server
+        run: |
+          go vet ./...
+          go test ./...
+
   wasm:
     name: wasm build (verifier skew gate — same core, byte-for-byte)
     runs-on: ubuntu-latest
