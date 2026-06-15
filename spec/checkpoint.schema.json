@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://feir.dev/spec/checkpoint.schema.json",
+  "title": "feir Checkpoint v2",
+  "description": "Frontier checkpoint: commits the set of head content-hashes for one project, hash-chained and externally anchored. Structure only — RCP §9.4/§10 defines canonical bytes, frontier computation, and the offline verification algorithm. The `anchor` block is added AFTER signing and is excluded from checkpoint_hash/sig.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "canon_version", "domain",
+    "checkpoint_id", "project_id", "checkpoint_seq", "prev_checkpoint_hash",
+    "frontier", "record_count", "created_ts", "checkpoint_hash", "sig", "key"
+  ],
+  "properties": {
+    "schema_version": { "const": "2" },
+    "canon_version": { "const": "rcp-1" },
+    "domain": { "const": "flightrecorder.checkpoint.v2" },
+
+    "checkpoint_id": { "type": "string" },
+    "project_id": { "type": "string" },
+    "checkpoint_seq": { "type": "integer", "minimum": 0 },
+    "prev_checkpoint_hash": { "anyOf": [ { "$ref": "#/$defs/sha256" }, { "type": "null" } ] },
+    "frontier": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true,
+      "description": "de-duplicated AND byte-sorted head content-hashes (RCP §10); schema cannot assert sortedness" },
+    "record_count": { "type": "integer", "minimum": 0 },
+    "created_ts": { "$ref": "#/$defs/ts" },
+
+    "checkpoint_hash": { "$ref": "#/$defs/sha256" },
+    "sig": { "$ref": "#/$defs/ed25519" },
+    "key": {
+      "type": "object", "additionalProperties": false,
+      "required": ["signing_key_id","key_epoch","key_status"],
+      "properties": {
+        "signing_key_id": { "type": "string" },
+        "key_epoch": { "type": "integer", "minimum": 0 },
+        "key_valid_from": { "$ref": "#/$defs/ts" },
+        "key_valid_until": { "$ref": "#/$defs/ts" },
+        "key_status": { "enum": ["active","retired","revoked","compromised"] },
+        "status_changed_at": { "$ref": "#/$defs/ts" },
+        "key_attestation_ref": { "type": ["string","null"] }
+      }
+    },
+
+    "anchor": {
+      "type": "object", "additionalProperties": false,
+      "description": "added AFTER signing; excluded from checkpoint_hash/sig preimage",
+      "required": ["scheme"],
+      "properties": {
+        "scheme": { "enum": ["rfc3161", "test-anchor"] },
+        "token_b64": { "type": "string", "description": "DER TimeStampToken (RFC3161) or test-anchor token, base64" },
+        "anchored_ts": { "type": "string", "description": "anchor time as reported by the TSA; precision may exceed ms — preserved verbatim" },
+        "tsa_url": { "type": "string" },
+        "witness_uri": { "type": "string" },
+        "witness_object_version": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "ed25519": { "type": "string", "pattern": "^ed25519:[A-Za-z0-9_-]{86}$" },
+    "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$" }
+  }
+}

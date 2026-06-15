@@ -1,0 +1,34 @@
+# Rust
+/target
+**/target
+Cargo.lock.bak
+
+# Go
+/bin
+*.test
+*.out
+
+# Node / web
+node_modules
+dist
+.svelte-kit
+.vite
+
+# Python
+__pycache__/
+*.py[cod]
+.venv
+*.egg-info
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+!spec/**/*.key   # test-only deterministic keys live under spec/
+
+# OS / editor
+.DS_Store
+.idea
+.vscode
+*.swp

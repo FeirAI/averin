@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://feir.dev/spec/decision-record.schema.json",
+  "title": "feir Decision Record v2",
+  "description": "Machine-checkable shape of a Decision Record. The hard canonicalization/crypto rules live in RCP v1 (rcp-1.md) and are enforced by decision-core; this schema documents structure and types. NOTE: JSON Schema cannot express RCP rules (no-floats, NFC, duplicate-key rejection, domain-separated preimages) — those are golden-vector tested.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "canon_version", "domain",
+    "record_id", "project_id", "agent_id", "agent_version", "session_id",
+    "span_id", "parent_span_id", "causal_prev_hashes", "display_seq",
+    "agent_ts", "received_ts",
+    "event_type", "action", "observed_via", "status",
+    "content_hash", "sig", "key"
+  ],
+  "properties": {
+    "schema_version": { "const": "2" },
+    "canon_version": { "const": "rcp-1" },
+    "domain": { "const": "flightrecorder.record.v2" },
+
+    "record_id": { "type": "string" },
+    "project_id": { "type": "string" },
+    "agent_id": { "type": "string" },
+    "agent_version": { "type": "string" },
+    "session_id": { "type": "string" },
+
+    "span_id": { "type": "string" },
+    "parent_span_id": { "type": ["string", "null"] },
+    "causal_prev_hashes": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true, "description": "de-duplicated AND byte-sorted ascending (RCP §7); schema cannot assert sortedness — RCP enforces it" },
+    "display_seq": { "type": "integer", "minimum": 0 },
+
+    "agent_ts": { "$ref": "#/$defs/ts" },
+    "received_ts": { "$ref": "#/$defs/ts" },
+    "anchored_ts": { "$ref": "#/$defs/ts" },
+
+    "event_type": { "enum": ["llm_call","tool_call","decision","approval_gate","handoff","spawn_child","incomplete"] },
+    "action": { "type": "string" },
+    "observed_via": { "enum": ["proxy","sdk","otel"] },
+    "input_commit": { "$ref": "#/$defs/commit" },
+    "output_commit": { "$ref": "#/$defs/commit" },
+    "rationale_commit": { "$ref": "#/$defs/commit" },
+    "status": { "enum": ["ok","error","blocked","pending_approval","incomplete"] },
+    "tokens": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "in": { "type": "integer" }, "out": { "type": "integer" } }
+    },
+    "cost_micros_usd": { "type": "integer", "description": "integer micro-USD; NO floats in signed records" },
+
+    "authority": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": { "enum": ["caller_declared","policy_engine_signed","human_signed","gateway_enforced"] },
+        "enforcement_point": { "enum": ["sdk","proxy","tool_gateway","credential_broker","external"] },
+        "decision_basis": { "enum": ["auto","human_approved","policy_allowed","policy_denied"] },
+        "policy_hash": { "$ref": "#/$defs/sha256" },
+        "policy_snapshot_ref": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "uri": {"type":"string"}, "digest": {"$ref":"#/$defs/sha256"}, "object_version": {"type":"string"} }
+        },
+        "grant_id": { "type": "string" },
+        "grant_type": { "enum": ["id-jag","oauth-scope","role","none"] },
+        "authorizing_principal": { "type": "string" },
+        "delegation_chain": { "type": "array", "items": { "type": "string" } },
+        "evidence_hash": { "$ref": "#/$defs/sha256" },
+        "evidence_sig": { "anyOf": [ { "$ref": "#/$defs/ed25519" }, { "type": "null" } ] },
+        "evaluated_at": { "$ref": "#/$defs/ts" },
+        "expires_at": { "$ref": "#/$defs/ts" },
+        "nonce": { "type": "string" }
+      }
+    },
+
+    "content": {
+      "type": "object", "additionalProperties": false,
+      "description": "when present, the address is mandatory (mutable keys are threat #5)",
+      "required": ["uri", "digest", "length", "object_version"],
+      "properties": {
+        "uri": { "type": "string" },
+        "digest": { "$ref": "#/$defs/sha256" },
+        "length": { "type": "integer", "minimum": 0 },
+        "content_type": { "type": "string" },
+        "enc_key_id": { "type": "string" },
+        "object_version": { "type": "string" }
+      }
+    },
+
+    "content_hash": { "$ref": "#/$defs/sha256" },
+    "sig": { "$ref": "#/$defs/ed25519" },
+    "key": {
+      "type": "object", "additionalProperties": false,
+      "required": ["signing_key_id","key_epoch","key_status"],
+      "properties": {
+        "signing_key_id": { "type": "string" },
+        "key_epoch": { "type": "integer", "minimum": 0 },
+        "key_valid_from": { "$ref": "#/$defs/ts" },
+        "key_valid_until": { "$ref": "#/$defs/ts" },
+        "key_status": { "enum": ["active","retired","revoked","compromised"] },
+        "status_changed_at": { "$ref": "#/$defs/ts", "description": "REQUIRED iff key_status is revoked|compromised (RCP §10.2); attested by key_attestation_ref" },
+        "key_attestation_ref": { "type": ["string","null"] },
+        "rotation_prev_key_sig": { "anyOf": [ { "$ref": "#/$defs/ed25519" }, { "type": "null" } ] }
+      },
+      "allOf": [
+        { "if": { "properties": { "key_status": { "enum": ["revoked","compromised"] } } },
+          "then": { "required": ["status_changed_at"] } }
+      ]
+    },
+
+    "framework": { "type": "string" },
+    "extensions": { "type": "object" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "ed25519": { "type": "string", "pattern": "^ed25519:[A-Za-z0-9_-]{86}$", "description": "64-byte signature, base64url no-pad = 86 chars; RCP also length-checks the decoded bytes" },
+    "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$", "description": "RFC3339 UTC, fixed millisecond precision. Regex is shape-only; the core MUST additionally validate the calendar date/time semantically (month 1-12, day-of-month, etc.). TSA-supplied anchor times of differing precision are preserved in the anchor block, not coerced into a signed record field." },
+    "commit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["alg","commitment","low_entropy"],
+      "properties": {
+        "alg": { "const": "sha256" },
+        "commitment": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "low_entropy": { "type": "boolean" }
+      }
+    }
+  }
+}

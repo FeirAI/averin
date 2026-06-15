@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  core:
+    name: rust decision-core (golden vectors + adversarial fixtures)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test (golden vectors are the acceptance gate)
+        run: cargo test --all-features
+      - name: build verify CLI
+        run: cargo build --release --bin feir-verify
+
+  wasm:
+    name: wasm build (verifier skew gate — same core, byte-for-byte)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: build wasm
+        run: cargo build --release --target wasm32-unknown-unknown --lib --features wasm
