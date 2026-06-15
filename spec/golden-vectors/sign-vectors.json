@@ -1,0 +1,16 @@
+{
+  "profile": "rcp-1",
+  "description": "Ed25519 signing + hiding-commitment vectors. Ed25519 is deterministic, so an implementation MUST reproduce `sig` exactly from `seed_hex` over the record body.",
+  "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "pubkey": "ed25519pub:A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "record_body": "{\n  \"schema_version\": \"2\",\n  \"canon_version\": \"rcp-1\",\n  \"domain\": \"flightrecorder.record.v2\",\n  \"record_id\": \"11111111-1111-1111-1111-111111111111\",\n  \"project_id\": \"22222222-2222-2222-2222-222222222222\",\n  \"agent_id\": \"billing-agent\",\n  \"agent_version\": \"1.4.2\",\n  \"session_id\": \"33333333-3333-3333-3333-333333333333\",\n  \"span_id\": \"span-0001\",\n  \"parent_span_id\": null,\n  \"causal_prev_hashes\": [],\n  \"display_seq\": 0,\n  \"agent_ts\": \"2026-06-15T10:00:00.000Z\",\n  \"received_ts\": \"2026-06-15T10:00:00.123Z\",\n  \"event_type\": \"llm_call\",\n  \"action\": \"chat.completions\",\n  \"observed_via\": \"proxy\",\n  \"status\": \"ok\",\n  \"tokens\": { \"in\": 1200, \"out\": 300 },\n  \"cost_micros_usd\": 18000,\n  \"key\": {\n    \"signing_key_id\": \"key-2026-06\",\n    \"key_epoch\": 7,\n    \"key_valid_from\": \"2026-06-01T00:00:00.000Z\",\n    \"key_status\": \"active\"\n  },\n  \"framework\": \"openai-agents\"\n}",
+  "content_hash": "sha256:652244a75682c836d37423dd81172eeeeded649808995785382236fac482ffb8",
+  "sig": "ed25519:hUSXxW3yFot4FyLMQnvS53PNLTGRlS2TtnTS-Pl6Q37eEqTNd16V1XvoYreMfbN6tgdHEWiK8jzLtg7Qd3SYAA",
+  "commitment": {
+    "field_domain": "input",
+    "value": "transfer $900.00 to acct 0xDEADBEEF",
+    "value_hex": "7472616e7366657220243930302e303020746f20616363742030784445414442454546",
+    "nonce_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "commitment": "sha256:4f7489372a70598d19948d2776d42332ecc033eb40a266d1c6f3d034a5df189d"
+  }
+}

@@ -3,6 +3,8 @@
 
 use crate::canon::CanonValue;
 use crate::hashx::{lp_str_into, sha256_prefixed};
+use crate::sign;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 
 pub const RECORD_DOMAIN: &str = "flightrecorder.record.v2";
 pub const CANON_VERSION: &str = "rcp-1";
@@ -16,6 +18,8 @@ pub enum RecordError {
     CanonVersionMismatch { expected: String, found: String },
     TooLong,
     ContentHashMismatch { expected: String, computed: String },
+    SignatureInvalid(String),
+    UnknownField(String),
 }
 
 impl std::fmt::Display for RecordError {
@@ -40,10 +44,96 @@ impl std::fmt::Display for RecordError {
                     "content_hash mismatch: stored {expected}, computed {computed}"
                 )
             }
+            RecordError::SignatureInvalid(e) => write!(f, "signature invalid: {e}"),
+            RecordError::UnknownField(k) => {
+                write!(
+                    f,
+                    "unknown top-level field '{k}' (only 'extensions' may hold unknown keys)"
+                )
+            }
         }
     }
 }
 impl std::error::Error for RecordError {}
+
+/// The closed set of permitted top-level record keys (schema v2). RCP §6: unknown signed fields
+/// are rejected; only `extensions` may hold arbitrary keys.
+pub const ALLOWED_TOP_KEYS: &[&str] = &[
+    "schema_version",
+    "canon_version",
+    "domain",
+    "record_id",
+    "project_id",
+    "agent_id",
+    "agent_version",
+    "session_id",
+    "span_id",
+    "parent_span_id",
+    "causal_prev_hashes",
+    "display_seq",
+    "agent_ts",
+    "received_ts",
+    "anchored_ts",
+    "event_type",
+    "action",
+    "observed_via",
+    "input_commit",
+    "output_commit",
+    "rationale_commit",
+    "status",
+    "tokens",
+    "cost_micros_usd",
+    "authority",
+    "content",
+    "content_hash",
+    "sig",
+    "key",
+    "framework",
+    "extensions",
+];
+
+/// Required top-level keys (schema v2). Absent ⇒ invalid.
+pub const REQUIRED_TOP_KEYS: &[&str] = &[
+    "schema_version",
+    "canon_version",
+    "domain",
+    "record_id",
+    "project_id",
+    "agent_id",
+    "agent_version",
+    "session_id",
+    "span_id",
+    "parent_span_id",
+    "causal_prev_hashes",
+    "display_seq",
+    "agent_ts",
+    "received_ts",
+    "event_type",
+    "action",
+    "observed_via",
+    "status",
+    "content_hash",
+    "sig",
+    "key",
+];
+
+/// Enforce the schema-v2 top-level shape: object, no unknown top-level keys (RCP §6), all
+/// required keys present. (Nested `additionalProperties:false` is validated by the JSON Schema in
+/// `/spec`; deeper structural checks land with the bundle verifier.)
+pub fn validate_record_shape(record: &CanonValue) -> Result<(), RecordError> {
+    let members = record.as_object().ok_or(RecordError::NotObject)?;
+    for (k, _) in members {
+        if !ALLOWED_TOP_KEYS.contains(&k.as_str()) {
+            return Err(RecordError::UnknownField(k.clone()));
+        }
+    }
+    for req in REQUIRED_TOP_KEYS {
+        if record.get(req).is_none() {
+            return Err(RecordError::MissingField(req));
+        }
+    }
+    Ok(())
+}
 
 fn str_field<'a>(obj: &'a CanonValue, key: &'static str) -> Result<&'a str, RecordError> {
     obj.get(key)
@@ -102,4 +192,45 @@ pub fn verify_content_hash(record: &CanonValue) -> Result<(), RecordError> {
         });
     }
     Ok(())
+}
+
+/// Return a clone of an object with `key` set to `value` (overwriting if present, else appended
+/// in insertion order). Panics only if called on a non-object.
+fn with_field(obj: &CanonValue, key: &str, value: CanonValue) -> CanonValue {
+    let mut members = obj.as_object().expect("with_field on non-object").clone();
+    if let Some(slot) = members.iter_mut().find(|(k, _)| k == key) {
+        slot.1 = value;
+    } else {
+        members.push((key.to_string(), value));
+    }
+    CanonValue::Object(members)
+}
+
+/// Seal a record body: compute `content_hash` (RCP §9.1), sign it (RCP §9.2), and return the
+/// record with both fields set. Any pre-existing `content_hash`/`sig` are ignored for hashing
+/// and overwritten.
+pub fn seal(record: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
+    let content_hash = compute_content_hash(record)?;
+    let sig = sign::sign(sign::RECORD_SIG_TAG, &content_hash, sk);
+    let stripped = record.without_keys(&["content_hash", "sig"]);
+    let with_hash = with_field(&stripped, "content_hash", CanonValue::Str(content_hash));
+    Ok(with_field(&with_hash, "sig", CanonValue::Str(sig)))
+}
+
+/// Verify a record's `sig` against the given verifying key (RCP §9.2). Does **not** re-check the
+/// `content_hash` — call [`verify_content_hash`] first (or use [`verify_sealed`]).
+pub fn verify_signature(record: &CanonValue, vk: &VerifyingKey) -> Result<(), RecordError> {
+    let content_hash = str_field(record, "content_hash")?;
+    let sig = str_field(record, "sig")?;
+    sign::verify(sign::RECORD_SIG_TAG, content_hash, sig, vk)
+        .map_err(|e| RecordError::SignatureInvalid(e.to_string()))
+}
+
+/// Full integrity check of a sealed record: schema-v2 shape (no unknown fields), domain/
+/// canon_version, `content_hash`, and `sig`. This is the authenticity check external verifiers
+/// must use — [`verify_content_hash`] alone only proves internal consistency, not authenticity.
+pub fn verify_sealed(record: &CanonValue, vk: &VerifyingKey) -> Result<(), RecordError> {
+    validate_record_shape(record)?;
+    verify_content_hash(record)?;
+    verify_signature(record, vk)
 }

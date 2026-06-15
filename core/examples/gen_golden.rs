@@ -3,8 +3,10 @@
 //! core reproduces them byte-for-byte. Regenerate only on an intentional RCP change.
 
 use feir_decision_core::canon::CanonValue;
+use feir_decision_core::commit::{commit, FieldDomain};
 use feir_decision_core::hashx::hex_lower;
-use feir_decision_core::record::compute_content_hash;
+use feir_decision_core::record::{compute_content_hash, seal};
+use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use std::path::PathBuf;
 
 fn spec_dir() -> PathBuf {
@@ -129,6 +131,12 @@ fn main() {
   "status": "ok",
   "tokens": { "in": 1200, "out": 300 },
   "cost_micros_usd": 18000,
+  "key": {
+    "signing_key_id": "key-2026-06",
+    "key_epoch": 7,
+    "key_valid_from": "2026-06-01T00:00:00.000Z",
+    "key_status": "active"
+  },
   "framework": "openai-agents"
 }"#;
     let rec = CanonValue::parse(record_input).expect("record must parse");
@@ -145,4 +153,44 @@ fn main() {
     std::fs::write(dir.join("record-basic.json"), &manifest).unwrap();
     println!("wrote {}", dir.join("record-basic.json").display());
     println!("content_hash = {content_hash}");
+
+    // ---- signing vector (Ed25519 is deterministic per RFC 8032, so this is reproducible) ----
+    let mut seed = [0u8; 32];
+    for (i, b) in seed.iter_mut().enumerate() {
+        *b = i as u8; // seed = 00 01 02 ... 1f
+    }
+    let sk = signing_key_from_seed(&seed);
+    let sealed = seal(&rec, &sk).expect("seal");
+    let sealed_ch = sealed.get("content_hash").unwrap().as_str().unwrap();
+    let sealed_sig = sealed.get("sig").unwrap().as_str().unwrap();
+    let pubkey = encode_pubkey(&sk.verifying_key());
+
+    // ---- commitment vector ----
+    let mut nonce = [0u8; 32];
+    for (i, b) in nonce.iter_mut().enumerate() {
+        *b = 0xA0 ^ (i as u8);
+    }
+    let commit_value = "transfer $900.00 to acct 0xDEADBEEF";
+    let commitment = commit(FieldDomain::Input, commit_value.as_bytes(), &nonce).unwrap();
+
+    let sign_manifest = format!(
+        "{{\n  \"profile\": \"rcp-1\",\n  \"description\": \"Ed25519 signing + hiding-commitment vectors. Ed25519 is deterministic, so an implementation MUST reproduce `sig` exactly from `seed_hex` over the record body.\",\n  \"seed_hex\": {},\n  \"pubkey\": {},\n  \"record_body\": {},\n  \"content_hash\": {},\n  \"sig\": {},\n  \"commitment\": {{\n    \"field_domain\": \"input\",\n    \"value\": {},\n    \"value_hex\": {},\n    \"nonce_hex\": {},\n    \"commitment\": {}\n  }}\n}}\n",
+        jstr(&hex_lower(&seed)),
+        jstr(&pubkey),
+        jstr(record_input),
+        jstr(sealed_ch),
+        jstr(sealed_sig),
+        jstr(commit_value),
+        jstr(&hex_lower(commit_value.as_bytes())),
+        jstr(&hex_lower(&nonce)),
+        jstr(&commitment),
+    );
+    std::fs::write(dir.join("sign-vectors.json"), &sign_manifest).unwrap();
+    println!("wrote {}", dir.join("sign-vectors.json").display());
+    println!("sig = {sealed_sig}");
+
+    // A full sealed record (canonical bytes) usable as a CLI fixture.
+    std::fs::write(dir.join("record-sealed.json"), sealed.serialize()).unwrap();
+    println!("wrote {}", dir.join("record-sealed.json").display());
+    println!("pubkey = {pubkey}");
 }

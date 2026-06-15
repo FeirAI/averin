@@ -5,12 +5,17 @@
 //! (`--features wasm`). The golden vectors in `/spec/golden-vectors` are the cross-target
 //! byte-for-byte contract (threat #10).
 
+pub mod b64;
 pub mod canon;
+pub mod commit;
 pub mod hashx;
 pub mod record;
+pub mod sign;
 
 pub use canon::{CanonError, CanonValue};
-pub use record::{compute_content_hash, verify_content_hash, RecordError};
+pub use commit::{commit, verify_commitment, FieldDomain};
+pub use record::{compute_content_hash, seal, verify_content_hash, verify_sealed, RecordError};
+pub use sign::{signing_key_from_seed, SigError};
 
 /// Crate version of the canonical profile this build implements.
 pub const CANON_VERSION: &str = "rcp-1";

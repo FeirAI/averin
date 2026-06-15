@@ -119,7 +119,7 @@ fn serializer_is_canonical_regardless_of_construction() {
     // so the hashed bytes are canonical even off the parse path.
     let decomposed = CanonValue::Str("e\u{0301}".to_string()); // e + combining acute
     assert_eq!(decomposed.serialize(), "\"\u{00e9}\""); // precomposed é
-    // The checked constructor normalizes up front and rejects duplicate keys.
+                                                        // The checked constructor normalizes up front and rejects duplicate keys.
     assert_eq!(CanonValue::string("e\u{0301}").serialize(), "\"\u{00e9}\"");
     let dup = CanonValue::object(vec![
         ("\u{00e9}".to_string(), CanonValue::Int(1)),
