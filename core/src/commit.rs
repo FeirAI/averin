@@ -28,6 +28,17 @@ impl FieldDomain {
             FieldDomain::Rationale => "rationale",
         }
     }
+
+    /// Parse a domain string from the closed registry. The disclosure `field` and the FFI `domain`
+    /// argument both resolve through here, so the registry stays in exactly one place.
+    pub fn parse(s: &str) -> Option<FieldDomain> {
+        match s {
+            "input" => Some(FieldDomain::Input),
+            "output" => Some(FieldDomain::Output),
+            "rationale" => Some(FieldDomain::Rationale),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -78,13 +89,22 @@ pub fn verify_commitment(
     }
 }
 
-/// Generate a fresh 32-byte nonce from the OS CSPRNG. Only available with the `std` feature
-/// (the WASM *verifier* never needs to mint nonces; it only checks disclosures).
+/// Generate a fresh 32-byte nonce from the OS CSPRNG, or `None` if the CSPRNG is unavailable.
+/// The FFI (`feir_random_nonce`) uses this fallible form so a CSPRNG failure becomes a clean
+/// `{"error":...}` instead of a panic unwinding across the C/cgo boundary (UB in the debug
+/// staticlib Go links). Only with the `std` feature — the WASM verifier never mints nonces.
+#[cfg(feature = "std")]
+pub fn try_random_nonce() -> Option<[u8; NONCE_LEN]> {
+    let mut n = [0u8; NONCE_LEN];
+    getrandom::getrandom(&mut n).ok()?;
+    Some(n)
+}
+
+/// Generate a fresh 32-byte nonce from the OS CSPRNG. Panics if the CSPRNG is unavailable; use
+/// [`try_random_nonce`] across an FFI boundary where unwinding is UB.
 #[cfg(feature = "std")]
 pub fn random_nonce() -> [u8; NONCE_LEN] {
-    let mut n = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut n).expect("OS CSPRNG unavailable");
-    n
+    try_random_nonce().expect("OS CSPRNG unavailable")
 }
 
 /// Length-independent byte comparison to avoid leaking via early-exit timing. The commitment is

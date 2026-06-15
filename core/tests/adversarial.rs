@@ -82,6 +82,144 @@ fn valid_bundle_verifies_clean() {
     assert_eq!(r.checkpoints_verified, 2);
     assert_eq!(r.dag_heads, 2); // two session heads
     assert!(r.first_broken_link.is_none());
+    // r2 discloses its committed `input` AND `output`; the verifier confirms both against the sealed
+    // commitments (two domains, end to end).
+    assert_eq!(r.disclosures_total, 2);
+    assert_eq!(r.disclosures_verified, 2);
+}
+
+// disclosures is a top-level bundle array; mutate the `input` entry (disclosures[0]) and splice back.
+fn with_disclosure(b: &CanonValue, field: &str, val: CanonValue) -> CanonValue {
+    let mut disc = arr(b, "disclosures");
+    disc[0] = change_field(&disc[0], field, val);
+    change_field(b, "disclosures", CanonValue::Array(disc))
+}
+
+#[test]
+fn tampered_disclosure_value_is_detected() {
+    // Threat #6: the exporter reveals a DIFFERENT value than was committed for `input`. The
+    // nonce/commitment are unchanged, so the recomputed commitment no longer matches — caught, the
+    // bundle fails, and only the untouched `output` disclosure still verifies.
+    let b = fixture();
+    // base64url of "SELECT * FROM accounts -- doctored" (not the committed value).
+    let bad = with_disclosure(
+        &b,
+        "value_b64",
+        CanonValue::string("U0VMRUNUICogRlJPTSBhY2NvdW50cyAtLSBkb2N0b3JlZA"),
+    );
+    let r = verify_bundle(&bad);
+    assert!(!r.ok, "a mismatched disclosure must fail the bundle");
+    assert_eq!(
+        r.disclosures_verified, 1,
+        "output still verifies; input does not"
+    );
+    assert!(
+        r.issues.iter().any(|i| i.contains("does not match")),
+        "expected commitment-mismatch issue, got: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn disclosure_against_wrong_present_field_is_detected() {
+    // The `field` selects BOTH the commitment slot (`<field>_commit`) AND the commitment domain. Take
+    // the (value, nonce) that legitimately opens `input_commit` but relabel it `output`: the verifier
+    // recomputes commit(Output, input_value, input_nonce) against `output_commit` and it must NOT
+    // match. Proves field→domain is bound, not just value equality. (Single disclosure so the
+    // duplicate-(record,field) guard doesn't fire against the real output disclosure.)
+    let b = fixture();
+    let input_disc = arr(&b, "disclosures")
+        .into_iter()
+        .find(|d| d.get("field").and_then(|v| v.as_str()) == Some("input"))
+        .expect("fixture has an input disclosure");
+    let cross = change_field(&input_disc, "field", CanonValue::string("output"));
+    let bad = change_field(&b, "disclosures", CanonValue::Array(vec![cross]));
+    let r = verify_bundle(&bad);
+    assert!(!r.ok);
+    assert_eq!(r.disclosures_verified, 0);
+    assert!(
+        r.issues.iter().any(|i| i.contains("does not match")),
+        "got: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn disclosure_for_uncommitted_field_is_rejected() {
+    // r2 has no `rationale_commit`; a disclosure naming `rationale` has nothing to check against.
+    let b = fixture();
+    let bad = with_disclosure(&b, "field", CanonValue::string("rationale"));
+    let r = verify_bundle(&bad);
+    assert!(!r.ok);
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("no rationale_commit.commitment")),
+        "got: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn duplicate_disclosure_for_same_field_is_rejected() {
+    // Two disclosures for the same (record_id, field) are redundant at best, contradictory at worst
+    // (one commitment cannot open to two values). The second is flagged, failing the bundle.
+    let b = fixture();
+    let input_disc = arr(&b, "disclosures")
+        .into_iter()
+        .find(|d| d.get("field").and_then(|v| v.as_str()) == Some("input"))
+        .expect("fixture has an input disclosure");
+    let dup = vec![input_disc.clone(), input_disc];
+    let bad = change_field(&b, "disclosures", CanonValue::Array(dup));
+    let r = verify_bundle(&bad);
+    assert!(!r.ok);
+    assert!(
+        r.issues.iter().any(|i| i.contains("duplicate disclosure")),
+        "got: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn disclosure_with_malformed_nonce_is_rejected() {
+    let b = fixture();
+    let bad = with_disclosure(&b, "nonce_hex", CanonValue::string("not-64-hex-chars"));
+    let r = verify_bundle(&bad);
+    assert!(!r.ok);
+    assert!(
+        r.issues.iter().any(|i| i.contains("nonce must be 64")),
+        "got: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn disclosure_referencing_unknown_record_is_rejected() {
+    let b = fixture();
+    let bad = with_disclosure(&b, "record_id", CanonValue::string("does-not-exist"));
+    let r = verify_bundle(&bad);
+    assert!(!r.ok);
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("no record 'does-not-exist'")),
+        "got: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn disclosures_null_is_treated_as_absent() {
+    // An SDK serializing an empty Option as JSON null must not brick an otherwise-valid bundle.
+    let b = fixture();
+    let nulled = change_field(&b, "disclosures", CanonValue::Null);
+    let r = verify_bundle(&nulled);
+    assert!(
+        r.ok,
+        "null disclosures == no disclosures; issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.disclosures_total, 0);
 }
 
 #[test]

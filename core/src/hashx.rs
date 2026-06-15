@@ -58,6 +58,20 @@ pub fn parse_sha256(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// Decode exactly 64 lowercase-hex chars into 32 raw bytes (None on wrong length or non-hex).
+/// Shared by 32-byte signing seeds and 32-byte commitment nonces.
+pub fn hex32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = (hex_val(bytes[2 * i])? << 4) | hex_val(bytes[2 * i + 1])?;
+    }
+    Some(out)
+}
+
 fn hex_val(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),

@@ -64,6 +64,9 @@ pub struct VerifyReport {
     pub checkpoints_verified: usize,
     pub checkpoints_anchored: usize,
     pub chain_ok: bool,
+    /// Selective-disclosure entries in the bundle, and how many matched their record's commitment.
+    pub disclosures_total: usize,
+    pub disclosures_verified: usize,
     pub issues: Vec<String>,
     pub first_broken_link: Option<String>,
 }
@@ -226,6 +229,120 @@ fn committed_set(
     seen
 }
 
+/// Verify selective-disclosure entries against the per-record hiding commitments embedded in the
+/// (signed) record bodies. A bundle MAY carry a top-level `disclosures` array; each entry reveals
+/// `(value, nonce)` for one `<field>_commit` so an auditor can confirm the disclosed value is the
+/// one that was committed at seal time (RCP §9.3). A mismatch is tamper (threat #6) and an `issue`,
+/// which fails the bundle. The commitment lives in the signed body, so a passing disclosure is only
+/// meaningful for a record that itself verifies — the per-record trust pass enforces that
+/// separately; here we only check value↔commitment binding.
+fn verify_disclosures(
+    bundle: &CanonValue,
+    records: &[CanonValue],
+    issues: &mut Vec<String>,
+) -> (usize, usize) {
+    let list = match bundle.get("disclosures") {
+        // Absent, or an explicit JSON `null`, both mean "no disclosures" — an SDK that serializes an
+        // empty Option as null must not brick an otherwise-valid bundle.
+        None => return (0, 0),
+        Some(v) if v.is_null() => return (0, 0),
+        Some(v) => match v.as_array() {
+            Some(a) => a,
+            None => {
+                issues.push("bundle.disclosures is present but not an array (malformed)".into());
+                return (0, 0);
+            }
+        },
+    };
+    // record_id -> record body (first wins; duplicate ids are flagged separately in the trust pass).
+    let mut by_id: BTreeMap<&str, &CanonValue> = BTreeMap::new();
+    for rec in records {
+        if let Some(id) = rec.get("record_id").and_then(|v| v.as_str()) {
+            by_id.entry(id).or_insert(rec);
+        }
+    }
+    let total = list.len();
+    let mut verified = 0usize;
+    // (record_id, field) must be disclosed at most once — a second disclosure for the same slot is
+    // either redundant (inflating the count) or a contradiction (one commitment, two values).
+    let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for (i, d) in list.iter().enumerate() {
+        let (rid, field, value_b64, nonce_hex) = match (
+            d.get("record_id").and_then(|v| v.as_str()),
+            d.get("field").and_then(|v| v.as_str()),
+            d.get("value_b64").and_then(|v| v.as_str()),
+            d.get("nonce_hex").and_then(|v| v.as_str()),
+        ) {
+            (Some(a), Some(b), Some(c), Some(e)) => (a, b, c, e),
+            _ => {
+                issues.push(format!(
+                    "disclosure {i}: missing record_id/field/value_b64/nonce_hex"
+                ));
+                continue;
+            }
+        };
+        if !seen.insert((rid, field)) {
+            issues.push(format!(
+                "disclosure {i}: duplicate disclosure for record '{rid}' field '{field}'"
+            ));
+            continue;
+        }
+        let domain = match crate::commit::FieldDomain::parse(field) {
+            Some(dm) => dm,
+            None => {
+                issues.push(format!(
+                    "disclosure {i}: field '{field}' not in input|output|rationale"
+                ));
+                continue;
+            }
+        };
+        let rec = match by_id.get(rid) {
+            Some(r) => *r,
+            None => {
+                issues.push(format!("disclosure {i}: no record '{rid}' in bundle"));
+                continue;
+            }
+        };
+        let commitment = rec
+            .get(&format!("{field}_commit"))
+            .and_then(|c| c.get("commitment"))
+            .and_then(|v| v.as_str());
+        let commitment = match commitment {
+            Some(c) => c,
+            None => {
+                issues.push(format!(
+                    "disclosure {i}: record '{rid}' has no {field}_commit.commitment to check"
+                ));
+                continue;
+            }
+        };
+        let value = match crate::b64::decode(value_b64) {
+            Ok(v) => v,
+            Err(_) => {
+                issues.push(format!("disclosure {i}: value_b64 is not valid base64url"));
+                continue;
+            }
+        };
+        let nonce = match crate::hashx::hex32(nonce_hex) {
+            Some(n) => n,
+            None => {
+                issues.push(format!(
+                    "disclosure {i}: nonce must be 64 lowercase hex chars (32 bytes)"
+                ));
+                continue;
+            }
+        };
+        if crate::commit::verify_commitment(commitment, domain, &value, &nonce) {
+            verified += 1;
+        } else {
+            issues.push(format!(
+                "disclosure {i}: revealed {field} does not match record '{rid}' commitment (tamper, threat #6)"
+            ));
+        }
+    }
+    (total, verified)
+}
+
 pub fn verify_bundle_json(text: &str) -> Result<VerifyReport, crate::canon::CanonError> {
     Ok(verify_bundle(&CanonValue::parse(text)?))
 }
@@ -295,6 +412,8 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("checkpoints_verified".into(), count(r.checkpoints_verified)),
         ("checkpoints_anchored".into(), count(r.checkpoints_anchored)),
         ("chain_ok".into(), CanonValue::Bool(r.chain_ok)),
+        ("disclosures_total".into(), count(r.disclosures_total)),
+        ("disclosures_verified".into(), count(r.disclosures_verified)),
         ("issues".into(), str_array(&r.issues)),
         ("first_broken_link".into(), opt_str(&r.first_broken_link)),
         ("record_trust".into(), CanonValue::Array(records)),
@@ -479,6 +598,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             }
         }
     }
+
+    // selective-disclosure entries (optional): bind revealed (value, nonce) to record commitments.
+    let (disclosures_total, disclosures_verified) =
+        verify_disclosures(bundle, records, &mut issues);
 
     // ---- 3. DAG ----
     let (dag_ok, dag_heads, collapsed_duplicates, dag_opt) = match dag::build(records) {
@@ -691,6 +814,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         checkpoints_verified,
         checkpoints_anchored,
         chain_ok,
+        disclosures_total,
+        disclosures_verified,
         issues,
         first_broken_link,
     }

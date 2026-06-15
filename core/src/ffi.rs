@@ -160,23 +160,104 @@ unsafe fn seal_impl(body: *const c_char, seed_hex: *const c_char, checkpoint: bo
     }
 }
 
-fn decode_seed(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
+/// Generate a fresh 32-byte hiding-commitment nonce, returned as 64 lowercase hex chars. Only
+/// meaningful with the `std` feature (the WASM verifier never mints nonces); returns `{"error":...}`
+/// otherwise.
+#[no_mangle]
+pub extern "C" fn feir_random_nonce() -> *mut c_char {
+    #[cfg(feature = "std")]
+    {
+        // Fallible: a CSPRNG failure must NOT panic-unwind across the C/cgo boundary (UB).
+        match crate::commit::try_random_nonce() {
+            Some(n) => into_cstring(crate::hashx::hex_lower(&n)),
+            None => into_cstring(json_error("OS CSPRNG unavailable")),
+        }
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        into_cstring(json_error("random_nonce requires the std feature"))
+    }
+}
+
+/// Compute a hiding commitment (RCP §9.3) over a low-entropy field. `domain` is one of
+/// `input`/`output`/`rationale`; `value_b64` is base64url-no-pad of the raw value bytes; `nonce_hex`
+/// is 64 hex chars (32 bytes). Returns `sha256:<hex>` or `{"error":...}`.
+///
+/// # Safety
+/// All three pointers must be valid null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn feir_commit(
+    domain: *const c_char,
+    value_b64: *const c_char,
+    nonce_hex: *const c_char,
+) -> *mut c_char {
+    match commit_inputs(domain, value_b64, nonce_hex) {
+        Ok((d, value, nonce)) => match crate::commit::commit(d, &value, &nonce) {
+            Ok(c) => into_cstring(c),
+            Err(e) => into_cstring(json_error(&e.to_string())),
+        },
+        Err(msg) => into_cstring(json_error(msg)),
+    }
+}
+
+/// Verify a disclosed `(value, nonce)` against a commitment. Returns `"true"`/`"false"`, or
+/// `{"error":...}` on malformed input.
+///
+/// # Safety
+/// All four pointers must be valid null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn feir_verify_commitment(
+    commitment: *const c_char,
+    domain: *const c_char,
+    value_b64: *const c_char,
+    nonce_hex: *const c_char,
+) -> *mut c_char {
+    let commitment = match cstr(commitment) {
+        // Null/invalid commitment is malformed input — return error JSON like the other arms, not a
+        // bare null (which the contract reserves for a different, undocumented outcome).
+        Some(c) => c,
+        None => return into_cstring(json_error("commitment must be non-null UTF-8")),
+    };
+    match commit_inputs(domain, value_b64, nonce_hex) {
+        Ok((d, value, nonce)) => {
+            let ok = crate::commit::verify_commitment(commitment, d, &value, &nonce);
+            into_cstring(if ok { "true".into() } else { "false".into() })
+        }
+        Err(msg) => into_cstring(json_error(msg)),
+    }
+}
+
+/// Borrow a C string as `&str` (None if null or non-UTF-8).
+///
+/// # Safety
+/// `p` must be a valid null-terminated C string. The returned `&str` aliases the C buffer; callers
+/// MUST consume it before `p` is invalidated. Every caller here uses it within the same FFI call,
+/// while the pointer is guaranteed live — do not store it past that scope.
+unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
+    if p.is_null() {
         return None;
     }
-    let b = hex.as_bytes();
-    let mut out = [0u8; 32];
-    let v = |c: u8| -> Option<u8> {
-        match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            _ => None,
-        }
-    };
-    for i in 0..32 {
-        out[i] = (v(b[2 * i])? << 4) | v(b[2 * i + 1])?;
-    }
-    Some(out)
+    CStr::from_ptr(p).to_str().ok()
+}
+
+#[allow(clippy::type_complexity)]
+unsafe fn commit_inputs(
+    domain: *const c_char,
+    value_b64: *const c_char,
+    nonce_hex: *const c_char,
+) -> Result<(crate::commit::FieldDomain, Vec<u8>, [u8; 32]), &'static str> {
+    use crate::commit::FieldDomain;
+    let domain = cstr(domain).ok_or("bad domain")?;
+    let d = FieldDomain::parse(domain).ok_or("domain must be input|output|rationale")?;
+    let value = crate::b64::decode(cstr(value_b64).ok_or("bad value_b64")?)
+        .map_err(|_| "value_b64 is not valid base64url")?;
+    let nonce_hex = cstr(nonce_hex).ok_or("bad nonce_hex")?;
+    let nonce = decode_seed(nonce_hex).ok_or("nonce must be 64 lowercase hex chars (32 bytes)")?;
+    Ok((d, value, nonce))
+}
+
+fn decode_seed(hex: &str) -> Option<[u8; 32]> {
+    crate::hashx::hex32(hex)
 }
 
 fn json_error(msg: &str) -> String {
@@ -314,5 +395,99 @@ mod tests {
     fn seal_rejects_bad_seed_and_body() {
         assert!(call2(feir_seal_record, "{}", "nothex").contains("error"));
         assert!(call2(feir_seal_record, "{not json", SEED).contains("error"));
+    }
+
+    // base64url-no-pad of b"hello" — the raw value bytes the Go side commits over.
+    const HELLO_B64: &str = "aGVsbG8";
+
+    #[test]
+    fn random_nonce_is_64_hex() {
+        let n = call(feir_random_nonce_zero, "ignored").unwrap();
+        assert_eq!(n.len(), 64, "{n}");
+        assert!(n.bytes().all(|b| b.is_ascii_hexdigit()), "{n}");
+        // two draws differ (CSPRNG, not a constant)
+        let m = call(feir_random_nonce_zero, "ignored").unwrap();
+        assert_ne!(n, m);
+    }
+
+    // wrapper so single-arg `call` can drive the no-arg nonce minter.
+    unsafe extern "C" fn feir_random_nonce_zero(_: *const c_char) -> *mut c_char {
+        feir_random_nonce()
+    }
+
+    #[test]
+    fn commit_and_verify_roundtrip() {
+        let nonce = call(feir_random_nonce_zero, "ignored").unwrap();
+        let c = call3(feir_commit, "input", HELLO_B64, &nonce);
+        assert!(c.starts_with("sha256:"), "{c}");
+
+        // disclosing the same (value, nonce) verifies true...
+        assert_eq!(
+            call4(feir_verify_commitment, &c, "input", HELLO_B64, &nonce),
+            "true"
+        );
+        // ...wrong domain, value, or nonce all verify false (binding holds).
+        assert_eq!(
+            call4(feir_verify_commitment, &c, "output", HELLO_B64, &nonce),
+            "false"
+        );
+        assert_eq!(
+            call4(feir_verify_commitment, &c, "input", "d29ybGQ", &nonce),
+            "false"
+        );
+        let other = call(feir_random_nonce_zero, "ignored").unwrap();
+        assert_eq!(
+            call4(feir_verify_commitment, &c, "input", HELLO_B64, &other),
+            "false"
+        );
+    }
+
+    #[test]
+    fn commit_rejects_malformed_inputs() {
+        let nonce = call(feir_random_nonce_zero, "ignored").unwrap();
+        assert!(call3(feir_commit, "bogus", HELLO_B64, &nonce).contains("error"));
+        assert!(call3(feir_commit, "input", "not base64!!", &nonce).contains("error"));
+        assert!(call3(feir_commit, "input", HELLO_B64, "shortnonce").contains("error"));
+    }
+
+    fn call3(
+        f: unsafe extern "C" fn(*const c_char, *const c_char, *const c_char) -> *mut c_char,
+        a: &str,
+        b: &str,
+        c: &str,
+    ) -> String {
+        let ca = CString::new(a).unwrap();
+        let cb = CString::new(b).unwrap();
+        let cc = CString::new(c).unwrap();
+        unsafe {
+            let out = f(ca.as_ptr(), cb.as_ptr(), cc.as_ptr());
+            let s = CStr::from_ptr(out).to_string_lossy().into_owned();
+            feir_string_free(out);
+            s
+        }
+    }
+
+    fn call4(
+        f: unsafe extern "C" fn(
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+        ) -> *mut c_char,
+        a: &str,
+        b: &str,
+        c: &str,
+        d: &str,
+    ) -> String {
+        let ca = CString::new(a).unwrap();
+        let cb = CString::new(b).unwrap();
+        let cc = CString::new(c).unwrap();
+        let cd = CString::new(d).unwrap();
+        unsafe {
+            let out = f(ca.as_ptr(), cb.as_ptr(), cc.as_ptr(), cd.as_ptr());
+            let s = CStr::from_ptr(out).to_string_lossy().into_owned();
+            feir_string_free(out);
+            s
+        }
     }
 }

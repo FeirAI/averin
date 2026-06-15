@@ -26,6 +26,20 @@ char *feir_seal_checkpoint(const char *body, const char *seed_hex);
 /* Return the ed25519pub: public key for a seed (for the server's published key list). */
 char *feir_pubkey_from_seed(const char *seed_hex);
 
+/* Mint a fresh 32-byte hiding-commitment nonce, returned as 64 lowercase hex chars (caller frees).
+ * Returns {"error":"..."} if the library was built without the std feature (e.g. WASM). */
+char *feir_random_nonce(void);
+
+/* Compute a hiding commitment over a low-entropy field (RCP §9.3). domain is "input"|"output"|
+ * "rationale"; value_b64 is base64url-no-pad of the raw value bytes; nonce_hex is 64 hex chars.
+ * Returns "sha256:<hex>" or {"error":"..."}. */
+char *feir_commit(const char *domain, const char *value_b64, const char *nonce_hex);
+
+/* Verify a disclosed (value, nonce) against a commitment. Returns "true"/"false", or
+ * {"error":"..."} on malformed input. */
+char *feir_verify_commitment(const char *commitment, const char *domain, const char *value_b64,
+                             const char *nonce_hex);
+
 /* Free a string returned by this library. */
 void feir_string_free(char *ptr);
 

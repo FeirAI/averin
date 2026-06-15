@@ -5,9 +5,20 @@
 use ed25519_dalek::SigningKey;
 use feir_decision_core::canon::CanonValue;
 use feir_decision_core::checkpoint::{checkpoint_body, seal_checkpoint};
+use feir_decision_core::commit::{commit, FieldDomain};
 use feir_decision_core::record::seal;
 use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use std::path::PathBuf;
+
+// r2 carries hiding commitments over BOTH its `input` and `output` fields; the bundle discloses the
+// (value, nonce) for each, so the verifier exercises selective disclosure across two domains end to
+// end (and the adversarial tests can prove the field→domain binding). Deterministic so the fixture
+// regenerates identically. input and output use DISTINCT values + nonces so a cross-field swap is a
+// real mismatch, not a coincidental collision.
+const DISCLOSED_INPUT: &[u8] = b"SELECT balance FROM accounts WHERE id=42";
+const DISCLOSED_INPUT_NONCE: [u8; 32] = [7u8; 32];
+const DISCLOSED_OUTPUT: &[u8] = b"balance=$1,204.00";
+const DISCLOSED_OUTPUT_NONCE: [u8; 32] = [9u8; 32];
 
 fn key_block() -> CanonValue {
     CanonValue::parse(
@@ -26,6 +37,7 @@ fn make_record(
     prev: &[String],
     seq: i64,
     received_ts: &str,
+    commits: &[(&str, &str)],
 ) -> CanonValue {
     let parent = match parent_span {
         Some(p) => format!("\"{p}\""),
@@ -36,6 +48,16 @@ fn make_record(
         .map(|p| format!("\"{p}\""))
         .collect::<Vec<_>>()
         .join(",");
+    // The plaintext fields never enter the signed body — only their hiding commitments do. Each entry
+    // is `"<domain>_commit": {...},` (trailing comma) so it splices cleanly before cost_micros_usd.
+    let commit_fields: String = commits
+        .iter()
+        .map(|(domain, c)| {
+            format!(
+                r#""{domain}_commit": {{"alg":"sha256","commitment":"{c}","low_entropy":true}},"#
+            )
+        })
+        .collect();
     let body = format!(
         r#"{{
           "schema_version": "2",
@@ -56,6 +78,7 @@ fn make_record(
           "action": "db.query",
           "observed_via": "sdk",
           "status": "ok",
+          {commit_fields}
           "cost_micros_usd": 18000,
           "key": {{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}
         }}"#
@@ -81,6 +104,16 @@ fn main() {
 
     let sk = signing_key_from_seed(&[0u8; 32]);
 
+    // r2's input/output are committed (hiding) rather than stored in clear; disclosed below.
+    let input_commitment =
+        commit(FieldDomain::Input, DISCLOSED_INPUT, &DISCLOSED_INPUT_NONCE).unwrap();
+    let output_commitment = commit(
+        FieldDomain::Output,
+        DISCLOSED_OUTPUT,
+        &DISCLOSED_OUTPUT_NONCE,
+    )
+    .unwrap();
+
     // session A: r0 -> r1 ; session B: r2 (independent root)
     let r0 = make_record(
         &sk,
@@ -91,6 +124,7 @@ fn main() {
         &[],
         0,
         "2026-06-15T10:00:00.100Z",
+        &[],
     );
     let r1 = make_record(
         &sk,
@@ -101,6 +135,7 @@ fn main() {
         &[ch(&r0)],
         1,
         "2026-06-15T10:00:01.100Z",
+        &[],
     );
     let r2 = make_record(
         &sk,
@@ -111,6 +146,7 @@ fn main() {
         &[],
         2,
         "2026-06-15T10:00:02.100Z",
+        &[("input", &input_commitment), ("output", &output_commitment)],
     );
 
     // heads after all three = {ch(r1), ch(r2)}; cp0 commits them, cp1 re-commits (no new work).
@@ -159,12 +195,36 @@ fn main() {
     ])
     .unwrap();
 
+    // Selective disclosure: reveal r2's input and output (value, nonce) so an auditor can confirm
+    // each matches the hiding commitment sealed into the record body (RCP §9.3). input is listed
+    // first so the adversarial tests can address it as disclosures[0].
+    let disclose = |field: &str, value: &[u8], nonce: &[u8; 32]| -> CanonValue {
+        CanonValue::object(vec![
+            ("record_id".into(), CanonValue::string("r2")),
+            ("field".into(), CanonValue::string(field)),
+            (
+                "value_b64".into(),
+                CanonValue::string(feir_decision_core::b64::encode(value)),
+            ),
+            (
+                "nonce_hex".into(),
+                CanonValue::string(feir_decision_core::hashx::hex_lower(nonce)),
+            ),
+        ])
+        .unwrap()
+    };
+    let disclosures = vec![
+        disclose("input", DISCLOSED_INPUT, &DISCLOSED_INPUT_NONCE),
+        disclose("output", DISCLOSED_OUTPUT, &DISCLOSED_OUTPUT_NONCE),
+    ];
+
     let bundle = CanonValue::object(vec![
         ("bundle_version".into(), CanonValue::string("1")),
         ("project_id".into(), CanonValue::string("proj-001")),
         ("keys".into(), CanonValue::Array(vec![key_entry])),
         ("records".into(), CanonValue::Array(vec![r0, r1, r2])),
         ("checkpoints".into(), CanonValue::Array(vec![cp0, cp1])),
+        ("disclosures".into(), CanonValue::Array(disclosures)),
     ])
     .unwrap();
 
