@@ -54,8 +54,10 @@ Every piece was Codex-reviewed before commit. End to end:
 - **SDKs** — Python + TypeScript. **Web** — Svelte 5 SPA (trace waterfall) + a frameworkless
   **offline verifier** (vanilla + WASM). **Self-host** — `docker compose up`.
 
-Adversarial matrix defended & tested: **#1, #2, #3, #4(partial), #6, #7, #8, #9, #10, #11** plus
-tamper. Tests: Rust 55 (61 w/ rfc3161), Go 7 packages, Python, TS, web, WASM verifier — all green.
+Adversarial matrix defended & tested: **#1, #2, #3, #4, #6, #7, #8, #9, #10, #11** plus tamper —
+with Phase 2 closing #4 (*declared → verified*), #6 (hiding commitments wired end-to-end), and #3
+(RFC 3161 anchoring). Tests: Rust 56 (lib) + 18 adversarial, Go (incl. real-Postgres-gated store
++ append-only), Python, TS, web, WASM verifier — all green.
 
 ```bash
 cargo test --workspace
@@ -68,7 +70,10 @@ Every claim is bounded by [`docs/coverage-limits.md`](docs/coverage-limits.md) (
 **Phase 2 in progress** (enforcement + production-readiness, each commit adversarially reviewed):
 - ☑ **Authority verification** — `evidence_sig` checked under pinned authority keys (#4 *declared → verified*), record_id-bound so an evidence triple can't be replayed.
 - ☑ **Project API-key auth** (`auth`), **OTel/OpenInference ingest** (`/v2/otel/traces`), **content-addressed blob store** (`content`), **append-only checkpoint witness + RFC 3161 TSA client** (`witness`) — four packages built in parallel via a workflow, wired into the server.
-- ☐ Remaining: Postgres store swap, content commitments + selective-disclosure export, the credential broker (Level 3 — the moat).
+- ☑ **Production Postgres store** — append-only at the database (REVOKE UPDATE/DELETE/TRUNCATE, verified under a least-privilege role), idempotency + content-hash collapse + DAG-derived frontier in SQL; auto-migrates; `docker compose up` is turnkey. Validated against real Postgres 16.
+- ☑ **Content commitments + selective-disclosure export** (#6) — low-entropy `input`/`output`/`rationale` are hiding-committed at ingest (plaintext → content store, never the signed body); a `selective_disclosure` export reveals `(value, nonce)` the offline verifier checks against each record's commitment. Disclosure secrets are written atomically with the record.
+- ☑ **RFC 3161 checkpoint anchoring** (#3) — checkpoints are timestamp-anchored to a third-party TSA, decoupled (out of the checkpoint lock, back-anchorable) and joined into the bundle at export.
+- ☐ Remaining: the credential broker (Level 3 — the moat). *Built when a design partner pulls* (per spec §scope).
 
 ## Verify an export offline
 
