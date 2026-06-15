@@ -5,15 +5,21 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/feir-dev/feir/server/internal/auth"
 	"github.com/feir-dev/feir/server/internal/meter"
+	"github.com/feir-dev/feir/server/internal/otel"
 	"github.com/feir-dev/feir/server/internal/store"
+	"github.com/feir-dev/feir/server/internal/witness"
 )
 
 // Sealer is the subset of the Rust core the API needs.
@@ -28,12 +34,17 @@ type Server struct {
 	core         Sealer
 	st           store.Store
 	meter        meter.Meter
+	auth         auth.KeyStore  // nil = no per-project auth (dev/single-tenant)
+	witness      witness.Witness // nil = no external witness configured
 	signingKeyID string
 	keyValidFrom string
 	now          func() time.Time // injectable clock for tests
 	// ingestMu serializes the heads->seal->put critical section so concurrent ingests cannot read
 	// a stale frontier and fork the DAG (the Postgres store will do this in a serializable tx).
 	ingestMu sync.Mutex
+	// checkpointMu serializes checkpoint creation so concurrent calls cannot read the same
+	// NextCheckpointSeq and fork the checkpoint chain.
+	checkpointMu sync.Mutex
 }
 
 func New(core Sealer, st store.Store, signingKeyID string) *Server {
@@ -53,17 +64,42 @@ func (s *Server) WithMeter(m meter.Meter) *Server {
 	return s
 }
 
-func (s *Server) Routes() *http.ServeMux {
+// WithAuth gates the /v2/* routes behind project-scoped API-key auth.
+func (s *Server) WithAuth(ks auth.KeyStore) *Server {
+	s.auth = ks
+	return s
+}
+
+// WithWitness appends every sealed checkpoint to a customer-controlled append-only witness
+// (out-of-vendor-control) so omitting/rewriting it later is detectable (threats #1/#15).
+func (s *Server) WithWitness(w witness.Witness) *Server {
+	s.witness = w
+	return s
+}
+
+func healthz(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) }
+
+func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("POST /v2/records", s.handleRecords)
+	mux.HandleFunc("POST /v2/otel/traces", s.handleOTel)
 	mux.HandleFunc("POST /v2/checkpoints", s.handleCheckpoint)
 	mux.HandleFunc("GET /v2/sessions", s.handleSessions)
 	mux.HandleFunc("GET /v2/dag", s.handleDAG)
 	mux.HandleFunc("GET /v2/verify", s.handleVerify)
 	mux.HandleFunc("GET /v2/export", s.handleExport)
 	mux.HandleFunc("GET /v2/usage", s.handleUsage)
-	return mux
+
+	if s.auth == nil || auth.IsOpen(s.auth) {
+		return mux // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
+	}
+	// gate every /v2/* route behind project-scoped auth; /healthz stays open.
+	gate := auth.Middleware(s.auth, "project")
+	guarded := http.NewServeMux()
+	guarded.HandleFunc("GET /healthz", healthz)
+	guarded.Handle("/v2/", gate(mux))
+	return guarded
 }
 
 func ts(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
@@ -116,6 +152,20 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 	if len(items) == 0 {
 		writeErr(w, http.StatusBadRequest, "empty batch")
 		return
+	}
+
+	// With auth enabled the project is named in ?project= (checked by the middleware); bind it so a
+	// token valid for project A cannot write to project B via the body's project_id. Validate the
+	// WHOLE batch up front so a mismatched item cannot partially persist earlier items.
+	queryProject := r.URL.Query().Get("project")
+	if queryProject != "" {
+		for _, raw := range items {
+			var probe map[string]any
+			if decode(raw, &probe) != nil || stringField(probe, "project_id") != queryProject {
+				writeErr(w, http.StatusForbidden, "a record's project_id does not match the authorized ?project=")
+				return
+			}
+		}
 	}
 
 	results := make([]map[string]any, 0, len(items))
@@ -238,6 +288,52 @@ func normalizeAuthority(rec map[string]any) {
 	rec["authority"] = a
 }
 
+// handleOTel ingests an OTLP/JSON trace export. The project comes from ?project= (NEVER the OTLP
+// payload), each span becomes a sealed record (observed_via=otel).
+func (s *Server) handleOTel(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	if project == "" {
+		writeErr(w, http.StatusBadRequest, "project query param required")
+		return
+	}
+	body, err := readBody(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	bodies, err := otel.MapSpansToRecords(body, project)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ingested, failed := 0, 0
+	var errs []string
+	for _, b := range bodies {
+		raw, err := json.Marshal(b)
+		if err != nil {
+			failed++
+			errs = append(errs, err.Error())
+			continue
+		}
+		// content-addressed idempotency key (passed as the header arg so we marshal once and don't
+		// mutate the body): a re-sent identical span collapses (#8), but two distinct spans — even
+		// sharing a span_id across traces — never collide. A per-span failure does not abort the
+		// rest (idempotency makes a whole-export retry safe), so partial success is reported honestly.
+		sum := sha256.Sum256(raw)
+		if _, _, err := s.ingestOne(raw, "otel-"+hex.EncodeToString(sum[:])); err != nil {
+			failed++
+			errs = append(errs, err.Error())
+			continue
+		}
+		ingested++
+	}
+	code := http.StatusCreated
+	if ingested == 0 && failed > 0 {
+		code = http.StatusBadRequest
+	}
+	writeJSON(w, code, map[string]any{"ingested": ingested, "failed": failed, "errors": errs})
+}
+
 // ---- checkpoints ----
 
 func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
@@ -246,15 +342,28 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project query param required")
 		return
 	}
-	sealed, err := s.createCheckpoint(projectID)
+	sealed, witnessWarn, err := s.createCheckpoint(r.Context(), projectID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, json.RawMessage(sealed))
+	resp := map[string]any{"checkpoint": json.RawMessage(sealed)}
+	if witnessWarn != nil {
+		resp["warning"] = witnessWarn.Error() // checkpoint created; witnessing is pending (backfill)
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
-func (s *Server) createCheckpoint(projectID string) (string, error) {
+// createCheckpoint seals the current frontier and stores it, then best-effort appends it to the
+// witness. Returns (sealed, witnessWarning, fatalErr). Serialized so concurrent calls cannot read
+// the same NextCheckpointSeq and fork the chain. Store-before-witness with a monotonic seq means a
+// witness failure does NOT re-seal the same seq on retry (seq has already advanced) — so it can
+// never wedge checkpointing; the un-witnessed checkpoint is reported via the warning and is
+// backfillable. A deterministic checkpoint_id keeps the body reproducible for a given seq.
+func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string, error, error) {
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+
 	heads, _ := s.st.ProjectHeads(projectID)
 	if heads == nil {
 		heads = []string{}
@@ -265,14 +374,12 @@ func (s *Server) createCheckpoint(projectID string) (string, error) {
 	var prevVal any
 	if hasPrev {
 		prevVal = prev
-	} else {
-		prevVal = nil
 	}
 	body := map[string]any{
 		"schema_version":       "2",
 		"canon_version":        "rcp-1",
 		"domain":               "flightrecorder.checkpoint.v2",
-		"checkpoint_id":        newUUID(),
+		"checkpoint_id":        fmt.Sprintf("cp-%s-%d", projectID, seq), // deterministic per seq
 		"project_id":           projectID,
 		"checkpoint_seq":       seq,
 		"prev_checkpoint_hash": prevVal,
@@ -289,7 +396,7 @@ func (s *Server) createCheckpoint(projectID string) (string, error) {
 	bodyJSON, _ := json.Marshal(body)
 	sealed, err := s.core.SealCheckpoint(string(bodyJSON))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var cp struct {
 		CheckpointHash string `json:"checkpoint_hash"`
@@ -297,9 +404,19 @@ func (s *Server) createCheckpoint(projectID string) (string, error) {
 	}
 	_ = json.Unmarshal([]byte(sealed), &cp)
 	if err := s.st.PutCheckpoint(projectID, store.Checkpoint{JSON: sealed, CheckpointHash: cp.CheckpointHash, Seq: cp.Seq}); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return sealed, nil
+	// best-effort witness append (bounded so a hung witness can't block); a failure leaves the
+	// checkpoint stored-but-un-witnessed (reported, backfillable) rather than wedging the chain.
+	var witnessWarn error
+	if s.witness != nil {
+		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := s.witness.Append(wctx, projectID, []byte(sealed)); err != nil {
+			witnessWarn = fmt.Errorf("checkpoint stored but witness append failed (backfill needed): %w", err)
+		}
+	}
+	return sealed, witnessWarn, nil
 }
 
 // ---- app / verify / export ----

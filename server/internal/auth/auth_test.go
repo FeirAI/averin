@@ -304,3 +304,20 @@ func TestConstantTimeCompareUsed(t *testing.T) {
 		t.Logf("timing near=%v far=%v ratio=%.2f (informational; wide tolerance)", near, far, ratio)
 	}
 }
+
+func TestParseKeys(t *testing.T) {
+	ks, n := ParseKeys(" proj-a : tok1, tok2 ; proj-b:tok3 ; :skip ; bad ")
+	if n != 2 {
+		t.Fatalf("expected 2 projects, got %d", n)
+	}
+	if !ks.ValidFor("proj-a", "tok1") || !ks.ValidFor("proj-a", "tok2") || !ks.ValidFor("proj-b", "tok3") {
+		t.Fatal("parsed tokens should be valid")
+	}
+	if ks.ValidFor("proj-a", "tok3") {
+		t.Fatal("tok3 belongs to proj-b only")
+	}
+	// empty / malformed -> zero keys (caller refuses to start)
+	if _, n := ParseKeys(" ; :tok ; nokeys: "); n != 0 {
+		t.Fatalf("expected 0 keys for malformed input, got %d", n)
+	}
+}

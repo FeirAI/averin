@@ -100,6 +100,26 @@ func (ks *MapStore) ValidFor(project, token string) bool {
 // openStore is the explicit, dev-only "allow everything" KeyStore. See NewOpenStore.
 type openStore struct{}
 
+// ParseKeys parses the FEIR_API_KEYS wire format "proj-a:tok1,tok2;proj-b:tok3" into a MapStore.
+// Empty projects/tokens are skipped. Returns the store and the number of projects with >=1 key, so
+// callers can refuse to start in a silent deny-all (zero keys) configuration.
+func ParseKeys(raw string) (*MapStore, int) {
+	m := map[string][]string{}
+	for _, entry := range strings.Split(raw, ";") {
+		proj, toks, ok := strings.Cut(strings.TrimSpace(entry), ":")
+		proj = strings.TrimSpace(proj)
+		if !ok || proj == "" {
+			continue
+		}
+		for _, t := range strings.Split(toks, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				m[proj] = append(m[proj], t)
+			}
+		}
+	}
+	return NewMapStore(m), len(m)
+}
+
 // NewOpenStore returns a KeyStore that authorizes ALL tokens for ALL projects — including the empty
 // token / no Authorization header at all (Middleware short-circuits to allow when the store is open).
 //

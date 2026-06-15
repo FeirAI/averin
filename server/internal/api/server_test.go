@@ -1,26 +1,36 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/feir-dev/feir/server/internal/api"
+	"github.com/feir-dev/feir/server/internal/auth"
 	"github.com/feir-dev/feir/server/internal/core"
 	"github.com/feir-dev/feir/server/internal/store"
+	"github.com/feir-dev/feir/server/internal/witness"
 )
 
 const seed = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 
 func newSrv(t *testing.T) http.Handler {
 	t.Helper()
+	return newServer(t).Routes()
+}
+
+func newServer(t *testing.T) *api.Server {
+	t.Helper()
 	c, err := core.New(seed)
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
-	return api.New(c, store.NewMem(), "k0").Routes()
+	return api.New(c, store.NewMem(), "k0")
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string) (int, string) {
@@ -106,6 +116,111 @@ func TestAuthorityIsDeclaredNotSilentlyVerified(t *testing.T) {
 	auth, _ := rec["authority"].(map[string]any)
 	if auth["source"] != "caller_declared" {
 		t.Fatalf("unverified authority must be caller_declared, got %v", auth["source"])
+	}
+}
+
+func TestOTelIngestSealsRecords(t *testing.T) {
+	h := newSrv(t)
+	otlp := `{"resourceSpans":[{"scopeSpans":[{"spans":[
+	  {"name":"db.query","spanId":"sp1","attributes":[{"key":"session.id","value":{"stringValue":"run-9"}},{"key":"db.system","value":{"stringValue":"pg"}}]}
+	]}]}]}`
+	code, resp := do(t, h, "POST", "/v2/otel/traces?project=p1", otlp)
+	if code != http.StatusCreated || !strings.Contains(resp, `"ingested":1`) {
+		t.Fatalf("otel ingest failed (%d): %s", code, resp)
+	}
+	// the span became a sealed record in session run-9
+	_, dag := do(t, h, "GET", "/v2/dag?project=p1&session=run-9", "")
+	if !strings.Contains(dag, `"observed_via":"otel"`) || !strings.Contains(dag, `"sig":"ed25519:`) {
+		t.Fatalf("otel span not sealed into session: %s", dag)
+	}
+}
+
+func TestAuthGatesRoutes(t *testing.T) {
+	srv := newServer(t).WithAuth(auth.NewMapStore(map[string][]string{"p1": {"s3cret"}}))
+	h := srv.Routes()
+	// no token -> 401
+	if code, _ := do(t, h, "GET", "/v2/sessions?project=p1", ""); code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got %d", code)
+	}
+	// right token -> 200
+	req := httptest.NewRequest("GET", "/v2/sessions?project=p1", nil)
+	req.Header.Set("X-Api-Key", "s3cret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with valid token, got %d", rec.Code)
+	}
+	// wrong project for the token -> 401
+	req2 := httptest.NewRequest("GET", "/v2/sessions?project=other", nil)
+	req2.Header.Set("X-Api-Key", "s3cret")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("token must not be valid for a different project, got %d", rec2.Code)
+	}
+}
+
+func TestCheckpointWrittenToWitness(t *testing.T) {
+	w := witness.NewMemWitness()
+	srv := newServer(t).WithWitness(w)
+	h := srv.Routes()
+	postRecord(t, h, `{"idempotency_key":"w1","project_id":"p1","session_id":"s1","action":"a"}`)
+	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint failed (%d): %s", code, resp)
+	}
+	entries, err := w.List(context.Background(), "p1")
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected 1 witnessed checkpoint, got %d (err %v)", len(entries), err)
+	}
+}
+
+// failOnceWitness fails the first Append, then delegates to a real MemWitness.
+type failOnceWitness struct {
+	inner  *witness.MemWitness
+	failed bool
+}
+
+func (f *failOnceWitness) Append(ctx context.Context, project string, cp []byte) error {
+	if !f.failed {
+		f.failed = true
+		return errors.New("transient witness outage")
+	}
+	return f.inner.Append(ctx, project, cp)
+}
+func (f *failOnceWitness) List(ctx context.Context, project string) ([][]byte, error) {
+	return f.inner.List(ctx, project)
+}
+
+func TestCheckpointSurvivesWitnessFailure(t *testing.T) {
+	w := &failOnceWitness{inner: witness.NewMemWitness()}
+	h := newServer(t).WithWitness(w).Routes()
+	postRecord(t, h, `{"idempotency_key":"x","project_id":"p1","session_id":"s1","action":"a"}`)
+
+	// first checkpoint: witness fails -> still 201, with a warning (checkpoint IS created)
+	code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", "")
+	if code != http.StatusCreated || !strings.Contains(resp, "warning") {
+		t.Fatalf("expected 201+warning on witness failure, got %d: %s", code, resp)
+	}
+	// second checkpoint must NOT be wedged: seq advanced, witness now succeeds
+	code2, resp2 := do(t, h, "POST", "/v2/checkpoints?project=p1", "")
+	if code2 != http.StatusCreated || strings.Contains(resp2, "warning") {
+		t.Fatalf("checkpointing wedged after a witness failure: %d %s", code2, resp2)
+	}
+}
+
+func TestConcurrentCheckpointsDoNotFork(t *testing.T) {
+	h := newServer(t).Routes()
+	postRecord(t, h, `{"idempotency_key":"x","project_id":"p1","session_id":"s1","action":"a"}`)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); do(t, h, "POST", "/v2/checkpoints?project=p1", "") }()
+	}
+	wg.Wait()
+	// the chain must still verify (serialized seqs, no fork)
+	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
+	if !strings.Contains(report, `"chain_ok":true`) {
+		t.Fatalf("concurrent checkpoints forked the chain: %s", report)
 	}
 }
 

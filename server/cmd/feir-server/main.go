@@ -8,9 +8,11 @@ import (
 	"os"
 
 	"github.com/feir-dev/feir/server/internal/api"
+	"github.com/feir-dev/feir/server/internal/auth"
 	"github.com/feir-dev/feir/server/internal/core"
 	"github.com/feir-dev/feir/server/internal/meter"
 	"github.com/feir-dev/feir/server/internal/store"
+	"github.com/feir-dev/feir/server/internal/witness"
 )
 
 func main() {
@@ -30,6 +32,28 @@ func main() {
 	srv.WithMeter(meter.NewStripeReporter(meter.NewMem(), meter.StripeConfig{
 		APIKey: os.Getenv("STRIPE_API_KEY"),
 	}))
+
+	// project-scoped API keys: FEIR_API_KEYS="proj-a:tok1,tok2;proj-b:tok3". Unset = no auth (dev).
+	if raw := os.Getenv("FEIR_API_KEYS"); raw != "" {
+		ks, n := auth.ParseKeys(raw)
+		if n == 0 {
+			log.Fatal("FEIR_API_KEYS is set but parsed to zero keys — refusing to start in silent deny-all (use 'proj:tok' form)")
+		}
+		srv.WithAuth(ks)
+		log.Printf("per-project API-key auth enabled (%d projects)", n)
+	} else {
+		log.Printf("WARNING: no FEIR_API_KEYS set — the app API is UNAUTHENTICATED (dev/single-tenant only)")
+	}
+	// customer witness for sealed checkpoints (append-only).
+	if dir := os.Getenv("FEIR_WITNESS_DIR"); dir != "" {
+		w, err := witness.NewFSWitness(dir)
+		if err != nil {
+			log.Fatalf("witness: %v", err)
+		}
+		srv.WithWitness(w)
+		log.Printf("checkpoint witness -> %s", dir)
+	}
+
 	log.Printf("feir-server listening on %s (pubkey %s)", addr, c.PubKey())
 	log.Fatal(http.ListenAndServe(addr, srv.Routes()))
 }
