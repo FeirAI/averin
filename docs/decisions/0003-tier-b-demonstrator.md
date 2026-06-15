@@ -1,7 +1,10 @@
 # ADR 0003 — Tier-B (Level 3) demonstrator: implementation design
 
-**Status:** Accepted (rev 4; Codex review READY TO BUILD — all four rev-2 MUST-FIXES resolved + the
-rev-3 R5 per-`grant_id` blocker closed; building tasks #15–#19, each adversarially reviewed before commit)
+**Status:** Implemented (rev 4; Codex review READY TO BUILD — all four rev-2 MUST-FIXES resolved + the
+rev-3 R5 per-`grant_id` blocker closed). Built across five adversarially-reviewed commits `tierb[1..5]`:
+R1 RCP-canonical re-derivable evidence_hash; R2 role-separated broker/resource authority keys;
+`resourceshim` (PoP-at-use + consume-before-act ledger, R4/R5); `POST /v2/use` resource-signed receipts;
+verifier use↔grant join over the closed set (R3) + `action_completeness` + the full match predicate.
 **Date:** 2026-06-15
 **Builds on:** ADR 0002 (the credential-broker architecture, hardened across 3 review rounds) and the
 shipped Tier-A prototype (`broker` pkg, `POST /v2/grants`, `feir_sign_evidence`, verifier

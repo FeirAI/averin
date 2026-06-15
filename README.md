@@ -22,7 +22,7 @@ Three honest trust levels (used verbatim in product copy):
 |-------|-------|---------|
 | **1 Record integrity** | sealed by this key, unchanged since | **Yes** |
 | **2 Event observation** | this event was observed by us | **Partial** (explicit coverage limits) |
-| **3 Complete accountability** | this is *everything* the agent did | **Not yet** (needs the credential broker) |
+| **3 Complete accountability** | this is *everything* the agent did | **Demonstrated over the brokered surface** (credential broker Tier A+B); full coverage still needs deployment attestations + a reduced broker TCB |
 
 ## Monorepo layout
 
@@ -56,8 +56,10 @@ Every piece was Codex-reviewed before commit. End to end:
 
 Adversarial matrix defended & tested: **#1, #2, #3, #4, #6, #7, #8, #9, #10, #11** plus tamper —
 with Phase 2 closing #4 (*declared → verified*), #6 (hiding commitments wired end-to-end), and #3
-(RFC 3161 anchoring). Tests: Rust 56 (lib) + 18 adversarial, Go (incl. real-Postgres-gated store
-+ append-only), Python, TS, web, WASM verifier — all green.
+(RFC 3161 anchoring), and the credential broker adding Tier-A grant accountability and Tier-B
+action accountability (use↔grant join, role separation, PoP-at-use). Tests: Rust 87 (incl. 32
+adversarial), Go (incl. the `resourceshim` + `/v2/use` end-to-end and a real-Postgres-gated store),
+Python, TS, web, WASM verifier — all green.
 
 ```bash
 cargo test --workspace
@@ -73,7 +75,7 @@ Every claim is bounded by [`docs/coverage-limits.md`](docs/coverage-limits.md) (
 - ☑ **Production Postgres store** — append-only at the database (REVOKE UPDATE/DELETE/TRUNCATE, verified under a least-privilege role), idempotency + content-hash collapse + DAG-derived frontier in SQL; auto-migrates; `docker compose up` is turnkey. Validated against real Postgres 16.
 - ☑ **Content commitments + selective-disclosure export** (#6) — low-entropy `input`/`output`/`rationale` are hiding-committed at ingest (plaintext → content store, never the signed body); a `selective_disclosure` export reveals `(value, nonce)` the offline verifier checks against each record's commitment. Disclosure secrets are written atomically with the record.
 - ☑ **RFC 3161 checkpoint anchoring** (#3) — checkpoints are timestamp-anchored to a third-party TSA, decoupled (out of the checkpoint lock, back-anchorable) and joined into the bundle at export.
-- ◐ **Credential broker (Level 3 — the moat)** — **design recorded** in [`docs/decisions/0002-credential-broker-level-3.md`](docs/decisions/0002-credential-broker-level-3.md) (hardened across three adversarial-review rounds: Tier A grant-accountability vs Tier B action-accountability), and the **Tier-A prototype is built**: `POST /v2/grants` records a signed `gateway_enforced` grant (record-before-issue, idempotent) and mints a sender-constrained, single-use, proof-of-possession capability; the offline verifier reports `grant_accountability` under the pinned broker key (`broker_trust: assumed`, honestly labeled). Tier B (resource use-receipts + attestations) and the broker-TCB reduction remain *built when a design partner pulls*.
+- ☑ **Credential broker (Level 3 — the moat)** — design in [`docs/decisions/0002-credential-broker-level-3.md`](docs/decisions/0002-credential-broker-level-3.md) (Tier A grant-accountability vs Tier B action-accountability), with the implementation design [`docs/decisions/0003-tier-b-demonstrator.md`](docs/decisions/0003-tier-b-demonstrator.md) hardened across two more Codex rounds to **READY**. **Tier A** (`POST /v2/grants`): a signed `gateway_enforced` grant (record-before-issue, idempotent) + a sender-constrained, single-use, proof-of-possession capability. **Tier B** (`POST /v2/use`, built across five adversarially-reviewed commits): the resource gateway validates a capability + PoP-at-use and consumes it before acting (`resourceshim`, consume-before-act ledger), then seals a **resource-signed** use receipt; the offline verifier re-derives each `evidence_hash` from canonical `grant_evidence`/`use_evidence` (R1), enforces **role-separated** broker/resource authority keys (R2, disjoint-or-fatal), and **joins each use to its grant over the verified-anchored CLOSED set** (R3) under the full match predicate — reporting `uses_matched` / `unmatched_violation` / `unmatched_pending` / `grants_unused`. Honest residuals (resource is TCB, taxonomy/attestations unevaluated, never-anchored suppression) are stated, not papered over; `action_completeness` never claims `attested_complete`.
 
 ## Verify an export offline
 
