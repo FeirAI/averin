@@ -941,14 +941,20 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	} else {
 		requested["claimed_agent_pubkey"] = req.AgentPubKey
 	}
-	// Derive the denial id from the FULL requested probe identity, NOT the caller idempotency key: a probe
-	// that reuses one idem key while VARYING any requested field is a DISTINCT denied probe and must be
-	// logged separately (else a varying-field sweep under a fixed idem would collapse to one record and
-	// suppress the rest of the B11 log). Encode the tuple as a JSON ARRAY, not a delimiter-joined string:
-	// a caller controls these fields and could embed the delimiter (e.g. U+001F), making two distinct tuples
-	// serialize identically (action="a",resource="b\x1fc" vs action="a\x1fb",resource="c") -> same id -> the
-	// second denial collapses (Codex). JSON quotes + escapes each element, so distinct tuples always differ.
-	probe, _ := json.Marshal([]string{req.Action, req.Resource, req.Scope, string(req.ScopeClass), req.AgentID, req.AgentPubKey, reason})
+	// Derive the id from the FULL denied request identity, NOT a hand-picked field subset: a probe that
+	// reuses one idem key while varying ANY distinguishing field (session_id, ttl_seconds, principal,
+	// delegation, justification, ...) is a DISTINCT denial and must be logged separately — else a sweep that
+	// varies, e.g., ttl_seconds or session_id collapses onto the first record and suppresses the rest of the
+	// B11 log. Marshal the WHOLE grantRequest (canonical, declaration-order-stable) so every recognized field
+	// is included and no future field is silently omitted, with the idempotency_key cleared (NOT part of the
+	// probe identity — that is the point) and agent_sig cleared (a derived value; sig-only variation is the
+	// same probe). The outer JSON array is unambiguous framing (each element quoted + escaped), so a field
+	// boundary cannot be forged by an embedded delimiter.
+	idReq := gr
+	idReq.IdempotencyKey = ""
+	idReq.AgentSig = ""
+	reqJSON, _ := json.Marshal(idReq)
+	probe, _ := json.Marshal([]string{string(reqJSON), reason})
 	denialID := "denial-" + uuidV5Shaped("feir.denial.id.v1", gr.ProjectID, string(probe))
 	rec := map[string]any{
 		"record_id":     denialID,

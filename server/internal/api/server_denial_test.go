@@ -192,6 +192,44 @@ func TestDenialIdResistsDelimiterInjection(t *testing.T) {
 	}
 }
 
+// customGrant posts a grant with explicit session/scope/ttl and a valid PoP (the PoP challenge covers
+// agent_id/action/resource/scope/agent_pubkey, NOT session_id or ttl, so those vary freely under one sig).
+// It asserts the request is rejected (400) — i.e. it produces a denial.
+func customGrant(t *testing.T, h http.Handler, ak ed25519.PrivateKey, idem, session, scope string, ttl int) {
+	t.Helper()
+	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
+	req := broker.Request{AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: scope, AgentPubKey: pub}
+	sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
+	body, _ := json.Marshal(map[string]any{
+		"idempotency_key": idem, "project_id": "p1", "session_id": session,
+		"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",
+		"scope": scope, "agent_pubkey": pub, "agent_sig": sig, "ttl_seconds": ttl,
+	})
+	if code, r := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusBadRequest {
+		t.Fatalf("denied grant should be 400, got %d: %s", code, r)
+	}
+}
+
+// TestDenialIdIncludesSessionAndTTL (Codex C3c): the denial id covers the FULL request, so varying any
+// distinguishing field — here session_id (forbidden-scope probes) and ttl_seconds (over-cap TTL probes),
+// both under a fixed idempotency key + otherwise-identical tuple — logs DISTINCT denials rather than
+// collapsing onto the first. Old subset-based id ignored session_id and ttl_seconds → would log only 2.
+func TestDenialIdIncludesSessionAndTTL(t *testing.T) {
+	h := denyLogServer(t)
+	ak := grantAgentKey()
+	customGrant(t, h, ak, "idem-x", "s1", "iam:reset", 60)     // forbidden_scope, session s1
+	customGrant(t, h, ak, "idem-x", "s2", "iam:reset", 60)     // forbidden_scope, session s2 (was collapsed)
+	customGrant(t, h, ak, "idem-y", "s3", "read:orders", 99999) // ttl_exceeded, ttl 99999
+	customGrant(t, h, ak, "idem-y", "s3", "read:orders", 88888) // ttl_exceeded, ttl 88888 (was collapsed)
+	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, r)
+	}
+	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
+	if !strings.Contains(report, `"denied_grants":4`) {
+		t.Fatalf("varying session_id and ttl_seconds must each produce a distinct denial (want 4): %s", report)
+	}
+}
+
 // TestDeniedGrantLogOffByDefault: without WithDeniedGrantLog the forbidden scope is still rejected but NO
 // denial is sealed (opt-in — avoids a probe-driven storage/billing DoS by default).
 func TestDeniedGrantLogOffByDefault(t *testing.T) {
