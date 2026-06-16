@@ -46,6 +46,15 @@ type Ledger interface {
 	// ConsumeJTI atomically marks a single-use credential jti consumed (double-spend protection);
 	// ErrConsumed if already spent.
 	ConsumeJTI(jti string) error
+	// ReleaseNonce / ReleaseJTI ROLL BACK a consumption when receipt construction fails AFTER ValidateUse
+	// consumed the credential but BEFORE the caller acted (the caller acts only on a 2xx response). This
+	// un-burns a single-use credential on a transient build error so an honest retry can re-validate, without
+	// weakening double-spend protection: a SUCCESSFUL use never releases, and the caller never acted on the
+	// failed one. Release is sound ONLY when the receipt definitively did not persist; a commit-ambiguous
+	// store error must NOT release (the api layer keeps the credential consumed there). Releasing an entry
+	// that was not consumed is a safe no-op.
+	ReleaseNonce(nonce string)
+	ReleaseJTI(jti string)
 }
 
 // MemLedger is an in-memory Ledger for the demonstrator and tests. Production backs the ledger with a
@@ -87,6 +96,20 @@ func (l *MemLedger) ConsumeJTI(jti string) error {
 	}
 	l.jti[jti] = struct{}{}
 	return nil
+}
+
+// ReleaseNonce un-marks a consumed nonce (rollback when a receipt did not persist). No-op if not consumed.
+func (l *MemLedger) ReleaseNonce(nonce string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.nonces, nonce)
+}
+
+// ReleaseJTI un-marks a consumed jti (rollback when a receipt did not persist). No-op if not consumed.
+func (l *MemLedger) ReleaseJTI(jti string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.jti, jti)
 }
 
 // Op is the operation a resource is about to perform under a presented capability. ResourceID comes
@@ -131,6 +154,16 @@ type Shim struct {
 // rejected); issuingPub is the broker's capability-signing public key.
 func New(issuingPub ed25519.PublicKey, resourceID string, ledger Ledger) *Shim {
 	return &Shim{issuingPub: issuingPub, resourceID: resourceID, ledger: ledger}
+}
+
+// RollbackUse releases the nonce and (single-use) jti a prior ValidateUse consumed. Call it ONLY when the
+// caller has NOT acted — receipt construction failed before any record persisted, so the api layer returns
+// an error and the caller never received a 2xx — to un-burn the credential for an honest retry. MUST NOT be
+// called after a commit-AMBIGUOUS store error (the receipt may be durable; releasing would allow a replay
+// double-spend). Releasing a jti that was not consumed (a reusable credential) is a no-op.
+func (s *Shim) RollbackUse(ev UseEvidence) {
+	s.ledger.ReleaseNonce(ev.Nonce)
+	s.ledger.ReleaseJTI(ev.JTI)
 }
 
 // ValidateUse validates a presented capability + proof-of-possession for op, consumes the credential

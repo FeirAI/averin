@@ -1269,10 +1269,29 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		grantID = ev.GrantID
 		rec, disclosures, e := s.buildUseRecord(useID, ur, ev, rawParams, paramsCommitment, brokerKind)
 		if e != nil {
+			// Receipt construction failed BEFORE any record was written and the caller never acted (it gets a
+			// 500). ValidateUse already consumed the single-use nonce/jti, so RELEASE them — otherwise a
+			// transient build error (e.g. the content store) burns the credential with no receipt. Safe: nothing
+			// persisted, the caller did not act, and a successful path never releases.
+			shim.RollbackUse(ev)
 			return e
 		}
 		sealed, _, e = s.sealAndStore(ur.ProjectID, ur.SessionID, idem, rec, disclosures)
-		return e
+		if e != nil {
+			// A store error at the COMMIT POINT is commit-AMBIGUOUS (an in-flight Postgres commit can still
+			// land). We must NOT release the credential here: if the receipt is durable-but-not-yet-visible,
+			// releasing would let a replay double-spend. Mirror the grant path — if the receipt is already
+			// durably visible, surface success (credential correctly stays consumed); otherwise return the
+			// error WITHOUT releasing. The deterministic useID lets an honest retry reclaim a durable receipt;
+			// a genuinely-uncommitted seal leaves the credential consumed (the same commit-ambiguity residual
+			// the grant path documents, narrowed to {seal failure, not durable, client never retries}).
+			if r2, found2, re := s.st.RecordByIdem(ur.ProjectID, idem); re == nil && found2 {
+				sealed = r2.JSON
+				return nil
+			}
+			return e
+		}
+		return nil
 	}()
 	if conflictErr != nil {
 		writeErr(w, http.StatusConflict, "use rejected: "+conflictErr.Error())

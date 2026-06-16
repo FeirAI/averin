@@ -1,11 +1,13 @@
 package api_test
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"testing"
 
 	"github.com/feir-dev/feir/server/internal/api"
+	"github.com/feir-dev/feir/server/internal/content"
 	"github.com/feir-dev/feir/server/internal/core"
 	"github.com/feir-dev/feir/server/internal/store"
 )
@@ -52,5 +54,49 @@ func TestUseFailsClosedOnIdemStoreError(t *testing.T) {
 	fs.fail = false
 	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusCreated {
 		t.Fatalf("after the store recovers, the un-consumed credential must still seal a receipt, got %d: %s", code, r)
+	}
+}
+
+// failContentStore injects a content-store Put failure, to drive a buildUseRecord error AFTER ValidateUse
+// has consumed the credential (the use receipt stores its params content-addressed during construction).
+type failContentStore struct {
+	content.Store
+	fail bool
+}
+
+func (f *failContentStore) Put(ctx context.Context, data []byte) (content.Address, error) {
+	if f.fail {
+		return content.Address{}, errors.New("injected content store failure")
+	}
+	return f.Store.Put(ctx, data)
+}
+
+// TestUseReleasesCredentialOnReceiptBuildFailure (Codex pass-8 high): if receipt construction fails AFTER
+// ValidateUse consumed the single-use credential but BEFORE anything persisted (here the content store fails
+// while storing the use params), the nonce/jti must be RELEASED — the caller got a 500 and never acted, so a
+// retry must be able to re-validate. Otherwise a transient build error burns the credential.
+func TestUseReleasesCredentialOnReceiptBuildFailure(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	rc, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatalf("resource core: %v", err)
+	}
+	fc := &failContentStore{Store: content.NewMemStore()}
+	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(fc).Routes()
+	ak := grantAgentKey()
+	grantID, cap := mkGrant(t, h, ak, "idem-grant") // grant minted while the content store is healthy
+
+	fc.fail = true
+	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusInternalServerError {
+		t.Fatalf("a receipt-build failure (content store) should be 500, got %d: %s", code, r)
+	}
+	// the single-use credential was RELEASED, not burned: with the content store healthy the SAME nonce
+	// re-validates and seals a receipt.
+	fc.fail = false
+	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusCreated {
+		t.Fatalf("after the content store recovers, the released credential must seal a receipt, got %d: %s", code, r)
 	}
 }
