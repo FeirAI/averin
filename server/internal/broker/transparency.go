@@ -27,6 +27,29 @@ type GrantSeqHash struct {
 // LP4 is a 4-byte big-endian length prefix; BE8 an 8-byte big-endian int. The caller MUST pass the
 // pairs already sorted by broker_seq (the producer folds in issue order). The empty log has a
 // well-defined non-zero seed root, so "no grants" is distinguishable from a forged/zero root.
+// BrokerGrantHead is the head a checkpoint anchors (ADR 0004 D6 / MF2): the cumulative_root over the
+// grant log [1..max_seq], the max_seq, and prior_head_hash linking to the PREVIOUS checkpoint's
+// cumulative_root (the empty-log root when there is no prior checkpoint). Because the head lives inside
+// the signed, fork-detected, anchored checkpoint, the broker cannot equivocate on the grant log without
+// a detectable fork/anchor mismatch. `grants` MUST be sorted by broker_seq.
+func BrokerGrantHead(grants []GrantSeqHash, priorHeadHash string) map[string]any {
+	var maxSeq int64
+	for _, g := range grants {
+		if g.Seq > maxSeq {
+			maxSeq = g.Seq
+		}
+	}
+	return map[string]any{
+		"max_seq":         maxSeq,
+		"prior_head_hash": priorHeadHash,
+		"cumulative_root": GrantHeadRoot(grants),
+	}
+}
+
+// EmptyGrantHeadRoot is the cumulative_root of an empty grant log — the prior_head_hash a project's
+// FIRST checkpoint uses (no previous head to chain to).
+func EmptyGrantHeadRoot() string { return GrantHeadRoot(nil) }
+
 func GrantHeadRoot(grants []GrantSeqHash) string {
 	lp4 := func(buf, b []byte) []byte {
 		var n [4]byte

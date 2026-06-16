@@ -245,6 +245,25 @@ assigns a `broker_seq` AND never records the grant at all is the never-anchored 
 golden tests (gap → violation; tail omission → violation; root mismatch → violation; forked head →
 detected; clean anchored sequence → `sequence_verified`; unanchored head → `sequence_consistent_export`).
 
+**Producer↔verifier contracts (the verifier MUST re-derive identically to the producer):**
+- **Grant-log membership = the role TUPLE, not signature trust.** A record is in the transparency log iff
+  `(extensions.broker.kind=="grant", authority.enforcement_point=="credential_broker")` — the same
+  `classify_role` tuple the verifier already uses. Membership is NOT gated on `evidence_sig` verifying: a
+  broker must not be able to drop a grant from the log by under-signing it (that IS the suppression D6
+  detects). Per-grant trust (`evidence_sig` under a pinned broker key → `grant_verified`) is a SEPARATE
+  axis. So `cumulative_root` folds every recorded tuple-classified grant; `grant_verified` counts the
+  subset whose sig verifies.
+- **D6 activation boundary.** Only grants that CARRY a `broker_seq` are in the D6 log; a tuple-classified
+  grant with no `broker_seq` predates D6 and is excluded by BOTH sides (so a fresh project's log is a
+  clean `[1..N]`, and a project with legacy grants is not wedged).
+- **Consistent snapshot.** The producer reads the frontier, record count, and grant log under one ingest
+  lock so the head folds exactly the grants the checkpoint frontier commits; the verifier re-derives over
+  that same closed (anchored-checkpoint-committed) grant set.
+- **Single-instance ordering / multi-instance residual.** Gapless RECORDED order (no higher seq anchored
+  before a lower) relies on single-process ingest serialization (as the DAG frontier already does); a
+  multi-instance deployment must hold a distributed per-project lock across allocate→seal→insert (the
+  Postgres advisory lock is the extension point). Stated, not hidden.
+
 ## D7 — Deployment attestation evaluation (claims, not enforced reality)
 
 **Residual (ADR 0003):** `attestation_status:"unevaluated"` — isolation/egress/non-transferability are

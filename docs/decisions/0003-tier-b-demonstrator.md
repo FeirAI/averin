@@ -102,6 +102,8 @@ keys, so the canonical form is byte-deterministic. Both payloads are integer-/st
 | `scope_class` | string | selects single-use (`single_operation`) vs reusable |
 | `agent_id` | string | provenance (not matched, audited) |
 | `cnf_kid` | string | key id the use's PoP must verify under |
+| `credential_binding` | string (`sha256:`) | binds the minted capability descriptor (ADR 0004 D2/D4) |
+| `broker_seq` | int (≥1) | gapless grant-transparency sequence (ADR 0004 D6/MF2) |
 | `issued_at` | int (unix s) | lower bound of the temporal window |
 | `exp` | int (unix s) | upper bound of the temporal window |
 

@@ -216,7 +216,10 @@ func KeyID(pub ed25519.PublicKey) string {
 // Prepare computes the grant artifacts. grantID is the unique grant id (also the credential jti and
 // the record_id the evidence is bound to); issuingKey mints the capability and its public half
 // determines the descriptor `kid`. now is the issuance time; req.TTL bounds the credential.
-func Prepare(req Request, grantID string, now time.Time, issuingKey ed25519.PrivateKey) (Prepared, error) {
+// allocSeq is invoked to obtain this grant's gapless broker_seq (ADR 0004 D6). It is called ONLY after
+// the request has FULLY validated (signature/scope/pubkey), so a rejected grant never burns a sequence
+// number and manufactures a false-suppression gap — the caller (api) wires it to Store.AllocateBrokerSeq.
+func Prepare(req Request, grantID string, allocSeq func() (int64, error), now time.Time, issuingKey ed25519.PrivateKey) (Prepared, error) {
 	if err := req.Validate(); err != nil {
 		return Prepared{}, err
 	}
@@ -243,6 +246,18 @@ func Prepare(req Request, grantID string, now time.Time, issuingKey ed25519.Priv
 		return Prepared{}, errors.New("agent_pubkey is not a valid ed25519 public key")
 	}
 	cnfCanonical := base64.RawURLEncoding.EncodeToString(cnfPub)
+
+	// All validation has passed — NOW allocate the gapless grant-transparency sequence (D6). Allocating
+	// here (not before validation) means a rejected request never consumes a seq, so the only gap a
+	// broker can produce is a genuinely abandoned-after-mint grant (a real suppression signal), never a
+	// 400 from an unauthenticated caller.
+	brokerSeq, err := allocSeq()
+	if err != nil {
+		return Prepared{}, fmt.Errorf("allocate broker_seq: %w", err)
+	}
+	if brokerSeq < 1 {
+		return Prepared{}, errors.New("allocated broker_seq must be >= 1 (gapless grant-transparency sequence, ADR 0004 D6)")
+	}
 
 	// Canonical credential descriptor — the exact claim set credential_binding commits to and the
 	// capability carries (ADR "Exact credential binding": typ/alg/kid/iss/sub/aud/act/jti/scope/cnf/
@@ -291,8 +306,11 @@ func Prepare(req Request, grantID string, now time.Time, issuingKey ed25519.Priv
 		"conformance_level":     ConformanceL1GrantOnly,
 		"cnf_kid":               KeyID(ed25519.PublicKey(cnfPub)),
 		"credential_binding":    credentialBinding,
-		"issued_at":             evaluatedAt.Unix(),
-		"exp":                   expiresAt.Unix(),
+		// broker_seq: the gapless grant-transparency sequence (ADR 0004 D6 / MF2), signed into the
+		// evidence so the verifier can re-derive the anchored cumulative_root and detect suppression.
+		"broker_seq": brokerSeq,
+		"issued_at":  evaluatedAt.Unix(),
+		"exp":        expiresAt.Unix(),
 	}
 
 	// Mint the capability: payload = the canonical descriptor bytes, signed by the issuing key. Only

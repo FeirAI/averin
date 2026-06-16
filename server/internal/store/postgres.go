@@ -178,6 +178,34 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 	return existing, false, nil
 }
 
+// ReleaseBrokerSeq deletes the (project, grant) row so a failed-after-allocation grant's seq is freed;
+// the next AllocateBrokerSeq's MAX(seq)+1 reuses it. Append-only is not violated: a broker_seq row that
+// never had a committed grant is rolled back, not a recorded one mutated. Called under the api ingest
+// lock, so no concurrent allocation observes the gap.
+func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
+	ctx := background()
+	if _, err := p.pool.Exec(ctx, `DELETE FROM broker_seq WHERE project_id = $1 AND grant_id = $2`, projectID, grantID); err != nil {
+		return fmt.Errorf("store: release broker seq: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) RecordByIdem(projectID, idemKey string) (Record, bool, error) {
+	ctx := background()
+	row := p.pool.QueryRow(ctx, `
+		SELECT json, content_hash, session_id, parents
+		FROM records WHERE project_id = $1 AND idempotency_key = $2
+	`, projectID, idemKey)
+	var rec Record
+	if err := row.Scan(&rec.JSON, &rec.ContentHash, &rec.SessionID, &rec.Parents); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Record{}, false, nil
+		}
+		return Record{}, false, fmt.Errorf("store: record by idem: %w", err)
+	}
+	return rec, true, nil
+}
+
 func selectByIdem(ctx context.Context, tx pgx.Tx, projectID, idemKey string) (Record, bool, error) {
 	row := tx.QueryRow(ctx, `
 		SELECT json, content_hash, session_id, parents
@@ -440,6 +468,43 @@ func (p *Postgres) NextCheckpointSeq(projectID string) (int64, error) {
 		return 0, fmt.Errorf("store: next checkpoint seq: %w", err)
 	}
 	return n, nil
+}
+
+// AllocateBrokerSeq allocates (or returns the existing) gapless, idempotent broker_seq for a grant
+// (ADR 0004 D6 / MF2). It runs under a per-project transaction-scoped advisory lock so two concurrent
+// issuances cannot read the same MAX(seq) and mint two grants at the same number; the lock auto-releases
+// at COMMIT/ROLLBACK. The INSERT ... ON CONFLICT (project_id, grant_id) DO NOTHING makes a retry of the
+// same deterministic grant_id a no-op, and the trailing SELECT returns the existing-or-just-inserted seq.
+func (p *Postgres) AllocateBrokerSeq(projectID, grantID string) (int64, error) {
+	ctx := background()
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin broker seq: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op.
+
+	// Serialize allocation per project (hashtext is stable within a PG major version; the lock value is
+	// purely an internal serialization token, never persisted, so its exact hash does not matter).
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, projectID); err != nil {
+		return 0, fmt.Errorf("store: broker seq lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO broker_seq (project_id, grant_id, seq)
+		SELECT $1, $2, COALESCE(MAX(seq), 0) + 1 FROM broker_seq WHERE project_id = $1
+		ON CONFLICT (project_id, grant_id) DO NOTHING
+	`, projectID, grantID); err != nil {
+		return 0, fmt.Errorf("store: broker seq insert: %w", err)
+	}
+	var seq int64
+	if err := tx.QueryRow(ctx, `
+		SELECT seq FROM broker_seq WHERE project_id = $1 AND grant_id = $2
+	`, projectID, grantID).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("store: broker seq select: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("store: broker seq commit: %w", err)
+	}
+	return seq, nil
 }
 
 // insertDisclosures writes a record's disclosure secrets inside the caller's transaction. Insert-only

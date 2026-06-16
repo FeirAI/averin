@@ -42,7 +42,7 @@ func mintCap(t *testing.T, issuing, agent ed25519.PrivateKey, grantID, action, r
 		TTL:         ttl,
 	}
 	req.AgentSig = b64(ed25519.Sign(agent, req.Challenge()))
-	p, err := broker.Prepare(req, grantID, now, issuing)
+	p, err := broker.Prepare(req, grantID, func() (int64, error) { return 1, nil }, now, issuing)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}

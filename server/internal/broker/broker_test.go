@@ -99,7 +99,7 @@ func TestProofOfPossessionBlocksVictimKeyBinding(t *testing.T) {
 
 func TestPrepareDeterministicAndBound(t *testing.T) {
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
-	p, err := Prepare(validRequest(), "grant-abc", now, issuingKey())
+	p, err := Prepare(validRequest(), "grant-abc", func() (int64, error) { return 1, nil }, now, issuingKey())
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -142,14 +142,48 @@ func TestPrepareDeterministicAndBound(t *testing.T) {
 	if p.Evidence["credential_binding"] != p.CredentialBinding {
 		t.Fatalf("evidence does not commit the credential binding")
 	}
+	// D6: the gapless grant-transparency sequence is bound into the signed grant_evidence.
+	if p.Evidence["broker_seq"] != int64(1) {
+		t.Fatalf("evidence must carry broker_seq=1 (D6), got %v", p.Evidence["broker_seq"])
+	}
 	if !strings.HasPrefix(p.CredentialBinding, "sha256:") {
 		t.Fatalf("credential binding not sha256")
 	}
 	// deterministic: identical inputs -> identical artifacts. (evidence_hash is derived from
 	// Evidence by the cgo-capable api layer via RCP; Evidence itself being deterministic suffices.)
-	p2, _ := Prepare(validRequest(), "grant-abc", now, issuingKey())
+	p2, _ := Prepare(validRequest(), "grant-abc", func() (int64, error) { return 1, nil }, now, issuingKey())
 	if p.CredentialBinding != p2.CredentialBinding || p.Capability != p2.Capability {
 		t.Fatalf("Prepare is not deterministic")
+	}
+}
+
+func TestPrepareDoesNotAllocateSeqOnValidationFailure(t *testing.T) {
+	// A rejected grant must NOT consume a broker_seq — else an unauthenticated caller passing only the
+	// minimal gate could spam validation failures and manufacture false-suppression gaps (ADR 0004 D6).
+	// The allocator callback must be invoked ONLY after the request fully validates.
+	allocCalled := false
+	alloc := func() (int64, error) { allocCalled = true; return 1, nil }
+
+	// forbidden scope for single_operation -> ClassifyScope rejects (after req.Validate passes).
+	r := validRequest()
+	r.Scope = "iam:PassRole"
+	r = signed(r, agentKey()) // re-sign: the challenge binds the scope
+	if _, err := Prepare(r, "g", alloc, time.Now().UTC(), issuingKey()); err == nil {
+		t.Fatal("a forbidden scope must be rejected")
+	}
+	if allocCalled {
+		t.Fatal("broker_seq must NOT be allocated for a forbidden-scope rejection (false-suppression gap)")
+	}
+
+	// tampered signature -> req.Validate fails before any allocation.
+	bad := validRequest()
+	bad.AgentSig = b64(bytes.Repeat([]byte{0}, ed25519.SignatureSize))
+	allocCalled = false
+	if _, err := Prepare(bad, "g", alloc, time.Now().UTC(), issuingKey()); err == nil {
+		t.Fatal("a tampered PoP signature must be rejected")
+	}
+	if allocCalled {
+		t.Fatal("broker_seq must NOT be allocated when the PoP signature is invalid")
 	}
 }
 
@@ -158,7 +192,7 @@ func TestSessionGrantIsNotSingleUse(t *testing.T) {
 	r.Scope = "read:*"
 	r.ScopeClass = ScopeSession
 	r = signed(r, agentKey()) // re-sign (scope changed -> challenge changed)
-	p, err := Prepare(r, "g", time.Now().UTC(), issuingKey())
+	p, err := Prepare(r, "g", func() (int64, error) { return 1, nil }, time.Now().UTC(), issuingKey())
 	if err != nil {
 		t.Fatalf("prepare session grant: %v", err)
 	}
@@ -172,7 +206,7 @@ func TestSessionGrantIsNotSingleUse(t *testing.T) {
 
 func TestCapabilityRoundTripAndTamper(t *testing.T) {
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
-	p, _ := Prepare(validRequest(), "grant-abc", now, issuingKey())
+	p, _ := Prepare(validRequest(), "grant-abc", func() (int64, error) { return 1, nil }, now, issuingKey())
 	pub := issuingKey().Public().(ed25519.PublicKey)
 
 	claims, err := VerifyCapability(p.Capability, pub)
@@ -208,7 +242,7 @@ func TestForbiddenScopeBlocksPrepare(t *testing.T) {
 	r := validRequest()
 	r.Scope = "iam:*"
 	r = signed(r, agentKey())
-	if _, err := Prepare(r, "g", time.Now().UTC(), issuingKey()); err == nil {
+	if _, err := Prepare(r, "g", func() (int64, error) { return 1, nil }, time.Now().UTC(), issuingKey()); err == nil {
 		t.Fatal("Prepare must reject a forbidden single_operation scope")
 	}
 }
@@ -228,7 +262,7 @@ func TestPrepareCanonicalizesAgentPubkey(t *testing.T) {
 	}
 	r := Request{AgentID: "a", Action: "x", Resource: "r", Scope: "read:x", AgentPubKey: nonCanon, TTL: time.Minute}
 	r.AgentSig = b64(ed25519.Sign(ak, r.Challenge()))
-	p, err := Prepare(r, "g", time.Now().UTC(), issuingKey())
+	p, err := Prepare(r, "g", func() (int64, error) { return 1, nil }, time.Now().UTC(), issuingKey())
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}

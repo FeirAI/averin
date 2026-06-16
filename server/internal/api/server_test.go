@@ -464,3 +464,19 @@ func TestMissingIdempotencyKeyRejected(t *testing.T) {
 		t.Fatalf("missing idempotency_key must be rejected, got %d", code)
 	}
 }
+
+// TestGenericRecordCannotForgeBrokerExtension proves the D6 head-poisoning guard: a generic /v2/records
+// caller that forges extensions.broker (e.g. kind=grant + a fake broker_seq) is REJECTED, so it can
+// never be folded into the broker grant-transparency head (ADR 0004 D6).
+func TestGenericRecordCannotForgeBrokerExtension(t *testing.T) {
+	h := newSrv(t)
+	body := `{"idempotency_key":"k1","project_id":"p1","session_id":"s1","action":"x",` +
+		`"extensions":{"broker":{"kind":"grant","grant_evidence":{"broker_seq":99}}}}`
+	code, resp := do(t, h, "POST", "/v2/records", body)
+	if code != http.StatusBadRequest {
+		t.Fatalf("a forged extensions.broker record must be rejected (400), got %d: %s", code, resp)
+	}
+	if !strings.Contains(resp, "extensions.broker is reserved") {
+		t.Fatalf("expected reserved-extensions rejection, got: %s", resp)
+	}
+}

@@ -22,3 +22,25 @@ func TestGrantHeadRootGoldenVector(t *testing.T) {
 		t.Fatal("grant_head_root must be order-sensitive")
 	}
 }
+
+func TestBrokerGrantHead(t *testing.T) {
+	grants := []GrantSeqHash{
+		{Seq: 1, ContentHash: "sha256:aa"},
+		{Seq: 2, ContentHash: "sha256:bb"},
+	}
+	head := BrokerGrantHead(grants, "sha256:prior")
+	if head["max_seq"] != int64(2) {
+		t.Fatalf("max_seq = %v, want 2", head["max_seq"])
+	}
+	if head["prior_head_hash"] != "sha256:prior" {
+		t.Fatalf("prior_head_hash = %v, want sha256:prior", head["prior_head_hash"])
+	}
+	if head["cumulative_root"] != GrantHeadRoot(grants) {
+		t.Fatalf("cumulative_root must equal grant_head_root over the grants")
+	}
+	// empty log: max_seq 0, root = empty-log seed.
+	empty := BrokerGrantHead(nil, EmptyGrantHeadRoot())
+	if empty["max_seq"] != int64(0) || empty["cumulative_root"] != EmptyGrantHeadRoot() {
+		t.Fatalf("empty head = %v; want max_seq 0 + empty root", empty)
+	}
+}

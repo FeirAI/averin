@@ -208,6 +208,12 @@ func TestPostgresAnchors(t *testing.T) {
 	exerciseAnchors(t, p)
 }
 
+func TestPostgresBrokerSeq(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseBrokerSeq(t, p)
+}
+
 func TestPostgresDuplicateContentHashCollapse(t *testing.T) {
 	p, done := newTestStore(t)
 	defer done()

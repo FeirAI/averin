@@ -47,6 +47,10 @@ type Store interface {
 	// PutRecord stores a record under an idempotency key. If the key was already used, it returns
 	// the previously stored record and created=false (threat #8: retry duplication collapses).
 	PutRecord(projectID, idemKey string, rec Record) (stored Record, created bool, err error)
+	// RecordByIdem returns the record previously stored under an idempotency key, if any. The broker
+	// uses it to detect an idempotent (or pre-D6 legacy) grant retry BEFORE allocating a broker_seq, so
+	// a replay can never burn a seq it then fails to record and manufacture a false transparency gap (D6).
+	RecordByIdem(projectID, idemKey string) (rec Record, found bool, err error)
 	// Heads returns the current head content_hashes for a session (records not referenced as a
 	// causal parent within that session), byte-sorted.
 	Heads(projectID, sessionID string) ([]string, error)
@@ -62,6 +66,39 @@ type Store interface {
 	Checkpoints(projectID string) ([]Checkpoint, error)
 	NextCheckpointSeq(projectID string) (int64, error)
 	LatestCheckpointHash(projectID string) (string, bool, error)
+
+	// AllocateBrokerSeq returns the grant-transparency sequence number for a grant (ADR 0004 D6 / MF2):
+	// strictly increasing and gapless per project [1..N], IDEMPOTENT on grantID (a retry of the same
+	// deterministic grant_id returns the same seq, so an idempotent re-issue does not create a gap). The
+	// seq is bound into the SIGNED grant_evidence, so it is allocated just before the grant is sealed —
+	// and ONLY after the request has fully validated (the broker calls it from inside Prepare, post-
+	// validation), so a rejected grant never burns a seq. The only way to leave a gap is for a VALID
+	// grant to be allocated a seq and then never persisted (a crash between mint and PutRecord); a retry
+	// of the same deterministic grant_id reclaims that exact seq, so a permanent gap requires a fully
+	// abandoned valid grant — which the verifier surfaces as a transparency anomaly (fail-toward-detection).
+	//
+	// DEPLOYMENT CONSTRAINT: the gapless RECORDED ORDER (a higher seq never anchored before a lower one)
+	// holds because the api serializes allocate→seal→insert under its single-process ingest mutex — the
+	// same single-instance assumption the DAG-frontier read already relies on. A multi-instance deployment
+	// sharing one store must additionally hold a DISTRIBUTED per-project lock across allocate→seal→insert
+	// (extend the Postgres advisory lock here to span the record insert), or two instances could record
+	// seq N+1 before seq N and a checkpoint could anchor a transient false gap.
+	AllocateBrokerSeq(projectID, grantID string) (int64, error)
+	// ReleaseBrokerSeq rolls back an allocation whose grant was NOT recorded (a failure after allocation
+	// but before the record committed), so the durable max sequence only advances for grants that exist —
+	// keeping the recorded log gapless. Safe to call when no allocation was made (no-op). MUST be called
+	// under the same per-project serialization as the allocation (the api's ingest lock), so the released
+	// seq is the current max and is cleanly reusable by the next allocation.
+	//
+	// ROLLBACK is BEST-EFFORT, not atomic with the allocation: the Mem store never errors here (so the Mem
+	// path is fully gapless), but a Postgres DELETE can fail. The api SURFACES that failure (it does not
+	// swallow it). A surfaced orphan SELF-HEALS — the deterministic grant_id makes AllocateBrokerSeq
+	// idempotent, so a retry of the same grant reuses the orphaned seq and records it. A PERMANENT gap
+	// therefore needs the narrow triple of {failure after allocation, failed rollback, client never
+	// retries}, which surfaces as a transparency anomaly the operator investigates. The full production
+	// hardening is to make allocation and record insertion ONE transaction (held across the cgo signing),
+	// which also subsumes the multi-instance ordering lock — out of scope for the single-instance demo.
+	ReleaseBrokerSeq(projectID, grantID string) error
 
 	// Disclosures returns every disclosure secret for the project (for selective_disclosure export),
 	// in canonical (record_id, field) order. Disclosure secrets are written atomically with their
@@ -84,14 +121,15 @@ type Mem struct {
 }
 
 type project struct {
-	records    []Record
-	idem       map[string]int // idempotency key -> record index
-	byHash     map[string]struct{}
-	checks     []Checkpoint
-	seqBySess  map[string]int64
-	disclosure []DisclosureSecret
-	discSeen   map[string]struct{} // record_id\x00field -> present (dedupe)
-	anchors    map[int64]string    // checkpoint seq -> token_b64
+	records      []Record
+	idem         map[string]int // idempotency key -> record index
+	byHash       map[string]struct{}
+	checks       []Checkpoint
+	seqBySess    map[string]int64
+	disclosure   []DisclosureSecret
+	discSeen     map[string]struct{} // record_id\x00field -> present (dedupe)
+	anchors    map[int64]string // checkpoint seq -> token_b64
+	brokerSeq  map[string]int64 // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
 }
 
 func NewMem() *Mem { return &Mem{projects: map[string]*project{}} }
@@ -105,6 +143,7 @@ func (m *Mem) proj(id string) *project {
 			seqBySess: map[string]int64{},
 			discSeen:  map[string]struct{}{},
 			anchors:   map[int64]string{},
+			brokerSeq: map[string]int64{},
 		}
 		m.projects[id] = p
 	}
@@ -148,6 +187,16 @@ func (m *Mem) PutRecord(projectID, idemKey string, rec Record) (Record, bool, er
 		p.disclosure = append(p.disclosure, d)
 	}
 	return rec, true, nil
+}
+
+func (m *Mem) RecordByIdem(projectID, idemKey string) (Record, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.proj(projectID)
+	if i, ok := p.idem[idemKey]; ok {
+		return p.records[i], true, nil
+	}
+	return Record{}, false, nil
 }
 
 func indexOf(recs []Record, hash string) int {
@@ -250,6 +299,33 @@ func (m *Mem) NextCheckpointSeq(projectID string) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return int64(len(m.proj(projectID).checks)), nil
+}
+
+func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.proj(projectID)
+	if seq, ok := p.brokerSeq[grantID]; ok {
+		return seq, nil // idempotent: a retry of the same grant_id gets its original seq (no gap)
+	}
+	// Derive next from the CURRENT max in the map (not a monotonic counter) so a ReleaseBrokerSeq of the
+	// highest seq is reusable — keeping the recorded sequence gapless even when a grant fails after
+	// allocation. Mirrors Postgres `MAX(seq)+1`.
+	var max int64
+	for _, s := range p.brokerSeq {
+		if s > max {
+			max = s
+		}
+	}
+	p.brokerSeq[grantID] = max + 1
+	return max + 1, nil
+}
+
+func (m *Mem) ReleaseBrokerSeq(projectID, grantID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.proj(projectID).brokerSeq, grantID)
+	return nil
 }
 
 func (m *Mem) LatestCheckpointHash(projectID string) (string, bool, error) {

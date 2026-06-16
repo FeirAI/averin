@@ -22,6 +22,16 @@
     "frontier": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true,
       "description": "de-duplicated AND byte-sorted head content-hashes (RCP §10); schema cannot assert sortedness" },
     "record_count": { "type": "integer", "minimum": 0 },
+    "broker_grant_head": {
+      "type": "object", "additionalProperties": false,
+      "description": "OPTIONAL grant-transparency head (ADR 0004 D6/MF2): the cumulative_root over the broker's grant log [1..max_seq] folded in broker_seq order, chained to the previous checkpoint's cumulative_root. Inside the signed/anchored checkpoint so the broker cannot equivocate on the grant log. Absent on pre-D6 checkpoints.",
+      "required": ["max_seq", "prior_head_hash", "cumulative_root"],
+      "properties": {
+        "max_seq": { "type": "integer", "minimum": 0, "description": "highest broker_seq committed by this checkpoint (0 = no grants)" },
+        "prior_head_hash": { "$ref": "#/$defs/sha256", "description": "previous checkpoint's cumulative_root (empty-log root for the first)" },
+        "cumulative_root": { "$ref": "#/$defs/sha256", "description": "sha256 hash-chain over (broker_seq, grant content_hash) in seq order" }
+      }
+    },
     "created_ts": { "$ref": "#/$defs/ts" },
 
     "checkpoint_hash": { "$ref": "#/$defs/sha256" },

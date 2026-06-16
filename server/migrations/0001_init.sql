@@ -92,6 +92,22 @@ CREATE TABLE IF NOT EXISTS display_seq (
     PRIMARY KEY (project_id, session_id)
 );
 
+-- broker_seq: the grant-transparency ALLOCATION LEDGER (ADR 0004 D6 / MF2). Per (project, grant_id) row,
+-- the gapless broker_seq bound into the SIGNED grant_evidence. This table is NOT integrity-bearing — the
+-- integrity is the signed grant_evidence + the anchored broker_grant_head; this is only an allocation
+-- helper (like display_seq, a mutable cell). Rows are INSERTed on allocation and DELETEd on rollback when
+-- a grant fails AFTER allocation but before its record commits (so the durable max only advances for
+-- recorded grants, keeping the log gapless); they are never UPDATEd. The PK makes allocation idempotent on
+-- grant_id; UNIQUE (project_id, seq) keeps the per-project sequence non-colliding; allocation runs under a
+-- per-project advisory lock so concurrent issuance cannot mint two grants at the same seq.
+CREATE TABLE IF NOT EXISTS broker_seq (
+    project_id text   NOT NULL,
+    grant_id   text   NOT NULL,
+    seq        bigint NOT NULL,
+    PRIMARY KEY (project_id, grant_id),
+    UNIQUE (project_id, seq)
+);
+
 -- Append-only enforcement (defense in depth — the PRIMARY integrity guarantee is the signed,
 -- hash-linked DAG + external anchor, not the database). Revoke mutation on the history tables.
 --
@@ -108,11 +124,13 @@ BEGIN
     EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON checkpoints FROM PUBLIC';
     EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON disclosures FROM PUBLIC';
     EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON anchors     FROM PUBLIC';
+    EXECUTE 'REVOKE UPDATE,         TRUNCATE ON broker_seq  FROM PUBLIC';
     EXECUTE 'REVOKE         DELETE, TRUNCATE ON display_seq FROM PUBLIC';
     EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON records     FROM %I', CURRENT_USER);
     EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON checkpoints FROM %I', CURRENT_USER);
     EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON disclosures FROM %I', CURRENT_USER);
     EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON anchors     FROM %I', CURRENT_USER);
+    EXECUTE format('REVOKE UPDATE,         TRUNCATE ON broker_seq  FROM %I', CURRENT_USER);
     EXECUTE format('REVOKE         DELETE, TRUNCATE ON display_seq FROM %I', CURRENT_USER);
     IF (SELECT rolsuper FROM pg_roles WHERE rolname = CURRENT_USER) THEN
         RAISE NOTICE 'feir: migrating role % is a SUPERUSER, so REVOKE is a no-op and append-only is NOT database-enforced. Run the application under a dedicated least-privilege, non-owner role.', CURRENT_USER;

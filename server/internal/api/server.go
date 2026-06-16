@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -283,6 +284,18 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	// authority is declared by default — never silently presented as verified (threat #4).
 	normalizeAuthority(rec)
 
+	// extensions.broker is RESERVED for the broker/resource lifecycle endpoints (/v2/grants, /v2/use),
+	// which build their own records — a GENERIC caller must not set it. Otherwise a forged
+	// extensions.broker.kind="grant" + authority.enforcement_point="credential_broker" would be folded
+	// into the D6 grant-transparency head by the producer (which cannot check the broker evidence_sig the
+	// offline verifier requires), so the producer's grant set would diverge from the verifier's and poison
+	// or DoS the anchored cumulative_root (ADR 0004 D6). Reject (not silently strip) so the caller sees it.
+	if ext, ok := rec["extensions"].(map[string]any); ok {
+		if _, reserved := ext["broker"]; reserved {
+			return "", false, fmt.Errorf("extensions.broker is reserved for the broker/resource endpoints and must not be set on a generic record")
+		}
+	}
+
 	// Replace any raw input/output/rationale with a hiding commitment (RCP §9.3, threat #6); the
 	// plaintext goes to the content store and never enters the signed body. The disclosure secrets
 	// ride along on the Record so PutRecord persists them ATOMICALLY with the record (and only when
@@ -462,33 +475,138 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		Justification:   gr.Justification,
 		TTL:             time.Duration(gr.TTLSeconds) * time.Second,
 	}
-	// broker.Prepare validates the request (incl. proof-of-possession + forbidden scopes) and mints
-	// the capability + the canonical evidence; a validation failure is the caller's (400). On an
-	// idempotent retry this freshly-timed capability is DISCARDED in favour of the stored original.
-	prepared, err := broker.Prepare(req, grantID, s.now(), s.brokerKey)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	// Validate the request — proof-of-possession (agent_sig) + forbidden-scope — BEFORE anything else, so
+	// a malformed / unsigned / forbidden request can NEVER retrieve a stored capability by reusing a known
+	// idempotency key (every response is gated on PoP + scope, not just brand-new grants). req.Validate
+	// verifies the Ed25519 agent_sig, so a caller that cannot sign the challenge is rejected here.
+	if e := req.Validate(); e != nil {
+		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
-
-	rec, disclosures, err := s.buildGrantRecord(grantID, gr, req, prepared)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+	if _, e := broker.ClassifyScope(req.Scope, req.ScopeClass); e != nil {
+		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
-
-	// Record-before-issue: seal + store the grant under the DAG lock; only on success do we return
-	// the capability. The lock is released via defer (panic-safe) so a core/store panic can't leak
-	// the global ingest mutex and wedge all ingestion.
+	// Mint + record-before-issue, all UNDER the ingest lock (ADR 0004 D6): broker.Prepare validates the
+	// request (proof-of-possession + forbidden scopes) and mints the capability + canonical evidence; its
+	// allocSeq callback assigns the gapless broker_seq ONLY after validation passes (a rejected grant
+	// never burns a seq) AND inside the same critical section as the record insert — so the broker_seq
+	// allocation ORDER equals the record/anchor ORDER, and the recorded grant log is always a gapless
+	// prefix [1..N] (a higher seq can never be recorded before a lower one). The lock is released via
+	// defer (panic-safe). A validation failure is the caller's (400); a build/store failure is a 500.
+	var prepared broker.Prepared
 	var sealed string
 	var created bool
+	var validationErr error // set => 400 (request rejected by Prepare's validation, before allocation)
+	var allocErr error      // set => 500 (broker_seq store/allocation failure, NOT caller-bad-input)
+	var conflictErr error   // set => 409 (idem key reused with a DIFFERENT grant request)
 	err = func() error {
 		s.ingestMu.Lock()
 		defer s.ingestMu.Unlock()
 		var e error
+		// Idempotent retry (or a pre-D6 legacy grant under this idem key): the record already exists, so
+		// DO NOT allocate a broker_seq (a replay must never burn a seq, ADR 0004 D6). The response metadata
+		// is derived from the SEALED record below (same for create and retry), so a retry's expires_at/
+		// scope_class match the original grant; the original capability is reconstructed from the descriptor.
+		if existing, found, le := s.st.RecordByIdem(gr.ProjectID, idem); le != nil {
+			return le
+		} else if found {
+			// Idempotency CONFLICT: a reused idem key MUST carry the SAME grant request. A different (even
+			// validly-signed) request must be rejected — otherwise a caller who knows/guesses another grant's
+			// idem key could retrieve its capability descriptor. Compare the identity + authorization fields
+			// against the stored grant_evidence (the request's cnf is its agent_pubkey's key id).
+			same, pe := storedGrantMatchesRequest(existing.JSON, req)
+			if pe != nil {
+				return pe
+			}
+			if !same {
+				conflictErr = fmt.Errorf("idempotency_key already used for a different grant request (agent/action/resource/scope/cnf mismatch)")
+				return nil
+			}
+			sealed, created = existing.JSON, false
+			return nil
+		}
+		// New grant: allocate (after validation, inside the lock), build, seal+store. Roll back the seq on
+		// ANY failure after allocation but before the record commits, so an uncommitted grant never burns a
+		// number (the rollback is safe under ingestMu — no other grant allocates in between).
+		allocated := false
+		prepared, e = broker.Prepare(req, grantID, func() (int64, error) {
+			seq, aerr := s.st.AllocateBrokerSeq(gr.ProjectID, grantID)
+			if aerr == nil && seq < 1 {
+				// a store-contract violation (non-positive seq with no error) is a 500 dependency bug,
+				// NOT caller-bad-input — synthesize an error so it routes to allocErr (500), not 400.
+				aerr = fmt.Errorf("store returned non-positive broker_seq %d", seq)
+			}
+			if aerr != nil {
+				allocErr = aerr // a dependency failure, not a 400 — surfaced as 500 below
+			} else {
+				allocated = true
+			}
+			return seq, aerr
+		}, s.now(), s.brokerKey)
+		// rollback frees a not-yet-recorded allocation and FOLDS a rollback-DELETE failure into the error so
+		// it is surfaced (not silently swallowed). A surfaced orphan self-heals: the deterministic grantID
+		// makes AllocateBrokerSeq idempotent, so a retry of THIS grant reuses the orphaned seq and records it
+		// (no gap). A permanent gap needs the narrow triple of: a failure after allocation, a failed
+		// rollback, AND the client never retrying — a documented Postgres residual (Mem rollback cannot
+		// fail). Full atomicity (one transaction across signing) is the production hardening; see the store
+		// ReleaseBrokerSeq doc.
+		rollback := func(cause error) error {
+			if !allocated {
+				return cause
+			}
+			if re := s.st.ReleaseBrokerSeq(gr.ProjectID, grantID); re != nil {
+				return fmt.Errorf("%w; broker_seq rollback ALSO failed (seq orphaned until a retry of this grant reclaims it): %v", cause, re)
+			}
+			return cause
+		}
+		if e != nil {
+			if allocErr == nil {
+				validationErr = rollback(e) // a real validation failure (400); allocation never ran/committed
+			} else {
+				allocErr = rollback(e) // defensive: Prepare's post-allocation steps don't error today
+			}
+			return nil // error mapped below by allocErr/validationErr (not a store-seal error)
+		}
+		rec, disclosures, e := s.buildGrantRecord(grantID, gr, req, prepared)
+		if e != nil {
+			return rollback(e)
+		}
 		sealed, created, e = s.sealAndStore(gr.ProjectID, gr.SessionID, idem, rec, disclosures)
-		return e
+		if e != nil {
+			// A store error AT THE COMMIT POINT is AMBIGUOUS: an immediate absence is NOT proof the commit
+			// did not (or will not) become durable (an in-flight/visibility-delayed Postgres commit can
+			// later land). Releasing the seq on a not-yet-visible commit could let a later grant REUSE a
+			// number a durable grant already recorded → duplicate broker_seq → poisoned head. So we NEVER
+			// release here: keeping the broker_seq row ORPHANED reserves the number (it is never reused), and
+			// the deterministic grantID makes a retry idempotent — it reclaims the same seq and reconstructs
+			// the record (if it committed) or records it (if it did not). If the record is ALREADY visibly
+			// durable, surface success; otherwise return the error and let the client retry (seq stays reserved).
+			if r2, found2, re := s.st.RecordByIdem(gr.ProjectID, idem); re == nil && found2 {
+				sealed, created = r2.JSON, false
+				return nil // committed + visible
+			}
+			return fmt.Errorf("%w — broker_seq left RESERVED (commit-ambiguous; never released, to avoid reuse; a retry of this grant reclaims it)", e)
+		}
+		if !created {
+			// defensive: a brand-new grant collapsed (impossible — content is unique). The record exists, so
+			// do NOT release the seq (a durable record holds it); surface the anomaly.
+			return fmt.Errorf("grant %s unexpectedly collapsed to an existing record (broker_seq left reserved)", grantID)
+		}
+		return nil
 	}()
+	if conflictErr != nil {
+		writeErr(w, http.StatusConflict, conflictErr.Error())
+		return
+	}
+	if allocErr != nil {
+		writeErr(w, http.StatusInternalServerError, "allocate broker_seq: "+allocErr.Error())
+		return
+	}
+	if validationErr != nil {
+		writeErr(w, http.StatusBadRequest, validationErr.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store grant: "+err.Error())
 		return
@@ -505,11 +623,20 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Derive expires_at/scope_class from the SEALED record's signed grant_evidence (same source for both
+	// create and retry), so the response always matches the grant the capability is bound to — never a
+	// fresh, request-time value that could outlast the (original) capability on an idempotent replay.
+	exp, scopeClass, perr := storedGrantFields(sealed)
+	if perr != nil {
+		writeErr(w, http.StatusInternalServerError, perr.Error())
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"grant_id":    grantID,
 		"capability":  capability, // the agent presents this to the resource
-		"expires_at":  prepared.ExpiresAt,
-		"scope_class": string(prepared.ScopeClass),
+		"expires_at":  ts(time.Unix(exp, 0)),
+		"scope_class": scopeClass,
 		"created":     created,
 		"record":      json.RawMessage(sealed),
 	})
@@ -973,6 +1100,172 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 // the same NextCheckpointSeq and fork the chain. Store-before-witness with a monotonic seq means a
 // witness failure does NOT re-seal the same seq on retry (seq has already advanced) — so it can
 // never wedge checkpointing; the un-witnessed checkpoint is reported via the warning and is
+// storedGrantFields reads the response metadata (exp unix-seconds, scope_class) from a STORED grant
+// record's signed grant_evidence, so an idempotent retry returns the ORIGINAL grant's expiry/scope_class
+// (matching the reconstructed original capability) rather than fresh, request-time values.
+func storedGrantFields(recordJSON string) (exp int64, scopeClass string, err error) {
+	var parsed struct {
+		Extensions struct {
+			Broker struct {
+				GrantEvidence struct {
+					Exp        int64  `json:"exp"`
+					ScopeClass string `json:"scope_class"`
+				} `json:"grant_evidence"`
+			} `json:"broker"`
+		} `json:"extensions"`
+	}
+	if e := json.Unmarshal([]byte(recordJSON), &parsed); e != nil {
+		return 0, "", fmt.Errorf("read stored grant fields: %w", e)
+	}
+	return parsed.Extensions.Broker.GrantEvidence.Exp, parsed.Extensions.Broker.GrantEvidence.ScopeClass, nil
+}
+
+// storedGrantMatchesRequest reports whether `req` is the SAME grant request that produced the stored
+// grant record — by comparing the identity + authorization fields (agent_id, action, resource_id, scope,
+// and the cnf key id derived from the request's agent_pubkey) against the signed grant_evidence. Used to
+// reject an idempotency-key reuse that carries a DIFFERENT request (which must not retrieve this grant's
+// capability). A malformed request pubkey cannot match a stored canonical cnf_kid → not a match.
+func storedGrantMatchesRequest(recordJSON string, req broker.Request) (bool, error) {
+	var p struct {
+		Extensions struct {
+			Broker struct {
+				GrantEvidence struct {
+					AgentID         string   `json:"agent_id"`
+					Action          string   `json:"action"`
+					ResourceID      string   `json:"resource_id"`
+					Scope           string   `json:"scope"`
+					ScopeClass      string   `json:"scope_class"`
+					CnfKid          string   `json:"cnf_kid"`
+					AuthzPrincipal  string   `json:"authorizing_principal"`
+					DelegationChain []string `json:"delegation_chain"`
+					IssuedAt        int64    `json:"issued_at"`
+					Exp             int64    `json:"exp"`
+				} `json:"grant_evidence"`
+			} `json:"broker"`
+		} `json:"extensions"`
+	}
+	if e := json.Unmarshal([]byte(recordJSON), &p); e != nil {
+		return false, fmt.Errorf("read stored grant match fields: %w", e)
+	}
+	ge := p.Extensions.Broker.GrantEvidence
+	pub, e := base64.RawURLEncoding.DecodeString(req.AgentPubKey)
+	if e != nil || len(pub) != ed25519.PublicKeySize {
+		return false, nil
+	}
+	// Compare EVERY field that shapes the grant/capability — not just identity — so a reused idem key with
+	// a different scope_class (single_use!), TTL (exp!), principal, or delegation chain is a 409 conflict,
+	// not a silent collapse onto a semantically-different stored capability. scope_class is the CLASSIFIED
+	// result (ClassifyScope keys off both scope AND the requested class), and TTL is exp-issued_at.
+	wantClass, ce := broker.ClassifyScope(req.Scope, req.ScopeClass)
+	if ce != nil {
+		return false, nil // an unclassifiable request can't match a stored (validly classified) grant
+	}
+	return ge.AgentID == req.AgentID &&
+		ge.Action == req.Action &&
+		ge.ResourceID == req.Resource &&
+		ge.Scope == req.Scope &&
+		ge.ScopeClass == string(wantClass) &&
+		ge.CnfKid == broker.KeyID(ed25519.PublicKey(pub)) &&
+		ge.AuthzPrincipal == req.Principal &&
+		ge.Exp-ge.IssuedAt == int64(req.TTL.Seconds()) &&
+		stringSlicesEqual(ge.DelegationChain, normalizeDelegation(req.DelegationChain)), nil
+}
+
+// normalizeDelegation maps a nil delegation chain to an empty slice, mirroring broker.Prepare's
+// normalization so a retry with nil vs [] does not spuriously 409.
+func normalizeDelegation(d []string) []string {
+	if d == nil {
+		return []string{}
+	}
+	return d
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// grantLog extracts the D6 grant-transparency log — each grant record's (broker_seq, content_hash) —
+// sorted by broker_seq. A record is a grant iff extensions.broker.kind == "grant"; its broker_seq is
+// read from the signed extensions.broker.grant_evidence.broker_seq. Any grant record with a missing or
+// non-positive broker_seq is a producer bug (every D6 grant carries one), so it is a hard error rather
+// than a silently-dropped row that would make the anchored head disagree with the recorded grants.
+func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
+	var log []broker.GrantSeqHash
+	for _, r := range records {
+		var parsed struct {
+			Authority struct {
+				EnforcementPoint string `json:"enforcement_point"`
+			} `json:"authority"`
+			Extensions struct {
+				Broker struct {
+					Kind          string `json:"kind"`
+					GrantEvidence struct {
+						BrokerSeq int64 `json:"broker_seq"`
+					} `json:"grant_evidence"`
+				} `json:"broker"`
+			} `json:"extensions"`
+		}
+		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil {
+			return nil, fmt.Errorf("grant log: parse record %s: %w", r.ContentHash, err)
+		}
+		// Identify a grant EXACTLY as the offline verifier's classify_role does — the tuple
+		// (extensions.broker.kind=="grant", authority.enforcement_point=="credential_broker"). MEMBERSHIP
+		// CONTRACT (the verifier's D6 cumulative_root re-derivation MUST use the identical rule): the
+		// transparency log includes every RECORDED grant by this tuple, NOT gated on whether its
+		// evidence_sig verifies — a broker must not be able to omit a grant from the log by under-signing
+		// it (that would BE suppression). Per-grant trust (evidence_sig under a pinned broker key) is a
+		// separate axis (grant_verified), independent of transparency-log membership. Generic ingest
+		// cannot set these markers (reserved above), so only /v2/grants produces them.
+		if parsed.Extensions.Broker.Kind != "grant" || parsed.Authority.EnforcementPoint != "credential_broker" {
+			continue
+		}
+		// D6 ACTIVATION BOUNDARY: the transparency log covers only grants that CARRY a broker_seq (issued
+		// under D6). A tuple-classified grant with no broker_seq predates D6 — SKIP it (it is outside the
+		// log; do not wedge checkpoints, do not fold it into the head). The verifier applies the identical
+		// boundary, so the two agree. (Current code always assigns broker_seq>=1, so only legacy grants
+		// recorded before this commit are ever skipped here.)
+		if parsed.Extensions.Broker.GrantEvidence.BrokerSeq < 1 {
+			continue
+		}
+		log = append(log, broker.GrantSeqHash{Seq: parsed.Extensions.Broker.GrantEvidence.BrokerSeq, ContentHash: r.ContentHash})
+	}
+	sort.Slice(log, func(i, j int) bool { return log[i].Seq < log[j].Seq })
+	return log, nil
+}
+
+// priorGrantHeadRoot returns the cumulative_root of the LATEST stored checkpoint's broker_grant_head, to
+// chain the next head to it (ADR 0004 D6). A project with no checkpoint yet — or whose latest checkpoint
+// predates D6 (no head) — chains from the empty-log root.
+func (s *Server) priorGrantHeadRoot(projectID string) (string, error) {
+	cps, err := s.st.Checkpoints(projectID)
+	if err != nil {
+		return "", fmt.Errorf("prior grant head: %w", err)
+	}
+	if len(cps) == 0 {
+		return broker.EmptyGrantHeadRoot(), nil
+	}
+	var parsed struct {
+		BrokerGrantHead struct {
+			CumulativeRoot string `json:"cumulative_root"`
+		} `json:"broker_grant_head"`
+	}
+	if err := json.Unmarshal([]byte(cps[len(cps)-1].JSON), &parsed); err != nil {
+		return "", fmt.Errorf("prior grant head: parse latest checkpoint: %w", err)
+	}
+	if parsed.BrokerGrantHead.CumulativeRoot == "" {
+		return broker.EmptyGrantHeadRoot(), nil // pre-D6 checkpoint
+	}
+	return parsed.BrokerGrantHead.CumulativeRoot, nil
+}
+
 // backfillable. A deterministic checkpoint_id keeps the body reproducible for a given seq.
 func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string, error, error) {
 	s.checkpointMu.Lock()
@@ -983,17 +1276,51 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 		}
 	}()
 
-	heads, _ := s.st.ProjectHeads(projectID)
+	// Read the frontier, record count, AND grant log from ONE CONSISTENT snapshot under ingestMu, so no
+	// grant/record insert can interleave between the frontier read and the grant-log read (D6). Otherwise
+	// the signed broker_grant_head could fold a grant the checkpoint frontier does not commit, and the
+	// offline D6 recomputation over the closed set would falsely report suppression. Lock order is always
+	// checkpointMu → ingestMu (no path takes them the other way), so there is no deadlock; the reads are
+	// O(records) but bounded by the same lock the ingest path already serializes on.
+	s.ingestMu.Lock()
+	heads, headsErr := s.st.ProjectHeads(projectID)
+	count, countErr := s.st.RecordCount(projectID)
+	allRecs, recErr := s.st.AllRecords(projectID)
+	s.ingestMu.Unlock()
+	// Surface any snapshot-read error: signing a checkpoint with an empty frontier (heads=nil) while the
+	// grant head folds a non-empty grant set would anchor a frontier that disagrees with the grant set it
+	// commits, so a store-read failure must abort the checkpoint, not silently degrade it.
+	seq, seqErr := s.st.NextCheckpointSeq(projectID)
+	prev, hasPrev, prevErr := s.st.LatestCheckpointHash(projectID)
+	// Surface ANY snapshot/chain read error: signing a checkpoint with a defaulted frontier/seq/prev (e.g.
+	// seq silently 0, or prev_checkpoint_hash omitted while broker_grant_head.prior_head_hash still points
+	// at the prior head) would anchor a broken/forked checkpoint, so a read failure must abort, not degrade.
+	for _, e := range []error{headsErr, countErr, recErr, seqErr, prevErr} {
+		if e != nil {
+			return "", nil, fmt.Errorf("checkpoint: read project snapshot: %w", e)
+		}
+	}
 	if heads == nil {
 		heads = []string{}
 	}
-	count, _ := s.st.RecordCount(projectID)
-	seq, _ := s.st.NextCheckpointSeq(projectID)
-	prev, hasPrev, _ := s.st.LatestCheckpointHash(projectID)
 	var prevVal any
 	if hasPrev {
 		prevVal = prev
 	}
+	// D6 (ADR 0004 / MF2): anchor the grant-transparency head into the signed, fork-detected checkpoint.
+	// The cumulative_root folds every recorded grant's (broker_seq, content_hash) in seq order, chained
+	// to the previous checkpoint's cumulative_root — so a dropped/renumbered/forked grant fails the
+	// verifier's re-derivation.
+	gl, err := grantLog(allRecs)
+	if err != nil {
+		return "", nil, err
+	}
+	prior, err := s.priorGrantHeadRoot(projectID)
+	if err != nil {
+		return "", nil, err
+	}
+	grantHead := broker.BrokerGrantHead(gl, prior)
+
 	body := map[string]any{
 		"schema_version":       "2",
 		"canon_version":        "rcp-1",
@@ -1004,6 +1331,7 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 		"prev_checkpoint_hash": prevVal,
 		"frontier":             heads,
 		"record_count":         count,
+		"broker_grant_head":    grantHead,
 		"created_ts":           ts(s.now()),
 		"key": map[string]any{
 			"signing_key_id": s.signingKeyID,
