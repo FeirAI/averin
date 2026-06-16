@@ -45,6 +45,39 @@ jobs:
           go vet ./...
           go test ./...
 
+  store-postgres:
+    name: store parity + append-only (Mem semantics ↔ real Postgres, non-owner role)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        # Wait until Postgres accepts connections before the test step runs.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      # The store package is pure Go (no cgo/core dependency), so no rust staticlib build is needed.
+      # Setting FEIR_TEST_DATABASE_URL un-skips the Postgres tests: the SAME exercise*(t, Store) contract
+      # helpers that TestMem* run now also run against real Postgres (parity), and
+      # TestPostgresAppendOnlyRejectsMutation proves UPDATE/DELETE/TRUNCATE are rejected (SQLSTATE 42501)
+      # under a freshly-created non-owner least-privilege role — the deployment topology the append-only
+      # claim depends on, exercised end to end. The superuser `postgres` role can CREATE ROLE for that test.
+      - name: store tests against real Postgres (parity + non-owner append-only)
+        working-directory: server
+        env:
+          FEIR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: go test -count=1 ./internal/store/...
+
   web:
     name: web app (svelte build + trace unit tests)
     runs-on: ubuntu-latest
