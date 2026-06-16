@@ -71,6 +71,48 @@ func (f *failContentStore) Put(ctx context.Context, data []byte) (content.Addres
 	return f.Store.Put(ctx, data)
 }
 
+// failPutStore injects a PutRecord error that is NOT store.ErrCommitAmbiguous (a pre-commit store failure:
+// begin/select/insert/disclosure), to test that the use path releases the consumed credential there.
+type failPutStore struct {
+	store.Store
+	fail bool
+}
+
+func (f *failPutStore) PutRecord(projectID, idemKey string, rec store.Record) (store.Record, bool, error) {
+	if f.fail {
+		return store.Record{}, false, errors.New("injected pre-commit store failure")
+	}
+	return f.Store.PutRecord(projectID, idemKey, rec)
+}
+
+// TestUseReleasesCredentialOnPreCommitPutFailure (Codex pass-10 high): a PutRecord error that is NOT
+// store.ErrCommitAmbiguous persists nothing (a begin/select/insert/disclosure failure), so the consumed
+// nonce/jti must be RELEASED — only a genuinely commit-ambiguous fresh-insert commit is held.
+func TestUseReleasesCredentialOnPreCommitPutFailure(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	rc, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatalf("resource core: %v", err)
+	}
+	fp := &failPutStore{Store: store.NewMem()}
+	h := api.New(c, fp, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	ak := grantAgentKey()
+	grantID, cap := mkGrant(t, h, ak, "idem-grant") // grant stores while PutRecord is healthy
+
+	fp.fail = true
+	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusInternalServerError {
+		t.Fatalf("a pre-commit PutRecord failure should be 500, got %d: %s", code, r)
+	}
+	// the credential was RELEASED (the error is not commit-ambiguous): the SAME nonce re-validates + seals.
+	fp.fail = false
+	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusCreated {
+		t.Fatalf("after the store recovers, the released credential must seal a receipt, got %d: %s", code, r)
+	}
+}
+
 // failSealCore wraps a Sealer and can inject a SealRecord failure — a PRE-commit error inside sealAndStore
 // (before PutRecord), to test that the use path releases the credential there too (not only on buildUseRecord).
 type failSealCore struct {

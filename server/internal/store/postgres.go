@@ -139,7 +139,11 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 			return Record{}, false, err
 		}
 		if err := tx.Commit(ctx); err != nil {
-			return Record{}, false, fmt.Errorf("store: commit: %w", err)
+			// The ONLY commit-AMBIGUOUS path: a fresh record was inserted and this commit's outcome is unknown,
+			// so the record may or may not be durable. Flag it so a caller that consumed an irreversible
+			// resource does NOT roll back here. Every other error above (begin/select/insert/disclosure) and
+			// the read-only/collapse commits below write NO new row, so they stay plain — safe to roll back.
+			return Record{}, false, fmt.Errorf("%w: %v", ErrCommitAmbiguous, err)
 		}
 		return rec, true, nil
 	case errors.Is(err, pgx.ErrNoRows):

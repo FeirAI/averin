@@ -42,6 +42,13 @@ type DisclosureSecret struct {
 
 var ErrNotFound = errors.New("not found")
 
+// ErrCommitAmbiguous wraps the ONE PutRecord error whose outcome is genuinely unknown — a tx.Commit() that
+// failed AFTER a fresh record insert, so the record may or may not have become durable. Every other store
+// failure (begin, select, insert, disclosure-insert, a read-only/collapse commit) persists NO new record, so
+// a caller that consumed an irreversible resource (a use credential) may safely roll back on those but MUST
+// NOT roll back on this one (releasing a durable-but-invisible receipt's credential would allow a double-spend).
+var ErrCommitAmbiguous = errors.New("store: commit outcome unknown (a record insert may or may not have persisted)")
+
 // Store is append-only: records and checkpoints are never mutated or removed.
 type Store interface {
 	// PutRecord stores a record under an idempotency key. If the key was already used, it returns
