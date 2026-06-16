@@ -944,9 +944,12 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	// Derive the denial id from the FULL requested probe identity, NOT the caller idempotency key: a probe
 	// that reuses one idem key while VARYING any requested field is a DISTINCT denied probe and must be
 	// logged separately (else a varying-field sweep under a fixed idem would collapse to one record and
-	// suppress the rest of the B11 log). Identical probes still dedup (same id -> content-hash collapse).
-	probe := strings.Join([]string{req.Action, req.Resource, req.Scope, string(req.ScopeClass), req.AgentID, req.AgentPubKey, reason}, "\x1f")
-	denialID := "denial-" + uuidV5Shaped("feir.denial.id.v1", gr.ProjectID, probe)
+	// suppress the rest of the B11 log). Encode the tuple as a JSON ARRAY, not a delimiter-joined string:
+	// a caller controls these fields and could embed the delimiter (e.g. U+001F), making two distinct tuples
+	// serialize identically (action="a",resource="b\x1fc" vs action="a\x1fb",resource="c") -> same id -> the
+	// second denial collapses (Codex). JSON quotes + escapes each element, so distinct tuples always differ.
+	probe, _ := json.Marshal([]string{req.Action, req.Resource, req.Scope, string(req.ScopeClass), req.AgentID, req.AgentPubKey, reason})
+	denialID := "denial-" + uuidV5Shaped("feir.denial.id.v1", gr.ProjectID, string(probe))
 	rec := map[string]any{
 		"record_id":     denialID,
 		"project_id":    gr.ProjectID,

@@ -161,6 +161,37 @@ func TestVaryingProbeFieldsLogDistinctDenials(t *testing.T) {
 	}
 }
 
+// TestDenialIdResistsDelimiterInjection (Codex C3b): the denial id encodes the probe tuple as a JSON array,
+// so a caller embedding the U+001F delimiter in a field cannot collide two DISTINCT probes into one id. The
+// two probes below join-collide under a raw \x1f separator (action="a",resource="b\x1fX" vs
+// action="a\x1fb",resource="X") but must still log as TWO distinct denials.
+func TestDenialIdResistsDelimiterInjection(t *testing.T) {
+	h := denyLogServer(t)
+	ak := grantAgentKey()
+	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
+	post := func(action, resource string) {
+		req := broker.Request{AgentID: "agent-1", Action: action, Resource: resource, Scope: "iam:reset", AgentPubKey: pub}
+		sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
+		body, _ := json.Marshal(map[string]any{
+			"idempotency_key": "idem-x", "project_id": "p1", "session_id": "s1",
+			"agent_id": "agent-1", "action": action, "resource": resource,
+			"scope": "iam:reset", "agent_pubkey": pub, "agent_sig": sig, "ttl_seconds": 60,
+		})
+		if code, r := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusBadRequest {
+			t.Fatalf("forbidden scope should be 400, got %d: %s", code, r)
+		}
+	}
+	post("a", "b\x1fX")
+	post("a\x1fb", "X")
+	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, r)
+	}
+	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
+	if !strings.Contains(report, `"denied_grants":2`) {
+		t.Fatalf("two probes that join-collide under a raw \\x1f separator must still log 2 distinct denials: %s", report)
+	}
+}
+
 // TestDeniedGrantLogOffByDefault: without WithDeniedGrantLog the forbidden scope is still rejected but NO
 // denial is sealed (opt-in — avoids a probe-driven storage/billing DoS by default).
 func TestDeniedGrantLogOffByDefault(t *testing.T) {
