@@ -2176,7 +2176,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // validated outcome is tracked as a DISTINCT record (intent_ref, grant_id, record_id, index) — NOT a
     // map keyed by intent_ref, which would let a second outcome for the same intent_ref overwrite the first
     // (hiding an extra unauthorized outcome, or dropping the legitimate one — order-dependent).
-    let mut outcomes: Vec<(String, String, String, usize)> = Vec::new();
+    let mut outcomes: Vec<(String, String, String, usize, String)> = Vec::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str() || broker_kind(rec).as_deref() != Some("use_outcome") {
@@ -2193,24 +2193,29 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             issues.push(format!("use_outcome {} ({}): closed but not validatable (integrity / resource authority / re-derivable payload) — Tier-B violation", rt.index, rt.record_id));
             continue;
         }
+        // The SIGNED payload also carries `intent_hash` (the intent's content_hash) — the RESOURCE attesting
+        // it observed THAT specific intent before signing this outcome. This binds the before-act ordering to
+        // the resource signature, NOT to the relay-controlled top-level causal_prev_hashes (which the
+        // record-signing key, a different trust domain, could backfill).
         match (
             ev_str(rec, "use_outcome", "kind"),
             ev_str(rec, "use_outcome", "intent_ref"),
             ev_str(rec, "use_outcome", "grant_id"),
+            ev_str(rec, "use_outcome", "intent_hash"),
         ) {
-            (Some(k), Some(iref), Some(ogid)) if k == "use_outcome" => {
-                outcomes.push((iref, ogid, rt.record_id.clone(), rt.index));
+            (Some(k), Some(iref), Some(ogid), Some(ihash)) if k == "use_outcome" => {
+                outcomes.push((iref, ogid, rt.record_id.clone(), rt.index, ihash));
             }
             _ => {
                 unmatched_violation += 1;
-                issues.push(format!("use_outcome {} ({}): signed payload missing kind=use_outcome / intent_ref / grant_id — violation", rt.index, rt.record_id));
+                issues.push(format!("use_outcome {} ({}): signed payload missing kind=use_outcome / intent_ref / grant_id / intent_hash — violation", rt.index, rt.record_id));
             }
         }
     }
     // index outcomes by (intent_ref, grant_id) -> positions, so each intent pops at most one candidate
     // instead of scanning every outcome (O(intents·outcomes) — a verifier DoS on adversarial bundles).
     let mut outcomes_by: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-    for (i, (iref, ogid, _, _)) in outcomes.iter().enumerate() {
+    for (i, (iref, ogid, _, _, _)) in outcomes.iter().enumerate() {
         outcomes_by.entry((iref.clone(), ogid.clone())).or_default().push(i);
     }
     let mut consumed_outcomes: BTreeSet<String> = BTreeSet::new();
@@ -2363,18 +2368,21 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // recorded-but-incomplete (the crash-after-act case). Surface it and stop BEFORE it counts as matched
         // / PoP-reverified or consumes a single-use grant.
         // D5 (ADR 0004 F4): pick a SPECIFIC un-consumed validated outcome that references THIS intent's
-        // record_id, attests THIS grant, AND causally FOLLOWS the intent (its `causal_prev_hashes` include
-        // the intent's content_hash — proving the intent was recorded BEFORE the outcome, i.e. before the
-        // side effect: an unordered/backfilled pair with no causal edge does NOT complete). The pick is held
-        // and only CONSUMED after every acceptance check (incl. PoP) passes — a later-rejected intent must
-        // not consume (and thereby mask from orphan accounting) its outcome.
+        // record_id, attests THIS grant, and proves the BEFORE-ACT ordering: the outcome's RESOURCE-SIGNED
+        // `intent_hash` must equal this intent's content_hash (the resource attests it observed THIS intent
+        // before signing the outcome — unforgeable by the relay), AND the top-level `causal_prev_hashes`
+        // include it (a DAG consistency check; the signed binding is the security boundary, since the
+        // record-signing key could backfill the top-level edge). An unordered/backfilled pair does NOT
+        // complete. The pick is held and only CONSUMED after every acceptance check (incl. PoP) passes — a
+        // later-rejected intent must not consume (and thereby mask from orphan accounting) its outcome.
         let mut pending_consume: Option<usize> = None;
         if bkind == "use_intent" {
             let key = (rt.record_id.clone(), gid.clone());
             pending_consume = outcomes_by.get(&key).and_then(|idxs| {
                 idxs.iter().copied().find(|&i| {
-                    let (_, _, orec, oidx) = &outcomes[i];
+                    let (_, _, orec, oidx, ihash) = &outcomes[i];
                     !consumed_outcomes.contains(orec)
+                        && ihash.as_str() == rt.content_hash.as_str()
                         && records[*oidx]
                             .get("causal_prev_hashes")
                             .and_then(|v| v.as_array())
@@ -2431,7 +2439,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // D5: a validated `use_outcome` that NO closed matching `use_intent` consumed is an ORPHAN — a recorded
     // completion with no anchored pre-action intent (the resource skipped the before-act recording that two-
     // phase exists to require). Flag it; otherwise an outcome-only bundle would read clean (false-clean).
-    for (iref, ogid, orec, _) in &outcomes {
+    for (iref, ogid, orec, _, _) in &outcomes {
         if !consumed_outcomes.contains(orec) {
             unmatched_violation += 1;
             issues.push(format!("use_outcome {orec}: references intent '{iref}' (grant {ogid}) but no closed matching use_intent consumed it — completion without a recorded intent (D5)"));

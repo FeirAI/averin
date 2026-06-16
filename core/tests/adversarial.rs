@@ -1084,12 +1084,23 @@ fn seal_outcome(rec_sk: &SigningKey, auth_sk: &SigningKey, record_id: &str, prev
     seal_outcome_k(rec_sk, auth_sk, record_id, prev, "use_outcome", signed_ref, sibling_ref, gid)
 }
 
-// seal_outcome with an explicit SIGNED-payload `kind` (use a non-"use_outcome" kind to model a relabeled
-// signed payload that the unsigned sibling routes here as a use_outcome).
+// seal_outcome with an explicit SIGNED-payload `kind`. The signed `intent_hash` (the before-act ordering
+// binding) defaults to the first causal parent (the honest convention: an outcome's DAG parent IS its
+// intent); `seal_outcome_full` overrides it to model a relay backfilling the top-level edge.
 #[allow(clippy::too_many_arguments)]
 fn seal_outcome_k(rec_sk: &SigningKey, auth_sk: &SigningKey, record_id: &str, prev: &[String], payload_kind: &str, signed_ref: &str, sibling_ref: &str, gid: &str) -> CanonValue {
+    let signed_hash = prev.first().cloned().unwrap_or_default();
+    seal_outcome_full(rec_sk, auth_sk, record_id, prev, payload_kind, signed_ref, sibling_ref, gid, &signed_hash)
+}
+
+// seal_outcome with an explicit SIGNED-payload `intent_hash` — to model a relay that re-seals a valid
+// resource-signed payload (whose signed intent_hash names intent A or nothing) while backfilling the
+// top-level causal_prev_hashes to point at a different (later) intent.
+#[allow(clippy::too_many_arguments)]
+fn seal_outcome_full(rec_sk: &SigningKey, auth_sk: &SigningKey, record_id: &str, prev: &[String], payload_kind: &str, signed_ref: &str, sibling_ref: &str, gid: &str, signed_intent_hash: &str) -> CanonValue {
     let outcome = CanonValue::object(vec![
         ("grant_id".into(), CanonValue::string(gid)),
+        ("intent_hash".into(), CanonValue::string(signed_intent_hash)),
         ("intent_ref".into(), CanonValue::string(signed_ref)),
         ("kind".into(), CanonValue::string(payload_kind)),
         ("status".into(), CanonValue::string("ok")),
@@ -3233,6 +3244,28 @@ fn tier_b_two_phase_failed_pop_intent_does_not_consume_outcome() {
     let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
     assert!(!r.ok && r.uses_matched == 0, "a failed-PoP intent is a violation: {:?}", r.issues);
     assert!(r.issues.iter().any(|i| i.contains("PoP re-verification")) && r.issues.iter().any(|i| i.contains("completion without a recorded intent")), "the failed-PoP intent's outcome must be flagged orphan, not masked: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_two_phase_backfilled_causal_edge_does_not_complete() {
+    // Codex round-5: the before-act ordering must be bound to the RESOURCE signature, not the relay-controlled
+    // top-level causal_prev_hashes. Here the resource-signed payload's intent_hash names a DIFFERENT intent,
+    // but the record-signing key (a relay) BACKFILLED the top-level causal_prev to point at the real intent.
+    // The SIGNED binding must govern -> the intent does NOT complete (the relay cannot forge the ordering).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let intent = seal_intent(&rec, &res, "intent-1", std::slice::from_ref(&gh), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let ih = content_hash_of(&intent);
+    let wrong_hash = sha256_prefixed(b"a-different-intent"); // the resource signed THIS, not the real intent
+    // top-level prev is backfilled to the REAL intent hash, but the signed intent_hash is wrong.
+    let outcome = seal_outcome_full(&rec, &res, "outcome-1", std::slice::from_ref(&ih), "use_outcome", "intent-1", "intent-1", GID, &wrong_hash);
+    let oh = content_hash_of(&outcome);
+    let cp = checkpoint_over(&rec, std::slice::from_ref(&oh), 3, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, intent, outcome], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 1), "a backfilled top-level edge must not complete when the SIGNED intent_hash differs: {:?}", r.issues);
+    assert!(!r.ok && r.issues.iter().any(|i| i.contains("completion without a recorded intent")), "the backfilled outcome is an orphan: {:?}", r.issues);
 }
 
 #[test]

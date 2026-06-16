@@ -205,9 +205,12 @@ resource) could redirect a resource-signed outcome to a different intent. A clos
 fully validatable (integrity / resource authority / re-derivable payload) is itself a Tier-B violation
 (parity with a one-phase use — no laundering). The use loop runs the SAME full predicate (D2 PoP / D3 replay / D4 action) on a `use_intent` as
 on a one-phase `use`; a `use_intent` completes (counts toward `uses_matched`) ONLY if a valid outcome (a)
-references it, (b) attests the SAME grant, AND (c) **causally FOLLOWS** it (the outcome's
-`causal_prev_hashes` include the intent's content_hash — the before-act guarantee; an unordered/backfilled
-pair does not complete). The matching outcome is consumed by **record_id** (so duplicate same-`intent_ref`
+references it, (b) attests the SAME grant, AND (c) proves the **before-act ordering** via the
+RESOURCE-SIGNED `intent_hash` in the `use_outcome` payload equalling the intent's content_hash (the
+resource attests it observed THAT intent before signing the outcome — a hash it could not know unless the
+intent already existed; the relay-controlled top-level `causal_prev_hashes` is kept only as a DAG
+consistency check, since the record-signing key could backfill it). An unordered/backfilled pair does not
+complete. The matching outcome is consumed by **record_id** (so duplicate same-`intent_ref`
 outcomes account independently; indexed by `(intent_ref, grant_id)` to avoid an O(intents·outcomes) scan),
 and consumption happens only AFTER every acceptance check (incl. PoP) passes (a later-rejected intent must
 not mask its outcome). Else the intent is an `intent_without_outcome` anomaly (surfaced, NOT a violation,
