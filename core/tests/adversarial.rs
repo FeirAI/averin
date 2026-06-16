@@ -2207,3 +2207,322 @@ fn taxonomy_digest_golden_vector() {
     let digest = sha256_prefixed(body.serialize().as_bytes());
     assert_eq!(digest, "sha256:eadbcd86089ce7b27a79fe516b42087bdc62c9215d7ba069295b4fbc04bc26b9");
 }
+
+// ---- D6: grant transparency / broker_trust (ADR 0004 / MF2) ----
+
+fn ghr(grants: &[(i64, &str)]) -> String {
+    let v: Vec<(i64, String)> = grants.iter().map(|(s, h)| (*s, h.to_string())).collect();
+    feir_decision_core::verify::grant_head_root(&v)
+}
+
+fn grant_head_cv(max_seq: i64, prior: &str, root: &str) -> CanonValue {
+    CanonValue::object(vec![
+        ("max_seq".into(), CanonValue::Int(max_seq)),
+        ("prior_head_hash".into(), CanonValue::string(prior)),
+        ("cumulative_root".into(), CanonValue::string(root)),
+    ])
+    .unwrap()
+}
+
+fn grant_evidence_d6(gid: &str, broker_seq: i64) -> CanonValue {
+    change_field(&grant_evidence(gid, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP), "broker_seq", CanonValue::Int(broker_seq))
+}
+
+// a checkpoint carrying a broker_grant_head (optionally anchored).
+fn checkpoint_with_head(rec_sk: &SigningKey, frontier: &[String], record_count: i64, head: CanonValue, anchor_with: Option<&SigningKey>) -> CanonValue {
+    let key_block = CanonValue::parse(r#"{"signing_key_id":"k0","key_epoch":0,"key_status":"active"}"#).unwrap();
+    let body = checkpoint_body("cp0", "proj-001", 0, None, frontier, record_count, "2026-06-15T10:10:00.000Z", key_block).unwrap();
+    let body = change_field(&body, "broker_grant_head", head);
+    let cp = seal_checkpoint(&body, rec_sk).unwrap();
+    match anchor_with {
+        Some(tsa) => {
+            let anchor = make_test_anchor(&checkpoint_hash(&cp), "2026-06-15T10:10:01.000Z", tsa, "tsa-1");
+            attach_anchor(&cp, anchor)
+        }
+        None => cp,
+    }
+}
+
+// a clean single-grant (broker_seq=1) bundle whose anchored checkpoint head correctly commits it.
+fn d6_clean(rec: &SigningKey, tsa: &SigningKey) -> CanonValue {
+    let grant = seal_grant(rec, rec, GID, &grant_evidence_d6(GID, 1));
+    let gh = content_hash_of(&grant);
+    let head = grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &gh)]));
+    let cp = checkpoint_with_head(rec, std::slice::from_ref(&gh), 1, head, Some(tsa));
+    tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp])
+}
+
+#[test]
+fn tier_b_broker_trust_sequence_verified() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d6_clean(&rec, &tsa);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.broker_trust, "sequence_verified", "anchored gapless head must reach sequence_verified");
+}
+
+#[test]
+fn tier_b_broker_trust_no_head_is_assumed() {
+    // INHERENT RESIDUAL (ADR 0004 D6, total-suppression / pre-D6 equivalence): a grant with NO broker_seq +
+    // a checkpoint with NO broker_grant_head field carries ZERO D6 signal, so the bundle is byte-identical
+    // to a legitimate pre-D6 export and verifies clean as `assumed`. This is NOT a clean D6 guarantee — it
+    // is the documented offline limit (an attacker who emits no D6 signal at all looks pre-D6). The moment
+    // any seq'd grant or any head appears, strict D6 engages (see _total_suppression_*, _seqless_*, and
+    // _d6_grant_without_head tests). Detection of this all-or-nothing case is pushed to the out-of-band
+    // transparency monitor, which knows the project adopted D6.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&grant)], 1, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.broker_trust, "assumed");
+}
+
+#[test]
+fn tier_b_broker_trust_d6_grant_without_head_is_violation() {
+    // a D6 grant (carries broker_seq) but the checkpoint dropped its head -> suppression (the producer
+    // always emits a head when D6 grants exist), so this must FAIL, not silently fall back to assumed.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&grant)], 1, Some(&tsa)); // NO broker_grant_head
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a D6 grant with no anchored head must fail");
+    assert!(r.issues.iter().any(|i| i.contains("no broker_grant_head") || i.contains("dropped head")), "issues: {:?}", r.issues);
+    assert_eq!(r.broker_trust, "assumed");
+}
+
+#[test]
+fn tier_b_broker_trust_unanchored_head_is_consistent_export() {
+    // head present + internally consistent, but the checkpoint is NOT anchored -> sequence_consistent_export.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let gh = content_hash_of(&grant);
+    let head = grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &gh)]));
+    let cp = checkpoint_with_head(&rec, std::slice::from_ref(&gh), 1, head, None); // NOT anchored
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert_eq!(r.broker_trust, "sequence_consistent_export", "an unanchored head is internal consistency only");
+}
+
+#[test]
+fn tier_b_broker_trust_gap_is_violation() {
+    // a grant with broker_seq=2 (no seq 1) -> the recorded log is not a gapless [1..N] prefix.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 2));
+    let gh = content_hash_of(&grant);
+    // head honestly folds the one recorded grant at seq 2, max_seq 2
+    let head = grant_head_cv(2, &ghr(&[]), &ghr(&[(2, &gh)]));
+    let cp = checkpoint_with_head(&rec, std::slice::from_ref(&gh), 1, head, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a gap in broker_seq must fail the bundle");
+    assert!(r.issues.iter().any(|i| i.contains("gapless")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_broker_trust_root_mismatch_is_violation() {
+    // anchored head with a WRONG cumulative_root -> re-derivation mismatch (suppression).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let gh = content_hash_of(&grant);
+    let head = grant_head_cv(1, &ghr(&[]), "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+    let cp = checkpoint_with_head(&rec, std::slice::from_ref(&gh), 1, head, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert!(r.issues.iter().any(|i| i.contains("cumulative_root")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_broker_trust_tail_omission_is_violation() {
+    // head claims max_seq=2 but only one grant (seq 1) is recorded -> tail omission.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let gh = content_hash_of(&grant);
+    // cumulative_root honestly folds the one recorded grant, but max_seq claims 2
+    let head = grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &gh)]));
+    let cp = checkpoint_with_head(&rec, std::slice::from_ref(&gh), 1, head, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert!(r.issues.iter().any(|i| i.contains("tail omission") || i.contains("max_seq")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_broker_trust_forked_prior_head_is_violation() {
+    // the head's prior_head_hash does NOT chain to the empty-log root (a forked/restarted grant log).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let gh = content_hash_of(&grant);
+    let head = grant_head_cv(1, "sha256:0000000000000000000000000000000000000000000000000000000000000000", &ghr(&[(1, &gh)]));
+    let cp = checkpoint_with_head(&rec, std::slice::from_ref(&gh), 1, head, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok);
+    assert!(r.issues.iter().any(|i| i.contains("prior_head_hash") && i.contains("fork/restart")), "issues: {:?}", r.issues);
+}
+
+// a checkpoint with explicit seq/id/prev (for multi-checkpoint chains), optional head, optional anchor.
+#[allow(clippy::too_many_arguments)]
+fn checkpoint_seqd(rec_sk: &SigningKey, cid: &str, seq: i64, prev: Option<&str>, frontier: &[String], count: i64, head: Option<CanonValue>, anchor_with: Option<&SigningKey>) -> CanonValue {
+    let key_block = CanonValue::parse(r#"{"signing_key_id":"k0","key_epoch":0,"key_status":"active"}"#).unwrap();
+    let mut body = checkpoint_body(cid, "proj-001", seq, prev, frontier, count, "2026-06-15T10:10:00.000Z", key_block).unwrap();
+    if let Some(h) = head {
+        body = change_field(&body, "broker_grant_head", h);
+    }
+    let cp = seal_checkpoint(&body, rec_sk).unwrap();
+    match anchor_with {
+        Some(tsa) => {
+            let anchor = make_test_anchor(&checkpoint_hash(&cp), "2026-06-15T10:10:01.000Z", tsa, "tsa-1");
+            attach_anchor(&cp, anchor)
+        }
+        None => cp,
+    }
+}
+
+#[test]
+fn tier_b_broker_trust_stale_subset_head_is_violation() {
+    // CRITICAL false-clean (found by BOTH reviewers): an attacker keeps a head only on an EARLIER
+    // checkpoint covering a SUBSET of grants, and DROPS the head from the genuinely-latest checkpoint that
+    // commits a later grant. The verifier MUST bind D6 to the latest checkpoint and reject this — else
+    // grant-2 is suppressed from every grant head while broker_trust reads sequence_verified.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let g1 = seal_grant(&rec, &rec, "grant-1", &grant_evidence_d6("grant-1", 1));
+    let g2 = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let (h1, h2) = (content_hash_of(&g1), content_hash_of(&g2));
+    let mut both = vec![h1.clone(), h2.clone()];
+    both.sort();
+    // cp0: anchored, head over ONLY grant-1 (a subset)
+    let cp0 = checkpoint_seqd(&rec, "cp0", 0, None, std::slice::from_ref(&h1), 1, Some(grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &h1)]))), Some(&tsa));
+    let cp0h = checkpoint_hash(&cp0);
+    // cp1 (LATEST): commits BOTH grants, but its head was DROPPED
+    let cp1 = checkpoint_seqd(&rec, "cp1", 1, Some(&cp0h), &both, 2, None, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g1, g2], vec![cp0, cp1]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a dropped head on the latest checkpoint must FAIL (grant-2 would be hidden)");
+    assert!(r.issues.iter().any(|i| i.contains("no broker_grant_head") || i.contains("dropped head")), "issues: {:?}", r.issues);
+    assert_eq!(r.broker_trust, "assumed");
+}
+
+#[test]
+fn tier_b_broker_trust_fraudulent_historical_head_is_violation() {
+    // CRITICAL (Codex round-2): cp0's FRONTIER commits grants 1 AND 2 but cp0's head covers only grant 1
+    // (a historical suppression); a later cp1 carries a correct FULL head chaining to cp0's fraudulent
+    // root. Validating EACH head against its OWN frontier (not only the latest) must catch cp0's fraud.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let g1 = seal_grant(&rec, &rec, "grant-1", &grant_evidence_d6("grant-1", 1));
+    let g2 = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let g3 = seal_grant(&rec, &rec, "grant-3", &grant_evidence_d6("grant-3", 3));
+    let (h1, h2, h3) = (content_hash_of(&g1), content_hash_of(&g2), content_hash_of(&g3));
+    let mut f01 = vec![h1.clone(), h2.clone()];
+    f01.sort();
+    let mut fall = vec![h1.clone(), h2.clone(), h3.clone()];
+    fall.sort();
+    // cp0: commits g1+g2 but a FRAUDULENT head over only g1
+    let cp0 = checkpoint_seqd(&rec, "cp0", 0, None, &f01, 2, Some(grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &h1)]))), Some(&tsa));
+    let cp0h = checkpoint_hash(&cp0);
+    let cp0_root = ghr(&[(1, &h1)]); // cp0's fraudulent cumulative_root (chains forward to cp1)
+    // cp1: latest, commits all 3, a CORRECT head chaining to cp0's fraudulent root
+    let cp1 = checkpoint_seqd(&rec, "cp1", 1, Some(&cp0h), &fall, 3, Some(grant_head_cv(3, &cp0_root, &ghr(&[(1, &h1), (2, &h2), (3, &h3)]))), Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g1, g2, g3], vec![cp0, cp1]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a fraudulent historical head (covering a subset of its OWN frontier) must fail");
+    assert!(r.issues.iter().any(|i| i.contains("seq 0") && (i.contains("max_seq") || i.contains("cumulative_root"))), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_broker_trust_seqless_broker_grant_is_violation() {
+    // a REAL broker grant signed WITHOUT broker_seq, committed by the latest checkpoint, would be silently
+    // dropped from the head's log (excluded from max_seq + cumulative_root) — must be a suppression
+    // violation, not a clean pass (the per-head checks over the seq'd grants alone would otherwise hold).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let g1 = seal_grant(&rec, &rec, "grant-1", &grant_evidence_d6("grant-1", 1));
+    let smuggled = seal_grant(&rec, &rec, "grant-x", &grant_evidence("grant-x", ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP)); // NO broker_seq
+    let (h1, hx) = (content_hash_of(&g1), content_hash_of(&smuggled));
+    let mut both = vec![h1.clone(), hx.clone()];
+    both.sort();
+    let head = grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &h1)])); // covers ONLY grant-1
+    let cp = checkpoint_with_head(&rec, &both, 2, head, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g1, smuggled], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a committed broker grant with no broker_seq must fail (smuggled out of the log)");
+    assert!(r.issues.iter().any(|i| i.contains("no broker_seq") || i.contains("smuggled")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_broker_trust_historical_headless_checkpoint_is_violation() {
+    // CRITICAL (Codex round-3): an EARLIER verified checkpoint commits a D6 grant but carries NO head,
+    // while a later checkpoint has a correct full head. The earlier checkpoint binds a grant into the
+    // anchored chain WITHOUT a transparency head — must be flagged, not skipped.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let g1 = seal_grant(&rec, &rec, "grant-1", &grant_evidence_d6("grant-1", 1));
+    let g2 = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let (h1, h2) = (content_hash_of(&g1), content_hash_of(&g2));
+    let mut both = vec![h1.clone(), h2.clone()];
+    both.sort();
+    // cp0: verified, anchored, commits grant-1 but carries NO broker_grant_head
+    let cp0 = checkpoint_seqd(&rec, "cp0", 0, None, std::slice::from_ref(&h1), 1, None, Some(&tsa));
+    let cp0h = checkpoint_hash(&cp0);
+    // cp1: latest, a correct full head (treated as head[0] since cp0 has none → prior == empty root)
+    let cp1 = checkpoint_seqd(&rec, "cp1", 1, Some(&cp0h), &both, 2, Some(grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &h1), (2, &h2)]))), Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g1, g2], vec![cp0, cp1]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a verified checkpoint committing D6 grants with no head must fail");
+    assert!(r.issues.iter().any(|i| i.contains("no (well-formed) broker_grant_head")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_broker_trust_malformed_head_is_violation() {
+    // Codex round-5: a checkpoint whose broker_grant_head FIELD is present but UNPARSEABLE (max_seq is a
+    // string, not an int) is a tampered D6 head — pre-D6 checkpoints never carry the field. It must ACTIVATE
+    // strict D6 and FAIL, never silently demote to a benign headless checkpoint that would let the committed
+    // seq-less grant slip through the no-D6 early return.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP)); // NO broker_seq
+    let gh = content_hash_of(&grant);
+    let garbled = change_field(&grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &gh)])), "max_seq", CanonValue::string("not-an-int"));
+    let cp = checkpoint_with_head(&rec, std::slice::from_ref(&gh), 1, garbled, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a present-but-malformed broker_grant_head must fail, not pass as assumed");
+    assert!(r.issues.iter().any(|i| i.contains("malformed broker_grant_head")), "issues: {:?}", r.issues);
+    assert_eq!(r.broker_trust, "assumed");
+}
+
+#[test]
+fn tier_b_broker_trust_duplicate_checkpoint_is_not_a_fork() {
+    // Codex round-5: validate_chain tolerates a byte-identical DUPLICATE checkpoint (idempotent re-export);
+    // D6 must too. Before the cp_heads dedup, chaining the same head twice made the 2nd copy's prior_head_hash
+    // mismatch the 1st copy's cumulative_root and fabricated a fork/restart — falsely rejecting a valid bundle.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let gh = content_hash_of(&grant);
+    let head = grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &gh)]));
+    let cp = checkpoint_with_head(&rec, std::slice::from_ref(&gh), 1, head, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp.clone(), cp]); // SAME checkpoint twice
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "a byte-identical duplicate checkpoint must not fabricate a fork: {:?}", r.issues);
+    assert_eq!(r.broker_trust, "sequence_verified");
+}
+
+#[test]
+fn tier_b_broker_trust_total_suppression_is_inherent_residual() {
+    // INHERENT RESIDUAL (ADR 0004 D6): when EVERY committed broker grant is seq-less AND no checkpoint carries
+    // a broker_grant_head, the bundle has ZERO D6 signal and is byte-indistinguishable from a pre-D6 export —
+    // it verifies clean as `assumed`. This pins the all-or-nothing boundary: total log suppression is NOT
+    // decidable offline (closing it would false-positive genuine pre-D6 bundles), so it is pushed to the
+    // out-of-band monitor. Partial suppression (any one seq'd grant or any head) IS caught — see _seqless_
+    // and _malformed_head_ tests.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let g1 = seal_grant(&rec, &rec, "grant-1", &grant_evidence("grant-1", ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let g2 = seal_grant(&rec, &rec, "grant-2", &grant_evidence("grant-2", ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let mut both = vec![content_hash_of(&g1), content_hash_of(&g2)];
+    both.sort();
+    let cp = checkpoint_over(&rec, &both, 2, Some(&tsa)); // NO head anywhere
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g1, g2], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "no D6 signal -> indistinguishable from pre-D6: {:?}", r.issues);
+    assert_eq!(r.broker_trust, "assumed");
+}

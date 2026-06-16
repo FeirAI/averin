@@ -253,9 +253,32 @@ detected; clean anchored sequence → `sequence_verified`; unanchored head → `
   detects). Per-grant trust (`evidence_sig` under a pinned broker key → `grant_verified`) is a SEPARATE
   axis. So `cumulative_root` folds every recorded tuple-classified grant; `grant_verified` counts the
   subset whose sig verifies.
-- **D6 activation boundary.** Only grants that CARRY a `broker_seq` are in the D6 log; a tuple-classified
-  grant with no `broker_seq` predates D6 and is excluded by BOTH sides (so a fresh project's log is a
-  clean `[1..N]`, and a project with legacy grants is not wedged).
+- **D6 activation boundary (STRICT).** D6 is *active* for a bundle once it carries ANY D6 signal: a
+  well-formed committed `broker_grant_head`, a checkpoint carrying a *present-but-malformed* head (a
+  tampered D6 head — pre-D6 checkpoints never emit the field, so it both activates D6 and is a violation
+  in its own right), or any tuple-classified grant carrying a `broker_seq`. Once active, EVERY
+  tuple-classified grant the verified DAG commits MUST carry a `broker_seq >= 1`. A committed broker grant
+  with NO `broker_seq` is one SMUGGLED OUT of the transparency log (it would be silently absent from every
+  head's `max_seq` + `cumulative_root`), so the verifier treats it as a suppression violation (down-ranks
+  `broker_trust` → `assumed` and fails the bundle), NOT as a benign pre-D6 row. The producer always
+  assigns a `broker_seq`, so a fresh project's log is a clean `[1..N]`. A project that recorded broker
+  grants BEFORE D6 must BACKFILL a `broker_seq` onto each (re-seal them into the log) before its first D6
+  checkpoint; an un-backfilled legacy grant present alongside any D6 signal is — correctly —
+  indistinguishable from a smuggled one and must not pass. The demonstrator is built fresh and has no
+  legacy grants. (Earlier drafts excluded seq-less grants on BOTH sides so legacy bundles were "not
+  wedged"; that left a suppression hole — a broker could drop a grant from every head by omitting its
+  `broker_seq` — so strict D6 closes it at the cost of requiring legacy backfill.)
+- **Inherent residual — total suppression / pre-D6 equivalence.** The one case strict D6 CANNOT decide
+  offline: a bundle with NO D6 signal *at all* — every committed broker grant seq-less AND no
+  `broker_grant_head` field on any checkpoint — is *byte-indistinguishable* from a legitimate pre-D6
+  export, so it verifies clean with `broker_trust:"assumed"`. An attacker who never emits a single D6
+  signal can therefore suppress the entire grant log and look exactly like a project that never adopted
+  D6. Activating on the mere *presence* of broker grants would false-positive every genuine pre-D6 bundle,
+  so this is not closable from the bundle alone; it is the same class of limit as equivocation, pushed to
+  the **out-of-band transparency monitor** (which has seen the project's adoption history and knows D6 is
+  expected) plus the TSA time anchor. Note the boundary is *all-or-nothing*: the moment ONE seq'd grant or
+  ONE head (well-formed or malformed) appears, strict D6 engages and every other committed grant must be
+  in the log — partial suppression is always caught.
 - **Consistent snapshot.** The producer reads the frontier, record count, and grant log under one ingest
   lock so the head folds exactly the grants the checkpoint frontier commits; the verifier re-derives over
   that same closed (anchored-checkpoint-committed) grant set.

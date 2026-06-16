@@ -1193,10 +1193,14 @@ func stringSlicesEqual(a, b []string) bool {
 }
 
 // grantLog extracts the D6 grant-transparency log — each grant record's (broker_seq, content_hash) —
-// sorted by broker_seq. A record is a grant iff extensions.broker.kind == "grant"; its broker_seq is
-// read from the signed extensions.broker.grant_evidence.broker_seq. Any grant record with a missing or
-// non-positive broker_seq is a producer bug (every D6 grant carries one), so it is a hard error rather
-// than a silently-dropped row that would make the anchored head disagree with the recorded grants.
+// sorted by broker_seq. A record is a grant iff the tuple (extensions.broker.kind == "grant",
+// authority.enforcement_point == "credential_broker") matches; its broker_seq is read from the signed
+// extensions.broker.grant_evidence.broker_seq. The producer ALWAYS assigns a broker_seq >= 1, so a record
+// with seq < 1 is a legacy (pre-D6) grant: it is SKIPPED here (never folded with a bogus seq, which would
+// corrupt the head's [1..N] prefix). Skipping is NOT silent acceptance — under strict D6 the offline
+// verifier's seq-less guard rejects any committed broker grant that lacks a broker_seq once D6 is active,
+// so an un-backfilled legacy grant fails verification rather than being quietly dropped (the demonstrator
+// is built fresh and has none).
 func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 	var log []broker.GrantSeqHash
 	for _, r := range records {
@@ -1227,11 +1231,15 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 		if parsed.Extensions.Broker.Kind != "grant" || parsed.Authority.EnforcementPoint != "credential_broker" {
 			continue
 		}
-		// D6 ACTIVATION BOUNDARY: the transparency log covers only grants that CARRY a broker_seq (issued
-		// under D6). A tuple-classified grant with no broker_seq predates D6 — SKIP it (it is outside the
-		// log; do not wedge checkpoints, do not fold it into the head). The verifier applies the identical
-		// boundary, so the two agree. (Current code always assigns broker_seq>=1, so only legacy grants
-		// recorded before this commit are ever skipped here.)
+		// STRICT D6: the head folds only grants that CARRY a broker_seq>=1, and the producer ALWAYS assigns
+		// one (allocated under ingestMu in /v2/grants). The seq<1 skip below therefore only ever fires on a
+		// LEGACY grant recorded before D6 — which strict D6 does NOT treat as benign: the verifier requires
+		// every tuple-classified grant the DAG commits to carry a broker_seq, and down-ranks broker_trust to
+		// `assumed` on any committed seq-less broker grant (a seq-less grant is indistinguishable from one
+		// SMUGGLED out of the log). So a legacy grant must be BACKFILLED with a broker_seq before the first
+		// D6 checkpoint; folding it here without a seq would instead corrupt the [1..N] prefix. The
+		// demonstrator is built fresh and has none. We skip-not-fold so we never put a seq<1 entry in the
+		// log; the verifier's seq-less guard — not this fold — is what rejects the un-backfilled bundle.
 		if parsed.Extensions.Broker.GrantEvidence.BrokerSeq < 1 {
 			continue
 		}

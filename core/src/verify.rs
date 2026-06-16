@@ -103,6 +103,14 @@ pub struct VerifyReport {
     /// requires BOTH `taxonomy_status == "validated"` AND `uses_action_unverified == 0`, never the status
     /// alone (Codex AREA 1).
     pub taxonomy_status: String,
+    /// Grant-transparency trust (ADR 0004 D6 / MF2), one of: `assumed` (no `broker_grant_head` in any
+    /// checkpoint — the bundle cannot prove the broker recorded every grant), `sequence_consistent_export`
+    /// (a head is present and the recorded grant log is a gapless prefix whose cumulative_root + chain
+    /// match it, but the head is NOT in a verified+anchored checkpoint — internal consistency only), or
+    /// `sequence_verified` (those checks pass AND the head is bound into a verified, anchored checkpoint,
+    /// so the broker cannot drop/renumber/fork a recorded grant without detection). A gap, tail omission,
+    /// root mismatch, or broken prior-head chain is a hard `issues` violation (detectable suppression).
+    pub broker_trust: String,
     /// The bundle's `coverage_manifest` echoed verbatim (the verifier does NOT trust it; it surfaces
     /// it so an auditor can evaluate the out-of-band attestations). `None` if absent.
     pub coverage_manifest: Option<CanonValue>,
@@ -568,10 +576,13 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             }),
         ),
         // Tier-A is grant accountability only; action completeness (Tier B / Level 3) additionally
-        // needs use receipts + attestations and is NOT claimed here (ADR 0002). broker_trust is
-        // `assumed` (the bundle cannot prove the broker did not mint without recording);
-        // attestation_status is `unevaluated` (this verifier does not evaluate the manifest).
-        ("broker_trust".into(), CanonValue::string("assumed")),
+        // needs use receipts + attestations and is NOT claimed here (ADR 0002). broker_trust (ADR 0004
+        // D6) reduces `assumed` toward `sequence_verified` when an anchored grant-transparency head proves
+        // the recorded grant log is gapless; attestation_status is `unevaluated` (manifest not evaluated).
+        (
+            "broker_trust".into(),
+            CanonValue::string(r.broker_trust.clone()),
+        ),
         (
             "attestation_status".into(),
             CanonValue::string("unevaluated"),
@@ -775,6 +786,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         unmatched_pending: 0,
         grants_unused: 0,
         taxonomy_status: "absent".to_string(),
+        broker_trust: "assumed".to_string(),
         coverage_manifest: None,
         issues: vec![msg.to_string()],
         first_broken_link: Some(msg.to_string()),
@@ -954,6 +966,23 @@ fn ev_int(rec: &CanonValue, payload_key: &str, field: &str) -> Option<i64> {
         .and_then(|v| v.as_int())
 }
 
+/// A checkpoint's `broker_grant_head` (ADR 0004 D6 / MF2), parsed fail-closed.
+#[derive(PartialEq)]
+struct GrantHead {
+    max_seq: i64,
+    prior_head_hash: String,
+    cumulative_root: String,
+}
+
+fn parse_grant_head(cp: &CanonValue) -> Option<GrantHead> {
+    let h = cp.get("broker_grant_head")?;
+    Some(GrantHead {
+        max_seq: h.get("max_seq").and_then(|v| v.as_int())?,
+        prior_head_hash: h.get("prior_head_hash").and_then(|v| v.as_str())?.to_string(),
+        cumulative_root: h.get("cumulative_root").and_then(|v| v.as_str())?.to_string(),
+    })
+}
+
 struct TaxonomyInfo {
     /// (resource_id, action) pairs the issuer asserts ARE single-operation. RESOURCE-BOUND (an entry
     /// vetted for one resource must not validate the same action name on another — Codex AREA 2).
@@ -1034,6 +1063,159 @@ fn validate_taxonomy(
         effective_from: tax.get("effective_from").and_then(|v| v.as_int())?,
         effective_until: tax.get("effective_until").and_then(|v| v.as_int())?,
     })
+}
+
+/// D6 (ADR 0004 / MF2): compute `broker_trust` by re-deriving the grant-transparency cumulative_root over
+/// the recorded grant log and checking it against the bundle's `broker_grant_head`s. Membership is the
+/// role TUPLE (`BrokerRole::Broker`) with a `broker_seq >= 1` — NOT sig-gated (a broker must not be able
+/// to drop a grant from the log by under-signing it; that IS the suppression D6 detects), matching the
+/// producer's grantLog. A gap / tail-omission / root-mismatch / broken prior-head chain is a hard
+/// violation pushed to `issues`.
+#[allow(clippy::too_many_arguments)]
+fn compute_broker_trust(
+    cp_heads: &[(i64, bool, GrantHead, Vec<String>)],
+    verified_headless: &[Vec<String>],
+    malformed_head: bool,
+    record_trust: &[RecordTrust],
+    records: &[CanonValue],
+    by_hash: &BTreeMap<String, usize>,
+    dag_heads: &[String],
+    latest_cp_seq: i64,
+    issues: &mut Vec<String>,
+) -> String {
+    // re-derive the tuple-classified grant log (broker_seq >= 1, NOT sig-gated — under-signing is
+    // suppression) committed by an arbitrary checkpoint frontier, sorted by broker_seq.
+    let log_for = |frontier: &[String]| -> Vec<(i64, String)> {
+        let committed = committed_set(records, by_hash, frontier);
+        let mut log: Vec<(i64, String)> = record_trust
+            .iter()
+            .filter(|rt| {
+                rt.broker_role == BrokerRole::Broker.as_str() && committed.contains(&rt.content_hash)
+            })
+            .filter_map(|rt| {
+                ev_int(&records[rt.index], "grant_evidence", "broker_seq")
+                    .filter(|seq| *seq >= 1)
+                    .map(|seq| (seq, rt.content_hash.clone()))
+            })
+            .collect();
+        log.sort_by_key(|(seq, _)| *seq);
+        log
+    };
+
+    // D6 is active once there is ANY well-formed head, ANY broker_seq grant, or a PRESENT-but-malformed head
+    // (a tampered D6 head is still a D6 signal — pre-D6 checkpoints never carry the field). With NO D6 signal
+    // at all the bundle is byte-INDISTINGUISHABLE from a legitimate pre-D6 / grant-only export (committed
+    // seq-less grants, no head field anywhere), so `broker_trust` stays `assumed`. That TOTAL grant-
+    // suppression case is an inherent OFFLINE residual (ADR 0004 D6: equivalence to pre-D6) — closing it
+    // would false-positive every genuine pre-D6 bundle, so it is pushed to the out-of-band transparency
+    // monitor (which has seen the project's adoption history), NOT decidable from the bundle alone.
+    let full_log = log_for(dag_heads);
+    if cp_heads.is_empty() && full_log.is_empty() && !malformed_head {
+        return "assumed".to_string();
+    }
+    let mut ok = true;
+
+    // A verified checkpoint carrying a present-but-malformed broker_grant_head is a tampered/garbled D6 head:
+    // a hard violation (and the activation signal above), never silently demoted to a benign headless cp.
+    if malformed_head {
+        issues.push("a verified checkpoint carries a present-but-malformed broker_grant_head — tampered/garbled D6 head (suppression, D6)".into());
+        ok = false;
+    }
+
+    // Once D6 is active, EVERY committed Broker-role grant MUST carry a broker_seq >= 1 — the producer always
+    // assigns one. A committed broker grant with NO broker_seq is one SMUGGLED OUT of the transparency log
+    // (it would be silently excluded from every head's max_seq + cumulative_root), so it is a suppression
+    // violation in its own right. Run this BEFORE the latest-head early-return so a seq-less grant under a
+    // malformed-or-missing latest head is still flagged, not skipped by the early bail.
+    let full_committed = committed_set(records, by_hash, dag_heads);
+    for rt in record_trust {
+        if rt.broker_role == BrokerRole::Broker.as_str()
+            && full_committed.contains(&rt.content_hash)
+            && ev_int(&records[rt.index], "grant_evidence", "broker_seq")
+                .filter(|seq| *seq >= 1)
+                .is_none()
+        {
+            issues.push(format!(
+                "committed broker grant {} carries no broker_seq while D6 is active — smuggled out of the transparency log (suppression, D6)",
+                rt.content_hash
+            ));
+            ok = false;
+        }
+    }
+
+    // A VERIFIED checkpoint with NO well-formed head whose frontier commits D6 grants binds those grants
+    // into the anchored chain WITHOUT a head — they'd be omitted from every head's log. Require a head on
+    // every grant-committing checkpoint (the producer emits one on every checkpoint). Dedup identical
+    // frontiers first so a benign byte-identical duplicate checkpoint does not double-report.
+    let mut headless: Vec<&Vec<String>> = verified_headless.iter().collect();
+    headless.sort();
+    headless.dedup();
+    for frontier in headless {
+        if !log_for(frontier).is_empty() {
+            issues.push("a verified checkpoint commits D6 grants but carries no (well-formed) broker_grant_head — grants bound without a transparency head (suppression, D6)".into());
+            ok = false;
+        }
+    }
+
+    // The head MUST be on the LATEST checkpoint (the one whose frontier covers the full DAG). A head only
+    // on an EARLIER checkpoint — with the latest checkpoint dropping its head — is exactly how an attacker
+    // hides grants the later checkpoint commits, so that is a suppression violation, never an inherited pass.
+    let latest = cp_heads.iter().find(|(seq, _, _, _)| *seq == latest_cp_seq);
+    let latest_anchored = match latest {
+        Some((_, anchored, _, _)) => *anchored,
+        None => {
+            issues.push("D6 grant transparency is active but the LATEST checkpoint carries no broker_grant_head — a dropped head hides later grants (suppression, D6)".into());
+            return "assumed".to_string();
+        }
+    };
+
+    // Re-derive EVERY verified head against ITS OWN committed frontier, ascending by seq: each head must
+    // (a) cover a gapless [1..n_i] prefix of grants its frontier commits, (b) carry max_seq == n_i, (c)
+    // re-derive cumulative_root over that exact log, and (d) chain (prior_head_hash == the previous head's
+    // cumulative_root; the first == the empty-log root). Validating each head against its OWN frontier —
+    // not only the latest against the full log — catches a fraudulent HISTORICAL head that omitted a grant
+    // its own frontier committed, even when a later checkpoint carries a correct full head.
+    let empty_root = grant_head_root(&[]);
+    let mut heads: Vec<&(i64, bool, GrantHead, Vec<String>)> = cp_heads.iter().collect();
+    heads.sort_by_key(|(seq, _, _, _)| *seq);
+    // validate_chain treats a byte-identical DUPLICATE checkpoint as benign (idempotent re-export); D6 must
+    // match — chaining the same head twice would make the 2nd copy's prior_head_hash mismatch the 1st copy's
+    // cumulative_root and fabricate a fork. Collapse exact-duplicate heads (same seq + head + frontier); a
+    // genuine same-seq divergence is a real fork already flagged by validate_chain.
+    heads.dedup_by(|a, b| a.0 == b.0 && a.2 == b.2 && a.3 == b.3);
+
+    let mut prev_root = empty_root;
+    for (cseq, _, head, frontier) in heads {
+        let log_i = log_for(frontier);
+        let n_i = log_i.len() as i64;
+        if !log_i.iter().enumerate().all(|(i, (seq, _))| *seq == i as i64 + 1) {
+            issues.push(format!("checkpoint seq {cseq}: committed grant broker_seq set is not a gapless [1..N] prefix — suppression/renumber (D6)"));
+            ok = false;
+        }
+        if head.max_seq != n_i {
+            issues.push(format!("checkpoint seq {cseq}: broker_grant_head.max_seq {} != its committed grant count {n_i} — omission/inflation (D6)", head.max_seq));
+            ok = false;
+        }
+        if grant_head_root(&log_i) != head.cumulative_root {
+            issues.push(format!("checkpoint seq {cseq}: broker_grant_head.cumulative_root does not re-derive from its committed grant log — suppression (D6)"));
+            ok = false;
+        }
+        if head.prior_head_hash != prev_root {
+            issues.push(format!("checkpoint seq {cseq}: broker_grant_head prior_head_hash does not chain to the previous head — grant-log fork/restart (D6)"));
+            ok = false;
+        }
+        prev_root = head.cumulative_root.clone();
+    }
+    if !ok {
+        return "assumed".to_string(); // a detected mismatch fails the bundle; the sequence is not trusted
+    }
+    // every head checks out (incl. the latest, whose frontier == the full DAG head set). The latest head is
+    // bound into a verified+anchored checkpoint ⇒ externally pinned; else self-asserted (internal only).
+    if latest_anchored {
+        "sequence_verified".to_string()
+    } else {
+        "sequence_consistent_export".to_string()
+    }
 }
 
 pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
@@ -1276,12 +1458,32 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut checkpoints_anchored = 0usize;
     // (seq, anchored_ts, frontier) for each checkpoint with a verified anchor
     let mut anchored: Vec<(i64, String, Vec<String>)> = Vec::new();
+    // D6: (seq, anchored_and_verified, head, frontier) for each VERIFIED checkpoint carrying a head;
+    // `verified_headless` holds the frontiers of verified checkpoints that carry NO well-formed head.
+    let mut cp_heads: Vec<(i64, bool, GrantHead, Vec<String>)> = Vec::new();
+    let mut verified_headless: Vec<Vec<String>> = Vec::new();
+    // A broker_grant_head FIELD present on a VERIFIED checkpoint but unparseable is a tampered/garbled D6
+    // head — pre-D6 checkpoints never carry the field, so it is a D6 activation signal (and a violation),
+    // distinct from a checkpoint with no head field at all. Tracked so D6 cannot be dodged by garbling it.
+    let mut verified_malformed_head = false;
     for (i, cp) in checkpoints.iter().enumerate() {
         if let Some(pid) = &project_id {
             if s(cp, "project_id").as_deref() != Some(pid.as_str()) {
                 issues.push(format!("checkpoint {i} project_id does not match bundle"));
             }
         }
+        let cp_seq = cp
+            .get("checkpoint_seq")
+            .and_then(|v| v.as_int())
+            .unwrap_or(0);
+        let cp_frontier: Vec<String> = cp
+            .get("frontier")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|h| h.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let head_field_present = cp.get("broker_grant_head").is_some();
+        let cp_head = parse_grant_head(cp);
+        let mut this_anchored = false;
         let vk = cp
             .get("key")
             .and_then(|k| s(k, "signing_key_id"))
@@ -1323,26 +1525,38 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 let cph = s(cp, "checkpoint_hash").unwrap_or_default();
                 match verify_anchor(&cph, anchor, &anchor_trust) {
                     Ok(ts) => {
-                        let seq = cp
-                            .get("checkpoint_seq")
-                            .and_then(|v| v.as_int())
-                            .unwrap_or(0);
-                        let frontier: Vec<String> = cp
-                            .get("frontier")
-                            .and_then(|v| v.as_array())
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|h| h.as_str().map(String::from))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        anchored.push((seq, ts, frontier));
+                        this_anchored = true;
+                        anchored.push((cp_seq, ts, cp_frontier.clone()));
                     }
                     Err(e) => issues.push(format!("checkpoint {i} anchor invalid: {e}")),
                 }
             }
         }
+        // Only a VERIFIED checkpoint's head + frontier are cryptographically bound — never seed D6 trust
+        // from an unsigned checkpoint whose head/frontier an attacker could choose. A verified checkpoint
+        // that carries NO (or a malformed → None) head is tracked separately so D6 can flag it if its
+        // frontier commits grants (a checkpoint that binds grants without a head omits them from the log).
+        if cp_verified {
+            match cp_head {
+                Some(head) => cp_heads.push((cp_seq, this_anchored, head, cp_frontier)),
+                None => {
+                    // present-but-malformed head ⇒ tampered D6 head: a D6 signal + violation (handled in
+                    // compute_broker_trust); absent field ⇒ genuinely headless (pre-D6 / no D6 head).
+                    if head_field_present {
+                        verified_malformed_head = true;
+                    }
+                    verified_headless.push(cp_frontier);
+                }
+            }
+        }
     }
+    // The latest checkpoint by seq (authoritative — validate_chain pins its frontier to the full DAG head
+    // set, so D6 trust MUST be bound to its head, never inherited from an earlier subset-frontier head).
+    let latest_cp_seq = checkpoints
+        .iter()
+        .filter_map(|cp| cp.get("checkpoint_seq").and_then(|v| v.as_int()))
+        .max()
+        .unwrap_or(-1);
     if !records.is_empty() && checkpoints.is_empty() {
         issues.push("no checkpoints: a non-empty run must be checkpoint-committed".into());
     }
@@ -1797,6 +2011,23 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         (Some(_), Some(_)) => "validated",
     };
 
+    // D6/MF2 broker_trust: re-derive the grant-transparency head over the recorded grant log. Needs the
+    // DAG (committed_set); without it (DAG invalid) the sequence cannot be re-derived → stays `assumed`.
+    let broker_trust = match dag_opt.as_ref() {
+        Some(d) => compute_broker_trust(
+            &cp_heads,
+            &verified_headless,
+            verified_malformed_head,
+            &record_trust,
+            records,
+            &d.by_hash,
+            &d.heads,
+            latest_cp_seq,
+            &mut issues,
+        ),
+        None => "assumed".to_string(),
+    };
+
     let coverage_manifest = bundle.get("coverage_manifest").cloned();
 
     let first_broken_link = issues.first().cloned();
@@ -1807,6 +2038,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         && checkpoints_verified == checkpoints.len()
         && !checkpoints.is_empty()
         && chain_ok;
+
+    // The trust label must never outrank the verdict: if the bundle is not `ok` (e.g. a broken checkpoint
+    // chain, an unverified checkpoint, or any other failure), `broker_trust` cannot claim a reduction.
+    let broker_trust = if ok { broker_trust } else { "assumed".to_string() };
 
     VerifyReport {
         ok,
@@ -1834,6 +2069,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         unmatched_pending,
         grants_unused,
         taxonomy_status: taxonomy_status.to_string(),
+        broker_trust,
         coverage_manifest,
         issues,
         first_broken_link,

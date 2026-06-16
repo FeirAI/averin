@@ -547,3 +547,26 @@ func TestGrantIdempotencyConflictOnShapingFields(t *testing.T) {
 		t.Fatalf("identical retry must succeed, got %d: %s", code, resp)
 	}
 }
+
+// TestGrantBundleReachesBrokerTrust proves the D6 producer->verifier path end-to-end: a real grant +
+// anchored checkpoint (carrying the broker_grant_head) verifies with broker_trust reduced past "assumed".
+func TestGrantBundleReachesBrokerTrust(t *testing.T) {
+	h := newBrokerServer(t)
+	ak := grantAgentKey()
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-1", "read:orders", ak, ak)); code != http.StatusCreated {
+		t.Fatalf("grant (%d): %s", code, resp)
+	}
+	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint (%d): %s", code, resp)
+	}
+	code, report := do(t, h, "GET", "/v2/verify?project=p1", "")
+	if code != http.StatusOK || !strings.Contains(report, `"ok":true`) {
+		t.Fatalf("verify not ok (%d): %s", code, report)
+	}
+	if strings.Contains(report, `"broker_trust":"assumed"`) {
+		t.Fatalf("broker_trust should be reduced past assumed once the head is anchored: %s", report)
+	}
+	if !strings.Contains(report, `"broker_trust":"sequence_verified"`) && !strings.Contains(report, `"broker_trust":"sequence_consistent_export"`) {
+		t.Fatalf("expected a D6 broker_trust state, got: %s", report)
+	}
+}
