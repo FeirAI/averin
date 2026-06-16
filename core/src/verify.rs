@@ -1613,6 +1613,25 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             }
         }
     }
+    // T7 (Codex): `authority_keys` (the keys that elevate a GENERIC BrokerRole::None record's
+    // policy_engine_signed/human_signed/gateway_enforced authority to `verified`) MAY equal
+    // `broker_authority_keys` — the self-host model where the broker IS the policy authority for its own
+    // gateway_enforced records (Go pins authority_keys=broker_keys). But it MUST be disjoint from the
+    // RESOURCE/taxonomy/attestation/TSA roles: a key in any of those that also elevates generic authority is
+    // role confusion (e.g. a resource key signing a generic record's evidence_sig would read as `verified`).
+    for (name, set) in [
+        ("resource_authority_keys", &opts.resource_authority_keys),
+        ("taxonomy_keys", &opts.taxonomy_keys),
+        ("attestation_keys", &opts.attestation_keys),
+        ("trusted_tsa_keys", &opts.trusted_tsa_keys),
+    ] {
+        if opts.trusted_authority_keys.iter().any(|k| set.contains(k)) {
+            return fatal_config_report(
+                project_id,
+                &format!("authority_keys and {name} must be disjoint (a non-broker role key must not also elevate generic authority) — fatal configuration error"),
+            );
+        }
+    }
 
     let keys_externally_pinned = opts.trusted_keys.is_some();
 

@@ -2077,6 +2077,20 @@ fn tier_b_taxonomy_keys_overlapping_resource_is_fatal() {
     assert!(r.issues.iter().any(|i| i.contains("must be disjoint")), "issues: {:?}", r.issues);
 }
 
+// T7 (Codex convergence): an `authority_keys` set (the generic policy_engine_signed/human_signed elevation
+// keys) that overlaps the RESOURCE authority keys is a FATAL config error — else a resource key could sign a
+// generic record's evidence_sig and have it read as `verified` (forged generic authority).
+#[test]
+fn tier_b_authority_keys_overlapping_resource_is_fatal() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.trusted_authority_keys = vec![res.verifying_key()]; // == resource key
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a resource key reused as a trusted authority key must abort fatally");
+    assert!(r.issues.iter().any(|i| i.contains("must be disjoint")), "issues: {:?}", r.issues);
+}
+
 // MF5: a validly-signed taxonomy with NO pinned digest/version stays `untrusted` (fail-closed — the
 // operator must vet a specific artifact; a signature alone does not make it `validated`).
 #[test]

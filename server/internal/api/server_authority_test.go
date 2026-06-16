@@ -115,3 +115,37 @@ func TestPolicyEngineSignedAuthorityElevates(t *testing.T) {
 		t.Fatalf("the forged-evidence record must NOT verify: %s", rep)
 	}
 }
+
+// TestPolicyEngineKeyMustBeDisjointFromResource (T7, Codex convergence): pinning a policy-engine key that
+// equals the RESOURCE key must fail fast at Routes() — in BOTH option orders (the guard cannot live only in
+// WithPolicyEngineKey, since WithResource may run after it). Else a resource key could elevate generic
+// authority, which the offline verifier's authority_keys disjointness check now also fatals on.
+func TestPolicyEngineKeyMustBeDisjointFromResource(t *testing.T) {
+	rcForKey, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatalf("resource core: %v", err)
+	}
+	rpubBytes, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(rcForKey.PubKey(), "ed25519pub:"))
+	if err != nil {
+		t.Fatalf("decode resource pubkey: %v", err)
+	}
+	rpub := ed25519.PublicKey(rpubBytes)
+	for _, order := range []string{"resource-first", "policy-first"} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("%s: Routes() must panic when the policy-engine key == the resource key", order)
+				}
+			}()
+			c, _ := core.New(seed)
+			rc, _ := core.New(resourceSeed)
+			s := api.New(c, store.NewMem(), "k0")
+			if order == "resource-first" {
+				s.WithResource(rc, "orders-db").WithPolicyEngineKey("policy_engine_signed", rpub)
+			} else {
+				s.WithPolicyEngineKey("policy_engine_signed", rpub).WithResource(rc, "orders-db")
+			}
+			s.Routes()
+		}()
+	}
+}

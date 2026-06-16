@@ -394,6 +394,16 @@ func (s *Server) WithTSA(t witness.TSA) *Server {
 func healthz(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) }
 
 func (s *Server) Routes() http.Handler {
+	// Role separation (T7, Codex): the pinned policy-engine key must be disjoint from the RESOURCE key too —
+	// checked HERE (not only in WithPolicyEngineKey) so it holds regardless of option order (WithResource can
+	// be called after WithPolicyEngineKey). Else a resource key could sign a generic record's evidence_sig and
+	// have the server stamp it `verified` — exactly what the offline verifier's authority_keys disjointness
+	// check now also fatals on. Fail fast at setup, like the other WithPolicyEngineKey guards.
+	if s.policyEngineKey != nil && s.resourceCore != nil {
+		if rpub, err := decodePubKey(s.resourceCore.PubKey()); err == nil && s.policyEngineKey.Equal(rpub) {
+			panic("the policy-engine key must be role-separated from the resource key")
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("POST /v2/records", s.handleRecords)
