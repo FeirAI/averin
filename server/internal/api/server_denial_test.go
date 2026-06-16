@@ -379,6 +379,44 @@ func TestPoPFailureDistinctSignaturesLogDistinctDenials(t *testing.T) {
 	}
 }
 
+// TestDenialIdCanonicalizesBase64 (Codex pass-8 medium): the broker's base64 decode is non-strict, so the
+// SAME agent_pubkey bytes under canonical vs non-canonical spellings must collapse to ONE denial — else a
+// caller inflates denied_grants without a distinct key. Two forbidden-scope probes, same key bytes, differing
+// only in the pubkey's base64 padding bit, must log a single denial.
+func TestDenialIdCanonicalizesBase64(t *testing.T) {
+	h := denyLogServer(t)
+	ak := grantAgentKey()
+	pub := ak.Public().(ed25519.PublicKey)
+	canon := base64.RawURLEncoding.EncodeToString(pub)
+	const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	idx := strings.IndexByte(alpha, canon[len(canon)-1])
+	nonCanon := canon[:len(canon)-1] + string(alpha[idx^1]) // same 32 bytes, non-canonical padding bit
+	if nonCanon == canon {
+		t.Fatal("failed to construct a non-canonical encoding")
+	}
+	post := func(pubB64 string) {
+		req := broker.Request{AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "iam:reset", AgentPubKey: pubB64}
+		sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
+		body, _ := json.Marshal(map[string]any{
+			"idempotency_key": "idem-x", "project_id": "p1", "session_id": "s1",
+			"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",
+			"scope": "iam:reset", "agent_pubkey": pubB64, "agent_sig": sig, "ttl_seconds": 60,
+		})
+		if code, r := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusBadRequest {
+			t.Fatalf("forbidden scope should be 400, got %d: %s", code, r)
+		}
+	}
+	post(canon)
+	post(nonCanon)
+	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, r)
+	}
+	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
+	if !strings.Contains(report, `"denied_grants":1`) {
+		t.Fatalf("the same pubkey under canonical + non-canonical base64 must collapse to ONE denial: %s", report)
+	}
+}
+
 // TestDeniedGrantLogOffByDefault: without WithDeniedGrantLog the forbidden scope is still rejected but NO
 // denial is sealed (opt-in — avoids a probe-driven storage/billing DoS by default).
 func TestDeniedGrantLogOffByDefault(t *testing.T) {

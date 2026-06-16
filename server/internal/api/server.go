@@ -969,13 +969,24 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	// boundary cannot be forged by an embedded delimiter.
 	idReq := gr
 	idReq.IdempotencyKey = "" // the idempotency key is the retry key, NOT part of the probe identity
+	// Canonicalize the base64 identity fields: the broker's base64 decode is non-strict, so re-encode the
+	// decoded bytes — otherwise alternate spellings of the SAME pubkey/signature bytes would yield distinct
+	// denial ids and let a caller inflate denied_grants without a distinct key/proof. A field that does not
+	// decode is left as-is (a malformed value is itself part of the identity; the denial still logs).
+	if pub, err := base64.RawURLEncoding.DecodeString(idReq.AgentPubKey); err == nil {
+		idReq.AgentPubKey = base64.RawURLEncoding.EncodeToString(pub)
+	}
 	// agent_sig is part of the probe identity ONLY for pop_failed: there each DISTINCT failed proof is a
 	// distinct attempt the B11 log must COUNT (a PoP brute-force should leave one record per attempt; volume
 	// is bounded by the per-project denial budget, not by hiding attempts). For forbidden_scope/ttl the sig
 	// is incidental — and since a key-OWNER can craft many distinct VALID ed25519 sigs over one challenge
 	// (Verify accepts any canonical sig, not just the deterministic one), keeping it would let them inflate
-	// one logical operation into N denials; so it is excluded there and the operation itself is the identity.
-	if reason != "pop_failed" {
+	// one logical operation into N denials; so it is excluded there. When kept, canonicalize it the same way.
+	if reason == "pop_failed" {
+		if sig, err := base64.RawURLEncoding.DecodeString(idReq.AgentSig); err == nil {
+			idReq.AgentSig = base64.RawURLEncoding.EncodeToString(sig)
+		}
+	} else {
 		idReq.AgentSig = ""
 	}
 	reqJSON, _ := json.Marshal(idReq)
