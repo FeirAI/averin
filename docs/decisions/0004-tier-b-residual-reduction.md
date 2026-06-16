@@ -227,7 +227,16 @@ resource-signed `intent_hash` (the before-act ordering proof). The signed `use_o
 `{kind, grant_id, intent_ref, intent_hash, status}`; the unsigned sibling discriminator routes the role.
 One-phase `/v2/use` is unchanged. Go tests assert producer structure + the signed binding + bundle
 integrity; the intent↔outcome MATCHING semantics (which need a verifiable anchor — the test StubTSA token
-is not crypto-valid) are exercised in the Rust adversarial suite.
+is not crypto-valid) are exercised in the Rust adversarial suite. **Idempotency hardening [D5.2 round-2]:**
+all three endpoints resolve retries on the request's `idempotency_key` via `RecordByIdem` (the SAME key the
+store dedupes on), requiring an EXACT `(record_id, session_id, broker kind)` match to collapse as an honest
+retry — anything else under that key is a `409` raised BEFORE the credential-consuming `ValidateUse`. This
+closes two holes in the prior session-scan-by-`useID` approach: (1) a generic `/v2/records` row already
+occupying the key (random `record_id` the scan missed) would let `ValidateUse` burn the nonce and then
+`PutRecord` silently collapse the seal onto that foreign row (`created=false`) — an action with no persisted
+receipt; (2) `/v2/use` and `/v2/use-intent` derive the same `useID` from `(project, key)`, so reusing one
+key across phases returned the wrong-kind record and skipped validation. Go tests cover the preseed-collision
+and cross-phase-key cases for all three endpoints.
 
 ## D6 — Grant transparency: reduce `broker_trust` from `assumed`
 

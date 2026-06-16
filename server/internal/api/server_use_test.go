@@ -372,6 +372,75 @@ func TestUseIsIdempotentOnRetry(t *testing.T) {
 
 
 
+// TestUsePreseededGenericIdemConflicts (Codex D5.2 round-2, HIGH): a generic /v2/records row already
+// occupying the use's idempotency key (with a different, random record_id the old session-scan-by-useID
+// missed) must make /v2/use a 409 conflict — NOT a 201 that re-consumed the credential in ValidateUse and
+// then silently collapsed the seal onto the foreign row in PutRecord (an action with no persisted receipt).
+// The credential must survive the conflict (the 409 is raised BEFORE ValidateUse).
+func TestUsePreseededGenericIdemConflicts(t *testing.T) {
+	h := newBrokerResourceServer(t)
+	ak := grantAgentKey()
+	grantID, cap := mkGrant(t, h, ak, "idem-grant")
+
+	// pre-seed a generic record under the SAME idempotency key the use will use (random record_id).
+	if c, r := do(t, h, "POST", "/v2/records", `{"idempotency_key":"shared-key","project_id":"p1","session_id":"s1","event_type":"decision","status":"ok","action":"squat"}`); c != http.StatusCreated {
+		t.Fatalf("preseed generic record: %d %s", c, r)
+	}
+	code, resp := do(t, h, "POST", "/v2/use", useBody(t, "shared-key", cap, grantID, ak, "SELECT 1", "nonce-1"))
+	if code != http.StatusConflict {
+		t.Fatalf("a use whose idempotency_key is already bound to a generic record must be 409, got %d: %s", code, resp)
+	}
+	// the credential/nonce must be intact: a fresh use (new key, SAME nonce) still validates and seals,
+	// proving ValidateUse never ran during the conflict (no burned nonce, no action-without-receipt).
+	code, resp = do(t, h, "POST", "/v2/use", useBody(t, "clean-key", cap, grantID, ak, "SELECT 1", "nonce-1"))
+	if code != http.StatusCreated {
+		t.Fatalf("the credential must survive the conflict — a clean retry should seal a receipt, got %d: %s", code, resp)
+	}
+}
+
+// TestUsePhasesDoNotShareIdemKey (Codex D5.2 round-2, MEDIUM): /v2/use and /v2/use-intent derive the same
+// deterministic record_id from (project, idempotency_key), so reusing one key across the two phases must
+// 409 — NOT silently return the use_intent as if it satisfied a one-phase /v2/use (skipping validation).
+func TestUsePhasesDoNotShareIdemKey(t *testing.T) {
+	h := newBrokerResourceServer(t)
+	ak := grantAgentKey()
+	grantID, cap := mkGrant(t, h, ak, "idem-grant")
+	// phase-1 intent under "shared-key" consumes the credential and records kind=use_intent.
+	if c, r := do(t, h, "POST", "/v2/use-intent", useBody(t, "shared-key", cap, grantID, ak, "SELECT 1", "nonce-1")); c != http.StatusCreated {
+		t.Fatalf("use-intent failed (%d): %s", c, r)
+	}
+	// a /v2/use reusing that key produces the same useID but kind=use; the kind mismatch must 409, not
+	// return the use_intent record short-circuiting PoP validation.
+	code, resp := do(t, h, "POST", "/v2/use", useBody(t, "shared-key", cap, grantID, ak, "SELECT 1", "nonce-2"))
+	if code != http.StatusConflict {
+		t.Fatalf("reusing a use_intent's idempotency_key for /v2/use must be 409 (kind mismatch), got %d: %s", code, resp)
+	}
+}
+
+// TestUseOutcomePreseededGenericIdemConflicts (Codex D5.2 round-2): the same guard covers /v2/use-outcome —
+// a generic row squatting the outcome's idempotency key must 409, not collapse the outcome onto it.
+func TestUseOutcomePreseededGenericIdemConflicts(t *testing.T) {
+	h := newBrokerResourceServer(t)
+	ak := grantAgentKey()
+	grantID, cap := mkGrant(t, h, ak, "idem-grant")
+	code, resp := do(t, h, "POST", "/v2/use-intent", useBody(t, "idem-intent", cap, grantID, ak, "SELECT 1", "nonce-1"))
+	if code != http.StatusCreated {
+		t.Fatalf("use-intent failed (%d): %s", code, resp)
+	}
+	var intent struct {
+		UseID string `json:"use_id"`
+	}
+	json.Unmarshal([]byte(resp), &intent)
+	// squat the outcome's idempotency key with a generic record.
+	if c, r := do(t, h, "POST", "/v2/records", `{"idempotency_key":"out-key","project_id":"p1","session_id":"s1","event_type":"decision","status":"ok","action":"squat"}`); c != http.StatusCreated {
+		t.Fatalf("preseed generic record: %d %s", c, r)
+	}
+	ob, _ := json.Marshal(map[string]any{"idempotency_key": "out-key", "project_id": "p1", "session_id": "s1", "intent_record_id": intent.UseID, "status": "ok"})
+	if c, r := do(t, h, "POST", "/v2/use-outcome", string(ob)); c != http.StatusConflict {
+		t.Fatalf("a use-outcome whose idempotency_key is already bound to a generic record must be 409, got %d: %s", c, r)
+	}
+}
+
 func TestUseRejectsForgedPoP(t *testing.T) {
 	h := newBrokerResourceServer(t)
 	ak, thief := grantAgentKey(), ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))

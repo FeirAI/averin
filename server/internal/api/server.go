@@ -1009,20 +1009,29 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 	}
 	shim := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, s.ledger)
 
-	// The idempotency check, the capability validation+consume, and the seal run as ONE critical
-	// section. Critically, validation (which consumes the credential, a side effect) MUST be skipped on
-	// a retry whose receipt already exists — re-running ValidateUse would re-consume the now-spent
-	// nonce/jti and spuriously 400 an honest lost-response retry. Doing the existence check inside the
-	// lock also makes concurrent retries safe: the second sees the stored receipt, not a consumed
-	// credential. validateErr (caller's 400) is distinguished from a store/build error (500).
+	// The idempotency resolution, the capability validation+consume, and the seal run as ONE critical
+	// section. Idempotency is keyed on `idem` — the SAME key sealAndStore→PutRecord dedupes on — resolved
+	// up front via RecordByIdem, NOT by scanning the session for useID. The by-id scan was unsafe: a prior
+	// /v2/records row OR the OTHER use phase can already occupy this idem key with a different record_id or
+	// kind that the scan misses; ValidateUse would then burn the nonce/jti and PutRecord would silently
+	// COLLAPSE the seal onto that prior row (created=false) → an action with no persisted receipt (and a
+	// foreign record echoed back). So: an EXACT (record_id, session_id, kind) match under this key is an
+	// honest retry (return it, skipping the credential-consuming ValidateUse — concurrent retries also see
+	// it under the lock); ANY other record under this key is a conflict → 409 BEFORE consuming anything.
+	// validateErr (caller's 400) and conflictErr (caller's 409) are distinguished from a store error (500).
 	var sealed, grantID string
 	var idempotent bool
-	var validateErr error
+	var validateErr, conflictErr error
 	storeErr := func() error {
 		s.ingestMu.Lock()
 		defer s.ingestMu.Unlock()
-		if existing, gid, ok := s.existingReceipt(ur.ProjectID, ur.SessionID, useID); ok {
-			sealed, grantID, idempotent = existing, gid, true
+		if prior, found, le := s.st.RecordByIdem(ur.ProjectID, idem); le == nil && found {
+			rid, sess, kind, gid := useReceiptIdentity(prior.JSON)
+			if rid == useID && sess == ur.SessionID && kind == brokerKind {
+				sealed, grantID, idempotent = prior.JSON, gid, true
+				return nil
+			}
+			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
 			return nil
 		}
 		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, resourceshim.Op{Action: ur.Action, ParamsCommitment: paramsCommitment}, ur.Nonce, s.now())
@@ -1038,6 +1047,10 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		sealed, _, e = s.sealAndStore(ur.ProjectID, ur.SessionID, idem, rec, disclosures)
 		return e
 	}()
+	if conflictErr != nil {
+		writeErr(w, http.StatusConflict, "use rejected: "+conflictErr.Error())
+		return
+	}
 	if validateErr != nil {
 		writeErr(w, http.StatusBadRequest, "use rejected: "+validateErr.Error())
 		return
@@ -1054,9 +1067,33 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 	})
 }
 
-// existingReceipt returns the sealed record (and its authority.grant_id) for a use already recorded
-// under useID in the session, so an idempotent retry returns the original instead of re-running
-// ValidateUse (which would re-consume the now-spent credential). Caller holds ingestMu.
+// useReceiptIdentity extracts the identity tuple of a stored broker/resource record — its record_id,
+// session_id, broker `kind` (use|use_intent|use_outcome) and authority.grant_id. It decides whether a
+// record found under an idempotency key is an EXACT idempotent retry of the current request (matching
+// record_id + session_id + kind) or a CONFLICTING reuse of that key. A generic /v2/records row carries no
+// extensions.broker.kind, so it returns kind == "" and can never match a use phase (kind is non-empty).
+func useReceiptIdentity(recJSON string) (recordID, sessionID, kind, grantID string) {
+	var probe struct {
+		RecordID  string `json:"record_id"`
+		SessionID string `json:"session_id"`
+		Authority struct {
+			GrantID string `json:"grant_id"`
+		} `json:"authority"`
+		Extensions struct {
+			Broker struct {
+				Kind string `json:"kind"`
+			} `json:"broker"`
+		} `json:"extensions"`
+	}
+	_ = json.Unmarshal([]byte(recJSON), &probe)
+	return probe.RecordID, probe.SessionID, probe.Extensions.Broker.Kind, probe.Authority.GrantID
+}
+
+// existingReceipt returns the sealed record (and its authority.grant_id) for a broker/resource record
+// whose record_id matches `useID` in the session — used by /v2/use-outcome to RESOLVE the use_intent it
+// completes (a lookup by referenced record_id, NOT an idempotency-key retry: retries are keyed on `idem`
+// via RecordByIdem). A generic record can never set extensions.broker (reserved), so a pre-seeded generic
+// row with a matching record_id is NOT resolvable as an intent. Caller holds ingestMu.
 func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, string, bool) {
 	recs, err := s.st.SessionRecords(projectID, sessionID)
 	if err != nil {
@@ -1218,12 +1255,20 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 
 	var sealed string
 	var idempotent bool
-	var clientErr error
+	var clientErr, conflictErr error
 	storeErr := func() error {
 		s.ingestMu.Lock()
 		defer s.ingestMu.Unlock()
-		if existing, _, ok := s.existingReceipt(or.ProjectID, or.SessionID, outcomeID); ok {
-			sealed, idempotent = existing, true
+		// Outcome idempotency is keyed on `idem` (the PutRecord dedupe key), resolved up front: an exact
+		// (record_id, session_id, kind) match is an honest retry; any other record under this key is a
+		// conflict → 409 (else PutRecord would later collapse the outcome onto a foreign row and echo it).
+		if prior, found, le := s.st.RecordByIdem(or.ProjectID, idem); le == nil && found {
+			rid, sess, kind, _ := useReceiptIdentity(prior.JSON)
+			if rid == outcomeID && sess == or.SessionID && kind == "use_outcome" {
+				sealed, idempotent = prior.JSON, true
+				return nil
+			}
+			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
 			return nil
 		}
 		// resolve the intent this outcome completes: it must be a use_intent recorded in this session, and
@@ -1258,6 +1303,10 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		sealed, _, err = s.sealAndStore(or.ProjectID, or.SessionID, idem, rec, nil)
 		return err
 	}()
+	if conflictErr != nil {
+		writeErr(w, http.StatusConflict, "use-outcome rejected: "+conflictErr.Error())
+		return
+	}
 	if clientErr != nil {
 		writeErr(w, http.StatusBadRequest, "use-outcome rejected: "+clientErr.Error())
 		return
