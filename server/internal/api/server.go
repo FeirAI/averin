@@ -1005,17 +1005,29 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 		log.Printf("WARNING: B11 grant-denial record %s failed to seal (denial NOT recorded): %v", denialID, e)
 		return
 	}
-	// Defense-in-depth: a created=false collapse must be a true retry of THIS denial (same record_id). Generic
-	// ingest reserves the "denial:" idem prefix so no foreign row can squat the key — but verify, so any future
-	// reservation gap surfaces as a loud tripwire (a denial silently dropped onto a foreign record) rather than
-	// invisible B11 suppression.
-	if !created {
-		var probe struct {
-			RecordID string `json:"record_id"`
-		}
-		if json.Unmarshal([]byte(stored), &probe) == nil && probe.RecordID != denialID {
-			log.Printf("WARNING: B11 grant-denial %s collapsed onto a foreign record %q — denial NOT recorded", denialID, probe.RecordID)
-		}
+	if created {
+		return // newly recorded
+	}
+	// created=false: PutRecord collapsed onto an existing row under the denial key. The "denial:" namespace is
+	// reserved at every CURRENT caller entry point, but a row PRE-DATING this hardening (a rolling deploy, or a
+	// caller that used the prefix before it was reserved) could still occupy the key. Treat the collapse as a
+	// true retry ONLY if the stored row IS this denial; on ANY foreign collision the denial was not recorded,
+	// so RE-SEAL it under a fresh, collision-proof recovery key (itself in the reserved "denial:" namespace, so
+	// it cannot be pre-seeded) — a denial must NEVER be silently suppressed by whatever sits under its key.
+	// The recovery key is non-deterministic, so repeated probes against a squatted key OVER-record rather than
+	// dedup (bounded by the per-project denial budget, a documented follow-up); over-recording is strictly
+	// preferable to suppression, and the squat only arises in a narrow pre-hardening rolling-deploy window.
+	var existing struct {
+		RecordID  string `json:"record_id"`
+		EventType string `json:"event_type"`
+	}
+	_ = json.Unmarshal([]byte(stored), &existing)
+	if existing.RecordID == denialID && existing.EventType == "credential_grant_denied" {
+		return // genuine idempotent retry of this exact denial
+	}
+	log.Printf("WARNING: B11 grant-denial %s collided with a foreign record %q under the reserved key — re-sealing under a recovery key", denialID, existing.RecordID)
+	if _, rc, re := s.sealAndStore(gr.ProjectID, gr.SessionID, denialIdemPrefix+"recovery-"+newUUID(), rec, nil); re != nil || !rc {
+		log.Printf("WARNING: B11 grant-denial %s recovery seal failed (denial NOT recorded): %v", denialID, re)
 	}
 }
 

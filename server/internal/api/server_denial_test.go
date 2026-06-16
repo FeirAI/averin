@@ -259,6 +259,47 @@ func TestBrokerEndpointsRejectReservedDenialIdem(t *testing.T) {
 	}
 }
 
+// squatStore simulates a row PRE-DATING the "denial:" namespace reservation: it injects a foreign record
+// under the first "denial:"-prefixed PutRecord and returns it as the collapse (created=false), the way an
+// upgrade/rolling deploy could leave a caller-seeded row occupying a denial's computed key.
+type squatStore struct {
+	store.Store
+	squatted bool
+}
+
+func (s *squatStore) PutRecord(projectID, idemKey string, rec store.Record) (store.Record, bool, error) {
+	if !s.squatted && strings.HasPrefix(idemKey, "denial:") {
+		s.squatted = true
+		foreign := store.Record{JSON: `{"record_id":"foreign-squat","event_type":"decision"}`, ContentHash: "sha256:" + strings.Repeat("f", 64), SessionID: rec.SessionID}
+		_, _, _ = s.Store.PutRecord(projectID, idemKey, foreign)
+		return foreign, false, nil
+	}
+	return s.Store.PutRecord(projectID, idemKey, rec)
+}
+
+// TestDenialRecoversFromPreSeededReservedKey (Codex C2d): if a FOREIGN row already occupies a denial's
+// reserved "denial:" key (a row pre-dating the hardening, which the entry-point guards can't retract), the
+// denial must be RECOVERED under a fresh collision-proof key — never silently suppressed by the collapse.
+func TestDenialRecoversFromPreSeededReservedKey(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	ss := &squatStore{Store: store.NewMem()}
+	h := api.New(c, ss, "k0").WithBroker(brokerIssuingKey()).WithDeniedGrantLog().Routes()
+	ak := grantAgentKey()
+	if code, r := do(t, h, "POST", "/v2/grants", grantBody("idem-deny", "iam:reset", ak, ak)); code != http.StatusBadRequest {
+		t.Fatalf("forbidden scope should be 400, got %d: %s", code, r)
+	}
+	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, r)
+	}
+	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
+	if !strings.Contains(report, `"denied_grants":1`) {
+		t.Fatalf("a denial whose reserved key was pre-seeded with a foreign row must be RECOVERED, not suppressed (denied_grants:1): %s", report)
+	}
+}
+
 // TestDeniedGrantLogOffByDefault: without WithDeniedGrantLog the forbidden scope is still rejected but NO
 // denial is sealed (opt-in — avoids a probe-driven storage/billing DoS by default).
 func TestDeniedGrantLogOffByDefault(t *testing.T) {
