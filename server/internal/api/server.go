@@ -481,6 +481,14 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	if idem == "" {
 		return "", false, fmt.Errorf("idempotency_key is required (field or Idempotency-Key header)")
 	}
+	// The "denial:" idempotency-key namespace is RESERVED for the broker's denied-grant log (sealGrantDenial
+	// stores under "denial:"+denialID). A generic caller must not squat it: pre-seeding a benign record under
+	// a denial's deterministic key would make the later denied grant's PutRecord collapse onto it and SILENTLY
+	// suppress the B11 evidence (the denial seal is best-effort). The broker path calls sealAndStore directly,
+	// bypassing this guard, so legitimate denials are unaffected.
+	if strings.HasPrefix(idem, "denial:") {
+		return "", false, fmt.Errorf("idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+	}
 	delete(rec, "idempotency_key") // not part of the signed record
 
 	projectID := stringField(rec, "project_id")
@@ -983,8 +991,22 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	}
 	s.ingestMu.Lock()
 	defer s.ingestMu.Unlock()
-	if _, _, e := s.sealAndStore(gr.ProjectID, gr.SessionID, "denial:"+denialID, rec, nil); e != nil {
+	stored, created, e := s.sealAndStore(gr.ProjectID, gr.SessionID, "denial:"+denialID, rec, nil)
+	if e != nil {
 		log.Printf("WARNING: B11 grant-denial record %s failed to seal (denial NOT recorded): %v", denialID, e)
+		return
+	}
+	// Defense-in-depth: a created=false collapse must be a true retry of THIS denial (same record_id). Generic
+	// ingest reserves the "denial:" idem prefix so no foreign row can squat the key — but verify, so any future
+	// reservation gap surfaces as a loud tripwire (a denial silently dropped onto a foreign record) rather than
+	// invisible B11 suppression.
+	if !created {
+		var probe struct {
+			RecordID string `json:"record_id"`
+		}
+		if json.Unmarshal([]byte(stored), &probe) == nil && probe.RecordID != denialID {
+			log.Printf("WARNING: B11 grant-denial %s collapsed onto a foreign record %q — denial NOT recorded", denialID, probe.RecordID)
+		}
 	}
 }
 

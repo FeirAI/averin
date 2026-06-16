@@ -129,6 +129,10 @@ func TestGenericIngestCannotForgeDenialEvidence(t *testing.T) {
 		`{"idempotency_key":"i1","project_id":"p1","session_id":"s1","event_type":"credential_grant_denied","status":"denied","action":"x"}`,
 		`{"idempotency_key":"i2","project_id":"p1","session_id":"s1","event_type":"decision","status":"ok","action":"x","extensions":{"broker_denial":{"kind":"grant_denied"}}}`,
 		`{"idempotency_key":"i3","project_id":"p1","session_id":"s1","event_type":"decision","status":"ok","action":"x","record_id":"denial-spoof"}`,
+		// squat the broker's "denial:"-prefixed idempotency-key namespace: pre-seeding a benign record under a
+		// denial's deterministic key would make the later denied grant's PutRecord collapse onto it and silently
+		// suppress the B11 evidence (Codex C2b). The prefix is reserved at ingest.
+		`{"idempotency_key":"denial:spoof","project_id":"p1","session_id":"s1","event_type":"decision","status":"ok","action":"x"}`,
 	}
 	for i, body := range cases {
 		if code, r := do(t, h, "POST", "/v2/records", body); code != http.StatusBadRequest {
