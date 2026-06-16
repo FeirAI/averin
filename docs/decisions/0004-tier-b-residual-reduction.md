@@ -204,11 +204,19 @@ CLOSED `use_outcome` to its `intent_ref` AND `grant_id` read from the **signed `
 resource) could redirect a resource-signed outcome to a different intent. A closed outcome that is not
 fully validatable (integrity / resource authority / re-derivable payload) is itself a Tier-B violation
 (parity with a one-phase use — no laundering). The use loop runs the SAME full predicate (D2 PoP / D3 replay / D4 action) on a `use_intent` as
-on a one-phase `use`; at match-success a `use_intent` counts toward `uses_matched` ONLY if a valid outcome
-references it, else it is an `intent_without_outcome` anomaly (surfaced, NOT a violation, does not consume
-a single-use grant). A one-phase `use` (ADR 0003) is still accepted/counted for back-compat (it cannot
-reach the D8 capstone — MF3). Tests: complete pair → matched; intent-without-outcome → anomaly; one-phase →
-matched; mismatched `intent_ref` → not completed; forged (non-resource-signed) outcome → not completed.
+on a one-phase `use`; a `use_intent` completes (counts toward `uses_matched`) ONLY if a valid outcome (a)
+references it, (b) attests the SAME grant, AND (c) **causally FOLLOWS** it (the outcome's
+`causal_prev_hashes` include the intent's content_hash — the before-act guarantee; an unordered/backfilled
+pair does not complete). The matching outcome is consumed by **record_id** (so duplicate same-`intent_ref`
+outcomes account independently; indexed by `(intent_ref, grant_id)` to avoid an O(intents·outcomes) scan),
+and consumption happens only AFTER every acceptance check (incl. PoP) passes (a later-rejected intent must
+not mask its outcome). Else the intent is an `intent_without_outcome` anomaly (surfaced, NOT a violation,
+does not consume a single-use grant); every un-consumed validated outcome is an orphan **violation**
+(a completion with no recorded pre-action intent). A one-phase `use` (ADR 0003) is still accepted/counted
+for back-compat (it cannot reach the D8 capstone — MF3). Tests (10): complete pair → matched;
+intent-without-outcome → anomaly; one-phase → matched; mismatched/phantom/unsigned-sibling `intent_ref`,
+wrong-grant, wrong-signed-kind, not-causally-after, and failed-PoP → not completed; orphan + forged +
+duplicate-same-intent outcomes → violation; all order-independent.
 **Deferred (D5.2):** the Go resource-gateway two-phase producer mode (emit `use_intent` before the side
 effect, `use_outcome` after); until then bundles carry one-phase uses and `intent_without_outcome` is 0.
 

@@ -3191,6 +3191,51 @@ fn tier_b_two_phase_duplicate_outcomes_account_separately() {
 }
 
 #[test]
+fn tier_b_two_phase_outcome_not_after_intent_does_not_complete() {
+    // Codex round-4: the outcome must causally FOLLOW the intent (the before-act guarantee). Here the outcome
+    // links to the GRANT, not the intent, so there is no causal edge intent->outcome (an unordered/backfilled
+    // pair). It must NOT complete the intent; the outcome is an orphan.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let intent = seal_intent(&rec, &res, "intent-1", std::slice::from_ref(&gh), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let ih = content_hash_of(&intent);
+    let outcome = seal_outcome(&rec, &res, "outcome-1", std::slice::from_ref(&gh), "intent-1", "intent-1", GID); // prev = grant, NOT intent
+    let oh = content_hash_of(&outcome);
+    let mut frontier = vec![ih, oh]; // intent + outcome are separate DAG heads
+    frontier.sort();
+    let cp = checkpoint_over(&rec, &frontier, 3, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, intent, outcome], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 1), "an outcome not causally after the intent must not complete: {:?}", r.issues);
+    assert!(!r.ok && r.issues.iter().any(|i| i.contains("completion without a recorded intent")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_two_phase_failed_pop_intent_does_not_consume_outcome() {
+    // Codex round-4: an intent that PICKS its outcome but then FAILS pop_reverify must NOT consume the
+    // outcome (consume only AFTER all acceptance checks) — else a failed-PoP intent would mask a validated
+    // outcome from orphan accounting. The carried cnf_pub's kid != the use_evidence.cnf_kid -> PoP fails.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ue = change_field(
+        &change_field(&use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED), "cnf_pub", CanonValue::string(b64enc(cnf.verifying_key().as_bytes()))),
+        "use_sig", CanonValue::string(b64enc(&[7u8; 64])),
+    );
+    let intent = seal_intent(&rec, &res, "intent-1", std::slice::from_ref(&gh), ACTION, &ue);
+    let ih = content_hash_of(&intent);
+    let outcome = seal_outcome(&rec, &res, "outcome-1", std::slice::from_ref(&ih), "intent-1", "intent-1", GID);
+    let oh = content_hash_of(&outcome);
+    let cp = checkpoint_over(&rec, std::slice::from_ref(&oh), 3, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, intent, outcome], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok && r.uses_matched == 0, "a failed-PoP intent is a violation: {:?}", r.issues);
+    assert!(r.issues.iter().any(|i| i.contains("PoP re-verification")) && r.issues.iter().any(|i| i.contains("completion without a recorded intent")), "the failed-PoP intent's outcome must be flagged orphan, not masked: {:?}", r.issues);
+}
+
+#[test]
 fn tier_b_two_phase_forged_outcome_does_not_complete() {
     // an outcome whose evidence is signed by a NON-resource key (forged) is not authority-verified, so it
     // cannot complete the intent -> intent_without_outcome (fail-closed). uses_matched stays 0.

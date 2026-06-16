@@ -2173,10 +2173,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // here is the UNSIGNED sibling, outside the resource signature — without this a relabeled signed payload
     // could complete an intent). Every validated outcome MUST be consumed by a matching intent; an
     // un-consumed (orphan) outcome is a completion with NO recorded pre-action intent — flagged below. Each
-    // validated outcome is tracked as a DISTINCT record (intent_ref, grant_id, outcome record_id) — NOT a
+    // validated outcome is tracked as a DISTINCT record (intent_ref, grant_id, record_id, index) — NOT a
     // map keyed by intent_ref, which would let a second outcome for the same intent_ref overwrite the first
     // (hiding an extra unauthorized outcome, or dropping the legitimate one — order-dependent).
-    let mut outcomes: Vec<(String, String, String)> = Vec::new();
+    let mut outcomes: Vec<(String, String, String, usize)> = Vec::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str() || broker_kind(rec).as_deref() != Some("use_outcome") {
@@ -2199,13 +2199,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_str(rec, "use_outcome", "grant_id"),
         ) {
             (Some(k), Some(iref), Some(ogid)) if k == "use_outcome" => {
-                outcomes.push((iref, ogid, rt.record_id.clone()));
+                outcomes.push((iref, ogid, rt.record_id.clone(), rt.index));
             }
             _ => {
                 unmatched_violation += 1;
                 issues.push(format!("use_outcome {} ({}): signed payload missing kind=use_outcome / intent_ref / grant_id — violation", rt.index, rt.record_id));
             }
         }
+    }
+    // index outcomes by (intent_ref, grant_id) -> positions, so each intent pops at most one candidate
+    // instead of scanning every outcome (O(intents·outcomes) — a verifier DoS on adversarial bundles).
+    let mut outcomes_by: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    for (i, (iref, ogid, _, _)) in outcomes.iter().enumerate() {
+        outcomes_by.entry((iref.clone(), ogid.clone())).or_default().push(i);
     }
     let mut consumed_outcomes: BTreeSet<String> = BTreeSet::new();
     for rt in &record_trust {
@@ -2356,22 +2362,28 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // that passed every predicate above but has no such outcome is an `intent_without_outcome` anomaly —
         // recorded-but-incomplete (the crash-after-act case). Surface it and stop BEFORE it counts as matched
         // / PoP-reverified or consumes a single-use grant.
+        // D5 (ADR 0004 F4): pick a SPECIFIC un-consumed validated outcome that references THIS intent's
+        // record_id, attests THIS grant, AND causally FOLLOWS the intent (its `causal_prev_hashes` include
+        // the intent's content_hash — proving the intent was recorded BEFORE the outcome, i.e. before the
+        // side effect: an unordered/backfilled pair with no causal edge does NOT complete). The pick is held
+        // and only CONSUMED after every acceptance check (incl. PoP) passes — a later-rejected intent must
+        // not consume (and thereby mask from orphan accounting) its outcome.
+        let mut pending_consume: Option<usize> = None;
         if bkind == "use_intent" {
-            // consume a SPECIFIC un-consumed validated outcome that references THIS intent's record_id AND
-            // attests THIS grant — by outcome record_id, so two outcomes for the same intent_ref each account
-            // separately (one pairs, any extra is flagged as an orphan below).
-            let pick = outcomes
-                .iter()
-                .find(|(iref, ogid, orec)| iref == &rt.record_id && *ogid == gid && !consumed_outcomes.contains(orec))
-                .map(|(_, _, orec)| orec.clone());
-            match pick {
-                Some(orec) => {
-                    consumed_outcomes.insert(orec);
-                }
-                None => {
-                    intent_without_outcome += 1;
-                    continue;
-                }
+            let key = (rt.record_id.clone(), gid.clone());
+            pending_consume = outcomes_by.get(&key).and_then(|idxs| {
+                idxs.iter().copied().find(|&i| {
+                    let (_, _, orec, oidx) = &outcomes[i];
+                    !consumed_outcomes.contains(orec)
+                        && records[*oidx]
+                            .get("causal_prev_hashes")
+                            .and_then(|v| v.as_array())
+                            .is_some_and(|p| p.iter().any(|h| h.as_str() == Some(rt.content_hash.as_str())))
+                })
+            });
+            if pending_consume.is_none() {
+                intent_without_outcome += 1;
+                continue;
             }
         }
         // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
@@ -2386,6 +2398,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 violation(&mut issues, format!("offline PoP re-verification: {msg}"));
                 continue;
             }
+        }
+        if let Some(i) = pending_consume {
+            consumed_outcomes.insert(outcomes[i].2.clone()); // accepted intent → consume its outcome now
         }
         g.used += 1;
         uses_matched += 1;
@@ -2416,7 +2431,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // D5: a validated `use_outcome` that NO closed matching `use_intent` consumed is an ORPHAN — a recorded
     // completion with no anchored pre-action intent (the resource skipped the before-act recording that two-
     // phase exists to require). Flag it; otherwise an outcome-only bundle would read clean (false-clean).
-    for (iref, ogid, orec) in &outcomes {
+    for (iref, ogid, orec, _) in &outcomes {
         if !consumed_outcomes.contains(orec) {
             unmatched_violation += 1;
             issues.push(format!("use_outcome {orec}: references intent '{iref}' (grant {ogid}) but no closed matching use_intent consumed it — completion without a recorded intent (D5)"));
