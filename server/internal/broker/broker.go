@@ -181,8 +181,6 @@ func (r Request) Validate() error {
 		return errors.New("scope is required")
 	case r.TTL <= 0:
 		return errors.New("ttl must be positive")
-	case r.TTL > MaxTTL:
-		return fmt.Errorf("ttl %s exceeds the maximum %s (credentials must be short-lived): %w", r.TTL, MaxTTL, ErrTTLExceeded)
 	}
 	// cnf: a sender-constrained credential needs the agent's ed25519 public key (32 bytes).
 	pub, err := base64.RawURLEncoding.DecodeString(r.AgentPubKey)
@@ -197,6 +195,13 @@ func (r Request) Validate() error {
 	}
 	if !ed25519.Verify(ed25519.PublicKey(pub), r.Challenge(), sig) {
 		return ErrPoPFailed
+	}
+	// The TTL CAP is a POLICY check applied only AFTER structural validation + PoP succeed (Codex): the
+	// broker seals a B11 ttl_exceeded denial on this error, so it must never fire for a malformed/unsigned
+	// request — else an unauthenticated caller could inject durable denied-grant evidence with arbitrary
+	// metadata. (The positive-TTL check above is a shape error, never logged.)
+	if r.TTL > MaxTTL {
+		return fmt.Errorf("ttl %s exceeds the maximum %s (credentials must be short-lived): %w", r.TTL, MaxTTL, ErrTTLExceeded)
 	}
 	return nil
 }

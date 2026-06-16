@@ -1004,12 +1004,11 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 		"action": req.Action, "resource_id": req.Resource, "scope": req.Scope,
 		"scope_class": string(req.ScopeClass), "agent_id": req.AgentID,
 	}
-	// cnf_kid is recorded as PROVEN possession ONLY for a forbidden_scope denial — the only reason where
-	// req.Validate() (including the PoP check) fully PASSED before ClassifyScope rejected. A ttl_exceeded
-	// denial returns from Validate() at the TTL switch case BEFORE the PoP check, and a pop_failed denial
-	// failed PoP outright; for BOTH the agent key is UNPROVEN, so record only the CLAIMED pubkey — never a
-	// verified cnf (else an attacker could bind a victim's pubkey into the evidence as a "proven" key).
-	if reason == "forbidden_scope" {
+	// cnf_kid is recorded as PROVEN possession for forbidden_scope AND ttl_exceeded — both reach a denial only
+	// AFTER req.Validate()'s PoP check passes (the TTL cap is now a post-PoP policy check; Codex). Only a
+	// pop_failed denial reaches here with an UNPROVEN key, so it records the CLAIMED pubkey — never a verified
+	// cnf (else an attacker could bind a victim's pubkey into the evidence as a "proven" key).
+	if reason == "forbidden_scope" || reason == "ttl_exceeded" {
 		if kid := agentCnfKid(req.AgentPubKey); kid != "" {
 			requested["cnf_kid"] = kid
 		}

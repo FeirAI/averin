@@ -93,10 +93,11 @@ func TestPoPFailureSealsDenialButMalformedDoesNot(t *testing.T) {
 	}
 }
 
-// TestTTLExceededDenialRecordsClaimedKeyNotProvenCnf (B11): an over-cap TTL is refused by Validate() BEFORE
-// the proof-of-possession check, so the agent key is UNPROVEN — the denial must record only the CLAIMED
-// pubkey, never a verified cnf_kid (else a forged-sig over-cap request could bind a victim's key as "proven").
-func TestTTLExceededDenialRecordsClaimedKeyNotProvenCnf(t *testing.T) {
+// TestTTLExceededDenialRecordsProvenCnf (B11, Codex convergence): the TTL cap is now a POLICY check applied
+// only AFTER proof-of-possession, so a ttl_exceeded denial GUARANTEES PoP passed (a forged sig now fails as
+// pop_failed, never ttl_exceeded). The denial therefore records the PROVEN cnf_kid — like forbidden_scope —
+// not the claimed pubkey.
+func TestTTLExceededDenialRecordsProvenCnf(t *testing.T) {
 	h := denyLogServer(t)
 	ak := grantAgentKey()
 	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
@@ -114,8 +115,8 @@ func TestTTLExceededDenialRecordsClaimedKeyNotProvenCnf(t *testing.T) {
 	if !strings.Contains(exp, `"denial_reason":"ttl_exceeded"`) {
 		t.Fatalf("a ttl-over-cap denial should be sealed: %s", exp)
 	}
-	if !strings.Contains(exp, "claimed_agent_pubkey") || strings.Contains(exp, `"cnf_kid"`) {
-		t.Fatalf("a ttl_exceeded denial must record only the CLAIMED pubkey (PoP unproven before the TTL check): %s", exp)
+	if !strings.Contains(exp, `"cnf_kid"`) || strings.Contains(exp, "claimed_agent_pubkey") {
+		t.Fatalf("a ttl_exceeded denial must record the PROVEN cnf_kid (PoP passes before the TTL check now): %s", exp)
 	}
 }
 
@@ -221,8 +222,8 @@ func customGrant(t *testing.T, h http.Handler, ak ed25519.PrivateKey, idem, sess
 func TestDenialIdIncludesSessionAndTTL(t *testing.T) {
 	h := denyLogServer(t)
 	ak := grantAgentKey()
-	customGrant(t, h, ak, "idem-x", "s1", "iam:reset", 60)     // forbidden_scope, session s1
-	customGrant(t, h, ak, "idem-x", "s2", "iam:reset", 60)     // forbidden_scope, session s2 (was collapsed)
+	customGrant(t, h, ak, "idem-x", "s1", "iam:reset", 60)      // forbidden_scope, session s1
+	customGrant(t, h, ak, "idem-x", "s2", "iam:reset", 60)      // forbidden_scope, session s2 (was collapsed)
 	customGrant(t, h, ak, "idem-y", "s3", "read:orders", 99999) // ttl_exceeded, ttl 99999
 	customGrant(t, h, ak, "idem-y", "s3", "read:orders", 88888) // ttl_exceeded, ttl 88888 (was collapsed)
 	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
@@ -231,6 +232,31 @@ func TestDenialIdIncludesSessionAndTTL(t *testing.T) {
 	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
 	if !strings.Contains(report, `"denied_grants":4`) {
 		t.Fatalf("varying session_id and ttl_seconds must each produce a distinct denial (want 4): %s", report)
+	}
+}
+
+// TestMalformedOverTTLGrantDoesNotLogDenial (Codex convergence): the TTL cap is a POLICY check applied only
+// AFTER structural validation + PoP, so a malformed/unsigned request with an over-cap TTL is plain malformed
+// input — it must NOT seal a ttl_exceeded denial (else an unauthenticated caller could inject durable B11
+// evidence with arbitrary metadata). A VALID-PoP over-cap-TTL request still seals one (the fix is surgical).
+func TestMalformedOverTTLGrantDoesNotLogDenial(t *testing.T) {
+	h := denyLogServer(t)
+	body, _ := json.Marshal(map[string]any{
+		"idempotency_key": "idem-mal", "project_id": "p1", "session_id": "s1",
+		"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",
+		"scope": "read:orders", "agent_pubkey": "AAAA", "agent_sig": "AAAA", "ttl_seconds": 99999,
+	})
+	if code, r := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusBadRequest {
+		t.Fatalf("a malformed over-cap-TTL grant should be 400, got %d: %s", code, r)
+	}
+	if _, exp := do(t, h, "GET", "/v2/export?project=p1", ""); strings.Contains(exp, "credential_grant_denied") {
+		t.Fatalf("a malformed (non-PoP-verified) over-cap-TTL request must NOT seal a denial: %s", exp)
+	}
+	// control: a VALID-PoP over-cap-TTL request DOES still seal a ttl_exceeded denial.
+	customGrant(t, h, grantAgentKey(), "idem-valid-ttl", "s1", "read:orders", 99999)
+	_, exp2 := do(t, h, "GET", "/v2/export?project=p1", "")
+	if !strings.Contains(exp2, "credential_grant_denied") || !strings.Contains(exp2, "ttl_exceeded") {
+		t.Fatalf("a valid-PoP over-cap-TTL request must still seal a ttl_exceeded denial: %s", exp2)
 	}
 }
 

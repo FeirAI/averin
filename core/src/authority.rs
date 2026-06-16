@@ -11,6 +11,14 @@ use crate::canon::CanonValue;
 use crate::hashx::{lp_str_into, parse_sha256};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
+// `v2` binds `project_id` into the preimage (tenant isolation; T7/Codex). It is a HARD cutover from `v1`:
+// the verifier accepts ONLY v2, so a v1 signature (no project_id) does not verify. This is safe as a
+// PRE-DEPLOYMENT break — feir has shipped no v1-signed records (the golden vectors carry no authority sig),
+// so there is nothing to migrate and adding a v1-accept fallback would only reintroduce a (downgraded)
+// cross-project replay surface for zero benefit. FORWARD-COMPAT POLICY (for any change AFTER deployment):
+// because authority evidence is append-only and cannot be re-signed in place, a future preimage change must
+// NOT hard-cutover — it must verify the newest version first and fall back to older versions under an
+// explicitly downgraded/legacy status, never silently dropping historical authority verification.
 pub const AUTHORITY_SIG_TAG: &str = "feir.authority.v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

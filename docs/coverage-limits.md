@@ -59,6 +59,13 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   `policy_engine_signed` / `human_signed` (with `evidence_sig` from the authority system) is
   *verified*. The UI must visibly distinguish "declared by agent" from "verified from policy
   engine." Never present declared authority as verified.
+- **Authority signature is project-bound (v2), with a one-time pre-release cutover.** The authority
+  `evidence_sig` preimage binds `project_id` (`feir.authority.v2`) so a verified triple cannot be replayed
+  across tenants. This is a **hard cutover** from the pre-release `v1` (no `project_id`): the verifier
+  accepts only v2. It is safe because feir has shipped no v1-signed records (nothing to migrate). **Forward
+  policy:** authority evidence is append-only and cannot be re-signed in place, so any preimage change
+  *after deployment* must verify the newest version first and fall back to older versions under an
+  explicitly downgraded/legacy status — never a silent hard cutover that drops historical verification.
 - **RFC 3161 wire format.** The DER/CMS `TimeStampToken` parser + verifier is implemented and
   feature-gated (`rfc3161`); it ships in the native verify CLI (built with the feature in CI) and is
   exercised end to end by the hermetic `test-anchor`/mini-TSA suite. It is **intentionally native-only**:
