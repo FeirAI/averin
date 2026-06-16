@@ -382,10 +382,17 @@ broker log — **conditional on the resource having truthfully labeled what it d
 the resource performed action A rather than B, nor that there were no undeclared side effects: that is
 the irreducible **resource TCB** (D9). To keep the conditional VISIBLE, the report ALWAYS carries
 `resource_trust: assumed_truthful` alongside `attested_complete_over_brokered_surface`, so a reader can
-never mistake the capstone for "everything the agent did." **Build artifact:** the conjunctive gate +
-the mandatory two-phase requirement + `resource_trust` field in `report_to_canon`; golden tests (full
-gate → capstone; each single condition removed → `claimed_over_manifest`; a bundle with even one
-one-phase matched use → `claimed_over_manifest`).
+never mistake the capstone for "everything the agent did." **Build artifact [IMPLEMENTED]:** the
+conjunctive gate in `report_to_canon` emits `action_completeness: attested_complete_over_brokered_surface`
+iff `ok ∧ coverage_manifest present ∧ uses_matched>0 ∧ !one_phase_use_present ∧ intent_without_outcome==0
+∧ taxonomy_status=="validated" ∧ uses_action_unverified==0 ∧ uses_pop_reverified==uses_matched ∧
+broker_trust=="sequence_verified" ∧ attestation_status=="attested_claims" ∧ unmatched_violation==0 ∧
+unmatched_pending==0`; else `claimed_over_manifest` (a manifest is present) or `not_claimed`. A new
+`one_phase_use_present` flag (set when a matched one-phase `use` is counted) enforces MF3, and
+`resource_trust: "assumed_truthful"` is emitted UNCONDITIONALLY (MF1). Tests: full conjunction → capstone;
+EACH of the 11 conjuncts individually removed → `claimed_over_manifest` (every conjunct is load-bearing);
+no manifest → `not_claimed`; a real bundle with a one-phase matched use sets the flag and is blocked
+end-to-end; `resource_trust` always present.
 
 ## D9 — The irreducible residual (stated permanently, not "fixed")
 

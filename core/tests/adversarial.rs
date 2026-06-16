@@ -11,7 +11,7 @@ use feir_decision_core::hashx::sha256_prefixed;
 use feir_decision_core::record::seal;
 use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use feir_decision_core::verify::{
-    verify_bundle, verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions,
+    report_to_json, verify_bundle, verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::path::PathBuf;
@@ -3280,4 +3280,102 @@ fn tier_b_two_phase_forged_outcome_does_not_complete() {
     assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 1), "a forged outcome must not complete an intent: {:?}", r.issues);
     // a closed-but-unauthorized use_outcome is itself a Tier-B violation (not a silently-ignored record).
     assert!(!r.ok && r.issues.iter().any(|i| i.contains("use_outcome") && i.contains("not validatable")), "issues: {:?}", r.issues);
+}
+
+// ---- D8: the attested_complete conjunctive capstone ----
+
+// a VerifyReport with EVERY capstone condition satisfied — start from a real verify result (real wiring),
+// then force the conjunction inputs. Tests then flip one input to prove each is load-bearing.
+fn capstone_report() -> VerifyReport {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d6_clean(&rec, &tsa); // a real, ok bundle (broker_trust=sequence_verified)
+    let mut r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "baseline must verify: {:?}", r.issues);
+    r.coverage_manifest = Some(CanonValue::string("manifest"));
+    r.uses_matched = 1;
+    r.uses_pop_reverified = 1;
+    r.uses_action_unverified = 0;
+    r.one_phase_use_present = false;
+    r.intent_without_outcome = 0;
+    r.taxonomy_status = "validated".to_string();
+    r.broker_trust = "sequence_verified".to_string();
+    r.attestation_status = "attested_claims".to_string();
+    r.unmatched_violation = 0;
+    r.unmatched_pending = 0;
+    r
+}
+
+#[test]
+fn tier_b_d8_capstone_when_all_conditions_hold() {
+    let out = report_to_json(&capstone_report());
+    assert!(out.contains(r#""action_completeness":"attested_complete_over_brokered_surface""#), "the full conjunction must reach the capstone: {out}");
+    // MF1: the resource-truthful conditional is ALWAYS surfaced alongside the capstone.
+    assert!(out.contains(r#""resource_trust":"assumed_truthful""#), "resource_trust must always be present: {out}");
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tier_b_d8_each_condition_is_load_bearing() {
+    // removing ANY single conjunct must drop the capstone to claimed_over_manifest (a manifest is present).
+    let mutators: Vec<(&str, fn(&mut VerifyReport))> = vec![
+        ("not ok", |r| r.ok = false),
+        ("no brokered surface", |r| r.uses_matched = 0),
+        ("one-phase use present (MF3)", |r| r.one_phase_use_present = true),
+        ("intent without outcome (D5)", |r| r.intent_without_outcome = 1),
+        ("taxonomy not validated (D4)", |r| r.taxonomy_status = "stale".to_string()),
+        ("action unverified (D4)", |r| r.uses_action_unverified = 1),
+        ("pop not reverified (D2)", |r| r.uses_pop_reverified = 0),
+        ("broker_trust not sequence_verified (D6)", |r| r.broker_trust = "sequence_consistent_export".to_string()),
+        ("attestation not attested_claims (D7)", |r| r.attestation_status = "unevaluated".to_string()),
+        ("unmatched violation", |r| r.unmatched_violation = 1),
+        ("unmatched pending", |r| r.unmatched_pending = 1),
+    ];
+    for (name, mutate) in mutators {
+        let mut r = capstone_report();
+        mutate(&mut r);
+        let out = report_to_json(&r);
+        assert!(out.contains(r#""action_completeness":"claimed_over_manifest""#), "removing condition '{name}' must block the capstone (-> claimed_over_manifest): {out}");
+        assert!(!out.contains("attested_complete_over_brokered_surface"), "condition '{name}' removed but capstone still emitted: {out}");
+    }
+}
+
+#[test]
+fn tier_b_d8_no_manifest_is_not_claimed() {
+    // the capstone is asserted OVER a coverage_manifest; with no manifest the label is `not_claimed` even if
+    // every other condition holds (there is no scope claim to attest completeness over).
+    let mut r = capstone_report();
+    r.coverage_manifest = None;
+    let out = report_to_json(&r);
+    assert!(out.contains(r#""action_completeness":"not_claimed""#), "no manifest -> not_claimed: {out}");
+    assert!(out.contains(r#""resource_trust":"assumed_truthful""#));
+}
+
+#[test]
+fn tier_b_d8_null_manifest_is_not_a_capstone() {
+    // Codex: a JSON `"coverage_manifest": null` deserializes to Some(Null) — NOT a real manifest. With every
+    // OTHER conjunct passing it must NOT reach the capstone (and is not_claimed, not claimed_over_manifest).
+    let mut r = capstone_report();
+    r.coverage_manifest = Some(CanonValue::Null);
+    let out = report_to_json(&r);
+    assert!(!out.contains("attested_complete_over_brokered_surface"), "a null manifest must not reach the capstone: {out}");
+    assert!(out.contains(r#""action_completeness":"not_claimed""#), "null manifest -> not_claimed: {out}");
+}
+
+#[test]
+fn tier_b_d8_one_phase_use_blocks_capstone_end_to_end() {
+    // MF3 end-to-end: a real bundle whose only matched use is ONE-PHASE sets one_phase_use_present, so even
+    // with a manifest it can never reach the capstone (it carries the record-after-action gap).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let gh = content_hash_of(&grant);
+    let use_rec = seal_use(&rec, &res, "use-1", std::slice::from_ref(&gh), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let uh = content_hash_of(&use_rec);
+    let mut both = vec![gh.clone(), uh];
+    both.sort();
+    let head = grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &gh)]));
+    let cp = checkpoint_with_head(&rec, &both, 2, head, Some(&tsa));
+    let bundle = change_field(&tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]), "coverage_manifest", CanonValue::string("m"));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.one_phase_use_present, "a one-phase matched use must set the flag: {:?}", r.issues);
+    assert!(!report_to_json(&r).contains("attested_complete_over_brokered_surface"), "a one-phase use must block the capstone");
 }

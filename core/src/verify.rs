@@ -98,6 +98,11 @@ pub struct VerifyReport {
     /// case becomes detectable rather than invisible. It does NOT count toward `uses_matched` and does NOT
     /// consume a single-use grant. A non-zero count blocks the D8 capstone over the closed set.
     pub intent_without_outcome: usize,
+    /// D8/MF3 (ADR 0004): true iff any MATCHED use is a one-phase ADR-0003 `use` receipt (not a two-phase
+    /// `use_intent`+`use_outcome` pair). A one-phase receipt carries the record-after-action gap two-phase
+    /// exists to reduce, so its presence forces `action_completeness` to stay `claimed_over_manifest` and can
+    /// never reach the `attested_complete_over_brokered_surface` capstone.
+    pub one_phase_use_present: bool,
     pub grants_unused: usize,
     /// Pinned operation-taxonomy ARTIFACT trust (ADR 0004 D4 / MF5), one of: `absent` (none pinned in
     /// opts), `untrusted` (unsigned / wrong issuer / pinned digest|version mismatch / no pin supplied /
@@ -143,6 +148,14 @@ pub struct VerifyReport {
     pub attestation_not_after: Option<String>,
     pub attestation_claim_types: Vec<String>,
     pub attestation_subject_digest: Option<String>,
+    /// D8/MF1 (ADR 0004): the IRREDUCIBLE resource-TCB conditional, ALWAYS `assumed_truthful`. The
+    /// `attested_complete_over_brokered_surface` capstone proves every resource-signed receipt over the
+    /// brokered surface is two-phase, PoP-re-verified, taxonomy-validated, replay-free, and committed to an
+    /// anchored gapless broker log — **conditional on the resource having truthfully labeled what it did**.
+    /// It does NOT prove the resource performed action A rather than B, nor that there were no undeclared
+    /// side effects (the irreducible resource TCB, ADR 0004 D9). Surfaced alongside the capstone so a reader
+    /// can never mistake it for "everything the agent did".
+    pub resource_trust: String,
     /// The bundle's `coverage_manifest` echoed verbatim (the verifier does NOT trust it; it surfaces
     /// it so an auditor can evaluate the out-of-band attestations). `None` if absent.
     pub coverage_manifest: Option<CanonValue>,
@@ -648,14 +661,48 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("attestation_not_after".into(), opt_str(&r.attestation_not_after)),
         ("attestation_claim_types".into(), str_array(&r.attestation_claim_types)),
         ("attestation_subject_digest".into(), opt_str(&r.attestation_subject_digest)),
-        (
-            "action_completeness".into(),
-            CanonValue::string(if r.coverage_manifest.is_some() {
+        // D8 (ADR 0004) — the `attested_complete` capstone: the CONJUNCTION of every reduction. The label
+        // `attested_complete_over_brokered_surface` is emitted ONLY when ALL hold: the bundle verified
+        // (`ok` — all in-scope records L2-proven, DAG + chain valid, no issues); there is a brokered surface
+        // (`uses_matched > 0`); EVERY matched use is a closed two-phase pair (MF3 — `!one_phase_use_present`,
+        // and `intent_without_outcome == 0` so no recorded-but-incomplete intent); every matched use is
+        // taxonomy-`validated` AND action-verified (D4 — `taxonomy_status=="validated"` ∧
+        // `uses_action_unverified == 0`); every matched use was PoP-RE-verified offline (D2 —
+        // `uses_pop_reverified == uses_matched`, never the shim-asserted path); the grant log is anchored +
+        // gapless (D6 — `broker_trust=="sequence_verified"`); a fresh pinned-issuer deployment attestation
+        // binds this bundle (D7 — `attestation_status=="attested_claims"`); and there is no unmatched
+        // violation or unexplained in-flight use (`unmatched_violation == 0` ∧ `unmatched_pending == 0`).
+        // The capstone is asserted over a `coverage_manifest`; absent one it is at most `claimed_over_manifest`.
+        // It is ALWAYS qualified by `resource_trust:"assumed_truthful"` (MF1 — the irreducible resource TCB).
+        ("action_completeness".into(), {
+            // a JSON `"coverage_manifest": null` deserializes to `Some(Null)`, which is NOT a real manifest
+            // (D7 already treats null as the empty digest) — the capstone must be asserted OVER a real scope
+            // claim, so require a NON-NULL manifest.
+            let has_manifest = r.coverage_manifest.as_ref().is_some_and(|m| !m.is_null());
+            let capstone = r.ok
+                && has_manifest
+                && r.uses_matched > 0
+                && !r.one_phase_use_present
+                && r.intent_without_outcome == 0
+                && r.taxonomy_status == "validated"
+                && r.uses_action_unverified == 0
+                && r.uses_pop_reverified == r.uses_matched
+                && r.broker_trust == "sequence_verified"
+                && r.attestation_status == "attested_claims"
+                && r.unmatched_violation == 0
+                && r.unmatched_pending == 0;
+            CanonValue::string(if capstone {
+                "attested_complete_over_brokered_surface"
+            } else if has_manifest {
                 "claimed_over_manifest"
             } else {
                 "not_claimed"
-            }),
-        ),
+            })
+        }),
+        // MF1: the resource-truthful-labeling conditional, ALWAYS present so the capstone can never be read
+        // as "everything the agent did" — only "everything over the brokered surface, IF the resource
+        // labeled it truthfully" (the irreducible resource TCB, D9).
+        ("resource_trust".into(), CanonValue::string(r.resource_trust.clone())),
         (
             "coverage_manifest".into(),
             r.coverage_manifest.clone().unwrap_or(CanonValue::Null),
@@ -846,6 +893,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         unmatched_violation: 0,
         unmatched_pending: 0,
         intent_without_outcome: 0,
+        one_phase_use_present: false,
         grants_unused: 0,
         taxonomy_status: "absent".to_string(),
         broker_trust: "assumed".to_string(),
@@ -857,6 +905,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         attestation_not_after: None,
         attestation_claim_types: Vec::new(),
         attestation_subject_digest: None,
+        resource_trust: "assumed_truthful".to_string(),
         coverage_manifest: None,
         issues: vec![msg.to_string()],
         first_broken_link: Some(msg.to_string()),
@@ -2158,6 +2207,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // submission over the visible set — independent of the per-grant_id single-use rule.
     let mut seen_nonces: BTreeSet<(String, String)> = BTreeSet::new();
     let mut intent_without_outcome = 0usize;
+    let mut one_phase_use_present = false; // D8/MF3: any matched one-phase `use` blocks the capstone
     let broker_kind = |rec: &CanonValue| -> Option<String> {
         rec.get("extensions").and_then(|e| e.get("broker")).and_then(|b| b.get("kind")).and_then(|v| v.as_str()).map(String::from)
     };
@@ -2410,6 +2460,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if let Some(i) = pending_consume {
             consumed_outcomes.insert(outcomes[i].2.clone()); // accepted intent → consume its outcome now
         }
+        if bkind == "use" {
+            one_phase_use_present = true; // D8/MF3: a matched one-phase receipt blocks the capstone
+        }
         g.used += 1;
         uses_matched += 1;
         // R6/D4: a matched use is action-VERIFIED only when a pinned, in-window taxonomy lists the
@@ -2532,6 +2585,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         unmatched_violation,
         unmatched_pending,
         intent_without_outcome,
+        one_phase_use_present,
         grants_unused,
         taxonomy_status: taxonomy_status.to_string(),
         broker_trust,
@@ -2543,6 +2597,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         attestation_not_after: attest.not_after,
         attestation_claim_types: attest.claim_types,
         attestation_subject_digest: attest.subject_digest,
+        resource_trust: "assumed_truthful".to_string(),
         coverage_manifest,
         issues,
         first_broken_link,
