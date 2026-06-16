@@ -64,6 +64,12 @@ type Server struct {
 	tsa          witness.TSA        // nil = no external timestamp anchoring configured
 	brokerKey    ed25519.PrivateKey // nil = credential broker (/v2/grants) disabled
 	denyLog      bool               // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
+	// T7 (ADR 0002 / coverage-limits #4): a pinned EXTERNAL policy-engine verifying key. When set, a generic
+	// record carrying a policy_engine_signed/human_signed authority evidence_sig that verifies under this key
+	// is stamped with that elevated source (else forced to caller_declared). nil = Phase-1 default (every
+	// generic authority is caller_declared). The policy engine holds the private half OUT of this server.
+	policyEngineKey    ed25519.PublicKey
+	policyEngineSource string
 	// Tier-B resource side (ADR 0003): the resource recording key signs use-receipt authority evidence
 	// (role-separated from the broker key, R2); resourceID is this resource's audience; ledger is the
 	// consume-before-act jti/nonce store. nil resourceCore = /v2/use disabled.
@@ -145,6 +151,29 @@ func (s *Server) WithBroker(issuingKey ed25519.PrivateKey) *Server {
 // but a per-project denial budget for varying-scope sweeps is a documented follow-up before default-on.
 func (s *Server) WithDeniedGrantLog() *Server {
 	s.denyLog = true
+	return s
+}
+
+// WithPolicyEngineKey (T7) pins an EXTERNAL policy engine's published verifying key + the authority source
+// it vouches for ("policy_engine_signed" or "human_signed"). At ingest, a generic record whose authority
+// carries that source plus a {evidence_hash, evidence_sig} that verifies under this key over the canonical
+// authority preimage is elevated to that source (so an offline verifier pinning the SAME key as authority_keys
+// reads it as `verified`); anything else falls back to forgeable `caller_declared` (threat #4). Model: the
+// policy engine signs with its OWN key off-box and the server only VERIFIES — keeping the policy engine out
+// of the server TCB. The key MUST be role-separated (the verifier does not fold authority_keys into its
+// disjointness check, so we reject the obvious overlap: the server's own signing key).
+func (s *Server) WithPolicyEngineKey(source string, key ed25519.PublicKey) *Server {
+	// The offline verifier only elevates these two generic authority sources; pinning any other source would
+	// make the server stamp records the verifier reads as `declared`, not `verified` (gateway_enforced is the
+	// broker's own source, not a generic policy-engine one).
+	if source != "policy_engine_signed" && source != "human_signed" {
+		panic("WithPolicyEngineKey: source must be policy_engine_signed or human_signed")
+	}
+	if serverPub, err := decodePubKey(s.core.PubKey()); err == nil && key.Equal(serverPub) {
+		panic("WithPolicyEngineKey: the policy-engine key must be role-separated from the server signing key")
+	}
+	s.policyEngineSource = source
+	s.policyEngineKey = key
 	return s
 }
 
@@ -523,7 +552,7 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	}
 
 	// authority is declared by default — never silently presented as verified (threat #4).
-	normalizeAuthority(rec)
+	s.normalizeAuthority(rec)
 
 	// extensions.broker is RESERVED for the broker/resource lifecycle endpoints (/v2/grants, /v2/use),
 	// which build their own records — a GENERIC caller must not set it. Otherwise a forged
@@ -1702,13 +1731,65 @@ func rawValueBytes(v any) ([]byte, error) {
 // `evidence_sig` against a policy engine's published key, so it NEVER labels authority as
 // `policy_engine_signed`/`human_signed` on the client's say-so — it forces `caller_declared` while
 // retaining any evidence fields for a future verifier to upgrade. (spec §11; coverage-limits.md)
-func normalizeAuthority(rec map[string]any) {
+func (s *Server) normalizeAuthority(rec map[string]any) {
 	a, ok := rec["authority"].(map[string]any)
 	if !ok {
 		return
 	}
-	a["source"] = "caller_declared"
+	claimed, _ := a["source"].(string)
+	// Phase-1 default, or no matching elevation claim: authority is forgeable -> caller_declared (threat #4).
+	if s.policyEngineKey == nil || claimed != s.policyEngineSource {
+		a["source"] = "caller_declared"
+		rec["authority"] = a
+		return
+	}
+	// T7 model (b): elevate to the pinned source ONLY if the caller-supplied evidence_sig verifies under the
+	// external policy-engine key over the canonical authority preimage; else fall back to caller_declared.
+	recordID, _ := rec["record_id"].(string)
+	eh, _ := a["evidence_hash"].(string)
+	es, _ := a["evidence_sig"].(string)
+	if verifyAuthorityEvidence(s.policyEngineSource, recordID, eh, es, s.policyEngineKey) {
+		a["source"] = s.policyEngineSource // verified; evidence_hash/evidence_sig retained for the offline verifier
+	} else {
+		a["source"] = "caller_declared"
+	}
 	rec["authority"] = a
+}
+
+// verifyAuthorityEvidence checks an authority evidence_sig exactly as the offline verifier does (core
+// authority.rs): ed25519 over LP4("feir.authority.v1") ‖ LP4(source) ‖ LP4(record_id) ‖ utf8(evidence_hash),
+// under `key`, with a well-formed sha256 evidence_hash and a non-empty record_id (so a record the server
+// stamps will actually elevate to `verified` offline, not `failed`).
+func verifyAuthorityEvidence(source, recordID, evidenceHash, evidenceSig string, key ed25519.PublicKey) bool {
+	if recordID == "" || !strings.HasPrefix(evidenceSig, "ed25519:") || !strings.HasPrefix(evidenceHash, "sha256:") {
+		return false
+	}
+	// evidence_hash must be CANONICAL lowercase sha256:<64hex>: the offline verifier's parse_sha256 rejects
+	// uppercase/non-canonical hex, so a record the server stamped over a non-canonical hash would read
+	// `failed`, not `verified`. Re-encoding the decoded bytes and comparing enforces canonical lowercase.
+	hexPart := strings.TrimPrefix(evidenceHash, "sha256:")
+	hb, err := hex.DecodeString(hexPart)
+	if err != nil || len(hb) != 32 || hex.EncodeToString(hb) != hexPart {
+		return false
+	}
+	// evidence_sig must be CANONICAL base64url too (the verifier's strict decoder rejects non-canonical bits).
+	sigPart := strings.TrimPrefix(evidenceSig, "ed25519:")
+	sig, err := base64.RawURLEncoding.DecodeString(sigPart)
+	if err != nil || len(sig) != ed25519.SignatureSize || base64.RawURLEncoding.EncodeToString(sig) != sigPart {
+		return false
+	}
+	var pre []byte
+	lp := func(str string) {
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], uint32(len(str)))
+		pre = append(pre, b[:]...)
+		pre = append(pre, str...)
+	}
+	lp("feir.authority.v1")
+	lp(source)
+	lp(recordID)
+	pre = append(pre, evidenceHash...)
+	return ed25519.Verify(key, pre, sig)
 }
 
 // handleOTel ingests an OTLP/JSON trace export. The project comes from ?project= (NEVER the OTLP
