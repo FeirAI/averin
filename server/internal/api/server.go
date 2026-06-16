@@ -466,6 +466,16 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"results": results})
 }
 
+// denialIdemPrefix namespaces the broker's best-effort denied-grant log: sealGrantDenial stores each denial
+// under denialIdemPrefix+denialID. NO caller-supplied idempotency key may use this prefix at ANY endpoint
+// (/v2/records, /v2/otel, /v2/grants, /v2/use, /v2/use-intent, /v2/use-outcome) — else a pre-seeded
+// grant/use/record under a denial's deterministic key would make the later denial's PutRecord collapse onto
+// it and SILENTLY suppress the B11 evidence (the denial seal is best-effort). Only sealGrantDenial writes
+// here, via sealAndStore, which bypasses these handler guards.
+const denialIdemPrefix = "denial:"
+
+func reservedIdem(idem string) bool { return strings.HasPrefix(idem, denialIdemPrefix) }
+
 func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) {
 	var rec map[string]any
 	if err := decode(raw, &rec); err != nil {
@@ -481,13 +491,8 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	if idem == "" {
 		return "", false, fmt.Errorf("idempotency_key is required (field or Idempotency-Key header)")
 	}
-	// The "denial:" idempotency-key namespace is RESERVED for the broker's denied-grant log (sealGrantDenial
-	// stores under "denial:"+denialID). A generic caller must not squat it: pre-seeding a benign record under
-	// a denial's deterministic key would make the later denied grant's PutRecord collapse onto it and SILENTLY
-	// suppress the B11 evidence (the denial seal is best-effort). The broker path calls sealAndStore directly,
-	// bypassing this guard, so legitimate denials are unaffected.
-	if strings.HasPrefix(idem, "denial:") {
-		return "", false, fmt.Errorf("idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+	if reservedIdem(idem) { // see denialIdemPrefix: no caller may squat the denied-grant log namespace
+		return "", false, fmt.Errorf("idempotency_key prefix %q is reserved for the broker denied-grant log", denialIdemPrefix)
 	}
 	delete(rec, "idempotency_key") // not part of the signed record
 
@@ -709,6 +714,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	if idem == "" {
 		writeErr(w, http.StatusBadRequest, "idempotency_key is required (field or Idempotency-Key header) so a retry cannot double-issue a credential")
+		return
+	}
+	if reservedIdem(idem) { // a grant under denial:<denialID> would later collapse a denial and suppress it
+		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
 		return
 	}
 	grantID := deterministicGrantID(gr.ProjectID, idem) // also the credential jti + record_id
@@ -991,7 +1000,7 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	}
 	s.ingestMu.Lock()
 	defer s.ingestMu.Unlock()
-	stored, created, e := s.sealAndStore(gr.ProjectID, gr.SessionID, "denial:"+denialID, rec, nil)
+	stored, created, e := s.sealAndStore(gr.ProjectID, gr.SessionID, denialIdemPrefix+denialID, rec, nil)
 	if e != nil {
 		log.Printf("WARNING: B11 grant-denial record %s failed to seal (denial NOT recorded): %v", denialID, e)
 		return
@@ -1172,6 +1181,10 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 	}
 	if idem == "" {
 		writeErr(w, http.StatusBadRequest, "idempotency_key is required (field or Idempotency-Key header) so a retry cannot re-consume the credential")
+		return
+	}
+	if reservedIdem(idem) { // a use under denial:<denialID> would later collapse a denial and suppress it
+		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
 		return
 	}
 	useID := deterministicUseID(ur.ProjectID, idem)
@@ -1432,6 +1445,10 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 	}
 	if idem == "" {
 		writeErr(w, http.StatusBadRequest, "idempotency_key is required (field or Idempotency-Key header)")
+		return
+	}
+	if reservedIdem(idem) { // an outcome under denial:<denialID> would later collapse a denial and suppress it
+		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
 		return
 	}
 	status := or.Status

@@ -234,6 +234,31 @@ func TestDenialIdIncludesSessionAndTTL(t *testing.T) {
 	}
 }
 
+// TestBrokerEndpointsRejectReservedDenialIdem (Codex C2c): the "denial:" idempotency-key namespace must be
+// reserved at EVERY caller-supplied entry point, not only generic/OTel ingest. A valid grant/use/outcome
+// pre-seeded under denial:<computed denialID> would otherwise collapse the later denial and silently
+// suppress the B11 evidence. Each broker endpoint rejects the prefix before any other processing.
+func TestBrokerEndpointsRejectReservedDenialIdem(t *testing.T) {
+	h := newBrokerResourceServer(t)
+	ak := grantAgentKey()
+	// /v2/grants with a valid PoP but a reserved-prefix idem — rejected before validation.
+	if code, r := do(t, h, "POST", "/v2/grants", grantBody("denial:squat", "read:orders", ak, ak)); code != http.StatusBadRequest || !strings.Contains(r, "reserved") {
+		t.Fatalf("/v2/grants must reject a denial:-prefixed idempotency_key, got %d: %s", code, r)
+	}
+	// /v2/use(+intent)/use-outcome check the prefix right after idem resolution, before capability/intent
+	// validation, so a minimal body reaches the guard.
+	minUse := `{"idempotency_key":"denial:squat","project_id":"p1","session_id":"s1"}`
+	for _, ep := range []string{"/v2/use", "/v2/use-intent"} {
+		if code, r := do(t, h, "POST", ep, minUse); code != http.StatusBadRequest || !strings.Contains(r, "reserved") {
+			t.Fatalf("%s must reject a denial:-prefixed idempotency_key, got %d: %s", ep, code, r)
+		}
+	}
+	minOut := `{"idempotency_key":"denial:squat","project_id":"p1","session_id":"s1","intent_record_id":"use-x"}`
+	if code, r := do(t, h, "POST", "/v2/use-outcome", minOut); code != http.StatusBadRequest || !strings.Contains(r, "reserved") {
+		t.Fatalf("/v2/use-outcome must reject a denial:-prefixed idempotency_key, got %d: %s", code, r)
+	}
+}
+
 // TestDeniedGrantLogOffByDefault: without WithDeniedGrantLog the forbidden scope is still rejected but NO
 // denial is sealed (opt-in — avoids a probe-driven storage/billing DoS by default).
 func TestDeniedGrantLogOffByDefault(t *testing.T) {
