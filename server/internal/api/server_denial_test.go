@@ -300,6 +300,58 @@ func TestDenialRecoversFromPreSeededReservedKey(t *testing.T) {
 	}
 }
 
+// denialRecordID extracts the record_id of the credential_grant_denied record in an export bundle.
+func denialRecordID(t *testing.T, exportJSON string) string {
+	t.Helper()
+	var bundle struct {
+		Records []json.RawMessage `json:"records"`
+	}
+	if err := json.Unmarshal([]byte(exportJSON), &bundle); err != nil {
+		t.Fatalf("parse export: %v", err)
+	}
+	for _, r := range bundle.Records {
+		var rec struct {
+			RecordID  string `json:"record_id"`
+			EventType string `json:"event_type"`
+		}
+		json.Unmarshal(r, &rec)
+		if rec.EventType == "credential_grant_denied" {
+			return rec.RecordID
+		}
+	}
+	t.Fatalf("no denial record in export: %s", exportJSON)
+	return ""
+}
+
+// TestDenialIdIsServerSecret (Codex C2e, root fix): the denial id mixes a server secret (a deterministic
+// signature under the broker private key), so a caller cannot precompute denial:<denialID> to pre-seed/forge
+// a row under it. Two deployments that differ ONLY in broker key produce DIFFERENT denial ids for the SAME
+// denied request — proving the id is not publicly computable.
+func TestDenialIdIsServerSecret(t *testing.T) {
+	mk := func(brokerKey ed25519.PrivateKey) http.Handler {
+		c, err := core.New(seed)
+		if err != nil {
+			t.Fatalf("core: %v", err)
+		}
+		return api.New(c, store.NewMem(), "k0").WithBroker(brokerKey).WithDeniedGrantLog().Routes()
+	}
+	ak := grantAgentKey()
+	bk2Seed := make([]byte, ed25519.SeedSize)
+	bk2Seed[0] = 0x33
+	post := func(h http.Handler) string {
+		if code, r := do(t, h, "POST", "/v2/grants", grantBody("idem-deny", "iam:reset", ak, ak)); code != http.StatusBadRequest {
+			t.Fatalf("forbidden scope should be 400, got %d: %s", code, r)
+		}
+		_, exp := do(t, h, "GET", "/v2/export?project=p1", "")
+		return denialRecordID(t, exp)
+	}
+	idA := post(mk(brokerIssuingKey()))
+	idB := post(mk(ed25519.NewKeyFromSeed(bk2Seed)))
+	if idA == idB {
+		t.Fatalf("denial id must depend on the server secret (broker key); both deployments produced %q", idA)
+	}
+}
+
 // TestDeniedGrantLogOffByDefault: without WithDeniedGrantLog the forbidden scope is still rejected but NO
 // denial is sealed (opt-in — avoids a probe-driven storage/billing DoS by default).
 func TestDeniedGrantLogOffByDefault(t *testing.T) {

@@ -971,7 +971,14 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	idReq.IdempotencyKey = ""
 	idReq.AgentSig = ""
 	reqJSON, _ := json.Marshal(idReq)
-	probe, _ := json.Marshal([]string{string(reqJSON), reason})
+	// ROOT defense against pre-seeding (C2b–C2e): mix a SERVER SECRET into the id so a caller can never
+	// precompute denial:<denialID> and squat the key in ANY version. The salt is a deterministic ed25519
+	// signature under the broker private key over a fixed domain string — secret (it needs the private key),
+	// stable across restarts (Ed25519 is deterministic, so genuine retries still dedup), and one-way through
+	// the sha256-based uuidV5Shaped (observed record_ids never reveal it). The namespace reservation + the
+	// foreign-collision recovery remain as defense-in-depth.
+	salt := ed25519.Sign(s.brokerKey, []byte("feir.denial.salt.v1"))
+	probe, _ := json.Marshal([]string{base64.RawURLEncoding.EncodeToString(salt), string(reqJSON), reason})
 	denialID := "denial-" + uuidV5Shaped("feir.denial.id.v1", gr.ProjectID, string(probe))
 	rec := map[string]any{
 		"record_id":     denialID,
