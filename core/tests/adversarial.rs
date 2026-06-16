@@ -3319,7 +3319,9 @@ fn tier_b_d8_each_condition_is_load_bearing() {
     // removing ANY single conjunct must drop the capstone to claimed_over_manifest (a manifest is present).
     let mutators: Vec<(&str, fn(&mut VerifyReport))> = vec![
         ("not ok", |r| r.ok = false),
-        ("no brokered surface", |r| r.uses_matched = 0),
+        // isolate the brokered-surface conjunct: zero uses_matched AND uses_pop_reverified together, so
+        // PoP-equality (0==0) still holds and ONLY `uses_matched > 0` is violated (Codex).
+        ("no brokered surface", |r| { r.uses_matched = 0; r.uses_pop_reverified = 0; }),
         ("one-phase use present (MF3)", |r| r.one_phase_use_present = true),
         ("intent without outcome (D5)", |r| r.intent_without_outcome = 1),
         ("taxonomy not validated (D4)", |r| r.taxonomy_status = "stale".to_string()),
