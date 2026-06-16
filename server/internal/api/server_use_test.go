@@ -370,7 +370,61 @@ func TestUseIsIdempotentOnRetry(t *testing.T) {
 	}
 }
 
+// TestUseIdemKeyReuseWithDifferentOperationConflicts (Codex convergence): reusing a successful /v2/use
+// idempotency key with a DIFFERENT operation (here different params -> different use_sig + params commitment)
+// must be a 409, NOT a 201 that echoes the old receipt while SKIPPING the credential-consuming ValidateUse —
+// which would "authorize" an operation the gateway never validated, with a receipt for the wrong operation.
+func TestUseIdemKeyReuseWithDifferentOperationConflicts(t *testing.T) {
+	h := newBrokerResourceServer(t)
+	ak := grantAgentKey()
+	grantID, cap := mkGrant(t, h, ak, "idem-grant")
+	if code, resp := do(t, h, "POST", "/v2/use", useBody(t, "idem-reuse", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusCreated {
+		t.Fatalf("first use failed (%d): %s", code, resp)
+	}
+	// SAME idem key, DIFFERENT params (even with the same nonce) -> different use_sig + params commitment -> 409.
+	if code, resp := do(t, h, "POST", "/v2/use", useBody(t, "idem-reuse", cap, grantID, ak, "SELECT 2", "nonce-1")); code != http.StatusConflict {
+		t.Fatalf("reusing the idem key with a different operation must be 409, got %d: %s", code, resp)
+	}
+	// the EXACT original request still replays idempotently (the exact-match tightening must not break honest retries).
+	if code, resp := do(t, h, "POST", "/v2/use", useBody(t, "idem-reuse", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusCreated || !strings.Contains(resp, `"idempotent":true`) {
+		t.Fatalf("the exact original use must still replay idempotently, got %d: %s", code, resp)
+	}
+}
 
+// TestUseOutcomeIdemKeyReuseWithDifferentStatusConflicts (Codex convergence): the use-outcome path has the
+// same shape — reusing a use-outcome idem key with a DIFFERENT status (or intent) must be a 409, not a 201
+// echoing an unrelated outcome.
+func TestUseOutcomeIdemKeyReuseWithDifferentStatusConflicts(t *testing.T) {
+	h := newBrokerResourceServer(t)
+	ak := grantAgentKey()
+	grantID, cap := mkGrant(t, h, ak, "idem-grant")
+	code, ir := do(t, h, "POST", "/v2/use-intent", useBody(t, "idem-intent", cap, grantID, ak, "SELECT 1", "nonce-1"))
+	if code != http.StatusCreated {
+		t.Fatalf("use-intent failed (%d): %s", code, ir)
+	}
+	var intent struct {
+		UseID string `json:"use_id"`
+	}
+	json.Unmarshal([]byte(ir), &intent)
+	outcome := func(idem, status string) (int, string) {
+		ob, _ := json.Marshal(map[string]any{
+			"idempotency_key": idem, "project_id": "p1", "session_id": "s1",
+			"intent_record_id": intent.UseID, "status": status,
+		})
+		return do(t, h, "POST", "/v2/use-outcome", string(ob))
+	}
+	if code, r := outcome("idem-outcome", "ok"); code != http.StatusCreated {
+		t.Fatalf("first outcome failed (%d): %s", code, r)
+	}
+	// SAME outcome idem key, DIFFERENT status -> 409.
+	if code, r := outcome("idem-outcome", "error"); code != http.StatusConflict {
+		t.Fatalf("reusing the outcome idem key with a different status must be 409, got %d: %s", code, r)
+	}
+	// the EXACT original outcome still replays idempotently.
+	if code, r := outcome("idem-outcome", "ok"); code != http.StatusCreated {
+		t.Fatalf("the exact original outcome must still replay idempotently, got %d: %s", code, r)
+	}
+}
 
 // TestUsePreseededGenericIdemConflicts (Codex D5.2 round-2, HIGH): a generic /v2/records row already
 // occupying the use's idempotency key (with a different, random record_id the old session-scan-by-useID

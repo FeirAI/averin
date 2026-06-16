@@ -55,15 +55,15 @@ type Sealer interface {
 }
 
 type Server struct {
-	core         Sealer
-	st           store.Store
-	content      content.Store // raw low-entropy values (committed at ingest, revealed on disclosure)
-	meter        meter.Meter
-	auth         auth.KeyStore      // nil = no per-project auth (dev/single-tenant)
-	witness      witness.Witness    // nil = no external witness configured
-	tsa          witness.TSA        // nil = no external timestamp anchoring configured
-	brokerKey    ed25519.PrivateKey // nil = credential broker (/v2/grants) disabled
-	denyLog      bool               // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
+	core      Sealer
+	st        store.Store
+	content   content.Store // raw low-entropy values (committed at ingest, revealed on disclosure)
+	meter     meter.Meter
+	auth      auth.KeyStore      // nil = no per-project auth (dev/single-tenant)
+	witness   witness.Witness    // nil = no external witness configured
+	tsa       witness.TSA        // nil = no external timestamp anchoring configured
+	brokerKey ed25519.PrivateKey // nil = credential broker (/v2/grants) disabled
+	denyLog   bool               // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
 	// inflate stored records without bound (the prerequisite for default-on). nil = unbounded (prior behavior).
 	denialBudget *denialBudget
@@ -88,8 +88,8 @@ type Server struct {
 	attestIssuedSkew time.Duration
 	attestValidity   time.Duration
 	signingKeyID     string
-	keyValidFrom string
-	now          func() time.Time // injectable clock for tests
+	keyValidFrom     string
+	now              func() time.Time // injectable clock for tests
 	// ingestMu serializes the heads->seal->put critical section so concurrent ingests cannot read
 	// a stale frontier and fork the DAG (the Postgres store will do this in a serializable tx).
 	ingestMu sync.Mutex
@@ -1213,8 +1213,8 @@ type useRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
 	ProjectID      string `json:"project_id"`
 	SessionID      string `json:"session_id"`
-	Capability     string `json:"capability"` // the minted, sender-constrained token
-	UseSig         string `json:"use_sig"`    // base64url ed25519 PoP signature (signed with the cnf key)
+	Capability     string `json:"capability"`   // the minted, sender-constrained token
+	UseSig         string `json:"use_sig"`      // base64url ed25519 PoP signature (signed with the cnf key)
 	Action         string `json:"action"`       // the operation to perform (must equal the grant's action)
 	Params         string `json:"params"`       // raw operation parameters (committed + PoP-bound)
 	Nonce          string `json:"nonce"`        // the one-time PoP freshness nonce
@@ -1233,8 +1233,10 @@ func deterministicUseID(projectID, idem string) string {
 // handleUse records a ONE-PHASE ADR-0003 use receipt (kind=use). handleUseIntent records the FIRST phase
 // of a two-phase use (kind=use_intent, ADR 0004 D5) — recorded BEFORE the resource performs the side effect;
 // it is completed by POST /v2/use-outcome. Both share the same validate+consume+seal path.
-func (s *Server) handleUse(w http.ResponseWriter, r *http.Request)       { s.handleUsePhase(w, r, "use") }
-func (s *Server) handleUseIntent(w http.ResponseWriter, r *http.Request) { s.handleUsePhase(w, r, "use_intent") }
+func (s *Server) handleUse(w http.ResponseWriter, r *http.Request) { s.handleUsePhase(w, r, "use") }
+func (s *Server) handleUseIntent(w http.ResponseWriter, r *http.Request) {
+	s.handleUsePhase(w, r, "use_intent")
+}
 
 func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKind string) {
 	if s.resourceCore == nil || s.brokerKey == nil {
@@ -1294,9 +1296,10 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 	// /v2/records row OR the OTHER use phase can already occupy this idem key with a different record_id or
 	// kind that the scan misses; ValidateUse would then burn the nonce/jti and PutRecord would silently
 	// COLLAPSE the seal onto that prior row (created=false) → an action with no persisted receipt (and a
-	// foreign record echoed back). So: an EXACT (record_id, session_id, kind) match under this key is an
-	// honest retry (return it, skipping the credential-consuming ValidateUse — concurrent retries also see
-	// it under the lock); ANY other record under this key is a conflict → 409 BEFORE consuming anything.
+	// foreign record echoed back). So: a retry under this key that ALSO matches the stored receipt's OPERATION
+	// (action/nonce/params-commitment/use_sig — storedUseMatchesRequest) is an honest retry (return it,
+	// skipping the credential-consuming ValidateUse — concurrent retries also see it under the lock); ANY other
+	// record under this key — including a DIFFERENT use reusing the key — is a conflict → 409 BEFORE consuming.
 	// validateErr (caller's 400) and conflictErr (caller's 409) are distinguished from a store error (500).
 	var sealed, grantID string
 	var idempotent bool
@@ -1313,7 +1316,12 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		}
 		if found {
 			rid, sess, kind, gid := useReceiptIdentity(prior.JSON)
-			if rid == useID && sess == ur.SessionID && kind == brokerKind {
+			// EXACT-request match (Codex): (record_id, session, kind) is NOT sufficient — useID is derived from
+			// (project, idem) so it always matches on key reuse. A reused idem key carrying a DIFFERENT use
+			// (capability/action/params/nonce/use_sig) must NOT collapse onto this receipt and return 201 while
+			// SKIPPING ValidateUse (which is what authorizes + consumes the credential), so also require the
+			// operation itself to match the signed receipt; anything else is a 409 BEFORE any side effect.
+			if rid == useID && sess == ur.SessionID && kind == brokerKind && storedUseMatchesRequest(prior.JSON, ur, paramsCommitment) {
 				sealed, grantID, idempotent = prior.JSON, gid, true
 				return nil
 			}
@@ -1398,6 +1406,61 @@ func useReceiptIdentity(recJSON string) (recordID, sessionID, kind, grantID stri
 	}
 	_ = json.Unmarshal([]byte(recJSON), &probe)
 	return probe.RecordID, probe.SessionID, probe.Extensions.Broker.Kind, probe.Authority.GrantID
+}
+
+// storedUseMatchesRequest reports whether `ur` (with its computed paramsCommitment) describes the SAME use
+// operation as the stored receipt — comparing the action, the single-use nonce, the canonical PoP use_sig,
+// and the params commitment against the signed use_evidence + input_commit. The use_sig is the agent's
+// ed25519 PoP over the challenge binding grant_id/resource_id/action/params_commitment/credential_binding/
+// nonce, so matching it (plus the explicit fields) is a cryptographic match of the whole operation. Used to
+// keep an idem-key reuse that carries a DIFFERENT use from collapsing onto this receipt and skipping the
+// credential-consuming ValidateUse (Codex convergence). A malformed/non-canonical use_sig cannot match the
+// stored canonical one → not a match (fail closed to 409).
+func storedUseMatchesRequest(recordJSON string, ur useRequest, paramsCommitment string) bool {
+	var p struct {
+		InputCommit struct {
+			Commitment string `json:"commitment"`
+		} `json:"input_commit"`
+		Extensions struct {
+			Broker struct {
+				UseEvidence struct {
+					Action string `json:"action"`
+					Nonce  string `json:"nonce"`
+					UseSig string `json:"use_sig"`
+				} `json:"use_evidence"`
+			} `json:"broker"`
+		} `json:"extensions"`
+	}
+	if json.Unmarshal([]byte(recordJSON), &p) != nil {
+		return false
+	}
+	ue := p.Extensions.Broker.UseEvidence
+	canonSig := ur.UseSig // canonicalize the request sig the way the resource shim stores it
+	if raw, e := base64.RawURLEncoding.DecodeString(ur.UseSig); e == nil {
+		canonSig = base64.RawURLEncoding.EncodeToString(raw)
+	}
+	return ue.Action == ur.Action && ue.Nonce == ur.Nonce && ue.UseSig == canonSig && p.InputCommit.Commitment == paramsCommitment
+}
+
+// storedOutcomeMatchesRequest reports whether the stored use_outcome receipt completes the SAME intent with
+// the SAME status — so a reused outcome idem key carrying a different intent_ref/status is a 409, not a 201
+// echoing an unrelated outcome (Codex convergence).
+func storedOutcomeMatchesRequest(recordJSON, intentRef, status string) bool {
+	var p struct {
+		Extensions struct {
+			Broker struct {
+				UseOutcome struct {
+					IntentRef string `json:"intent_ref"`
+					Status    string `json:"status"`
+				} `json:"use_outcome"`
+			} `json:"broker"`
+		} `json:"extensions"`
+	}
+	if json.Unmarshal([]byte(recordJSON), &p) != nil {
+		return false
+	}
+	uo := p.Extensions.Broker.UseOutcome
+	return uo.IntentRef == intentRef && uo.Status == status
 }
 
 // existingReceipt returns the sealed record (and its authority.grant_id) for a broker/resource record
@@ -1574,16 +1637,20 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 	storeErr := func() error {
 		s.ingestMu.Lock()
 		defer s.ingestMu.Unlock()
-		// Outcome idempotency is keyed on `idem` (the PutRecord dedupe key), resolved up front: an exact
-		// (record_id, session_id, kind) match is an honest retry; any other record under this key is a
-		// conflict → 409 (else PutRecord would later collapse the outcome onto a foreign row and echo it).
+		// Outcome idempotency is keyed on `idem` (the PutRecord dedupe key), resolved up front: a retry that
+		// matches (record_id, session_id, kind) AND completes the SAME intent_ref/status
+		// (storedOutcomeMatchesRequest) is an honest retry; any other record under this key is a conflict → 409
+		// (else PutRecord would later collapse the outcome onto a foreign row and echo it).
 		prior, found, le := s.st.RecordByIdem(or.ProjectID, idem)
 		if le != nil {
 			return le // fail closed on an ambiguous idempotency lookup (mirror handleUsePhase) — no partial outcome
 		}
 		if found {
 			rid, sess, kind, _ := useReceiptIdentity(prior.JSON)
-			if rid == outcomeID && sess == or.SessionID && kind == "use_outcome" {
+			// EXACT-request match (Codex): also require the stored outcome to complete the SAME intent with the
+			// SAME status, so a reused idem key carrying a different intent_ref/status is a 409, not a 201 that
+			// echoes an unrelated outcome.
+			if rid == outcomeID && sess == or.SessionID && kind == "use_outcome" && storedOutcomeMatchesRequest(prior.JSON, or.IntentRecordID, status) {
 				sealed, idempotent = prior.JSON, true
 				return nil
 			}
@@ -1668,12 +1735,12 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 		"causal_prev_hashes": []string{intentHash},
 		"project_id":         projectID,
 		"session_id":         sessionID,
-		"agent_id":      "feir-resource",
-		"agent_version": "feir-resource",
-		"event_type":    "tool_call",
-		"observed_via":  "broker",
-		"action":        "use_outcome",
-		"status":        status,
+		"agent_id":           "feir-resource",
+		"agent_version":      "feir-resource",
+		"event_type":         "tool_call",
+		"observed_via":       "broker",
+		"action":             "use_outcome",
+		"status":             status,
 		"authority": map[string]any{
 			"source":            "gateway_enforced",
 			"enforcement_point": "tool_gateway",
