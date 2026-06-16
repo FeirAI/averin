@@ -71,6 +71,48 @@ func (f *failContentStore) Put(ctx context.Context, data []byte) (content.Addres
 	return f.Store.Put(ctx, data)
 }
 
+// failSealCore wraps a Sealer and can inject a SealRecord failure — a PRE-commit error inside sealAndStore
+// (before PutRecord), to test that the use path releases the credential there too (not only on buildUseRecord).
+type failSealCore struct {
+	api.Sealer
+	fail bool
+}
+
+func (f *failSealCore) SealRecord(bodyJSON string) (string, error) {
+	if f.fail {
+		return "", errors.New("injected seal failure")
+	}
+	return f.Sealer.SealRecord(bodyJSON)
+}
+
+// TestUseReleasesCredentialOnSealFailure (Codex pass-9 high): a SealRecord failure inside sealAndStore is a
+// PRE-commit error (nothing reached PutRecord), so — like a buildUseRecord failure — the consumed nonce/jti
+// must be released. ValidateUse succeeds, then SealRecord fails; the credential must survive for an honest retry.
+func TestUseReleasesCredentialOnSealFailure(t *testing.T) {
+	realCore, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	rc, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatalf("resource core: %v", err)
+	}
+	fsc := &failSealCore{Sealer: realCore}
+	h := api.New(fsc, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	ak := grantAgentKey()
+	grantID, cap := mkGrant(t, h, ak, "idem-grant") // grant seals while SealRecord is healthy
+
+	fsc.fail = true
+	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusInternalServerError {
+		t.Fatalf("a pre-commit SealRecord failure should be 500, got %d: %s", code, r)
+	}
+	// the credential was RELEASED (pre-commit failure, nothing persisted): the SAME nonce re-validates + seals.
+	fsc.fail = false
+	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusCreated {
+		t.Fatalf("after the sealer recovers, the released credential must seal a receipt, got %d: %s", code, r)
+	}
+}
+
 // TestUseReleasesCredentialOnReceiptBuildFailure (Codex pass-8 high): if receipt construction fails AFTER
 // ValidateUse consumed the single-use credential but BEFORE anything persisted (here the content store fails
 // while storing the use params), the nonce/jti must be RELEASED — the caller got a 500 and never acted, so a

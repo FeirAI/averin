@@ -559,6 +559,12 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 // the generic ingest path (normalizeAuthority + commitLowEntropyFields) and the credential broker
 // (its own gateway_enforced authority + input_commit) share these DAG/seal/store mechanics without
 // the broker's verified authority being clobbered back to caller_declared.
+// errAtCommit wraps a sealAndStore error that occurred AT the PutRecord commit point (vs a pre-commit
+// marshal/seal failure). A caller that consumed an irreversible resource before sealing — the use path,
+// which consumed the single-use nonce/jti — must release it on a pre-commit failure (nothing persisted)
+// but NOT on a commit-ambiguous one (the record may be durable; releasing would allow a replay double-spend).
+var errAtCommit = errors.New("record store commit point")
+
 func (s *Server) sealAndStore(projectID, sessionID, idem string, rec map[string]any, disclosures []store.DisclosureSecret) (string, bool, error) {
 	now := s.now()
 	// server-controlled fields (override anything the caller sent)
@@ -632,7 +638,10 @@ func (s *Server) sealAndStore(projectID, sessionID, idem string, rec map[string]
 		JSON: sealed, ContentHash: ch, SessionID: sess, Parents: parents, Disclosures: disclosures,
 	})
 	if err != nil {
-		return "", false, err
+		// Wrap the COMMIT-POINT error so a caller that consumed an irreversible resource (a use credential)
+		// can tell a commit-AMBIGUOUS PutRecord failure (the record may be durable) from a PRE-commit
+		// marshal/seal failure above (nothing persisted). It releases only on the latter.
+		return "", false, fmt.Errorf("%w: %v", errAtCommit, err)
 	}
 	if created {
 		s.meter.RecordsIngested(projectID, 1) // billable per record beyond the free tier
@@ -1289,13 +1298,18 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		}
 		sealed, _, e = s.sealAndStore(ur.ProjectID, ur.SessionID, idem, rec, disclosures)
 		if e != nil {
-			// A store error at the COMMIT POINT is commit-AMBIGUOUS (an in-flight Postgres commit can still
-			// land). We must NOT release the credential here: if the receipt is durable-but-not-yet-visible,
-			// releasing would let a replay double-spend. Mirror the grant path — if the receipt is already
-			// durably visible, surface success (credential correctly stays consumed); otherwise return the
-			// error WITHOUT releasing. The deterministic useID lets an honest retry reclaim a durable receipt;
-			// a genuinely-uncommitted seal leaves the credential consumed (the same commit-ambiguity residual
-			// the grant path documents, narrowed to {seal failure, not durable, client never retries}).
+			if !errors.Is(e, errAtCommit) {
+				// PRE-COMMIT failure (marshal/seal, BEFORE PutRecord): nothing persisted and the caller never
+				// acted, so RELEASE the consumed credential — same as a buildUseRecord failure.
+				shim.RollbackUse(ev)
+				return e
+			}
+			// COMMIT-AMBIGUOUS (the PutRecord commit point): an in-flight Postgres commit can still land, so we
+			// must NOT release (a durable-but-invisible receipt + a released credential would let a replay
+			// double-spend). Mirror the grant path — if the receipt is already durably visible, surface success
+			// (credential correctly stays consumed); otherwise return the error WITHOUT releasing. The
+			// deterministic useID lets an honest retry reclaim a durable receipt; a genuinely-uncommitted seal
+			// leaves the credential consumed (the same narrow commit-ambiguity residual the grant path documents).
 			if r2, found2, re := s.st.RecordByIdem(ur.ProjectID, idem); re == nil && found2 {
 				sealed = r2.JSON
 				return nil
