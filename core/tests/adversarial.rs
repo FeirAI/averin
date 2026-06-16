@@ -1053,6 +1053,58 @@ fn seal_use(
     seal_use_full(rec_sk, res_sk, record_id, prev, top_action, "tool_gateway", ue, &eh)
 }
 
+// D5: a two-phase use_intent — a resource record whose broker kind AND use_evidence.kind are "use_intent",
+// carrying the same PoP-validated use_evidence as a one-phase use (the match predicate runs on it).
+fn seal_intent(rec_sk: &SigningKey, res_sk: &SigningKey, record_id: &str, prev: &[String], top_action: &str, ue: &CanonValue) -> CanonValue {
+    let ue = change_field(ue, "kind", CanonValue::string("use_intent"));
+    let eh = sha256_prefixed(ue.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", record_id, &eh, res_sk);
+    let gid = ue.get("grant_id").unwrap().as_str().unwrap();
+    let resource = ue.get("resource_id").unwrap().as_str().unwrap();
+    let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"feir-resource","agent_version":"feir-resource",
+        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
+        "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
+        "event_type":"tool_call","action":"{top_action}","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"tool_gateway","grant_id":"{gid}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "extensions":{{"broker":{{"kind":"use_intent","grant_id":"{gid}","resource_id":"{resource}","use_evidence":{ue}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ue = ue.serialize(),
+    );
+    seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
+// D5: a use_outcome completing an intent. The SIGNED use_outcome payload carries grant_id + intent_ref
+// (what the verifier reads, bound by evidence_hash); the UNSIGNED sibling extensions.broker.intent_ref is
+// set separately to `sibling_ref` so a test can DIVERGE them. `auth_sk` signs the evidence (a non-resource
+// key models a FORGED outcome).
+fn seal_outcome(rec_sk: &SigningKey, auth_sk: &SigningKey, record_id: &str, prev: &[String], signed_ref: &str, sibling_ref: &str, gid: &str) -> CanonValue {
+    let outcome = CanonValue::object(vec![
+        ("grant_id".into(), CanonValue::string(gid)),
+        ("intent_ref".into(), CanonValue::string(signed_ref)),
+        ("kind".into(), CanonValue::string("use_outcome")),
+        ("status".into(), CanonValue::string("ok")),
+    ])
+    .unwrap();
+    let eh = sha256_prefixed(outcome.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", record_id, &eh, auth_sk);
+    let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"feir-resource","agent_version":"feir-resource",
+        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":2,
+        "agent_ts":"2026-06-15T10:00:06.000Z","received_ts":"2026-06-15T10:00:06.000Z",
+        "event_type":"tool_call","action":"{ACTION}","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"tool_gateway","grant_id":"{gid}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "extensions":{{"broker":{{"kind":"use_outcome","grant_id":"{gid}","intent_ref":"{sibling_ref}","use_outcome":{outcome}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        outcome = outcome.serialize(),
+    );
+    seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
 fn checkpoint_over(rec_sk: &SigningKey, frontier: &[String], record_count: i64, anchor_with: Option<&SigningKey>) -> CanonValue {
     let key_block =
         CanonValue::parse(r#"{"signing_key_id":"k0","key_epoch":0,"key_status":"active"}"#).unwrap();
@@ -2966,4 +3018,123 @@ fn tier_b_attestation_stale_anchored_replayed_on_later_bundle_is_failed() {
     assert!(!r.ok, "an attestation that does not cover a later checkpoint must fail");
     assert_eq!(r.attestation_status, "failed");
     assert!(r.issues.iter().any(|i| i.contains("does not cover the bundle frontier")), "issues: {:?}", r.issues);
+}
+
+// ---- D5: two-phase intent/outcome gateway ----
+
+// a grant + intent (record_id "intent-1") + (optional) outcome, DAG-linked and anchored. Returns the bundle.
+fn two_phase_bundle(rec: &SigningKey, res: &SigningKey, tsa: &SigningKey, outcome: Option<CanonValue>) -> CanonValue {
+    let grant = seal_grant(rec, rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let intent = seal_intent(rec, res, "intent-1", std::slice::from_ref(&gh), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let ih = content_hash_of(&intent);
+    match outcome {
+        Some(o) => {
+            let oh = content_hash_of(&o);
+            let cp = checkpoint_over(rec, std::slice::from_ref(&oh), 3, Some(tsa));
+            tier_b_bundle(&rec.verifying_key(), vec![grant, intent, o], vec![cp])
+        }
+        None => {
+            let cp = checkpoint_over(rec, std::slice::from_ref(&ih), 2, Some(tsa));
+            tier_b_bundle(&rec.verifying_key(), vec![grant, intent], vec![cp])
+        }
+    }
+}
+
+// the intent's content_hash, for an outcome's causal_prev_hashes (so the outcome is the DAG head).
+fn intent_hash(rec: &SigningKey, res: &SigningKey) -> String {
+    let grant = seal_grant(rec, rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    content_hash_of(&seal_intent(rec, res, "intent-1", std::slice::from_ref(&gh), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED)))
+}
+
+#[test]
+fn tier_b_two_phase_complete_pair_matches() {
+    // intent + matching outcome -> a complete two-phase use: counted, no anomaly.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ih = intent_hash(&rec, &res);
+    let outcome = seal_outcome(&rec, &res, "outcome-1", std::slice::from_ref(&ih), "intent-1", "intent-1", GID);
+    let bundle = two_phase_bundle(&rec, &res, &tsa, Some(outcome));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "a complete two-phase pair must verify clean: {:?}", r.issues);
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (1, 0));
+}
+
+#[test]
+fn tier_b_two_phase_intent_without_outcome_is_anomaly() {
+    // a closed intent with NO outcome -> intent_without_outcome (the crash-after-act case): surfaced, NOT a
+    // violation, NOT counted as matched, and does not consume the single-use grant.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = two_phase_bundle(&rec, &res, &tsa, None);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "a recorded intent without outcome is an anomaly, not a violation: {:?}", r.issues);
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 1));
+}
+
+#[test]
+fn tier_b_one_phase_use_still_matches() {
+    // back-compat (ADR 0003): a one-phase `use` is still accepted + counted (it just cannot reach the D8
+    // capstone). No intent_without_outcome anomaly.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let use_rec = seal_use(&rec, &res, "use-1", std::slice::from_ref(&gh), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let uh = content_hash_of(&use_rec);
+    let cp = checkpoint_over(&rec, std::slice::from_ref(&uh), 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "a one-phase use must still verify: {:?}", r.issues);
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (1, 0));
+}
+
+#[test]
+fn tier_b_two_phase_mismatched_intent_ref_does_not_complete() {
+    // a valid outcome that references a DIFFERENT (phantom) intent does not complete the real intent ->
+    // intent_without_outcome (pairing is by the signed intent_ref == the intent's record_id).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ih = intent_hash(&rec, &res);
+    let outcome = seal_outcome(&rec, &res, "outcome-1", std::slice::from_ref(&ih), "intent-PHANTOM", "intent-PHANTOM", GID);
+    let bundle = two_phase_bundle(&rec, &res, &tsa, Some(outcome));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 1), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_two_phase_unsigned_sibling_intent_ref_does_not_complete() {
+    // Codex + finder: the verifier MUST join on the SIGNED use_outcome.intent_ref, not the unsigned sibling
+    // extensions.broker.intent_ref. Here the resource signed a payload referencing a PHANTOM intent, but the
+    // sibling points at the real intent-1 (as a relay holding the record key would forge). The intent must
+    // NOT complete — proving the join key is bound to the resource authority signature.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ih = intent_hash(&rec, &res);
+    let outcome = seal_outcome(&rec, &res, "outcome-1", std::slice::from_ref(&ih), "intent-PHANTOM", "intent-1", GID); // signed!=sibling
+    let bundle = two_phase_bundle(&rec, &res, &tsa, Some(outcome));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 1), "the unsigned sibling intent_ref must NOT complete the intent: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_two_phase_outcome_for_other_grant_does_not_complete() {
+    // finding #3: an outcome that attests a DIFFERENT grant_id than the intent's must not complete it
+    // (the join binds intent_ref AND grant_id).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ih = intent_hash(&rec, &res);
+    let outcome = seal_outcome(&rec, &res, "outcome-1", std::slice::from_ref(&ih), "intent-1", "intent-1", "grant-OTHER"); // wrong grant
+    let bundle = two_phase_bundle(&rec, &res, &tsa, Some(outcome));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 1), "an outcome for a different grant must not complete the intent: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_two_phase_forged_outcome_does_not_complete() {
+    // an outcome whose evidence is signed by a NON-resource key (forged) is not authority-verified, so it
+    // cannot complete the intent -> intent_without_outcome (fail-closed). uses_matched stays 0.
+    let (rec, res, tsa, forge) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[88u8; 32]));
+    let ih = intent_hash(&rec, &res);
+    let outcome = seal_outcome(&rec, &forge, "outcome-1", std::slice::from_ref(&ih), "intent-1", "intent-1", GID); // forged auth
+    let bundle = two_phase_bundle(&rec, &res, &tsa, Some(outcome));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 1), "a forged outcome must not complete an intent: {:?}", r.issues);
+    // a closed-but-unauthorized use_outcome is itself a Tier-B violation (not a silently-ignored record).
+    assert!(!r.ok && r.issues.iter().any(|i| i.contains("use_outcome") && i.contains("not validatable")), "issues: {:?}", r.issues);
 }

@@ -92,6 +92,12 @@ pub struct VerifyReport {
     pub uses_pop_reverified: usize,
     pub unmatched_violation: usize,
     pub unmatched_pending: usize,
+    /// D5 (ADR 0004 F4): a CLOSED `use_intent` (recorded + anchored BEFORE the side effect, passing the full
+    /// grant-match predicate) with NO matching closed `use_outcome` — the action started and was recorded but
+    /// completion was not. A surfaced anomaly (NOT a violation, NOT a clean matched use): the crash-after-act
+    /// case becomes detectable rather than invisible. It does NOT count toward `uses_matched` and does NOT
+    /// consume a single-use grant. A non-zero count blocks the D8 capstone over the closed set.
+    pub intent_without_outcome: usize,
     pub grants_unused: usize,
     /// Pinned operation-taxonomy ARTIFACT trust (ADR 0004 D4 / MF5), one of: `absent` (none pinned in
     /// opts), `untrusted` (unsigned / wrong issuer / pinned digest|version mismatch / no pin supplied /
@@ -278,7 +284,12 @@ fn classify_role(rec: &CanonValue) -> (BrokerRole, bool) {
         .and_then(|v| v.as_str());
     let role = match (kind, ep) {
         (Some("grant"), Some("credential_broker")) => BrokerRole::Broker,
-        (Some("use"), Some("tool_gateway")) => BrokerRole::Resource,
+        // D5 (ADR 0004): a two-phase use is a `use_intent` (recorded BEFORE the side effect) + a
+        // `use_outcome` (AFTER); both are resource-signed records under the tool gateway, alongside the
+        // one-phase `use` (ADR 0003, still accepted for back-compat).
+        (Some("use"), Some("tool_gateway"))
+        | (Some("use_intent"), Some("tool_gateway"))
+        | (Some("use_outcome"), Some("tool_gateway")) => BrokerRole::Resource,
         _ => BrokerRole::None,
     };
     (role, kind.is_some())
@@ -599,6 +610,7 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             count(r.unmatched_violation),
         ),
         ("unmatched_pending".into(), count(r.unmatched_pending)),
+        ("intent_without_outcome".into(), count(r.intent_without_outcome)),
         ("grants_unused".into(), count(r.grants_unused)),
         (
             "taxonomy_status".into(),
@@ -833,6 +845,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         uses_pop_reverified: 0,
         unmatched_violation: 0,
         unmatched_pending: 0,
+        intent_without_outcome: 0,
         grants_unused: 0,
         taxonomy_status: "absent".to_string(),
         broker_trust: "assumed".to_string(),
@@ -2144,10 +2157,54 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // D3 (ADR 0004): a (resource_id, PoP nonce) pair seen on two CLOSED receipts is a replay/duplicate
     // submission over the visible set — independent of the per-grant_id single-use rule.
     let mut seen_nonces: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut intent_without_outcome = 0usize;
+    let broker_kind = |rec: &CanonValue| -> Option<String> {
+        rec.get("extensions").and_then(|e| e.get("broker")).and_then(|b| b.get("kind")).and_then(|v| v.as_str()).map(String::from)
+    };
+    // D5 pre-pass: a `use_outcome` (kind=use_outcome) COMPLETES a `use_intent`. The join key (intent_ref)
+    // AND the grant_id are read from the SIGNED `use_outcome` PAYLOAD — bound by `authority.evidence_hash`
+    // (re-derived here) + the resource `evidence_sig` — NOT the unsigned sibling `extensions.broker.intent_ref`
+    // (which the resource's signature never covers). Without this, the record-signing key (a relay/exporter,
+    // a DIFFERENT trust domain than the resource) could redirect a resource-signed outcome to complete a
+    // different intent. A CLOSED outcome MUST be fully validatable (integrity + resource authority +
+    // re-derivable payload) — else it is a Tier-B violation (parity with a one-phase use; a use_outcome must
+    // not be a laundering path for an unauthorized resource record). `outcome_for` maps the signed intent_ref
+    // → the signed grant_id, so an intent completes only when an outcome attests THE SAME grant.
+    let mut outcome_for: BTreeMap<String, String> = BTreeMap::new();
+    for rt in &record_trust {
+        let rec = &records[rt.index];
+        if rt.broker_role != BrokerRole::Resource.as_str() || broker_kind(rec).as_deref() != Some("use_outcome") {
+            continue;
+        }
+        if !closed.contains(rt.content_hash.as_str()) {
+            continue; // in-flight outcome: not yet anchored, completes nothing
+        }
+        if rt.trust != TrustLevel::IntegrityProven
+            || rt.authority != AuthorityTrust::Verified
+            || !evidence_rederivable(rec, "use_outcome")
+        {
+            unmatched_violation += 1;
+            issues.push(format!("use_outcome {} ({}): closed but not validatable (integrity / resource authority / re-derivable payload) — Tier-B violation", rt.index, rt.record_id));
+            continue;
+        }
+        match (ev_str(rec, "use_outcome", "intent_ref"), ev_str(rec, "use_outcome", "grant_id")) {
+            (Some(iref), Some(ogid)) => {
+                outcome_for.insert(iref, ogid);
+            }
+            _ => {
+                unmatched_violation += 1;
+                issues.push(format!("use_outcome {} ({}): missing signed intent_ref/grant_id in payload — violation", rt.index, rt.record_id));
+            }
+        }
+    }
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str() {
             continue;
+        }
+        let bkind = broker_kind(rec).unwrap_or_default();
+        if bkind == "use_outcome" {
+            continue; // outcomes are joined to their intent in the pre-pass, not counted as standalone uses
         }
         if !seen_uses.insert(rt.content_hash.as_str()) {
             continue; // verbatim-duplicate use deduped (not double-counted)
@@ -2182,8 +2239,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
         // MUST-FIX 1 (mirror of the grant-side kind guard): `kind` is duplicated at extensions.broker.kind
         // (the role discriminator that made this a resource record) and inside use_evidence. The payload
-        // MUST say kind="use"; absence or divergence is a hard failure.
-        if ev_str(rec, "use_evidence", "kind").as_deref() != Some("use") {
+        // MUST say the SAME kind as the discriminator ("use" one-phase, or "use_intent" two-phase); absence
+        // or divergence is a hard failure. (D5: a `use_intent` carries the same PoP-validated use_evidence as
+        // a one-phase use, with kind="use_intent".)
+        if ev_str(rec, "use_evidence", "kind").as_deref() != Some(bkind.as_str()) {
             unmatched_violation += 1;
             violation(&mut issues, "use_evidence.kind is absent or diverges from the extensions.broker.kind discriminator (MUST-FIX 1)".into());
             continue;
@@ -2279,6 +2338,15 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if single && g.used >= 1 {
             unmatched_violation += 1;
             violation(&mut issues, format!("single-use grant '{gid}' exercised more than once — double-spend (R5)"));
+            continue;
+        }
+        // D5 (ADR 0004 F4): a `use_intent` is a COMPLETE two-phase use only if a valid `use_outcome` whose
+        // SIGNED payload references THIS intent's record_id AND attests THIS grant_id completes it. An intent
+        // that passed every predicate above but has no such outcome is an `intent_without_outcome` anomaly —
+        // recorded-but-incomplete (the crash-after-act case). Surface it and stop BEFORE it counts as matched
+        // / PoP-reverified or consumes a single-use grant.
+        if bkind == "use_intent" && outcome_for.get(&rt.record_id).map(String::as_str) != Some(gid.as_str()) {
+            intent_without_outcome += 1;
             continue;
         }
         // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
@@ -2406,6 +2474,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         uses_pop_reverified,
         unmatched_violation,
         unmatched_pending,
+        intent_without_outcome,
         grants_unused,
         taxonomy_status: taxonomy_status.to_string(),
         broker_trust,

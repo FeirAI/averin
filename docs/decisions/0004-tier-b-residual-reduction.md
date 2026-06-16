@@ -196,9 +196,21 @@ outcome never lands — the crash-after-act case becomes a *detectable anomaly* 
 action. **Residual (irreducible, see D8/D9):** an action whose **intent was never anchored** is still
 invisible — the resource could decline to record the intent. Two-phase moves the trust boundary from
 "trust the resource to record after acting" to "trust the resource to record-intent-before-acting",
-which is strictly stronger but not elimination. **Build artifact:** `use_intent`/`use_outcome` record
-kinds + roles; the resource gateway two-phase mode; verifier intent↔outcome join +
-`intent_without_outcome` count; golden tests.
+which is strictly stronger but not elimination. **Build artifact [IMPLEMENTED, verifier side]:**
+`classify_role` maps `(use_intent|use_outcome, tool_gateway)` → resource role. A pre-pass binds each
+CLOSED `use_outcome` to its `intent_ref` AND `grant_id` read from the **signed `use_outcome` payload**
+(re-derived against `authority.evidence_hash` + the resource `evidence_sig`), NOT the unsigned sibling
+`extensions.broker.intent_ref` — else the record-signing key (a relay, a different trust domain than the
+resource) could redirect a resource-signed outcome to a different intent. A closed outcome that is not
+fully validatable (integrity / resource authority / re-derivable payload) is itself a Tier-B violation
+(parity with a one-phase use — no laundering). The use loop runs the SAME full predicate (D2 PoP / D3 replay / D4 action) on a `use_intent` as
+on a one-phase `use`; at match-success a `use_intent` counts toward `uses_matched` ONLY if a valid outcome
+references it, else it is an `intent_without_outcome` anomaly (surfaced, NOT a violation, does not consume
+a single-use grant). A one-phase `use` (ADR 0003) is still accepted/counted for back-compat (it cannot
+reach the D8 capstone — MF3). Tests: complete pair → matched; intent-without-outcome → anomaly; one-phase →
+matched; mismatched `intent_ref` → not completed; forged (non-resource-signed) outcome → not completed.
+**Deferred (D5.2):** the Go resource-gateway two-phase producer mode (emit `use_intent` before the side
+effect, `use_outcome` after); until then bundles carry one-phase uses and `intent_without_outcome` is 0.
 
 ## D6 — Grant transparency: reduce `broker_trust` from `assumed`
 
