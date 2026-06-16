@@ -2931,6 +2931,20 @@ fn tier_b_attestation_malformed_window_is_failed() {
 }
 
 #[test]
+fn tier_b_attestation_shape_valid_but_impossible_window_is_failed() {
+    // Codex round-2: a bound that PASSES the 24-char shape but names an impossible date/time
+    // (2026-99-99T99:99:99.999Z) must be rejected — is_canonical_ts validates field RANGES, not just shape.
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), ATT_ISSUED, "2026-99-99T99:99:99.999Z", honest_subject(&rec, &res, &cph, &head_root), &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert!(!r.ok, "a shape-valid but out-of-range window must fail");
+    assert_eq!(r.attestation_status, "failed");
+    assert!(r.issues.iter().any(|i| i.contains("not canonical timestamps")), "issues: {:?}", r.issues);
+}
+
+#[test]
 fn tier_b_attestation_stale_anchored_replayed_on_later_bundle_is_failed() {
     // Codex: an attestation bound to the latest ANCHORED checkpoint (cp0) must NOT pass when a LATER verified
     // checkpoint (cp1, unanchored) has extended the bundle beyond it — the attestation does not cover the

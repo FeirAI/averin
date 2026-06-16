@@ -326,35 +326,34 @@ fn worst_status(a: &str, b: &str) -> String {
     .to_string()
 }
 
-/// True iff `s` is exactly `YYYY-MM-DDThh:mm:ss.mmmZ` (fixed-ms UTC). Lexical `<=` on two such
-/// strings equals chronological order; we only compare anchor vs status-change times that pass this.
+/// True iff `s` is a REAL canonical UTC timestamp `YYYY-MM-DDThh:mm:ss.mmmZ` (24 chars) with in-RANGE
+/// fields (month 01-12, day 01-31, hour 00-23, min/sec 00-59) — not merely the right SHAPE. Lexical `<=`
+/// on two such strings equals chronological order, an invariant that only holds for in-range fields
+/// (a shape-only `2026-13-01` would lexically sort AFTER `2026-02-01` yet name no real month). Range
+/// validation (Codex D7) also stops a signed-but-malformed attestation window like `2026-99-99T99:99:99.999Z`
+/// from passing the freshness check. (Day is 01-31, not month-length/leap-aware — impossible values are
+/// rejected; a harmless 02-30 is not, which does not affect ordering.)
 fn is_canonical_ts(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 24 {
         return false;
     }
     let digit = |i: usize| b[i].is_ascii_digit();
-    (0..4).all(digit)
-        && b[4] == b'-'
-        && digit(5)
-        && digit(6)
-        && b[7] == b'-'
-        && digit(8)
-        && digit(9)
-        && b[10] == b'T'
-        && digit(11)
-        && digit(12)
-        && b[13] == b':'
-        && digit(14)
-        && digit(15)
-        && b[16] == b':'
-        && digit(17)
-        && digit(18)
-        && b[19] == b'.'
-        && digit(20)
-        && digit(21)
-        && digit(22)
-        && b[23] == b'Z'
+    let shape = (0..4).all(digit)
+        && b[4] == b'-' && digit(5) && digit(6)
+        && b[7] == b'-' && digit(8) && digit(9)
+        && b[10] == b'T' && digit(11) && digit(12)
+        && b[13] == b':' && digit(14) && digit(15)
+        && b[16] == b':' && digit(17) && digit(18)
+        && b[19] == b'.' && digit(20) && digit(21) && digit(22)
+        && b[23] == b'Z';
+    if !shape {
+        return false;
+    }
+    // shape guarantees these positions are ASCII digits, so each pair is in 0..=99 (no overflow).
+    let two = |i: usize| (b[i] - b'0') * 10 + (b[i + 1] - b'0');
+    let (month, day, hour, min, sec) = (two(5), two(8), two(11), two(14), two(17));
+    (1..=12).contains(&month) && (1..=31).contains(&day) && hour <= 23 && min <= 59 && sec <= 59
 }
 
 /// All content_hashes reachable as causal ancestors of `frontier` (inclusive) — the set a
