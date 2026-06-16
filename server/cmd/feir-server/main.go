@@ -130,7 +130,10 @@ func main() {
 func selectStore() store.Store {
 	dsn := os.Getenv("FEIR_DATABASE_URL")
 	if dsn == "" {
-		log.Printf("storage: in-memory (set FEIR_DATABASE_URL for a durable Postgres store)")
+		log.Printf("WARNING: no FEIR_DATABASE_URL set — storage is IN-MEMORY: evidence is NOT durable " +
+			"(lost on restart) and the heads->seal->put ingest path is not a single transaction (only the " +
+			"Postgres store is serializable). Dev/single-process only; set FEIR_DATABASE_URL for the durable " +
+			"append-only Postgres store.")
 		return store.NewMem()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
