@@ -323,11 +323,21 @@ the report surfaces the attestation's **issuer key id, freshness window, and cla
 the status, so a reader sees exactly *what* was attested *by whom* *for when* — never rendered as
 TEE-style enforcement. **Residual (out-of-scope):** binding the attestation to actual runtime
 enforcement (TEE quote → measured boot → the running broker/resource binary) is real-infra work;
-documented as the boundary. **Build artifact:** `deployment_attestation` schema (incl. the signed
-`subject` binding) + pinned attestation-authority key + verifier evaluation;
-`attestation_status: unevaluated|attested_claims|failed` + the surfaced issuer/window/claim/subject
-fields; golden tests INCLUDING a substitution test — a valid, fresh, pinned-issuer attestation whose
-`subject` names a DIFFERENT project/manifest/checkpoint/key-set → `failed` (not `attested_claims`).
+documented as the boundary. **Build artifact [IMPLEMENTED, verifier side]:** a top-level
+`deployment_attestation` object `{issuer_kid, issued_at, not_after, claim_types[], subject{...}, sig}`
+signed (domain `feir.attestation.v1`) over its RCP-canonical bytes minus `sig`, verified under a pinned
+`attestation_keys` issuer (role-separated — disjoint from broker/resource/taxonomy, a FATAL config error
+otherwise). The signed `subject` binds `project_id`, `coverage_manifest_digest`, the latest anchored
+`checkpoint_hash` + `broker_grant_head_root`, the `authority_kids` set (broker+resource+taxonomy pinned
+key ids), and the `resource_ids` set. **Freshness is offline-anchored:** the latest anchored checkpoint's
+TSA timestamp must fall within `[issued_at, not_after]` (no wall clock is trusted). The verifier emits
+`attestation_status: unevaluated|attested_claims|failed` plus surfaced `attestation_issuer_kid` /
+`attestation_issued_at` / `attestation_not_after` / `attestation_claim_types` / `attestation_subject_digest`.
+Tests include the mandatory **substitution test** (a valid, fresh, pinned-issuer attestation whose
+`subject` names a DIFFERENT project/checkpoint → `failed`, not `attested_claims`), bad-sig, issuer-kid
+mismatch, stale-window, absent (→`unevaluated`), and the role-separation fatal. **Deferred (D7.2):** the
+Go producer emitting a real `deployment_attestation` on export; until then a bundle without one is
+`unevaluated` (safe default).
 
 ## D8 — The `attested_complete` gate (the honest capstone)
 

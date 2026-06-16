@@ -122,6 +122,21 @@ pub struct VerifyReport {
     /// disclosure, label↔credential fidelity stays a `broker_trust` residual.
     pub cred_label_checks: usize,
     pub cred_label_matched: usize,
+    /// Deployment-attestation evaluation (ADR 0004 D7), one of: `unevaluated` (no `deployment_attestation`
+    /// in the bundle, or no `attestation_keys` pinned — the runtime claims are NOT assessed), `failed`
+    /// (an attestation is present but its `sig`/issuer is bad, it is stale/out-of-window, or its signed
+    /// `subject` does NOT match this bundle — a substitution/replay), or `attested_claims` (a fresh,
+    /// pinned-issuer attestation whose `subject` binds THIS project/manifest/checkpoint/head/key-set/
+    /// resource-set exists). This proves such an attestation EXISTS — NOT that the runtime obeyed it
+    /// (real isolation/egress/non-transferability needs a TEE/remote-attestation chain, out of scope).
+    /// The issuer kid, freshness window, claim types, and subject digest are surfaced alongside so a
+    /// reader sees exactly what was attested, by whom, for when.
+    pub attestation_status: String,
+    pub attestation_issuer_kid: Option<String>,
+    pub attestation_issued_at: Option<String>,
+    pub attestation_not_after: Option<String>,
+    pub attestation_claim_types: Vec<String>,
+    pub attestation_subject_digest: Option<String>,
     /// The bundle's `coverage_manifest` echoed verbatim (the verifier does NOT trust it; it surfaces
     /// it so an auditor can evaluate the out-of-band attestations). `None` if absent.
     pub coverage_manifest: Option<CanonValue>,
@@ -193,6 +208,13 @@ pub struct VerifyOptions {
     /// Pinned monotonic version the `taxonomy`'s `version` field must equal to reach `validated` (MF5
     /// rollback anchor). Absent ⇒ no taxonomy can reach `validated`.
     pub taxonomy_version: Option<i64>,
+    /// Trusted DEPLOYMENT-ATTESTATION authority keys (ADR 0004 D7). A `deployment_attestation` whose `sig`
+    /// verifies under one of these — AND whose signed `subject` matches this bundle (project / manifest /
+    /// latest anchored checkpoint + head / authority key-id set / resource_id set), within its freshness
+    /// window — elevates `attestation_status` to `attested_claims`. Must be role-separated (disjoint from
+    /// broker/resource/taxonomy keys — enforced as a FATAL config error), so a broker cannot self-attest.
+    /// Absent ⇒ `attestation_status` stays `unevaluated` (the attestation, if any, is not evaluated).
+    pub attestation_keys: Vec<VerifyingKey>,
 }
 
 struct KeyEntry {
@@ -604,10 +626,17 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ),
         ("cred_label_checks".into(), count(r.cred_label_checks)),
         ("cred_label_matched".into(), count(r.cred_label_matched)),
+        // D7 (ADR 0004): the attestation verdict + what/by-whom/for-when, so a reader sees the claims were
+        // attested by a pinned issuer for a window — never rendered as TEE-style runtime enforcement.
         (
             "attestation_status".into(),
-            CanonValue::string("unevaluated"),
+            CanonValue::string(r.attestation_status.clone()),
         ),
+        ("attestation_issuer_kid".into(), opt_str(&r.attestation_issuer_kid)),
+        ("attestation_issued_at".into(), opt_str(&r.attestation_issued_at)),
+        ("attestation_not_after".into(), opt_str(&r.attestation_not_after)),
+        ("attestation_claim_types".into(), str_array(&r.attestation_claim_types)),
+        ("attestation_subject_digest".into(), opt_str(&r.attestation_subject_digest)),
         (
             "action_completeness".into(),
             CanonValue::string(if r.coverage_manifest.is_some() {
@@ -810,6 +839,12 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         broker_trust: "assumed".to_string(),
         cred_label_checks: 0,
         cred_label_matched: 0,
+        attestation_status: "unevaluated".to_string(),
+        attestation_issuer_kid: None,
+        attestation_issued_at: None,
+        attestation_not_after: None,
+        attestation_claim_types: Vec::new(),
+        attestation_subject_digest: None,
         coverage_manifest: None,
         issues: vec![msg.to_string()],
         first_broken_link: Some(msg.to_string()),
@@ -1241,6 +1276,171 @@ fn compute_broker_trust(
     }
 }
 
+/// The surfaced outcome of D7 deployment-attestation evaluation.
+struct AttestationEval {
+    status: String,
+    issuer_kid: Option<String>,
+    issued_at: Option<String>,
+    not_after: Option<String>,
+    claim_types: Vec<String>,
+    subject_digest: Option<String>,
+}
+
+/// D7 (ADR 0004): evaluate a `deployment_attestation`. It does NOT verify the runtime properties; it proves
+/// a fresh, PINNED-issuer attestation whose signed `subject` binds THIS exact bundle EXISTS. Returns
+/// `attested_claims` only when the `sig` verifies under a pinned `attestation_keys` issuer, the claimed
+/// `issuer_kid` matches that signer, the latest anchored checkpoint timestamp falls within
+/// `[issued_at, not_after]`, AND every `subject` field (project / coverage_manifest digest / latest
+/// anchored checkpoint_hash + broker_grant_head root / authority key-id set / resource_id set) matches the
+/// bundle. A present-but-bad attestation is `failed` (never silently `unevaluated`); absent attestation or
+/// no pinned issuer is `unevaluated`.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_attestation(
+    bundle: &CanonValue,
+    opts: &VerifyOptions,
+    project_id: Option<&str>,
+    anchored_cp_ids: &[(i64, String, String, Option<String>)],
+    resource_ids: &BTreeSet<String>,
+    issues: &mut Vec<String>,
+) -> AttestationEval {
+    let unevaluated = || AttestationEval {
+        status: "unevaluated".to_string(),
+        issuer_kid: None,
+        issued_at: None,
+        not_after: None,
+        claim_types: Vec::new(),
+        subject_digest: None,
+    };
+    let att = match bundle.get("deployment_attestation") {
+        Some(a) if !a.is_null() => a,
+        _ => return unevaluated(), // no attestation -> runtime claims simply not evaluated
+    };
+    if opts.attestation_keys.is_empty() {
+        return unevaluated(); // present, but the verifier pinned no issuer -> cannot evaluate
+    }
+    let s_str = |o: &CanonValue, k: &str| o.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    // surfaced fields (parsed up front so a `failed` verdict still reports what/by-whom/for-when).
+    let claim_types: Vec<String> = att
+        .get("claim_types")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let subject_digest = att.get("subject").map(|s| crate::hashx::sha256_prefixed(s.serialize().as_bytes()));
+    let (issued_at, not_after) = (s_str(att, "issued_at"), s_str(att, "not_after"));
+    let mut eval = AttestationEval {
+        status: "failed".to_string(), // default to failed once an attestation is present + evaluable
+        issuer_kid: att.get("issuer_kid").and_then(|v| v.as_str()).map(String::from),
+        issued_at: Some(issued_at.clone()),
+        not_after: Some(not_after.clone()),
+        claim_types,
+        subject_digest,
+    };
+
+    // 1. signature over the canonical attestation minus `sig`, under a pinned issuer (mirrors taxonomy).
+    let sig = match att.get("sig").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            issues.push("deployment_attestation: missing sig (D7)".into());
+            return eval;
+        }
+    };
+    let mut obj = match att.as_object() {
+        Some(o) => o.clone(),
+        None => {
+            issues.push("deployment_attestation: not an object (D7)".into());
+            return eval;
+        }
+    };
+    obj.retain(|(k, _)| k != "sig");
+    let digest = crate::hashx::sha256_prefixed(CanonValue::Object(obj).serialize().as_bytes());
+    let signer = match opts
+        .attestation_keys
+        .iter()
+        .find(|vk| crate::sign::verify("feir.attestation.v1", &digest, sig, vk).is_ok())
+    {
+        Some(vk) => vk,
+        None => {
+            issues.push("deployment_attestation: sig does not verify under any pinned attestation key (D7)".into());
+            return eval;
+        }
+    };
+    // the CLAIMED issuer_kid must be the ACTUAL signer (else a reader's surfaced issuer is a lie).
+    let signer_kid = cnf_kid(signer);
+    if eval.issuer_kid.as_deref() != Some(signer_kid.as_str()) {
+        issues.push("deployment_attestation: issuer_kid does not match the signing key (D7)".into());
+        eval.issuer_kid = Some(signer_kid); // surface the truth, not the claim
+        return eval;
+    }
+
+    // 2. freshness / window coverage: the LATEST anchored checkpoint's TSA timestamp must fall within
+    // [issued_at, not_after] (offline has no wall clock; the anchored time is the trusted reference).
+    let latest = match anchored_cp_ids.iter().max_by_key(|(seq, _, _, _)| *seq) {
+        Some(a) => a,
+        None => {
+            issues.push("deployment_attestation present but no verified+anchored checkpoint to bind/date it (D7)".into());
+            return eval;
+        }
+    };
+    let ts = &latest.2;
+    // a MISSING/empty bound is not "no bound" — an empty issued_at would make `"" <= ts` always true and
+    // silently drop the LOWER freshness bound (open-ended backdating). Require both bounds present.
+    if issued_at.is_empty() || not_after.is_empty() {
+        issues.push("deployment_attestation: missing/empty issued_at or not_after — no bounded freshness window (D7)".into());
+        return eval;
+    }
+    if !(issued_at.as_str() <= ts.as_str() && ts.as_str() <= not_after.as_str()) {
+        issues.push("deployment_attestation: anchored checkpoint time is outside the attestation window — stale/not-covering (D7)".into());
+        return eval;
+    }
+
+    // 3. subject match: every bound field must equal the bundle under review (substitution/replay guard).
+    let sub = match att.get("subject").and_then(|s| s.as_object()) {
+        Some(_) => att.get("subject").unwrap(),
+        None => {
+            issues.push("deployment_attestation: missing/!object subject (D7)".into());
+            return eval;
+        }
+    };
+    let arr = |o: &CanonValue, k: &str| -> BTreeSet<String> {
+        o.get(k)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    let manifest_digest = bundle
+        .get("coverage_manifest")
+        .filter(|m| !m.is_null())
+        .map(|m| crate::hashx::sha256_prefixed(m.serialize().as_bytes()))
+        .unwrap_or_default();
+    let head_root = latest.3.clone().unwrap_or_else(|| grant_head_root(&[]));
+    let mut kids: BTreeSet<String> = BTreeSet::new();
+    for vk in opts
+        .broker_authority_keys
+        .iter()
+        .chain(opts.resource_authority_keys.iter())
+        .chain(opts.taxonomy_keys.iter())
+    {
+        kids.insert(cnf_kid(vk));
+    }
+    let mut mism: Vec<&str> = Vec::new();
+    // project_id MUST be a non-empty binding: an empty bundle project_id matching an empty subject field
+    // would turn this substitution guard into a no-op, so an absent/empty project_id is always a mismatch.
+    let bundle_project = project_id.unwrap_or_default();
+    if bundle_project.is_empty() || s_str(sub, "project_id") != bundle_project { mism.push("project_id"); }
+    if s_str(sub, "coverage_manifest_digest") != manifest_digest { mism.push("coverage_manifest_digest"); }
+    if s_str(sub, "checkpoint_hash") != latest.1 { mism.push("checkpoint_hash"); }
+    if s_str(sub, "broker_grant_head_root") != head_root { mism.push("broker_grant_head_root"); }
+    if arr(sub, "authority_kids") != kids { mism.push("authority_kids"); }
+    if &arr(sub, "resource_ids") != resource_ids { mism.push("resource_ids"); }
+    if !mism.is_empty() {
+        issues.push(format!("deployment_attestation: subject does not match the bundle under review — substitution/replay (D7): {}", mism.join(", ")));
+        return eval;
+    }
+
+    eval.status = "attested_claims".to_string();
+    eval
+}
+
 pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
     let mut issues: Vec<String> = Vec::new();
     let project_id = s(bundle, "project_id");
@@ -1252,10 +1452,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // use. This is a FATAL configuration error — abort before evaluating any record (VerifyingKey
     // equality is raw-bytes, which also settles the derived key id). Never proceed on an ambiguous
     // key universe.
-    let role_sets: [(&str, &[VerifyingKey]); 3] = [
+    let role_sets: [(&str, &[VerifyingKey]); 5] = [
         ("broker_authority_keys", &opts.broker_authority_keys),
         ("resource_authority_keys", &opts.resource_authority_keys),
         ("taxonomy_keys", &opts.taxonomy_keys),
+        // D7: the attestation authority must be role-separated too — else a broker/resource could sign a
+        // deployment_attestation that vouches for its own runtime (self-attestation).
+        ("attestation_keys", &opts.attestation_keys),
+        // The TSA mints the freshness timestamp D7 anchors the attestation window to; a key that is BOTH
+        // the TSA and an authority (broker/resource/taxonomy/attestation) could self-mint a timestamp inside
+        // its own window, so the time authority must be disjoint from every signing role too.
+        ("trusted_tsa_keys", &opts.trusted_tsa_keys),
     ];
     for i in 0..role_sets.len() {
         for j in (i + 1)..role_sets.len() {
@@ -1481,6 +1688,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut checkpoints_anchored = 0usize;
     // (seq, anchored_ts, frontier) for each checkpoint with a verified anchor
     let mut anchored: Vec<(i64, String, Vec<String>)> = Vec::new();
+    // D7: (seq, checkpoint_hash, anchored_ts, head cumulative_root) of each verified+anchored checkpoint,
+    // so the deployment-attestation subject can bind the LATEST anchored checkpoint identity + its head.
+    let mut anchored_cp_ids: Vec<(i64, String, String, Option<String>)> = Vec::new();
     // D6: (seq, anchored_and_verified, head, frontier) for each VERIFIED checkpoint carrying a head;
     // `verified_headless` holds the frontiers of verified checkpoints that carry NO well-formed head.
     let mut cp_heads: Vec<(i64, bool, GrantHead, Vec<String>)> = Vec::new();
@@ -1549,6 +1759,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 match verify_anchor(&cph, anchor, &anchor_trust) {
                     Ok(ts) => {
                         this_anchored = true;
+                        anchored_cp_ids.push((cp_seq, cph.clone(), ts.clone(), cp_head.as_ref().map(|h| h.cumulative_root.clone())));
                         anchored.push((cp_seq, ts, cp_frontier.clone()));
                     }
                     Err(e) => issues.push(format!("checkpoint {i} anchor invalid: {e}")),
@@ -2117,6 +2328,20 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         None => "assumed".to_string(),
     };
 
+    // D7: the resource_id set the deployment-attestation subject must bind — every resource named by a
+    // grant_evidence or use_evidence in the bundle (so a substituted attestation for a different surface
+    // is rejected).
+    let mut resource_ids: BTreeSet<String> = BTreeSet::new();
+    for rec in records {
+        if let Some(r) = ev_str(rec, "grant_evidence", "resource_id") {
+            resource_ids.insert(r);
+        }
+        if let Some(r) = ev_str(rec, "use_evidence", "resource_id") {
+            resource_ids.insert(r);
+        }
+    }
+    let attest = evaluate_attestation(bundle, opts, project_id.as_deref(), &anchored_cp_ids, &resource_ids, &mut issues);
+
     let coverage_manifest = bundle.get("coverage_manifest").cloned();
 
     let first_broken_link = issues.first().cloned();
@@ -2161,6 +2386,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         broker_trust,
         cred_label_checks,
         cred_label_matched,
+        attestation_status: attest.status,
+        attestation_issuer_kid: attest.issuer_kid,
+        attestation_issued_at: attest.issued_at,
+        attestation_not_after: attest.not_after,
+        attestation_claim_types: attest.claim_types,
+        attestation_subject_digest: attest.subject_digest,
         coverage_manifest,
         issues,
         first_broken_link,

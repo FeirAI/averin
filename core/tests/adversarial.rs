@@ -2670,3 +2670,207 @@ fn tier_b_cred_descriptor_absent_is_residual() {
     assert!(r.ok, "absent disclosure must still verify: {:?}", r.issues);
     assert_eq!((r.cred_label_checks, r.cred_label_matched), (0, 0));
 }
+
+// ---- D7: deployment-attestation evaluation ----
+
+// the attestation window must cover checkpoint_with_head's make_test_anchor timestamp (2026-06-15T10:10:01Z).
+const ATT_ISSUED: &str = "2026-06-15T00:00:00.000Z";
+const ATT_NOT_AFTER: &str = "2026-06-16T00:00:00.000Z";
+
+// a D6 grant + anchored checkpoint(head); returns (bundle without attestation, checkpoint_hash, head_root).
+fn d6_anchored(rec: &SigningKey, tsa: &SigningKey) -> (CanonValue, String, String) {
+    let grant = seal_grant(rec, rec, GID, &grant_evidence_d6(GID, 1));
+    let gh = content_hash_of(&grant);
+    let head = grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &gh)]));
+    let cp = checkpoint_with_head(rec, std::slice::from_ref(&gh), 1, head, Some(tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp.clone()]);
+    (bundle, checkpoint_hash(&cp), ghr(&[(1, &gh)]))
+}
+
+// the honest subject that binds the d6_anchored bundle (broker=rec, resource=res, no taxonomy, no manifest).
+fn honest_subject(rec: &SigningKey, res: &SigningKey, cph: &str, head_root: &str) -> CanonValue {
+    CanonValue::object(vec![
+        ("project_id".into(), CanonValue::string("proj-001")),
+        ("coverage_manifest_digest".into(), CanonValue::string("")),
+        ("checkpoint_hash".into(), CanonValue::string(cph)),
+        ("broker_grant_head_root".into(), CanonValue::string(head_root)),
+        ("authority_kids".into(), CanonValue::Array(vec![
+            CanonValue::string(feir_decision_core::verify::cnf_kid(&rec.verifying_key())),
+            CanonValue::string(feir_decision_core::verify::cnf_kid(&res.verifying_key())),
+        ])),
+        ("resource_ids".into(), CanonValue::Array(vec![CanonValue::string(RESOURCE)])),
+    ])
+    .unwrap()
+}
+
+fn attestation(issuer_kid: &str, issued: &str, not_after: &str, subject: CanonValue, attest_sk: &SigningKey) -> CanonValue {
+    let body = CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("deployment_attestation")),
+        ("issuer_kid".into(), CanonValue::string(issuer_kid)),
+        ("issued_at".into(), CanonValue::string(issued)),
+        ("not_after".into(), CanonValue::string(not_after)),
+        ("claim_types".into(), CanonValue::Array(vec![
+            CanonValue::string("sandbox_isolation"),
+            CanonValue::string("egress_policy"),
+            CanonValue::string("key_non_transferability"),
+        ])),
+        ("subject".into(), subject),
+    ])
+    .unwrap();
+    let digest = sha256_prefixed(body.serialize().as_bytes());
+    let sig = feir_decision_core::sign::sign("feir.attestation.v1", &digest, attest_sk);
+    change_field(&body, "sig", CanonValue::string(sig))
+}
+
+fn attest_opts(rec: &SigningKey, res: &SigningKey, tsa: &SigningKey, attest: &SigningKey) -> VerifyOptions {
+    let mut o = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    o.attestation_keys = vec![attest.verifying_key()];
+    o
+}
+
+#[test]
+fn tier_b_attestation_unevaluated_when_absent() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (bundle, _, _) = d6_anchored(&rec, &tsa);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.attestation_status, "unevaluated");
+}
+
+#[test]
+fn tier_b_attestation_unevaluated_without_pinned_issuer() {
+    // attestation PRESENT but no attestation_keys pinned -> the verifier cannot evaluate -> unevaluated
+    // (NOT failed: an unpinned issuer is "we don't assess", never a violation).
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), ATT_ISSUED, ATT_NOT_AFTER, honest_subject(&rec, &res, &cph, &head_root), &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key())); // no attestation_keys
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.attestation_status, "unevaluated");
+}
+
+#[test]
+fn tier_b_attestation_attested_claims() {
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), ATT_ISSUED, ATT_NOT_AFTER, honest_subject(&rec, &res, &cph, &head_root), &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert!(r.ok, "a matching fresh pinned-issuer attestation must verify: {:?}", r.issues);
+    assert_eq!(r.attestation_status, "attested_claims");
+    assert_eq!(r.attestation_issuer_kid.as_deref(), Some(feir_decision_core::verify::cnf_kid(&attest.verifying_key()).as_str()));
+    assert!(r.attestation_claim_types.contains(&"sandbox_isolation".to_string()));
+    assert!(r.attestation_subject_digest.is_some());
+}
+
+#[test]
+fn tier_b_attestation_bad_sig_is_failed() {
+    // signed by a key that is NOT the pinned issuer -> sig does not verify -> failed (not unevaluated).
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let wrong = signing_key_from_seed(&[12u8; 32]);
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), ATT_ISSUED, ATT_NOT_AFTER, honest_subject(&rec, &res, &cph, &head_root), &wrong);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert!(!r.ok, "a bad-signature attestation must fail the bundle");
+    assert_eq!(r.attestation_status, "failed");
+    assert!(r.issues.iter().any(|i| i.contains("sig does not verify")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_attestation_issuer_kid_mismatch_is_failed() {
+    // sig verifies under the pinned issuer, but the CLAIMED issuer_kid names a different key.
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    let att = attestation("ed25519-WrongKid0", ATT_ISSUED, ATT_NOT_AFTER, honest_subject(&rec, &res, &cph, &head_root), &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert!(!r.ok);
+    assert_eq!(r.attestation_status, "failed");
+    assert!(r.issues.iter().any(|i| i.contains("issuer_kid does not match")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_attestation_stale_window_is_failed() {
+    // the anchored checkpoint time falls OUTSIDE [issued_at, not_after] -> stale/not-covering.
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    // window ends BEFORE the anchored ts (ANCHOR_TS = 2026-06-15T10:10:01Z)
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), "2026-06-14T00:00:00.000Z", "2026-06-15T00:00:00.000Z", honest_subject(&rec, &res, &cph, &head_root), &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert!(!r.ok);
+    assert_eq!(r.attestation_status, "failed");
+    assert!(r.issues.iter().any(|i| i.contains("outside the attestation window")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_attestation_subject_substitution_is_failed() {
+    // CRITICAL (ADR 0004 D7 substitution test): a VALID, FRESH, PINNED-ISSUER attestation whose subject
+    // names a DIFFERENT project must NOT pass — else an attestation for another deployment is replayable.
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    let mut subject = honest_subject(&rec, &res, &cph, &head_root);
+    subject = change_field(&subject, "project_id", CanonValue::string("proj-OTHER")); // signed, but wrong deployment
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), ATT_ISSUED, ATT_NOT_AFTER, subject, &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert!(!r.ok, "a fresh valid attestation for a DIFFERENT subject must not pass");
+    assert_eq!(r.attestation_status, "failed");
+    assert!(r.issues.iter().any(|i| i.contains("substitution/replay") && i.contains("project_id")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_attestation_checkpoint_substitution_is_failed() {
+    // subject names a different (wrong) checkpoint_hash -> substitution -> failed.
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let (bundle, _cph, head_root) = d6_anchored(&rec, &tsa);
+    let subject = honest_subject(&rec, &res, "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", &head_root);
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), ATT_ISSUED, ATT_NOT_AFTER, subject, &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert!(!r.ok);
+    assert_eq!(r.attestation_status, "failed");
+    assert!(r.issues.iter().any(|i| i.contains("checkpoint_hash")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_attestation_keys_overlapping_broker_is_fatal() {
+    // role separation: the attestation authority must be disjoint from broker/resource/taxonomy keys, else
+    // a broker could self-attest. A shared key is a FATAL config error.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (bundle, _, _) = d6_anchored(&rec, &tsa);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.attestation_keys = vec![rec.verifying_key()]; // == broker key
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok);
+    assert!(r.issues.iter().any(|i| i.contains("attestation_keys") && i.contains("must be disjoint")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_attestation_keys_overlapping_tsa_is_fatal() {
+    // the TSA mints the freshness timestamp the attestation window is anchored to; a key that is BOTH the
+    // TSA and the attestation authority could self-mint a timestamp inside its own window -> fatal.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (bundle, _, _) = d6_anchored(&rec, &tsa);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.attestation_keys = vec![tsa.verifying_key()]; // == TSA key
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok);
+    assert!(r.issues.iter().any(|i| i.contains("trusted_tsa_keys") && i.contains("must be disjoint")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_attestation_empty_window_is_failed() {
+    // a MISSING/empty issued_at would silently drop the LOWER freshness bound (open-ended backdating);
+    // both bounds must be present, else the attestation is failed (not attested_claims).
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), "", ATT_NOT_AFTER, honest_subject(&rec, &res, &cph, &head_root), &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert!(!r.ok, "an empty issued_at must fail (no bounded window)");
+    assert_eq!(r.attestation_status, "failed");
+    assert!(r.issues.iter().any(|i| i.contains("no bounded freshness window")), "issues: {:?}", r.issues);
+}
