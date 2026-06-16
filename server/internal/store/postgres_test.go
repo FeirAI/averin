@@ -214,6 +214,12 @@ func TestPostgresBrokerSeq(t *testing.T) {
 	exerciseBrokerSeq(t, p)
 }
 
+func TestPostgresIdemBinding(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseIdemBinding(t, p)
+}
+
 func TestPostgresDuplicateContentHashCollapse(t *testing.T) {
 	p, done := newTestStore(t)
 	defer done()

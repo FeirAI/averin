@@ -152,3 +152,41 @@ func exerciseBrokerSeq(t *testing.T, s Store) {
 func TestMemBrokerSeq(t *testing.T) {
 	exerciseBrokerSeq(t, NewMem())
 }
+
+// exerciseIdemBinding pins the converged idempotency-key-binding contract shared by Mem and Postgres
+// (append-only): when a record collapses on content_hash under a NEW idempotency key, that new key is NOT
+// bound to the collapsed row — RecordByIdem(newKey) is found=false on BOTH stores. Mem used to bind it
+// (RecordByIdem(newKey)=found=true), diverging from Postgres (which physically cannot, REVOKE UPDATE +
+// content_hash unique index) and risking a foreign row surfacing through the broker/use idempotency probes.
+func exerciseIdemBinding(t *testing.T, s Store) {
+	t.Helper()
+	r := rec("sha256:dup", "s1")
+
+	// K1 creates the row.
+	if _, created, err := s.PutRecord("p", "K1", r); err != nil || !created {
+		t.Fatalf("put K1: created=%v err=%v; want created", created, err)
+	}
+	// Same content under a NEW key K2 collapses (created=false) and returns the canonical row...
+	if got, created, err := s.PutRecord("p", "K2", r); err != nil || created || got.ContentHash != r.ContentHash {
+		t.Fatalf("put K2: created=%v hash=%q err=%v; want collapse to the existing row", created, got.ContentHash, err)
+	}
+	// ...but K2 must NOT be bound: RecordByIdem(K2) is found=false (the converged append-only contract).
+	if _, found, err := s.RecordByIdem("p", "K2"); err != nil || found {
+		t.Fatalf("RecordByIdem(K2) found=%v err=%v; want found=false (no cross-key binding on content collapse)", found, err)
+	}
+	// K1 — the key that actually created the row — IS bound.
+	if _, found, err := s.RecordByIdem("p", "K1"); err != nil || !found {
+		t.Fatalf("RecordByIdem(K1) found=%v err=%v; want found=true", found, err)
+	}
+	// A retry under K2 still collapses on content_hash to the same row (idempotent), and stays unbound.
+	if got, created, err := s.PutRecord("p", "K2", r); err != nil || created || got.ContentHash != r.ContentHash {
+		t.Fatalf("retry K2: created=%v err=%v; want stable collapse", created, err)
+	}
+	if _, found, _ := s.RecordByIdem("p", "K2"); found {
+		t.Fatalf("RecordByIdem(K2) after retry: want still found=false")
+	}
+}
+
+func TestMemIdemBinding(t *testing.T) {
+	exerciseIdemBinding(t, NewMem())
+}

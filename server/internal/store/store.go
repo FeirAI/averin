@@ -159,13 +159,16 @@ func (m *Mem) PutRecord(projectID, idemKey string, rec Record) (Record, bool, er
 			return p.records[i], false, nil
 		}
 	}
-	// collapse exact duplicate content (same bytes == same content_hash) — threat #8
+	// collapse exact duplicate content (same bytes == same content_hash) — threat #8. Match Postgres
+	// (append-only): do NOT bind idemKey onto the collapsed row. content-dedup and idem-retry are distinct
+	// concerns — a later retry of the SAME key collapses on content_hash again to the same row, so the
+	// binding buys nothing, and Postgres physically cannot do it (records REVOKEs UPDATE and a content_hash
+	// unique index forbids a second row). A NEW key under identical content therefore stays unbound on BOTH
+	// stores — RecordByIdem(newKey) is found=false — so the broker's idempotent-grant probe and the use/
+	// use-outcome retry guards see one consistent answer regardless of backend.
 	if _, dup := p.byHash[rec.ContentHash]; dup {
 		for _, r := range p.records {
 			if r.ContentHash == rec.ContentHash {
-				if idemKey != "" {
-					p.idem[idemKey] = indexOf(p.records, rec.ContentHash)
-				}
 				return r, false, nil
 			}
 		}
@@ -197,15 +200,6 @@ func (m *Mem) RecordByIdem(projectID, idemKey string) (Record, bool, error) {
 		return p.records[i], true, nil
 	}
 	return Record{}, false, nil
-}
-
-func indexOf(recs []Record, hash string) int {
-	for i, r := range recs {
-		if r.ContentHash == hash {
-			return i
-		}
-	}
-	return -1
 }
 
 func headsOf(recs []Record) []string {
