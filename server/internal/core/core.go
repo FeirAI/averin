@@ -145,25 +145,28 @@ func (c *Core) Commit(domain string, value []byte, nonceHex string) (string, err
 	return checkValue(goStrFree(C.feir_commit(cd, cv, cn)))
 }
 
-// SignEvidence signs an authority evidence statement bound to (source, recordID, evidenceHash) with
-// the held key — the credential broker (and policy engine) uses this to produce the `evidence_sig`
-// that elevates a record to `verified` under the pinned authority key. source must be one of
+// SignEvidence signs an authority evidence statement bound to (source, projectID, recordID, evidenceHash)
+// with the held key — the credential broker (and policy engine) uses this to produce the `evidence_sig`
+// that elevates a record to `verified` under the pinned authority key. projectID binds the evidence to its
+// tenant so a verified triple cannot be replayed into another project (Codex). source must be one of
 // "policy_engine_signed"|"human_signed"|"gateway_enforced" (others are rejected — they could never
 // verify). evidenceHash must be "sha256:<64 LOWERCASE hex>". Returns "ed25519:<base64url>".
 //
 // Trust boundary: this signs evidenceHash as an opaque value; it does NOT check that
 // evidenceHash == sha256(the real canonical evidence). The caller (broker) must guarantee that
 // binding (the broker TCB — ADR 0002 broker_trust: assumed).
-func (c *Core) SignEvidence(source, recordID, evidenceHash string) (string, error) {
+func (c *Core) SignEvidence(source, projectID, recordID, evidenceHash string) (string, error) {
 	cs := C.CString(source)
+	cproj := C.CString(projectID)
 	crid := C.CString(recordID)
 	ceh := C.CString(evidenceHash)
 	cseed := C.CString(c.seedHex)
 	defer C.free(unsafe.Pointer(cs))
+	defer C.free(unsafe.Pointer(cproj))
 	defer C.free(unsafe.Pointer(crid))
 	defer C.free(unsafe.Pointer(ceh))
 	defer C.free(unsafe.Pointer(cseed))
-	return checkValue(goStrFree(C.feir_sign_evidence(cs, crid, ceh, cseed)))
+	return checkValue(goStrFree(C.feir_sign_evidence(cs, cproj, crid, ceh, cseed)))
 }
 
 // VerifyCommitment reports whether the disclosed (value, nonce) opens commitment under domain.

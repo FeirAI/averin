@@ -48,7 +48,7 @@ type Sealer interface {
 	RandomNonce() (string, error)
 	Commit(domain string, value []byte, nonceHex string) (string, error)
 	// authority evidence: the credential broker signs a gateway_enforced grant (RCP §11).
-	SignEvidence(source, recordID, evidenceHash string) (string, error)
+	SignEvidence(source, projectID, recordID, evidenceHash string) (string, error)
 	// RcpEvidenceHash derives evidence_hash = sha256(RCP-canonicalize(payload)) so the verifier can
 	// re-derive it from the embedded grant_evidence (ADR 0003 R1).
 	RcpEvidenceHash(payloadJSON string) (string, error)
@@ -1133,7 +1133,7 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 		return nil, nil, fmt.Errorf("derive grant evidence_hash: %w", err)
 	}
 	// Sign the gateway_enforced evidence (record_id-bound) — this is what the verifier elevates.
-	evidenceSig, err := s.core.SignEvidence("gateway_enforced", grantID, evidenceHash)
+	evidenceSig, err := s.core.SignEvidence("gateway_enforced", gr.ProjectID, grantID, evidenceHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sign grant evidence: %w", err)
 	}
@@ -1451,7 +1451,7 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 	if err != nil {
 		return nil, nil, fmt.Errorf("derive use evidence_hash: %w", err)
 	}
-	evidenceSig, err := s.resourceCore.SignEvidence("gateway_enforced", useID, evidenceHash)
+	evidenceSig, err := s.resourceCore.SignEvidence("gateway_enforced", ur.ProjectID, useID, evidenceHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sign use evidence (resource key): %w", err)
 	}
@@ -1659,7 +1659,7 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 	if err != nil {
 		evidenceHash = "" // a bad hash yields a non-validatable outcome (caught by the verifier), never a silent pass
 	}
-	evidenceSig, _ := s.resourceCore.SignEvidence("gateway_enforced", outcomeID, evidenceHash)
+	evidenceSig, _ := s.resourceCore.SignEvidence("gateway_enforced", projectID, outcomeID, evidenceHash)
 	return map[string]any{
 		"record_id": outcomeID,
 		// FORCE the causal edge to the intent (unioned with session heads in sealAndStore) so the outcome
@@ -1762,9 +1762,10 @@ func (s *Server) normalizeAuthority(rec map[string]any) {
 	// T7 model (b): elevate to the pinned source ONLY if the caller-supplied evidence_sig verifies under the
 	// external policy-engine key over the canonical authority preimage; else fall back to caller_declared.
 	recordID, _ := rec["record_id"].(string)
+	projectID, _ := rec["project_id"].(string)
 	eh, _ := a["evidence_hash"].(string)
 	es, _ := a["evidence_sig"].(string)
-	if verifyAuthorityEvidence(s.policyEngineSource, recordID, eh, es, s.policyEngineKey) {
+	if verifyAuthorityEvidence(s.policyEngineSource, projectID, recordID, eh, es, s.policyEngineKey) {
 		a["source"] = s.policyEngineSource // verified; evidence_hash/evidence_sig retained for the offline verifier
 	} else {
 		a["source"] = "caller_declared"
@@ -1773,11 +1774,12 @@ func (s *Server) normalizeAuthority(rec map[string]any) {
 }
 
 // verifyAuthorityEvidence checks an authority evidence_sig exactly as the offline verifier does (core
-// authority.rs): ed25519 over LP4("feir.authority.v1") ‖ LP4(source) ‖ LP4(record_id) ‖ utf8(evidence_hash),
-// under `key`, with a well-formed sha256 evidence_hash and a non-empty record_id (so a record the server
-// stamps will actually elevate to `verified` offline, not `failed`).
-func verifyAuthorityEvidence(source, recordID, evidenceHash, evidenceSig string, key ed25519.PublicKey) bool {
-	if recordID == "" || !strings.HasPrefix(evidenceSig, "ed25519:") || !strings.HasPrefix(evidenceHash, "sha256:") {
+// authority.rs): ed25519 over LP4("feir.authority.v2") ‖ LP4(source) ‖ LP4(project_id) ‖ LP4(record_id) ‖
+// utf8(evidence_hash), under `key`, with a well-formed sha256 evidence_hash and a non-empty project_id +
+// record_id (so a record the server stamps will actually elevate to `verified` offline, not `failed`).
+// project_id binds the evidence to its tenant so a verified triple cannot be replayed cross-project (Codex).
+func verifyAuthorityEvidence(source, projectID, recordID, evidenceHash, evidenceSig string, key ed25519.PublicKey) bool {
+	if projectID == "" || recordID == "" || !strings.HasPrefix(evidenceSig, "ed25519:") || !strings.HasPrefix(evidenceHash, "sha256:") {
 		return false
 	}
 	// evidence_hash must be CANONICAL lowercase sha256:<64hex>: the offline verifier's parse_sha256 rejects
@@ -1801,8 +1803,9 @@ func verifyAuthorityEvidence(source, recordID, evidenceHash, evidenceSig string,
 		pre = append(pre, b[:]...)
 		pre = append(pre, str...)
 	}
-	lp("feir.authority.v1")
+	lp("feir.authority.v2")
 	lp(source)
+	lp(projectID)
 	lp(recordID)
 	pre = append(pre, evidenceHash...)
 	return ed25519.Verify(key, pre, sig)

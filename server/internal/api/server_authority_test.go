@@ -18,8 +18,8 @@ import (
 )
 
 // signAuthorityEvidence signs an authority statement the way the core does (authority.rs sign_evidence):
-// ed25519 over LP4("feir.authority.v1") ‖ LP4(source) ‖ LP4(record_id) ‖ utf8(evidence_hash).
-func signAuthorityEvidence(source, recordID, evidenceHash string, pe ed25519.PrivateKey) string {
+// ed25519 over LP4("feir.authority.v2") ‖ LP4(source) ‖ LP4(project_id) ‖ LP4(record_id) ‖ utf8(evidence_hash).
+func signAuthorityEvidence(source, projectID, recordID, evidenceHash string, pe ed25519.PrivateKey) string {
 	var pre []byte
 	lp := func(s string) {
 		var b [4]byte
@@ -27,8 +27,9 @@ func signAuthorityEvidence(source, recordID, evidenceHash string, pe ed25519.Pri
 		pre = append(pre, b[:]...)
 		pre = append(pre, s...)
 	}
-	lp("feir.authority.v1")
+	lp("feir.authority.v2")
 	lp(source)
+	lp(projectID)
 	lp(recordID)
 	pre = append(pre, evidenceHash...)
 	return "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(pe, pre))
@@ -51,9 +52,9 @@ func TestPolicyEngineSignedAuthorityElevates(t *testing.T) {
 	sum := sha256.Sum256([]byte("authority-claim"))
 	eh := "sha256:" + hex.EncodeToString(sum[:])
 
-	post := func(idem, recordID, evSig string) string {
+	post := func(proj, idem, recordID, evSig string) string {
 		body, _ := json.Marshal(map[string]any{
-			"idempotency_key": idem, "project_id": "p1", "session_id": "s1", "record_id": recordID,
+			"idempotency_key": idem, "project_id": proj, "session_id": "s1", "record_id": recordID,
 			"event_type": "decision", "status": "ok", "action": "x",
 			"authority": map[string]any{"source": "policy_engine_signed", "evidence_hash": eh, "evidence_sig": evSig},
 		})
@@ -64,21 +65,27 @@ func TestPolicyEngineSignedAuthorityElevates(t *testing.T) {
 		return resp
 	}
 
-	// valid policy-engine evidence -> elevated source retained.
-	resp := post("i1", "policy-rec-1", signAuthorityEvidence("policy_engine_signed", "policy-rec-1", eh, pe))
+	// valid policy-engine evidence (signed over project p1) -> elevated source retained.
+	resp := post("p1", "i1", "policy-rec-1", signAuthorityEvidence("policy_engine_signed", "p1", "policy-rec-1", eh, pe))
 	if !strings.Contains(resp, `"source":"policy_engine_signed"`) {
 		t.Fatalf("a valid policy-engine evidence_sig should elevate the source: %s", resp)
 	}
 	// forged evidence (signed by a DIFFERENT key) -> falls back to caller_declared.
 	wrong := ed25519.NewKeyFromSeed(peSeed(0x45))
-	resp2 := post("i2", "policy-rec-2", signAuthorityEvidence("policy_engine_signed", "policy-rec-2", eh, wrong))
+	resp2 := post("p1", "i2", "policy-rec-2", signAuthorityEvidence("policy_engine_signed", "p1", "policy-rec-2", eh, wrong))
 	if !strings.Contains(resp2, `"source":"caller_declared"`) {
 		t.Fatalf("a forged policy-engine evidence_sig must fall back to caller_declared: %s", resp2)
+	}
+	// CROSS-PROJECT REPLAY (Codex): a block validly signed for project p1 (same record_id/evidence_hash/sig),
+	// replayed into project p2, must NOT elevate — project_id is bound into the authority preimage.
+	respX := post("p2", "i4", "policy-rec-1", signAuthorityEvidence("policy_engine_signed", "p1", "policy-rec-1", eh, pe))
+	if !strings.Contains(respX, `"source":"caller_declared"`) {
+		t.Fatalf("a p1-signed authority block replayed into p2 must fall back to caller_declared: %s", respX)
 	}
 	// a non-canonical (uppercase-hex) evidence_hash the verifier would reject must NOT be stamped — even with
 	// a valid sig over it — so the server never stamps a record the auditor reads as `failed` (cross-language parity).
 	ehUpper := "sha256:" + strings.ToUpper(hex.EncodeToString(sum[:]))
-	respUp := post("i3", "policy-rec-3", signAuthorityEvidence("policy_engine_signed", "policy-rec-3", ehUpper, pe))
+	respUp := post("p1", "i3", "policy-rec-3", signAuthorityEvidence("policy_engine_signed", "p1", "policy-rec-3", ehUpper, pe))
 	if !strings.Contains(respUp, `"source":"caller_declared"`) {
 		t.Fatalf("a non-canonical (uppercase-hex) evidence_hash must NOT elevate (verifier requires lowercase): %s", respUp)
 	}

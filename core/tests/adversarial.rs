@@ -92,7 +92,7 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
     ])
     .unwrap();
     let evidence_hash = sha256_prefixed(grant_evidence.serialize().as_bytes());
-    let evidence_sig = sign_evidence("gateway_enforced", record_id, &evidence_hash, &sk);
+    let evidence_sig = sign_evidence("gateway_enforced", "proj-001", record_id, &evidence_hash, &sk);
     // Build a grant body with a given extensions.broker inner body + authority (evidence_hash/sig).
     let mk_body = |broker_inner: &str, eh: &str, esig: &str| {
         format!(
@@ -222,7 +222,7 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
     // (the broker signed the "use"-kinded payload), the role label and the signed payload disagree.
     let ge_use = change_field(&grant_evidence, "kind", CanonValue::string("use"));
     let eh_use = sha256_prefixed(ge_use.serialize().as_bytes());
-    let esig_use = sign_evidence("gateway_enforced", record_id, &eh_use, &sk);
+    let esig_use = sign_evidence("gateway_enforced", "proj-001", record_id, &eh_use, &sk);
     let kind_div_body = mk_body(
         &format!(r#""kind":"grant","grant_evidence":{}"#, ge_use.serialize()),
         &eh_use,
@@ -299,7 +299,7 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
     // A forged gateway_enforced grant (agent-claimed, no real broker key) does NOT elevate: re-sign
     // the evidence with a DIFFERENT key, pin only the real broker key.
     let imposter = signing_key_from_seed(&[7u8; 32]);
-    let bad_sig = sign_evidence("gateway_enforced", record_id, &evidence_hash, &imposter);
+    let bad_sig = sign_evidence("gateway_enforced", "proj-001", record_id, &evidence_hash, &imposter);
     let bad_body = body.replace(&evidence_sig, &bad_sig);
     let bad_grant = seal(&CanonValue::parse(&bad_body).unwrap(), &sk).unwrap();
     let bad_bundle = change_field(&bundle, "records", CanonValue::Array(vec![bad_grant]));
@@ -991,7 +991,7 @@ fn use_evidence_n(
 
 fn seal_grant(rec_sk: &SigningKey, broker_sk: &SigningKey, record_id: &str, ge: &CanonValue) -> CanonValue {
     let eh = sha256_prefixed(ge.serialize().as_bytes());
-    let esig = sign_evidence("gateway_enforced", record_id, &eh, broker_sk);
+    let esig = sign_evidence("gateway_enforced", "proj-001", record_id, &eh, broker_sk);
     let action = ge.get("action").unwrap().as_str().unwrap();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
@@ -1020,7 +1020,7 @@ fn seal_use_full(
     ue: &CanonValue,
     eh: &str,
 ) -> CanonValue {
-    let esig = sign_evidence("gateway_enforced", record_id, eh, res_sk);
+    let esig = sign_evidence("gateway_enforced", "proj-001", record_id, eh, res_sk);
     let gid = ue.get("grant_id").unwrap().as_str().unwrap();
     let resource = ue.get("resource_id").unwrap().as_str().unwrap();
     let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
@@ -1058,7 +1058,7 @@ fn seal_use(
 fn seal_intent(rec_sk: &SigningKey, res_sk: &SigningKey, record_id: &str, prev: &[String], top_action: &str, ue: &CanonValue) -> CanonValue {
     let ue = change_field(ue, "kind", CanonValue::string("use_intent"));
     let eh = sha256_prefixed(ue.serialize().as_bytes());
-    let esig = sign_evidence("gateway_enforced", record_id, &eh, res_sk);
+    let esig = sign_evidence("gateway_enforced", "proj-001", record_id, &eh, res_sk);
     let gid = ue.get("grant_id").unwrap().as_str().unwrap();
     let resource = ue.get("resource_id").unwrap().as_str().unwrap();
     let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
@@ -1107,7 +1107,7 @@ fn seal_outcome_full(rec_sk: &SigningKey, auth_sk: &SigningKey, record_id: &str,
     ])
     .unwrap();
     let eh = sha256_prefixed(outcome.serialize().as_bytes());
-    let esig = sign_evidence("gateway_enforced", record_id, &eh, auth_sk);
+    let esig = sign_evidence("gateway_enforced", "proj-001", record_id, &eh, auth_sk);
     let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
@@ -1680,7 +1680,7 @@ fn seal_d2_use(
     ])
     .unwrap();
     let eh = sha256_prefixed(ue.serialize().as_bytes());
-    let esig = sign_evidence("gateway_enforced", record_id, &eh, res_sk);
+    let esig = sign_evidence("gateway_enforced", "proj-001", record_id, &eh, res_sk);
     let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
@@ -2711,7 +2711,7 @@ fn tier_b_broker_trust_total_suppression_is_inherent_residual() {
 // a broker grant carrying a credential_commit over the descriptor (so a credential disclosure can open it).
 fn seal_grant_cred(rec_sk: &SigningKey, broker_sk: &SigningKey, record_id: &str, ge: &CanonValue, commitment: &str) -> CanonValue {
     let eh = sha256_prefixed(ge.serialize().as_bytes());
-    let esig = sign_evidence("gateway_enforced", record_id, &eh, broker_sk);
+    let esig = sign_evidence("gateway_enforced", "proj-001", record_id, &eh, broker_sk);
     let action = ge.get("action").unwrap().as_str().unwrap();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",

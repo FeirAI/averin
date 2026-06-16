@@ -11,7 +11,7 @@ use crate::canon::CanonValue;
 use crate::hashx::{lp_str_into, parse_sha256};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
-pub const AUTHORITY_SIG_TAG: &str = "feir.authority.v1";
+pub const AUTHORITY_SIG_TAG: &str = "feir.authority.v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorityTrust {
@@ -41,14 +41,17 @@ impl AuthorityTrust {
     }
 }
 
-/// Preimage the authority system signs: `LP(tag) ‖ LP(source) ‖ LP(record_id) ‖ utf8(evidence_hash)`.
-/// Binding `source` prevents re-labelling; binding `record_id` prevents copying a valid evidence
-/// triple onto an unrelated record (the verifier additionally rejects duplicate record_ids, so a
-/// record_id is a sound binding handle).
-fn preimage(source: &str, record_id: &str, evidence_hash: &str) -> Vec<u8> {
-    let mut p = Vec::with_capacity(48 + source.len() + record_id.len() + evidence_hash.len());
+/// Preimage the authority system signs:
+/// `LP(tag) ‖ LP(source) ‖ LP(project_id) ‖ LP(record_id) ‖ utf8(evidence_hash)`.
+/// Binding `source` prevents re-labelling; binding `project_id` AND `record_id` prevents replaying a valid
+/// evidence triple onto an unrelated record OR a record in a DIFFERENT project (cross-tenant replay, Codex).
+/// `record_id` alone is caller-chosen and the verifier's duplicate-record_id rejection is only WITHIN a
+/// bundle, so `project_id` is the load-bearing tenant-isolation binding.
+fn preimage(source: &str, project_id: &str, record_id: &str, evidence_hash: &str) -> Vec<u8> {
+    let mut p = Vec::with_capacity(56 + source.len() + project_id.len() + record_id.len() + evidence_hash.len());
     lp_str_into(&mut p, AUTHORITY_SIG_TAG);
     lp_str_into(&mut p, source);
+    lp_str_into(&mut p, project_id);
     lp_str_into(&mut p, record_id);
     p.extend_from_slice(evidence_hash.as_bytes());
     p
@@ -57,12 +60,13 @@ fn preimage(source: &str, record_id: &str, evidence_hash: &str) -> Vec<u8> {
 /// Sign an authority evidence statement (for the policy engine / approval system, and fixtures).
 pub fn sign_evidence(
     source: &str,
+    project_id: &str,
     record_id: &str,
     evidence_hash: &str,
     sk: &SigningKey,
 ) -> String {
     use ed25519_dalek::Signer;
-    let sig = sk.sign(&preimage(source, record_id, evidence_hash));
+    let sig = sk.sign(&preimage(source, project_id, record_id, evidence_hash));
     format!("ed25519:{}", b64::encode(&sig.to_bytes()))
 }
 
@@ -86,14 +90,20 @@ pub fn verify_authority(record: &CanonValue, trusted: &[VerifyingKey]) -> Author
                 .get("record_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            // The authority sig binds project_id (tenant isolation): a verified evidence triple from one
+            // project must NOT verify when replayed into another (Codex). project_id is read from the record.
+            let project_id = record
+                .get("project_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let evidence_hash = authority.get("evidence_hash").and_then(|v| v.as_str());
             let evidence_sig = authority.get("evidence_sig").and_then(|v| v.as_str());
             let (eh, es) = match (evidence_hash, evidence_sig) {
                 (Some(h), Some(s)) => (h, s),
                 _ => return AuthorityTrust::Failed, // claims verified but has no evidence
             };
-            if parse_sha256(eh).is_none() || record_id.is_empty() {
-                return AuthorityTrust::Failed; // malformed evidence_hash or unbindable record
+            if parse_sha256(eh).is_none() || record_id.is_empty() || project_id.is_empty() {
+                return AuthorityTrust::Failed; // malformed evidence_hash or unbindable record/project
             }
             let raw = match es
                 .strip_prefix("ed25519:")
@@ -107,7 +117,7 @@ pub fn verify_authority(record: &CanonValue, trusted: &[VerifyingKey]) -> Author
                 return AuthorityTrust::Unverifiable;
             }
             let sig = Signature::from_bytes(&raw);
-            let pre = preimage(source, record_id, eh);
+            let pre = preimage(source, project_id, record_id, eh);
             for vk in trusted {
                 if vk.verify_strict(&pre, &sig).is_ok() {
                     return AuthorityTrust::Verified;
@@ -144,11 +154,15 @@ mod tests {
     }
 
     const EH: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const PROJ: &str = "proj-1";
 
     fn signed_record(source: &str, record_id: &str, sk: &ed25519_dalek::SigningKey) -> CanonValue {
-        let sig = sign_evidence(source, record_id, EH, sk);
+        signed_record_p(source, PROJ, record_id, sk)
+    }
+    fn signed_record_p(source: &str, project_id: &str, record_id: &str, sk: &ed25519_dalek::SigningKey) -> CanonValue {
+        let sig = sign_evidence(source, project_id, record_id, EH, sk);
         rec_with_authority(&format!(
-            r#"{{"record_id":"{record_id}","authority":{{"source":"{source}","evidence_hash":"{EH}","evidence_sig":"{sig}"}}}}"#
+            r#"{{"project_id":"{project_id}","record_id":"{record_id}","authority":{{"source":"{source}","evidence_hash":"{EH}","evidence_sig":"{sig}"}}}}"#
         ))
     }
 
@@ -172,13 +186,30 @@ mod tests {
     fn evidence_triple_cannot_be_copied_to_another_record() {
         let k = signing_key_from_seed(&[77u8; 32]);
         let rec_a = signed_record("policy_engine_signed", "rec-A", &k);
-        // copy A's authority block verbatim onto a record with a DIFFERENT record_id
+        // copy A's authority block verbatim onto a record with a DIFFERENT record_id (SAME project)
         let stolen = authority_of(&rec_a);
-        let rec_b = rec_with_authority(&format!(r#"{{"record_id":"rec-B","authority":{stolen}}}"#));
+        let rec_b = rec_with_authority(&format!(r#"{{"project_id":"{PROJ}","record_id":"rec-B","authority":{stolen}}}"#));
         assert_eq!(
             verify_authority(&rec_b, &[k.verifying_key()]),
             AuthorityTrust::Failed
         );
+    }
+
+    #[test]
+    fn evidence_triple_cannot_be_replayed_to_another_project() {
+        // Codex: a verified policy_engine_signed authority block from project P1 must NOT verify when replayed
+        // into a DIFFERENT project P2 with the SAME record_id/evidence_hash/evidence_sig (cross-tenant replay).
+        let k = signing_key_from_seed(&[77u8; 32]);
+        let rec_p1 = signed_record_p("policy_engine_signed", "proj-1", "rec-X", &k);
+        let stolen = authority_of(&rec_p1);
+        let rec_p2 = rec_with_authority(&format!(r#"{{"project_id":"proj-2","record_id":"rec-X","authority":{stolen}}}"#));
+        assert_eq!(
+            verify_authority(&rec_p2, &[k.verifying_key()]),
+            AuthorityTrust::Failed,
+            "a P1-signed authority block must not verify when replayed into P2"
+        );
+        // sanity: the SAME block in its OWN project still verifies.
+        assert_eq!(verify_authority(&rec_p1, &[k.verifying_key()]), AuthorityTrust::Verified);
     }
 
     fn authority_of(rec: &CanonValue) -> String {
@@ -201,9 +232,9 @@ mod tests {
     #[test]
     fn source_is_bound_no_relabel() {
         let key = signing_key_from_seed(&[5u8; 32]);
-        let human_sig = sign_evidence("human_signed", "rec-1", EH, &key);
+        let human_sig = sign_evidence("human_signed", PROJ, "rec-1", EH, &key);
         let relabelled = rec_with_authority(&format!(
-            r#"{{"record_id":"rec-1","authority":{{"source":"policy_engine_signed","evidence_hash":"{EH}","evidence_sig":"{human_sig}"}}}}"#
+            r#"{{"project_id":"{PROJ}","record_id":"rec-1","authority":{{"source":"policy_engine_signed","evidence_hash":"{EH}","evidence_sig":"{human_sig}"}}}}"#
         ));
         assert_eq!(
             verify_authority(&relabelled, &[key.verifying_key()]),

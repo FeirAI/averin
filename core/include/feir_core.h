@@ -54,11 +54,12 @@ char *feir_verify_commitment(const char *commitment, const char *domain, const c
                              const char *nonce_hex);
 
 /* Sign an authority evidence statement (RCP §11): the policy engine / approval service / credential
- * broker signs (source, record_id, evidence_hash) so the verifier can elevate a record from
- * "declared" to "verified" under the pinned authority key. evidence_hash must be "sha256:<64 hex>".
+ * broker signs (source, project_id, record_id, evidence_hash) so the verifier can elevate a record from
+ * "declared" to "verified" under the pinned authority key. project_id binds the evidence to its tenant so
+ * a verified triple cannot be replayed into another project. evidence_hash must be "sha256:<64 hex>".
  * Returns "ed25519:<base64url>" or {"error":"..."}. seed_hex is the authority system's signing key. */
-char *feir_sign_evidence(const char *source, const char *record_id, const char *evidence_hash,
-                         const char *seed_hex);
+char *feir_sign_evidence(const char *source, const char *project_id, const char *record_id,
+                         const char *evidence_hash, const char *seed_hex);
 
 /* Free a string returned by this library. */
 void feir_string_free(char *ptr);
