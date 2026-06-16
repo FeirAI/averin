@@ -69,8 +69,13 @@ type Server struct {
 	ledger       resourceshim.Ledger
 	// D7.2 (ADR 0004): the deployment-attestation issuing key (role-separated from broker/resource/TSA).
 	// nil = no attestation emitted on export (a bundle then verifies attestation_status:"unevaluated").
-	attestKey    ed25519.PrivateKey
-	signingKeyID string
+	attestKey ed25519.PrivateKey
+	// attestIssuedSkew / attestValidity define the attestation freshness window around the latest
+	// checkpoint's created_ts (the verifier checks the anchored TSA genTime against it, NOT export time).
+	// Set by WithAttestation; overridable via WithAttestationWindow.
+	attestIssuedSkew time.Duration
+	attestValidity   time.Duration
+	signingKeyID     string
 	keyValidFrom string
 	now          func() time.Time // injectable clock for tests
 	// ingestMu serializes the heads->seal->put critical section so concurrent ingests cannot read
@@ -149,6 +154,31 @@ func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
 // `attested_claims`; the attestation asserts a CLAIM exists, never runtime enforcement (ADR 0004 D7).
 func (s *Server) WithAttestation(key ed25519.PrivateKey) *Server {
 	s.attestKey = key
+	if s.attestIssuedSkew == 0 {
+		s.attestIssuedSkew = time.Hour // small skew below the checkpoint time for TSA/clock jitter
+	}
+	if s.attestValidity == 0 {
+		// Window above the checkpoint time. Widened from the original 24h so a slow/queued anchor whose
+		// genTime lands hours-to-days after the seal still falls inside (D7.2 residual). A wide not_after
+		// is safe: the subject binds the exact checkpoint_hash + frontier coverage, so a stale attestation
+		// cannot be replayed onto a moved-on bundle regardless of window width.
+		s.attestValidity = 7 * 24 * time.Hour
+	}
+	return s
+}
+
+// WithAttestationWindow overrides the deployment-attestation freshness window: issuedSkew is how far
+// BELOW the latest checkpoint's created_ts issued_at sits (clock/anchor jitter), validity is how far
+// ABOVE it not_after sits (must exceed the worst-case anchor latency). Call after WithAttestation.
+func (s *Server) WithAttestationWindow(issuedSkew, validity time.Duration) *Server {
+	if issuedSkew <= 0 {
+		issuedSkew = time.Hour // a non-positive skew would degenerate issued_at to the checkpoint time
+	}
+	if validity <= 0 {
+		validity = 7 * 24 * time.Hour // ...and a non-positive validity would fail every anchored genTime closed
+	}
+	s.attestIssuedSkew = issuedSkew
+	s.attestValidity = validity
 	return s
 }
 
@@ -209,6 +239,27 @@ func signTagged(tag, contentHash string, sk ed25519.PrivateKey) string {
 	return "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(sk, pre))
 }
 
+// attestFallbackSkew is the (wide) lower-bound skew used when a checkpoint carries no parseable created_ts,
+// so an honest attestation over a legacy/externally-produced checkpoint is not failed CLOSED (its anchored
+// TSA genTime may predate now()-issuedSkew). not_after still bounds the window; subject binding prevents replay.
+const attestFallbackSkew = 30 * 24 * time.Hour
+
+// attestationWindow computes the [issued_at, not_after] freshness window for a deployment attestation.
+// The offline verifier checks the latest ANCHORED checkpoint's TSA genTime (≈ the checkpoint's createdTS)
+// against this window — it has no wall clock of its own — so the window is bracketed on createdTS, NOT on
+// export time. Anchoring to export now() fails whenever a checkpoint is exported after its seal (Codex D7.2).
+// When createdTS is missing/unparseable we cannot bracket the real anchor time, so issued_at is widened to
+// attestFallbackSkew below export time rather than fail an honest attestation closed.
+func attestationWindow(createdTS string, now time.Time, issuedSkew, validity time.Duration) (string, string) {
+	base := now
+	if t, err := time.Parse("2006-01-02T15:04:05.000Z", createdTS); err == nil {
+		base = t
+	} else if issuedSkew < attestFallbackSkew {
+		issuedSkew = attestFallbackSkew
+	}
+	return ts(base.Add(-issuedSkew)), ts(base.Add(validity))
+}
+
 // buildDeploymentAttestation assembles the D7.2 attestation over the project's latest checkpoint. The
 // signed `subject` binds project_id / coverage_manifest_digest / latest checkpoint_hash +
 // broker_grant_head_root / the authority key-id set / the resource-id set; the digest is the verifier's
@@ -263,21 +314,11 @@ func (s *Server) buildDeploymentAttestation(projectID string, recs []store.Recor
 		"authority_kids":           authorityKids,
 		"resource_ids":             resourceIDs,
 	}
-	// Freshness window must COVER the latest checkpoint's ANCHORED time, not export time. The verifier
-	// checks the TSA genTime (≈ the checkpoint's created_ts) against [issued_at, not_after] — it has no
-	// wall clock of its own. Anchoring the window to export `now()` fails whenever a checkpoint is exported
-	// more than ~1h after it was sealed (Codex D7.2). Bracket the latest checkpoint's own created_ts with
-	// margin for TSA clock skew + anchor latency, falling back to now() only for a pre-created_ts checkpoint.
-	windowBase := s.now()
-	if cp.CreatedTS != "" {
-		if t, perr := time.Parse("2006-01-02T15:04:05.000Z", cp.CreatedTS); perr == nil {
-			windowBase = t
-		}
-	}
+	issuedAt, notAfter := attestationWindow(cp.CreatedTS, s.now(), s.attestIssuedSkew, s.attestValidity)
 	att := map[string]any{
 		"issuer_kid":  broker.KeyID(s.attestKey.Public().(ed25519.PublicKey)),
-		"issued_at":   ts(windowBase.Add(-1 * time.Hour)),
-		"not_after":   ts(windowBase.Add(24 * time.Hour)),
+		"issued_at":   issuedAt,
+		"not_after":   notAfter,
 		"claim_types": []string{"sandbox_isolation", "egress_policy", "key_non_transferability"},
 		"subject":     subject,
 	}

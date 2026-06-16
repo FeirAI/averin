@@ -384,7 +384,15 @@ opts path (`verify_bundle_with_json`) now parses `attestation_keys`, so the Go s
 can pin the issuer and elevate to `attested_claims`. Without a configured key, no attestation is emitted
 (bundle verifies `unevaluated`). The Go test pins the issuer and confirms the verifier's signature + issuer
 + subject checks pass cross-language (only the test StubTSA's non-crypto-valid anchor blocks the freshness
-step); the full `attested_claims` path is in the Rust suite.
+step); the full `attested_claims` path is in the Rust suite. **Freshness window [D7.2 round-2]:** the
+producer brackets `[issued_at, not_after]` on the latest checkpoint's own `created_ts` (the verifier checks
+the anchored TSA genTime, ≈ `created_ts`, NOT export time), with `issued_at = created_ts − issuedSkew`
+(default 1h) and `not_after = created_ts + validity` (default **7 days** — widened from 24h so a slow/queued
+anchor whose genTime lands hours-to-days after the seal still falls inside; both overridable via
+`WithAttestationWindow`). A wide `not_after` is safe because the subject binds the exact `checkpoint_hash` +
+frontier coverage, so a stale attestation cannot be replayed onto a moved-on bundle. If `created_ts` is
+missing/unparseable (a legacy/externally-produced checkpoint), `issued_at` widens to ~30 days below export
+time rather than fail an honest attestation **closed** (its anchored genTime may predate `now − issuedSkew`).
 
 ## D8 — The `attested_complete` gate (the honest capstone)
 
