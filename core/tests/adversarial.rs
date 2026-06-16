@@ -3164,6 +3164,33 @@ fn tier_b_two_phase_outcome_signed_payload_wrong_kind_is_violation() {
 }
 
 #[test]
+fn tier_b_two_phase_duplicate_outcomes_account_separately() {
+    // Codex round-3: two closed validated outcomes for the SAME intent_ref — one attesting the right grant,
+    // one a WRONG grant — must each account independently REGARDLESS of record order (no last-write-wins
+    // collapse): the right-grant outcome completes the intent, the wrong-grant one is an orphan violation.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let intent = seal_intent(&rec, &res, "intent-1", std::slice::from_ref(&gh), ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let ih = content_hash_of(&intent);
+    let ok_outcome = seal_outcome(&rec, &res, "outcome-ok", std::slice::from_ref(&ih), "intent-1", "intent-1", GID);
+    let bad_outcome = seal_outcome(&rec, &res, "outcome-bad", std::slice::from_ref(&ih), "intent-1", "intent-1", "grant-OTHER");
+    let mut frontier = vec![content_hash_of(&ok_outcome), content_hash_of(&bad_outcome)];
+    frontier.sort();
+    let orders = [
+        vec![grant.clone(), intent.clone(), ok_outcome.clone(), bad_outcome.clone()],
+        vec![grant.clone(), intent.clone(), bad_outcome.clone(), ok_outcome.clone()],
+    ];
+    for order in orders {
+        let cp = checkpoint_over(&rec, &frontier, 4, Some(&tsa));
+        let bundle = tier_b_bundle(&rec.verifying_key(), order, vec![cp]);
+        let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+        assert_eq!((r.uses_matched, r.intent_without_outcome), (1, 0), "the right-grant outcome must complete regardless of order: {:?}", r.issues);
+        assert!(!r.ok && r.issues.iter().any(|i| i.contains("outcome-bad") && i.contains("completion without a recorded intent")), "the wrong-grant outcome must be flagged orphan: {:?}", r.issues);
+    }
+}
+
+#[test]
 fn tier_b_two_phase_forged_outcome_does_not_complete() {
     // an outcome whose evidence is signed by a NON-resource key (forged) is not authority-verified, so it
     // cannot complete the intent -> intent_without_outcome (fail-closed). uses_matched stays 0.
