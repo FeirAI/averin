@@ -64,6 +64,9 @@ type Server struct {
 	tsa          witness.TSA        // nil = no external timestamp anchoring configured
 	brokerKey    ed25519.PrivateKey // nil = credential broker (/v2/grants) disabled
 	denyLog      bool               // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
+	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
+	// inflate stored records without bound (the prerequisite for default-on). nil = unbounded (prior behavior).
+	denialBudget *denialBudget
 	// T7 (ADR 0002 / coverage-limits #4): a pinned EXTERNAL policy-engine verifying key. When set, a generic
 	// record carrying a policy_engine_signed/human_signed authority evidence_sig that verifies under this key
 	// is stamped with that elevated source (else forced to caller_declared). nil = Phase-1 default (every
@@ -148,7 +151,8 @@ func (s *Server) WithBroker(issuingKey ed25519.PrivateKey) *Server {
 // — so a metadata-oracle probe leaves tamper-evident evidence instead of an invisible 400. Malformed input
 // is never logged (no policy signal). OPT-IN / default OFF: a probing attacker who varies the scope can
 // otherwise inflate stored (billable) records; deterministic-id dedup collapses retries of the SAME probe,
-// but a per-project denial budget for varying-scope sweeps is a documented follow-up before default-on.
+// and WithDeniedGrantBudget (#47) bounds the volume of DISTINCT-probe seals — the safeguard a default-on
+// posture needs.
 func (s *Server) WithDeniedGrantLog() *Server {
 	s.denyLog = true
 	return s
@@ -973,6 +977,18 @@ func (s *Server) reconstructCapability(projectID, grantID string) (string, error
 // record_id collapses retries of the same probe. Best-effort: a seal failure is logged and never changes
 // the caller's 400. Caller must NOT already hold ingestMu (this takes it for the seal critical section).
 func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, detail string) {
+	// #47: bound the best-effort denial log. A drop changes NOTHING the caller sees — every call site invokes
+	// this from inside the denial branch and writes the same 4xx immediately after it returns, regardless of
+	// whether a seal happened — it only declines to seal one more best-effort record once a sweep exceeds the
+	// budget. The check runs BEFORE taking ingestMu, so a rate-limited probe never enters the seal critical section.
+	if s.denialBudget != nil {
+		if ok, logDrop := s.denialBudget.allow(gr.ProjectID); !ok {
+			if logDrop {
+				log.Printf("WARNING: B11 denial seals are being dropped — per-project/global denial budget exhausted (varying-scope sweep DoS bound; this log is throttled to ~1/sec)")
+			}
+			return
+		}
+	}
 	now := ts(s.now())
 	requested := map[string]any{
 		"action": req.Action, "resource_id": req.Resource, "scope": req.Scope,
