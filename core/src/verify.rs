@@ -702,7 +702,14 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
                 && r.broker_trust == "sequence_verified"
                 && r.attestation_status == "attested_claims"
                 && r.unmatched_violation == 0
-                && r.unmatched_pending == 0;
+                && r.unmatched_pending == 0
+                // T6: the brokered surface stayed within the operator's AFFIRMATIVELY-declared side-effect
+                // closure. This is load-bearing beyond `r.ok`: an `unclosed` surface already forces `!ok`, but
+                // a `not_declared` manifest (no closure asserted) does NOT — so without this conjunct an
+                // otherwise-perfect bundle that declares ZERO closure would reach the capstone. Requiring
+                // `closed` makes attested_complete mean "complete over the surface AND that surface is within
+                // the declared closure" (still bounded by resource_trust:assumed_truthful — declaration, not obedience).
+                && r.side_effect_closure_status == "closed";
             CanonValue::string(if capstone {
                 "attested_complete_over_brokered_surface"
             } else if has_manifest {
@@ -2606,10 +2613,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // T6 (ADR 0002 open Q1, ACTIONABLE half): side_effect_closure COMPLETENESS over the observed brokered
     // surface. The operator declares, in the D7-digest-bound coverage_manifest, which resources each acted
     // action may transitively touch; every resource the bundle's grants/uses actually NAME (the resource_ids
-    // set) must fall within that declared closure. A touched-but-undeclared resource is an unclosed-side-effect
-    // violation (hard `issues` → !ok). This proves the manifest DECLARES a complete closure over what happened
-    // — NOT that the runtime obeyed it nor that the closure is semantically complete (the irreducible resource
-    // TCB, resource_trust:assumed_truthful, D9 floor 2).
+    // set) must fall within that declared closure. Note resource_ids is built from EVERY grant_evidence AND
+    // use_evidence resource_id above — so a grant that was ISSUED BUT NEVER USED still contributes its
+    // resource_id, and the operator must declare closure for it too. This is intentional: a grant's mere
+    // existence widened the authorized surface (the broker could have honored a use), so completeness is
+    // claimed over what was AUTHORIZED, not only what was exercised. A touched-but-undeclared resource is an
+    // unclosed-side-effect violation (hard `issues` → !ok). This proves the manifest DECLARES a complete
+    // closure over what happened — NOT that the runtime obeyed it nor that the closure is semantically
+    // complete (the irreducible resource TCB, resource_trust:assumed_truthful, D9 floor 2).
     let mut unclosed_side_effects = 0usize;
     let side_effect_closure_status = match coverage_manifest.as_ref().filter(|m| !m.is_null()) {
         Some(m) if m.get("side_effect_closure").is_some() => match side_effect_closure_resources(m) {

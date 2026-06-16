@@ -3386,10 +3386,16 @@ fn tier_b_two_phase_forged_outcome_does_not_complete() {
 // then force the conjunction inputs. Tests then flip one input to prove each is load-bearing.
 fn capstone_report() -> VerifyReport {
     let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
-    let bundle = d6_clean(&rec, &tsa); // a real, ok bundle (broker_trust=sequence_verified)
+    // a real, ok bundle (broker_trust=sequence_verified) carrying a REAL side_effect_closure manifest that
+    // declares its only touched resource (RESOURCE, from the grant) — so the verifier COMPUTES coverage_manifest
+    // and side_effect_closure_status=="closed" end-to-end rather than us asserting them (T6 e2e). The remaining
+    // fields below are still synthesized because d6_clean carries no matched use / attestation of its own.
+    let bundle = d6_clean(&rec, &tsa);
+    let bundle = change_field(&bundle, "coverage_manifest", closure_manifest(&[(RESOURCE, ACTION, &[])]));
     let mut r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
     assert!(r.ok, "baseline must verify: {:?}", r.issues);
-    r.coverage_manifest = Some(CanonValue::string("manifest"));
+    assert_eq!(r.side_effect_closure_status, "closed", "the real manifest must compute closed (T6 e2e): {:?}", r.issues);
+    assert!(r.coverage_manifest.as_ref().is_some_and(|m| !m.is_null()), "the real manifest must be echoed: {:?}", r.coverage_manifest);
     r.uses_matched = 1;
     r.uses_pop_reverified = 1;
     r.uses_action_unverified = 0;
@@ -3429,6 +3435,13 @@ fn tier_b_d8_each_condition_is_load_bearing() {
         ("attestation not attested_claims (D7)", |r| r.attestation_status = "unevaluated".to_string()),
         ("unmatched violation", |r| r.unmatched_violation = 1),
         ("unmatched pending", |r| r.unmatched_pending = 1),
+        // string-isolation: `unclosed` in a live verify ALSO forces !ok (covered e2e by
+        // tier_b_t6_undeclared_touched_resource_is_unclosed); here we mutate ONLY the status on a synthetic
+        // report (ok left true) to prove the capstone gate keys on `=="closed"` independently of `ok`.
+        ("side effect unclosed (T6)", |r| r.side_effect_closure_status = "unclosed".to_string()),
+        // the KEY load-bearing case: `not_declared` does NOT force !ok, so this conjunct is the ONLY thing
+        // blocking the capstone for a perfect bundle that asserts ZERO side-effect closure.
+        ("side effect not declared (T6)", |r| r.side_effect_closure_status = "not_declared".to_string()),
     ];
     for (name, mutate) in mutators {
         let mut r = capstone_report();

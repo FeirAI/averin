@@ -421,10 +421,16 @@ conjunctive gate in `report_to_canon` emits `action_completeness: attested_compl
 iff `ok ∧ coverage_manifest present ∧ uses_matched>0 ∧ !one_phase_use_present ∧ intent_without_outcome==0
 ∧ taxonomy_status=="validated" ∧ uses_action_unverified==0 ∧ uses_pop_reverified==uses_matched ∧
 broker_trust=="sequence_verified" ∧ attestation_status=="attested_claims" ∧ unmatched_violation==0 ∧
-unmatched_pending==0`; else `claimed_over_manifest` (a manifest is present) or `not_claimed`. A new
-`one_phase_use_present` flag (set when a matched one-phase `use` is counted) enforces MF3, and
-`resource_trust: "assumed_truthful"` is emitted UNCONDITIONALLY (MF1). Tests: full conjunction → capstone;
-EACH of the 11 conjuncts individually removed → `claimed_over_manifest` (every conjunct is load-bearing);
+unmatched_pending==0 ∧ side_effect_closure_status=="closed"` (T6, the 12th conjunct: the brokered surface
+stayed within the operator's AFFIRMATIVELY-declared side-effect closure — load-bearing beyond `ok` because
+an `unclosed` surface already forces `!ok` but a `not_declared` manifest does NOT, so without it a perfect
+bundle declaring ZERO closure would reach the capstone); else `claimed_over_manifest` (a manifest is
+present) or `not_claimed`. (Term-count: the formula has 13 AND-terms, but `coverage_manifest present` is
+the *gate precondition* — removing it yields `not_claimed`, not `claimed_over_manifest` — so it is counted
+apart from the 12 *load-bearing conjuncts* whose individual removal drops the label to `claimed_over_manifest`.) A new `one_phase_use_present` flag (set when a matched one-phase `use` is counted)
+enforces MF3, and `resource_trust: "assumed_truthful"` is emitted UNCONDITIONALLY (MF1). Tests: full
+conjunction → capstone; EACH of the 12 conjuncts individually removed → `claimed_over_manifest` (every
+conjunct is load-bearing, incl. the T6 `not_declared` case which proves it adds beyond `ok`);
 no manifest → `not_claimed`; a real bundle with a one-phase matched use sets the flag and is blocked
 end-to-end; `resource_trust` always present.
 
@@ -444,6 +450,14 @@ Two distinct floors remain irreducible offline, and the capstone label asserts n
    effects*. D2 binds the PoP to the committed params, and D4 validates the action *taxonomy class*,
    but neither proves the resource's real-world effect matched its receipt. This is the irreducible
    resource TCB; it is surfaced as `resource_trust: assumed_truthful` and bounds the D8 capstone.
+   **T6 closes the ACTIONABLE half (ADR 0002 open Q1):** the operator declares, in the D7-digest-bound
+   `coverage_manifest`, a `side_effect_closure` — per `(resource_id, action)`, the resources it may
+   transitively touch — and the verifier proves that declaration is *complete over the observed brokered
+   surface* (every resource a grant/use names is within the declared closure, else an `unclosed_side_effects`
+   violation; `side_effect_closure_status` ∈ `not_declared|closed|unclosed`, the 12th D8 conjunct requires
+   `closed`). This proves the manifest **declares** a complete closure over what happened — it does NOT prove
+   the runtime **obeyed** it nor that the closure is semantically complete; those stay the irreducible TCB
+   above, closable only by D7-style runtime/TEE enforcement.
 
 `attested_complete_over_brokered_surface` says exactly "every resource-signed receipt on the brokered
 surface is two-phase, PoP-re-verified, taxonomy-validated, replay-free, and in an anchored gapless
