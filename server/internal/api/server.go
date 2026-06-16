@@ -13,7 +13,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -61,6 +63,7 @@ type Server struct {
 	witness      witness.Witness    // nil = no external witness configured
 	tsa          witness.TSA        // nil = no external timestamp anchoring configured
 	brokerKey    ed25519.PrivateKey // nil = credential broker (/v2/grants) disabled
+	denyLog      bool               // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
 	// Tier-B resource side (ADR 0003): the resource recording key signs use-receipt authority evidence
 	// (role-separated from the broker key, R2); resourceID is this resource's audience; ledger is the
 	// consume-before-act jti/nonce store. nil resourceCore = /v2/use disabled.
@@ -131,6 +134,17 @@ func (s *Server) WithWitness(w witness.Witness) *Server {
 // reduced TCB (ADR 0002). Nil/unset disables the endpoint.
 func (s *Server) WithBroker(issuingKey ed25519.PrivateKey) *Server {
 	s.brokerKey = issuingKey
+	return s
+}
+
+// WithDeniedGrantLog (B11, ADR 0002 open Q4) makes the broker SEAL a `grant_denied` record when it
+// refuses a well-formed grant request on policy (forbidden scope, over-cap TTL, failed proof-of-possession)
+// — so a metadata-oracle probe leaves tamper-evident evidence instead of an invisible 400. Malformed input
+// is never logged (no policy signal). OPT-IN / default OFF: a probing attacker who varies the scope can
+// otherwise inflate stored (billable) records; deterministic-id dedup collapses retries of the SAME probe,
+// but a per-project denial budget for varying-scope sweeps is a documented follow-up before default-on.
+func (s *Server) WithDeniedGrantLog() *Server {
+	s.denyLog = true
 	return s
 }
 
@@ -698,10 +712,20 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	// idempotency key (every response is gated on PoP + scope, not just brand-new grants). req.Validate
 	// verifies the Ed25519 agent_sig, so a caller that cannot sign the challenge is rejected here.
 	if e := req.Validate(); e != nil {
+		// Seal a B11 denial ONLY for a policy refusal of a well-formed request (failed PoP or over-cap TTL);
+		// a missing/ill-shaped field is malformed input, never logged.
+		if s.denyLog && errors.Is(e, broker.ErrPoPFailed) {
+			s.sealGrantDenial(gr, req, idem, "pop_failed", e.Error())
+		} else if s.denyLog && errors.Is(e, broker.ErrTTLExceeded) {
+			s.sealGrantDenial(gr, req, idem, "ttl_exceeded", e.Error())
+		}
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
 	if _, e := broker.ClassifyScope(req.Scope, req.ScopeClass); e != nil {
+		if s.denyLog && errors.Is(e, broker.ErrForbiddenScope) {
+			s.sealGrantDenial(gr, req, idem, "forbidden_scope", e.Error())
+		}
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
@@ -878,6 +902,74 @@ func (s *Server) reconstructCapability(projectID, grantID string) (string, error
 		}
 	}
 	return "", fmt.Errorf("no stored credential descriptor for grant %s", grantID)
+}
+
+// sealGrantDenial seals a B11 denied-grant record for a POLICY refusal (forbidden scope / over-cap TTL /
+// failed PoP). It deliberately classifies to BrokerRole::None in the verifier — event_type
+// credential_grant_denied (so it is never counted as a grant), authority.enforcement_point
+// credential_broker_denied and extensions.broker.kind grant_denied (so it matches no grant-role tuple) —
+// and carries NO broker_seq / grant_evidence / capability: nothing was issued, so the gapless D6 grant
+// sequence is untouched. It records the REQUESTED scope metadata (the probe target). A deterministic
+// record_id collapses retries of the same probe. Best-effort: a seal failure is logged and never changes
+// the caller's 400. Caller must NOT already hold ingestMu (this takes it for the seal critical section).
+func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, idem, reason, detail string) {
+	now := ts(s.now())
+	requested := map[string]any{
+		"action": req.Action, "resource_id": req.Resource, "scope": req.Scope,
+		"scope_class": string(req.ScopeClass), "agent_id": req.AgentID,
+	}
+	// cnf_kid is recorded as PROVEN possession ONLY for a forbidden_scope denial — the only reason where
+	// req.Validate() (including the PoP check) fully PASSED before ClassifyScope rejected. A ttl_exceeded
+	// denial returns from Validate() at the TTL switch case BEFORE the PoP check, and a pop_failed denial
+	// failed PoP outright; for BOTH the agent key is UNPROVEN, so record only the CLAIMED pubkey — never a
+	// verified cnf (else an attacker could bind a victim's pubkey into the evidence as a "proven" key).
+	if reason == "forbidden_scope" {
+		if kid := agentCnfKid(req.AgentPubKey); kid != "" {
+			requested["cnf_kid"] = kid
+		}
+	} else {
+		requested["claimed_agent_pubkey"] = req.AgentPubKey
+	}
+	denialID := "denial-" + uuidV5Shaped("feir.denial.id.v1", gr.ProjectID, idem+"|"+req.Scope+"|"+reason)
+	rec := map[string]any{
+		"record_id":     denialID,
+		"project_id":    gr.ProjectID,
+		"session_id":    gr.SessionID,
+		"agent_id":      req.AgentID,
+		"agent_version": "feir-broker",
+		"event_type":    "credential_grant_denied", // NOT credential_grant -> the verifier never counts it as a grant
+		"observed_via":  "broker",
+		"action":        req.Action,
+		"status":        "denied",
+		// NO authority block (nothing was authorized) and NO extensions.broker.kind: a record that CARRIES
+		// extensions.broker.kind but classifies to no recognized (kind, enforcement_point) role fails the
+		// verifier CLOSED (R2 rule 4). The denial therefore rides under a SIBLING key, extensions.broker_denial,
+		// so it stays a generic BrokerRole::None record — integrity-bound + anchored, but never grant-counted
+		// and never a D6 broker-seq member.
+		"extensions": map[string]any{
+			"broker_denial": map[string]any{
+				"kind":          "grant_denied",
+				"denial_reason": reason,
+				"denial_detail": detail,
+				"requested":     requested,
+				"denied_at":     now,
+			},
+		},
+	}
+	s.ingestMu.Lock()
+	defer s.ingestMu.Unlock()
+	if _, _, e := s.sealAndStore(gr.ProjectID, gr.SessionID, "denial:"+denialID, rec, nil); e != nil {
+		log.Printf("WARNING: B11 grant-denial record %s failed to seal (denial NOT recorded): %v", denialID, e)
+	}
+}
+
+// agentCnfKid returns the broker key-id of a base64url-no-pad ed25519 agent public key, or "" if malformed.
+func agentCnfKid(agentPubKeyB64 string) string {
+	pub, err := base64.RawURLEncoding.DecodeString(agentPubKeyB64)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return ""
+	}
+	return broker.KeyID(ed25519.PublicKey(pub))
 }
 
 // buildGrantRecord assembles the unsealed grant Decision Record: gateway_enforced authority with a

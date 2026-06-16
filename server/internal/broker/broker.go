@@ -98,6 +98,16 @@ var escalationActionPrefixes = []string{
 	"issuecredential", "createkey", "createaccesskey", "escalate",
 }
 
+// Policy-denial sentinels mark a WELL-FORMED grant request the broker REFUSES on policy (B11 metadata
+// oracle: a forbidden scope, an over-cap TTL, or a failed proof-of-possession) — as opposed to a malformed
+// request (missing/ill-shaped fields). The api layer seals ONLY policy denials into the denied-grant log
+// (matched via errors.Is); malformed input carries no policy signal and is excluded (pure DoS surface).
+var (
+	ErrForbiddenScope = errors.New("scope is too broad for a single_operation grant")
+	ErrTTLExceeded    = errors.New("ttl exceeds the maximum allowed")
+	ErrPoPFailed      = errors.New("agent_sig does not prove possession of agent_pubkey")
+)
+
 // ClassifyScope resolves the effective scope_class. requested defaults to single_operation. A
 // single_operation request whose scope is forbidden (too broad) is REJECTED — the broker will not
 // issue a Tier-B grant for it. session_grant / batch_grant are explicit Tier-A-only coarsenings and
@@ -110,8 +120,8 @@ func ClassifyScope(scope string, requested ScopeClass) (ScopeClass, error) {
 	case ScopeSingleOperation:
 		if IsForbiddenSingleOp(scope) {
 			return "", fmt.Errorf(
-				"scope %q is too broad for a single_operation grant: it can mint/delegate authority or trigger unbounded work; request session_grant/batch_grant (Tier-A only) if intentional",
-				scope)
+				"scope %q is too broad for a single_operation grant: it can mint/delegate authority or trigger unbounded work; request session_grant/batch_grant (Tier-A only) if intentional: %w",
+				scope, ErrForbiddenScope)
 		}
 		return ScopeSingleOperation, nil
 	case ScopeSession, ScopeBatch:
@@ -172,7 +182,7 @@ func (r Request) Validate() error {
 	case r.TTL <= 0:
 		return errors.New("ttl must be positive")
 	case r.TTL > MaxTTL:
-		return fmt.Errorf("ttl %s exceeds the maximum %s (credentials must be short-lived)", r.TTL, MaxTTL)
+		return fmt.Errorf("ttl %s exceeds the maximum %s (credentials must be short-lived): %w", r.TTL, MaxTTL, ErrTTLExceeded)
 	}
 	// cnf: a sender-constrained credential needs the agent's ed25519 public key (32 bytes).
 	pub, err := base64.RawURLEncoding.DecodeString(r.AgentPubKey)
@@ -186,7 +196,7 @@ func (r Request) Validate() error {
 		return errors.New("agent_sig must be a base64url-no-pad ed25519 signature over the challenge")
 	}
 	if !ed25519.Verify(ed25519.PublicKey(pub), r.Challenge(), sig) {
-		return errors.New("agent_sig does not prove possession of agent_pubkey")
+		return ErrPoPFailed
 	}
 	return nil
 }
