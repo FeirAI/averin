@@ -2552,22 +2552,31 @@ fn seal_grant_cred(rec_sk: &SigningKey, broker_sk: &SigningKey, record_id: &str,
 // a credential descriptor carrying the 6 cross-checked fields (act/aud/jti/cnf/exp/single_use), cnf = the
 // canonical base64url of a real ed25519 key so its derived kid can be compared to grant_evidence.cnf_kid.
 fn cred_descriptor(cnf_vk: &VerifyingKey, act: &str, aud: &str, jti: &str, exp: i64, single_use: bool) -> CanonValue {
+    // mirrors the producer's capability descriptor: every field the verifier cross-checks against the signed
+    // grant_evidence (act/aud/jti/cnf/exp/single_use + scope/sub/iat/nbf) is present and matches by default.
     CanonValue::object(vec![
         ("act".into(), CanonValue::string(act)),
         ("aud".into(), CanonValue::string(aud)),
         ("cnf".into(), CanonValue::string(feir_decision_core::b64::encode(cnf_vk.as_bytes()))),
         ("exp".into(), CanonValue::Int(exp)),
+        ("iat".into(), CanonValue::Int(ISSUED)),
         ("jti".into(), CanonValue::string(jti)),
+        ("nbf".into(), CanonValue::Int(ISSUED)),
+        ("scope".into(), CanonValue::string("read:orders")),
         ("single_use".into(), CanonValue::Bool(single_use)),
+        ("sub".into(), CanonValue::string("agent-1")),
         ("typ".into(), CanonValue::string("capability")),
     ])
     .unwrap()
 }
 
-// grant_evidence for a single_operation grant carrying a caller-chosen credential_binding + cnf_kid.
+// grant_evidence for a single_operation grant carrying a caller-chosen credential_binding + cnf_kid, plus the
+// scope + agent_id the producer signs (so the D6.4 scope/subject cross-check has a real label to compare).
 fn cred_ge(cnf_kid: &str, binding: &str) -> CanonValue {
     let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", cnf_kid, ISSUED, EXP);
-    change_field(&ge, "credential_binding", CanonValue::string(binding))
+    let ge = change_field(&ge, "credential_binding", CanonValue::string(binding));
+    let ge = change_field(&ge, "scope", CanonValue::string("read:orders"));
+    change_field(&ge, "agent_id", CanonValue::string("agent-1"))
 }
 
 // assemble a verified+closed broker grant that carries a credential_commit over `descriptor` (with the given
@@ -2619,6 +2628,38 @@ fn tier_b_cred_descriptor_action_mismatch_is_violation() {
     let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
     assert!(!r.ok, "descriptor act contradicting the grant label must fail");
     assert!(r.issues.iter().any(|i| i.contains("broker mislabel/equivocation")), "issues: {:?}", r.issues);
+    assert_eq!((r.cred_label_checks, r.cred_label_matched), (1, 0));
+}
+
+#[test]
+fn tier_b_cred_descriptor_scope_mismatch_is_violation() {
+    // Codex: the broker mints a credential with a BROADER `scope` than the grant LABELS — the hash still
+    // matches credential_binding (it IS the minted credential) but the labeled scope lies. Must be a violation.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let descriptor = change_field(&cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true), "scope", CanonValue::string("admin:*"));
+    let binding = sha256_prefixed(descriptor.serialize().as_bytes());
+    let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &binding));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a broader descriptor scope than the grant label must fail");
+    assert!(r.issues.iter().any(|i| i.contains("scope") && i.contains("broker mislabel")), "issues: {:?}", r.issues);
+    assert_eq!((r.cred_label_checks, r.cred_label_matched), (1, 0));
+}
+
+#[test]
+fn tier_b_cred_descriptor_subject_mismatch_is_violation() {
+    // Codex: the credential's `sub` (the bound agent) differs from the grant's agent_id — a credential minted
+    // for a DIFFERENT subject than labeled (subject confusion). Must be a violation.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let descriptor = change_field(&cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true), "sub", CanonValue::string("agent-evil"));
+    let binding = sha256_prefixed(descriptor.serialize().as_bytes());
+    let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &binding));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a descriptor sub != grant agent_id must fail");
+    assert!(r.issues.iter().any(|i| i.contains("sub") && i.contains("agent_id")), "issues: {:?}", r.issues);
     assert_eq!((r.cred_label_checks, r.cred_label_matched), (1, 0));
 }
 
@@ -2873,4 +2914,42 @@ fn tier_b_attestation_empty_window_is_failed() {
     assert!(!r.ok, "an empty issued_at must fail (no bounded window)");
     assert_eq!(r.attestation_status, "failed");
     assert!(r.issues.iter().any(|i| i.contains("no bounded freshness window")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_attestation_malformed_window_is_failed() {
+    // Codex: a non-empty but MALFORMED bound ("0".."z") sorts lexicographically around a real anchor
+    // timestamp and would pass the window comparison — require canonical YYYY-MM-DDThh:mm:ss.mmmZ bounds.
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), "0", "z", honest_subject(&rec, &res, &cph, &head_root), &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert!(!r.ok, "a malformed non-empty window must fail");
+    assert_eq!(r.attestation_status, "failed");
+    assert!(r.issues.iter().any(|i| i.contains("not canonical timestamps")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_attestation_stale_anchored_replayed_on_later_bundle_is_failed() {
+    // Codex: an attestation bound to the latest ANCHORED checkpoint (cp0) must NOT pass when a LATER verified
+    // checkpoint (cp1, unanchored) has extended the bundle beyond it — the attestation does not cover the
+    // bundle's true frontier (old anchored attestation replayed onto a later, unanchored-tail bundle).
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let gh = content_hash_of(&grant);
+    let root = ghr(&[(1, &gh)]);
+    // cp0: seq 0, anchored, head over grant-1
+    let cp0 = checkpoint_seqd(&rec, "cp0", 0, None, std::slice::from_ref(&gh), 1, Some(grant_head_cv(1, &ghr(&[]), &root)), Some(&tsa));
+    let cp0h = checkpoint_hash(&cp0);
+    // cp1: seq 1, UNANCHORED, head chains from cp0 over the same frontier
+    let cp1 = checkpoint_seqd(&rec, "cp1", 1, Some(&cp0h), std::slice::from_ref(&gh), 1, Some(grant_head_cv(1, &root, &root)), None);
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp0, cp1]);
+    // the attestation honestly binds cp0 (the latest ANCHORED) — but cp1 sits beyond it.
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), ATT_ISSUED, ATT_NOT_AFTER, honest_subject(&rec, &res, &cp0h, &root), &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert!(!r.ok, "an attestation that does not cover a later checkpoint must fail");
+    assert_eq!(r.attestation_status, "failed");
+    assert!(r.issues.iter().any(|i| i.contains("does not cover the bundle frontier")), "issues: {:?}", r.issues);
 }

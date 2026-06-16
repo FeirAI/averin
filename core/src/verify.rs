@@ -1300,6 +1300,7 @@ fn evaluate_attestation(
     opts: &VerifyOptions,
     project_id: Option<&str>,
     anchored_cp_ids: &[(i64, String, String, Option<String>)],
+    latest_cp_seq: i64,
     resource_ids: &BTreeSet<String>,
     issues: &mut Vec<String>,
 ) -> AttestationEval {
@@ -1381,11 +1382,26 @@ fn evaluate_attestation(
             return eval;
         }
     };
+    // the attestation must cover the bundle's TRUE frontier (Codex): if a checkpoint exists BEYOND the latest
+    // anchored one the subject binds, the bundle has moved on (records/head the attestation never covered) —
+    // an old anchored attestation replayed onto a later, unanchored-tail bundle. attested_claims requires the
+    // latest anchored checkpoint to BE the latest checkpoint overall.
+    if latest.0 != latest_cp_seq {
+        issues.push("deployment_attestation: a checkpoint exists beyond the latest anchored one the subject binds — does not cover the bundle frontier (D7)".into());
+        return eval;
+    }
     let ts = &latest.2;
     // a MISSING/empty bound is not "no bound" — an empty issued_at would make `"" <= ts` always true and
-    // silently drop the LOWER freshness bound (open-ended backdating). Require both bounds present.
+    // silently drop the LOWER freshness bound (open-ended backdating). Require both bounds present...
     if issued_at.is_empty() || not_after.is_empty() {
         issues.push("deployment_attestation: missing/empty issued_at or not_after — no bounded freshness window (D7)".into());
+        return eval;
+    }
+    // ...and CANONICAL (Codex): a malformed non-empty bound like "0".."z" sorts around a real timestamp and
+    // would pass the lexicographic window check, so require the exact YYYY-MM-DDTHH:MM:SS.mmmZ shape and a
+    // non-inverted window before comparing.
+    if !is_canonical_ts(&issued_at) || !is_canonical_ts(&not_after) || issued_at.as_str() > not_after.as_str() {
+        issues.push("deployment_attestation: issued_at/not_after are not canonical timestamps, or issued_at > not_after — malformed window (D7)".into());
         return eval;
     }
     if !(issued_at.as_str() <= ts.as_str() && ts.as_str() <= not_after.as_str()) {
@@ -2102,6 +2118,16 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if descriptor.get("exp").and_then(|v| v.as_int()) != ev_int(rec, "grant_evidence", "exp") { mism.push("exp != grant_evidence.exp".to_string()); }
         if single_use != Some(single) { mism.push(format!("single_use != (scope_class=='single_operation' => {single})")); }
         if !cnf_kid_ok { mism.push(format!("cnf does not derive cnf_kid '{kidl}'")); }
+        // EVERY capability-shaping claim the producer mirrors into BOTH the descriptor and grant_evidence must
+        // agree (Codex): scope (a broad scope minted but a narrow scope LABELED is exactly the mislabel D6.4
+        // exists to catch), sub↔agent_id (a credential for a different subject), and iat/nbf↔issued_at (a
+        // back/post-dated validity). Checking only act/aud/jti/cnf/exp/single_use left scope+subject+timing
+        // unbound — a real false-clean.
+        if ds("scope") != label("scope").as_str() { mism.push(format!("scope '{}' != grant_evidence.scope '{}'", ds("scope"), label("scope"))); }
+        if ds("sub") != label("agent_id").as_str() { mism.push(format!("sub '{}' != grant_evidence.agent_id '{}'", ds("sub"), label("agent_id"))); }
+        let iss_at = ev_int(rec, "grant_evidence", "issued_at");
+        if descriptor.get("iat").and_then(|v| v.as_int()) != iss_at { mism.push("iat != grant_evidence.issued_at".to_string()); }
+        if descriptor.get("nbf").and_then(|v| v.as_int()) != iss_at { mism.push("nbf != grant_evidence.issued_at".to_string()); }
         if mism.is_empty() {
             cred_label_matched += 1;
         } else {
@@ -2340,7 +2366,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             resource_ids.insert(r);
         }
     }
-    let attest = evaluate_attestation(bundle, opts, project_id.as_deref(), &anchored_cp_ids, &resource_ids, &mut issues);
+    let attest = evaluate_attestation(bundle, opts, project_id.as_deref(), &anchored_cp_ids, latest_cp_seq, &resource_ids, &mut issues);
 
     let coverage_manifest = bundle.get("coverage_manifest").cloned();
 
