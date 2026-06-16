@@ -67,6 +67,18 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   `wasm32-unknown-unknown` backend), so a WASM verifier reports an `rfc3161` anchor as `Unsupported`
   — **never a silent pass** — and production-anchored bundles are verified by the native/CLI verifier.
   The remaining open item is the production Go anchoring round-trip against a real third-party TSA.
+- **Best-effort secret scrubbing.** The proxy and SDK ingestion paths run captured I/O through
+  regex-based credential/PII redaction (`server/internal/scrub`) before anything is stored or hashed.
+  This is **best-effort defense in depth** — Go's RE2 regexes are linear-time (no ReDoS) but **cannot
+  catch every secret shape**. The primary protection is that in self-host the data never leaves customer
+  infra; customers should not put secrets in agent prompts. The redaction rules are not a guarantee
+  against all credential or PII patterns.
+- **Resource-introspection binding relocates the TCB, it does not remove it.** For native / token-exchange
+  credentials (OAuth/STS/Vault) whose effective scope the verifier cannot recompute offline, the binding
+  commits the resource's *signed introspection transcript* (its statement of the credential's effective
+  scope). The verifier proves the resource **signed** that transcript — but the transcript's truthfulness
+  is the same resource trust boundary as `resource_trust: assumed_truthful`. This moves trust from broker
+  recomputation to the resource's signed statement; it does not eliminate the need to trust the resource.
 - **Compliance exports** map sealed records to *selected* control-evidence fields with an explicit
   `gap_report`. They do **not** by themselves satisfy EU AI Act Annex IV / SOC 2. Field-level
   statutory mapping requires legal review.

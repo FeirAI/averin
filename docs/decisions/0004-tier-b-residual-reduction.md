@@ -483,6 +483,13 @@ boundary; it is documented, not papered over.
   D6.4 proves `sha256(descriptor)==credential_binding` and that the descriptor's scope/subject/timing/
   action match the signed grant labels — closing the "broker mislabeled the credential" gap. Absent the
   disclosure it remains a `broker_trust` residual; it never reaches the resource's real-world effect.
+- **Introspection-transcript binding relocates, does not eliminate, the TCB (floor 2).** For native /
+  token-exchange credentials (OAuth/STS/Vault) whose effective scope the verifier cannot recompute
+  offline, the binding commits the resource's **signed introspection transcript** (its statement of the
+  credential's effective scope) instead of a verifier-recomputable descriptor. This MOVES the trust from
+  broker recomputation to the resource's signed statement — the verifier proves the resource *signed* the
+  transcript, but the transcript's truthfulness is the same resource TCB as floor 2 (`resource_trust:
+  assumed_truthful`). It is a relocation of the trust boundary, not a closure of it (ADR 0002 Q3).
 
 ## Build order (each commit adversarially reviewed; dependency-ordered)
 
