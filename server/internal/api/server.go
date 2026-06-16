@@ -155,6 +155,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v2/records", s.handleRecords)
 	mux.HandleFunc("POST /v2/grants", s.handleGrant)
 	mux.HandleFunc("POST /v2/use", s.handleUse)
+	mux.HandleFunc("POST /v2/use-intent", s.handleUseIntent)
+	mux.HandleFunc("POST /v2/use-outcome", s.handleUseOutcome)
 	mux.HandleFunc("POST /v2/otel/traces", s.handleOTel)
 	mux.HandleFunc("POST /v2/checkpoints", s.handleCheckpoint)
 	mux.HandleFunc("GET /v2/sessions", s.handleSessions)
@@ -276,7 +278,14 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 		return "", false, fmt.Errorf("project_id and session_id are required")
 	}
 
-	// record_id must be assigned before commit-on-ingest binds disclosure secrets to it.
+	// record_id must be assigned before commit-on-ingest binds disclosure secrets to it. The "use-" and
+	// "outcome-" prefixes are RESERVED for the resource-gateway endpoints (deterministic ids from the
+	// idempotency key): a generic caller must not pre-seed one, else a later /v2/use[-intent|-outcome] retry
+	// with the matching idempotency key could short-circuit to the pre-seeded record and SKIP PoP validation
+	// / consume-before-act (a forged-capability use reading as success).
+	if rid := stringField(rec, "record_id"); strings.HasPrefix(rid, "use-") || strings.HasPrefix(rid, "outcome-") {
+		return "", false, fmt.Errorf("record_id prefix of %q is reserved for the resource-gateway endpoints", rid)
+	}
 	if stringField(rec, "record_id") == "" {
 		rec["record_id"] = newUUID()
 	}
@@ -349,10 +358,22 @@ func (s *Server) sealAndStore(projectID, sessionID, idem string, rec map[string]
 	// NOTE: heads+seal+put are not yet one atomic transaction in the in-memory store; the Postgres
 	// store performs this in a single serializable transaction.
 	heads, _ := s.st.Heads(projectID, sessionID)
-	if heads == nil {
-		heads = []string{} // marshal as [] not null (RCP arrays are not nullable here)
+	// A caller (the use_outcome producer) may pre-set causal_prev_hashes to FORCE a parent edge that must
+	// persist even when the target is no longer a session head — the outcome MUST link to its intent so the
+	// verifier's before-act DAG-consistency check holds even if a record was appended between the two phases.
+	// UNION the forced parents with the current heads (dedup, byte-sorted), so a normal record (no forced
+	// parents) still links to exactly the heads.
+	forced, _ := rec["causal_prev_hashes"].([]string)
+	seen := map[string]bool{}
+	parents := []string{}
+	for _, h := range append(append([]string{}, forced...), heads...) {
+		if h != "" && !seen[h] {
+			seen[h] = true
+			parents = append(parents, h)
+		}
 	}
-	rec["causal_prev_hashes"] = heads
+	sort.Strings(parents)
+	rec["causal_prev_hashes"] = parents
 
 	// signing key block
 	rec["key"] = map[string]any{
@@ -778,7 +799,13 @@ func deterministicUseID(projectID, idem string) string {
 // handleUse records a Tier-B USE RECEIPT: the resource validates a presented capability + PoP at use
 // time (resourceshim: capability sig, validity window, audience/action, PoP, consume-before-act), then
 // seals a resource-signed receipt whose authority evidence the offline verifier joins to the grant.
-func (s *Server) handleUse(w http.ResponseWriter, r *http.Request) {
+// handleUse records a ONE-PHASE ADR-0003 use receipt (kind=use). handleUseIntent records the FIRST phase
+// of a two-phase use (kind=use_intent, ADR 0004 D5) — recorded BEFORE the resource performs the side effect;
+// it is completed by POST /v2/use-outcome. Both share the same validate+consume+seal path.
+func (s *Server) handleUse(w http.ResponseWriter, r *http.Request)       { s.handleUsePhase(w, r, "use") }
+func (s *Server) handleUseIntent(w http.ResponseWriter, r *http.Request) { s.handleUsePhase(w, r, "use_intent") }
+
+func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKind string) {
 	if s.resourceCore == nil || s.brokerKey == nil {
 		writeErr(w, http.StatusNotImplemented, "resource gateway not enabled (set the resource recording key + broker issuing key)")
 		return
@@ -848,7 +875,7 @@ func (s *Server) handleUse(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		grantID = ev.GrantID
-		rec, disclosures, e := s.buildUseRecord(useID, ur, ev, rawParams, paramsCommitment)
+		rec, disclosures, e := s.buildUseRecord(useID, ur, ev, rawParams, paramsCommitment, brokerKind)
 		if e != nil {
 			return e
 		}
@@ -885,8 +912,17 @@ func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, st
 			Authority struct {
 				GrantID string `json:"grant_id"`
 			} `json:"authority"`
+			Extensions struct {
+				Broker struct {
+					Kind string `json:"kind"`
+				} `json:"broker"`
+			} `json:"extensions"`
 		}
-		if json.Unmarshal([]byte(rec.JSON), &probe) == nil && probe.RecordID == useID {
+		// A valid retry must be a real broker/resource record (it carries extensions.broker.kind). A generic
+		// record can never set extensions.broker (reserved), so a pre-seeded generic record with a matching
+		// record_id is NOT treated as a use/outcome retry — the gateway validation (PoP, consume-before-act)
+		// is never skipped on a spoofed record. (Reserved record_id prefixes also block the pre-seed.)
+		if json.Unmarshal([]byte(rec.JSON), &probe) == nil && probe.RecordID == useID && probe.Extensions.Broker.Kind != "" {
 			return rec.JSON, probe.Authority.GrantID, true
 		}
 	}
@@ -896,7 +932,11 @@ func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, st
 // buildUseRecord assembles the unsealed use-receipt Decision Record: a tool_gateway-role authority
 // with a RESOURCE-signed evidence_sig over the re-derivable use_evidence (R1/R2), a hiding commitment
 // over the operation params, and the use lifecycle under extensions.broker (kind=use → resource role).
-func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.UseEvidence, rawParams []byte, commitment string) (map[string]any, []store.DisclosureSecret, error) {
+func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.UseEvidence, rawParams []byte, commitment, brokerKind string) (map[string]any, []store.DisclosureSecret, error) {
+	// D5 (ADR 0004): brokerKind is "use" (one-phase ADR-0003) or "use_intent" (two-phase, recorded BEFORE
+	// the side effect). use_evidence.kind MUST equal the extensions.broker.kind discriminator (the verifier
+	// rejects divergence), so stamp it onto the evidence before hashing.
+	ev.Kind = brokerKind
 	// evidence_hash = sha256(RCP-canonicalize(use_evidence)) via the core (R1), signed by the RESOURCE
 	// key (R2) and record_id-bound to this receipt.
 	evidenceJSON, err := json.Marshal(ev)
@@ -952,8 +992,9 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 		},
 		"extensions": map[string]any{
 			"broker": map[string]any{
-				// kind=use + enforcement_point=tool_gateway classifies this to the RESOURCE role (R2).
-				"kind":         "use",
+				// kind (use | use_intent) + enforcement_point=tool_gateway classifies this to the RESOURCE
+				// role (R2); the verifier requires use_evidence.kind == this discriminator.
+				"kind":         brokerKind,
 				"grant_id":     ev.GrantID,
 				"resource_id":  ev.ResourceID,
 				"use_evidence": useEvidence,
@@ -964,6 +1005,168 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 		{RecordID: useID, Field: "input", ValueDigest: addr.Digest, NonceHex: nonce},
 	}
 	return rec, disclosures, nil
+}
+
+func deterministicOutcomeID(projectID, idem string) string {
+	return "outcome-" + uuidV5Shaped("feir.use_outcome.id.v1", projectID, idem)
+}
+
+type useOutcomeRequest struct {
+	IdempotencyKey string `json:"idempotency_key"`
+	ProjectID      string `json:"project_id"`
+	SessionID      string `json:"session_id"`
+	IntentRecordID string `json:"intent_record_id"` // the use_intent's record_id (from POST /v2/use-intent)
+	Status         string `json:"status"`           // outcome status, default "ok"
+}
+
+// handleUseOutcome records the SECOND phase of a two-phase use (ADR 0004 D5) — recorded AFTER the side
+// effect, completing the use_intent named by intent_record_id. No new PoP/consumption (the intent already
+// consumed the credential before acting); this just anchors the completion so a crash-after-act leaves a
+// detectable intent_without_outcome rather than an invisible action.
+func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
+	if s.resourceCore == nil || s.brokerKey == nil {
+		writeErr(w, http.StatusNotImplemented, "resource gateway not enabled (set the resource recording key + broker issuing key)")
+		return
+	}
+	body, err := readBody(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var or useOutcomeRequest
+	if err := decode(body, &or); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid use-outcome request: "+err.Error())
+		return
+	}
+	if qp := r.URL.Query().Get("project"); qp != "" && or.ProjectID != qp {
+		writeErr(w, http.StatusForbidden, "project_id does not match the authorized ?project=")
+		return
+	}
+	if or.ProjectID == "" || or.SessionID == "" || or.IntentRecordID == "" {
+		writeErr(w, http.StatusBadRequest, "project_id, session_id and intent_record_id are required")
+		return
+	}
+	idem := or.IdempotencyKey
+	if idem == "" {
+		idem = r.Header.Get("Idempotency-Key")
+	}
+	if idem == "" {
+		writeErr(w, http.StatusBadRequest, "idempotency_key is required (field or Idempotency-Key header)")
+		return
+	}
+	status := or.Status
+	if status == "" {
+		status = "ok"
+	}
+	outcomeID := deterministicOutcomeID(or.ProjectID, idem)
+
+	var sealed string
+	var idempotent bool
+	var clientErr error
+	storeErr := func() error {
+		s.ingestMu.Lock()
+		defer s.ingestMu.Unlock()
+		if existing, _, ok := s.existingReceipt(or.ProjectID, or.SessionID, outcomeID); ok {
+			sealed, idempotent = existing, true
+			return nil
+		}
+		// resolve the intent this outcome completes: it must be a use_intent recorded in this session, and
+		// we read its content_hash to bind the before-act ordering into the resource-signed payload.
+		intentJSON, _, ok := s.existingReceipt(or.ProjectID, or.SessionID, or.IntentRecordID)
+		if !ok {
+			clientErr = fmt.Errorf("intent_record_id %q not found in this session", or.IntentRecordID)
+			return nil
+		}
+		var probe struct {
+			ContentHash string `json:"content_hash"`
+			Extensions  struct {
+				Broker struct {
+					Kind string `json:"kind"`
+					// read grant_id from the SIGNED use_evidence (what the verifier matches), not the
+					// unsigned extensions.broker.grant_id sibling, so the outcome binds the same grant the
+					// resource signed into the intent.
+					UseEvidence struct {
+						GrantID string `json:"grant_id"`
+					} `json:"use_evidence"`
+				} `json:"broker"`
+			} `json:"extensions"`
+		}
+		if e := json.Unmarshal([]byte(intentJSON), &probe); e != nil {
+			return fmt.Errorf("parse intent record: %w", e)
+		}
+		if probe.Extensions.Broker.Kind != "use_intent" {
+			clientErr = fmt.Errorf("record %q is not a use_intent (kind=%q)", or.IntentRecordID, probe.Extensions.Broker.Kind)
+			return nil
+		}
+		rec := s.buildUseOutcomeRecord(outcomeID, or.ProjectID, or.SessionID, probe.Extensions.Broker.UseEvidence.GrantID, or.IntentRecordID, probe.ContentHash, status)
+		sealed, _, err = s.sealAndStore(or.ProjectID, or.SessionID, idem, rec, nil)
+		return err
+	}()
+	if clientErr != nil {
+		writeErr(w, http.StatusBadRequest, "use-outcome rejected: "+clientErr.Error())
+		return
+	}
+	if storeErr != nil {
+		writeErr(w, http.StatusInternalServerError, "store use outcome: "+storeErr.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"outcome_id": outcomeID,
+		"intent_ref": or.IntentRecordID,
+		"record":     json.RawMessage(sealed),
+		"idempotent": idempotent,
+	})
+}
+
+// buildUseOutcomeRecord assembles a use_outcome record. The SIGNED use_outcome payload binds the join
+// (grant_id, intent_ref) AND the before-act ordering (intent_hash = the intent's content_hash) to the
+// RESOURCE evidence signature — the verifier reads these from the signed payload, never the unsigned
+// extensions.broker siblings, so a relay holding only the record-signing key cannot redirect or backfill.
+func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID, intentRef, intentHash, status string) map[string]any {
+	payload := map[string]any{
+		"grant_id":    grantID,
+		"intent_hash": intentHash,
+		"intent_ref":  intentRef,
+		"kind":        "use_outcome",
+		"status":      status,
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	evidenceHash, err := s.core.RcpEvidenceHash(string(payloadJSON))
+	if err != nil {
+		evidenceHash = "" // a bad hash yields a non-validatable outcome (caught by the verifier), never a silent pass
+	}
+	evidenceSig, _ := s.resourceCore.SignEvidence("gateway_enforced", outcomeID, evidenceHash)
+	return map[string]any{
+		"record_id": outcomeID,
+		// FORCE the causal edge to the intent (unioned with session heads in sealAndStore) so the outcome
+		// links to its intent even if a record was appended between the two phases — the verifier requires
+		// the outcome's causal_prev to include the intent content_hash.
+		"causal_prev_hashes": []string{intentHash},
+		"project_id":         projectID,
+		"session_id":         sessionID,
+		"agent_id":      "feir-resource",
+		"agent_version": "feir-resource",
+		"event_type":    "tool_call",
+		"observed_via":  "broker",
+		"action":        "use_outcome",
+		"status":        status,
+		"authority": map[string]any{
+			"source":            "gateway_enforced",
+			"enforcement_point": "tool_gateway",
+			"grant_id":          grantID,
+			"evidence_hash":     evidenceHash,
+			"evidence_sig":      evidenceSig,
+			"evaluated_at":      ts(s.now()),
+		},
+		"extensions": map[string]any{
+			"broker": map[string]any{
+				"kind":        "use_outcome",
+				"grant_id":    grantID,
+				"intent_ref":  intentRef,
+				"use_outcome": payload,
+			},
+		},
+	}
 }
 
 // commitLowEntropyFields replaces each raw input/output/rationale field in rec with a hiding

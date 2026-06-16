@@ -220,8 +220,14 @@ for back-compat (it cannot reach the D8 capstone — MF3). Tests (10): complete 
 intent-without-outcome → anomaly; one-phase → matched; mismatched/phantom/unsigned-sibling `intent_ref`,
 wrong-grant, wrong-signed-kind, not-causally-after, and failed-PoP → not completed; orphan + forged +
 duplicate-same-intent outcomes → violation; all order-independent.
-**Deferred (D5.2):** the Go resource-gateway two-phase producer mode (emit `use_intent` before the side
-effect, `use_outcome` after); until then bundles carry one-phase uses and `intent_without_outcome` is 0.
+**Producer [D5.2, IMPLEMENTED]:** `POST /v2/use-intent` records the `use_intent` (kind=use_intent, the same
+validate+consume+PoP path as one-phase `/v2/use`) BEFORE the side effect; `POST /v2/use-outcome` records the
+`use_outcome` AFTER, resolving the intent by `intent_record_id` and binding its `content_hash` as the
+resource-signed `intent_hash` (the before-act ordering proof). The signed `use_outcome` payload carries
+`{kind, grant_id, intent_ref, intent_hash, status}`; the unsigned sibling discriminator routes the role.
+One-phase `/v2/use` is unchanged. Go tests assert producer structure + the signed binding + bundle
+integrity; the intent↔outcome MATCHING semantics (which need a verifiable anchor — the test StubTSA token
+is not crypto-valid) are exercised in the Rust adversarial suite.
 
 ## D6 — Grant transparency: reduce `broker_trust` from `assumed`
 
