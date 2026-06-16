@@ -968,8 +968,16 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	// same probe). The outer JSON array is unambiguous framing (each element quoted + escaped), so a field
 	// boundary cannot be forged by an embedded delimiter.
 	idReq := gr
-	idReq.IdempotencyKey = ""
-	idReq.AgentSig = ""
+	idReq.IdempotencyKey = "" // the idempotency key is the retry key, NOT part of the probe identity
+	// agent_sig is part of the probe identity ONLY for pop_failed: there each DISTINCT failed proof is a
+	// distinct attempt the B11 log must COUNT (a PoP brute-force should leave one record per attempt; volume
+	// is bounded by the per-project denial budget, not by hiding attempts). For forbidden_scope/ttl the sig
+	// is incidental — and since a key-OWNER can craft many distinct VALID ed25519 sigs over one challenge
+	// (Verify accepts any canonical sig, not just the deterministic one), keeping it would let them inflate
+	// one logical operation into N denials; so it is excluded there and the operation itself is the identity.
+	if reason != "pop_failed" {
+		idReq.AgentSig = ""
+	}
 	reqJSON, _ := json.Marshal(idReq)
 	// ROOT defense against pre-seeding (C2b–C2e): mix a SERVER SECRET into the id so a caller can never
 	// precompute denial:<denialID> and squat the key in ANY version. The salt is a deterministic ed25519

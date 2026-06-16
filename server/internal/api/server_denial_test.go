@@ -352,6 +352,33 @@ func TestDenialIdIsServerSecret(t *testing.T) {
 	}
 }
 
+// TestPoPFailureDistinctSignaturesLogDistinctDenials (Codex C2f): agent_sig stays in the denial identity, so
+// two pop_failure attempts for the SAME operation but with DISTINCT failing signatures are logged as two
+// distinct denials (each a distinct failed proof) — a PoP brute-force leaves one record per attempt, not one
+// collapsed record. (forbidden_scope retries still dedup: their valid sig is deterministic.)
+func TestPoPFailureDistinctSignaturesLogDistinctDenials(t *testing.T) {
+	h := denyLogServer(t)
+	ak := grantAgentKey()
+	thief1 := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)) // all-zero seed
+	s2 := make([]byte, ed25519.SeedSize)
+	s2[0] = 0x55
+	thief2 := ed25519.NewKeyFromSeed(s2) // a DIFFERENT wrong key -> a distinct failing signature
+	// same operation + agent_pubkey (ak), two distinct invalid signatures -> two distinct failed proofs.
+	if code, _ := do(t, h, "POST", "/v2/grants", grantBody("idem-pop", "read:orders", ak, thief1)); code != http.StatusBadRequest {
+		t.Fatalf("bad PoP should be 400")
+	}
+	if code, _ := do(t, h, "POST", "/v2/grants", grantBody("idem-pop", "read:orders", ak, thief2)); code != http.StatusBadRequest {
+		t.Fatalf("bad PoP should be 400")
+	}
+	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, r)
+	}
+	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
+	if !strings.Contains(report, `"denied_grants":2`) {
+		t.Fatalf("two pop_failure attempts with distinct signatures must log 2 distinct denials: %s", report)
+	}
+}
+
 // TestDeniedGrantLogOffByDefault: without WithDeniedGrantLog the forbidden scope is still rejected but NO
 // denial is sealed (opt-in — avoids a probe-driven storage/billing DoS by default).
 func TestDeniedGrantLogOffByDefault(t *testing.T) {
