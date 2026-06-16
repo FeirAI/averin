@@ -222,6 +222,10 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 	}
 	if claims.SingleUse {
 		if err := s.ledger.ConsumeJTI(claims.Jti); err != nil {
+			// The nonce was just consumed but this use fails here (double-spend) and produces no receipt —
+			// release it so a definitively-pre-persistence failure leaves the consume-before-act ledger
+			// consistent (mirror the handler's RollbackUse on later failures; Codex). The jti stays consumed.
+			s.ledger.ReleaseNonce(nonce)
 			return UseEvidence{}, fmt.Errorf("resourceshim: single-use double-spend: %w", err)
 		}
 	}

@@ -202,6 +202,29 @@ func TestSingleUseDoubleSpendRejected(t *testing.T) {
 	}
 }
 
+// TestDoubleSpendReleasesNonce (Codex convergence): a use that consumes the nonce and then fails at
+// ConsumeJTI (double-spend) produces no receipt, so it must RELEASE the just-consumed nonce — leaving the
+// consume-before-act ledger consistent. Without the release the nonce is permanently burned.
+func TestDoubleSpendReleasesNonce(t *testing.T) {
+	issuing, agent := keyFromByte(1), keyFromByte(2)
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	token := defaultCap(t, issuing, agent, time.Hour, now)
+	ledger := NewMemLedger()
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, ledger)
+	op := Op{Action: testAction, ParamsCommitment: testParams}
+	if _, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n1"), op, "n1", now); err != nil {
+		t.Fatalf("first use should succeed: %v", err)
+	}
+	// the double-spend (fresh nonce n2) fails at ConsumeJTI...
+	if _, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n2"), op, "n2", now); err == nil {
+		t.Fatal("double-spend should be rejected")
+	}
+	// ...and n2 must be free again — the failed use released it (else ConsumeNonce would report it consumed).
+	if err := ledger.ConsumeNonce("n2"); err != nil {
+		t.Fatalf("the double-spend's nonce must be released, not burned: %v", err)
+	}
+}
+
 func TestTamperedTokenRejected(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)

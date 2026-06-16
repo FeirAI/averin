@@ -1685,7 +1685,10 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 			clientErr = fmt.Errorf("record %q is not a use_intent (kind=%q)", or.IntentRecordID, probe.Extensions.Broker.Kind)
 			return nil
 		}
-		rec := s.buildUseOutcomeRecord(outcomeID, or.ProjectID, or.SessionID, probe.Extensions.Broker.UseEvidence.GrantID, or.IntentRecordID, probe.ContentHash, status)
+		rec, be := s.buildUseOutcomeRecord(outcomeID, or.ProjectID, or.SessionID, probe.Extensions.Broker.UseEvidence.GrantID, or.IntentRecordID, probe.ContentHash, status)
+		if be != nil {
+			return be // 500: never seal an outcome whose evidence could not be hashed/signed
+		}
 		sealed, _, err = s.sealAndStore(or.ProjectID, or.SessionID, idem, rec, nil)
 		return err
 	}()
@@ -1713,7 +1716,7 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 // (grant_id, intent_ref) AND the before-act ordering (intent_hash = the intent's content_hash) to the
 // RESOURCE evidence signature — the verifier reads these from the signed payload, never the unsigned
 // extensions.broker siblings, so a relay holding only the record-signing key cannot redirect or backfill.
-func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID, intentRef, intentHash, status string) map[string]any {
+func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID, intentRef, intentHash, status string) (map[string]any, error) {
 	payload := map[string]any{
 		"grant_id":    grantID,
 		"intent_hash": intentHash,
@@ -1724,9 +1727,15 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 	payloadJSON, _ := json.Marshal(payload)
 	evidenceHash, err := s.core.RcpEvidenceHash(string(payloadJSON))
 	if err != nil {
-		evidenceHash = "" // a bad hash yields a non-validatable outcome (caught by the verifier), never a silent pass
+		return nil, fmt.Errorf("use-outcome evidence hash: %w", err)
 	}
-	evidenceSig, _ := s.resourceCore.SignEvidence("gateway_enforced", projectID, outcomeID, evidenceHash)
+	// Do NOT seal an outcome carrying an unsigned/invalid evidence_sig into the append-only log: propagate a
+	// sign failure so the caller gets a 500 and can retry. The intent is already recorded, so a missing valid
+	// outcome surfaces as intent_without_outcome — never a permanently-unverifiable record (Codex).
+	evidenceSig, err := s.resourceCore.SignEvidence("gateway_enforced", projectID, outcomeID, evidenceHash)
+	if err != nil {
+		return nil, fmt.Errorf("use-outcome evidence sign: %w", err)
+	}
 	return map[string]any{
 		"record_id": outcomeID,
 		// FORCE the causal edge to the intent (unioned with session heads in sealAndStore) so the outcome
@@ -1757,7 +1766,7 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 				"use_outcome": payload,
 			},
 		},
-	}
+	}, nil
 }
 
 // commitLowEntropyFields replaces each raw input/output/rationale field in rec with a hiding
