@@ -30,9 +30,11 @@ sha2 = "0.10"
 ed25519-dalek = "2"
 unicode-normalization = "0.1"
 getrandom = { version = "0.2", optional = true }
-# rfc3161 feature only
-cms = { version = "0.2", optional = true, features = ["builder"] }
-x509-cert = { version = "0.2", optional = true, features = ["builder"] }
+# rfc3161 feature only. The `builder` features of cms/x509-cert are deliberately NOT enabled: they drag
+# in `rsa` (-> getrandom) and a cert-signing stack we never use — the verifier only PARSES tokens, and the
+# hermetic make_test_token assembles its CMS SignedData by hand from the core types (no cms::builder).
+cms = { version = "0.2", optional = true }
+x509-cert = { version = "0.2", optional = true }
 der = { version = "0.7", optional = true, features = ["derive", "oid"] }
 spki = { version = "0.7", optional = true }
 const-oid = { version = "0.9", optional = true, features = ["db"] }

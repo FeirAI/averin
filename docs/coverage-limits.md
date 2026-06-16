@@ -59,9 +59,14 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   `policy_engine_signed` / `human_signed` (with `evidence_sig` from the authority system) is
   *verified*. The UI must visibly distinguish "declared by agent" from "verified from policy
   engine." Never present declared authority as verified.
-- **RFC 3161 wire format** is being finalized (the Go anchoring job + a feature-gated DER/CMS
-  parser). The detection *logic* is proven today via the hermetic `test-anchor` scheme; the
-  production trust anchor is a real third-party TSA.
+- **RFC 3161 wire format.** The DER/CMS `TimeStampToken` parser + verifier is implemented and
+  feature-gated (`rfc3161`); it ships in the native verify CLI (built with the feature in CI) and is
+  exercised end to end by the hermetic `test-anchor`/mini-TSA suite. It is **intentionally native-only**:
+  the in-browser WASM verifier is built `--no-default-features` to stay lean and RNG-free (the P-256
+  curve-arithmetic stack the RFC 3161 path needs transitively pulls `getrandom`, which has no
+  `wasm32-unknown-unknown` backend), so a WASM verifier reports an `rfc3161` anchor as `Unsupported`
+  — **never a silent pass** — and production-anchored bundles are verified by the native/CLI verifier.
+  The remaining open item is the production Go anchoring round-trip against a real third-party TSA.
 - **Compliance exports** map sealed records to *selected* control-evidence fields with an explicit
   `gap_report`. They do **not** by themselves satisfy EU AI Act Annex IV / SOC 2. Field-level
   statutory mapping requires legal review.

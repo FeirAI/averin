@@ -27,6 +27,8 @@ jobs:
         run: cargo test --features test-tsa
       - name: build verify CLI
         run: cargo build --release --bin feir-verify
+      - name: build verify CLI WITH rfc3161 (shippable real-TSA verifier stays green)
+        run: cargo build --release --bin feir-verify --features rfc3161
 
   server:
     name: go server (cgo -> rust core; ingestion + verify pipeline)

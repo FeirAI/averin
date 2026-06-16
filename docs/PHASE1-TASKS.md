@@ -34,15 +34,18 @@ The **adversarial tests are the acceptance gates** (spec §15, §17). A mileston
 | M1.9 | Build target: FFI lib (cdylib + C header) | ☑ |
 | M1.10 | Build target: **verify CLI** (offline) | ☑ |
 | M1.11 | Build target: **WASM** (wasm-bindgen) | ☑ |
-| M1.12 | External anchoring — verify in core (test-anchor ☑; rfc3161 = `Unsupported` until feature-gated DER/CMS parser ships with the Go job) | ◔ |
+| M1.12 | External anchoring — verify in core (test-anchor ☑; rfc3161 DER/CMS parser+verifier ☑ feature-gated, in the native CLI + CI; intentionally native-only — WASM stays lean/RNG-free, reports `Unsupported` not a silent pass; remaining: production Go round-trip to a real TSA) | ◕ |
 | M1.13 | FFI lib + C header + cgo-style smoke test | ☑ |
 | M1.14 | WASM build target (`--no-default-features --features wasm`) | ☑ |
 | M1.15 | Parser nesting-depth cap (DoS hardening) | ☑ |
 | **Acceptance (adversarial)** | defends #1 omitted session, #2 forked history, #3 backdated, #9 key compromise, #10 verifier skew on fixtures; CLI verifies offline + per-record trust-levels | ☑ **#1,2,3,9,10** (52 tests, all Codex-reviewed) |
 
-> **M1 status:** the integrity core is feature-complete and reviewed for Phase 1. Remaining
-> within M1 = the real RFC 3161 DER/CMS wire-format parser (test-anchor proves the detection
-> logic now; production uses a third-party TSA via the Go anchoring job).
+> **M1 status:** the integrity core is feature-complete and reviewed for Phase 1. The RFC 3161
+> DER/CMS wire-format parser+verifier is implemented and feature-gated (`rfc3161`), shipped in the
+> native verify CLI and built in CI; it is intentionally native-only (the WASM verifier is kept lean
+> and RNG-free, so it reports `rfc3161` anchors as `Unsupported` — never a silent pass — and the
+> native verifier covers production-anchored bundles). Remaining within M1 = the production Go
+> anchoring round-trip against a real third-party TSA (infra/external).
 
 ## M2 — Ingestion + storage + SDKs  (~4–6 wks)  — *done*
 
