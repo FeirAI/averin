@@ -1893,6 +1893,87 @@ fn tier_b_taxonomy_unlisted_action_stays_unverified() {
     assert_eq!(r.taxonomy_status, "validated");
 }
 
+// closure_manifest builds a coverage_manifest declaring side_effect_closure entries (resource_id, action,
+// may_touch) for the T6 tests.
+fn closure_manifest(entries: &[(&str, &str, &[&str])]) -> CanonValue {
+    let arr: Vec<CanonValue> = entries
+        .iter()
+        .map(|(rid, act, touch)| {
+            CanonValue::object(vec![
+                ("resource_id".into(), CanonValue::string(*rid)),
+                ("action".into(), CanonValue::string(*act)),
+                ("may_touch".into(), CanonValue::Array(touch.iter().map(|t| CanonValue::string(*t)).collect())),
+            ])
+            .unwrap()
+        })
+        .collect();
+    CanonValue::object(vec![("side_effect_closure".into(), CanonValue::Array(arr))]).unwrap()
+}
+
+// T6: a coverage_manifest whose side_effect_closure declares every touched resource -> closed + ok.
+#[test]
+fn tier_b_t6_closed_surface_is_ok() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa); // the only touched resource is RESOURCE
+    let bundle = change_field(&bundle, "coverage_manifest", closure_manifest(&[(RESOURCE, ACTION, &[])]));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.unclosed_side_effects, 0);
+    assert_eq!(r.side_effect_closure_status, "closed");
+}
+
+// T6: a resource the surface touches that is in NO declared closure -> unclosed violation (hard fail).
+#[test]
+fn tier_b_t6_undeclared_touched_resource_is_unclosed() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let bundle = change_field(&bundle, "coverage_manifest", closure_manifest(&[("unrelated-db", "x:y", &["audit-log"])]));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "an undeclared touched resource must fail the bundle");
+    assert_eq!(r.unclosed_side_effects, 1);
+    assert_eq!(r.side_effect_closure_status, "unclosed");
+    assert!(r.issues.iter().any(|i| i.contains(RESOURCE) && i.contains("side_effect_closure")), "issues: {:?}", r.issues);
+}
+
+// T6: a touched resource that is declared inside another action's may_touch list is closed.
+#[test]
+fn tier_b_t6_may_touch_resource_is_closed() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    // declare RESOURCE only inside an unrelated action's may_touch (not as a key) — still counts as declared.
+    let bundle = change_field(&bundle, "coverage_manifest", closure_manifest(&[("billing-svc", "billing:charge", &[RESOURCE])]));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.side_effect_closure_status, "closed");
+}
+
+// T6: a present-but-malformed side_effect_closure fails closed (never silently treated as empty/closed).
+#[test]
+fn tier_b_t6_malformed_closure_fails_closed() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let bad_entry = CanonValue::object(vec![("resource_id".into(), CanonValue::string(RESOURCE))]).unwrap(); // missing action/may_touch
+    let manifest = CanonValue::object(vec![("side_effect_closure".into(), CanonValue::Array(vec![bad_entry]))]).unwrap();
+    let bundle = change_field(&bundle, "coverage_manifest", manifest);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a malformed side_effect_closure must fail closed");
+    assert_eq!(r.side_effect_closure_status, "unclosed");
+    assert!(r.issues.iter().any(|i| i.contains("malformed")), "issues: {:?}", r.issues);
+}
+
+// T6: a coverage_manifest present but WITHOUT a side_effect_closure is `not_declared` (and still ok).
+#[test]
+fn tier_b_t6_no_closure_is_not_declared() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let manifest = CanonValue::object(vec![("conformance_level".into(), CanonValue::string("L2_use_receipts"))]).unwrap();
+    let bundle = change_field(&bundle, "coverage_manifest", manifest);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.side_effect_closure_status, "not_declared");
+    assert_eq!(r.unclosed_side_effects, 0);
+}
+
 #[test]
 fn tier_b_taxonomy_stale_window_stays_unverified() {
     let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));

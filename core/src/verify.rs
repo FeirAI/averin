@@ -163,6 +163,13 @@ pub struct VerifyReport {
     /// The bundle's `coverage_manifest` echoed verbatim (the verifier does NOT trust it; it surfaces
     /// it so an auditor can evaluate the out-of-band attestations). `None` if absent.
     pub coverage_manifest: Option<CanonValue>,
+    /// T6 (ADR 0002 open Q1, actionable half): `unclosed_side_effects` = resources the brokered surface
+    /// touched (any grant/use `resource_id`) that fall within NO operator-declared `side_effect_closure`;
+    /// `side_effect_closure_status` is `not_declared` (no closure in the manifest), `closed` (every touched
+    /// resource declared), or `unclosed` (≥1 undeclared — a hard `issues` violation). Proves the manifest
+    /// DECLARES a complete closure over the observed surface — NOT runtime obedience (the resource TCB, D9).
+    pub unclosed_side_effects: usize,
+    pub side_effect_closure_status: String,
     pub issues: Vec<String>,
     pub first_broken_link: Option<String>,
 }
@@ -712,6 +719,8 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             "coverage_manifest".into(),
             r.coverage_manifest.clone().unwrap_or(CanonValue::Null),
         ),
+        ("unclosed_side_effects".into(), count(r.unclosed_side_effects)),
+        ("side_effect_closure_status".into(), CanonValue::string(r.side_effect_closure_status.clone())),
         ("issues".into(), str_array(&r.issues)),
         ("first_broken_link".into(), opt_str(&r.first_broken_link)),
         ("record_trust".into(), CanonValue::Array(records)),
@@ -920,6 +929,8 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         attestation_subject_digest: None,
         resource_trust: "assumed_truthful".to_string(),
         coverage_manifest: None,
+        unclosed_side_effects: 0,
+        side_effect_closure_status: "not_declared".to_string(),
         issues: vec![msg.to_string()],
         first_broken_link: Some(msg.to_string()),
     }
@@ -1142,6 +1153,26 @@ fn tax_pairs(tax: &CanonValue, key: &str, absent: Option<BTreeSet<(String, Strin
         set.insert((r.to_string(), a.to_string()));
     }
     Some(set)
+}
+
+/// Parse `coverage_manifest.side_effect_closure` (T6) into the set of resource_ids it DECLARES — every
+/// upstream `resource_id` key plus every resource named in a `may_touch` list. Fail-closed like `tax_pairs`:
+/// a present-but-malformed list (an entry that is not an object, is missing a string `resource_id`/`action`,
+/// or whose `may_touch` is not an array of strings) returns `None`. The caller checks field PRESENCE
+/// separately, so an absent field is `not_declared` while a malformed one fails closed.
+fn side_effect_closure_resources(manifest: &CanonValue) -> Option<BTreeSet<String>> {
+    let arr = manifest.get("side_effect_closure")?.as_array()?;
+    let mut declared = BTreeSet::new();
+    for e in arr {
+        let r = e.get("resource_id").and_then(|x| x.as_str())?;
+        let _ = e.get("action").and_then(|x| x.as_str())?; // required for shape (resource-bound, like the taxonomy)
+        let may_touch = e.get("may_touch").and_then(|x| x.as_array())?;
+        declared.insert(r.to_string());
+        for t in may_touch {
+            declared.insert(t.as_str()?.to_string());
+        }
+    }
+    Some(declared)
 }
 
 /// Validate a pinned signed operation taxonomy (ADR 0004 D4 / MF5): returns its info iff ALL of —
@@ -2572,6 +2603,34 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
 
     let coverage_manifest = bundle.get("coverage_manifest").cloned();
 
+    // T6 (ADR 0002 open Q1, ACTIONABLE half): side_effect_closure COMPLETENESS over the observed brokered
+    // surface. The operator declares, in the D7-digest-bound coverage_manifest, which resources each acted
+    // action may transitively touch; every resource the bundle's grants/uses actually NAME (the resource_ids
+    // set) must fall within that declared closure. A touched-but-undeclared resource is an unclosed-side-effect
+    // violation (hard `issues` → !ok). This proves the manifest DECLARES a complete closure over what happened
+    // — NOT that the runtime obeyed it nor that the closure is semantically complete (the irreducible resource
+    // TCB, resource_trust:assumed_truthful, D9 floor 2).
+    let mut unclosed_side_effects = 0usize;
+    let side_effect_closure_status = match coverage_manifest.as_ref().filter(|m| !m.is_null()) {
+        Some(m) if m.get("side_effect_closure").is_some() => match side_effect_closure_resources(m) {
+            Some(declared) => {
+                for r in &resource_ids {
+                    if !declared.contains(r) {
+                        unclosed_side_effects += 1;
+                        issues.push(format!("resource '{r}' is touched by the brokered surface but is within no declared side_effect_closure (T6)"));
+                    }
+                }
+                if unclosed_side_effects == 0 { "closed" } else { "unclosed" }
+            }
+            None => {
+                issues.push("coverage_manifest.side_effect_closure is present but malformed (T6 fail-closed)".into());
+                "unclosed"
+            }
+        },
+        _ => "not_declared",
+    }
+    .to_string();
+
     let first_broken_link = issues.first().cloned();
     let ok = issues.is_empty()
         && records_proven == records.len()
@@ -2625,6 +2684,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         attestation_subject_digest: attest.subject_digest,
         resource_trust: "assumed_truthful".to_string(),
         coverage_manifest,
+        unclosed_side_effects,
+        side_effect_closure_status,
         issues,
         first_broken_link,
     }
