@@ -453,7 +453,8 @@ Two distinct floors remain irreducible offline, and the capstone label asserts n
    **T6 closes the ACTIONABLE half (ADR 0002 open Q1):** the operator declares, in the D7-digest-bound
    `coverage_manifest`, a `side_effect_closure` — per `(resource_id, action)`, the resources it may
    transitively touch — and the verifier proves that declaration is *complete over the observed brokered
-   surface* (every resource a grant/use names is within the declared closure, else an `unclosed_side_effects`
+   surface* (every `(resource_id, action)` a grant/use exercises is within the declared closure for THAT
+   action — a resource declared only under another action does not close it — else an `unclosed_side_effects`
    violation; `side_effect_closure_status` ∈ `not_declared|closed|unclosed`, the 12th D8 conjunct requires
    `closed`). This proves the manifest **declares** a complete closure over what happened — it does NOT prove
    the runtime **obeyed** it nor that the closure is semantically complete; those stay the irreducible TCB

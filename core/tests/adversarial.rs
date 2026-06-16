@@ -1935,16 +1935,31 @@ fn tier_b_t6_undeclared_touched_resource_is_unclosed() {
     assert!(r.issues.iter().any(|i| i.contains(RESOURCE) && i.contains("side_effect_closure")), "issues: {:?}", r.issues);
 }
 
-// T6: a touched resource that is declared inside another action's may_touch list is closed.
+// T6 (action-bound, Codex): a resource declared via may_touch UNDER THE SAME action that touches it is closed.
+// The surface touches (RESOURCE, ACTION); RESOURCE is declared as the may_touch of `other-primary` under the
+// SAME ACTION, so (RESOURCE, ACTION) is in the declared closure -> closed.
 #[test]
-fn tier_b_t6_may_touch_resource_is_closed() {
+fn tier_b_t6_may_touch_under_same_action_is_closed() {
     let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
     let bundle = d4_bundle(&rec, &res, &tsa);
-    // declare RESOURCE only inside an unrelated action's may_touch (not as a key) — still counts as declared.
-    let bundle = change_field(&bundle, "coverage_manifest", closure_manifest(&[("billing-svc", "billing:charge", &[RESOURCE])]));
+    let bundle = change_field(&bundle, "coverage_manifest", closure_manifest(&[("other-primary", ACTION, &[RESOURCE])]));
     let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
     assert!(r.ok, "issues: {:?}", r.issues);
     assert_eq!(r.side_effect_closure_status, "closed");
+}
+
+// T6 (action-bound, Codex regression): a resource declared ONLY under an UNRELATED action must NOT close it
+// for the action actually acting on it. The surface touches (RESOURCE, ACTION); the manifest declares RESOURCE
+// only under "billing:charge" (as primary AND as may_touch) — neither covers (RESOURCE, ACTION) -> unclosed.
+#[test]
+fn tier_b_t6_resource_under_unrelated_action_is_unclosed() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let bundle = change_field(&bundle, "coverage_manifest", closure_manifest(&[(RESOURCE, "billing:charge", &[]), ("billing-svc", "billing:charge", &[RESOURCE])]));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a resource declared only under an unrelated action must not close it for ACTION");
+    assert_eq!(r.side_effect_closure_status, "unclosed");
+    assert!(r.issues.iter().any(|i| i.contains(RESOURCE) && i.contains(ACTION) && i.contains("side_effect_closure")), "issues: {:?}", r.issues);
 }
 
 // T6: a present-but-malformed side_effect_closure fails closed (never silently treated as empty/closed).
@@ -1957,6 +1972,19 @@ fn tier_b_t6_malformed_closure_fails_closed() {
     let bundle = change_field(&bundle, "coverage_manifest", manifest);
     let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
     assert!(!r.ok, "a malformed side_effect_closure must fail closed");
+    assert_eq!(r.side_effect_closure_status, "unclosed");
+    assert!(r.issues.iter().any(|i| i.contains("malformed")), "issues: {:?}", r.issues);
+}
+
+// T6 (Codex hardening): an entry with an EMPTY action is malformed -> fail closed. An empty action must never
+// enter the declared set, else an `action:""` entry could "close" a malformed action-less grant.
+#[test]
+fn tier_b_t6_empty_action_fails_closed() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let bundle = change_field(&bundle, "coverage_manifest", closure_manifest(&[(RESOURCE, "", &[])]));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "an empty-action closure entry must fail closed");
     assert_eq!(r.side_effect_closure_status, "unclosed");
     assert!(r.issues.iter().any(|i| i.contains("malformed")), "issues: {:?}", r.issues);
 }

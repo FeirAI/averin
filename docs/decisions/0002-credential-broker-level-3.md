@@ -126,8 +126,9 @@ non-backdatable. What feir **cannot** prove from the bundle (and must surface, n
 - **Side-effect closure** — a granted action on resource X may trigger effects on resource Y. The
   manifest declares transitive side-effect assumptions as `side_effect_closure`. **[T6, IMPLEMENTED —
   actionable half]:** the verifier now proves that declaration is COMPLETE over the observed brokered
-  surface (every resource a grant/use names must be within the declared closure, else an
-  `unclosed_side_effects` violation; the D8 capstone requires `side_effect_closure_status == "closed"`).
+  surface — ACTION-BOUND: every `(resource_id, action)` a grant/use exercises must be within the declared
+  closure for THAT action (a resource declared only under another action does not close it), else an
+  `unclosed_side_effects` violation; the D8 capstone requires `side_effect_closure_status == "closed"`.
   This proves the manifest *declares* a complete closure; it does NOT prove the runtime *obeyed* it nor that
   the closure is semantically complete — the irreducible resource TCB (`resource_trust: assumed_truthful`),
   closable only by D7-style runtime/TEE enforcement.
@@ -422,8 +423,10 @@ Round-2 review: 7/9 rev-1 findings RESOLVED; 2 PARTIAL + 5 new, all incorporated
 1. **Side-effect closure** is declarative (the manifest *asserts* what a granted action can touch).
    Is there any way to make it *verifiable* rather than asserted, or is it irreducibly an attestation?
    *[T6, PARTIALLY RESOLVED — see ADR 0004 D9 floor 2.]* The **declaration-completeness** half is now
-   verifiable: the verifier checks that every resource any granted/used surface names is *affirmatively
-   declared* in the D7-digest-bound `side_effect_closure` (else `unclosed_side_effects` → `ok=false`), and
+   verifiable: the verifier checks that every `(resource_id, action)` any granted/used surface exercises is
+   *affirmatively declared* in the D7-digest-bound `side_effect_closure` — **action-bound**, so a resource
+   declared only under a different action does not close it for the action acting on it (else
+   `unclosed_side_effects` → `ok=false`), and
    the D8 capstone requires `side_effect_closure_status=="closed"`. What stays irreducibly attested is
    **runtime obedience** — that the resource actually confined the action to the declared closure
    (bounded by `resource_trust: assumed_truthful`, the resource TCB). So: the *manifest is asserted*, but

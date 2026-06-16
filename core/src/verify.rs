@@ -1162,21 +1162,28 @@ fn tax_pairs(tax: &CanonValue, key: &str, absent: Option<BTreeSet<(String, Strin
     Some(set)
 }
 
-/// Parse `coverage_manifest.side_effect_closure` (T6) into the set of resource_ids it DECLARES — every
-/// upstream `resource_id` key plus every resource named in a `may_touch` list. Fail-closed like `tax_pairs`:
-/// a present-but-malformed list (an entry that is not an object, is missing a string `resource_id`/`action`,
-/// or whose `may_touch` is not an array of strings) returns `None`. The caller checks field PRESENCE
-/// separately, so an absent field is `not_declared` while a malformed one fails closed.
-fn side_effect_closure_resources(manifest: &CanonValue) -> Option<BTreeSet<String>> {
+/// Parse `coverage_manifest.side_effect_closure` (T6) into the set of `(resource_id, action)` pairs it
+/// DECLARES — for every entry, the primary `(resource_id, action)` PLUS `(may_touch_resource, action)` for
+/// each resource in that entry's `may_touch` list (the may_touch resources are declared touchable UNDER THE
+/// ENTRY'S ACTION). Closure is action-bound (per `(resource_id, action)`, like the ADR specifies): a resource
+/// declared only under a DIFFERENT action does not close that resource for the action actually acting on it.
+/// Fail-closed like `tax_pairs`: a present-but-malformed list (an entry that is not an object, is missing a
+/// string `resource_id`/`action`, or whose `may_touch` is not an array of strings) returns `None`. The caller
+/// checks field PRESENCE separately, so an absent field is `not_declared` while a malformed one fails closed.
+fn side_effect_closure_resources(manifest: &CanonValue) -> Option<BTreeSet<(String, String)>> {
     let arr = manifest.get("side_effect_closure")?.as_array()?;
     let mut declared = BTreeSet::new();
     for e in arr {
-        let r = e.get("resource_id").and_then(|x| x.as_str())?;
-        let _ = e.get("action").and_then(|x| x.as_str())?; // required for shape (resource-bound, like the taxonomy)
+        // Reject EMPTY resource_id/action (fail-closed): an `action:""` entry would otherwise declare a
+        // ("",..)/(.., "") pair that could "close" a malformed action-less grant whose own action parsed
+        // empty — so an empty action can never appear in the declared set (Codex hardening).
+        let r = e.get("resource_id").and_then(|x| x.as_str()).filter(|s| !s.is_empty())?;
+        let a = e.get("action").and_then(|x| x.as_str()).filter(|s| !s.is_empty())?; // action-bound: per (resource_id, action)
         let may_touch = e.get("may_touch").and_then(|x| x.as_array())?;
-        declared.insert(r.to_string());
+        declared.insert((r.to_string(), a.to_string()));
         for t in may_touch {
-            declared.insert(t.as_str()?.to_string());
+            let tr = t.as_str().filter(|s| !s.is_empty())?;
+            declared.insert((tr.to_string(), a.to_string()));
         }
     }
     Some(declared)
@@ -2598,11 +2605,18 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // grant_evidence or use_evidence in the bundle (so a substituted attestation for a different surface
     // is rejected).
     let mut resource_ids: BTreeSet<String> = BTreeSet::new();
+    // T6: the (resource_id, action) PAIRS the brokered surface actually touches — closure is checked
+    // action-bound (per the ADR), so a resource touched under action A must be declared under A, not merely
+    // named somewhere under an unrelated action. A grant/use missing its action contributes ("", resource)
+    // so it can never match a declared (resource, real-action) pair — it fails closed.
+    let mut touched_pairs: BTreeSet<(String, String)> = BTreeSet::new();
     for rec in records {
         if let Some(r) = ev_str(rec, "grant_evidence", "resource_id") {
+            touched_pairs.insert((r.clone(), ev_str(rec, "grant_evidence", "action").unwrap_or_default()));
             resource_ids.insert(r);
         }
         if let Some(r) = ev_str(rec, "use_evidence", "resource_id") {
+            touched_pairs.insert((r.clone(), ev_str(rec, "use_evidence", "action").unwrap_or_default()));
             resource_ids.insert(r);
         }
     }
@@ -2611,24 +2625,26 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let coverage_manifest = bundle.get("coverage_manifest").cloned();
 
     // T6 (ADR 0002 open Q1, ACTIONABLE half): side_effect_closure COMPLETENESS over the observed brokered
-    // surface. The operator declares, in the D7-digest-bound coverage_manifest, which resources each acted
-    // action may transitively touch; every resource the bundle's grants/uses actually NAME (the resource_ids
-    // set) must fall within that declared closure. Note resource_ids is built from EVERY grant_evidence AND
-    // use_evidence resource_id above — so a grant that was ISSUED BUT NEVER USED still contributes its
-    // resource_id, and the operator must declare closure for it too. This is intentional: a grant's mere
-    // existence widened the authorized surface (the broker could have honored a use), so completeness is
-    // claimed over what was AUTHORIZED, not only what was exercised. A touched-but-undeclared resource is an
-    // unclosed-side-effect violation (hard `issues` → !ok). This proves the manifest DECLARES a complete
-    // closure over what happened — NOT that the runtime obeyed it nor that the closure is semantically
-    // complete (the irreducible resource TCB, resource_trust:assumed_truthful, D9 floor 2).
+    // surface. The operator declares, in the D7-digest-bound coverage_manifest, per `(resource_id, action)`,
+    // which resources each acted action may transitively touch; every `(resource_id, action)` the bundle's
+    // grants/uses actually exercise (`touched_pairs`) must fall within that ACTION-BOUND declared closure —
+    // a resource declared only under a DIFFERENT action does NOT close it for the action acting on it (Codex).
+    // Note touched_pairs is built from EVERY grant_evidence AND use_evidence pair above — so a grant that was
+    // ISSUED BUT NEVER USED still contributes its `(resource_id, action)`, and the operator must declare
+    // closure for it too. This is intentional: a grant's mere existence widened the authorized surface (the
+    // broker could have honored a use), so completeness is claimed over what was AUTHORIZED, not only what was
+    // exercised. A touched-but-undeclared `(resource_id, action)` is an unclosed-side-effect violation (hard
+    // `issues` → !ok). This proves the manifest DECLARES a complete closure over what happened — NOT that the
+    // runtime obeyed it nor that the closure is semantically complete (resource TCB, resource_trust:assumed_truthful, D9 floor 2).
     let mut unclosed_side_effects = 0usize;
     let side_effect_closure_status = match coverage_manifest.as_ref().filter(|m| !m.is_null()) {
         Some(m) if m.get("side_effect_closure").is_some() => match side_effect_closure_resources(m) {
             Some(declared) => {
-                for r in &resource_ids {
-                    if !declared.contains(r) {
+                for pair in &touched_pairs {
+                    if !declared.contains(pair) {
                         unclosed_side_effects += 1;
-                        issues.push(format!("resource '{r}' is touched by the brokered surface but is within no declared side_effect_closure (T6)"));
+                        let (r, a) = pair;
+                        issues.push(format!("resource '{r}' under action '{a}' is touched by the brokered surface but is within no declared side_effect_closure (T6)"));
                     }
                 }
                 if unclosed_side_effects == 0 { "closed" } else { "unclosed" }
