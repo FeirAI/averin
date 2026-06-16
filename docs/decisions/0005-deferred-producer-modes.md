@@ -1,7 +1,7 @@
 # ADR 0005 — Deferred Producer Modes (design-only + staging map)
 
 **Status:** Accepted (DESIGN ONLY — no production code). Stages the six credential-broker producer modes
-ADR 0002 deferred (line 361) and resolves ADR 0002 open Q2 (N-use) + Q3 (introspection).
+ADR 0002 deferred (line 362) and resolves ADR 0002 open Q2 (N-use) + Q3 (introspection).
 **Date:** 2026-06-17
 **Builds on:** ADR 0002 (broker, tiers, B-threats), ADR 0003 (Tier-B demonstrator: R1–R5, role separation),
 ADR 0004 (D1–D9 residual reduction, MF1–MF5, the D8 capstone + per-conjunct discipline, the build-order
@@ -46,8 +46,8 @@ rather than rewriting them; the reuse inventory is called out per mode.
   delegation certs; each broker's `broker_seq` log verified independently; cross-broker suppression surfaced.
 - **Revocation** = **tiered**: a bundled, signed, time-bounded list (offline default; stale status blocks the
   capstone) + opt-in online CRL.
-- **Cosig** = **M-of-N grant approval**: N approver keys disjoint from broker/resource keys (extends the R2
-  disjointness check); the verifier counts ≥ M verified cosignatures.
+- **Cosig** = **M-of-N grant approval**: N approver keys disjoint from broker/resource keys (a new role key
+  set ADDED to the R2 disjointness machinery — see the note below); the verifier counts ≥ M cosignatures.
 - Opt-in **online checks are allowed** (clearly labeled non-offline). The ADR **classifies each mode's D8
   interaction**.
 
@@ -68,11 +68,15 @@ Capstone → Signature domain → Residual*.
   `[issued_at, exp]`.
 - **Schema delta.** `grant_evidence.use_limit:int`; `use_evidence.use_sequence_number:int`; `Descriptor`
   carries `use_limit`. Reuses the `single_use:false` path and the existing `[nbf,exp]` enforcement.
-- **Verifier semantics.** The single-use check (verify.rs ~2466) becomes per-class: `single_operation` keeps
-  `jti==grant_id` + `used==0`; `bounded_reuse` requires `jti == "{grant_id}#{usn}"` with `1≤usn≤use_limit`,
-  dedups `(grant_id, usn)` across closed receipts, and caps `used ≤ use_limit`. New report fields:
-  `bounded_reuse_grants`, `bounded_reuse_overspent`, `bounded_reuse_seq_replays`. The `#` delimiter is
-  reserved — a `grant_id` containing `#` fails closed at grant-indexing.
+- **Verifier semantics.** The single-use check (verify.rs ~2466) becomes per-class. `single_operation` keeps
+  `jti==grant_id` + `used==0`. `bounded_reuse` **keeps `jti==grant_id` too** (so the D6.4 descriptor
+  cross-check `descriptor.jti == grant_id` at verify.rs ~2267 is UNCHANGED — the resource sources
+  `use_evidence.jti` straight from the descriptor jti, so it must NOT diverge); the per-exercise identity is
+  the SEPARATE `use_sequence_number` field. The verifier requires `1≤usn≤use_limit`, dedups `(grant_id, usn)`
+  across closed receipts, and caps `used ≤ use_limit`. On the producer side the shim's single-use ledger
+  consumes `(grant_id, usn)` for `bounded_reuse` instead of the bare jti (resourceshim ConsumeJTI key
+  generalizes; the nonce ledger is unchanged). New report fields: `bounded_reuse_grants`,
+  `bounded_reuse_overspent`, `bounded_reuse_seq_replays`.
 - **Capstone.** **Reachable.** The existing `!one_phase_use_present` + `uses_pop_reverified==uses_matched`
   conjuncts already enforce "two-phase + PoP-reverified"; add `bounded_reuse_overspent==0 &&
   bounded_reuse_seq_replays==0` (surfacing-redundant with `unmatched_violation` but self-documenting).
@@ -143,8 +147,9 @@ Capstone → Signature domain → Residual*.
   optional `grant_evidence.cross_broker_cert`. `broker_grant_head` generalizes to a per-`broker_id` map.
 - **Verifier semantics.** `compute_broker_trust` runs per `broker_id`; aggregate `broker_trust =
   worst(per-broker)`. New fields `brokers_total/_seq_verified`, `cross_broker_suppression`,
-  `federation_status`, `per_broker_trust[]`. R2 disjointness extends: approver/resource/etc. keys disjoint from
-  the *union* of all per-broker key sets; distinct brokers MAY share a root unless a cross-broker cert is
+  `federation_status`, `per_broker_trust[]`. The R2 disjointness machinery needs NEW logic here (today it is a
+  fixed pairwise array over single key sets — see the note below): every other role's keys must be disjoint
+  from the *union* of all per-broker key sets; distinct brokers MAY share a root unless a cross-broker cert is
   active (then issuer≠subject).
 - **Capstone.** **Reachable**, gated by `cross_broker_suppression==0 && brokers_seq_verified==brokers_total`.
 - **Signature domain.** `feir.broker.federation.cert.v1` = `sha256(LP4(tag) ‖ LP4(issuer_broker_id) ‖
@@ -178,8 +183,8 @@ Capstone → Signature domain → Residual*.
 ### M6 — Cosig (M-of-N grant approval)
 
 - **Mechanism.** A grant may require M-of-N approver cosignatures before it is Tier-B-eligible. The verifier
-  counts distinct approver signatures that verify under the pinned `cosig_approver_keys` (disjoint from
-  broker/resource — extends R2); `< M` ⇒ the grant is not indexed (its use becomes `unmatched_violation`).
+  counts distinct approver signatures that verify under the pinned `cosig_approver_keys` (a new role key set
+  added to the R2 disjointness check — see §5); `< M` ⇒ the grant is not indexed (its use becomes `unmatched_violation`).
 - **Schema delta.** `grant_evidence.{cosignatures[], cosig_threshold, cosig_signers[]}`; new
   `cosig_approver_keys` verify-opt (FATAL config error on overlap with any role, like the existing
   disjointness loop). Use-side unchanged.
@@ -205,20 +210,28 @@ Capstone → Signature domain → Residual*.
 | Revocation | **Gated** | +`revocation_status∉{stale,revoked_present} && revoked_uses_blocked==0` (`absent` does not block) |
 | Cosig | **Gated** | +`cosig_threshold_failures==0 && (total==0 || satisfied==total)` |
 
-The conjunction grows from 12 → ~19 load-bearing terms. Per ADR 0004's discipline, **each new conjunct gets a
+The conjunction grows from its current 13 AND-terms (12 load-bearing conjuncts + the `coverage_manifest`-present
+gate precondition, per ADR 0004) toward ~19. Per ADR 0004's discipline, **each new conjunct gets a
 per-conjunct removal test** (remove it → drops to `claimed_over_manifest`). Only Native's
 `!native_credential_present` is *strictly* necessary; the rest also fire as `unmatched_violation` but are kept
 explicit so the capstone's meaning is self-documenting.
 
 ## 5. Cross-mode interactions (reconciliations)
 
-- **Delegation × N-Use** compose: `max_uses` is read ONLY from the root `grant_evidence`, never a hop assertion
+- **Delegation × N-Use** compose: `use_limit` is read ONLY from the root `grant_evidence`, never a hop assertion
   (a delegator cannot grant more uses than exist).
 - **Revocation × Delegation** cascade: a chain shares the root `grant_id`, so revoking the root revokes all
   leaves automatically.
 - **Cosig × Native/STS**: cosig approves the *grant-of-use-authority* (the broker record), decoupled from the
   external STS mint; the cosig preimage binds the introspection `credential_ref`.
-- **Cosig R2 × Federation**: approver keys must be disjoint from the *union* of all per-broker key sets.
+- **The R2 disjointness machinery (Cosig + Federation note).** Today the check is a FIXED pairwise array
+  literal over five single key sets — `[(broker, resource, taxonomy, attestation, tsa)]` — plus a hard-coded
+  `authority_keys` loop (verify.rs ~1591–1627). Cosig and Federation are therefore NOT "extensions of an
+  extension point": Cosig adds a sixth `cosig_approver_keys` entry (an array + loop edit), and Federation
+  replaces the single `broker_authority_keys` slot with a per-`broker_id` map and adds new union-disjointness
+  logic (approvers/resource/etc. disjoint from the *union* of all per-broker key sets; brokers MAY share a
+  root, but a cross-broker cert's issuer≠subject). Both are code changes to those literals/loops, surfaced
+  here so the implementer doesn't expect a ready-made registry.
 - **Federation × Revocation**: per-broker lists; `revocation_status = worst(per-broker)`.
 
 ## 6. Build order (dependency-ordered; each lands producer + verifier + golden fixtures in one reviewed commit)
@@ -265,12 +278,12 @@ reserved `record_id`/idempotency prefixes (`introspection-`, `revocation-`) now.
 
 ## 9. Amendments to ADR 0002 (to apply alongside the first implementation)
 
-- **Deferred-modes list (:361)** → append `[RESOLVED/STAGED in ADR 0005]` with the six-mode summary.
-- **Open Q2 (:431)** → `[RESOLVED in ADR 0005 §M1]`: yes, as `bounded_reuse` — a Tier-B-eligible bounded reuse
+- **Deferred-modes list (:362)** → append `[RESOLVED/STAGED in ADR 0005]` with the six-mode summary.
+- **Open Q2 (:434)** → `[RESOLVED in ADR 0005 §M1]`: yes, as `bounded_reuse` — a Tier-B-eligible bounded reuse
   of the identical `(action, resource_id)`, reopening a bounded slice of B3 (stated).
-- **Open Q3 (:434)** → `[RESOLVED in ADR 0005 §M3]`: post-mint resource-signed introspection transcript; it
+- **Open Q3 (:437)** → `[RESOLVED in ADR 0005 §M3]`: post-mint resource-signed introspection transcript; it
   **relocates** the resource TCB (consistent with ADR 0004 D9 floor 2), it does not remove it.
-- **B9 row (:326)** → append `[strengthened in ADR 0005 §M2: per-hop SIGNED assertions, monotonic non-increase
+- **B9 row (:327)** → append `[strengthened in ADR 0005 §M2: per-hop SIGNED assertions, monotonic non-increase
   re-verified offline]`.
 
 ## Open questions (next round)
