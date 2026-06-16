@@ -1158,7 +1158,14 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 	storeErr := func() error {
 		s.ingestMu.Lock()
 		defer s.ingestMu.Unlock()
-		if prior, found, le := s.st.RecordByIdem(ur.ProjectID, idem); le == nil && found {
+		prior, found, le := s.st.RecordByIdem(ur.ProjectID, idem)
+		if le != nil {
+			// FAIL CLOSED on an ambiguous idempotency lookup: a transient store error must abort BEFORE
+			// ValidateUse, which consumes the single-use nonce/jti — otherwise a read-path failure burns the
+			// credential and leaves no persisted receipt (action without a receipt). Surface as 500.
+			return le
+		}
+		if found {
 			rid, sess, kind, gid := useReceiptIdentity(prior.JSON)
 			if rid == useID && sess == ur.SessionID && kind == brokerKind {
 				sealed, grantID, idempotent = prior.JSON, gid, true
@@ -1395,7 +1402,11 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		// Outcome idempotency is keyed on `idem` (the PutRecord dedupe key), resolved up front: an exact
 		// (record_id, session_id, kind) match is an honest retry; any other record under this key is a
 		// conflict → 409 (else PutRecord would later collapse the outcome onto a foreign row and echo it).
-		if prior, found, le := s.st.RecordByIdem(or.ProjectID, idem); le == nil && found {
+		prior, found, le := s.st.RecordByIdem(or.ProjectID, idem)
+		if le != nil {
+			return le // fail closed on an ambiguous idempotency lookup (mirror handleUsePhase) — no partial outcome
+		}
+		if found {
 			rid, sess, kind, _ := useReceiptIdentity(prior.JSON)
 			if rid == outcomeID && sess == or.SessionID && kind == "use_outcome" {
 				sealed, idempotent = prior.JSON, true
