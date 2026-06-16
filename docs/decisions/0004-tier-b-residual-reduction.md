@@ -23,9 +23,11 @@ software honestly can and stating precisely what stays residual.
 - **MF4 (D2):** the resource MUST recompute `commit("input", params, params_nonce)` and reject a
   mismatch BEFORE the side effect; the params domain is `input`; the report distinguishes
   commitment-bound PoP from disclosed-param verification.
-- **MF5 (D4):** taxonomy carries digest/version/effective-interval; `taxonomy_status: validated` only
-  when signature + pinned issuer + version + interval all cover the grant/use time (else `stale`/
-  `untrusted`).
+- **MF5 (D4):** taxonomy carries resource-bound action lists + digest/version/effective-interval;
+  `taxonomy_status: validated` (artifact-level) only with a valid signature + pinned role-separated
+  issuer + matched pinned digest/version. The effective interval is enforced PER-USE (a listed action
+  outside it → `stale`); the honest per-use signal is `uses_action_unverified` (a D4/D8 gate needs BOTH
+  `validated` and `uses_action_unverified == 0`).
 
 ## What this ADR is — and the honesty bar it holds
 
@@ -124,30 +126,52 @@ violation; `ledger_commitment` tamper → violation).
 **Residual (ADR 0003 R6):** no signed taxonomy validates `scope_class == single_operation`, so EVERY
 matched use is `uses_action_unverified` and can never upgrade `action_completeness`.
 
-**Mechanism:** a signed **operation taxonomy** — a record (or out-of-band artifact, pinned like the
-TSA/authority keys) mapping `action → operation_class`, asserting which classes are genuinely
-single-operation (bounded, non-escalating, non-async), and carrying (MF5, mirroring ADR 0002):
-- a content **digest** + monotonic **version**, and an **effective interval** `[effective_from,
-  effective_until]`. It is signed by a **taxonomy authority key** (pinned in verify options,
-  role-separated from broker/resource).
+**Mechanism:** a signed **operation taxonomy** — an out-of-band artifact pinned like the TSA/authority
+keys — carrying two **resource-bound** lists of `{resource_id, action}` entries: `single_operation_actions`
+(pairs the issuer asserts ARE a single bounded, non-escalating, non-async operation) and an optional
+`escalating_actions` (pairs affirmatively marked NOT single-operation). Entries are resource-bound so a
+taxonomy vetted for one resource cannot validate a colliding action name on another. It also carries
+(MF5, mirroring ADR 0002) a monotonic **version** and an **effective interval** `[effective_from,
+effective_until]`, and is signed by a **taxonomy authority key** pinned in verify options and
+**role-separated from broker/resource** (a key shared with either role is a FATAL config error — it
+could self-validate a taxonomy). The verifier pins BOTH an expected content **digest** (`sha256:` over
+the RCP-canonical taxonomy minus `sig`) and the expected **version**; absent either pin, no taxonomy can
+reach `validated` (fail-closed).
 
-The verifier validates a grant's `(action, scope_class)` against the pinned taxonomy and sets a
-`taxonomy_status`:
-- **`validated`** ONLY when the signature verifies under the pinned issuer, the pinned digest/version
-  match, AND the effective interval covers the grant's `issued_at` and the use's `used_at`;
-- **`stale`** when a validly-signed taxonomy's interval does NOT cover the grant/use time;
-- **`untrusted`** when unsigned / wrong issuer / digest mismatch.
+`taxonomy_status` reports **artifact trust ONLY** (it does NOT assert every matched use was verified):
+- **`validated`** — signature verifies under the pinned role-separated issuer AND the pinned
+  digest+version both match;
+- **`stale`** — validly signed+pinned, but a listed action fell outside the effective interval for some
+  matched use;
+- **`untrusted`** — unsigned / wrong issuer / pinned digest|version mismatch / no pin / malformed.
 
-A matched use counts as **action-verified** (NOT `uses_action_unverified`) ONLY under
-`taxonomy_status: validated`; `stale`/`untrusted`/absent → stays `uses_action_unverified` (unchanged).
+A matched use counts as **action-verified** (NOT `uses_action_unverified`) ONLY when the grant is
+`single_operation`, the taxonomy is signed+pinned, the grant's `(resource_id, action)` is listed, and
+the interval covers BOTH the grant's `issued_at` and the use's `used_at`. Because `taxonomy_status` is
+artifact-level, **the honest per-use signal is `uses_action_unverified`** (0 ⇔ all verified); any D4/D8
+gate MUST require BOTH `taxonomy_status == validated` AND `uses_action_unverified == 0`, never the status
+alone. A `single_operation` grant whose `(resource_id, action)` is in `escalating_actions` is **rejected
+as mis-scoped AT ISSUANCE** (a hard `issues` failure when the grant is indexed, whether or not it is ever
+exercised — a dangerous capability must not be invisible just because no use receipt is present).
 
-**Closes:** R6 for taxonomy-`validated` actions within the taxonomy's effective window. **Residual:** the
-taxonomy's *semantic correctness* (does "db.query:orders-ro" truly denote one bounded operation?)
-remains TCB — surfaced as the `taxonomy_status` label + the pinned issuer/version, never as a proof of
-the claim's correctness. **Build artifact:** taxonomy schema (digest/version/interval) + signing +
-pinned verify option + the per-use action-verified split gated on `taxonomy_status==validated`; golden
-tests (validated single-op → verified; stale interval → still `action_unverified`; wrong issuer/digest
-→ `untrusted`; escalating action marked non-single-op → grant rejected as mis-scoped).
+**Closes:** R6 for taxonomy-`validated` `(resource, action)` pairs within the effective window.
+**Residual:** (a) the taxonomy's *semantic correctness* (does "db.query:orders-ro" truly denote one
+bounded operation?) remains TCB — surfaced as the `taxonomy_status` label + the pinned issuer/version,
+never as a proof of the claim's correctness; (b) `action_verified` trusts the broker's grant **labels**
+(`action`/`resource_id`/`scope_class` in the signed grant_evidence) — it proves the LABELED operation is
+taxonomy-classified single-op, NOT that the minted credential behind `credential_binding` is no broader
+than its label. This gap is **reducible, not irreducible**: when the credential descriptor is disclosed
+(`credential_commit` opened), the verifier can cross-check `sha256(descriptor) == credential_binding` and
+the descriptor's `act/aud/jti/cnf/exp/single_use` against `grant_evidence` to prove label↔credential
+consistency offline. That cross-check is part of the **D6** `broker_trust` reduction (below) and is not
+yet implemented; until then — and whenever the descriptor is not disclosed — the gap rests on
+`broker_trust`, never asserted by D4 as proof. Both are stated, not hidden. **Build artifact:** taxonomy schema (resource-bound lists +
+digest/version/interval) + signing + pinned verify option (digest+version, fail-closed) + role-separation
+config check + the per-use resource-bound action-verified split + escalating mis-scope rejection; golden
+tests (validated single-op → verified; action listed for another resource → still `action_unverified`;
+stale interval → still `action_unverified`; wrong issuer/digest/version, unpinned, missing version,
+tampered body → `untrusted`; escalating single-op grant → mis-scoped violation) + a cross-language
+`sha256:` digest-preimage golden vector so a Go/FFI auditor computing `taxonomy_digest` cannot drift.
 
 ## D5 — Two-phase intent/outcome gateway (reduce the F4 record-after-action gap)
 
@@ -201,6 +225,14 @@ grant `content_hash` (the `committed_set`). D6 binds the grant log INTO it:
    of the latest anchored `broker_grant_head`, the `cumulative_root` re-derives from the closed grants,
    and the `prior_head_hash` chain is intact across checkpoints. A gap, a tail omission (`max_seq` >
    max closed `broker_seq`), or a root mismatch is a **detectable suppression** violation.
+
+**Second `broker_trust` lever — credential label fidelity (D4 cross-reference):** D4's `action_verified`
+trusts the broker's grant LABELS (`action`/`resource_id`/`scope_class`). When the credential descriptor
+is disclosed (the `credential_commit` opened), D6 additionally cross-checks `sha256(descriptor) ==
+grant_evidence.credential_binding` and the descriptor's `act/aud/jti/cnf/exp/single_use` against the
+signed `grant_evidence` — proving the broker did not mislabel a broad credential as a benign single-op
+action. A mismatch is a broker-equivocation violation; absent the disclosure the label fidelity remains a
+`broker_trust` residual. (Surfaced here so D4's label-trust gap is tracked, not orphaned.)
 
 **Reduces:** `broker_trust` from `assumed` to **`sequence_verified`** — because the head is anchored +
 hash-chained + witnessed, the broker can no longer drop a middle/tail grant, renumber, or fork the log

@@ -78,9 +78,11 @@ pub struct VerifyReport {
     /// Tier-B use↔grant join (ADR 0003 step 5), computed over the CLOSED set (records committed by a
     /// verified, anchored checkpoint, R3). `uses_total` = resource-role use receipts; `uses_matched` =
     /// closed uses bound to a closed grant under the full predicate; `uses_action_unverified` = matched
-    /// uses against a taxonomy-unvalidated grant (R6, all of them in the demonstrator);
-    /// `unmatched_violation` = a closed use with no/again a matching grant (hard fail); `unmatched_pending`
-    /// = a use not yet closed (in-flight); `grants_unused` = closed grants with no matching use.
+    /// uses NOT action-verified — i.e. a non-`single_operation` grant, or no `validated`, in-window
+    /// taxonomy listing the grant's `(resource_id, action)` (ADR 0004 D4; `0` ⇔ every matched use is
+    /// action-verified); `unmatched_violation` = a closed use with no/again a matching grant, or one
+    /// honoring a mis-scoped grant (hard fail); `unmatched_pending` = a use not yet closed (in-flight);
+    /// `grants_unused` = closed grants with no matching use.
     pub uses_total: usize,
     pub uses_matched: usize,
     pub uses_action_unverified: usize,
@@ -91,6 +93,16 @@ pub struct VerifyReport {
     pub unmatched_violation: usize,
     pub unmatched_pending: usize,
     pub grants_unused: usize,
+    /// Pinned operation-taxonomy ARTIFACT trust (ADR 0004 D4 / MF5), one of: `absent` (none pinned in
+    /// opts), `untrusted` (unsigned / wrong issuer / pinned digest|version mismatch / no pin supplied /
+    /// malformed), `stale` (signed + pinned but a listed action fell outside the effective interval for
+    /// some matched use), `validated` (signed under a pinned ROLE-SEPARATED issuer, digest+version pins
+    /// match). This reports ARTIFACT trust ONLY — it does NOT assert every matched use was action-verified
+    /// (an unlisted action or a non-`single_operation` grant leaves `validated` intact while incrementing
+    /// `uses_action_unverified`). The per-use signal is `uses_action_unverified`; a correct D4/D8 gate
+    /// requires BOTH `taxonomy_status == "validated"` AND `uses_action_unverified == 0`, never the status
+    /// alone (Codex AREA 1).
+    pub taxonomy_status: String,
     /// The bundle's `coverage_manifest` echoed verbatim (the verifier does NOT trust it; it surfaces
     /// it so an auditor can evaluate the out-of-band attestations). `None` if absent.
     pub coverage_manifest: Option<CanonValue>,
@@ -138,6 +150,30 @@ pub struct VerifyOptions {
     /// Trusted RESOURCE recording keys. Only a `tool_gateway`-role record (a use receipt) elevates
     /// under one of these (ADR 0003 R2). Must be disjoint from `broker_authority_keys`.
     pub resource_authority_keys: Vec<VerifyingKey>,
+    /// A pinned signed operation taxonomy (ADR 0004 D4): `{version, effective_from, effective_until,
+    /// single_operation_actions:[{resource_id, action}…], escalating_actions:[{resource_id, action}…]?,
+    /// sig}`. Entries are RESOURCE-BOUND. When present + signature-valid under `taxonomy_keys`, the pinned
+    /// `taxonomy_digest`/`taxonomy_version` match, and in-window, a matched use against a single_operation
+    /// grant whose `(resource_id, action)` it lists is action-VERIFIED; a single_operation grant for an
+    /// `escalating_actions` pair is rejected as mis-scoped AT ISSUANCE (a hard `issues` failure, whether
+    /// or not the grant is ever exercised). NOTE: `action_verified` trusts the broker's grant LABELS
+    /// (action/resource/scope_class) — it proves the LABELED operation is taxonomy-single-op, not that the
+    /// minted credential matches its label. That correspondence is REDUCIBLE, not irreducible: when the
+    /// credential descriptor is disclosed, cross-checking `sha256(descriptor) == credential_binding` plus
+    /// its `act/aud/jti/cnf/exp/single_use` against `grant_evidence` proves label↔credential consistency
+    /// offline — done as part of the D6 broker_trust reduction (not yet implemented); absent that
+    /// disclosure/check, the gap rests on `broker_trust` (D6).
+    pub taxonomy: Option<CanonValue>,
+    /// Trusted operation-taxonomy authority keys (role-separated from broker/resource — enforced as a
+    /// FATAL config error in `verify_bundle_with`). Pin to validate `taxonomy`.
+    pub taxonomy_keys: Vec<VerifyingKey>,
+    /// Pinned content digest the `taxonomy` must match to reach `validated` (MF5 — the operator vetted
+    /// THIS artifact, by `sha256:`-prefixed RCP digest of the taxonomy minus `sig`). Absent ⇒ no
+    /// taxonomy can reach `validated` (fail-closed; a signed-but-unpinned taxonomy is `untrusted`).
+    pub taxonomy_digest: Option<String>,
+    /// Pinned monotonic version the `taxonomy`'s `version` field must equal to reach `validated` (MF5
+    /// rollback anchor). Absent ⇒ no taxonomy can reach `validated`.
+    pub taxonomy_version: Option<i64>,
 }
 
 struct KeyEntry {
@@ -516,6 +552,10 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ),
         ("unmatched_pending".into(), count(r.unmatched_pending)),
         ("grants_unused".into(), count(r.grants_unused)),
+        (
+            "taxonomy_status".into(),
+            CanonValue::string(r.taxonomy_status.clone()),
+        ),
         // Tier-A grant accountability: every grant verified to gateway_enforced under a pinned key.
         (
             "grant_accountability".into(),
@@ -605,6 +645,26 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
+    let taxonomy_keys = match parse_pubkeys(&opts_val, "taxonomy_keys") {
+        Ok(k) => k,
+        Err(e) => return error_report(&e),
+    };
+    // The taxonomy provenance pins (MF5). Optional, but present-but-wrong-type is an error (fail-closed:
+    // a typo'd pin must not silently degrade to "no pin" → a forever-`untrusted` taxonomy with no signal).
+    let taxonomy_digest = match opts_val.get("taxonomy_digest") {
+        None | Some(CanonValue::Null) => None,
+        Some(v) => match v.as_str() {
+            Some(s) => Some(s.to_string()),
+            None => return error_report("taxonomy_digest must be a string"),
+        },
+    };
+    let taxonomy_version = match opts_val.get("taxonomy_version") {
+        None | Some(CanonValue::Null) => None,
+        Some(v) => match v.as_int() {
+            Some(n) => Some(n),
+            None => return error_report("taxonomy_version must be an integer"),
+        },
+    };
     let tsa_keys = match parse_pubkeys(&opts_val, "tsa_keys") {
         Ok(k) => k,
         Err(e) => return error_report(&e),
@@ -621,6 +681,10 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         trusted_authority_keys: authority,
         broker_authority_keys: broker_authority,
         resource_authority_keys: resource_authority,
+        taxonomy: opts_val.get("taxonomy").cloned(),
+        taxonomy_keys,
+        taxonomy_digest,
+        taxonomy_version,
         trusted_tsa_keys: tsa_keys,
         trusted_tsa_spki: tsa_spki,
         ..Default::default()
@@ -710,6 +774,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         unmatched_violation: 0,
         unmatched_pending: 0,
         grants_unused: 0,
+        taxonomy_status: "absent".to_string(),
         coverage_manifest: None,
         issues: vec![msg.to_string()],
         first_broken_link: Some(msg.to_string()),
@@ -859,26 +924,133 @@ fn ev_int(rec: &CanonValue, payload_key: &str, field: &str) -> Option<i64> {
         .and_then(|v| v.as_int())
 }
 
+struct TaxonomyInfo {
+    /// (resource_id, action) pairs the issuer asserts ARE single-operation. RESOURCE-BOUND (an entry
+    /// vetted for one resource must not validate the same action name on another — Codex AREA 2).
+    actions: BTreeSet<(String, String)>,
+    /// (resource_id, action) pairs the issuer affirmatively marks as escalating / NOT single-operation:
+    /// a grant claiming `single_operation` scope for one of these is mis-scoped and is rejected (D4).
+    escalating: BTreeSet<(String, String)>,
+    effective_from: i64,
+    effective_until: i64,
+}
+
+/// Parse a taxonomy list of `{resource_id, action}` objects into a `(resource_id, action)` set. `absent`
+/// chooses the value for a missing field (`Some(empty)` for an optional list, `None` to require it); any
+/// PRESENT-but-malformed entry (not an array, or an object missing a string `resource_id`/`action`)
+/// returns `None` so the WHOLE taxonomy fails closed to `untrusted` rather than silently dropping a row.
+fn tax_pairs(tax: &CanonValue, key: &str, absent: Option<BTreeSet<(String, String)>>) -> Option<BTreeSet<(String, String)>> {
+    let arr = match tax.get(key) {
+        None | Some(CanonValue::Null) => return absent,
+        Some(v) => v.as_array()?,
+    };
+    let mut set = BTreeSet::new();
+    for e in arr {
+        let r = e.get("resource_id").and_then(|x| x.as_str())?;
+        let a = e.get("action").and_then(|x| x.as_str())?;
+        set.insert((r.to_string(), a.to_string()));
+    }
+    Some(set)
+}
+
+/// Validate a pinned signed operation taxonomy (ADR 0004 D4 / MF5): returns its info iff ALL of —
+/// (1) the verifier pinned BOTH an expected content digest and version (`pinned_digest`/`pinned_version`
+/// present); (2) the taxonomy's RCP-canonical digest (minus `sig`) equals the pinned digest; (3) `sig`
+/// verifies under a pinned `taxonomy_keys` issuer over that digest; (4) the carried `version` field
+/// equals the pinned version; and (5) the required fields are present + well-formed. `None`
+/// (→ `untrusted`) otherwise.
+///
+/// The pin (digest+version) is what makes a `validated` taxonomy mean "the operator vetted THIS artifact
+/// at THIS version" — a signature alone proves only issuer authority, not that the structurally-minimal
+/// blob the bundle carries is the taxonomy the operator reviewed (an unpinned signed taxonomy stays
+/// `untrusted`, fail-closed). The effective window is enforced PER-USE (a validly-signed but stale
+/// taxonomy validates nothing outside its interval — so it cannot back-date an action). The version pin
+/// is checked by EQUALITY against the operator's pin (the pin is the rollback anchor — the offline
+/// verifier cannot know a "last seen" version, so it does not enforce ordering itself).
+fn validate_taxonomy(
+    tax: &CanonValue,
+    keys: &[VerifyingKey],
+    pinned_digest: Option<&str>,
+    pinned_version: Option<i64>,
+) -> Option<TaxonomyInfo> {
+    // MF5: no pin ⇒ unprovable provenance ⇒ never `validated`. Require BOTH the digest and version pins
+    // up front so an operator who forgets one cannot silently get a weaker check than they intended.
+    let pinned_digest = pinned_digest?;
+    let pinned_version = pinned_version?;
+    let sig = tax.get("sig").and_then(|v| v.as_str())?;
+    let mut obj = tax.as_object()?.clone();
+    obj.retain(|(k, _)| k != "sig");
+    let digest = crate::hashx::sha256_prefixed(CanonValue::Object(obj).serialize().as_bytes());
+    // The pin must match the EXACT bytes signed (digests are public, so a plain compare is fine).
+    if digest != pinned_digest {
+        return None;
+    }
+    if !keys
+        .iter()
+        .any(|vk| crate::sign::verify("feir.taxonomy.v1", &digest, sig, vk).is_ok())
+    {
+        return None;
+    }
+    // The carried version must equal the pin (rollback anchor). `version` is part of the digest preimage,
+    // so a digest match already pins it byte-for-byte — but an explicit version field + pin gives a
+    // distinct, human-meaningful mismatch signal and forces the taxonomy to actually carry one (a minimal
+    // blob with no `version` cannot reach `validated`).
+    if tax.get("version").and_then(|v| v.as_int())? != pinned_version {
+        return None;
+    }
+    Some(TaxonomyInfo {
+        actions: tax_pairs(tax, "single_operation_actions", None)?,
+        escalating: tax_pairs(tax, "escalating_actions", Some(BTreeSet::new()))?,
+        effective_from: tax.get("effective_from").and_then(|v| v.as_int())?,
+        effective_until: tax.get("effective_until").and_then(|v| v.as_int())?,
+    })
+}
+
 pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
     let mut issues: Vec<String> = Vec::new();
     let project_id = s(bundle, "project_id");
 
-    // R2 (ADR 0003): broker and resource authority key sets MUST be disjoint. A key present in both
-    // could sign either a grant or a use and pass role separation, so this is a FATAL configuration
-    // error — abort before evaluating any record (VerifyingKey equality is raw-bytes, which also
-    // settles the derived key id). Never proceed on an ambiguous key universe.
-    if opts
-        .broker_authority_keys
-        .iter()
-        .any(|bk| opts.resource_authority_keys.contains(bk))
-    {
-        return fatal_config_report(
-            project_id,
-            "broker_authority_keys and resource_authority_keys must be disjoint (a key in both breaks R2 role separation) — fatal configuration error",
-        );
+    // R2 (ADR 0003) + D4 (ADR 0004): the broker, resource, and operation-taxonomy authority key sets
+    // MUST be PAIRWISE disjoint. A key shared across two roles could sign across the role boundary —
+    // e.g. a broker/resource key in `taxonomy_keys` could self-validate a D4 taxonomy to fabricate
+    // `taxonomy_status:"validated"`, or a key in both broker+resource could sign either a grant or a
+    // use. This is a FATAL configuration error — abort before evaluating any record (VerifyingKey
+    // equality is raw-bytes, which also settles the derived key id). Never proceed on an ambiguous
+    // key universe.
+    let role_sets: [(&str, &[VerifyingKey]); 3] = [
+        ("broker_authority_keys", &opts.broker_authority_keys),
+        ("resource_authority_keys", &opts.resource_authority_keys),
+        ("taxonomy_keys", &opts.taxonomy_keys),
+    ];
+    for i in 0..role_sets.len() {
+        for j in (i + 1)..role_sets.len() {
+            if role_sets[i].1.iter().any(|k| role_sets[j].1.contains(k)) {
+                return fatal_config_report(
+                    project_id,
+                    &format!(
+                        "{} and {} must be disjoint (a key in both breaks role separation) — fatal configuration error",
+                        role_sets[i].0, role_sets[j].0
+                    ),
+                );
+            }
+        }
     }
 
     let keys_externally_pinned = opts.trusted_keys.is_some();
+
+    // D4 (ADR 0004 / MF5): a pinned signed operation taxonomy. `taxonomy_info` is `Some` iff the
+    // signature verifies under a pinned key AND the pinned digest/version match; the effective window is
+    // enforced PER-USE below (a stale taxonomy can't back-date an action). The `stale` vs `validated`
+    // distinction is finalized after the use loop (a window rejection of a listed action → stale).
+    let taxonomy_info = opts.taxonomy.as_ref().and_then(|t| {
+        validate_taxonomy(
+            t,
+            &opts.taxonomy_keys,
+            opts.taxonomy_digest.as_deref(),
+            opts.taxonomy_version,
+        )
+    });
+    let mut taxonomy_window_failed = false;
 
     let empty: Vec<CanonValue> = Vec::new();
     let key_entries = arr(bundle, "keys", &empty, &mut issues);
@@ -1332,6 +1504,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         used: usize,
     }
     let mut grants_by_id: BTreeMap<String, GrantInfo> = BTreeMap::new();
+    // D4 (ADR 0004): grant_ids flagged mis-scoped at issuance (a single_operation grant for an action a
+    // signed+pinned taxonomy marks ESCALATING). Rejected here, NOT only when exercised, so a dangerous
+    // capability is visible even with no use receipt; a use against one is then skipped (single violation).
+    let mut misscoped: BTreeSet<String> = BTreeSet::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         let qualifies = rt.broker_role == BrokerRole::Broker.as_str()
@@ -1353,6 +1529,21 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_int(rec, "grant_evidence", "exp"),
         ) {
             (Some(gid), Some(action), Some(resource_id), Some(scope_class), Some(cnf_kid), Some(credential_binding), Some(issued_at), Some(exp)) => {
+                // Mis-scope at issuance: a single_operation grant for a (resource, action) the taxonomy
+                // affirmatively marks escalating is rejected here regardless of whether it is exercised.
+                // `misscoped.insert` is the LAST condition so the issue is pushed exactly once per grant_id
+                // (a second closed record reusing the same grant_id does not double-count).
+                if scope_class == "single_operation"
+                    && taxonomy_info
+                        .as_ref()
+                        .is_some_and(|ti| ti.escalating.contains(&(resource_id.clone(), action.clone())))
+                    && misscoped.insert(gid.clone())
+                {
+                    issues.push(format!(
+                        "grant {} ({}): claims single_operation for action '{action}' on '{resource_id}' which the taxonomy marks escalating — mis-scoped (D4)",
+                        rt.index, rt.record_id
+                    ));
+                }
                 grants_by_id.entry(gid).or_insert(GrantInfo {
                     action,
                     resource_id,
@@ -1479,6 +1670,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             violation(&mut issues, format!("PoP nonce '{nonce}' replayed across closed receipts for resource '{resource_id}' (duplicate submission) — D3"));
             continue;
         }
+        // D4 mis-scope (ADR 0004): the grant was already flagged + rejected at issuance (see grant
+        // indexing). Skip its use BEFORE any matching/counting so the violation is recorded exactly once
+        // (at the grant, even if unused) and the use never touches uses_matched / uses_pop_reverified /
+        // action_verified. Checked before the grant lookup so a mis-scoped grant left out of (or kept in)
+        // the index behaves identically.
+        if misscoped.contains(&gid) {
+            continue;
+        }
         let g = match grants_by_id.get_mut(&gid) {
             Some(g) => g,
             None => {
@@ -1528,12 +1727,45 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
         g.used += 1;
         uses_matched += 1;
-        // R6: no signed operation taxonomy validates scope_class==single_operation, so a matched use is
-        // a demonstrator artifact (action_unverified) and never contributes to an attested_complete
-        // upgrade.
-        uses_action_unverified += 1;
+        // R6/D4: a matched use is action-VERIFIED only when a pinned, in-window taxonomy lists the
+        // grant's (single_operation) action FOR THIS RESOURCE — otherwise it stays a demonstrator
+        // artifact (uses_action_unverified) that can never reach the attested_complete upgrade. The
+        // listing is resource-BOUND so a taxonomy vetted for one resource cannot validate a colliding
+        // action name on another (Codex AREA 2).
+        let action_verified = single
+            && taxonomy_info.as_ref().is_some_and(|ti| {
+                if !ti.actions.contains(&(resource_id.clone(), action.clone())) {
+                    return false;
+                }
+                let in_window = g.issued_at >= ti.effective_from
+                    && g.issued_at <= ti.effective_until
+                    && used_at >= ti.effective_from
+                    && used_at <= ti.effective_until;
+                if !in_window {
+                    // a listed action rejected ONLY by the effective window → the taxonomy is stale (MF5)
+                    taxonomy_window_failed = true;
+                }
+                in_window
+            });
+        if !action_verified {
+            uses_action_unverified += 1;
+        }
     }
-    let grants_unused = grants_by_id.values().filter(|g| g.used == 0).count();
+    // D4: a mis-scoped grant is rejected, not "unused" — exclude it so an exercised-but-mis-scoped grant
+    // (whose use was skipped, leaving used==0) is not mis-reported as a clean unused grant.
+    let grants_unused = grants_by_id
+        .iter()
+        .filter(|(gid, g)| g.used == 0 && !misscoped.contains(*gid))
+        .count();
+
+    // D4/MF5 taxonomy_status: absent (none pinned) | untrusted (bad sig/issuer/pin) | stale (signed +
+    // pinned but a listed action was out of its effective window) | validated (signed, pinned, in-window).
+    let taxonomy_status = match (&opts.taxonomy, &taxonomy_info) {
+        (None, _) => "absent",
+        (Some(_), None) => "untrusted",
+        (Some(_), Some(_)) if taxonomy_window_failed => "stale",
+        (Some(_), Some(_)) => "validated",
+    };
 
     let coverage_manifest = bundle.get("coverage_manifest").cloned();
 
@@ -1571,6 +1803,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         unmatched_violation,
         unmatched_pending,
         grants_unused,
+        taxonomy_status: taxonomy_status.to_string(),
         coverage_manifest,
         issues,
         first_broken_link,

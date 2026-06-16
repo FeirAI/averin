@@ -1706,3 +1706,487 @@ fn use_pop_challenge_and_cnf_kid_golden_vectors() {
     let cnf = signing_key_from_seed(&[5u8; 32]).verifying_key();
     assert_eq!(vk_cnf_kid(&cnf), "ed25519-dZl3bDCF4_k");
 }
+
+// ---- D4: signed operation taxonomy fixtures (ADR 0004) ----
+
+// a single resource-bound `{resource_id, action}` taxonomy entry.
+fn tax_entry(resource: &str, action: &str) -> CanonValue {
+    CanonValue::object(vec![
+        ("resource_id".into(), CanonValue::string(resource)),
+        ("action".into(), CanonValue::string(action)),
+    ])
+    .unwrap()
+}
+
+// convenience: build a taxonomy listing `actions` as single-operation ON `RESOURCE` (the common case).
+fn taxonomy(tax_sk: &SigningKey, actions: &[&str], from: i64, until: i64) -> CanonValue {
+    taxonomy_v(tax_sk, actions, from, until, 1)
+}
+
+// version-parameterized convenience builder (actions are bound to the `RESOURCE` const).
+fn taxonomy_v(tax_sk: &SigningKey, actions: &[&str], from: i64, until: i64, version: i64) -> CanonValue {
+    let single: Vec<(&str, &str)> = actions.iter().map(|a| (RESOURCE, *a)).collect();
+    taxonomy_full(tax_sk, &single, &[], from, until, version)
+}
+
+// full builder: explicit resource-bound single_operation + escalating (resource, action) pairs.
+fn taxonomy_full(tax_sk: &SigningKey, single: &[(&str, &str)], escalating: &[(&str, &str)], from: i64, until: i64, version: i64) -> CanonValue {
+    let entries = |pairs: &[(&str, &str)]| CanonValue::Array(pairs.iter().map(|(r, a)| tax_entry(r, a)).collect());
+    let mut fields = vec![
+        ("kind".into(), CanonValue::string("operation_taxonomy")),
+        ("version".into(), CanonValue::Int(version)),
+        ("effective_from".into(), CanonValue::Int(from)),
+        ("effective_until".into(), CanonValue::Int(until)),
+        ("single_operation_actions".into(), entries(single)),
+    ];
+    if !escalating.is_empty() {
+        fields.push(("escalating_actions".into(), entries(escalating)));
+    }
+    let body = CanonValue::object(fields).unwrap();
+    let digest = sha256_prefixed(body.serialize().as_bytes());
+    let sig = feir_decision_core::sign::sign("feir.taxonomy.v1", &digest, tax_sk);
+    change_field(&body, "sig", CanonValue::string(sig))
+}
+
+// The pinned content digest of a taxonomy = sha256_prefixed(RCP-canonical taxonomy MINUS `sig`) —
+// mirrors validate_taxonomy's preimage so a test pins exactly what the verifier recomputes.
+fn tax_digest(tax: &CanonValue) -> String {
+    let mut obj = tax.as_object().unwrap().clone();
+    obj.retain(|(k, _)| k != "sig");
+    sha256_prefixed(CanonValue::Object(obj).serialize().as_bytes())
+}
+
+fn pinned_roles_tax(broker_vk: VerifyingKey, resource_vk: VerifyingKey, tsa_vk: VerifyingKey, tax: CanonValue, tax_vk: VerifyingKey) -> VerifyOptions {
+    // pin the honest digest + version so the taxonomy can reach `validated` (MF5); negative tests below
+    // override `taxonomy_digest`/`taxonomy_version` to exercise the pin checks.
+    let digest = tax_digest(&tax);
+    let version = tax.get("version").and_then(|v| v.as_int());
+    VerifyOptions {
+        broker_authority_keys: vec![broker_vk],
+        resource_authority_keys: vec![resource_vk],
+        trusted_tsa_keys: vec![tsa_vk],
+        taxonomy: Some(tax),
+        taxonomy_keys: vec![tax_vk],
+        taxonomy_digest: Some(digest),
+        taxonomy_version: version,
+        ..Default::default()
+    }
+}
+
+// d4_bundle builds the standard happy-path grant+use+anchored-checkpoint bundle (single_operation).
+fn d4_bundle(rec: &SigningKey, res: &SigningKey, tsa: &SigningKey) -> CanonValue {
+    let grant = seal_grant(rec, rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(rec, res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(rec, &[content_hash_of(&use_rec)], 2, Some(tsa));
+    tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp])
+}
+
+#[test]
+fn tier_b_taxonomy_validated_use_is_action_verified() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100); // covers issued + used
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.uses_action_unverified, 0, "a taxonomy-validated use is action-verified");
+    assert_eq!(r.taxonomy_status, "validated");
+    assert!(feir_decision_core::verify::report_to_json(&r).contains(r#""taxonomy_status":"validated""#));
+}
+
+#[test]
+fn tier_b_taxonomy_unlisted_action_stays_unverified() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy(&tax, &["some.other:action"], ISSUED - 100, EXP + 100); // ACTION not listed
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert!(r.ok);
+    assert_eq!(r.uses_action_unverified, 1, "an unlisted action stays unverified");
+    assert_eq!(r.taxonomy_status, "validated");
+}
+
+#[test]
+fn tier_b_taxonomy_stale_window_stays_unverified() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, USED - 1); // window ends BEFORE used_at
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert!(r.ok);
+    assert_eq!(r.uses_action_unverified, 1, "a stale (out-of-window) taxonomy must not validate the use");
+    // a listed action rejected by the effective window marks the taxonomy `stale` (MF5), not `validated`
+    assert_eq!(r.taxonomy_status, "stale");
+}
+
+#[test]
+fn tier_b_taxonomy_untrusted_signature() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let wrong = signing_key_from_seed(&[12u8; 32]);
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy(&wrong, &[ACTION], ISSUED - 100, EXP + 100); // signed by a NON-pinned key
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert_eq!(r.taxonomy_status, "untrusted");
+    assert_eq!(r.uses_action_unverified, 1, "an untrusted taxonomy validates nothing");
+}
+
+#[test]
+fn tier_b_taxonomy_via_json_opts() {
+    // the Go/FFI auditor pins the taxonomy through the JSON options path (verify_bundle_with_json).
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
+    let digest = tax_digest(&t);
+    let key_arr = |vk| CanonValue::Array(vec![CanonValue::string(encode_pubkey(vk))]);
+    let opts = CanonValue::object(vec![
+        ("broker_authority_keys".into(), key_arr(&rec.verifying_key())),
+        ("resource_authority_keys".into(), key_arr(&res.verifying_key())),
+        ("tsa_keys".into(), key_arr(&tsa.verifying_key())),
+        ("taxonomy".into(), t),
+        ("taxonomy_keys".into(), key_arr(&tax.verifying_key())),
+        ("taxonomy_digest".into(), CanonValue::string(digest)),
+        ("taxonomy_version".into(), CanonValue::Int(1)),
+    ])
+    .unwrap();
+    let report = feir_decision_core::verify::verify_bundle_with_json(&bundle.serialize(), &opts.serialize());
+    assert!(report.contains(r#""taxonomy_status":"validated""#), "{report}");
+    assert!(report.contains(r#""uses_action_unverified":0"#), "{report}");
+}
+
+// ---- D4 negative coverage: role separation (Codex AREA 1) + pinned digest/version (Codex AREA 3) ----
+
+// A taxonomy_keys set that overlaps the broker authority keys is a FATAL config error: that broker key
+// could self-validate a D4 taxonomy to fabricate `taxonomy_status:"validated"`.
+#[test]
+fn tier_b_taxonomy_keys_overlapping_broker_is_fatal() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
+    let mut opts = pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key());
+    opts.taxonomy_keys = vec![rec.verifying_key()]; // == broker key
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a broker key reused as a taxonomy key must abort fatally");
+    assert!(r.issues.iter().any(|i| i.contains("must be disjoint")), "issues: {:?}", r.issues);
+}
+
+// Same fatal abort when taxonomy_keys overlaps the RESOURCE authority keys (the pairwise check).
+#[test]
+fn tier_b_taxonomy_keys_overlapping_resource_is_fatal() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
+    let mut opts = pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key());
+    opts.taxonomy_keys = vec![res.verifying_key()]; // == resource key
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a resource key reused as a taxonomy key must abort fatally");
+    assert!(r.issues.iter().any(|i| i.contains("must be disjoint")), "issues: {:?}", r.issues);
+}
+
+// MF5: a validly-signed taxonomy with NO pinned digest/version stays `untrusted` (fail-closed — the
+// operator must vet a specific artifact; a signature alone does not make it `validated`).
+#[test]
+fn tier_b_taxonomy_unpinned_is_untrusted() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
+    let mut opts = pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key());
+    opts.taxonomy_digest = None;
+    opts.taxonomy_version = None;
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.taxonomy_status, "untrusted", "an unpinned taxonomy must not reach validated");
+    assert_eq!(r.uses_action_unverified, 1);
+}
+
+// MF5: signature + version are fine, but the pinned digest does not match → `untrusted` (the bundle's
+// taxonomy is not the artifact the operator pinned).
+#[test]
+fn tier_b_taxonomy_wrong_pinned_digest_is_untrusted() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
+    let mut opts = pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key());
+    opts.taxonomy_digest = Some(sha256_prefixed(b"not-the-real-taxonomy-digest"));
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.taxonomy_status, "untrusted", "a pinned-digest mismatch must not reach validated");
+    assert_eq!(r.uses_action_unverified, 1);
+}
+
+// MF5: signature + digest match, but the carried version != the pinned version → `untrusted` (rollback
+// anchor: an operator pins version N and a re-signed-but-older taxonomy cannot pass).
+#[test]
+fn tier_b_taxonomy_wrong_pinned_version_is_untrusted() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy_v(&tax, &[ACTION], ISSUED - 100, EXP + 100, 2); // taxonomy is version 2
+    let mut opts = pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key());
+    opts.taxonomy_version = Some(1); // operator pins version 1
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.taxonomy_status, "untrusted", "a pinned-version mismatch must not reach validated");
+    assert_eq!(r.uses_action_unverified, 1);
+}
+
+// Tampering with the signed body (adding an action after signing) breaks both the content digest and
+// the signature → `untrusted` (the signature binds the action list).
+#[test]
+fn tier_b_taxonomy_body_tampering_is_untrusted() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let honest = taxonomy(&tax, &["benign:read"], ISSUED - 100, EXP + 100);
+    // attacker appends the grant's (RESOURCE, ACTION) to the action list after signing
+    let tampered = change_field(
+        &honest,
+        "single_operation_actions",
+        CanonValue::Array(vec![tax_entry(RESOURCE, "benign:read"), tax_entry(RESOURCE, ACTION)]),
+    );
+    let opts = pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), tampered, tax.verifying_key());
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.taxonomy_status, "untrusted", "post-signature tampering must not reach validated");
+    assert_eq!(r.uses_action_unverified, 1, "the smuggled action must NOT become action-verified");
+}
+
+// A NON-single_operation (session) grant stays `uses_action_unverified` even under a `validated`
+// taxonomy that lists its action — the action-verified split is gated on `scope_class==single_operation`.
+#[test]
+fn tier_b_taxonomy_non_single_operation_stays_unverified() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "session", CNF, ISSUED, EXP));
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.taxonomy_status, "validated");
+    assert_eq!(r.uses_action_unverified, 1, "a session-scope use is never action-verified, even under a validated taxonomy");
+}
+
+// Explicit baseline: no taxonomy pinned at all → `absent`, and every matched use stays unverified.
+#[test]
+fn tier_b_taxonomy_absent_baseline() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let opts = VerifyOptions {
+        broker_authority_keys: vec![rec.verifying_key()],
+        resource_authority_keys: vec![res.verifying_key()],
+        trusted_tsa_keys: vec![tsa.verifying_key()],
+        ..Default::default()
+    };
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.taxonomy_status, "absent");
+    assert_eq!(r.uses_action_unverified, 1, "with no taxonomy every matched use stays unverified");
+}
+
+// ---- D4: resource-binding (Codex AREA 2) + mis-scope rejection + remaining coverage ----
+
+// A taxonomy that lists the action FOR A DIFFERENT resource must NOT validate the use on RESOURCE — the
+// listing is resource-bound, so a colliding action name on another resource stays unverified.
+#[test]
+fn tier_b_taxonomy_action_listed_for_other_resource_stays_unverified() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    // ACTION is single-operation only on "some-other-db", NOT on RESOURCE (orders-db)
+    let t = taxonomy_full(&tax, &[("some-other-db", ACTION)], &[], ISSUED - 100, EXP + 100, 1);
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert!(r.ok);
+    assert_eq!(r.taxonomy_status, "validated", "the artifact is still trusted");
+    assert_eq!(r.uses_action_unverified, 1, "an action listed for another resource must not validate this use");
+}
+
+// A grant claiming single_operation for an action the taxonomy marks ESCALATING is mis-scoped: it is
+// rejected AT ISSUANCE (a hard `issues` failure), and its use is skipped (never counted/verified).
+#[test]
+fn tier_b_taxonomy_escalating_single_op_grant_is_misscoped_violation() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa); // grant claims single_operation for (RESOURCE, ACTION), and is USED
+    // taxonomy affirmatively marks (RESOURCE, ACTION) as escalating — so single_operation is mis-scoped
+    let t = taxonomy_full(&tax, &[(RESOURCE, "benign:read")], &[(RESOURCE, ACTION)], ISSUED - 100, EXP + 100, 1);
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert!(!r.ok, "a mis-scoped grant must fail the bundle");
+    assert!(r.issues.iter().any(|i| i.contains("mis-scoped")), "issues: {:?}", r.issues);
+    // the violation is recorded once, at the grant — the use is skipped, not double-counted
+    assert_eq!(r.uses_matched, 0, "a mis-scoped grant's use must not count as matched/verified");
+    // a USED mis-scoped grant is rejected, NOT mis-reported as a clean unused grant
+    assert_eq!(r.grants_unused, 0, "a mis-scoped grant must not be reported as unused");
+    // exactly one mis-scope issue (no double-count)
+    assert_eq!(r.issues.iter().filter(|i| i.contains("mis-scoped")).count(), 1);
+}
+
+// A D2 use (carrying a valid cnf_pub + use_sig — its PoP WOULD re-verify) against a mis-scoped grant is
+// skipped BEFORE the PoP re-check: `uses_pop_reverified` stays 0 (no use-side counter leaks through a
+// rejected grant), and the single mis-scope issue is recorded at the grant.
+#[test]
+fn tier_b_misscoped_grant_d2_use_does_not_leak_pop_reverified() {
+    let (rec, res, cnf, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), signing_key_from_seed(&[5u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let pc = sha256_prefixed(b"params-commit");
+    let grant = d2_grant(&rec, &cnf.verifying_key()); // single_operation (GID, ACTION, RESOURCE)
+    let use_rec = seal_d2_use(&rec, &res, "use-1", &[content_hash_of(&grant)], USED, &pc, &pc, &vk_cnf_kid(&cnf.verifying_key()), &cnf.verifying_key(), &cnf);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    // taxonomy marks (RESOURCE, ACTION) escalating → the grant is mis-scoped at issuance
+    let t = taxonomy_full(&tax, &[], &[(RESOURCE, ACTION)], ISSUED - 100, EXP + 100, 1);
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert!(!r.ok);
+    assert!(r.issues.iter().any(|i| i.contains("mis-scoped")), "issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 0);
+    assert_eq!(r.uses_pop_reverified, 0, "a rejected grant's use must not increment uses_pop_reverified");
+    assert_eq!(r.grants_unused, 0);
+    assert_eq!(r.issues.iter().filter(|i| i.contains("mis-scoped")).count(), 1);
+}
+
+// The mis-scope rejection fires even when the grant is NEVER exercised — an issued-but-unused
+// single_operation grant for an escalating pair is still a hard failure (no use receipt required).
+#[test]
+fn tier_b_taxonomy_unused_escalating_grant_is_misscoped() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    // grant only — NO use receipt
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&grant)], 1, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let t = taxonomy_full(&tax, &[], &[(RESOURCE, ACTION)], ISSUED - 100, EXP + 100, 1);
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert!(!r.ok, "an unused mis-scoped grant must still fail the bundle");
+    assert!(r.issues.iter().any(|i| i.contains("mis-scoped")), "issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 0);
+}
+
+// Precedence: a pair in BOTH single_operation_actions AND escalating_actions resolves to mis-scoped
+// (escalating wins) — an adversarial taxonomy author cannot launder an escalating pair to action-verified
+// by also listing it as single-operation.
+#[test]
+fn tier_b_taxonomy_escalating_beats_single_operation_listing() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    // (RESOURCE, ACTION) is in BOTH lists
+    let t = taxonomy_full(&tax, &[(RESOURCE, ACTION)], &[(RESOURCE, ACTION)], ISSUED - 100, EXP + 100, 1);
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert!(!r.ok, "escalating must win over a single_operation listing of the same pair");
+    assert!(r.issues.iter().any(|i| i.contains("mis-scoped")), "issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 0, "the pair must NOT be laundered to action-verified");
+}
+
+// tax_pairs fail-closed: a MALFORMED taxonomy entry (object missing `action`) sinks the WHOLE taxonomy to
+// `untrusted` — it must NOT be silently dropped (which would weaken the listing) nor panic.
+#[test]
+fn tier_b_taxonomy_malformed_entry_is_untrusted() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    // an entry with resource_id but no `action`, then sign honestly so ONLY the malformed shape sinks it
+    let bad_entry = CanonValue::object(vec![("resource_id".into(), CanonValue::string(RESOURCE))]).unwrap();
+    let body = CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("operation_taxonomy")),
+        ("version".into(), CanonValue::Int(1)),
+        ("effective_from".into(), CanonValue::Int(ISSUED - 100)),
+        ("effective_until".into(), CanonValue::Int(EXP + 100)),
+        ("single_operation_actions".into(), CanonValue::Array(vec![bad_entry])),
+    ])
+    .unwrap();
+    let digest = sha256_prefixed(body.serialize().as_bytes());
+    let sig = feir_decision_core::sign::sign("feir.taxonomy.v1", &digest, &tax);
+    let t = change_field(&body, "sig", CanonValue::string(sig));
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert_eq!(r.taxonomy_status, "untrusted", "a malformed entry must fail the whole taxonomy closed");
+    assert_eq!(r.uses_action_unverified, 1);
+}
+
+// A taxonomy carrying NO `version` field cannot reach `validated` (the digest pin alone is not enough —
+// MF5 forces the artifact to carry a version, per validate_taxonomy's `version?`).
+#[test]
+fn tier_b_taxonomy_missing_version_is_untrusted() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    // build an honest taxonomy then strip `version` and RE-SIGN so the signature itself is valid — only
+    // the missing version field should sink it.
+    let body = CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("operation_taxonomy")),
+        ("effective_from".into(), CanonValue::Int(ISSUED - 100)),
+        ("effective_until".into(), CanonValue::Int(EXP + 100)),
+        ("single_operation_actions".into(), CanonValue::Array(vec![tax_entry(RESOURCE, ACTION)])),
+    ])
+    .unwrap();
+    let digest = sha256_prefixed(body.serialize().as_bytes());
+    let sig = feir_decision_core::sign::sign("feir.taxonomy.v1", &digest, &tax);
+    let t = change_field(&body, "sig", CanonValue::string(sig));
+    let mut opts = pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key());
+    opts.taxonomy_version = Some(1); // operator pins a version, but the artifact carries none
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.taxonomy_status, "untrusted", "a versionless taxonomy must not reach validated");
+    assert_eq!(r.uses_action_unverified, 1);
+}
+
+// JSON-opts fail-closed: a non-string taxonomy_digest or non-integer taxonomy_version is an ERROR, not a
+// silent degrade to "no pin" (which would leave a forever-`untrusted` taxonomy with no signal).
+#[test]
+fn tier_b_taxonomy_json_pins_are_fail_closed() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
+    let (bvk, rvk, tvk, xvk) = (rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), tax.verifying_key());
+    let key_arr = |vk: &VerifyingKey| CanonValue::Array(vec![CanonValue::string(encode_pubkey(vk))]);
+    let base = |digest: CanonValue, version: CanonValue| {
+        CanonValue::object(vec![
+            ("broker_authority_keys".into(), key_arr(&bvk)),
+            ("resource_authority_keys".into(), key_arr(&rvk)),
+            ("tsa_keys".into(), key_arr(&tvk)),
+            ("taxonomy".into(), t.clone()),
+            ("taxonomy_keys".into(), key_arr(&xvk)),
+            ("taxonomy_digest".into(), digest),
+            ("taxonomy_version".into(), version),
+        ])
+        .unwrap()
+    };
+    let good_digest = CanonValue::string(tax_digest(&t));
+    // non-string digest → error
+    let bad_digest = base(CanonValue::Int(7), CanonValue::Int(1));
+    let r1 = feir_decision_core::verify::verify_bundle_with_json(&bundle.serialize(), &bad_digest.serialize());
+    assert!(r1.contains(r#""error""#) && r1.contains("taxonomy_digest"), "{r1}");
+    // non-integer version → error
+    let bad_version = base(good_digest, CanonValue::string("1"));
+    let r2 = feir_decision_core::verify::verify_bundle_with_json(&bundle.serialize(), &bad_version.serialize());
+    assert!(r2.contains(r#""error""#) && r2.contains("taxonomy_version"), "{r2}");
+}
+
+// Mixed multi-use bundle: TWO single_operation grants — one for a taxonomy-listed action (its use is
+// action-VERIFIED) and one for an unlisted action (its use stays unverified). `uses_action_unverified`
+// must count exactly the unlisted one (1, not 0 and not 2) while `taxonomy_status` stays `validated`.
+// This genuinely exercises the per-use split (a session-only bundle could not distinguish it).
+#[test]
+fn tier_b_taxonomy_mixed_uses_count_only_the_unverified() {
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    const OTHER: &str = "db.query:invoices-ro"; // NOT listed in the taxonomy
+    // both single_operation (so each is single-use, jti == grant_id), distinct grant_ids
+    let g1 = seal_grant(&rec, &rec, "grant-a", &grant_evidence("grant-a", ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let g2 = seal_grant(&rec, &rec, "grant-b", &grant_evidence("grant-b", OTHER, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let u1 = seal_use(&rec, &res, "use-a", &[content_hash_of(&g1)], ACTION, &use_evidence("grant-a", ACTION, RESOURCE, "grant-a", CNF, USED));
+    let u2 = seal_use(&rec, &res, "use-b", &[content_hash_of(&g2)], OTHER, &use_evidence("grant-b", OTHER, RESOURCE, "grant-b", CNF, USED + 1));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&u1), content_hash_of(&u2)], 4, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g1, g2, u1, u2], vec![cp]);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100); // lists (RESOURCE, ACTION), not OTHER
+    let r = verify_bundle_with(&bundle, &pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), t, tax.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 2);
+    assert_eq!(r.taxonomy_status, "validated");
+    assert_eq!(r.uses_action_unverified, 1, "exactly the unlisted-action use stays unverified; the listed one is action-verified");
+}
+
+// Cross-language golden vector: a FIXED taxonomy body (minus `sig`) → this exact `sha256:` digest. The
+// digest preimage is RCP-canonical taxonomy-minus-`sig`; a Go/FFI auditor computing taxonomy_digest MUST
+// reproduce this byte-for-byte. Hardcoding the expected value (not re-deriving it) is what catches drift
+// in key ordering / NFC / sig-stripping that a self-mirroring helper cannot.
+#[test]
+fn taxonomy_digest_golden_vector() {
+    let body = CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("operation_taxonomy")),
+        ("version".into(), CanonValue::Int(1)),
+        ("effective_from".into(), CanonValue::Int(1_718_445_600)),
+        ("effective_until".into(), CanonValue::Int(1_718_449_200)),
+        (
+            "single_operation_actions".into(),
+            CanonValue::Array(vec![tax_entry("orders-db", "db.query:orders-ro")]),
+        ),
+    ])
+    .unwrap();
+    let digest = sha256_prefixed(body.serialize().as_bytes());
+    assert_eq!(digest, "sha256:eadbcd86089ce7b27a79fe516b42087bdc62c9215d7ba069295b4fbc04bc26b9");
+}
