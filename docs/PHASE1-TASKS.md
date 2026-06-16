@@ -44,15 +44,15 @@ The **adversarial tests are the acceptance gates** (spec §15, §17). A mileston
 > within M1 = the real RFC 3161 DER/CMS wire-format parser (test-anchor proves the detection
 > logic now; production uses a third-party TSA via the Go anchoring job).
 
-## M2 — Ingestion + storage + SDKs  (~4–6 wks)  — *done (Postgres/content-store deferred)*
+## M2 — Ingestion + storage + SDKs  (~4–6 wks)  — *done*
 
 | # | Task | Status |
 |---|------|--------|
 | M2.1 | Go OpenAI-compatible proxy (streaming/SSE) + secret scrubbing | ☑ |
 | M2.2 | Go ingestion API `POST /v2/records` (single+batch, idempotency-key) | ☑ |
-| M2.3 | OTel / OpenInference ingest | ⏸ (SDK is OTel-shaped; ingest deferred) |
-| M2.4 | Postgres schema (append-only; revoke UPDATE/DELETE) | ◔ (Store interface + in-mem; Postgres swap deferred) |
-| M2.5 | Content-addressed S3/MinIO (digest + object version) | ◔ (schema fields ☑; blob store deferred) |
+| M2.3 | OTel / OpenInference ingest | ☑ (`POST /v2/otel/traces`, OTLP/JSON → records) |
+| M2.4 | Postgres schema (append-only; revoke UPDATE/DELETE) | ☑ (`store.NewPostgres` + migrations; Mem-parity tested) |
+| M2.5 | Content-addressed store (digest + object version) | ☑ (FS + in-mem backends; S3/MinIO an optional future backend) |
 | M2.6 | Python SDK (`record()` + authority) | ☑ |
 | M2.7 | TypeScript SDK (BigInt i64) | ☑ |
 | M2.8 | Go↔Rust FFI wiring (cgo) | ☑ |
@@ -65,7 +65,7 @@ The **adversarial tests are the acceptance gates** (spec §15, §17). A mileston
 | M3.1 | Svelte 5 SPA (client-only): session list | ☑ |
 | M3.2 | Trace-waterfall run view (causal depth) | ☑ |
 | M3.3 | In-browser WASM verify (standalone page) | ☑ |
-| M3.4 | Export modes (`proof_only`/`full_evidence`) + `gap_report` | ☑ (selective_disclosure needs content store) |
+| M3.4 | Export modes (`proof_only`/`full_evidence`) + `gap_report` | ☑ (selective_disclosure wired via the content store) |
 | M3.5 | Broken-chain error UX | ☑ (first_broken_link surfaced) |
 | M3.6 | Standalone offline verifier (vanilla + WASM) | ☑ |
 | **Acceptance** | #12 offline-export verified in-browser with no server access | ☑ (tested) |

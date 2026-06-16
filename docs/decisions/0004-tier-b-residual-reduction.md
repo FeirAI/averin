@@ -112,9 +112,11 @@ is).
 
 **Mechanism:** the verifier tracks every `(resource_id, nonce)` seen across **closed** use receipts; a
 duplicate is a replay/duplicate-submission `unmatched_violation` (independent of the per-`grant_id`
-single-use rule — it also catches reusable-grant replays). Optionally cross-check `ledger_commitment`
-re-derives from `(jti, nonce, used_at)` IF the verifier is given the ledger-tag preimage (it can, since
-those fields are in `use_evidence`).
+single-use rule — it also catches reusable-grant replays). The verifier ALSO re-derives
+`ledger_commitment` from `(jti, nonce, used_at)` and compares it to the carried value for **every** closed
+use receipt — a mismatch is an `unmatched_violation`. This is mandatory, not optional: the preimage is
+always present (those fields are gated as well-formed in `use_evidence` before the check), so there is no
+"if the verifier is given the preimage" branch — it is intrinsic to the receipt, never an out-of-band pin.
 
 **Closes:** offline detection of a replayed nonce among *visible* receipts — fully. **Residual:** a
 never-anchored replayed receipt stays invisible (D6/irreducible). **Build artifact:** nonce-dedup in
