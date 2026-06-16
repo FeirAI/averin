@@ -417,6 +417,25 @@ broker log — conditional on `resource_trust: assumed_truthful`" and no more. C
 runtime enforcement of D7 (real TEE attestation), not a verifier change. This is the honest Level-3
 boundary; it is documented, not papered over.
 
+**Residuals surfaced during implementation (all facets of the two floors, stated not hidden):**
+- **D6 total grant-suppression = pre-D6 equivalence (floor 1).** A bundle with NO D6 signal at all
+  (every committed broker grant seq-less, no `broker_grant_head` on any checkpoint) is byte-identical
+  to a legitimate pre-D6 export, so it verifies `broker_trust:"assumed"` — an all-or-nothing instance
+  of "never-sequenced grant". The moment ONE seq'd grant or head (even malformed) appears, strict D6
+  engages; total suppression is pushed to the out-of-band transparency monitor + TSA anchor.
+- **Globally-consistent grant equivocation (floor 1).** A broker that renumbers AND rewrites every head
+  + prior-head-chain into a self-consistent fabricated history is indistinguishable offline; only the
+  monitor (which has seen the real history over time) detects it. `sequence_verified` is the offline
+  ceiling.
+- **Relay/record-key trust boundary (floor 2, hardened).** D5 binds the two-phase join (intent_ref,
+  grant_id, `intent_hash` ordering, kind) to the RESOURCE signature, so a relay holding only the
+  record-signing key cannot fabricate completion or ordering. What the resource SIGNS is trusted; what
+  it actually DID remains the resource TCB.
+- **Label↔credential fidelity (floor 2, reduced by D6.4).** When the credential descriptor is disclosed,
+  D6.4 proves `sha256(descriptor)==credential_binding` and that the descriptor's scope/subject/timing/
+  action match the signed grant labels — closing the "broker mislabeled the credential" gap. Absent the
+  disclosure it remains a `broker_trust` residual; it never reaches the resource's real-world effect.
+
 ## Build order (each commit adversarially reviewed; dependency-ordered)
 
 1. **D1** dedicated `credential` commit domain (foundational cleanup; touches RCP/schema/SDK).
