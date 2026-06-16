@@ -75,6 +75,10 @@ pub struct VerifyReport {
     /// `gateway_enforced` under a pinned authority key (Level 3 Tier-A grant accountability).
     pub grant_total: usize,
     pub grant_verified: usize,
+    /// B11 denied-grant log: count of sealed `credential_grant_denied` records (a forbidden/invalid grant
+    /// request that was refused AND recorded as evidence, opt-in producer side). NOT a grant (never folded
+    /// into `grant_total`/`grant_accountability`); a generic BrokerRole::None record.
+    pub denied_grants: usize,
     /// Tier-B use↔grant join (ADR 0003 step 5), computed over the CLOSED set (records committed by a
     /// verified, anchored checkpoint, R3). `uses_total` = resource-role use receipts; `uses_matched` =
     /// closed uses bound to a closed grant under the full predicate; `uses_action_unverified` = matched
@@ -608,6 +612,7 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("disclosures_verified".into(), count(r.disclosures_verified)),
         ("grant_total".into(), count(r.grant_total)),
         ("grant_verified".into(), count(r.grant_verified)),
+        ("denied_grants".into(), count(r.denied_grants)),
         ("uses_total".into(), count(r.uses_total)),
         ("uses_matched".into(), count(r.uses_matched)),
         (
@@ -893,6 +898,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         disclosures_verified: 0,
         grant_total: 0,
         grant_verified: 0,
+        denied_grants: 0,
         uses_total: 0,
         uses_matched: 0,
         uses_action_unverified: 0,
@@ -1995,7 +2001,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // content_hash so a verbatim-replayed grant isn't double-counted.
     let mut grant_total = 0usize;
     let mut grant_verified = 0usize;
+    let mut denied_grants = 0usize;
     let mut seen_grants: BTreeSet<&str> = BTreeSet::new();
+    let mut seen_denials: BTreeSet<&str> = BTreeSet::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if s(rec, "event_type").as_deref() == Some("credential_grant")
@@ -2040,6 +2048,15 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     ));
                 }
             }
+        }
+        // B11 denied-grant log: count sealed grant_denied records (deduped by content_hash). A denial is a
+        // generic BrokerRole::None record (no broker role discriminator, no broker_seq, no grant_evidence),
+        // so it is never grant-counted nor a D6 sequence member — surfaced here purely as evidence that a
+        // forbidden/invalid request was refused and RECORDED rather than silently dropped (threat B11).
+        if s(rec, "event_type").as_deref() == Some("credential_grant_denied")
+            && seen_denials.insert(rt.content_hash.as_str())
+        {
+            denied_grants += 1;
         }
     }
 
@@ -2585,6 +2602,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         disclosures_total,
         disclosures_verified,
         grant_total,
+        denied_grants,
         grant_verified,
         uses_total,
         uses_matched,

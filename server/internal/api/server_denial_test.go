@@ -57,6 +57,10 @@ func TestForbiddenScopeSealsDenialRecord(t *testing.T) {
 	if !strings.Contains(report, `"grant_total":0`) {
 		t.Fatalf("a denial must not count as a grant (grant_total:0): %s", report)
 	}
+	// the verifier SURFACES the denial as evidence (B11): denied_grants counts it, separate from grants.
+	if !strings.Contains(report, `"denied_grants":1`) {
+		t.Fatalf("the verifier should surface the sealed denial (denied_grants:1): %s", report)
+	}
 }
 
 // TestPoPFailureSealsDenialButMalformedDoesNot (B11): a well-formed request that fails proof-of-possession is
