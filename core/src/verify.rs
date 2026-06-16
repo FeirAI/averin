@@ -111,6 +111,17 @@ pub struct VerifyReport {
     /// so the broker cannot drop/renumber/fork a recorded grant without detection). A gap, tail omission,
     /// root mismatch, or broken prior-head chain is a hard `issues` violation (detectable suppression).
     pub broker_trust: String,
+    /// D6.4 (ADR 0004 D6) — credential-descriptor cross-check, the SECOND `broker_trust` lever. D4's
+    /// `action_verified` trusts the broker's grant LABELS; when the credential descriptor is DISCLOSED (its
+    /// `credential_commit` opened + verified), the verifier additionally checks `sha256(descriptor) ==
+    /// grant_evidence.credential_binding` and the descriptor's `act/aud/jti/cnf/exp/single_use` against the
+    /// signed grant labels — proving the broker did not mislabel a broad credential as a benign single-op.
+    /// `cred_label_checks` counts disclosed descriptors bound to a verified+closed broker grant (labels
+    /// trusted); `cred_label_matched` counts those whose binding AND every field matched. A shortfall
+    /// (`checks > matched`) is a broker-equivocation **violation** (pushed to `issues`). Absent the
+    /// disclosure, label↔credential fidelity stays a `broker_trust` residual.
+    pub cred_label_checks: usize,
+    pub cred_label_matched: usize,
     /// The bundle's `coverage_manifest` echoed verbatim (the verifier does NOT trust it; it surfaces
     /// it so an auditor can evaluate the out-of-band attestations). `None` if absent.
     pub coverage_manifest: Option<CanonValue>,
@@ -169,8 +180,8 @@ pub struct VerifyOptions {
     /// minted credential matches its label. That correspondence is REDUCIBLE, not irreducible: when the
     /// credential descriptor is disclosed, cross-checking `sha256(descriptor) == credential_binding` plus
     /// its `act/aud/jti/cnf/exp/single_use` against `grant_evidence` proves label↔credential consistency
-    /// offline — done as part of the D6 broker_trust reduction (not yet implemented); absent that
-    /// disclosure/check, the gap rests on `broker_trust` (D6).
+    /// offline — implemented (D6.4) as the `cred_label_checks`/`cred_label_matched` cross-check; absent the
+    /// disclosure, the gap rests on `broker_trust` (D6).
     pub taxonomy: Option<CanonValue>,
     /// Trusted operation-taxonomy authority keys (role-separated from broker/resource — enforced as a
     /// FATAL config error in `verify_bundle_with`). Pin to validate `taxonomy`.
@@ -364,17 +375,17 @@ fn verify_disclosures(
     bundle: &CanonValue,
     records: &[CanonValue],
     issues: &mut Vec<String>,
-) -> (usize, usize) {
+) -> (usize, usize, Vec<(String, Vec<u8>)>) {
     let list = match bundle.get("disclosures") {
         // Absent, or an explicit JSON `null`, both mean "no disclosures" — an SDK that serializes an
         // empty Option as null must not brick an otherwise-valid bundle.
-        None => return (0, 0),
-        Some(v) if v.is_null() => return (0, 0),
+        None => return (0, 0, Vec::new()),
+        Some(v) if v.is_null() => return (0, 0, Vec::new()),
         Some(v) => match v.as_array() {
             Some(a) => a,
             None => {
                 issues.push("bundle.disclosures is present but not an array (malformed)".into());
-                return (0, 0);
+                return (0, 0, Vec::new());
             }
         },
     };
@@ -387,6 +398,9 @@ fn verify_disclosures(
     }
     let total = list.len();
     let mut verified = 0usize;
+    // D6.4: VERIFIED credential descriptors (record_id, raw descriptor bytes) handed back for the
+    // label↔credential cross-check against grant_evidence (only descriptors that opened their commitment).
+    let mut cred_descriptors: Vec<(String, Vec<u8>)> = Vec::new();
     // (record_id, field) must be disclosed at most once — a second disclosure for the same slot is
     // either redundant (inflating the count) or a contradiction (one commitment, two values).
     let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
@@ -458,13 +472,18 @@ fn verify_disclosures(
         };
         if crate::commit::verify_commitment(commitment, domain, &value, &nonce) {
             verified += 1;
+            // hand back the verified credential descriptor bytes for the D6.4 cross-check (value moves in —
+            // it is not used after this point in the loop body).
+            if field == "credential" {
+                cred_descriptors.push((rid.to_string(), value));
+            }
         } else {
             issues.push(format!(
                 "disclosure {i}: revealed {field} does not match record '{rid}' commitment (tamper, threat #6)"
             ));
         }
     }
-    (total, verified)
+    (total, verified, cred_descriptors)
 }
 
 pub fn verify_bundle_json(text: &str) -> Result<VerifyReport, crate::canon::CanonError> {
@@ -583,6 +602,8 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             "broker_trust".into(),
             CanonValue::string(r.broker_trust.clone()),
         ),
+        ("cred_label_checks".into(), count(r.cred_label_checks)),
+        ("cred_label_matched".into(), count(r.cred_label_matched)),
         (
             "attestation_status".into(),
             CanonValue::string("unevaluated"),
@@ -787,6 +808,8 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         grants_unused: 0,
         taxonomy_status: "absent".to_string(),
         broker_trust: "assumed".to_string(),
+        cred_label_checks: 0,
+        cred_label_matched: 0,
         coverage_manifest: None,
         issues: vec![msg.to_string()],
         first_broken_link: Some(msg.to_string()),
@@ -1441,7 +1464,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
 
     // selective-disclosure entries (optional): bind revealed (value, nonce) to record commitments.
-    let (disclosures_total, disclosures_verified) =
+    let (disclosures_total, disclosures_verified, cred_descriptors) =
         verify_disclosures(bundle, records, &mut issues);
 
     // ---- 3. DAG ----
@@ -1809,6 +1832,72 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
     }
 
+    // D6.4 (ADR 0004 D6) — credential-descriptor cross-check, the SECOND broker_trust lever. D4's
+    // action_verified trusts the broker's grant LABELS; when the credential descriptor is DISCLOSED (its
+    // credential_commit opened + verified in verify_disclosures), cross-check it against the record's SIGNED
+    // grant_evidence: sha256(descriptor) must equal credential_binding, and the descriptor's
+    // act/aud/jti/cnf/exp/single_use must match action/resource_id/grant_id/cnf_kid/exp/
+    // (scope_class=="single_operation"). A mismatch proves the broker MISLABELED the minted credential (a
+    // broad capability dressed as a benign single-op) — a broker-equivocation violation. The labels AND the
+    // credential_commit live in the SAME record, bound by its content signature (integrity_ok), so the
+    // contradiction is detectable WITHOUT a pinned broker authority key (authority/grant_verified is a
+    // separate trust axis); we gate only on an integrity-proven broker-role grant. An undisclosed descriptor
+    // leaves the label↔credential gap a residual.
+    let mut grant_labels: BTreeMap<&str, &CanonValue> = BTreeMap::new();
+    for rt in &record_trust {
+        if rt.broker_role == BrokerRole::Broker.as_str() && rt.trust == TrustLevel::IntegrityProven {
+            grant_labels.entry(rt.record_id.as_str()).or_insert(&records[rt.index]);
+        }
+    }
+    let mut cred_label_checks = 0usize;
+    let mut cred_label_matched = 0usize;
+    for (rid, descriptor_bytes) in &cred_descriptors {
+        let rec = match grant_labels.get(rid.as_str()) {
+            Some(r) => *r,
+            None => continue, // disclosed for a record that is not an integrity-proven broker grant
+        };
+        cred_label_checks += 1;
+        // (a) the disclosed descriptor must be THE credential the signed grant_evidence bound.
+        if crate::hashx::sha256_prefixed(descriptor_bytes) != ev_str(rec, "grant_evidence", "credential_binding").unwrap_or_default() {
+            issues.push(format!("grant {rid}: disclosed credential descriptor sha256 != grant_evidence.credential_binding — wrong or forged descriptor (D6.4)"));
+            continue;
+        }
+        // (b) descriptor fields must agree with the signed grant labels.
+        let descriptor = match core::str::from_utf8(descriptor_bytes).ok().and_then(|s| CanonValue::parse(s).ok()) {
+            Some(d) => d,
+            None => {
+                issues.push(format!("grant {rid}: disclosed credential descriptor is not valid canonical JSON (D6.4)"));
+                continue;
+            }
+        };
+        let ds = |k: &str| descriptor.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+        let label = |f: &str| ev_str(rec, "grant_evidence", f).unwrap_or_default();
+        let (act, aud, jti) = (ds("act"), ds("aud"), ds("jti"));
+        let (action, resource, gid, kidl) = (label("action"), label("resource_id"), label("grant_id"), label("cnf_kid"));
+        let single = label("scope_class") == "single_operation";
+        let single_use = match descriptor.get("single_use") {
+            Some(CanonValue::Bool(b)) => Some(*b),
+            _ => None,
+        };
+        let cnf_kid_ok = crate::b64::decode_fixed::<32>(ds("cnf"))
+            .ok()
+            .and_then(|b| VerifyingKey::from_bytes(&b).ok())
+            .map(|vk| cnf_kid(&vk) == kidl)
+            .unwrap_or(false);
+        let mut mism: Vec<String> = Vec::new();
+        if act != action.as_str() { mism.push(format!("act '{act}' != action '{action}'")); }
+        if aud != resource.as_str() { mism.push(format!("aud '{aud}' != resource_id '{resource}'")); }
+        if jti != gid.as_str() { mism.push(format!("jti '{jti}' != grant_id '{gid}'")); }
+        if descriptor.get("exp").and_then(|v| v.as_int()) != ev_int(rec, "grant_evidence", "exp") { mism.push("exp != grant_evidence.exp".to_string()); }
+        if single_use != Some(single) { mism.push(format!("single_use != (scope_class=='single_operation' => {single})")); }
+        if !cnf_kid_ok { mism.push(format!("cnf does not derive cnf_kid '{kidl}'")); }
+        if mism.is_empty() {
+            cred_label_matched += 1;
+        } else {
+            issues.push(format!("grant {rid}: disclosed credential descriptor contradicts signed grant labels — broker mislabel/equivocation (D6.4): {}", mism.join("; ")));
+        }
+    }
+
     let mut uses_total = 0usize;
     let mut uses_matched = 0usize;
     let mut uses_action_unverified = 0usize;
@@ -2070,6 +2159,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         grants_unused,
         taxonomy_status: taxonomy_status.to_string(),
         broker_trust,
+        cred_label_checks,
+        cred_label_matched,
         coverage_manifest,
         issues,
         first_broken_link,

@@ -2526,3 +2526,147 @@ fn tier_b_broker_trust_total_suppression_is_inherent_residual() {
     assert!(r.ok, "no D6 signal -> indistinguishable from pre-D6: {:?}", r.issues);
     assert_eq!(r.broker_trust, "assumed");
 }
+
+// ---- D6.4: credential-descriptor cross-check ----
+
+// a broker grant carrying a credential_commit over the descriptor (so a credential disclosure can open it).
+fn seal_grant_cred(rec_sk: &SigningKey, broker_sk: &SigningKey, record_id: &str, ge: &CanonValue, commitment: &str) -> CanonValue {
+    let eh = sha256_prefixed(ge.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", record_id, &eh, broker_sk);
+    let action = ge.get("action").unwrap().as_str().unwrap();
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"feir-broker",
+        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
+        "agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z",
+        "event_type":"credential_grant","action":"{action}","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"credential_broker","grant_type":"id-jag","grant_id":"{record_id}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "credential_commit":{{"alg":"sha256","commitment":"{commitment}","low_entropy":true}},
+        "extensions":{{"broker":{{"kind":"grant","grant_evidence":{ge}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ge = ge.serialize(),
+    );
+    seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
+// a credential descriptor carrying the 6 cross-checked fields (act/aud/jti/cnf/exp/single_use), cnf = the
+// canonical base64url of a real ed25519 key so its derived kid can be compared to grant_evidence.cnf_kid.
+fn cred_descriptor(cnf_vk: &VerifyingKey, act: &str, aud: &str, jti: &str, exp: i64, single_use: bool) -> CanonValue {
+    CanonValue::object(vec![
+        ("act".into(), CanonValue::string(act)),
+        ("aud".into(), CanonValue::string(aud)),
+        ("cnf".into(), CanonValue::string(feir_decision_core::b64::encode(cnf_vk.as_bytes()))),
+        ("exp".into(), CanonValue::Int(exp)),
+        ("jti".into(), CanonValue::string(jti)),
+        ("single_use".into(), CanonValue::Bool(single_use)),
+        ("typ".into(), CanonValue::string("capability")),
+    ])
+    .unwrap()
+}
+
+// grant_evidence for a single_operation grant carrying a caller-chosen credential_binding + cnf_kid.
+fn cred_ge(cnf_kid: &str, binding: &str) -> CanonValue {
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", cnf_kid, ISSUED, EXP);
+    change_field(&ge, "credential_binding", CanonValue::string(binding))
+}
+
+// assemble a verified+closed broker grant that carries a credential_commit over `descriptor` (with the given
+// grant_evidence labels) + the opening disclosure, anchored so the grant is closed.
+fn cred_bundle(rec: &SigningKey, tsa: &SigningKey, descriptor: &CanonValue, ge: &CanonValue) -> CanonValue {
+    let dbytes = descriptor.serialize();
+    let nonce = [0x11u8; 32];
+    let commitment = feir_decision_core::commit(feir_decision_core::FieldDomain::parse("credential").unwrap(), dbytes.as_bytes(), &nonce).unwrap();
+    let grant = seal_grant_cred(rec, rec, GID, ge, &commitment);
+    let gh = content_hash_of(&grant);
+    let cp = checkpoint_over(rec, std::slice::from_ref(&gh), 1, Some(tsa));
+    let disclosure = CanonValue::object(vec![
+        ("record_id".into(), CanonValue::string(GID)),
+        ("field".into(), CanonValue::string("credential")),
+        ("value_b64".into(), CanonValue::string(feir_decision_core::b64::encode(dbytes.as_bytes()))),
+        ("nonce_hex".into(), CanonValue::string(feir_decision_core::hashx::hex_lower(&nonce))),
+    ])
+    .unwrap();
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    change_field(&bundle, "disclosures", CanonValue::Array(vec![disclosure]))
+}
+
+#[test]
+fn tier_b_cred_descriptor_match() {
+    // happy path: the disclosed descriptor's act/aud/jti/cnf/exp/single_use all agree with the signed grant
+    // labels and sha256(descriptor) == credential_binding -> cross-check passes (checks==matched==1).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let descriptor = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true);
+    let binding = sha256_prefixed(descriptor.serialize().as_bytes());
+    let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &binding));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "matching descriptor must verify clean: {:?}", r.issues);
+    assert_eq!((r.cred_label_checks, r.cred_label_matched), (1, 1));
+    assert_eq!(r.disclosures_verified, 1);
+}
+
+#[test]
+fn tier_b_cred_descriptor_action_mismatch_is_violation() {
+    // the broker discloses a descriptor whose `act` is BROADER than the benign single-op the grant LABELS —
+    // binding still matches (it is the real descriptor) but the label contradicts it: broker mislabel (D6.4).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let descriptor = cred_descriptor(&cnf.verifying_key(), "db.admin:orders-rw", RESOURCE, GID, EXP, true); // act != label
+    let binding = sha256_prefixed(descriptor.serialize().as_bytes());
+    let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &binding));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "descriptor act contradicting the grant label must fail");
+    assert!(r.issues.iter().any(|i| i.contains("broker mislabel/equivocation")), "issues: {:?}", r.issues);
+    assert_eq!((r.cred_label_checks, r.cred_label_matched), (1, 0));
+}
+
+#[test]
+fn tier_b_cred_descriptor_single_use_mismatch_is_violation() {
+    // the core attack: a session/batch credential (single_use=false) labeled single_operation. The descriptor
+    // is honestly broad; the label lies. Must be a violation.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let descriptor = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, false); // single_use=false vs label single_operation
+    let binding = sha256_prefixed(descriptor.serialize().as_bytes());
+    let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &binding));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "single_use=false under a single_operation label must fail");
+    assert!(r.issues.iter().any(|i| i.contains("single_use")), "issues: {:?}", r.issues);
+    assert_eq!((r.cred_label_checks, r.cred_label_matched), (1, 0));
+}
+
+#[test]
+fn tier_b_cred_descriptor_binding_mismatch_is_violation() {
+    // the signed credential_binding (used by the PoP path) disagrees with the disclosed credential_commit's
+    // descriptor: sha256(descriptor) != credential_binding -> wrong/forged descriptor (D6.4).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let descriptor = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true);
+    let wrong_binding = sha256_prefixed(b"a-different-descriptor"); // != sha256(descriptor)
+    let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &wrong_binding));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "descriptor sha256 != credential_binding must fail");
+    assert!(r.issues.iter().any(|i| i.contains("!= grant_evidence.credential_binding")), "issues: {:?}", r.issues);
+    assert_eq!((r.cred_label_checks, r.cred_label_matched), (1, 0));
+}
+
+#[test]
+fn tier_b_cred_descriptor_absent_is_residual() {
+    // RESIDUAL: with NO credential disclosure, the verifier cannot cross-check labels vs the minted credential
+    // (cred_label_checks==0). The bundle still verifies; label↔credential fidelity rests on broker_trust (D6).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let descriptor = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true);
+    let binding = sha256_prefixed(descriptor.serialize().as_bytes());
+    // build the grant + commit but DO NOT disclose (strip the disclosures the helper adds).
+    let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &binding));
+    let bundle = change_field(&bundle, "disclosures", CanonValue::Array(vec![]));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "absent disclosure must still verify: {:?}", r.issues);
+    assert_eq!((r.cred_label_checks, r.cred_label_matched), (0, 0));
+}

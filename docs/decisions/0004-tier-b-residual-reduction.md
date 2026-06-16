@@ -226,13 +226,19 @@ grant `content_hash` (the `committed_set`). D6 binds the grant log INTO it:
    and the `prior_head_hash` chain is intact across checkpoints. A gap, a tail omission (`max_seq` >
    max closed `broker_seq`), or a root mismatch is a **detectable suppression** violation.
 
-**Second `broker_trust` lever — credential label fidelity (D4 cross-reference):** D4's `action_verified`
-trusts the broker's grant LABELS (`action`/`resource_id`/`scope_class`). When the credential descriptor
-is disclosed (the `credential_commit` opened), D6 additionally cross-checks `sha256(descriptor) ==
-grant_evidence.credential_binding` and the descriptor's `act/aud/jti/cnf/exp/single_use` against the
-signed `grant_evidence` — proving the broker did not mislabel a broad credential as a benign single-op
-action. A mismatch is a broker-equivocation violation; absent the disclosure the label fidelity remains a
-`broker_trust` residual. (Surfaced here so D4's label-trust gap is tracked, not orphaned.)
+**Second `broker_trust` lever — credential label fidelity (D4 cross-reference) [D6.4, IMPLEMENTED]:** D4's
+`action_verified` trusts the broker's grant LABELS (`action`/`resource_id`/`scope_class`). When the
+credential descriptor is disclosed (the `credential_commit` opened + verified), the verifier additionally
+cross-checks `sha256(descriptor) == grant_evidence.credential_binding` and the descriptor's
+`act/aud/jti/cnf/exp/single_use` against the signed `grant_evidence`
+(`action`/`resource_id`/`grant_id`/`cnf_kid`/`exp`/`scope_class=="single_operation"`) — proving the broker
+did not mislabel a broad credential as a benign single-op action. The labels AND the `credential_commit`
+live in the SAME record, bound by its content signature, so the check runs on any **integrity-proven**
+broker grant — it does NOT require a pinned broker authority key (that is the separate
+`authority`/`grant_verified` axis). Surfaced as `cred_label_checks`/`cred_label_matched`; a shortfall is a
+broker-equivocation **violation** (hard `issues`). Absent the disclosure, label↔credential fidelity remains
+a `broker_trust` residual. Cross-language byte-exactness (descriptor `cnf` base64url ↔ Rust `cnf_kid`) is
+pinned by an end-to-end Go test against the real broker-minted descriptor.
 
 **Reduces:** `broker_trust` from `assumed` to **`sequence_verified`** — because the head is anchored +
 hash-chained + witnessed, the broker can no longer drop a middle/tail grant, renumber, or fork the log

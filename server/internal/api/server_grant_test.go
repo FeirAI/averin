@@ -170,6 +170,37 @@ func TestGrantDescriptorDisclosesUnderCredentialDomain(t *testing.T) {
 	}
 }
 
+// TestGrantDescriptorCrossChecksLabels proves the D6.4 producer->verifier path end-to-end: the REAL minted
+// credential descriptor, disclosed under selective_disclosure, cross-checks clean against the signed
+// grant_evidence labels (sha256(descriptor)==credential_binding AND act/aud/jti/cnf/exp/single_use match the
+// labels) — guarding against any cross-language drift in the descriptor<->grant_evidence field mapping.
+func TestGrantDescriptorCrossChecksLabels(t *testing.T) {
+	h := newBrokerServer(t)
+	ak := grantAgentKey()
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-1", "read:orders", ak, ak)); code != http.StatusCreated {
+		t.Fatalf("grant failed (%d): %s", code, resp)
+	}
+	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, resp)
+	}
+	code, exp := do(t, h, "GET", "/v2/export?project=p1&mode=selective_disclosure", "")
+	if code != http.StatusOK {
+		t.Fatalf("export (%d): %s", code, exp)
+	}
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	report := c.VerifyBundle(exp)
+	if !strings.Contains(report, `"ok":true`) {
+		t.Fatalf("disclosing grant bundle should verify ok: %s", report)
+	}
+	// the disclosed real descriptor cross-checks against the signed grant labels: 1 checked, 1 matched.
+	if !strings.Contains(report, `"cred_label_checks":1`) || !strings.Contains(report, `"cred_label_matched":1`) {
+		t.Fatalf("the real credential descriptor should cross-check clean against grant_evidence labels: %s", report)
+	}
+}
+
 func TestGrantIsIdempotent(t *testing.T) {
 	h := newBrokerServer(t)
 	ak := grantAgentKey()
