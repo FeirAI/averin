@@ -119,6 +119,48 @@ func TestTTLExceededDenialRecordsClaimedKeyNotProvenCnf(t *testing.T) {
 	}
 }
 
+// TestGenericIngestCannotForgeDenialEvidence (Codex C2): a denial is sealed by the server signing key like
+// every record, so the verifier cannot tell a broker-produced denial from a generic-forged one — the
+// reservation must live at ingest. A generic /v2/records caller must NOT be able to forge B11 denial
+// evidence via the event_type, the extensions.broker_denial payload, or a reserved denial- record_id.
+func TestGenericIngestCannotForgeDenialEvidence(t *testing.T) {
+	h := newBrokerServer(t)
+	cases := []string{
+		`{"idempotency_key":"i1","project_id":"p1","session_id":"s1","event_type":"credential_grant_denied","status":"denied","action":"x"}`,
+		`{"idempotency_key":"i2","project_id":"p1","session_id":"s1","event_type":"decision","status":"ok","action":"x","extensions":{"broker_denial":{"kind":"grant_denied"}}}`,
+		`{"idempotency_key":"i3","project_id":"p1","session_id":"s1","event_type":"decision","status":"ok","action":"x","record_id":"denial-spoof"}`,
+	}
+	for i, body := range cases {
+		if code, r := do(t, h, "POST", "/v2/records", body); code != http.StatusBadRequest {
+			t.Fatalf("case %d: generic ingest must reject a forged denial marker, got %d: %s", i, code, r)
+		}
+	}
+}
+
+// TestVaryingProbeFieldsLogDistinctDenials (Codex C3): the denial id derives from the FULL requested probe
+// identity, not the idempotency key — so two probes reusing one idem key + scope + reason but differing in
+// another requested field (here the agent key) are logged as TWO distinct denials, not collapsed to one.
+func TestVaryingProbeFieldsLogDistinctDenials(t *testing.T) {
+	h := denyLogServer(t)
+	ak1 := grantAgentKey()
+	seed2 := make([]byte, ed25519.SeedSize)
+	seed2[0] = 7
+	ak2 := ed25519.NewKeyFromSeed(seed2) // a DIFFERENT agent key (a field the old idem|scope|reason id ignored)
+	if code, r := do(t, h, "POST", "/v2/grants", grantBody("idem-probe", "iam:reset", ak1, ak1)); code != http.StatusBadRequest {
+		t.Fatalf("probe 1 should be 400, got %d: %s", code, r)
+	}
+	if code, r := do(t, h, "POST", "/v2/grants", grantBody("idem-probe", "iam:reset", ak2, ak2)); code != http.StatusBadRequest {
+		t.Fatalf("probe 2 should be 400, got %d: %s", code, r)
+	}
+	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, r)
+	}
+	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
+	if !strings.Contains(report, `"denied_grants":2`) {
+		t.Fatalf("two probes differing in the agent key must log 2 distinct denials (not collapse): %s", report)
+	}
+}
+
 // TestDeniedGrantLogOffByDefault: without WithDeniedGrantLog the forbidden scope is still rejected but NO
 // denial is sealed (opt-in — avoids a probe-driven storage/billing DoS by default).
 func TestDeniedGrantLogOffByDefault(t *testing.T) {

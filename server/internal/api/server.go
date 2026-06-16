@@ -494,11 +494,19 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	// idempotency key): a generic caller must not pre-seed one, else a later /v2/use[-intent|-outcome] retry
 	// with the matching idempotency key could short-circuit to the pre-seeded record and SKIP PoP validation
 	// / consume-before-act (a forged-capability use reading as success).
-	if rid := stringField(rec, "record_id"); strings.HasPrefix(rid, "use-") || strings.HasPrefix(rid, "outcome-") {
-		return "", false, fmt.Errorf("record_id prefix of %q is reserved for the resource-gateway endpoints", rid)
+	if rid := stringField(rec, "record_id"); strings.HasPrefix(rid, "use-") || strings.HasPrefix(rid, "outcome-") || strings.HasPrefix(rid, "denial-") {
+		return "", false, fmt.Errorf("record_id prefix of %q is reserved for the broker/resource endpoints", rid)
 	}
 	if stringField(rec, "record_id") == "" {
 		rec["record_id"] = newUUID()
+	}
+	// credential_grant_denied is the B11 denied-grant marker the verifier counts (denied_grants) by
+	// event_type alone. A denial is sealed by the server signing key like every record, so the verifier
+	// cannot cryptographically tell a broker-produced denial from a generic-forged one — the ONLY defense
+	// is to reserve the marker at ingest, so only the opt-in broker denial path can produce it (else any
+	// project writer could fabricate B11 evidence with arbitrary claimed pubkeys in tamper-evident records).
+	if stringField(rec, "event_type") == "credential_grant_denied" {
+		return "", false, fmt.Errorf("event_type \"credential_grant_denied\" is reserved for the broker denied-grant log")
 	}
 
 	// authority is declared by default — never silently presented as verified (threat #4).
@@ -513,6 +521,9 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	if ext, ok := rec["extensions"].(map[string]any); ok {
 		if _, reserved := ext["broker"]; reserved {
 			return "", false, fmt.Errorf("extensions.broker is reserved for the broker/resource endpoints and must not be set on a generic record")
+		}
+		if _, reserved := ext["broker_denial"]; reserved {
+			return "", false, fmt.Errorf("extensions.broker_denial is reserved for the broker denied-grant log and must not be set on a generic record")
 		}
 	}
 
@@ -715,16 +726,16 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		// Seal a B11 denial ONLY for a policy refusal of a well-formed request (failed PoP or over-cap TTL);
 		// a missing/ill-shaped field is malformed input, never logged.
 		if s.denyLog && errors.Is(e, broker.ErrPoPFailed) {
-			s.sealGrantDenial(gr, req, idem, "pop_failed", e.Error())
+			s.sealGrantDenial(gr, req, "pop_failed", e.Error())
 		} else if s.denyLog && errors.Is(e, broker.ErrTTLExceeded) {
-			s.sealGrantDenial(gr, req, idem, "ttl_exceeded", e.Error())
+			s.sealGrantDenial(gr, req, "ttl_exceeded", e.Error())
 		}
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
 	if _, e := broker.ClassifyScope(req.Scope, req.ScopeClass); e != nil {
 		if s.denyLog && errors.Is(e, broker.ErrForbiddenScope) {
-			s.sealGrantDenial(gr, req, idem, "forbidden_scope", e.Error())
+			s.sealGrantDenial(gr, req, "forbidden_scope", e.Error())
 		}
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
@@ -912,7 +923,7 @@ func (s *Server) reconstructCapability(projectID, grantID string) (string, error
 // sequence is untouched. It records the REQUESTED scope metadata (the probe target). A deterministic
 // record_id collapses retries of the same probe. Best-effort: a seal failure is logged and never changes
 // the caller's 400. Caller must NOT already hold ingestMu (this takes it for the seal critical section).
-func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, idem, reason, detail string) {
+func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, detail string) {
 	now := ts(s.now())
 	requested := map[string]any{
 		"action": req.Action, "resource_id": req.Resource, "scope": req.Scope,
@@ -930,7 +941,12 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, idem, reas
 	} else {
 		requested["claimed_agent_pubkey"] = req.AgentPubKey
 	}
-	denialID := "denial-" + uuidV5Shaped("feir.denial.id.v1", gr.ProjectID, idem+"|"+req.Scope+"|"+reason)
+	// Derive the denial id from the FULL requested probe identity, NOT the caller idempotency key: a probe
+	// that reuses one idem key while VARYING any requested field is a DISTINCT denied probe and must be
+	// logged separately (else a varying-field sweep under a fixed idem would collapse to one record and
+	// suppress the rest of the B11 log). Identical probes still dedup (same id -> content-hash collapse).
+	probe := strings.Join([]string{req.Action, req.Resource, req.Scope, string(req.ScopeClass), req.AgentID, req.AgentPubKey, reason}, "\x1f")
+	denialID := "denial-" + uuidV5Shaped("feir.denial.id.v1", gr.ProjectID, probe)
 	rec := map[string]any{
 		"record_id":     denialID,
 		"project_id":    gr.ProjectID,
