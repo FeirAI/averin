@@ -796,6 +796,12 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
+    // D7.2: pinned deployment-attestation issuer keys (so the JSON/FFI path — used by the Go server and any
+    // external auditor — can elevate `attestation_status` to `attested_claims`, not just the direct Rust API).
+    let attestation_keys = match parse_pubkeys(&opts_val, "attestation_keys") {
+        Ok(k) => k,
+        Err(e) => return error_report(&e),
+    };
     let mut opts = VerifyOptions {
         trusted_authority_keys: authority,
         broker_authority_keys: broker_authority,
@@ -806,6 +812,7 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         taxonomy_version,
         trusted_tsa_keys: tsa_keys,
         trusted_tsa_spki: tsa_spki,
+        attestation_keys,
         ..Default::default()
     };
     if !signing.is_empty() {
@@ -1490,13 +1497,14 @@ fn evaluate_attestation(
         .map(|m| crate::hashx::sha256_prefixed(m.serialize().as_bytes()))
         .unwrap_or_default();
     let head_root = latest.3.clone().unwrap_or_else(|| grant_head_root(&[]));
+    // `authority_kids` binds the deployment's GRANT/USE authorities — the broker and resource roles ONLY.
+    // taxonomy_keys is deliberately NOT folded in: the operation taxonomy is a separate verifier-pinned
+    // artifact (validated independently via `taxonomy_status`), not a runtime authority over this
+    // deployment's grants/uses, and the attestation producer (broker/server) holds no taxonomy key — it
+    // cannot bind a kid it never sees. Folding it would force every auditor who pins a taxonomy issuer
+    // (the normal D4/D8 posture) into a spurious authority_kids mismatch -> attestation_status:"failed".
     let mut kids: BTreeSet<String> = BTreeSet::new();
-    for vk in opts
-        .broker_authority_keys
-        .iter()
-        .chain(opts.resource_authority_keys.iter())
-        .chain(opts.taxonomy_keys.iter())
-    {
+    for vk in opts.broker_authority_keys.iter().chain(opts.resource_authority_keys.iter()) {
         kids.insert(cnf_kid(vk));
     }
     let mut mism: Vec<&str> = Vec::new();

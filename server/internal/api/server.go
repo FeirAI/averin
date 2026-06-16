@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -66,6 +67,9 @@ type Server struct {
 	resourceCore Sealer
 	resourceID   string
 	ledger       resourceshim.Ledger
+	// D7.2 (ADR 0004): the deployment-attestation issuing key (role-separated from broker/resource/TSA).
+	// nil = no attestation emitted on export (a bundle then verifies attestation_status:"unevaluated").
+	attestKey    ed25519.PrivateKey
 	signingKeyID string
 	keyValidFrom string
 	now          func() time.Time // injectable clock for tests
@@ -136,6 +140,158 @@ func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
 	s.resourceID = resourceID
 	s.ledger = resourceshim.NewMemLedger()
 	return s
+}
+
+// WithAttestation enables the D7.2 deployment-attestation export: every /v2/export bundle carries a
+// top-level `deployment_attestation` signed by `key` (the attestation issuer, role-separated from
+// broker/resource/TSA), binding this bundle's project / latest checkpoint + grant-head / authority key
+// ids / resource ids. A verifier that pins this key (out of band) elevates `attestation_status` toward
+// `attested_claims`; the attestation asserts a CLAIM exists, never runtime enforcement (ADR 0004 D7).
+func (s *Server) WithAttestation(key ed25519.PrivateKey) *Server {
+	s.attestKey = key
+	return s
+}
+
+func decodePubKey(encoded string) (ed25519.PublicKey, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(encoded, "ed25519pub:"))
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("not an ed25519pub key: %q", encoded)
+	}
+	return ed25519.PublicKey(raw), nil
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// resourceIDsOf returns the resource_id(s) a record names via its signed grant_evidence / use_evidence —
+// the same fields the verifier folds into the attestation-subject resource_id set.
+func resourceIDsOf(recordJSON string) []string {
+	var probe struct {
+		Extensions struct {
+			Broker struct {
+				GrantEvidence struct {
+					ResourceID string `json:"resource_id"`
+				} `json:"grant_evidence"`
+				UseEvidence struct {
+					ResourceID string `json:"resource_id"`
+				} `json:"use_evidence"`
+			} `json:"broker"`
+		} `json:"extensions"`
+	}
+	if json.Unmarshal([]byte(recordJSON), &probe) != nil {
+		return nil
+	}
+	var out []string
+	if r := probe.Extensions.Broker.GrantEvidence.ResourceID; r != "" {
+		out = append(out, r)
+	}
+	if r := probe.Extensions.Broker.UseEvidence.ResourceID; r != "" {
+		out = append(out, r)
+	}
+	return out
+}
+
+// signTagged signs `contentHash` under a domain `tag` exactly as the Rust core's sign::sign does:
+// ed25519(sk, LP4(tag) ‖ utf8(contentHash)), returning "ed25519:<base64url-no-pad>". (RCP §9.2.)
+func signTagged(tag, contentHash string, sk ed25519.PrivateKey) string {
+	pre := make([]byte, 0, 4+len(tag)+len(contentHash))
+	var lp [4]byte
+	binary.BigEndian.PutUint32(lp[:], uint32(len(tag)))
+	pre = append(pre, lp[:]...)
+	pre = append(pre, tag...)
+	pre = append(pre, contentHash...)
+	return "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(sk, pre))
+}
+
+// buildDeploymentAttestation assembles the D7.2 attestation over the project's latest checkpoint. The
+// signed `subject` binds project_id / coverage_manifest_digest / latest checkpoint_hash +
+// broker_grant_head_root / the authority key-id set / the resource-id set; the digest is the verifier's
+// (sha256 of RCP-canonical attestation minus sig), signed under "feir.attestation.v1".
+func (s *Server) buildDeploymentAttestation(projectID string, recs []store.Record, checks []store.Checkpoint) (map[string]any, error) {
+	if len(checks) == 0 {
+		return nil, nil // nothing anchored to attest over yet
+	}
+	latest := checks[len(checks)-1]
+	var cp struct {
+		CheckpointHash  string `json:"checkpoint_hash"`
+		CreatedTS       string `json:"created_ts"`
+		BrokerGrantHead struct {
+			CumulativeRoot string `json:"cumulative_root"`
+		} `json:"broker_grant_head"`
+	}
+	if err := json.Unmarshal([]byte(latest.JSON), &cp); err != nil {
+		return nil, fmt.Errorf("parse latest checkpoint: %w", err)
+	}
+	headRoot := cp.BrokerGrantHead.CumulativeRoot
+	if headRoot == "" {
+		headRoot = broker.EmptyGrantHeadRoot()
+	}
+	// authority key ids = the kids of the broker (server) + resource recording keys — exactly the set the
+	// verifier derives from its pinned broker+resource authority keys. The taxonomy issuer is NOT an
+	// authority over this deployment's grants/uses (it is validated separately via taxonomy_status), and
+	// the producer holds no taxonomy key, so it is deliberately excluded here and in the verifier.
+	kids := map[string]bool{}
+	if pk, err := decodePubKey(s.core.PubKey()); err == nil {
+		kids[broker.KeyID(pk)] = true
+	}
+	if s.resourceCore != nil {
+		if pk, err := decodePubKey(s.resourceCore.PubKey()); err == nil {
+			kids[broker.KeyID(pk)] = true
+		}
+	}
+	authorityKids := sortedKeys(kids)
+	// resource ids = every resource named by a grant_evidence / use_evidence in the bundle.
+	resIDs := map[string]bool{}
+	for _, r := range recs {
+		for _, rid := range resourceIDsOf(r.JSON) {
+			resIDs[rid] = true
+		}
+	}
+	resourceIDs := sortedKeys(resIDs)
+
+	subject := map[string]any{
+		"project_id":               projectID,
+		"coverage_manifest_digest": "", // the base export carries no coverage_manifest
+		"checkpoint_hash":          cp.CheckpointHash,
+		"broker_grant_head_root":   headRoot,
+		"authority_kids":           authorityKids,
+		"resource_ids":             resourceIDs,
+	}
+	// Freshness window must COVER the latest checkpoint's ANCHORED time, not export time. The verifier
+	// checks the TSA genTime (≈ the checkpoint's created_ts) against [issued_at, not_after] — it has no
+	// wall clock of its own. Anchoring the window to export `now()` fails whenever a checkpoint is exported
+	// more than ~1h after it was sealed (Codex D7.2). Bracket the latest checkpoint's own created_ts with
+	// margin for TSA clock skew + anchor latency, falling back to now() only for a pre-created_ts checkpoint.
+	windowBase := s.now()
+	if cp.CreatedTS != "" {
+		if t, perr := time.Parse("2006-01-02T15:04:05.000Z", cp.CreatedTS); perr == nil {
+			windowBase = t
+		}
+	}
+	att := map[string]any{
+		"issuer_kid":  broker.KeyID(s.attestKey.Public().(ed25519.PublicKey)),
+		"issued_at":   ts(windowBase.Add(-1 * time.Hour)),
+		"not_after":   ts(windowBase.Add(24 * time.Hour)),
+		"claim_types": []string{"sandbox_isolation", "egress_policy", "key_non_transferability"},
+		"subject":     subject,
+	}
+	// digest = sha256(RCP-canonical(attestation minus sig)) — exactly what the verifier recomputes.
+	bodyJSON, err := json.Marshal(att)
+	if err != nil {
+		return nil, fmt.Errorf("marshal attestation: %w", err)
+	}
+	digest, err := s.core.RcpEvidenceHash(string(bodyJSON))
+	if err != nil {
+		return nil, fmt.Errorf("attestation digest: %w", err)
+	}
+	att["sig"] = signTagged("feir.attestation.v1", digest, s.attestKey)
+	return att, nil
 }
 
 // WithTSA anchors every sealed checkpoint to a third-party RFC 3161 timestamp authority, attaching
@@ -1783,6 +1939,17 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 		"keys":           []any{keyEntry},
 		"records":        records,
 		"checkpoints":    checkpoints,
+	}
+	// D7.2: emit a deployment_attestation binding this bundle's latest checkpoint + authority/resource set,
+	// when an attestation issuing key is configured (else the bundle verifies attestation_status:unevaluated).
+	if s.attestKey != nil {
+		att, e := s.buildDeploymentAttestation(projectID, recs, checks)
+		if e != nil {
+			return "", e
+		}
+		if att != nil {
+			bundle["deployment_attestation"] = att
+		}
 	}
 	out, err := json.Marshal(bundle)
 	return string(out), err

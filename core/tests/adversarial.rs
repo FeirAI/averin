@@ -2876,6 +2876,23 @@ fn tier_b_attestation_attested_claims() {
 }
 
 #[test]
+fn tier_b_attestation_attested_claims_with_pinned_taxonomy() {
+    // REGRESSION (D7.2): pinning a taxonomy issuer (the normal D4/D8 auditor posture) must NOT change the
+    // attestation's authority_kids expectation. authority_kids binds the GRANT/USE authorities
+    // (broker+resource) only; the taxonomy is a separate verifier-pinned artifact the producer never holds.
+    // Folding taxonomy_keys into the compared kid set would force a spurious authority_kids mismatch -> failed.
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let tax = signing_key_from_seed(&[13u8; 32]); // disjoint from broker/resource/attest/tsa
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), ATT_ISSUED, ATT_NOT_AFTER, honest_subject(&rec, &res, &cph, &head_root), &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let mut opts = attest_opts(&rec, &res, &tsa, &attest);
+    opts.taxonomy_keys = vec![tax.verifying_key()]; // auditor ALSO pins a taxonomy issuer
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.attestation_status, "attested_claims", "pinning a taxonomy issuer must not break the attestation authority_kids match: {:?}", r.issues);
+}
+
+#[test]
 fn tier_b_attestation_bad_sig_is_failed() {
     // signed by a key that is NOT the pinned issuer -> sig does not verify -> failed (not unevaluated).
     let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
