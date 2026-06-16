@@ -1081,10 +1081,17 @@ fn seal_intent(rec_sk: &SigningKey, res_sk: &SigningKey, record_id: &str, prev: 
 // set separately to `sibling_ref` so a test can DIVERGE them. `auth_sk` signs the evidence (a non-resource
 // key models a FORGED outcome).
 fn seal_outcome(rec_sk: &SigningKey, auth_sk: &SigningKey, record_id: &str, prev: &[String], signed_ref: &str, sibling_ref: &str, gid: &str) -> CanonValue {
+    seal_outcome_k(rec_sk, auth_sk, record_id, prev, "use_outcome", signed_ref, sibling_ref, gid)
+}
+
+// seal_outcome with an explicit SIGNED-payload `kind` (use a non-"use_outcome" kind to model a relabeled
+// signed payload that the unsigned sibling routes here as a use_outcome).
+#[allow(clippy::too_many_arguments)]
+fn seal_outcome_k(rec_sk: &SigningKey, auth_sk: &SigningKey, record_id: &str, prev: &[String], payload_kind: &str, signed_ref: &str, sibling_ref: &str, gid: &str) -> CanonValue {
     let outcome = CanonValue::object(vec![
         ("grant_id".into(), CanonValue::string(gid)),
         ("intent_ref".into(), CanonValue::string(signed_ref)),
-        ("kind".into(), CanonValue::string("use_outcome")),
+        ("kind".into(), CanonValue::string(payload_kind)),
         ("status".into(), CanonValue::string("ok")),
     ])
     .unwrap();
@@ -3123,6 +3130,37 @@ fn tier_b_two_phase_outcome_for_other_grant_does_not_complete() {
     let bundle = two_phase_bundle(&rec, &res, &tsa, Some(outcome));
     let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
     assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 1), "an outcome for a different grant must not complete the intent: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_two_phase_orphan_outcome_is_violation() {
+    // Codex round-2: a valid resource-signed use_outcome with NO matching use_intent is a completion with NO
+    // anchored pre-action intent (the resource skipped the before-act recording two-phase exists to require).
+    // An outcome-only bundle must NOT read clean.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let outcome = seal_outcome(&rec, &res, "outcome-1", std::slice::from_ref(&gh), "intent-1", "intent-1", GID);
+    let oh = content_hash_of(&outcome);
+    let cp = checkpoint_over(&rec, std::slice::from_ref(&oh), 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, outcome], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "an orphan outcome (no recorded intent) must be a violation");
+    assert!(r.issues.iter().any(|i| i.contains("completion without a recorded intent")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_two_phase_outcome_signed_payload_wrong_kind_is_violation() {
+    // Codex round-2: the SIGNED use_outcome payload must itself assert kind="use_outcome" — the role
+    // discriminator that routed it here is the UNSIGNED sibling. A relabeled signed payload (kind="use")
+    // must NOT complete the intent and must be flagged.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ih = intent_hash(&rec, &res);
+    let outcome = seal_outcome_k(&rec, &res, "outcome-1", std::slice::from_ref(&ih), "use", "intent-1", "intent-1", GID); // signed kind != use_outcome
+    let bundle = two_phase_bundle(&rec, &res, &tsa, Some(outcome));
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 1), "a wrong-kind signed payload must not complete: {:?}", r.issues);
+    assert!(!r.ok && r.issues.iter().any(|i| i.contains("missing kind=use_outcome")), "issues: {:?}", r.issues);
 }
 
 #[test]

@@ -2169,8 +2169,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // different intent. A CLOSED outcome MUST be fully validatable (integrity + resource authority +
     // re-derivable payload) — else it is a Tier-B violation (parity with a one-phase use; a use_outcome must
     // not be a laundering path for an unauthorized resource record). `outcome_for` maps the signed intent_ref
-    // → the signed grant_id, so an intent completes only when an outcome attests THE SAME grant.
-    let mut outcome_for: BTreeMap<String, String> = BTreeMap::new();
+    // → (signed grant_id, outcome record_id), so an intent completes only when an outcome attests THE SAME
+    // grant. The signed payload must ALSO assert kind="use_outcome" (the role discriminator that routed it
+    // here is the UNSIGNED sibling, outside the resource signature — without this a relabeled signed payload
+    // could complete an intent). Every validated outcome MUST be consumed by a matching intent; an
+    // un-consumed (orphan) outcome is a completion with NO recorded pre-action intent — flagged below.
+    let mut outcome_for: BTreeMap<String, (String, String)> = BTreeMap::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str() || broker_kind(rec).as_deref() != Some("use_outcome") {
@@ -2187,16 +2191,21 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             issues.push(format!("use_outcome {} ({}): closed but not validatable (integrity / resource authority / re-derivable payload) — Tier-B violation", rt.index, rt.record_id));
             continue;
         }
-        match (ev_str(rec, "use_outcome", "intent_ref"), ev_str(rec, "use_outcome", "grant_id")) {
-            (Some(iref), Some(ogid)) => {
-                outcome_for.insert(iref, ogid);
+        match (
+            ev_str(rec, "use_outcome", "kind"),
+            ev_str(rec, "use_outcome", "intent_ref"),
+            ev_str(rec, "use_outcome", "grant_id"),
+        ) {
+            (Some(k), Some(iref), Some(ogid)) if k == "use_outcome" => {
+                outcome_for.insert(iref, (ogid, rt.record_id.clone()));
             }
             _ => {
                 unmatched_violation += 1;
-                issues.push(format!("use_outcome {} ({}): missing signed intent_ref/grant_id in payload — violation", rt.index, rt.record_id));
+                issues.push(format!("use_outcome {} ({}): signed payload missing kind=use_outcome / intent_ref / grant_id — violation", rt.index, rt.record_id));
             }
         }
     }
+    let mut consumed_outcomes: BTreeSet<String> = BTreeSet::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str() {
@@ -2345,9 +2354,16 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // that passed every predicate above but has no such outcome is an `intent_without_outcome` anomaly —
         // recorded-but-incomplete (the crash-after-act case). Surface it and stop BEFORE it counts as matched
         // / PoP-reverified or consumes a single-use grant.
-        if bkind == "use_intent" && outcome_for.get(&rt.record_id).map(String::as_str) != Some(gid.as_str()) {
-            intent_without_outcome += 1;
-            continue;
+        if bkind == "use_intent" {
+            match outcome_for.get(&rt.record_id) {
+                Some((ogid, _)) if *ogid == gid => {
+                    consumed_outcomes.insert(rt.record_id.clone()); // this intent consumes its outcome
+                }
+                _ => {
+                    intent_without_outcome += 1;
+                    continue;
+                }
+            }
         }
         // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
         // reconstructing the challenge from the proven fields + this grant's credential_binding + the
@@ -2386,6 +2402,15 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             });
         if !action_verified {
             uses_action_unverified += 1;
+        }
+    }
+    // D5: a validated `use_outcome` that NO closed matching `use_intent` consumed is an ORPHAN — a recorded
+    // completion with no anchored pre-action intent (the resource skipped the before-act recording that two-
+    // phase exists to require). Flag it; otherwise an outcome-only bundle would read clean (false-clean).
+    for (iref, (ogid, orec)) in &outcome_for {
+        if !consumed_outcomes.contains(iref) {
+            unmatched_violation += 1;
+            issues.push(format!("use_outcome {orec}: references intent '{iref}' (grant {ogid}) but no closed matching use_intent consumed it — completion without a recorded intent (D5)"));
         }
     }
     // D4: a mis-scoped grant is rejected, not "unused" — exclude it so an exercised-but-mis-scoped grant
