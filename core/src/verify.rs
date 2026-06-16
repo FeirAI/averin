@@ -834,6 +834,36 @@ pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
     crate::hashx::sha256_prefixed(&pre)
 }
 
+/// Cumulative grant-transparency root (ADR 0004 D6 / MF2): a hash-CHAIN over a broker's grant log,
+/// folding `(broker_seq, grant content_hash)` pairs **in ascending `broker_seq` order**. Byte-identical
+/// to Go `broker.GrantHeadRoot`, so the offline verifier re-derives the `cumulative_root` an anchored
+/// checkpoint's `broker_grant_head` carries and a dropped/renumbered/forked grant fails the match.
+///
+/// `acc_0 = sha256( LP4(tag) )`; `acc_i = sha256( LP4(tag) ‖ acc_{i-1}(32 raw bytes) ‖ BE8(seq_i) ‖
+/// LP4(content_hash_i) )`, tag = "feir.broker.grant_head.v1". The caller MUST pass the pairs already
+/// sorted by `broker_seq` (the verifier sorts the closed grant set; the producer folds in issue order).
+/// Returns `sha256:<hex>` of the final accumulator. The empty log has a well-defined non-zero root.
+pub fn grant_head_root(grants: &[(i64, String)]) -> String {
+    const TAG: &str = "feir.broker.grant_head.v1";
+    let lp4 = |pre: &mut Vec<u8>, b: &[u8]| {
+        pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
+        pre.extend_from_slice(b);
+    };
+    // acc_0 = sha256(LP4(tag)) — a fixed non-zero seed so an empty log is distinguishable from a forged one.
+    let mut seed = Vec::new();
+    lp4(&mut seed, TAG.as_bytes());
+    let mut acc = crate::hashx::sha256(&seed);
+    for (seq, content_hash) in grants {
+        let mut pre = Vec::new();
+        lp4(&mut pre, TAG.as_bytes());
+        pre.extend_from_slice(&acc);
+        pre.extend_from_slice(&(*seq as u64).to_be_bytes());
+        lp4(&mut pre, content_hash.as_bytes());
+        acc = crate::hashx::sha256(&pre);
+    }
+    format!("sha256:{}", crate::hashx::hex_lower(&acc))
+}
+
 /// Re-derive the use-time PoP challenge digest the resource shim signs over (ADR 0003 R4 / ADR 0004
 /// D2), byte-identically to Go `resourceshim.usePoPChallenge`: `sha256( LP4(tag) ‖ LP4(grant_id) ‖
 /// LP4(resource_id) ‖ LP4(action) ‖ LP4(params_commitment) ‖ LP4(credential_binding) ‖ LP4(nonce) )`,

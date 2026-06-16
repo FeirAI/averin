@@ -1542,6 +1542,23 @@ fn ledger_commitment_golden_vector() {
     );
 }
 
+#[test]
+fn grant_head_root_golden_vector() {
+    use feir_decision_core::verify::grant_head_root;
+    // Empty log has a fixed non-zero seed root (distinguishes "no grants" from a forged/zero root).
+    assert_eq!(grant_head_root(&[]), "sha256:ac2cfdddb12235d5eff3a497e169b50fec13c9e7052e3b53c2a29d9318f9126d");
+    // A 3-grant log folded in ascending broker_seq order — MUST equal Go broker.GrantHeadRoot.
+    let grants = vec![
+        (1i64, "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_string()),
+        (2i64, "sha256:2222222222222222222222222222222222222222222222222222222222222222".to_string()),
+        (3i64, "sha256:3333333333333333333333333333333333333333333333333333333333333333".to_string()),
+    ];
+    assert_eq!(grant_head_root(&grants), "sha256:03becbd3622a271d2f4e144c3402c6a6de8f06dfa58f3b6be3d9248ea42bdaac");
+    // Folding is ORDER-SENSITIVE: a renumber/reorder yields a different root (suppression detection).
+    let reordered = vec![grants[1].clone(), grants[0].clone(), grants[2].clone()];
+    assert_ne!(grant_head_root(&reordered), grant_head_root(&grants));
+}
+
 // ---- D2: offline PoP re-verification fixtures (ADR 0004) ----
 use feir_decision_core::b64::encode as b64enc;
 use feir_decision_core::hashx::hex_lower;
