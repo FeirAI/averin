@@ -38,3 +38,6 @@ __pycache__/
 verifier/*.wasm
 web/dist
 web/node_modules
+
+# built server binary (go build ./cmd/feir-server)
+/server/feir-server
