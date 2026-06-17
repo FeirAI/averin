@@ -3929,12 +3929,26 @@ fn tier_b_cosig_equivocating_sibling_is_still_rejected() {
 
 #[test]
 fn cosig_approval_challenge_golden_vector() {
-    // pin the cross-language wire format of the feir.broker.cosig.approval.v1 challenge so the Go producer
-    // (Piece 2) has a fixed target; a drift in either implementation breaks this against the same constant.
-    let cb = sha256_prefixed(b"test-credential-binding");
-    let digest = cosig_approval_challenge("grant-1", "ed25519-AgentKid0", &cb, 2, 1_718_449_200);
-    let hex = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    assert_eq!(hex, "e93a922c6417050a97335230292c4cd2f6a8dab9c476e9d41f6cfaf0f06b5fee", "cosig challenge digest drifted: {hex}");
+    // Cross-language pinned vectors from the SHARED file — MUST equal Go broker.CosigApprovalChallenge.
+    // The multibyte case asserts byte-length LP4 prefixing is identical in both languages (ADR 0005 M6).
+    let v = preimage_vectors();
+    let cases = v.get("cosig_approval_challenge").unwrap().as_array().unwrap();
+    assert!(!cases.is_empty(), "shared vector: cosig_approval_challenge section is empty");
+    for case in cases {
+        let ch = cosig_approval_challenge(
+            case.get("grant_id").unwrap().as_str().unwrap(),
+            case.get("approver_kid").unwrap().as_str().unwrap(),
+            case.get("credential_binding").unwrap().as_str().unwrap(),
+            case.get("threshold_m").unwrap().as_int().unwrap(),
+            case.get("exp").unwrap().as_int().unwrap(),
+        );
+        assert_eq!(
+            hex_lower(&ch),
+            case.get("expect_hex").unwrap().as_str().unwrap(),
+            "cosig_approval_challenge drifted from the shared vector (case {})",
+            case.get("name").unwrap().as_str().unwrap()
+        );
+    }
 }
 
 // ---- D8: the attested_complete conjunctive capstone ----

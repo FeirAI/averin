@@ -1,5 +1,5 @@
 {
-  "_comment": "Cross-language preimage golden vectors (ADR 0003/0004 broker/resource binding). Loaded by BOTH the Rust core tests (core/tests/adversarial.rs) AND the Go broker+resourceshim tests, so the LP4/BE8 domain-tagged preimages stay byte-identical across languages. Editing a preimage breaks BOTH languages against this ONE file, forcing a lockstep update — that is the point of a SHARED vector (vs. independently-hardcoded copies that can silently diverge). Outputs are sha256:<hex>, except use_pop_challenge.expect_hex which is the raw 32-byte challenge digest as hex (the function returns the bytes).",
+  "_comment": "Cross-language preimage golden vectors (ADR 0003/0004/0005 broker/resource binding). Loaded by BOTH the Rust core tests (core/tests/adversarial.rs) AND the Go broker+resourceshim tests, so the LP4/BE8 domain-tagged preimages stay byte-identical across languages. Editing a preimage breaks BOTH languages against this ONE file, forcing a lockstep update — that is the point of a SHARED vector (vs. independently-hardcoded copies that can silently diverge). Outputs are sha256:<hex>, except use_pop_challenge.expect_hex and cosig_approval_challenge.expect_hex which are the raw 32-byte challenge digest as hex (the function returns the bytes).",
   "grant_head_root": [
     {
       "name": "empty",
@@ -50,6 +50,36 @@
     {
       "seed_hex": "0505050505050505050505050505050505050505050505050505050505050505",
       "expect": "ed25519-dZl3bDCF4_k"
+    }
+  ],
+  "cosig_approval_challenge": [
+    {
+      "name": "ascii",
+      "grant_id": "grant-1",
+      "approver_kid": "ed25519-AgentKid0",
+      "credential_binding": "sha256:3d8cb08731ebf6063261f0da1bf47d8be3a17f9d2e24015f353d738ed22477c1",
+      "threshold_m": 2,
+      "exp": 1718449200,
+      "expect_hex": "e93a922c6417050a97335230292c4cd2f6a8dab9c476e9d41f6cfaf0f06b5fee"
+    },
+    {
+      "name": "multibyte-utf8",
+      "grant_id": "café",
+      "approver_kid": "ed25519-鍵",
+      "credential_binding": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "threshold_m": 3,
+      "exp": 1718449200,
+      "expect_hex": "1ca6103ab46e8adc33b4bb0706e8b7699ab25f3114e38bfc134605ae42de418e"
+    },
+    {
+      "_note": "two's-complement BE8 boundary: threshold_m=-1 (0xFFFF..FF), exp=i64::MIN (0x8000..00). Not a reachable verifier state (the gate requires threshold>=1) — it pins the int64->BE8 encoding identically across languages so a sign-handling drift breaks the file itself.",
+      "name": "int64-edges",
+      "grant_id": "g",
+      "approver_kid": "ed25519-AgentKid0",
+      "credential_binding": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "threshold_m": -1,
+      "exp": -9223372036854775808,
+      "expect_hex": "41e15553d63d095fd2cba56e43e0e21391d0d46157009d08464b080b286c1365"
     }
   ]
 }

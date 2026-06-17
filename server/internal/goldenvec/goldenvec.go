@@ -52,12 +52,25 @@ type CnfKidCase struct {
 	Expect  string `json:"expect"`
 }
 
+// CosigCase pins the cosig_approval_challenge digest (ADR 0005 M6) over fixed inputs (ExpectHex is the
+// raw 32-byte challenge digest the approver signs).
+type CosigCase struct {
+	Name              string `json:"name"`
+	GrantID           string `json:"grant_id"`
+	ApproverKid       string `json:"approver_kid"`
+	CredentialBinding string `json:"credential_binding"`
+	ThresholdM        int64  `json:"threshold_m"`
+	Exp               int64  `json:"exp"`
+	ExpectHex         string `json:"expect_hex"`
+}
+
 // Vectors is the whole shared file.
 type Vectors struct {
-	GrantHeadRoot    []GrantHeadCase `json:"grant_head_root"`
-	LedgerCommitment []LedgerCase    `json:"ledger_commitment"`
-	UsePoPChallenge  []PoPCase       `json:"use_pop_challenge"`
-	CnfKid           []CnfKidCase    `json:"cnf_kid"`
+	GrantHeadRoot          []GrantHeadCase `json:"grant_head_root"`
+	LedgerCommitment       []LedgerCase    `json:"ledger_commitment"`
+	UsePoPChallenge        []PoPCase       `json:"use_pop_challenge"`
+	CnfKid                 []CnfKidCase    `json:"cnf_kid"`
+	CosigApprovalChallenge []CosigCase     `json:"cosig_approval_challenge"`
 }
 
 // Load reads the shared vector. It locates the repo root from THIS source file's path (runtime.Caller)
