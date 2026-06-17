@@ -3722,6 +3722,11 @@ fn tier_b_d8_each_condition_is_load_bearing() {
         ("attestation not attested_claims (D7)", |r| r.attestation_status = "unevaluated".to_string()),
         ("unmatched violation", |r| r.unmatched_violation = 1),
         ("unmatched pending", |r| r.unmatched_pending = 1),
+        // M1 (ADR 0005): the two bounded_reuse conjuncts. Surfacing-redundant with unmatched_violation in a
+        // live verify (each anomaly also bumps it), but this synthetic report keeps unmatched_violation=0
+        // and flips ONLY the M1 counter, proving each is independently load-bearing in the capstone formula.
+        ("bounded_reuse overspent (M1)", |r| r.bounded_reuse_overspent = 1),
+        ("bounded_reuse seq replay (M1)", |r| r.bounded_reuse_seq_replays = 1),
         // string-isolation: `unclosed` in a live verify ALSO forces !ok (covered e2e by
         // tier_b_t6_undeclared_touched_resource_is_unclosed); here we mutate ONLY the status on a synthetic
         // report (ok left true) to prove the capstone gate keys on `=="closed"` independently of `ok`.

@@ -85,3 +85,80 @@ func TestCapstoneAttestedCompleteEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// TestCapstoneOverBoundedReuseEndToEnd proves the capstone over an N-Use (bounded_reuse) credential: one
+// grant exercised TWICE via two-phase PoP uses (usn 1 and 2) reaches attested_complete_over_brokered_surface
+// with bounded_reuse_grants:1 and no overspend/replay — the cross-cutting bounded_reuse × capstone path.
+func TestCapstoneOverBoundedReuseEndToEnd(t *testing.T) {
+	c, _ := core.New(seed)
+	rc, _ := core.New(resourceSeed)
+	att := attestationKey()
+	taxKey := taxonomyKey()
+	tsa := testTSAKey()
+	ak := grantAgentKey()
+
+	manifest := `{"side_effect_closure":[{"resource_id":"orders-db","action":"db.query:orders-ro","may_touch":[]}]}`
+	h := api.New(c, store.NewMem(), "k0").
+		WithBroker(brokerIssuingKey()).
+		WithResource(rc, "orders-db").
+		WithAttestation(att).
+		WithCoverageManifest(manifest).
+		Routes()
+
+	code, resp := do(t, h, "POST", "/v2/grants", boundedGrantBody("idem-grant", 2, ak))
+	if code != http.StatusCreated {
+		t.Fatalf("bounded_reuse grant (%d): %s", code, resp)
+	}
+	var g struct {
+		GrantID    string `json:"grant_id"`
+		Capability string `json:"capability"`
+	}
+	json.Unmarshal([]byte(resp), &g)
+
+	// Exercise the one credential twice, each a two-phase use at its own sequence number.
+	for i, u := range []struct {
+		nonce string
+		usn   int
+	}{{"nonce-1", 1}, {"nonce-2", 2}} {
+		code, ir := do(t, h, "POST", "/v2/use-intent", boundedUseBody(t, fmt.Sprintf("idem-intent-%d", u.usn), g.Capability, g.GrantID, ak, "SELECT 1", u.nonce, u.usn))
+		if code != http.StatusCreated {
+			t.Fatalf("use-intent %d (%d): %s", i+1, code, ir)
+		}
+		var intent struct {
+			UseID string `json:"use_id"`
+		}
+		json.Unmarshal([]byte(ir), &intent)
+		ob, _ := json.Marshal(map[string]any{"idempotency_key": fmt.Sprintf("idem-outcome-%d", u.usn), "project_id": "p1", "session_id": "s1", "intent_record_id": intent.UseID, "status": "ok"})
+		if code, or := do(t, h, "POST", "/v2/use-outcome", string(ob)); code != http.StatusCreated {
+			t.Fatalf("use-outcome %d (%d): %s", i+1, code, or)
+		}
+	}
+	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, r)
+	}
+	_, exp := do(t, h, "GET", "/v2/export?project=p1", "")
+	anchored := attachTestAnchor(t, exp, tsa)
+
+	taxJSON, digest, ver, err := taxonomy.Sign(c, taxKey, 1, 0, 9_999_999_999,
+		[]taxonomy.Entry{{ResourceID: "orders-db", Action: "db.query:orders-ro"}}, nil)
+	if err != nil {
+		t.Fatalf("taxonomy.Sign: %v", err)
+	}
+	opts := fmt.Sprintf(`{"broker_authority_keys":[%q],"resource_authority_keys":[%q],"tsa_keys":[%q],"attestation_keys":[%q],"taxonomy":%s,"taxonomy_keys":[%q],"taxonomy_digest":%q,"taxonomy_version":%d}`,
+		c.PubKey(), rc.PubKey(), tsaPubEncoded(tsa), attestPubEncoded(att), taxJSON, attestPubEncoded(taxKey), digest, ver)
+	rep := c.VerifyBundleWith(anchored, opts)
+
+	for _, want := range []string{
+		`"ok":true`,
+		`"action_completeness":"attested_complete_over_brokered_surface"`,
+		`"bounded_reuse_grants":1`,
+		`"uses_matched":2`,      // BOTH exercises of the one N-Use credential matched
+		`"uses_pop_reverified":2`, // each was independently PoP-reverified
+		`"bounded_reuse_overspent":0`,
+		`"bounded_reuse_seq_replays":0`,
+	} {
+		if !strings.Contains(rep, want) {
+			t.Fatalf("capstone over bounded_reuse must verify with %s\nreport: %s", want, rep)
+		}
+	}
+}
