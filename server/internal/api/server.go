@@ -185,12 +185,25 @@ func (s *Server) WithPolicyEngineKey(source string, key ed25519.PublicKey) *Serv
 // authority evidence with resourceCore's key — which MUST be DISTINCT from the server signing key and
 // the broker key (R2 role separation; the verifier rejects a broker/resource key-set overlap). It
 // requires the broker to be enabled (the resource verifies capabilities under the broker issuing
-// key). The ledger is an in-memory consume-before-act store for the demonstrator; production injects a
-// durable one. Nil resourceCore (unset) disables /v2/use.
+// key). The consume-before-act ledger defaults to an in-memory store (correct within one process but
+// VOLATILE across restarts); inject a durable one with WithLedger BEFORE WithResource. Nil resourceCore
+// (unset) disables /v2/use.
 func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
 	s.resourceCore = resourceCore
 	s.resourceID = resourceID
-	s.ledger = resourceshim.NewMemLedger()
+	if s.ledger == nil {
+		s.ledger = resourceshim.NewMemLedger()
+	}
+	return s
+}
+
+// WithLedger injects the consume-before-act ledger backing /v2/use (R5 single-use + PoP-nonce replay
+// protection). Call it BEFORE WithResource to override the default. The default MemLedger is VOLATILE —
+// consumed jti/nonce are lost on restart, reopening a replay window for a single-use capability — so a
+// durable, atomically-consistent ledger is a production requirement. (No durable implementation ships
+// yet; this is the seam for one, e.g. a Postgres-backed Ledger keyed under the project.)
+func (s *Server) WithLedger(ledger resourceshim.Ledger) *Server {
+	s.ledger = ledger
 	return s
 }
 

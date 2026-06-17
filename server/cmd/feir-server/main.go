@@ -117,6 +117,7 @@ func main() {
 		}
 		srv.WithResource(rc, rid)
 		log.Printf("resource gateway enabled (POST /v2/use) for resource %q", rid)
+		log.Printf("WARNING: the consume-before-act ledger is in-memory (volatile) — consumed single-use jti/nonce reset on restart, reopening a replay window for /v2/use. A durable ledger is a production requirement (Server.WithLedger is the seam; no durable impl ships yet).")
 	}
 
 	log.Printf("feir-server listening on %s (pubkey %s)", addr, c.PubKey())
