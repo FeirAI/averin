@@ -5,13 +5,25 @@
 #ifndef FEIR_CORE_H
 #define FEIR_CORE_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* Verify an export bundle (UTF-8 JSON). Returns a JSON report string (caller frees), or NULL on
- * NULL/invalid-UTF-8 input. The report always parses; check its "ok" field. */
+ * NULL/invalid-UTF-8 input. The report always parses; check its "ok" field.
+ * NOTE: a C string ends at the first NUL, so a 0x00 in untrusted input truncates verification to the
+ * prefix before it. Valid RCP never contains 0x00; for a bundle you did not produce, prefer the
+ * length-aware feir_verify_bundle_json_n below. */
 char *feir_verify_bundle_json(const char *input);
+
+/* Length-aware, truncation-proof bundle verify: reads exactly `len` bytes (does NOT stop at an
+ * interior NUL), so untrusted input cannot be silently truncated into a prefix-only "ok". Same report
+ * shape as feir_verify_bundle_json; NULL on NULL/invalid-UTF-8 input. Prefer this for any bundle you
+ * did not produce yourself. */
+char *feir_verify_bundle_json_n(const uint8_t *ptr, size_t len);
 
 /* Verify a bundle with out-of-band pinned trust roots. opts_json is a JSON object with optional
  * arrays: authority_keys/signing_keys/tsa_keys ("ed25519pub:" strings), tsa_spki_b64 (base64url DER).

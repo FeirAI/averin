@@ -2,7 +2,7 @@
 //
 // No framework, no build step, no network: the whole verifier is this file + the .wasm + an HTML
 // page. The WASM is the SAME Rust integrity core as the CLI and the cgo FFI (threat #10), exposed
-// over a tiny C ABI (feir_alloc / feir_verify_bundle_json / feir_string_free / feir_dealloc). You
+// over a tiny C ABI (feir_alloc / feir_verify_bundle_json_n / feir_string_free / feir_dealloc). You
 // can read every line.
 
 export async function initFeir(wasmSource) {
@@ -18,6 +18,8 @@ export async function initFeir(wasmSource) {
   return new FeirVerifier(instance);
 }
 
+const NUL = String.fromCharCode(0);
+
 class FeirVerifier {
   constructor(instance) {
     this.x = instance.exports;
@@ -28,11 +30,24 @@ class FeirVerifier {
     return new Uint8Array(this.x.memory.buffer);
   }
 
+  _writeBytes(str) {
+    // Length-aware write: no NUL terminator. The callee is told the exact byte length and reads all of
+    // it, so an interior 0x00 cannot truncate the input into a verified-only prefix. Used by verifyBundle.
+    const bytes = new TextEncoder().encode(str);
+    const ptr = this.x.feir_alloc(bytes.length);
+    this._mem().set(bytes, ptr);
+    return { ptr, len: bytes.length };
+  }
+
   _writeCString(str) {
+    // A C string ends at the first NUL, so an interior 0x00 in untrusted input would be silently
+    // truncated at the FFI boundary and a valid prefix reported "ok" over bytes never read. Valid
+    // RCP/JSON never contains 0x00, so reject it here. (verifyBundle uses the length-aware path below.)
+    if (str.indexOf(NUL) !== -1) throw new Error("input contains a NUL byte (not valid RCP)");
     const bytes = new TextEncoder().encode(str);
     const size = bytes.length + 1;
     const ptr = this.x.feir_alloc(size);
-    this._mem().set(bytes, ptr); // JSON never contains a raw NUL, so null-termination is safe
+    this._mem().set(bytes, ptr);
     this._mem()[ptr + bytes.length] = 0;
     return { ptr, size };
   }
@@ -59,9 +74,19 @@ class FeirVerifier {
 
   /** Verify an export bundle (JSON string) entirely offline. Returns the parsed report object. */
   verifyBundle(bundleJson) {
-    const out = this._call1(this.x.feir_verify_bundle_json, bundleJson);
-    if (out === null) throw new Error("verifier returned null (invalid input)");
-    return JSON.parse(out);
+    // Length-aware call: the verifier reads exactly `len` bytes, so an interior NUL (never present in
+    // valid RCP) cannot truncate the artifact into a prefix-only "ok" — it is verified in full and
+    // fails closed. (The old NUL-terminated feir_verify_bundle_json truncated at the first 0x00.)
+    const { ptr, len } = this._writeBytes(bundleJson);
+    let resultPtr = 0;
+    try {
+      resultPtr = this.x.feir_verify_bundle_json_n(ptr, len);
+      if (resultPtr === 0) throw new Error("verifier returned null (invalid input)");
+      return JSON.parse(this._readCString(resultPtr));
+    } finally {
+      if (resultPtr !== 0) this.x.feir_string_free(resultPtr);
+      this.x.feir_dealloc(ptr, len);
+    }
   }
 
   /** Canonicalize a JSON document under RCP v1 (or a string starting with "ERROR:"). */

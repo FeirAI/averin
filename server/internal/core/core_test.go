@@ -20,6 +20,22 @@ func TestPubKeyAndBadSeed(t *testing.T) {
 	}
 }
 
+func TestVerifyBundleRejectsInteriorNUL(t *testing.T) {
+	c, _ := New(seed)
+	// A C string is NUL-terminated, so an interior 0x00 would truncate the bundle at the FFI boundary
+	// and could be reported "ok" over only the prefix before it. The cgo wrapper rejects it fail-closed.
+	got := c.VerifyBundle("{\"records\":[]}\x00{\"decoy\":\"x\"}PADDING")
+	if !strings.Contains(got, `"ok":false`) {
+		t.Fatalf("interior NUL must fail closed: %s", got)
+	}
+	if !strings.Contains(got, "NUL byte") {
+		t.Fatalf("expected a NUL-byte rejection message: %s", got)
+	}
+	if got2 := c.VerifyBundleWith("{\"records\":[]}\x00junk", "{}"); !strings.Contains(got2, `"ok":false`) {
+		t.Fatalf("VerifyBundleWith interior NUL must fail closed: %s", got2)
+	}
+}
+
 func TestSealRecordThroughFFI(t *testing.T) {
 	c, _ := New(seed)
 	body := `{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2","action":"x"}`

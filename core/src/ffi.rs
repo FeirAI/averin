@@ -33,6 +33,12 @@ pub unsafe extern "C" fn feir_dealloc(ptr: *mut u8, size: usize) {
 /// Verify an export bundle (null-terminated UTF-8 JSON). Returns a newly-allocated, null-terminated
 /// JSON report string (free with [`feir_string_free`]), or null if `input` is null or not UTF-8.
 ///
+/// **Untrusted input:** because a C string ends at the first NUL, any `0x00` byte in `input` silently
+/// truncates verification to the prefix before it — and a valid prefix would then be reported `ok`
+/// over a file whose tail was never read. A valid RCP bundle never contains `0x00`, so this is only
+/// reachable with a malformed/adversarial artifact, but for any bundle you did not produce yourself
+/// prefer [`feir_verify_bundle_json_n`], which reads an explicit length and cannot be truncated.
+///
 /// # Safety
 /// `input` must be a valid null-terminated C string for the duration of the call.
 #[no_mangle]
@@ -49,6 +55,26 @@ pub unsafe extern "C" fn feir_verify_bundle_json(input: *const c_char) -> *mut c
         Ok(c) => c.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+/// Verify an export bundle from an explicit `(ptr, len)` byte span — the length-aware,
+/// truncation-proof counterpart to [`feir_verify_bundle_json`]. Use this for UNTRUSTED input.
+///
+/// It reads exactly `len` bytes and does NOT stop at an interior NUL, so a buffer containing a `0x00`
+/// (never present in valid RCP) is verified IN FULL and fails closed at canonicalization, instead of
+/// being truncated at the first NUL and reported valid over only its prefix. Returns a
+/// newly-allocated, null-terminated JSON report (free with [`feir_string_free`]); null if `ptr` is
+/// null or the `len` bytes are not valid UTF-8.
+///
+/// # Safety
+/// `ptr` must point to at least `len` initialized bytes that stay valid for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn feir_verify_bundle_json_n(ptr: *const u8, len: usize) -> *mut c_char {
+    let text = match bytes_to_str(ptr, len) {
+        Some(t) => t,
+        None => return std::ptr::null_mut(),
+    };
+    into_cstring(crate::verify::verify_bundle_to_json(text))
 }
 
 /// Verify an export bundle with out-of-band pinned trust roots. `opts_json` is a JSON object whose
@@ -352,6 +378,17 @@ unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
     CStr::from_ptr(p).to_str().ok()
 }
 
+/// Build a `&str` from an explicit `(ptr, len)` span, or `None` if null / not UTF-8. Unlike
+/// [`cstr`], this does NOT stop at an interior NUL — all `len` bytes are returned, so a
+/// truncation-based fail-open is impossible (a raw NUL is not valid RCP, so canonicalization rejects
+/// it fail-closed downstream).
+unsafe fn bytes_to_str<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
+    if ptr.is_null() {
+        return None;
+    }
+    std::str::from_utf8(std::slice::from_raw_parts(ptr, len)).ok()
+}
+
 #[allow(clippy::type_complexity)]
 unsafe fn commit_inputs(
     domain: *const c_char,
@@ -439,6 +476,37 @@ mod tests {
         )
         .unwrap();
         assert!(bad.contains("\"ok\":false"), "{bad}");
+    }
+
+    /// Call the length-aware verify entrypoint with raw bytes that MAY contain an interior NUL.
+    fn call_n(bytes: &[u8]) -> Option<String> {
+        unsafe {
+            let out = feir_verify_bundle_json_n(bytes.as_ptr(), bytes.len());
+            if out.is_null() {
+                return None;
+            }
+            let s = CStr::from_ptr(out).to_string_lossy().into_owned();
+            feir_string_free(out);
+            Some(s)
+        }
+    }
+
+    #[test]
+    fn verify_bundle_json_n_is_truncation_proof() {
+        // Clean bytes verify the same as the C-string path.
+        let clean = bundle();
+        let ok = call_n(clean.as_bytes()).unwrap();
+        assert!(ok.contains("\"ok\":true"), "{ok}");
+
+        // `‹valid bundle› 0x00 ‹arbitrary bytes›`: the length-aware entrypoint reads the FULL input,
+        // so the interior NUL is seen and canonicalization fails closed — it is NOT truncated to an
+        // "ok" prefix the way the NUL-terminated `feir_verify_bundle_json` would be. This is the
+        // regression lock for the FFI/WASM truncation fail-open.
+        let mut attack = clean.into_bytes();
+        attack.push(0);
+        attack.extend_from_slice(br#"{"decoy":"unverified"}PADDING"#);
+        let bad = call_n(&attack).unwrap();
+        assert!(bad.contains("\"ok\":false"), "interior NUL must fail closed: {bad}");
     }
 
     #[test]

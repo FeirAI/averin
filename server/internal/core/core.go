@@ -77,8 +77,23 @@ func (c *Core) SealCheckpoint(bodyJSON string) (string, error) {
 	return checkSeal(goStrFree(C.feir_seal_checkpoint(cb, cs)))
 }
 
+// nulRejectReport is the fail-closed JSON report for a bundle that contains a NUL byte. A C string is
+// NUL-terminated, so an interior 0x00 would truncate the input at the FFI boundary and could be
+// reported "ok" over only the prefix before it. Valid RCP never contains 0x00, so reject it here where
+// the true Go-string length is known, mirroring the verifier's own fail-closed verdict on such input.
+func nulRejectReport(at int) string {
+	b, _ := json.Marshal(map[string]any{
+		"ok":    false,
+		"error": fmt.Sprintf("bundle contains a NUL byte at offset %d (not valid RCP)", at),
+	})
+	return string(b)
+}
+
 // VerifyBundle verifies an export bundle and returns the JSON report.
 func (c *Core) VerifyBundle(bundleJSON string) string {
+	if i := strings.IndexByte(bundleJSON, 0); i >= 0 {
+		return nulRejectReport(i)
+	}
 	cb := C.CString(bundleJSON)
 	defer C.free(unsafe.Pointer(cb))
 	return goStrFree(C.feir_verify_bundle_json(cb))
@@ -87,6 +102,9 @@ func (c *Core) VerifyBundle(bundleJSON string) string {
 // VerifyBundleWith verifies a bundle with out-of-band pinned trust roots (optsJSON: arrays of
 // authority_keys/signing_keys/tsa_keys as "ed25519pub:" + tsa_spki_b64). Returns the JSON report.
 func (c *Core) VerifyBundleWith(bundleJSON, optsJSON string) string {
+	if i := strings.IndexByte(bundleJSON, 0); i >= 0 {
+		return nulRejectReport(i)
+	}
 	cb := C.CString(bundleJSON)
 	co := C.CString(optsJSON)
 	defer C.free(unsafe.Pointer(cb))
