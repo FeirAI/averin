@@ -749,6 +749,33 @@ fn future_dated_bundle_compromise_cannot_upgrade_under_pinning() {
 }
 
 #[test]
+fn non_canonical_anchor_time_is_rejected() {
+    // F9 hardening: an anchored_ts that is not a canonical RCP timestamp (here: no milliseconds) breaks the
+    // lexical==chronological ordering the backdating check relies on, so it must be flagged rather than
+    // silently mis-ordered — matching how the rest of the file gates string-time comparisons.
+    let b = fixture();
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let mut checkpoints = arr(&b, "checkpoints");
+    let a = make_test_anchor(&checkpoint_hash(&checkpoints[1]), "2026-06-15T10:05:00Z", &tsa, "t");
+    checkpoints[1] = attach_anchor(&checkpoints[1], a);
+    let bad = rebuild(arr(&b, "keys"), arr(&b, "records"), checkpoints);
+    let r = verify_bundle_with(
+        &bad,
+        &VerifyOptions {
+            trusted_keys: None,
+            trusted_tsa_keys: vec![tsa.verifying_key()],
+            ..Default::default()
+        },
+    );
+    assert!(!r.ok, "a non-canonical anchor time must fail the bundle");
+    assert!(
+        r.issues.iter().any(|i| i.contains("not a canonical RCP timestamp")),
+        "issues: {:?}",
+        r.issues
+    );
+}
+
+#[test]
 fn backdated_anchor_time_is_detected() {
     // Threat #3: cp0 anchored at 10:05 but cp1 (later seq) anchored at 10:02 — anchor time went
     // backwards, which an un-forgeable TSA timestamp cannot do. Detected.

@@ -20,6 +20,21 @@ func TestPubKeyAndBadSeed(t *testing.T) {
 	}
 }
 
+// TestNewSeedIsLowercaseOnly documents the asymmetry behind the F13 startup hardening: the core's seed
+// decoder (Rust hashx::hex32) is lowercase-only and REJECTS an uppercase seed, whereas the broker seed
+// is decoded by Go's case-insensitive hex.DecodeString. That is precisely why main.go's broker/resource
+// disjointness check derives pubkeys (and compares those) rather than the raw seed-hex strings — an
+// uppercase broker seed + a lowercase resource seed for the SAME key would otherwise slip a string compare.
+func TestNewSeedIsLowercaseOnly(t *testing.T) {
+	lower := "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+	if _, err := New(lower); err != nil {
+		t.Fatalf("a lowercase seed must be accepted: %v", err)
+	}
+	if _, err := New(strings.ToUpper(lower)); err == nil {
+		t.Fatal("an uppercase seed must be rejected (the core requires lowercase hex)")
+	}
+}
+
 func TestVerifyBundleRejectsInteriorNUL(t *testing.T) {
 	c, _ := New(seed)
 	// A C string is NUL-terminated, so an interior 0x00 would truncate the bundle at the FFI boundary

@@ -2013,8 +2013,18 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // every checkpoint is the exporter's responsibility, not a verifier PASS invariant.
     let mut sorted_anchored = anchored.clone();
     sorted_anchored.sort_by_key(|(seq, _, _)| *seq);
+    // A non-canonical anchored_ts breaks the assumption that lexical order == chronological order (RFC3339
+    // fixed-ms UTC sorts lexically iff canonical), so reject it rather than silently mis-ordering — matching
+    // how the rest of the file gates string-time comparisons on is_canonical_ts (e.g. the attestation window).
+    for (seq, ts, _) in &sorted_anchored {
+        if !is_canonical_ts(ts) {
+            issues.push(format!(
+                "checkpoint {seq}: anchor time {ts:?} is not a canonical RCP timestamp — the backdating ordering check requires canonical times (threat #3)"
+            ));
+        }
+    }
     for w in sorted_anchored.windows(2) {
-        if w[1].1 < w[0].1 {
+        if is_canonical_ts(&w[0].1) && is_canonical_ts(&w[1].1) && w[1].1 < w[0].1 {
             issues.push(format!(
                 "anchor time decreased across checkpoints {} -> {} (backdating, threat #3)",
                 w[0].0, w[1].0

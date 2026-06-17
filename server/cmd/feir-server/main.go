@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"log"
 	"net/http"
@@ -84,13 +85,16 @@ func main() {
 	// credential broker (Level 3 Tier-A): POST /v2/grants. The issuing key signs the capabilities;
 	// the recording key (the server signing key) signs the gateway_enforced evidence. Unset = off.
 	brokerEnabled := false
+	var brokerPubKey string // ed25519pub:<b64url>, for the R2 broker∩resource disjointness check below
 	if seed := os.Getenv("FEIR_BROKER_ISSUING_SEED"); seed != "" {
 		raw, err := hex.DecodeString(seed)
 		if err != nil || len(raw) != ed25519.SeedSize {
 			log.Fatal("FEIR_BROKER_ISSUING_SEED must be 64 hex chars (32-byte Ed25519 seed)")
 		}
-		srv.WithBroker(ed25519.NewKeyFromSeed(raw))
+		bk := ed25519.NewKeyFromSeed(raw)
+		srv.WithBroker(bk)
 		brokerEnabled = true
+		brokerPubKey = "ed25519pub:" + base64.RawURLEncoding.EncodeToString(bk.Public().(ed25519.PublicKey))
 		log.Printf("credential broker enabled (POST /v2/grants)")
 	}
 	// resource gateway (Level 3 Tier-B): POST /v2/use. The resource recording key signs use-receipt
@@ -112,7 +116,12 @@ func main() {
 		if rc.PubKey() == c.PubKey() {
 			log.Fatal("FEIR_RESOURCE_SEED must differ from FEIR_SIGNING_SEED (R2: broker and resource recording keys must be disjoint)")
 		}
-		if rseed == os.Getenv("FEIR_BROKER_ISSUING_SEED") {
+		// Compare DERIVED pubkeys, not raw seed hex. The broker seed is decoded by Go's case-insensitive
+		// hex.DecodeString while the resource seed goes through the core's lowercase-only decoder, so an
+		// UPPERCASE broker seed + a lowercase resource seed for the SAME key are byte-distinct strings that
+		// a raw compare misses — silently violating R2 (broker == resource key), which the offline verifier
+		// would then reject as a fatal config error. Comparing pubkeys catches it fast at startup.
+		if rc.PubKey() == brokerPubKey {
 			log.Fatal("FEIR_RESOURCE_SEED must differ from FEIR_BROKER_ISSUING_SEED (keep the capability-issuing and use-recording key roles distinct)")
 		}
 		srv.WithResource(rc, rid)
