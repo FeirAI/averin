@@ -87,6 +87,11 @@ type Server struct {
 	// Set by WithAttestation; overridable via WithAttestationWindow.
 	attestIssuedSkew time.Duration
 	attestValidity   time.Duration
+	// T6/D8 (ADR 0004): the operator-declared coverage_manifest (raw JSON, e.g. a side_effect_closure).
+	// Emitted verbatim in every export bundle, and its RCP-canonical digest is bound into the
+	// deployment_attestation subject so the two cannot diverge. Empty = no manifest (capstone stays at most
+	// claimed_over_manifest). This is a DECLARATION, never auto-derived from what happened.
+	coverageManifest string
 	signingKeyID     string
 	keyValidFrom     string
 	now              func() time.Time // injectable clock for tests
@@ -224,6 +229,17 @@ func (s *Server) WithAttestation(key ed25519.PrivateKey) *Server {
 		// cannot be replayed onto a moved-on bundle regardless of window width.
 		s.attestValidity = 7 * 24 * time.Hour
 	}
+	return s
+}
+
+// WithCoverageManifest sets the operator-declared coverage_manifest (raw JSON) emitted in every export
+// bundle. Its primary content is a `side_effect_closure` — the operator's AFFIRMATIVE declaration of the
+// (resource_id, action) pairs the deployment may touch (T6 / ADR 0002 Q1). The verifier checks the
+// brokered surface stayed WITHIN this closure; a manifest is REQUIRED to reach the
+// attested_complete_over_brokered_surface capstone (D8). The manifest's RCP digest is bound into the
+// deployment_attestation, so the closure cannot be swapped without breaking the attestation.
+func (s *Server) WithCoverageManifest(manifestJSON string) *Server {
+	s.coverageManifest = manifestJSON
 	return s
 }
 
@@ -366,9 +382,19 @@ func (s *Server) buildDeploymentAttestation(projectID string, recs []store.Recor
 	}
 	resourceIDs := sortedKeys(resIDs)
 
+	// Bind the coverage_manifest the bundle carries: digest == sha256(RCP-canonical(manifest)), exactly
+	// what the verifier recomputes from bundle.coverage_manifest. Empty when no manifest is declared.
+	manifestDigest := ""
+	if s.coverageManifest != "" {
+		d, e := s.core.RcpEvidenceHash(s.coverageManifest)
+		if e != nil {
+			return nil, fmt.Errorf("coverage_manifest digest: %w", e)
+		}
+		manifestDigest = d
+	}
 	subject := map[string]any{
 		"project_id":               projectID,
-		"coverage_manifest_digest": "", // the base export carries no coverage_manifest
+		"coverage_manifest_digest": manifestDigest,
 		"checkpoint_hash":          cp.CheckpointHash,
 		"broker_grant_head_root":   headRoot,
 		"authority_kids":           authorityKids,
@@ -2470,6 +2496,11 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 		"keys":           []any{keyEntry},
 		"records":        records,
 		"checkpoints":    checkpoints,
+	}
+	// T6/D8: emit the operator-declared coverage_manifest verbatim. Its digest is bound into the
+	// deployment_attestation (above), so the closure the verifier checks is the one the operator attested.
+	if s.coverageManifest != "" {
+		bundle["coverage_manifest"] = json.RawMessage(s.coverageManifest)
 	}
 	// D7.2: emit a deployment_attestation binding this bundle's latest checkpoint + authority/resource set,
 	// when an attestation issuing key is configured (else the bundle verifies attestation_status:unevaluated).
