@@ -1320,6 +1320,39 @@ fn compute_broker_trust(
         }
     }
 
+    // D6 grant_id INJECTIVITY: a grant_id is one credential identity, so the producer assigns it exactly
+    // ONE broker_seq and emits record_id == grant_id (store dedups broker_seq per grant_id). The head/log
+    // fold binds only (broker_seq, content_hash) — grant_id is NOT in the preimage — so two committed
+    // Broker-role grants that SHARE a grant_id but are bound to DISTINCT (broker_seq, content_hash) pairs
+    // re-derive a perfectly gapless cumulative_root and would otherwise pass as `sequence_verified` while
+    // the credential identity is equivocated (one grant_id double-bound to two different credentials,
+    // e.g. distinct cnf/scope at seq 1 and seq 2). Both twins are co-committed in this one anchored log,
+    // so the equivocation is LOCALLY decidable here — it is NOT the irreducible globally-consistent
+    // equivocation floor (divergent histories never co-committed in one bundle, ADR 0004 D6). Identical
+    // re-exports of the SAME grant record (same content_hash at the same seq) are benign and collapse.
+    let mut pairs_by_grant: BTreeMap<String, BTreeSet<(i64, String)>> = BTreeMap::new();
+    for rt in record_trust {
+        if rt.broker_role != BrokerRole::Broker.as_str() || !full_committed.contains(&rt.content_hash) {
+            continue;
+        }
+        if let Some(gid) = ev_str(&records[rt.index], "grant_evidence", "grant_id") {
+            let seq = ev_int(&records[rt.index], "grant_evidence", "broker_seq").unwrap_or(0);
+            pairs_by_grant
+                .entry(gid)
+                .or_default()
+                .insert((seq, rt.content_hash.clone()));
+        }
+    }
+    for (gid, pairs) in &pairs_by_grant {
+        if pairs.len() > 1 {
+            issues.push(format!(
+                "grant_id {gid} is bound to {} distinct (broker_seq, content_hash) pairs in one committed transparency log — equivocated credential identity (D6)",
+                pairs.len()
+            ));
+            ok = false;
+        }
+    }
+
     // A VERIFIED checkpoint with NO well-formed head whose frontier commits D6 grants binds those grants
     // into the anchored chain WITHOUT a head — they'd be omitted from every head's log. Require a head on
     // every grant-committing checkpoint (the producer emits one on every checkpoint). Dedup identical

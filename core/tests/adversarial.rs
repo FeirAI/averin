@@ -2473,6 +2473,31 @@ fn tier_b_broker_trust_no_head_is_assumed() {
 }
 
 #[test]
+fn tier_b_broker_trust_grant_id_equivocation_is_violation() {
+    // D6 grant_id INJECTIVITY: one grant_id double-bound to TWO distinct credentials at broker_seq 1 and
+    // 2, both co-committed in ONE anchored head with DISTINCT top-level record_ids. The head folds only
+    // (broker_seq, content_hash), so it re-derives a gapless cumulative_root and — before the injectivity
+    // guard — passed as `sequence_verified` with grant_verified=2 and zero issues, certifying a clean log
+    // over an equivocated credential identity (a fail-OPEN). Must now fail closed. This is the
+    // LOCALLY-decidable equivocation (both twins in one bundle), NOT the globally-consistent offline floor.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let g1 = seal_grant(&rec, &rec, "rec-A", &grant_evidence_d6(GID, 1));
+    let g2 = seal_grant(&rec, &rec, "rec-B", &grant_evidence_d6(GID, 2));
+    let (ha, hb) = (content_hash_of(&g1), content_hash_of(&g2));
+    let head = grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &ha), (2, &hb)]));
+    let cp = checkpoint_with_head(&rec, &[ha.clone(), hb.clone()], 2, head, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g1, g2], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "an equivocated grant_id must fail the bundle; broker_trust={}", r.broker_trust);
+    assert_ne!(r.broker_trust, "sequence_verified", "equivocation must never reach sequence_verified");
+    assert!(
+        r.issues.iter().any(|i| i.contains("equivocated credential identity")),
+        "issues: {:?}",
+        r.issues
+    );
+}
+
+#[test]
 fn tier_b_broker_trust_d6_grant_without_head_is_violation() {
     // a D6 grant (carries broker_seq) but the checkpoint dropped its head -> suppression (the producer
     // always emits a head when D6 grants exist), so this must FAIL, not silently fall back to assumed.
