@@ -260,7 +260,8 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 // makes the concatenation unambiguous (no field-boundary confusion). The agent, the shim, AND the
 // offline verifier all compute it identically (ADR 0004 D2): the verifier reconstructs this challenge
 // from the receipt and RE-RUNS the Ed25519 PoP under the carried cnf pubkey, so the encoding is a
-// cross-language binding kept in sync via a shared golden vector.
+// cross-language binding kept in sync via the SHARED golden vector
+// spec/golden-vectors/broker-preimages.json (loaded by both languages' tests).
 func usePoPChallenge(grantID, resourceID, action, paramsCommitment, credentialBinding, nonce string) []byte {
 	h := sha256.New()
 	for _, part := range []string{usePoPTag, grantID, resourceID, action, paramsCommitment, credentialBinding, nonce} {

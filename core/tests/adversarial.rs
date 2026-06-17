@@ -1603,30 +1603,75 @@ fn tier_b_ledger_commitment_mismatch_is_a_violation() {
     assert!(r.issues.iter().any(|i| i.contains("does not re-derive")), "{:?}", r.issues);
 }
 
+// ---- Cross-language preimage golden vectors ----
+// `spec/golden-vectors/broker-preimages.json` is the SHARED vector that BOTH this Rust suite and the
+// Go broker/resourceshim tests load, so the LP4/BE8 domain-tagged preimages stay byte-identical:
+// editing a preimage breaks BOTH languages against this ONE file (vs. independently-hardcoded copies
+// that could silently diverge). Mirrors how `golden.rs` loads `canon.json`.
+fn preimage_vectors() -> CanonValue {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/golden-vectors/broker-preimages.json");
+    let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {p:?}: {e}"));
+    CanonValue::parse(&text).unwrap_or_else(|e| panic!("parse {p:?}: {e}"))
+}
+
 #[test]
 fn ledger_commitment_golden_vector() {
-    // Cross-language pinned vector — MUST equal Go resourceshim.ledgerCommitment (golden test there).
-    assert_eq!(
-        feir_decision_core::verify::ledger_commitment("jti-x", "nonce-y", 1_718_445_700),
-        "sha256:b4566365dae04faf6e17e3ab8ab7183f7236b812fd1b957ef3fcd966ad6a163b"
-    );
+    use feir_decision_core::verify::ledger_commitment;
+    let v = preimage_vectors();
+    let cases = v.get("ledger_commitment").unwrap().as_array().unwrap();
+    assert!(!cases.is_empty(), "shared vector: ledger_commitment section is empty");
+    for case in cases {
+        let got = ledger_commitment(
+            case.get("jti").unwrap().as_str().unwrap(),
+            case.get("nonce").unwrap().as_str().unwrap(),
+            case.get("used_at").unwrap().as_int().unwrap(),
+        );
+        assert_eq!(
+            got,
+            case.get("expect").unwrap().as_str().unwrap(),
+            "ledger_commitment drifted from the shared vector"
+        );
+    }
 }
 
 #[test]
 fn grant_head_root_golden_vector() {
     use feir_decision_core::verify::grant_head_root;
-    // Empty log has a fixed non-zero seed root (distinguishes "no grants" from a forged/zero root).
-    assert_eq!(grant_head_root(&[]), "sha256:ac2cfdddb12235d5eff3a497e169b50fec13c9e7052e3b53c2a29d9318f9126d");
-    // A 3-grant log folded in ascending broker_seq order — MUST equal Go broker.GrantHeadRoot.
-    let grants = vec![
-        (1i64, "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_string()),
-        (2i64, "sha256:2222222222222222222222222222222222222222222222222222222222222222".to_string()),
-        (3i64, "sha256:3333333333333333333333333333333333333333333333333333333333333333".to_string()),
-    ];
-    assert_eq!(grant_head_root(&grants), "sha256:03becbd3622a271d2f4e144c3402c6a6de8f06dfa58f3b6be3d9248ea42bdaac");
+    let v = preimage_vectors();
+    let parse_grants = |case: &CanonValue| -> Vec<(i64, String)> {
+        case.get("grants")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| {
+                (
+                    g.get("seq").unwrap().as_int().unwrap(),
+                    g.get("content_hash").unwrap().as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let mut three: Vec<(i64, String)> = Vec::new();
+    for case in v.get("grant_head_root").unwrap().as_array().unwrap() {
+        let grants = parse_grants(case);
+        assert_eq!(
+            grant_head_root(&grants),
+            case.get("expect").unwrap().as_str().unwrap(),
+            "grant_head_root drifted from the shared vector (case {})",
+            case.get("name").unwrap().as_str().unwrap()
+        );
+        if grants.len() == 3 {
+            three = grants;
+        }
+    }
     // Folding is ORDER-SENSITIVE: a renumber/reorder yields a different root (suppression detection).
-    let reordered = vec![grants[1].clone(), grants[0].clone(), grants[2].clone()];
-    assert_ne!(grant_head_root(&reordered), grant_head_root(&grants));
+    assert!(three.len() == 3, "the shared vector must carry a 3-grant case");
+    let reordered = vec![three[1].clone(), three[0].clone(), three[2].clone()];
+    assert_ne!(grant_head_root(&reordered), grant_head_root(&three));
 }
 
 // ---- D2: offline PoP re-verification fixtures (ADR 0004) ----
@@ -1784,14 +1829,38 @@ fn tier_b_pop_reverify_wrong_cnf_pub_is_a_violation() {
 
 #[test]
 fn use_pop_challenge_and_cnf_kid_golden_vectors() {
-    // Cross-language pinned vectors — MUST equal Go resourceshim.usePoPChallenge + broker.KeyID.
-    let ch = use_pop_challenge("g", "r", "a", "pc", "cb", "n");
-    assert_eq!(hex_lower(&ch), "6e5f46c15724b1fa4af4c7e462d62a08fde27943e389171ff3e88993cdc1b4b5");
-    // multibyte UTF-8 fields must length-prefix by BYTE count identically in both languages
-    let mb = use_pop_challenge("café", "資源", "🔑", "pc", "cb", "n");
-    assert_eq!(hex_lower(&mb), "a7dec20864a4b5b0c0bdcc79c9f8176100661498c763f04fa7106f88663073ce");
-    let cnf = signing_key_from_seed(&[5u8; 32]).verifying_key();
-    assert_eq!(vk_cnf_kid(&cnf), "ed25519-dZl3bDCF4_k");
+    // Cross-language pinned vectors from the SHARED file — MUST equal Go resourceshim.usePoPChallenge
+    // + broker.KeyID. The multibyte case asserts byte-length prefixing is identical in both languages.
+    let v = preimage_vectors();
+    let pop_cases = v.get("use_pop_challenge").unwrap().as_array().unwrap();
+    let cnf_cases = v.get("cnf_kid").unwrap().as_array().unwrap();
+    assert!(!pop_cases.is_empty() && !cnf_cases.is_empty(), "shared vector: pop/cnf section is empty");
+    for case in pop_cases {
+        let ch = use_pop_challenge(
+            case.get("grant_id").unwrap().as_str().unwrap(),
+            case.get("resource_id").unwrap().as_str().unwrap(),
+            case.get("action").unwrap().as_str().unwrap(),
+            case.get("params_commitment").unwrap().as_str().unwrap(),
+            case.get("credential_binding").unwrap().as_str().unwrap(),
+            case.get("nonce").unwrap().as_str().unwrap(),
+        );
+        assert_eq!(
+            hex_lower(&ch),
+            case.get("expect_hex").unwrap().as_str().unwrap(),
+            "use_pop_challenge drifted from the shared vector (case {})",
+            case.get("name").unwrap().as_str().unwrap()
+        );
+    }
+    for case in cnf_cases {
+        let seed = feir_decision_core::hashx::hex32(case.get("seed_hex").unwrap().as_str().unwrap())
+            .expect("seed_hex is 32 bytes");
+        let cnf = signing_key_from_seed(&seed).verifying_key();
+        assert_eq!(
+            vk_cnf_kid(&cnf),
+            case.get("expect").unwrap().as_str().unwrap(),
+            "cnf_kid drifted from the shared vector"
+        );
+    }
 }
 
 // ---- D4: signed operation taxonomy fixtures (ADR 0004) ----

@@ -17,7 +17,8 @@ type GrantSeqHash struct {
 
 // GrantHeadRoot is the cumulative grant-transparency root (ADR 0004 D6 / MF2): a hash-CHAIN that folds
 // (broker_seq, grant content_hash) pairs in ASCENDING broker_seq order. It is byte-identical to Rust
-// feir_decision_core::verify::grant_head_root (pinned by a shared golden vector), so the offline
+// feir_decision_core::verify::grant_head_root (pinned by the SHARED golden vector
+// spec/golden-vectors/broker-preimages.json, loaded by both languages' tests), so the offline
 // verifier re-derives the cumulative_root an anchored checkpoint's broker_grant_head carries — and a
 // dropped, renumbered, or forked grant fails the re-derivation.
 //

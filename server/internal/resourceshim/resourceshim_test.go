@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/feir-dev/feir/server/internal/broker"
+	"github.com/feir-dev/feir/server/internal/goldenvec"
 )
 
 func keyFromByte(b byte) ed25519.PrivateKey {
@@ -329,32 +330,48 @@ func TestNonceUniqueAcrossDifferentCredentials(t *testing.T) {
 }
 
 func TestLedgerCommitmentGoldenVector(t *testing.T) {
-	// Cross-language pinned vector — MUST equal Rust verify::ledger_commitment (golden test there).
-	// If this drifts, the offline verifier's D3 ledger_commitment re-derivation rejects real receipts.
-	got := ledgerCommitment("jti-x", "nonce-y", 1718445700)
-	want := "sha256:b4566365dae04faf6e17e3ab8ab7183f7236b812fd1b957ef3fcd966ad6a163b"
-	if got != want {
-		t.Fatalf("ledger_commitment golden vector drifted from Rust: got %s want %s", got, want)
+	// Cross-language pinned vectors from the SHARED file (spec/golden-vectors/broker-preimages.json),
+	// also loaded by core/tests/adversarial.rs — MUST equal Rust verify::ledger_commitment. If this
+	// drifts, the offline verifier's D3 ledger_commitment re-derivation rejects real receipts.
+	v, err := goldenvec.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.LedgerCommitment) == 0 {
+		t.Fatal("shared vector: ledger_commitment section is empty")
+	}
+	for _, c := range v.LedgerCommitment {
+		if got := ledgerCommitment(c.JTI, c.Nonce, c.UsedAt); got != c.Expect {
+			t.Fatalf("ledger_commitment drifted from the shared vector: got %s want %s", got, c.Expect)
+		}
 	}
 }
 
 func TestUsePoPChallengeAndKeyIDGoldenVectors(t *testing.T) {
-	// Cross-language pinned vectors — MUST equal Rust verify::use_pop_challenge + verify::cnf_kid (ADR
-	// 0004 D2). If these drift, the offline verifier's PoP re-verification rejects genuine receipts.
-	ch := usePoPChallenge("g", "r", "a", "pc", "cb", "n")
-	if got := hex.EncodeToString(ch); got != "6e5f46c15724b1fa4af4c7e462d62a08fde27943e389171ff3e88993cdc1b4b5" {
-		t.Fatalf("usePoPChallenge golden vector drifted from Rust: %s", got)
+	// Cross-language pinned vectors from the SHARED file — MUST equal Rust verify::use_pop_challenge +
+	// verify::cnf_kid (ADR 0004 D2). The multibyte case checks byte-length prefixing matches Rust. If
+	// these drift, the offline verifier's PoP re-verification rejects genuine receipts.
+	v, err := goldenvec.Load()
+	if err != nil {
+		t.Fatal(err)
 	}
-	// multibyte UTF-8 fields must length-prefix by BYTE count identically to Rust
-	if got := hex.EncodeToString(usePoPChallenge("café", "資源", "🔑", "pc", "cb", "n")); got != "a7dec20864a4b5b0c0bdcc79c9f8176100661498c763f04fa7106f88663073ce" {
-		t.Fatalf("usePoPChallenge multibyte golden vector drifted from Rust: %s", got)
+	if len(v.UsePoPChallenge) == 0 || len(v.CnfKid) == 0 {
+		t.Fatal("shared vector: use_pop_challenge / cnf_kid section is empty")
 	}
-	seed := make([]byte, ed25519.SeedSize)
-	for i := range seed {
-		seed[i] = 5
+	for _, c := range v.UsePoPChallenge {
+		got := hex.EncodeToString(usePoPChallenge(c.GrantID, c.ResourceID, c.Action, c.ParamsCommitment, c.CredentialBinding, c.Nonce))
+		if got != c.ExpectHex {
+			t.Fatalf("usePoPChallenge case %q drifted from the shared vector: %s", c.Name, got)
+		}
 	}
-	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
-	if got := broker.KeyID(pub); got != "ed25519-dZl3bDCF4_k" {
-		t.Fatalf("KeyID golden vector drifted from Rust: %s", got)
+	for _, c := range v.CnfKid {
+		seed, err := hex.DecodeString(c.SeedHex)
+		if err != nil || len(seed) != ed25519.SeedSize {
+			t.Fatalf("bad seed_hex %q", c.SeedHex)
+		}
+		pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+		if got := broker.KeyID(pub); got != c.Expect {
+			t.Fatalf("KeyID drifted from the shared vector: %s", got)
+		}
 	}
 }

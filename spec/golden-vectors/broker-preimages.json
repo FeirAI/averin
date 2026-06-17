@@ -1,0 +1,55 @@
+{
+  "_comment": "Cross-language preimage golden vectors (ADR 0003/0004 broker/resource binding). Loaded by BOTH the Rust core tests (core/tests/adversarial.rs) AND the Go broker+resourceshim tests, so the LP4/BE8 domain-tagged preimages stay byte-identical across languages. Editing a preimage breaks BOTH languages against this ONE file, forcing a lockstep update — that is the point of a SHARED vector (vs. independently-hardcoded copies that can silently diverge). Outputs are sha256:<hex>, except use_pop_challenge.expect_hex which is the raw 32-byte challenge digest as hex (the function returns the bytes).",
+  "grant_head_root": [
+    {
+      "name": "empty",
+      "grants": [],
+      "expect": "sha256:ac2cfdddb12235d5eff3a497e169b50fec13c9e7052e3b53c2a29d9318f9126d"
+    },
+    {
+      "name": "three-ascending",
+      "grants": [
+        { "seq": 1, "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111" },
+        { "seq": 2, "content_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222" },
+        { "seq": 3, "content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333" }
+      ],
+      "expect": "sha256:03becbd3622a271d2f4e144c3402c6a6de8f06dfa58f3b6be3d9248ea42bdaac"
+    }
+  ],
+  "ledger_commitment": [
+    {
+      "jti": "jti-x",
+      "nonce": "nonce-y",
+      "used_at": 1718445700,
+      "expect": "sha256:b4566365dae04faf6e17e3ab8ab7183f7236b812fd1b957ef3fcd966ad6a163b"
+    }
+  ],
+  "use_pop_challenge": [
+    {
+      "name": "ascii",
+      "grant_id": "g",
+      "resource_id": "r",
+      "action": "a",
+      "params_commitment": "pc",
+      "credential_binding": "cb",
+      "nonce": "n",
+      "expect_hex": "6e5f46c15724b1fa4af4c7e462d62a08fde27943e389171ff3e88993cdc1b4b5"
+    },
+    {
+      "name": "multibyte-utf8",
+      "grant_id": "café",
+      "resource_id": "資源",
+      "action": "🔑",
+      "params_commitment": "pc",
+      "credential_binding": "cb",
+      "nonce": "n",
+      "expect_hex": "a7dec20864a4b5b0c0bdcc79c9f8176100661498c763f04fa7106f88663073ce"
+    }
+  ],
+  "cnf_kid": [
+    {
+      "seed_hex": "0505050505050505050505050505050505050505050505050505050505050505",
+      "expect": "ed25519-dZl3bDCF4_k"
+    }
+  ]
+}

@@ -984,8 +984,10 @@ fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
 /// Re-derive the resource ledger_commitment (ADR 0003 R5 / ADR 0004 D3) the SAME way the resource
 /// shim does: `sha256( LP4("feir.broker.use.ledger.v1") ‖ LP4(jti) ‖ LP4(nonce) ‖ BE8(used_at) )`,
 /// where LP4 is a 4-byte big-endian length prefix and BE8 an 8-byte big-endian integer. Returns
-/// `sha256:<lowercase hex>`. Kept byte-identical to `resourceshim.ledgerCommitment` via a shared
-/// golden vector (Go `TestLedgerCommitmentGoldenVector` + Rust `ledger_commitment_golden_vector`).
+/// `sha256:<lowercase hex>`. Kept byte-identical to Go `resourceshim.ledgerCommitment` via the SHARED
+/// golden vector `spec/golden-vectors/broker-preimages.json` — loaded by BOTH Go
+/// `TestLedgerCommitmentGoldenVector` and Rust `ledger_commitment_golden_vector`, so a drift in either
+/// implementation breaks both suites against the one file (not two independently-hardcoded copies).
 pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
     let mut pre = Vec::new();
     for part in ["feir.broker.use.ledger.v1", jti, nonce] {
