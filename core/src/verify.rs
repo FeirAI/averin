@@ -2774,7 +2774,16 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // named somewhere under an unrelated action. A grant/use missing its action contributes ("", resource)
     // so it can never match a declared (resource, real-action) pair — it fails closed.
     let mut touched_pairs: BTreeSet<(String, String)> = BTreeSet::new();
-    for rec in records {
+    // F10: harvest ONLY from INTEGRITY-PROVEN records, so a non-proven (e.g. relay-appended) record cannot
+    // inject a bogus resource_id/(resource,action) — which would force the D7 attestation (must bind every
+    // resource_id) or the T6 side_effect_closure (must declare every touched pair) to fail, a
+    // denial-of-attestation. Gating on integrity (not role) is the safe level: every genuine grant/use is
+    // integrity-proven, so no actually-touched resource is dropped (which would be the opposite, fail-open).
+    for rt in &record_trust {
+        if rt.trust != TrustLevel::IntegrityProven {
+            continue;
+        }
+        let rec = &records[rt.index];
         if let Some(r) = ev_str(rec, "grant_evidence", "resource_id") {
             touched_pairs.insert((r.clone(), ev_str(rec, "grant_evidence", "action").unwrap_or_default()));
             resource_ids.insert(r);

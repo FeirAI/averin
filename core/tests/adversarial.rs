@@ -3206,6 +3206,30 @@ fn tier_b_attestation_unevaluated_without_pinned_issuer() {
 }
 
 #[test]
+fn tier_b_attestation_ignores_non_proven_injected_resource() {
+    // F10: a non-proven (e.g. relay-appended) record carrying a bogus resource_id must NOT enter the
+    // attestation/closure surface — otherwise it would force the D7 attestation to bind a resource it
+    // never covered (denial-of-attestation). The integrity gate on the harvest excludes it.
+    let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
+    let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
+    // Append a TAMPERED grant whose grant_evidence names a bogus resource (the edited top-level field
+    // breaks its content_hash, so it verifies as non-proven).
+    let evil = seal_grant(&rec, &rec, "r-evil", &grant_evidence("g-evil", ACTION, "evil-resource", "single_operation", CNF, ISSUED, EXP));
+    let evil = change_field(&evil, "agent_id", CanonValue::string("tampered"));
+    let mut recs = arr(&bundle, "records");
+    recs.push(evil);
+    let bundle = change_field(&bundle, "records", CanonValue::Array(recs));
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), ATT_ISSUED, ATT_NOT_AFTER, honest_subject(&rec, &res, &cph, &head_root), &attest);
+    let bundle = change_field(&bundle, "deployment_attestation", att);
+    let r = verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest));
+    assert_eq!(
+        r.attestation_status, "attested_claims",
+        "a non-proven injected resource must not pollute the attestation surface (F10); issues: {:?}",
+        r.issues
+    );
+}
+
+#[test]
 fn tier_b_attestation_attested_claims() {
     let (rec, res, tsa, attest) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]));
     let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
