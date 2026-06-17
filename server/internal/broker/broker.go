@@ -31,8 +31,12 @@ import (
 type ScopeClass string
 
 const (
-	// ScopeSingleOperation: one credential = one operation. The only Tier-B-eligible class.
+	// ScopeSingleOperation: one credential = one operation. Tier-B-eligible.
 	ScopeSingleOperation ScopeClass = "single_operation"
+	// ScopeBoundedReuse (ADR 0005 M1 / N-Use): one credential = N uses of the IDENTICAL (action,
+	// resource_id), capped by use_limit and indexed per use_sequence_number. Tier-B-eligible too
+	// (action↔grant tightness is preserved), but reopens a bounded slice of B3 (reuse within one window).
+	ScopeBoundedReuse ScopeClass = "bounded_reuse"
 	// ScopeSession / ScopeBatch: explicit, labeled coarsenings — Tier-A-only (never counted as Tier B).
 	ScopeSession ScopeClass = "session_grant"
 	ScopeBatch   ScopeClass = "batch_grant"
@@ -117,13 +121,16 @@ func ClassifyScope(scope string, requested ScopeClass) (ScopeClass, error) {
 		requested = ScopeSingleOperation
 	}
 	switch requested {
-	case ScopeSingleOperation:
+	case ScopeSingleOperation, ScopeBoundedReuse:
+		// bounded_reuse is also a TIGHT (action, resource_id) grant, so it is held to the same
+		// forbidden-scope bar as single_operation (a broad/escalating scope must coarsen to
+		// session_grant/batch_grant, which are Tier-A only).
 		if IsForbiddenSingleOp(scope) {
 			return "", fmt.Errorf(
-				"scope %q is too broad for a single_operation grant: it can mint/delegate authority or trigger unbounded work; request session_grant/batch_grant (Tier-A only) if intentional: %w",
-				scope, ErrForbiddenScope)
+				"scope %q is too broad for a %s grant: it can mint/delegate authority or trigger unbounded work; request session_grant/batch_grant (Tier-A only) if intentional: %w",
+				scope, requested, ErrForbiddenScope)
 		}
-		return ScopeSingleOperation, nil
+		return requested, nil
 	case ScopeSession, ScopeBatch:
 		return requested, nil
 	default:
@@ -138,6 +145,7 @@ type Request struct {
 	Resource    string     // the target (audience)
 	Scope       string     // the requested scope string
 	ScopeClass  ScopeClass // requested class; "" -> single_operation
+	UseLimit    int        // bounded_reuse only: the cap N (must be >= 1); ignored for other classes
 	AgentPubKey string     // base64url ed25519 public key for the sender constraint (cnf)
 	AgentSig    string     // base64url ed25519 signature over Challenge() — proves the
 	// requester controls AgentPubKey (so it can't bind a key it
@@ -245,6 +253,11 @@ func Prepare(req Request, grantID string, allocSeq func() (int64, error), now ti
 	if err != nil {
 		return Prepared{}, err
 	}
+	// M1 (bounded_reuse): a positive cap is mandatory; reject otherwise so an "unbounded bounded" grant is
+	// never minted. use_limit is ignored (and must not be carried) for the other classes.
+	if scopeClass == ScopeBoundedReuse && req.UseLimit < 1 {
+		return Prepared{}, errors.New("bounded_reuse requires use_limit >= 1")
+	}
 	evaluatedAt := now.UTC()
 	expiresAt := evaluatedAt.Add(req.TTL)
 	// kid is derived from the issuing key, never caller-supplied, so it can't claim a key it isn't.
@@ -294,6 +307,11 @@ func Prepare(req Request, grantID string, allocSeq func() (int64, error), now ti
 		"exp":        expiresAt.Unix(),
 		"single_use": singleUse,
 	}
+	// M1: bounded_reuse carries its cap in BOTH the descriptor (so the resource shim enforces it and a
+	// disclosed-descriptor cross-check can confirm it) and the grant_evidence below.
+	if scopeClass == ScopeBoundedReuse {
+		descriptor["use_limit"] = req.UseLimit
+	}
 	credentialBinding, descriptorBytes := canonHash(descriptor)
 
 	delegation := req.DelegationChain
@@ -326,6 +344,9 @@ func Prepare(req Request, grantID string, allocSeq func() (int64, error), now ti
 		"broker_seq": brokerSeq,
 		"issued_at":  evaluatedAt.Unix(),
 		"exp":        expiresAt.Unix(),
+	}
+	if scopeClass == ScopeBoundedReuse {
+		evidence["use_limit"] = req.UseLimit // the verifier reads the cap from the SIGNED grant_evidence
 	}
 
 	// Mint the capability: payload = the canonical descriptor bytes, signed by the issuing key. Only
@@ -379,6 +400,9 @@ type Claims struct {
 	Iat       int64  `json:"iat"`
 	Exp       int64  `json:"exp"`
 	SingleUse bool   `json:"single_use"`
+	// UseLimit is present (>= 1) ONLY on a bounded_reuse capability (ADR 0005 M1): the resource shim caps
+	// uses at this N and indexes each by use_sequence_number. Absent/0 for every other scope class.
+	UseLimit int `json:"use_limit,omitempty"`
 }
 
 // VerifyCapability validates a minted token under the issuing public key and returns the typed

@@ -120,6 +120,9 @@ type Op struct {
 	// ParamsCommitment is a sha256:<hex> hiding commitment over the operation parameters. It is bound
 	// into the PoP challenge so a captured use_sig cannot be replayed against different params.
 	ParamsCommitment string
+	// UseSequenceNumber (ADR 0005 M1, bounded_reuse only): the 1-based exercise index in [1, use_limit].
+	// Ignored (0) for every other scope class.
+	UseSequenceNumber int
 }
 
 // UseEvidence is the canonical use_evidence payload (ADR 0003 §"Canonical evidence schemas"). The api
@@ -140,6 +143,18 @@ type UseEvidence struct {
 	// ADR 0004 D2 — carried so the offline verifier can RE-RUN the Ed25519 PoP (off the shim TCB):
 	CnfPub string `json:"cnf_pub"` // base64url agent cnf public key (id == cnf_kid)
 	UseSig string `json:"use_sig"` // base64url PoP signature over the use_pop_challenge digest
+	// ADR 0005 M1 (bounded_reuse): the 1-based exercise index; omitted for non-bounded uses.
+	UseSequenceNumber int `json:"use_sequence_number,omitempty"`
+}
+
+// consumeKey is the ledger double-spend key. For single_operation it is the bare jti (== grant_id). For
+// bounded_reuse it is (jti, use_sequence_number) so the SAME jti can be spent once per sequence number up
+// to use_limit — generalizing the per-jti ledger to the per-(grant_id, usn) M1 rule.
+func consumeKey(jti string, useSeq int) string {
+	if useSeq > 0 {
+		return fmt.Sprintf("%s#%d", jti, useSeq)
+	}
+	return jti
 }
 
 // Shim is the resource-side gateway, configured once with the broker's capability-issuing public key,
@@ -163,7 +178,8 @@ func New(issuingPub ed25519.PublicKey, resourceID string, ledger Ledger) *Shim {
 // double-spend). Releasing a jti that was not consumed (a reusable credential) is a no-op.
 func (s *Shim) RollbackUse(ev UseEvidence) {
 	s.ledger.ReleaseNonce(ev.Nonce)
-	s.ledger.ReleaseJTI(ev.JTI)
+	// Release the SAME key ValidateUse consumed: bare jti (single_operation) or (jti, usn) (bounded_reuse).
+	s.ledger.ReleaseJTI(consumeKey(ev.JTI, ev.UseSequenceNumber))
 }
 
 // ValidateUse validates a presented capability + proof-of-possession for op, consumes the credential
@@ -214,19 +230,31 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 	if !ed25519.Verify(ed25519.PublicKey(cnfPub), challenge, useSig) {
 		return UseEvidence{}, errors.New("resourceshim: use_sig does not prove possession of the cnf key (PoP failed)")
 	}
-	// 5. Consume-before-act (R5): mark the nonce (replay) and, for a single-use credential, the jti
-	// (double-spend) consumed BEFORE the caller performs the side effect. A second receipt for the same
-	// single-use jti, or a replay of the same nonce, fails here.
+	// 4.5 M1 (bounded_reuse): the descriptor carries use_limit (>0) iff this is a bounded_reuse capability.
+	// Validate the sequence number BEFORE consuming anything, so a bad usn never burns the nonce/credential.
+	bounded := claims.UseLimit > 0
+	useSeq := 0
+	if bounded {
+		useSeq = op.UseSequenceNumber
+		if useSeq < 1 || useSeq > claims.UseLimit {
+			return UseEvidence{}, fmt.Errorf("resourceshim: use_sequence_number %d outside [1, %d] for bounded_reuse", useSeq, claims.UseLimit)
+		}
+	}
+	// 5. Consume-before-act (R5): mark the nonce (replay) and the credential's double-spend key consumed
+	// BEFORE the caller performs the side effect. The key is the bare jti for single_operation and
+	// (jti, use_sequence_number) for bounded_reuse, so the same jti can be spent once per sequence number
+	// up to use_limit. session_grant/batch_grant are unbounded reusable (no jti consume). A replayed key
+	// or nonce fails here.
 	if err := s.ledger.ConsumeNonce(nonce); err != nil {
 		return UseEvidence{}, fmt.Errorf("resourceshim: nonce replay: %w", err)
 	}
-	if claims.SingleUse {
-		if err := s.ledger.ConsumeJTI(claims.Jti); err != nil {
+	if claims.SingleUse || bounded {
+		if err := s.ledger.ConsumeJTI(consumeKey(claims.Jti, useSeq)); err != nil {
 			// The nonce was just consumed but this use fails here (double-spend) and produces no receipt —
 			// release it so a definitively-pre-persistence failure leaves the consume-before-act ledger
-			// consistent (mirror the handler's RollbackUse on later failures; Codex). The jti stays consumed.
+			// consistent (mirror the handler's RollbackUse on later failures; Codex). The key stays consumed.
 			s.ledger.ReleaseNonce(nonce)
-			return UseEvidence{}, fmt.Errorf("resourceshim: single-use double-spend: %w", err)
+			return UseEvidence{}, fmt.Errorf("resourceshim: double-spend (R5): %w", err)
 		}
 	}
 	// 6. Build the canonical use_evidence. For a single_operation grant jti == grant_id (the broker
@@ -249,8 +277,9 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 		// canonically re-encoded from their decoded bytes — Go's base64 decode is non-strict but the Rust
 		// verifier rejects non-canonical base64url, so a non-canonical agent value would otherwise
 		// false-fail re-verification.
-		CnfPub: base64.RawURLEncoding.EncodeToString(cnfPub),
-		UseSig: base64.RawURLEncoding.EncodeToString(useSig),
+		CnfPub:            base64.RawURLEncoding.EncodeToString(cnfPub),
+		UseSig:            base64.RawURLEncoding.EncodeToString(useSig),
+		UseSequenceNumber: useSeq, // 0 for non-bounded (omitted by json omitempty)
 	}, nil
 }
 

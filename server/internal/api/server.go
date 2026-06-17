@@ -711,6 +711,7 @@ type grantRequest struct {
 	Resource        string   `json:"resource"`
 	Scope           string   `json:"scope"`
 	ScopeClass      string   `json:"scope_class"`
+	UseLimit        int      `json:"use_limit"` // bounded_reuse only (ADR 0005 M1): the cap N (>= 1)
 	AgentPubKey     string   `json:"agent_pubkey"`
 	AgentSig        string   `json:"agent_sig"`
 	Principal       string   `json:"authorizing_principal"`
@@ -787,6 +788,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		Resource:        gr.Resource,
 		Scope:           gr.Scope,
 		ScopeClass:      broker.ScopeClass(gr.ScopeClass),
+		UseLimit:        gr.UseLimit,
 		AgentPubKey:     gr.AgentPubKey,
 		AgentSig:        gr.AgentSig,
 		Principal:       gr.Principal,
@@ -1241,6 +1243,9 @@ type useRequest struct {
 	Params         string `json:"params"`       // raw operation parameters (committed + PoP-bound)
 	Nonce          string `json:"nonce"`        // the one-time PoP freshness nonce
 	ParamsNonce    string `json:"params_nonce"` // 64-hex nonce hiding the params commitment the PoP binds (D2)
+	// UseSequenceNumber (ADR 0005 M1, bounded_reuse only): the 1-based exercise index in [1, use_limit].
+	// Ignored for other scope classes; the shim validates it against the capability's use_limit.
+	UseSequenceNumber int `json:"use_sequence_number"`
 }
 
 // deterministicUseID derives a stable use-receipt id from (project, idempotency_key), so an honest
@@ -1350,7 +1355,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
 			return nil
 		}
-		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, resourceshim.Op{Action: ur.Action, ParamsCommitment: paramsCommitment}, ur.Nonce, s.now())
+		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, resourceshim.Op{Action: ur.Action, ParamsCommitment: paramsCommitment, UseSequenceNumber: ur.UseSequenceNumber}, ur.Nonce, s.now())
 		if e != nil {
 			validateErr = e // a forged/expired/replayed/wrong-scope use — the caller's fault
 			return nil
@@ -2015,6 +2020,7 @@ func storedGrantMatchesRequest(recordJSON string, req broker.Request) (bool, err
 					ResourceID      string   `json:"resource_id"`
 					Scope           string   `json:"scope"`
 					ScopeClass      string   `json:"scope_class"`
+					UseLimit        int      `json:"use_limit"`
 					CnfKid          string   `json:"cnf_kid"`
 					AuthzPrincipal  string   `json:"authorizing_principal"`
 					DelegationChain []string `json:"delegation_chain"`
@@ -2045,6 +2051,10 @@ func storedGrantMatchesRequest(recordJSON string, req broker.Request) (bool, err
 		ge.ResourceID == req.Resource &&
 		ge.Scope == req.Scope &&
 		ge.ScopeClass == string(wantClass) &&
+		// M1: a retry with a different bounded_reuse cap is a 409, not a collapse. Gate on the class so a
+		// non-bounded retry that carries a stray use_limit in its body (which Prepare drops, storing 0)
+		// does not spuriously 409 against the stored 0.
+		(wantClass != broker.ScopeBoundedReuse || ge.UseLimit == req.UseLimit) &&
 		ge.CnfKid == broker.KeyID(ed25519.PublicKey(pub)) &&
 		ge.AuthzPrincipal == req.Principal &&
 		ge.Exp-ge.IssuedAt == int64(req.TTL.Seconds()) &&

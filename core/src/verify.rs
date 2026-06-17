@@ -2355,6 +2355,20 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         let iss_at = ev_int(rec, "grant_evidence", "issued_at");
         if descriptor.get("iat").and_then(|v| v.as_int()) != iss_at { mism.push("iat != grant_evidence.issued_at".to_string()); }
         if descriptor.get("nbf").and_then(|v| v.as_int()) != iss_at { mism.push("nbf != grant_evidence.issued_at".to_string()); }
+        // M1 (ADR 0005): for a bounded_reuse grant the cap is mirrored into BOTH the descriptor (which the
+        // resource shim enforces at runtime) and grant_evidence (which THIS verifier caps from). They must
+        // agree — a credential minted for more uses than the grant labels is the same mislabel/equivocation
+        // D6.4 catches for the other claims. RESIDUAL (broker TCB, like every D6.4 label↔credential check):
+        // this descriptor↔evidence equality is only reachable when the descriptor is DISCLOSED. It is NOT a
+        // fail-open, though: the evidence-plane cap is `grant_evidence.use_limit`, enforced fail-CLOSED
+        // (a use beyond it is `bounded_reuse_overspent` → !ok), so the verifier never certifies CLEAN over
+        // more uses than the signed grant_evidence authorizes — a descriptor minted with a larger cap can
+        // only surface as overspend receipts, never as silent over-acceptance.
+        if label("scope_class") == "bounded_reuse"
+            && descriptor.get("use_limit").and_then(|v| v.as_int()) != ev_int(rec, "grant_evidence", "use_limit")
+        {
+            mism.push("use_limit (descriptor) != grant_evidence.use_limit".to_string());
+        }
         if mism.is_empty() {
             cred_label_matched += 1;
         } else {
