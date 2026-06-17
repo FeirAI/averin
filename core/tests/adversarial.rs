@@ -1269,6 +1269,30 @@ fn tier_b_grant_id_equivocation_without_d6_is_a_violation() {
     );
 }
 
+#[test]
+fn tier_b_grant_id_equivocation_unanchored_is_a_violation() {
+    // Adversarial-review finding (GLM/Codex substitute): the original F8 ran inside the closed-gated grant
+    // ACCOUNTING loop, so a D6-absent equivocation committed only by a verified-but-UNANCHORED checkpoint
+    // was NOT closed -> F8 skipped it, yet grant counting (un-gated) reported ok:true + grant_verified=2 over
+    // one equivocated grant_id. The injectivity check must run over ALL verified broker grants, independent of
+    // anchoring (the F8 commit's "ALWAYS" guarantee). Same as the test above but the checkpoint is UNANCHORED.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let g1 = seal_grant(&rec, &rec, "rec-A", &ge);
+    let g2 = seal_grant(&rec, &rec, "rec-B", &ge);
+    let mut frontier = vec![content_hash_of(&g1), content_hash_of(&g2)];
+    frontier.sort();
+    let cp = checkpoint_over(&rec, &frontier, 2, None); // UNANCHORED (no TSA) — the gap GLM found
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g1, g2], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "an UNANCHORED grant_id equivocation must still fail the bundle (F8 always-on, independent of anchoring)");
+    assert!(
+        r.issues.iter().any(|i| i.contains("equivocated credential identity")),
+        "issues: {:?}",
+        r.issues
+    );
+}
+
 // ---- M1 (ADR 0005): bounded_reuse / N-Use ----
 
 // build a bounded_reuse grant capped at `n` uses of the standard (ACTION, RESOURCE).
@@ -3905,9 +3929,10 @@ fn tier_b_cosig_cosignatures_without_threshold_fails_closed() {
 
 #[test]
 fn tier_b_cosig_equivocating_sibling_is_still_rejected() {
-    // the F8-before-cosig ordering invariant: a grant_id bound to two distinct records — one cosig-FAILED, one
-    // cosig-SATISFIED — is still equivocation, so the bundle is rejected even though the satisfied sibling would
-    // otherwise index the grant. Locks the ordering so a future refactor can't open a fail-open here.
+    // F8 × cosig: a grant_id bound to two distinct records — one cosig-FAILED, one cosig-SATISFIED — is still
+    // equivocation, so the bundle is rejected even though the satisfied sibling would otherwise index the grant.
+    // (F8 injectivity now runs in the un-gated grant-counting pass, BEFORE any cosig/accounting logic, so the
+    // cosig gate's `continue` can never skip the equivocation flag — this just confirms the two compose.)
     let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
     let (a1, a2) = (approver(40), approver(41));
     let g_fail = cosigned_grant_rid(&rec, "rec-A", 2, &[&a1]); // 1-of-2 -> fails the threshold

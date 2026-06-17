@@ -2275,6 +2275,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut denied_grants = 0usize;
     let mut seen_grants: BTreeSet<&str> = BTreeSet::new();
     let mut seen_denials: BTreeSet<&str> = BTreeSet::new();
+    // F8 (always-on, anchoring-independent): grant_id -> content_hash over the VERIFIED broker grants, so a
+    // second distinct content_hash under one grant_id (broker equivocation) is flagged whether or not the
+    // grant is anchored/closed. Tracked in THIS (un-gated) counting pass, not the closed-gated accounting
+    // loop below — an earlier version gated it on `closed`, so a verified-but-UNANCHORED equivocation slipped
+    // through as ok:true / grant_verified=2.
+    let mut grant_content_seen: BTreeMap<String, String> = BTreeMap::new();
+    let mut grant_equivocations: BTreeSet<String> = BTreeSet::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if s(rec, "event_type").as_deref() == Some("credential_grant")
@@ -2312,6 +2319,25 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             if rt.trust == TrustLevel::IntegrityProven && rt.authority == AuthorityTrust::Verified {
                 if evidence_rederivable(rec, "grant_evidence") {
                     grant_verified += 1;
+                    // F8: a second DISTINCT content_hash under one grant_id is equivocation (flag once per
+                    // grant_id). `seen_grants` above already collapsed byte-identical duplicates, so this
+                    // fires only on a true distinct-content collision; honest producers emit unique grant_ids.
+                    if let Some(gid) = ev_str(rec, "grant_evidence", "grant_id") {
+                        match grant_content_seen.get(&gid) {
+                            Some(prev) if prev != &rt.content_hash => {
+                                if grant_equivocations.insert(gid.clone()) {
+                                    issues.push(format!(
+                                        "grant_id {gid}: two distinct grant records ({prev}, {}) share one grant_id — equivocated credential identity",
+                                        rt.content_hash
+                                    ));
+                                }
+                            }
+                            None => {
+                                grant_content_seen.insert(gid, rt.content_hash.clone());
+                            }
+                            _ => {}
+                        }
+                    }
                 } else {
                     issues.push(format!(
                         "grant {} ({}): authority.evidence_hash is not re-derivable from extensions.broker.grant_evidence (payload absent or divergent — R1, threat #4)",
@@ -2365,13 +2391,6 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // signed+pinned taxonomy marks ESCALATING). Rejected here, NOT only when exercised, so a dangerous
     // capability is visible even with no use receipt; a use against one is then skipped (single violation).
     let mut misscoped: BTreeSet<String> = BTreeSet::new();
-    // F8: a grant_id is ONE credential identity. Flag two distinct grant records (distinct content_hash)
-    // sharing one grant_id as broker equivocation ALWAYS — like the duplicate-record_id check, NOT only
-    // under D6 (compute_broker_trust's D6.4 injectivity guard covers the D6-active case). Honest producers
-    // emit record_id == grant_id so the duplicate-record_id guard already catches a collision; this adds
-    // the forged-distinct-record_id, no-D6-head case (which would otherwise first-wins-collapse silently).
-    let mut grant_content_seen: BTreeMap<String, String> = BTreeMap::new();
-    let mut grant_equivocations: BTreeSet<String> = BTreeSet::new();
     // M6 (ADR 0005): cosig (M-of-N grant approval) accounting. A grant declaring grant_evidence.cosig_threshold
     // >= 1 must carry >= M distinct valid approver cosignatures or it is NOT indexed (gated below). Counts are
     // deduped per grant_id via `cosig_seen` so an equivocating/duplicate record cannot inflate them.
@@ -2428,22 +2447,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         rt.index, rt.record_id
                     ));
                 }
-                // F8: grant_id injectivity (always-on). A second DISTINCT content_hash under one grant_id is
-                // equivocation; flag once per grant_id. (A byte-identical duplicate record is benign.)
-                match grant_content_seen.get(&gid) {
-                    Some(prev) if prev != &rt.content_hash => {
-                        if grant_equivocations.insert(gid.clone()) {
-                            issues.push(format!(
-                                "grant_id {gid}: two distinct grant records ({prev}, {}) share one grant_id — equivocated credential identity",
-                                rt.content_hash
-                            ));
-                        }
-                    }
-                    None => {
-                        grant_content_seen.insert(gid.clone(), rt.content_hash.clone());
-                    }
-                    _ => {}
-                }
+                // (F8 grant_id-injectivity equivocation detection now runs in the un-gated grant-counting
+                // pass above, so it covers anchored AND unanchored grants — see the grant_content_seen block.)
                 // M6 (ADR 0005): cosig gate. A grant declaring grant_evidence.cosig_threshold >= 1 must carry
                 // >= M DISTINCT approver cosignatures verifying under the pinned cosig_approver_keys; otherwise
                 // it is NOT Tier-B-eligible (not indexed → a use against it reads as unmatched_violation). The
