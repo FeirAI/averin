@@ -108,6 +108,16 @@ pub struct VerifyReport {
     /// never reach the `attested_complete_over_brokered_surface` capstone.
     pub one_phase_use_present: bool,
     pub grants_unused: usize,
+    /// M1 / ADR 0005 (`bounded_reuse` / N-Use). `bounded_reuse_grants` = closed grants whose
+    /// `scope_class == "bounded_reuse"` (a credential bounded to N uses of the identical
+    /// `(action, resource_id)`); `bounded_reuse_overspent` = matched-candidate uses rejected because
+    /// `use_sequence_number` was outside `[1, use_limit]` or the grant was exercised more than `use_limit`
+    /// times; `bounded_reuse_seq_replays` = uses rejected because their `(grant_id, use_sequence_number)`
+    /// was already consumed. Both anomaly counts are also `unmatched_violation`s (so `!ok`); they are
+    /// surfaced separately so the D8 capstone can require `== 0` self-documentingly.
+    pub bounded_reuse_grants: usize,
+    pub bounded_reuse_overspent: usize,
+    pub bounded_reuse_seq_replays: usize,
     /// Pinned operation-taxonomy ARTIFACT trust (ADR 0004 D4 / MF5), one of: `absent` (none pinned in
     /// opts), `untrusted` (unsigned / wrong issuer / pinned digest|version mismatch / no pin supplied /
     /// malformed), `stale` (signed + pinned but a listed action fell outside the effective interval for
@@ -637,6 +647,9 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("unmatched_pending".into(), count(r.unmatched_pending)),
         ("intent_without_outcome".into(), count(r.intent_without_outcome)),
         ("grants_unused".into(), count(r.grants_unused)),
+        ("bounded_reuse_grants".into(), count(r.bounded_reuse_grants)),
+        ("bounded_reuse_overspent".into(), count(r.bounded_reuse_overspent)),
+        ("bounded_reuse_seq_replays".into(), count(r.bounded_reuse_seq_replays)),
         (
             "taxonomy_status".into(),
             CanonValue::string(r.taxonomy_status.clone()),
@@ -703,6 +716,11 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
                 && r.attestation_status == "attested_claims"
                 && r.unmatched_violation == 0
                 && r.unmatched_pending == 0
+                // M1 (ADR 0005): no bounded_reuse grant was overspent or had a replayed sequence number.
+                // Surfacing-redundant with unmatched_violation (each anomaly is also a violation, so !ok),
+                // but kept explicit so the capstone's meaning is self-documenting over the N-Use surface.
+                && r.bounded_reuse_overspent == 0
+                && r.bounded_reuse_seq_replays == 0
                 // T6: the brokered surface stayed within the operator's AFFIRMATIVELY-declared side-effect
                 // closure. This is load-bearing beyond `r.ok`: an `unclosed` surface already forces `!ok`, but
                 // a `not_declared` manifest (no closure asserted) does NOT — so without this conjunct an
@@ -924,6 +942,9 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         intent_without_outcome: 0,
         one_phase_use_present: false,
         grants_unused: 0,
+        bounded_reuse_grants: 0,
+        bounded_reuse_overspent: 0,
+        bounded_reuse_seq_replays: 0,
         taxonomy_status: "absent".to_string(),
         broker_trust: "assumed".to_string(),
         cred_label_checks: 0,
@@ -2181,6 +2202,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         issued_at: i64,
         exp: i64,
         used: usize,
+        /// M1 (bounded_reuse): the declared cap N (0 for other scope classes). `used <= use_limit`.
+        use_limit: i64,
+        /// M1 (bounded_reuse): the `use_sequence_number`s already CONSUMED by accepted uses, for
+        /// `(grant_id, usn)` replay dedup. A usn is inserted only when a use is fully accepted (mirrors
+        /// `used`), so a use that fails PoP/outcome does not burn its sequence number.
+        used_seqs: BTreeSet<i64>,
     }
     let mut grants_by_id: BTreeMap<String, GrantInfo> = BTreeMap::new();
     // D4 (ADR 0004): grant_ids flagged mis-scoped at issuance (a single_operation grant for an action a
@@ -2208,18 +2235,31 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_int(rec, "grant_evidence", "exp"),
         ) {
             (Some(gid), Some(action), Some(resource_id), Some(scope_class), Some(cnf_kid), Some(credential_binding), Some(issued_at), Some(exp)) => {
-                // Mis-scope at issuance: a single_operation grant for a (resource, action) the taxonomy
-                // affirmatively marks escalating is rejected here regardless of whether it is exercised.
-                // `misscoped.insert` is the LAST condition so the issue is pushed exactly once per grant_id
-                // (a second closed record reusing the same grant_id does not double-count).
-                if scope_class == "single_operation"
+                // M1 (bounded_reuse): the cap rides inside the signed grant_evidence (0/absent for other
+                // classes). A bounded_reuse grant MUST declare a positive use_limit; an "unbounded bounded"
+                // grant is fail-closed (NOT indexed), so a use against it reads as action-without-credential
+                // rather than silently honoring an uncapped reuse.
+                let use_limit = ev_int(rec, "grant_evidence", "use_limit").unwrap_or(0);
+                if scope_class == "bounded_reuse" && use_limit < 1 {
+                    issues.push(format!(
+                        "grant {} ({}): bounded_reuse grant_evidence.use_limit must be >= 1 — fail-closed",
+                        rt.index, rt.record_id
+                    ));
+                    continue;
+                }
+                // Mis-scope at issuance: a single_operation OR bounded_reuse grant (both fix one
+                // (action, resource_id)) for a (resource, action) the taxonomy affirmatively marks
+                // escalating is rejected here regardless of whether it is exercised. `misscoped.insert`
+                // is the LAST condition so the issue is pushed exactly once per grant_id (a second closed
+                // record reusing the same grant_id does not double-count).
+                if (scope_class == "single_operation" || scope_class == "bounded_reuse")
                     && taxonomy_info
                         .as_ref()
                         .is_some_and(|ti| ti.escalating.contains(&(resource_id.clone(), action.clone())))
                     && misscoped.insert(gid.clone())
                 {
                     issues.push(format!(
-                        "grant {} ({}): claims single_operation for action '{action}' on '{resource_id}' which the taxonomy marks escalating — mis-scoped (D4)",
+                        "grant {} ({}): claims {scope_class} for action '{action}' on '{resource_id}' which the taxonomy marks escalating — mis-scoped (D4)",
                         rt.index, rt.record_id
                     ));
                 }
@@ -2232,6 +2272,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     issued_at,
                     exp,
                     used: 0,
+                    use_limit,
+                    used_seqs: BTreeSet::new(),
                 });
             }
             // A verified, closed broker grant whose grant_evidence is missing a required match field is
@@ -2325,6 +2367,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut uses_action_unverified = 0usize;
     let mut uses_pop_reverified = 0usize;
     let mut unmatched_violation = 0usize;
+    // M1 (bounded_reuse): per-class anomaly counters (also folded into unmatched_violation).
+    let mut bounded_reuse_overspent = 0usize;
+    let mut bounded_reuse_seq_replays = 0usize;
     let mut unmatched_pending = 0usize;
     let mut seen_uses: BTreeSet<&str> = BTreeSet::new();
     // D3 (ADR 0004): a (resource_id, PoP nonce) pair seen on two CLOSED receipts is a replay/duplicate
@@ -2525,10 +2570,16 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             continue;
         }
         // Single-use (R5 rev 4): per-grant_id at most once, regardless of jti; jti must equal grant_id.
+        // M1 (bounded_reuse, ADR 0005): a 4th scope class allowing N uses of the IDENTICAL
+        // (action, resource_id); replay is bounded by a per-grant `use_sequence_number in [1, use_limit]`,
+        // deduped per (grant_id, usn). jti still equals grant_id for both classes (the resource sources
+        // use_evidence.jti from the descriptor jti, so the D6.4 descriptor cross-check is UNCHANGED); the
+        // per-exercise identity is the SEPARATE use_sequence_number.
         let single = g.scope_class == "single_operation";
-        if single && jti != gid {
+        let bounded = g.scope_class == "bounded_reuse";
+        if (single || bounded) && jti != gid {
             unmatched_violation += 1;
-            violation(&mut issues, format!("single_operation grant '{gid}' requires use_evidence.jti == grant_id (R5) — violation"));
+            violation(&mut issues, format!("{} grant '{gid}' requires use_evidence.jti == grant_id (R5) — violation", g.scope_class));
             continue;
         }
         if single && g.used >= 1 {
@@ -2536,6 +2587,32 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             violation(&mut issues, format!("single-use grant '{gid}' exercised more than once — double-spend (R5)"));
             continue;
         }
+        // M1: validate the bounded_reuse sequence number BEFORE counting; the usn is CONSUMED only when the
+        // use is fully accepted (alongside g.used), so a use that later fails PoP/outcome does not burn it.
+        let use_seq: Option<i64> = if bounded {
+            let usn = ev_int(rec, "use_evidence", "use_sequence_number").unwrap_or(0);
+            if usn < 1 || usn > g.use_limit {
+                bounded_reuse_overspent += 1;
+                unmatched_violation += 1;
+                violation(&mut issues, format!("bounded_reuse grant '{gid}' use_sequence_number {usn} outside [1, {}] — overspend (M1)", g.use_limit));
+                continue;
+            }
+            if g.used_seqs.contains(&usn) {
+                bounded_reuse_seq_replays += 1;
+                unmatched_violation += 1;
+                violation(&mut issues, format!("bounded_reuse grant '{gid}' use_sequence_number {usn} replayed across receipts — seq-replay (M1)"));
+                continue;
+            }
+            if g.used >= g.use_limit as usize {
+                bounded_reuse_overspent += 1;
+                unmatched_violation += 1;
+                violation(&mut issues, format!("bounded_reuse grant '{gid}' exercised more than use_limit {} times — overspend (M1)", g.use_limit));
+                continue;
+            }
+            Some(usn)
+        } else {
+            None
+        };
         // D5 (ADR 0004 F4): a `use_intent` is a COMPLETE two-phase use only if a valid `use_outcome` whose
         // SIGNED payload references THIS intent's record_id AND attests THIS grant_id completes it. An intent
         // that passed every predicate above but has no such outcome is an `intent_without_outcome` anomaly —
@@ -2588,13 +2665,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             one_phase_use_present = true; // D8/MF3: a matched one-phase receipt blocks the capstone
         }
         g.used += 1;
+        if let Some(usn) = use_seq {
+            g.used_seqs.insert(usn); // M1: consume the sequence number only now (use fully accepted)
+        }
         uses_matched += 1;
         // R6/D4: a matched use is action-VERIFIED only when a pinned, in-window taxonomy lists the
-        // grant's (single_operation) action FOR THIS RESOURCE — otherwise it stays a demonstrator
-        // artifact (uses_action_unverified) that can never reach the attested_complete upgrade. The
-        // listing is resource-BOUND so a taxonomy vetted for one resource cannot validate a colliding
-        // action name on another (Codex AREA 2).
-        let action_verified = single
+        // grant's action FOR THIS RESOURCE — otherwise it stays a demonstrator artifact
+        // (uses_action_unverified) that can never reach the attested_complete upgrade. The listing is
+        // resource-BOUND so a taxonomy vetted for one resource cannot validate a colliding action name on
+        // another (Codex AREA 2). M1: bounded_reuse is action-verifiable too — it fixes one
+        // (action, resource_id) exactly like single_operation (action↔grant tightness preserved).
+        let action_verified = (single || bounded)
             && taxonomy_info.as_ref().is_some_and(|ti| {
                 if !ti.actions.contains(&(resource_id.clone(), action.clone())) {
                     return false;
@@ -2627,6 +2708,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let grants_unused = grants_by_id
         .iter()
         .filter(|(gid, g)| g.used == 0 && !misscoped.contains(*gid))
+        .count();
+    // M1: closed grants bounded to N uses of one (action, resource_id).
+    let bounded_reuse_grants = grants_by_id
+        .values()
+        .filter(|g| g.scope_class == "bounded_reuse")
         .count();
 
     // D4/MF5 taxonomy_status: absent (none pinned) | untrusted (bad sig/issuer/pin) | stale (signed +
@@ -2753,6 +2839,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         intent_without_outcome,
         one_phase_use_present,
         grants_unused,
+        bounded_reuse_grants,
+        bounded_reuse_overspent,
+        bounded_reuse_seq_replays,
         taxonomy_status: taxonomy_status.to_string(),
         broker_trust,
         cred_label_checks,

@@ -1216,6 +1216,106 @@ fn tier_b_use_matches_closed_grant() {
     }
 }
 
+// ---- M1 (ADR 0005): bounded_reuse / N-Use ----
+
+// build a bounded_reuse grant capped at `n` uses of the standard (ACTION, RESOURCE).
+fn bounded_grant(rec: &SigningKey, n: i64) -> CanonValue {
+    let ge = change_field(
+        &grant_evidence(GID, ACTION, RESOURCE, "bounded_reuse", CNF, ISSUED, EXP),
+        "use_limit",
+        CanonValue::Int(n),
+    );
+    seal_grant(rec, rec, GID, &ge)
+}
+
+// build a bounded_reuse use receipt at sequence number `usn`, with `used_at` driving a distinct nonce.
+fn bounded_use(rec: &SigningKey, res: &SigningKey, rid: &str, grant_hash: &str, usn: i64, used_at: i64) -> CanonValue {
+    let ue = change_field(
+        &use_evidence(GID, ACTION, RESOURCE, GID, CNF, used_at), // jti == grant_id (M1 keeps this)
+        "use_sequence_number",
+        CanonValue::Int(usn),
+    );
+    seal_use(rec, res, rid, &[grant_hash.to_string()], ACTION, &ue)
+}
+
+#[test]
+fn tier_b_bounded_reuse_within_cap_verifies() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = bounded_grant(&rec, 2);
+    let gh = content_hash_of(&grant);
+    let u1 = bounded_use(&rec, &res, "use-1", &gh, 1, USED);
+    let u2 = bounded_use(&rec, &res, "use-2", &gh, 2, USED + 100);
+    let mut frontier = vec![content_hash_of(&u1), content_hash_of(&u2)];
+    frontier.sort();
+    let cp = checkpoint_over(&rec, &frontier, 3, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, u1, u2], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "N uses within the cap should verify; issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 2, "both uses join the bounded_reuse grant");
+    assert_eq!(r.bounded_reuse_grants, 1);
+    assert_eq!(r.bounded_reuse_overspent, 0);
+    assert_eq!(r.bounded_reuse_seq_replays, 0);
+    assert_eq!(r.unmatched_violation, 0);
+    assert_eq!(r.grants_unused, 0);
+    let json = feir_decision_core::verify::report_to_json(&r);
+    for field in [r#""bounded_reuse_grants":1"#, r#""bounded_reuse_overspent":0"#, r#""bounded_reuse_seq_replays":0"#] {
+        assert!(json.contains(field), "report JSON missing {field}: {json}");
+    }
+}
+
+#[test]
+fn tier_b_bounded_reuse_overspend_is_a_violation() {
+    // use_limit=1 but the receipt claims use_sequence_number=2 (outside [1,1]).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = bounded_grant(&rec, 1);
+    let gh = content_hash_of(&grant);
+    let u = bounded_use(&rec, &res, "use-1", &gh, 2, USED);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&u)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, u], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "an out-of-range use_sequence_number must fail the bundle");
+    assert_eq!(r.bounded_reuse_overspent, 1);
+    assert_eq!(r.uses_matched, 0);
+    assert!(r.issues.iter().any(|i| i.contains("overspend")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_bounded_reuse_sequence_replay_is_a_violation() {
+    // use_limit=2, but TWO receipts claim use_sequence_number=1 (distinct nonces, so it is a USN replay,
+    // not a D3 nonce replay) — the second is rejected as a seq-replay.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = bounded_grant(&rec, 2);
+    let gh = content_hash_of(&grant);
+    let u1 = bounded_use(&rec, &res, "use-1", &gh, 1, USED);
+    let u2 = bounded_use(&rec, &res, "use-2", &gh, 1, USED + 100); // same usn, different nonce
+    let mut frontier = vec![content_hash_of(&u1), content_hash_of(&u2)];
+    frontier.sort();
+    let cp = checkpoint_over(&rec, &frontier, 3, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, u1, u2], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a replayed use_sequence_number must fail the bundle");
+    assert_eq!(r.bounded_reuse_seq_replays, 1);
+    assert_eq!(r.uses_matched, 1, "the first usn=1 matches; the second is the replay");
+    assert!(r.issues.iter().any(|i| i.contains("seq-replay")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_bounded_reuse_without_use_limit_fails_closed() {
+    // a bounded_reuse grant that declares NO use_limit is fail-closed (an unbounded "bounded" grant must
+    // not be honored); a use against it then reads as action-without-credential.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "bounded_reuse", CNF, ISSUED, EXP); // no use_limit
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let gh = content_hash_of(&grant);
+    let u = bounded_use(&rec, &res, "use-1", &gh, 1, USED);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&u)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, u], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a bounded_reuse grant with no use_limit must fail closed");
+    assert_eq!(r.bounded_reuse_grants, 0, "the malformed grant is not indexed");
+    assert!(r.issues.iter().any(|i| i.contains("use_limit must be >= 1")), "issues: {:?}", r.issues);
+}
+
 #[test]
 fn tier_b_action_without_credential_is_a_violation() {
     // A closed use receipt with NO matching closed grant — action without a credential.
