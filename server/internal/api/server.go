@@ -218,8 +218,8 @@ func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
 // WithLedger injects the consume-before-act ledger backing /v2/use (R5 single-use + PoP-nonce replay
 // protection). Call it BEFORE WithResource to override the default. The default MemLedger is VOLATILE —
 // consumed jti/nonce are lost on restart, reopening a replay window for a single-use capability — so a
-// durable, atomically-consistent ledger is a production requirement. (No durable implementation ships
-// yet; this is the seam for one, e.g. a Postgres-backed Ledger keyed under the project.)
+// durable, atomically-consistent ledger is a production requirement. internal/pgledger is the durable,
+// Postgres-backed implementation; feir-server injects it here automatically when FEIR_DATABASE_URL is set.
 func (s *Server) WithLedger(ledger resourceshim.Ledger) *Server {
 	s.ledger = ledger
 	return s
