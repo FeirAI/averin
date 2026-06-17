@@ -1,0 +1,266 @@
+{
+  "_comment": "Real Go-produced Tier-A/B broker bundle (gateway_enforced grant + two-phase use, test-anchored). The WASM/JS offline-verifier broker-path test (verifier/test/broker.test.js) verifies `bundle` via feir_verify_bundle_with(bundle, opts), pinning the broker/resource/tsa keys in `opts`. Regenerate: FEIR_GEN_BROKER_FIXTURE=1 go test ./internal/api -run TestGenerateBrokerFixture.",
+  "bundle": {
+    "bundle_version": "1",
+    "checkpoints": [
+      {
+        "anchor": {
+          "anchored_ts": "2026-06-17T13:20:59.418Z",
+          "scheme": "test-anchor",
+          "token_b64": "oJlWqo7JY26Zzvrm8f7Chynazi0tyVi3qrIXF-BjK81s2kAVfQfPbE30UyBDM7TKxQWMimcsbsCFUeSfqrDBBg",
+          "tsa_key_id": "test-tsa"
+        },
+        "broker_grant_head": {
+          "cumulative_root": "sha256:86389d570233d28a7b9f2a966475c0f5a991853661dc2a3297e1d98cfe2d997f",
+          "max_seq": 1,
+          "prior_head_hash": "sha256:ac2cfdddb12235d5eff3a497e169b50fec13c9e7052e3b53c2a29d9318f9126d"
+        },
+        "canon_version": "rcp-1",
+        "checkpoint_hash": "sha256:c8ad46a037e3c4bf45c90c11cb40ff4d5ecd416fc189f4a8acf2677105dbbc8b",
+        "checkpoint_id": "cp-p1-0",
+        "checkpoint_seq": 0,
+        "created_ts": "2026-06-17T13:20:59.418Z",
+        "domain": "flightrecorder.checkpoint.v2",
+        "frontier": [
+          "sha256:e332ef0b3b95d4cb52ececc0b51c8b74a854c06865a8c2bb7fd1b58f259e2c2c"
+        ],
+        "key": {
+          "key_epoch": 0,
+          "key_status": "active",
+          "key_valid_from": "2026-01-01T00:00:00.000Z",
+          "signing_key_id": "k0"
+        },
+        "prev_checkpoint_hash": null,
+        "project_id": "p1",
+        "record_count": 3,
+        "schema_version": "2",
+        "sig": "ed25519:FFV4VgyGcA5ycNp8TlefZHqX_cFMOBAuXh9-nxSY9hp7j_TzqNDPpn8zpxMskIVzhixqRqR2v8b7w6Z9vwojDQ"
+      }
+    ],
+    "gap_report": {
+      "customer_supplied": [
+        "raw input/output/rationale blobs (content store)"
+      ],
+      "gaps": [
+        "Level-2 observation scope is per-record; Level-3 completeness not claimed"
+      ],
+      "mapped_fields": [
+        "record integrity",
+        "checkpoint chain",
+        "declared authority"
+      ],
+      "raw_content_available": false
+    },
+    "keys": [
+      {
+        "key_epoch": 0,
+        "key_status": "active",
+        "public_key": "ed25519pub:A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "signing_key_id": "k0"
+      }
+    ],
+    "mode": "proof_only",
+    "project_id": "p1",
+    "records": [
+      {
+        "action": "db.query:orders-ro",
+        "agent_id": "agent-1",
+        "agent_ts": "2026-06-17T13:20:59.406Z",
+        "agent_version": "feir-broker",
+        "authority": {
+          "authorizing_principal": "",
+          "delegation_chain": [],
+          "enforcement_point": "credential_broker",
+          "evaluated_at": "2026-06-17T13:20:59.404Z",
+          "evidence_hash": "sha256:5f3716e21aeec970e35f483a3b4cff3d8569650e5a7bb8cba6d3511bf982a48b",
+          "evidence_sig": "ed25519:KG0COIQP51y_Jo5gsYERWIYhqpzBxcQ46KcKriRJANaADCe1FE9fXOkPuIjpB0KFKV7UAK3GIIzVZ2hxCN4ADw",
+          "expires_at": "2026-06-17T13:21:59.404Z",
+          "grant_id": "31b83f89-6db7-5c34-b9f9-e2f7673d9e8f",
+          "grant_type": "id-jag",
+          "source": "gateway_enforced"
+        },
+        "canon_version": "rcp-1",
+        "causal_prev_hashes": [],
+        "content_hash": "sha256:c9eb29d56c252c419e50d7e7be60cf4e6b7dc7ae821ad8c60302d9bde5630548",
+        "credential_commit": {
+          "alg": "sha256",
+          "commitment": "sha256:cc2f6c28a4302a599fe2efb05afa148995becdebe5d3703441535ce2662f3fad",
+          "low_entropy": true
+        },
+        "display_seq": 0,
+        "domain": "flightrecorder.record.v2",
+        "event_type": "credential_grant",
+        "extensions": {
+          "broker": {
+            "conformance_level": "L1_grant_only",
+            "credential_binding": "sha256:8efa4ae8f24f8d9e544f7bd8bdbf731a1a6d6e94b27f6c21e3c9ffac50410ea4",
+            "grant_evidence": {
+              "action": "db.query:orders-ro",
+              "agent_id": "agent-1",
+              "authorizing_principal": "",
+              "broker_seq": 1,
+              "cnf_kid": "ed25519-ckVnIEEgN6Y",
+              "conformance_level": "L1_grant_only",
+              "credential_binding": "sha256:8efa4ae8f24f8d9e544f7bd8bdbf731a1a6d6e94b27f6c21e3c9ffac50410ea4",
+              "delegation_chain": [],
+              "exp": 1781702519,
+              "grant_id": "31b83f89-6db7-5c34-b9f9-e2f7673d9e8f",
+              "grant_type": "id-jag",
+              "issued_at": 1781702459,
+              "kind": "grant",
+              "resource_id": "orders-db",
+              "scope": "read:orders",
+              "scope_class": "single_operation"
+            },
+            "issuance_status": "recorded",
+            "kind": "grant",
+            "scope_class": "single_operation"
+          }
+        },
+        "key": {
+          "key_epoch": 0,
+          "key_status": "active",
+          "key_valid_from": "2026-01-01T00:00:00.000Z",
+          "signing_key_id": "k0"
+        },
+        "observed_via": "broker",
+        "parent_span_id": null,
+        "project_id": "p1",
+        "received_ts": "2026-06-17T13:20:59.406Z",
+        "record_id": "31b83f89-6db7-5c34-b9f9-e2f7673d9e8f",
+        "schema_version": "2",
+        "session_id": "s1",
+        "sig": "ed25519:QKCBSZwmYpYIgbcoLXlex-BbkoLyn0g8WH0eM4Cj0SeeBm0yxMCX8WoFS92JqH7kOeW6mLqum7UgBAthkWD8DA",
+        "span_id": "span-7b53b360-d3c5-4133-9d70-3760f3a2e0cc",
+        "status": "ok"
+      },
+      {
+        "action": "db.query:orders-ro",
+        "agent_id": "feir-resource",
+        "agent_ts": "2026-06-17T13:20:59.412Z",
+        "agent_version": "feir-resource",
+        "authority": {
+          "enforcement_point": "tool_gateway",
+          "evaluated_at": "2026-06-17T13:20:59.412Z",
+          "evidence_hash": "sha256:d4535826481d7acca06f15d01f2f2b73a22dfddb0ddefb7b6d228f428011879a",
+          "evidence_sig": "ed25519:GnyxF5Eenva1cDFxtBTIhzF6UNZjyh4T-cCddQ0Ut8fC38sElTARcg_C_uOC3ymtNrYGeWdkMkYOcuztsHgqDQ",
+          "grant_id": "31b83f89-6db7-5c34-b9f9-e2f7673d9e8f",
+          "source": "gateway_enforced"
+        },
+        "canon_version": "rcp-1",
+        "causal_prev_hashes": [
+          "sha256:c9eb29d56c252c419e50d7e7be60cf4e6b7dc7ae821ad8c60302d9bde5630548"
+        ],
+        "content_hash": "sha256:60416e0baf831a87735e83409330f0c37280b52cb483b7e2490f0fa574685d6d",
+        "display_seq": 1,
+        "domain": "flightrecorder.record.v2",
+        "event_type": "tool_call",
+        "extensions": {
+          "broker": {
+            "grant_id": "31b83f89-6db7-5c34-b9f9-e2f7673d9e8f",
+            "kind": "use_intent",
+            "resource_id": "orders-db",
+            "use_evidence": {
+              "action": "db.query:orders-ro",
+              "cnf_kid": "ed25519-ckVnIEEgN6Y",
+              "cnf_pub": "iodf_x6zhFFXes1a_uQFRWVo3XyJ4JCGOgVXvHr0nxc",
+              "grant_id": "31b83f89-6db7-5c34-b9f9-e2f7673d9e8f",
+              "jti": "31b83f89-6db7-5c34-b9f9-e2f7673d9e8f",
+              "kind": "use_intent",
+              "ledger_commitment": "sha256:49b8a45f97bf352c8026974cb176b246b16bc55b7d819e2dbfbe34eb1664e389",
+              "nonce": "nonce-1",
+              "pop_challenge_hash": "sha256:47c2e14c31dfa9a359a53171482dc7450d050042aceec334c29736f80f07df1e",
+              "resource_id": "orders-db",
+              "use_sig": "Igax0v3T0Hh85xg663PVoEVhCc5wta7b20CVa3xnLOd6H1sAm4h1kHdamC8AdSF82YHGdRKwEApLeqkxTSGsAw",
+              "used_at": 1781702459
+            }
+          }
+        },
+        "input_commit": {
+          "alg": "sha256",
+          "commitment": "sha256:d86f0507a97d633af3ec42533bc5284c2b5bf4c4c87c4d206a0d90a265b26180",
+          "low_entropy": true
+        },
+        "key": {
+          "key_epoch": 0,
+          "key_status": "active",
+          "key_valid_from": "2026-01-01T00:00:00.000Z",
+          "signing_key_id": "k0"
+        },
+        "observed_via": "broker",
+        "parent_span_id": null,
+        "project_id": "p1",
+        "received_ts": "2026-06-17T13:20:59.412Z",
+        "record_id": "use-e544ee6f-06f3-57a2-b685-1d8fc2d77981",
+        "schema_version": "2",
+        "session_id": "s1",
+        "sig": "ed25519:5A5YTrj01ycYzX3vAKuc8cM5TEcuTu6U632VIgtwVrQaHdYcJMKDAIgmuLlj4i9nTujoGxju8DuqRXhZuGV6DA",
+        "span_id": "span-5561752b-4b70-4aca-8f88-6fa15fce9f75",
+        "status": "ok"
+      },
+      {
+        "action": "use_outcome",
+        "agent_id": "feir-resource",
+        "agent_ts": "2026-06-17T13:20:59.416Z",
+        "agent_version": "feir-resource",
+        "authority": {
+          "enforcement_point": "tool_gateway",
+          "evaluated_at": "2026-06-17T13:20:59.416Z",
+          "evidence_hash": "sha256:187a83a2caf11164b5282282b33ee039b54fbb3afcbefe02bbc5dac3b9d2a411",
+          "evidence_sig": "ed25519:2E65gVJrwdAu6LTzFB2mP6JhcdgLnBkKivtH5FnujIf8WpzmSfmryOxYDmq3OXrGun2912AIhkhGIsIqLElYAw",
+          "grant_id": "31b83f89-6db7-5c34-b9f9-e2f7673d9e8f",
+          "source": "gateway_enforced"
+        },
+        "canon_version": "rcp-1",
+        "causal_prev_hashes": [
+          "sha256:60416e0baf831a87735e83409330f0c37280b52cb483b7e2490f0fa574685d6d"
+        ],
+        "content_hash": "sha256:e332ef0b3b95d4cb52ececc0b51c8b74a854c06865a8c2bb7fd1b58f259e2c2c",
+        "display_seq": 2,
+        "domain": "flightrecorder.record.v2",
+        "event_type": "tool_call",
+        "extensions": {
+          "broker": {
+            "grant_id": "31b83f89-6db7-5c34-b9f9-e2f7673d9e8f",
+            "intent_ref": "use-e544ee6f-06f3-57a2-b685-1d8fc2d77981",
+            "kind": "use_outcome",
+            "use_outcome": {
+              "grant_id": "31b83f89-6db7-5c34-b9f9-e2f7673d9e8f",
+              "intent_hash": "sha256:60416e0baf831a87735e83409330f0c37280b52cb483b7e2490f0fa574685d6d",
+              "intent_ref": "use-e544ee6f-06f3-57a2-b685-1d8fc2d77981",
+              "kind": "use_outcome",
+              "status": "ok"
+            }
+          }
+        },
+        "key": {
+          "key_epoch": 0,
+          "key_status": "active",
+          "key_valid_from": "2026-01-01T00:00:00.000Z",
+          "signing_key_id": "k0"
+        },
+        "observed_via": "broker",
+        "parent_span_id": null,
+        "project_id": "p1",
+        "received_ts": "2026-06-17T13:20:59.416Z",
+        "record_id": "outcome-c613fdf7-77f6-54d4-aa56-75f22e3f4638",
+        "schema_version": "2",
+        "session_id": "s1",
+        "sig": "ed25519:B9X-Q_jooz7zY3FA2RoLPECnoJe77C5sCcIWiAYa3DwNg7-UZPKk8cJZlQl-QIGzm9qLZFnLDZ0GVhjd0makCA",
+        "span_id": "span-5ed99e5f-82d8-46a6-bd1e-9a9bdcd11071",
+        "status": "ok"
+      }
+    ]
+  },
+  "opts": {
+    "broker_authority_keys": [
+      "ed25519pub:A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+    ],
+    "resource_authority_keys": [
+      "ed25519pub:YNKOpy5vcA5_56xDop0LUkgwXx2oBSri8sq5qZ9PuHk"
+    ],
+    "tsa_keys": [
+      "ed25519pub:NAQvkh7qgtKpstJZl-s3VufCQamg1jR26uw_kPPWv8A"
+    ]
+  }
+}

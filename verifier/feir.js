@@ -89,6 +89,30 @@ class FeirVerifier {
     }
   }
 
+  /**
+   * Verify an export bundle with out-of-band pinned trust roots, offline. `opts` is an object whose
+   * optional arrays pin keys: `authority_keys` / `broker_authority_keys` / `resource_authority_keys` /
+   * `signing_keys` / `tsa_keys` (`ed25519pub:` strings) and `tsa_spki_b64`. Pinning the broker +
+   * resource recording keys is what elevates a credential-broker bundle to Tier-A grant accountability
+   * and Tier-B action accountability (role-separated, ADR 0003 R2). Returns the parsed report.
+   */
+  verifyBundleWith(bundleJson, opts) {
+    // Both args go through _writeCString, which rejects an interior NUL (valid RCP never contains 0x00),
+    // so this is NUL-truncation-safe (fail-closed on a malformed/adversarial bundle).
+    const a = this._writeCString(bundleJson);
+    const o = this._writeCString(typeof opts === "string" ? opts : JSON.stringify(opts ?? {}));
+    let resultPtr = 0;
+    try {
+      resultPtr = this.x.feir_verify_bundle_with(a.ptr, o.ptr);
+      if (resultPtr === 0) throw new Error("verifier returned null (invalid input)");
+      return JSON.parse(this._readCString(resultPtr));
+    } finally {
+      if (resultPtr !== 0) this.x.feir_string_free(resultPtr);
+      this.x.feir_dealloc(a.ptr, a.size);
+      this.x.feir_dealloc(o.ptr, o.size);
+    }
+  }
+
   /** Canonicalize a JSON document under RCP v1 (or a string starting with "ERROR:"). */
   canonicalize(jsonDoc) {
     return this._call1(this.x.feir_rcp_canonicalize, jsonDoc) ?? "ERROR: null input";
