@@ -16,9 +16,11 @@ files, and no behavior change ship with this ADR.** Following ADR 0004's rule, e
 it proves *cryptographically* versus what stays *TCB* (`resource_trust: assumed_truthful`), and the D8
 conjunction only ever gets MORE restrictive (or gains an explicit, weaker, labeled tier) — never looser.
 
-> **Implementation status (updated):** **M1 (`bounded_reuse`/N-Use) has since been built end-to-end** —
-> see its §M1 status note. M2–M6 remain design-only staging maps. The ADR 0002 amendments §9 prescribes
-> "to apply alongside the first implementation" are now applied (M1 was that first implementation).
+> **Implementation status (updated):** **M1 (`bounded_reuse`/N-Use) and M6 (Cosig) have since been built** —
+> see their §M1/§M6 status notes. M1 is end-to-end (incl. the online `POST /v2/grants` path); M6 ships the
+> verifier semantics + the Go producer + a cross-language FFI round-trip, with only its online HTTP path
+> (inherently two-phase) deferred. M2–M5 remain design-only staging maps. The ADR 0002 amendments §9
+> prescribes "to apply alongside the first implementation" are now applied (M1 was that first implementation).
 
 The design was pressure-tested against the live verifier (`core/src/verify.rs`) and producer
 (`server/internal/broker`, `server/internal/api`, `server/internal/resourceshim`). Where a mode stresses or
@@ -196,6 +198,21 @@ Capstone → Signature domain → Residual*.
   via `revocation_status`, never silently passed.
 
 ### M6 — Cosig (M-of-N grant approval)
+
+> **Status: verifier + producer + cross-language e2e IMPLEMENTED; online HTTP path deferred.** Verifier
+> semantics `55a21b2` (the `cosig_approver_keys` role-disjoint VerifyOption, the
+> `feir.broker.cosig.approval.v1` challenge, distinct-approver counting + the `>= M` indexing gate, the four
+> report fields, the two capstone conjuncts, + a fail-closed guard for cosignatures-without-threshold). Go
+> producer `668e531`: `broker.CosigApprovalChallenge` (byte-identical to the verifier, pinned by the SHARED
+> golden vector) + `broker.AttachCosignatures` (the fail-closed phase-2 embed). FFI e2e `eb4e464`: a cosigned
+> grant produced entirely in Go seals + anchors + verifies clean under the Rust verifier
+> (`cosig_status:"satisfied"`), with a one-key-short negative control. Tested: Rust adversarial (threshold
+> met / below / duplicate-counts-once / forged / unpinned-fail-closed / disjointness-fatal / equivocating
+> sibling / cosignatures-without-threshold) + Go (golden vector incl. an int64-edge BE8 case + the e2e).
+> **Deferred:** the online `POST /v2/grants` flow is inherently two-phase — the cosig challenge binds the
+> minted `credential_binding`, so an approver can only sign after the broker prepares and reveals it — so it
+> needs a prepare→approve→finalize API, staged but not yet built. Today cosig is reachable as a producer
+> library (`broker.AttachCosignatures`) + the verifier enforces it for any bundle that carries it.
 
 - **Mechanism.** A grant may require M-of-N approver cosignatures before it is Tier-B-eligible. The verifier
   counts distinct approver signatures that verify under the pinned `cosig_approver_keys` (a new role key set
