@@ -38,7 +38,7 @@ The **adversarial tests are the acceptance gates** (spec §15, §17). A mileston
 | M1.13 | FFI lib + C header + cgo-style smoke test | ☑ |
 | M1.14 | WASM build target (`--no-default-features --features wasm`) | ☑ |
 | M1.15 | Parser nesting-depth cap (DoS hardening) | ☑ |
-| **Acceptance (adversarial)** | defends #1 omitted session, #2 forked history, #3 backdated, #9 key compromise, #10 verifier skew on fixtures; CLI verifies offline + per-record trust-levels | ☑ **#1,2,3,9,10** (52 tests, all Codex-reviewed) |
+| **Acceptance (adversarial)** | defends #1 omitted session, #2 forked history, #3 backdated, #9 key compromise, #10 verifier skew on fixtures; CLI verifies offline + per-record trust-levels | ☑ **#1,2,3,9,10** (52 adversarial tests at M1, all Codex-reviewed; the suite has since grown to 135 — see README / `cargo test --workspace`) |
 
 > **M1 status:** the integrity core is feature-complete and reviewed for Phase 1. The RFC 3161
 > DER/CMS wire-format parser+verifier is implemented and feature-gated (`rfc3161`), shipped in the
@@ -96,7 +96,7 @@ The **adversarial tests are the acceptance gates** (spec §15, §17). A mileston
 | 4 | Authority lie | M2 | ◑ key-pinning + worst-status done; authority `evidence_sig` UI = M2 |
 | 5 | Blob substitution | M2 | ☐ (schema digest+object_version ☑) |
 | 6 | Hash dictionary | M1 | ☑ hiding commitments; **tested** |
-| 7 | Partial SSE stream | M2 | ☐ (incomplete event_type in schema ☑) |
+| 7 | Partial SSE stream | M2 | ☑ truncation + mid-stream error sealed as `incomplete`; **tested** (`proxy` package) |
 | 8 | Retry duplication | M1 | ☑ DAG duplicate-collapse; **tested** (ingest idempotency = M2) |
 | 9 | Key compromise | M1 | ☑ key-epoch + anchored-before + TrustedKey pinning; **tested** |
 | 10 | Verifier skew | M1 | ☑ one Rust core → CLI+WASM+FFI + golden vectors; **tested** |
