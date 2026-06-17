@@ -17,6 +17,7 @@ import (
 	"github.com/feir-dev/feir/server/internal/content"
 	"github.com/feir-dev/feir/server/internal/core"
 	"github.com/feir-dev/feir/server/internal/meter"
+	"github.com/feir-dev/feir/server/internal/pgledger"
 	"github.com/feir-dev/feir/server/internal/store"
 	"github.com/feir-dev/feir/server/internal/witness"
 	"github.com/feir-dev/feir/server/migrations"
@@ -124,9 +125,22 @@ func main() {
 		if rc.PubKey() == brokerPubKey {
 			log.Fatal("FEIR_RESOURCE_SEED must differ from FEIR_BROKER_ISSUING_SEED (keep the capability-issuing and use-recording key roles distinct)")
 		}
+		// Durable consume-before-act ledger when Postgres is configured; else the volatile MemLedger.
+		// WithLedger must precede WithResource (which installs the MemLedger default only if none is set).
+		if dsn := os.Getenv("FEIR_DATABASE_URL"); dsn != "" {
+			lctx, lcancel := context.WithTimeout(context.Background(), 30*time.Second)
+			pl, err := pgledger.New(lctx, dsn)
+			lcancel()
+			if err != nil {
+				log.Fatalf("resource ledger: Postgres requested but unavailable: %v", err)
+			}
+			srv.WithLedger(pl)
+			log.Printf("consume-before-act ledger -> Postgres (durable)")
+		} else {
+			log.Printf("WARNING: the consume-before-act ledger is in-memory (volatile) — consumed single-use jti/nonce reset on restart, reopening a replay window for /v2/use. Set FEIR_DATABASE_URL for the durable Postgres-backed ledger.")
+		}
 		srv.WithResource(rc, rid)
 		log.Printf("resource gateway enabled (POST /v2/use) for resource %q", rid)
-		log.Printf("WARNING: the consume-before-act ledger is in-memory (volatile) — consumed single-use jti/nonce reset on restart, reopening a replay window for /v2/use. A durable ledger is a production requirement (Server.WithLedger is the seam; no durable impl ships yet).")
 	}
 
 	log.Printf("feir-server listening on %s (pubkey %s)", addr, c.PubKey())

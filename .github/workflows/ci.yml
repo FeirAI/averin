@@ -78,7 +78,7 @@ jobs:
         working-directory: server
         env:
           FEIR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: go test -count=1 ./internal/store/...
+        run: go test -count=1 ./internal/store/... ./internal/pgledger/...
 
   web:
     name: web app (svelte build + trace unit tests)
