@@ -28,17 +28,14 @@ Three honest trust levels (used verbatim in product copy):
 
 | Path | What |
 |------|------|
-| `core/` | **Rust `decision-core`** — canonicalize → commit → hash → sign → DAG-link → checkpoint → verify. One crate → FFI lib + verify CLI + WASM. The single source of truth. |
-| `proxy/` | Go: OpenAI-compatible reverse proxy + ingestion |
-| `server/` | Go: app API, MCP server, x402 meter, export, anchoring |
+| `core/` | **Rust `decision-core`** — canonicalize → commit → hash → sign → DAG-link → checkpoint → verify. One crate → FFI lib + the `feir-verify` CLI (`src/bin`) + WASM. The single source of truth. |
+| `server/` | Go: app API + ingestion, OpenAI-compatible recording proxy (`internal/proxy`), credential broker + resource gateway, MCP server, export, anchoring. (Experimental x402 metering lives in `internal/x402`, not yet wired into the binary.) |
 | `web/` | Svelte 5 + Vite SPA (client-only) — trace-waterfall run view |
-| `verifier/` | Vanilla TS + WASM standalone offline verifier (no framework) |
-| `landing/` | Separate static marketing site (3D-DAG hero, deps quarantined) |
+| `verifier/` | Vanilla JS + WASM standalone offline verifier (no framework) |
 | `sdk/python`, `sdk/typescript` | Client SDKs |
-| `cli/` | verify CLI distribution (wraps `core`) |
 | `spec/` | **schema v2, RCP v1, golden vectors, adversarial fixtures** |
 | `deploy/` | docker-compose self-host |
-| `docs/` | quickstart, coverage limits, verification guide, ADRs |
+| `docs/` | coverage limits, deployment readiness, vultrino integration, ADRs (0001–0005) |
 
 ## Status
 

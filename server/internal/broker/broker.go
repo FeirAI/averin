@@ -433,6 +433,17 @@ func VerifyCapability(token string, issuingPub ed25519.PublicKey) (Claims, error
 }
 
 // canonHash returns ("sha256:<hex>", canonicalBytes) over json.Marshal(m) (Go sorts map keys).
+//
+// F16 (audit) — the returned bytes ARE the credential descriptor: credential_binding is their byte-hash,
+// and on selective disclosure the OFFLINE verifier (1) byte-compares sha256(disclosed bytes) ==
+// credential_binding AND (2) re-parses the bytes with STRICT RCP (CanonValue::parse) for the D6.4
+// label↔credential cross-check. So these bytes MUST stay RCP-parseable. They are today: every descriptor
+// field is a string or an integer (typ/alg/kid/iss/sub/aud/act/jti/scope/cnf/mode/nbf/iat/exp/single_use,
+// + use_limit for bounded_reuse), all of which json.Marshal emits in an RCP-acceptable form (JSON string
+// escapes incl. Go's HTML-escaping of <>& round-trip through CanonValue::parse; key order is irrelevant —
+// the binding is an opaque byte-hash and the cross-check reads fields BY KEY). The coupling to a strict
+// consumer is the residual: if a future descriptor field were ever a float / NaN / non-RCP type, the
+// disclosed-descriptor cross-check would reject it. Keep descriptor fields string/int.
 func canonHash(m map[string]any) (string, []byte) {
 	b, _ := json.Marshal(m)
 	sum := sha256.Sum256(b)
