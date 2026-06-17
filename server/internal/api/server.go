@@ -194,6 +194,19 @@ func (s *Server) WithPolicyEngineKey(source string, key ed25519.PublicKey) *Serv
 // VOLATILE across restarts); inject a durable one with WithLedger BEFORE WithResource. Nil resourceCore
 // (unset) disables /v2/use.
 func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
+	// R2 (ADR 0003): the resource recording key MUST be disjoint from the server signing key and the
+	// broker issuing key, else a grant could forge its own use receipt. The offline verifier rejects an
+	// overlap as a fatal config error and feir-server checks it at startup — this fail-fasts an embedder
+	// that constructs a Server directly. Compares the keys set so far (call WithBroker first for the
+	// broker check). A key collision here is a programming error, so it panics.
+	if rpub, err := decodePubKey(resourceCore.PubKey()); err == nil {
+		if cpub, e := decodePubKey(s.core.PubKey()); e == nil && bytes.Equal(rpub, cpub) {
+			panic("WithResource: resource recording key must differ from the server signing key (R2 role separation)")
+		}
+		if s.brokerKey != nil && bytes.Equal(rpub, s.brokerKey.Public().(ed25519.PublicKey)) {
+			panic("WithResource: resource recording key must differ from the broker issuing key (R2 role separation)")
+		}
+	}
 	s.resourceCore = resourceCore
 	s.resourceID = resourceID
 	if s.ledger == nil {
@@ -521,22 +534,45 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// With auth enabled the project is named in ?project= (checked by the middleware); bind it so a
-	// token valid for project A cannot write to project B via the body's project_id. Validate the
-	// WHOLE batch up front so a mismatched item cannot partially persist earlier items.
+	// Validate the WHOLE batch up front so a malformed item cannot partially persist the earlier ones
+	// (F14: batch ingest is all-or-nothing on a deterministic 400). This runs EVERY deterministic 400-class
+	// check the per-item ingest does — JSON decodability, the project_id binding (with auth, a token for
+	// project A must not write to project B via the body's project_id), the idempotency-key requirement,
+	// and the reserved-field checks (via validateGenericRecordItem, shared with ingestOne) — before any
+	// item is sealed. Only a rarer non-deterministic failure (a commit/seal/store error AFTER this pass)
+	// can still partial-persist, and that is self-healing: every record is idempotency-keyed, so a
+	// whole-batch retry collapses the already-sealed items rather than duplicating them.
 	queryProject := r.URL.Query().Get("project")
-	if queryProject != "" {
-		for _, raw := range items {
-			var probe map[string]any
-			if decode(raw, &probe) != nil || stringField(probe, "project_id") != queryProject {
-				writeErr(w, http.StatusForbidden, "a record's project_id does not match the authorized ?project=")
-				return
-			}
+	headerIdem := r.Header.Get("Idempotency-Key")
+	for _, raw := range items {
+		var probe map[string]any
+		if decode(raw, &probe) != nil {
+			writeErr(w, http.StatusBadRequest, "invalid record in batch")
+			return
+		}
+		if queryProject != "" && stringField(probe, "project_id") != queryProject {
+			writeErr(w, http.StatusForbidden, "a record's project_id does not match the authorized ?project=")
+			return
+		}
+		idem := stringField(probe, "idempotency_key")
+		if idem == "" {
+			idem = headerIdem
+		}
+		if idem == "" {
+			writeErr(w, http.StatusBadRequest, "idempotency_key is required (field or Idempotency-Key header)")
+			return
+		}
+		if reservedIdem(idem) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("idempotency_key prefix %q is reserved for the broker denied-grant log", denialIdemPrefix))
+			return
+		}
+		if err := validateGenericRecordItem(probe); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
 		}
 	}
 
 	results := make([]map[string]any, 0, len(items))
-	headerIdem := r.Header.Get("Idempotency-Key")
 	for _, raw := range items {
 		sealed, created, err := s.ingestOne(raw, headerIdem)
 		if err != nil {
@@ -558,6 +594,46 @@ const denialIdemPrefix = "denial:"
 
 func reservedIdem(idem string) bool { return strings.HasPrefix(idem, denialIdemPrefix) }
 
+// validateGenericRecordItem runs the deterministic, body-only validations the generic /v2/records path
+// rejects with a 400. It is shared by ingestOne and the batch up-front pre-pass (F14: a malformed item
+// must reject the WHOLE batch before any earlier item is sealed) so the two cannot diverge. It does NOT
+// mutate the record (the caller assigns record_id / normalizes authority after).
+func validateGenericRecordItem(rec map[string]any) error {
+	if stringField(rec, "project_id") == "" || stringField(rec, "session_id") == "" {
+		return fmt.Errorf("project_id and session_id are required")
+	}
+	// The "use-"/"outcome-"/"denial-" prefixes are RESERVED for the resource-gateway / denial endpoints
+	// (deterministic ids from the idempotency key): a generic caller must not pre-seed one, else a later
+	// /v2/use[-intent|-outcome] retry with the matching idempotency key could short-circuit to the
+	// pre-seeded record and SKIP PoP validation / consume-before-act (a forged-capability use as success).
+	if rid := stringField(rec, "record_id"); strings.HasPrefix(rid, "use-") || strings.HasPrefix(rid, "outcome-") || strings.HasPrefix(rid, "denial-") {
+		return fmt.Errorf("record_id prefix of %q is reserved for the broker/resource endpoints", rid)
+	}
+	// credential_grant_denied is the B11 denied-grant marker the verifier counts (denied_grants) by
+	// event_type alone. A denial is sealed by the server signing key like every record, so the verifier
+	// cannot cryptographically tell a broker-produced denial from a generic-forged one — the ONLY defense
+	// is to reserve the marker at ingest, so only the opt-in broker denial path can produce it (else any
+	// project writer could fabricate B11 evidence with arbitrary claimed pubkeys in tamper-evident records).
+	if stringField(rec, "event_type") == "credential_grant_denied" {
+		return fmt.Errorf("event_type \"credential_grant_denied\" is reserved for the broker denied-grant log")
+	}
+	// extensions.broker is RESERVED for the broker/resource lifecycle endpoints, which build their own
+	// records — a GENERIC caller must not set it. Otherwise a forged extensions.broker.kind="grant" +
+	// authority.enforcement_point="credential_broker" would be folded into the D6 grant-transparency head
+	// by the producer (which cannot check the broker evidence_sig the offline verifier requires), so the
+	// producer's grant set would diverge from the verifier's and poison/DoS the anchored cumulative_root
+	// (ADR 0004 D6). Reject (not silently strip) so the caller sees it.
+	if ext, ok := rec["extensions"].(map[string]any); ok {
+		if _, reserved := ext["broker"]; reserved {
+			return fmt.Errorf("extensions.broker is reserved for the broker/resource endpoints and must not be set on a generic record")
+		}
+		if _, reserved := ext["broker_denial"]; reserved {
+			return fmt.Errorf("extensions.broker_denial is reserved for the broker denied-grant log and must not be set on a generic record")
+		}
+	}
+	return nil
+}
+
 func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) {
 	var rec map[string]any
 	if err := decode(raw, &rec); err != nil {
@@ -578,49 +654,18 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	}
 	delete(rec, "idempotency_key") // not part of the signed record
 
+	// The deterministic body validations the generic path rejects with a 400 — shared with the batch
+	// up-front pre-pass (F14) so a malformed item rejects the WHOLE batch before any item is sealed.
+	if err := validateGenericRecordItem(rec); err != nil {
+		return "", false, err
+	}
 	projectID := stringField(rec, "project_id")
 	sessionID := stringField(rec, "session_id")
-	if projectID == "" || sessionID == "" {
-		return "", false, fmt.Errorf("project_id and session_id are required")
-	}
-
-	// record_id must be assigned before commit-on-ingest binds disclosure secrets to it. The "use-" and
-	// "outcome-" prefixes are RESERVED for the resource-gateway endpoints (deterministic ids from the
-	// idempotency key): a generic caller must not pre-seed one, else a later /v2/use[-intent|-outcome] retry
-	// with the matching idempotency key could short-circuit to the pre-seeded record and SKIP PoP validation
-	// / consume-before-act (a forged-capability use reading as success).
-	if rid := stringField(rec, "record_id"); strings.HasPrefix(rid, "use-") || strings.HasPrefix(rid, "outcome-") || strings.HasPrefix(rid, "denial-") {
-		return "", false, fmt.Errorf("record_id prefix of %q is reserved for the broker/resource endpoints", rid)
-	}
 	if stringField(rec, "record_id") == "" {
 		rec["record_id"] = newUUID()
 	}
-	// credential_grant_denied is the B11 denied-grant marker the verifier counts (denied_grants) by
-	// event_type alone. A denial is sealed by the server signing key like every record, so the verifier
-	// cannot cryptographically tell a broker-produced denial from a generic-forged one — the ONLY defense
-	// is to reserve the marker at ingest, so only the opt-in broker denial path can produce it (else any
-	// project writer could fabricate B11 evidence with arbitrary claimed pubkeys in tamper-evident records).
-	if stringField(rec, "event_type") == "credential_grant_denied" {
-		return "", false, fmt.Errorf("event_type \"credential_grant_denied\" is reserved for the broker denied-grant log")
-	}
-
 	// authority is declared by default — never silently presented as verified (threat #4).
 	s.normalizeAuthority(rec)
-
-	// extensions.broker is RESERVED for the broker/resource lifecycle endpoints (/v2/grants, /v2/use),
-	// which build their own records — a GENERIC caller must not set it. Otherwise a forged
-	// extensions.broker.kind="grant" + authority.enforcement_point="credential_broker" would be folded
-	// into the D6 grant-transparency head by the producer (which cannot check the broker evidence_sig the
-	// offline verifier requires), so the producer's grant set would diverge from the verifier's and poison
-	// or DoS the anchored cumulative_root (ADR 0004 D6). Reject (not silently strip) so the caller sees it.
-	if ext, ok := rec["extensions"].(map[string]any); ok {
-		if _, reserved := ext["broker"]; reserved {
-			return "", false, fmt.Errorf("extensions.broker is reserved for the broker/resource endpoints and must not be set on a generic record")
-		}
-		if _, reserved := ext["broker_denial"]; reserved {
-			return "", false, fmt.Errorf("extensions.broker_denial is reserved for the broker denied-grant log and must not be set on a generic record")
-		}
-	}
 
 	// Replace any raw input/output/rationale with a hiding commitment (RCP §9.3, threat #6); the
 	// plaintext goes to the content store and never enters the signed body. The disclosure secrets
