@@ -11,7 +11,8 @@ use feir_decision_core::hashx::sha256_prefixed;
 use feir_decision_core::record::seal;
 use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use feir_decision_core::verify::{
-    report_to_json, verify_bundle, verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
+    cnf_kid, cosig_approval_challenge, report_to_json, verify_bundle, verify_bundle_with, TrustLevel,
+    TrustedKey, VerifyOptions, VerifyReport,
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::path::PathBuf;
@@ -3692,6 +3693,250 @@ fn tier_b_two_phase_forged_outcome_does_not_complete() {
     assert!(!r.ok && r.issues.iter().any(|i| i.contains("use_outcome") && i.contains("not validatable")), "issues: {:?}", r.issues);
 }
 
+// ---- M6 (ADR 0005): Cosig / M-of-N grant approval (dual control at issuance) ----
+
+// a role-separated approver signing key (disjoint from rec/res/tsa seeds, which are 0/3/200).
+fn approver(seed: u8) -> SigningKey {
+    signing_key_from_seed(&[seed; 32])
+}
+
+// build a single_operation grant DECLARING cosig_threshold=M and carrying one cosignature per signer. Each
+// signer signs the real feir.broker.cosig.approval.v1 challenge (grant_id/its-kid/credential_binding/M/exp),
+// so the cosignatures are integrity-bound inside the signed grant_evidence (additive: an old verifier ignores
+// them and the evidence_hash still re-derives).
+fn cosigned_grant(rec: &SigningKey, threshold: i64, signers: &[&SigningKey]) -> CanonValue {
+    cosigned_grant_rid(rec, GID, threshold, signers)
+}
+
+// as above but with an explicit record_id, so two records can share one grant_id with distinct content_hash
+// (to exercise the F8 equivocation × cosig interaction). The cosig challenge always binds the grant_id (GID).
+fn cosigned_grant_rid(rec: &SigningKey, record_id: &str, threshold: i64, signers: &[&SigningKey]) -> CanonValue {
+    let cb = sha256_prefixed(b"test-credential-binding"); // the binding grant_evidence() embeds
+    let cosigs: Vec<CanonValue> = signers
+        .iter()
+        .map(|sk| {
+            let kid = cnf_kid(&sk.verifying_key());
+            let challenge = cosig_approval_challenge(GID, &kid, &cb, threshold, EXP);
+            let sig = feir_decision_core::b64::encode(&sk.sign(&challenge).to_bytes());
+            CanonValue::object(vec![
+                ("approver_kid".into(), CanonValue::string(kid)),
+                ("sig".into(), CanonValue::string(sig)),
+            ])
+            .unwrap()
+        })
+        .collect();
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let ge = change_field(&ge, "cosig_threshold", CanonValue::Int(threshold));
+    let ge = change_field(&ge, "cosignatures", CanonValue::Array(cosigs));
+    seal_grant(rec, rec, record_id, &ge)
+}
+
+#[test]
+fn tier_b_cosig_threshold_met_verifies() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (a1, a2) = (approver(40), approver(41));
+    let grant = cosigned_grant(&rec, 2, &[&a1, &a2]);
+    let gh = content_hash_of(&grant);
+    let use_rec = seal_use(&rec, &res, "use-1", &[gh], ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.cosig_approver_keys = vec![a1.verifying_key(), a2.verifying_key()];
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(r.ok, "a 2-of-2 cosigned grant must verify; issues: {:?}", r.issues);
+    assert_eq!(r.cosigned_grants_total, 1);
+    assert_eq!(r.cosigned_grants_satisfied, 1);
+    assert_eq!(r.cosig_threshold_failures, 0);
+    assert_eq!(r.cosig_status, "satisfied");
+    assert_eq!(r.uses_matched, 1, "the use joins the cosig-approved grant");
+    let json = report_to_json(&r);
+    for field in [
+        r#""cosigned_grants_total":1"#,
+        r#""cosigned_grants_satisfied":1"#,
+        r#""cosig_threshold_failures":0"#,
+        r#""cosig_status":"satisfied""#,
+    ] {
+        assert!(json.contains(field), "report JSON missing {field}: {json}");
+    }
+}
+
+#[test]
+fn tier_b_cosig_below_threshold_is_a_violation() {
+    // a 2-of-N grant with only ONE valid approver is NOT Tier-B-eligible: the grant is not indexed, so its
+    // use reads as an unmatched_violation (fail-closed).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (a1, a2) = (approver(40), approver(41));
+    let grant = cosigned_grant(&rec, 2, &[&a1]); // only one of two required approvers signed
+    let gh = content_hash_of(&grant);
+    let use_rec = seal_use(&rec, &res, "use-1", &[gh], ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.cosig_approver_keys = vec![a1.verifying_key(), a2.verifying_key()];
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a grant short of its cosig threshold must not verify");
+    assert_eq!(r.cosigned_grants_total, 1);
+    assert_eq!(r.cosigned_grants_satisfied, 0);
+    assert_eq!(r.cosig_threshold_failures, 1);
+    assert_eq!(r.cosig_status, "unsatisfied");
+    assert_eq!(r.uses_matched, 0, "the use cannot join an un-indexed grant");
+    assert!(r.unmatched_violation >= 1, "the use is an unmatched violation: {:?}", r.issues);
+    assert!(r.issues.iter().any(|i| i.contains("cosig threshold not met")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_cosig_duplicate_approver_counts_once() {
+    // one approver signing twice must NOT inflate a 2-of-N threshold (distinct-key dedup).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (a1, a2) = (approver(40), approver(41));
+    let grant = cosigned_grant(&rec, 2, &[&a1, &a1]); // a1 twice -> one distinct approver
+    let cp = checkpoint_over(&rec, &[content_hash_of(&grant)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.cosig_approver_keys = vec![a1.verifying_key(), a2.verifying_key()];
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "one approver signing twice must not satisfy a 2-of-N threshold");
+    assert_eq!(r.cosig_threshold_failures, 1, "no threshold inflation");
+    assert_eq!(r.cosigned_grants_satisfied, 0);
+    assert_eq!(r.cosig_status, "unsatisfied");
+}
+
+#[test]
+fn tier_b_cosig_forged_signature_does_not_count() {
+    // an entry claiming approver a1's kid but signed by a DIFFERENT key must not count (the kid only selects
+    // a candidate; acceptance still requires a real signature by that exact pinned key).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (a1, imposter) = (approver(40), approver(99));
+    let cb = sha256_prefixed(b"test-credential-binding");
+    let a1_kid = cnf_kid(&a1.verifying_key());
+    let challenge = cosig_approval_challenge(GID, &a1_kid, &cb, 1, EXP);
+    let forged_sig = feir_decision_core::b64::encode(&imposter.sign(&challenge).to_bytes());
+    let cosig = CanonValue::object(vec![
+        ("approver_kid".into(), CanonValue::string(a1_kid)),
+        ("sig".into(), CanonValue::string(forged_sig)),
+    ])
+    .unwrap();
+    let ge = change_field(
+        &change_field(&grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP), "cosig_threshold", CanonValue::Int(1)),
+        "cosignatures",
+        CanonValue::Array(vec![cosig]),
+    );
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&grant)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.cosig_approver_keys = vec![a1.verifying_key()];
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a forged cosignature must not satisfy the threshold");
+    assert_eq!(r.cosig_threshold_failures, 1);
+    assert_eq!(r.cosig_status, "unsatisfied");
+}
+
+#[test]
+fn tier_b_cosig_approver_overlapping_a_role_is_fatal() {
+    // an approver key that is ALSO the broker key collapses dual control to single control -> FATAL config
+    // error (the R2 disjointness extension), aborting before any record is evaluated.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = cosigned_grant(&rec, 1, &[&approver(40)]);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&grant)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.cosig_approver_keys = vec![rec.verifying_key()]; // == broker_authority_keys -> overlap
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "an approver key overlapping the broker role is a fatal config error");
+    assert!(
+        r.issues.iter().any(|i| i.contains("cosig_approver_keys") && i.contains("disjoint")),
+        "issues: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn tier_b_cosig_unpinned_approvers_fail_closed() {
+    // a validly-cosigned grant whose approver keys the verifier did NOT pin counts zero approvals -> the grant
+    // is not indexed (fail-closed: the governance keys must be pinned to trust the governance).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = cosigned_grant(&rec, 1, &[&approver(40)]);
+    let gh = content_hash_of(&grant);
+    let use_rec = seal_use(&rec, &res, "use-1", &[gh], ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()); // NO cosig_approver_keys
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a cosigned grant with no pinned approvers must fail closed");
+    assert_eq!(r.cosig_threshold_failures, 1);
+    assert_eq!(r.cosigned_grants_satisfied, 0);
+    assert_eq!(r.uses_matched, 0);
+}
+
+#[test]
+fn tier_b_cosig_cosignatures_without_threshold_fails_closed() {
+    // a grant carrying cosignatures but NO positive cosig_threshold is a malformed cosig declaration — it must
+    // NOT be silently demoted to an ordinary grant (which would lose dual control). Fail-closed: not indexed.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let a1 = approver(40);
+    let cb = sha256_prefixed(b"test-credential-binding");
+    let kid = cnf_kid(&a1.verifying_key());
+    // threshold=1 used only to forge a well-formed-looking cosignature; the grant_evidence omits the threshold.
+    let sig = feir_decision_core::b64::encode(&a1.sign(&cosig_approval_challenge(GID, &kid, &cb, 1, EXP)).to_bytes());
+    let cosig = CanonValue::object(vec![
+        ("approver_kid".into(), CanonValue::string(kid)),
+        ("sig".into(), CanonValue::string(sig)),
+    ])
+    .unwrap();
+    // grant_evidence with cosignatures but NO cosig_threshold field.
+    let ge = change_field(
+        &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP),
+        "cosignatures",
+        CanonValue::Array(vec![cosig]),
+    );
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let gh = content_hash_of(&grant);
+    let use_rec = seal_use(&rec, &res, "use-1", &[gh], ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.cosig_approver_keys = vec![a1.verifying_key()];
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "cosignatures without a positive threshold must fail closed");
+    assert_eq!(r.uses_matched, 0, "the malformed grant must not be indexed");
+    assert!(r.issues.iter().any(|i| i.contains("malformed cosig declaration")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_cosig_equivocating_sibling_is_still_rejected() {
+    // the F8-before-cosig ordering invariant: a grant_id bound to two distinct records — one cosig-FAILED, one
+    // cosig-SATISFIED — is still equivocation, so the bundle is rejected even though the satisfied sibling would
+    // otherwise index the grant. Locks the ordering so a future refactor can't open a fail-open here.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (a1, a2) = (approver(40), approver(41));
+    let g_fail = cosigned_grant_rid(&rec, "rec-A", 2, &[&a1]); // 1-of-2 -> fails the threshold
+    let g_ok = cosigned_grant_rid(&rec, "rec-B", 2, &[&a1, &a2]); // 2-of-2 -> satisfied
+    let mut frontier = vec![content_hash_of(&g_fail), content_hash_of(&g_ok)];
+    frontier.sort();
+    let cp = checkpoint_over(&rec, &frontier, 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g_fail, g_ok], vec![cp]);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.cosig_approver_keys = vec![a1.verifying_key(), a2.verifying_key()];
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "an equivocated cosigned grant_id must reject the bundle regardless of the satisfied sibling");
+    assert!(
+        r.issues.iter().any(|i| i.contains("equivocated credential identity")),
+        "issues: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn cosig_approval_challenge_golden_vector() {
+    // pin the cross-language wire format of the feir.broker.cosig.approval.v1 challenge so the Go producer
+    // (Piece 2) has a fixed target; a drift in either implementation breaks this against the same constant.
+    let cb = sha256_prefixed(b"test-credential-binding");
+    let digest = cosig_approval_challenge("grant-1", "ed25519-AgentKid0", &cb, 2, 1_718_449_200);
+    let hex = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    assert_eq!(hex, "e93a922c6417050a97335230292c4cd2f6a8dab9c476e9d41f6cfaf0f06b5fee", "cosig challenge digest drifted: {hex}");
+}
+
 // ---- D8: the attested_complete conjunctive capstone ----
 
 // a VerifyReport with EVERY capstone condition satisfied — start from a real verify result (real wiring),
@@ -3752,6 +3997,13 @@ fn tier_b_d8_each_condition_is_load_bearing() {
         // and flips ONLY the M1 counter, proving each is independently load-bearing in the capstone formula.
         ("bounded_reuse overspent (M1)", |r| r.bounded_reuse_overspent = 1),
         ("bounded_reuse seq replay (M1)", |r| r.bounded_reuse_seq_replays = 1),
+        // M6 (ADR 0005): the two cosig conjuncts. Like the M1 pair these are surfacing-redundant with
+        // unmatched_violation in a live verify (a short cosigned grant is un-indexed -> its use violates), but
+        // this synthetic report flips ONLY the cosig counter (unmatched_violation left 0) to prove each is
+        // independently load-bearing. The second mutator sets total=1/satisfied=0 with failures=0 to isolate
+        // the `satisfied==total` conjunct from the `failures==0` one.
+        ("cosig threshold failure (M6)", |r| r.cosig_threshold_failures = 1),
+        ("cosig not all satisfied (M6)", |r| { r.cosigned_grants_total = 1; r.cosigned_grants_satisfied = 0; }),
         // string-isolation: `unclosed` in a live verify ALSO forces !ok (covered e2e by
         // tier_b_t6_undeclared_touched_resource_is_unclosed); here we mutate ONLY the status on a synthetic
         // report (ok left true) to prove the capstone gate keys on `=="closed"` independently of `ok`.

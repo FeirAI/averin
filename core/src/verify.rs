@@ -118,6 +118,18 @@ pub struct VerifyReport {
     pub bounded_reuse_grants: usize,
     pub bounded_reuse_overspent: usize,
     pub bounded_reuse_seq_replays: usize,
+    /// M6 / ADR 0005 (Cosig — M-of-N grant approval / dual control at issuance). `cosigned_grants_total` =
+    /// closed, verified broker grants whose signed `grant_evidence.cosig_threshold >= 1` (they DECLARE a
+    /// cosig requirement); `cosigned_grants_satisfied` = those for which ≥ `cosig_threshold` DISTINCT pinned
+    /// `cosig_approver_keys` produced a valid `feir.broker.cosig.approval.v1` cosignature; `cosig_threshold_failures`
+    /// = cosigned grants that fell short (each is also NOT indexed → its use is an `unmatched_violation`, so
+    /// `!ok`; surfaced separately so the D8 capstone can require `== 0` self-documentingly). `cosig_status` ∈
+    /// {`absent` (no cosigned grants), `satisfied` (every cosigned grant met threshold), `unsatisfied` (≥1
+    /// short)}. The same approver key signing twice counts once (no threshold inflation).
+    pub cosigned_grants_total: usize,
+    pub cosigned_grants_satisfied: usize,
+    pub cosig_threshold_failures: usize,
+    pub cosig_status: String,
     /// Pinned operation-taxonomy ARTIFACT trust (ADR 0004 D4 / MF5), one of: `absent` (none pinned in
     /// opts), `untrusted` (unsigned / wrong issuer / pinned digest|version mismatch / no pin supplied /
     /// malformed), `stale` (signed + pinned but a listed action fell outside the effective interval for
@@ -255,6 +267,15 @@ pub struct VerifyOptions {
     /// broker/resource/taxonomy keys — enforced as a FATAL config error), so a broker cannot self-attest.
     /// Absent ⇒ `attestation_status` stays `unevaluated` (the attestation, if any, is not evaluated).
     pub attestation_keys: Vec<VerifyingKey>,
+    /// Trusted COSIGNATURE-APPROVER keys (ADR 0005 M6 — M-of-N grant approval / dual control). A grant
+    /// whose signed `grant_evidence.cosig_threshold >= 1` is Tier-B-eligible ONLY if at least that many
+    /// DISTINCT keys in this set produced a valid `feir.broker.cosig.approval.v1` cosignature over it;
+    /// otherwise the grant is NOT indexed (its use reads as `unmatched_violation`). Role-separated — a
+    /// FATAL config error on overlap with ANY other role (broker/resource/taxonomy/attestation/tsa) and
+    /// with the generic `authority_keys`, so an approver cannot self-approve via another hat. Absent ⇒ a
+    /// cosigned grant has zero countable approvers and is fail-closed (the governance keys must be pinned
+    /// to trust the governance).
+    pub cosig_approver_keys: Vec<VerifyingKey>,
 }
 
 struct KeyEntry {
@@ -650,6 +671,11 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("bounded_reuse_grants".into(), count(r.bounded_reuse_grants)),
         ("bounded_reuse_overspent".into(), count(r.bounded_reuse_overspent)),
         ("bounded_reuse_seq_replays".into(), count(r.bounded_reuse_seq_replays)),
+        // M6 (ADR 0005): cosig (M-of-N grant approval) accounting + the artifact-level status.
+        ("cosigned_grants_total".into(), count(r.cosigned_grants_total)),
+        ("cosigned_grants_satisfied".into(), count(r.cosigned_grants_satisfied)),
+        ("cosig_threshold_failures".into(), count(r.cosig_threshold_failures)),
+        ("cosig_status".into(), CanonValue::string(r.cosig_status.clone())),
         (
             "taxonomy_status".into(),
             CanonValue::string(r.taxonomy_status.clone()),
@@ -721,6 +747,11 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
                 // but kept explicit so the capstone's meaning is self-documenting over the N-Use surface.
                 && r.bounded_reuse_overspent == 0
                 && r.bounded_reuse_seq_replays == 0
+                // M6 (ADR 0005): every cosigned grant met its M-of-N approval threshold. A short cosigned
+                // grant is also NOT indexed (its use → unmatched_violation, so !ok), but the conjunct is kept
+                // explicit so the capstone self-documents that dual-control was satisfied over the surface.
+                && r.cosig_threshold_failures == 0
+                && (r.cosigned_grants_total == 0 || r.cosigned_grants_satisfied == r.cosigned_grants_total)
                 // T6: the brokered surface stayed within the operator's AFFIRMATIVELY-declared side-effect
                 // closure. This is load-bearing beyond `r.ok`: an `unclosed` surface already forces `!ok`, but
                 // a `not_declared` manifest (no closure asserted) does NOT — so without this conjunct an
@@ -841,6 +872,12 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
+    // M6 (ADR 0005): pinned cosignature-approver keys, so the JSON/FFI path (the Go server + any external
+    // auditor) can enforce M-of-N grant approval, not just the direct Rust API.
+    let cosig_approver_keys = match parse_pubkeys(&opts_val, "cosig_approver_keys") {
+        Ok(k) => k,
+        Err(e) => return error_report(&e),
+    };
     let mut opts = VerifyOptions {
         trusted_authority_keys: authority,
         broker_authority_keys: broker_authority,
@@ -852,6 +889,7 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         trusted_tsa_keys: tsa_keys,
         trusted_tsa_spki: tsa_spki,
         attestation_keys,
+        cosig_approver_keys,
         ..Default::default()
     };
     if !signing.is_empty() {
@@ -945,6 +983,10 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         bounded_reuse_grants: 0,
         bounded_reuse_overspent: 0,
         bounded_reuse_seq_replays: 0,
+        cosigned_grants_total: 0,
+        cosigned_grants_satisfied: 0,
+        cosig_threshold_failures: 0,
+        cosig_status: "absent".to_string(),
         taxonomy_status: "absent".to_string(),
         broker_trust: "assumed".to_string(),
         cred_label_checks: 0,
@@ -1076,6 +1118,99 @@ pub fn use_pop_challenge(
         pre.extend_from_slice(part.as_bytes());
     }
     crate::hashx::sha256(&pre)
+}
+
+/// Re-derive the cosignature-approval challenge an approver signs (ADR 0005 M6), byte-identically to the
+/// Go producer: `sha256( LP4(tag) ‖ LP4(grant_id) ‖ LP4(approver_kid) ‖ LP4(credential_binding) ‖
+/// BE8(threshold_m) ‖ BE8(exp) )`, tag = "feir.broker.cosig.approval.v1". Binding `approver_kid` makes an
+/// approval non-transferable to a different approver; binding `credential_binding` + `threshold_m` + `exp`
+/// makes it non-replayable onto a re-minted grant, a different threshold, or a different expiry. Returns the
+/// 32-byte digest the approver signs (raw, like `use_pop_challenge`). Kept in sync with Go via the shared
+/// golden vector `spec/golden-vectors/broker-preimages.json`.
+pub fn cosig_approval_challenge(
+    grant_id: &str,
+    approver_kid: &str,
+    credential_binding: &str,
+    threshold_m: i64,
+    exp: i64,
+) -> [u8; 32] {
+    let mut pre = Vec::new();
+    for part in [
+        "feir.broker.cosig.approval.v1",
+        grant_id,
+        approver_kid,
+        credential_binding,
+    ] {
+        pre.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        pre.extend_from_slice(part.as_bytes());
+    }
+    pre.extend_from_slice(&(threshold_m as u64).to_be_bytes());
+    pre.extend_from_slice(&(exp as u64).to_be_bytes());
+    crate::hashx::sha256(&pre)
+}
+
+/// The `grant_evidence.cosignatures[]` array of a broker record, if present (ADR 0005 M6). Borrowed from the
+/// record's signed payload (integrity-bound), so a reader cannot strip/add entries without breaking the seal.
+fn cosignatures_of(rec: &CanonValue) -> Option<&Vec<CanonValue>> {
+    rec.get("extensions")
+        .and_then(|e| e.get("broker"))
+        .and_then(|b| b.get("grant_evidence"))
+        .and_then(|g| g.get("cosignatures"))
+        .and_then(|v| v.as_array())
+}
+
+/// M6 (ADR 0005): count the DISTINCT pinned approver keys that produced a valid cosignature over this grant.
+/// Each entry in the signed `grant_evidence.cosignatures[]` is `{approver_kid, sig}` (`sig` a base64url-no-pad
+/// 64-byte Ed25519 signature, like `use_sig`). For each entry the verifier selects the pinned approver key
+/// whose `cnf_kid` equals the entry's claimed `approver_kid`, rebuilds the per-approver challenge, and verifies
+/// the sig under THAT key — so the claimed kid only *selects* a candidate; acceptance still requires a real
+/// signature by that exact pinned key over a challenge bound to that exact kid. Distinct approver kids are
+/// deduped (one approver signing twice counts once — no threshold inflation); an entry whose kid matches no
+/// pinned key, whose sig is malformed, or whose sig fails verification is ignored (never counted).
+fn count_cosig_approvals(
+    rec: &CanonValue,
+    grant_id: &str,
+    credential_binding: &str,
+    threshold_m: i64,
+    exp: i64,
+    approver_keys: &[VerifyingKey],
+) -> usize {
+    let cosignatures = match cosignatures_of(rec) {
+        Some(a) => a,
+        None => return 0,
+    };
+    // kid -> pinned approver key (raw-bytes identity; cnf_kid is a deterministic function of the key, so a
+    // distinct kid is a distinct key modulo a negligible 64-bit collision in an operator's own pin set).
+    let pinned: BTreeMap<String, &VerifyingKey> =
+        approver_keys.iter().map(|vk| (cnf_kid(vk), vk)).collect();
+    let mut credited: BTreeSet<String> = BTreeSet::new();
+    for cs in cosignatures {
+        let kid = match cs.get("approver_kid").and_then(|v| v.as_str()) {
+            Some(k) => k,
+            None => continue,
+        };
+        if credited.contains(kid) {
+            continue; // this approver is already credited (dedup — no double counting)
+        }
+        let vk = match pinned.get(kid) {
+            Some(vk) => *vk,
+            None => continue, // not a pinned approver -> never counts
+        };
+        let sig_str = match cs.get("sig").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let sig_bytes = match crate::b64::decode_fixed::<64>(sig_str) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let signature = Signature::from_bytes(&sig_bytes);
+        let challenge = cosig_approval_challenge(grant_id, kid, credential_binding, threshold_m, exp);
+        if vk.verify_strict(&challenge, &signature).is_ok() {
+            credited.insert(kid.to_string());
+        }
+    }
+    credited.len()
 }
 
 /// Re-derive the cnf key id (Go `broker.KeyID`): `"ed25519-" + base64url-nopad(sha256(pubkey)[..8])`.
@@ -1644,7 +1779,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // use. This is a FATAL configuration error — abort before evaluating any record (VerifyingKey
     // equality is raw-bytes, which also settles the derived key id). Never proceed on an ambiguous
     // key universe.
-    let role_sets: [(&str, &[VerifyingKey]); 5] = [
+    let role_sets: [(&str, &[VerifyingKey]); 6] = [
         ("broker_authority_keys", &opts.broker_authority_keys),
         ("resource_authority_keys", &opts.resource_authority_keys),
         ("taxonomy_keys", &opts.taxonomy_keys),
@@ -1655,6 +1790,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // the TSA and an authority (broker/resource/taxonomy/attestation) could self-mint a timestamp inside
         // its own window, so the time authority must be disjoint from every signing role too.
         ("trusted_tsa_keys", &opts.trusted_tsa_keys),
+        // M6 (ADR 0005): a cosignature approver must be disjoint from the broker it governs and from every
+        // other role — else an approver who is also the broker/resource/taxonomy/attestation/TSA signer
+        // could self-approve a grant (dual control collapses to single control).
+        ("cosig_approver_keys", &opts.cosig_approver_keys),
     ];
     for i in 0..role_sets.len() {
         for j in (i + 1)..role_sets.len() {
@@ -1680,6 +1819,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         ("taxonomy_keys", &opts.taxonomy_keys),
         ("attestation_keys", &opts.attestation_keys),
         ("trusted_tsa_keys", &opts.trusted_tsa_keys),
+        // M6: an approver key must not also elevate a generic record's authority to `verified`.
+        ("cosig_approver_keys", &opts.cosig_approver_keys),
     ] {
         if opts.trusted_authority_keys.iter().any(|k| set.contains(k)) {
             return fatal_config_report(
@@ -2231,6 +2372,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // the forged-distinct-record_id, no-D6-head case (which would otherwise first-wins-collapse silently).
     let mut grant_content_seen: BTreeMap<String, String> = BTreeMap::new();
     let mut grant_equivocations: BTreeSet<String> = BTreeSet::new();
+    // M6 (ADR 0005): cosig (M-of-N grant approval) accounting. A grant declaring grant_evidence.cosig_threshold
+    // >= 1 must carry >= M distinct valid approver cosignatures or it is NOT indexed (gated below). Counts are
+    // deduped per grant_id via `cosig_seen` so an equivocating/duplicate record cannot inflate them.
+    let mut cosigned_grants_total = 0usize;
+    let mut cosigned_grants_satisfied = 0usize;
+    let mut cosig_threshold_failures = 0usize;
+    let mut cosig_seen: BTreeSet<String> = BTreeSet::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         let qualifies = rt.broker_role == BrokerRole::Broker.as_str()
@@ -2295,6 +2443,51 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         grant_content_seen.insert(gid.clone(), rt.content_hash.clone());
                     }
                     _ => {}
+                }
+                // M6 (ADR 0005): cosig gate. A grant declaring grant_evidence.cosig_threshold >= 1 must carry
+                // >= M DISTINCT approver cosignatures verifying under the pinned cosig_approver_keys; otherwise
+                // it is NOT Tier-B-eligible (not indexed → a use against it reads as unmatched_violation). The
+                // counts are deduped per grant_id (cosig_seen), but the `continue` gate ALWAYS applies — so a
+                // duplicate of an already-counted, cosig-failed grant is never silently indexed.
+                let cosig_threshold = ev_int(rec, "grant_evidence", "cosig_threshold").unwrap_or(0);
+                // A grant carrying cosignatures but NO positive cosig_threshold is a malformed/ambiguous cosig
+                // declaration — fail-closed (NOT indexed) rather than silently demoted to an ordinary grant, so
+                // a producer that emits approvals but forgets the threshold cannot quietly lose dual control.
+                // Both fields live inside the SIGNED grant_evidence, so this fires on a producer mistake, never
+                // on a stripped field (stripping breaks evidence_rederivable). Threshold absent AND no
+                // cosignatures => an ordinary grant, unaffected (additive).
+                if cosig_threshold < 1 && cosignatures_of(rec).is_some_and(|a| !a.is_empty()) {
+                    issues.push(format!(
+                        "grant {} ({}): carries cosignatures but no positive cosig_threshold — malformed cosig declaration (M6 fail-closed)",
+                        rt.index, rt.record_id
+                    ));
+                    continue;
+                }
+                if cosig_threshold >= 1 {
+                    let approvals = count_cosig_approvals(
+                        rec,
+                        &gid,
+                        &credential_binding,
+                        cosig_threshold,
+                        exp,
+                        &opts.cosig_approver_keys,
+                    );
+                    let satisfied = approvals >= cosig_threshold as usize;
+                    if cosig_seen.insert(gid.clone()) {
+                        cosigned_grants_total += 1;
+                        if satisfied {
+                            cosigned_grants_satisfied += 1;
+                        } else {
+                            cosig_threshold_failures += 1;
+                            issues.push(format!(
+                                "grant {} ({}): cosig threshold not met — {approvals} of {cosig_threshold} required approver signatures verified under pinned cosig_approver_keys — not Tier-B-eligible (M6)",
+                                rt.index, rt.record_id
+                            ));
+                        }
+                    }
+                    if !satisfied {
+                        continue; // fail-closed: do not index a grant that did not meet its approval threshold
+                    }
                 }
                 grants_by_id.entry(gid).or_insert(GrantInfo {
                     action,
@@ -2762,6 +2955,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         .filter(|g| g.scope_class == "bounded_reuse")
         .count();
 
+    // M6 (ADR 0005): cosig artifact status. `absent` (no grant declared a cosig requirement) | `satisfied`
+    // (every cosigned grant met its threshold) | `unsatisfied` (≥1 fell short — each is also a hard violation).
+    let cosig_status = if cosigned_grants_total == 0 {
+        "absent"
+    } else if cosig_threshold_failures == 0 && cosigned_grants_satisfied == cosigned_grants_total {
+        "satisfied"
+    } else {
+        "unsatisfied"
+    }
+    .to_string();
+
     // D4/MF5 taxonomy_status: absent (none pinned) | untrusted (bad sig/issuer/pin) | stale (signed +
     // pinned but a listed action was out of its effective window) | validated (signed, pinned, in-window).
     let taxonomy_status = match (&opts.taxonomy, &taxonomy_info) {
@@ -2898,6 +3102,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         bounded_reuse_grants,
         bounded_reuse_overspent,
         bounded_reuse_seq_replays,
+        cosigned_grants_total,
+        cosigned_grants_satisfied,
+        cosig_threshold_failures,
+        cosig_status,
         taxonomy_status: taxonomy_status.to_string(),
         broker_trust,
         cred_label_checks,
