@@ -127,6 +127,75 @@ func TestSSESecretSplitAcrossChunksIsScrubbed(t *testing.T) {
 	}
 }
 
+// #7 (Partial SSE stream): a capture that is truncated at the buffer cap is sealed as a VISIBLE gap
+// — event_type/status "incomplete", never a clean "llm_call" — while the client still receives the
+// full upstream body. This drives the `captured.truncated` trigger of the incomplete-sealing path.
+func TestTruncatedResponseSealedAsIncomplete(t *testing.T) {
+	big := strings.Repeat("A", (512<<10)+4096) // exceeds maxCapture (512 KiB) -> captured.truncated
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"` + big + `"}}]}`))
+	}))
+	defer upstream.Close()
+
+	rec := newStub()
+	srv := httptest.NewServer(New(upstream.URL, "p1", rec).Handler())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"gpt-4o"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if len(out) < 512<<10 {
+		t.Fatalf("client must still receive the FULL body, got only %d bytes", len(out))
+	}
+
+	rec.wait(t, 1)
+	r := rec.records[0]
+	if r["event_type"] != "incomplete" || r["status"] != "incomplete" {
+		t.Fatalf("a truncated capture must seal as incomplete, got event_type=%v status=%v", r["event_type"], r["status"])
+	}
+}
+
+// #7: a stream that drops mid-body (copyErr != nil) is likewise sealed as incomplete. The upstream
+// promises a Content-Length, delivers a partial body, then slams the connection shut so the proxy's
+// io.Copy returns an error during the stream.
+func TestStreamErrorSealedAsIncomplete(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("upstream needs hijack support")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Promise 50000 bytes but deliver a few, then abort — the proxy's io.Copy gets an unexpected EOF.
+		io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 50000\r\n\r\n")
+		io.WriteString(conn, `{"choices":[{"message":{"content":"partial`)
+		conn.Close()
+	}))
+	defer upstream.Close()
+
+	rec := newStub()
+	srv := httptest.NewServer(New(upstream.URL, "p1", rec).Handler())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"gpt-4o"}`))
+	if err == nil {
+		io.ReadAll(resp.Body) // the body read errors mid-stream; we don't assert on it
+		resp.Body.Close()
+	}
+
+	rec.wait(t, 1)
+	r := rec.records[0]
+	if r["event_type"] != "incomplete" || r["status"] != "incomplete" {
+		t.Fatalf("a mid-stream error must seal as incomplete, got event_type=%v status=%v", r["event_type"], r["status"])
+	}
+}
+
 func TestNonCompletionPathForwardedButNotRecorded(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"data":[]}`))
