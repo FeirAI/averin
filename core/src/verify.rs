@@ -2224,6 +2224,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // signed+pinned taxonomy marks ESCALATING). Rejected here, NOT only when exercised, so a dangerous
     // capability is visible even with no use receipt; a use against one is then skipped (single violation).
     let mut misscoped: BTreeSet<String> = BTreeSet::new();
+    // F8: a grant_id is ONE credential identity. Flag two distinct grant records (distinct content_hash)
+    // sharing one grant_id as broker equivocation ALWAYS — like the duplicate-record_id check, NOT only
+    // under D6 (compute_broker_trust's D6.4 injectivity guard covers the D6-active case). Honest producers
+    // emit record_id == grant_id so the duplicate-record_id guard already catches a collision; this adds
+    // the forged-distinct-record_id, no-D6-head case (which would otherwise first-wins-collapse silently).
+    let mut grant_content_seen: BTreeMap<String, String> = BTreeMap::new();
+    let mut grant_equivocations: BTreeSet<String> = BTreeSet::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         let qualifies = rt.broker_role == BrokerRole::Broker.as_str()
@@ -2272,6 +2279,22 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         "grant {} ({}): claims {scope_class} for action '{action}' on '{resource_id}' which the taxonomy marks escalating — mis-scoped (D4)",
                         rt.index, rt.record_id
                     ));
+                }
+                // F8: grant_id injectivity (always-on). A second DISTINCT content_hash under one grant_id is
+                // equivocation; flag once per grant_id. (A byte-identical duplicate record is benign.)
+                match grant_content_seen.get(&gid) {
+                    Some(prev) if prev != &rt.content_hash => {
+                        if grant_equivocations.insert(gid.clone()) {
+                            issues.push(format!(
+                                "grant_id {gid}: two distinct grant records ({prev}, {}) share one grant_id — equivocated credential identity",
+                                rt.content_hash
+                            ));
+                        }
+                    }
+                    None => {
+                        grant_content_seen.insert(gid.clone(), rt.content_hash.clone());
+                    }
+                    _ => {}
                 }
                 grants_by_id.entry(gid).or_insert(GrantInfo {
                     action,

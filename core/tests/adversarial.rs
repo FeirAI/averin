@@ -1243,6 +1243,31 @@ fn tier_b_use_matches_closed_grant() {
     }
 }
 
+#[test]
+fn tier_b_grant_id_equivocation_without_d6_is_a_violation() {
+    // F8: a grant_id bound to two distinct grant records (distinct content_hash via distinct record_ids)
+    // is broker equivocation flagged ALWAYS — even with NO D6 head (broker_trust only 'assumed'), so a
+    // forged collision is surfaced rather than silently first-wins-collapsed. The honest producer emits
+    // record_id == grant_id, so this covers the forged-distinct-record_id case the duplicate-record_id
+    // guard misses.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let g1 = seal_grant(&rec, &rec, "rec-A", &ge); // distinct record_ids -> distinct content_hash, one grant_id
+    let g2 = seal_grant(&rec, &rec, "rec-B", &ge);
+    let mut frontier = vec![content_hash_of(&g1), content_hash_of(&g2)];
+    frontier.sort();
+    let cp = checkpoint_over(&rec, &frontier, 2, Some(&tsa)); // NO broker_grant_head -> no D6
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![g1, g2], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a grant_id collision must fail the bundle even without D6");
+    assert_eq!(r.broker_trust, "assumed", "no head -> assumed (the F8 flag is independent of D6)");
+    assert!(
+        r.issues.iter().any(|i| i.contains("equivocated credential identity")),
+        "issues: {:?}",
+        r.issues
+    );
+}
+
 // ---- M1 (ADR 0005): bounded_reuse / N-Use ----
 
 // build a bounded_reuse grant capped at `n` uses of the standard (ACTION, RESOURCE).
