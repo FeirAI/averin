@@ -361,7 +361,9 @@ authoritative); the descriptor reuses the `input` commit domain.
 
 **Deferred past the demonstrator:** token-exchange/native-credential mode with introspection
 transcripts, full delegation-policy engine, TEE/measured-boot attestation ingestion + evaluator,
-revocation lists, multi-broker federation.
+revocation lists, multi-broker federation. *[STAGED in ADR 0005, which specifies all six modes; the
+N-Use (`bounded_reuse`) mode of that ADR is now IMPLEMENTED end-to-end (ADR 0005 §M1), the other five
+remain design-only.]*
 
 ## Honest non-goals (state, don't hide)
 
@@ -434,6 +436,10 @@ Round-2 review: 7/9 rev-1 findings RESOLVED; 2 PARTIAL + 5 new, all incorporated
 2. **Single-use vs. throughput.** Per-operation credentials maximize action↔grant tightness but cap
    agent throughput at broker round-trip latency. Is a bounded short-TTL multi-use credential (N uses
    within Δ, each emitting a use record) an acceptable Tier-B point, or does it reopen B3?
+   *[RESOLVED + IMPLEMENTED in ADR 0005 §M1: yes, as the `bounded_reuse` scope class — N uses of the
+   identical `(action, resource_id)`, each two-phase + PoP-reverified, deduped per `(grant_id,
+   use_sequence_number)`. Tier-B-eligible (action↔grant tightness preserved); reopens a bounded,
+   labeled slice of B3 (reuse within one window). Shipped `fbab33c`/`a5877c6`.]*
 3. **Resource introspection trust.** Token-exchange binding relies on the resource's signed
    introspection transcript — does that just move the TCB to the resource, and is that better or worse
    than trusting the broker?

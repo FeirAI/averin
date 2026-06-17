@@ -13,6 +13,7 @@ boundary between "feir ships this" and "your deployment provides this."
 | 3. Multi-instance `broker_seq` lock (D6) | per-project `pg_advisory_xact_lock` for seq | shared Postgres + ingest-path distributed lock | **Seq-lock done; ingest-lock design** |
 | 4. TEE/remote-attestation enforcement (D7) | signed `deployment_attestation` claim | TEE hardware + attestation service + quote-verify lib | **Assertion today; hardware-root design** |
 | 5. git remote + push | clean tree, `.gitignore` hardened | remote URL + push credentials | **Repo push-ready; operator action** |
+| 6. Durable consume-before-act ledger (R5) | Postgres-backed `internal/pgledger` (auto-injected when `FEIR_DATABASE_URL` is set) | shared Postgres | **Done** — survives restart + serializes across instances (`a9c4b9c`) |
 
 ---
 

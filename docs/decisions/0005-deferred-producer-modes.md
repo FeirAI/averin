@@ -16,6 +16,10 @@ files, and no behavior change ship with this ADR.** Following ADR 0004's rule, e
 it proves *cryptographically* versus what stays *TCB* (`resource_trust: assumed_truthful`), and the D8
 conjunction only ever gets MORE restrictive (or gains an explicit, weaker, labeled tier) — never looser.
 
+> **Implementation status (updated):** **M1 (`bounded_reuse`/N-Use) has since been built end-to-end** —
+> see its §M1 status note. M2–M6 remain design-only staging maps. The ADR 0002 amendments §9 prescribes
+> "to apply alongside the first implementation" are now applied (M1 was that first implementation).
+
 The design was pressure-tested against the live verifier (`core/src/verify.rs`) and producer
 (`server/internal/broker`, `server/internal/api`, `server/internal/resourceshim`). Where a mode stresses or
 breaks an existing invariant, the exact reconciliation is given.
@@ -61,6 +65,17 @@ Each subsection mirrors the ADR 0004 D-series shape: *Mechanism → Schema delta
 Capstone → Signature domain → Residual*.
 
 ### M1 — N-Use (`bounded_reuse`) — resolves ADR 0002 Q2
+
+> **Status: IMPLEMENTED end-to-end** (verifier semantics `fbab33c`, Go producer + D6.4 `use_limit`
+> cross-check `a5877c6`). This is the first ADR-0005 mode to ship; the design below is live. The other
+> five modes (M2–M6) remain design-only staging maps. Live surface: `POST /v2/grants` accepts
+> `scope_class:"bounded_reuse"` + `use_limit:N`; `POST /v2/use[-intent]` accepts `use_sequence_number`;
+> the verifier enforces the per-class branch + `(grant_id, usn)` dedup + the two capstone conjuncts; the
+> resource shim keys its consume-before-act ledger on `(grant_id, usn)`. Tested: Rust adversarial
+> (within-cap / overspend / seq-replay / no-`use_limit`-fail-closed) + Go e2e (incl. the capstone over an
+> N-Use credential). One honest residual, documented in `verify.rs`: the descriptor↔grant_evidence
+> `use_limit` equality is verified only under credential-descriptor disclosure (the standard D6.4
+> broker-TCB residual), but the evidence-plane cap is `grant_evidence.use_limit`, enforced fail-closed.
 
 - **Mechanism.** A fourth `ScopeClass` `bounded_reuse` (alongside `single_operation`/`session_grant`/
   `batch_grant`). The grant fixes `(action, resource_id)` and a cap `N`; the credential is `single_use:false`
