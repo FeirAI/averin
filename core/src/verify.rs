@@ -1377,6 +1377,37 @@ pub fn revocation_leaf(grant_id: &str) -> [u8; 32] {
     crate::hashx::sha256(&pre)
 }
 
+/// M5 Merkle-non-disclosure (ADR 0005): the canonical Merkle ROOT (`sha256:<hex>`) the revocation authority
+/// signs, over the SORTED, sentinel-bracketed set of `revocation_leaf(grant_id)` values. A PRODUCER reference
+/// (the verifier checks proofs against the SIGNED root, never recomputing the whole tree) — kept in sync with
+/// the Go producer via the shared golden vector. Leaves = `[MIN(0x00*32)] ++ sorted(leaf hashes) ++ [MAX(0xff*32)]`;
+/// the tree folds RFC6962-style (`merkle_leaf_hash` for the 0x00 leaves, `merkle_node_hash` for 0x01 nodes, an
+/// odd level promotes its last node).
+pub fn revocation_merkle_root(revoked: &[&str]) -> String {
+    let mut hs: Vec<[u8; 32]> = revoked.iter().map(|g| revocation_leaf(g)).collect();
+    hs.sort();
+    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(hs.len() + 2);
+    leaves.push([0u8; 32]);
+    leaves.extend(hs);
+    leaves.push([0xffu8; 32]);
+    let mut level: Vec<[u8; 32]> = leaves.iter().map(merkle_leaf_hash).collect();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut i = 0;
+        while i < level.len() {
+            if i + 1 < level.len() {
+                next.push(merkle_node_hash(&level[i], &level[i + 1]));
+                i += 2;
+            } else {
+                next.push(level[i]); // promote the last (odd) node
+                i += 1;
+            }
+        }
+        level = next;
+    }
+    format!("sha256:{}", crate::hashx::hex_lower(&level[0]))
+}
+
 /// RFC6962-style domain-separated Merkle LEAF hash: `sha256( 0x00 ‖ leaf_value )`. The 0x00 prefix separates
 /// leaves from internal nodes so a leaf hash can never be reinterpreted as an interior node (a second-preimage
 /// guard standard to transparency logs).

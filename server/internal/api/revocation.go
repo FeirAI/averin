@@ -42,3 +42,29 @@ func BuildRevocationList(canon Sealer, revKey ed25519.PrivateKey, issuedAt, notA
 	body["sig"] = signTagged("feir.revocation.v1", digest, revKey)
 	return body, nil
 }
+
+// BuildRevocationMerkleRoot constructs a signed revocation_merkle_root (ADR 0005 M5 Merkle-non-disclosure) — a
+// commitment to the SORTED revoked-grant set that does NOT disclose it. The `sig` (domain
+// feir.broker.revocation.merkleroot.v1) is ed25519 over sha256(RCP-canonical(root object minus sig)), exactly
+// mirroring BuildRevocationList; the verifier recomputes the identical digest and then checks each use's
+// per-grant proof (broker.RevocationTree.NonMembershipProof / MembershipProof) against the committed `root`.
+func BuildRevocationMerkleRoot(canon Sealer, revKey ed25519.PrivateKey, issuedAt, notAfter string, tree *broker.RevocationTree) (map[string]any, error) {
+	body := map[string]any{
+		"issuer_kid": broker.KeyID(revKey.Public().(ed25519.PublicKey)),
+		"issued_at":  issuedAt,
+		"not_after":  notAfter,
+		"leaf_count": tree.LeafCount(),
+		"root":       tree.RootHex(),
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal revocation_merkle_root: %w", err)
+	}
+	// digest = sha256(RCP-canonical(root minus sig)) — exactly what the verifier recomputes.
+	digest, err := canon.RcpEvidenceHash(string(bodyJSON))
+	if err != nil {
+		return nil, fmt.Errorf("revocation_merkle_root digest: %w", err)
+	}
+	body["sig"] = signTagged("feir.broker.revocation.merkleroot.v1", digest, revKey)
+	return body, nil
+}

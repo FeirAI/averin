@@ -33,9 +33,11 @@ conjunction only ever gets MORE restrictive (or gains an explicit, weaker, label
 > capability), and `POST /v2/introspection` records the resource-signed transcript (the resource signs the
 > `feir.resource.introspection.v1` challenge with its raw key). Operator readiness: `feir-verify bundle b.json
 > opts.json` pins the role-disjoint key sets (authentic verification + every mode gate) and surfaces all mode
-> statuses; `docs/operator-verification.md` is the operator guide. **Still deferred (clearly labeled, optional):**
-> the Merkle-non-disclosure revocation mode. (M4's optional `cross_broker_cert` transitive-trust tier —
-> `feir.broker.federation.cert.v1` + shared golden vector + FFI e2e — is now implemented; see §M4.)
+> statuses; `docs/operator-verification.md` is the operator guide. **All six modes + both optional tiers are now
+> implemented** — M4's `cross_broker_cert` transitive trust (`feir.broker.federation.cert.v1`; see §M4) and M5's
+> Merkle-non-disclosure revocation (`feir.broker.revocation.merkleroot.v1`; see §M5), each two-piece +
+> triple-reviewed with a shared golden vector + Go→Rust FFI e2e. The only remaining deferral is the OPT-IN online
+> CRL (`online_crl_url`), a network feature outside the offline-verifier surface.
 
 The design was pressure-tested against the live verifier (`core/src/verify.rs`) and producer
 (`server/internal/broker`, `server/internal/api`, `server/internal/resourceshim`). Where a mode stresses or
@@ -303,10 +305,23 @@ Capstone → Signature domain → Residual*.
 > `absent` is the honest baseline. Go producer `56f8b1d`: `api.BuildRevocationList` + an FFI e2e where a
 > Go-built list spliced into a real anchored grant+use bundle blocks the revoked use under the Rust verifier.
 > Tested: Rust adversarial (fresh-no-match / fresh-blocks-revoked / stale / forged-sig / role-overlap-fatal) +
-> Go e2e. **Deferred:** the opt-in online CRL (`online_crl_url` → `online_fresh`) and the Merkle-root
-> NON-disclosure mode (per-use proofs without disclosing the full list — today the full `revoked_grant_ids` are
-> disclosed + sig-covered). **Residual (ADR floor):** an offline verifier cannot know of a revocation never
-> delivered in a fresh list — surfaced via `revocation_status`, never silently passed.
+> Go e2e.
+>
+> **UPDATE — Merkle-non-disclosure mode implemented.** A top-level signed `revocation_merkle_root` (domain
+> `feir.broker.revocation.merkleroot.v1`, same canonical-minus-sig + freshness discipline as the disclosed list)
+> commits to the SORTED, sentinel-bracketed set of `revocation_leaf(grant_id)` hashes WITHOUT disclosing it. Each
+> Tier-B use carries a per-grant proof in a top-level `revocation_proofs` map: a NON-membership proof (two
+> consecutive sorted leaves strictly bracketing the grant's leaf, both authenticating to the signed root via an
+> RFC6962 audit path) lets the use proceed; a MEMBERSHIP proof blocks it; a missing/forged proof is FAIL-CLOSED
+> (the set is hidden, so silence ≠ safe). Soundness: when a grant's leaf is genuinely present, NO consecutive
+> pair can strictly bracket it — so a revoked grant's use can never be laundered (Opus brute-forced thousands of
+> random sorted trees: zero forgeries). Two-piece, TRIPLE-reviewed (finder + Opus + GLM, SHIP); report fields
+> `revocation_merkle_status` + `revocation_nonmembership_verified`; a stale root blocks the capstone like a stale
+> list. 8 Rust adversarial tests + a shared `revocation_leaf`/`revocation_merkle_root` golden vector (Go ↔ Rust
+> byte-identical) + a Go→Rust FFI e2e (non-membership proceeds, membership blocks, missing-proof fail-closed).
+> **Still deferred:** only the opt-in online CRL (`online_crl_url` → `online_fresh`). **Residual (ADR floor):** an
+> offline verifier cannot know of a revocation never delivered in a fresh list/root — surfaced via
+> `revocation_status`/`revocation_merkle_status`, never silently passed.
 
 - **Mechanism.** A new top-level bundle object `revocation_list` — signed, time-bounded, carrying a Merkle root
   of revoked `grant_id`s — pinned under a new role key set `revocation_keys`. A use of a revoked grant inside

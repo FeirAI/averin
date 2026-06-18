@@ -187,5 +187,47 @@
       "not_after": -9223372036854775808,
       "expect_hex": "26aced645332567b0f9d51bc112dc22d5a7a69776beca706446931ac32cf1f98"
     }
+  ],
+  "revocation_leaf": [
+    {
+      "_note": "ADR 0005 M5 Merkle-non-disclosure: the leaf VALUE for a grant_id = sha256(LP4(tag) ‖ LP4(grant_id)). expect_hex is the raw 32-byte hash (NOT 0x00-prefixed — that hashing happens inside the tree).",
+      "name": "ascii",
+      "grant_id": "grant-001",
+      "expect_hex": "d82024d002e8ca2d3adf478b3483a08691bddf8457ef1e1d583f529527f01f62"
+    },
+    {
+      "name": "multibyte-utf8",
+      "grant_id": "資格-証明-é",
+      "expect_hex": "304acd3cbf9b1fb28c81d64da104f64fd9b7572368726897107eb9e9770c15cc"
+    },
+    {
+      "name": "single-char",
+      "grant_id": "g",
+      "expect_hex": "6746a7385acc0c8a76b97dea027c10576bb79dfc119b44986fd651c2a296a4f0"
+    }
+  ],
+  "revocation_merkle_root": [
+    {
+      "_note": "the full SORTED, sentinel-bracketed RFC6962 tree root (sha256:<hex>) over a revoked set. Pins the whole fold: leaf 0x00 / node 0x01 / odd-promote / MIN(0x00*32)+MAX(0xff*32) sentinels. The empty set is just the two sentinels.",
+      "name": "empty",
+      "revoked": [],
+      "expect": "sha256:3a954786471ff29dd55023366c821134de742bcdcaa7544d9c6988e812e3b6bd"
+    },
+    {
+      "name": "single",
+      "revoked": ["grant-001"],
+      "expect": "sha256:1fb8f3484420de97262129bde8fc70c855ef3c727f64c953670a4e3300ddf1c3"
+    },
+    {
+      "name": "three",
+      "revoked": ["grant-001", "grant-002", "grant-003"],
+      "expect": "sha256:12ecd84343ebea0a7e928937e8a869617fc9cd82a1908e67fe30a1b36ef0d0cd"
+    },
+    {
+      "_note": "an UNSORTED input — the producer sorts by leaf-hash byte order before folding, so the root is order-independent (this pins that both languages sort identically).",
+      "name": "unsorted-four",
+      "revoked": ["zzz", "aaa", "mmm", "ggg"],
+      "expect": "sha256:56b0af74678c1697895a25e809232c882f5b23e8b0960b00e7d643bed9466c9b"
+    }
   ]
 }

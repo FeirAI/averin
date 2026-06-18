@@ -4087,6 +4087,35 @@ fn federation_cert_challenge_golden_vector() {
     }
 }
 
+#[test]
+fn revocation_leaf_and_merkle_root_golden_vector() {
+    // Cross-language pinned vectors from the SHARED file — MUST equal Go broker.RevocationLeaf and the Go
+    // RevocationTree fold. Pins the leaf preimage AND the whole sorted/sentinel/odd-promote RFC6962 tree (M5).
+    let v = preimage_vectors();
+    let leaf_cases = v.get("revocation_leaf").unwrap().as_array().unwrap();
+    assert!(!leaf_cases.is_empty(), "shared vector: revocation_leaf section is empty");
+    for case in leaf_cases {
+        let leaf = feir_decision_core::verify::revocation_leaf(case.get("grant_id").unwrap().as_str().unwrap());
+        assert_eq!(
+            hex_lower(&leaf),
+            case.get("expect_hex").unwrap().as_str().unwrap(),
+            "revocation_leaf drifted from the shared vector (case {})",
+            case.get("name").unwrap().as_str().unwrap()
+        );
+    }
+    let root_cases = v.get("revocation_merkle_root").unwrap().as_array().unwrap();
+    assert!(!root_cases.is_empty(), "shared vector: revocation_merkle_root section is empty");
+    for case in root_cases {
+        let revoked: Vec<&str> = case.get("revoked").unwrap().as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+        assert_eq!(
+            feir_decision_core::verify::revocation_merkle_root(&revoked),
+            case.get("expect").unwrap().as_str().unwrap(),
+            "revocation_merkle_root drifted from the shared vector (case {})",
+            case.get("name").unwrap().as_str().unwrap()
+        );
+    }
+}
+
 // ---- M2 (ADR 0005): Delegation / per-hop signed re-delegation ----
 
 const DSCOPE: &str = "read:orders"; // the grant scope the demonstrator monotonicity holds equal down the chain
