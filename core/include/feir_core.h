@@ -29,8 +29,16 @@ char *feir_verify_bundle_json_n(const uint8_t *ptr, size_t len);
  * arrays: authority_keys/signing_keys/tsa_keys ("ed25519pub:" strings), tsa_spki_b64 (base64url DER).
  * Pin the broker recording key as authority_keys to elevate credential_grant records to
  * gateway_enforced (grant_verified). Same report shape as feir_verify_bundle_json (a malformed
- * opts key yields {"ok":false,"error":...}); NULL on NULL/invalid-UTF-8 input. */
+ * opts key yields {"ok":false,"error":...}); NULL on NULL/invalid-UTF-8 input.
+ * NOTE: both args are C strings (end at the first NUL); a 0x00 in opts_json could silently truncate the
+ * pinned trust roots. For untrusted bundle OR opts, prefer the length-aware feir_verify_bundle_with_n. */
 char *feir_verify_bundle_with(const char *bundle, const char *opts_json);
+
+/* Length-aware, truncation-proof counterpart to feir_verify_bundle_with: reads exactly the given byte
+ * lengths for BOTH the bundle and opts (does NOT stop at an interior NUL), so neither the bundle nor the
+ * pinned trust roots can be silently truncated. Same report shape; NULL on NULL/invalid-UTF-8 input. */
+char *feir_verify_bundle_with_n(const uint8_t *bundle_ptr, size_t bundle_len,
+                                const uint8_t *opts_ptr, size_t opts_len);
 
 /* Canonicalize a JSON document under RCP v1. Returns the canonical string (caller frees), which
  * begins with "ERROR:" on a parse error; NULL on NULL/invalid-UTF-8 input. */

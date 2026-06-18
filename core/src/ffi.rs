@@ -83,6 +83,10 @@ pub unsafe extern "C" fn feir_verify_bundle_json_n(ptr: *const u8, len: usize) -
 /// (pin the broker recording key as `authority_keys`). Returns the same JSON report as
 /// [`feir_verify_bundle_json`]; null if either pointer is null or not UTF-8.
 ///
+/// NUL caveat: both arguments are read as C strings and stop at the first `0x00`. For an UNTRUSTED
+/// bundle OR opts, prefer [`feir_verify_bundle_with_n`], which reads explicit lengths and cannot be
+/// truncated (a `0x00` in `opts_json` would otherwise silently truncate the pinned trust roots).
+///
 /// # Safety
 /// `bundle` and `opts_json` must be valid null-terminated C strings for the duration of the call.
 #[no_mangle]
@@ -95,6 +99,33 @@ pub unsafe extern "C" fn feir_verify_bundle_with(
         None => return std::ptr::null_mut(),
     };
     let opts = match cstr(opts_json) {
+        Some(o) => o,
+        None => return std::ptr::null_mut(),
+    };
+    into_cstring(crate::verify::verify_bundle_with_json(bundle, opts))
+}
+
+/// Verify an export bundle with pinned trust roots from explicit `(ptr, len)` byte spans — the
+/// length-aware, truncation-proof counterpart to [`feir_verify_bundle_with`]. Reads exactly the given
+/// lengths and does NOT stop at an interior NUL in EITHER the bundle or the opts, so a `0x00` (never
+/// present in valid RCP / an `ed25519pub:` or base64url opts value) cannot truncate the bundle to a
+/// verified prefix nor silently drop the pinned trust roots; the full input is verified and fails closed
+/// at canonicalization. Returns the same JSON report; null if either span is null or not valid UTF-8.
+///
+/// # Safety
+/// `bundle_ptr` and `opts_ptr` must each point to at least their `len` initialized bytes, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn feir_verify_bundle_with_n(
+    bundle_ptr: *const u8,
+    bundle_len: usize,
+    opts_ptr: *const u8,
+    opts_len: usize,
+) -> *mut c_char {
+    let bundle = match bytes_to_str(bundle_ptr, bundle_len) {
+        Some(b) => b,
+        None => return std::ptr::null_mut(),
+    };
+    let opts = match bytes_to_str(opts_ptr, opts_len) {
         Some(o) => o,
         None => return std::ptr::null_mut(),
     };
@@ -507,6 +538,41 @@ mod tests {
         attack.extend_from_slice(br#"{"decoy":"unverified"}PADDING"#);
         let bad = call_n(&attack).unwrap();
         assert!(bad.contains("\"ok\":false"), "interior NUL must fail closed: {bad}");
+    }
+
+    /// Call the length-aware WITH entrypoint with raw bundle + opts spans (either MAY contain a NUL).
+    fn call_with_n(bundle: &[u8], opts: &[u8]) -> Option<String> {
+        unsafe {
+            let out =
+                feir_verify_bundle_with_n(bundle.as_ptr(), bundle.len(), opts.as_ptr(), opts.len());
+            if out.is_null() {
+                return None;
+            }
+            let s = CStr::from_ptr(out).to_string_lossy().into_owned();
+            feir_string_free(out);
+            Some(s)
+        }
+    }
+
+    #[test]
+    fn verify_bundle_with_n_opts_truncation_proof() {
+        let clean = bundle();
+        // empty opts {} verifies like the no-opts path.
+        let ok = call_with_n(clean.as_bytes(), b"{}").unwrap();
+        assert!(ok.contains("\"ok\":true"), "{ok}");
+
+        // opts = `{}` ‹0x00› ‹junk›: the NUL-terminated `feir_verify_bundle_with` would stop at the NUL and
+        // verify under the truncated, valid `{}` (no pinned trust roots). The length-aware entrypoint reads
+        // the FULL opts span, so the interior NUL is seen and the opts parse fails CLOSED — the pinned trust
+        // roots can never be silently truncated. Regression lock for the optsJSON truncation gap.
+        let mut opts_attack = b"{}".to_vec();
+        opts_attack.push(0);
+        opts_attack.extend_from_slice(br#"{"decoy":1}"#);
+        let bad = call_with_n(clean.as_bytes(), &opts_attack).unwrap();
+        assert!(
+            bad.contains("\"ok\":false") || bad.contains("error"),
+            "interior NUL in opts must fail closed, not truncate the trust roots: {bad}"
+        );
     }
 
     #[test]

@@ -49,6 +49,11 @@ func TestVerifyBundleRejectsInteriorNUL(t *testing.T) {
 	if got2 := c.VerifyBundleWith("{\"records\":[]}\x00junk", "{}"); !strings.Contains(got2, `"ok":false`) {
 		t.Fatalf("VerifyBundleWith interior NUL must fail closed: %s", got2)
 	}
+	// A NUL in the OPTS must also fail closed: otherwise C.CString would truncate opts at the NUL and verify
+	// under a partial trust-root set (e.g. dropping resource_authority_keys), a latent over-acceptance.
+	if got3 := c.VerifyBundleWith("{\"records\":[]}", "{}\x00{\"resource_authority_keys\":[]}"); !strings.Contains(got3, `"ok":false`) {
+		t.Fatalf("VerifyBundleWith interior NUL in opts must fail closed: %s", got3)
+	}
 }
 
 func TestSealRecordThroughFFI(t *testing.T) {
