@@ -5272,3 +5272,105 @@ fn tier_b_federation_distinct_brokers_may_share_a_key() {
     assert_eq!(r.grant_verified, 2);
     assert_eq!(r.federation_status, "sequence_verified");
 }
+
+// ---- M4 federation: aggregate-review coverage additions (all currently fail-closed, now pinned) ----
+
+#[test]
+fn tier_b_federation_committed_grant_without_broker_seq_is_fail_closed() {
+    // a federated grant carrying broker_id but NO broker_seq is smuggled out of its partition's log -> !ok.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let valid = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    // broker_id A but NO broker_seq (the base grant_evidence carries none).
+    let noseq_ge = change_field(&grant_evidence("grant-a2", ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP), "broker_id", CanonValue::string(BID_A));
+    let noseq = seal_grant(&rec, &rec, "rec-a2", &noseq_ge);
+    let (hv, hn) = (content_hash_of(&valid), content_hash_of(&noseq));
+    let heads = fed_heads(&[(BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hv)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, &[hv.clone(), hn.clone()], 2, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![valid, noseq], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a committed federated grant with no broker_seq must fail closed");
+    assert!(r.issues.iter().any(|i| i.contains("no broker_seq") && i.contains("smuggled")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_malformed_head_map_is_fail_closed() {
+    // a broker_grant_heads MAP entry missing a field (max_seq) -> parse_grant_heads_map None -> malformed -> !ok.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let ha = content_hash_of(&ga);
+    let bad_head = CanonValue::object(vec![
+        ("prior_head_hash".into(), CanonValue::string(ghr(&[]))),
+        ("cumulative_root".into(), CanonValue::string(ghr(&[(1, &ha)]))), // NO max_seq
+    ])
+    .unwrap();
+    let heads = CanonValue::object(vec![(BID_A.to_string(), bad_head)]).unwrap();
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&ha), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a malformed broker_grant_heads map must fail closed");
+    assert!(r.issues.iter().any(|i| i.contains("malformed broker_grant_heads")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_headless_checkpoint_committing_grants_is_suppression() {
+    // a verified checkpoint that commits a federated grant but carries NO broker_grant_heads map at all -> the
+    // grant is bound without a transparency head -> suppression (the verified_fed_headless / latest-no-map paths).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let ha = content_hash_of(&ga);
+    let cp = checkpoint_over(&rec, std::slice::from_ref(&ha), 1, Some(&tsa)); // NO head map at all
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a federated grant committed under a checkpoint with no head map must fail closed");
+    assert_eq!(r.federation_status, "suppression");
+    assert!(r.issues.iter().any(|i| i.contains("broker_grant_heads map")), "issues: {:?}", r.issues);
+}
+
+// a VerifyReport reaching the brokered capstone over a REAL clean 2-broker federation surface (federation_status,
+// brokers_total/_seq_verified, broker_trust, side_effect_closure all COMPUTED end-to-end), with the use/attestation/
+// taxonomy conjuncts synthesized (the federation bundle carries no uses/attestation of its own).
+fn federation_capstone_report() -> VerifyReport {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let gb = seal_grant(&rec, &rec, "rec-b1", &grant_evidence_fed("grant-b1", BID_B, 1));
+    let (ha, hb) = (content_hash_of(&ga), content_hash_of(&gb));
+    let heads = fed_heads(&[
+        (BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)]))),
+        (BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)]))),
+    ]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, &[ha.clone(), hb.clone()], 2, heads, Some(&tsa));
+    let bundle = change_field(&tier_b_bundle(&rec.verifying_key(), vec![ga, gb], vec![cp]), "coverage_manifest", closure_manifest(&[(RESOURCE, ACTION, &[])]));
+    let mut r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "federation baseline must verify: {:?}", r.issues);
+    assert_eq!(r.federation_status, "sequence_verified");
+    assert_eq!(r.brokers_total, 2);
+    assert_eq!(r.brokers_seq_verified, 2);
+    assert_eq!(r.broker_trust, "sequence_verified", "the aggregate broker_trust is COMPUTED from the federation");
+    assert_eq!(r.side_effect_closure_status, "closed");
+    // synthesize the use/attestation/taxonomy conjuncts (broker_trust + federation_status are already real).
+    r.uses_matched = 1;
+    r.uses_pop_reverified = 1;
+    r.uses_action_unverified = 0;
+    r.one_phase_use_present = false;
+    r.intent_without_outcome = 0;
+    r.taxonomy_status = "validated".to_string();
+    r.attestation_status = "attested_claims".to_string();
+    r.unmatched_violation = 0;
+    r.unmatched_pending = 0;
+    r
+}
+
+#[test]
+fn tier_b_federation_capstone_reachable_when_clean() {
+    let out = report_to_json(&federation_capstone_report());
+    assert!(out.contains(r#""action_completeness":"attested_complete_over_brokered_surface""#), "a clean 2-broker federation must reach the capstone: {out}");
+}
+
+#[test]
+fn tier_b_federation_capstone_blocked_by_suppression() {
+    let mut r = federation_capstone_report();
+    r.cross_broker_suppression = 1; // one broker suppressed
+    let out = report_to_json(&r);
+    assert!(!out.contains("attested_complete_over_brokered_surface"), "a suppressed federation must NOT reach the capstone: {out}");
+    assert!(out.contains(r#""action_completeness":"claimed_over_manifest""#), "{out}");
+}
