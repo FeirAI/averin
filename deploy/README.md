@@ -49,13 +49,18 @@ cargo run -p feir-decision-core --bin feir-verify -- bundle bundle.json
 | `FEIR_UPSTREAM` | proxy | `https://api.openai.com` | upstream LLM |
 | `FEIR_PROJECT_ID` | proxy | `default` | project the proxy records under |
 
-### Online two-phase grant flows (ADR-0005 M6 Cosig / M2 Delegation)
+### Online grant flows (ADR-0005 M6 Cosig / M2 Delegation / M3 Native)
 
 A cosigned/delegated grant is inherently two-phase (the approver/delegator signs a challenge that binds
 the broker-minted credential): `POST /v2/grants/prepare` mints + reveals `{grant_id, credential_binding,
 exp, cnf_kid, cosig_threshold}`; the approvers/delegators sign it; `POST /v2/grants/finalize` submits the
-`cosignatures` (M6) / `delegation_hops` (M2) and commits. The single-phase `POST /v2/grants` remains the
-path for ordinary + native (`mode:"token_exchange"`) grants.
+`cosignatures` (M6) / `delegation_hops` (M2) and commits.
+
+A **native (M3)** grant is single-phase: `POST /v2/grants` with `mode:"token_exchange"` + `lease_id`
+issues a grant for an externally-minted IdP/STS credential (no PoP, no minted capability); the resource
+then records its effective-scope attestation with `POST /v2/introspection` (`{grant_id, credential_ref,
+effective_scope, effective_exp}`), enabled automatically when `FEIR_RESOURCE_SEED` is set. The verifier
+checks `credential_ref == lease_id`, `effective_scope ⊆ grant.scope`, and `effective_exp ≤ grant.exp`.
 
 ### Verifying a bundle (authentic, with the mode gates)
 

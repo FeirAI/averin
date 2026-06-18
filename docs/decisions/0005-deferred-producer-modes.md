@@ -24,17 +24,18 @@ conjunction only ever gets MORE restrictive (or gains an explicit, weaker, label
 > online producer-orchestration HTTP path deferred. The ADR 0002 amendments §9 are applied (M1 was first); the Q3
 > resolution (§9, M3) is live.
 >
-> **Online HTTP flows + operator readiness (built):** the two-phase online grant flow is now live for **M6
-> Cosig + M2 Delegation** — `POST /v2/grants/prepare` mints + reveals the challenge (the broker-minted
-> credential_binding/exp), the approvers/delegators sign it, `POST /v2/grants/finalize` binds the
-> cosignatures/hops + commits (the gapless `broker_seq` is allocated at finalize, so the D6 log invariant holds);
-> `WithCosigPolicy` / `FEIR_COSIG_APPROVER_KEYS` pin the M-of-N. Operator readiness: `feir-verify bundle b.json
+> **Online HTTP flows + operator readiness (built):** the online grant flow is now live for **M6 Cosig + M2
+> Delegation + M3 Native/STS**. Cosig/Delegation are two-phase — `POST /v2/grants/prepare` mints + reveals the
+> challenge (the broker-minted credential_binding/exp), the approvers/delegators sign it, `POST
+> /v2/grants/finalize` binds the cosignatures/hops + commits (the gapless `broker_seq` is allocated at finalize,
+> so the D6 log invariant holds); `WithCosigPolicy` / `FEIR_COSIG_APPROVER_KEYS` pin the M-of-N. Native is
+> single-phase — `POST /v2/grants` with `mode:"token_exchange"` + `lease_id` issues the native grant (no PoP, no
+> capability), and `POST /v2/introspection` records the resource-signed transcript (the resource signs the
+> `feir.resource.introspection.v1` challenge with its raw key). Operator readiness: `feir-verify bundle b.json
 > opts.json` pins the role-disjoint key sets (authentic verification + every mode gate) and surfaces all mode
-> statuses; `docs/operator-verification.md` is the operator guide. **Still deferred (clearly labeled):** the
-> **native (M3) online path** (`POST /v2/introspection` — needs the resource recording key to sign the structured
-> `feir.resource.introspection.v1` challenge, a small server-key-plumbing change + the `mode:"token_exchange"`
-> grant branch); the Merkle-non-disclosure revocation mode; and M4's optional `cross_broker_cert` transitive-trust
-> tier (`feir.broker.federation.cert.v1` + golden vector).
+> statuses; `docs/operator-verification.md` is the operator guide. **Still deferred (clearly labeled, optional):**
+> the Merkle-non-disclosure revocation mode, and M4's optional `cross_broker_cert` transitive-trust tier
+> (`feir.broker.federation.cert.v1` + golden vector).
 
 The design was pressure-tested against the live verifier (`core/src/verify.rs`) and producer
 (`server/internal/broker`, `server/internal/api`, `server/internal/resourceshim`). Where a mode stresses or
