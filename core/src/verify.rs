@@ -200,6 +200,14 @@ pub struct VerifyReport {
     pub revocation_status: String,
     pub revoked_grants_matched: usize,
     pub revoked_uses_blocked: usize,
+    /// M5 Merkle-non-disclosure (ADR 0005): `revocation_merkle_status` ∈ {`absent`, `fresh`, `stale`} for a
+    /// top-level signed `revocation_merkle_root` (a commitment to the revoked set that does NOT disclose it).
+    /// When `fresh`, EVERY Tier-B use must carry a per-grant proof in `revocation_proofs`: a non-membership proof
+    /// to proceed (counted in `revocation_nonmembership_verified`), else it is blocked (a membership proof) or
+    /// FAIL-CLOSED (missing/forged) — both counted in `revoked_uses_blocked` + a hard violation (`!ok`). `stale`
+    /// blocks the capstone (like the disclosed list); `absent`/`fresh`-with-all-proofs do not.
+    pub revocation_merkle_status: String,
+    pub revocation_nonmembership_verified: usize,
     /// M3 / ADR 0005 (Native/STS — post-mint resource-signed introspection transcript, resolves ADR 0002 Q3).
     /// `native_credential_present` = a closed, verified broker grant declared `grant_evidence.mode ==
     /// "token_exchange"` (a credential minted by an external IdP/STS whose effective scope the verifier cannot
@@ -795,6 +803,8 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("revocation_status".into(), CanonValue::string(r.revocation_status.clone())),
         ("revoked_grants_matched".into(), count(r.revoked_grants_matched)),
         ("revoked_uses_blocked".into(), count(r.revoked_uses_blocked)),
+        ("revocation_merkle_status".into(), CanonValue::string(r.revocation_merkle_status.clone())),
+        ("revocation_nonmembership_verified".into(), count(r.revocation_nonmembership_verified)),
         // M3 (ADR 0005): native/STS introspection-transcript accounting + the artifact-level status.
         ("native_credential_present".into(), CanonValue::Bool(r.native_credential_present)),
         ("introspection_transcripts_total".into(), count(r.introspection_transcripts_total)),
@@ -916,6 +926,11 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
                 && r.revocation_status != "stale"
                 && r.revocation_status != "revoked_present"
                 && r.revoked_uses_blocked == 0
+                // M5 Merkle-non-disclosure: a present-but-stale signed root is too old to certify currency (a
+                // grant could have been revoked after the window), so it blocks the capstone exactly like a stale
+                // disclosed list. `absent`/`fresh` pass (a fresh root's blocked uses already raised the conjunct
+                // above + a hard violation).
+                && r.revocation_merkle_status != "stale"
                 // M4 (ADR 0005): when federation is active, EVERY broker's per-`broker_id` head chain verified and
                 // none was suppressed. A suppressed broker is also a hard violation (→ !ok), but the conjuncts are
                 // explicit so the capstone self-documents that no broker's grant log was suppressed. `absent`
@@ -1226,6 +1241,8 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         delegation_monotonicity_violations: 0,
         delegation_status: "absent".to_string(),
         revocation_status: "absent".to_string(),
+        revocation_merkle_status: "absent".to_string(),
+        revocation_nonmembership_verified: 0,
         revoked_grants_matched: 0,
         revoked_uses_blocked: 0,
         native_credential_present: false,
@@ -1341,6 +1358,78 @@ pub fn grant_head_root(grants: &[(i64, String)]) -> String {
         acc = crate::hashx::sha256(&pre);
     }
     format!("sha256:{}", crate::hashx::hex_lower(&acc))
+}
+
+/// M5 Merkle-non-disclosure revocation (ADR 0005): the domain-separated leaf VALUE for a (possibly) revoked
+/// grant_id: `sha256( LP4("feir.broker.revocation.leaf.v1") ‖ LP4(grant_id) )`. The revocation tree's leaves are
+/// the SORTED set of these 32-byte values, bracketed by the MIN (0x00*32) / MAX (0xff*32) sentinels so EVERY
+/// queried id has a strictly-bracketing CONSECUTIVE pair (eliminating the first/last edge case). A
+/// non-membership proof reveals only the two adjacent leaf VALUES (hashes), never the full revoked list — the
+/// non-disclosure win. Kept in sync with the Go producer via the shared golden vector.
+pub fn revocation_leaf(grant_id: &str) -> [u8; 32] {
+    let mut pre = Vec::new();
+    let lp4 = |pre: &mut Vec<u8>, b: &[u8]| {
+        pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
+        pre.extend_from_slice(b);
+    };
+    lp4(&mut pre, b"feir.broker.revocation.leaf.v1");
+    lp4(&mut pre, grant_id.as_bytes());
+    crate::hashx::sha256(&pre)
+}
+
+/// RFC6962-style domain-separated Merkle LEAF hash: `sha256( 0x00 ‖ leaf_value )`. The 0x00 prefix separates
+/// leaves from internal nodes so a leaf hash can never be reinterpreted as an interior node (a second-preimage
+/// guard standard to transparency logs).
+fn merkle_leaf_hash(v: &[u8; 32]) -> [u8; 32] {
+    let mut pre = Vec::with_capacity(33);
+    pre.push(0x00);
+    pre.extend_from_slice(v);
+    crate::hashx::sha256(&pre)
+}
+
+/// RFC6962-style internal Merkle NODE: `sha256( 0x01 ‖ left ‖ right )`.
+fn merkle_node_hash(l: &[u8; 32], r: &[u8; 32]) -> [u8; 32] {
+    let mut pre = Vec::with_capacity(65);
+    pre.push(0x01);
+    pre.extend_from_slice(l);
+    pre.extend_from_slice(r);
+    crate::hashx::sha256(&pre)
+}
+
+/// Recompute the Merkle root from an inclusion proof (RFC6962 audit path; an odd level PROMOTES its last node,
+/// consuming NO path entry). `leaf_value` is the 32-byte leaf VALUE at `index` in a tree of `size` leaves;
+/// `path` is the audit path (bottom-up siblings). Returns `None` on ANY inconsistency — index out of range, a
+/// path entry missing, or an UNCONSUMED path entry (a too-long path) — so a malformed proof is fail-closed, not
+/// a recomputed-but-wrong root. The caller compares the result to the signed root.
+fn merkle_root_from_proof(
+    leaf_value: &[u8; 32],
+    index: usize,
+    size: usize,
+    path: &[[u8; 32]],
+) -> Option<[u8; 32]> {
+    if size == 0 || index >= size {
+        return None;
+    }
+    let mut hash = merkle_leaf_hash(leaf_value);
+    let mut idx = index;
+    let mut last = size - 1;
+    let mut it = path.iter();
+    while last > 0 {
+        if idx % 2 == 1 {
+            // right child: the sibling is on the LEFT.
+            hash = merkle_node_hash(it.next()?, &hash);
+        } else if idx < last {
+            // left child WITH a right sibling.
+            hash = merkle_node_hash(&hash, it.next()?);
+        }
+        // else: a left child that is the last node at this level (odd count) — promoted, no path entry.
+        idx /= 2;
+        last /= 2;
+    }
+    if it.next().is_some() {
+        return None; // extra (unconsumed) path entries -> malformed -> fail-closed
+    }
+    Some(hash)
 }
 
 /// Re-derive the use-time PoP challenge digest the resource shim signs over (ADR 0003 R4 / ADR 0004
@@ -2533,6 +2622,196 @@ fn evaluate_revocation(
     RevocationEval {
         status: if fresh { "fresh" } else { "stale" }.to_string(),
         revoked,
+    }
+}
+
+/// Parse a 64-char lowercase-hex string into 32 raw bytes (the Merkle leaf VALUES / audit-path nodes are raw
+/// hashes, not the `sha256:` content-hash form). Fail-closed (`None`) on wrong length or a non-hex digit.
+fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Outcome of evaluating a top-level `revocation_merkle_root` (M5 Merkle-non-disclosure mode).
+struct MerkleRevEval {
+    status: String,         // absent | fresh | stale
+    root: Option<[u8; 32]>, // the signed Merkle root (raw 32 bytes); Some iff validly signed
+    leaf_count: usize,      // the tree's leaf count (incl. the 2 sentinels), covered by the sig
+}
+
+/// M5 Merkle-non-disclosure revocation (ADR 0005): evaluate a bundle's top-level `revocation_merkle_root` — a
+/// signed, time-bounded commitment to the SORTED revoked-grant set that does NOT disclose it. Mirrors
+/// `evaluate_revocation` exactly: the `sig` (domain `feir.broker.revocation.merkleroot.v1`) covers the canonical
+/// object minus `sig`, verified under a pinned role-separated `revocation_keys` issuer; the claimed `issuer_kid`
+/// must be the signer; freshness is the latest anchored TSA time within `[issued_at, not_after]`. Unlike the
+/// disclosed list, the revoked set is NOT in the bundle — each USE proves its grant's (non-)membership against
+/// `root` via a per-grant proof (`check_revocation_proof`). `fresh` iff signed + in-window; `stale` iff signed
+/// but out-of-window (or malformed → issue → !ok); `absent` iff no root or no pinned issuer.
+fn evaluate_merkle_revocation(
+    bundle: &CanonValue,
+    opts: &VerifyOptions,
+    anchored_latest_ts: Option<&str>,
+    issues: &mut Vec<String>,
+) -> MerkleRevEval {
+    let absent = || MerkleRevEval { status: "absent".to_string(), root: None, leaf_count: 0 };
+    let rr = match bundle.get("revocation_merkle_root") {
+        Some(a) if !a.is_null() => a,
+        _ => return absent(),
+    };
+    if opts.revocation_keys.is_empty() {
+        return absent(); // present but no pinned issuer -> not evaluated
+    }
+    let stale = || MerkleRevEval { status: "stale".to_string(), root: None, leaf_count: 0 };
+
+    let sig = match rr.get("sig").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            issues.push("revocation_merkle_root: missing sig (M5)".into());
+            return stale();
+        }
+    };
+    let mut obj = match rr.as_object() {
+        Some(o) => o.clone(),
+        None => {
+            issues.push("revocation_merkle_root: not an object (M5)".into());
+            return stale();
+        }
+    };
+    obj.retain(|(k, _)| k != "sig");
+    let digest = crate::hashx::sha256_prefixed(CanonValue::Object(obj).serialize().as_bytes());
+    let signer = match opts
+        .revocation_keys
+        .iter()
+        .find(|vk| crate::sign::verify("feir.broker.revocation.merkleroot.v1", &digest, sig, vk).is_ok())
+    {
+        Some(vk) => vk,
+        None => {
+            issues.push("revocation_merkle_root: sig does not verify under any pinned revocation_keys issuer (M5)".into());
+            return stale();
+        }
+    };
+    if rr.get("issuer_kid").and_then(|v| v.as_str()) != Some(cnf_kid(signer).as_str()) {
+        issues.push("revocation_merkle_root: issuer_kid does not match the signing key (M5)".into());
+        return stale();
+    }
+
+    // the committed root (sha256:<hex>) + leaf_count, both covered by the verified sig.
+    let root = match rr.get("root").and_then(|v| v.as_str()).and_then(|s| s.strip_prefix("sha256:")).and_then(parse_hex32) {
+        Some(r) => r,
+        None => {
+            issues.push("revocation_merkle_root: malformed root (expect sha256:<64-hex>) (M5)".into());
+            return stale();
+        }
+    };
+    let leaf_count = match rr.get("leaf_count").and_then(|v| v.as_int()) {
+        // a sound tree always carries the 2 sentinels, so leaf_count >= 2.
+        Some(n) if n >= 2 => n as usize,
+        _ => {
+            issues.push("revocation_merkle_root: leaf_count missing or < 2 (the sentinels are mandatory) (M5)".into());
+            return stale();
+        }
+    };
+
+    let issued_at = rr.get("issued_at").and_then(|v| v.as_str()).unwrap_or_default();
+    let not_after = rr.get("not_after").and_then(|v| v.as_str()).unwrap_or_default();
+    let signed = MerkleRevEval { status: "stale".to_string(), root: Some(root), leaf_count };
+    if issued_at.is_empty() || not_after.is_empty() || !is_canonical_ts(issued_at) || !is_canonical_ts(not_after) || issued_at > not_after {
+        issues.push("revocation_merkle_root: issued_at/not_after missing, non-canonical, or inverted (M5)".into());
+        return signed;
+    }
+    let ts = match anchored_latest_ts {
+        Some(t) => t,
+        None => {
+            issues.push("revocation_merkle_root present but no verified+anchored checkpoint to date it (M5)".into());
+            return signed;
+        }
+    };
+    let fresh = issued_at <= ts && ts <= not_after;
+    MerkleRevEval {
+        status: if fresh { "fresh" } else { "stale" }.to_string(),
+        root: Some(root),
+        leaf_count,
+    }
+}
+
+/// The per-grant verdict of a Merkle revocation proof (M5 non-disclosure).
+#[derive(PartialEq)]
+enum ProofVerdict {
+    NotRevoked, // a valid NON-membership proof: the grant is provably absent from the revoked set
+    Revoked,    // a valid MEMBERSHIP proof: the grant is in the revoked set
+    Unproven,   // missing/malformed/forged — fail-closed (cannot prove non-revocation)
+}
+
+/// Parse an audit path: an array of 64-char-hex node hashes. Fail-closed on any malformed entry.
+fn parse_hex32_path(v: Option<&CanonValue>) -> Option<Vec<[u8; 32]>> {
+    let arr = v?.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for e in arr {
+        out.push(parse_hex32(e.as_str()?)?);
+    }
+    Some(out)
+}
+
+/// M5 Merkle-non-disclosure: verify a single per-grant revocation proof against the signed `root`. A
+/// `nonmembership` proof reveals the two CONSECUTIVE sorted leaves `lo < q < hi` (q = `revocation_leaf(grant_id)`)
+/// that strictly bracket the grant — proving no leaf equals q (the tree is issuer-sorted + sentinel-bracketed,
+/// so adjacency + strict bracketing ⇒ absence). A `membership` proof authenticates q itself as a leaf. EVERYTHING
+/// must re-derive the signed root, both bracketing leaves must authenticate at CONSECUTIVE indices, and the
+/// bracket must be STRICT — any deviation is `Unproven` (fail-closed). Soundness rests on the issuer (a pinned,
+/// role-separated revocation authority) building a sorted tree; the bundle assembler cannot forge a false
+/// non-membership for a leaf that is actually present.
+fn check_revocation_proof(proof: &CanonValue, grant_id: &str, root: &[u8; 32], leaf_count: usize) -> ProofVerdict {
+    let q = revocation_leaf(grant_id);
+    match proof.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "membership" => {
+            let index = proof.get("index").and_then(|v| v.as_int());
+            let path = parse_hex32_path(proof.get("path"));
+            match (index, path) {
+                (Some(i), Some(p)) if i >= 0 => {
+                    if merkle_root_from_proof(&q, i as usize, leaf_count, &p) == Some(*root) {
+                        ProofVerdict::Revoked
+                    } else {
+                        ProofVerdict::Unproven
+                    }
+                }
+                _ => ProofVerdict::Unproven,
+            }
+        }
+        "nonmembership" => {
+            let lo = proof.get("lo").and_then(|v| v.as_str()).and_then(parse_hex32);
+            let hi = proof.get("hi").and_then(|v| v.as_str()).and_then(parse_hex32);
+            let lo_index = proof.get("lo_index").and_then(|v| v.as_int());
+            let hi_index = proof.get("hi_index").and_then(|v| v.as_int());
+            let lo_path = parse_hex32_path(proof.get("lo_path"));
+            let hi_path = parse_hex32_path(proof.get("hi_path"));
+            match (lo, hi, lo_index, hi_index, lo_path, hi_path) {
+                (Some(lo), Some(hi), Some(li), Some(hi_i), Some(lp), Some(hp)) if li >= 0 && hi_i >= 0 => {
+                    // adjacency: the two leaves must be CONSECUTIVE in the sorted tree.
+                    if hi_i != li + 1 {
+                        return ProofVerdict::Unproven;
+                    }
+                    // STRICT bracket: lo < q < hi, so q is not equal to either leaf and nothing lies between them.
+                    if !(lo < q && q < hi) {
+                        return ProofVerdict::Unproven;
+                    }
+                    // both adjacent leaves must authenticate to the SAME signed root at their claimed indices.
+                    if merkle_root_from_proof(&lo, li as usize, leaf_count, &lp) != Some(*root)
+                        || merkle_root_from_proof(&hi, hi_i as usize, leaf_count, &hp) != Some(*root)
+                    {
+                        return ProofVerdict::Unproven;
+                    }
+                    ProofVerdict::NotRevoked
+                }
+                _ => ProofVerdict::Unproven,
+            }
+        }
+        _ => ProofVerdict::Unproven,
     }
 }
 
@@ -3793,7 +4072,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         .max_by_key(|(seq, _, _, _)| *seq)
         .map(|(_, _, ts, _)| ts.as_str());
     let revocation = evaluate_revocation(bundle, opts, anchored_latest_ts, &mut issues);
+    // M5 Merkle-non-disclosure (ADR 0005): the signed root + the top-level per-grant proof map. When the root is
+    // FRESH, every Tier-B use MUST carry a valid proof — a non-membership proof to proceed, else (membership or
+    // missing/malformed) the use is blocked/fail-closed (the revoked set is not disclosed, so silence ≠ safe).
+    let merkle_rev = evaluate_merkle_revocation(bundle, opts, anchored_latest_ts, &mut issues);
+    let revocation_proofs = bundle.get("revocation_proofs");
     let mut revoked_uses_blocked = 0usize;
+    let mut revocation_nonmembership_verified = 0usize;
     let mut seen_uses: BTreeSet<&str> = BTreeSet::new();
     // D3 (ADR 0004): a (resource_id, PoP nonce) pair seen on two CLOSED receipts is a replay/duplicate
     // submission over the visible set — independent of the per-grant_id single-use rule.
@@ -3993,6 +4278,36 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             violation(&mut issues, format!("use of grant '{gid}' which a fresh revocation_list marks REVOKED — blocked (M5)"));
             continue;
         }
+        // M5 Merkle-non-disclosure (ADR 0005): when a FRESH signed root is present, this use's grant must PROVE
+        // its non-revocation against the (undisclosed) revoked set. A valid non-membership proof lets it proceed;
+        // a valid membership proof blocks it (revoked); a missing/malformed/forged proof is FAIL-CLOSED (the set
+        // is hidden, so an unproven use cannot be assumed safe). All three end the per-use decision here.
+        if merkle_rev.status == "fresh" {
+            // Defense-in-depth: a `fresh` status MUST carry a committed root (the eval guarantees it). Match on
+            // BOTH together so that if a future change ever returns `fresh` with `root: None`, this fails CLOSED
+            // (blocks the use) rather than silently skipping the revocation gate — never a latent fail-open.
+            let proof = revocation_proofs.and_then(|m| m.get(gid.as_str()));
+            let verdict = merkle_rev
+                .root
+                .as_ref()
+                .map(|root| proof.map_or(ProofVerdict::Unproven, |p| check_revocation_proof(p, &gid, root, merkle_rev.leaf_count)))
+                .unwrap_or(ProofVerdict::Unproven);
+            match verdict {
+                ProofVerdict::NotRevoked => {
+                    revocation_nonmembership_verified += 1; // proven not-revoked; fall through to matching
+                }
+                ProofVerdict::Revoked => {
+                    revoked_uses_blocked += 1;
+                    violation(&mut issues, format!("use of grant '{gid}' which a fresh revocation_merkle_root proves REVOKED — blocked (M5)"));
+                    continue;
+                }
+                ProofVerdict::Unproven => {
+                    revoked_uses_blocked += 1;
+                    violation(&mut issues, format!("use of grant '{gid}': a fresh revocation_merkle_root is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)"));
+                    continue;
+                }
+            }
+        }
         // Full predicate: action / resource / temporal-window / cnf_kid equality, read from the proven
         // payloads on both sides.
         // The temporal window is [issued_at, exp) — used_at >= exp is expired, matching the resource
@@ -4186,6 +4501,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // (validly-signed) list; if a fresh list blocked any use, the status becomes `revoked_present`.
     let revoked_grants_matched = grants_by_id.keys().filter(|gid| revocation.revoked.contains(*gid)).count();
     let revocation_status = if revoked_uses_blocked > 0 { "revoked_present".to_string() } else { revocation.status };
+    // The Merkle-mode status is reported as evaluated (absent|fresh|stale); blocked/unproven uses already raise a
+    // hard violation (→ !ok) and are counted in revoked_uses_blocked, so no separate "revoked_present" recolor.
+    let revocation_merkle_status = merkle_rev.status.clone();
 
     // M3 (ADR 0005): native/STS introspection-transcript pre-pass. A native (token_exchange) credential's use is
     // accountable ONLY via a resource-signed introspection transcript, never a brokered PoP receipt. Each CLOSED
@@ -4535,6 +4853,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         revocation_status,
         revoked_grants_matched,
         revoked_uses_blocked,
+        revocation_merkle_status,
+        revocation_nonmembership_verified,
         native_credential_present,
         introspection_transcripts_total,
         introspection_transcripts_verified,

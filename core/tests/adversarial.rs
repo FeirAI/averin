@@ -4372,6 +4372,254 @@ fn tier_b_revocation_key_overlapping_a_role_is_fatal() {
     assert!(r.issues.iter().any(|i| i.contains("revocation_keys") && i.contains("disjoint")), "issues: {:?}", r.issues);
 }
 
+// ---- M5 Merkle-non-disclosure revocation (signed root + per-grant non-membership/membership proofs) ----
+
+// the test-side Merkle math — MUST match the verifier's private merkle_leaf_hash/merkle_node_hash (the positive
+// test passing IS the proof that they agree: a divergent leaf/node hash recomputes a different root -> Unproven).
+fn mleaf(v: &[u8; 32]) -> [u8; 32] {
+    let mut pre = vec![0x00u8];
+    pre.extend_from_slice(v);
+    feir_decision_core::hashx::sha256(&pre)
+}
+fn mnode(l: &[u8; 32], r: &[u8; 32]) -> [u8; 32] {
+    let mut pre = vec![0x01u8];
+    pre.extend_from_slice(l);
+    pre.extend_from_slice(r);
+    feir_decision_core::hashx::sha256(&pre)
+}
+fn merkle_levels(leaves: &[[u8; 32]]) -> Vec<Vec<[u8; 32]>> {
+    let mut level: Vec<[u8; 32]> = leaves.iter().map(mleaf).collect();
+    let mut levels = vec![level.clone()];
+    while level.len() > 1 {
+        let mut next = Vec::new();
+        let mut i = 0;
+        while i < level.len() {
+            if i + 1 < level.len() {
+                next.push(mnode(&level[i], &level[i + 1]));
+                i += 2;
+            } else {
+                next.push(level[i]); // promote the last (odd) node
+                i += 1;
+            }
+        }
+        levels.push(next.clone());
+        level = next;
+    }
+    levels
+}
+fn merkle_root_hex(leaves: &[[u8; 32]]) -> String {
+    format!("sha256:{}", hex_lower(merkle_levels(leaves).last().unwrap().first().unwrap()))
+}
+fn merkle_path(leaves: &[[u8; 32]], index: usize) -> Vec<[u8; 32]> {
+    let levels = merkle_levels(leaves);
+    let (mut idx, mut path) = (index, Vec::new());
+    for level in &levels {
+        if level.len() <= 1 {
+            break;
+        }
+        let last = level.len() - 1;
+        if idx % 2 == 1 {
+            path.push(level[idx - 1]);
+        } else if idx < last {
+            path.push(level[idx + 1]);
+        }
+        idx /= 2;
+    }
+    path
+}
+fn hx(b: &[u8; 32]) -> CanonValue {
+    CanonValue::string(hex_lower(b))
+}
+fn path_cv(path: &[[u8; 32]]) -> CanonValue {
+    CanonValue::Array(path.iter().map(hx).collect())
+}
+// SORTED, sentinel-bracketed leaf VALUES for a revoked set (matches the producer).
+fn rev_leaves(revoked: &[&str]) -> Vec<[u8; 32]> {
+    let mut hs: Vec<[u8; 32]> = revoked.iter().map(|g| feir_decision_core::verify::revocation_leaf(g)).collect();
+    hs.sort();
+    let mut leaves = vec![[0u8; 32]];
+    leaves.extend(hs);
+    leaves.push([0xffu8; 32]);
+    leaves
+}
+fn merkle_root_obj(rev: &SigningKey, issued_at: &str, not_after: &str, leaves: &[[u8; 32]]) -> CanonValue {
+    let body = CanonValue::object(vec![
+        ("issuer_kid".into(), CanonValue::string(vk_cnf_kid(&rev.verifying_key()))),
+        ("issued_at".into(), CanonValue::string(issued_at)),
+        ("not_after".into(), CanonValue::string(not_after)),
+        ("leaf_count".into(), CanonValue::Int(leaves.len() as i64)),
+        ("root".into(), CanonValue::string(merkle_root_hex(leaves))),
+    ])
+    .unwrap();
+    let digest = sha256_prefixed(body.serialize().as_bytes());
+    let sig = feir_decision_core::sign::sign("feir.broker.revocation.merkleroot.v1", &digest, rev);
+    change_field(&body, "sig", CanonValue::string(sig))
+}
+fn nonmembership_proof(leaves: &[[u8; 32]], grant_id: &str) -> CanonValue {
+    let q = feir_decision_core::verify::revocation_leaf(grant_id);
+    let i = leaves.windows(2).position(|w| w[0] < q && q < w[1]).expect("a sentinel-bracketed tree always brackets a non-member");
+    CanonValue::object(vec![
+        ("type".into(), CanonValue::string("nonmembership")),
+        ("lo".into(), hx(&leaves[i])),
+        ("hi".into(), hx(&leaves[i + 1])),
+        ("lo_index".into(), CanonValue::Int(i as i64)),
+        ("hi_index".into(), CanonValue::Int((i + 1) as i64)),
+        ("lo_path".into(), path_cv(&merkle_path(leaves, i))),
+        ("hi_path".into(), path_cv(&merkle_path(leaves, i + 1))),
+    ])
+    .unwrap()
+}
+fn membership_proof(leaves: &[[u8; 32]], grant_id: &str) -> CanonValue {
+    let q = feir_decision_core::verify::revocation_leaf(grant_id);
+    let i = leaves.iter().position(|l| *l == q).expect("grant is in the revoked set");
+    CanonValue::object(vec![
+        ("type".into(), CanonValue::string("membership")),
+        ("index".into(), CanonValue::Int(i as i64)),
+        ("path".into(), path_cv(&merkle_path(leaves, i))),
+    ])
+    .unwrap()
+}
+// a grant+use bundle carrying a revocation_merkle_root + a revocation_proofs map (keyed by grant_id).
+fn merkle_rev_bundle_verify(rec: &SigningKey, res: &SigningKey, tsa: &SigningKey, rev: &SigningKey, root_obj: CanonValue, proofs: Vec<(String, CanonValue)>) -> VerifyReport {
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(rec, rec, GID, &ge);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(rec, res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(rec, &[content_hash_of(&use_rec)], 2, Some(tsa));
+    let bundle = change_field(&tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]), "revocation_merkle_root", root_obj);
+    let bundle = change_field(&bundle, "revocation_proofs", CanonValue::object(proofs).unwrap());
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.revocation_keys = vec![rev.verifying_key()];
+    verify_bundle_with(&bundle, &opts)
+}
+
+fn rev_keys() -> (SigningKey, SigningKey, SigningKey, SigningKey) {
+    (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[77u8; 32]))
+}
+
+#[test]
+fn tier_b_merkle_revocation_nonmembership_proof_verifies() {
+    // THE POSITIVE: GID is NOT revoked; a fresh signed root commits to {other-1, other-2}; a non-membership proof
+    // for GID re-derives the root from two consecutive bracketing leaves -> the use proceeds.
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let proofs = vec![(GID.to_string(), nonmembership_proof(&leaves, GID))];
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, proofs);
+    assert!(r.ok, "a valid non-membership proof must verify; issues: {:?}", r.issues);
+    assert_eq!(r.revocation_merkle_status, "fresh");
+    assert_eq!(r.revocation_nonmembership_verified, 1);
+    assert_eq!(r.revoked_uses_blocked, 0);
+    assert_eq!(r.uses_matched, 1);
+    let json = report_to_json(&r);
+    assert!(json.contains(r#""revocation_merkle_status":"fresh""#), "{json}");
+}
+
+#[test]
+fn tier_b_merkle_revocation_membership_proof_blocks_use() {
+    // GID IS revoked; a membership proof authenticates its leaf -> the use is blocked (revoked).
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&[GID, "other-1"]);
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let proofs = vec![(GID.to_string(), membership_proof(&leaves, GID))];
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, proofs);
+    assert!(!r.ok, "a use of a membership-proven revoked grant must fail");
+    assert_eq!(r.revoked_uses_blocked, 1);
+    assert_eq!(r.uses_matched, 0);
+    assert!(r.issues.iter().any(|i| i.contains("proves REVOKED")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_merkle_revocation_missing_proof_is_fail_closed() {
+    // FAIL-CLOSED: a fresh root is present but the use carries NO proof -> the verifier cannot prove
+    // non-revocation -> blocked (the revoked set is undisclosed, so silence is NOT safe).
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, vec![]); // no proofs
+    assert!(!r.ok, "a fresh root with no proof for a use must fail closed");
+    assert_eq!(r.revoked_uses_blocked, 1);
+    assert_eq!(r.uses_matched, 0);
+    assert!(r.issues.iter().any(|i| i.contains("no valid non-membership proof")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_merkle_revocation_revoked_grant_cannot_forge_nonmembership() {
+    // THE CARDINAL FAIL-OPEN this construction closes: GID IS revoked (its leaf is in the tree). An attacker tries
+    // to pass a non-membership proof. No consecutive pair can strictly bracket q when q is itself a leaf — the
+    // attacker's best (claiming q's true neighbors as a consecutive pair) either fails adjacency or the strict
+    // lo<q<hi bound. We construct that forgery attempt and assert it is rejected (blocked, not matched).
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&[GID, "aaa", "zzz"]); // GID is a leaf at some index j
+    let q = feir_decision_core::verify::revocation_leaf(GID);
+    let j = leaves.iter().position(|l| *l == q).unwrap();
+    // forge: claim the pair (j-1, j+1) brackets q — true values bracket q but the indices are NOT consecutive.
+    let forged = CanonValue::object(vec![
+        ("type".into(), CanonValue::string("nonmembership")),
+        ("lo".into(), hx(&leaves[j - 1])),
+        ("hi".into(), hx(&leaves[j + 1])),
+        ("lo_index".into(), CanonValue::Int((j - 1) as i64)),
+        ("hi_index".into(), CanonValue::Int((j + 1) as i64)), // gap where the revoked leaf sits
+        ("lo_path".into(), path_cv(&merkle_path(&leaves, j - 1))),
+        ("hi_path".into(), path_cv(&merkle_path(&leaves, j + 1))),
+    ])
+    .unwrap();
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, vec![(GID.to_string(), forged)]);
+    assert!(!r.ok, "a non-consecutive 'bracket' around a revoked leaf must be rejected");
+    assert_eq!(r.revoked_uses_blocked, 1, "the revoked grant's use is fail-closed");
+    assert_eq!(r.uses_matched, 0);
+}
+
+#[test]
+fn tier_b_merkle_revocation_tampered_path_is_fail_closed() {
+    // a non-membership proof whose audit path is corrupted re-derives a DIFFERENT root -> Unproven -> blocked.
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&["other-1", "other-2", "other-3"]);
+    let mut proof = nonmembership_proof(&leaves, GID);
+    // corrupt the first lo_path node.
+    if let Some(p) = proof.get("lo_path").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|h| h.as_str()) {
+        let mut bad = p.to_string();
+        bad.replace_range(0..1, if p.starts_with('a') { "b" } else { "a" });
+        let newpath = CanonValue::Array(vec![CanonValue::string(bad)]);
+        proof = change_field(&proof, "lo_path", newpath);
+    }
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, vec![(GID.to_string(), proof)]);
+    assert!(!r.ok, "a tampered audit path must fail closed");
+    assert_eq!(r.revoked_uses_blocked, 1);
+}
+
+#[test]
+fn tier_b_merkle_revocation_forged_root_sig_is_a_violation() {
+    // a root signed by a non-pinned key must not be honored (stale + issue), and its proofs are not trusted.
+    let (rec, res, tsa, rev) = rev_keys();
+    let imposter = signing_key_from_seed(&[123u8; 32]);
+    let leaves = rev_leaves(&["other-1"]);
+    let root_obj = merkle_root_obj(&imposter, REV_FRESH_FROM, REV_FRESH_TO, &leaves); // signed by the imposter
+    let proofs = vec![(GID.to_string(), nonmembership_proof(&leaves, GID))];
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, proofs);
+    assert!(!r.ok, "a root not signed by a pinned revocation issuer must fail");
+    assert_eq!(r.revocation_merkle_status, "stale");
+    assert!(r.issues.iter().any(|i| i.contains("does not verify under any pinned revocation_keys")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_merkle_revocation_stale_root_does_not_block_use() {
+    // a validly-signed but OUT-OF-WINDOW root is stale -> too old to certify currency. Like a stale disclosed
+    // list, it does NOT block the use (status != fresh, so no proof is demanded) and does not fail the bundle —
+    // but it does block the capstone (proven separately via the capstone conjunct test below).
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&["other-1"]);
+    // not_after BEFORE the anchored ts (2026-06-15T10:10:01Z) -> stale.
+    let root_obj = merkle_root_obj(&rev, "2026-06-14T00:00:00.000Z", "2026-06-15T09:00:00.000Z", &leaves);
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, vec![]); // no proof needed when not fresh
+    assert!(r.ok, "a stale root must not fail the bundle; issues: {:?}", r.issues);
+    assert_eq!(r.revocation_merkle_status, "stale");
+    assert_eq!(r.revoked_uses_blocked, 0);
+    assert_eq!(r.uses_matched, 1);
+}
+
 // ---- D8: the attested_complete conjunctive capstone ----
 
 // a VerifyReport with EVERY capstone condition satisfied — start from a real verify result (real wiring),
@@ -4447,6 +4695,8 @@ fn tier_b_d8_each_condition_is_load_bearing() {
         // M5 (ADR 0005): the revocation conjuncts (stale list / revoked use blocks the capstone; absent/fresh pass).
         ("revocation stale (M5)", |r| r.revocation_status = "stale".to_string()),
         ("revocation revoked_present (M5)", |r| { r.revocation_status = "revoked_present".to_string(); r.revoked_uses_blocked = 1; }),
+        // M5 Merkle-non-disclosure: a stale signed root blocks the capstone exactly like a stale disclosed list.
+        ("revocation merkle stale (M5)", |r| r.revocation_merkle_status = "stale".to_string()),
         // M4 (ADR 0005): the two federation conjuncts (synthetic isolation — a suppressed broker also forces !ok
         // in a live verify, but here unmatched_violation is left 0 and ONLY the federation counter is flipped, so
         // each is independently load-bearing). `absent` (single-broker) keeps both at 0 and passes.
