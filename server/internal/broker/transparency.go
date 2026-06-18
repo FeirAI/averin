@@ -51,6 +51,25 @@ func BrokerGrantHead(grants []GrantSeqHash, priorHeadHash string) map[string]any
 // FIRST checkpoint uses (no previous head to chain to).
 func EmptyGrantHeadRoot() string { return GrantHeadRoot(nil) }
 
+// BrokerGrantHeads is the FEDERATED head a checkpoint anchors (ADR 0005 M4): a MAP `{broker_id:
+// BrokerGrantHead(...)}` — the per-`broker_id` generalization of the single `broker_grant_head`. Each broker's
+// entry folds ONLY that broker's grant log (its own gapless [1..n_b] broker_seq prefix) and chains to that
+// broker's OWN previous head via `prior[broker_id]` (the empty-log root when the broker has no prior checkpoint).
+// The offline verifier re-derives each broker's cumulative_root independently, so a gap in broker A's sequence is
+// detected in A's partition and can never be masked by broker B's interleaved grants. Each `perBroker` slice MUST
+// be sorted by broker_seq.
+func BrokerGrantHeads(perBroker map[string][]GrantSeqHash, prior map[string]string) map[string]any {
+	heads := make(map[string]any, len(perBroker))
+	for brokerID, grants := range perBroker {
+		p, ok := prior[brokerID]
+		if !ok {
+			p = EmptyGrantHeadRoot()
+		}
+		heads[brokerID] = BrokerGrantHead(grants, p)
+	}
+	return heads
+}
+
 func GrantHeadRoot(grants []GrantSeqHash) string {
 	lp4 := func(buf, b []byte) []byte {
 		var n [4]byte

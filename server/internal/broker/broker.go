@@ -154,6 +154,10 @@ type Request struct {
 	DelegationChain []string      // [caller, …, agent]
 	Justification   string        // free text, recorded
 	TTL             time.Duration // credential lifetime
+	// BrokerID (ADR 0005 M4 — Federation): the issuing broker's identity. When non-empty, the grant joins
+	// this broker's OWN per-broker_id grant-transparency partition (broker_seq is gapless WITHIN the broker),
+	// and the offline verifier checks this broker's head independently. Empty ⇒ the single-broker default.
+	BrokerID string
 }
 
 const popTag = "feir.broker.pop.v1"
@@ -347,6 +351,12 @@ func Prepare(req Request, grantID string, allocSeq func() (int64, error), now ti
 	}
 	if scopeClass == ScopeBoundedReuse {
 		evidence["use_limit"] = req.UseLimit // the verifier reads the cap from the SIGNED grant_evidence
+	}
+	// M4 (ADR 0005 — Federation): tag the grant with its issuing broker_id so the offline verifier
+	// partitions the grant-transparency log per broker_id (its head is checked independently). Rides inside
+	// the signed grant_evidence, so a relay cannot move a grant between brokers' partitions.
+	if req.BrokerID != "" {
+		evidence["broker_id"] = req.BrokerID
 	}
 
 	// Mint the capability: payload = the canonical descriptor bytes, signed by the issuing key. Only
