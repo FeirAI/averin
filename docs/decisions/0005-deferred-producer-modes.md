@@ -22,9 +22,19 @@ conjunction only ever gets MORE restrictive (or gains an explicit, weaker, label
 > M3, and M4 each ship the verifier semantics + the Go producer (+ a shared golden vector for M6/M2/M3; M4 reuses
 > the existing `grant_head_root` fold so no new vector; M5 reuses the canonical-doc-signing path), with only their
 > online producer-orchestration HTTP path deferred. The ADR 0002 amendments §9 are applied (M1 was first); the Q3
-> resolution (§9, M3) is live. Deferred sub-features (clearly labeled per mode): the online two-phase HTTP flows
-> (cosig/delegation/native/the introspected-capstone-LABEL e2e), the Merkle-non-disclosure revocation mode, and
-> M4's optional `cross_broker_cert` transitive-trust tier (`feir.broker.federation.cert.v1`).
+> resolution (§9, M3) is live.
+>
+> **Online HTTP flows + operator readiness (built):** the two-phase online grant flow is now live for **M6
+> Cosig + M2 Delegation** — `POST /v2/grants/prepare` mints + reveals the challenge (the broker-minted
+> credential_binding/exp), the approvers/delegators sign it, `POST /v2/grants/finalize` binds the
+> cosignatures/hops + commits (the gapless `broker_seq` is allocated at finalize, so the D6 log invariant holds);
+> `WithCosigPolicy` / `FEIR_COSIG_APPROVER_KEYS` pin the M-of-N. Operator readiness: `feir-verify bundle b.json
+> opts.json` pins the role-disjoint key sets (authentic verification + every mode gate) and surfaces all mode
+> statuses; `docs/operator-verification.md` is the operator guide. **Still deferred (clearly labeled):** the
+> **native (M3) online path** (`POST /v2/introspection` — needs the resource recording key to sign the structured
+> `feir.resource.introspection.v1` challenge, a small server-key-plumbing change + the `mode:"token_exchange"`
+> grant branch); the Merkle-non-disclosure revocation mode; and M4's optional `cross_broker_cert` transitive-trust
+> tier (`feir.broker.federation.cert.v1` + golden vector).
 
 The design was pressure-tested against the live verifier (`core/src/verify.rs`) and producer
 (`server/internal/broker`, `server/internal/api`, `server/internal/resourceshim`). Where a mode stresses or
