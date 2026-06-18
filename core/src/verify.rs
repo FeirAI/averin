@@ -4528,8 +4528,44 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
     .to_string();
 
+    // M5 (ADR 0005): a NATIVE (token_exchange) credential can be revoked too. The use-loop revocation gates only
+    // cover the BROKERED surface; native accountability is the separate introspection pre-pass, so a revoked
+    // native grant would otherwise keep introspection_status:"attested" (a revoked credential certified — a
+    // fail-open). Apply the SAME gates to each native grant_id HERE (before finalizing revocation_status so it
+    // recolors), collecting the revoked set so the pre-pass can force those grants out of `covered_native` (never
+    // `attested` over a revoked credential). Each is also a hard violation (→ !ok) + counted in revoked_uses_blocked.
+    let mut revoked_native: BTreeSet<String> = BTreeSet::new();
+    for gid in native_grants_by_id.keys() {
+        if revocation.status == "fresh" && revocation.revoked.contains(gid.as_str()) {
+            revoked_uses_blocked += 1;
+            revoked_native.insert(gid.clone());
+            issues.push(format!("native credential for grant '{gid}': a fresh revocation_list marks it REVOKED — its introspected surface is blocked (M5)"));
+        } else if merkle_rev.status == "fresh" {
+            let proof = revocation_proofs.and_then(|m| m.get(gid.as_str()));
+            let verdict = merkle_rev
+                .root
+                .as_ref()
+                .map(|root| proof.map_or(ProofVerdict::Unproven, |p| check_revocation_proof(p, gid, root, merkle_rev.leaf_count)))
+                .unwrap_or(ProofVerdict::Unproven);
+            match verdict {
+                ProofVerdict::NotRevoked => revocation_nonmembership_verified += 1,
+                ProofVerdict::Revoked => {
+                    revoked_uses_blocked += 1;
+                    revoked_native.insert(gid.clone());
+                    issues.push(format!("native credential for grant '{gid}': a fresh revocation_merkle_root proves it REVOKED — blocked (M5)"));
+                }
+                ProofVerdict::Unproven => {
+                    revoked_uses_blocked += 1;
+                    revoked_native.insert(gid.clone());
+                    issues.push(format!("native credential for grant '{gid}': a fresh revocation_merkle_root is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)"));
+                }
+            }
+        }
+    }
+
     // M5 (ADR 0005): finalize revocation. revoked_grants_matched = closed grants whose grant_id is on the
-    // (validly-signed) list; if a fresh list blocked any use, the status becomes `revoked_present`.
+    // (validly-signed) list; if a fresh list blocked any use OR native credential, the status becomes
+    // `revoked_present`.
     let revoked_grants_matched = grants_by_id.keys().filter(|gid| revocation.revoked.contains(*gid)).count();
     let revocation_status = if revoked_uses_blocked > 0 { "revoked_present".to_string() } else { revocation.status };
     // The Merkle-mode status is reported as evaluated (absent|fresh|stale); blocked/unproven uses already raise a
@@ -4665,6 +4701,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             introspection_scope_narrowed += 1; // a proper subset: the resource attested a real narrowing
         }
         covered_native.insert(gid);
+    }
+    // M5 (ADR 0005): a REVOKED native grant (computed above) is forced OUT of coverage — so even a fully-verified
+    // transcript cannot make a revoked credential's surface `attested` (it counts as uncovered → `unattested`).
+    for gid in &revoked_native {
+        covered_native.remove(gid);
     }
     // Every native grant must be covered by ≥1 verified transcript for the introspected surface to be COMPLETE.
     let native_grants_uncovered = native_grants_by_id.keys().filter(|gid| !covered_native.contains(*gid)).count();

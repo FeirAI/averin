@@ -4896,6 +4896,83 @@ fn tier_b_native_transcript_verifies_and_attests() {
     }
 }
 
+// shared scaffold for the native × revocation regression tests: a native grant + a valid (attesting) transcript,
+// anchored, returning the (bundle-minus-revocation, opts-with-revocation_keys) so each test splices its own
+// revocation artifact. WITHOUT any revocation this reaches introspection_status:"attested".
+fn native_attested_bundle(rec: &SigningKey, res: &SigningKey, tsa: &SigningKey, rev: &SigningKey) -> (CanonValue, VerifyOptions) {
+    let grant = seal_grant(rec, rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ie = introspection_evidence(res, GID, LEASE, NSCOPE, RESOURCE, USED, EXP);
+    let t = seal_introspection(rec, res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let th = content_hash_of(&t);
+    let cp = checkpoint_over(rec, std::slice::from_ref(&th), 2, Some(tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, t], vec![cp]);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.revocation_keys = vec![rev.verifying_key()];
+    (bundle, opts)
+}
+
+#[test]
+fn tier_b_native_credential_disclosed_revocation_blocks_attested_surface() {
+    // FAIL-OPEN REGRESSION (audit): a REVOKED native (token_exchange) credential must NOT stay attested. The M5
+    // revocation gate runs in the brokered use-loop; native accountability is a separate pre-pass — so without an
+    // explicit native gate a revoked native credential silently keeps introspection_status:"attested".
+    let (rec, res, tsa, rev) = rev_keys();
+    let (bundle, opts) = native_attested_bundle(&rec, &res, &tsa, &rev);
+    let revlist = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[GID]); // a FRESH list revoking the native grant
+    let r = verify_bundle_with(&change_field(&bundle, "revocation_list", revlist), &opts);
+    assert!(!r.ok, "a revoked native credential must fail the bundle (not stay attested)");
+    assert_eq!(r.revoked_uses_blocked, 1, "the revoked native credential is blocked");
+    assert_ne!(r.introspection_status, "attested", "a revoked native credential must NOT be attested");
+}
+
+#[test]
+fn tier_b_native_credential_merkle_membership_blocks_attested_surface() {
+    // the Merkle path: a membership proof for the native grant_id under a fresh root -> blocked.
+    let (rec, res, tsa, rev) = rev_keys();
+    let (bundle, opts) = native_attested_bundle(&rec, &res, &tsa, &rev);
+    let leaves = rev_leaves(&[GID, "other"]);
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let proofs = CanonValue::object(vec![(GID.to_string(), membership_proof(&leaves, GID))]).unwrap();
+    let b = change_field(&change_field(&bundle, "revocation_merkle_root", root_obj), "revocation_proofs", proofs);
+    let r = verify_bundle_with(&b, &opts);
+    assert!(!r.ok, "a Merkle-revoked native credential must fail");
+    assert_eq!(r.revoked_uses_blocked, 1);
+    assert_ne!(r.introspection_status, "attested");
+}
+
+#[test]
+fn tier_b_native_credential_merkle_missing_proof_is_fail_closed() {
+    // FAIL-CLOSED: a fresh root present but NO proof for the native grant -> cannot prove non-revocation -> blocked
+    // (consistent with the brokered surface; the revoked set is undisclosed, so silence is not safe).
+    let (rec, res, tsa, rev) = rev_keys();
+    let (bundle, opts) = native_attested_bundle(&rec, &res, &tsa, &rev);
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let b = change_field(&change_field(&bundle, "revocation_merkle_root", root_obj), "revocation_proofs", CanonValue::object(vec![]).unwrap());
+    let r = verify_bundle_with(&b, &opts);
+    assert!(!r.ok, "a fresh root with no proof for a native grant must fail closed");
+    assert_eq!(r.revoked_uses_blocked, 1);
+    assert_ne!(r.introspection_status, "attested");
+}
+
+#[test]
+fn tier_b_native_credential_merkle_nonmembership_stays_attested() {
+    // POSITIVE CONTROL (no over-block): a fresh root NOT revoking the native grant + a non-membership proof keeps
+    // the native surface attested and the bundle ok.
+    let (rec, res, tsa, rev) = rev_keys();
+    let (bundle, opts) = native_attested_bundle(&rec, &res, &tsa, &rev);
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let proofs = CanonValue::object(vec![(GID.to_string(), nonmembership_proof(&leaves, GID))]).unwrap();
+    let b = change_field(&change_field(&bundle, "revocation_merkle_root", root_obj), "revocation_proofs", proofs);
+    let r = verify_bundle_with(&b, &opts);
+    assert!(r.ok, "a non-revoked native credential with a non-membership proof must stay ok; issues: {:?}", r.issues);
+    assert_eq!(r.revoked_uses_blocked, 0);
+    assert_eq!(r.introspection_status, "attested");
+    assert_eq!(r.revocation_nonmembership_verified, 1);
+}
+
 #[test]
 fn tier_b_native_transcript_scope_narrowing_is_surfaced() {
     // effective_scope is a PROPER subset of the grant scope -> verified, with introspection_scope_narrowed bumped.
