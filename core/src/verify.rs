@@ -226,6 +226,34 @@ pub struct VerifyReport {
     pub introspection_transcripts_verified: usize,
     pub introspection_scope_narrowed: usize,
     pub introspection_status: String,
+    /// M4 / ADR 0005 (Federation — tiered multi-broker). Activated ONLY when a committed, integrity-proven
+    /// broker grant carries a non-empty signed `grant_evidence.broker_id` (a single-broker bundle is BYTE-FOR-BYTE
+    /// unchanged — D6 `broker_trust` runs exactly as before and these fields stay at the `absent` defaults). When
+    /// active, the grant-transparency log is PARTITIONED per `broker_id`: each broker's grants must form their own
+    /// gapless `[1..n_b]` `broker_seq` prefix with their own `cumulative_root` chain re-derived against that
+    /// broker's entry in the checkpoint's `broker_grant_heads` map — so a gap in broker A's sequence is detected
+    /// in A's partition and can never be masked by broker B's interleaved grants (the cross-broker suppression the
+    /// flat D6 log could not see). `brokers_total` = distinct `broker_id`s with a committed grant;
+    /// `brokers_seq_verified` = those whose per-broker head chain fully re-derived AND is bound into a
+    /// verified+anchored checkpoint; `cross_broker_suppression` = brokers whose partition failed (a gap, a tail
+    /// omission, a missing/inflated head, or a non-chaining prior-head — each also a hard `issues` violation).
+    /// `federation_status` ∈ {`absent` (single-broker / not activated), `sequence_verified` (every broker's head
+    /// chain verified + anchored), `sequence_consistent_export` (verified but the latest head is not anchored),
+    /// `suppression` (≥1 broker partition failed)}. `per_broker_trust` lists each `broker_id` with its own trust.
+    /// Capstone-gated by `cross_broker_suppression==0 && brokers_seq_verified==brokers_total`. Those two conjuncts
+    /// surface PER-BROKER suppression; the whole-log global failures (a grant smuggled out of every partition, a
+    /// phantom-broker head, a grant_id equivocation, a malformed head) additionally force `broker_trust=="assumed"`
+    /// (failing the existing `broker_trust=="sequence_verified"` capstone conjunct) AND a hard `issues` violation
+    /// (`!ok`), so the capstone is blocked on multiple independent grounds, not the two federation conjuncts alone.
+    /// Residual: a
+    /// globally-consistent cross-broker equivocation (divergent histories never co-committed in one bundle) stays
+    /// the offline floor (ADR 0004 D9 floor 1) — only an out-of-band monitor catches a coordinated multi-broker
+    /// rewrite. (The baseline pins one shared broker root; per-`broker_id` key pinning + cross-broker certs layer on.)
+    pub federation_status: String,
+    pub brokers_total: usize,
+    pub brokers_seq_verified: usize,
+    pub cross_broker_suppression: usize,
+    pub per_broker_trust: Vec<(String, String)>,
     /// D8/MF1 (ADR 0004): the IRREDUCIBLE resource-TCB conditional, ALWAYS `assumed_truthful`. The
     /// `attested_complete_over_brokered_surface` capstone proves every resource-signed receipt over the
     /// brokered surface is two-phase, PoP-re-verified, taxonomy-validated, replay-free, and committed to an
@@ -754,6 +782,26 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("introspection_transcripts_verified".into(), count(r.introspection_transcripts_verified)),
         ("introspection_scope_narrowed".into(), count(r.introspection_scope_narrowed)),
         ("introspection_status".into(), CanonValue::string(r.introspection_status.clone())),
+        // M4 (ADR 0005): federation (per-broker_id grant-transparency partition) status + counts.
+        ("federation_status".into(), CanonValue::string(r.federation_status.clone())),
+        ("brokers_total".into(), count(r.brokers_total)),
+        ("brokers_seq_verified".into(), count(r.brokers_seq_verified)),
+        ("cross_broker_suppression".into(), count(r.cross_broker_suppression)),
+        (
+            "per_broker_trust".into(),
+            CanonValue::Array(
+                r.per_broker_trust
+                    .iter()
+                    .map(|(bid, trust)| {
+                        CanonValue::object(vec![
+                            ("broker_id".into(), CanonValue::string(bid.clone())),
+                            ("trust".into(), CanonValue::string(trust.clone())),
+                        ])
+                        .unwrap()
+                    })
+                    .collect(),
+            ),
+        ),
         (
             "taxonomy_status".into(),
             CanonValue::string(r.taxonomy_status.clone()),
@@ -848,6 +896,12 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
                 && r.revocation_status != "stale"
                 && r.revocation_status != "revoked_present"
                 && r.revoked_uses_blocked == 0
+                // M4 (ADR 0005): when federation is active, EVERY broker's per-`broker_id` head chain verified and
+                // none was suppressed. A suppressed broker is also a hard violation (→ !ok), but the conjuncts are
+                // explicit so the capstone self-documents that no broker's grant log was suppressed. `absent`
+                // (single-broker) trivially passes: brokers_total==brokers_seq_verified==0 and no suppression.
+                && r.cross_broker_suppression == 0
+                && r.brokers_seq_verified == r.brokers_total
                 // T6: the brokered surface stayed within the operator's AFFIRMATIVELY-declared side-effect
                 // closure. This is load-bearing beyond `r.ok`: an `unclosed` surface already forces `!ok`, but
                 // a `not_declared` manifest (no closure asserted) does NOT — so without this conjunct an
@@ -1120,6 +1174,11 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         introspection_transcripts_verified: 0,
         introspection_scope_narrowed: 0,
         introspection_status: "absent".to_string(),
+        federation_status: "absent".to_string(),
+        brokers_total: 0,
+        brokers_seq_verified: 0,
+        cross_broker_suppression: 0,
+        per_broker_trust: Vec::new(),
         taxonomy_status: "absent".to_string(),
         broker_trust: "assumed".to_string(),
         cred_label_checks: 0,
@@ -1609,6 +1668,10 @@ struct GrantHead {
     cumulative_root: String,
 }
 
+/// M4 (ADR 0005): one verified checkpoint's federated head context — `(checkpoint_seq, anchored, per-`broker_id`
+/// head map, frontier)`. The per-broker generalization of `compute_broker_trust`'s `(seq, anchored, GrantHead, frontier)`.
+type FedHeadCp = (i64, bool, BTreeMap<String, GrantHead>, Vec<String>);
+
 fn parse_grant_head(cp: &CanonValue) -> Option<GrantHead> {
     let h = cp.get("broker_grant_head")?;
     Some(GrantHead {
@@ -1910,6 +1973,288 @@ fn compute_broker_trust(
         "sequence_verified".to_string()
     } else {
         "sequence_consistent_export".to_string()
+    }
+}
+
+/// M4 (ADR 0005): a checkpoint's federated `broker_grant_heads` — a MAP `{<broker_id>: {max_seq, prior_head_hash,
+/// cumulative_root}}` (the per-`broker_id` generalization of the single D6 `broker_grant_head`). Parsed fail-closed:
+/// a present-but-non-object map, or ANY entry missing a field, returns `None` (a malformed/tampered federation head).
+fn parse_grant_heads_map(cp: &CanonValue) -> Option<BTreeMap<String, GrantHead>> {
+    let obj = cp.get("broker_grant_heads")?.as_object()?;
+    let mut map = BTreeMap::new();
+    for (bid, v) in obj.iter() {
+        map.insert(
+            bid.clone(),
+            GrantHead {
+                max_seq: v.get("max_seq").and_then(|x| x.as_int())?,
+                prior_head_hash: v.get("prior_head_hash").and_then(|x| x.as_str())?.to_string(),
+                cumulative_root: v.get("cumulative_root").and_then(|x| x.as_str())?.to_string(),
+            },
+        );
+    }
+    Some(map)
+}
+
+/// M4 (ADR 0005): the surfaced outcome of federated (per-`broker_id`) grant-transparency evaluation.
+struct FederationEval {
+    /// Aggregate broker_trust: the WORST per-broker trust, or `assumed` on any global failure (the caller also
+    /// forces `assumed` when the bundle is not `ok`).
+    broker_trust: String,
+    /// `sequence_verified` (every broker's head chain verified + anchored) | `sequence_consistent_export`
+    /// (verified but the latest head is not anchored) | `suppression` (≥1 broker partition failed) | `absent`.
+    status: String,
+    brokers_total: usize,
+    brokers_seq_verified: usize,
+    cross_broker_suppression: usize,
+    per_broker: Vec<(String, String)>,
+}
+
+/// M4 (ADR 0005): compute federated grant-transparency trust over a PARTITION of the recorded grant log by
+/// `broker_id`. Each broker's grants must form their OWN gapless `[1..n_b]` `broker_seq` prefix with their OWN
+/// `cumulative_root` chain re-derived against that broker's entry in each checkpoint's `broker_grant_heads` map —
+/// so a gap in broker A's sequence is detected in A's partition and can NEVER be masked by broker B's interleaved
+/// grants (the cross-broker suppression a single flat D6 log cannot see). Structurally a per-`broker_id` replica of
+/// `compute_broker_trust`'s head-chain re-derivation; kept SEPARATE (not a refactor of the legacy function) so the
+/// single-broker path stays byte-for-byte unchanged. Every detected failure is a hard `issues` violation (→ `!ok`).
+#[allow(clippy::too_many_arguments)]
+fn compute_federation_trust(
+    cp_fed_heads: &[FedHeadCp],
+    verified_fed_headless: &[Vec<String>],
+    malformed_fed_head: bool,
+    record_trust: &[RecordTrust],
+    records: &[CanonValue],
+    by_hash: &BTreeMap<String, usize>,
+    dag_heads: &[String],
+    latest_cp_seq: i64,
+    issues: &mut Vec<String>,
+) -> FederationEval {
+    let broker_id_of = |rt: &RecordTrust| -> Option<String> {
+        ev_str(&records[rt.index], "grant_evidence", "broker_id").filter(|b| !b.is_empty())
+    };
+    // The per-broker grant log committed by a frontier: Broker-role grants of THIS broker_id with broker_seq>=1,
+    // sorted by broker_seq (membership is the role tuple + broker_id, NOT sig-gated — under-signing IS suppression,
+    // matching the legacy D6 log).
+    let log_for = |frontier: &[String], bid: &str| -> Vec<(i64, String)> {
+        let committed = committed_set(records, by_hash, frontier);
+        let mut log: Vec<(i64, String)> = record_trust
+            .iter()
+            .filter(|rt| {
+                rt.broker_role == BrokerRole::Broker.as_str()
+                    && committed.contains(&rt.content_hash)
+                    && broker_id_of(rt).as_deref() == Some(bid)
+            })
+            .filter_map(|rt| {
+                ev_int(&records[rt.index], "grant_evidence", "broker_seq")
+                    .filter(|seq| *seq >= 1)
+                    .map(|seq| (seq, rt.content_hash.clone()))
+            })
+            .collect();
+        log.sort_by_key(|(seq, _)| *seq);
+        log
+    };
+
+    let full_committed = committed_set(records, by_hash, dag_heads);
+    let mut suppressed: BTreeSet<String> = BTreeSet::new();
+
+    if malformed_fed_head {
+        issues.push("a verified checkpoint carries a present-but-malformed broker_grant_heads map — tampered/garbled federation head (suppression, M4)".into());
+    }
+
+    // distinct broker_ids over committed Broker grants; fail-closed on a committed broker grant MISSING broker_id
+    // (smuggled out of every partition — omitted from all per-broker heads) or broker_seq (smuggled out of its log).
+    let mut brokers: BTreeSet<String> = BTreeSet::new();
+    let mut smuggled = false;
+    for rt in record_trust {
+        if rt.broker_role != BrokerRole::Broker.as_str() || !full_committed.contains(&rt.content_hash) {
+            continue;
+        }
+        match broker_id_of(rt) {
+            Some(b) => {
+                brokers.insert(b);
+            }
+            None => {
+                issues.push(format!(
+                    "committed broker grant {} carries no broker_id while federation is active — smuggled out of the per-broker partition (suppression, M4)",
+                    rt.content_hash
+                ));
+                smuggled = true;
+            }
+        }
+        if ev_int(&records[rt.index], "grant_evidence", "broker_seq").filter(|seq| *seq >= 1).is_none() {
+            issues.push(format!(
+                "committed broker grant {} carries no broker_seq while federation is active — smuggled out of the transparency log (suppression, M4)",
+                rt.content_hash
+            ));
+            smuggled = true;
+        }
+    }
+
+    // grant_id INJECTIVITY across the whole committed log: broker_id is part of the credential identity, so a
+    // grant_id bound to >1 distinct (broker_id, broker_seq, content_hash) tuple is equivocated (one credential
+    // identity double-bound, incl. the same grant_id reused under two brokers). Locally decidable (co-committed).
+    let mut by_grant: BTreeMap<String, BTreeSet<(String, i64, String)>> = BTreeMap::new();
+    for rt in record_trust {
+        if rt.broker_role != BrokerRole::Broker.as_str() || !full_committed.contains(&rt.content_hash) {
+            continue;
+        }
+        if let Some(gid) = ev_str(&records[rt.index], "grant_evidence", "grant_id") {
+            let bid = broker_id_of(rt).unwrap_or_default();
+            let seq = ev_int(&records[rt.index], "grant_evidence", "broker_seq").unwrap_or(0);
+            by_grant.entry(gid).or_default().insert((bid, seq, rt.content_hash.clone()));
+        }
+    }
+    let mut equivocated = false;
+    for (gid, tuples) in &by_grant {
+        if tuples.len() > 1 {
+            issues.push(format!(
+                "grant_id {gid} is bound to {} distinct (broker_id, broker_seq, content_hash) tuples in one committed log — equivocated credential identity (M4/D6)",
+                tuples.len()
+            ));
+            equivocated = true;
+        }
+    }
+
+    // A verified checkpoint carrying NO (well-formed) broker_grant_heads map whose frontier commits a broker's
+    // grants binds them without a head — suppression for that broker. Dedup identical frontiers first.
+    let mut headless: Vec<&Vec<String>> = verified_fed_headless.iter().collect();
+    headless.sort();
+    headless.dedup();
+    for frontier in headless {
+        for b in &brokers {
+            if !log_for(frontier, b).is_empty() {
+                issues.push(format!(
+                    "broker '{b}': a verified checkpoint commits its grants but carries no broker_grant_heads map — bound without a transparency head (suppression, M4)"
+                ));
+                suppressed.insert(b.clone());
+            }
+        }
+    }
+
+    // The head MUST be on the LATEST checkpoint (whose frontier covers the full DAG); a head only on an EARLIER
+    // checkpoint hides grants the latest commits. The latest checkpoint's map must carry a head for EVERY broker
+    // with committed grants.
+    let latest_fed = cp_fed_heads.iter().find(|(seq, _, _, _)| *seq == latest_cp_seq);
+    let latest_anchored = latest_fed.map(|(_, a, _, _)| *a).unwrap_or(false);
+    match latest_fed {
+        None => {
+            issues.push("federation is active but the LATEST checkpoint carries no broker_grant_heads map — a dropped federation head hides later grants (suppression, M4)".into());
+            for b in &brokers {
+                suppressed.insert(b.clone());
+            }
+        }
+        Some((_, _, m, _)) => {
+            for b in &brokers {
+                if !m.contains_key(b) {
+                    issues.push(format!("broker '{b}' has committed grants but the LATEST checkpoint's broker_grant_heads has no head for it — dropped head (suppression, M4)"));
+                    suppressed.insert(b.clone());
+                }
+            }
+        }
+    }
+
+    // A head entry for a broker_id with NO committed grants anywhere is a phantom-broker head (inflation): a head
+    // claiming a partition that does not exist. Surfaced once per phantom broker_id.
+    let mut phantom: BTreeSet<String> = BTreeSet::new();
+    for (cseq, _, map, _) in cp_fed_heads {
+        for bid in map.keys() {
+            if !brokers.contains(bid) && phantom.insert(bid.clone()) {
+                issues.push(format!(
+                    "broker_grant_heads (checkpoint seq {cseq}) carries a head for broker '{bid}' with no committed grants — phantom-broker head (inflation, M4)"
+                ));
+            }
+        }
+    }
+
+    // Per-broker head-chain re-derivation: for EACH broker, re-walk its own head entries ascending by checkpoint
+    // seq — gapless [1..n], max_seq == n, cumulative_root re-derive over the broker's committed log, prior_head
+    // chaining the broker's OWN previous head (per-broker chain). A checkpoint that commits the broker's grants but
+    // whose map lacks its head binds them without a head (suppression).
+    let empty_root = grant_head_root(&[]);
+    for b in &brokers {
+        let mut entries: Vec<(i64, &GrantHead, &Vec<String>)> = Vec::new();
+        for (cseq, _, map, frontier) in cp_fed_heads {
+            match map.get(b) {
+                Some(h) => entries.push((*cseq, h, frontier)),
+                None => {
+                    if !log_for(frontier, b).is_empty() {
+                        issues.push(format!("broker '{b}' checkpoint seq {cseq}: commits its grants but its broker_grant_heads has no head for it — bound without a head (suppression, M4)"));
+                        suppressed.insert(b.clone());
+                    }
+                }
+            }
+        }
+        entries.sort_by_key(|(seq, _, _)| *seq);
+        entries.dedup_by(|a, c| a.0 == c.0 && a.1 == c.1 && a.2 == c.2);
+        let mut prev_root = empty_root.clone();
+        for (cseq, head, frontier) in entries {
+            let log_i = log_for(frontier, b);
+            let n_i = log_i.len() as i64;
+            if !log_i.iter().enumerate().all(|(i, (seq, _))| *seq == i as i64 + 1) {
+                issues.push(format!("broker '{b}' checkpoint seq {cseq}: committed grant broker_seq set is not a gapless [1..N] prefix — suppression/renumber (M4)"));
+                suppressed.insert(b.clone());
+            }
+            if head.max_seq != n_i {
+                issues.push(format!("broker '{b}' checkpoint seq {cseq}: head max_seq {} != its committed grant count {n_i} — omission/inflation (M4)", head.max_seq));
+                suppressed.insert(b.clone());
+            }
+            if grant_head_root(&log_i) != head.cumulative_root {
+                issues.push(format!("broker '{b}' checkpoint seq {cseq}: head cumulative_root does not re-derive from its committed grant log — suppression (M4)"));
+                suppressed.insert(b.clone());
+            }
+            if head.prior_head_hash != prev_root {
+                issues.push(format!("broker '{b}' checkpoint seq {cseq}: head prior_head_hash does not chain the broker's previous head — grant-log fork/restart (M4)"));
+                suppressed.insert(b.clone());
+            }
+            prev_root = head.cumulative_root.clone();
+        }
+    }
+
+    let global_fail = smuggled || equivocated || malformed_fed_head || !phantom.is_empty();
+
+    let brokers_total = brokers.len();
+    let mut per_broker: Vec<(String, String)> = Vec::new();
+    let mut brokers_seq_verified = 0usize;
+    let mut worst = "sequence_verified";
+    for b in &brokers {
+        // A non-suppressed broker's head chain validated AND (we required) its head is on the latest checkpoint —
+        // so its trust is bound to the latest checkpoint's anchored status (the same single anchor for all brokers).
+        let trust = if suppressed.contains(b) {
+            "suppression"
+        } else if latest_anchored {
+            "sequence_verified"
+        } else {
+            "sequence_consistent_export"
+        };
+        match trust {
+            "sequence_verified" => brokers_seq_verified += 1,
+            "sequence_consistent_export" if worst == "sequence_verified" => worst = "sequence_consistent_export",
+            _ => {}
+        }
+        per_broker.push((b.clone(), trust.to_string()));
+    }
+    let cross_broker_suppression = per_broker.iter().filter(|(_, t)| t == "suppression").count();
+
+    let failed = global_fail || cross_broker_suppression > 0;
+    let status = if failed {
+        "suppression".to_string()
+    } else if brokers_total == 0 {
+        "absent".to_string() // federation activated but no committed federated grant (degenerate); caller→assumed
+    } else {
+        worst.to_string()
+    };
+    let broker_trust = if failed || brokers_total == 0 {
+        "assumed".to_string()
+    } else {
+        worst.to_string()
+    };
+
+    FederationEval {
+        broker_trust,
+        status,
+        brokers_total,
+        brokers_seq_verified,
+        cross_broker_suppression,
+        per_broker,
     }
 }
 
@@ -2478,6 +2823,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // `verified_headless` holds the frontiers of verified checkpoints that carry NO well-formed head.
     let mut cp_heads: Vec<(i64, bool, GrantHead, Vec<String>)> = Vec::new();
     let mut verified_headless: Vec<Vec<String>> = Vec::new();
+    // M4 (ADR 0005): the per-`broker_id` federated head maps of verified checkpoints (the generalization of the
+    // single D6 head), the frontiers of verified checkpoints carrying NO such map, and a present-but-malformed
+    // map flag — used by `compute_federation_trust` ONLY when federation is active (else they are ignored and the
+    // single-broker D6 path runs verbatim).
+    let mut cp_fed_heads: Vec<FedHeadCp> = Vec::new();
+    let mut verified_fed_headless: Vec<Vec<String>> = Vec::new();
+    let mut verified_malformed_fed_head = false;
     // A broker_grant_head FIELD present on a VERIFIED checkpoint but unparseable is a tampered/garbled D6
     // head — pre-D6 checkpoints never carry the field, so it is a D6 activation signal (and a violation),
     // distinct from a checkpoint with no head field at all. Tracked so D6 cannot be dodged by garbling it.
@@ -2499,6 +2851,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             .unwrap_or_default();
         let head_field_present = cp.get("broker_grant_head").is_some();
         let cp_head = parse_grant_head(cp);
+        // M4: the federated head MAP (mutually exclusive with the single head in a well-formed bundle).
+        let fed_head_field_present = cp.get("broker_grant_heads").is_some();
+        let cp_fed_head = parse_grant_heads_map(cp);
         let mut this_anchored = false;
         let vk = cp
             .get("key")
@@ -2554,6 +2909,18 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // that carries NO (or a malformed → None) head is tracked separately so D6 can flag it if its
         // frontier commits grants (a checkpoint that binds grants without a head omits them from the log).
         if cp_verified {
+            // M4: the per-broker federated head map (used only when federation is active). A verified checkpoint
+            // with NO well-formed map is tracked as fed-headless (so a federated grant it commits without a head is
+            // flagged); a present-but-malformed map is a tampered federation head.
+            match cp_fed_head {
+                Some(map) => cp_fed_heads.push((cp_seq, this_anchored, map, cp_frontier.clone())),
+                None => {
+                    if fed_head_field_present {
+                        verified_malformed_fed_head = true;
+                    }
+                    verified_fed_headless.push(cp_frontier.clone());
+                }
+            }
             match cp_head {
                 Some(head) => cp_heads.push((cp_seq, this_anchored, head, cp_frontier)),
                 None => {
@@ -3740,18 +4107,62 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
 
     // D6/MF2 broker_trust: re-derive the grant-transparency head over the recorded grant log. Needs the
     // DAG (committed_set); without it (DAG invalid) the sequence cannot be re-derived → stays `assumed`.
+    // M4 (ADR 0005): the federation ACTIVATION BOUNDARY. Federation is active iff a committed, integrity-proven
+    // Broker grant carries a non-empty signed `grant_evidence.broker_id`. When NOT active the single-broker D6
+    // path runs VERBATIM (byte-for-byte unchanged) and the federation fields stay at their `absent` defaults; when
+    // active the per-`broker_id` partition runs instead and these fields are populated.
+    let mut federation_status = "absent".to_string();
+    let mut brokers_total = 0usize;
+    let mut brokers_seq_verified = 0usize;
+    let mut cross_broker_suppression = 0usize;
+    let mut per_broker_trust: Vec<(String, String)> = Vec::new();
     let broker_trust = match dag_opt.as_ref() {
-        Some(d) => compute_broker_trust(
-            &cp_heads,
-            &verified_headless,
-            verified_malformed_head,
-            &record_trust,
-            records,
-            &d.by_hash,
-            &d.heads,
-            latest_cp_seq,
-            &mut issues,
-        ),
+        Some(d) => {
+            let full_committed = committed_set(records, &d.by_hash, &d.heads);
+            // ACTIVATION (spec §M4): a committed, INTEGRITY-PROVEN Broker grant carrying a non-empty signed
+            // `broker_id`. The integrity-proven qualifier matches the spec exactly; it is also strictly
+            // fail-closed either way (an unproven `broker_id`-bearing record already forces `records_proven <
+            // len` → `!ok`, and `broker_id` rides inside the sealed grant_evidence so a relay cannot strip it
+            // from a genuine grant without breaking the seal).
+            let federation_active = record_trust.iter().any(|rt| {
+                rt.broker_role == BrokerRole::Broker.as_str()
+                    && rt.trust == TrustLevel::IntegrityProven
+                    && full_committed.contains(&rt.content_hash)
+                    && ev_str(&records[rt.index], "grant_evidence", "broker_id")
+                        .is_some_and(|b| !b.is_empty())
+            });
+            if federation_active {
+                let fe = compute_federation_trust(
+                    &cp_fed_heads,
+                    &verified_fed_headless,
+                    verified_malformed_fed_head,
+                    &record_trust,
+                    records,
+                    &d.by_hash,
+                    &d.heads,
+                    latest_cp_seq,
+                    &mut issues,
+                );
+                federation_status = fe.status;
+                brokers_total = fe.brokers_total;
+                brokers_seq_verified = fe.brokers_seq_verified;
+                cross_broker_suppression = fe.cross_broker_suppression;
+                per_broker_trust = fe.per_broker;
+                fe.broker_trust
+            } else {
+                compute_broker_trust(
+                    &cp_heads,
+                    &verified_headless,
+                    verified_malformed_head,
+                    &record_trust,
+                    records,
+                    &d.by_hash,
+                    &d.heads,
+                    latest_cp_seq,
+                    &mut issues,
+                )
+            }
+        }
         None => "assumed".to_string(),
     };
 
@@ -3891,6 +4302,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         introspection_transcripts_verified,
         introspection_scope_narrowed,
         introspection_status,
+        federation_status,
+        brokers_total,
+        brokers_seq_verified,
+        cross_broker_suppression,
+        per_broker_trust,
         resource_trust: "assumed_truthful".to_string(),
         coverage_manifest,
         unclosed_side_effects,

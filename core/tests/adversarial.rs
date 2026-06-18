@@ -1019,13 +1019,20 @@ fn use_evidence_n(
 }
 
 fn seal_grant(rec_sk: &SigningKey, broker_sk: &SigningKey, record_id: &str, ge: &CanonValue) -> CanonValue {
+    seal_grant_prev(rec_sk, broker_sk, record_id, ge, &[])
+}
+
+// seal_grant with explicit causal_prev_hashes (a DAG parent) — so a grant can be chained behind another grant
+// (e.g. for a multi-checkpoint per-broker transparency chain, M4).
+fn seal_grant_prev(rec_sk: &SigningKey, broker_sk: &SigningKey, record_id: &str, ge: &CanonValue, prev: &[String]) -> CanonValue {
     let eh = sha256_prefixed(ge.serialize().as_bytes());
     let esig = sign_evidence("gateway_enforced", "proj-001", record_id, &eh, broker_sk);
     let action = ge.get("action").unwrap().as_str().unwrap();
+    let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
         "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"feir-broker",
-        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
+        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":0,
         "agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z",
         "event_type":"credential_grant","action":"{action}","observed_via":"broker","status":"ok",
         "authority":{{"source":"gateway_enforced","enforcement_point":"credential_broker","grant_type":"id-jag","grant_id":"{record_id}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
@@ -4413,6 +4420,11 @@ fn tier_b_d8_each_condition_is_load_bearing() {
         // M5 (ADR 0005): the revocation conjuncts (stale list / revoked use blocks the capstone; absent/fresh pass).
         ("revocation stale (M5)", |r| r.revocation_status = "stale".to_string()),
         ("revocation revoked_present (M5)", |r| { r.revocation_status = "revoked_present".to_string(); r.revoked_uses_blocked = 1; }),
+        // M4 (ADR 0005): the two federation conjuncts (synthetic isolation — a suppressed broker also forces !ok
+        // in a live verify, but here unmatched_violation is left 0 and ONLY the federation counter is flipped, so
+        // each is independently load-bearing). `absent` (single-broker) keeps both at 0 and passes.
+        ("cross broker suppression (M4)", |r| r.cross_broker_suppression = 1),
+        ("broker not all seq_verified (M4)", |r| { r.brokers_total = 1; r.brokers_seq_verified = 0; }),
         // string-isolation: `unclosed` in a live verify ALSO forces !ok (covered e2e by
         // tier_b_t6_undeclared_touched_resource_is_unclosed); here we mutate ONLY the status on a synthetic
         // report (ok left true) to prove the capstone gate keys on `=="closed"` independently of `ok`.
@@ -4838,4 +4850,274 @@ fn tier_b_d8_introspected_each_condition_is_load_bearing() {
         assert!(!out.contains("attested_complete_over_introspected_surface"), "condition '{name}' removed but introspected capstone still emitted: {out}");
         assert!(out.contains(r#""action_completeness":"claimed_over_manifest""#), "removing '{name}' must drop to claimed_over_manifest: {out}");
     }
+}
+
+// ---- M4 (ADR 0005): Federation (per-broker_id grant-transparency partition) ----
+
+const BID_A: &str = "broker-A";
+const BID_B: &str = "broker-B";
+
+// a federated grant_evidence: a standard single_operation grant tagged with broker_id + broker_seq.
+fn grant_evidence_fed(gid: &str, broker_id: &str, broker_seq: i64) -> CanonValue {
+    let ge = change_field(&grant_evidence(gid, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP), "broker_seq", CanonValue::Int(broker_seq));
+    change_field(&ge, "broker_id", CanonValue::string(broker_id))
+}
+
+// a broker_grant_heads MAP `{broker_id: head}` from (broker_id, head) entries.
+fn fed_heads(entries: &[(&str, CanonValue)]) -> CanonValue {
+    CanonValue::object(entries.iter().map(|(b, h)| ((*b).to_string(), h.clone())).collect()).unwrap()
+}
+
+// a checkpoint carrying a broker_grant_heads MAP (the federated head form), seq/prev-parameterized + optionally anchored.
+#[allow(clippy::too_many_arguments)]
+fn checkpoint_with_fed_heads(rec_sk: &SigningKey, cid: &str, seq: i64, prev: Option<&str>, frontier: &[String], count: i64, heads: CanonValue, anchor_with: Option<&SigningKey>) -> CanonValue {
+    let key_block = CanonValue::parse(r#"{"signing_key_id":"k0","key_epoch":0,"key_status":"active"}"#).unwrap();
+    let body = checkpoint_body(cid, "proj-001", seq, prev, frontier, count, "2026-06-15T10:10:00.000Z", key_block).unwrap();
+    let body = change_field(&body, "broker_grant_heads", heads);
+    let cp = seal_checkpoint(&body, rec_sk).unwrap();
+    match anchor_with {
+        Some(tsa) => {
+            let anchor = make_test_anchor(&checkpoint_hash(&cp), "2026-06-15T10:10:01.000Z", tsa, "tsa-1");
+            attach_anchor(&cp, anchor)
+        }
+        None => cp,
+    }
+}
+
+#[test]
+fn tier_b_federation_single_broker_path_unchanged() {
+    // REGRESSION GUARD: a bundle with NO broker_id is byte-for-byte the legacy single-broker D6 path — the
+    // federation fields stay at their `absent` defaults and broker_trust is computed exactly as before.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let r = verify_bundle_with(&d6_clean(&rec, &tsa), &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.broker_trust, "sequence_verified");
+    assert_eq!(r.federation_status, "absent", "no broker_id -> federation not activated");
+    assert_eq!(r.brokers_total, 0);
+    assert_eq!(r.cross_broker_suppression, 0);
+    assert!(r.per_broker_trust.is_empty());
+}
+
+#[test]
+fn tier_b_federation_two_brokers_gapless_verifies() {
+    // TWO independently-sequenced brokers, each gapless within its OWN partition — a flat D6 verifier would read
+    // the interleaved seqs as a gap/dup (false suppression); the per-broker partition verifies BOTH.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let gb = seal_grant(&rec, &rec, "rec-b1", &grant_evidence_fed("grant-b1", BID_B, 1));
+    let (ha, hb) = (content_hash_of(&ga), content_hash_of(&gb));
+    let heads = fed_heads(&[
+        (BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)]))),
+        (BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)]))),
+    ]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, &[ha.clone(), hb.clone()], 2, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga, gb], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "two gapless brokers must verify; issues: {:?}", r.issues);
+    assert_eq!(r.federation_status, "sequence_verified");
+    assert_eq!(r.brokers_total, 2);
+    assert_eq!(r.brokers_seq_verified, 2);
+    assert_eq!(r.cross_broker_suppression, 0);
+    assert_eq!(r.broker_trust, "sequence_verified");
+    let json = report_to_json(&r);
+    for f in [r#""federation_status":"sequence_verified""#, r#""brokers_total":2"#, r#""brokers_seq_verified":2"#] {
+        assert!(json.contains(f), "report JSON missing {f}: {json}");
+    }
+}
+
+#[test]
+fn tier_b_federation_single_broker_with_broker_id_verifies() {
+    // a SINGLE federated broker (broker_id present, one partition) reaches sequence_verified via the MAP head form.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let ha = content_hash_of(&ga);
+    let heads = fed_heads(&[(BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&ha), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.federation_status, "sequence_verified");
+    assert_eq!(r.brokers_total, 1);
+    assert_eq!(r.brokers_seq_verified, 1);
+    assert_eq!(r.broker_trust, "sequence_verified");
+}
+
+#[test]
+fn tier_b_federation_one_broker_gap_does_not_mask_via_other() {
+    // THE CROSS-BROKER NON-MASKING CRUX: broker A has a GAP (broker_seq 1 and 3, missing 2); broker B is gapless
+    // (1,2). A's gap is detected in A's OWN partition — B's grants do NOT fill a global sequence to mask it, and
+    // B stays sequence_verified (the suppression is isolated to A).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let a1 = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let a3 = seal_grant(&rec, &rec, "rec-a3", &grant_evidence_fed("grant-a3", BID_A, 3)); // A's GAP: missing seq 2
+    let b1 = seal_grant(&rec, &rec, "rec-b1", &grant_evidence_fed("grant-b1", BID_B, 1));
+    let b2 = seal_grant(&rec, &rec, "rec-b2", &grant_evidence_fed("grant-b2", BID_B, 2));
+    let (ha1, ha3, hb1, hb2) = (content_hash_of(&a1), content_hash_of(&a3), content_hash_of(&b1), content_hash_of(&b2));
+    let heads = fed_heads(&[
+        (BID_A, grant_head_cv(3, &ghr(&[]), &ghr(&[(1, &ha1), (3, &ha3)]))), // A's head over its gappy [1,3]
+        (BID_B, grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &hb1), (2, &hb2)]))), // B gapless [1,2]
+    ]);
+    let frontier = vec![ha1.clone(), ha3.clone(), hb1.clone(), hb2.clone()];
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, &frontier, 4, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![a1, a3, b1, b2], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "broker A's gap must fail the bundle");
+    assert_eq!(r.federation_status, "suppression");
+    assert_eq!(r.cross_broker_suppression, 1, "only broker A is suppressed");
+    assert!(r.per_broker_trust.iter().any(|(b, t)| b == BID_A && t == "suppression"), "A suppressed: {:?}", r.per_broker_trust);
+    assert!(r.per_broker_trust.iter().any(|(b, t)| b == BID_B && t == "sequence_verified"), "B unaffected by A's gap (non-masking): {:?}", r.per_broker_trust);
+    assert!(r.issues.iter().any(|i| i.contains("broker-A") && i.contains("gapless")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_missing_broker_head_is_suppression() {
+    // broker B has a committed grant but the broker_grant_heads map carries NO head for it -> B's grants bound
+    // without a head -> suppression.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let gb = seal_grant(&rec, &rec, "rec-b1", &grant_evidence_fed("grant-b1", BID_B, 1));
+    let (ha, hb) = (content_hash_of(&ga), content_hash_of(&gb));
+    let heads = fed_heads(&[(BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)])))]); // B's head DROPPED
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, &[ha.clone(), hb.clone()], 2, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga, gb], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a broker with grants but no head must fail");
+    assert_eq!(r.cross_broker_suppression, 1);
+    assert!(r.per_broker_trust.iter().any(|(b, t)| b == BID_B && t == "suppression"), "{:?}", r.per_broker_trust);
+    assert!(r.issues.iter().any(|i| i.contains("broker-B") && i.contains("no head")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_committed_grant_without_broker_id_is_fail_closed() {
+    // a federated bundle (broker A present) where ANOTHER committed grant carries NO broker_id -> it is smuggled
+    // out of every partition (omitted from all per-broker heads) -> fail-closed.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let gx = seal_grant(&rec, &rec, "rec-x", &grant_evidence_d6("grant-x", 1)); // broker_seq but NO broker_id
+    let (ha, hx) = (content_hash_of(&ga), content_hash_of(&gx));
+    let heads = fed_heads(&[(BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, &[ha.clone(), hx.clone()], 2, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga, gx], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a committed grant with no broker_id in an active federation must fail closed");
+    assert!(r.issues.iter().any(|i| i.contains("no broker_id") && i.contains("smuggled")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_phantom_broker_head_is_inflation() {
+    // broker_grant_heads carries a head for a broker_id with NO committed grants -> phantom-broker head (inflation).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let ha = content_hash_of(&ga);
+    let phantom_root = ghr(&[(1, "sha256:00000000000000000000000000000000000000000000000000000000deadbeef")]);
+    let heads = fed_heads(&[
+        (BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)]))),
+        ("broker-C", grant_head_cv(1, &ghr(&[]), &phantom_root)), // C has NO committed grant
+    ]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&ha), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a phantom-broker head must fail");
+    assert!(r.issues.iter().any(|i| i.contains("phantom-broker head")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_head_prior_not_chaining_is_fork() {
+    // a broker's first (only) head whose prior_head_hash != the empty-log root is a fork/restart of its log.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let ha = content_hash_of(&ga);
+    let bogus_prior = ghr(&[(1, "sha256:1111111111111111111111111111111111111111111111111111111111111111")]);
+    let heads = fed_heads(&[(BID_A, grant_head_cv(1, &bogus_prior, &ghr(&[(1, &ha)])))]); // prior != empty_root
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&ha), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a non-chaining broker head must fail");
+    assert_eq!(r.cross_broker_suppression, 1);
+    assert!(r.issues.iter().any(|i| i.contains("does not chain")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_inflated_head_max_seq_is_suppression() {
+    // a broker head claiming max_seq=2 while only one grant (seq 1) is committed for it -> omission/inflation.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let ha = content_hash_of(&ga);
+    // claim max_seq=2 + a cumulative_root over a phantom 2-grant log (so the count mismatch fires, not a root re-derive that happens to match).
+    let heads = fed_heads(&[(BID_A, grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &ha)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&ha), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "an inflated max_seq must fail");
+    assert!(r.issues.iter().any(|i| i.contains("max_seq") && i.contains("broker-A")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_grant_id_reused_across_brokers_is_equivocation() {
+    // the marquee M4 equivocation: ONE grant_id minted under TWO brokers (A seq1, B seq1) — broker_id is part of
+    // the credential identity, so the grant_id is bound to 2 distinct (broker_id, seq, hash) tuples -> fail-closed.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ga = seal_grant(&rec, &rec, "rec-a", &grant_evidence_fed("grant-shared", BID_A, 1));
+    let gb = seal_grant(&rec, &rec, "rec-b", &grant_evidence_fed("grant-shared", BID_B, 1)); // SAME grant_id, broker B
+    let (ha, hb) = (content_hash_of(&ga), content_hash_of(&gb));
+    let heads = fed_heads(&[
+        (BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)]))),
+        (BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)]))),
+    ]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, &[ha.clone(), hb.clone()], 2, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga, gb], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a grant_id reused across brokers must fail closed");
+    assert!(r.issues.iter().any(|i| i.contains("equivocated credential identity")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_per_broker_chain_two_checkpoints() {
+    // broker A across TWO chained checkpoints: cp0(seq 0) commits A's grant1 with head1; cp1(seq 1) commits
+    // grant1+grant2 with head2 whose prior_head_hash chains head1's cumulative_root (the per-broker chain ACROSS
+    // checkpoints — depth >1). The whole chain must re-walk and reach sequence_verified.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let a1 = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let h1 = content_hash_of(&a1);
+    let a2 = {
+        // grant2's DAG parent is grant1 (so cp1's frontier [h2] transitively commits both).
+        let ge = grant_evidence_fed("grant-a2", BID_A, 2);
+        seal_grant_prev(&rec, &rec, "rec-a2", &ge, std::slice::from_ref(&h1))
+    };
+    let h2 = content_hash_of(&a2);
+    let root1 = ghr(&[(1, &h1)]);
+    let head1 = grant_head_cv(1, &ghr(&[]), &root1);
+    let head2 = grant_head_cv(2, &root1, &ghr(&[(1, &h1), (2, &h2)])); // prior == head1.cumulative_root (chained)
+    let cp0 = checkpoint_with_fed_heads(&rec, "cp-0", 0, None, std::slice::from_ref(&h1), 1, fed_heads(&[(BID_A, head1)]), Some(&tsa));
+    let cp0h = checkpoint_hash(&cp0);
+    let cp1 = checkpoint_with_fed_heads(&rec, "cp-1", 1, Some(&cp0h), std::slice::from_ref(&h2), 2, fed_heads(&[(BID_A, head2)]), Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![a1, a2], vec![cp0, cp1]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "a chained two-checkpoint per-broker head must verify; issues: {:?}", r.issues);
+    assert_eq!(r.federation_status, "sequence_verified");
+    assert_eq!(r.brokers_total, 1);
+    assert_eq!(r.brokers_seq_verified, 1);
+}
+
+#[test]
+fn tier_b_federation_unanchored_is_consistent_export() {
+    // a verified-but-UNANCHORED federated bundle: the per-broker heads re-derive (no suppression) but the latest
+    // checkpoint is not anchored, so trust is only `sequence_consistent_export` (internal consistency, not pinned).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let _ = &tsa; // not used to anchor here
+    let ga = seal_grant(&rec, &rec, "rec-a1", &grant_evidence_fed("grant-a1", BID_A, 1));
+    let gb = seal_grant(&rec, &rec, "rec-b1", &grant_evidence_fed("grant-b1", BID_B, 1));
+    let (ha, hb) = (content_hash_of(&ga), content_hash_of(&gb));
+    let heads = fed_heads(&[
+        (BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)]))),
+        (BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)]))),
+    ]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, &[ha.clone(), hb.clone()], 2, heads, None); // NOT anchored
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga, gb], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "an unanchored but consistent federation must still verify; issues: {:?}", r.issues);
+    assert_eq!(r.federation_status, "sequence_consistent_export");
+    assert_eq!(r.brokers_total, 2);
+    assert_eq!(r.brokers_seq_verified, 0, "unanchored -> not sequence_verified");
+    assert_eq!(r.broker_trust, "sequence_consistent_export");
 }
