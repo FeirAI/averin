@@ -16,12 +16,12 @@ files, and no behavior change ship with this ADR.** Following ADR 0004's rule, e
 it proves *cryptographically* versus what stays *TCB* (`resource_trust: assumed_truthful`), and the D8
 conjunction only ever gets MORE restrictive (or gains an explicit, weaker, labeled tier) — never looser.
 
-> **Implementation status (updated):** **M1 (`bounded_reuse`/N-Use), M6 (Cosig), and M2 (Delegation) have
-> since been built** — see their §M1/§M6/§M2 status notes. M1 is end-to-end (incl. the online `POST /v2/grants`
-> path); M6 and M2 each ship the verifier semantics + the Go producer + a shared cross-language golden vector,
-> with only their online HTTP path (inherently two-phase) deferred. M3–M5 remain design-only staging maps. The
-> ADR 0002 amendments §9 prescribes "to apply alongside the first implementation" are now applied (M1 was that
-> first implementation).
+> **Implementation status (updated):** **M1 (`bounded_reuse`/N-Use), M6 (Cosig), M2 (Delegation), and M5
+> (Revocation) have since been built** — see their §M1/§M6/§M2/§M5 status notes. M1 is end-to-end (incl. the
+> online `POST /v2/grants` path); M6, M2, and M5 each ship the verifier semantics + the Go producer (+ a shared
+> golden vector for M6/M2; M5 reuses the canonical-doc-signing path so no structured vector is needed), with
+> only their online producer-orchestration HTTP path deferred. M3–M4 remain design-only staging maps. The ADR
+> 0002 amendments §9 prescribes "to apply alongside the first implementation" are now applied (M1 was first).
 
 The design was pressure-tested against the live verifier (`core/src/verify.rs`) and producer
 (`server/internal/broker`, `server/internal/api`, `server/internal/resourceshim`). Where a mode stresses or
@@ -195,6 +195,21 @@ Capstone → Signature domain → Residual*.
   only the out-of-band monitor catches a coordinated multi-broker rewrite.
 
 ### M5 — Revocation (tiered)
+
+> **Status: verifier + producer + FFI e2e IMPLEMENTED; online CRL + Merkle-non-disclosure deferred.** Verifier
+> `ae4b3b7`: `evaluate_revocation` (a top-level signed, time-bounded `revocation_list` under a pinned,
+> role-separated `revocation_keys` — sig domain `feir.revocation.v1` over the RCP-canonical list minus `sig`,
+> reusing the deployment_attestation pattern wholesale; freshness = latest anchored TSA time within
+> `[issued_at, not_after]`), the use-loop gate (a matched use of a grant on a FRESH list is blocked BEFORE it
+> is consumed/counted), the `revocation_keys` R2 + generic-authority disjointness extension, 3 report fields +
+> the capstone conjunct. `stale` blocks the capstone but not the bundle (blocking on stale data would be a DoS);
+> `absent` is the honest baseline. Go producer `56f8b1d`: `api.BuildRevocationList` + an FFI e2e where a
+> Go-built list spliced into a real anchored grant+use bundle blocks the revoked use under the Rust verifier.
+> Tested: Rust adversarial (fresh-no-match / fresh-blocks-revoked / stale / forged-sig / role-overlap-fatal) +
+> Go e2e. **Deferred:** the opt-in online CRL (`online_crl_url` → `online_fresh`) and the Merkle-root
+> NON-disclosure mode (per-use proofs without disclosing the full list — today the full `revoked_grant_ids` are
+> disclosed + sig-covered). **Residual (ADR floor):** an offline verifier cannot know of a revocation never
+> delivered in a fresh list — surfaced via `revocation_status`, never silently passed.
 
 - **Mechanism.** A new top-level bundle object `revocation_list` — signed, time-bounded, carrying a Merkle root
   of revoked `grant_id`s — pinned under a new role key set `revocation_keys`. A use of a revoked grant inside
