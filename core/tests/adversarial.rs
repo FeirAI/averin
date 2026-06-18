@@ -4028,6 +4028,31 @@ fn delegation_hop_challenge_golden_vector() {
     }
 }
 
+#[test]
+fn introspection_transcript_challenge_golden_vector() {
+    // Cross-language pinned vectors from the SHARED file — MUST equal Go broker.IntrospectionTranscriptChallenge.
+    // multibyte asserts byte-length LP4 prefixing; int64-edges pins the BE8 two's-complement on the timestamps (M3).
+    let v = preimage_vectors();
+    let cases = v.get("introspection_transcript_challenge").unwrap().as_array().unwrap();
+    assert!(!cases.is_empty(), "shared vector: introspection_transcript_challenge section is empty");
+    for case in cases {
+        let ch = introspection_transcript_challenge(
+            case.get("grant_id").unwrap().as_str().unwrap(),
+            case.get("credential_ref").unwrap().as_str().unwrap(),
+            case.get("effective_scope").unwrap().as_str().unwrap(),
+            case.get("resource_id").unwrap().as_str().unwrap(),
+            case.get("introspected_at").unwrap().as_int().unwrap(),
+            case.get("effective_exp").unwrap().as_int().unwrap(),
+        );
+        assert_eq!(
+            hex_lower(&ch),
+            case.get("expect_hex").unwrap().as_str().unwrap(),
+            "introspection_transcript_challenge drifted from the shared vector (case {})",
+            case.get("name").unwrap().as_str().unwrap()
+        );
+    }
+}
+
 // ---- M2 (ADR 0005): Delegation / per-hop signed re-delegation ----
 
 const DSCOPE: &str = "read:orders"; // the grant scope the demonstrator monotonicity holds equal down the chain

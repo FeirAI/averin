@@ -120,5 +120,38 @@
       "exp": -9223372036854775808,
       "expect_hex": "eb5dc1eb5db4a751b626e7637e0b7695cccd33c3a97a07614928c105369cb125"
     }
+  ],
+  "introspection_transcript_challenge": [
+    {
+      "name": "ascii",
+      "grant_id": "grant-1",
+      "credential_ref": "lease-sts-001",
+      "effective_scope": "read:orders",
+      "resource_id": "orders-db",
+      "introspected_at": 1718445700,
+      "effective_exp": 1718449200,
+      "expect_hex": "0e6784ecd962ed630c3da5b3e5069227bf3b33f53ecf1e9c398aaa0b72519700"
+    },
+    {
+      "name": "multibyte-utf8",
+      "grant_id": "café",
+      "credential_ref": "資格参照",
+      "effective_scope": "閲覧",
+      "resource_id": "資源",
+      "introspected_at": 1718445700,
+      "effective_exp": 1718449200,
+      "expect_hex": "703a3edab5c1badc3f4a2900c89f3ed6800052e851e7b3f7aa96f77a1188db4a"
+    },
+    {
+      "_note": "int64 BE8 boundary on introspected_at + effective_exp = i64::MIN (0x8000..00): pins the two's-complement encoding identically across languages. Not a reachable verifier state (introspected_at >= issued_at) — it pins the int64->BE8 encoding.",
+      "name": "int64-edges",
+      "grant_id": "g",
+      "credential_ref": "c",
+      "effective_scope": "s",
+      "resource_id": "r",
+      "introspected_at": -9223372036854775808,
+      "effective_exp": -9223372036854775808,
+      "expect_hex": "16b2a46d0c9c07378460a24881b9dc39af34104be7b12f7af3ddb94810e6195b"
+    }
   ]
 }
