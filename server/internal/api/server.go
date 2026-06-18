@@ -147,6 +147,18 @@ func (s *Server) WithWitness(w witness.Witness) *Server {
 // Tier-A prototype that is broker_trust: assumed — issuing and recording keys are NOT split into a
 // reduced TCB (ADR 0002). Nil/unset disables the endpoint.
 func (s *Server) WithBroker(issuingKey ed25519.PrivateKey) *Server {
+	// R2 (ADR 0003): mirror of WithResource's disjointness check, so a broker/resource key overlap is caught
+	// REGARDLESS of call order. WithResource's broker-overlap check is gated on s.brokerKey being set, so
+	// calling WithResource BEFORE WithBroker would skip it; this reciprocal check (against an already-set
+	// resource key) closes that order dependence — F12 must fail CLOSED on the broker axis, not only the
+	// signing axis. The offline verifier also rejects the overlap as a fatal config error; this is the
+	// producer fail-fast. A key collision is a programming error -> panic.
+	if s.resourceCore != nil {
+		if rpub, err := decodePubKey(s.resourceCore.PubKey()); err == nil &&
+			bytes.Equal(issuingKey.Public().(ed25519.PublicKey), rpub) {
+			panic("WithBroker: broker issuing key must differ from the resource recording key (R2 role separation)")
+		}
+	}
 	s.brokerKey = issuingKey
 	return s
 }
@@ -570,6 +582,21 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// F14: the seal RCP-canonicalizes the record and HARD-rejects floats, out-of-range integers, and
+		// interior NULs (canon.rs) — deterministic 400s the shallow checks above miss. Without this dry-run a
+		// bad field in a LATER batch item would fail only at seal time, AFTER earlier items are already stored
+		// (a partial commit that is NOT self-healing: the failure is deterministic, so a retry fails identically
+		// while the earlier item stays persisted). Batch records chain in the session DAG (each seal reads the
+		// frontier the prior item updated), so "seal all then store all" is not possible; instead canonicalize
+		// here over the fields that reach the seal VERBATIM — idempotency_key is dropped and input/output/
+		// rationale are commitment-replaced before sealing, so strip them to avoid a false reject; the
+		// server-stamped fields are always canonical. RcpEvidenceHash runs the SAME RCP parse the seal does.
+		probeForCanon := canonProbe(probe)
+		probeJSON, _ := json.Marshal(probeForCanon)
+		if _, err := s.core.RcpEvidenceHash(string(probeJSON)); err != nil {
+			writeErr(w, http.StatusBadRequest, "record is not RCP-canonical (a float, out-of-range integer, or NUL in a signed field rejects the whole batch): "+err.Error())
+			return
+		}
 	}
 
 	results := make([]map[string]any, 0, len(items))
@@ -593,6 +620,54 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 const denialIdemPrefix = "denial:"
 
 func reservedIdem(idem string) bool { return strings.HasPrefix(idem, denialIdemPrefix) }
+
+// canonProbe projects a decoded record down to exactly the fields whose CALLER-supplied value reaches the
+// seal verbatim, so the batch pre-pass (F14) can dry-run the RCP canonicalizer and reject a deterministic
+// seal-time failure (float / out-of-range int / interior NUL) UP FRONT — without false-rejecting a batch the
+// seal would accept. It mirrors ingestOne+sealAndScore field disposition exactly:
+//   - DROPPED: idempotency_key (deleted), input/output/rationale (commitment-replaced), and the
+//     unconditionally server-overwritten fields (schema_version, canon_version, domain, received_ts,
+//     display_seq, causal_prev_hashes, key) — their caller value never reaches the seal.
+//   - CONDITIONALLY-DEFAULTED (agent_id/agent_version/event_type/action/observed_via/status, agent_ts,
+//     record_id, span_id): setDefault/stringField overwrite a NON-string or EMPTY value, so the caller value
+//     reaches the seal ONLY when it is a non-empty string — keep it then (so an interior NUL is still
+//     caught), drop it otherwise (else a non-string like agent_id:1.5 would false-reject a batch the seal
+//     accepts by overwriting it with "unknown").
+//   - authority: normalizeAuthority overwrites only authority.source (and only for a map); every other
+//     sub-key reaches the seal verbatim, so canon-check authority minus a map's `source`.
+//   - everything else (project_id/session_id, extensions, parent_span_id, arbitrary caller fields like
+//     "cost"): reaches the seal verbatim — canon-check it.
+func canonProbe(probe map[string]any) map[string]any {
+	out := make(map[string]any, len(probe))
+	for k, v := range probe {
+		switch k {
+		case "idempotency_key", "input", "output", "rationale",
+			"schema_version", "canon_version", "domain", "received_ts",
+			"display_seq", "causal_prev_hashes", "key":
+			// dropped / commitment-replaced / unconditionally server-overwritten before the seal
+		case "agent_id", "agent_version", "event_type", "action", "observed_via", "status",
+			"agent_ts", "record_id", "span_id":
+			if sv, ok := v.(string); ok && sv != "" {
+				out[k] = v // a non-empty string reaches the seal verbatim; check it (catches interior NUL)
+			}
+		case "authority":
+			if m, ok := v.(map[string]any); ok {
+				cp := make(map[string]any, len(m))
+				for ak, av := range m {
+					if ak != "source" { // normalizeAuthority overwrites source; the rest reaches the seal
+						cp[ak] = av
+					}
+				}
+				out[k] = cp
+			} else {
+				out[k] = v // a non-map authority is left as-is by normalizeAuthority -> reaches the seal
+			}
+		default:
+			out[k] = v
+		}
+	}
+	return out
+}
 
 // validateGenericRecordItem runs the deterministic, body-only validations the generic /v2/records path
 // rejects with a 400. It is shared by ingestOne and the batch up-front pre-pass (F14: a malformed item
