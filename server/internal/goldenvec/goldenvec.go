@@ -64,13 +64,29 @@ type CosigCase struct {
 	ExpectHex         string `json:"expect_hex"`
 }
 
+// DelegationCase pins the delegation_hop_challenge digest (ADR 0005 M2) over fixed inputs (ExpectHex is the
+// raw 32-byte challenge digest the delegator signs).
+type DelegationCase struct {
+	Name         string `json:"name"`
+	GrantID      string `json:"grant_id"`
+	HopIndex     int64  `json:"hop_index"`
+	DelegatorKid string `json:"delegator_kid"`
+	DelegateKid  string `json:"delegate_kid"`
+	Scope        string `json:"scope"`
+	Action       string `json:"action"`
+	ResourceID   string `json:"resource_id"`
+	Exp          int64  `json:"exp"`
+	ExpectHex    string `json:"expect_hex"`
+}
+
 // Vectors is the whole shared file.
 type Vectors struct {
-	GrantHeadRoot          []GrantHeadCase `json:"grant_head_root"`
-	LedgerCommitment       []LedgerCase    `json:"ledger_commitment"`
-	UsePoPChallenge        []PoPCase       `json:"use_pop_challenge"`
-	CnfKid                 []CnfKidCase    `json:"cnf_kid"`
-	CosigApprovalChallenge []CosigCase     `json:"cosig_approval_challenge"`
+	GrantHeadRoot          []GrantHeadCase  `json:"grant_head_root"`
+	LedgerCommitment       []LedgerCase     `json:"ledger_commitment"`
+	UsePoPChallenge        []PoPCase        `json:"use_pop_challenge"`
+	CnfKid                 []CnfKidCase     `json:"cnf_kid"`
+	CosigApprovalChallenge []CosigCase      `json:"cosig_approval_challenge"`
+	DelegationHopChallenge []DelegationCase `json:"delegation_hop_challenge"`
 }
 
 // Load reads the shared vector. It locates the repo root from THIS source file's path (runtime.Caller)

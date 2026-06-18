@@ -4000,6 +4000,33 @@ fn cosig_approval_challenge_golden_vector() {
     }
 }
 
+#[test]
+fn delegation_hop_challenge_golden_vector() {
+    // Cross-language pinned vectors from the SHARED file — MUST equal Go broker.DelegationHopChallenge.
+    // multibyte asserts byte-length LP4 prefixing; int64-edges pins the BE8 two's-complement on hop_index/exp.
+    let v = preimage_vectors();
+    let cases = v.get("delegation_hop_challenge").unwrap().as_array().unwrap();
+    assert!(!cases.is_empty(), "shared vector: delegation_hop_challenge section is empty");
+    for case in cases {
+        let ch = delegation_hop_challenge(
+            case.get("grant_id").unwrap().as_str().unwrap(),
+            case.get("hop_index").unwrap().as_int().unwrap(),
+            case.get("delegator_kid").unwrap().as_str().unwrap(),
+            case.get("delegate_kid").unwrap().as_str().unwrap(),
+            case.get("scope").unwrap().as_str().unwrap(),
+            case.get("action").unwrap().as_str().unwrap(),
+            case.get("resource_id").unwrap().as_str().unwrap(),
+            case.get("exp").unwrap().as_int().unwrap(),
+        );
+        assert_eq!(
+            hex_lower(&ch),
+            case.get("expect_hex").unwrap().as_str().unwrap(),
+            "delegation_hop_challenge drifted from the shared vector (case {})",
+            case.get("name").unwrap().as_str().unwrap()
+        );
+    }
+}
+
 // ---- M2 (ADR 0005): Delegation / per-hop signed re-delegation ----
 
 const DSCOPE: &str = "read:orders"; // the grant scope the demonstrator monotonicity holds equal down the chain

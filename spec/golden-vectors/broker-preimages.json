@@ -1,5 +1,5 @@
 {
-  "_comment": "Cross-language preimage golden vectors (ADR 0003/0004/0005 broker/resource binding). Loaded by BOTH the Rust core tests (core/tests/adversarial.rs) AND the Go broker+resourceshim tests, so the LP4/BE8 domain-tagged preimages stay byte-identical across languages. Editing a preimage breaks BOTH languages against this ONE file, forcing a lockstep update — that is the point of a SHARED vector (vs. independently-hardcoded copies that can silently diverge). Outputs are sha256:<hex>, except use_pop_challenge.expect_hex and cosig_approval_challenge.expect_hex which are the raw 32-byte challenge digest as hex (the function returns the bytes).",
+  "_comment": "Cross-language preimage golden vectors (ADR 0003/0004/0005 broker/resource binding). Loaded by BOTH the Rust core tests (core/tests/adversarial.rs) AND the Go broker+resourceshim tests, so the LP4/BE8 domain-tagged preimages stay byte-identical across languages. Editing a preimage breaks BOTH languages against this ONE file, forcing a lockstep update — that is the point of a SHARED vector (vs. independently-hardcoded copies that can silently diverge). Outputs are sha256:<hex>, except use_pop_challenge / cosig_approval_challenge / delegation_hop_challenge expect_hex which are the raw 32-byte challenge digest as hex (the function returns the bytes).",
   "grant_head_root": [
     {
       "name": "empty",
@@ -80,6 +80,45 @@
       "threshold_m": -1,
       "exp": -9223372036854775808,
       "expect_hex": "41e15553d63d095fd2cba56e43e0e21391d0d46157009d08464b080b286c1365"
+    }
+  ],
+  "delegation_hop_challenge": [
+    {
+      "name": "ascii",
+      "grant_id": "grant-1",
+      "hop_index": 0,
+      "delegator_kid": "ed25519-AgentKid0",
+      "delegate_kid": "ed25519-AgentKid1",
+      "scope": "read:orders",
+      "action": "db.query:orders-ro",
+      "resource_id": "orders-db",
+      "exp": 1718449200,
+      "expect_hex": "487a73bc0ff7095c32d29ab06bccf8b277780df63b67ae6ab1b6569aa4debab7"
+    },
+    {
+      "name": "multibyte-utf8",
+      "grant_id": "café",
+      "hop_index": 2,
+      "delegator_kid": "ed25519-鍵",
+      "delegate_kid": "ed25519-子",
+      "scope": "閲覧",
+      "action": "🔑",
+      "resource_id": "資源",
+      "exp": 1718449200,
+      "expect_hex": "0bde95025cd374379aac8d0fd918af379e5b98ffda98592a29997569e0918df3"
+    },
+    {
+      "_note": "int64 BE8 boundary on hop_index + exp: pins the two's-complement encoding identically across languages.",
+      "name": "int64-edges",
+      "grant_id": "g",
+      "hop_index": -1,
+      "delegator_kid": "ed25519-AgentKid0",
+      "delegate_kid": "ed25519-AgentKid1",
+      "scope": "s",
+      "action": "a",
+      "resource_id": "r",
+      "exp": -9223372036854775808,
+      "expect_hex": "eb5dc1eb5db4a751b626e7637e0b7695cccd33c3a97a07614928c105369cb125"
     }
   ]
 }
