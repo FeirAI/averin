@@ -16,11 +16,12 @@ files, and no behavior change ship with this ADR.** Following ADR 0004's rule, e
 it proves *cryptographically* versus what stays *TCB* (`resource_trust: assumed_truthful`), and the D8
 conjunction only ever gets MORE restrictive (or gains an explicit, weaker, labeled tier) — never looser.
 
-> **Implementation status (updated):** **M1 (`bounded_reuse`/N-Use) and M6 (Cosig) have since been built** —
-> see their §M1/§M6 status notes. M1 is end-to-end (incl. the online `POST /v2/grants` path); M6 ships the
-> verifier semantics + the Go producer + a cross-language FFI round-trip, with only its online HTTP path
-> (inherently two-phase) deferred. M2–M5 remain design-only staging maps. The ADR 0002 amendments §9
-> prescribes "to apply alongside the first implementation" are now applied (M1 was that first implementation).
+> **Implementation status (updated):** **M1 (`bounded_reuse`/N-Use), M6 (Cosig), and M2 (Delegation) have
+> since been built** — see their §M1/§M6/§M2 status notes. M1 is end-to-end (incl. the online `POST /v2/grants`
+> path); M6 and M2 each ship the verifier semantics + the Go producer + a shared cross-language golden vector,
+> with only their online HTTP path (inherently two-phase) deferred. M3–M5 remain design-only staging maps. The
+> ADR 0002 amendments §9 prescribes "to apply alongside the first implementation" are now applied (M1 was that
+> first implementation).
 
 The design was pressure-tested against the live verifier (`core/src/verify.rs`) and producer
 (`server/internal/broker`, `server/internal/api`, `server/internal/resourceshim`). Where a mode stresses or
@@ -105,6 +106,23 @@ Capstone → Signature domain → Residual*.
   (identical `(action, resource_id)`).
 
 ### M2 — Delegation (per-hop signed)
+
+> **Status: verifier + producer + cross-language golden vector IMPLEMENTED; online HTTP path deferred.**
+> Verifier semantics `6282136`: `delegation_hop_challenge`, `verify_delegation_chain` (re-walks from the
+> broker-signed root cnf_kid — hop0 delegator == grant cnf; hop[i] delegator == hop[i-1] delegate; each sig
+> verified under the delegator key; monotonicity = equality), the leaf binding (`GrantInfo.effective_cnf_kid` +
+> narrowed `effective_exp = min(grant exp, hop exps)`, with the use↔grant predicate keyed on those so a
+> sub-agent's PoP matches and the root cannot use a delegated-away credential), the four report fields + two
+> capstone conjuncts, all fail-closed (an invalid/forged/broken-link/wrong-root/non-monotone chain is NOT
+> indexed → its use is an `unmatched_violation`). Go producer `a012a43`: `broker.DelegationHopChallenge`
+> (byte-identical, pinned by the SHARED golden vector incl. multibyte + an int64-edge BE8 case) +
+> `broker.AttachDelegation` (the fail-closed phase-2 embed that re-walks exactly as the verifier). Tested: Rust
+> adversarial (1-hop / 2-hop verify, leaf-not-root binding, widened-scope, forged-sig, broken-link, wrong-root,
+> and delegation × D2 PoP under the leaf key) + Go (golden vector + AttachDelegation valid / 2-hop / 5 reject
+> cases). **Deferred:** the online `POST /v2/grants` flow is inherently two-phase (the hop challenge binds the
+> minted grant_id, so agents can only sign after issuance), staged but not built. **Residual (demonstrator):**
+> monotonicity is EQUALITY, not a true narrowing lattice — a legitimately-narrower hop is fail-closed
+> (rejected), the documented future extension; a TCB on the scope vocabulary either way.
 
 - **Mechanism.** The grant carries an ordered list of signed hop-assertions. Each hop `H_k` is signed by hop
   k's cnf key (the delegator) over the *next* hop's identity + narrowed scope + cnf + exp. The verifier
