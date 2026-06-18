@@ -153,5 +153,39 @@
       "effective_exp": -9223372036854775808,
       "expect_hex": "16b2a46d0c9c07378460a24881b9dc39af34104be7b12f7af3ddb94810e6195b"
     }
+  ],
+  "federation_cert_challenge": [
+    {
+      "_note": "ADR 0005 M4 cross_broker_cert: a PINNED issuer broker vouches for a subject broker's KEY. subject_kid IS in the preimage (between subject_broker_id and scope) — binding the key, not just the id, is what closes key substitution.",
+      "name": "ascii",
+      "issuer_broker_id": "broker-A",
+      "subject_broker_id": "broker-B",
+      "subject_kid": "ed25519-3hsF0vKkm1c",
+      "scope": "read:orders",
+      "resource_id": "orders-db",
+      "not_after": 1718449200,
+      "expect_hex": "c45fc9640967a2739c2381000b9887900dd4bc75568454152571ef28c2f52b8d"
+    },
+    {
+      "name": "multibyte-utf8",
+      "issuer_broker_id": "courtier-café",
+      "subject_broker_id": "ブローカーB",
+      "subject_kid": "ed25519-鍵指紋",
+      "scope": "閲覧:注文",
+      "resource_id": "資源データベース",
+      "not_after": 1718449200,
+      "expect_hex": "73f93004ecd580666a11f0d4146e9855d5a66006811cf70356e51ac7d780868c"
+    },
+    {
+      "_note": "int64 BE8 boundary on not_after = i64::MIN (0x8000..00): pins the two's-complement encoding identically across languages.",
+      "name": "int64-edges",
+      "issuer_broker_id": "i",
+      "subject_broker_id": "s",
+      "subject_kid": "k",
+      "scope": "sc",
+      "resource_id": "r",
+      "not_after": -9223372036854775808,
+      "expect_hex": "26aced645332567b0f9d51bc112dc22d5a7a69776beca706446931ac32cf1f98"
+    }
   ]
 }

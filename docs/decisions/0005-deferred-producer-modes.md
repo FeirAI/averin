@@ -34,8 +34,8 @@ conjunction only ever gets MORE restrictive (or gains an explicit, weaker, label
 > `feir.resource.introspection.v1` challenge with its raw key). Operator readiness: `feir-verify bundle b.json
 > opts.json` pins the role-disjoint key sets (authentic verification + every mode gate) and surfaces all mode
 > statuses; `docs/operator-verification.md` is the operator guide. **Still deferred (clearly labeled, optional):**
-> the Merkle-non-disclosure revocation mode, and M4's optional `cross_broker_cert` transitive-trust tier
-> (`feir.broker.federation.cert.v1` + golden vector).
+> the Merkle-non-disclosure revocation mode. (M4's optional `cross_broker_cert` transitive-trust tier —
+> `feir.broker.federation.cert.v1` + shared golden vector + FFI e2e — is now implemented; see §M4.)
 
 The design was pressure-tested against the live verifier (`core/src/verify.rs`) and producer
 (`server/internal/broker`, `server/internal/api`, `server/internal/resourceshim`). Where a mode stresses or
@@ -249,8 +249,19 @@ Capstone → Signature domain → Residual*.
 > separation, not relay-reachable, no false capstone). 23 Rust federation adversarial tests + 2 Go FFI e2e + 5
 > aggregate-review coverage additions. **Residual (ADR floor):** a globally-consistent cross-broker equivocation
 > (divergent histories never co-committed in one bundle) stays the offline floor (ADR 0004 D9 floor 1) — only the
-> out-of-band monitor catches a coordinated multi-broker rewrite. **Deferred:** the `cross_broker_cert`
-> untrusted→transitive elevation (`feir.broker.federation.cert.v1` + its golden vector) + the online HTTP path.
+> out-of-band monitor catches a coordinated multi-broker rewrite.
+>
+> **UPDATE — `cross_broker_cert` (the optional transitive tier) implemented.** A grant whose subject `broker_id`
+> is NOT pinned can elevate to `transitive` trust iff it carries a `grant_evidence.cross_broker_cert` signed by a
+> PINNED issuer broker vouching for the subject's KEY (`feir.broker.federation.cert.v1`, with `subject_kid` in
+> the preimage — see the signature-domain note below). Two-piece + triple-reviewed (finder + Opus + GLM): the
+> review caught a REAL high-severity fail-open both the finder and Opus independently confirmed — the cert-derived
+> subject key was elevated as broker authority with NO role-disjointness check (a pinned/compromised issuer could
+> vouch for a resource/tsa/etc. key → role confusion); fixed TDD (failing regression → guard → re-review). New
+> report field `transitive_grants`; the federation capstone is unaffected (per-broker suppression still applies).
+> 8 Rust adversarial tests (positive + 7 fail-closed vectors incl. the role-confusion regression) + a shared
+> `federation_cert_challenge` golden vector (Go ↔ Rust byte-identical) + a Go→Rust FFI e2e. **Still deferred:** the
+> Merkle-non-disclosure revocation mode.
 
 - **Mechanism.** Each grant carries `broker_id` + `issuer_kid`. The verifier pins per-broker authority keys and
   verifies each broker's `broker_seq` transparency log **independently** (a gap in broker A's seq never masks
@@ -266,9 +277,17 @@ Capstone → Signature domain → Residual*.
   active (then issuer≠subject).
 - **Capstone.** **Reachable**, gated by `cross_broker_suppression==0 && brokers_seq_verified==brokers_total`.
 - **Signature domain.** `feir.broker.federation.cert.v1` = `sha256(LP4(tag) ‖ LP4(issuer_broker_id) ‖
-  LP4(subject_broker_id) ‖ LP4(scope) ‖ LP4(resource_id) ‖ BE8(not_after))`; the per-broker head reuses
-  `feir.broker.grant_head.v1` unchanged (partitioning is in the log-fold, so existing golden vectors stay
-  valid).
+  LP4(subject_broker_id) ‖ LP4(subject_kid) ‖ LP4(scope) ‖ LP4(resource_id) ‖ BE8(not_after))` where
+  `subject_kid = cnf_kid(subject_pubkey)`. **Binding `subject_kid` (the subject's KEY, not just its id) is
+  load-bearing:** without it, the issuer's (public) cert could be replayed over a grant signed by ANY key
+  claiming the subject's id (key substitution). The cert carries `subject_pubkey`; the verifier derives
+  `subject_kid`, re-checks the issuer sig, then runs the grant's normal `verify_authority` under
+  `subject_pubkey` (a cert alone never trusts a grant — the grant must independently be signed by the vouched
+  key). The cert-derived subject key is ALSO checked disjoint from every non-broker role
+  (resource/tsa/taxonomy/attestation/cosig/revocation) — else a pinned (or compromised) issuer could vouch for
+  a non-broker key and launder it into broker authority (a runtime backdoor around the startup R2 disjointness
+  fatal). The per-broker head reuses `feir.broker.grant_head.v1` unchanged (partitioning is in the log-fold, so
+  existing golden vectors stay valid).
 - **Residual.** Globally-consistent cross-broker equivocation is still an offline floor (ADR 0004 D9 floor 1) —
   only the out-of-band monitor catches a coordinated multi-broker rewrite.
 

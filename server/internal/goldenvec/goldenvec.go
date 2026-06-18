@@ -92,15 +92,29 @@ type IntrospectionCase struct {
 	ExpectHex      string `json:"expect_hex"`
 }
 
+// FederationCertCase pins the federation_cert_challenge digest (ADR 0005 M4, OPTIONAL cross_broker_cert) over
+// fixed inputs (ExpectHex is the raw 32-byte challenge digest the issuer broker signs).
+type FederationCertCase struct {
+	Name            string `json:"name"`
+	IssuerBrokerID  string `json:"issuer_broker_id"`
+	SubjectBrokerID string `json:"subject_broker_id"`
+	SubjectKid      string `json:"subject_kid"`
+	Scope           string `json:"scope"`
+	ResourceID      string `json:"resource_id"`
+	NotAfter        int64  `json:"not_after"`
+	ExpectHex       string `json:"expect_hex"`
+}
+
 // Vectors is the whole shared file.
 type Vectors struct {
-	GrantHeadRoot                    []GrantHeadCase     `json:"grant_head_root"`
-	LedgerCommitment                 []LedgerCase        `json:"ledger_commitment"`
-	UsePoPChallenge                  []PoPCase           `json:"use_pop_challenge"`
-	CnfKid                           []CnfKidCase        `json:"cnf_kid"`
-	CosigApprovalChallenge           []CosigCase         `json:"cosig_approval_challenge"`
-	DelegationHopChallenge           []DelegationCase    `json:"delegation_hop_challenge"`
-	IntrospectionTranscriptChallenge []IntrospectionCase `json:"introspection_transcript_challenge"`
+	GrantHeadRoot                    []GrantHeadCase      `json:"grant_head_root"`
+	LedgerCommitment                 []LedgerCase         `json:"ledger_commitment"`
+	UsePoPChallenge                  []PoPCase            `json:"use_pop_challenge"`
+	CnfKid                           []CnfKidCase         `json:"cnf_kid"`
+	CosigApprovalChallenge           []CosigCase          `json:"cosig_approval_challenge"`
+	DelegationHopChallenge           []DelegationCase     `json:"delegation_hop_challenge"`
+	IntrospectionTranscriptChallenge []IntrospectionCase  `json:"introspection_transcript_challenge"`
+	FederationCertChallenge          []FederationCertCase `json:"federation_cert_challenge"`
 }
 
 // Load reads the shared vector. It locates the repo root from THIS source file's path (runtime.Caller)

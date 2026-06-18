@@ -4061,6 +4061,32 @@ fn introspection_transcript_challenge_golden_vector() {
     }
 }
 
+#[test]
+fn federation_cert_challenge_golden_vector() {
+    // Cross-language pinned vectors from the SHARED file — MUST equal Go broker.FederationCertChallenge.
+    // multibyte asserts byte-length LP4 prefixing; int64-edges pins the BE8 two's-complement on not_after; the
+    // subject_kid field is what binds the cert to a specific subject KEY (M4 cross_broker_cert).
+    let v = preimage_vectors();
+    let cases = v.get("federation_cert_challenge").unwrap().as_array().unwrap();
+    assert!(!cases.is_empty(), "shared vector: federation_cert_challenge section is empty");
+    for case in cases {
+        let ch = federation_cert_challenge(
+            case.get("issuer_broker_id").unwrap().as_str().unwrap(),
+            case.get("subject_broker_id").unwrap().as_str().unwrap(),
+            case.get("subject_kid").unwrap().as_str().unwrap(),
+            case.get("scope").unwrap().as_str().unwrap(),
+            case.get("resource_id").unwrap().as_str().unwrap(),
+            case.get("not_after").unwrap().as_int().unwrap(),
+        );
+        assert_eq!(
+            hex_lower(&ch),
+            case.get("expect_hex").unwrap().as_str().unwrap(),
+            "federation_cert_challenge drifted from the shared vector (case {})",
+            case.get("name").unwrap().as_str().unwrap()
+        );
+    }
+}
+
 // ---- M2 (ADR 0005): Delegation / per-hop signed re-delegation ----
 
 const DSCOPE: &str = "read:orders"; // the grant scope the demonstrator monotonicity holds equal down the chain

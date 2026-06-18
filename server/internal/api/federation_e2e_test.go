@@ -3,6 +3,7 @@ package api_test
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -155,6 +156,51 @@ func TestFederationPerBrokerKeysRoundTripsThroughRustVerifier(t *testing.T) {
 	}
 	if !strings.Contains(repF, `"grant_verified":1`) {
 		t.Fatalf("only broker B's grant should remain verified:\n%s", repF)
+	}
+}
+
+// TestFederationCrossBrokerCertRoundTripsThroughRustVerifier is the cross-language proof for the OPTIONAL M4
+// transitive tier: a PINNED issuer broker A signs a cross_broker_cert (via broker.CrossBrokerCert) vouching for
+// an UNPINNED subject broker B's authority key; B's grant — signed by B's key, carrying the cert — round-trips
+// through the Rust verifier and elevates to transitive_grants:1, grant_verified:1 with ONLY A pinned. Plus a
+// negative control: a cert from an unpinned issuer does NOT elevate the subject.
+func TestFederationCrossBrokerCertRoundTripsThroughRustVerifier(t *testing.T) {
+	c, _ := core.New(seed) // the record-seal key (k0)
+	caSeed := "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+	cbSeed := "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+	ca, _ := core.New(caSeed) // issuer A authority (PINNED)
+	cb, _ := core.New(cbSeed) // subject B authority (NOT pinned)
+	tsa := testTSAKey()
+
+	caRawSeed, _ := hex.DecodeString(caSeed)
+	caRaw := ed25519.NewKeyFromSeed(caRawSeed) // A's raw key, to sign the cert
+	cbRawSeed, _ := hex.DecodeString(cbSeed)
+	cbPub := ed25519.NewKeyFromSeed(cbRawSeed).Public().(ed25519.PublicKey) // B's authority pubkey
+
+	geB := prepareFedGrantEvidence(t, "broker-B", "grant-b", 1)
+	// A vouches for B's KEY over the grant's OWN (scope, resource); not_after >= the grant's issued_at (1718445600).
+	cert := broker.CrossBrokerCert("broker-A", "broker-B", cbPub, geB["scope"].(string), geB["resource_id"].(string), 1_718_449_200, caRaw)
+	geB["cross_broker_cert"] = cert
+	recB, hashB := fedGrantRecord(t, c, cb, "grant-b", geB) // B's evidence (with the cert) signed by cb
+
+	heads := broker.BrokerGrantHeads(map[string][]broker.GrantSeqHash{"broker-B": {{Seq: 1, ContentHash: hashB}}}, nil)
+	bundle := fedCheckpointBundle(t, c, tsa, []string{recB}, []string{hashB}, 1, heads)
+
+	// pin ONLY issuer A; broker B is NOT in federated_broker_keys -> B elevates ONLY via A's cert.
+	pinned := `{"federated_broker_keys":{"broker-A":["` + ca.PubKey() + `"]},"tsa_keys":["` + tsaPubEncoded(tsa) + `"]}`
+	rep := c.VerifyBundleWith(bundle, pinned)
+	for _, want := range []string{`"ok":true`, `"grant_verified":1`, `"transitive_grants":1`, `"federation_status":"sequence_verified"`} {
+		if !strings.Contains(rep, want) {
+			t.Fatalf("Go-produced cross_broker_cert transitive grant did not verify (missing %s):\n%s", want, rep)
+		}
+	}
+
+	// NEGATIVE: pin a DIFFERENT issuer (not A) -> the cert's issuer A is unpinned -> no transitive elevation.
+	other, _ := core.New("c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3")
+	pinnedOther := `{"federated_broker_keys":{"broker-OTHER":["` + other.PubKey() + `"]},"tsa_keys":["` + tsaPubEncoded(tsa) + `"]}`
+	repN := c.VerifyBundleWith(bundle, pinnedOther)
+	if strings.Contains(repN, `"transitive_grants":1`) || strings.Contains(repN, `"grant_verified":1`) {
+		t.Fatalf("a cert from an UNPINNED issuer must not elevate the subject:\n%s", repN)
 	}
 }
 
