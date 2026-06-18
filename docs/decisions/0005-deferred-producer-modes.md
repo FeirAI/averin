@@ -16,12 +16,13 @@ files, and no behavior change ship with this ADR.** Following ADR 0004's rule, e
 it proves *cryptographically* versus what stays *TCB* (`resource_trust: assumed_truthful`), and the D8
 conjunction only ever gets MORE restrictive (or gains an explicit, weaker, labeled tier) — never looser.
 
-> **Implementation status (updated):** **M1 (`bounded_reuse`/N-Use), M6 (Cosig), M2 (Delegation), and M5
-> (Revocation) have since been built** — see their §M1/§M6/§M2/§M5 status notes. M1 is end-to-end (incl. the
-> online `POST /v2/grants` path); M6, M2, and M5 each ship the verifier semantics + the Go producer (+ a shared
-> golden vector for M6/M2; M5 reuses the canonical-doc-signing path so no structured vector is needed), with
-> only their online producer-orchestration HTTP path deferred. M3–M4 remain design-only staging maps. The ADR
-> 0002 amendments §9 prescribes "to apply alongside the first implementation" are now applied (M1 was first).
+> **Implementation status (updated):** **M1 (`bounded_reuse`/N-Use), M6 (Cosig), M2 (Delegation), M5
+> (Revocation), and M3 (Native/STS) have since been built** — see their §M1/§M6/§M2/§M5/§M3 status notes. M1 is
+> end-to-end (incl. the online `POST /v2/grants` path); M6, M2, M5, and M3 each ship the verifier semantics + the
+> Go producer (+ a shared golden vector for M6/M2/M3; M5 reuses the canonical-doc-signing path so no structured
+> vector is needed), with only their online producer-orchestration HTTP path deferred. M4 remains a design-only
+> staging map. The ADR 0002 amendments §9 prescribes "to apply alongside the first implementation" are now
+> applied (M1 was first); the Q3 resolution (§9, M3) is now live.
 
 The design was pressure-tested against the live verifier (`core/src/verify.rs`) and producer
 (`server/internal/broker`, `server/internal/api`, `server/internal/resourceshim`). Where a mode stresses or
@@ -145,6 +146,39 @@ Capstone → Signature domain → Residual*.
   monotonicity subset relation over scope strings remains a TCB on the scope vocabulary (D4 taxonomy).
 
 ### M3 — Native/STS (post-mint introspection transcript) — resolves ADR 0002 Q3
+
+> **Status: verifier + producer + shared golden vector + FFI e2e IMPLEMENTED; the introspected-capstone-LABEL
+> e2e + online introspection HTTP path deferred.** Verifier `feb4f74`: a native grant (signed
+> `grant_evidence.mode=="token_exchange"` + `lease_id`) is indexed into a SEPARATE `native_grants_by_id`, NEVER
+> the brokered `grants_by_id` — so the two surfaces are DISJOINT (a brokered use naming a native grant_id is an
+> `unmatched_violation`; a native credential never reaches `uses_matched`/`uses_pop_reverified`). The native
+> early-branch is fully additive (the brokered path is byte-for-byte unchanged). A resource-signed
+> `introspection_transcript` record (kind `introspection_transcript` → `classify_role` Resource) is the SOLE
+> native-use artifact; the M3 pre-pass verifies each closed transcript — the structured
+> `feir.resource.introspection.v1` sig under a pinned, role-separated `resource_authority_keys` issuer +
+> grant-bind + `credential_ref == grant.lease_id` + resource match + `effective_scope ⊆ grant.scope`
+> (space-delimited OAuth token subset, no broadening) + `effective_exp <= grant.exp` + `introspected_at >=
+> issued_at` — every failure a hard `unmatched_violation` → `!ok`. **The native-use-matching question is
+> RESOLVED: the transcript is the sole action-accountability artifact (no brokered use receipt).** Report fields
+> `native_credential_present`, `introspection_transcripts_total/_verified`, `introspection_scope_narrowed`,
+> `introspection_status`. **Capstone:** the standard `attested_complete_over_brokered_surface` gains
+> `!native_credential_present`; a NEW strictly-weaker PARALLEL label `attested_complete_over_introspected_surface`
+> requires `uses_matched==0` (PURITY) + `native_credential_present` + `introspection_status=="attested"` (every
+> closed transcript verified AND every native grant covered, total>0). A MIXED native+PoP bundle reaches NEITHER
+> label (`claimed_over_manifest`). D4×M3: a native grant for a taxonomy-escalating `(resource,action)` is
+> mis-scoped (fail-closed); native×cosig/delegation is a deferred composition (fail-closed). Triple-reviewed
+> SOUND (read-only finder + Opus + GLM 5.2/opencode, no fail-open; the `credential_ref`↔`lease_id` and native-D4
+> binding gaps both reviewers flagged were TDD-fixed pre-commit). Producer `13c3839`:
+> `broker.IntrospectionTranscriptChallenge` (byte-identical, pinned by the SHARED golden vector incl. multibyte +
+> int64-edge) + `broker.NativeGrantEvidence` + `broker.IntrospectionEvidence`, with an FFI e2e where a
+> Go-produced native grant + transcript reaches `introspection_status:"attested"` under the Rust verifier (+ four
+> fail-closed negative controls). Tested: Rust adversarial (16 native/introspection cases incl. MIXED-reaches-
+> neither + the per-conjunct capstone load-bearing) + Go (golden vector + the FFI e2e). **Deferred:** the
+> introspected-capstone-LABEL e2e + the online `POST /v2/introspection` two-phase flow ride the (separately
+> deferred) online HTTP path, exactly as the brokered-capstone e2e uses the online server. **Residual (ADR
+> floor):** the transcript is resource-signed → it RELOCATES, does not remove, the resource TCB
+> (`resource_trust: assumed_truthful`, ADR 0004 D9 floor 2 / ADR 0002 Q3) — the verifier proves the resource
+> SIGNED the effective scope, not that the IdP's scope is honest.
 
 - **Mechanism.** For credentials minted by an external IdP/STS whose effective scope the verifier cannot
   recompute, record the grant (`mode:"token_exchange"`, `lease_id`), then bind the *resource's signed
