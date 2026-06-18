@@ -11,8 +11,9 @@ use feir_decision_core::hashx::sha256_prefixed;
 use feir_decision_core::record::seal;
 use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use feir_decision_core::verify::{
-    cnf_kid, cosig_approval_challenge, delegation_hop_challenge, report_to_json, verify_bundle,
-    verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
+    cnf_kid, cosig_approval_challenge, delegation_hop_challenge, introspection_transcript_challenge,
+    report_to_json, verify_bundle, verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions,
+    VerifyReport,
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::path::PathBuf;
@@ -4443,4 +4444,373 @@ fn tier_b_d8_one_phase_use_blocks_capstone_end_to_end() {
     let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
     assert!(r.one_phase_use_present, "a one-phase matched use must set the flag: {:?}", r.issues);
     assert!(!report_to_json(&r).contains("attested_complete_over_brokered_surface"), "a one-phase use must block the capstone");
+}
+
+// ---- M3 (ADR 0005): Native/STS (post-mint resource-signed introspection transcript) ----
+
+const NSCOPE: &str = "read:orders write:orders"; // a native grant's authorized scope (space-delimited tokens)
+const LEASE: &str = "lease-sts-001"; // the external (IdP/STS) credential reference == introspection credential_ref
+
+// a native (token_exchange) grant_evidence: mode + lease_id + scope; NO cnf PoP / credential_binding (a native
+// credential is minted by an external IdP/STS the broker never sees). The verifier reads (grant_id, scope,
+// resource_id, issued_at, exp) from this; `action` is the human-echo carried for T6 closure harvesting.
+fn native_grant_evidence(gid: &str, scope: &str, resource: &str, lease: &str, issued: i64, exp: i64) -> CanonValue {
+    CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("grant")),
+        ("grant_id".into(), CanonValue::string(gid)),
+        ("mode".into(), CanonValue::string("token_exchange")),
+        ("grant_type".into(), CanonValue::string("oauth-scope")),
+        ("lease_id".into(), CanonValue::string(lease)),
+        ("action".into(), CanonValue::string(ACTION)),
+        ("resource_id".into(), CanonValue::string(resource)),
+        ("scope".into(), CanonValue::string(scope)),
+        ("scope_class".into(), CanonValue::string("session_grant")),
+        ("issued_at".into(), CanonValue::Int(issued)),
+        ("exp".into(), CanonValue::Int(exp)),
+    ])
+    .unwrap()
+}
+
+// a resource's introspection_evidence: its signed statement of an externally-minted credential's effective scope.
+// `sig_sk` signs the structured feir.resource.introspection.v1 challenge (the resource key for a valid transcript;
+// an imposter to forge). The carried `transcript_hash` rides the record evidence hash but is not in the structured sig.
+fn introspection_evidence(sig_sk: &SigningKey, gid: &str, cred_ref: &str, eff_scope: &str, resource: &str, introspected_at: i64, effective_exp: i64) -> CanonValue {
+    let challenge = introspection_transcript_challenge(gid, cred_ref, eff_scope, resource, introspected_at, effective_exp);
+    let sig = feir_decision_core::b64::encode(&sig_sk.sign(&challenge).to_bytes());
+    CanonValue::object(vec![
+        ("kind".into(), CanonValue::string("introspection_transcript")),
+        ("grant_id".into(), CanonValue::string(gid)),
+        ("credential_ref".into(), CanonValue::string(cred_ref)),
+        ("effective_scope".into(), CanonValue::string(eff_scope)),
+        ("resource_id".into(), CanonValue::string(resource)),
+        ("transcript_hash".into(), CanonValue::string(sha256_prefixed(b"native-action-payload"))),
+        ("introspected_at".into(), CanonValue::Int(introspected_at)),
+        ("effective_exp".into(), CanonValue::Int(effective_exp)),
+        ("sig".into(), CanonValue::string(sig)),
+    ])
+    .unwrap()
+}
+
+// seal an introspection_transcript RECORD: kind=introspection_transcript + tool_gateway (classify_role->Resource),
+// resource-signed evidence_sig (so its authority elevates under resource_authority_keys). `prev` is its DAG parent.
+fn seal_introspection(rec_sk: &SigningKey, res_sk: &SigningKey, record_id: &str, prev: &[String], ie: &CanonValue) -> CanonValue {
+    let eh = sha256_prefixed(ie.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", "proj-001", record_id, &eh, res_sk);
+    let gid = ie.get("grant_id").unwrap().as_str().unwrap();
+    let resource = ie.get("resource_id").unwrap().as_str().unwrap();
+    let prev_json = CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"feir-resource","agent_version":"feir-resource",
+        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
+        "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
+        "event_type":"tool_call","action":"{ACTION}","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"tool_gateway","grant_id":"{gid}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "extensions":{{"broker":{{"kind":"introspection_transcript","grant_id":"{gid}","resource_id":"{resource}","introspection_evidence":{ie}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ie = ie.serialize(),
+    );
+    seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
+// assemble + verify a native bundle: a token_exchange grant, an optional transcript (DAG-child of the grant), an
+// anchored checkpoint, and an optional coverage_manifest. Mirrors revocation_bundle_verify / delegation_bundle_verify.
+fn native_bundle_verify(rec: &SigningKey, res: &SigningKey, tsa: &SigningKey, grant: CanonValue, transcript: Option<CanonValue>, manifest: Option<CanonValue>) -> VerifyReport {
+    let gh = content_hash_of(&grant);
+    let (records, frontier, count) = match transcript {
+        Some(t) => {
+            let th = content_hash_of(&t); // the transcript's DAG parent is the grant, so committing it commits both
+            (vec![grant, t], vec![th], 2)
+        }
+        None => (vec![grant], vec![gh], 1),
+    };
+    let cp = checkpoint_over(rec, &frontier, count, Some(tsa));
+    let mut bundle = tier_b_bundle(&rec.verifying_key(), records, vec![cp]);
+    if let Some(m) = manifest {
+        bundle = change_field(&bundle, "coverage_manifest", m);
+    }
+    verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()))
+}
+
+#[test]
+fn tier_b_native_transcript_verifies_and_attests() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ie = introspection_evidence(&res, GID, LEASE, NSCOPE, RESOURCE, USED, EXP); // effective == grant scope/exp
+    let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let r = native_bundle_verify(&rec, &res, &tsa, grant, Some(t), None);
+    assert!(r.ok, "a native grant + valid transcript must verify; issues: {:?}", r.issues);
+    assert!(r.native_credential_present);
+    assert_eq!(r.introspection_transcripts_total, 1);
+    assert_eq!(r.introspection_transcripts_verified, 1);
+    assert_eq!(r.introspection_status, "attested");
+    assert_eq!(r.uses_matched, 0, "a native surface uses NO brokered receipts");
+    assert_eq!(r.introspection_scope_narrowed, 0, "effective_scope == grant scope: not a proper narrowing");
+    let json = report_to_json(&r);
+    for f in [r#""native_credential_present":true"#, r#""introspection_transcripts_verified":1"#, r#""introspection_status":"attested""#] {
+        assert!(json.contains(f), "report JSON missing {f}: {json}");
+    }
+}
+
+#[test]
+fn tier_b_native_transcript_scope_narrowing_is_surfaced() {
+    // effective_scope is a PROPER subset of the grant scope -> verified, with introspection_scope_narrowed bumped.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ie = introspection_evidence(&res, GID, LEASE, "read:orders", RESOURCE, USED, EXP); // ⊊ "read:orders write:orders"
+    let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let r = native_bundle_verify(&rec, &res, &tsa, grant, Some(t), None);
+    assert!(r.ok, "a narrowed transcript must verify; issues: {:?}", r.issues);
+    assert_eq!(r.introspection_transcripts_verified, 1);
+    assert_eq!(r.introspection_scope_narrowed, 1);
+    assert_eq!(r.introspection_status, "attested");
+}
+
+#[test]
+fn tier_b_native_transcript_scope_broadening_is_a_violation() {
+    // effective_scope carries a token NOT in the grant scope -> the resource broadened past the grant it was handed.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ie = introspection_evidence(&res, GID, LEASE, "read:orders admin:all", RESOURCE, USED, EXP); // admin:all ∉ grant
+    let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let r = native_bundle_verify(&rec, &res, &tsa, grant, Some(t), None);
+    assert!(!r.ok, "a scope-broadening transcript must fail the bundle");
+    assert_eq!(r.introspection_transcripts_verified, 0);
+    assert_eq!(r.introspection_status, "unattested");
+    assert!(r.unmatched_violation >= 1);
+    assert!(r.issues.iter().any(|i| i.contains("broadened past the grant")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_native_transcript_time_broadening_is_a_violation() {
+    // effective_exp outlives the grant's exp -> the resource extended the credential window past the grant.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ie = introspection_evidence(&res, GID, LEASE, NSCOPE, RESOURCE, USED, EXP + 1); // effective_exp > grant exp
+    let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let r = native_bundle_verify(&rec, &res, &tsa, grant, Some(t), None);
+    assert!(!r.ok, "a time-broadening transcript must fail the bundle");
+    assert_eq!(r.introspection_transcripts_verified, 0);
+    assert!(r.issues.iter().any(|i| i.contains("time-broadening")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_native_transcript_forged_sig_is_a_violation() {
+    // the structured introspection sig is by an IMPOSTER, not a pinned resource key -> it must not verify (even
+    // though the RECORD evidence_sig is still by the resource, so it routes here as a resource record).
+    let (rec, res, tsa, imposter) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), approver(99));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ie = introspection_evidence(&imposter, GID, LEASE, NSCOPE, RESOURCE, USED, EXP); // structured sig by imposter
+    let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let r = native_bundle_verify(&rec, &res, &tsa, grant, Some(t), None);
+    assert!(!r.ok, "a forged introspection sig must fail the bundle");
+    assert_eq!(r.introspection_transcripts_verified, 0);
+    assert!(r.issues.iter().any(|i| i.contains("does not verify under any pinned resource_authority_keys")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_native_transcript_resource_mismatch_is_a_violation() {
+    // the transcript attests a DIFFERENT resource than the native grant authorizes (the structured sig is valid
+    // over the wrong resource_id, but it must equal the grant's resource).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ie = introspection_evidence(&res, GID, LEASE, NSCOPE, "other-resource", USED, EXP); // != grant RESOURCE
+    let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let r = native_bundle_verify(&rec, &res, &tsa, grant, Some(t), None);
+    assert!(!r.ok, "a resource-mismatched transcript must fail the bundle");
+    assert_eq!(r.introspection_transcripts_verified, 0);
+    assert!(r.issues.iter().any(|i| i.contains("resource mismatch")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_native_transcript_credential_ref_mismatch_is_a_violation() {
+    // the transcript's credential_ref (the leased external credential id, bound into the M3 signature) must equal
+    // the native grant's lease_id — a transcript ABOUT A DIFFERENT leased credential must not cover the grant
+    // (grant_id alone is not enough; the signed credential_ref must be cross-checked).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ie = introspection_evidence(&res, GID, "lease-OTHER", NSCOPE, RESOURCE, USED, EXP); // credential_ref != grant lease_id
+    let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let r = native_bundle_verify(&rec, &res, &tsa, grant, Some(t), None);
+    assert!(!r.ok, "a transcript whose credential_ref != the grant's lease_id must fail");
+    assert_eq!(r.introspection_transcripts_verified, 0);
+    assert_eq!(r.introspection_status, "unattested");
+    assert!(r.issues.iter().any(|i| i.contains("credential_ref")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_native_transcript_dangling_to_brokered_grant_is_a_violation() {
+    // a transcript can ONLY introspect a native credential. Pointed at a BROKERED grant_id it dangles (the
+    // surfaces are disjoint) — fail-closed, and native_credential_present stays false (no token_exchange grant).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let brokered = seal_grant(&rec, &rec, GID, &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP));
+    let gh = content_hash_of(&brokered);
+    let ie = introspection_evidence(&res, GID, LEASE, NSCOPE, RESOURCE, USED, EXP); // GID is brokered here
+    let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let r = native_bundle_verify(&rec, &res, &tsa, brokered, Some(t), None);
+    assert!(!r.ok, "a transcript pointed at a brokered grant must fail (cross-surface)");
+    assert!(!r.native_credential_present, "no token_exchange grant is present");
+    assert_eq!(r.introspection_transcripts_verified, 0);
+    assert!(r.issues.iter().any(|i| i.contains("not a present native")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_native_uncovered_grant_is_unattested_not_a_violation() {
+    // a native grant with NO transcript: native_credential_present, but `unattested` (the introspected surface is
+    // incomplete). NOT a violation (the grant is valid, merely un-introspected) -> the bundle can still be ok.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let r = native_bundle_verify(&rec, &res, &tsa, grant, None, None);
+    assert!(r.ok, "an uncovered native grant is not a violation; issues: {:?}", r.issues);
+    assert!(r.native_credential_present);
+    assert_eq!(r.introspection_transcripts_total, 0);
+    assert_eq!(r.introspection_status, "unattested", "no transcript -> the native grant is uncovered -> unattested");
+}
+
+#[test]
+fn tier_b_brokered_use_against_native_grant_is_unmatched_violation() {
+    // DISJOINTNESS: a brokered PoP use receipt naming a NATIVE grant_id finds no brokered grant in grants_by_id —
+    // a native credential must be exercised via an introspection transcript, never a brokered receipt.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", std::slice::from_ref(&gh), ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r.ok, "a brokered use against a native grant must not match");
+    assert!(r.native_credential_present);
+    assert_eq!(r.uses_matched, 0, "the native grant is NOT in the brokered index");
+    assert!(r.unmatched_violation >= 1);
+    assert!(r.issues.iter().any(|i| i.contains("no matching closed grant")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_native_escalating_action_is_misscoped() {
+    // D4 × M3: a native (token_exchange) grant for a (resource, action) the pinned taxonomy marks ESCALATING is
+    // mis-scoped at issuance, mirroring the brokered single_operation discipline — fail-closed (not indexed as
+    // native; its transcript then dangles), so an escalating native exchange can never reach the introspected
+    // capstone. Only fires when a pinned taxonomy affirmatively marks the pair escalating (otherwise additive).
+    let (rec, res, tsa, tax) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[55u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ie = introspection_evidence(&res, GID, LEASE, NSCOPE, RESOURCE, USED, EXP);
+    let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&t)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, t], vec![cp]);
+    let taxonomy = taxonomy_full(&tax, &[], &[(RESOURCE, ACTION)], ISSUED - 100, EXP + 100, 7); // marks (RESOURCE, ACTION) escalating
+    let opts = pinned_roles_tax(rec.verifying_key(), res.verifying_key(), tsa.verifying_key(), taxonomy, tax.verifying_key());
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a native grant for a taxonomy-escalating action must be mis-scoped");
+    assert!(r.native_credential_present);
+    assert_eq!(r.introspection_transcripts_verified, 0, "the transcript dangles (the native grant was not indexed)");
+    assert!(r.issues.iter().any(|i| i.contains("escalating")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_native_grant_with_cosig_is_fail_closed() {
+    // native × cosig is a deferred composition (ADR 0005 §5) -> a native grant ALSO carrying cosignatures is
+    // fail-closed (NOT indexed as native), surfaced honestly rather than silently skipping the cosig gate.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ge = native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP);
+    let ge = change_field(&ge, "cosig_threshold", CanonValue::Int(1));
+    let dummy_cosig = CanonValue::object(vec![
+        ("approver_kid".into(), CanonValue::string("ed25519-x")),
+        ("sig".into(), CanonValue::string("AA")),
+    ])
+    .unwrap();
+    let ge = change_field(&ge, "cosignatures", CanonValue::Array(vec![dummy_cosig]));
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let r = native_bundle_verify(&rec, &res, &tsa, grant, None, None);
+    assert!(!r.ok, "a native grant carrying cosignatures is fail-closed (unsupported composition)");
+    assert!(r.native_credential_present);
+    assert!(r.issues.iter().any(|i| i.contains("unsupported composition")), "issues: {:?}", r.issues);
+}
+
+// ---- M3 capstone: the parallel attested_complete_over_introspected_surface label + MIXED reaches neither ----
+
+// a VerifyReport reaching the INTROSPECTED capstone: a REAL native bundle (so native_credential_present,
+// introspection_status=="attested", uses_matched==0 and side_effect_closure_status=="closed" are computed
+// end-to-end), then the remaining shared `base` conjuncts synthesized (as capstone_report does for the brokered one).
+fn introspected_capstone_report() -> VerifyReport {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let grant = seal_grant(&rec, &rec, GID, &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP));
+    let gh = content_hash_of(&grant);
+    let ie = introspection_evidence(&res, GID, LEASE, NSCOPE, RESOURCE, USED, EXP);
+    let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+    let mut r = native_bundle_verify(&rec, &res, &tsa, grant, Some(t), Some(closure_manifest(&[(RESOURCE, ACTION, &[])])));
+    assert!(r.ok, "native baseline must verify: {:?}", r.issues);
+    assert!(r.native_credential_present);
+    assert_eq!(r.introspection_status, "attested", "issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 0);
+    assert_eq!(r.side_effect_closure_status, "closed", "the native grant's (resource, action) must be declared closed e2e");
+    // synthesize the base conjuncts the minimal bundle doesn't carry (mirrors capstone_report()).
+    r.taxonomy_status = "validated".to_string();
+    r.broker_trust = "sequence_verified".to_string();
+    r.attestation_status = "attested_claims".to_string();
+    r
+}
+
+#[test]
+fn tier_b_native_introspected_capstone_when_all_hold() {
+    let out = report_to_json(&introspected_capstone_report());
+    assert!(out.contains(r#""action_completeness":"attested_complete_over_introspected_surface""#), "the native conjunction must reach the introspected capstone: {out}");
+    assert!(!out.contains("attested_complete_over_brokered_surface"), "a native bundle must NEVER reach the brokered label: {out}");
+    assert!(out.contains(r#""resource_trust":"assumed_truthful""#), "MF1 must always be surfaced: {out}");
+    assert!(out.contains(r#""introspection_status":"attested""#));
+}
+
+#[test]
+fn tier_b_mixed_native_and_pop_reaches_neither_label() {
+    // THE CRUX: a MIXED surface (a brokered PoP use AND a native credential) reaches NEITHER full label.
+    // (a) introspected report + a brokered PoP use (uses_matched=1): not introspected (uses_matched != 0) and
+    //     not brokered (native present) -> claimed_over_manifest.
+    let mut r = introspected_capstone_report();
+    r.uses_matched = 1;
+    r.uses_pop_reverified = 1;
+    let out = report_to_json(&r);
+    assert!(out.contains(r#""action_completeness":"claimed_over_manifest""#), "mixed (native + brokered use) must reach neither label: {out}");
+    assert!(!out.contains("attested_complete_over_"), "mixed must reach no attested_complete label: {out}");
+    // (b) brokered capstone report + a native credential: not brokered (!native_credential_present fails) and
+    //     not introspected (uses_matched != 0) -> claimed_over_manifest.
+    let mut r2 = capstone_report();
+    r2.native_credential_present = true;
+    let out2 = report_to_json(&r2);
+    assert!(out2.contains(r#""action_completeness":"claimed_over_manifest""#), "a brokered surface + a native credential must reach neither label: {out2}");
+    assert!(!out2.contains("attested_complete_over_"), "mixed must reach no attested_complete label: {out2}");
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tier_b_d8_introspected_each_condition_is_load_bearing() {
+    // removing ANY conjunct of the introspected label (its distinguishing ones + the shared base) must drop it.
+    let mutators: Vec<(&str, fn(&mut VerifyReport))> = vec![
+        ("not ok", |r| r.ok = false),
+        ("native not present", |r| r.native_credential_present = false),
+        ("introspection unattested", |r| r.introspection_status = "unattested".to_string()),
+        ("introspection absent", |r| r.introspection_status = "absent".to_string()),
+        // PURITY: a brokered PoP use coexisting makes the surface non-pure (the MIXED case), dropping the label.
+        ("a brokered use present (not pure)", |r| { r.uses_matched = 1; r.uses_pop_reverified = 1; }),
+        // shared base conjuncts:
+        ("taxonomy not validated", |r| r.taxonomy_status = "stale".to_string()),
+        ("broker_trust not sequence_verified", |r| r.broker_trust = "assumed".to_string()),
+        ("attestation not attested_claims", |r| r.attestation_status = "unevaluated".to_string()),
+        ("unmatched violation", |r| r.unmatched_violation = 1),
+        ("side effect not closed", |r| r.side_effect_closure_status = "not_declared".to_string()),
+    ];
+    for (name, mutate) in mutators {
+        let mut r = introspected_capstone_report();
+        mutate(&mut r);
+        let out = report_to_json(&r);
+        assert!(!out.contains("attested_complete_over_introspected_surface"), "condition '{name}' removed but introspected capstone still emitted: {out}");
+        assert!(out.contains(r#""action_completeness":"claimed_over_manifest""#), "removing '{name}' must drop to claimed_over_manifest: {out}");
+    }
 }

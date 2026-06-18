@@ -200,6 +200,32 @@ pub struct VerifyReport {
     pub revocation_status: String,
     pub revoked_grants_matched: usize,
     pub revoked_uses_blocked: usize,
+    /// M3 / ADR 0005 (Native/STS — post-mint resource-signed introspection transcript, resolves ADR 0002 Q3).
+    /// `native_credential_present` = a closed, verified broker grant declared `grant_evidence.mode ==
+    /// "token_exchange"` (a credential minted by an external IdP/STS whose effective scope the verifier cannot
+    /// recompute). Such a grant has NO broker `credential_binding` and NO cnf-key PoP, so it is accounted on a
+    /// SEPARATE channel: it is NEVER folded into the brokered `grants_by_id`/`uses_matched`, and its surface is
+    /// attested by resource-signed `introspection_transcript` records, NOT brokered use receipts (so the two
+    /// surfaces stay DISJOINT — a brokered use naming a native grant_id reads as `unmatched_violation`, and a
+    /// transcript naming a brokered/absent grant_id is a violation). `introspection_transcripts_total` = closed
+    /// `introspection_transcript` records; `introspection_transcripts_verified` = those whose structured
+    /// `feir.resource.introspection.v1` signature verifies under a pinned `resource_authority_keys` issuer, bind to
+    /// a present native grant, and whose `effective_scope ⊆ grant.scope` (space-delimited OAuth token subset) with
+    /// no time-broadening (`effective_exp <= grant.exp`) and `issued_at <= introspected_at`. A failing transcript
+    /// (bad sig / dangling / scope- or time-broadening) is a hard `unmatched_violation` (→ `!ok`).
+    /// `introspection_scope_narrowed` = verified transcripts whose effective scope is a PROPER subset of the grant
+    /// scope (the resource attested a narrowing — informational). `introspection_status` ∈ {`absent` (no native
+    /// credential), `attested` (a native credential is present, every closed transcript verified, every native
+    /// grant is covered by ≥1 verified transcript, and total > 0), `unattested` (a native credential is present
+    /// but a transcript failed or a native grant is uncovered)}. The native surface reaches the strictly-weaker
+    /// parallel capstone `attested_complete_over_introspected_surface`, NEVER the brokered one (PoP is broken);
+    /// a MIXED native+PoP bundle reaches NEITHER. Residual: the transcript is resource-signed, so it RELOCATES —
+    /// does not remove — the resource TCB (`resource_trust: assumed_truthful`, ADR 0004 D9 floor 2 / ADR 0002 Q3).
+    pub native_credential_present: bool,
+    pub introspection_transcripts_total: usize,
+    pub introspection_transcripts_verified: usize,
+    pub introspection_scope_narrowed: usize,
+    pub introspection_status: String,
     /// D8/MF1 (ADR 0004): the IRREDUCIBLE resource-TCB conditional, ALWAYS `assumed_truthful`. The
     /// `attested_complete_over_brokered_surface` capstone proves every resource-signed receipt over the
     /// brokered surface is two-phase, PoP-re-verified, taxonomy-validated, replay-free, and committed to an
@@ -377,6 +403,11 @@ fn classify_role(rec: &CanonValue) -> (BrokerRole, bool) {
         (Some("use"), Some("tool_gateway"))
         | (Some("use_intent"), Some("tool_gateway"))
         | (Some("use_outcome"), Some("tool_gateway")) => BrokerRole::Resource,
+        // M3 (ADR 0005): a resource-signed introspection transcript (its statement of an externally-minted
+        // credential's effective scope) is a RESOURCE-role record — so its `evidence_sig` elevates under
+        // `resource_authority_keys` (R2). It is NOT a use receipt: the use-loop SKIPS it and the M3 pre-pass
+        // handles it (binding it to a native grant + checking `effective_scope ⊆ grant.scope`).
+        (Some("introspection_transcript"), Some("tool_gateway")) => BrokerRole::Resource,
         _ => BrokerRole::None,
     };
     (role, kind.is_some())
@@ -717,6 +748,12 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("revocation_status".into(), CanonValue::string(r.revocation_status.clone())),
         ("revoked_grants_matched".into(), count(r.revoked_grants_matched)),
         ("revoked_uses_blocked".into(), count(r.revoked_uses_blocked)),
+        // M3 (ADR 0005): native/STS introspection-transcript accounting + the artifact-level status.
+        ("native_credential_present".into(), CanonValue::Bool(r.native_credential_present)),
+        ("introspection_transcripts_total".into(), count(r.introspection_transcripts_total)),
+        ("introspection_transcripts_verified".into(), count(r.introspection_transcripts_verified)),
+        ("introspection_scope_narrowed".into(), count(r.introspection_scope_narrowed)),
+        ("introspection_status".into(), CanonValue::string(r.introspection_status.clone())),
         (
             "taxonomy_status".into(),
             CanonValue::string(r.taxonomy_status.clone()),
@@ -766,14 +803,21 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         // violation or unexplained in-flight use (`unmatched_violation == 0` ∧ `unmatched_pending == 0`).
         // The capstone is asserted over a `coverage_manifest`; absent one it is at most `claimed_over_manifest`.
         // It is ALWAYS qualified by `resource_trust:"assumed_truthful"` (MF1 — the irreducible resource TCB).
+        // M3 (ADR 0005): native/STS credentials add a PARALLEL, strictly-weaker fourth label,
+        // `attested_complete_over_introspected_surface`, over a PURELY-INTROSPECTED native surface (every other
+        // reduction, the brokered-PoP conjuncts vacuous, PLUS `native_credential_present` and
+        // `introspection_status=="attested"`). The standard label additionally requires `!native_credential_present`,
+        // so a MIXED native+PoP bundle (a brokered surface AND a native credential) reaches NEITHER label — it is
+        // `claimed_over_manifest` — keeping each label's MF1 meaning crisp (brokered-PoP surface vs. native surface).
         ("action_completeness".into(), {
             // a JSON `"coverage_manifest": null` deserializes to `Some(Null)`, which is NOT a real manifest
             // (D7 already treats null as the empty digest) — the capstone must be asserted OVER a real scope
             // claim, so require a NON-NULL manifest.
             let has_manifest = r.coverage_manifest.as_ref().is_some_and(|m| !m.is_null());
-            let capstone = r.ok
+            // `base` is the conjunction SHARED by both capstone labels — every reduction EXCEPT the
+            // surface-shape conjuncts (`uses_matched`, native-vs-brokered) that distinguish the two labels.
+            let base = r.ok
                 && has_manifest
-                && r.uses_matched > 0
                 && !r.one_phase_use_present
                 && r.intent_without_outcome == 0
                 && r.taxonomy_status == "validated"
@@ -811,8 +855,28 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
                 // `closed` makes attested_complete mean "complete over the surface AND that surface is within
                 // the declared closure" (still bounded by resource_trust:assumed_truthful — declaration, not obedience).
                 && r.side_effect_closure_status == "closed";
-            CanonValue::string(if capstone {
+            // The STANDARD capstone: a non-empty BROKERED surface (`uses_matched > 0`), every matched use
+            // PoP-reverified (in `base`), and NO native credential (M3 — a token_exchange credential has no
+            // broker credential_binding / cnf PoP, so it can never satisfy `uses_pop_reverified == uses_matched`;
+            // the explicit `!native_credential_present` makes "purely brokered surface" load-bearing).
+            let brokered = base && r.uses_matched > 0 && !r.native_credential_present;
+            // M3 (ADR 0005): the PARALLEL, strictly-weaker capstone over a PURELY-INTROSPECTED native surface.
+            // Same `base`, but the surface is native rather than brokered: ZERO brokered PoP uses
+            // (`uses_matched == 0`, the PURITY conjunct), a native credential present, and every closed
+            // introspection transcript verified + every native grant covered (`introspection_status == "attested"`,
+            // which also requires ≥1 transcript). The PoP conjunct in `base` is vacuous here (0 == 0) — PoP is
+            // not load-bearing for the introspected surface; the resource-signed transcripts are. A MIXED
+            // native+PoP bundle has `uses_matched > 0` AND `native_credential_present`, so it satisfies NEITHER
+            // `brokered` (native present) NOR `introspected` (uses_matched != 0) — it falls to `claimed_over_manifest`,
+            // keeping each label's MF1 meaning crisp (still bounded by resource_trust:assumed_truthful).
+            let introspected = base
+                && r.uses_matched == 0
+                && r.native_credential_present
+                && r.introspection_status == "attested";
+            CanonValue::string(if brokered {
                 "attested_complete_over_brokered_surface"
+            } else if introspected {
+                "attested_complete_over_introspected_surface"
             } else if has_manifest {
                 "claimed_over_manifest"
             } else {
@@ -1051,6 +1115,11 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         revocation_status: "absent".to_string(),
         revoked_grants_matched: 0,
         revoked_uses_blocked: 0,
+        native_credential_present: false,
+        introspection_transcripts_total: 0,
+        introspection_transcripts_verified: 0,
+        introspection_scope_narrowed: 0,
+        introspection_status: "absent".to_string(),
         taxonomy_status: "absent".to_string(),
         broker_trust: "assumed".to_string(),
         cred_label_checks: 0,
@@ -1223,6 +1292,17 @@ fn cosignatures_of(rec: &CanonValue) -> Option<&Vec<CanonValue>> {
         .and_then(|v| v.as_array())
 }
 
+/// True iff a broker record's signed `grant_evidence` carries a non-empty `delegation_assertions[]` (ADR 0005
+/// M2). Used by the M3 native branch to fail-closed on the deferred native × delegation composition.
+fn delegation_assertions_present(rec: &CanonValue) -> bool {
+    rec.get("extensions")
+        .and_then(|e| e.get("broker"))
+        .and_then(|b| b.get("grant_evidence"))
+        .and_then(|g| g.get("delegation_assertions"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty())
+}
+
 /// M6 (ADR 0005): count the DISTINCT pinned approver keys that produced a valid cosignature over this grant.
 /// Each entry in the signed `grant_evidence.cosignatures[]` is `{approver_kid, sig}` (`sig` a base64url-no-pad
 /// 64-byte Ed25519 signature, like `use_sig`). For each entry the verifier selects the pinned approver key
@@ -1309,6 +1389,39 @@ pub fn delegation_hop_challenge(
     lp4(&mut pre, action.as_bytes());
     lp4(&mut pre, resource_id.as_bytes());
     pre.extend_from_slice(&(exp as u64).to_be_bytes());
+    crate::hashx::sha256(&pre)
+}
+
+/// Re-derive the resource's introspection-transcript challenge (ADR 0005 M3), byte-identically to the Go
+/// producer: `sha256( LP4(tag) ‖ LP4(grant_id) ‖ LP4(credential_ref) ‖ LP4(effective_scope) ‖ LP4(resource_id)
+/// ‖ BE8(introspected_at) ‖ BE8(effective_exp) )`, tag = "feir.resource.introspection.v1". A native/STS
+/// credential is minted by an external IdP/STS the broker never sees, so the verifier cannot recompute its
+/// effective scope; the RESOURCE signs this statement of the scope it observed (the `credential_ref` is the
+/// `lease_id`). Binding `grant_id` ties the transcript to the broker grant authorizing the exchange; binding
+/// `effective_scope`/`resource_id`/`effective_exp` makes the attested scope/window non-malleable. Returns the
+/// 32-byte digest the resource signs (raw, like `use_pop_challenge`). Kept in sync with Go via the shared golden
+/// vector `spec/golden-vectors/broker-preimages.json`.
+#[allow(clippy::too_many_arguments)]
+pub fn introspection_transcript_challenge(
+    grant_id: &str,
+    credential_ref: &str,
+    effective_scope: &str,
+    resource_id: &str,
+    introspected_at: i64,
+    effective_exp: i64,
+) -> [u8; 32] {
+    let mut pre = Vec::new();
+    let lp4 = |pre: &mut Vec<u8>, b: &[u8]| {
+        pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
+        pre.extend_from_slice(b);
+    };
+    lp4(&mut pre, b"feir.resource.introspection.v1");
+    lp4(&mut pre, grant_id.as_bytes());
+    lp4(&mut pre, credential_ref.as_bytes());
+    lp4(&mut pre, effective_scope.as_bytes());
+    lp4(&mut pre, resource_id.as_bytes());
+    pre.extend_from_slice(&(introspected_at as u64).to_be_bytes());
+    pre.extend_from_slice(&(effective_exp as u64).to_be_bytes());
     crate::hashx::sha256(&pre)
 }
 
@@ -2726,6 +2839,24 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut delegation_chains_verified = 0usize;
     let mut delegation_monotonicity_violations = 0usize;
     let mut delegation_seen: BTreeSet<String> = BTreeSet::new();
+    // M3 (ADR 0005): native/STS grants. A grant whose SIGNED grant_evidence declares `mode == "token_exchange"`
+    // is an externally-minted (IdP/STS) credential the broker never saw the secret of — it has no broker
+    // credential_binding and no cnf-key PoP. It is indexed into a SEPARATE map, NEVER the brokered `grants_by_id`,
+    // so the brokered and native surfaces stay disjoint: a brokered use receipt naming a native grant_id finds no
+    // entry in `grants_by_id` → `unmatched_violation`, and a use of the native credential is accountable ONLY via
+    // a resource-signed introspection transcript (the M3 pre-pass below), never a PoP receipt.
+    struct NativeGrant {
+        scope: String,
+        resource_id: String,
+        /// The external (IdP/STS) credential reference. A transcript's `credential_ref` MUST equal this — the M3
+        /// signature binds `credential_ref`, so the verifier cross-checks it against the grant's own lease so a
+        /// resource-signed statement about a DIFFERENT leased credential cannot cover this grant.
+        lease_id: String,
+        issued_at: i64,
+        exp: i64,
+    }
+    let mut native_grants_by_id: BTreeMap<String, NativeGrant> = BTreeMap::new();
+    let mut native_credential_present = false;
     for rt in &record_trust {
         let rec = &records[rt.index];
         let qualifies = rt.broker_role == BrokerRole::Broker.as_str()
@@ -2734,6 +2865,68 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             && evidence_rederivable(rec, "grant_evidence")
             && closed.contains(rt.content_hash.as_str());
         if !qualifies {
+            continue;
+        }
+        // M3 (ADR 0005): native/STS early branch. Detected from the SIGNED grant_evidence (riding the evidence
+        // hash, so it cannot be stripped without breaking `evidence_rederivable` above). A native grant is
+        // accounted on the separate `native_grants_by_id` channel and NEVER falls through to the brokered 8-tuple
+        // match below — so the brokered path is byte-for-byte unchanged for every non-native grant (additive).
+        if ev_str(rec, "grant_evidence", "mode").as_deref() == Some("token_exchange") {
+            native_credential_present = true; // set even if malformed → excludes the brokered capstone
+            // Cross-mode compositions (native × cosig / native × delegation) are deferred (ADR 0005 §5 open
+            // question) — a native grant that ALSO carries cosignatures or delegation_assertions is fail-closed
+            // (NOT indexed as native), so its transcript dangles and the introspected capstone is unreachable,
+            // rather than silently skipping the cosig/delegation gates the brokered path would have enforced.
+            if cosignatures_of(rec).is_some_and(|a| !a.is_empty())
+                || delegation_assertions_present(rec)
+            {
+                issues.push(format!(
+                    "grant {} ({}): native (token_exchange) grant also carries cosignatures/delegation_assertions — unsupported composition in M3 (fail-closed)",
+                    rt.index, rt.record_id
+                ));
+                continue;
+            }
+            // D4 × M3: a native grant for a (resource_id, action) a signed+pinned taxonomy marks ESCALATING is
+            // mis-scoped at issuance, mirroring the brokered single_operation discipline — fail-closed (NOT indexed
+            // as native; its transcript then dangles), so an escalating native exchange can never reach the
+            // introspected capstone. Only fires when a pinned taxonomy affirmatively lists the pair (else additive).
+            if let (Some(n_resource), Some(n_action)) = (
+                ev_str(rec, "grant_evidence", "resource_id"),
+                ev_str(rec, "grant_evidence", "action"),
+            ) {
+                if taxonomy_info
+                    .as_ref()
+                    .is_some_and(|ti| ti.escalating.contains(&(n_resource.clone(), n_action.clone())))
+                {
+                    issues.push(format!(
+                        "grant {} ({}): native (token_exchange) grant for action '{n_action}' on '{n_resource}' which the taxonomy marks escalating — mis-scoped (D4)",
+                        rt.index, rt.record_id
+                    ));
+                    continue;
+                }
+            }
+            match (
+                ev_str(rec, "grant_evidence", "grant_id"),
+                ev_str(rec, "grant_evidence", "scope"),
+                ev_str(rec, "grant_evidence", "resource_id"),
+                ev_str(rec, "grant_evidence", "lease_id"),
+                ev_int(rec, "grant_evidence", "issued_at"),
+                ev_int(rec, "grant_evidence", "exp"),
+            ) {
+                (Some(gid), Some(scope), Some(resource_id), Some(lease_id), Some(issued_at), Some(exp)) => {
+                    native_grants_by_id.entry(gid).or_insert(NativeGrant {
+                        scope,
+                        resource_id,
+                        lease_id,
+                        issued_at,
+                        exp,
+                    });
+                }
+                _ => issues.push(format!(
+                    "grant {} ({}): native (token_exchange) grant_evidence is missing a required field (grant_id/scope/resource_id/lease_id/issued_at/exp) — fail-closed",
+                    rt.index, rt.record_id
+                )),
+            }
             continue;
         }
         match (
@@ -3072,6 +3265,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if bkind == "use_outcome" {
             continue; // outcomes are joined to their intent in the pre-pass, not counted as standalone uses
         }
+        // M3 (ADR 0005): an introspection_transcript is a RESOURCE record but NOT a use receipt — it carries no
+        // use_evidence/PoP. It is handled by the M3 pre-pass below (bound to a native grant + scope-subset
+        // checked); skip it here so it is never mis-counted as a use (which would read as `unmatched_violation`).
+        if bkind == "introspection_transcript" {
+            continue;
+        }
         if !seen_uses.insert(rt.content_hash.as_str()) {
             continue; // verbatim-duplicate use deduped (not double-counted)
         }
@@ -3383,6 +3582,153 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let revoked_grants_matched = grants_by_id.keys().filter(|gid| revocation.revoked.contains(*gid)).count();
     let revocation_status = if revoked_uses_blocked > 0 { "revoked_present".to_string() } else { revocation.status };
 
+    // M3 (ADR 0005): native/STS introspection-transcript pre-pass. A native (token_exchange) credential's use is
+    // accountable ONLY via a resource-signed introspection transcript, never a brokered PoP receipt. Each CLOSED
+    // `introspection_transcript` record must: be a validatable resource record (integrity + resource authority +
+    // re-derivable `introspection_evidence`); bind to a present NATIVE grant by grant_id (a brokered/absent
+    // grant_id is dangling — the surfaces stay disjoint); carry a structured `feir.resource.introspection.v1`
+    // signature verifying under a pinned `resource_authority_keys` issuer over its EXACT
+    // (grant_id, credential_ref, effective_scope, resource_id, introspected_at, effective_exp) tuple; name the
+    // grant's own resource_id; and prove `effective_scope ⊆ grant.scope` (space-delimited OAuth token subset — no
+    // scope-broadening) with no time-broadening (`effective_exp <= grant.exp`) and `grant.issued_at <=
+    // introspected_at`. ANY failure is a hard `unmatched_violation` (→ !ok): a resource broadening past the grant
+    // it was handed is an escalation, not a quiet non-match. Every native grant must be covered by ≥1 verified
+    // transcript for the introspected surface to be COMPLETE.
+    let mut introspection_transcripts_total = 0usize;
+    let mut introspection_transcripts_verified = 0usize;
+    let mut introspection_scope_narrowed = 0usize;
+    let mut introspected_seen: BTreeSet<&str> = BTreeSet::new();
+    let mut covered_native: BTreeSet<String> = BTreeSet::new();
+    // OAuth-style scope subset over SPACE-delimited tokens: `sub` ⊆ `sup` iff every token of sub is a token of sup
+    // (a real narrowing lattice — empty effective_scope is the maximal narrowing, trivially ⊆ anything).
+    let scope_tokens = |sc: &str| -> BTreeSet<String> {
+        sc.split(' ').filter(|t| !t.is_empty()).map(String::from).collect()
+    };
+    for rt in &record_trust {
+        let rec = &records[rt.index];
+        if rt.broker_role != BrokerRole::Resource.as_str()
+            || broker_kind(rec).as_deref() != Some("introspection_transcript")
+        {
+            continue;
+        }
+        if !closed.contains(rt.content_hash.as_str()) {
+            continue; // in-flight transcript: not yet anchored, attests nothing over the closed set
+        }
+        if !introspected_seen.insert(rt.content_hash.as_str()) {
+            continue; // verbatim-duplicate transcript deduped (not double-counted)
+        }
+        introspection_transcripts_total += 1;
+        let violation = |issues: &mut Vec<String>, msg: String| {
+            issues.push(format!("introspection_transcript {} ({}): {msg}", rt.index, rt.record_id));
+        };
+        if rt.trust != TrustLevel::IntegrityProven
+            || rt.authority != AuthorityTrust::Verified
+            || !evidence_rederivable(rec, "introspection_evidence")
+        {
+            unmatched_violation += 1;
+            violation(&mut issues, "closed but not validatable (integrity / resource authority / re-derivable introspection_evidence) — Tier-B violation".into());
+            continue;
+        }
+        let (gid, cred_ref, eff_scope, t_resource, introspected_at, eff_exp, sig) = match (
+            ev_str(rec, "introspection_evidence", "grant_id"),
+            ev_str(rec, "introspection_evidence", "credential_ref"),
+            ev_str(rec, "introspection_evidence", "effective_scope"),
+            ev_str(rec, "introspection_evidence", "resource_id"),
+            ev_int(rec, "introspection_evidence", "introspected_at"),
+            ev_int(rec, "introspection_evidence", "effective_exp"),
+            ev_str(rec, "introspection_evidence", "sig"),
+        ) {
+            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) => (a, b, c, d, e, f, g),
+            _ => {
+                unmatched_violation += 1;
+                violation(&mut issues, "introspection_evidence is missing a required field (grant_id/credential_ref/effective_scope/resource_id/introspected_at/effective_exp/sig) — violation".into());
+                continue;
+            }
+        };
+        // Bind to a present NATIVE grant — a transcript can ONLY introspect a native credential. A grant_id that
+        // is brokered or absent finds no native grant, keeping the surfaces disjoint (fail-closed).
+        let g = match native_grants_by_id.get(&gid) {
+            Some(g) => g,
+            None => {
+                unmatched_violation += 1;
+                violation(&mut issues, format!("references grant '{gid}' which is not a present native (token_exchange) grant — dangling/cross-surface transcript (violation)"));
+                continue;
+            }
+        };
+        // The structured M3 signature over the EXACT tuple, verified under a pinned resource issuer (the record's
+        // evidence_sig already proved it is a genuine resource record; THIS proves the resource committed to this
+        // exact effective-scope statement, the M3 signature domain pinned byte-for-byte by the golden vector).
+        let sig_bytes = match crate::b64::decode_fixed::<64>(&sig) {
+            Ok(b) => b,
+            Err(_) => {
+                unmatched_violation += 1;
+                violation(&mut issues, "introspection_evidence.sig is not a base64url 64-byte signature — violation".into());
+                continue;
+            }
+        };
+        let signature = Signature::from_bytes(&sig_bytes);
+        let challenge = introspection_transcript_challenge(&gid, &cred_ref, &eff_scope, &t_resource, introspected_at, eff_exp);
+        if !opts.resource_authority_keys.iter().any(|vk| vk.verify_strict(&challenge, &signature).is_ok()) {
+            unmatched_violation += 1;
+            violation(&mut issues, "introspection sig does not verify under any pinned resource_authority_keys issuer over its (grant_id, credential_ref, effective_scope, resource_id, introspected_at, effective_exp) tuple — violation".into());
+            continue;
+        }
+        // The transcript must attest the grant's OWN resource (no redirect to a different resource_id).
+        if t_resource != g.resource_id {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("attests resource '{t_resource}' but native grant '{gid}' is for resource '{}' — resource mismatch (violation)", g.resource_id));
+            continue;
+        }
+        // The transcript must attest the grant's OWN leased credential. `credential_ref` is bound into the M3
+        // signature, so without this cross-check a resource-signed statement about a DIFFERENT leased credential
+        // could cover this grant (grant_id binds the broker's authorization; lease_id binds the actual credential).
+        if cred_ref != g.lease_id {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("attests credential_ref '{cred_ref}' but native grant '{gid}' leased '{}' — credential_ref mismatch (violation)", g.lease_id));
+            continue;
+        }
+        // Scope subset (no broadening) + no time-broadening + causal ordering — a resource may NARROW the grant's
+        // authority but never widen it (in scope or in time).
+        let sub = scope_tokens(&eff_scope);
+        let sup = scope_tokens(&g.scope);
+        if !sub.is_subset(&sup) {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("attested effective_scope '{eff_scope}' is not within native grant scope '{}' — resource broadened past the grant (violation)", g.scope));
+            continue;
+        }
+        if eff_exp > g.exp {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("attested effective_exp {eff_exp} outlives native grant exp {} — time-broadening (violation)", g.exp));
+            continue;
+        }
+        if introspected_at < g.issued_at {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("introspected_at {introspected_at} precedes native grant issued_at {} — non-causal (violation)", g.issued_at));
+            continue;
+        }
+        introspection_transcripts_verified += 1;
+        if sub != sup {
+            introspection_scope_narrowed += 1; // a proper subset: the resource attested a real narrowing
+        }
+        covered_native.insert(gid);
+    }
+    // Every native grant must be covered by ≥1 verified transcript for the introspected surface to be COMPLETE.
+    let native_grants_uncovered = native_grants_by_id.keys().filter(|gid| !covered_native.contains(*gid)).count();
+    // M3 artifact status: `absent` (no native credential) | `attested` (native present, every closed transcript
+    // verified, every native grant covered, ≥1 transcript) | `unattested` (native present but a transcript failed
+    // or a native grant is uncovered). The strictly-weaker introspected capstone keys on `attested`.
+    let introspection_status = if !native_credential_present {
+        "absent"
+    } else if introspection_transcripts_total > 0
+        && introspection_transcripts_verified == introspection_transcripts_total
+        && native_grants_uncovered == 0
+    {
+        "attested"
+    } else {
+        "unattested"
+    }
+    .to_string();
+
     // D4/MF5 taxonomy_status: absent (none pinned) | untrusted (bad sig/issuer/pin) | stale (signed +
     // pinned but a listed action was out of its effective window) | validated (signed, pinned, in-window).
     let taxonomy_status = match (&opts.taxonomy, &taxonomy_info) {
@@ -3540,6 +3886,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         revocation_status,
         revoked_grants_matched,
         revoked_uses_blocked,
+        native_credential_present,
+        introspection_transcripts_total,
+        introspection_transcripts_verified,
+        introspection_scope_narrowed,
+        introspection_status,
         resource_trust: "assumed_truthful".to_string(),
         coverage_manifest,
         unclosed_side_effects,
