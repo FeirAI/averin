@@ -1,30 +1,38 @@
 //! `feir-verify` — offline verify CLI (wraps decision-core). Honest about what it proves.
 //!
-//!   feir-verify bundle <bundle.json>            full offline verification (records + checkpoint
+//!   feir-verify bundle <bundle.json> [opts.json]   full offline verification (records + checkpoint
 //!                                                history + public keys); omission/fork/tamper.
+//!                                                With opts.json the role-disjoint authority key sets are
+//!                                                PINNED (authentic verification + the Tier-B/mode gates).
 //!   feir-verify record <record.json> [pubkey]   single record; without a key = integrity only.
 
 use feir_decision_core::record::{validate_record_shape, verify_content_hash, verify_sealed};
 use feir_decision_core::sign::decode_pubkey;
-use feir_decision_core::verify::{verify_bundle_json, TrustLevel};
+use feir_decision_core::verify::{report_to_canon, verify_bundle_json, verify_bundle_with_json};
 use feir_decision_core::CanonValue;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some("bundle") if args.len() >= 3 => verify_bundle_cmd(&args[2]),
+        Some("bundle") if args.len() >= 3 => verify_bundle_cmd(&args[2], args.get(3)),
         Some("record") if args.len() >= 3 => verify_record_cmd(&args[2], args.get(3)),
         _ => {
             eprintln!("usage:");
-            eprintln!("  feir-verify bundle <bundle.json>");
+            eprintln!("  feir-verify bundle <bundle.json> [opts.json]   (opts.json pins role-disjoint keys)");
             eprintln!("  feir-verify record <record.json> [ed25519pub:<key>]");
+            eprintln!();
+            eprintln!("opts.json keys (each a role-disjoint set; omit a set to leave that mode unevaluated):");
+            eprintln!("  broker_authority_keys, resource_authority_keys, tsa_keys, taxonomy/taxonomy_keys/");
+            eprintln!("  taxonomy_digest/taxonomy_version, attestation_keys, cosig_approver_keys, revocation_keys,");
+            eprintln!("  federated_broker_keys (a {{broker_id: [keys]}} map), authority_keys — all base64url");
+            eprintln!("  ed25519pub: strings (see docs/operator-verification.md).");
             ExitCode::from(2)
         }
     }
 }
 
-fn verify_bundle_cmd(path: &str) -> ExitCode {
+fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
@@ -32,62 +40,93 @@ fn verify_bundle_cmd(path: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let report = match verify_bundle_json(&text) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("FAIL: bundle is not valid JSON/RCP: {e}");
-            return ExitCode::from(1);
+    // With an opts.json, PIN the role-disjoint authority key sets (authentic verification + the Tier-B/mode
+    // gates: cosig/revocation/federation/native/attestation/taxonomy). Without it, internal-consistency only
+    // (keys from the bundle). The report comes back as canonical JSON either way, so one printer serves both.
+    let report: CanonValue = match opts_path {
+        Some(op) => {
+            let opts_text = match std::fs::read_to_string(op) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("error: cannot read opts {op}: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            match CanonValue::parse(&verify_bundle_with_json(&text, &opts_text)) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("FAIL: verifier returned non-JSON: {e}");
+                    return ExitCode::from(1);
+                }
+            }
         }
+        None => match verify_bundle_json(&text) {
+            Ok(r) => report_to_canon(&r),
+            Err(e) => {
+                eprintln!("FAIL: bundle is not valid JSON/RCP: {e}");
+                return ExitCode::from(1);
+            }
+        },
     };
 
+    let gs = |k: &str| report.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let gi = |k: &str| report.get(k).and_then(|v| v.as_int()).unwrap_or(0);
+    let gb = |k: &str| matches!(report.get(k), Some(CanonValue::Bool(true)));
+
     println!("feir offline verification");
-    if let Some(p) = &report.project_id {
-        println!("  project:      {p}");
+    let pid = gs("project_id");
+    if !pid.is_empty() {
+        println!("  project:      {pid}");
     }
-    println!(
-        "  records:      {}/{} integrity-proven",
-        report.records_proven, report.records_total
-    );
-    if !report.keys_externally_pinned {
-        println!("  keys:         from the bundle (NOT externally pinned) — proves internal");
-        println!("                consistency under the bundle's own key claims, not authenticity");
-        println!("                against an out-of-band trust root.");
+    println!("  records:      {}/{} integrity-proven", gi("records_proven"), gi("records_total"));
+    if !gb("keys_externally_pinned") {
+        println!("  keys:         from the bundle (NOT externally pinned) — proves internal consistency");
+        println!("                under the bundle's own key claims, not authenticity. Pass an opts.json to PIN");
+        println!("                the role-disjoint authority keys (see docs/operator-verification.md).");
     }
-    println!(
-        "  DAG:          {} ({} heads, {} duplicates collapsed)",
-        if report.dag_ok { "valid" } else { "INVALID" },
-        report.dag_heads,
-        report.collapsed_duplicates
-    );
+    println!("  DAG:          {} ({} heads)", if gb("dag_ok") { "valid" } else { "INVALID" }, gi("dag_heads"));
     println!(
         "  checkpoints:  {}/{} verified, {} anchored, chain {}",
-        report.checkpoints_verified,
-        report.checkpoints_total,
-        report.checkpoints_anchored,
-        if report.chain_ok { "ok" } else { "BROKEN" }
+        gi("checkpoints_verified"), gi("checkpoints_total"), gi("checkpoints_anchored"),
+        if gb("chain_ok") { "ok" } else { "BROKEN" }
     );
-    for t in &report.record_trust {
-        let mark = match t.trust {
-            TrustLevel::IntegrityProven => "✓",
-            TrustLevel::Untrusted => "✗",
-        };
-        println!(
-            "    {mark} {:<10} via {:<5} key={:<10} {}",
-            t.record_id,
-            t.observed_via,
-            t.key_status,
-            t.notes.first().cloned().unwrap_or_default()
-        );
+    // Tier-B / ADR-0005 mode gates (only meaningful when the relevant key set was pinned via opts.json).
+    println!("  grant accountability: {} ({} grants, {} verified)", gs("grant_accountability"), gi("grant_total"), gi("grant_verified"));
+    println!("  broker_trust:         {}", gs("broker_trust"));
+    println!(
+        "  uses:                 {} matched / {} pop-reverified ({} unmatched, {} pending)",
+        gi("uses_matched"), gi("uses_pop_reverified"), gi("unmatched_violation"), gi("unmatched_pending")
+    );
+    for (label, key) in [
+        ("taxonomy", "taxonomy_status"),
+        ("attestation", "attestation_status"),
+        ("cosig", "cosig_status"),
+        ("delegation", "delegation_status"),
+        ("revocation", "revocation_status"),
+        ("introspection", "introspection_status"),
+        ("federation", "federation_status"),
+    ] {
+        let v = gs(key);
+        if !v.is_empty() && v != "absent" && v != "unevaluated" {
+            println!("  {label:<21} {v}");
+        }
     }
-    if let Some(b) = &report.first_broken_link {
-        println!("  first broken link: {b}");
+    println!("  action_completeness:  {}  (resource_trust: {})", gs("action_completeness"), gs("resource_trust"));
+    if let Some(issues) = report.get("issues").and_then(|v| v.as_array()) {
+        for (i, iss) in issues.iter().enumerate() {
+            if i >= 8 {
+                println!("    … {} more issue(s)", issues.len() - 8);
+                break;
+            }
+            if let Some(s) = iss.as_str() {
+                println!("  ✗ {s}");
+            }
+        }
     }
     println!();
-    if report.ok {
-        println!(
-            "RESULT: PASS — every record sealed, linked, and checkpoint-consistent (Level 1)."
-        );
-        println!("NOTE: this proves integrity/provenance, not that the records are a COMPLETE account (Level 3).");
+    if gb("ok") {
+        println!("RESULT: PASS — every record sealed, linked, and checkpoint-consistent.");
+        println!("NOTE: a `*_complete` action_completeness is bounded by resource_trust:assumed_truthful (MF1).");
         ExitCode::SUCCESS
     } else {
         println!("RESULT: FAIL — see issues above.");

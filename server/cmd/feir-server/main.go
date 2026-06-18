@@ -10,6 +10,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/feir-dev/feir/server/internal/api"
@@ -98,6 +100,30 @@ func main() {
 		brokerPubKey = "ed25519pub:" + base64.RawURLEncoding.EncodeToString(bk.Public().(ed25519.PublicKey))
 		log.Printf("credential broker enabled (POST /v2/grants)")
 	}
+	// M6 (ADR 0005): the ONLINE two-phase cosig policy (POST /v2/grants/prepare + /v2/grants/finalize). The
+	// M-of-N approver keys are role-separated GOVERNANCE keys — the offline verifier re-pins them as
+	// cosig_approver_keys (a FATAL config error on overlap with any other role). Requires the broker.
+	// FEIR_COSIG_APPROVER_KEYS = comma-separated ed25519 pubkeys (base64url-no-pad, optional ed25519pub:
+	// prefix); FEIR_COSIG_THRESHOLD = M (default = number of approvers).
+	if raw := os.Getenv("FEIR_COSIG_APPROVER_KEYS"); raw != "" {
+		if !brokerEnabled {
+			log.Fatal("FEIR_COSIG_APPROVER_KEYS requires FEIR_BROKER_ISSUING_SEED (cosig is a broker grant-approval policy)")
+		}
+		approvers := parseCosigApprovers(raw)
+		if len(approvers) == 0 {
+			log.Fatal("FEIR_COSIG_APPROVER_KEYS is set but parsed to zero keys")
+		}
+		threshold := len(approvers)
+		if t := os.Getenv("FEIR_COSIG_THRESHOLD"); t != "" {
+			n, err := strconv.Atoi(t)
+			if err != nil || n < 1 || n > len(approvers) {
+				log.Fatalf("FEIR_COSIG_THRESHOLD must be an integer in [1, %d]", len(approvers))
+			}
+			threshold = n
+		}
+		srv.WithCosigPolicy(threshold, approvers)
+		log.Printf("online cosig policy enabled: %d-of-%d (POST /v2/grants/prepare + finalize)", threshold, len(approvers))
+	}
 	// resource gateway (Level 3 Tier-B): POST /v2/use. The resource recording key signs use-receipt
 	// evidence and MUST be DISTINCT from the server signing key and the broker key (R2 role separation;
 	// the verifier rejects a broker/resource key overlap). Requires the broker (capabilities are
@@ -178,4 +204,23 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// parseCosigApprovers parses a comma-separated list of base64url-no-pad ed25519 public keys (each with an
+// optional "ed25519pub:" prefix) into the M6 cosig approver set. A malformed entry is fatal (fail-closed —
+// a typo'd governance key must not silently shrink the approver set).
+func parseCosigApprovers(raw string) []ed25519.PublicKey {
+	var out []ed25519.PublicKey
+	for _, part := range strings.Split(raw, ",") {
+		s := strings.TrimPrefix(strings.TrimSpace(part), "ed25519pub:")
+		if s == "" {
+			continue
+		}
+		b, err := base64.RawURLEncoding.DecodeString(s)
+		if err != nil || len(b) != ed25519.PublicKeySize {
+			log.Fatalf("FEIR_COSIG_APPROVER_KEYS: %q is not a base64url-no-pad ed25519 public key (32 bytes)", part)
+		}
+		out = append(out, ed25519.PublicKey(b))
+	}
+	return out
 }

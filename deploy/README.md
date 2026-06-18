@@ -39,9 +39,32 @@ cargo run -p feir-decision-core --bin feir-verify -- bundle bundle.json
 | `FEIR_BROKER_ISSUING_SEED` | server | (none) | 64 hex chars. Enables the credential broker (`POST /v2/grants`); signs minted capabilities. Unset = off. |
 | `FEIR_RESOURCE_SEED` | server | (none) | 64 hex chars. Enables the resource gateway (`POST /v2/use`, Tier-B); signs use-receipt evidence. MUST differ from `FEIR_SIGNING_SEED` and `FEIR_BROKER_ISSUING_SEED` (R2 role separation). Requires the broker. Unset = off. |
 | `FEIR_RESOURCE_ID` | server | (none) | the resource's audience id; required when `FEIR_RESOURCE_SEED` is set. |
+| `FEIR_COSIG_APPROVER_KEYS` | server | (none) | comma-separated ed25519 pubkeys (base64url, optional `ed25519pub:` prefix). Enables the **online M-of-N cosig flow** (`POST /v2/grants/prepare` + `/v2/grants/finalize`, ADR-0005 M6). Requires the broker. The verifier re-pins these as `cosig_approver_keys` (role-disjoint). |
+| `FEIR_COSIG_THRESHOLD` | server | = #approvers | M, the cosig threshold (1 ≤ M ≤ #approvers). |
+| `FEIR_DATABASE_URL` | server | (none) | Postgres DSN. Set for the **durable, serializable, append-only** store + ledger (production). Unset = in-memory (dev, NOT durable). |
+| `FEIR_API_KEYS` | server | (none) | `proj-a:tok1,tok2;proj-b:tok3` — per-project API-key auth. **Unset = unauthenticated** (dev/single-tenant only). |
+| `FEIR_TSA_URL` | server | (none) | RFC 3161 TSA URL — anchors every checkpoint (threat #3 backdating). The verifier pins the TSA out-of-band (`tsa_keys`/`tsa_spki_b64`). |
+| `FEIR_CONTENT_DIR` / `FEIR_WITNESS_DIR` | server | (none) | durable content-store / append-only checkpoint-witness directories. |
 | `STRIPE_API_KEY` | server | (none) | enables usage-based metering reporting; no key = local counting only |
 | `FEIR_UPSTREAM` | proxy | `https://api.openai.com` | upstream LLM |
 | `FEIR_PROJECT_ID` | proxy | `default` | project the proxy records under |
+
+### Online two-phase grant flows (ADR-0005 M6 Cosig / M2 Delegation)
+
+A cosigned/delegated grant is inherently two-phase (the approver/delegator signs a challenge that binds
+the broker-minted credential): `POST /v2/grants/prepare` mints + reveals `{grant_id, credential_binding,
+exp, cnf_kid, cosig_threshold}`; the approvers/delegators sign it; `POST /v2/grants/finalize` submits the
+`cosignatures` (M6) / `delegation_hops` (M2) and commits. The single-phase `POST /v2/grants` remains the
+path for ordinary + native (`mode:"token_exchange"`) grants.
+
+### Verifying a bundle (authentic, with the mode gates)
+
+To enforce the Tier-B / ADR-0005 mode guarantees you must PIN the role-disjoint authority key sets — see
+**[`docs/operator-verification.md`](../docs/operator-verification.md)** for the full `opts.json` and:
+
+```bash
+feir-verify bundle bundle.json opts.json   # pinned, authentic + cosig/revocation/federation/native gates
+```
 
 > **Phase-1 limits (see `docs/coverage-limits.md`):** no per-project auth yet (deploy behind your
 > own auth or single-tenant); the in-memory store is single-node (Postgres + content store are the
