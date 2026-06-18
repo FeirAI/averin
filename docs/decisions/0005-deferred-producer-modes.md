@@ -16,13 +16,15 @@ files, and no behavior change ship with this ADR.** Following ADR 0004's rule, e
 it proves *cryptographically* versus what stays *TCB* (`resource_trust: assumed_truthful`), and the D8
 conjunction only ever gets MORE restrictive (or gains an explicit, weaker, labeled tier) — never looser.
 
-> **Implementation status (updated):** **M1 (`bounded_reuse`/N-Use), M6 (Cosig), M2 (Delegation), M5
-> (Revocation), and M3 (Native/STS) have since been built** — see their §M1/§M6/§M2/§M5/§M3 status notes. M1 is
-> end-to-end (incl. the online `POST /v2/grants` path); M6, M2, M5, and M3 each ship the verifier semantics + the
-> Go producer (+ a shared golden vector for M6/M2/M3; M5 reuses the canonical-doc-signing path so no structured
-> vector is needed), with only their online producer-orchestration HTTP path deferred. M4 remains a design-only
-> staging map. The ADR 0002 amendments §9 prescribes "to apply alongside the first implementation" are now
-> applied (M1 was first); the Q3 resolution (§9, M3) is now live.
+> **Implementation status (updated):** **ALL SIX deferred modes are now built** — M1 (`bounded_reuse`/N-Use),
+> M6 (Cosig), M2 (Delegation), M5 (Revocation), M3 (Native/STS), and M4 (Federation) — see their
+> §M1/§M6/§M2/§M5/§M3/§M4 status notes. M1 is end-to-end (incl. the online `POST /v2/grants` path); M6, M2, M5,
+> M3, and M4 each ship the verifier semantics + the Go producer (+ a shared golden vector for M6/M2/M3; M4 reuses
+> the existing `grant_head_root` fold so no new vector; M5 reuses the canonical-doc-signing path), with only their
+> online producer-orchestration HTTP path deferred. The ADR 0002 amendments §9 are applied (M1 was first); the Q3
+> resolution (§9, M3) is live. Deferred sub-features (clearly labeled per mode): the online two-phase HTTP flows
+> (cosig/delegation/native/the introspected-capstone-LABEL e2e), the Merkle-non-disclosure revocation mode, and
+> M4's optional `cross_broker_cert` transitive-trust tier (`feir.broker.federation.cert.v1`).
 
 The design was pressure-tested against the live verifier (`core/src/verify.rs`) and producer
 (`server/internal/broker`, `server/internal/api`, `server/internal/resourceshim`). Where a mode stresses or
@@ -207,6 +209,37 @@ Capstone → Signature domain → Residual*.
   *signed* the effective scope, not that the IdP's scope is honest.
 
 ### M4 — Federation (tiered)
+
+> **Status: verifier (V1 partition + V2 per-broker keys) + Go producer + FFI e2e IMPLEMENTED; the optional
+> `cross_broker_cert` transitive-trust tier + the online introspection/federation HTTP path deferred.** The
+> HEAVIEST mode — it partitions the most fail-open-prone subsystem (the D6 grant-transparency suppression
+> detector) per `broker_id`. **V1** `68dc01b`: an ACTIVATION BOUNDARY (a committed, integrity-proven broker grant
+> carrying a non-empty signed `grant_evidence.broker_id`) dispatches to `compute_federation_trust` — a per-broker
+> replica of `compute_broker_trust` kept SEPARATE so the single-broker path is byte-for-byte unchanged. Each
+> broker's grants must form their OWN gapless `[1..n_b]` `broker_seq` prefix with their OWN `cumulative_root` chain
+> re-derived against that broker's entry in the checkpoint's `broker_grant_heads` MAP (`parse_grant_heads_map`),
+> `prior_head_hash` chaining the broker's OWN previous head — so a gap in broker A is caught in A's partition and
+> can NEVER be masked by broker B's interleaved grants (the §8 flag-2 crux). Every failure (smuggled grant [no
+> broker_id/broker_seq], dropped/missing/inflated head, phantom-broker head, fork, grant_id equivocation across
+> `(broker_id, broker_seq, content_hash)`) is a hard `issues` violation → `!ok`. New fields `federation_status`
+> {absent | sequence_verified | sequence_consistent_export | suppression}, `brokers_total/_seq_verified`,
+> `cross_broker_suppression`, `per_broker_trust[]`; capstone gains `cross_broker_suppression==0 &&
+> brokers_seq_verified==brokers_total`. **V2** `2de786b`: optional `federated_broker_keys` (per-`broker_id`
+> authority key map) — a federated grant elevates ONLY under its own broker's pinned set (an unpinned broker_id →
+> empty slice → never verifies; a grant signed by another broker's key is not accountable AND its use is
+> `unmatched_violation` → `!ok`); the R2 disjointness extends to the UNION of all broker key sets; D7
+> `authority_kids` folds the per-broker keys. **Producer** `0eaa051`: `broker.Request.BrokerID` →
+> `grant_evidence.broker_id` (the real `Prepare` path) + `broker.BrokerGrantHeads` (the per-broker head MAP,
+> reusing the existing cross-language-pinned `GrantHeadRoot` fold — NO new signature domain or golden vector). FFI
+> e2e: a two-broker Go-built bundle reaches `federation_status:"sequence_verified"` under the Rust verifier (V1
+> shared-root + V2 per-broker-key variants), with dropped-head suppression + cross-broker-forgery negative
+> controls. TRIPLE-reviewed per piece (finder + Opus + GLM) AND a WHOLE-FEATURE aggregate review (Opus + GLM SHIP,
+> no fail-open; the third reviewer's NO-SHIP was verified a false positive — pre-existing legacy integrity/authority
+> separation, not relay-reachable, no false capstone). 23 Rust federation adversarial tests + 2 Go FFI e2e + 5
+> aggregate-review coverage additions. **Residual (ADR floor):** a globally-consistent cross-broker equivocation
+> (divergent histories never co-committed in one bundle) stays the offline floor (ADR 0004 D9 floor 1) — only the
+> out-of-band monitor catches a coordinated multi-broker rewrite. **Deferred:** the `cross_broker_cert`
+> untrusted→transitive elevation (`feir.broker.federation.cert.v1` + its golden vector) + the online HTTP path.
 
 - **Mechanism.** Each grant carries `broker_id` + `issuer_kid`. The verifier pins per-broker authority keys and
   verifies each broker's `broker_seq` transparency log **independently** (a gap in broker A's seq never masks
