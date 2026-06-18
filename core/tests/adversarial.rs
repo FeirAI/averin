@@ -16,6 +16,7 @@ use feir_decision_core::verify::{
     VerifyReport,
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 fn fixture() -> CanonValue {
@@ -5120,4 +5121,154 @@ fn tier_b_federation_unanchored_is_consistent_export() {
     assert_eq!(r.brokers_total, 2);
     assert_eq!(r.brokers_seq_verified, 0, "unanchored -> not sequence_verified");
     assert_eq!(r.broker_trust, "sequence_consistent_export");
+}
+
+// ---- M4 V2: per-broker_id authority key pinning (federated_broker_keys) + union-disjointness ----
+
+// VerifyOptions pinning a SEPARATE broker authority key per broker_id (broker_authority_keys left empty: all
+// grants here are federated). resource/tsa pinned as usual; the per-broker sets must be role-disjoint from them.
+fn fed_keys_opts(res_vk: VerifyingKey, tsa_vk: VerifyingKey, brokers: &[(&str, VerifyingKey)]) -> VerifyOptions {
+    let mut m = BTreeMap::new();
+    for (b, k) in brokers {
+        m.insert((*b).to_string(), vec![*k]);
+    }
+    VerifyOptions {
+        resource_authority_keys: vec![res_vk],
+        trusted_tsa_keys: vec![tsa_vk],
+        federated_broker_keys: m,
+        ..Default::default()
+    }
+}
+
+// a two-broker federated bundle whose grants' EVIDENCE is signed by per-broker keys `ba`/`bb` (the records are
+// still outer-sealed by the bundle record key `rec`/k0). Returns the bundle + the per-broker authority pubkeys.
+fn fed_two_broker_bundle(rec: &SigningKey, tsa: &SigningKey, ba: &SigningKey, bb: &SigningKey) -> CanonValue {
+    let ga = seal_grant(rec, ba, "rec-a", &grant_evidence_fed("grant-a", BID_A, 1));
+    let gb = seal_grant(rec, bb, "rec-b", &grant_evidence_fed("grant-b", BID_B, 1));
+    let (ha, hb) = (content_hash_of(&ga), content_hash_of(&gb));
+    let heads = fed_heads(&[
+        (BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)]))),
+        (BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)]))),
+    ]);
+    let cp = checkpoint_with_fed_heads(rec, "cp0", 0, None, &[ha.clone(), hb.clone()], 2, heads, Some(tsa));
+    tier_b_bundle(&rec.verifying_key(), vec![ga, gb], vec![cp])
+}
+
+#[test]
+fn tier_b_federation_per_broker_keys_each_grant_verified() {
+    // each federated grant elevates under ITS OWN broker_id's pinned key set -> both grant_verified.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (ba, bb) = (approver(60), approver(61)); // role-separated per-broker authority keys
+    let bundle = fed_two_broker_bundle(&rec, &tsa, &ba, &bb);
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, ba.verifying_key()), (BID_B, bb.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(r.ok, "per-broker-pinned grants must verify; issues: {:?}", r.issues);
+    assert_eq!(r.grant_total, 2);
+    assert_eq!(r.grant_verified, 2, "each grant elevates under its OWN broker key");
+    assert_eq!(r.federation_status, "sequence_verified");
+    assert_eq!(r.brokers_seq_verified, 2);
+}
+
+#[test]
+fn tier_b_federation_grant_signed_by_another_brokers_key_not_accountable() {
+    // SECURITY: broker A's grant signed by broker B's key does NOT elevate under A's pinned set -> it is not a
+    // verified grant (broker B cannot issue an A-accountable grant). It is "untrusted" (the cross-broker-cert
+    // future extension would elevate it to "transitive"); grant accountability is incomplete.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (ba, bb) = (approver(60), approver(61));
+    // A's grant, but the EVIDENCE is signed by broker B's key.
+    let ga = seal_grant(&rec, &bb, "rec-a", &grant_evidence_fed("grant-a", BID_A, 1));
+    let ha = content_hash_of(&ga);
+    let heads = fed_heads(&[(BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&ha), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga], vec![cp]);
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, ba.verifying_key()), (BID_B, bb.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.grant_total, 1);
+    assert_eq!(r.grant_verified, 0, "a grant signed by another broker's key must NOT be A-accountable");
+    let json = report_to_json(&r);
+    assert!(json.contains(r#""grant_accountability":"incomplete""#), "grant accountability must be incomplete: {json}");
+}
+
+#[test]
+fn tier_b_federation_per_broker_key_overlapping_a_role_is_fatal() {
+    // a per-broker authority key that also serves as the RESOURCE key breaks the union-disjointness -> fatal.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bb = approver(61);
+    let bundle = fed_two_broker_bundle(&rec, &tsa, &res, &bb); // A's grant signed by the RESOURCE key (for shape)
+    // pin federated_broker_keys[A] = the RESOURCE key -> the broker UNION overlaps resource_authority_keys.
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, res.verifying_key()), (BID_B, bb.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a per-broker key overlapping the resource role is a fatal config error");
+    assert!(r.issues.iter().any(|i| i.contains("disjoint")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_use_over_mis_signed_grant_is_unmatched_violation() {
+    // END-TO-END (the strong property): a USE over a grant signed by ANOTHER broker's key. The grant fails to
+    // elevate under its broker's pinned key (authority not verified), so it is NOT indexed -> the use finds no
+    // matching closed grant -> unmatched_violation -> !ok. So per-broker authority effectively gates the capstone
+    // through the use surface, not only grant_accountability.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (ba, bb) = (approver(60), approver(61));
+    let grant = seal_grant(&rec, &bb, "rec-a", &grant_evidence_fed("grant-a", BID_A, 1)); // A's grant, B's key
+    let gh = content_hash_of(&grant);
+    let ue = use_evidence("grant-a", ACTION, RESOURCE, "grant-a", CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", std::slice::from_ref(&gh), ACTION, &ue);
+    let heads = fed_heads(&[(BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &gh)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, &[content_hash_of(&use_rec)], 2, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, ba.verifying_key()), (BID_B, bb.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a use over a mis-signed (wrong-broker-key) grant must fail closed");
+    assert_eq!(r.uses_matched, 0);
+    assert!(r.unmatched_violation >= 1);
+    assert!(r.issues.iter().any(|i| i.contains("no matching closed grant")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_federation_unpinned_broker_id_does_not_elevate() {
+    // a grant whose broker_id is NOT in the pinned map elevates under an EMPTY key set -> never verified
+    // (fail-closed; no fallback to the union or another broker).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (ba, bb) = (approver(60), approver(61));
+    let grant = seal_grant(&rec, &ba, "rec-z", &grant_evidence_fed("grant-z", "broker-Z", 1)); // broker_id Z not pinned
+    let gz = content_hash_of(&grant);
+    let heads = fed_heads(&[("broker-Z", grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &gz)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&gz), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, ba.verifying_key()), (BID_B, bb.verifying_key())]); // no Z
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.grant_total, 1);
+    assert_eq!(r.grant_verified, 0, "a grant for an UNPINNED broker_id must not elevate under any key");
+}
+
+#[test]
+fn tier_b_federation_non_broker_id_grant_uses_shared_root_with_map_pinned() {
+    // ADDITIVITY: with a non-empty federated map pinned, a grant carrying NO broker_id still elevates under the
+    // shared-root broker_authority_keys (the `None => broker_authority_keys` arm) and federation is NOT activated.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ba = approver(60);
+    let bundle = d6_clean(&rec, &tsa); // a normal single-broker grant: NO broker_id, signed by rec
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()); // broker_authority_keys=[rec]
+    opts.federated_broker_keys = BTreeMap::from([(BID_A.to_string(), vec![ba.verifying_key()])]); // non-empty, but unmatched
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(r.ok, "a no-broker_id grant must elevate under the shared root even with a map pinned; issues: {:?}", r.issues);
+    assert_eq!(r.federation_status, "absent", "no broker_id -> federation NOT activated");
+    assert_eq!(r.broker_trust, "sequence_verified");
+    assert_eq!(r.grant_verified, 1);
+}
+
+#[test]
+fn tier_b_federation_distinct_brokers_may_share_a_key() {
+    // distinct broker_ids MAY map to the SAME authority key (the ADR's shared-root allowance) — the union dedups,
+    // so it is NOT a false disjointness fatal, and both grants elevate.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let shared = approver(62);
+    let bundle = fed_two_broker_bundle(&rec, &tsa, &shared, &shared); // both A and B signed by `shared`
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, shared.verifying_key()), (BID_B, shared.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(r.ok, "distinct brokers sharing a key must not be a false fatal; issues: {:?}", r.issues);
+    assert_eq!(r.grant_verified, 2);
+    assert_eq!(r.federation_status, "sequence_verified");
 }

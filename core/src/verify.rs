@@ -362,6 +362,17 @@ pub struct VerifyOptions {
     /// so a broker cannot sign its own revocation list. Absent ⇒ `revocation_status` stays `absent` (a present
     /// list is not evaluated — the operator must pin the revocation authority to honor revocations).
     pub revocation_keys: Vec<VerifyingKey>,
+    /// M4 / ADR 0005 (Federation — per-`broker_id` authority pinning). OPTIONAL: when non-empty, the operator has
+    /// pinned a SEPARATE broker authority key set PER `broker_id`. A federated grant (one carrying a non-empty
+    /// signed `grant_evidence.broker_id`) then elevates its `evidence_sig` to `verified` ONLY under ITS OWN
+    /// broker_id's key set here — a `broker_id` with no entry does NOT elevate (fail-closed; never under another
+    /// broker's keys or the union), so broker B cannot issue grants in broker A's name. A grant with NO `broker_id`
+    /// (non-federated) still elevates under `broker_authority_keys`. When this map is EMPTY (the default), ALL
+    /// broker grants elevate under `broker_authority_keys` — the "brokers share one pinned root" baseline the ADR
+    /// permits. The R2 disjointness is enforced against the UNION of `broker_authority_keys` and every per-broker
+    /// set: every OTHER role (resource/taxonomy/attestation/tsa/cosig/revocation/generic-authority) must be
+    /// disjoint from that union (a FATAL config error otherwise); distinct brokers MAY share a key.
+    pub federated_broker_keys: BTreeMap<String, Vec<VerifyingKey>>,
 }
 
 struct KeyEntry {
@@ -1052,10 +1063,17 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
+    // M4 (ADR 0005): optional per-`broker_id` authority key map, so the JSON/FFI path (the Go server + any
+    // external auditor) can pin per-broker federation authority, not just the direct Rust API.
+    let federated_broker_keys = match parse_pubkey_map(&opts_val, "federated_broker_keys") {
+        Ok(m) => m,
+        Err(e) => return error_report(&e),
+    };
     let mut opts = VerifyOptions {
         trusted_authority_keys: authority,
         broker_authority_keys: broker_authority,
         resource_authority_keys: resource_authority,
+        federated_broker_keys,
         taxonomy: opts_val.get("taxonomy").cloned(),
         taxonomy_keys,
         taxonomy_digest,
@@ -1091,6 +1109,38 @@ fn parse_pubkeys(opts: &CanonValue, key: &str) -> Result<Vec<VerifyingKey>, Stri
         let vk = decode_pubkey(s)
             .map_err(|e| format!("{key}[{i}] is not a valid ed25519pub key: {e}"))?;
         out.push(vk);
+    }
+    Ok(out)
+}
+
+/// M4 (ADR 0005): parse an optional MAP `{<broker_id>: [ed25519pub: …]}` (per-broker authority key sets).
+/// Absent ⇒ empty; present-but-malformed (not an object, or any value not an array of valid keys) ⇒ Err
+/// (fail-closed). An empty `broker_id` key is rejected (it would collide with the non-federated default).
+fn parse_pubkey_map(opts: &CanonValue, key: &str) -> Result<BTreeMap<String, Vec<VerifyingKey>>, String> {
+    let obj = match opts.get(key) {
+        None | Some(CanonValue::Null) => return Ok(BTreeMap::new()),
+        Some(v) => v
+            .as_object()
+            .ok_or_else(|| format!("{key} must be an object {{broker_id: [ed25519pub: …]}}"))?,
+    };
+    let mut out = BTreeMap::new();
+    for (bid, v) in obj.iter() {
+        if bid.is_empty() {
+            return Err(format!("{key} has an empty broker_id key (not allowed)"));
+        }
+        let arr = v
+            .as_array()
+            .ok_or_else(|| format!("{key}[{bid}] must be an array of ed25519pub: strings"))?;
+        let mut keys = Vec::with_capacity(arr.len());
+        for (i, e) in arr.iter().enumerate() {
+            let s = e
+                .as_str()
+                .ok_or_else(|| format!("{key}[{bid}][{i}] must be a string"))?;
+            let vk = decode_pubkey(s)
+                .map_err(|err| format!("{key}[{bid}][{i}] is not a valid ed25519pub key: {err}"))?;
+            keys.push(vk);
+        }
+        out.insert(bid.clone(), keys);
     }
     Ok(out)
 }
@@ -2516,7 +2566,17 @@ fn evaluate_attestation(
     // cannot bind a kid it never sees. Folding it would force every auditor who pins a taxonomy issuer
     // (the normal D4/D8 posture) into a spurious authority_kids mismatch -> attestation_status:"failed".
     let mut kids: BTreeSet<String> = BTreeSet::new();
-    for vk in opts.broker_authority_keys.iter().chain(opts.resource_authority_keys.iter()) {
+    // M4 (ADR 0005): the broker authorities include every per-`broker_id` `federated_broker_keys` set (a
+    // federation deployment may pin per-broker authority and leave `broker_authority_keys` empty), so the
+    // attestation must bind those kids too. Folding them is strictly stricter (a larger expected kid set →
+    // a federated attestation that omits a per-broker kid mismatches → `failed`, fail-closed); for a
+    // single-broker deployment (empty map) the set is byte-for-byte unchanged.
+    for vk in opts
+        .broker_authority_keys
+        .iter()
+        .chain(opts.federated_broker_keys.values().flatten())
+        .chain(opts.resource_authority_keys.iter())
+    {
         kids.insert(cnf_kid(vk));
     }
     let mut mism: Vec<&str> = Vec::new();
@@ -2549,8 +2609,21 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // use. This is a FATAL configuration error — abort before evaluating any record (VerifyingKey
     // equality is raw-bytes, which also settles the derived key id). Never proceed on an ambiguous
     // key universe.
+    // M4 (ADR 0005): the "broker" role for disjointness is the UNION of `broker_authority_keys` and every
+    // per-`broker_id` `federated_broker_keys` set (an operator may pin per-broker authority). Every OTHER role
+    // must be disjoint from that union; distinct brokers MAY share a key (the cross-broker-cert refinement, not
+    // yet implemented, is what would constrain intra-broker key sharing). When `federated_broker_keys` is empty
+    // the union == `broker_authority_keys`, so the single-broker disjointness is byte-for-byte unchanged.
+    let mut broker_union: Vec<VerifyingKey> = opts.broker_authority_keys.clone();
+    for keys in opts.federated_broker_keys.values() {
+        for k in keys.iter().cloned() {
+            if !broker_union.contains(&k) {
+                broker_union.push(k);
+            }
+        }
+    }
     let role_sets: [(&str, &[VerifyingKey]); 7] = [
-        ("broker_authority_keys", &opts.broker_authority_keys),
+        ("broker_authority_keys", &broker_union),
         ("resource_authority_keys", &opts.resource_authority_keys),
         ("taxonomy_keys", &opts.taxonomy_keys),
         // D7: the attestation authority must be role-separated too — else a broker/resource could sign a
@@ -2743,6 +2816,22 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // role confusion (a resource key signing a grant, or vice versa) fail to elevate.
         let (broker_role, claims_role) = classify_role(rec);
         let auth_keys: &[VerifyingKey] = match broker_role {
+            // M4 (ADR 0005): per-broker authority. When `federated_broker_keys` is pinned, a grant carrying a
+            // `broker_id` elevates ONLY under THAT broker's key set — a broker_id with no pinned set does NOT
+            // elevate (fail-closed, never under another broker's keys or the union), so broker B cannot issue a
+            // grant in broker A's name. A grant with NO broker_id (non-federated) uses `broker_authority_keys`.
+            // When the map is empty (default), every broker grant uses `broker_authority_keys` (shared-root
+            // baseline) — so the single-broker path is byte-for-byte unchanged.
+            BrokerRole::Broker if !opts.federated_broker_keys.is_empty() => {
+                match ev_str(rec, "grant_evidence", "broker_id").filter(|b| !b.is_empty()) {
+                    Some(bid) => opts
+                        .federated_broker_keys
+                        .get(&bid)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]),
+                    None => &opts.broker_authority_keys,
+                }
+            }
             BrokerRole::Broker => &opts.broker_authority_keys,
             BrokerRole::Resource => &opts.resource_authority_keys,
             BrokerRole::None => &opts.trusted_authority_keys,
