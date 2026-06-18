@@ -130,6 +130,19 @@ pub struct VerifyReport {
     pub cosigned_grants_satisfied: usize,
     pub cosig_threshold_failures: usize,
     pub cosig_status: String,
+    /// M2 / ADR 0005 (Delegation — per-hop SIGNED re-delegation). `delegation_chains_total` = closed,
+    /// verified broker grants whose signed `grant_evidence.delegation_assertions[]` is non-empty (they
+    /// re-delegate the credential to a sub-agent); `delegation_chains_verified` = those whose chain fully
+    /// re-walked from the broker-signed root cnf_kid — every hop signed by its delegator, linked to the prior
+    /// hop's delegate, and scope/action/resource non-increasing (demonstrator: equality). A verified chain
+    /// binds the use to the LEAF cnf_kid + the narrowed window `min(grant exp, hop exps)`, so PoP runs under
+    /// the sub-agent's key; an invalid OR non-monotone chain is NOT indexed (its use → `unmatched_violation`).
+    /// `delegation_monotonicity_violations` counts chains rejected specifically for widening (surfaced for the
+    /// capstone). `delegation_status` ∈ {`absent`, `verified` (all chains re-walked), `unverified` (≥1 failed)}.
+    pub delegation_chains_total: usize,
+    pub delegation_chains_verified: usize,
+    pub delegation_monotonicity_violations: usize,
+    pub delegation_status: String,
     /// Pinned operation-taxonomy ARTIFACT trust (ADR 0004 D4 / MF5), one of: `absent` (none pinned in
     /// opts), `untrusted` (unsigned / wrong issuer / pinned digest|version mismatch / no pin supplied /
     /// malformed), `stale` (signed + pinned but a listed action fell outside the effective interval for
@@ -676,6 +689,11 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("cosigned_grants_satisfied".into(), count(r.cosigned_grants_satisfied)),
         ("cosig_threshold_failures".into(), count(r.cosig_threshold_failures)),
         ("cosig_status".into(), CanonValue::string(r.cosig_status.clone())),
+        // M2 (ADR 0005): delegation (per-hop signed re-delegation) accounting + artifact status.
+        ("delegation_chains_total".into(), count(r.delegation_chains_total)),
+        ("delegation_chains_verified".into(), count(r.delegation_chains_verified)),
+        ("delegation_monotonicity_violations".into(), count(r.delegation_monotonicity_violations)),
+        ("delegation_status".into(), CanonValue::string(r.delegation_status.clone())),
         (
             "taxonomy_status".into(),
             CanonValue::string(r.taxonomy_status.clone()),
@@ -752,6 +770,11 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
                 // explicit so the capstone self-documents that dual-control was satisfied over the surface.
                 && r.cosig_threshold_failures == 0
                 && (r.cosigned_grants_total == 0 || r.cosigned_grants_satisfied == r.cosigned_grants_total)
+                // M2 (ADR 0005): every present delegation chain fully re-walked (sigs + links + monotonic).
+                // A failed/non-monotone chain also un-indexes the grant (its use → unmatched_violation, so !ok),
+                // but the conjuncts are explicit so the capstone self-documents that re-delegation was verified.
+                && (r.delegation_chains_total == 0 || r.delegation_chains_verified == r.delegation_chains_total)
+                && r.delegation_monotonicity_violations == 0
                 // T6: the brokered surface stayed within the operator's AFFIRMATIVELY-declared side-effect
                 // closure. This is load-bearing beyond `r.ok`: an `unclosed` surface already forces `!ok`, but
                 // a `not_declared` manifest (no closure asserted) does NOT — so without this conjunct an
@@ -987,6 +1010,10 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         cosigned_grants_satisfied: 0,
         cosig_threshold_failures: 0,
         cosig_status: "absent".to_string(),
+        delegation_chains_total: 0,
+        delegation_chains_verified: 0,
+        delegation_monotonicity_violations: 0,
+        delegation_status: "absent".to_string(),
         taxonomy_status: "absent".to_string(),
         broker_trust: "assumed".to_string(),
         cred_label_checks: 0,
@@ -1211,6 +1238,156 @@ fn count_cosig_approvals(
         }
     }
     credited.len()
+}
+
+/// Re-derive the per-hop delegation challenge a delegator signs (ADR 0005 M2), byte-identically to the Go
+/// producer: `sha256( LP4(tag) ‖ LP4(grant_id) ‖ BE8(hop_index) ‖ LP4(delegator_kid) ‖ LP4(delegate_kid) ‖
+/// LP4(scope) ‖ LP4(action) ‖ LP4(resource_id) ‖ BE8(exp) )`, tag = "feir.broker.delegation.hop.v1". Binding
+/// the kids + hop_index makes a hop assertion non-transferable to a different delegator/delegate/position;
+/// binding scope/action/resource/exp makes it non-replayable onto a different authority or window. Returns the
+/// 32-byte digest the delegator signs (raw, like `use_pop_challenge`). Kept in sync with Go via the shared
+/// golden vector `spec/golden-vectors/broker-preimages.json`.
+#[allow(clippy::too_many_arguments)]
+pub fn delegation_hop_challenge(
+    grant_id: &str,
+    hop_index: i64,
+    delegator_kid: &str,
+    delegate_kid: &str,
+    scope: &str,
+    action: &str,
+    resource_id: &str,
+    exp: i64,
+) -> [u8; 32] {
+    let mut pre = Vec::new();
+    let lp4 = |pre: &mut Vec<u8>, b: &[u8]| {
+        pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
+        pre.extend_from_slice(b);
+    };
+    lp4(&mut pre, b"feir.broker.delegation.hop.v1");
+    lp4(&mut pre, grant_id.as_bytes());
+    pre.extend_from_slice(&(hop_index as u64).to_be_bytes());
+    lp4(&mut pre, delegator_kid.as_bytes());
+    lp4(&mut pre, delegate_kid.as_bytes());
+    lp4(&mut pre, scope.as_bytes());
+    lp4(&mut pre, action.as_bytes());
+    lp4(&mut pre, resource_id.as_bytes());
+    pre.extend_from_slice(&(exp as u64).to_be_bytes());
+    crate::hashx::sha256(&pre)
+}
+
+/// Outcome of re-walking a grant's `delegation_assertions[]` chain (ADR 0005 M2).
+enum ChainResult {
+    /// No (or empty) delegation_assertions — an ordinary, undelegated grant.
+    Absent,
+    /// Fully verified: every hop signed by its delegator, linked from the root, and monotone. The use binds
+    /// to `eff_cnf_kid` (the leaf delegate) and the narrowed window `eff_exp = min(grant exp, hop exps)`.
+    Verified { eff_cnf_kid: String, eff_exp: i64 },
+    /// Sigs + links re-walked, but a hop widened scope/action/resource beyond the grant (demonstrator
+    /// monotonicity = equality). Counted separately so the capstone can require `== 0`.
+    Monotonicity,
+    /// A malformed hop, an undecodable key/sig, a broken link (delegator ≠ prior delegate / ≠ root cnf_kid),
+    /// or a forged hop signature. The grant is not Tier-B-eligible.
+    Invalid,
+}
+
+/// M2 (ADR 0005): re-walk a grant's signed `delegation_assertions[]` from the broker-signed root cnf_kid,
+/// proving each hop and computing the effective (leaf) cnf_kid + narrowed window — never trusting the
+/// broker's flattened `delegation_chain[]` claim. Each assertion is `{delegator_cnf, delegate_cnf, scope,
+/// action, resource_id, exp, sig}` where the `*_cnf` are base64url ed25519 PUBLIC keys (the verifier derives
+/// the kids) and `sig` is the base64url-64 signature over `delegation_hop_challenge`. Hop 0's delegator must
+/// be the root; hop i's delegator must equal hop i-1's delegate; the effective cnf is the final delegate.
+fn verify_delegation_chain(
+    rec: &CanonValue,
+    grant_id: &str,
+    root_cnf_kid: &str,
+    grant_scope: &str,
+    grant_action: &str,
+    grant_resource_id: &str,
+    grant_exp: i64,
+) -> ChainResult {
+    let assertions = match rec
+        .get("extensions")
+        .and_then(|e| e.get("broker"))
+        .and_then(|b| b.get("grant_evidence"))
+        .and_then(|g| g.get("delegation_assertions"))
+        .and_then(|v| v.as_array())
+    {
+        Some(a) if !a.is_empty() => a,
+        _ => return ChainResult::Absent,
+    };
+    let mut expected_delegator_kid = root_cnf_kid.to_string(); // hop 0's delegator must be the grant's cnf
+    let mut eff_exp = grant_exp;
+    let mut monotone = true;
+    for (i, hop) in assertions.iter().enumerate() {
+        let (delegator_b64, delegate_b64, scope, action, resource_id, sig_b64) = match (
+            hop.get("delegator_cnf").and_then(|v| v.as_str()),
+            hop.get("delegate_cnf").and_then(|v| v.as_str()),
+            hop.get("scope").and_then(|v| v.as_str()),
+            hop.get("action").and_then(|v| v.as_str()),
+            hop.get("resource_id").and_then(|v| v.as_str()),
+            hop.get("sig").and_then(|v| v.as_str()),
+        ) {
+            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)) => (a, b, c, d, e, f),
+            _ => return ChainResult::Invalid,
+        };
+        let hop_exp = match hop.get("exp").and_then(|v| v.as_int()) {
+            Some(e) => e,
+            None => return ChainResult::Invalid,
+        };
+        let delegator_vk = match crate::b64::decode_fixed::<32>(delegator_b64)
+            .ok()
+            .and_then(|b| VerifyingKey::from_bytes(&b).ok())
+        {
+            Some(vk) => vk,
+            None => return ChainResult::Invalid,
+        };
+        let delegate_vk = match crate::b64::decode_fixed::<32>(delegate_b64)
+            .ok()
+            .and_then(|b| VerifyingKey::from_bytes(&b).ok())
+        {
+            Some(vk) => vk,
+            None => return ChainResult::Invalid,
+        };
+        let delegator_kid = cnf_kid(&delegator_vk);
+        let delegate_kid = cnf_kid(&delegate_vk);
+        // Link: hop 0's delegator must be the root cnf_kid; hop i's must be the previous hop's delegate.
+        if delegator_kid != expected_delegator_kid {
+            return ChainResult::Invalid;
+        }
+        // Signature: the delegator authorized THIS hop (binds the next delegate + scope/action/resource/exp).
+        let challenge = delegation_hop_challenge(
+            grant_id,
+            i as i64,
+            &delegator_kid,
+            &delegate_kid,
+            scope,
+            action,
+            resource_id,
+            hop_exp,
+        );
+        let sig_bytes = match crate::b64::decode_fixed::<64>(sig_b64) {
+            Ok(b) => b,
+            Err(_) => return ChainResult::Invalid,
+        };
+        if delegator_vk
+            .verify_strict(&challenge, &Signature::from_bytes(&sig_bytes))
+            .is_err()
+        {
+            return ChainResult::Invalid;
+        }
+        // Monotonicity (demonstrator = equality, fail-closed): a hop may not change scope/action/resource. A
+        // true narrowing lattice over the scope vocabulary is the documented future extension (ADR 0005 M2).
+        if scope != grant_scope || action != grant_action || resource_id != grant_resource_id {
+            monotone = false;
+        }
+        eff_exp = eff_exp.min(hop_exp); // a delegation can only NARROW the window, never extend it
+        expected_delegator_kid = delegate_kid;
+    }
+    if !monotone {
+        return ChainResult::Monotonicity;
+    }
+    // expected_delegator_kid now holds the LAST hop's delegate kid = the leaf the use must present.
+    ChainResult::Verified { eff_cnf_kid: expected_delegator_kid, eff_exp }
 }
 
 /// Re-derive the cnf key id (Go `broker.KeyID`): `"ed25519-" + base64url-nopad(sha256(pubkey)[..8])`.
@@ -2374,10 +2551,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         action: String,
         resource_id: String,
         scope_class: String,
-        cnf_kid: String,
         credential_binding: String,
         issued_at: i64,
-        exp: i64,
         used: usize,
         /// M1 (bounded_reuse): the declared cap N (0 for other scope classes). `used <= use_limit`.
         use_limit: i64,
@@ -2385,6 +2560,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         /// `(grant_id, usn)` replay dedup. A usn is inserted only when a use is fully accepted (mirrors
         /// `used`), so a use that fails PoP/outcome does not burn its sequence number.
         used_seqs: BTreeSet<i64>,
+        /// M2 (delegation): the cnf_kid a USE must present, and the temporal window the use must fall in —
+        /// the LEAF of a verified delegation chain (narrowed window `min(grant exp, hop exps)`), or the root
+        /// cnf_kid / grant exp for an undelegated grant. The use predicate keys on these so a sub-agent's PoP
+        /// matches a re-delegated grant. (For an undelegated grant these equal the root cnf_kid / grant exp.)
+        effective_cnf_kid: String,
+        effective_exp: i64,
     }
     let mut grants_by_id: BTreeMap<String, GrantInfo> = BTreeMap::new();
     // D4 (ADR 0004): grant_ids flagged mis-scoped at issuance (a single_operation grant for an action a
@@ -2398,6 +2579,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut cosigned_grants_satisfied = 0usize;
     let mut cosig_threshold_failures = 0usize;
     let mut cosig_seen: BTreeSet<String> = BTreeSet::new();
+    // M2 (ADR 0005): delegation accounting. A grant whose grant_evidence.delegation_assertions[] is non-empty
+    // must re-walk to a verified, monotone chain or it is NOT indexed (gated below). Deduped per grant_id.
+    let mut delegation_chains_total = 0usize;
+    let mut delegation_chains_verified = 0usize;
+    let mut delegation_monotonicity_violations = 0usize;
+    let mut delegation_seen: BTreeSet<String> = BTreeSet::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         let qualifies = rt.broker_role == BrokerRole::Broker.as_str()
@@ -2499,17 +2686,56 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         continue; // fail-closed: do not index a grant that did not meet its approval threshold
                     }
                 }
+                // M2 (ADR 0005): delegation. If the grant re-delegates (delegation_assertions[] present),
+                // re-walk the signed chain from the root cnf_kid and bind the use to the LEAF cnf/narrowed
+                // window; an invalid or non-monotone chain is fail-closed (not indexed → its use reads as
+                // unmatched_violation). An undelegated grant keeps the root cnf_kid + exp (additive). Counts
+                // are deduped per grant_id (delegation_seen); the `continue` gate always applies.
+                let grant_scope = ev_str(rec, "grant_evidence", "scope").unwrap_or_default();
+                let (effective_cnf_kid, effective_exp) = match verify_delegation_chain(
+                    rec, &gid, &cnf_kid, &grant_scope, &action, &resource_id, exp,
+                ) {
+                    ChainResult::Absent => (cnf_kid.clone(), exp),
+                    ChainResult::Verified { eff_cnf_kid, eff_exp } => {
+                        if delegation_seen.insert(gid.clone()) {
+                            delegation_chains_total += 1;
+                            delegation_chains_verified += 1;
+                        }
+                        (eff_cnf_kid, eff_exp)
+                    }
+                    ChainResult::Monotonicity => {
+                        if delegation_seen.insert(gid.clone()) {
+                            delegation_chains_total += 1;
+                            delegation_monotonicity_violations += 1;
+                            issues.push(format!(
+                                "grant {} ({}): delegation chain widens scope/action/resource beyond the grant — monotonicity violation (M2)",
+                                rt.index, rt.record_id
+                            ));
+                        }
+                        continue; // fail-closed: not Tier-B-eligible
+                    }
+                    ChainResult::Invalid => {
+                        if delegation_seen.insert(gid.clone()) {
+                            delegation_chains_total += 1;
+                            issues.push(format!(
+                                "grant {} ({}): delegation chain failed signature/link/root re-verification — not Tier-B-eligible (M2)",
+                                rt.index, rt.record_id
+                            ));
+                        }
+                        continue; // fail-closed: not Tier-B-eligible
+                    }
+                };
                 grants_by_id.entry(gid).or_insert(GrantInfo {
                     action,
                     resource_id,
                     scope_class,
-                    cnf_kid,
                     credential_binding,
                     issued_at,
-                    exp,
                     used: 0,
                     use_limit,
                     used_seqs: BTreeSet::new(),
+                    effective_cnf_kid,
+                    effective_exp,
                 });
             }
             // A verified, closed broker grant whose grant_evidence is missing a required match field is
@@ -2809,11 +3035,15 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // payloads on both sides.
         // The temporal window is [issued_at, exp) — used_at >= exp is expired, matching the resource
         // shim's `now >= exp` rejection (so the verifier is not more lenient than the gateway).
+        // M2 (delegation): match the use's cnf_kid against the EFFECTIVE (leaf) cnf and the NARROWED window,
+        // not the root — so a sub-agent's PoP matches a re-delegated grant, and a use by the original root
+        // (root cnf != leaf cnf) correctly fails to match a delegated-away credential. For an undelegated
+        // grant effective_cnf_kid==cnf_kid and effective_exp==exp, so this is unchanged (additive).
         if action != g.action
             || resource_id != g.resource_id
-            || cnf_kid != g.cnf_kid
+            || cnf_kid != g.effective_cnf_kid
             || used_at < g.issued_at
-            || used_at >= g.exp
+            || used_at >= g.effective_exp
         {
             unmatched_violation += 1;
             violation(&mut issues, format!("action/resource/cnf/window does not match grant '{gid}' — violation"));
@@ -2979,6 +3209,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
     .to_string();
 
+    // M2 (ADR 0005): delegation artifact status. `absent` (no grant re-delegated) | `verified` (every chain
+    // fully re-walked + monotone) | `unverified` (≥1 chain failed sig/link/root or widened).
+    let delegation_status = if delegation_chains_total == 0 {
+        "absent"
+    } else if delegation_chains_verified == delegation_chains_total && delegation_monotonicity_violations == 0 {
+        "verified"
+    } else {
+        "unverified"
+    }
+    .to_string();
+
     // D4/MF5 taxonomy_status: absent (none pinned) | untrusted (bad sig/issuer/pin) | stale (signed +
     // pinned but a listed action was out of its effective window) | validated (signed, pinned, in-window).
     let taxonomy_status = match (&opts.taxonomy, &taxonomy_info) {
@@ -3119,6 +3360,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         cosigned_grants_satisfied,
         cosig_threshold_failures,
         cosig_status,
+        delegation_chains_total,
+        delegation_chains_verified,
+        delegation_monotonicity_violations,
+        delegation_status,
         taxonomy_status: taxonomy_status.to_string(),
         broker_trust,
         cred_label_checks,

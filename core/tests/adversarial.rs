@@ -11,8 +11,8 @@ use feir_decision_core::hashx::sha256_prefixed;
 use feir_decision_core::record::seal;
 use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use feir_decision_core::verify::{
-    cnf_kid, cosig_approval_challenge, report_to_json, verify_bundle, verify_bundle_with, TrustLevel,
-    TrustedKey, VerifyOptions, VerifyReport,
+    cnf_kid, cosig_approval_challenge, delegation_hop_challenge, report_to_json, verify_bundle,
+    verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::path::PathBuf;
@@ -4000,6 +4000,191 @@ fn cosig_approval_challenge_golden_vector() {
     }
 }
 
+// ---- M2 (ADR 0005): Delegation / per-hop signed re-delegation ----
+
+const DSCOPE: &str = "read:orders"; // the grant scope the demonstrator monotonicity holds equal down the chain
+
+fn kid_of(sk: &SigningKey) -> String {
+    cnf_kid(&sk.verifying_key())
+}
+fn pub_b64(sk: &SigningKey) -> String {
+    feir_decision_core::b64::encode(sk.verifying_key().as_bytes())
+}
+
+// one signed delegation hop {delegator_cnf, delegate_cnf, scope, action, resource_id, exp, sig}.
+fn dhop(hop_index: i64, delegator: &SigningKey, delegate: &SigningKey, scope: &str, action: &str, resource: &str, exp: i64) -> CanonValue {
+    let dkid = kid_of(delegator);
+    let ekid = kid_of(delegate);
+    let challenge = delegation_hop_challenge(GID, hop_index, &dkid, &ekid, scope, action, resource, exp);
+    let sig = feir_decision_core::b64::encode(&delegator.sign(&challenge).to_bytes());
+    CanonValue::object(vec![
+        ("delegator_cnf".into(), CanonValue::string(pub_b64(delegator))),
+        ("delegate_cnf".into(), CanonValue::string(pub_b64(delegate))),
+        ("scope".into(), CanonValue::string(scope)),
+        ("action".into(), CanonValue::string(action)),
+        ("resource_id".into(), CanonValue::string(resource)),
+        ("exp".into(), CanonValue::Int(exp)),
+        ("sig".into(), CanonValue::string(sig)),
+    ])
+    .unwrap()
+}
+
+// a delegated grant: cnf_kid = root's kid (the credential is minted for the root), scope = DSCOPE, and the
+// signed delegation_assertions chain. Sealed under the broker/record key `rec`.
+fn delegated_grant(rec: &SigningKey, root: &SigningKey, hops: Vec<CanonValue>) -> CanonValue {
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", &kid_of(root), ISSUED, EXP);
+    let ge = change_field(&ge, "scope", CanonValue::string(DSCOPE));
+    let ge = change_field(&ge, "delegation_assertions", CanonValue::Array(hops));
+    seal_grant(rec, rec, GID, &ge)
+}
+
+// build the standard delegated bundle (grant + a use by `user`) and verify it.
+fn delegation_bundle_verify(rec: &SigningKey, res: &SigningKey, tsa: &SigningKey, grant: CanonValue, user: &SigningKey) -> VerifyReport {
+    let gh = content_hash_of(&grant);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, &kid_of(user), USED); // jti == grant_id (single-use)
+    let use_rec = seal_use(rec, res, "use-1", &[gh], ACTION, &ue);
+    let cp = checkpoint_over(rec, &[content_hash_of(&use_rec)], 2, Some(tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()))
+}
+
+#[test]
+fn tier_b_delegation_single_hop_use_by_leaf_verifies() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (root, leaf) = (approver(40), approver(41));
+    let grant = delegated_grant(&rec, &root, vec![dhop(0, &root, &leaf, DSCOPE, ACTION, RESOURCE, EXP)]);
+    let r = delegation_bundle_verify(&rec, &res, &tsa, grant, &leaf); // use by the LEAF (delegate)
+    assert!(r.ok, "a valid 1-hop delegation used by the leaf must verify; issues: {:?}", r.issues);
+    assert_eq!(r.delegation_chains_total, 1);
+    assert_eq!(r.delegation_chains_verified, 1);
+    assert_eq!(r.delegation_status, "verified");
+    assert_eq!(r.uses_matched, 1, "the leaf's use joins the re-delegated grant");
+    let json = report_to_json(&r);
+    for field in [r#""delegation_chains_total":1"#, r#""delegation_chains_verified":1"#, r#""delegation_status":"verified""#] {
+        assert!(json.contains(field), "report JSON missing {field}: {json}");
+    }
+}
+
+#[test]
+fn tier_b_delegation_two_hop_use_by_leaf_verifies() {
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (root, mid, leaf) = (approver(40), approver(42), approver(43));
+    let hops = vec![
+        dhop(0, &root, &mid, DSCOPE, ACTION, RESOURCE, EXP),
+        dhop(1, &mid, &leaf, DSCOPE, ACTION, RESOURCE, EXP),
+    ];
+    let grant = delegated_grant(&rec, &root, hops);
+    let r = delegation_bundle_verify(&rec, &res, &tsa, grant, &leaf);
+    assert!(r.ok, "a valid 2-hop delegation used by the leaf must verify; issues: {:?}", r.issues);
+    assert_eq!(r.delegation_chains_verified, 1);
+    assert_eq!(r.uses_matched, 1);
+}
+
+#[test]
+fn tier_b_delegation_binds_to_leaf_not_root() {
+    // the delegated credential is bound to the LEAF: a use presenting the ROOT cnf must NOT match (the root
+    // delegated the capability away).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (root, leaf) = (approver(40), approver(41));
+    let grant = delegated_grant(&rec, &root, vec![dhop(0, &root, &leaf, DSCOPE, ACTION, RESOURCE, EXP)]);
+    let r = delegation_bundle_verify(&rec, &res, &tsa, grant, &root); // use by the ROOT — wrong cnf
+    assert!(!r.ok, "a use presenting the root cnf must not match a delegated-away credential");
+    assert_eq!(r.uses_matched, 0);
+    assert!(r.unmatched_violation >= 1, "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_delegation_widened_scope_is_a_violation() {
+    // a hop that WIDENS scope beyond the grant is a monotonicity violation -> chain rejected, grant not indexed.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (root, leaf) = (approver(40), approver(41));
+    let grant = delegated_grant(&rec, &root, vec![dhop(0, &root, &leaf, "admin:all", ACTION, RESOURCE, EXP)]); // != DSCOPE
+    let r = delegation_bundle_verify(&rec, &res, &tsa, grant, &leaf);
+    assert!(!r.ok, "a scope-widening delegation hop must fail the bundle");
+    assert_eq!(r.delegation_monotonicity_violations, 1);
+    assert_eq!(r.delegation_chains_verified, 0);
+    assert_eq!(r.delegation_status, "unverified");
+    assert!(r.issues.iter().any(|i| i.contains("monotonicity violation")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_delegation_forged_hop_signature_is_a_violation() {
+    // a hop whose sig is NOT by the delegator (an imposter) must fail re-verification.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (root, leaf, imposter) = (approver(40), approver(41), approver(99));
+    // build a well-formed hop, then replace its sig with the imposter's signature over the same challenge.
+    let dkid = kid_of(&root);
+    let ekid = kid_of(&leaf);
+    let challenge = delegation_hop_challenge(GID, 0, &dkid, &ekid, DSCOPE, ACTION, RESOURCE, EXP);
+    let forged = feir_decision_core::b64::encode(&imposter.sign(&challenge).to_bytes());
+    let hop = change_field(&dhop(0, &root, &leaf, DSCOPE, ACTION, RESOURCE, EXP), "sig", CanonValue::string(forged));
+    let grant = delegated_grant(&rec, &root, vec![hop]);
+    let r = delegation_bundle_verify(&rec, &res, &tsa, grant, &leaf);
+    assert!(!r.ok, "a forged hop signature must fail the bundle");
+    assert_eq!(r.delegation_chains_verified, 0);
+    assert_eq!(r.delegation_status, "unverified");
+}
+
+#[test]
+fn tier_b_delegation_broken_link_is_a_violation() {
+    // hop 1's delegator is NOT hop 0's delegate -> broken chain.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (root, mid, leaf, stranger) = (approver(40), approver(42), approver(43), approver(44));
+    let hops = vec![
+        dhop(0, &root, &mid, DSCOPE, ACTION, RESOURCE, EXP),
+        dhop(1, &stranger, &leaf, DSCOPE, ACTION, RESOURCE, EXP), // stranger != mid -> broken link
+    ];
+    let grant = delegated_grant(&rec, &root, hops);
+    let r = delegation_bundle_verify(&rec, &res, &tsa, grant, &leaf);
+    assert!(!r.ok, "a broken delegation link must fail the bundle");
+    assert_eq!(r.delegation_chains_verified, 0);
+}
+
+#[test]
+fn tier_b_delegation_wrong_root_binding_is_a_violation() {
+    // hop 0's delegator is NOT the grant's cnf_kid (a stranger forges a chain off a credential that wasn't
+    // delegated to them) -> the root binding fails.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (root, leaf, stranger) = (approver(40), approver(41), approver(44));
+    // grant cnf = root, but hop 0 is signed by `stranger` delegating to leaf.
+    let grant = delegated_grant(&rec, &root, vec![dhop(0, &stranger, &leaf, DSCOPE, ACTION, RESOURCE, EXP)]);
+    let r = delegation_bundle_verify(&rec, &res, &tsa, grant, &leaf);
+    assert!(!r.ok, "a chain whose root hop is not signed by the grant's cnf must fail");
+    assert_eq!(r.delegation_chains_verified, 0);
+}
+
+#[test]
+fn tier_b_delegation_pop_reverified_under_leaf_key() {
+    // Delegation × D2 (the strongest binding): a delegated grant's use is PoP-RE-VERIFIED offline only when
+    // the receipt is signed by the LEAF private key — proving the re-delegated credential binds to possession
+    // of the sub-agent's key, not merely a string-equal cnf_kid. Composes the M2 leaf binding with the D2 path.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (root, leaf) = (approver(40), approver(41));
+    let pc = sha256_prefixed(b"params-commit");
+    let hops = || vec![dhop(0, &root, &leaf, DSCOPE, ACTION, RESOURCE, EXP)];
+
+    // POSITIVE: use carries the leaf cnf_pub AND is signed by the leaf private key -> PoP re-runs under leaf.
+    let grant = delegated_grant(&rec, &root, hops());
+    let use_rec = seal_d2_use(&rec, &res, "use-1", &[content_hash_of(&grant)], USED, &pc, &pc, &kid_of(&leaf), &leaf.verifying_key(), &leaf);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let r = verify_bundle_with(&bundle, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(r.ok, "a delegated grant used (D2) by the leaf must verify; issues: {:?}", r.issues);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.uses_pop_reverified, 1, "PoP must be independently re-run under the LEAF key");
+    assert_eq!(r.delegation_chains_verified, 1);
+
+    // NEGATIVE: the receipt carries the leaf cnf_pub (so the cnf string matches the leaf) but is signed by the
+    // ROOT key — the root no longer holds the delegated credential. PoP re-verification must fail closed.
+    let grant2 = delegated_grant(&rec, &root, hops());
+    let forged = seal_d2_use(&rec, &res, "use-1", &[content_hash_of(&grant2)], USED, &pc, &pc, &kid_of(&leaf), &leaf.verifying_key(), &root);
+    let cp2 = checkpoint_over(&rec, &[content_hash_of(&forged)], 2, Some(&tsa));
+    let bundle2 = tier_b_bundle(&rec.verifying_key(), vec![grant2, forged], vec![cp2]);
+    let r2 = verify_bundle_with(&bundle2, &pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key()));
+    assert!(!r2.ok, "a use carrying the leaf cnf but signed by the root key must fail PoP re-verify");
+    assert_eq!(r2.uses_pop_reverified, 0);
+}
+
 // ---- D8: the attested_complete conjunctive capstone ----
 
 // a VerifyReport with EVERY capstone condition satisfied — start from a real verify result (real wiring),
@@ -4067,6 +4252,11 @@ fn tier_b_d8_each_condition_is_load_bearing() {
         // the `satisfied==total` conjunct from the `failures==0` one.
         ("cosig threshold failure (M6)", |r| r.cosig_threshold_failures = 1),
         ("cosig not all satisfied (M6)", |r| { r.cosigned_grants_total = 1; r.cosigned_grants_satisfied = 0; }),
+        // M2 (ADR 0005): the two delegation conjuncts (synthetic isolation, same discipline as M1/M6 — a
+        // failed/non-monotone chain also un-indexes the grant → unmatched_violation in a live verify, but
+        // here only the delegation counter is flipped, with unmatched_violation left 0).
+        ("delegation chain not all verified (M2)", |r| { r.delegation_chains_total = 1; r.delegation_chains_verified = 0; }),
+        ("delegation monotonicity violation (M2)", |r| r.delegation_monotonicity_violations = 1),
         // string-isolation: `unclosed` in a live verify ALSO forces !ok (covered e2e by
         // tier_b_t6_undeclared_touched_resource_is_unclosed); here we mutate ONLY the status on a synthetic
         // report (ok left true) to prove the capstone gate keys on `=="closed"` independently of `ok`.
