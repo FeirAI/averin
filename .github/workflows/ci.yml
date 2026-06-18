@@ -30,6 +30,28 @@ jobs:
       - name: build verify CLI WITH rfc3161 (shippable real-TSA verifier stays green)
         run: cargo build --release --bin feir-verify --features rfc3161
 
+  core-32bit:
+    name: rust decision-core on 32-bit (usize=u32 — wasm32 truncation gate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+      # i686 has usize == u32, exactly like the shipped wasm32 verifier. Running the FULL adversarial suite
+      # here makes the 32-bit-truncation regression tests load-bearing in CI — chiefly the cosig
+      # `tier_b_cosig_threshold_above_u32_is_not_truncated` and the bounded_reuse use_limit cases, where an
+      # `i64 as usize` would deflate a signed threshold/limit and fail OPEN on a 32-bit verdict but pass on
+      # 64-bit. wasm32-unknown-unknown can't run std `#[test]` without wasm-bindgen (which the core avoids),
+      # so i686 is the practical native stand-in for the same usize width.
+      - name: install 32-bit linker (multilib)
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      - name: test on i686 (32-bit usize)
+        run: cargo test --target i686-unknown-linux-gnu
+
   server:
     name: go server (cgo -> rust core; ingestion + verify pipeline)
     runs-on: ubuntu-latest
