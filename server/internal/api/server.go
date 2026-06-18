@@ -95,6 +95,18 @@ type Server struct {
 	signingKeyID     string
 	keyValidFrom     string
 	now              func() time.Time // injectable clock for tests
+	// M6/M2 (ADR 0005) — the ONLINE two-phase grant flow (/v2/grants/prepare + /v2/grants/finalize). A
+	// cosigned/delegated grant is inherently two-phase: the cosig/delegation challenge binds the broker-MINTED
+	// credential_binding/exp, so an approver/delegator can only sign AFTER the broker prepares + reveals it.
+	// `pending` holds the minted-but-uncommitted broker.Prepared between the two phases, keyed by project:idem,
+	// WITHOUT a broker_seq (the seq is allocated at FINALIZE, under ingestMu, so the seq order == the record
+	// commit order and the D6 grant log stays a gapless prefix). In-memory: requires a single instance and does
+	// not survive a restart mid-approval (a production deployment persists this). cosigApprovers/cosigThreshold
+	// are the SERVER-pinned M-of-N policy a finalize's cosignatures are validated against (never client-supplied).
+	pending        map[string]*pendingGrant
+	pendingMu      sync.Mutex
+	cosigThreshold int
+	cosigApprovers []ed25519.PublicKey
 	// ingestMu serializes the heads->seal->put critical section so concurrent ingests cannot read
 	// a stale frontier and fork the DAG (the Postgres store will do this in a serializable tx).
 	ingestMu sync.Mutex
@@ -112,6 +124,7 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		signingKeyID: signingKeyID,
 		keyValidFrom: "2026-01-01T00:00:00.000Z",
 		now:          time.Now,
+		pending:      make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
 	}
 }
 
@@ -472,6 +485,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("POST /v2/records", s.handleRecords)
 	mux.HandleFunc("POST /v2/grants", s.handleGrant)
+	mux.HandleFunc("POST /v2/grants/prepare", s.handleGrantPrepare)   // M6/M2 online two-phase: phase 1 (mint+reveal)
+	mux.HandleFunc("POST /v2/grants/finalize", s.handleGrantFinalize) // M6/M2 online two-phase: phase 2 (attach+commit)
 	mux.HandleFunc("POST /v2/use", s.handleUse)
 	mux.HandleFunc("POST /v2/use-intent", s.handleUseIntent)
 	mux.HandleFunc("POST /v2/use-outcome", s.handleUseOutcome)
