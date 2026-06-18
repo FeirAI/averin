@@ -2477,7 +2477,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         exp,
                         &opts.cosig_approver_keys,
                     );
-                    let satisfied = approvals >= cosig_threshold as usize;
+                    // Compare in i64, NOT `cosig_threshold as usize`: on the wasm32 verifier `usize == u32`,
+                    // so a broker-signed `cosig_threshold` above 2^32 would truncate to a small value and let a
+                    // SUB-threshold grant read as satisfied (a fail-open on the browser verifier; the 64-bit
+                    // CLI/cgo build was unaffected). `approvals` is bounded by the cosignature count, so the
+                    // widen is lossless on every target. (`cosig_threshold >= 1` is already guaranteed above.)
+                    let satisfied = approvals as i64 >= cosig_threshold;
                     if cosig_seen.insert(gid.clone()) {
                         cosigned_grants_total += 1;
                         if satisfied {
@@ -2848,7 +2853,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 violation(&mut issues, format!("bounded_reuse grant '{gid}' use_sequence_number {usn} replayed across receipts — seq-replay (M1)"));
                 continue;
             }
-            if g.used >= g.use_limit as usize {
+            // Compare in i64, NOT `use_limit as usize` (same wasm32 `usize==u32` truncation concern as the
+            // cosig gate above). Here truncation would shrink the cap (fail-CLOSED, over-restrictive) rather
+            // than open, but the verdict must still be platform-independent; `g.used` is a small count.
+            if g.used as i64 >= g.use_limit {
                 bounded_reuse_overspent += 1;
                 unmatched_violation += 1;
                 violation(&mut issues, format!("bounded_reuse grant '{gid}' exercised more than use_limit {} times — overspend (M1)", g.use_limit));

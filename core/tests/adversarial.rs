@@ -3953,6 +3953,30 @@ fn tier_b_cosig_equivocating_sibling_is_still_rejected() {
 }
 
 #[test]
+fn tier_b_cosig_threshold_above_u32_is_not_truncated() {
+    // wasm32 fail-open guard (adversarial-review finding): the satisfaction test must compare in i64, not
+    // `cosig_threshold as usize`. A broker-signed cosig_threshold of 2^32+1 truncates to 1 under a 32-bit
+    // usize (the wasm/browser verifier), so the OLD code let a single approver satisfy it (1 >= 1) and index
+    // a sub-threshold grant -> ok:true. With one approver and threshold 2^32+1 the grant MUST read as
+    // unsatisfied. On 64-bit this passes with or without the fix (it documents the contract); on wasm32 it is
+    // load-bearing (the truncated threshold is exactly 1).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let a1 = approver(40);
+    let grant = cosigned_grant(&rec, 4_294_967_297, &[&a1]); // 2^32 + 1 -> truncates to 1 on a 32-bit usize
+    let gh = content_hash_of(&grant);
+    let use_rec = seal_use(&rec, &res, "use-1", &[gh], ACTION, &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED));
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.cosig_approver_keys = vec![a1.verifying_key()];
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a cosig_threshold above u32 range with 1 approver must NOT be satisfied (no usize truncation)");
+    assert_eq!(r.cosig_status, "unsatisfied");
+    assert_eq!(r.cosig_threshold_failures, 1);
+    assert_eq!(r.uses_matched, 0, "the sub-threshold grant must not index");
+}
+
+#[test]
 fn cosig_approval_challenge_golden_vector() {
     // Cross-language pinned vectors from the SHARED file — MUST equal Go broker.CosigApprovalChallenge.
     // The multibyte case asserts byte-length LP4 prefixing is identical in both languages (ADR 0005 M6).
