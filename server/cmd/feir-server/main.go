@@ -167,6 +167,14 @@ func main() {
 		}
 		srv.WithResource(rc, rid)
 		log.Printf("resource gateway enabled (POST /v2/use) for resource %q", rid)
+		// M3 (ADR 0005 — Native/STS): enable POST /v2/introspection with the RAW resource key (the same key,
+		// derived from FEIR_RESOURCE_SEED) so the resource can sign the structured introspection challenge.
+		if rawSeed, e := hex.DecodeString(rseed); e == nil && len(rawSeed) == ed25519.SeedSize {
+			srv.WithIntrospection(ed25519.NewKeyFromSeed(rawSeed))
+			log.Printf("native introspection enabled (POST /v2/introspection)")
+		} else {
+			log.Printf("WARNING: could not derive the raw resource key — POST /v2/introspection disabled")
+		}
 	}
 
 	log.Printf("feir-server listening on %s (pubkey %s)", addr, c.PubKey())

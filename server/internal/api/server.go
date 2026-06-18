@@ -79,6 +79,10 @@ type Server struct {
 	resourceCore Sealer
 	resourceID   string
 	ledger       resourceshim.Ledger
+	// M3 (ADR 0005 — Native/STS): the RAW resource recording key (the same key resourceCore wraps). The
+	// introspection-transcript producer needs it to sign the structured feir.resource.introspection.v1 challenge
+	// (over raw bytes), which the FFI core's tagged SignEvidence cannot do. nil = POST /v2/introspection disabled.
+	resourceRawKey ed25519.PrivateKey
 	// D7.2 (ADR 0004): the deployment-attestation issuing key (role-separated from broker/resource/TSA).
 	// nil = no attestation emitted on export (a bundle then verifies attestation_status:"unevaluated").
 	attestKey ed25519.PrivateKey
@@ -487,6 +491,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v2/grants", s.handleGrant)
 	mux.HandleFunc("POST /v2/grants/prepare", s.handleGrantPrepare)   // M6/M2 online two-phase: phase 1 (mint+reveal)
 	mux.HandleFunc("POST /v2/grants/finalize", s.handleGrantFinalize) // M6/M2 online two-phase: phase 2 (attach+commit)
+	mux.HandleFunc("POST /v2/introspection", s.handleIntrospection)   // M3 native/STS: record a resource introspection transcript
 	mux.HandleFunc("POST /v2/use", s.handleUse)
 	mux.HandleFunc("POST /v2/use-intent", s.handleUseIntent)
 	mux.HandleFunc("POST /v2/use-outcome", s.handleUseOutcome)
@@ -879,6 +884,11 @@ type grantRequest struct {
 	DelegationChain []string `json:"delegation_chain"`
 	Justification   string   `json:"justification"`
 	TTLSeconds      int      `json:"ttl_seconds"`
+	// M3 (ADR 0005 — Native/STS): when Mode == "token_exchange", this is a NATIVE grant for an externally
+	// minted (IdP/STS) credential — no broker credential_binding / cnf PoP (agent_pubkey/agent_sig are not
+	// required). LeaseID is the external credential reference a later introspection transcript must match.
+	Mode    string `json:"mode"`
+	LeaseID string `json:"lease_id"`
 }
 
 // uuidV5Shaped derives a DETERMINISTIC, UUIDv5-shaped id from (namespace, project, idempotency_key),
@@ -942,6 +952,14 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grantID := deterministicGrantID(gr.ProjectID, idem) // also the credential jti + record_id
+
+	// M3 (ADR 0005 — Native/STS): a token_exchange grant is for an EXTERNALLY-minted credential — no broker
+	// credential_binding, no cnf PoP — so it takes the separate native path (no agent_sig required, no minted
+	// capability). Its use is later accountable ONLY via a resource-signed introspection transcript (/v2/introspection).
+	if gr.Mode == "token_exchange" {
+		s.handleNativeGrant(w, gr, idem, grantID)
+		return
+	}
 
 	req := broker.Request{
 		AgentID:         gr.AgentID,
