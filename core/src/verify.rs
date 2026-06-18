@@ -187,6 +187,19 @@ pub struct VerifyReport {
     pub attestation_not_after: Option<String>,
     pub attestation_claim_types: Vec<String>,
     pub attestation_subject_digest: Option<String>,
+    /// M5 / ADR 0005 (Revocation — tiered). `revocation_status` ∈ {`absent` (no signed `revocation_list` in the
+    /// bundle, or no `revocation_keys` pinned — not evaluated, the legitimate baseline), `fresh` (a list signed
+    /// under a pinned role-separated `revocation_keys` issuer whose disclosed `revoked_grant_ids` re-derive its
+    /// signed `merkle_root`, with the latest anchored checkpoint timestamp inside `[issued_at, not_after]`),
+    /// `stale` (validly signed but the anchored time is outside the window — too old to trust for currency, OR
+    /// a malformed/forged list, surfaced honestly), `revoked_present` (a FRESH list AND ≥1 matched use is
+    /// against a revoked grant_id — a use of a revoked credential)}. `revoked_grants_matched` = closed grants in
+    /// this bundle whose grant_id is in the (valid) list; `revoked_uses_blocked` = matched-candidate uses
+    /// rejected because their grant was revoked inside the window (each also a hard violation → `!ok`). `absent`
+    /// and `fresh` do NOT block the capstone; `stale` and `revoked_present` do (the offline freshness limit).
+    pub revocation_status: String,
+    pub revoked_grants_matched: usize,
+    pub revoked_uses_blocked: usize,
     /// D8/MF1 (ADR 0004): the IRREDUCIBLE resource-TCB conditional, ALWAYS `assumed_truthful`. The
     /// `attested_complete_over_brokered_surface` capstone proves every resource-signed receipt over the
     /// brokered surface is two-phase, PoP-re-verified, taxonomy-validated, replay-free, and committed to an
@@ -289,6 +302,12 @@ pub struct VerifyOptions {
     /// cosigned grant has zero countable approvers and is fail-closed (the governance keys must be pinned
     /// to trust the governance).
     pub cosig_approver_keys: Vec<VerifyingKey>,
+    /// Trusted REVOCATION-LIST issuer keys (ADR 0005 M5). A bundle's top-level `revocation_list` is evaluated
+    /// ONLY when its `sig` verifies under one of these. Role-separated — a FATAL config error on overlap with
+    /// ANY other role (broker/resource/taxonomy/attestation/tsa/cosig) and with the generic `authority_keys`,
+    /// so a broker cannot sign its own revocation list. Absent ⇒ `revocation_status` stays `absent` (a present
+    /// list is not evaluated — the operator must pin the revocation authority to honor revocations).
+    pub revocation_keys: Vec<VerifyingKey>,
 }
 
 struct KeyEntry {
@@ -694,6 +713,10 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("delegation_chains_verified".into(), count(r.delegation_chains_verified)),
         ("delegation_monotonicity_violations".into(), count(r.delegation_monotonicity_violations)),
         ("delegation_status".into(), CanonValue::string(r.delegation_status.clone())),
+        // M5 (ADR 0005): revocation (tiered signed-list) status + counts.
+        ("revocation_status".into(), CanonValue::string(r.revocation_status.clone())),
+        ("revoked_grants_matched".into(), count(r.revoked_grants_matched)),
+        ("revoked_uses_blocked".into(), count(r.revoked_uses_blocked)),
         (
             "taxonomy_status".into(),
             CanonValue::string(r.taxonomy_status.clone()),
@@ -775,6 +798,12 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
                 // but the conjuncts are explicit so the capstone self-documents that re-delegation was verified.
                 && (r.delegation_chains_total == 0 || r.delegation_chains_verified == r.delegation_chains_total)
                 && r.delegation_monotonicity_violations == 0
+                // M5 (ADR 0005): no fresh revocation list flagged a revoked use, and the list is not stale. A
+                // revoked use is also a hard violation (→ !ok), but the conjunct is explicit so the capstone
+                // self-documents that no honored grant was revoked over the window. `absent`/`fresh` pass.
+                && r.revocation_status != "stale"
+                && r.revocation_status != "revoked_present"
+                && r.revoked_uses_blocked == 0
                 // T6: the brokered surface stayed within the operator's AFFIRMATIVELY-declared side-effect
                 // closure. This is load-bearing beyond `r.ok`: an `unclosed` surface already forces `!ok`, but
                 // a `not_declared` manifest (no closure asserted) does NOT — so without this conjunct an
@@ -897,6 +926,10 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
     };
     // M6 (ADR 0005): pinned cosignature-approver keys, so the JSON/FFI path (the Go server + any external
     // auditor) can enforce M-of-N grant approval, not just the direct Rust API.
+    let revocation_keys = match parse_pubkeys(&opts_val, "revocation_keys") {
+        Ok(k) => k,
+        Err(e) => return error_report(&e),
+    };
     let cosig_approver_keys = match parse_pubkeys(&opts_val, "cosig_approver_keys") {
         Ok(k) => k,
         Err(e) => return error_report(&e),
@@ -913,6 +946,7 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         trusted_tsa_spki: tsa_spki,
         attestation_keys,
         cosig_approver_keys,
+        revocation_keys,
         ..Default::default()
     };
     if !signing.is_empty() {
@@ -1014,6 +1048,9 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         delegation_chains_verified: 0,
         delegation_monotonicity_violations: 0,
         delegation_status: "absent".to_string(),
+        revocation_status: "absent".to_string(),
+        revoked_grants_matched: 0,
+        revoked_uses_blocked: 0,
         taxonomy_status: "absent".to_string(),
         broker_trust: "assumed".to_string(),
         cred_label_checks: 0,
@@ -1773,6 +1810,104 @@ struct AttestationEval {
     subject_digest: Option<String>,
 }
 
+struct RevocationEval {
+    status: String,            // absent | fresh | stale (revoked_present is set by the use loop)
+    revoked: BTreeSet<String>, // disclosed revoked grant_ids (covered by the sig); empty unless validly signed
+}
+
+/// M5 (ADR 0005): evaluate a bundle's top-level `revocation_list` — a signed, time-bounded list of revoked
+/// grant_ids under a pinned, role-separated `revocation_keys` issuer. Reuses the deployment_attestation
+/// pattern wholesale: the `sig` (domain `feir.revocation.v1`) covers the canonical list minus `sig` (so the
+/// disclosed `revoked_grant_ids` are authenticated directly — a Merkle-root NON-disclosure mode is the future
+/// extension), and freshness is the latest anchored checkpoint TSA timestamp falling within
+/// `[issued_at, not_after]` (canonical ISO, the same temporal anchor D7 uses). `fresh` iff signed + the
+/// issuer_kid matches the signer + in-window; `stale` iff validly signed but out of window (or malformed →
+/// issue pushed → !ok); `absent` iff no list or no pinned issuer. The returned `revoked` set is enforced
+/// (blocks in-window uses) by the caller ONLY when `status == "fresh"`.
+fn evaluate_revocation(
+    bundle: &CanonValue,
+    opts: &VerifyOptions,
+    anchored_latest_ts: Option<&str>,
+    issues: &mut Vec<String>,
+) -> RevocationEval {
+    let absent = RevocationEval { status: "absent".to_string(), revoked: BTreeSet::new() };
+    let rl = match bundle.get("revocation_list") {
+        Some(a) if !a.is_null() => a,
+        _ => return absent,
+    };
+    if opts.revocation_keys.is_empty() {
+        return absent; // present but the verifier pinned no issuer -> not evaluated (revocations not honored)
+    }
+    let stale_empty = || RevocationEval { status: "stale".to_string(), revoked: BTreeSet::new() };
+
+    // 1. signature over the canonical list minus `sig`, under a pinned issuer (mirrors evaluate_attestation).
+    let sig = match rl.get("sig").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            issues.push("revocation_list: missing sig (M5)".into());
+            return stale_empty();
+        }
+    };
+    let mut obj = match rl.as_object() {
+        Some(o) => o.clone(),
+        None => {
+            issues.push("revocation_list: not an object (M5)".into());
+            return stale_empty();
+        }
+    };
+    obj.retain(|(k, _)| k != "sig");
+    let digest = crate::hashx::sha256_prefixed(CanonValue::Object(obj).serialize().as_bytes());
+    let signer = match opts
+        .revocation_keys
+        .iter()
+        .find(|vk| crate::sign::verify("feir.revocation.v1", &digest, sig, vk).is_ok())
+    {
+        Some(vk) => vk,
+        None => {
+            issues.push("revocation_list: sig does not verify under any pinned revocation_keys issuer (M5)".into());
+            return stale_empty();
+        }
+    };
+    // the CLAIMED issuer_kid must be the ACTUAL signer (else a reader's surfaced issuer is a lie).
+    if rl.get("issuer_kid").and_then(|v| v.as_str()) != Some(cnf_kid(signer).as_str()) {
+        issues.push("revocation_list: issuer_kid does not match the signing key (M5)".into());
+        return stale_empty();
+    }
+
+    // 2. the disclosed revoked grant_ids — covered by the verified sig above.
+    let revoked: BTreeSet<String> = rl
+        .get("revoked_grant_ids")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    // 3. freshness window (canonical ISO, compared lexicographically against the anchored TSA time).
+    let issued_at = rl.get("issued_at").and_then(|v| v.as_str()).unwrap_or_default();
+    let not_after = rl.get("not_after").and_then(|v| v.as_str()).unwrap_or_default();
+    let stale_with_list = || RevocationEval { status: "stale".to_string(), revoked: revoked.clone() };
+    if issued_at.is_empty()
+        || not_after.is_empty()
+        || !is_canonical_ts(issued_at)
+        || !is_canonical_ts(not_after)
+        || issued_at > not_after
+    {
+        issues.push("revocation_list: issued_at/not_after missing, non-canonical, or inverted — malformed window (M5)".into());
+        return stale_with_list();
+    }
+    let ts = match anchored_latest_ts {
+        Some(t) => t,
+        None => {
+            issues.push("revocation_list present but no verified+anchored checkpoint to date it (M5)".into());
+            return stale_with_list();
+        }
+    };
+    let fresh = issued_at <= ts && ts <= not_after;
+    RevocationEval {
+        status: if fresh { "fresh" } else { "stale" }.to_string(),
+        revoked,
+    }
+}
+
 /// D7 (ADR 0004): evaluate a `deployment_attestation`. It does NOT verify the runtime properties; it proves
 /// a fresh, PINNED-issuer attestation whose signed `subject` binds THIS exact bundle EXISTS. Returns
 /// `attested_claims` only when the `sig` verifies under a pinned `attestation_keys` issuer, the claimed
@@ -1956,7 +2091,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // use. This is a FATAL configuration error — abort before evaluating any record (VerifyingKey
     // equality is raw-bytes, which also settles the derived key id). Never proceed on an ambiguous
     // key universe.
-    let role_sets: [(&str, &[VerifyingKey]); 6] = [
+    let role_sets: [(&str, &[VerifyingKey]); 7] = [
         ("broker_authority_keys", &opts.broker_authority_keys),
         ("resource_authority_keys", &opts.resource_authority_keys),
         ("taxonomy_keys", &opts.taxonomy_keys),
@@ -1971,6 +2106,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // other role — else an approver who is also the broker/resource/taxonomy/attestation/TSA signer
         // could self-approve a grant (dual control collapses to single control).
         ("cosig_approver_keys", &opts.cosig_approver_keys),
+        // M5 (ADR 0005): the revocation-list issuer must be disjoint from the broker it revokes and from every
+        // other role — else a broker could sign (or refuse to sign) its own revocation list (self-revocation
+        // control). This is why M5, unlike cosig/delegation, EXTENDS the R2 disjointness loop.
+        ("revocation_keys", &opts.revocation_keys),
     ];
     for i in 0..role_sets.len() {
         for j in (i + 1)..role_sets.len() {
@@ -1998,6 +2137,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         ("trusted_tsa_keys", &opts.trusted_tsa_keys),
         // M6: an approver key must not also elevate a generic record's authority to `verified`.
         ("cosig_approver_keys", &opts.cosig_approver_keys),
+        // M5: a revocation-list issuer must not also elevate a generic record's authority.
+        ("revocation_keys", &opts.revocation_keys),
     ] {
         if opts.trusted_authority_keys.iter().any(|k| set.contains(k)) {
             return fatal_config_report(
@@ -2847,6 +2988,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut bounded_reuse_overspent = 0usize;
     let mut bounded_reuse_seq_replays = 0usize;
     let mut unmatched_pending = 0usize;
+    // M5 (ADR 0005): revocation. Evaluate the bundle's signed revocation_list against the latest anchored TSA
+    // time; a FRESH list blocks any matched use of a revoked grant_id.
+    let anchored_latest_ts = anchored_cp_ids
+        .iter()
+        .max_by_key(|(seq, _, _, _)| *seq)
+        .map(|(_, _, ts, _)| ts.as_str());
+    let revocation = evaluate_revocation(bundle, opts, anchored_latest_ts, &mut issues);
+    let mut revoked_uses_blocked = 0usize;
     let mut seen_uses: BTreeSet<&str> = BTreeSet::new();
     // D3 (ADR 0004): a (resource_id, PoP nonce) pair seen on two CLOSED receipts is a replay/duplicate
     // submission over the visible set — independent of the per-grant_id single-use rule.
@@ -3031,6 +3180,15 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 continue;
             }
         };
+        // M5 (ADR 0005): a use of a grant on a FRESH revocation list is blocked — the credential was revoked
+        // inside the window. A hard violation (→ !ok); counted separately so the capstone surfaces it. The grant
+        // is NOT consumed (the use never reaches uses_matched). A `stale` list does not block (the window passed,
+        // surfaced via revocation_status), and `absent` (no list / unpinned issuer) is the baseline.
+        if revocation.status == "fresh" && revocation.revoked.contains(&gid) {
+            revoked_uses_blocked += 1;
+            violation(&mut issues, format!("use of grant '{gid}' which a fresh revocation_list marks REVOKED — blocked (M5)"));
+            continue;
+        }
         // Full predicate: action / resource / temporal-window / cnf_kid equality, read from the proven
         // payloads on both sides.
         // The temporal window is [issued_at, exp) — used_at >= exp is expired, matching the resource
@@ -3220,6 +3378,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
     .to_string();
 
+    // M5 (ADR 0005): finalize revocation. revoked_grants_matched = closed grants whose grant_id is on the
+    // (validly-signed) list; if a fresh list blocked any use, the status becomes `revoked_present`.
+    let revoked_grants_matched = grants_by_id.keys().filter(|gid| revocation.revoked.contains(*gid)).count();
+    let revocation_status = if revoked_uses_blocked > 0 { "revoked_present".to_string() } else { revocation.status };
+
     // D4/MF5 taxonomy_status: absent (none pinned) | untrusted (bad sig/issuer/pin) | stale (signed +
     // pinned but a listed action was out of its effective window) | validated (signed, pinned, in-window).
     let taxonomy_status = match (&opts.taxonomy, &taxonomy_info) {
@@ -3374,6 +3537,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         attestation_not_after: attest.not_after,
         attestation_claim_types: attest.claim_types,
         attestation_subject_digest: attest.subject_digest,
+        revocation_status,
+        revoked_grants_matched,
+        revoked_uses_blocked,
         resource_trust: "assumed_truthful".to_string(),
         coverage_manifest,
         unclosed_side_effects,

@@ -4212,6 +4212,106 @@ fn tier_b_delegation_pop_reverified_under_leaf_key() {
     assert_eq!(r2.uses_pop_reverified, 0);
 }
 
+// ---- M5 (ADR 0005): Revocation (signed, time-bounded list) ----
+
+const REV_FRESH_FROM: &str = "2026-06-15T00:00:00.000Z"; // brackets the test anchor ts 2026-06-15T10:10:01Z
+const REV_FRESH_TO: &str = "2026-06-16T00:00:00.000Z";
+
+// build a signed revocation_list object (sig over the canonical list minus sig, domain feir.revocation.v1).
+fn revocation_list(rev: &SigningKey, issued_at: &str, not_after: &str, revoked: &[&str]) -> CanonValue {
+    let body = CanonValue::object(vec![
+        ("issuer_kid".into(), CanonValue::string(vk_cnf_kid(&rev.verifying_key()))),
+        ("issued_at".into(), CanonValue::string(issued_at)),
+        ("not_after".into(), CanonValue::string(not_after)),
+        ("revoked_grant_ids".into(), CanonValue::Array(revoked.iter().map(|g| CanonValue::string(*g)).collect())),
+    ])
+    .unwrap();
+    let digest = sha256_prefixed(body.serialize().as_bytes());
+    let sig = feir_decision_core::sign::sign("feir.revocation.v1", &digest, rev);
+    change_field(&body, "sig", CanonValue::string(sig))
+}
+
+// a standard grant+use bundle with a revocation_list attached, verified with revocation_keys pinned.
+fn revocation_bundle_verify(rec: &SigningKey, res: &SigningKey, tsa: &SigningKey, rev: &SigningKey, revlist: CanonValue) -> VerifyReport {
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(rec, rec, GID, &ge);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(rec, res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(rec, &[content_hash_of(&use_rec)], 2, Some(tsa));
+    let bundle = change_field(&tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]), "revocation_list", revlist);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.revocation_keys = vec![rev.verifying_key()];
+    verify_bundle_with(&bundle, &opts)
+}
+
+#[test]
+fn tier_b_revocation_fresh_list_no_match_verifies() {
+    let (rec, res, tsa, rev) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[77u8; 32]));
+    let revlist = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &["some-other-grant"]); // doesn't revoke GID
+    let r = revocation_bundle_verify(&rec, &res, &tsa, &rev, revlist);
+    assert!(r.ok, "a fresh list revoking nothing in the bundle must verify; issues: {:?}", r.issues);
+    assert_eq!(r.revocation_status, "fresh");
+    assert_eq!(r.revoked_uses_blocked, 0);
+    assert_eq!(r.uses_matched, 1);
+    let json = report_to_json(&r);
+    for f in [r#""revocation_status":"fresh""#, r#""revoked_uses_blocked":0"#] {
+        assert!(json.contains(f), "report JSON missing {f}: {json}");
+    }
+}
+
+#[test]
+fn tier_b_revocation_fresh_list_blocks_revoked_use() {
+    let (rec, res, tsa, rev) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[77u8; 32]));
+    let revlist = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[GID]); // revokes the bundle's grant
+    let r = revocation_bundle_verify(&rec, &res, &tsa, &rev, revlist);
+    assert!(!r.ok, "a use of a freshly-revoked grant must fail the bundle");
+    assert_eq!(r.revocation_status, "revoked_present");
+    assert_eq!(r.revoked_uses_blocked, 1);
+    assert_eq!(r.revoked_grants_matched, 1);
+    assert_eq!(r.uses_matched, 0, "the revoked use is blocked, not matched");
+    assert!(r.issues.iter().any(|i| i.contains("REVOKED")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_revocation_stale_list_does_not_block_but_blocks_capstone() {
+    // a validly-signed list whose window does NOT bracket the anchored time is `stale` — it does not block the
+    // use (the window passed) and does not fail the bundle, but it does block the capstone (surfaced honestly).
+    let (rec, res, tsa, rev) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[77u8; 32]));
+    let revlist = revocation_list(&rev, "2026-06-14T00:00:00.000Z", "2026-06-15T09:00:00.000Z", &[GID]); // not_after < anchored ts
+    let r = revocation_bundle_verify(&rec, &res, &tsa, &rev, revlist);
+    assert!(r.ok, "a validly-signed but stale list must not fail the bundle; issues: {:?}", r.issues);
+    assert_eq!(r.revocation_status, "stale");
+    assert_eq!(r.revoked_uses_blocked, 0, "a stale list does not block uses (window passed)");
+    assert_eq!(r.uses_matched, 1);
+}
+
+#[test]
+fn tier_b_revocation_forged_sig_is_a_violation() {
+    // a revocation_list signed by a non-pinned key must fail (and not be honored).
+    let (rec, res, tsa, rev, imposter) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[77u8; 32]), signing_key_from_seed(&[88u8; 32]));
+    // signed by `imposter`, but pin `rev` as the revocation issuer.
+    let revlist = revocation_list(&imposter, REV_FRESH_FROM, REV_FRESH_TO, &[GID]);
+    let r = revocation_bundle_verify(&rec, &res, &tsa, &rev, revlist);
+    assert!(!r.ok, "a revocation_list not signed by a pinned issuer must fail");
+    assert_eq!(r.revocation_status, "stale");
+    assert!(r.issues.iter().any(|i| i.contains("does not verify under any pinned revocation_keys")), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn tier_b_revocation_key_overlapping_a_role_is_fatal() {
+    // the revocation issuer must be role-separated from the broker it revokes (R2 extension).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&grant)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp]);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.revocation_keys = vec![rec.verifying_key()]; // == broker_authority_keys -> overlap
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(!r.ok, "a revocation key overlapping the broker role is a fatal config error");
+    assert!(r.issues.iter().any(|i| i.contains("revocation_keys") && i.contains("disjoint")), "issues: {:?}", r.issues);
+}
+
 // ---- D8: the attested_complete conjunctive capstone ----
 
 // a VerifyReport with EVERY capstone condition satisfied — start from a real verify result (real wiring),
@@ -4284,6 +4384,9 @@ fn tier_b_d8_each_condition_is_load_bearing() {
         // here only the delegation counter is flipped, with unmatched_violation left 0).
         ("delegation chain not all verified (M2)", |r| { r.delegation_chains_total = 1; r.delegation_chains_verified = 0; }),
         ("delegation monotonicity violation (M2)", |r| r.delegation_monotonicity_violations = 1),
+        // M5 (ADR 0005): the revocation conjuncts (stale list / revoked use blocks the capstone; absent/fresh pass).
+        ("revocation stale (M5)", |r| r.revocation_status = "stale".to_string()),
+        ("revocation revoked_present (M5)", |r| { r.revocation_status = "revoked_present".to_string(); r.revoked_uses_blocked = 1; }),
         // string-isolation: `unclosed` in a live verify ALSO forces !ok (covered e2e by
         // tier_b_t6_undeclared_touched_resource_is_unclosed); here we mutate ONLY the status on a synthetic
         // report (ok left true) to prove the capstone gate keys on `=="closed"` independently of `ok`.
