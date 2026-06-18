@@ -254,6 +254,11 @@ pub struct VerifyReport {
     pub brokers_seq_verified: usize,
     pub cross_broker_suppression: usize,
     pub per_broker_trust: Vec<(String, String)>,
+    /// M4 (ADR 0005, OPTIONAL transitive tier): how many verified broker grants elevated ONLY because a PINNED
+    /// issuer broker's cross_broker_cert vouched for the (otherwise-unpinned) subject broker's key. `0` for a
+    /// directly-pinned federation (the common case). Observability only — a transitive grant is otherwise
+    /// counted/matched exactly like a directly-verified grant; the cert's soundness is enforced at elevation.
+    pub transitive_grants: usize,
     /// D8/MF1 (ADR 0004): the IRREDUCIBLE resource-TCB conditional, ALWAYS `assumed_truthful`. The
     /// `attested_complete_over_brokered_surface` capstone proves every resource-signed receipt over the
     /// brokered surface is two-phase, PoP-re-verified, taxonomy-validated, replay-free, and committed to an
@@ -395,6 +400,9 @@ struct Pending {
     status_changed_at: Option<String>,
     authority: AuthorityTrust,
     broker_role: BrokerRole,
+    /// M4 (ADR 0005): this grant's authority verified ONLY via a cross_broker_cert (the subject broker was not
+    /// directly pinned). Counted for observability; the grant is otherwise treated as any verified broker grant.
+    transitive_authority: bool,
     notes: Vec<String>,
 }
 
@@ -798,6 +806,7 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("brokers_total".into(), count(r.brokers_total)),
         ("brokers_seq_verified".into(), count(r.brokers_seq_verified)),
         ("cross_broker_suppression".into(), count(r.cross_broker_suppression)),
+        ("transitive_grants".into(), count(r.transitive_grants)),
         (
             "per_broker_trust".into(),
             CanonValue::Array(
@@ -1226,6 +1235,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         introspection_status: "absent".to_string(),
         federation_status: "absent".to_string(),
         brokers_total: 0,
+        transitive_grants: 0,
         brokers_seq_verified: 0,
         cross_broker_suppression: 0,
         per_broker_trust: Vec::new(),
@@ -1534,6 +1544,37 @@ pub fn introspection_transcript_challenge(
     crate::hashx::sha256(&pre)
 }
 
+/// Re-derive the cross-broker certificate challenge (ADR 0005 M4, OPTIONAL transitive-trust tier),
+/// byte-identically to the Go producer: `sha256( LP4(tag) ‖ LP4(issuer_broker_id) ‖ LP4(subject_broker_id)
+/// ‖ LP4(subject_kid) ‖ LP4(scope) ‖ LP4(resource_id) ‖ BE8(not_after) )`, tag = "feir.broker.federation.cert.v1".
+/// Issuer broker A — whose key the auditor PINS in `federated_broker_keys` — vouches that subject broker B is
+/// authorized for `scope` over `resource_id` until `not_after`. B is identified BY KEY via
+/// `subject_kid = cnf_kid(subject_pubkey)`, NOT by id alone: binding the subject's key is what makes the cert
+/// un-substitutable — without it, A's (public) cert could be replayed over a grant signed by ANY key claiming
+/// B's id (a key-substitution fail-open). Kept in sync with Go via the shared golden vector.
+pub fn federation_cert_challenge(
+    issuer_broker_id: &str,
+    subject_broker_id: &str,
+    subject_kid: &str,
+    scope: &str,
+    resource_id: &str,
+    not_after: i64,
+) -> [u8; 32] {
+    let mut pre = Vec::new();
+    let lp4 = |pre: &mut Vec<u8>, b: &[u8]| {
+        pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
+        pre.extend_from_slice(b);
+    };
+    lp4(&mut pre, b"feir.broker.federation.cert.v1");
+    lp4(&mut pre, issuer_broker_id.as_bytes());
+    lp4(&mut pre, subject_broker_id.as_bytes());
+    lp4(&mut pre, subject_kid.as_bytes());
+    lp4(&mut pre, scope.as_bytes());
+    lp4(&mut pre, resource_id.as_bytes());
+    pre.extend_from_slice(&(not_after as u64).to_be_bytes());
+    crate::hashx::sha256(&pre)
+}
+
 /// Outcome of re-walking a grant's `delegation_assertions[]` chain (ADR 0005 M2).
 enum ChainResult {
     /// No (or empty) delegation_assertions — an ordinary, undelegated grant.
@@ -1654,6 +1695,85 @@ fn verify_delegation_chain(
 pub fn cnf_kid(cnf_pub: &VerifyingKey) -> String {
     let sum = crate::hashx::sha256(cnf_pub.as_bytes());
     format!("ed25519-{}", crate::b64::encode(&sum[..8]))
+}
+
+/// M4 (ADR 0005, OPTIONAL transitive trust): validate a grant's `grant_evidence.cross_broker_cert` and, if it
+/// holds, return the SUBJECT broker's authority key — the key the grant's own `evidence_sig` must then verify
+/// under (via the normal `verify_authority`). This elevates an otherwise-UNPINNED subject broker B to
+/// `transitive` trust BECAUSE a PINNED issuer broker A (`federated_broker_keys[issuer]`) signed a certificate
+/// vouching for B's key over a specific resource/scope. Fail-closed at EVERY step (returns `None`): the issuer
+/// is not pinned, issuer == subject (a broker may not vouch for itself), a malformed key/sig, a forged cert sig,
+/// the grant's `broker_id`/`scope`/`resource_id` ≠ the cert's (demonstrator monotonicity = equality, consistent
+/// with delegation — a true subset lattice is the documented future extension), or the cert expired relative to
+/// the grant's own `issued_at`. Returning the subject key does NOT by itself trust the grant: the caller still
+/// runs `verify_authority` under it, so a valid cert + a grant NOT signed by the vouched key still fails to
+/// elevate (the cert binds `subject_kid = cnf_kid(subject_pubkey)`, closing key substitution).
+fn cross_broker_cert_key(rec: &CanonValue, opts: &VerifyOptions) -> Option<VerifyingKey> {
+    let cert = rec
+        .get("extensions")?
+        .get("broker")?
+        .get("grant_evidence")?
+        .get("cross_broker_cert")?;
+    let issuer = cert.get("issuer_broker_id")?.as_str()?;
+    let subject = cert.get("subject_broker_id")?.as_str()?;
+    let subject_pub_b64 = cert.get("subject_pubkey")?.as_str()?;
+    let cert_scope = cert.get("scope")?.as_str()?;
+    let cert_resource = cert.get("resource_id")?.as_str()?;
+    let not_after = cert.get("not_after").and_then(|v| v.as_int())?;
+    let sig_b64 = cert.get("sig")?.as_str()?;
+    // Both ids required; a broker may not vouch for itself (issuer ≠ subject — the disjointness boundary).
+    if issuer.is_empty() || subject.is_empty() || issuer == subject {
+        return None;
+    }
+    // The grant's claimed broker_id MUST be the cert's subject, and the grant's scope/resource MUST equal the
+    // cert's — otherwise A's cert for (B, scopeX, resX) could launder a (B, scopeY) grant.
+    if ev_str(rec, "grant_evidence", "broker_id").as_deref() != Some(subject)
+        || ev_str(rec, "grant_evidence", "scope").as_deref() != Some(cert_scope)
+        || ev_str(rec, "grant_evidence", "resource_id").as_deref() != Some(cert_resource)
+    {
+        return None;
+    }
+    // Temporal: the grant must have been issued while the cert was still valid (cert.not_after ≥ grant.issued_at).
+    // `issued_at` rides the SUBJECT-signed grant evidence; the cert (issuer-signed) bounds the validity window.
+    let issued_at = ev_int(rec, "grant_evidence", "issued_at")?;
+    if not_after < issued_at {
+        return None;
+    }
+    let subject_vk = crate::b64::decode_fixed::<32>(subject_pub_b64)
+        .ok()
+        .and_then(|b| VerifyingKey::from_bytes(&b).ok())?;
+    // R2 (STRUCTURAL): the cert-derived subject key becomes a de-facto BROKER authority key, so it MUST be
+    // disjoint from every NON-broker role — else a pinned issuer (or a COMPROMISED one) could vouch for a
+    // resource/tsa/taxonomy/attestation/cosig/revocation key and turn it into broker authority, a RUNTIME
+    // backdoor around the unconditional startup disjointness fatal (which only covers PINNED broker keys). The
+    // generic `trusted_authority_keys` set is intentionally NOT here: a broker key MAY equal it (the self-host
+    // model where the broker IS its own generic policy authority), exactly as the startup check permits.
+    let non_broker_roles: [&[VerifyingKey]; 6] = [
+        &opts.resource_authority_keys,
+        &opts.taxonomy_keys,
+        &opts.attestation_keys,
+        &opts.trusted_tsa_keys,
+        &opts.cosig_approver_keys,
+        &opts.revocation_keys,
+    ];
+    if non_broker_roles.iter().any(|set| set.contains(&subject_vk)) {
+        return None; // fail-closed: the cert may not launder a non-broker key into broker authority
+    }
+    let subject_kid = cnf_kid(&subject_vk);
+    let challenge =
+        federation_cert_challenge(issuer, subject, &subject_kid, cert_scope, cert_resource, not_after);
+    let sig_bytes = crate::b64::decode_fixed::<64>(sig_b64).ok()?;
+    let sig = Signature::from_bytes(&sig_bytes);
+    // The cert must be signed by ONE of the issuer's PINNED keys; an unpinned issuer yields no candidates → None.
+    let issuer_keys = opts.federated_broker_keys.get(issuer)?;
+    if issuer_keys
+        .iter()
+        .any(|vk| vk.verify_strict(&challenge, &sig).is_ok())
+    {
+        Some(subject_vk)
+    } else {
+        None
+    }
 }
 
 /// Offline PoP re-verification (ADR 0004 D2). Returns `Ok(true)` if the receipt carried the agent
@@ -2815,20 +2935,40 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // only under resource keys, and any other record under the generic authority keys. This makes
         // role confusion (a resource key signing a grant, or vice versa) fail to elevate.
         let (broker_role, claims_role) = classify_role(rec);
+        // M4 (ADR 0005, OPTIONAL transitive trust): a Broker grant whose `broker_id` is NOT directly pinned may
+        // still elevate IF it carries a valid cross_broker_cert from a PINNED issuer broker vouching for the
+        // subject's key. Computed here (owned) so the borrow below can fall back to it. Only attempted for an
+        // unpinned subject under a non-empty `federated_broker_keys`; a directly-pinned broker never reaches it.
+        let cross_cert_key: Option<VerifyingKey> =
+            if broker_role == BrokerRole::Broker && !opts.federated_broker_keys.is_empty() {
+                match ev_str(rec, "grant_evidence", "broker_id").filter(|b| !b.is_empty()) {
+                    Some(bid) if !opts.federated_broker_keys.contains_key(&bid) => {
+                        cross_broker_cert_key(rec, opts)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+        let cross_cert_slice: &[VerifyingKey] = match &cross_cert_key {
+            Some(vk) => std::slice::from_ref(vk),
+            None => &[],
+        };
         let auth_keys: &[VerifyingKey] = match broker_role {
             // M4 (ADR 0005): per-broker authority. When `federated_broker_keys` is pinned, a grant carrying a
             // `broker_id` elevates ONLY under THAT broker's key set — a broker_id with no pinned set does NOT
             // elevate (fail-closed, never under another broker's keys or the union), so broker B cannot issue a
-            // grant in broker A's name. A grant with NO broker_id (non-federated) uses `broker_authority_keys`.
-            // When the map is empty (default), every broker grant uses `broker_authority_keys` (shared-root
-            // baseline) — so the single-broker path is byte-for-byte unchanged.
+            // grant in broker A's name — UNLESS a valid cross_broker_cert vouches for it (`cross_cert_slice`,
+            // the OPTIONAL transitive tier; empty when no cert holds → still fail-closed). A grant with NO
+            // broker_id (non-federated) uses `broker_authority_keys`. When the map is empty (default), every
+            // broker grant uses `broker_authority_keys` (shared-root baseline) — single-broker is unchanged.
             BrokerRole::Broker if !opts.federated_broker_keys.is_empty() => {
                 match ev_str(rec, "grant_evidence", "broker_id").filter(|b| !b.is_empty()) {
                     Some(bid) => opts
                         .federated_broker_keys
                         .get(&bid)
                         .map(|v| v.as_slice())
-                        .unwrap_or(&[]),
+                        .unwrap_or(cross_cert_slice),
                     None => &opts.broker_authority_keys,
                 }
             }
@@ -2837,6 +2977,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             BrokerRole::None => &opts.trusted_authority_keys,
         };
         let authority = verify_authority(rec, auth_keys);
+        // A grant verified ONLY because a cross_broker_cert vouched for its (unpinned) subject key is `transitive`.
+        let transitive_authority = cross_cert_key.is_some() && authority == AuthorityTrust::Verified;
         if authority == AuthorityTrust::Failed {
             notes.push(format!(
                 "authority claims a verified source but its evidence_sig did not verify under a trusted {} authority key",
@@ -2867,6 +3009,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             status_changed_at,
             authority,
             broker_role,
+            transitive_authority,
             notes,
         });
     }
@@ -3095,6 +3238,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
 
     let mut record_trust = Vec::with_capacity(pending.len());
     let mut records_proven = 0usize;
+    // M4 (ADR 0005, OPTIONAL): count integrity-proven broker grants whose authority verified ONLY via a
+    // cross_broker_cert (observability — a transitive grant is otherwise counted/matched as any verified grant).
+    let mut transitive_grants = 0usize;
     for mut p in pending {
         let base_ok = p.integrity_ok && p.signature_ok && p.project_ok && p.pinned;
         let trust = if !base_ok {
@@ -3124,6 +3270,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
 
         if trust == TrustLevel::IntegrityProven {
             records_proven += 1;
+            if p.transitive_authority && p.broker_role == BrokerRole::Broker {
+                transitive_grants += 1;
+            }
         } else {
             issues.push(format!(
                 "record {} ({}) untrusted: {}",
@@ -4396,6 +4545,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         brokers_seq_verified,
         cross_broker_suppression,
         per_broker_trust,
+        transitive_grants,
         resource_trust: "assumed_truthful".to_string(),
         coverage_manifest,
         unclosed_side_effects,

@@ -11,9 +11,9 @@ use feir_decision_core::hashx::sha256_prefixed;
 use feir_decision_core::record::seal;
 use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use feir_decision_core::verify::{
-    cnf_kid, cosig_approval_challenge, delegation_hop_challenge, introspection_transcript_challenge,
-    report_to_json, verify_bundle, verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions,
-    VerifyReport,
+    cnf_kid, cosig_approval_challenge, delegation_hop_challenge, federation_cert_challenge,
+    introspection_transcript_challenge, report_to_json, verify_bundle, verify_bundle_with, TrustLevel,
+    TrustedKey, VerifyOptions, VerifyReport,
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::collections::BTreeMap;
@@ -5271,6 +5271,212 @@ fn tier_b_federation_distinct_brokers_may_share_a_key() {
     assert!(r.ok, "distinct brokers sharing a key must not be a false fatal; issues: {:?}", r.issues);
     assert_eq!(r.grant_verified, 2);
     assert_eq!(r.federation_status, "sequence_verified");
+}
+
+// ---- M4 V2 (OPTIONAL): cross_broker_cert transitive trust (a PINNED issuer vouches for an UNPINNED subject) ----
+
+// build a cross_broker_cert: issuer A (signing with `issuer_sk`) vouches for subject B's key (`subject_vk`)
+// over (scope, resource) until `not_after`. The sig is over federation_cert_challenge with subject_kid bound.
+#[allow(clippy::too_many_arguments)]
+fn cross_cert(
+    issuer_id: &str,
+    subject_id: &str,
+    subject_vk: &VerifyingKey,
+    scope: &str,
+    resource: &str,
+    not_after: i64,
+    issuer_sk: &SigningKey,
+) -> CanonValue {
+    let kid = cnf_kid(subject_vk);
+    let challenge = federation_cert_challenge(issuer_id, subject_id, &kid, scope, resource, not_after);
+    let sig = feir_decision_core::b64::encode(&issuer_sk.sign(&challenge).to_bytes());
+    CanonValue::object(vec![
+        ("issuer_broker_id".into(), CanonValue::string(issuer_id)),
+        ("subject_broker_id".into(), CanonValue::string(subject_id)),
+        ("subject_pubkey".into(), CanonValue::string(feir_decision_core::b64::encode(subject_vk.as_bytes()))),
+        ("scope".into(), CanonValue::string(scope)),
+        ("resource_id".into(), CanonValue::string(resource)),
+        ("not_after".into(), CanonValue::Int(not_after)),
+        ("sig".into(), CanonValue::string(sig)),
+    ])
+    .unwrap()
+}
+
+// a federated grant_evidence for subject B carrying a cross_broker_cert + a "scope" field matching the cert.
+fn grant_evidence_cert(gid: &str, subject_id: &str, broker_seq: i64, scope: &str, cert: CanonValue) -> CanonValue {
+    let ge = change_field(&grant_evidence_fed(gid, subject_id, broker_seq), "scope", CanonValue::string(scope));
+    change_field(&ge, "cross_broker_cert", cert)
+}
+
+// a single-subject bundle whose grant elevates ONLY via a cross_broker_cert; returns (bundle, opts) with ONLY
+// the issuer A pinned (subject B is NOT in federated_broker_keys).
+fn cross_cert_bundle(
+    rec: &SigningKey,
+    tsa: &SigningKey,
+    issuer_sk: &SigningKey,
+    subject_sk: &SigningKey,
+    scope: &str,
+    not_after: i64,
+) -> CanonValue {
+    let cert = cross_cert(BID_A, BID_B, &subject_sk.verifying_key(), scope, RESOURCE, not_after, issuer_sk);
+    let ge = grant_evidence_cert("grant-b1", BID_B, 1, scope, cert);
+    let gb = seal_grant(rec, subject_sk, "rec-b1", &ge);
+    let hb = content_hash_of(&gb);
+    let heads = fed_heads(&[(BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)])))]);
+    let cp = checkpoint_with_fed_heads(rec, "cp0", 0, None, std::slice::from_ref(&hb), 1, heads, Some(tsa));
+    tier_b_bundle(&rec.verifying_key(), vec![gb], vec![cp])
+}
+
+#[test]
+fn tier_b_cross_broker_cert_elevates_unpinned_subject_to_transitive() {
+    // THE POSITIVE: subject broker B is NOT pinned, but pinned issuer A signed a cert vouching for B's key over
+    // (scope, resource). B's grant — signed by B's key, scope/resource matching the cert — elevates transitively.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (ba, bb) = (approver(60), approver(61)); // A pinned, B NOT pinned
+    let bundle = cross_cert_bundle(&rec, &tsa, &ba, &bb, "read:orders", EXP);
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, ba.verifying_key())]); // ONLY A
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(r.ok, "a cert-vouched transitive grant must verify; issues: {:?}", r.issues);
+    assert_eq!(r.grant_verified, 1, "B's grant elevates transitively via A's cert");
+    assert_eq!(r.transitive_grants, 1);
+    assert_eq!(r.federation_status, "sequence_verified");
+    let json = report_to_json(&r);
+    assert!(json.contains(r#""transitive_grants":1"#), "report JSON missing transitive_grants: {json}");
+}
+
+#[test]
+fn tier_b_cross_broker_cert_unpinned_issuer_does_not_elevate() {
+    // FAIL-CLOSED: the cert's ISSUER is not pinned (a self-signed "vouching" by an untrusted broker). No transitive
+    // elevation — anyone can mint a cert, only a PINNED issuer's vouching counts.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (ba, bb) = (approver(60), approver(61));
+    let bundle = cross_cert_bundle(&rec, &tsa, &ba, &bb, "read:orders", EXP);
+    // pin a DIFFERENT broker (not A) — so the cert's issuer A is unpinned.
+    let other = approver(70);
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[("broker-OTHER", other.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.grant_verified, 0, "a cert from an UNPINNED issuer must not elevate the subject");
+    assert_eq!(r.transitive_grants, 0);
+}
+
+#[test]
+fn tier_b_cross_broker_cert_key_substitution_fails_closed() {
+    // THE CARDINAL FAIL-OPEN this design closes: A's (public) cert vouches for B's key bb. An attacker attaches A's
+    // genuine cert to a grant signed by the ATTACKER's key. The verifier derives the trusted key from the cert
+    // (bb), then re-runs verify_authority — the grant's evidence_sig (attacker's key) does NOT verify under bb.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (ba, bb, attacker) = (approver(60), approver(61), approver(99));
+    // A's genuine cert vouches for bb; but the grant is signed by `attacker`, not bb.
+    let cert = cross_cert(BID_A, BID_B, &bb.verifying_key(), "read:orders", RESOURCE, EXP, &ba);
+    let ge = grant_evidence_cert("grant-b1", BID_B, 1, "read:orders", cert);
+    let gb = seal_grant(&rec, &attacker, "rec-b1", &ge); // signed by the attacker, NOT bb
+    let hb = content_hash_of(&gb);
+    let heads = fed_heads(&[(BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&hb), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![gb], vec![cp]);
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, ba.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.grant_verified, 0, "a grant NOT signed by the cert-vouched key must not elevate (no key substitution)");
+    assert_eq!(r.transitive_grants, 0);
+}
+
+#[test]
+fn tier_b_cross_broker_cert_subject_pubkey_swap_breaks_issuer_sig() {
+    // a subtler key substitution: the attacker swaps the cert's subject_pubkey to their OWN key (so the grant they
+    // sign WOULD verify under it) — but the cert sig binds subject_kid = cnf_kid(subject_pubkey), so swapping the
+    // pubkey changes the challenge and A's signature no longer verifies -> the cert is rejected -> fail-closed.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (ba, bb, attacker) = (approver(60), approver(61), approver(99));
+    let cert = cross_cert(BID_A, BID_B, &bb.verifying_key(), "read:orders", RESOURCE, EXP, &ba);
+    // swap subject_pubkey to the attacker's key (A never signed over THIS kid).
+    let forged = change_field(&cert, "subject_pubkey", CanonValue::string(feir_decision_core::b64::encode(attacker.verifying_key().as_bytes())));
+    let ge = grant_evidence_cert("grant-b1", BID_B, 1, "read:orders", forged);
+    let gb = seal_grant(&rec, &attacker, "rec-b1", &ge); // signed by attacker, matching the swapped pubkey
+    let hb = content_hash_of(&gb);
+    let heads = fed_heads(&[(BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&hb), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![gb], vec![cp]);
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, ba.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.grant_verified, 0, "swapping subject_pubkey breaks A's sig (subject_kid is bound) -> fail-closed");
+}
+
+#[test]
+fn tier_b_cross_broker_cert_scope_mismatch_does_not_launder() {
+    // A's cert for (B, "read:orders") may NOT launder a grant claiming a DIFFERENT scope ("write:orders").
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (ba, bb) = (approver(60), approver(61));
+    // cert vouches for "read:orders" but the grant claims "write:orders".
+    let cert = cross_cert(BID_A, BID_B, &bb.verifying_key(), "read:orders", RESOURCE, EXP, &ba);
+    let ge = grant_evidence_cert("grant-b1", BID_B, 1, "write:orders", cert);
+    let gb = seal_grant(&rec, &bb, "rec-b1", &ge);
+    let hb = content_hash_of(&gb);
+    let heads = fed_heads(&[(BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&hb), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![gb], vec![cp]);
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, ba.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.grant_verified, 0, "a scope-mismatched grant must not be laundered by the cert");
+}
+
+#[test]
+fn tier_b_cross_broker_cert_self_vouch_rejected() {
+    // a broker may not vouch for ITSELF (issuer == subject) — that would let any broker self-elevate without a
+    // pinned vouching party. The cert is rejected even though it is well-formed and self-signed by a pinned key.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let bb = approver(61);
+    // issuer == subject == BID_B; signed by bb itself; BID_B pinned-as-issuer would still be self-vouch.
+    let cert = cross_cert(BID_B, BID_B, &bb.verifying_key(), "read:orders", RESOURCE, EXP, &bb);
+    let ge = grant_evidence_cert("grant-b1", BID_B, 1, "read:orders", cert);
+    let gb = seal_grant(&rec, &bb, "rec-b1", &ge);
+    let hb = content_hash_of(&gb);
+    let heads = fed_heads(&[(BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&hb), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![gb], vec![cp]);
+    // even if B were (wrongly) pinned-as-issuer, self-vouch is rejected before the sig check.
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_B, bb.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    // B IS pinned here, so the grant elevates DIRECTLY (not transitively) — assert it is NOT counted transitive,
+    // and the self-vouch cert contributed nothing. (Direct pinning is the legitimate path; the cert is inert.)
+    assert_eq!(r.transitive_grants, 0, "a self-vouch cert must never count as a transitive elevation");
+}
+
+#[test]
+fn tier_b_cross_broker_cert_subject_equal_resource_key_is_role_confusion_fail_closed() {
+    // R2 STRUCTURAL (the disjointness-bypass fail-open): a pinned issuer A may NOT vouch for a key that is ALSO a
+    // pinned RESOURCE key — that would let a resource key elevate a BROKER grant (role confusion), a backdoor
+    // around the unconditional R2 disjointness fatal (which only covers PINNED broker keys, not cert-vouched
+    // ones). The cert-derived subject key must be rejected when it collides with any non-broker role.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let ba = approver(60); // issuer A pinned
+    // A vouches for subject_pubkey = the RESOURCE key; the grant's evidence_sig is signed by the resource key.
+    let cert = cross_cert(BID_A, BID_B, &res.verifying_key(), "read:orders", RESOURCE, EXP, &ba);
+    let ge = grant_evidence_cert("grant-b1", BID_B, 1, "read:orders", cert);
+    let gb = seal_grant(&rec, &res, "rec-b1", &ge); // signed by the RESOURCE key
+    let hb = content_hash_of(&gb);
+    let heads = fed_heads(&[(BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)])))]);
+    let cp = checkpoint_with_fed_heads(&rec, "cp0", 0, None, std::slice::from_ref(&hb), 1, heads, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![gb], vec![cp]);
+    // res is pinned as resource_authority_keys; A is the only pinned broker. The startup disjointness fatal does
+    // NOT fire (res is not in the pinned broker union) — the collision is introduced at runtime by the cert.
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, ba.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.grant_verified, 0, "a cert vouching for a RESOURCE key must NOT elevate a broker grant (R2 backdoor)");
+    assert_eq!(r.transitive_grants, 0);
+}
+
+#[test]
+fn tier_b_cross_broker_cert_expired_relative_to_grant_rejected() {
+    // the cert's not_after is BEFORE the grant's issued_at -> the grant was issued after B's vouching lapsed ->
+    // not transitive (fail-closed temporal bound).
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let (ba, bb) = (approver(60), approver(61));
+    // not_after = ISSUED - 1 (the grant_evidence_fed uses issued_at = ISSUED), so not_after < issued_at.
+    let bundle = cross_cert_bundle(&rec, &tsa, &ba, &bb, "read:orders", ISSUED - 1);
+    let opts = fed_keys_opts(res.verifying_key(), tsa.verifying_key(), &[(BID_A, ba.verifying_key())]);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.grant_verified, 0, "a cert expired before the grant's issued_at must not elevate");
+    assert_eq!(r.transitive_grants, 0);
 }
 
 // ---- M4 federation: aggregate-review coverage additions (all currently fail-closed, now pinned) ----
