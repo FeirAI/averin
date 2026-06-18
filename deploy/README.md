@@ -71,6 +71,13 @@ To enforce the Tier-B / ADR-0005 mode guarantees you must PIN the role-disjoint 
 feir-verify bundle bundle.json opts.json   # pinned, authentic + cosig/revocation/federation/native gates
 ```
 
+The optional M4/M5 tiers are pinned the same way: `revocation_keys` gates **both** the disclosed
+`revocation_list` and the Merkle-non-disclosure `revocation_merkle_root` (+ the bundle's `revocation_proofs`);
+`federated_broker_keys` (a `{broker_id: [keys]}` map) gates per-broker federation and the `cross_broker_cert`
+transitive tier. The verifier prints `revocation_merkle_status` / `transitive_grants` / federation broker counts
+when those modes are active. `docs/operator-verification.md` has a "Producing the optional artifacts" section for
+building a Merkle revocation root or a cross-broker cert.
+
 > **Phase-1 limits (see `docs/coverage-limits.md`):** no per-project auth yet (deploy behind your
 > own auth or single-tenant); the in-memory store is single-node (Postgres + content store are the
 > production swap); raw content blobs are not bundled (commitments only). The cryptographic

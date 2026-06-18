@@ -103,6 +103,7 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         ("cosig", "cosig_status"),
         ("delegation", "delegation_status"),
         ("revocation", "revocation_status"),
+        ("revocation (merkle)", "revocation_merkle_status"),
         ("introspection", "introspection_status"),
         ("federation", "federation_status"),
     ] {
@@ -110,6 +111,22 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         if !v.is_empty() && v != "absent" && v != "unevaluated" {
             println!("  {label:<21} {v}");
         }
+    }
+    // Mode-specific counts (only printed when non-trivial — keeps the common single-broker output terse).
+    let brokers_total = gi("brokers_total");
+    if brokers_total > 0 {
+        println!(
+            "  federation brokers:   {}/{} seq-verified ({} suppressed, {} transitive via cross_broker_cert)",
+            gi("brokers_seq_verified"), brokers_total, gi("cross_broker_suppression"), gi("transitive_grants")
+        );
+    } else if gi("transitive_grants") > 0 {
+        println!("  transitive_grants:    {} (elevated via cross_broker_cert)", gi("transitive_grants"));
+    }
+    if gi("revoked_uses_blocked") > 0 || gi("revoked_grants_matched") > 0 {
+        println!("  revocation blocks:    {} use(s) blocked, {} grant(s) matched on the list", gi("revoked_uses_blocked"), gi("revoked_grants_matched"));
+    }
+    if gi("revocation_nonmembership_verified") > 0 {
+        println!("  merkle non-revocation: {} grant(s) proven NOT revoked", gi("revocation_nonmembership_verified"));
     }
     println!("  action_completeness:  {}  (resource_trust: {})", gs("action_completeness"), gs("resource_trust"));
     if let Some(issues) = report.get("issues").and_then(|v| v.as_array()) {
