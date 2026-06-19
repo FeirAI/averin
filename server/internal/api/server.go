@@ -69,7 +69,15 @@ type Server struct {
 	// can be combined with OTHER brokers' bundles without one broker's grants masking another's. "" = single-broker
 	// (legacy byte-identical path — no broker_id, no map).
 	brokerID string
-	denyLog  bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
+	// M5 (ADR 0005): the revocation authority key (role-separated from broker/resource/signing/attestation/TSA).
+	// When set, POST /v2/revoke records a grant_id as revoked, and each /v2/export carries a signed, time-bounded
+	// revocation_list over the project's revoked set (the verifier blocks any use of a revoked grant). nil =
+	// revocation disabled. The revoked set is IN-MEMORY (Phase-1; a production deployment persists it).
+	revocationKey      ed25519.PrivateKey
+	revoked            map[string]map[string]struct{} // projectID -> set of revoked grant_ids
+	revokedMu          sync.Mutex
+	revocationValidity time.Duration
+	denyLog            bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
 	// inflate stored records without bound (the prerequisite for default-on). nil = unbounded (prior behavior).
 	denialBudget *denialBudget
@@ -512,6 +520,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v2/grants/prepare", s.handleGrantPrepare)   // M6/M2 online two-phase: phase 1 (mint+reveal)
 	mux.HandleFunc("POST /v2/grants/finalize", s.handleGrantFinalize) // M6/M2 online two-phase: phase 2 (attach+commit)
 	mux.HandleFunc("POST /v2/introspection", s.handleIntrospection)   // M3 native/STS: record a resource introspection transcript
+	mux.HandleFunc("POST /v2/revoke", s.handleRevoke)                 // M5: mark a grant_id revoked (export carries a signed revocation_list)
 	mux.HandleFunc("POST /v2/use", s.handleUse)
 	mux.HandleFunc("POST /v2/use-intent", s.handleUseIntent)
 	mux.HandleFunc("POST /v2/use-outcome", s.handleUseOutcome)
@@ -2725,6 +2734,19 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 		}
 		if att != nil {
 			bundle["deployment_attestation"] = att
+		}
+	}
+	// M5 (ADR 0005): emit a signed, time-bounded revocation_list over the project's revoked grant_ids, when a
+	// revocation authority key is configured and there is at least one revoked grant. Its freshness window is
+	// derived from the latest checkpoint's created_ts (same anchor the attestation uses), so the verifier reads
+	// it `fresh` for this bundle and `stale` for a much-later one.
+	if s.revocationKey != nil {
+		rl, e := s.buildRevocationListForExport(projectID, checks)
+		if e != nil {
+			return "", e
+		}
+		if rl != nil {
+			bundle["revocation_list"] = rl
 		}
 	}
 	out, err := json.Marshal(bundle)

@@ -183,6 +183,21 @@ func main() {
 		}
 	}
 
+	// M5 (ADR 0005): optional revocation authority. POST /v2/revoke marks a grant_id revoked; every /v2/export
+	// then carries a signed, time-bounded revocation_list (the verifier blocks any use of a revoked grant). The
+	// key MUST be role-separated from the broker/resource/signing/attestation keys (the verifier enforces it).
+	if rvseed := os.Getenv("FEIR_REVOCATION_SEED"); rvseed != "" {
+		raw, err := hex.DecodeString(rvseed)
+		if err != nil || len(raw) != ed25519.SeedSize {
+			log.Fatal("FEIR_REVOCATION_SEED must be 64 hex chars (32-byte Ed25519 seed)")
+		}
+		if rvseed == seed || rvseed == os.Getenv("FEIR_BROKER_ISSUING_SEED") || rvseed == os.Getenv("FEIR_RESOURCE_SEED") {
+			log.Fatal("FEIR_REVOCATION_SEED must differ from the signing/broker/resource seeds (R2 role separation)")
+		}
+		srv.WithRevocation(ed25519.NewKeyFromSeed(raw))
+		log.Printf("revocation enabled (POST /v2/revoke; exports carry a signed revocation_list)")
+	}
+
 	log.Printf("feir-server listening on %s (pubkey %s)", addr, c.PubKey())
 	log.Fatal(http.ListenAndServe(addr, srv.Routes()))
 }
