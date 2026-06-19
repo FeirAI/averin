@@ -7,9 +7,12 @@ package proxy
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -23,10 +26,11 @@ type Recorder interface {
 }
 
 type Proxy struct {
-	upstream  string // e.g. https://api.openai.com
-	client    *http.Client
-	rec       Recorder
-	projectID string
+	upstream     string // e.g. https://api.openai.com
+	client       *http.Client
+	rec          Recorder
+	projectID    string
+	inboundToken string // when set, inbound callers MUST present it (X-Feir-Proxy-Token or Bearer) — else open relay
 }
 
 func New(upstream, projectID string, rec Recorder) *Proxy {
@@ -36,6 +40,15 @@ func New(upstream, projectID string, rec Recorder) *Proxy {
 		rec:       rec,
 		projectID: projectID,
 	}
+}
+
+// WithInboundAuth requires every inbound request to present `token` (header `X-Feir-Proxy-Token: <token>` or
+// `Authorization: Bearer <token>`) before the proxy forwards + records it. Without it the proxy is an open relay:
+// any caller can drive the upstream LLM AND inject fabricated llm_call evidence under any X-Feir-Session-Id, so
+// an unconfigured proxy MUST be bound to loopback / behind the agent's own trust boundary.
+func (p *Proxy) WithInboundAuth(token string) *Proxy {
+	p.inboundToken = token
+	return p
 }
 
 func (p *Proxy) Handler() http.Handler {
@@ -58,6 +71,12 @@ var hopByHop = map[string]bool{
 }
 
 func (p *Proxy) handle(w http.ResponseWriter, r *http.Request) {
+	// Inbound auth (when configured): only an authorized caller may relay to the upstream AND inject a
+	// session-scoped llm_call record. Without it the proxy is an open relay + evidence-injection surface.
+	if p.inboundToken != "" && !p.inboundAuthOK(r) {
+		http.Error(w, "unauthorized (set X-Feir-Proxy-Token or Authorization: Bearer)", http.StatusUnauthorized)
+		return
+	}
 	// cap the request: read one extra byte to detect (and reject) over-limit bodies rather than
 	// silently forwarding a truncated request.
 	reqBody, _ := io.ReadAll(io.LimitReader(r.Body, maxReqBody+1))
@@ -160,7 +179,23 @@ func (p *Proxy) recordCall(r *http.Request, reqBody, respBody []byte, httpStatus
 	if tin >= 0 || tout >= 0 {
 		rec["tokens"] = map[string]any{"in": max0(tin), "out": max0(tout)}
 	}
-	_ = p.rec.Record(rec) // best-effort: never fail the user's request because recording failed
+	// Best-effort (never fail the user's LLM call because recording failed) but NOT silent: a dropped record is
+	// a gap in the evidence trail, so a recording failure (incl. a feir auth 401, a 4xx/5xx, or feir being down)
+	// is LOGGED rather than swallowed — otherwise the operator believes I/O is captured while it is discarded.
+	if err := p.rec.Record(rec); err != nil {
+		log.Printf("feir-proxy: WARNING — failed to record llm_call (session=%q, model=%q): %v — this LLM call is NOT in the evidence trail", session, model, err)
+	}
+}
+
+// inboundAuthOK constant-time-compares the configured inbound token against X-Feir-Proxy-Token or a Bearer token.
+func (p *Proxy) inboundAuthOK(r *http.Request) bool {
+	tok := strings.TrimSpace(r.Header.Get("X-Feir-Proxy-Token"))
+	if tok == "" {
+		if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
+			tok = strings.TrimSpace(h[7:])
+		}
+	}
+	return tok != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(p.inboundToken)) == 1
 }
 
 // ---- helpers ----
@@ -292,6 +327,7 @@ func max0(n int) int {
 // HTTPRecorder posts records to a feir ingestion server.
 type HTTPRecorder struct {
 	URL    string // feir server base, e.g. http://localhost:8080
+	Token  string // feir API token (sent as X-Api-Key) — REQUIRED when the feir server has FEIR_API_KEYS auth on
 	Client *http.Client
 }
 
@@ -304,11 +340,25 @@ func (h *HTTPRecorder) Record(body map[string]any) error {
 	if c == nil {
 		c = &http.Client{Timeout: 10 * time.Second}
 	}
-	resp, err := c.Post(strings.TrimRight(h.URL, "/")+"/v2/records", "application/json", bytes.NewReader(b))
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(h.URL, "/")+"/v2/records", bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	req.Header.Set("Content-Type", "application/json")
+	if h.Token != "" {
+		req.Header.Set("X-Api-Key", h.Token) // so records aren't silently 401'd against an auth-enabled feir
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	// A non-2xx (401 unauth, 400 reserved/malformed, 413 too-large, 5xx) means the record was NOT sealed — surface
+	// it as an error so the caller logs the evidence gap instead of treating any HTTP response as success.
+	if resp.StatusCode/100 != 2 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("feir /v2/records returned %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
 	return nil
 }
 

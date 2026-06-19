@@ -50,6 +50,8 @@ cargo run -p feir-decision-core --bin feir-verify -- bundle bundle.json
 | `STRIPE_API_KEY` | server | (none) | enables usage-based metering reporting; no key = local counting only |
 | `FEIR_UPSTREAM` | proxy | `https://api.openai.com` | upstream LLM |
 | `FEIR_PROJECT_ID` | proxy | `default` | project the proxy records under |
+| `FEIR_PROXY_INBOUND_TOKEN` | proxy | (none) | shared secret inbound callers must present (`X-Feir-Proxy-Token` / `Bearer`). **Unset = OPEN RELAY + evidence-injection surface — bind to loopback or behind your own auth.** |
+| `FEIR_PROXY_FEIR_TOKEN` | proxy | (none) | the feir API token the proxy sends (`X-Api-Key`) so records aren't silently 401'd when the feir server has `FEIR_API_KEYS` auth on. A recording failure is logged (the LLM call is then NOT in the trail). |
 
 ### Online grant flows (ADR-0005 M6 Cosig / M2 Delegation / M3 Native)
 

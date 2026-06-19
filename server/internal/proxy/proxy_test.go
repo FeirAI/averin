@@ -212,3 +212,57 @@ func TestNonCompletionPathForwardedButNotRecorded(t *testing.T) {
 		t.Fatalf("non-completion path should not be recorded, got %d", len(rec.records))
 	}
 }
+
+func TestHTTPRecorderErrorsOnNon2xxAndSendsToken(t *testing.T) {
+	var gotKey string
+	feir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("X-Api-Key")
+		if gotKey == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer feir.Close()
+
+	// no token -> 401 -> the failure is SURFACED (not silently dropped as success).
+	if err := (&HTTPRecorder{URL: feir.URL}).Record(map[string]any{"x": 1}); err == nil {
+		t.Fatal("a non-2xx from feir must return an error, not silent success")
+	}
+	// with the token -> X-Api-Key sent -> 201 -> nil.
+	if err := (&HTTPRecorder{URL: feir.URL, Token: "secret-tok"}).Record(map[string]any{"x": 1}); err != nil {
+		t.Fatalf("authenticated record must succeed: %v", err)
+	}
+	if gotKey != "secret-tok" {
+		t.Fatalf("recorder did not send the feir token: %q", gotKey)
+	}
+}
+
+func TestInboundAuthRejectsUnauthenticated(t *testing.T) {
+	var upstreamHit bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHit = true
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(New(upstream.URL, "p1", newStub()).WithInboundAuth("the-secret").Handler())
+	defer srv.Close()
+
+	// no token -> 401, upstream NOT reached (no relay + no injection).
+	resp, _ := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated request must be 401, got %d", resp.StatusCode)
+	}
+	if upstreamHit {
+		t.Fatal("unauthenticated request must NOT reach the upstream")
+	}
+	// with the token -> forwarded.
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("X-Feir-Proxy-Token", "the-secret")
+	resp2, _ := http.DefaultClient.Do(req)
+	resp2.Body.Close()
+	if resp2.StatusCode == http.StatusUnauthorized || !upstreamHit {
+		t.Fatalf("authenticated request must be forwarded (status %d, hit %v)", resp2.StatusCode, upstreamHit)
+	}
+}

@@ -16,8 +16,14 @@ func main() {
 	projectID := envOr("FEIR_PROJECT_ID", "default")
 	addr := envOr("FEIR_PROXY_ADDR", ":8081")
 
-	rec := &proxy.HTTPRecorder{URL: feirURL}
+	rec := &proxy.HTTPRecorder{URL: feirURL, Token: os.Getenv("FEIR_PROXY_FEIR_TOKEN")}
 	p := proxy.New(upstream, projectID, rec)
+	if inbound := os.Getenv("FEIR_PROXY_INBOUND_TOKEN"); inbound != "" {
+		p.WithInboundAuth(inbound)
+		log.Printf("feir-proxy: inbound auth REQUIRED (X-Feir-Proxy-Token / Authorization: Bearer)")
+	} else {
+		log.Printf("feir-proxy: WARNING — no FEIR_PROXY_INBOUND_TOKEN set: this is an OPEN RELAY + evidence-injection surface; bind to loopback or place behind your own auth")
+	}
 	log.Printf("feir-proxy on %s -> upstream %s, recording to %s", addr, upstream, feirURL)
 	log.Fatal(http.ListenAndServe(addr, p.Handler()))
 }
