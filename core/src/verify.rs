@@ -2576,6 +2576,7 @@ fn evaluate_revocation(
     bundle: &CanonValue,
     opts: &VerifyOptions,
     anchored_latest_ts: Option<&str>,
+    anchored_is_latest: bool,
     issues: &mut Vec<String>,
 ) -> RevocationEval {
     let absent = RevocationEval { status: "absent".to_string(), revoked: BTreeSet::new() };
@@ -2649,7 +2650,13 @@ fn evaluate_revocation(
             return stale_with_list();
         }
     };
-    let fresh = issued_at <= ts && ts <= not_after;
+    // Currency is dated against the LATEST ANCHORED checkpoint's TSA time. If an UNANCHORED checkpoint exists
+    // beyond it (anchored_is_latest == false), a producer has rolled "now" backward — a list that is actually
+    // stale relative to the bundle's true frontier would otherwise read `fresh`, hiding revocations made after
+    // the anchored point. Mirror the deployment_attestation guard (`latest != latest_cp_seq`): the revocation
+    // currency cannot be established, so it is `stale` (blocks the capstone; named grants still block via the
+    // membership gate). Not a hard violation — an unanchored tail is a normal pending-anchoring state.
+    let fresh = issued_at <= ts && ts <= not_after && anchored_is_latest;
     RevocationEval {
         status: if fresh { "fresh" } else { "stale" }.to_string(),
         revoked,
@@ -2688,6 +2695,7 @@ fn evaluate_merkle_revocation(
     bundle: &CanonValue,
     opts: &VerifyOptions,
     anchored_latest_ts: Option<&str>,
+    anchored_is_latest: bool,
     issues: &mut Vec<String>,
 ) -> MerkleRevEval {
     let absent = || MerkleRevEval { status: "absent".to_string(), root: None, leaf_count: 0 };
@@ -2763,7 +2771,10 @@ fn evaluate_merkle_revocation(
             return signed;
         }
     };
-    let fresh = issued_at <= ts && ts <= not_after;
+    // See evaluate_revocation: an UNANCHORED checkpoint beyond the latest anchored one rolls "now" backward, so
+    // currency cannot be established → `stale` (the per-use non-membership proof is still demanded since the root
+    // is present). Mirrors the deployment_attestation latest-checkpoint guard.
+    let fresh = issued_at <= ts && ts <= not_after && anchored_is_latest;
     MerkleRevEval {
         status: if fresh { "fresh" } else { "stale" }.to_string(),
         root: Some(root),
@@ -4101,15 +4112,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut unmatched_pending = 0usize;
     // M5 (ADR 0005): revocation. Evaluate the bundle's signed revocation_list against the latest anchored TSA
     // time; a FRESH list blocks any matched use of a revoked grant_id.
-    let anchored_latest_ts = anchored_cp_ids
-        .iter()
-        .max_by_key(|(seq, _, _, _)| *seq)
-        .map(|(_, _, ts, _)| ts.as_str());
-    let revocation = evaluate_revocation(bundle, opts, anchored_latest_ts, &mut issues);
+    let anchored_latest = anchored_cp_ids.iter().max_by_key(|(seq, _, _, _)| *seq);
+    let anchored_latest_ts = anchored_latest.map(|(_, _, ts, _)| ts.as_str());
+    // #2 (deep review): the revocation freshness "now" is the latest ANCHORED checkpoint's time. If a newer
+    // UNANCHORED checkpoint exists, "now" has been rolled back; treat revocation currency as un-establishable
+    // (stale) so an attacker cannot keep a stale list reading `fresh` by withholding an anchor. Mirrors the
+    // deployment_attestation `latest != latest_cp_seq` guard. (No anchored checkpoint → handled inside the
+    // evaluators as a distinct hard issue.)
+    let anchored_is_latest = anchored_latest.map(|(seq, _, _, _)| *seq) == Some(latest_cp_seq);
+    let revocation = evaluate_revocation(bundle, opts, anchored_latest_ts, anchored_is_latest, &mut issues);
     // M5 Merkle-non-disclosure (ADR 0005): the signed root + the top-level per-grant proof map. When the root is
     // FRESH, every Tier-B use MUST carry a valid proof — a non-membership proof to proceed, else (membership or
     // missing/malformed) the use is blocked/fail-closed (the revoked set is not disclosed, so silence ≠ safe).
-    let merkle_rev = evaluate_merkle_revocation(bundle, opts, anchored_latest_ts, &mut issues);
+    let merkle_rev = evaluate_merkle_revocation(bundle, opts, anchored_latest_ts, anchored_is_latest, &mut issues);
     let revocation_proofs = bundle.get("revocation_proofs");
     let mut revoked_uses_blocked = 0usize;
     let mut revocation_nonmembership_verified = 0usize;

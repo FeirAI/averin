@@ -4379,6 +4379,31 @@ fn tier_b_revocation_stale_list_still_blocks_explicitly_revoked_use() {
 }
 
 #[test]
+fn tier_b_revocation_unanchored_newer_checkpoint_downgrades_freshness_to_stale() {
+    // #2 (deep review): revocation freshness is dated against the latest ANCHORED checkpoint's TSA time. A
+    // producer who appends a newer UNANCHORED checkpoint rolls "now" backward — a list whose window brackets the
+    // OLD anchor would otherwise read `fresh` while hiding revocations made after it. The verifier downgrades to
+    // `stale` (mirroring the deployment_attestation latest-checkpoint guard), so the strong capstone is blocked
+    // even though the window technically brackets the latest anchored time.
+    let (rec, res, tsa) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]));
+    let rev = signing_key_from_seed(&[77u8; 32]);
+    let grant = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let gh = content_hash_of(&grant);
+    // cp0: ANCHORED at 10:10:01 (∈ the REV_FRESH window), head over the grant.
+    let cp0 = checkpoint_seqd(&rec, "cp0", 0, None, std::slice::from_ref(&gh), 1, Some(grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &gh)]))), Some(&tsa));
+    let cp0h = checkpoint_hash(&cp0);
+    // cp1 (LATEST, UNANCHORED): chains to cp0, re-commits the same grant, head chaining to cp0's root.
+    let cp1 = checkpoint_seqd(&rec, "cp1", 1, Some(&cp0h), std::slice::from_ref(&gh), 1, Some(grant_head_cv(1, &ghr(&[(1, &gh)]), &ghr(&[(1, &gh)]))), None);
+    // a list whose window BRACKETS cp0's anchor (window-fresh), naming an UNUSED grant (so freshness, not blocking, is what we test).
+    let revlist = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &["some-other-grant"]);
+    let bundle = change_field(&tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp0, cp1]), "revocation_list", revlist);
+    let mut opts = pinned_roles(rec.verifying_key(), res.verifying_key(), tsa.verifying_key());
+    opts.revocation_keys = vec![rev.verifying_key()];
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(r.revocation_status, "stale", "an unanchored newer checkpoint must downgrade revocation freshness to stale; issues: {:?}", r.issues);
+}
+
+#[test]
 fn tier_b_revocation_stale_list_naming_unused_grant_does_not_over_block() {
     // NO OVER-BLOCK: a stale list naming a grant that is NOT used in the bundle does not block the (different)
     // use; the bundle stays ok (no revoked use was honored), only the capstone is blocked by the stale status.
