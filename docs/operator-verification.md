@@ -93,16 +93,28 @@ comes from *your* opts, never the bundle, so a forger cannot self-assert it. A n
 `status_changed_at` (or an unanchored record) withdraws **unconditionally** (fail-closed — an undatable
 compromise cannot be proven to predate anything).
 
-This applies to the **authority-elevation** roles — `broker_authority_keys`, `resource_authority_keys`,
-`authority_keys`, and each `federated_broker_keys` set (where it ALSO gates a transitive `cross_broker_cert`
-grant by the **issuer** key's lifecycle). A `cross_broker_cert` whose issuer key is compromised before the
-grant's anchor no longer elevates.
+The object form works for **every** role key (`signing_keys` excepted — its lifecycle is the richer Rust
+`TrustedKey` API). The exact rule differs by what the role signs:
 
-> **Fail-closed, not silent.** The other roles — `tsa_keys`, `attestation_keys`, `cosig_approver_keys`,
-> `revocation_keys`, `taxonomy_keys` — do **not** yet accept the object/rotation form (their freshness is dated
-> differently). Supplying it on one of them is a **parse error**, not a silently-ignored directive — so you can
-> never get false comfort that a rotation took effect when it didn't. An UNKNOWN status, or a misspelled field
-> name, is likewise a parse error (never read as `active`).
+- **Authority-elevation** (`broker_authority_keys`, `resource_authority_keys`, `authority_keys`, each
+  `federated_broker_keys` set) and **`cosig_approver_keys`** — the signed artifact is committed by an anchor, so
+  a `compromised`/`rotated`/`revoked` key is honored for anything anchored **at or before** `status_changed_at`
+  (the anchor proves it predates the compromise). A `federated_broker_keys` rotation also gates a transitive
+  `cross_broker_cert` grant by the **issuer** key's lifecycle. A non-honored approver's approval stops counting
+  toward the M-of-N threshold.
+- **`attestation_keys`, `revocation_keys`, `tsa_keys`** — the signed artifact carries a SELF-asserted time a
+  stolen key could forge, so `compromised`/`revoked` is **never** honored; only `rotated`, and only for an
+  artifact whose own time is `≤ status_changed_at`. Effects: a non-honored **attestation** issuer →
+  `attestation_status:failed`; a non-honored **revocation** issuer → `revocation_status:stale` (the listed
+  revocations still block — they are never un-honored), `ok:false`; a non-honored **TSA** key → its anchors are
+  distrusted, so the checkpoint is treated as un-anchored (this is what stops a stolen TSA key from backdating).
+- **`taxonomy_keys`** — your `taxonomy_digest` pin already binds the exact artifact, so rotation is
+  defense-in-depth: `compromised`/`revoked` → the taxonomy is `untrusted`; `rotated` keeps the digest-pinned
+  taxonomy valid.
+
+> **Fail-closed, not silent.** An UNKNOWN status, a misspelled field name, or the object form on `signing_keys`
+> is a **parse error** (never silently read as `active`) — you can never get false comfort that a rotation took
+> effect when it didn't.
 
 ## What each mode means in the report
 

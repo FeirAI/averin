@@ -8562,6 +8562,63 @@ fn tier_b_merkle_revocation_nonmembership_proof_verifies() {
 }
 
 #[test]
+fn role_key_rotation_merkle_revocation_compromised_issuer_downgrades_currency() {
+    // ADR 0006 §1 (revocation, MERKLE variant — same rule as the disclosed list): a non-active issuer cannot
+    // certify currency → revocation_merkle_status `stale` (+ an issue → !ok). The root is KEPT (per-use
+    // non-membership proofs still demanded). issued_at is REV_FRESH_FROM (2026-06-15T00:00).
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&["other-1", "other-2"]); // GID not revoked
+    let proofs = vec![(GID.to_string(), nonmembership_proof(&leaves, GID))];
+    let run = |rks: Option<(&str, &str)>| {
+        let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+        let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+        let grant = seal_grant(&rec, &rec, GID, &ge);
+        let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+        let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+        let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+        let bundle = change_field(
+            &change_field(
+                &tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]),
+                "revocation_merkle_root",
+                root_obj,
+            ),
+            "revocation_proofs",
+            CanonValue::object(proofs.clone()).unwrap(),
+        );
+        let mut opts = pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        );
+        opts.revocation_keys = vec![rev.verifying_key()];
+        if let Some((s, t)) = rks {
+            opts.role_key_status = role_status(rev.verifying_key(), s, Some(t));
+        }
+        verify_bundle_with(&bundle, &opts)
+    };
+
+    assert_eq!(
+        run(None).revocation_merkle_status,
+        "fresh",
+        "control: active"
+    );
+    let rc = run(Some(("compromised", "2026-12-31T00:00:00.000Z")));
+    assert_eq!(
+        rc.revocation_merkle_status, "stale",
+        "compromised → currency not certified"
+    );
+    assert!(!rc.ok);
+    assert_eq!(
+        run(Some(("rotated", "2026-06-15T12:00:00.000Z"))).revocation_merkle_status,
+        "fresh"
+    );
+    assert_eq!(
+        run(Some(("rotated", "2026-06-14T00:00:00.000Z"))).revocation_merkle_status,
+        "stale"
+    );
+}
+
+#[test]
 fn tier_b_merkle_revocation_membership_proof_blocks_use() {
     // GID IS revoked; a membership proof authenticates its leaf -> the use is blocked (revoked).
     let (rec, res, tsa, rev) = rev_keys();

@@ -95,22 +95,44 @@ the generic `authority_keys`), which all share ONE gating point, so a single imp
   keyed by raw key bytes. A key absent from the map is `active`. The role-key vectors stay `Vec<VerifyingKey>`
   (a parallel status map, NOT a `Vec<RoleKey>`) — this leaves the membership-based elevation + the
   R2-disjointness matrix completely unchanged, the least-invasive faithful realization.
-- **Wire format:** each authority-role array element is a bare `ed25519pub:` string (active) OR
-  `{"key","status","status_changed_at"}` (`parse_one_role_key`). Fail-closed: an UNKNOWN status is an error
-  (never silently active), and the freshness-dated roles (tsa/attestation/cosig/revocation/taxonomy) stay
-  string-only, so a rotation directive on them is a parse error — no silent false comfort about a role that is
-  not yet gated.
+- **Wire format:** each role-key array element is a bare `ed25519pub:` string (active) OR
+  `{"key","status","status_changed_at"}` (`parse_one_role_key`). Fail-closed: an UNKNOWN status, or a typo'd
+  field name, is a parse error (never silently active). `signing_keys` stays string-only on the opts path (its
+  rotation is the richer Rust `TrustedKey` API).
 - **The gate** (`verify.rs` pass-2): `verify_authority_with_key` returns WHICH pinned key verified the
-  authority evidence; pass-1 stores its `role_key_status` in `Pending.authority_role_status`; pass-2 withdraws
-  the elevation (`authority -> Failed`) for a non-active role key UNLESS the record is
+  authority evidence; pass-1 stores its `role_key_status` in `Pending`; pass-2 withdraws the elevation
+  (`authority -> Failed`) for a non-active role key UNLESS the record is
   `anchored_before(content_hash, status_changed_at)` — reusing the exact signing-key helper. A used withdrawn
   grant then fails to match (→ violation, !ok); an unused one drops to unaccountable. The record's own
   integrity/signature trust is independent (a real record stays integrity-proven; only its AUTHORITY is gone).
 
-**Deferred (documented, not silently unsupported):** the freshness-dated roles. Their "anchored time of the
-evidence" is NOT the record's own commit time — a revocation list / deployment attestation / TSA token is dated
-against the *latest-anchored* time, and the TSA key is itself the time source (gating it is circular). Each
-needs its own dating rule, so they warrant a separate pass; until then their object/rotation form is rejected.
+**The 5 freshness-dated roles — now ALSO implemented (a later pass).** Two shared rule helpers capture the
+distinction the deferral foresaw:
+- `honored_anchored_before` — ANCHOR-COMMITTED artifacts. The **cosig** approval lives inside the grant's
+  signed evidence (committed with the grant), so the anchor proves predating: every non-active status is
+  honored iff the grant was anchored before `status_changed_at`. A non-honored approval stops counting toward
+  the M-of-N threshold.
+- `honored_clean_rotation` — NON-anchor-committed artifacts with a SELF-asserted time. A STOLEN key
+  (`compromised`/`revoked`) can forge ANY timestamp, so it is **never** honored; only a cleanly `rotated` key,
+  and only if the artifact's own time is canonical and `≤ status_changed_at`. Applied to:
+  - **attestation** → a non-honored issuer is `failed` (no `attested_claims`); fail-closed (weakens the
+    capstone only).
+  - **revocation** (disclosed list AND Merkle root) → a non-honored issuer cannot certify currency → `stale`
+    (+ an issue, !ok), but the disclosed `revoked` set is **KEPT** blocking — un-honoring it would UN-BLOCK a
+    revoked grant (the only fail-OPEN direction; a forged over-revocation is mere DoS = fail-closed).
+  - **TSA** (the foundational case) → `verify_anchor_keyed` returns the verifying ed25519 key; a non-honored
+    TSA key's anchor is REJECTED, so the checkpoint is effectively un-anchored (broker_trust can't reach
+    `sequence_verified`). This cascade is what stops a compromised TSA from backdating an anchor to make a
+    post-compromise grant look `anchored_before` and thereby bypass every other gate. (RFC 3161 SPKIs are not
+    ed25519 role keys — `tsa_vk` is `None` — so their rotation is out of scope; an attacker cannot use an
+    rfc3161 anchor to dodge ed25519 TSA rotation without a separately-pinned, trusted rfc3161 SPKI.)
+  - **taxonomy** → defense-in-depth: the auditor's digest pin already binds the EXACT vetted artifact (the
+    dominant check), so a compromised key cannot substitute one. `compromised`/`revoked` → untrusted; a cleanly
+    `rotated` issuer keeps the digest-pinned taxonomy valid (status-only, no window — a taxonomy carries no
+    clean self-asserted issue time).
+
+  A 5-lens adversarial review (fail-direction-per-role / self-asserted-time-spoofing / TSA-cascade-soundness /
+  framework-parser-regression / test-quality) found ZERO security findings (one test-coverage gap, fixed).
 
 **Transitive (cross_broker_cert) elevation — gated.** The first 5-lens review caught a real fail-open here: a
 grant elevated transitively via a `cross_broker_cert` keyed the gate on the (unpinned) cert SUBJECT, so a
