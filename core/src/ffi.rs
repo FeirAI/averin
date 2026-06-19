@@ -54,6 +54,11 @@ pub unsafe extern "C" fn feir_dealloc(ptr: *mut u8, size: usize) {
 ///
 /// # Safety
 /// `input` must be a valid null-terminated C string for the duration of the call.
+///
+/// NOT compiled for `wasm32`: the browser verifier (the auditor-facing surface) must expose ONLY the
+/// length-aware [`feir_verify_bundle_json_n`], so a third party loading the `.wasm` cannot reach a
+/// NUL-truncatable verify entrypoint. The cgo path (native) keeps this symbol and guards NUL on the Go side.
+#[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]
 pub unsafe extern "C" fn feir_verify_bundle_json(input: *const c_char) -> *mut c_char {
     if input.is_null() {
@@ -102,6 +107,11 @@ pub unsafe extern "C" fn feir_verify_bundle_json_n(ptr: *const u8, len: usize) -
 ///
 /// # Safety
 /// `bundle` and `opts_json` must be valid null-terminated C strings for the duration of the call.
+///
+/// NOT compiled for `wasm32` (see [`feir_verify_bundle_json`]): the browser verifier exposes only the
+/// length-aware [`feir_verify_bundle_with_n`], so a `0x00` in the pinned `opts_json` cannot silently truncate
+/// the trust roots in the auditor's `.wasm`. The cgo path keeps this symbol and guards NUL on the Go side.
+#[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]
 pub unsafe extern "C" fn feir_verify_bundle_with(
     bundle: *const c_char,

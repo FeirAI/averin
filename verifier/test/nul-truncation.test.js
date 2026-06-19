@@ -42,3 +42,21 @@ test("canonicalize rejects an interior NUL rather than truncating", async () => 
   const v = await feir();
   expect(() => v.canonicalize('{"a":1}' + NUL + "junk")).toThrow();
 });
+
+test("verifyBundleWith: interior NUL in the bundle fails closed (length-aware _with_n)", async () => {
+  const v = await feir();
+  const clean = readFileSync(BUNDLE, "utf8");
+  const attack = clean + NUL + JSON.stringify({ decoy: "unverified" }) + "PADDING";
+  // verifyBundleWith now uses feir_verify_bundle_with_n, so the full input is read and an interior NUL
+  // fails closed at canonicalization instead of truncating to a verified prefix.
+  expect(v.verifyBundleWith(attack, {}).ok).toBe(false);
+});
+
+test("the wasm exports ONLY the length-aware verify entrypoints (no NUL-truncatable variant)", async () => {
+  const v = await feir();
+  // The auditor-facing wasm must not expose a verify entrypoint a third party could call NUL-unsafe.
+  expect(typeof v.x.feir_verify_bundle_json_n).toBe("function");
+  expect(typeof v.x.feir_verify_bundle_with_n).toBe("function");
+  expect(v.x.feir_verify_bundle_json).toBeUndefined();
+  expect(v.x.feir_verify_bundle_with).toBeUndefined();
+});

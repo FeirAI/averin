@@ -97,19 +97,21 @@ class FeirVerifier {
    * and Tier-B action accountability (role-separated, ADR 0003 R2). Returns the parsed report.
    */
   verifyBundleWith(bundleJson, opts) {
-    // Both args go through _writeCString, which rejects an interior NUL (valid RCP never contains 0x00),
-    // so this is NUL-truncation-safe (fail-closed on a malformed/adversarial bundle).
-    const a = this._writeCString(bundleJson);
-    const o = this._writeCString(typeof opts === "string" ? opts : JSON.stringify(opts ?? {}));
+    // LENGTH-AWARE call (feir_verify_bundle_with_n): both the bundle AND the pinned opts are passed with their
+    // exact byte lengths, so an interior 0x00 in either (never present in valid RCP / an ed25519pub: or base64url
+    // value) cannot truncate the bundle to a verified prefix NOR silently drop the pinned trust roots — the full
+    // input is verified and fails closed. The NUL-truncatable C-string entrypoints are not compiled into the wasm.
+    const a = this._writeBytes(typeof bundleJson === "string" ? bundleJson : JSON.stringify(bundleJson));
+    const o = this._writeBytes(typeof opts === "string" ? opts : JSON.stringify(opts ?? {}));
     let resultPtr = 0;
     try {
-      resultPtr = this.x.feir_verify_bundle_with(a.ptr, o.ptr);
+      resultPtr = this.x.feir_verify_bundle_with_n(a.ptr, a.len, o.ptr, o.len);
       if (resultPtr === 0) throw new Error("verifier returned null (invalid input)");
       return JSON.parse(this._readCString(resultPtr));
     } finally {
       if (resultPtr !== 0) this.x.feir_string_free(resultPtr);
-      this.x.feir_dealloc(a.ptr, a.size);
-      this.x.feir_dealloc(o.ptr, o.size);
+      this.x.feir_dealloc(a.ptr, a.len);
+      this.x.feir_dealloc(o.ptr, o.len);
     }
   }
 

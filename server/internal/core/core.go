@@ -108,7 +108,8 @@ func (c *Core) VerifyBundleWith(bundleJSON, optsJSON string) string {
 	// Guard optsJSON too: C.CString stops at the first NUL, so a 0x00 in opts could silently truncate the
 	// pinned trust roots (e.g. drop a resource_authority_keys entry). Valid opts (ed25519pub:/base64url) never
 	// contain 0x00, so reject fail-closed rather than verify under a truncated trust set. (The truncation-proof
-	// ABI feir_verify_bundle_with_n exists for non-Go consumers.)
+	// ABI feir_verify_bundle_with_n is what the wasm verifier exports — the NUL-truncatable C-string variants are
+	// compiled ONLY for native/cgo, where this Go-side guard covers them.)
 	if i := strings.IndexByte(optsJSON, 0); i >= 0 {
 		return nulRejectReport(i)
 	}
