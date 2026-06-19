@@ -993,6 +993,15 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// M6 (ADR 0005): when this broker pins an M-of-N cosig policy, a single-phase brokered grant would mint a
+	// credential with NO cosignatures (the verifier only requires cosig on a grant that DECLARES cosig_threshold,
+	// which single-phase issuance never sets) — silently bypassing the policy. Require the two-phase
+	// prepare/finalize flow, which is the ONLY path that stamps cosig_threshold + binds the approver signatures.
+	if s.cosigThreshold > 0 {
+		writeErr(w, http.StatusBadRequest, "this broker pins an M-of-N cosig policy — brokered grants must be issued via the two-phase POST /v2/grants/prepare + POST /v2/grants/finalize flow (single-phase issuance would bypass cosig)")
+		return
+	}
+
 	req := broker.Request{
 		AgentID:         gr.AgentID,
 		Action:          gr.Action,

@@ -36,6 +36,38 @@ func newCosigBrokerServer(t *testing.T, threshold int, approvers []ed25519.Publi
 	return api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithCosigPolicy(threshold, approvers).Routes()
 }
 
+// TestSinglePhaseGrantRejectedUnderCosigPolicy: a pinned cosig policy must not be bypassable by issuing via the
+// single-phase /v2/grants endpoint — that path mints a grant with NO cosignatures (cosig is verifier-enforced
+// only on grants declaring cosig_threshold, which single-phase never sets). Single-phase brokered issuance is
+// rejected (400) so the only way to mint is the two-phase prepare/finalize flow that binds the M-of-N.
+func TestSinglePhaseGrantRejectedUnderCosigPolicy(t *testing.T) {
+	a1, a2 := seedKey(40), seedKey(41)
+	approvers := []ed25519.PublicKey{a1.Public().(ed25519.PublicKey), a2.Public().(ed25519.PublicKey)}
+	h := newCosigBrokerServer(t, 2, approvers)
+	ak := grantAgentKey()
+	code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-bypass", "read:orders", ak, ak))
+	if code != http.StatusBadRequest {
+		t.Fatalf("single-phase issuance under a cosig policy must be rejected (got %d): %s", code, resp)
+	}
+	if !strings.Contains(resp, "cosig") {
+		t.Fatalf("rejection should explain the cosig policy: %s", resp)
+	}
+	// CONTROL: a server WITHOUT a cosig policy still accepts single-phase issuance.
+	hNoCosig := api.New(mustCore(t), store.NewMem(), "k0").WithBroker(brokerIssuingKey()).Routes()
+	if code, r := do(t, hNoCosig, "POST", "/v2/grants", grantBody("idem-ok", "read:orders", ak, ak)); code != http.StatusCreated {
+		t.Fatalf("single-phase issuance without a cosig policy must work (got %d): %s", code, r)
+	}
+}
+
+func mustCore(t *testing.T) *core.Core {
+	t.Helper()
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	return c
+}
+
 // TestOnlineCosigGrantPrepareFinalize is the M6 online two-phase flow: prepare reveals the challenge, the
 // approvers sign it, finalize binds the cosignatures + commits the grant.
 func TestOnlineCosigGrantPrepareFinalize(t *testing.T) {
