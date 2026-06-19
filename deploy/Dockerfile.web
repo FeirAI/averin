@@ -1,5 +1,10 @@
 # feir web app + standalone verifier, served statically. Builds the Svelte SPA and the WASM for the
 # offline verifier, then serves both via nginx.
+#
+# SUPPLY CHAIN — pin base images by digest for production (tags below float). Resolve with:
+#   docker buildx imagetools inspect <image:tag> --format '{{.Manifest.Digest}}'
+# then write `FROM <image:tag>@sha256:<digest>`. The .wasm built here is the verifier TRUST ROOT; its exact
+# rustc is governed by rust-toolchain.toml, and the published digest is pinned per verifier/SUPPLY-CHAIN.md.
 FROM rust:1-bookworm AS wasmbuild
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./

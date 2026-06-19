@@ -1,0 +1,38 @@
+# cargo-deny supply-chain policy for the Rust integrity core (the trust root). Enforced in CI.
+# Run locally: cargo deny check
+
+[advisories]
+version = 2
+# A YANKED crate in Cargo.lock is a supply-chain smell (pulled for a reason) — fail on it.
+# Known vulnerabilities are always denied under schema v2 and cannot be downgraded here.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# The core's transitive tree is entirely permissive (see `cargo metadata` license set). Anything OUTSIDE
+# this allow-list fails — a copyleft/unknown license entering the trust root must be a deliberate decision,
+# not a silent dependency bump.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-1-Clause",
+  "BSD-3-Clause",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Surface (don't hard-fail) duplicate versions and wildcard requirements: both are reproducibility/bloat
+# smells in a trust root, worth a CI warning without blocking a legitimate transitive diamond.
+multiple-versions = "warn"
+wildcards = "warn"
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io. An unknown registry or a git dependency in the trust root is denied — no out-of-band code.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

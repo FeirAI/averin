@@ -1,5 +1,12 @@
 # feir server + proxy. Multi-stage: build the Rust integrity core (staticlib), then the cgo Go
 # binaries, then a slim runtime. The Go services link the SAME Rust core the CLI/WASM use.
+#
+# SUPPLY CHAIN — pin base images by digest for production. The tags below float (a `:1-bookworm` can be
+# re-pushed under you). Resolve and append the digest before deploying, e.g.:
+#   docker buildx imagetools inspect rust:1-bookworm --format '{{.Manifest.Digest}}'
+#   FROM rust:1-bookworm@sha256:<digest> AS rustbuild
+# The EXACT rustc used to build the core is governed by rust-toolchain.toml (rustup honors it inside the
+# container regardless of the rust: image's default), so the staticlib is reproducible independent of this tag.
 FROM rust:1-bookworm AS rustbuild
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./

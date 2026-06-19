@@ -1,5 +1,9 @@
 name: ci
 
+# The Rust version is pinned in rust-toolchain.toml (1.92.0 + wasm32/i686 targets + rustfmt/clippy). cargo
+# honors that file in every job below regardless of which toolchain the setup action installs, so the
+# reproducible verifier .wasm digest and the CI build share one source of truth. Bump it there, not here.
+
 on:
   push:
     branches: [ main ]
@@ -63,11 +67,18 @@ jobs:
           go-version: '1.25'
       - name: build rust staticlib (cgo links it)
         run: cargo build -p feir-decision-core
+      - name: stale-staticlib guard (the cgo lib must match current core source, never a stale trust root)
+        run: ./scripts/check-staticlib-fresh.sh
       - name: go vet + test
         working-directory: server
         run: |
           go vet ./...
           go test ./...
+      - name: govulncheck (Go stdlib + module CVE scan; cgo needs the staticlib built above)
+        working-directory: server
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
   store-postgres:
     name: store parity + append-only (Mem semantics ↔ real Postgres, non-owner role)
@@ -128,3 +139,14 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: build wasm (same C ABI as cgo; no wasm-bindgen, RNG-free)
         run: cargo build --release --target wasm32-unknown-unknown --lib --no-default-features
+
+  supply-chain:
+    name: "supply chain (cargo-deny: advisories, licenses, sources, bans)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Scans Cargo.lock for known-vulnerable/yanked crates, non-permissive licenses, and any dependency
+      # not from crates.io — a defense for the Rust integrity core (the trust root). Policy: deny.toml.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses sources bans

@@ -4,4 +4,8 @@
 # pinned digest in the same commit. See verifier/SUPPLY-CHAIN.md.
 [toolchain]
 channel = "1.92.0"
-targets = ["wasm32-unknown-unknown"]
+# wasm32: the browser verifier trust root. i686: usize==u32, the 32-bit-truncation gate that stands in for
+# wasm32 in the native adversarial suite (CI core-32bit job). rustfmt/clippy: CI runs both under THIS exact
+# pin (not a floating stable), so they must be present on 1.92.0.
+targets = ["wasm32-unknown-unknown", "i686-unknown-linux-gnu"]
+components = ["rustfmt", "clippy"]
