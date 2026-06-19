@@ -3303,6 +3303,36 @@ fn tier_b_attestation_attested_claims() {
 }
 
 #[test]
+fn tier_b_attestation_bound_revocation_digest_detects_stripped_list() {
+    // #3 (deep review): the STRIP-revocation downgrade. Revocation is a soft tier whose ABSENCE reads as the safe
+    // baseline, so an attacker who can edit the bundle deletes `revocation_list` -> revocation_status:absent ->
+    // revoked uses no longer blocked, ok stays true. Binding the revocation_list digest into the SIGNED attestation
+    // subject closes it for attested deployments: stripping the list makes the bundle digest "" != the signed
+    // subject -> subject mismatch -> !ok. The attacker cannot drop the subject field (it is sig-covered).
+    let (rec, res, tsa, attest, rev) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[11u8; 32]), signing_key_from_seed(&[77u8; 32]));
+    let (base, cph, head_root) = d6_anchored(&rec, &tsa);
+    let revlist = revocation_list(&rev, ATT_ISSUED, ATT_NOT_AFTER, &["some-other-grant"]); // names nothing used
+    let rev_digest = sha256_prefixed(revlist.serialize().as_bytes());
+    let subj = change_field(&honest_subject(&rec, &res, &cph, &head_root), "revocation_digest", CanonValue::string(&rev_digest));
+    let att = attestation(&feir_decision_core::verify::cnf_kid(&attest.verifying_key()), ATT_ISSUED, ATT_NOT_AFTER, subj, &attest);
+    let mut opts = attest_opts(&rec, &res, &tsa, &attest);
+    opts.revocation_keys = vec![rev.verifying_key()];
+
+    // PRESENT (control): list + attestation -> subject matches -> attested_claims, ok.
+    let present = change_field(&change_field(&base, "revocation_list", revlist), "deployment_attestation", att.clone());
+    let r = verify_bundle_with(&present, &opts);
+    assert!(r.ok, "list present + matching subject must verify; issues: {:?}", r.issues);
+    assert_eq!(r.attestation_status, "attested_claims");
+
+    // ATTACK: strip the revocation_list (keep the attestation binding its digest) -> mismatch -> !ok.
+    let stripped = change_field(&base, "deployment_attestation", att);
+    let r2 = verify_bundle_with(&stripped, &opts);
+    assert!(!r2.ok, "stripping the bound revocation_list must fail the attestation subject match");
+    assert_ne!(r2.attestation_status, "attested_claims");
+    assert!(r2.issues.iter().any(|i| i.contains("revocation_digest")), "issues: {:?}", r2.issues);
+}
+
+#[test]
 fn tier_b_attestation_attested_claims_with_pinned_taxonomy() {
     // REGRESSION (D7.2): pinning a taxonomy issuer (the normal D4/D8 auditor posture) must NOT change the
     // attestation's authority_kids expectation. authority_kids binds the GRANT/USE authorities

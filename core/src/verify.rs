@@ -3002,6 +3002,17 @@ fn evaluate_attestation(
         .filter(|m| !m.is_null())
         .map(|m| crate::hashx::sha256_prefixed(m.serialize().as_bytes()))
         .unwrap_or_default();
+    // #3 (deep review): the digest of the bundle's `revocation_list`, "" when absent. Binding it into the signed
+    // attestation subject closes the STRIP-revocation downgrade: revocation is a "soft" tier whose ABSENCE reads
+    // as the safe baseline, so an attacker who can edit the bundle (a relay/MITM/malicious customer) can delete
+    // `revocation_list` → `revocation_status: absent` → revoked uses no longer blocked while `ok` stays true. A
+    // fresh attestation that committed a revocation_list will mismatch once the list is stripped (digest "" != the
+    // signed digest) → subject mismatch → !ok. The attestation sig protects the subject field itself from removal.
+    let revocation_digest = bundle
+        .get("revocation_list")
+        .filter(|m| !m.is_null())
+        .map(|m| crate::hashx::sha256_prefixed(m.serialize().as_bytes()))
+        .unwrap_or_default();
     let head_root = latest.3.clone().unwrap_or_else(|| grant_head_root(&[]));
     // `authority_kids` binds the deployment's GRANT/USE authorities — the broker and resource roles ONLY.
     // taxonomy_keys is deliberately NOT folded in: the operation taxonomy is a separate verifier-pinned
@@ -3033,6 +3044,12 @@ fn evaluate_attestation(
     if s_str(sub, "broker_grant_head_root") != head_root { mism.push("broker_grant_head_root"); }
     if arr(sub, "authority_kids") != kids { mism.push("authority_kids"); }
     if &arr(sub, "resource_ids") != resource_ids { mism.push("resource_ids"); }
+    // #3: enforce the bound revocation_list digest ONLY when the (signed) subject carries the field — so a
+    // pre-this-change attestation (no field) stays compatible, while a new attestation that committed a list
+    // mismatches if the list is later stripped. The attacker cannot drop the subject field (it is sig-covered).
+    if sub.get("revocation_digest").is_some() && s_str(sub, "revocation_digest") != revocation_digest {
+        mism.push("revocation_digest");
+    }
     if !mism.is_empty() {
         issues.push(format!("deployment_attestation: subject does not match the bundle under review — substitution/replay (D7): {}", mism.join(", ")));
         return eval;

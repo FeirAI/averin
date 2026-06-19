@@ -410,7 +410,7 @@ func attestationWindow(createdTS string, now time.Time, issuedSkew, validity tim
 // signed `subject` binds project_id / coverage_manifest_digest / latest checkpoint_hash +
 // broker_grant_head_root / the authority key-id set / the resource-id set; the digest is the verifier's
 // (sha256 of RCP-canonical attestation minus sig), signed under "feir.attestation.v1".
-func (s *Server) buildDeploymentAttestation(projectID string, recs []store.Record, checks []store.Checkpoint) (map[string]any, error) {
+func (s *Server) buildDeploymentAttestation(projectID string, recs []store.Record, checks []store.Checkpoint, revocationDigest string) (map[string]any, error) {
 	if len(checks) == 0 {
 		return nil, nil // nothing anchored to attest over yet
 	}
@@ -469,6 +469,9 @@ func (s *Server) buildDeploymentAttestation(projectID string, recs []store.Recor
 		"broker_grant_head_root":   headRoot,
 		"authority_kids":           authorityKids,
 		"resource_ids":             resourceIDs,
+		// #3: bind the digest of the revocation_list this export carries ("" when none) so the strip-downgrade
+		// (deleting the soft-tier revocation_list to read `absent`) breaks this signed subject match → !ok.
+		"revocation_digest": revocationDigest,
 	}
 	issuedAt, notAfter := attestationWindow(cp.CreatedTS, s.now(), s.attestIssuedSkew, s.attestValidity)
 	att := map[string]any{
@@ -2725,21 +2728,12 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 	if s.coverageManifest != "" {
 		bundle["coverage_manifest"] = json.RawMessage(s.coverageManifest)
 	}
-	// D7.2: emit a deployment_attestation binding this bundle's latest checkpoint + authority/resource set,
-	// when an attestation issuing key is configured (else the bundle verifies attestation_status:unevaluated).
-	if s.attestKey != nil {
-		att, e := s.buildDeploymentAttestation(projectID, recs, checks)
-		if e != nil {
-			return "", e
-		}
-		if att != nil {
-			bundle["deployment_attestation"] = att
-		}
-	}
 	// M5 (ADR 0005): emit a signed, time-bounded revocation_list over the project's revoked grant_ids, when a
 	// revocation authority key is configured and there is at least one revoked grant. Its freshness window is
 	// derived from the latest checkpoint's created_ts (same anchor the attestation uses), so the verifier reads
-	// it `fresh` for this bundle and `stale` for a much-later one.
+	// it `fresh` for this bundle and `stale` for a much-later one. Built BEFORE the attestation so the
+	// attestation can bind its digest (#3 strip-downgrade defense).
+	revocationDigest := ""
 	if s.revocationKey != nil {
 		rl, e := s.buildRevocationListForExport(projectID, checks)
 		if e != nil {
@@ -2747,6 +2741,27 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 		}
 		if rl != nil {
 			bundle["revocation_list"] = rl
+			rlJSON, e := json.Marshal(rl)
+			if e != nil {
+				return "", fmt.Errorf("marshal revocation_list: %w", e)
+			}
+			d, e := s.core.RcpEvidenceHash(string(rlJSON))
+			if e != nil {
+				return "", fmt.Errorf("revocation_list digest: %w", e)
+			}
+			revocationDigest = d
+		}
+	}
+	// D7.2: emit a deployment_attestation binding this bundle's latest checkpoint + authority/resource set
+	// (+ the revocation_list digest), when an attestation issuing key is configured (else the bundle verifies
+	// attestation_status:unevaluated).
+	if s.attestKey != nil {
+		att, e := s.buildDeploymentAttestation(projectID, recs, checks, revocationDigest)
+		if e != nil {
+			return "", e
+		}
+		if att != nil {
+			bundle["deployment_attestation"] = att
 		}
 	}
 	out, err := json.Marshal(bundle)

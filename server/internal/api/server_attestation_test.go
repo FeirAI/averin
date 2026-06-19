@@ -40,6 +40,59 @@ func newAttestingServer(t *testing.T) (http.Handler, *core.Core, *core.Core, ed2
 	return h, c, rc, att
 }
 
+// TestAttestationBindsRevocationDigestStripDetectedEndToEnd (#3 deep review): the deployment_attestation binds
+// the digest of the exported revocation_list. A real attested+revocation bundle reaches attested_claims under the
+// Rust verifier; STRIPPING the revocation_list (the soft-tier downgrade) makes the bundle's revocation digest ""
+// mismatch the signed subject → subject mismatch → !ok. Closes the strip-downgrade for attested deployments.
+func TestAttestationBindsRevocationDigestStripDetectedEndToEnd(t *testing.T) {
+	c, _ := core.New(seed)
+	rc, _ := core.New(resourceSeed)
+	att := attestationKey()
+	rev := revocationKey()
+	tsa := testTSAKey()
+	h := api.New(c, store.NewMem(), "k0").
+		WithBroker(brokerIssuingKey()).
+		WithResource(rc, "orders-db").
+		WithAttestation(att).
+		WithRevocation(rev).
+		Routes()
+	ak := grantAgentKey()
+	grantID, capb := mkGrant(t, h, ak, "idem-grant")
+	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", capb, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusCreated {
+		t.Fatalf("use: %d %s", code, r)
+	}
+	// revoke a DIFFERENT (unused) grant so the revocation_list is non-empty but does not block the used grant.
+	rb, _ := json.Marshal(map[string]any{"project_id": "p1", "grant_id": "some-other-grant"})
+	if code, r := do(t, h, "POST", "/v2/revoke?project=p1", string(rb)); code != http.StatusCreated {
+		t.Fatalf("revoke: %d %s", code, r)
+	}
+	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, r)
+	}
+	_, exp := do(t, h, "GET", "/v2/export?project=p1", "")
+	anchored := attachTestAnchor(t, exp, tsa)
+
+	revPub := "ed25519pub:" + base64.RawURLEncoding.EncodeToString(rev.Public().(ed25519.PublicKey))
+	pinned := `{"broker_authority_keys":["` + c.PubKey() + `"],"resource_authority_keys":["` + rc.PubKey() + `"],"tsa_keys":["` + tsaPubEncoded(tsa) + `"],"attestation_keys":["` + attestPubEncoded(att) + `"],"revocation_keys":["` + revPub + `"]}`
+
+	// PRESENT: the attestation binds the revocation_list digest -> attested_claims, ok.
+	rep := c.VerifyBundleWith(anchored, pinned)
+	for _, want := range []string{`"ok":true`, `"attestation_status":"attested_claims"`} {
+		if !strings.Contains(rep, want) {
+			t.Fatalf("present attested+revocation bundle (missing %s):\n%s", want, rep)
+		}
+	}
+	// ATTACK: strip the revocation_list -> the attestation's bound digest no longer matches -> !ok.
+	var b map[string]json.RawMessage
+	json.Unmarshal([]byte(anchored), &b)
+	delete(b, "revocation_list")
+	stripped, _ := json.Marshal(b)
+	rep2 := c.VerifyBundleWith(string(stripped), pinned)
+	if !strings.Contains(rep2, `"ok":false`) || !strings.Contains(rep2, "revocation_digest") {
+		t.Fatalf("stripping the bound revocation_list must fail the attestation subject match:\n%s", rep2)
+	}
+}
+
 // TestExportEmitsDeploymentAttestation (D7.2): /v2/export emits a top-level deployment_attestation binding
 // this bundle's latest checkpoint + authority/resource set, signed by the issuer key. When the issuer key
 // is PINNED, the verifier's signature + issuer checks pass cross-language (it only fails on the missing
