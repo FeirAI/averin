@@ -1369,6 +1369,22 @@ fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Length-prefixed framing (LP4) shared by EVERY broker/resource challenge + Merkle-leaf preimage below: a
+/// 4-byte big-endian length prefix then the bytes. Defined ONCE (was re-inlined as a per-function closure or
+/// loop ~8×) so the framing rule lives in a single place — a divergent copy would silently break the
+/// producer↔verifier byte-identity the shared golden vectors enforce.
+#[inline]
+fn lp4(pre: &mut Vec<u8>, b: &[u8]) {
+    pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
+    pre.extend_from_slice(b);
+}
+
+/// 8-byte big-endian integer (BE8) — the companion numeric framing for those same challenges.
+#[inline]
+fn be8(pre: &mut Vec<u8>, n: u64) {
+    pre.extend_from_slice(&n.to_be_bytes());
+}
+
 /// Re-derive the resource ledger_commitment (ADR 0003 R5 / ADR 0004 D3) the SAME way the resource
 /// shim does: `sha256( LP4("feir.broker.use.ledger.v1") ‖ LP4(jti) ‖ LP4(nonce) ‖ BE8(used_at) )`,
 /// where LP4 is a 4-byte big-endian length prefix and BE8 an 8-byte big-endian integer. Returns
@@ -1379,10 +1395,9 @@ fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
 pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
     let mut pre = Vec::new();
     for part in ["feir.broker.use.ledger.v1", jti, nonce] {
-        pre.extend_from_slice(&(part.len() as u32).to_be_bytes());
-        pre.extend_from_slice(part.as_bytes());
+        lp4(&mut pre, part.as_bytes());
     }
-    pre.extend_from_slice(&(used_at as u64).to_be_bytes());
+    be8(&mut pre, used_at as u64);
     crate::hashx::sha256_prefixed(&pre)
 }
 
@@ -1397,10 +1412,6 @@ pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
 /// Returns `sha256:<hex>` of the final accumulator. The empty log has a well-defined non-zero root.
 pub fn grant_head_root(grants: &[(i64, String)]) -> String {
     const TAG: &str = "feir.broker.grant_head.v1";
-    let lp4 = |pre: &mut Vec<u8>, b: &[u8]| {
-        pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
-        pre.extend_from_slice(b);
-    };
     // acc_0 = sha256(LP4(tag)) — a fixed non-zero seed so an empty log is distinguishable from a forged one.
     let mut seed = Vec::new();
     lp4(&mut seed, TAG.as_bytes());
@@ -1408,8 +1419,8 @@ pub fn grant_head_root(grants: &[(i64, String)]) -> String {
     for (seq, content_hash) in grants {
         let mut pre = Vec::new();
         lp4(&mut pre, TAG.as_bytes());
-        pre.extend_from_slice(&acc);
-        pre.extend_from_slice(&(*seq as u64).to_be_bytes());
+        pre.extend_from_slice(&acc); // raw 32-byte accumulator, NOT length-prefixed
+        be8(&mut pre, *seq as u64);
         lp4(&mut pre, content_hash.as_bytes());
         acc = crate::hashx::sha256(&pre);
     }
@@ -1424,10 +1435,6 @@ pub fn grant_head_root(grants: &[(i64, String)]) -> String {
 /// non-disclosure win. Kept in sync with the Go producer via the shared golden vector.
 pub fn revocation_leaf(grant_id: &str) -> [u8; 32] {
     let mut pre = Vec::new();
-    let lp4 = |pre: &mut Vec<u8>, b: &[u8]| {
-        pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
-        pre.extend_from_slice(b);
-    };
     lp4(&mut pre, b"feir.broker.revocation.leaf.v1");
     lp4(&mut pre, grant_id.as_bytes());
     crate::hashx::sha256(&pre)
@@ -1542,8 +1549,7 @@ pub fn use_pop_challenge(
         credential_binding,
         nonce,
     ] {
-        pre.extend_from_slice(&(part.len() as u32).to_be_bytes());
-        pre.extend_from_slice(part.as_bytes());
+        lp4(&mut pre, part.as_bytes());
     }
     crate::hashx::sha256(&pre)
 }
@@ -1569,11 +1575,10 @@ pub fn cosig_approval_challenge(
         approver_kid,
         credential_binding,
     ] {
-        pre.extend_from_slice(&(part.len() as u32).to_be_bytes());
-        pre.extend_from_slice(part.as_bytes());
+        lp4(&mut pre, part.as_bytes());
     }
-    pre.extend_from_slice(&(threshold_m as u64).to_be_bytes());
-    pre.extend_from_slice(&(exp as u64).to_be_bytes());
+    be8(&mut pre, threshold_m as u64);
+    be8(&mut pre, exp as u64);
     crate::hashx::sha256(&pre)
 }
 
@@ -1672,19 +1677,15 @@ pub fn delegation_hop_challenge(
     exp: i64,
 ) -> [u8; 32] {
     let mut pre = Vec::new();
-    let lp4 = |pre: &mut Vec<u8>, b: &[u8]| {
-        pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
-        pre.extend_from_slice(b);
-    };
     lp4(&mut pre, b"feir.broker.delegation.hop.v1");
     lp4(&mut pre, grant_id.as_bytes());
-    pre.extend_from_slice(&(hop_index as u64).to_be_bytes());
+    be8(&mut pre, hop_index as u64);
     lp4(&mut pre, delegator_kid.as_bytes());
     lp4(&mut pre, delegate_kid.as_bytes());
     lp4(&mut pre, scope.as_bytes());
     lp4(&mut pre, action.as_bytes());
     lp4(&mut pre, resource_id.as_bytes());
-    pre.extend_from_slice(&(exp as u64).to_be_bytes());
+    be8(&mut pre, exp as u64);
     crate::hashx::sha256(&pre)
 }
 
@@ -1707,17 +1708,13 @@ pub fn introspection_transcript_challenge(
     effective_exp: i64,
 ) -> [u8; 32] {
     let mut pre = Vec::new();
-    let lp4 = |pre: &mut Vec<u8>, b: &[u8]| {
-        pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
-        pre.extend_from_slice(b);
-    };
     lp4(&mut pre, b"feir.resource.introspection.v1");
     lp4(&mut pre, grant_id.as_bytes());
     lp4(&mut pre, credential_ref.as_bytes());
     lp4(&mut pre, effective_scope.as_bytes());
     lp4(&mut pre, resource_id.as_bytes());
-    pre.extend_from_slice(&(introspected_at as u64).to_be_bytes());
-    pre.extend_from_slice(&(effective_exp as u64).to_be_bytes());
+    be8(&mut pre, introspected_at as u64);
+    be8(&mut pre, effective_exp as u64);
     crate::hashx::sha256(&pre)
 }
 
@@ -1738,17 +1735,13 @@ pub fn federation_cert_challenge(
     not_after: i64,
 ) -> [u8; 32] {
     let mut pre = Vec::new();
-    let lp4 = |pre: &mut Vec<u8>, b: &[u8]| {
-        pre.extend_from_slice(&(b.len() as u32).to_be_bytes());
-        pre.extend_from_slice(b);
-    };
     lp4(&mut pre, b"feir.broker.federation.cert.v1");
     lp4(&mut pre, issuer_broker_id.as_bytes());
     lp4(&mut pre, subject_broker_id.as_bytes());
     lp4(&mut pre, subject_kid.as_bytes());
     lp4(&mut pre, scope.as_bytes());
     lp4(&mut pre, resource_id.as_bytes());
-    pre.extend_from_slice(&(not_after as u64).to_be_bytes());
+    be8(&mut pre, not_after as u64);
     crate::hashx::sha256(&pre)
 }
 
@@ -2168,6 +2161,47 @@ fn validate_taxonomy(
 /// to drop a grant from the log by under-signing it; that IS the suppression D6 detects), matching the
 /// producer's grantLog. A gap / tail-omission / root-mismatch / broken prior-head chain is a hard
 /// violation pushed to `issues`.
+/// The committed broker-grant log a `frontier` commits: Broker-role grants with `broker_seq >= 1` committed
+/// by that frontier, sorted ascending by broker_seq. Membership is the role TUPLE (NOT sig-gated — a broker
+/// under-signing a grant IS the suppression D6/M4 detect). `broker_id = None` takes ALL brokers (the D6
+/// single-broker transparency log); `Some(bid)` restricts to one broker's partition (the M4 federation
+/// per-broker log) — federation is the per-broker generalization of D6, so both derive the log identically
+/// here (one place to keep byte-aligned with the producer's grantLog) and diverge only in their head folding.
+fn committed_broker_log(
+    record_trust: &[RecordTrust],
+    records: &[CanonValue],
+    by_hash: &BTreeMap<String, usize>,
+    frontier: &[String],
+    broker_id: Option<&str>,
+) -> Vec<(i64, String)> {
+    let committed = committed_set(records, by_hash, frontier);
+    let mut log: Vec<(i64, String)> = record_trust
+        .iter()
+        .filter(|rt| {
+            rt.broker_role == BrokerRole::Broker.as_str()
+                && committed.contains(&rt.content_hash)
+                && match broker_id {
+                    None => true,
+                    // empty broker_id never matches a (non-empty) partition id — it is a smuggling signal the
+                    // caller flags separately, exactly as the prior broker_id_of(rt) filter did.
+                    Some(bid) => {
+                        ev_str(&records[rt.index], "grant_evidence", "broker_id")
+                            .filter(|b| !b.is_empty())
+                            .as_deref()
+                            == Some(bid)
+                    }
+                }
+        })
+        .filter_map(|rt| {
+            ev_int(&records[rt.index], "grant_evidence", "broker_seq")
+                .filter(|seq| *seq >= 1)
+                .map(|seq| (seq, rt.content_hash.clone()))
+        })
+        .collect();
+    log.sort_by_key(|(seq, _)| *seq);
+    log
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compute_broker_trust(
     cp_heads: &[(i64, bool, GrantHead, Vec<String>)],
@@ -2180,25 +2214,9 @@ fn compute_broker_trust(
     latest_cp_seq: i64,
     issues: &mut Vec<String>,
 ) -> String {
-    // re-derive the tuple-classified grant log (broker_seq >= 1, NOT sig-gated — under-signing is
-    // suppression) committed by an arbitrary checkpoint frontier, sorted by broker_seq.
-    let log_for = |frontier: &[String]| -> Vec<(i64, String)> {
-        let committed = committed_set(records, by_hash, frontier);
-        let mut log: Vec<(i64, String)> = record_trust
-            .iter()
-            .filter(|rt| {
-                rt.broker_role == BrokerRole::Broker.as_str()
-                    && committed.contains(&rt.content_hash)
-            })
-            .filter_map(|rt| {
-                ev_int(&records[rt.index], "grant_evidence", "broker_seq")
-                    .filter(|seq| *seq >= 1)
-                    .map(|seq| (seq, rt.content_hash.clone()))
-            })
-            .collect();
-        log.sort_by_key(|(seq, _)| *seq);
-        log
-    };
+    // the tuple-classified single-broker (D6) grant log committed by an arbitrary checkpoint frontier.
+    let log_for =
+        |frontier: &[String]| committed_broker_log(record_trust, records, by_hash, frontier, None);
 
     // D6 is active once there is ANY well-formed head, ANY broker_seq grant, or a PRESENT-but-malformed head
     // (a tampered D6 head is still a D6 signal — pre-D6 checkpoints never carry the field). With NO D6 signal
@@ -2416,26 +2434,10 @@ fn compute_federation_trust(
     let broker_id_of = |rt: &RecordTrust| -> Option<String> {
         ev_str(&records[rt.index], "grant_evidence", "broker_id").filter(|b| !b.is_empty())
     };
-    // The per-broker grant log committed by a frontier: Broker-role grants of THIS broker_id with broker_seq>=1,
-    // sorted by broker_seq (membership is the role tuple + broker_id, NOT sig-gated — under-signing IS suppression,
-    // matching the legacy D6 log).
-    let log_for = |frontier: &[String], bid: &str| -> Vec<(i64, String)> {
-        let committed = committed_set(records, by_hash, frontier);
-        let mut log: Vec<(i64, String)> = record_trust
-            .iter()
-            .filter(|rt| {
-                rt.broker_role == BrokerRole::Broker.as_str()
-                    && committed.contains(&rt.content_hash)
-                    && broker_id_of(rt).as_deref() == Some(bid)
-            })
-            .filter_map(|rt| {
-                ev_int(&records[rt.index], "grant_evidence", "broker_seq")
-                    .filter(|seq| *seq >= 1)
-                    .map(|seq| (seq, rt.content_hash.clone()))
-            })
-            .collect();
-        log.sort_by_key(|(seq, _)| *seq);
-        log
+    // The per-broker (M4) grant log committed by a frontier: the SAME derivation as the D6 single-broker log,
+    // restricted to THIS broker_id's partition (membership is the role tuple + broker_id).
+    let log_for = |frontier: &[String], bid: &str| {
+        committed_broker_log(record_trust, records, by_hash, frontier, Some(bid))
     };
 
     let full_committed = committed_set(records, by_hash, dag_heads);
