@@ -69,11 +69,12 @@ test("an unexpected (no sealed record) response is rejected", async () => {
 
 test("fetchTransport throws on a non-2xx HTTP status (surfacing the server error)", async () => {
   const realFetch = globalThis.fetch;
+  // cast via unknown: a minimal stub does not satisfy the full `typeof fetch` surface (e.g. `preconnect`).
   globalThis.fetch = (async () =>
     new Response(JSON.stringify({ error: "idempotency_key is required" }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
-    })) as typeof fetch;
+    })) as unknown as typeof fetch;
   try {
     const c = new Client("http://x", "p1"); // default fetchTransport
     await expect(c.record("s1", "a")).rejects.toThrow(FeirError);

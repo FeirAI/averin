@@ -126,6 +126,36 @@ jobs:
       - run: bun run test
       - run: bun run build
 
+  sdk:
+    name: typescript sdk (test + typecheck)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run typecheck
+
+  verifier:
+    name: "offline verifier (trust-root tests: NUL-truncation, supply-chain pin, accountability)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: oven-sh/setup-bun@v2
+      # build.sh builds the wasm + self-pins index.html/sidecar to THIS build (wasm32 bytes are host-specific,
+      # so the committed dev-host pin is re-derived here rather than asserted — see verifier/SUPPLY-CHAIN.md).
+      - name: build wasm + self-pin
+        run: ./verifier/build.sh
+      - name: verifier tests
+        working-directory: verifier
+        run: bun test
+
   wasm:
     name: wasm build (verifier skew gate — same core, byte-for-byte)
     runs-on: ubuntu-latest
