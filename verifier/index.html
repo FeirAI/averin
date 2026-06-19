@@ -35,6 +35,13 @@
       .mark.ok { color: var(--ok); } .mark.bad { color: var(--bad); }
       .issues { color: var(--bad); font-family: ui-monospace, monospace; font-size: 13px; white-space: pre-wrap; }
       .note { color: var(--mut); font-size: 13px; margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 12px; }
+      .adv { margin-top: 14px; }
+      .adv summary { color: var(--accent); cursor: pointer; font-size: 13px; }
+      .adv summary code, .adv .sub code { color: var(--accent); }
+      .sec { margin: 14px 0 4px; color: var(--mut); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+      .modes { display: flex; flex-wrap: wrap; gap: 8px; }
+      .mode { background: #0e1117; border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; font-family: ui-monospace, monospace; font-size: 12px; }
+      .mode b { color: var(--ink); } .mode.good b { color: var(--ok); } .mode.bad b { color: var(--bad); }
     </style>
   </head>
   <body>
@@ -52,6 +59,19 @@
         <button id="verify" disabled>Verify offline</button>
         <span id="status" class="sub" style="margin:0"></span>
       </div>
+
+      <details class="adv">
+        <summary>Pin trust roots (optional) — paste an <code>opts.json</code> of role-disjoint keys</summary>
+        <p class="sub" style="margin:8px 0">
+          Without pinned keys, a PASS proves <b>internal consistency under the bundle's own key claims</b>, not
+          authenticity. Paste the role-disjoint authority key sets you obtained <b>out of band</b>
+          (<code>broker_authority_keys</code>, <code>resource_authority_keys</code>, <code>tsa_keys</code>,
+          <code>attestation_keys</code>, <code>cosig_approver_keys</code>, <code>revocation_keys</code>,
+          <code>federated_broker_keys</code> — all <code>ed25519pub:</code> strings) to verify <b>authenticity</b>
+          and elevate the Tier-A/Tier-B accountability gates.
+        </p>
+        <textarea id="opts" placeholder='{"broker_authority_keys":["ed25519pub:…"],"resource_authority_keys":["ed25519pub:…"]}' style="height:120px"></textarea>
+      </details>
 
       <div id="out"></div>
     </div>
@@ -88,8 +108,20 @@
       $("verify").addEventListener("click", () => {
         const text = $("bundle").value.trim();
         if (!text) return;
+        const optsText = $("opts").value.trim();
         let report;
-        try { report = feir.verifyBundle(text); }
+        try {
+          // With pinned opts, verify AUTHENTICITY + the mode gates (verifyBundleWith); otherwise internal
+          // consistency only. Parse the opts here so a malformed paste is a clear error, not a silent downgrade.
+          if (optsText) {
+            let opts;
+            try { opts = JSON.parse(optsText); }
+            catch (e) { $("out").innerHTML = `<div class="panel"><span class="fail">pinned opts.json is not valid JSON: ${esc(String(e))}</span></div>`; return; }
+            report = feir.verifyBundleWith(text, opts);
+          } else {
+            report = feir.verifyBundle(text);
+          }
+        }
         catch (err) { $("out").innerHTML = `<div class="panel"><span class="fail">verify error: ${esc(String(err))}</span></div>`; return; }
         render(report);
       });
@@ -106,8 +138,33 @@
             ${t.notes && t.notes[0] ? `<span style="color:var(--bad)">${esc(t.notes[0])}</span>` : ""}</div>`;
         }).join("");
         const stat = (b, s) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`;
+
+        // Accountability is the LEVEL ABOVE integrity: who is answerable for the grants/uses, and whether the
+        // bundle is a complete account (the capstone). broker_trust reflects whether the ROLE keys were pinned
+        // (sequence_verified/gateway_enforced = pinned + elevated; the value itself is the honest signal).
+        const acct = `<div class="sec">accountability</div>
+          <div class="stats">
+            ${stat(esc(r.grant_accountability || "—"), `grants · ${r.grant_verified ?? 0}/${r.grant_total ?? 0} verified`)}
+            ${stat(`${r.uses_matched ?? 0}`, `uses matched · ${r.unmatched_pending ?? 0} pending · ${r.unmatched_violation ?? 0} violations`)}
+            ${stat(esc(r.action_completeness || "—"), `action completeness · resource ${esc(r.resource_trust || "—")}`)}
+            ${stat(esc(r.broker_trust || "—"), "broker trust")}
+          </div>`;
+
+        // Mode gates (ADR 0005 / Tier-B). Only shown when present; colored by whether the status blocks the
+        // capstone (stale/failed/unverified/revoked_present) or supports it (fresh/verified/satisfied/…).
+        const BAD = /fail|stale|unverified|revoked_present|broken|invalid|mismatch|violation/i;
+        const modes = [
+          ["taxonomy", r.taxonomy_status], ["attestation", r.attestation_status],
+          ["cosig", r.cosig_status], ["delegation", r.delegation_status],
+          ["revocation", r.revocation_status], ["revocation/merkle", r.revocation_merkle_status],
+          ["introspection", r.introspection_status], ["federation", r.federation_status],
+        ].filter(([, v]) => v && v !== "absent" && v !== "unevaluated")
+          .map(([label, v]) => `<div class="mode ${BAD.test(v) ? "bad" : "good"}">${label}: <b>${esc(v)}</b></div>`)
+          .join("");
+
         $("out").innerHTML = `<div class="panel">
           <div class="verdict ${r.ok ? "pass" : "fail"}">${r.ok ? "PASS" : "FAIL"}</div>
+          <div class="sec">integrity &amp; provenance</div>
           <div class="stats">
             ${stat(`${r.records_proven}/${r.records_total}`, "records integrity-proven")}
             ${stat(r.dag_ok ? "valid" : "INVALID", `DAG · ${r.dag_heads} heads`)}
@@ -115,11 +172,13 @@
             ${stat(r.chain_ok ? "ok" : "BROKEN", "checkpoint chain")}
             ${stat(r.keys_externally_pinned ? "pinned" : "bundle-supplied", "trust root")}
           </div>
+          ${acct}
+          ${modes ? `<div class="sec">modes</div><div class="modes">${modes}</div>` : ""}
           ${recs}
           ${r.first_broken_link ? `<div class="issues">first broken link:\n${esc(r.first_broken_link)}</div>` : ""}
           <div class="note">
-            ${r.keys_externally_pinned ? "" : "Keys came from the bundle (not externally pinned): this proves internal consistency under the bundle's own key claims, not authenticity against an out-of-band trust root.<br/>"}
-            A PASS proves <b>integrity &amp; provenance</b> (Level 1) — not that the records are a <b>complete</b> account of everything the agent did (Level 3).
+            ${r.keys_externally_pinned ? "Record signing keys were externally pinned: record-level <b>authenticity</b> is proven against your trust roots." : "Record signing keys were NOT pinned: record integrity is proven under the bundle's own key claims, not authenticity."} Grant/use accountability elevates separately when you pin <code>broker_authority_keys</code> / <code>resource_authority_keys</code> — the <code>broker trust</code> value above is the signal (<code>sequence_verified</code> = pinned &amp; elevated; <code>sequence_consistent_export</code> = unpinned). Paste an <b>opts.json</b> above to pin trust roots.<br/>
+            A PASS proves <b>integrity &amp; provenance</b> (Level 1) — the <b>accountability</b> row is the higher claim (who is answerable; whether the account is <b>complete</b>). <code>action_completeness</code> is the capstone; <code>not_claimed</code> is normal and not a failure.
           </div>
         </div>`;
       }

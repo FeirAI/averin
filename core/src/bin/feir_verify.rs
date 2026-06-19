@@ -69,7 +69,13 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         },
     };
 
-    let gs = |k: &str| report.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let gs = |k: &str| {
+        report
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     let gi = |k: &str| report.get(k).and_then(|v| v.as_int()).unwrap_or(0);
     let gb = |k: &str| matches!(report.get(k), Some(CanonValue::Bool(true)));
 
@@ -82,24 +88,46 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
     if !bd.is_empty() {
         println!("  bundle:       {bd}");
     }
-    println!("  records:      {}/{} integrity-proven", gi("records_proven"), gi("records_total"));
+    println!(
+        "  records:      {}/{} integrity-proven",
+        gi("records_proven"),
+        gi("records_total")
+    );
     if !gb("keys_externally_pinned") {
-        println!("  keys:         from the bundle (NOT externally pinned) — proves internal consistency");
+        println!(
+            "  keys:         from the bundle (NOT externally pinned) — proves internal consistency"
+        );
         println!("                under the bundle's own key claims, not authenticity. Pass an opts.json to PIN");
-        println!("                the role-disjoint authority keys (see docs/operator-verification.md).");
+        println!(
+            "                the role-disjoint authority keys (see docs/operator-verification.md)."
+        );
     }
-    println!("  DAG:          {} ({} heads)", if gb("dag_ok") { "valid" } else { "INVALID" }, gi("dag_heads"));
+    println!(
+        "  DAG:          {} ({} heads)",
+        if gb("dag_ok") { "valid" } else { "INVALID" },
+        gi("dag_heads")
+    );
     println!(
         "  checkpoints:  {}/{} verified, {} anchored, chain {}",
-        gi("checkpoints_verified"), gi("checkpoints_total"), gi("checkpoints_anchored"),
+        gi("checkpoints_verified"),
+        gi("checkpoints_total"),
+        gi("checkpoints_anchored"),
         if gb("chain_ok") { "ok" } else { "BROKEN" }
     );
     // Tier-B / ADR-0005 mode gates (only meaningful when the relevant key set was pinned via opts.json).
-    println!("  grant accountability: {} ({} grants, {} verified)", gs("grant_accountability"), gi("grant_total"), gi("grant_verified"));
+    println!(
+        "  grant accountability: {} ({} grants, {} verified)",
+        gs("grant_accountability"),
+        gi("grant_total"),
+        gi("grant_verified")
+    );
     println!("  broker_trust:         {}", gs("broker_trust"));
     println!(
         "  uses:                 {} matched / {} pop-reverified ({} unmatched, {} pending)",
-        gi("uses_matched"), gi("uses_pop_reverified"), gi("unmatched_violation"), gi("unmatched_pending")
+        gi("uses_matched"),
+        gi("uses_pop_reverified"),
+        gi("unmatched_violation"),
+        gi("unmatched_pending")
     );
     for (label, key) in [
         ("taxonomy", "taxonomy_status"),
@@ -124,15 +152,29 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
             gi("brokers_seq_verified"), brokers_total, gi("cross_broker_suppression"), gi("transitive_grants")
         );
     } else if gi("transitive_grants") > 0 {
-        println!("  transitive_grants:    {} (elevated via cross_broker_cert)", gi("transitive_grants"));
+        println!(
+            "  transitive_grants:    {} (elevated via cross_broker_cert)",
+            gi("transitive_grants")
+        );
     }
     if gi("revoked_uses_blocked") > 0 || gi("revoked_grants_matched") > 0 {
-        println!("  revocation blocks:    {} use(s) blocked, {} grant(s) matched on the list", gi("revoked_uses_blocked"), gi("revoked_grants_matched"));
+        println!(
+            "  revocation blocks:    {} use(s) blocked, {} grant(s) matched on the list",
+            gi("revoked_uses_blocked"),
+            gi("revoked_grants_matched")
+        );
     }
     if gi("revocation_nonmembership_verified") > 0 {
-        println!("  merkle non-revocation: {} grant(s) proven NOT revoked", gi("revocation_nonmembership_verified"));
+        println!(
+            "  merkle non-revocation: {} grant(s) proven NOT revoked",
+            gi("revocation_nonmembership_verified")
+        );
     }
-    println!("  action_completeness:  {}  (resource_trust: {})", gs("action_completeness"), gs("resource_trust"));
+    println!(
+        "  action_completeness:  {}  (resource_trust: {})",
+        gs("action_completeness"),
+        gs("resource_trust")
+    );
     if let Some(issues) = report.get("issues").and_then(|v| v.as_array()) {
         for (i, iss) in issues.iter().enumerate() {
             if i >= 8 {
@@ -146,8 +188,21 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
     }
     println!();
     if gb("ok") {
-        println!("RESULT: PASS — every record sealed, linked, and checkpoint-consistent.");
-        println!("NOTE: a `*_complete` action_completeness is bounded by resource_trust:assumed_truthful (MF1).");
+        // PASS is the INTEGRITY verdict (records sealed/linked, checkpoint chain consistent, no hard violation).
+        // It is NOT the accountability capstone — echo that level on the same line so a reader never mistakes a
+        // PASS for "fully accountable" when no role keys were pinned and the capstone is `not_claimed`.
+        println!(
+            "RESULT: PASS (integrity) — every record sealed, linked, and checkpoint-consistent."
+        );
+        println!(
+            "        capstone: action_completeness={} · grant_accountability={} · broker_trust={}",
+            gs("action_completeness"),
+            gs("grant_accountability"),
+            gs("broker_trust")
+        );
+        println!("NOTE: PASS is integrity-level; the capstone above is the higher claim. `not_claimed`/`incomplete`");
+        println!("      are normal when role keys were not pinned (pass an opts.json to elevate). A `*_complete`");
+        println!("      capstone is itself bounded by resource_trust:assumed_truthful (MF1).");
         ExitCode::SUCCESS
     } else {
         println!("RESULT: FAIL — see issues above.");
