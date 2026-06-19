@@ -84,17 +84,28 @@ pub fn sign_evidence(
 /// out-of-band (a policy engine / approval service). Never elevates to `Verified` without a
 /// signature that checks out.
 pub fn verify_authority(record: &CanonValue, trusted: &[VerifyingKey]) -> AuthorityTrust {
+    verify_authority_with_key(record, trusted).0
+}
+
+/// Like [`verify_authority`], but also returns WHICH trusted key verified the evidence signature (when the
+/// result is `Verified`). The verifier uses the key to look up its ROLE-key rotation lifecycle (ADR 0006 §1):
+/// elevation under a compromised/rotated authority key is withdrawn for evidence not anchored before the
+/// status change. `None` for every non-`Verified` outcome.
+pub fn verify_authority_with_key(
+    record: &CanonValue,
+    trusted: &[VerifyingKey],
+) -> (AuthorityTrust, Option<VerifyingKey>) {
     let authority = match record.get("authority") {
         Some(a) => a,
-        None => return AuthorityTrust::None,
+        None => return (AuthorityTrust::None, None),
     };
     let source = authority
         .get("source")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     match source {
-        "" => AuthorityTrust::None,
-        "caller_declared" => AuthorityTrust::Declared,
+        "" => (AuthorityTrust::None, None),
+        "caller_declared" => (AuthorityTrust::Declared, None),
         "policy_engine_signed" | "human_signed" | "gateway_enforced" => {
             let record_id = record
                 .get("record_id")
@@ -110,32 +121,32 @@ pub fn verify_authority(record: &CanonValue, trusted: &[VerifyingKey]) -> Author
             let evidence_sig = authority.get("evidence_sig").and_then(|v| v.as_str());
             let (eh, es) = match (evidence_hash, evidence_sig) {
                 (Some(h), Some(s)) => (h, s),
-                _ => return AuthorityTrust::Failed, // claims verified but has no evidence
+                _ => return (AuthorityTrust::Failed, None), // claims verified but has no evidence
             };
             if parse_sha256(eh).is_none() || record_id.is_empty() || project_id.is_empty() {
-                return AuthorityTrust::Failed; // malformed evidence_hash or unbindable record/project
+                return (AuthorityTrust::Failed, None); // malformed evidence_hash or unbindable record/project
             }
             let raw = match es
                 .strip_prefix("ed25519:")
                 .and_then(|s| b64::decode_fixed::<64>(s).ok())
             {
                 Some(r) => r,
-                None => return AuthorityTrust::Failed,
+                None => return (AuthorityTrust::Failed, None),
             };
             // honest: with no authority keys configured we cannot check the signature.
             if trusted.is_empty() {
-                return AuthorityTrust::Unverifiable;
+                return (AuthorityTrust::Unverifiable, None);
             }
             let sig = Signature::from_bytes(&raw);
             let pre = preimage(source, project_id, record_id, eh);
             for vk in trusted {
                 if vk.verify_strict(&pre, &sig).is_ok() {
-                    return AuthorityTrust::Verified;
+                    return (AuthorityTrust::Verified, Some(*vk));
                 }
             }
-            AuthorityTrust::Failed
+            (AuthorityTrust::Failed, None)
         }
-        _ => AuthorityTrust::Declared, // unknown source: treat as declared, never verified
+        _ => (AuthorityTrust::Declared, None), // unknown source: treat as declared, never verified
     }
 }
 

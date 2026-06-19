@@ -84,6 +84,47 @@ It is monotone: every bundle that verifies today still verifies (bare-string key
 the only new outcomes are *down*grades of post-compromise elevations. It reuses the audited signing-key
 status machinery rather than adding a parallel one.
 
+### 1.6 Implemented — scope, design, and the deferred roles
+
+Shipped for the **authority-elevation** roles (the highest-value: broker, resource, per-broker federated, and
+the generic `authority_keys`), which all share ONE gating point, so a single implementation covers them:
+
+- **Data model:** `VerifyOptions.role_key_status: BTreeMap<[u8;32], RoleKeyStatus{status, status_changed_at}>`,
+  keyed by raw key bytes. A key absent from the map is `active`. The role-key vectors stay `Vec<VerifyingKey>`
+  (a parallel status map, NOT a `Vec<RoleKey>`) — this leaves the membership-based elevation + the
+  R2-disjointness matrix completely unchanged, the least-invasive faithful realization.
+- **Wire format:** each authority-role array element is a bare `ed25519pub:` string (active) OR
+  `{"key","status","status_changed_at"}` (`parse_one_role_key`). Fail-closed: an UNKNOWN status is an error
+  (never silently active), and the freshness-dated roles (tsa/attestation/cosig/revocation/taxonomy) stay
+  string-only, so a rotation directive on them is a parse error — no silent false comfort about a role that is
+  not yet gated.
+- **The gate** (`verify.rs` pass-2): `verify_authority_with_key` returns WHICH pinned key verified the
+  authority evidence; pass-1 stores its `role_key_status` in `Pending.authority_role_status`; pass-2 withdraws
+  the elevation (`authority -> Failed`) for a non-active role key UNLESS the record is
+  `anchored_before(content_hash, status_changed_at)` — reusing the exact signing-key helper. A used withdrawn
+  grant then fails to match (→ violation, !ok); an unused one drops to unaccountable. The record's own
+  integrity/signature trust is independent (a real record stays integrity-proven; only its AUTHORITY is gone).
+
+**Deferred (documented, not silently unsupported):** the freshness-dated roles. Their "anchored time of the
+evidence" is NOT the record's own commit time — a revocation list / deployment attestation / TSA token is dated
+against the *latest-anchored* time, and the TSA key is itself the time source (gating it is circular). Each
+needs its own dating rule, so they warrant a separate pass; until then their object/rotation form is rejected.
+
+**Transitive (cross_broker_cert) elevation — gated.** The first 5-lens review caught a real fail-open here: a
+grant elevated transitively via a `cross_broker_cert` keyed the gate on the (unpinned) cert SUBJECT, so a
+forged grant vouched by a COMPROMISED pinned ISSUER key still reached `gateway_enforced`. Closed:
+`cross_broker_cert_key` now returns `(subject, issuer)`, and the gate collects the rotation lifecycle of EVERY
+pinned key the elevation depends on — the verifying authority/subject key AND the cert issuer key — withdrawing
+if ANY of them postdates the record's anchor. A cert the issuer signed after its own compromise no longer
+launders a grant. (The subject key, if an auditor also pins it, is gated too; an entirely unpinned subject
+carries no status by construction — there is nothing to date it against.) Parser hardening from the same
+review: an UNKNOWN object field (e.g. a typo'd `statuss`) is now a parse error, so a mistyped directive can
+never silently drop to `active`.
+
+Two adversarial-review rounds gated this change: a 5-lens pass (fail-open hunter / gate-correctness /
+parser-failclosed / authoritative-pinning / consistency-regression) that surfaced the issuer fail-open + the
+typo'd-field drop + a key-specificity test gap, and a focused re-verification of the fix.
+
 ---
 
 ## 2. `verify_bundle_with` structure (2091 lines → phases)

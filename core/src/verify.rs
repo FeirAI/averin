@@ -14,7 +14,7 @@
 //! `≤ status_changed_at` transitively commits it (RCP §10.2, threat #9).
 
 use crate::anchor::verify_anchor;
-use crate::authority::{verify_authority, AuthorityTrust};
+use crate::authority::{verify_authority_with_key, AuthorityTrust};
 use crate::canon::CanonValue;
 use crate::checkpoint::{validate_chain, verify_checkpoint_sealed};
 use crate::dag;
@@ -425,8 +425,28 @@ impl From<VerifyingKey> for TrustedKey {
     }
 }
 
+/// The lifecycle of a pinned ROLE key (the keys that ELEVATE grants/uses — broker/resource/federated/generic
+/// authority), generalizing [`TrustedKey`]'s status to those keys (ADR 0006 §1). Absent ⇒ `active`. A
+/// non-active status WITHDRAWS authority elevation for any grant/use NOT transitively committed by a verified
+/// anchor at or before `status_changed_at` — so a grant signed by a compromised broker key after the
+/// compromise no longer reaches `gateway_enforced` (a use of it then fails to match → violation). Like
+/// `TrustedKey`, these values are AUTHORITATIVE (auditor-supplied, out of band) and override any bundle
+/// self-assertion. Statuses other than `active` that trigger the withdrawal: `rotated`, `compromised`,
+/// `revoked`.
+#[derive(Debug, Clone, Default)]
+pub struct RoleKeyStatus {
+    pub status: String,
+    pub status_changed_at: Option<String>,
+}
+
 #[derive(Default)]
 pub struct VerifyOptions {
+    /// ADR 0006 §1 — out-of-band lifecycle for the authority-elevation ROLE keys, keyed by raw 32-byte public
+    /// key. A key absent from this map is `active`. Consulted ONLY for the keys that elevate authority via
+    /// `verify_authority` (broker/resource/federated/generic `authority_keys`); the freshness-dated roles
+    /// (tsa/attestation/cosig/revocation/taxonomy) are not yet rotation-gated, so the JSON parser REJECTS a
+    /// rotation directive on them rather than silently ignoring it.
+    pub role_key_status: BTreeMap<[u8; 32], RoleKeyStatus>,
     /// If `Some`, a record is only `IntegrityProven` when its resolved key is in this set. When a
     /// pinned key carries `status`/`status_changed_at`, those authoritative values override the
     /// bundle's self-asserted claims (so an attacker cannot future-date a compromise to upgrade).
@@ -524,6 +544,11 @@ struct Pending {
     eff_status: String,
     status_changed_at: Option<String>,
     authority: AuthorityTrust,
+    /// ADR 0006 §1: the NON-ACTIVE rotation lifecycles of every pinned key this record's authority elevation
+    /// depends on — the verifying authority/subject key AND (transitive) the cross_broker_cert issuer key.
+    /// Resolved in pass-1 (the keys are known there); the anchored-before withdrawal is GATED in pass-2 where
+    /// the anchored set is known. Empty ⇒ every involved key is active (or authority not Verified).
+    authority_role_statuses: Vec<RoleKeyStatus>,
     broker_role: BrokerRole,
     /// M4 (ADR 0005): this grant's authority verified ONLY via a cross_broker_cert (the subject broker was not
     /// directly pinned). Counted for observability; the grant is otherwise treated as any verified broker grant.
@@ -1185,18 +1210,24 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
     // Parse pinned keys FAIL-CLOSED: any malformed entry is an error, never a silent drop — a caller
     // who supplied keys must not be downgraded to unpinned verification (signing keys) or get a
     // confusing grant_verified:0 (authority keys) because a key was pasted in the wrong encoding.
-    let authority = match parse_pubkeys(&opts_val, "authority_keys") {
+    // ADR 0006 §1: the authority-elevation roles accept a string-OR-object rotation form; their lifecycle is
+    // collected here (keyed by raw key bytes) and consulted at the pass-2 elevation gate. The freshness-dated
+    // roles below stay string-only via parse_pubkeys, so a rotation directive on them is a clear parse error.
+    let mut role_key_status: BTreeMap<[u8; 32], RoleKeyStatus> = BTreeMap::new();
+    let authority = match parse_role_pubkeys(&opts_val, "authority_keys", &mut role_key_status) {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
-    let broker_authority = match parse_pubkeys(&opts_val, "broker_authority_keys") {
-        Ok(k) => k,
-        Err(e) => return error_report(&e),
-    };
-    let resource_authority = match parse_pubkeys(&opts_val, "resource_authority_keys") {
-        Ok(k) => k,
-        Err(e) => return error_report(&e),
-    };
+    let broker_authority =
+        match parse_role_pubkeys(&opts_val, "broker_authority_keys", &mut role_key_status) {
+            Ok(k) => k,
+            Err(e) => return error_report(&e),
+        };
+    let resource_authority =
+        match parse_role_pubkeys(&opts_val, "resource_authority_keys", &mut role_key_status) {
+            Ok(k) => k,
+            Err(e) => return error_report(&e),
+        };
     let taxonomy_keys = match parse_pubkeys(&opts_val, "taxonomy_keys") {
         Ok(k) => k,
         Err(e) => return error_report(&e),
@@ -1247,15 +1278,17 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
     };
     // M4 (ADR 0005): optional per-`broker_id` authority key map, so the JSON/FFI path (the Go server + any
     // external auditor) can pin per-broker federation authority, not just the direct Rust API.
-    let federated_broker_keys = match parse_pubkey_map(&opts_val, "federated_broker_keys") {
-        Ok(m) => m,
-        Err(e) => return error_report(&e),
-    };
+    let federated_broker_keys =
+        match parse_pubkey_map(&opts_val, "federated_broker_keys", &mut role_key_status) {
+            Ok(m) => m,
+            Err(e) => return error_report(&e),
+        };
     let mut opts = VerifyOptions {
         trusted_authority_keys: authority,
         broker_authority_keys: broker_authority,
         resource_authority_keys: resource_authority,
         federated_broker_keys,
+        role_key_status,
         taxonomy: opts_val.get("taxonomy").cloned(),
         taxonomy_keys,
         taxonomy_digest,
@@ -1295,12 +1328,106 @@ fn parse_pubkeys(opts: &CanonValue, key: &str) -> Result<Vec<VerifyingKey>, Stri
     Ok(out)
 }
 
+/// Parse ONE authority-elevation role-key element (ADR 0006 §1 rotation): an `ed25519pub:` string (status
+/// `active`) OR an object `{"key":"ed25519pub:…","status":"compromised"|"rotated"|"revoked"|"active",
+/// "status_changed_at":"…"}`. `ctx` is the error-location prefix. A non-active status is recorded in `status`
+/// keyed by the raw 32-byte key. Fail-closed: a malformed key, an UNKNOWN status (NEVER silently read as
+/// active), or a non-string field is an Err.
+fn parse_one_role_key(
+    v: &CanonValue,
+    ctx: &str,
+    status: &mut BTreeMap<[u8; 32], RoleKeyStatus>,
+) -> Result<VerifyingKey, String> {
+    if let Some(s) = v.as_str() {
+        return decode_pubkey(s).map_err(|e| format!("{ctx} is not a valid ed25519pub key: {e}"));
+    }
+    let obj = match v.as_object() {
+        Some(o) => o,
+        None => {
+            return Err(format!(
+                "{ctx} must be an ed25519pub: string or a {{key,status,status_changed_at}} object"
+            ))
+        }
+    };
+    // Fail-closed on an UNKNOWN/misspelled field (e.g. "statuss"): silently dropping it would lose the
+    // auditor's compromise pin (the key would read as active). Only these three keys are allowed.
+    for (k, _) in obj {
+        if !matches!(k.as_str(), "key" | "status" | "status_changed_at") {
+            return Err(format!(
+                "{ctx} has unknown field {k:?} (allowed: key, status, status_changed_at)"
+            ));
+        }
+    }
+    let ks = v
+        .get("key")
+        .and_then(|k| k.as_str())
+        .ok_or_else(|| format!("{ctx}.key must be an ed25519pub: string"))?;
+    let vk =
+        decode_pubkey(ks).map_err(|e| format!("{ctx}.key is not a valid ed25519pub key: {e}"))?;
+    let st = match v.get("status") {
+        None | Some(CanonValue::Null) => "active".to_string(),
+        Some(sv) => sv
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| format!("{ctx}.status must be a string"))?,
+    };
+    if !matches!(
+        st.as_str(),
+        "active" | "rotated" | "compromised" | "revoked"
+    ) {
+        return Err(format!(
+            "{ctx}.status {st:?} is not one of active|rotated|compromised|revoked"
+        ));
+    }
+    let changed = match v.get("status_changed_at") {
+        None | Some(CanonValue::Null) => None,
+        Some(cv) => Some(
+            cv.as_str()
+                .map(String::from)
+                .ok_or_else(|| format!("{ctx}.status_changed_at must be a string"))?,
+        ),
+    };
+    // Only a NON-active status needs recording; an explicit "active" entry is the same as a bare key.
+    if st != "active" {
+        status.insert(
+            vk.to_bytes(),
+            RoleKeyStatus {
+                status: st,
+                status_changed_at: changed,
+            },
+        );
+    }
+    Ok(vk)
+}
+
+/// Parse an AUTHORITY-ELEVATION role-key array (broker/resource/generic authority), each element via
+/// [`parse_one_role_key`]. Returns the bare key vector (so the existing membership-based elevation is
+/// unchanged) and populates the rotation lifecycle in `status` out of band.
+fn parse_role_pubkeys(
+    opts: &CanonValue,
+    key: &str,
+    status: &mut BTreeMap<[u8; 32], RoleKeyStatus>,
+) -> Result<Vec<VerifyingKey>, String> {
+    let arr = match opts.get(key) {
+        None | Some(CanonValue::Null) => return Ok(Vec::new()),
+        Some(v) => v.as_array().ok_or_else(|| {
+            format!("{key} must be an array of ed25519pub: strings or {{key,status,status_changed_at}} objects")
+        })?,
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        out.push(parse_one_role_key(v, &format!("{key}[{i}]"), status)?);
+    }
+    Ok(out)
+}
+
 /// M4 (ADR 0005): parse an optional MAP `{<broker_id>: [ed25519pub: …]}` (per-broker authority key sets).
 /// Absent ⇒ empty; present-but-malformed (not an object, or any value not an array of valid keys) ⇒ Err
 /// (fail-closed). An empty `broker_id` key is rejected (it would collide with the non-federated default).
 fn parse_pubkey_map(
     opts: &CanonValue,
     key: &str,
+    status: &mut BTreeMap<[u8; 32], RoleKeyStatus>,
 ) -> Result<BTreeMap<String, Vec<VerifyingKey>>, String> {
     let obj = match opts.get(key) {
         None | Some(CanonValue::Null) => return Ok(BTreeMap::new()),
@@ -1318,12 +1445,12 @@ fn parse_pubkey_map(
             .ok_or_else(|| format!("{key}[{bid}] must be an array of ed25519pub: strings"))?;
         let mut keys = Vec::with_capacity(arr.len());
         for (i, e) in arr.iter().enumerate() {
-            let s = e
-                .as_str()
-                .ok_or_else(|| format!("{key}[{bid}][{i}] must be a string"))?;
-            let vk = decode_pubkey(s)
-                .map_err(|err| format!("{key}[{bid}][{i}] is not a valid ed25519pub key: {err}"))?;
-            keys.push(vk);
+            // ADR 0006 §1: per-broker federated authority keys carry the same string-or-object rotation form.
+            keys.push(parse_one_role_key(
+                e,
+                &format!("{key}[{bid}][{i}]"),
+                status,
+            )?);
         }
         out.insert(bid.clone(), keys);
     }
@@ -1986,7 +2113,14 @@ pub fn cnf_kid(cnf_pub: &VerifyingKey) -> String {
 /// the grant's own `issued_at`. Returning the subject key does NOT by itself trust the grant: the caller still
 /// runs `verify_authority` under it, so a valid cert + a grant NOT signed by the vouched key still fails to
 /// elevate (the cert binds `subject_kid = cnf_kid(subject_pubkey)`, closing key substitution).
-fn cross_broker_cert_key(rec: &CanonValue, opts: &VerifyOptions) -> Option<VerifyingKey> {
+/// Returns `(subject_vk, issuer_vk)` when a valid cross_broker_cert vouches for the grant's subject: the
+/// SUBJECT key elevates the grant, and the ISSUER key is the PINNED federated key that signed the cert — the
+/// caller must gate the transitive elevation on the ISSUER's rotation lifecycle (a cert signed after the
+/// issuer's own compromise is forged; ADR 0006 §1).
+fn cross_broker_cert_key(
+    rec: &CanonValue,
+    opts: &VerifyOptions,
+) -> Option<(VerifyingKey, VerifyingKey)> {
     let cert = rec
         .get("extensions")?
         .get("broker")?
@@ -2049,15 +2183,13 @@ fn cross_broker_cert_key(rec: &CanonValue, opts: &VerifyOptions) -> Option<Verif
     let sig_bytes = crate::b64::decode_fixed::<64>(sig_b64).ok()?;
     let sig = Signature::from_bytes(&sig_bytes);
     // The cert must be signed by ONE of the issuer's PINNED keys; an unpinned issuer yields no candidates → None.
+    // Capture WHICH issuer key verified it, so the caller can gate the transitive elevation on that pinned
+    // issuer key's rotation lifecycle (ADR 0006 §1 — a cert the issuer signed after its own compromise).
     let issuer_keys = opts.federated_broker_keys.get(issuer)?;
-    if issuer_keys
+    let issuer_vk = issuer_keys
         .iter()
-        .any(|vk| vk.verify_strict(&challenge, &sig).is_ok())
-    {
-        Some(subject_vk)
-    } else {
-        None
-    }
+        .find(|vk| vk.verify_strict(&challenge, &sig).is_ok())?;
+    Some((subject_vk, *issuer_vk))
 }
 
 /// Offline PoP re-verification (ADR 0004 D2). Returns `Ok(true)` if the receipt carried the agent
@@ -3645,7 +3777,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // still elevate IF it carries a valid cross_broker_cert from a PINNED issuer broker vouching for the
         // subject's key. Computed here (owned) so the borrow below can fall back to it. Only attempted for an
         // unpinned subject under a non-empty `federated_broker_keys`; a directly-pinned broker never reaches it.
-        let cross_cert_key: Option<VerifyingKey> =
+        // `(subject_vk, issuer_vk)`: the subject elevates the grant; the issuer is the pinned federated key that
+        // signed the vouching cert (gated for rotation below).
+        let cross_cert_pair: Option<(VerifyingKey, VerifyingKey)> =
             if broker_role == BrokerRole::Broker && !opts.federated_broker_keys.is_empty() {
                 match ev_str(rec, "grant_evidence", "broker_id").filter(|b| !b.is_empty()) {
                     Some(bid) if !opts.federated_broker_keys.contains_key(&bid) => {
@@ -3656,8 +3790,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             } else {
                 None
             };
-        let cross_cert_slice: &[VerifyingKey] = match &cross_cert_key {
-            Some(vk) => std::slice::from_ref(vk),
+        let cross_cert_slice: &[VerifyingKey] = match &cross_cert_pair {
+            Some((subject, _issuer)) => std::slice::from_ref(subject),
             None => &[],
         };
         let auth_keys: &[VerifyingKey] = match broker_role {
@@ -3682,10 +3816,22 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             BrokerRole::Resource => &opts.resource_authority_keys,
             BrokerRole::None => &opts.trusted_authority_keys,
         };
-        let authority = verify_authority(rec, auth_keys);
+        let (authority, authority_vk) = verify_authority_with_key(rec, auth_keys);
+        // ADR 0006 §1: the rotation lifecycle of EVERY pinned key this elevation depends on (the non-active
+        // ones), looked up here (the verifying key is known) and gated by anchored-before in pass-2. Two keys:
+        //   1. the verifying AUTHORITY key (the direct elevating key, or — transitive — the cert SUBJECT key,
+        //      which an auditor MAY also pin), and
+        //   2. for a transitive (cross_broker_cert) elevation, the cert ISSUER key — a cert the issuer signed
+        //      AFTER its own compromise is forged, so the issuer's lifecycle must gate the transitive grant too
+        //      (else a stolen issuer key launders a forged grant to gateway_enforced — the fail-open this closes).
+        let authority_role_statuses: Vec<RoleKeyStatus> = authority_vk
+            .into_iter()
+            .chain(cross_cert_pair.map(|(_subject, issuer)| issuer))
+            .filter_map(|vk| opts.role_key_status.get(&vk.to_bytes()).cloned())
+            .collect();
         // A grant verified ONLY because a cross_broker_cert vouched for its (unpinned) subject key is `transitive`.
         let transitive_authority =
-            cross_cert_key.is_some() && authority == AuthorityTrust::Verified;
+            cross_cert_pair.is_some() && authority == AuthorityTrust::Verified;
         if authority == AuthorityTrust::Failed {
             notes.push(format!(
                 "authority claims a verified source but its evidence_sig did not verify under a trusted {} authority key",
@@ -3715,6 +3861,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             eff_status,
             status_changed_at,
             authority,
+            authority_role_statuses,
             broker_role,
             transitive_authority,
             notes,
@@ -3960,6 +4107,37 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         } else {
             TrustLevel::Untrusted
         };
+
+        // ADR 0006 §1 — role-key rotation. A grant/use whose authority evidence verified under a COMPROMISED /
+        // ROTATED / REVOKED role key keeps its `gateway_enforced` elevation ONLY if the record was transitively
+        // committed by a verified anchor AT OR BEFORE the role key's status_changed_at — i.e. it predates the
+        // compromise. Otherwise the elevation is WITHDRAWN (authority -> Failed): the grant no longer reaches
+        // Tier-A, so any USE of it fails to match (a violation, -> !ok) while an unused grant simply drops to
+        // unaccountable. The status is AUTHORITATIVE (auditor-pinned, out of band) — the bundle cannot
+        // self-assert it. A non-active status whose `status_changed_at` is absent or non-canonical withdraws
+        // UNCONDITIONALLY (fail-closed: an undatable compromise cannot be proven to predate any record). The
+        // record's own integrity/signature trust (above) is independent — a real record signed by a good
+        // signing key stays integrity-proven; only its authority ELEVATION is withdrawn.
+        if p.authority == AuthorityTrust::Verified {
+            // Withdraw if ANY involved pinned key (direct authority/subject OR transitive cert issuer) is
+            // non-active and this record does NOT predate that key's status change. The list holds only
+            // non-active statuses, so each entry is a real gate.
+            for rks in &p.authority_role_statuses {
+                let predates = rks
+                    .status_changed_at
+                    .as_deref()
+                    .is_some_and(|c| anchored_before(&p.content_hash, c));
+                if !predates {
+                    p.authority = AuthorityTrust::Failed;
+                    p.transitive_authority = false;
+                    p.notes.push(format!(
+                        "an authority role key it depends on is {}: this grant/use is NOT anchored before that role-key status change — elevation withdrawn (ADR 0006 role-key rotation)",
+                        rks.status
+                    ));
+                    break;
+                }
+            }
+        }
 
         if trust == TrustLevel::IntegrityProven {
             records_proven += 1;

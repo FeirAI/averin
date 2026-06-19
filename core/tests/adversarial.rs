@@ -14,7 +14,8 @@ use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use feir_decision_core::verify::{
     cnf_kid, cosig_approval_challenge, delegation_hop_challenge, federation_cert_challenge,
     introspection_transcript_challenge, report_to_json, verify_bundle, verify_bundle_with,
-    ActionCompleteness, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
+    verify_bundle_with_json, ActionCompleteness, RoleKeyStatus, TrustLevel, TrustedKey,
+    VerifyOptions, VerifyReport,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -4183,6 +4184,247 @@ fn d6_clean(rec: &SigningKey, tsa: &SigningKey) -> CanonValue {
     let head = grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &gh)]));
     let cp = checkpoint_with_head(rec, std::slice::from_ref(&gh), 1, head, Some(tsa));
     tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp])
+}
+
+// ===== ADR 0006 §1 — role-key compromise/rotation (authority-elevation roles) =====
+// d6_clean anchors its grant via checkpoint_with_head at 2026-06-15T10:10:01.000Z; the rotation gate is
+// `anchored at or before status_changed_at` (predates the compromise) == keep elevation, else withdraw.
+
+/// Pin ONE authority-elevation key's rotation lifecycle (ADR 0006 §1).
+fn role_status(
+    vk: VerifyingKey,
+    status: &str,
+    changed_at: Option<&str>,
+) -> std::collections::BTreeMap<[u8; 32], RoleKeyStatus> {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert(
+        vk.to_bytes(),
+        RoleKeyStatus {
+            status: status.to_string(),
+            status_changed_at: changed_at.map(String::from),
+        },
+    );
+    m
+}
+
+#[test]
+fn role_key_compromised_after_grant_anchor_keeps_elevation() {
+    // The broker authority key is (authoritatively) compromised at 10:20, but the grant was anchored at
+    // 10:10:01 — BEFORE — so the key was good when it signed: the grant KEEPS gateway_enforced.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let bundle = d6_clean(&rec, &tsa);
+    let mut opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    opts.role_key_status = role_status(
+        rec.verifying_key(),
+        "compromised",
+        Some("2026-06-15T10:20:00.000Z"),
+    );
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(
+        r.ok,
+        "anchored-before-compromise grant must stay elevated: {:?}",
+        r.issues
+    );
+    assert_eq!(
+        r.grant_verified, 1,
+        "a grant signed before the compromise keeps gateway_enforced"
+    );
+    assert_eq!(r.broker_trust, "sequence_verified");
+}
+
+#[test]
+fn role_key_compromised_before_grant_anchor_withdraws_elevation() {
+    // OFFENSE: the compromise time (10:05) is BEFORE the grant's anchor (10:10:01) — the grant could have been
+    // forged AFTER the broker key was compromised, so its gateway_enforced elevation is WITHDRAWN
+    // (grant_verified -> 0 + a withdrawal note). The record stays integrity-proven; only its AUTHORITY is gone.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let bundle = d6_clean(&rec, &tsa);
+    let mut opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    opts.role_key_status = role_status(
+        rec.verifying_key(),
+        "compromised",
+        Some("2026-06-15T10:05:00.000Z"),
+    );
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(
+        r.grant_verified, 0,
+        "a grant elevated by a key compromised before its anchor must NOT verify"
+    );
+    assert!(
+        r.record_trust
+            .iter()
+            .any(|t| t.notes.iter().any(|n| n.contains("elevation withdrawn"))),
+        "expected a role-key rotation withdrawal note: {:?}",
+        r.record_trust
+    );
+    // Control: WITHOUT the rotation pin the SAME grant verifies — the withdrawal is what changed it.
+    let r0 = verify_bundle_with(
+        &bundle,
+        &pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        ),
+    );
+    assert_eq!(
+        r0.grant_verified, 1,
+        "control: unpinned-rotation grant elevates"
+    );
+}
+
+#[test]
+fn role_key_compromised_with_no_changed_at_withdraws_unconditionally() {
+    // A non-active status with NO status_changed_at cannot be dated, so no record can be proven to predate it
+    // — fail-closed: elevation is withdrawn even though the grant IS anchored.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let bundle = d6_clean(&rec, &tsa);
+    let mut opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    opts.role_key_status = role_status(rec.verifying_key(), "compromised", None);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(
+        r.grant_verified, 0,
+        "an undatable compromise withdraws elevation unconditionally (fail-closed)"
+    );
+}
+
+#[test]
+fn role_key_rotation_json_parser_is_fail_closed() {
+    // The JSON/FFI opts path accepts the {key,status,status_changed_at} object form for the AUTHORITY-elevation
+    // roles, and FAILS CLOSED on an unknown status (never silently 'active') and on the object form for a
+    // freshness-dated role (tsa/attestation/...) that is not yet rotation-gated (no silent false comfort).
+    let bundle_json =
+        r#"{"bundle_version":"1","project_id":"p","keys":[],"records":[],"checkpoints":[]}"#;
+    let key = encode_pubkey(&signing_key_from_seed(&[7u8; 32]).verifying_key());
+
+    let bad = format!(r#"{{"broker_authority_keys":[{{"key":"{key}","status":"pwned"}}]}}"#);
+    assert!(verify_bundle_with_json(bundle_json, &bad)
+        .contains("is not one of active|rotated|compromised|revoked"));
+
+    let good = format!(
+        r#"{{"broker_authority_keys":[{{"key":"{key}","status":"compromised","status_changed_at":"2026-01-01T00:00:00.000Z"}}]}}"#
+    );
+    assert!(
+        verify_bundle_with_json(bundle_json, &good).contains("action_completeness"),
+        "a valid rotation object must PARSE and verify"
+    );
+
+    let tsa = format!(r#"{{"tsa_keys":[{{"key":"{key}","status":"compromised"}}]}}"#);
+    assert!(verify_bundle_with_json(bundle_json, &tsa).contains("must be a string"));
+
+    // A misspelled/UNKNOWN field is rejected (fail-closed): silently dropping it would lose the auditor's
+    // compromise pin (read as active) — exactly the silent fail-open the 5-lens review caught.
+    let typo =
+        format!(r#"{{"broker_authority_keys":[{{"key":"{key}","statuss":"compromised"}}]}}"#);
+    assert!(verify_bundle_with_json(bundle_json, &typo).contains("unknown field"));
+}
+
+#[test]
+fn role_key_rotation_is_key_specific_not_set_wide() {
+    // The withdrawal must fire ONLY on the key that actually SIGNED — a DIFFERENT compromised key in the same
+    // role set must NOT withdraw a grant signed by an ACTIVE key (else any compromise would nuke every grant).
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let other = approver(99); // a SECOND broker authority key that did NOT sign this grant
+    let bundle = d6_clean(&rec, &tsa); // grant signed by rec, anchored 10:10:01
+    let mut opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    opts.broker_authority_keys = vec![rec.verifying_key(), other.verifying_key()];
+    // Mark the OTHER (non-signing) broker key compromised before the anchor; the actual signer `rec` is active.
+    opts.role_key_status = role_status(
+        other.verifying_key(),
+        "compromised",
+        Some("2026-06-15T10:05:00.000Z"),
+    );
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(
+        r.grant_verified, 1,
+        "a grant signed by the ACTIVE broker key must elevate; a DIFFERENT compromised key is irrelevant"
+    );
+    assert!(
+        r.ok,
+        "key-specific gate must not break the bundle: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn role_key_rotation_withdraws_transitive_grant_under_compromised_issuer() {
+    // ADR 0006 §1 FAIL-OPEN CLOSED (5-lens review, HIGH): a grant elevated TRANSITIVELY via a cross_broker_cert
+    // whose PINNED ISSUER key is compromised BEFORE the grant's anchor must NOT keep gateway_enforced — a cert
+    // the issuer signed after its own compromise is forged. (Subject B is unpinned/vouched; issuer A is pinned.)
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let (ba, bb) = (approver(60), approver(61)); // A pinned issuer, B unpinned subject
+    let bundle = cross_cert_bundle(&rec, &tsa, &ba, &bb, "read:orders", EXP); // grant anchored 10:10:01
+    let mut opts = fed_keys_opts(
+        res.verifying_key(),
+        tsa.verifying_key(),
+        &[(BID_A, ba.verifying_key())],
+    );
+    // Control: without rotation, the transitive grant elevates.
+    assert_eq!(verify_bundle_with(&bundle, &opts).grant_verified, 1);
+
+    // Issuer A compromised at 10:05 — BEFORE the 10:10:01 anchor: the vouching cert is forged → WITHDRAW.
+    opts.role_key_status = role_status(
+        ba.verifying_key(),
+        "compromised",
+        Some("2026-06-15T10:05:00.000Z"),
+    );
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(
+        r.grant_verified, 0,
+        "a transitive grant whose cert issuer is compromised before the anchor must NOT elevate (fail-open closed)"
+    );
+    assert_eq!(r.transitive_grants, 0);
+    assert!(r
+        .record_trust
+        .iter()
+        .any(|t| t.notes.iter().any(|n| n.contains("elevation withdrawn"))));
+
+    // Issuer A compromised at 10:20 — AFTER the anchor: the cert predates the compromise → elevation KEPT.
+    opts.role_key_status = role_status(
+        ba.verifying_key(),
+        "compromised",
+        Some("2026-06-15T10:20:00.000Z"),
+    );
+    assert_eq!(
+        verify_bundle_with(&bundle, &opts).grant_verified,
+        1,
+        "an issuer compromised AFTER the cert's anchor keeps the transitive elevation"
+    );
 }
 
 #[test]
@@ -9581,6 +9823,74 @@ fn tier_b_federation_two_brokers_gapless_verifies() {
     ] {
         assert!(json.contains(f), "report JSON missing {f}: {json}");
     }
+}
+
+#[test]
+fn role_key_rotation_applies_on_the_federated_authority_path() {
+    // ADR 0006 §1 — the rotation gate must also fire when auth_keys comes from the per-broker
+    // `federated_broker_keys` map (a DIFFERENT selection path than broker_authority_keys, M4). Both federated
+    // grants are signed by `rec`, pinned per-broker; `rec` is compromised at 10:05, BEFORE the 10:10:01 anchor,
+    // so BOTH grants' gateway_enforced elevation is withdrawn.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let ga = seal_grant(
+        &rec,
+        &rec,
+        "rec-a1",
+        &grant_evidence_fed("grant-a1", BID_A, 1),
+    );
+    let gb = seal_grant(
+        &rec,
+        &rec,
+        "rec-b1",
+        &grant_evidence_fed("grant-b1", BID_B, 1),
+    );
+    let (ha, hb) = (content_hash_of(&ga), content_hash_of(&gb));
+    let heads = fed_heads(&[
+        (BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)]))),
+        (BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)]))),
+    ]);
+    let cp = checkpoint_with_fed_heads(
+        &rec,
+        "cp0",
+        0,
+        None,
+        &[ha.clone(), hb.clone()],
+        2,
+        heads,
+        Some(&tsa),
+    );
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![ga, gb], vec![cp]);
+    let mut fed = std::collections::BTreeMap::new();
+    fed.insert(BID_A.to_string(), vec![rec.verifying_key()]);
+    fed.insert(BID_B.to_string(), vec![rec.verifying_key()]);
+    let opts = VerifyOptions {
+        federated_broker_keys: fed,
+        resource_authority_keys: vec![res.verifying_key()],
+        trusted_tsa_keys: vec![tsa.verifying_key()],
+        role_key_status: role_status(
+            rec.verifying_key(),
+            "compromised",
+            Some("2026-06-15T10:05:00.000Z"),
+        ),
+        ..Default::default()
+    };
+    let r = verify_bundle_with(&bundle, &opts);
+    assert_eq!(
+        r.grant_verified, 0,
+        "both federated grants elevated by a key compromised before their anchor must be withdrawn"
+    );
+    assert!(
+        r.record_trust
+            .iter()
+            .filter(|t| t.broker_role == "broker")
+            .all(|t| t.notes.iter().any(|n| n.contains("elevation withdrawn"))),
+        "every federated grant must carry the withdrawal note: {:?}",
+        r.record_trust
+    );
 }
 
 #[test]
