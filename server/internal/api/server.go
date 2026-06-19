@@ -63,7 +63,13 @@ type Server struct {
 	witness   witness.Witness    // nil = no external witness configured
 	tsa       witness.TSA        // nil = no external timestamp anchoring configured
 	brokerKey ed25519.PrivateKey // nil = credential broker (/v2/grants) disabled
-	denyLog   bool               // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
+	// M4 (ADR 0005): this broker's federation identity. When set, every grant this server issues is tagged with
+	// grant_evidence.broker_id, and each checkpoint ALSO carries a per-broker_id `broker_grant_heads` map (in
+	// addition to the legacy single `broker_grant_head`), so its bundles verify under `federated_broker_keys` and
+	// can be combined with OTHER brokers' bundles without one broker's grants masking another's. "" = single-broker
+	// (legacy byte-identical path — no broker_id, no map).
+	brokerID string
+	denyLog  bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
 	// inflate stored records without bound (the prerequisite for default-on). nil = unbounded (prior behavior).
 	denialBudget *denialBudget
@@ -177,6 +183,20 @@ func (s *Server) WithBroker(issuingKey ed25519.PrivateKey) *Server {
 		}
 	}
 	s.brokerKey = issuingKey
+	return s
+}
+
+// WithBrokerID sets this broker's federation identity (ADR 0005 M4). When set, grants this server issues carry
+// grant_evidence.broker_id, and checkpoints carry a per-broker_id `broker_grant_heads` map — so the bundle
+// verifies under `federated_broker_keys[brokerID]` and is combinable with other brokers' bundles. Requires the
+// broker (WithBroker). A single configured broker_id gets the project's gapless [1..N] broker_seq as its own
+// partition (the global counter == the one broker's counter); a multi-broker_id deployment would need per-broker
+// sequence allocation (not yet — one server = one broker_id).
+func (s *Server) WithBrokerID(brokerID string) *Server {
+	if s.brokerKey == nil {
+		panic("WithBrokerID requires WithBroker (broker_id tags the grants this broker issues)")
+	}
+	s.brokerID = brokerID
 	return s
 }
 
@@ -974,6 +994,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		DelegationChain: gr.DelegationChain,
 		Justification:   gr.Justification,
 		TTL:             time.Duration(gr.TTLSeconds) * time.Second,
+		BrokerID:        s.brokerID, // M4: tag the grant with this broker's federation id ("" = single-broker)
 	}
 	// Validate the request — proof-of-possession (agent_sig) + forbidden-scope — BEFORE anything else, so
 	// a malformed / unsigned / forbidden request can NEVER retrieve a stored capability by reusing a known
@@ -2343,6 +2364,32 @@ func (s *Server) priorGrantHeadRoot(projectID string) (string, error) {
 	return parsed.BrokerGrantHead.CumulativeRoot, nil
 }
 
+// priorFedHeadRoot returns the cumulative_root of `brokerID`'s entry in the LATEST stored checkpoint's
+// `broker_grant_heads` MAP (M4), so the next federated head chains per-broker. A project with no checkpoint yet —
+// or whose latest carries no map / no entry for this broker (the first federated checkpoint, or a pre-federation
+// checkpoint) — chains from the empty-log root (this broker's federated log starts fresh).
+func (s *Server) priorFedHeadRoot(projectID, brokerID string) (string, error) {
+	cps, err := s.st.Checkpoints(projectID)
+	if err != nil {
+		return "", fmt.Errorf("prior fed head: %w", err)
+	}
+	if len(cps) == 0 {
+		return broker.EmptyGrantHeadRoot(), nil
+	}
+	var parsed struct {
+		BrokerGrantHeads map[string]struct {
+			CumulativeRoot string `json:"cumulative_root"`
+		} `json:"broker_grant_heads"`
+	}
+	if err := json.Unmarshal([]byte(cps[len(cps)-1].JSON), &parsed); err != nil {
+		return "", fmt.Errorf("prior fed head: parse latest checkpoint: %w", err)
+	}
+	if h, ok := parsed.BrokerGrantHeads[brokerID]; ok && h.CumulativeRoot != "" {
+		return h.CumulativeRoot, nil
+	}
+	return broker.EmptyGrantHeadRoot(), nil
+}
+
 // backfillable. A deterministic checkpoint_id keeps the body reproducible for a given seq.
 func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string, error, error) {
 	s.checkpointMu.Lock()
@@ -2416,6 +2463,20 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 			"key_valid_from": s.keyValidFrom,
 			"key_status":     "active",
 		},
+	}
+	// M4 (ADR 0005): when this broker has a federation id, ALSO emit the per-broker_id `broker_grant_heads` MAP.
+	// A single configured broker_id owns the project's whole gapless [1..N] log, so its partition == the flat
+	// `gl`. The legacy single `broker_grant_head` above stays (the verifier IGNORES it once federation is active
+	// — it dispatches to the per-broker partition — and it keeps the single-broker + D7 attestation paths intact).
+	if s.brokerID != "" {
+		priorFed, ferr := s.priorFedHeadRoot(projectID, s.brokerID)
+		if ferr != nil {
+			return "", nil, ferr
+		}
+		body["broker_grant_heads"] = broker.BrokerGrantHeads(
+			map[string][]broker.GrantSeqHash{s.brokerID: gl},
+			map[string]string{s.brokerID: priorFed},
+		)
 	}
 	bodyJSON, _ := json.Marshal(body)
 	sealed, err := s.core.SealCheckpoint(string(bodyJSON))

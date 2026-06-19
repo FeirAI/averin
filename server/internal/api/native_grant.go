@@ -64,6 +64,9 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 			return fmt.Errorf("store returned non-positive broker_seq %d", seq)
 		}
 		evidence := broker.NativeGrantEvidence(grantID, gr.Action, gr.Resource, gr.Scope, gr.LeaseID, seq, issued.Unix(), exp.Unix())
+		if s.brokerID != "" {
+			evidence["broker_id"] = s.brokerID // M4: tag the native grant with this broker's federation id
+		}
 		rec, e := s.buildNativeGrantRecord(gr, grantID, evidence)
 		if e != nil {
 			return e

@@ -99,6 +99,12 @@ func main() {
 		brokerEnabled = true
 		brokerPubKey = "ed25519pub:" + base64.RawURLEncoding.EncodeToString(bk.Public().(ed25519.PublicKey))
 		log.Printf("credential broker enabled (POST /v2/grants)")
+		// M4 (ADR 0005): optional federation identity. When set, grants carry grant_evidence.broker_id and
+		// checkpoints carry a per-broker_id broker_grant_heads map (verify with federated_broker_keys[<id>]).
+		if bid := os.Getenv("FEIR_BROKER_ID"); bid != "" {
+			srv.WithBrokerID(bid)
+			log.Printf("federation enabled: grants tagged broker_id=%q (per-broker broker_grant_heads in checkpoints)", bid)
+		}
 	}
 	// M6 (ADR 0005): the ONLINE two-phase cosig policy (POST /v2/grants/prepare + /v2/grants/finalize). The
 	// M-of-N approver keys are role-separated GOVERNANCE keys — the offline verifier re-pins them as

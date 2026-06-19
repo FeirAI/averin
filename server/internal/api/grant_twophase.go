@@ -127,6 +127,7 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req := grantRequestToBroker(gr)
+	req.BrokerID = s.brokerID // M4: tag the grant with this broker's federation id ("" = single-broker)
 	// Validate proof-of-possession + scope BEFORE minting (same gate as the single-phase /v2/grants).
 	if e := req.Validate(); e != nil {
 		writeErr(w, http.StatusBadRequest, e.Error())
