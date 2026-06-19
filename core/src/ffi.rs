@@ -9,6 +9,19 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
+/// Run a verifier closure, CATCHING any panic so it can never unwind across the C/cgo boundary (which is
+/// undefined behavior) and never aborts the host process on untrusted input. On a panic the verifier fails
+/// CLOSED — it returns a minimal `ok:false` report (no false `ok:true` is ever produced). The Go server links
+/// the debug staticlib (panic=unwind), where this catches; the release CLI/WASM use panic=abort, where the
+/// verifier is already panic-free on attacker input (the only known reachable panic — a Merkle-proof index
+/// overflow — is fixed with checked arithmetic). `AssertUnwindSafe` is sound here: the closure borrows only
+/// `&str` inputs and the verifier holds no observable state across the unwind.
+fn catch_verify(f: impl FnOnce() -> String) -> String {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        r#"{"ok":false,"issues":["verifier panicked while processing this input — failing closed (please report this bundle as a verifier bug)"]}"#.to_string()
+    })
+}
+
 /// Allocate `size` bytes of wasm/native memory and return the pointer (for the browser verifier to
 /// write an input string into). Pair with [`feir_dealloc`].
 #[no_mangle]
@@ -50,7 +63,7 @@ pub unsafe extern "C" fn feir_verify_bundle_json(input: *const c_char) -> *mut c
         Ok(t) => t,
         Err(_) => return std::ptr::null_mut(),
     };
-    let out = crate::verify::verify_bundle_to_json(text);
+    let out = catch_verify(|| crate::verify::verify_bundle_to_json(text));
     match CString::new(out) {
         Ok(c) => c.into_raw(),
         Err(_) => std::ptr::null_mut(),
@@ -74,7 +87,7 @@ pub unsafe extern "C" fn feir_verify_bundle_json_n(ptr: *const u8, len: usize) -
         Some(t) => t,
         None => return std::ptr::null_mut(),
     };
-    into_cstring(crate::verify::verify_bundle_to_json(text))
+    into_cstring(catch_verify(|| crate::verify::verify_bundle_to_json(text)))
 }
 
 /// Verify an export bundle with out-of-band pinned trust roots. `opts_json` is a JSON object whose
@@ -102,7 +115,7 @@ pub unsafe extern "C" fn feir_verify_bundle_with(
         Some(o) => o,
         None => return std::ptr::null_mut(),
     };
-    into_cstring(crate::verify::verify_bundle_with_json(bundle, opts))
+    into_cstring(catch_verify(|| crate::verify::verify_bundle_with_json(bundle, opts)))
 }
 
 /// Verify an export bundle with pinned trust roots from explicit `(ptr, len)` byte spans — the
@@ -129,7 +142,7 @@ pub unsafe extern "C" fn feir_verify_bundle_with_n(
         Some(o) => o,
         None => return std::ptr::null_mut(),
     };
-    into_cstring(crate::verify::verify_bundle_with_json(bundle, opts))
+    into_cstring(catch_verify(|| crate::verify::verify_bundle_with_json(bundle, opts)))
 }
 
 /// Canonicalize a JSON document under RCP v1. Returns a newly-allocated string (free with
@@ -471,6 +484,18 @@ pub unsafe extern "C" fn feir_string_free(ptr: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catch_verify_returns_fail_closed_json_on_panic() {
+        // A panic inside the verifier must become a fail-CLOSED ok:false report, never a propagated panic that
+        // would unwind across the cgo boundary (UB) or crash the host. (The release build uses panic=abort, so
+        // this catch is the cgo/debug-profile defense; the only known reachable panic is separately fixed.)
+        let out = catch_verify(|| panic!("synthetic verifier panic"));
+        let v = crate::CanonValue::parse(&out).expect("fail-closed report is valid JSON");
+        assert!(matches!(v.get("ok"), Some(crate::CanonValue::Bool(false))), "panic must yield ok:false: {out}");
+        // a normal (non-panicking) closure passes through unchanged.
+        assert_eq!(catch_verify(|| "passthrough".to_string()), "passthrough");
+    }
 
     /// Round-trip a `&str` through one of the FFI entrypoints, returning the freed result string.
     /// (Cross-language ABI symbol resolution is covered by `core/examples/ffi_smoke.c`; this

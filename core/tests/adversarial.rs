@@ -4362,16 +4362,33 @@ fn tier_b_revocation_fresh_list_blocks_revoked_use() {
 }
 
 #[test]
-fn tier_b_revocation_stale_list_does_not_block_but_blocks_capstone() {
-    // a validly-signed list whose window does NOT bracket the anchored time is `stale` — it does not block the
-    // use (the window passed) and does not fail the bundle, but it does block the capstone (surfaced honestly).
+fn tier_b_revocation_stale_list_still_blocks_explicitly_revoked_use() {
+    // SECURITY (currency vs validity): a validly-signed revocation_list that EXPLICITLY names a grant is a
+    // MONOTONE fact — that grant WAS revoked, and never becomes un-revoked because time passed. Staleness (the
+    // window no longer brackets the anchored time) only means the list may not be the LATEST snapshot — it does
+    // NOT make a named grant valid again. So a stale list naming a USED grant MUST still block that use (it must
+    // not silently pass to ok:true — that was a fail-open the deep review found). The stale status separately
+    // still blocks the strong capstone (currency for UN-named grants is unknown).
     let (rec, res, tsa, rev) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[77u8; 32]));
-    let revlist = revocation_list(&rev, "2026-06-14T00:00:00.000Z", "2026-06-15T09:00:00.000Z", &[GID]); // not_after < anchored ts
+    let revlist = revocation_list(&rev, "2026-06-14T00:00:00.000Z", "2026-06-15T09:00:00.000Z", &[GID]); // stale: not_after < anchored ts
     let r = revocation_bundle_verify(&rec, &res, &tsa, &rev, revlist);
-    assert!(r.ok, "a validly-signed but stale list must not fail the bundle; issues: {:?}", r.issues);
-    assert_eq!(r.revocation_status, "stale");
-    assert_eq!(r.revoked_uses_blocked, 0, "a stale list does not block uses (window passed)");
+    assert!(!r.ok, "a stale list that explicitly revokes a USED grant must still block it (currency != validity)");
+    assert_eq!(r.revoked_uses_blocked, 1);
+    assert_eq!(r.uses_matched, 0);
+    assert_eq!(r.revocation_status, "revoked_present");
+}
+
+#[test]
+fn tier_b_revocation_stale_list_naming_unused_grant_does_not_over_block() {
+    // NO OVER-BLOCK: a stale list naming a grant that is NOT used in the bundle does not block the (different)
+    // use; the bundle stays ok (no revoked use was honored), only the capstone is blocked by the stale status.
+    let (rec, res, tsa, rev) = (signing_key_from_seed(&[0u8; 32]), signing_key_from_seed(&[3u8; 32]), test_tsa_key(&[200u8; 32]), signing_key_from_seed(&[77u8; 32]));
+    let revlist = revocation_list(&rev, "2026-06-14T00:00:00.000Z", "2026-06-15T09:00:00.000Z", &["some-other-grant"]);
+    let r = revocation_bundle_verify(&rec, &res, &tsa, &rev, revlist);
+    assert!(r.ok, "a stale list naming an UNUSED grant must not block this use; issues: {:?}", r.issues);
+    assert_eq!(r.revoked_uses_blocked, 0);
     assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.revocation_status, "stale");
 }
 
 #[test]
@@ -4634,19 +4651,59 @@ fn tier_b_merkle_revocation_forged_root_sig_is_a_violation() {
 }
 
 #[test]
-fn tier_b_merkle_revocation_stale_root_does_not_block_use() {
-    // a validly-signed but OUT-OF-WINDOW root is stale -> too old to certify currency. Like a stale disclosed
-    // list, it does NOT block the use (status != fresh, so no proof is demanded) and does not fail the bundle —
-    // but it does block the capstone (proven separately via the capstone conjunct test below).
+fn tier_b_merkle_revocation_stale_root_demands_proof_fail_closed() {
+    // SECURITY: a stale (out-of-window) but validly-signed merkle root still COMMITS to a revoked set. The set is
+    // UNDISCLOSED, so a use must still PROVE non-membership even when the root is stale — else an attacker could
+    // present an old (stale) root + omit the proof for a revoked grant to get it accepted (the fail-open the deep
+    // review found). A use with NO proof under a stale root is FAIL-CLOSED (blocked); the stale status separately
+    // blocks the capstone.
     let (rec, res, tsa, rev) = rev_keys();
-    let leaves = rev_leaves(&["other-1"]);
-    // not_after BEFORE the anchored ts (2026-06-15T10:10:01Z) -> stale.
+    let leaves = rev_leaves(&[GID, "other-1"]); // GID IS in the (stale) revoked set
     let root_obj = merkle_root_obj(&rev, "2026-06-14T00:00:00.000Z", "2026-06-15T09:00:00.000Z", &leaves);
-    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, vec![]); // no proof needed when not fresh
-    assert!(r.ok, "a stale root must not fail the bundle; issues: {:?}", r.issues);
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, vec![]); // no proof for the used grant
+    assert!(!r.ok, "a stale root with no non-membership proof must fail closed");
+    assert_eq!(r.revoked_uses_blocked, 1);
+    assert_eq!(r.uses_matched, 0);
     assert_eq!(r.revocation_merkle_status, "stale");
+}
+
+#[test]
+fn tier_b_merkle_revocation_crafted_lo_index_does_not_panic() {
+    // SAFETY (DoS/UB): lo_index/hi_index ride the UNSIGNED top-level revocation_proofs map (attacker-controlled).
+    // The shipped staticlib is the DEBUG profile (overflow-checks ON), so `li + 1` with li = i64::MAX would PANIC
+    // — a denial of service, and UB across the cgo boundary. A crafted index is just an invalid proof (Unproven →
+    // the use is fail-closed), never a panic.
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves); // fresh -> the proof gate fires
+    let bad = CanonValue::object(vec![
+        ("type".into(), CanonValue::string("nonmembership")),
+        ("lo".into(), hx(&leaves[0])),
+        ("hi".into(), hx(&leaves[1])),
+        ("lo_index".into(), CanonValue::Int(i64::MAX)), // li + 1 overflows under debug overflow-checks
+        ("hi_index".into(), CanonValue::Int(1)),
+        ("lo_path".into(), CanonValue::Array(vec![])),
+        ("hi_path".into(), CanonValue::Array(vec![])),
+    ])
+    .unwrap();
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, vec![(GID.to_string(), bad)]);
+    assert!(!r.ok, "a crafted lo_index must fail closed, not panic");
+    assert_eq!(r.revoked_uses_blocked, 1);
+}
+
+#[test]
+fn tier_b_merkle_revocation_stale_root_nonmembership_proof_does_not_over_block() {
+    // NO OVER-BLOCK: a stale root + a valid NON-membership proof for the used grant lets the use proceed (it is
+    // proven not-revoked AS OF the stale root). The bundle is ok; only the capstone is blocked by the stale status.
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&["other-1", "other-2"]); // GID NOT revoked
+    let root_obj = merkle_root_obj(&rev, "2026-06-14T00:00:00.000Z", "2026-06-15T09:00:00.000Z", &leaves);
+    let proofs = vec![(GID.to_string(), nonmembership_proof(&leaves, GID))];
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, proofs);
+    assert!(r.ok, "a stale root with a valid non-membership proof must not over-block; issues: {:?}", r.issues);
     assert_eq!(r.revoked_uses_blocked, 0);
     assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.revocation_merkle_status, "stale");
 }
 
 // ---- D8: the attested_complete conjunctive capstone ----

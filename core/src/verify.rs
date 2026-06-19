@@ -2823,8 +2823,11 @@ fn check_revocation_proof(proof: &CanonValue, grant_id: &str, root: &[u8; 32], l
             let hi_path = parse_hex32_path(proof.get("hi_path"));
             match (lo, hi, lo_index, hi_index, lo_path, hi_path) {
                 (Some(lo), Some(hi), Some(li), Some(hi_i), Some(lp), Some(hp)) if li >= 0 && hi_i >= 0 => {
-                    // adjacency: the two leaves must be CONSECUTIVE in the sorted tree.
-                    if hi_i != li + 1 {
+                    // adjacency: the two leaves must be CONSECUTIVE in the sorted tree. `li`/`hi_i` are
+                    // attacker-controlled i64 from the unsigned proof, so use checked_add — `li == i64::MAX`
+                    // would overflow `li + 1` and PANIC under the debug overflow-checks the shipped staticlib
+                    // uses (a DoS + UB across cgo). An overflow is simply an invalid proof.
+                    if li.checked_add(1) != Some(hi_i) {
                         return ProofVerdict::Unproven;
                     }
                     // STRICT bracket: lo < q < hi, so q is not equal to either leaf and nothing lies between them.
@@ -4300,23 +4303,26 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 continue;
             }
         };
-        // M5 (ADR 0005): a use of a grant on a FRESH revocation list is blocked — the credential was revoked
-        // inside the window. A hard violation (→ !ok); counted separately so the capstone surfaces it. The grant
-        // is NOT consumed (the use never reaches uses_matched). A `stale` list does not block (the window passed,
-        // surfaced via revocation_status), and `absent` (no list / unpinned issuer) is the baseline.
-        if revocation.status == "fresh" && revocation.revoked.contains(&gid) {
+        // M5 (ADR 0005): a use of a grant the revocation_list EXPLICITLY marks revoked is blocked — whether the
+        // list is `fresh` OR `stale`. `revoked` is populated ONLY for a validly-signed list (a forged/malformed
+        // list yields an empty set + an issue), and a signed "this grant is revoked" is a MONOTONE fact: staleness
+        // (the window no longer brackets the anchored time) means the list may not be the LATEST snapshot, NOT
+        // that a named grant became valid again. Blocking only on `fresh` was a fail-open (a relying party gating
+        // on `ok` accepted a provably-revoked credential). A hard violation (→ !ok); the grant is NOT consumed.
+        // `absent` (no list / unpinned issuer) leaves `revoked` empty, so this is a no-op there.
+        if revocation.revoked.contains(&gid) {
             revoked_uses_blocked += 1;
-            violation(&mut issues, format!("use of grant '{gid}' which a fresh revocation_list marks REVOKED — blocked (M5)"));
+            violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_list ({}) marks REVOKED — blocked (M5)", revocation.status));
             continue;
         }
-        // M5 Merkle-non-disclosure (ADR 0005): when a FRESH signed root is present, this use's grant must PROVE
-        // its non-revocation against the (undisclosed) revoked set. A valid non-membership proof lets it proceed;
-        // a valid membership proof blocks it (revoked); a missing/malformed/forged proof is FAIL-CLOSED (the set
-        // is hidden, so an unproven use cannot be assumed safe). All three end the per-use decision here.
-        if merkle_rev.status == "fresh" {
-            // Defense-in-depth: a `fresh` status MUST carry a committed root (the eval guarantees it). Match on
-            // BOTH together so that if a future change ever returns `fresh` with `root: None`, this fails CLOSED
-            // (blocks the use) rather than silently skipping the revocation gate — never a latent fail-open.
+        // M5 Merkle-non-disclosure (ADR 0005): when a signed root is present (fresh OR stale), this use's grant
+        // must PROVE its non-revocation against the (undisclosed) revoked set. A valid non-membership proof lets
+        // it proceed; a valid membership proof blocks it (revoked); a missing/malformed/forged proof is
+        // FAIL-CLOSED (the set is hidden, so an unproven use cannot be assumed safe — and a STALE root must still
+        // demand a proof, else an attacker presents an old root + omits the proof for a revoked grant). The stale
+        // status separately blocks the capstone; here we only enforce per-use non-revocation. `absent` (no
+        // root / unpinned issuer) leaves `root: None`, so this gate is skipped.
+        if merkle_rev.root.is_some() {
             let proof = revocation_proofs.and_then(|m| m.get(gid.as_str()));
             let verdict = merkle_rev
                 .root
@@ -4329,12 +4335,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 }
                 ProofVerdict::Revoked => {
                     revoked_uses_blocked += 1;
-                    violation(&mut issues, format!("use of grant '{gid}' which a fresh revocation_merkle_root proves REVOKED — blocked (M5)"));
+                    violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_merkle_root ({}) proves REVOKED — blocked (M5)", merkle_rev.status));
                     continue;
                 }
                 ProofVerdict::Unproven => {
                     revoked_uses_blocked += 1;
-                    violation(&mut issues, format!("use of grant '{gid}': a fresh revocation_merkle_root is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)"));
+                    violation(&mut issues, format!("use of grant '{gid}': a signed revocation_merkle_root ({}) is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)", merkle_rev.status));
                     continue;
                 }
             }
@@ -4534,13 +4540,15 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // fail-open). Apply the SAME gates to each native grant_id HERE (before finalizing revocation_status so it
     // recolors), collecting the revoked set so the pre-pass can force those grants out of `covered_native` (never
     // `attested` over a revoked credential). Each is also a hard violation (→ !ok) + counted in revoked_uses_blocked.
+    // Mirrors the brokered use-loop gates: block on an EXPLICIT disclosed revocation (fresh OR stale — a signed
+    // "revoked" is monotone), and demand a non-membership proof whenever a Merkle root is present (fresh OR stale).
     let mut revoked_native: BTreeSet<String> = BTreeSet::new();
     for gid in native_grants_by_id.keys() {
-        if revocation.status == "fresh" && revocation.revoked.contains(gid.as_str()) {
+        if revocation.revoked.contains(gid.as_str()) {
             revoked_uses_blocked += 1;
             revoked_native.insert(gid.clone());
-            issues.push(format!("native credential for grant '{gid}': a fresh revocation_list marks it REVOKED — its introspected surface is blocked (M5)"));
-        } else if merkle_rev.status == "fresh" {
+            issues.push(format!("native credential for grant '{gid}': a signed revocation_list ({}) marks it REVOKED — its introspected surface is blocked (M5)", revocation.status));
+        } else if merkle_rev.root.is_some() {
             let proof = revocation_proofs.and_then(|m| m.get(gid.as_str()));
             let verdict = merkle_rev
                 .root
@@ -4552,12 +4560,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 ProofVerdict::Revoked => {
                     revoked_uses_blocked += 1;
                     revoked_native.insert(gid.clone());
-                    issues.push(format!("native credential for grant '{gid}': a fresh revocation_merkle_root proves it REVOKED — blocked (M5)"));
+                    issues.push(format!("native credential for grant '{gid}': a signed revocation_merkle_root ({}) proves it REVOKED — blocked (M5)", merkle_rev.status));
                 }
                 ProofVerdict::Unproven => {
                     revoked_uses_blocked += 1;
                     revoked_native.insert(gid.clone());
-                    issues.push(format!("native credential for grant '{gid}': a fresh revocation_merkle_root is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)"));
+                    issues.push(format!("native credential for grant '{gid}': a signed revocation_merkle_root ({}) is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)", merkle_rev.status));
                 }
             }
         }
