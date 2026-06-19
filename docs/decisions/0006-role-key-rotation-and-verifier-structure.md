@@ -1,6 +1,8 @@
 # ADR 0006 — Role-key compromise/rotation + verifier structure (design-only)
 
-**Status:** Proposed (DESIGN ONLY — no production code ships with this ADR).
+**Status:** Accepted — all three items IMPLEMENTED (see the per-section "Implemented" notes). Each shipped
+TDD-first, gated by the cross-language golden vectors + the adversarial suite and a multi-lens adversarial
+review (item 1, the trust-root security feature, took two review rounds).
 **Date:** 2026-06-19
 **Builds on:** ADR 0003 (R2 role separation; the role-disjoint key sets), ADR 0004 (D1–D9, the D8 capstone),
 ADR 0005 (the six producer modes + their pinned role keys), and the existing **signing-key** rotation model
