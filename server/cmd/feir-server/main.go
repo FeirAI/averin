@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -57,6 +58,23 @@ func main() {
 		log.Printf("per-project API-key auth enabled (%d projects)", n)
 	} else {
 		log.Printf("WARNING: no FEIR_API_KEYS set — the app API is UNAUTHENTICATED (dev/single-tenant only)")
+	}
+	// T7: pin an EXTERNAL policy-engine verifying key so a generic record carrying a
+	// policy_engine_signed (or human_signed) authority block with an evidence_sig that
+	// verifies under THIS key is elevated to that source at ingest (else forced to the
+	// forgeable caller_declared). FEIR_POLICY_ENGINE_PUBKEY is the 32-byte ed25519 public
+	// key, hex- OR base64url-encoded (the "ed25519pub:<base64url>" published form is
+	// accepted with the prefix stripped). FEIR_POLICY_ENGINE_SOURCE is the source it
+	// vouches for (default policy_engine_signed). The policy engine holds the PRIVATE half
+	// out of this server. Unset = Phase-1 default (every generic authority is caller_declared).
+	if raw := os.Getenv("FEIR_POLICY_ENGINE_PUBKEY"); raw != "" {
+		pub, err := decodeAuthorityPubKey(raw)
+		if err != nil {
+			log.Fatalf("FEIR_POLICY_ENGINE_PUBKEY: %v", err)
+		}
+		source := envOr("FEIR_POLICY_ENGINE_SOURCE", "policy_engine_signed")
+		srv.WithPolicyEngineKey(source, pub)
+		log.Printf("T7 policy-engine key pinned (source=%s): a verifying authority evidence_sig elevates to %s", source, source)
 	}
 	// durable content store for committed low-entropy values (raw input/output/rationale). No dir =
 	// in-memory (NOT durable; disclosures won't survive a restart).
@@ -263,4 +281,24 @@ func parseCosigApprovers(raw string) []ed25519.PublicKey {
 		out = append(out, ed25519.PublicKey(b))
 	}
 	return out
+}
+
+// decodeAuthorityPubKey parses an ed25519 public key from either hex (64 chars) or the
+// published "ed25519pub:<base64url-no-pad>" / bare base64url-no-pad form. It is used to
+// pin the external policy-engine verifying key (T7). A wrong length or bad encoding is an
+// error (fail-closed: a typo'd pin must not silently disable elevation).
+func decodeAuthorityPubKey(raw string) (ed25519.PublicKey, error) {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "ed25519pub:")
+	// hex (64 chars => 32 bytes).
+	if len(s) == ed25519.PublicKeySize*2 {
+		if b, err := hex.DecodeString(s); err == nil {
+			return ed25519.PublicKey(b), nil
+		}
+	}
+	// base64url-no-pad (the published "ed25519pub:" body).
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil && len(b) == ed25519.PublicKeySize {
+		return ed25519.PublicKey(b), nil
+	}
+	return nil, fmt.Errorf("not a 32-byte ed25519 public key (accepts 64-hex or base64url-no-pad, optional ed25519pub: prefix): %q", raw)
 }
