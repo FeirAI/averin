@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/feir-dev/feir/server/internal/proxy"
 )
@@ -25,7 +26,16 @@ func main() {
 		log.Printf("feir-proxy: WARNING — no FEIR_PROXY_INBOUND_TOKEN set: this is an OPEN RELAY + evidence-injection surface; bind to loopback or place behind your own auth")
 	}
 	log.Printf("feir-proxy on %s -> upstream %s, recording to %s", addr, upstream, feirURL)
-	log.Fatal(http.ListenAndServe(addr, p.Handler()))
+	// Timeouts on the INBOUND server (http.ListenAndServe leaves them unbounded → Slowloris). No WriteTimeout:
+	// the proxy STREAMS long upstream completions back to the client, which must not be cut off.
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           p.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	log.Fatal(httpSrv.ListenAndServe())
 }
 
 func envOr(k, def string) string {

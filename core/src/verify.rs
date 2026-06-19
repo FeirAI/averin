@@ -1005,8 +1005,26 @@ fn report_json_with_digest(r: &VerifyReport, input_bytes: &[u8]) -> String {
     canon.serialize()
 }
 
+/// DoS backstop: the maximum input bundle the FFI/WASM/CLI verify entrypoints will process. The verifier runs on
+/// an UNTRUSTED, attacker-supplied artifact, and its work is ~O(input bytes) (parse + per-record verify + per-hop
+/// signature checks), so an uncapped multi-GB bundle is a memory/CPU amplification on the relying party. 256 MiB
+/// is far above any realistic export yet bounds a hostile one; an over-cap input fails closed before parse.
+pub const MAX_BUNDLE_BYTES: usize = 256 << 20;
+
+fn over_cap_report(len: usize) -> String {
+    CanonValue::object(vec![
+        ("ok".into(), CanonValue::Bool(false)),
+        ("error".into(), CanonValue::string(format!("bundle is {len} bytes, exceeding the {MAX_BUNDLE_BYTES}-byte verify cap (DoS backstop) — fail-closed"))),
+    ])
+    .unwrap()
+    .serialize()
+}
+
 /// Verify a bundle JSON string and return the report as a JSON string (the shape WASM/FFI return).
 pub fn verify_bundle_to_json(text: &str) -> String {
+    if text.len() > MAX_BUNDLE_BYTES {
+        return over_cap_report(text.len());
+    }
     match verify_bundle_json(text) {
         Ok(r) => report_json_with_digest(&r, text.as_bytes()),
         Err(e) => CanonValue::object(vec![
@@ -1029,6 +1047,9 @@ pub fn verify_bundle(bundle: &CanonValue) -> VerifyReport {
 /// optional arrays: `authority_keys`/`signing_keys`/`tsa_keys` are `ed25519pub:` strings;
 /// `tsa_spki_b64` are base64url-no-pad DER SubjectPublicKeyInfos.
 pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
+    if bundle_text.len() > MAX_BUNDLE_BYTES {
+        return over_cap_report(bundle_text.len());
+    }
     let bundle = match CanonValue::parse(bundle_text) {
         Ok(b) => b,
         Err(e) => return error_report(&format!("bundle parse: {e}")),

@@ -199,7 +199,18 @@ func main() {
 	}
 
 	log.Printf("feir-server listening on %s (pubkey %s)", addr, c.PubKey())
-	log.Fatal(http.ListenAndServe(addr, srv.Routes()))
+	// Explicit timeouts (http.ListenAndServe leaves them at 0 = unbounded → Slowloris / slow-body / idle
+	// keep-alive connection exhaustion). The server reads bounded bodies (8 MiB) and does not stream long
+	// responses, so finite read/write timeouts are safe.
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           srv.Routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	log.Fatal(httpSrv.ListenAndServe())
 }
 
 // selectStore returns a Postgres store when FEIR_DATABASE_URL is set, else the in-memory store. For
