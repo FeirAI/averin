@@ -5713,6 +5713,54 @@ fn tier_b_attestation_attested_claims() {
 }
 
 #[test]
+fn role_key_rotation_attestation_compromised_or_late_rotation_not_honored() {
+    // ADR 0006 §1 (attestation): the attestation is NOT anchor-committed (self-asserted issued_at), so a STOLEN
+    // issuer key forges any attestation → a COMPROMISED issuer is never honored; a cleanly ROTATED issuer is
+    // honored only when issued_at (2026-06-15T00:00) is at/before the rotation.
+    let (rec, res, tsa, attest) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+        signing_key_from_seed(&[11u8; 32]),
+    );
+    let (base, cph, head_root) = d6_anchored(&rec, &tsa);
+    let att = attestation(
+        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        ATT_ISSUED,
+        ATT_NOT_AFTER,
+        honest_subject(&rec, &res, &cph, &head_root),
+        &attest,
+    );
+    let bundle = change_field(&base, "deployment_attestation", att);
+    let run = |status: &str, changed: &str| {
+        let mut opts = attest_opts(&rec, &res, &tsa, &attest);
+        opts.role_key_status = role_status(attest.verifying_key(), status, Some(changed));
+        verify_bundle_with(&bundle, &opts)
+    };
+
+    // Control: active issuer -> attested_claims.
+    assert_eq!(
+        verify_bundle_with(&bundle, &attest_opts(&rec, &res, &tsa, &attest)).attestation_status,
+        "attested_claims"
+    );
+    // COMPROMISED (even far in the future) -> a stolen key forges anything -> never honored -> failed.
+    assert_eq!(
+        run("compromised", "2026-12-31T00:00:00.000Z").attestation_status,
+        "failed"
+    );
+    // ROTATED with issued_at BEFORE the rotation -> the clean-retirement window honors it -> attested_claims.
+    assert_eq!(
+        run("rotated", "2026-06-15T12:00:00.000Z").attestation_status,
+        "attested_claims"
+    );
+    // ROTATED with issued_at AFTER the rotation (the issuer had retired) -> not honored -> failed.
+    assert_eq!(
+        run("rotated", "2026-06-14T00:00:00.000Z").attestation_status,
+        "failed"
+    );
+}
+
+#[test]
 fn tier_b_attestation_bound_revocation_digest_detects_stripped_list() {
     // #3 (deep review): the STRIP-revocation downgrade. Revocation is a soft tier whose ABSENCE reads as the safe
     // baseline, so an attacker who can edit the bundle deletes `revocation_list` -> revocation_status:absent ->
@@ -6961,6 +7009,81 @@ fn tier_b_cosig_threshold_met_verifies() {
     ] {
         assert!(json.contains(field), "report JSON missing {field}: {json}");
     }
+}
+
+#[test]
+fn role_key_rotation_cosig_compromised_approver_drops_below_threshold() {
+    // ADR 0006 §1 (cosig): a 2-of-2 grant anchored at 10:10:01. Approver a1 is (authoritatively) compromised at
+    // 10:05 — BEFORE the anchor — so its approval (forgeable after the compromise) no longer counts: only 1 of 2
+    // → below threshold → the grant is not Tier-B-eligible → its use is an unmatched violation → ok:false.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let (a1, a2) = (approver(40), approver(41));
+    let grant = cosigned_grant(&rec, 2, &[&a1, &a2]);
+    let gh = content_hash_of(&grant);
+    let use_rec = seal_use(
+        &rec,
+        &res,
+        "use-1",
+        &[gh],
+        ACTION,
+        &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED),
+    );
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let mut opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    opts.cosig_approver_keys = vec![a1.verifying_key(), a2.verifying_key()];
+    assert!(
+        verify_bundle_with(&bundle, &opts).ok,
+        "control: 2-of-2 satisfies"
+    );
+
+    opts.role_key_status = role_status(
+        a1.verifying_key(),
+        "compromised",
+        Some("2026-06-15T10:05:00.000Z"),
+    );
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(
+        !r.ok,
+        "a grant relying on a compromised approver's approval must fail the threshold"
+    );
+    assert_eq!(r.cosig_threshold_failures, 1);
+
+    opts.role_key_status = role_status(
+        a1.verifying_key(),
+        "compromised",
+        Some("2026-06-15T10:20:00.000Z"),
+    );
+    assert!(
+        verify_bundle_with(&bundle, &opts).ok,
+        "an approver compromised AFTER the grant's anchor keeps its approval"
+    );
+}
+
+#[test]
+fn role_key_rotation_cosig_json_accepts_object_form_fail_closed() {
+    // cosig_approver_keys now accepts the rotation object form on the JSON/FFI path (was a parse error); an
+    // unknown status still fails closed.
+    let bundle_json =
+        r#"{"bundle_version":"1","project_id":"p","keys":[],"records":[],"checkpoints":[]}"#;
+    let key = encode_pubkey(&approver(40).verifying_key());
+    let good = format!(
+        r#"{{"cosig_approver_keys":[{{"key":"{key}","status":"compromised","status_changed_at":"2026-01-01T00:00:00.000Z"}}]}}"#
+    );
+    assert!(
+        verify_bundle_with_json(bundle_json, &good).contains("action_completeness"),
+        "a cosig rotation object must parse"
+    );
+    let bad = format!(r#"{{"cosig_approver_keys":[{{"key":"{key}","status":"nope"}}]}}"#);
+    assert!(verify_bundle_with_json(bundle_json, &bad).contains("is not one of"));
 }
 
 #[test]

@@ -439,6 +439,50 @@ pub struct RoleKeyStatus {
     pub status_changed_at: Option<String>,
 }
 
+/// ADR 0006 §1 — is a signature by role key `vk` HONORED under its pinned rotation lifecycle? `active` (absent
+/// from `role_status`) ⇒ always. A non-active status delegates to `honored`, which encodes the ROLE's dating
+/// rule over the full [`RoleKeyStatus`]. Two families:
+///   * ANCHOR-COMMITTED artifacts (grant/use authority — done in item 1; cosig approvals — committed inside the
+///     grant) ⇒ honored when the record was anchored before `status_changed_at`, the SAME for every non-active
+///     status (the anchor is the cryptographic proof of predating). See [`honored_anchored_before`].
+///   * NON-anchor-committed artifacts with a SELF-asserted time (attestation / revocation list / TSA token)
+///     ⇒ a STOLEN key (`compromised`/`revoked`) can forge any timestamp, so it is NEVER honored; only a cleanly
+///     `rotated` key's artifact is honored, and only if its own time is at/before the rotation. See
+///     [`honored_clean_rotation`].
+fn role_key_honored(
+    vk: &VerifyingKey,
+    role_status: &BTreeMap<[u8; 32], RoleKeyStatus>,
+    honored: impl FnOnce(&RoleKeyStatus) -> bool,
+) -> bool {
+    match role_status.get(&vk.to_bytes()) {
+        None => true,
+        Some(rks) => honored(rks),
+    }
+}
+
+/// ANCHOR-COMMITTED dating rule: honored when the record (`content_hash`) was transitively committed by a
+/// verified anchor at/before the key's `status_changed_at` — valid for every non-active status (the anchor
+/// proves the artifact predates the compromise). Fail-closed if `status_changed_at` is absent.
+fn honored_anchored_before(
+    rks: &RoleKeyStatus,
+    content_hash: &str,
+    anchored_before: &impl Fn(&str, &str) -> bool,
+) -> bool {
+    rks.status_changed_at
+        .as_deref()
+        .is_some_and(|t| anchored_before(content_hash, t))
+}
+
+/// NON-anchor-committed dating rule (self-asserted `artifact_time`): a STOLEN key (`compromised`/`revoked`)
+/// can forge any timestamp, so it is NEVER honored; a cleanly `rotated` key's artifact is genuine and honored
+/// iff its own time is canonical and at/before the (canonical) rotation time. Fail-closed otherwise.
+fn honored_clean_rotation(rks: &RoleKeyStatus, artifact_time: &str) -> bool {
+    rks.status == "rotated"
+        && rks.status_changed_at.as_deref().is_some_and(|t| {
+            is_canonical_ts(t) && is_canonical_ts(artifact_time) && artifact_time <= t
+        })
+}
+
 #[derive(Default)]
 pub struct VerifyOptions {
     /// ADR 0006 §1 — out-of-band lifecycle for the authority-elevation ROLE keys, keyed by raw 32-byte public
@@ -1262,20 +1306,26 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
     };
     // D7.2: pinned deployment-attestation issuer keys (so the JSON/FFI path — used by the Go server and any
     // external auditor — can elevate `attestation_status` to `attested_claims`, not just the direct Rust API).
-    let attestation_keys = match parse_pubkeys(&opts_val, "attestation_keys") {
-        Ok(k) => k,
-        Err(e) => return error_report(&e),
-    };
+    // ADR 0006 §1: attestation issuers accept the rotation object form (compromised/revoked → never honored;
+    // cleanly rotated → honored only for an attestation issued at/before the rotation).
+    let attestation_keys =
+        match parse_role_pubkeys(&opts_val, "attestation_keys", &mut role_key_status) {
+            Ok(k) => k,
+            Err(e) => return error_report(&e),
+        };
     // M6 (ADR 0005): pinned cosignature-approver keys, so the JSON/FFI path (the Go server + any external
     // auditor) can enforce M-of-N grant approval, not just the direct Rust API.
     let revocation_keys = match parse_pubkeys(&opts_val, "revocation_keys") {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
-    let cosig_approver_keys = match parse_pubkeys(&opts_val, "cosig_approver_keys") {
-        Ok(k) => k,
-        Err(e) => return error_report(&e),
-    };
+    // ADR 0006 §1: cosig approvers accept the rotation object form (a compromised approver's approvals stop
+    // counting for grants anchored after the compromise).
+    let cosig_approver_keys =
+        match parse_role_pubkeys(&opts_val, "cosig_approver_keys", &mut role_key_status) {
+            Ok(k) => k,
+            Err(e) => return error_report(&e),
+        };
     // M4 (ADR 0005): optional per-`broker_id` authority key map, so the JSON/FFI path (the Go server + any
     // external auditor) can pin per-broker federation authority, not just the direct Rust API.
     let federated_broker_keys =
@@ -1843,6 +1893,7 @@ fn delegation_assertions_present(rec: &CanonValue) -> bool {
 /// signature by that exact pinned key over a challenge bound to that exact kid. Distinct approver kids are
 /// deduped (one approver signing twice counts once — no threshold inflation); an entry whose kid matches no
 /// pinned key, whose sig is malformed, or whose sig fails verification is ignored (never counted).
+#[allow(clippy::too_many_arguments)]
 fn count_cosig_approvals(
     rec: &CanonValue,
     grant_id: &str,
@@ -1850,6 +1901,11 @@ fn count_cosig_approvals(
     threshold_m: i64,
     exp: i64,
     approver_keys: &[VerifyingKey],
+    // ADR 0006 §1 cosig-approver rotation: an approval by a compromised/rotated approver counts ONLY if THIS
+    // grant (which embeds the approval in its signed evidence) was anchored before the approver's status change.
+    role_status: &BTreeMap<[u8; 32], RoleKeyStatus>,
+    grant_content_hash: &str,
+    anchored_before: &impl Fn(&str, &str) -> bool,
 ) -> usize {
     let cosignatures = match cosignatures_of(rec) {
         Some(a) => a,
@@ -1883,7 +1939,11 @@ fn count_cosig_approvals(
         let signature = Signature::from_bytes(&sig_bytes);
         let challenge =
             cosig_approval_challenge(grant_id, kid, credential_binding, threshold_m, exp);
-        if vk.verify_strict(&challenge, &signature).is_ok() {
+        if vk.verify_strict(&challenge, &signature).is_ok()
+            && role_key_honored(vk, role_status, |rks| {
+                honored_anchored_before(rks, grant_content_hash, anchored_before)
+            })
+        {
             credited.insert(kid.to_string());
         }
     }
@@ -3391,6 +3451,18 @@ fn evaluate_attestation(
         return eval;
     }
 
+    // ADR 0006 §1 — attestation-key rotation. The attestation is NOT anchor-committed: it is a top-level
+    // bundle artifact with a SELF-asserted `issued_at`, so a STOLEN issuer key could forge an attestation with
+    // any time. A `compromised`/`revoked` issuer is therefore NEVER honored; a cleanly `rotated` issuer is
+    // honored only when the attestation's own `issued_at` is at/before the rotation. A withdrawn attestation
+    // stays `failed` (no `attested_claims`) — fail-closed (it weakens the capstone, never strengthens it).
+    if !role_key_honored(signer, &opts.role_key_status, |rks| {
+        honored_clean_rotation(rks, &issued_at)
+    }) {
+        issues.push("deployment_attestation: issuer key is rotated/compromised and the attestation is not provably before that status change — not honored (ADR 0006 role-key rotation)".into());
+        return eval;
+    }
+
     // 2. freshness / window coverage: the LATEST anchored checkpoint's TSA timestamp must fall within
     // [issued_at, not_after] (offline has no wall clock; the anchored time is the trusted reference).
     let latest = match anchored_cp_ids.iter().max_by_key(|(seq, _, _, _)| *seq) {
@@ -4473,6 +4545,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         cosig_threshold,
                         exp,
                         &opts.cosig_approver_keys,
+                        &opts.role_key_status,
+                        &rt.content_hash,
+                        &anchored_before,
                     );
                     // Compare in i64, NOT `cosig_threshold as usize`: on the wasm32 verifier `usize == u32`,
                     // so a broker-signed `cosig_threshold` above 2^32 would truncate to a small value and let a
