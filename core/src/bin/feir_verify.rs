@@ -78,6 +78,10 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
     if !pid.is_empty() {
         println!("  project:      {pid}");
     }
+    let bd = gs("bundle_digest"); // binds this verdict to the exact bytes verified (pair the report with the artifact)
+    if !bd.is_empty() {
+        println!("  bundle:       {bd}");
+    }
     println!("  records:      {}/{} integrity-proven", gi("records_proven"), gi("records_total"));
     if !gb("keys_externally_pinned") {
         println!("  keys:         from the bundle (NOT externally pinned) — proves internal consistency");

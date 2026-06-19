@@ -993,13 +993,26 @@ pub fn report_to_json(r: &VerifyReport) -> String {
     report_to_canon(r).serialize()
 }
 
+/// Serialize the report with a `bundle_digest` = sha256 of the EXACT input bytes verified, bound in at the JSON
+/// boundary (the only place the raw input exists). This makes an `ok:true` report un-detachable from its artifact:
+/// a verdict pasted next to a DIFFERENT bundle is detectable (the bundle's own digest won't match). It is the raw
+/// input, not the canonical form, so it binds the literal bytes an auditor supplied.
+fn report_json_with_digest(r: &VerifyReport, input_bytes: &[u8]) -> String {
+    let mut canon = report_to_canon(r);
+    if let CanonValue::Object(ref mut fields) = canon {
+        fields.push(("bundle_digest".into(), CanonValue::string(crate::hashx::sha256_prefixed(input_bytes))));
+    }
+    canon.serialize()
+}
+
 /// Verify a bundle JSON string and return the report as a JSON string (the shape WASM/FFI return).
 pub fn verify_bundle_to_json(text: &str) -> String {
     match verify_bundle_json(text) {
-        Ok(r) => report_to_json(&r),
+        Ok(r) => report_json_with_digest(&r, text.as_bytes()),
         Err(e) => CanonValue::object(vec![
             ("ok".into(), CanonValue::Bool(false)),
             ("error".into(), CanonValue::string(e.to_string())),
+            ("bundle_digest".into(), CanonValue::string(crate::hashx::sha256_prefixed(text.as_bytes()))),
         ])
         .unwrap()
         .serialize(),
@@ -1113,7 +1126,7 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         // No out-of-band status/compromise override here — that is the richer Rust API's job.
         opts.trusted_keys = Some(signing.into_iter().map(TrustedKey::from).collect());
     }
-    report_to_json(&verify_bundle_with(&bundle, &opts))
+    report_json_with_digest(&verify_bundle_with(&bundle, &opts), bundle_text.as_bytes())
 }
 
 /// Parse an optional array of `ed25519pub:` strings. Absent ⇒ empty; present-but-malformed ⇒ Err

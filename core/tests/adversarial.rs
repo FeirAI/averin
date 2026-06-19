@@ -2692,6 +2692,25 @@ fn checkpoint_with_head(rec_sk: &SigningKey, frontier: &[String], record_count: 
 }
 
 // a clean single-grant (broker_seq=1) bundle whose anchored checkpoint head correctly commits it.
+#[test]
+fn verify_report_binds_the_input_digest() {
+    // #12 (deep review): the report carries bundle_digest = sha256 of the EXACT verified input bytes, so an
+    // ok:true verdict cannot be silently re-paired with a DIFFERENT bundle (a detached-proof swap is detectable).
+    let (rec, tsa) = (signing_key_from_seed(&[0u8; 32]), test_tsa_key(&[200u8; 32]));
+    let text = d6_clean(&rec, &tsa).serialize();
+    let want = sha256_prefixed(text.as_bytes());
+    // unpinned path
+    let r = CanonValue::parse(&feir_decision_core::verify::verify_bundle_to_json(&text)).unwrap();
+    assert_eq!(r.get("bundle_digest").and_then(|v| v.as_str()), Some(want.as_str()), "unpinned report must bind the input digest");
+    // pinned path (verify_bundle_with_json) binds the BUNDLE bytes (not opts)
+    let r2 = CanonValue::parse(&feir_decision_core::verify::verify_bundle_with_json(&text, "{}")).unwrap();
+    assert_eq!(r2.get("bundle_digest").and_then(|v| v.as_str()), Some(want.as_str()), "pinned report must bind the bundle digest");
+    // a parse-error report also binds the digest of what was supplied.
+    let bad = "{not json";
+    let r3 = CanonValue::parse(&feir_decision_core::verify::verify_bundle_to_json(bad)).unwrap();
+    assert_eq!(r3.get("bundle_digest").and_then(|v| v.as_str()), Some(sha256_prefixed(bad.as_bytes()).as_str()));
+}
+
 fn d6_clean(rec: &SigningKey, tsa: &SigningKey) -> CanonValue {
     let grant = seal_grant(rec, rec, GID, &grant_evidence_d6(GID, 1));
     let gh = content_hash_of(&grant);
