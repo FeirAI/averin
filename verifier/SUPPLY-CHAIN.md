@@ -23,26 +23,41 @@ obtain the expected digest from a channel you trust (this repository / a signed 
 `WASM_SHA256` you were served — shown in the page — equals it. Reproducing the build from source (below)
 closes the loop: it proves the pinned digest corresponds to auditable source, not an opaque blob.
 
+## Two distinct properties — don't conflate them
+
+1. **Load-time tamper detection (the fail-closed pin).** The build that PRODUCES the served `.wasm` also writes
+   its digest into the served `index.html` (`build.sh` locally; `Dockerfile.web` for the deployment). So
+   `served == pinned` **by construction** — it does NOT depend on the build being reproducible. A binary swapped
+   *after* the build (a CDN/cache/MitM replacing only the `.wasm`) no longer matches the served pin → the loader
+   refuses to run. This works on every machine.
+2. **Source transparency (reproduce-from-source).** Proving the pinned digest corresponds to *auditable source*,
+   not an opaque blob. This DOES require reproducing the build — but only in a **matching build environment**.
+
 ## Reproduce the digest from source
 
-The toolchain is pinned in `rust-toolchain.toml` (exact `rustc` version + `wasm32-unknown-unknown` target),
-because even a patch-level compiler bump changes codegen and therefore the digest. With that pin, the build is
-deterministic:
+The toolchain is pinned in `rust-toolchain.toml` (exact `rustc` version + target). `build.sh` additionally
+**remaps the three absolute path roots** rustc would embed in panic-location strings (workspace, cargo
+registry, sysroot) to fixed labels — so the digest is identical across *directories* on the same OS/arch:
 
 ```
-./verifier/build.sh
-# or, by hand:
-cd core && cargo build --release --locked --target wasm32-unknown-unknown --no-default-features
-shasum -a 256 ../target/wasm32-unknown-unknown/release/feir_decision_core.wasm
+./verifier/build.sh           # builds, remaps paths, writes .sha256 + rewrites the WASM_SHA256 pin
 ```
 
-`build.sh` recomputes the digest, writes `feir_decision_core.wasm.sha256`, and rewrites the `WASM_SHA256` pin
-in `index.html` so the three never drift apart. Compare the printed `sha256:…` against the value in this repo;
-they must be identical. (`--locked` forbids silent dependency drift via `Cargo.lock`.)
-
-> Bit-for-bit reproduction across machines requires the same pinned toolchain and target. A different `rustc`
-> patch version, host OS, or LLVM can produce a functionally identical core with a different digest. When you
-> bump the toolchain, regenerate and commit the new digest in the same change.
+> **Cross-machine reality:** `wasm32-unknown-unknown` codegen is **not** bit-identical across build *hosts* —
+> the same pinned `rustc` on macOS-arm64 vs linux-amd64 yields different `.wasm` bytes (host-dependent codegen,
+> not just paths; the remap removes only the path component). So the committed pin is a **dev-host reference**,
+> and the **deployment self-pins what it builds** (it never trusts the committed pin). To verify source
+> transparency, reproduce in the **same environment** as the published artifact — the canonical builder is the
+> pinned Linux image:
+> ```
+> docker run --rm --platform linux/amd64 -v "$PWD":/src:ro rust:1.92-bookworm bash -c '
+>   set -e; mkdir /w && tar -C /src --exclude=./target --exclude=./.git -cf - . | tar -C /w -xf -
+>   cd /w/core && rustup target add wasm32-unknown-unknown
+>   cargo build --release --locked --target wasm32-unknown-unknown --no-default-features
+>   sha256sum /w/target/wasm32-unknown-unknown/release/feir_decision_core.wasm'
+> ```
+> and compare against the digest the deployment serves (shown in the verifier page). Bumping the toolchain
+> changes the digest — regenerate in the same change.
 
 ## When you change the core
 

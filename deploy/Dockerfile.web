@@ -23,5 +23,14 @@ FROM nginx:1-alpine
 COPY --from=webbuild /src/web/dist /usr/share/nginx/html
 COPY verifier /usr/share/nginx/html/verifier
 COPY --from=wasmbuild /src/target/wasm32-unknown-unknown/release/feir_decision_core.wasm /usr/share/nginx/html/verifier/feir_decision_core.wasm
+# SELF-PIN: rewrite the served index.html's WASM_SHA256 (and the sidecar) to the digest of the wasm ACTUALLY
+# built+served HERE. The committed pin was generated on a dev host; wasm32 codegen is NOT bit-identical across
+# build hosts, so a static pin would not match this freshly-built binary and the fail-closed loader would
+# refuse to start the deployed verifier. Pinning what we serve makes served==pinned by construction. (Source
+# reproduction/transparency is a separate property — see verifier/SUPPLY-CHAIN.md.)
+RUN d="$(sha256sum /usr/share/nginx/html/verifier/feir_decision_core.wasm | cut -d' ' -f1)" \
+ && sed -i "s|const WASM_SHA256 = \"sha256:[0-9a-f]*\"|const WASM_SHA256 = \"sha256:$d\"|" /usr/share/nginx/html/verifier/index.html \
+ && printf 'sha256:%s  feir_decision_core.wasm\n' "$d" > /usr/share/nginx/html/verifier/feir_decision_core.wasm.sha256 \
+ && grep -q "sha256:$d" /usr/share/nginx/html/verifier/index.html  # fail the build if the pin didn't take
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80

@@ -10,6 +10,13 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 
+# Reproducibility: remap the three absolute path roots rustc would otherwise embed in panic-location strings
+# (the workspace, the cargo registry, and the toolchain sysroot) to FIXED labels, so two builds with the same
+# toolchain on the same OS/arch from DIFFERENT directories produce the byte-identical digest. (This does NOT
+# make it identical across OS/arch — wasm32 codegen still varies by build host; see SUPPLY-CHAIN.md. The
+# DEPLOYMENT self-pins what it builds, so cross-host reproduction is a transparency property, not a load gate.)
+sysroot="$(rustc --print sysroot)"
+export RUSTFLAGS="--remap-path-prefix=$root=/feir --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$sysroot=/rust ${RUSTFLAGS:-}"
 # --locked: build the EXACT dependency versions in Cargo.lock (no silent registry drift), a prerequisite
 # for a reproducible digest.
 ( cd "$root/core" && cargo build --release --locked --target wasm32-unknown-unknown --no-default-features )
