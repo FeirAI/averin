@@ -43,6 +43,10 @@ type Sealer interface {
 	// VerifyBundleWithRoles pins broker + resource recording keys separately (ADR 0003 R2), so a
 	// grant elevates only under a broker key and a use receipt only under a resource key.
 	VerifyBundleWithRoles(bundleJSON string, brokerKeys, resourceKeys []string) string
+	// VerifyBundleWith pins the FULL role-disjoint trust set from a JSON opts object (broker/resource/
+	// revocation/attestation/cosig/federation/tsa) — used by the self-verify endpoint to evaluate every mode
+	// the server can attest to, not only grant/use.
+	VerifyBundleWith(bundleJSON, optsJSON string) string
 	PubKey() string
 	// content commitments (RCP §9.3): mint a nonce and commit a low-entropy field at ingest.
 	RandomNonce() (string, error)
@@ -76,6 +80,7 @@ type Server struct {
 	revocationKey      ed25519.PrivateKey
 	revoked            map[string]map[string]struct{} // projectID -> set of revoked grant_ids
 	revokedMu          sync.Mutex
+	revokeCapWarnAt    time.Time // throttles the at-capacity WARNING (guarded by revokedMu)
 	revocationValidity time.Duration
 	denyLog            bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
@@ -2609,19 +2614,51 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Pin the broker recording key (== this server's signing key; broker_trust: assumed) so any
-	// credential-broker grants in the bundle elevate to gateway_enforced (Tier-A grant accountability).
-	// When the resource gateway is enabled, ALSO pin its (distinct) recording key as the resource role,
-	// so use receipts elevate under the resource role (ADR 0003 R2). An EXTERNAL auditor pins both keys
-	// out-of-band instead of trusting the server's self-view.
-	var report string
-	if s.resourceCore != nil {
-		report = s.core.VerifyBundleWithRoles(bundle, []string{s.core.PubKey()}, []string{s.resourceCore.PubKey()})
-	} else {
-		report = s.core.VerifyBundleWithAuthority(bundle, []string{s.core.PubKey()})
-	}
+	// Self-verify under the trust roots this server holds that are MEANINGFUL without the externally-held TSA key —
+	// broker (or per-broker federation), resource, revocation, and cosig — so every such mode is EVALUATED rather
+	// than read as a benign `absent`/`unevaluated` (false comfort). This is the server's SELF-VIEW; an INDEPENDENT
+	// auditor pins all roles INCLUDING the RFC3161 TSA out-of-band (the real check). See selfVerifyOpts on why the
+	// attestation role is deliberately NOT self-pinned.
+	report := s.core.VerifyBundleWith(bundle, s.selfVerifyOpts())
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(report))
+}
+
+// selfVerifyOpts builds the pinned-trust-root opts JSON from the server's configured keys, for the self-verify
+// endpoint. Role-disjoint by construction (the With* setters enforce it). It pins ONLY the roles whose verdict is
+// meaningful WITHOUT the external RFC3161 TSA key (which this server does not hold): broker/federation and resource
+// elevation (no temporal dependency), revocation (the membership gate blocks a revoked use independent of list
+// currency — see verify.rs M5), and cosig (a signature, no anchor dependency).
+//
+// The attestation role is deliberately EXCLUDED: its D7 freshness requires a VERIFIED+anchored checkpoint, which is
+// unreachable without a pinned TSA key. Self-pinning it could therefore only ever yield `failed` (never `fresh`),
+// flipping a fully-valid pre-anchor bundle to ok:false — a FALSE ALARM, the inverse of the false comfort this
+// endpoint exists to remove. Only an auditor who pins the TSA can meaningfully evaluate the attestation.
+func (s *Server) selfVerifyOpts() string {
+	enc := func(pub ed25519.PublicKey) string {
+		return "ed25519pub:" + base64.RawURLEncoding.EncodeToString(pub)
+	}
+	opts := map[string]any{}
+	if s.brokerID != "" {
+		opts["federated_broker_keys"] = map[string]any{s.brokerID: []string{s.core.PubKey()}}
+	} else {
+		opts["broker_authority_keys"] = []string{s.core.PubKey()}
+	}
+	if s.resourceCore != nil {
+		opts["resource_authority_keys"] = []string{s.resourceCore.PubKey()}
+	}
+	if s.revocationKey != nil {
+		opts["revocation_keys"] = []string{enc(s.revocationKey.Public().(ed25519.PublicKey))}
+	}
+	if len(s.cosigApprovers) > 0 {
+		ak := make([]string, len(s.cosigApprovers))
+		for i, a := range s.cosigApprovers {
+			ak[i] = enc(a)
+		}
+		opts["cosig_approver_keys"] = ak
+	}
+	b, _ := json.Marshal(opts)
+	return string(b)
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {

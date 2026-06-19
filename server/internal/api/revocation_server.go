@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
+	"log"
 	"net/http"
 	"sort"
 	"time"
@@ -53,6 +54,11 @@ func (s *Server) WithRevocation(revKey ed25519.PrivateKey) *Server {
 	return s
 }
 
+// maxRevokedPerProject bounds the in-memory revoked set per project. A revocation_list is signed + exported in
+// full each time, so an unbounded set is both a memory and an export-size amplification vector. 100k revoked
+// grants per project is far past any realistic operational need while still capping abuse.
+const maxRevokedPerProject = 100_000
+
 // revokeRequest is the POST /v2/revoke wire shape.
 type revokeRequest struct {
 	ProjectID string `json:"project_id"`
@@ -85,11 +91,31 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project_id and grant_id are required")
 		return
 	}
+	// Revocation is intentionally PERMISSIVE by grant_id: we do NOT require the id to already exist in this
+	// server's store. The primitive is "block any use of this id," and an operator must be able to revoke a
+	// compromised id preemptively (or a federated grant minted by a peer broker) that this instance has not yet
+	// observed. Gating on existence would turn a security action into a fail-open ("unknown grant_id" read as
+	// "nothing to worry about"). Abuse is bounded by auth (project-scoped) + the per-project size cap below.
 	s.revokedMu.Lock()
 	set := s.revoked[rr.ProjectID]
 	if set == nil {
 		set = map[string]struct{}{}
 		s.revoked[rr.ProjectID] = set
+	}
+	// Bound the in-memory set so a caller cannot flood it with fabricated grant_ids (unbounded memory + export
+	// bloat). A NEW id past the cap is rejected; re-revoking an existing id is always allowed (idempotent). The
+	// rejection is EXPLICIT (429, never a silent drop) so the operator attempting a legitimate revocation knows it
+	// did not take effect and can act (raise the cap / restart / investigate a flood) — eviction or expiry is NOT
+	// an option here: dropping an id would silently UN-revoke that grant (a fail-open), since revocation is
+	// monotone-add. A throttled server-side WARNING also surfaces exhaustion to monitoring.
+	if _, exists := set[rr.GrantID]; !exists && len(set) >= maxRevokedPerProject {
+		if now := s.now(); now.Sub(s.revokeCapWarnAt) > time.Minute {
+			s.revokeCapWarnAt = now
+			log.Printf("WARNING: project %q revoked-grant set is at capacity (%d) — NEW revocations are being REJECTED until the cap is raised or the set is persisted/pruned; this log is throttled to ~1/min", rr.ProjectID, maxRevokedPerProject)
+		}
+		s.revokedMu.Unlock()
+		writeErr(w, http.StatusTooManyRequests, "the project's revoked-grant set is at capacity — raise the cap or persist/prune the set; this revocation did NOT take effect")
+		return
 	}
 	set[rr.GrantID] = struct{}{}
 	n := len(set)
