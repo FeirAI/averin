@@ -112,6 +112,34 @@ fn verify_sealed_rejects_unknown_top_level_field() {
 }
 
 #[test]
+fn verify_sealed_accepts_optional_record_kind() {
+    // leria integration: the OPTIONAL typed top-level `record_kind` is in ALLOWED_TOP_KEYS, so a
+    // record carrying it (a SIBLING of event_type, not a replacement) seals AND verifies — it must
+    // NOT raise UnknownField. Both closed-set values are exercised; record_kind is signed (covered by
+    // content_hash/sig — canon iterates object keys), so a verify over a chain containing it passes.
+    let m = manifest();
+    let sk = signing_key_from_seed(&[7u8; 32]);
+    let vk = sk.verifying_key();
+    for kind in ["budget-exhausted", "chargeback-posted"] {
+        let body = CanonValue::parse(m.get("record_body").unwrap().as_str().unwrap()).unwrap();
+        let CanonValue::Object(mut members) = body else {
+            panic!()
+        };
+        members.push(("record_kind".to_string(), CanonValue::Str(kind.to_string())));
+        let sealed = seal(&CanonValue::Object(members), &sk).unwrap();
+        // record_kind is part of the signed body and survives the seal verbatim.
+        assert_eq!(
+            sealed.get("record_kind").unwrap().as_str().unwrap(),
+            kind,
+            "record_kind must be preserved through the seal preimage"
+        );
+        // verify_sealed must PASS (shape + content_hash + sig) — no UnknownField on record_kind.
+        verify_sealed(&sealed, &vk)
+            .unwrap_or_else(|e| panic!("record_kind={kind} should verify, got: {e}"));
+    }
+}
+
+#[test]
 fn wrong_key_fails_signature() {
     let m = manifest();
     let body = CanonValue::parse(m.get("record_body").unwrap().as_str().unwrap()).unwrap();

@@ -34,6 +34,7 @@
     "anchored_ts": { "$ref": "#/$defs/ts" },
 
     "event_type": { "enum": ["llm_call","tool_call","decision","approval_gate","handoff","spawn_child","incomplete","credential_grant"] },
+    "record_kind": { "enum": ["budget-exhausted","chargeback-posted"], "description": "OPTIONAL typed evidence kind, a sibling of event_type (does NOT replace it). Lets first-class verify/export distinguish & filter spend-governance evidence (leria seals) without parsing extensions. Signed top-level field (covered by content_hash/sig)." },
     "action": { "type": "string" },
     "observed_via": { "enum": ["proxy","sdk","otel","broker"] },
     "input_commit": { "$ref": "#/$defs/commit" },

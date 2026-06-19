@@ -749,6 +749,16 @@ func validateGenericRecordItem(rec map[string]any) error {
 	if stringField(rec, "event_type") == "credential_grant_denied" {
 		return fmt.Errorf("event_type \"credential_grant_denied\" is reserved for the broker denied-grant log")
 	}
+	// record_kind is OPTIONAL but its value-set is CLOSED (schema enum). The Rust closed-key gate only
+	// admits the KEY (so a record carrying it verifies), not the value — so enforce the enum here at
+	// ingest, else an off-enum kind would seal AND verify yet be invisible to / mis-classified by a
+	// record_kind-filtered export. Absent record_kind is fine (it is not required).
+	if rk, present := rec["record_kind"]; present {
+		rks, ok := rk.(string)
+		if !ok || !validRecordKind(rks) {
+			return fmt.Errorf("record_kind must be one of {budget-exhausted, chargeback-posted}")
+		}
+	}
 	// extensions.broker is RESERVED for the broker/resource lifecycle endpoints, which build their own
 	// records — a GENERIC caller must not set it. Otherwise a forged extensions.broker.kind="grant" +
 	// authority.enforcement_point="credential_broker" would be folded into the D6 grant-transparency head
@@ -2661,11 +2671,32 @@ func (s *Server) selfVerifyOpts() string {
 	return string(b)
 }
 
+// validRecordKind is the closed value-set for the optional typed `record_kind` field (kebab-case
+// per feir convention), mirroring spec/decision-record.schema.json and core/src/record.rs. leria
+// seals spend-governance evidence under these kinds; a board/GRC pack filters /v2/export by them
+// without parsing `extensions`.
+func validRecordKind(k string) bool {
+	switch k {
+	case "budget-exhausted", "chargeback-posted":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
 	mode := r.URL.Query().Get("mode")
 	if mode == "" {
 		mode = "proof_only"
+	}
+	// Optional record_kind filter: a board pulls "all budget-exhausted this quarter" (or chargebacks)
+	// without parsing `extensions`. Reject an unknown value (vs. silently returning everything) so a
+	// caller's typo cannot masquerade as "no matching evidence". Works in proof_only AND full_evidence.
+	recordKind := r.URL.Query().Get("record_kind")
+	if recordKind != "" && !validRecordKind(recordKind) {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown record_kind %q (allowed: budget-exhausted, chargeback-posted)", recordKind))
+		return
 	}
 	bundle, err := s.buildBundle(projectID, true)
 	if err != nil {
@@ -2677,6 +2708,19 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal([]byte(bundle), &obj)
 	obj["mode"], _ = jsonRaw(mode)
 
+	// record_kind filtering surfaces a typed VIEW alongside the canonical bundle. The full `records`/
+	// `checkpoints` arrays are left INTACT (the DAG + checkpoint chain verify over the WHOLE set — pruning
+	// records would break causal-parent / frontier resolution), so the bundle still verifies as-is; the
+	// filter only adds `filtered_records` (the matching sealed records, each individually verifiable) plus
+	// a `record_kind_filter` echo. In a disclosing mode the disclosures are also pruned to the matching
+	// records, so a board view does not over-disclose unrelated evidence.
+	matchedRecordIDs := map[string]struct{}{}
+	if recordKind != "" {
+		filtered := filterRecordsByKind(obj["records"], recordKind, matchedRecordIDs)
+		obj["filtered_records"], _ = jsonRaw(filtered)
+		obj["record_kind_filter"], _ = jsonRaw(recordKind)
+	}
+
 	// For a disclosing mode, attach the (value, nonce) for every committed field so an offline
 	// verifier can confirm each disclosure against its record's commitment (RCP §9.3). proof_only
 	// ships commitments only.
@@ -2687,6 +2731,19 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		// When a record_kind filter is active, restrict disclosures to the matching records so a typed
+		// board view (full_evidence + record_kind) does not over-disclose unrelated evidence's raw fields.
+		if recordKind != "" {
+			pruned := disclosures[:0]
+			for _, d := range disclosures {
+				if rid, _ := d["record_id"].(string); rid != "" {
+					if _, ok := matchedRecordIDs[rid]; ok {
+						pruned = append(pruned, d)
+					}
+				}
+			}
+			disclosures = pruned
 		}
 		obj["disclosures"], _ = jsonRaw(disclosures)
 		rawAvailable = len(disclosures) > 0
@@ -2703,6 +2760,38 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	out, _ := json.Marshal(obj)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(out)
+}
+
+// filterRecordsByKind returns the subset of the bundle's sealed records whose signed top-level
+// `record_kind` equals kind, preserving each record's canonical bytes verbatim (so a filtered_records
+// entry stays individually verifiable). It records the matching records' record_ids into matched (for
+// pruning disclosures). The canonical `records` array is never mutated — this is a typed VIEW only.
+func filterRecordsByKind(recordsRaw json.RawMessage, kind string, matched map[string]struct{}) []json.RawMessage {
+	var recs []json.RawMessage
+	_ = json.Unmarshal(recordsRaw, &recs)
+	out := make([]json.RawMessage, 0, len(recs))
+	for _, r := range recs {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(r, &m) != nil {
+			continue
+		}
+		var rk string
+		if raw, ok := m["record_kind"]; ok {
+			_ = json.Unmarshal(raw, &rk)
+		}
+		if rk != kind {
+			continue
+		}
+		out = append(out, r)
+		var rid string
+		if raw, ok := m["record_id"]; ok {
+			_ = json.Unmarshal(raw, &rid)
+		}
+		if rid != "" {
+			matched[rid] = struct{}{}
+		}
+	}
+	return out
 }
 
 // buildDisclosures turns the project's stored disclosure secrets into the bundle's `disclosures`
