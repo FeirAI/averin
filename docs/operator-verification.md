@@ -87,24 +87,27 @@ Most modes are produced automatically by the broker/resource on the recording pa
 `/v2/grants/*`, `/v2/use*`, `/v2/introspection` flows). Two OPTIONAL tiers are assembled at bundle/checkpoint
 time from a role-separated key:
 
-- **Merkle-non-disclosure revocation (M5).** A revocation authority (a key disjoint from the broker it
-  revokes) builds a sorted Merkle tree over the revoked grant_ids, signs the root, and attaches
-  `revocation_merkle_root` + a per-grant `revocation_proofs` map to the bundle — committing to the revoked set
-  **without disclosing it**:
+- **Disclosed revocation (M5) — server-native.** Set `FEIR_REVOCATION_SEED` (a key disjoint from the broker,
+  resource, attestation, and cosig keys). `POST /v2/revoke {project_id, grant_id}` marks a grant revoked; every
+  `/v2/export` then carries a signed, time-bounded `revocation_list` (its freshness window anchored to the latest
+  checkpoint). Verify with `revocation_keys` pinned → a revoked grant's use (brokered OR native) is blocked.
+- **Federation (M4) — server-native.** Set `FEIR_BROKER_ID`; the server tags its grants with `broker_id` and
+  emits a per-broker_id `broker_grant_heads` map in each checkpoint. Verify with `federated_broker_keys[<id>]`
+  pinned → `federation_status: sequence_verified`. (One server = one broker_id; combine bundles from multiple
+  brokers to verify a multi-broker federation.)
+- **Merkle-non-disclosure revocation (M5).** The library producer (no server endpoint) — a revocation authority
+  builds a sorted Merkle tree over the revoked grant_ids, signs the root, and attaches `revocation_merkle_root` +
+  a per-grant `revocation_proofs` map — committing to the revoked set **without disclosing it**:
   - Go: `broker.BuildRevocationTree(revokedIDs)` → `api.BuildRevocationMerkleRoot(core, revKey, issuedAt, notAfter, tree)`
     for the signed root; `tree.NonMembershipProof(gid)` / `tree.MembershipProof(gid)` for each grant in the bundle.
   - Verify with `revocation_keys` pinned; under a fresh root **every** use and native credential needs a proof
     (a missing proof is fail-closed → blocked).
-- **Cross-broker cert (M4 transitive trust).** A PINNED issuer broker A vouches for an UNPINNED subject broker
-  B's authority key over a `(scope, resource)`:
+- **Cross-broker cert (M4 transitive trust).** The library producer (no server endpoint) — a PINNED issuer
+  broker A vouches for an UNPINNED subject broker B's authority key over a `(scope, resource)`:
   - Go: `broker.CrossBrokerCert(issuerID, subjectID, subjectPub, scope, resource, notAfter, issuerKey)`, embedded
     in B's `grant_evidence.cross_broker_cert`.
   - Verify with only A pinned in `federated_broker_keys`; B's grant elevates to `transitive` and is counted in
     `transitive_grants`.
-
-> These two tiers are currently produced via the library/SDK at bundle-assembly time; server HTTP endpoints that
-> emit a per-broker `broker_grant_heads` map (federation) and the revocation artifacts directly into the
-> checkpoint/export flow are the remaining wiring follow-up.
 
 ## Running it
 
