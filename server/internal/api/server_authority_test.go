@@ -116,6 +116,122 @@ func TestPolicyEngineSignedAuthorityElevates(t *testing.T) {
 	}
 }
 
+// TestMultipleAuthorityKeysElevatePerSource (residual fix): the server can pin DISTINCT keys for
+// policy_engine_signed AND human_signed at the same time. A human_signed record signed by the pinned human
+// key elevates to human_signed (so govder's kill/approval records read as human_signed, not caller_declared);
+// a policy_engine_signed record signed by the pinned policy key still elevates to policy_engine_signed; and a
+// record signed by an UNPINNED key (or claiming a source whose key cross-signs the other source's evidence)
+// stays caller_declared. The offline verifier pinning BOTH keys as authority_keys reads each as `verified`.
+func TestMultipleAuthorityKeysElevatePerSource(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	pe := ed25519.NewKeyFromSeed(peSeed(0x44))    // policy engine (signs policy_engine_signed)
+	human := ed25519.NewKeyFromSeed(peSeed(0x46)) // human-approval service (signs human_signed) — a DIFFERENT key
+	rogue := ed25519.NewKeyFromSeed(peSeed(0x47)) // unpinned key
+	h := api.New(c, store.NewMem(), "k0").
+		WithPolicyEngineKey("policy_engine_signed", pe.Public().(ed25519.PublicKey)).
+		WithPolicyEngineKey("human_signed", human.Public().(ed25519.PublicKey)).
+		Routes()
+
+	sum := sha256.Sum256([]byte("authority-claim"))
+	eh := "sha256:" + hex.EncodeToString(sum[:])
+
+	post := func(idem, recordID, source, evSig string) string {
+		body, _ := json.Marshal(map[string]any{
+			"idempotency_key": idem, "project_id": "p1", "session_id": "s1", "record_id": recordID,
+			"event_type": "decision", "status": "ok", "action": "x",
+			"authority": map[string]any{"source": source, "evidence_hash": eh, "evidence_sig": evSig},
+		})
+		code, resp := do(t, h, "POST", "/v2/records", string(body))
+		if code != http.StatusCreated {
+			t.Fatalf("ingest %s (%d): %s", recordID, code, resp)
+		}
+		return resp
+	}
+
+	// human_signed signed by the pinned human key -> elevates to human_signed (the residual fix).
+	respH := post("ih", "human-rec-1", "human_signed", signAuthorityEvidence("human_signed", "p1", "human-rec-1", eh, human))
+	if !strings.Contains(respH, `"source":"human_signed"`) {
+		t.Fatalf("a valid human-key evidence_sig should elevate to human_signed: %s", respH)
+	}
+	// policy_engine_signed signed by the pinned policy key -> still elevates (back-compat).
+	respP := post("ip", "policy-rec-1", "policy_engine_signed", signAuthorityEvidence("policy_engine_signed", "p1", "policy-rec-1", eh, pe))
+	if !strings.Contains(respP, `"source":"policy_engine_signed"`) {
+		t.Fatalf("a valid policy-key evidence_sig should still elevate to policy_engine_signed: %s", respP)
+	}
+	// human_signed signed by an UNPINNED key -> caller_declared.
+	respR := post("ir", "rogue-rec-1", "human_signed", signAuthorityEvidence("human_signed", "p1", "rogue-rec-1", eh, rogue))
+	if !strings.Contains(respR, `"source":"caller_declared"`) {
+		t.Fatalf("an unpinned key must fall back to caller_declared: %s", respR)
+	}
+	// CROSS-SOURCE: a human_signed claim whose evidence is signed by the POLICY key (the wrong source's key)
+	// must NOT elevate — the human source's pinned key is the human key, and the verifier binds source into
+	// the preimage anyway. Stays caller_declared.
+	respX := post("ix", "cross-rec-1", "human_signed", signAuthorityEvidence("human_signed", "p1", "cross-rec-1", eh, pe))
+	if !strings.Contains(respX, `"source":"caller_declared"`) {
+		t.Fatalf("a human_signed claim signed by the policy key must stay caller_declared: %s", respX)
+	}
+
+	// offline verify: pinning BOTH keys as authority_keys reads the human and policy records as VERIFIED.
+	_, exp := do(t, h, "GET", "/v2/export?project=p1", "")
+	pePub := "ed25519pub:" + base64.RawURLEncoding.EncodeToString(pe.Public().(ed25519.PublicKey))
+	humanPub := "ed25519pub:" + base64.RawURLEncoding.EncodeToString(human.Public().(ed25519.PublicKey))
+	rep := c.VerifyBundleWith(exp, fmt.Sprintf(`{"authority_keys":[%q,%q]}`, pePub, humanPub))
+	var report struct {
+		RecordTrust []struct {
+			RecordID  string `json:"record_id"`
+			Authority string `json:"authority"`
+		} `json:"record_trust"`
+	}
+	if err := json.Unmarshal([]byte(rep), &report); err != nil {
+		t.Fatalf("decode report: %v\n%s", err, rep)
+	}
+	got := map[string]string{}
+	for _, rt := range report.RecordTrust {
+		got[rt.RecordID] = rt.Authority
+	}
+	if got["human-rec-1"] != "verified" {
+		t.Fatalf("human-rec-1 authority = %q, want verified: %s", got["human-rec-1"], rep)
+	}
+	if got["policy-rec-1"] != "verified" {
+		t.Fatalf("policy-rec-1 authority = %q, want verified: %s", got["policy-rec-1"], rep)
+	}
+	if got["rogue-rec-1"] == "verified" {
+		t.Fatalf("the unpinned-key record must NOT verify: %s", rep)
+	}
+}
+
+// TestAuthorityKeyRejectsDuplicateSourceAndReusedKey (residual fix, role separation): pinning the same source
+// twice, or re-using ONE key for two different sources, must panic — keeping the pinned set as cleanly
+// role-separated as the verifier's per-source authority_keys model expects.
+func TestAuthorityKeyRejectsDuplicateSourceAndReusedKey(t *testing.T) {
+	pe := ed25519.NewKeyFromSeed(peSeed(0x44)).Public().(ed25519.PublicKey)
+	human := ed25519.NewKeyFromSeed(peSeed(0x46)).Public().(ed25519.PublicKey)
+
+	mustPanic := func(name string, fn func()) {
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("%s: expected panic", name)
+			}
+		}()
+		fn()
+	}
+	mustPanic("duplicate source", func() {
+		c, _ := core.New(seed)
+		api.New(c, store.NewMem(), "k0").
+			WithPolicyEngineKey("policy_engine_signed", pe).
+			WithPolicyEngineKey("policy_engine_signed", human)
+	})
+	mustPanic("one key reused across two sources", func() {
+		c, _ := core.New(seed)
+		api.New(c, store.NewMem(), "k0").
+			WithPolicyEngineKey("policy_engine_signed", pe).
+			WithPolicyEngineKey("human_signed", pe)
+	})
+}
+
 // TestPolicyEngineKeyMustBeDisjointFromResource (T7, Codex convergence): pinning a policy-engine key that
 // equals the RESOURCE key must fail fast at Routes() — in BOTH option orders (the guard cannot live only in
 // WithPolicyEngineKey, since WithResource may run after it). Else a resource key could elevate generic

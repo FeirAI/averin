@@ -86,12 +86,15 @@ type Server struct {
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
 	// inflate stored records without bound (the prerequisite for default-on). nil = unbounded (prior behavior).
 	denialBudget *denialBudget
-	// T7 (ADR 0002 / coverage-limits #4): a pinned EXTERNAL policy-engine verifying key. When set, a generic
-	// record carrying a policy_engine_signed/human_signed authority evidence_sig that verifies under this key
-	// is stamped with that elevated source (else forced to caller_declared). nil = Phase-1 default (every
-	// generic authority is caller_declared). The policy engine holds the private half OUT of this server.
-	policyEngineKey    ed25519.PublicKey
-	policyEngineSource string
+	// T7 (ADR 0002 / coverage-limits #4): pinned EXTERNAL authority verifying keys, keyed by the authority
+	// source they vouch for ("policy_engine_signed" and/or "human_signed"). When a generic record carries a
+	// matching source plus an authority evidence_sig that verifies under that source's pinned key, it is
+	// stamped with that elevated source (else forced to caller_declared). An empty map = Phase-1 default
+	// (every generic authority is caller_declared). Each external authority holds the private half OUT of
+	// this server. Distinct sources MAY be served by distinct keys (e.g. the policy engine signs
+	// policy_engine_signed, a separate human-approval service signs human_signed) so a record signed by the
+	// matching key elevates to ITS source — exactly the verifier's per-source trusted_authority_keys model.
+	policyEngineKeys map[string]ed25519.PublicKey
 	// Tier-B resource side (ADR 0003): the resource recording key signs use-receipt authority evidence
 	// (role-separated from the broker key, R2); resourceID is this resource's audience; ledger is the
 	// consume-before-act jti/nonce store. nil resourceCore = /v2/use disabled.
@@ -225,14 +228,17 @@ func (s *Server) WithDeniedGrantLog() *Server {
 	return s
 }
 
-// WithPolicyEngineKey (T7) pins an EXTERNAL policy engine's published verifying key + the authority source
-// it vouches for ("policy_engine_signed" or "human_signed"). At ingest, a generic record whose authority
-// carries that source plus a {evidence_hash, evidence_sig} that verifies under this key over the canonical
-// authority preimage is elevated to that source (so an offline verifier pinning the SAME key as authority_keys
-// reads it as `verified`); anything else falls back to forgeable `caller_declared` (threat #4). Model: the
-// policy engine signs with its OWN key off-box and the server only VERIFIES — keeping the policy engine out
-// of the server TCB. The key MUST be role-separated (the verifier does not fold authority_keys into its
-// disjointness check, so we reject the obvious overlap: the server's own signing key).
+// WithPolicyEngineKey (T7) pins an EXTERNAL authority's published verifying key + the authority source it
+// vouches for ("policy_engine_signed" or "human_signed"). It may be called ONCE PER SOURCE: pin the policy
+// engine's key for policy_engine_signed AND (separately) a human-approval service's key for human_signed, so
+// a record signed by the matching key elevates to ITS source. At ingest, a generic record whose authority
+// carries a pinned source plus a {evidence_hash, evidence_sig} that verifies under that source's key over the
+// canonical authority preimage is elevated to that source (so an offline verifier pinning the SAME keys as
+// authority_keys reads it as `verified`); anything else — an unpinned source, or a mismatched/forged key —
+// falls back to forgeable `caller_declared` (threat #4). Model: each authority signs with its OWN key off-box
+// and the server only VERIFIES — keeping those authorities out of the server TCB. Every pinned key MUST be
+// role-separated (the verifier does not fold authority_keys into its disjointness check, so we reject the
+// obvious overlaps: the server's own signing key, and re-using one key across two authority sources).
 func (s *Server) WithPolicyEngineKey(source string, key ed25519.PublicKey) *Server {
 	// The offline verifier only elevates these two generic authority sources; pinning any other source would
 	// make the server stamp records the verifier reads as `declared`, not `verified` (gateway_enforced is the
@@ -241,10 +247,23 @@ func (s *Server) WithPolicyEngineKey(source string, key ed25519.PublicKey) *Serv
 		panic("WithPolicyEngineKey: source must be policy_engine_signed or human_signed")
 	}
 	if serverPub, err := decodePubKey(s.core.PubKey()); err == nil && key.Equal(serverPub) {
-		panic("WithPolicyEngineKey: the policy-engine key must be role-separated from the server signing key")
+		panic("WithPolicyEngineKey: the authority key must be role-separated from the server signing key")
 	}
-	s.policyEngineSource = source
-	s.policyEngineKey = key
+	if s.policyEngineKeys == nil {
+		s.policyEngineKeys = make(map[string]ed25519.PublicKey, 2)
+	}
+	if _, dup := s.policyEngineKeys[source]; dup {
+		panic("WithPolicyEngineKey: source " + source + " already pinned (pin at most one key per source)")
+	}
+	// Reuse of ONE key across two authority sources would let a record signed for one source be re-labeled with
+	// the other's source by a caller (the verifier binds source into the preimage, so this is only a
+	// defense-in-depth guard, but it keeps the pinned set as cleanly role-separated as the verifier expects).
+	for existingSource, existing := range s.policyEngineKeys {
+		if existing.Equal(key) {
+			panic("WithPolicyEngineKey: this key is already pinned for source " + existingSource + " (one key per source)")
+		}
+	}
+	s.policyEngineKeys[source] = key
 	return s
 }
 
@@ -511,14 +530,18 @@ func (s *Server) WithTSA(t witness.TSA) *Server {
 func healthz(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) }
 
 func (s *Server) Routes() http.Handler {
-	// Role separation (T7, Codex): the pinned policy-engine key must be disjoint from the RESOURCE key too —
+	// Role separation (T7, Codex): every pinned authority key must be disjoint from the RESOURCE key too —
 	// checked HERE (not only in WithPolicyEngineKey) so it holds regardless of option order (WithResource can
 	// be called after WithPolicyEngineKey). Else a resource key could sign a generic record's evidence_sig and
 	// have the server stamp it `verified` — exactly what the offline verifier's authority_keys disjointness
 	// check now also fatals on. Fail fast at setup, like the other WithPolicyEngineKey guards.
-	if s.policyEngineKey != nil && s.resourceCore != nil {
-		if rpub, err := decodePubKey(s.resourceCore.PubKey()); err == nil && s.policyEngineKey.Equal(rpub) {
-			panic("the policy-engine key must be role-separated from the resource key")
+	if len(s.policyEngineKeys) > 0 && s.resourceCore != nil {
+		if rpub, err := decodePubKey(s.resourceCore.PubKey()); err == nil {
+			for source, key := range s.policyEngineKeys {
+				if key.Equal(rpub) {
+					panic("the " + source + " authority key must be role-separated from the resource key")
+				}
+			}
 		}
 	}
 	mux := http.NewServeMux()
@@ -2092,20 +2115,23 @@ func (s *Server) normalizeAuthority(rec map[string]any) {
 		return
 	}
 	claimed, _ := a["source"].(string)
-	// Phase-1 default, or no matching elevation claim: authority is forgeable -> caller_declared (threat #4).
-	if s.policyEngineKey == nil || claimed != s.policyEngineSource {
+	// Phase-1 default, or a source with no pinned key: authority is forgeable -> caller_declared (threat #4).
+	// Looking the key up BY the claimed source is what lets policy_engine_signed AND human_signed coexist —
+	// each elevates only under the key pinned for that exact source.
+	key, pinned := s.policyEngineKeys[claimed]
+	if !pinned {
 		a["source"] = "caller_declared"
 		rec["authority"] = a
 		return
 	}
-	// T7 model (b): elevate to the pinned source ONLY if the caller-supplied evidence_sig verifies under the
-	// external policy-engine key over the canonical authority preimage; else fall back to caller_declared.
+	// T7 model (b): elevate to the claimed source ONLY if the caller-supplied evidence_sig verifies under that
+	// source's pinned key over the canonical authority preimage; else fall back to caller_declared.
 	recordID, _ := rec["record_id"].(string)
 	projectID, _ := rec["project_id"].(string)
 	eh, _ := a["evidence_hash"].(string)
 	es, _ := a["evidence_sig"].(string)
-	if verifyAuthorityEvidence(s.policyEngineSource, projectID, recordID, eh, es, s.policyEngineKey) {
-		a["source"] = s.policyEngineSource // verified; evidence_hash/evidence_sig retained for the offline verifier
+	if verifyAuthorityEvidence(claimed, projectID, recordID, eh, es, key) {
+		a["source"] = claimed // verified; evidence_hash/evidence_sig retained for the offline verifier
 	} else {
 		a["source"] = "caller_declared"
 	}

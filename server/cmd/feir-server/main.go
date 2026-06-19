@@ -59,14 +59,25 @@ func main() {
 	} else {
 		log.Printf("WARNING: no FEIR_API_KEYS set — the app API is UNAUTHENTICATED (dev/single-tenant only)")
 	}
-	// T7: pin an EXTERNAL policy-engine verifying key so a generic record carrying a
-	// policy_engine_signed (or human_signed) authority block with an evidence_sig that
-	// verifies under THIS key is elevated to that source at ingest (else forced to the
-	// forgeable caller_declared). FEIR_POLICY_ENGINE_PUBKEY is the 32-byte ed25519 public
-	// key, hex- OR base64url-encoded (the "ed25519pub:<base64url>" published form is
-	// accepted with the prefix stripped). FEIR_POLICY_ENGINE_SOURCE is the source it
-	// vouches for (default policy_engine_signed). The policy engine holds the PRIVATE half
-	// out of this server. Unset = Phase-1 default (every generic authority is caller_declared).
+	// T7: pin EXTERNAL authority verifying keys so a generic record carrying a policy_engine_signed
+	// OR human_signed authority block, with an evidence_sig that verifies under the key pinned FOR
+	// THAT source, is elevated to that source at ingest (else forced to the forgeable
+	// caller_declared). Three env forms, all composable (each pins at most one key per source):
+	//
+	//   FEIR_POLICY_ENGINE_PUBKEY   — back-compat: one key for FEIR_POLICY_ENGINE_SOURCE
+	//                                 (default source policy_engine_signed).
+	//   FEIR_HUMAN_SIGNED_PUBKEY    — one key for the human_signed source (govder's kill/approval
+	//                                 records are human_signed, signed by a DIFFERENT key than the
+	//                                 policy engine — this is what lets them elevate, not normalize
+	//                                 down to caller_declared on verify/export).
+	//   FEIR_AUTHORITY_KEYS         — a general "source=pubkey,source=pubkey" list (the two sources
+	//                                 are policy_engine_signed and human_signed).
+	//
+	// Each pubkey is the 32-byte ed25519 public key, hex- OR base64url-encoded (the
+	// "ed25519pub:<base64url>" published form is accepted with the prefix stripped). Each external
+	// authority holds the PRIVATE half out of this server. None set = Phase-1 default (every generic
+	// authority is caller_declared). Pinning the SAME source twice across these forms is a fatal
+	// config error (WithPolicyEngineKey rejects a duplicate source).
 	if raw := os.Getenv("FEIR_POLICY_ENGINE_PUBKEY"); raw != "" {
 		pub, err := decodeAuthorityPubKey(raw)
 		if err != nil {
@@ -74,7 +85,21 @@ func main() {
 		}
 		source := envOr("FEIR_POLICY_ENGINE_SOURCE", "policy_engine_signed")
 		srv.WithPolicyEngineKey(source, pub)
-		log.Printf("T7 policy-engine key pinned (source=%s): a verifying authority evidence_sig elevates to %s", source, source)
+		log.Printf("T7 authority key pinned (source=%s): a verifying authority evidence_sig elevates to %s", source, source)
+	}
+	if raw := os.Getenv("FEIR_HUMAN_SIGNED_PUBKEY"); raw != "" {
+		pub, err := decodeAuthorityPubKey(raw)
+		if err != nil {
+			log.Fatalf("FEIR_HUMAN_SIGNED_PUBKEY: %v", err)
+		}
+		srv.WithPolicyEngineKey("human_signed", pub)
+		log.Printf("T7 authority key pinned (source=human_signed): a verifying authority evidence_sig elevates to human_signed")
+	}
+	if raw := os.Getenv("FEIR_AUTHORITY_KEYS"); raw != "" {
+		for source, pub := range parseAuthorityKeys(raw) {
+			srv.WithPolicyEngineKey(source, pub)
+			log.Printf("T7 authority key pinned (source=%s, via FEIR_AUTHORITY_KEYS): a verifying authority evidence_sig elevates to %s", source, source)
+		}
 	}
 	// durable content store for committed low-entropy values (raw input/output/rationale). No dir =
 	// in-memory (NOT durable; disclosures won't survive a restart).
@@ -279,6 +304,39 @@ func parseCosigApprovers(raw string) []ed25519.PublicKey {
 			log.Fatalf("FEIR_COSIG_APPROVER_KEYS: %q is not a base64url-no-pad ed25519 public key (32 bytes)", part)
 		}
 		out = append(out, ed25519.PublicKey(b))
+	}
+	return out
+}
+
+// parseAuthorityKeys parses the general FEIR_AUTHORITY_KEYS form: a comma-separated list of
+// "<source>=<pubkey>" pairs, where <source> is policy_engine_signed or human_signed and <pubkey> is a
+// hex- or base64url-encoded ed25519 public key (optional "ed25519pub:" prefix). A malformed entry, an
+// unknown source, or a duplicate source within the list is fatal (fail-closed: a typo'd pin must not
+// silently disable elevation). The returned map is then fed one-per-source into WithPolicyEngineKey,
+// which also fatals on a source already pinned by FEIR_POLICY_ENGINE_PUBKEY/FEIR_HUMAN_SIGNED_PUBKEY.
+func parseAuthorityKeys(raw string) map[string]ed25519.PublicKey {
+	out := make(map[string]ed25519.PublicKey, 2)
+	for _, part := range strings.Split(raw, ",") {
+		entry := strings.TrimSpace(part)
+		if entry == "" {
+			continue
+		}
+		source, key, ok := strings.Cut(entry, "=")
+		source = strings.TrimSpace(source)
+		if !ok || source == "" {
+			log.Fatalf("FEIR_AUTHORITY_KEYS: %q is not a source=pubkey pair", part)
+		}
+		if source != "policy_engine_signed" && source != "human_signed" {
+			log.Fatalf("FEIR_AUTHORITY_KEYS: unknown source %q (want policy_engine_signed or human_signed)", source)
+		}
+		if _, dup := out[source]; dup {
+			log.Fatalf("FEIR_AUTHORITY_KEYS: source %q listed more than once", source)
+		}
+		pub, err := decodeAuthorityPubKey(strings.TrimSpace(key))
+		if err != nil {
+			log.Fatalf("FEIR_AUTHORITY_KEYS (%s): %v", source, err)
+		}
+		out[source] = pub
 	}
 	return out
 }
