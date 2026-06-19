@@ -3392,22 +3392,22 @@ fn evaluate_attestation(
     eval
 }
 
-pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
-    let mut issues: Vec<String> = Vec::new();
-    let project_id = s(bundle, "project_id");
-
-    // R2 (ADR 0003) + D4 (ADR 0004): the broker, resource, and operation-taxonomy authority key sets
-    // MUST be PAIRWISE disjoint. A key shared across two roles could sign across the role boundary —
-    // e.g. a broker/resource key in `taxonomy_keys` could self-validate a D4 taxonomy to fabricate
-    // `taxonomy_status:"validated"`, or a key in both broker+resource could sign either a grant or a
-    // use. This is a FATAL configuration error — abort before evaluating any record (VerifyingKey
-    // equality is raw-bytes, which also settles the derived key id). Never proceed on an ambiguous
-    // key universe.
-    // M4 (ADR 0005): the "broker" role for disjointness is the UNION of `broker_authority_keys` and every
-    // per-`broker_id` `federated_broker_keys` set (an operator may pin per-broker authority). Every OTHER role
-    // must be disjoint from that union; distinct brokers MAY share a key (the cross-broker-cert refinement, not
-    // yet implemented, is what would constrain intra-broker key sharing). When `federated_broker_keys` is empty
-    // the union == `broker_authority_keys`, so the single-broker disjointness is byte-for-byte unchanged.
+/// R2 (ADR 0003) + D4 (ADR 0004) + D7 + M5/M6 role separation. The broker (∪ every per-`broker_id`
+/// `federated_broker_keys` set, M4), resource, operation-taxonomy, attestation, TSA, cosig-approver, and
+/// revocation key sets MUST be PAIRWISE disjoint — a key shared across two roles could sign ACROSS the role
+/// boundary (a broker/resource key in `taxonomy_keys` self-validating a D4 taxonomy; a TSA that is also an
+/// authority self-minting a freshness timestamp inside its own window; an approver that is also the broker
+/// self-approving a grant; a broker signing its own revocation list). Separately, `authority_keys` MAY equal
+/// `broker_authority_keys` (the self-host model — Go pins them equal) but MUST be disjoint from every
+/// NON-broker role (T7). Any overlap is a FATAL configuration error: abort before evaluating any record over an
+/// ambiguous key universe. Returns `Some(report)` — the fatal report to abort with — on any overlap, or `None`
+/// to proceed. (VerifyingKey equality is raw-bytes, which also settles the derived key id.)
+fn check_role_disjointness(
+    opts: &VerifyOptions,
+    project_id: Option<String>,
+) -> Option<VerifyReport> {
+    // M4: the "broker" role for disjointness is the UNION of `broker_authority_keys` and every per-broker set;
+    // when `federated_broker_keys` is empty the union == `broker_authority_keys` (single-broker unchanged).
     let mut broker_union: Vec<VerifyingKey> = opts.broker_authority_keys.clone();
     for keys in opts.federated_broker_keys.values() {
         for k in keys.iter().cloned() {
@@ -3420,57 +3420,111 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         ("broker_authority_keys", &broker_union),
         ("resource_authority_keys", &opts.resource_authority_keys),
         ("taxonomy_keys", &opts.taxonomy_keys),
-        // D7: the attestation authority must be role-separated too — else a broker/resource could sign a
-        // deployment_attestation that vouches for its own runtime (self-attestation).
         ("attestation_keys", &opts.attestation_keys),
-        // The TSA mints the freshness timestamp D7 anchors the attestation window to; a key that is BOTH
-        // the TSA and an authority (broker/resource/taxonomy/attestation) could self-mint a timestamp inside
-        // its own window, so the time authority must be disjoint from every signing role too.
         ("trusted_tsa_keys", &opts.trusted_tsa_keys),
-        // M6 (ADR 0005): a cosignature approver must be disjoint from the broker it governs and from every
-        // other role — else an approver who is also the broker/resource/taxonomy/attestation/TSA signer
-        // could self-approve a grant (dual control collapses to single control).
         ("cosig_approver_keys", &opts.cosig_approver_keys),
-        // M5 (ADR 0005): the revocation-list issuer must be disjoint from the broker it revokes and from every
-        // other role — else a broker could sign (or refuse to sign) its own revocation list (self-revocation
-        // control). This is why M5, unlike cosig/delegation, EXTENDS the R2 disjointness loop.
         ("revocation_keys", &opts.revocation_keys),
     ];
     for i in 0..role_sets.len() {
         for j in (i + 1)..role_sets.len() {
             if role_sets[i].1.iter().any(|k| role_sets[j].1.contains(k)) {
-                return fatal_config_report(
+                return Some(fatal_config_report(
                     project_id,
                     &format!(
                         "{} and {} must be disjoint (a key in both breaks role separation) — fatal configuration error",
                         role_sets[i].0, role_sets[j].0
                     ),
-                );
+                ));
             }
         }
     }
-    // T7 (Codex): `authority_keys` (the keys that elevate a GENERIC BrokerRole::None record's
-    // policy_engine_signed/human_signed/gateway_enforced authority to `verified`) MAY equal
-    // `broker_authority_keys` — the self-host model where the broker IS the policy authority for its own
-    // gateway_enforced records (Go pins authority_keys=broker_keys). But it MUST be disjoint from the
-    // RESOURCE/taxonomy/attestation/TSA roles: a key in any of those that also elevates generic authority is
-    // role confusion (e.g. a resource key signing a generic record's evidence_sig would read as `verified`).
+    // T7 (Codex): `authority_keys` MAY equal `broker_authority_keys`, but a key in any NON-broker role that
+    // ALSO elevates a generic record's authority to `verified` is role confusion.
     for (name, set) in [
         ("resource_authority_keys", &opts.resource_authority_keys),
         ("taxonomy_keys", &opts.taxonomy_keys),
         ("attestation_keys", &opts.attestation_keys),
         ("trusted_tsa_keys", &opts.trusted_tsa_keys),
-        // M6: an approver key must not also elevate a generic record's authority to `verified`.
         ("cosig_approver_keys", &opts.cosig_approver_keys),
-        // M5: a revocation-list issuer must not also elevate a generic record's authority.
         ("revocation_keys", &opts.revocation_keys),
     ] {
         if opts.trusted_authority_keys.iter().any(|k| set.contains(k)) {
-            return fatal_config_report(
+            return Some(fatal_config_report(
                 project_id,
                 &format!("authority_keys and {name} must be disjoint (a non-broker role key must not also elevate generic authority) — fatal configuration error"),
-            );
+            ));
         }
+    }
+    None
+}
+
+/// Build the bundle's signing-key store: (signing_key_id, key_epoch) -> KeyEntry, decoding each declared
+/// public_key. A malformed entry (undecodable key, or missing id/epoch/public_key) is recorded as an issue and
+/// skipped — that simply leaves any record referencing it signature-unverifiable downstream (fail-closed).
+fn build_key_store(
+    key_entries: &[CanonValue],
+    issues: &mut Vec<String>,
+) -> BTreeMap<(String, i64), KeyEntry> {
+    let mut keys: BTreeMap<(String, i64), KeyEntry> = BTreeMap::new();
+    for e in key_entries {
+        match (
+            s(e, "signing_key_id"),
+            e.get("key_epoch").and_then(|v| v.as_int()),
+            s(e, "public_key"),
+        ) {
+            (Some(id), Some(epoch), Some(pk)) => match decode_pubkey(&pk) {
+                Ok(vk) => {
+                    keys.insert(
+                        (id, epoch),
+                        KeyEntry {
+                            vk,
+                            status: s(e, "key_status").unwrap_or_else(|| "active".into()),
+                            status_changed_at: s(e, "status_changed_at"),
+                        },
+                    );
+                }
+                Err(err) => issues.push(format!("key {id}/{epoch} bad public_key: {err}")),
+            },
+            _ => issues.push("key entry missing signing_key_id/key_epoch/public_key".into()),
+        }
+    }
+    keys
+}
+
+/// Backdating gate (RCP §10.1 step 5 / threat #3): anchored times must be NON-DECREASING with checkpoint seq.
+/// `anchored` is `(seq, anchored_ts, frontier)` for each checkpoint carrying a VERIFIED anchor — only verified
+/// anchors are compared (partial anchoring cannot backdate: the latest anchored checkpoint cryptographically
+/// bounds the existence time of all its causal ancestors, and `agent_ts` is untrusted regardless). A
+/// non-canonical `anchored_ts` breaks the lexical==chronological assumption (RFC3339 fixed-ms UTC sorts
+/// lexically iff canonical), so it is rejected rather than silently mis-ordered.
+fn check_anchor_backdating(anchored: &[(i64, String, Vec<String>)], issues: &mut Vec<String>) {
+    let mut sorted_anchored = anchored.to_vec();
+    sorted_anchored.sort_by_key(|(seq, _, _)| *seq);
+    for (seq, ts, _) in &sorted_anchored {
+        if !is_canonical_ts(ts) {
+            issues.push(format!(
+                "checkpoint {seq}: anchor time {ts:?} is not a canonical RCP timestamp — the backdating ordering check requires canonical times (threat #3)"
+            ));
+        }
+    }
+    for w in sorted_anchored.windows(2) {
+        if is_canonical_ts(&w[0].1) && is_canonical_ts(&w[1].1) && w[1].1 < w[0].1 {
+            issues.push(format!(
+                "anchor time decreased across checkpoints {} -> {} (backdating, threat #3)",
+                w[0].0, w[1].0
+            ));
+        }
+    }
+}
+
+pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
+    let mut issues: Vec<String> = Vec::new();
+    let project_id = s(bundle, "project_id");
+
+    // Seam 1 — role-key disjointness (R2/D4/D7/M5/M6). A FATAL config error aborts here before any record is
+    // evaluated; see check_role_disjointness for the full role matrix + rationale.
+    if let Some(report) = check_role_disjointness(opts, project_id.clone()) {
+        return report;
     }
 
     let keys_externally_pinned = opts.trusted_keys.is_some();
@@ -3500,30 +3554,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         issues.push("bundle has no records".into());
     }
 
-    // ---- 1. key store ----
-    let mut keys: BTreeMap<(String, i64), KeyEntry> = BTreeMap::new();
-    for e in key_entries {
-        match (
-            s(e, "signing_key_id"),
-            e.get("key_epoch").and_then(|v| v.as_int()),
-            s(e, "public_key"),
-        ) {
-            (Some(id), Some(epoch), Some(pk)) => match decode_pubkey(&pk) {
-                Ok(vk) => {
-                    keys.insert(
-                        (id, epoch),
-                        KeyEntry {
-                            vk,
-                            status: s(e, "key_status").unwrap_or_else(|| "active".into()),
-                            status_changed_at: s(e, "status_changed_at"),
-                        },
-                    );
-                }
-                Err(err) => issues.push(format!("key {id}/{epoch} bad public_key: {err}")),
-            },
-            _ => issues.push("key entry missing signing_key_id/key_epoch/public_key".into()),
-        }
-    }
+    // Seam 2 — the bundle's signing-key store ((signing_key_id, key_epoch) -> KeyEntry).
+    let keys = build_key_store(key_entries, &mut issues);
     let pinned_for = |vk: &VerifyingKey| -> Option<&TrustedKey> {
         opts.trusted_keys
             .as_ref()
@@ -3861,31 +3893,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         issues.push("no checkpoints: a non-empty run must be checkpoint-committed".into());
     }
 
-    // anchored times must be non-decreasing with seq (RCP §10.1 step 5 — backdating #3).
-    // NOTE: this compares only checkpoints that carry a *verified* anchor. Partial anchoring does
-    // not enable a meaningful backdate: the latest anchored checkpoint cryptographically bounds the
-    // existence time of all its causal ancestors, and `agent_ts` is untrusted regardless. Anchoring
-    // every checkpoint is the exporter's responsibility, not a verifier PASS invariant.
-    let mut sorted_anchored = anchored.clone();
-    sorted_anchored.sort_by_key(|(seq, _, _)| *seq);
-    // A non-canonical anchored_ts breaks the assumption that lexical order == chronological order (RFC3339
-    // fixed-ms UTC sorts lexically iff canonical), so reject it rather than silently mis-ordering — matching
-    // how the rest of the file gates string-time comparisons on is_canonical_ts (e.g. the attestation window).
-    for (seq, ts, _) in &sorted_anchored {
-        if !is_canonical_ts(ts) {
-            issues.push(format!(
-                "checkpoint {seq}: anchor time {ts:?} is not a canonical RCP timestamp — the backdating ordering check requires canonical times (threat #3)"
-            ));
-        }
-    }
-    for w in sorted_anchored.windows(2) {
-        if is_canonical_ts(&w[0].1) && is_canonical_ts(&w[1].1) && w[1].1 < w[0].1 {
-            issues.push(format!(
-                "anchor time decreased across checkpoints {} -> {} (backdating, threat #3)",
-                w[0].0, w[1].0
-            ));
-        }
-    }
+    // Seam 3 — anchored times must be non-decreasing with seq (backdating, threat #3).
+    check_anchor_backdating(&anchored, &mut issues);
 
     let mut chain_ok = true;
     match &dag_opt {

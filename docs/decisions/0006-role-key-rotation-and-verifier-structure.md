@@ -111,6 +111,22 @@ nothing semantically but keep it to minimize diff), and extract **one seam per c
 full Rust + wasm + cgo suites, so a regression is bisectable to a single seam. This is readability/maintenance
 only — explicitly NOT worth a big-bang rewrite of the trust root.
 
+> **Implemented — the refined criterion: extract only CLEAN-OUTPUT phases; leave wide-output phases inline.**
+> A phase is worth extracting when its OUTPUT is small/cohesive (it genuinely simplifies the caller); it is NOT
+> worth extracting when it produces many disparate outputs, because the helper then returns a 10+-field
+> "result struct" that merely RELOCATES the locals — a god-struct, the exact smell the refactor should remove —
+> while adding a long signature and trust-root risk. Three clean-output seams shipped:
+> `check_role_disjointness(opts, project_id) -> Option<VerifyReport>` (Some = fatal abort, None = proceed — the
+> ~75-line R2/D4/D7/M5/M6 matrix; returns `Option`, not `Result<(), VerifyReport>`, because the big-`Err`
+> `result_large_err` clippy lint would fail CI), `build_key_store(key_entries, issues) -> keymap`, and
+> `check_anchor_backdating(anchored, issues)`. The top of `verify_bundle_with` now reads as named "Seam 1/2/3".
+> The WIDE-output phases (the ~180-line checkpoint+anchor loop produces ~12 accumulators feeding the trust
+> computations; pass-1/pass-2 and the Tier-B use↔grant join share heavy mutable state) are DELIBERATELY left
+> inline behind their `// ---- N. ---` headers: extracting them would demand a context god-struct or 12-way
+> output threading that reads worse than the current sequential code — the big-bang the ADR rules out. A 4-lens
+> adversarial review (byte-identity / issue-ordering / state-capture / fail-open) confirmed the lift is
+> behavior-identical.
+
 ---
 
 ## 3. `action_completeness` onto `VerifyReport`
