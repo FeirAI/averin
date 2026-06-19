@@ -1,0 +1,7 @@
+# Pin the EXACT Rust toolchain so the verifier .wasm (the trust root) and the cgo staticlib are byte-for-byte
+# reproducible: even a patch-level rustc bump can change codegen and thus the published wasm digest. rustup
+# auto-installs this version + targets on first build. Bump deliberately, and regenerate verifier/build.sh's
+# pinned digest in the same commit. See verifier/SUPPLY-CHAIN.md.
+[toolchain]
+channel = "1.92.0"
+targets = ["wasm32-unknown-unknown"]

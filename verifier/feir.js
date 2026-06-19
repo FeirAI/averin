@@ -5,7 +5,15 @@
 // over a tiny C ABI (feir_alloc / feir_verify_bundle_json_n / feir_string_free / feir_dealloc). You
 // can read every line.
 
-export async function initFeir(wasmSource) {
+/**
+ * Load the verifier core. `opts.expectedSha256` PINS the .wasm — the trust root. When provided, the loaded
+ * bytes are digested and a MISMATCH refuses to instantiate (fail-closed): a substituted/tampered core (a
+ * MitM/CDN swap of just the binary) must never run and certify bundles. This is the one-level-up supply-chain
+ * defense — without it, a forged .wasm could report `ok:true` over anything. The digest is also exposed as
+ * `verifier.wasmSha256` so a page can DISPLAY it for out-of-band comparison against the reproducible build
+ * (see verifier/SUPPLY-CHAIN.md). Accepts a "sha256:"-prefixed or bare hex digest, case-insensitively.
+ */
+export async function initFeir(wasmSource, opts = {}) {
   let bytes;
   if (wasmSource instanceof Uint8Array) bytes = wasmSource;
   else if (wasmSource instanceof ArrayBuffer) bytes = new Uint8Array(wasmSource);
@@ -13,9 +21,31 @@ export async function initFeir(wasmSource) {
     const resp = await fetch(wasmSource);
     bytes = new Uint8Array(await resp.arrayBuffer());
   }
+  const sha256 = await sha256Hex(bytes);
+  const expected = normalizeDigest(opts.expectedSha256);
+  if (expected && expected !== sha256) {
+    // Fail CLOSED: do not instantiate a core that does not match the pinned build.
+    throw new Error(
+      `wasm digest mismatch — refusing to load a verifier core that does not match the pinned build ` +
+        `(pinned sha256:${expected}, got sha256:${sha256})`,
+    );
+  }
   // The verify path is pure computation — it needs no host imports.
   const { instance } = await WebAssembly.instantiate(bytes, {});
-  return new FeirVerifier(instance);
+  const v = new FeirVerifier(instance);
+  v.wasmSha256 = sha256;
+  return v;
+}
+
+/** SHA-256 of `bytes` (Uint8Array) as lowercase hex, via WebCrypto (browser + Node/Bun). */
+export async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function normalizeDigest(d) {
+  if (!d) return null;
+  return String(d).trim().toLowerCase().replace(/^sha256:/, "");
 }
 
 const NUL = String.fromCharCode(0);
