@@ -56,7 +56,9 @@ impl AuthorityTrust {
 /// `record_id` alone is caller-chosen and the verifier's duplicate-record_id rejection is only WITHIN a
 /// bundle, so `project_id` is the load-bearing tenant-isolation binding.
 fn preimage(source: &str, project_id: &str, record_id: &str, evidence_hash: &str) -> Vec<u8> {
-    let mut p = Vec::with_capacity(56 + source.len() + project_id.len() + record_id.len() + evidence_hash.len());
+    let mut p = Vec::with_capacity(
+        56 + source.len() + project_id.len() + record_id.len() + evidence_hash.len(),
+    );
     lp_str_into(&mut p, AUTHORITY_SIG_TAG);
     lp_str_into(&mut p, source);
     lp_str_into(&mut p, project_id);
@@ -167,7 +169,12 @@ mod tests {
     fn signed_record(source: &str, record_id: &str, sk: &ed25519_dalek::SigningKey) -> CanonValue {
         signed_record_p(source, PROJ, record_id, sk)
     }
-    fn signed_record_p(source: &str, project_id: &str, record_id: &str, sk: &ed25519_dalek::SigningKey) -> CanonValue {
+    fn signed_record_p(
+        source: &str,
+        project_id: &str,
+        record_id: &str,
+        sk: &ed25519_dalek::SigningKey,
+    ) -> CanonValue {
         let sig = sign_evidence(source, project_id, record_id, EH, sk);
         rec_with_authority(&format!(
             r#"{{"project_id":"{project_id}","record_id":"{record_id}","authority":{{"source":"{source}","evidence_hash":"{EH}","evidence_sig":"{sig}"}}}}"#
@@ -196,7 +203,9 @@ mod tests {
         let rec_a = signed_record("policy_engine_signed", "rec-A", &k);
         // copy A's authority block verbatim onto a record with a DIFFERENT record_id (SAME project)
         let stolen = authority_of(&rec_a);
-        let rec_b = rec_with_authority(&format!(r#"{{"project_id":"{PROJ}","record_id":"rec-B","authority":{stolen}}}"#));
+        let rec_b = rec_with_authority(&format!(
+            r#"{{"project_id":"{PROJ}","record_id":"rec-B","authority":{stolen}}}"#
+        ));
         assert_eq!(
             verify_authority(&rec_b, &[k.verifying_key()]),
             AuthorityTrust::Failed
@@ -210,14 +219,19 @@ mod tests {
         let k = signing_key_from_seed(&[77u8; 32]);
         let rec_p1 = signed_record_p("policy_engine_signed", "proj-1", "rec-X", &k);
         let stolen = authority_of(&rec_p1);
-        let rec_p2 = rec_with_authority(&format!(r#"{{"project_id":"proj-2","record_id":"rec-X","authority":{stolen}}}"#));
+        let rec_p2 = rec_with_authority(&format!(
+            r#"{{"project_id":"proj-2","record_id":"rec-X","authority":{stolen}}}"#
+        ));
         assert_eq!(
             verify_authority(&rec_p2, &[k.verifying_key()]),
             AuthorityTrust::Failed,
             "a P1-signed authority block must not verify when replayed into P2"
         );
         // sanity: the SAME block in its OWN project still verifies.
-        assert_eq!(verify_authority(&rec_p1, &[k.verifying_key()]), AuthorityTrust::Verified);
+        assert_eq!(
+            verify_authority(&rec_p1, &[k.verifying_key()]),
+            AuthorityTrust::Verified
+        );
     }
 
     fn authority_of(rec: &CanonValue) -> String {

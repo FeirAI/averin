@@ -125,7 +125,9 @@ pub unsafe extern "C" fn feir_verify_bundle_with(
         Some(o) => o,
         None => return std::ptr::null_mut(),
     };
-    into_cstring(catch_verify(|| crate::verify::verify_bundle_with_json(bundle, opts)))
+    into_cstring(catch_verify(|| {
+        crate::verify::verify_bundle_with_json(bundle, opts)
+    }))
 }
 
 /// Verify an export bundle with pinned trust roots from explicit `(ptr, len)` byte spans — the
@@ -152,7 +154,9 @@ pub unsafe extern "C" fn feir_verify_bundle_with_n(
         Some(o) => o,
         None => return std::ptr::null_mut(),
     };
-    into_cstring(catch_verify(|| crate::verify::verify_bundle_with_json(bundle, opts)))
+    into_cstring(catch_verify(|| {
+        crate::verify::verify_bundle_with_json(bundle, opts)
+    }))
 }
 
 /// Canonicalize a JSON document under RCP v1. Returns a newly-allocated string (free with
@@ -374,15 +378,19 @@ pub unsafe extern "C" fn feir_sign_evidence(
     evidence_hash: *const c_char,
     seed_hex: *const c_char,
 ) -> *mut c_char {
-    let (source, project_id, record_id, evidence_hash) =
-        match (cstr(source), cstr(project_id), cstr(record_id), cstr(evidence_hash)) {
-            (Some(a), Some(p), Some(b), Some(c)) => (a, p, b, c),
-            _ => {
-                return into_cstring(json_error(
-                    "source/project_id/record_id/evidence_hash must be non-null UTF-8",
-                ))
-            }
-        };
+    let (source, project_id, record_id, evidence_hash) = match (
+        cstr(source),
+        cstr(project_id),
+        cstr(record_id),
+        cstr(evidence_hash),
+    ) {
+        (Some(a), Some(p), Some(b), Some(c)) => (a, p, b, c),
+        _ => {
+            return into_cstring(json_error(
+                "source/project_id/record_id/evidence_hash must be non-null UTF-8",
+            ))
+        }
+    };
     // Only sign sources verify_authority can actually elevate to `verified` (mirror authority.rs).
     // Signing any other source mints an inert signature that can never verify — the same
     // can-never-verify class the empty-record_id guard below refuses; fail fast instead.
@@ -502,7 +510,10 @@ mod tests {
         // this catch is the cgo/debug-profile defense; the only known reachable panic is separately fixed.)
         let out = catch_verify(|| panic!("synthetic verifier panic"));
         let v = crate::CanonValue::parse(&out).expect("fail-closed report is valid JSON");
-        assert!(matches!(v.get("ok"), Some(crate::CanonValue::Bool(false))), "panic must yield ok:false: {out}");
+        assert!(
+            matches!(v.get("ok"), Some(crate::CanonValue::Bool(false))),
+            "panic must yield ok:false: {out}"
+        );
         // a normal (non-panicking) closure passes through unchanged.
         assert_eq!(catch_verify(|| "passthrough".to_string()), "passthrough");
     }
@@ -572,7 +583,10 @@ mod tests {
         attack.push(0);
         attack.extend_from_slice(br#"{"decoy":"unverified"}PADDING"#);
         let bad = call_n(&attack).unwrap();
-        assert!(bad.contains("\"ok\":false"), "interior NUL must fail closed: {bad}");
+        assert!(
+            bad.contains("\"ok\":false"),
+            "interior NUL must fail closed: {bad}"
+        );
     }
 
     /// Call the length-aware WITH entrypoint with raw bundle + opts spans (either MAY contain a NUL).
@@ -773,7 +787,14 @@ mod tests {
         use crate::authority::{verify_authority, AuthorityTrust};
         use crate::sign::signing_key_from_seed;
         let eh = crate::hashx::sha256_prefixed(b"grant-evidence-bytes");
-        let sig = call5(feir_sign_evidence, "gateway_enforced", "proj-1", "rec-1", &eh, SEED);
+        let sig = call5(
+            feir_sign_evidence,
+            "gateway_enforced",
+            "proj-1",
+            "rec-1",
+            &eh,
+            SEED,
+        );
         assert!(sig.starts_with("ed25519:"), "{sig}");
 
         // A record carrying this authority block verifies to `gateway_enforced` under the broker key.
@@ -811,18 +832,82 @@ mod tests {
     #[test]
     fn sign_evidence_rejects_malformed() {
         let eh = crate::hashx::sha256_prefixed(b"x");
-        assert!(call5(feir_sign_evidence, "gateway_enforced", "proj-1", "rec-1", "not-a-hash", SEED).contains("error"));
+        assert!(call5(
+            feir_sign_evidence,
+            "gateway_enforced",
+            "proj-1",
+            "rec-1",
+            "not-a-hash",
+            SEED
+        )
+        .contains("error"));
         // empty record_id OR empty project_id is unbindable -> refused.
-        assert!(call5(feir_sign_evidence, "gateway_enforced", "proj-1", "", &eh, SEED).contains("error"));
-        assert!(call5(feir_sign_evidence, "gateway_enforced", "", "rec-1", &eh, SEED).contains("error"));
-        assert!(call5(feir_sign_evidence, "gateway_enforced", "proj-1", "rec-1", &eh, "shortseed").contains("error"));
+        assert!(call5(
+            feir_sign_evidence,
+            "gateway_enforced",
+            "proj-1",
+            "",
+            &eh,
+            SEED
+        )
+        .contains("error"));
+        assert!(call5(
+            feir_sign_evidence,
+            "gateway_enforced",
+            "",
+            "rec-1",
+            &eh,
+            SEED
+        )
+        .contains("error"));
+        assert!(call5(
+            feir_sign_evidence,
+            "gateway_enforced",
+            "proj-1",
+            "rec-1",
+            &eh,
+            "shortseed"
+        )
+        .contains("error"));
         // Refuse to mint an inert signature for a source verify_authority can never elevate.
-        assert!(call5(feir_sign_evidence, "caller_declared", "proj-1", "rec-1", &eh, SEED).contains("error"));
-        assert!(call5(feir_sign_evidence, "gateway-enforced", "proj-1", "rec-1", &eh, SEED).contains("error")); // typo
+        assert!(call5(
+            feir_sign_evidence,
+            "caller_declared",
+            "proj-1",
+            "rec-1",
+            &eh,
+            SEED
+        )
+        .contains("error"));
+        assert!(call5(
+            feir_sign_evidence,
+            "gateway-enforced",
+            "proj-1",
+            "rec-1",
+            &eh,
+            SEED
+        )
+        .contains("error")); // typo
         assert!(call5(feir_sign_evidence, "", "proj-1", "rec-1", &eh, SEED).contains("error"));
         // policy_engine_signed / human_signed are valid elevating sources.
-        assert!(call5(feir_sign_evidence, "policy_engine_signed", "proj-1", "rec-1", &eh, SEED).starts_with("ed25519:"));
-        assert!(call5(feir_sign_evidence, "human_signed", "proj-1", "rec-1", &eh, SEED).starts_with("ed25519:"));
+        assert!(call5(
+            feir_sign_evidence,
+            "policy_engine_signed",
+            "proj-1",
+            "rec-1",
+            &eh,
+            SEED
+        )
+        .starts_with("ed25519:"));
+        assert!(call5(
+            feir_sign_evidence,
+            "human_signed",
+            "proj-1",
+            "rec-1",
+            &eh,
+            SEED
+        )
+        .starts_with("ed25519:"));
     }
 
     fn call4(
@@ -872,7 +957,13 @@ mod tests {
             CString::new(e).unwrap(),
         );
         unsafe {
-            let out = f(ca.as_ptr(), cb.as_ptr(), cc.as_ptr(), cd.as_ptr(), ce.as_ptr());
+            let out = f(
+                ca.as_ptr(),
+                cb.as_ptr(),
+                cc.as_ptr(),
+                cd.as_ptr(),
+                ce.as_ptr(),
+            );
             let s = CStr::from_ptr(out).to_string_lossy().into_owned();
             feir_string_free(out);
             s

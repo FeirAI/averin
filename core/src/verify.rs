@@ -524,12 +524,25 @@ fn is_canonical_ts(s: &str) -> bool {
     }
     let digit = |i: usize| b[i].is_ascii_digit();
     let shape = (0..4).all(digit)
-        && b[4] == b'-' && digit(5) && digit(6)
-        && b[7] == b'-' && digit(8) && digit(9)
-        && b[10] == b'T' && digit(11) && digit(12)
-        && b[13] == b':' && digit(14) && digit(15)
-        && b[16] == b':' && digit(17) && digit(18)
-        && b[19] == b'.' && digit(20) && digit(21) && digit(22)
+        && b[4] == b'-'
+        && digit(5)
+        && digit(6)
+        && b[7] == b'-'
+        && digit(8)
+        && digit(9)
+        && b[10] == b'T'
+        && digit(11)
+        && digit(12)
+        && b[13] == b':'
+        && digit(14)
+        && digit(15)
+        && b[16] == b':'
+        && digit(17)
+        && digit(18)
+        && b[19] == b'.'
+        && digit(20)
+        && digit(21)
+        && digit(22)
         && b[23] == b'Z';
     if !shape {
         return false;
@@ -1000,7 +1013,10 @@ pub fn report_to_json(r: &VerifyReport) -> String {
 fn report_json_with_digest(r: &VerifyReport, input_bytes: &[u8]) -> String {
     let mut canon = report_to_canon(r);
     if let CanonValue::Object(ref mut fields) = canon {
-        fields.push(("bundle_digest".into(), CanonValue::string(crate::hashx::sha256_prefixed(input_bytes))));
+        fields.push((
+            "bundle_digest".into(),
+            CanonValue::string(crate::hashx::sha256_prefixed(input_bytes)),
+        ));
     }
     canon.serialize()
 }
@@ -1030,7 +1046,10 @@ pub fn verify_bundle_to_json(text: &str) -> String {
         Err(e) => CanonValue::object(vec![
             ("ok".into(), CanonValue::Bool(false)),
             ("error".into(), CanonValue::string(e.to_string())),
-            ("bundle_digest".into(), CanonValue::string(crate::hashx::sha256_prefixed(text.as_bytes()))),
+            (
+                "bundle_digest".into(),
+                CanonValue::string(crate::hashx::sha256_prefixed(text.as_bytes())),
+            ),
         ])
         .unwrap()
         .serialize(),
@@ -1174,7 +1193,10 @@ fn parse_pubkeys(opts: &CanonValue, key: &str) -> Result<Vec<VerifyingKey>, Stri
 /// M4 (ADR 0005): parse an optional MAP `{<broker_id>: [ed25519pub: …]}` (per-broker authority key sets).
 /// Absent ⇒ empty; present-but-malformed (not an object, or any value not an array of valid keys) ⇒ Err
 /// (fail-closed). An empty `broker_id` key is rejected (it would collide with the non-federated default).
-fn parse_pubkey_map(opts: &CanonValue, key: &str) -> Result<BTreeMap<String, Vec<VerifyingKey>>, String> {
+fn parse_pubkey_map(
+    opts: &CanonValue,
+    key: &str,
+) -> Result<BTreeMap<String, Vec<VerifyingKey>>, String> {
     let obj = match opts.get(key) {
         None | Some(CanonValue::Null) => return Ok(BTreeMap::new()),
         Some(v) => v
@@ -1622,7 +1644,8 @@ fn count_cosig_approvals(
             Err(_) => continue,
         };
         let signature = Signature::from_bytes(&sig_bytes);
-        let challenge = cosig_approval_challenge(grant_id, kid, credential_binding, threshold_m, exp);
+        let challenge =
+            cosig_approval_challenge(grant_id, kid, credential_binding, threshold_m, exp);
         if vk.verify_strict(&challenge, &signature).is_ok() {
             credited.insert(kid.to_string());
         }
@@ -1841,7 +1864,10 @@ fn verify_delegation_chain(
         return ChainResult::Monotonicity;
     }
     // expected_delegator_kid now holds the LAST hop's delegate kid = the leaf the use must present.
-    ChainResult::Verified { eff_cnf_kid: expected_delegator_kid, eff_exp }
+    ChainResult::Verified {
+        eff_cnf_kid: expected_delegator_kid,
+        eff_exp,
+    }
 }
 
 /// Re-derive the cnf key id (Go `broker.KeyID`): `"ed25519-" + base64url-nopad(sha256(pubkey)[..8])`.
@@ -1914,8 +1940,14 @@ fn cross_broker_cert_key(rec: &CanonValue, opts: &VerifyOptions) -> Option<Verif
         return None; // fail-closed: the cert may not launder a non-broker key into broker authority
     }
     let subject_kid = cnf_kid(&subject_vk);
-    let challenge =
-        federation_cert_challenge(issuer, subject, &subject_kid, cert_scope, cert_resource, not_after);
+    let challenge = federation_cert_challenge(
+        issuer,
+        subject,
+        &subject_kid,
+        cert_scope,
+        cert_resource,
+        not_after,
+    );
     let sig_bytes = crate::b64::decode_fixed::<64>(sig_b64).ok()?;
     let sig = Signature::from_bytes(&sig_bytes);
     // The cert must be signed by ONE of the issuer's PINNED keys; an unpinned issuer yields no candidates → None.
@@ -1969,9 +2001,9 @@ fn pop_reverify(rec: &CanonValue, credential_binding: &str) -> Result<bool, Stri
     let sig_bytes = crate::b64::decode_fixed::<64>(&sig_b64)
         .map_err(|_| "use_evidence.use_sig is not a base64url 64-byte signature".to_string())?;
     let sig = Signature::from_bytes(&sig_bytes);
-    cnf_pub
-        .verify_strict(&challenge, &sig)
-        .map_err(|_| "use_sig does not verify under cnf_pub (offline PoP re-check failed)".to_string())?;
+    cnf_pub.verify_strict(&challenge, &sig).map_err(|_| {
+        "use_sig does not verify under cnf_pub (offline PoP re-check failed)".to_string()
+    })?;
     Ok(true)
 }
 
@@ -2000,8 +2032,14 @@ fn parse_grant_head(cp: &CanonValue) -> Option<GrantHead> {
     let h = cp.get("broker_grant_head")?;
     Some(GrantHead {
         max_seq: h.get("max_seq").and_then(|v| v.as_int())?,
-        prior_head_hash: h.get("prior_head_hash").and_then(|v| v.as_str())?.to_string(),
-        cumulative_root: h.get("cumulative_root").and_then(|v| v.as_str())?.to_string(),
+        prior_head_hash: h
+            .get("prior_head_hash")
+            .and_then(|v| v.as_str())?
+            .to_string(),
+        cumulative_root: h
+            .get("cumulative_root")
+            .and_then(|v| v.as_str())?
+            .to_string(),
     })
 }
 
@@ -2020,7 +2058,11 @@ struct TaxonomyInfo {
 /// chooses the value for a missing field (`Some(empty)` for an optional list, `None` to require it); any
 /// PRESENT-but-malformed entry (not an array, or an object missing a string `resource_id`/`action`)
 /// returns `None` so the WHOLE taxonomy fails closed to `untrusted` rather than silently dropping a row.
-fn tax_pairs(tax: &CanonValue, key: &str, absent: Option<BTreeSet<(String, String)>>) -> Option<BTreeSet<(String, String)>> {
+fn tax_pairs(
+    tax: &CanonValue,
+    key: &str,
+    absent: Option<BTreeSet<(String, String)>>,
+) -> Option<BTreeSet<(String, String)>> {
     let arr = match tax.get(key) {
         None | Some(CanonValue::Null) => return absent,
         Some(v) => v.as_array()?,
@@ -2049,8 +2091,14 @@ fn side_effect_closure_resources(manifest: &CanonValue) -> Option<BTreeSet<(Stri
         // Reject EMPTY resource_id/action (fail-closed): an `action:""` entry would otherwise declare a
         // ("",..)/(.., "") pair that could "close" a malformed action-less grant whose own action parsed
         // empty — so an empty action can never appear in the declared set (Codex hardening).
-        let r = e.get("resource_id").and_then(|x| x.as_str()).filter(|s| !s.is_empty())?;
-        let a = e.get("action").and_then(|x| x.as_str()).filter(|s| !s.is_empty())?; // action-bound: per (resource_id, action)
+        let r = e
+            .get("resource_id")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())?;
+        let a = e
+            .get("action")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())?; // action-bound: per (resource_id, action)
         let may_touch = e.get("may_touch").and_then(|x| x.as_array())?;
         declared.insert((r.to_string(), a.to_string()));
         for t in may_touch {
@@ -2139,7 +2187,8 @@ fn compute_broker_trust(
         let mut log: Vec<(i64, String)> = record_trust
             .iter()
             .filter(|rt| {
-                rt.broker_role == BrokerRole::Broker.as_str() && committed.contains(&rt.content_hash)
+                rt.broker_role == BrokerRole::Broker.as_str()
+                    && committed.contains(&rt.content_hash)
             })
             .filter_map(|rt| {
                 ev_int(&records[rt.index], "grant_evidence", "broker_seq")
@@ -2204,7 +2253,9 @@ fn compute_broker_trust(
     // re-exports of the SAME grant record (same content_hash at the same seq) are benign and collapse.
     let mut pairs_by_grant: BTreeMap<String, BTreeSet<(i64, String)>> = BTreeMap::new();
     for rt in record_trust {
-        if rt.broker_role != BrokerRole::Broker.as_str() || !full_committed.contains(&rt.content_hash) {
+        if rt.broker_role != BrokerRole::Broker.as_str()
+            || !full_committed.contains(&rt.content_hash)
+        {
             continue;
         }
         if let Some(gid) = ev_str(&records[rt.index], "grant_evidence", "grant_id") {
@@ -2270,7 +2321,11 @@ fn compute_broker_trust(
     for (cseq, _, head, frontier) in heads {
         let log_i = log_for(frontier);
         let n_i = log_i.len() as i64;
-        if !log_i.iter().enumerate().all(|(i, (seq, _))| *seq == i as i64 + 1) {
+        if !log_i
+            .iter()
+            .enumerate()
+            .all(|(i, (seq, _))| *seq == i as i64 + 1)
+        {
             issues.push(format!("checkpoint seq {cseq}: committed grant broker_seq set is not a gapless [1..N] prefix — suppression/renumber (D6)"));
             ok = false;
         }
@@ -2311,8 +2366,14 @@ fn parse_grant_heads_map(cp: &CanonValue) -> Option<BTreeMap<String, GrantHead>>
             bid.clone(),
             GrantHead {
                 max_seq: v.get("max_seq").and_then(|x| x.as_int())?,
-                prior_head_hash: v.get("prior_head_hash").and_then(|x| x.as_str())?.to_string(),
-                cumulative_root: v.get("cumulative_root").and_then(|x| x.as_str())?.to_string(),
+                prior_head_hash: v
+                    .get("prior_head_hash")
+                    .and_then(|x| x.as_str())?
+                    .to_string(),
+                cumulative_root: v
+                    .get("cumulative_root")
+                    .and_then(|x| x.as_str())?
+                    .to_string(),
             },
         );
     }
@@ -2389,7 +2450,9 @@ fn compute_federation_trust(
     let mut brokers: BTreeSet<String> = BTreeSet::new();
     let mut smuggled = false;
     for rt in record_trust {
-        if rt.broker_role != BrokerRole::Broker.as_str() || !full_committed.contains(&rt.content_hash) {
+        if rt.broker_role != BrokerRole::Broker.as_str()
+            || !full_committed.contains(&rt.content_hash)
+        {
             continue;
         }
         match broker_id_of(rt) {
@@ -2404,7 +2467,10 @@ fn compute_federation_trust(
                 smuggled = true;
             }
         }
-        if ev_int(&records[rt.index], "grant_evidence", "broker_seq").filter(|seq| *seq >= 1).is_none() {
+        if ev_int(&records[rt.index], "grant_evidence", "broker_seq")
+            .filter(|seq| *seq >= 1)
+            .is_none()
+        {
             issues.push(format!(
                 "committed broker grant {} carries no broker_seq while federation is active — smuggled out of the transparency log (suppression, M4)",
                 rt.content_hash
@@ -2418,13 +2484,18 @@ fn compute_federation_trust(
     // identity double-bound, incl. the same grant_id reused under two brokers). Locally decidable (co-committed).
     let mut by_grant: BTreeMap<String, BTreeSet<(String, i64, String)>> = BTreeMap::new();
     for rt in record_trust {
-        if rt.broker_role != BrokerRole::Broker.as_str() || !full_committed.contains(&rt.content_hash) {
+        if rt.broker_role != BrokerRole::Broker.as_str()
+            || !full_committed.contains(&rt.content_hash)
+        {
             continue;
         }
         if let Some(gid) = ev_str(&records[rt.index], "grant_evidence", "grant_id") {
             let bid = broker_id_of(rt).unwrap_or_default();
             let seq = ev_int(&records[rt.index], "grant_evidence", "broker_seq").unwrap_or(0);
-            by_grant.entry(gid).or_default().insert((bid, seq, rt.content_hash.clone()));
+            by_grant
+                .entry(gid)
+                .or_default()
+                .insert((bid, seq, rt.content_hash.clone()));
         }
     }
     let mut equivocated = false;
@@ -2457,7 +2528,9 @@ fn compute_federation_trust(
     // The head MUST be on the LATEST checkpoint (whose frontier covers the full DAG); a head only on an EARLIER
     // checkpoint hides grants the latest commits. The latest checkpoint's map must carry a head for EVERY broker
     // with committed grants.
-    let latest_fed = cp_fed_heads.iter().find(|(seq, _, _, _)| *seq == latest_cp_seq);
+    let latest_fed = cp_fed_heads
+        .iter()
+        .find(|(seq, _, _, _)| *seq == latest_cp_seq);
     let latest_anchored = latest_fed.map(|(_, a, _, _)| *a).unwrap_or(false);
     match latest_fed {
         None => {
@@ -2513,7 +2586,11 @@ fn compute_federation_trust(
         for (cseq, head, frontier) in entries {
             let log_i = log_for(frontier, b);
             let n_i = log_i.len() as i64;
-            if !log_i.iter().enumerate().all(|(i, (seq, _))| *seq == i as i64 + 1) {
+            if !log_i
+                .iter()
+                .enumerate()
+                .all(|(i, (seq, _))| *seq == i as i64 + 1)
+            {
                 issues.push(format!("broker '{b}' checkpoint seq {cseq}: committed grant broker_seq set is not a gapless [1..N] prefix — suppression/renumber (M4)"));
                 suppressed.insert(b.clone());
             }
@@ -2551,12 +2628,17 @@ fn compute_federation_trust(
         };
         match trust {
             "sequence_verified" => brokers_seq_verified += 1,
-            "sequence_consistent_export" if worst == "sequence_verified" => worst = "sequence_consistent_export",
+            "sequence_consistent_export" if worst == "sequence_verified" => {
+                worst = "sequence_consistent_export"
+            }
             _ => {}
         }
         per_broker.push((b.clone(), trust.to_string()));
     }
-    let cross_broker_suppression = per_broker.iter().filter(|(_, t)| t == "suppression").count();
+    let cross_broker_suppression = per_broker
+        .iter()
+        .filter(|(_, t)| t == "suppression")
+        .count();
 
     let failed = global_fail || cross_broker_suppression > 0;
     let status = if failed {
@@ -2593,7 +2675,7 @@ struct AttestationEval {
 }
 
 struct RevocationEval {
-    status: String,            // absent | fresh | stale (revoked_present is set by the use loop)
+    status: String, // absent | fresh | stale (revoked_present is set by the use loop)
     revoked: BTreeSet<String>, // disclosed revoked grant_ids (covered by the sig); empty unless validly signed
 }
 
@@ -2613,7 +2695,10 @@ fn evaluate_revocation(
     anchored_is_latest: bool,
     issues: &mut Vec<String>,
 ) -> RevocationEval {
-    let absent = RevocationEval { status: "absent".to_string(), revoked: BTreeSet::new() };
+    let absent = RevocationEval {
+        status: "absent".to_string(),
+        revoked: BTreeSet::new(),
+    };
     let rl = match bundle.get("revocation_list") {
         Some(a) if !a.is_null() => a,
         _ => return absent,
@@ -2621,7 +2706,10 @@ fn evaluate_revocation(
     if opts.revocation_keys.is_empty() {
         return absent; // present but the verifier pinned no issuer -> not evaluated (revocations not honored)
     }
-    let stale_empty = || RevocationEval { status: "stale".to_string(), revoked: BTreeSet::new() };
+    let stale_empty = || RevocationEval {
+        status: "stale".to_string(),
+        revoked: BTreeSet::new(),
+    };
 
     // 1. signature over the canonical list minus `sig`, under a pinned issuer (mirrors evaluate_attestation).
     let sig = match rl.get("sig").and_then(|v| v.as_str()) {
@@ -2647,7 +2735,10 @@ fn evaluate_revocation(
     {
         Some(vk) => vk,
         None => {
-            issues.push("revocation_list: sig does not verify under any pinned revocation_keys issuer (M5)".into());
+            issues.push(
+                "revocation_list: sig does not verify under any pinned revocation_keys issuer (M5)"
+                    .into(),
+            );
             return stale_empty();
         }
     };
@@ -2661,13 +2752,26 @@ fn evaluate_revocation(
     let revoked: BTreeSet<String> = rl
         .get("revoked_grant_ids")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     // 3. freshness window (canonical ISO, compared lexicographically against the anchored TSA time).
-    let issued_at = rl.get("issued_at").and_then(|v| v.as_str()).unwrap_or_default();
-    let not_after = rl.get("not_after").and_then(|v| v.as_str()).unwrap_or_default();
-    let stale_with_list = || RevocationEval { status: "stale".to_string(), revoked: revoked.clone() };
+    let issued_at = rl
+        .get("issued_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let not_after = rl
+        .get("not_after")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let stale_with_list = || RevocationEval {
+        status: "stale".to_string(),
+        revoked: revoked.clone(),
+    };
     if issued_at.is_empty()
         || not_after.is_empty()
         || !is_canonical_ts(issued_at)
@@ -2680,7 +2784,10 @@ fn evaluate_revocation(
     let ts = match anchored_latest_ts {
         Some(t) => t,
         None => {
-            issues.push("revocation_list present but no verified+anchored checkpoint to date it (M5)".into());
+            issues.push(
+                "revocation_list present but no verified+anchored checkpoint to date it (M5)"
+                    .into(),
+            );
             return stale_with_list();
         }
     };
@@ -2732,7 +2839,11 @@ fn evaluate_merkle_revocation(
     anchored_is_latest: bool,
     issues: &mut Vec<String>,
 ) -> MerkleRevEval {
-    let absent = || MerkleRevEval { status: "absent".to_string(), root: None, leaf_count: 0 };
+    let absent = || MerkleRevEval {
+        status: "absent".to_string(),
+        root: None,
+        leaf_count: 0,
+    };
     let rr = match bundle.get("revocation_merkle_root") {
         Some(a) if !a.is_null() => a,
         _ => return absent(),
@@ -2740,7 +2851,11 @@ fn evaluate_merkle_revocation(
     if opts.revocation_keys.is_empty() {
         return absent(); // present but no pinned issuer -> not evaluated
     }
-    let stale = || MerkleRevEval { status: "stale".to_string(), root: None, leaf_count: 0 };
+    let stale = || MerkleRevEval {
+        status: "stale".to_string(),
+        root: None,
+        leaf_count: 0,
+    };
 
     let sig = match rr.get("sig").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -2758,11 +2873,9 @@ fn evaluate_merkle_revocation(
     };
     obj.retain(|(k, _)| k != "sig");
     let digest = crate::hashx::sha256_prefixed(CanonValue::Object(obj).serialize().as_bytes());
-    let signer = match opts
-        .revocation_keys
-        .iter()
-        .find(|vk| crate::sign::verify("feir.broker.revocation.merkleroot.v1", &digest, sig, vk).is_ok())
-    {
+    let signer = match opts.revocation_keys.iter().find(|vk| {
+        crate::sign::verify("feir.broker.revocation.merkleroot.v1", &digest, sig, vk).is_ok()
+    }) {
         Some(vk) => vk,
         None => {
             issues.push("revocation_merkle_root: sig does not verify under any pinned revocation_keys issuer (M5)".into());
@@ -2770,15 +2883,23 @@ fn evaluate_merkle_revocation(
         }
     };
     if rr.get("issuer_kid").and_then(|v| v.as_str()) != Some(cnf_kid(signer).as_str()) {
-        issues.push("revocation_merkle_root: issuer_kid does not match the signing key (M5)".into());
+        issues
+            .push("revocation_merkle_root: issuer_kid does not match the signing key (M5)".into());
         return stale();
     }
 
     // the committed root (sha256:<hex>) + leaf_count, both covered by the verified sig.
-    let root = match rr.get("root").and_then(|v| v.as_str()).and_then(|s| s.strip_prefix("sha256:")).and_then(parse_hex32) {
+    let root = match rr
+        .get("root")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.strip_prefix("sha256:"))
+        .and_then(parse_hex32)
+    {
         Some(r) => r,
         None => {
-            issues.push("revocation_merkle_root: malformed root (expect sha256:<64-hex>) (M5)".into());
+            issues.push(
+                "revocation_merkle_root: malformed root (expect sha256:<64-hex>) (M5)".into(),
+            );
             return stale();
         }
     };
@@ -2791,11 +2912,29 @@ fn evaluate_merkle_revocation(
         }
     };
 
-    let issued_at = rr.get("issued_at").and_then(|v| v.as_str()).unwrap_or_default();
-    let not_after = rr.get("not_after").and_then(|v| v.as_str()).unwrap_or_default();
-    let signed = MerkleRevEval { status: "stale".to_string(), root: Some(root), leaf_count };
-    if issued_at.is_empty() || not_after.is_empty() || !is_canonical_ts(issued_at) || !is_canonical_ts(not_after) || issued_at > not_after {
-        issues.push("revocation_merkle_root: issued_at/not_after missing, non-canonical, or inverted (M5)".into());
+    let issued_at = rr
+        .get("issued_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let not_after = rr
+        .get("not_after")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let signed = MerkleRevEval {
+        status: "stale".to_string(),
+        root: Some(root),
+        leaf_count,
+    };
+    if issued_at.is_empty()
+        || not_after.is_empty()
+        || !is_canonical_ts(issued_at)
+        || !is_canonical_ts(not_after)
+        || issued_at > not_after
+    {
+        issues.push(
+            "revocation_merkle_root: issued_at/not_after missing, non-canonical, or inverted (M5)"
+                .into(),
+        );
         return signed;
     }
     let ts = match anchored_latest_ts {
@@ -2842,7 +2981,12 @@ fn parse_hex32_path(v: Option<&CanonValue>) -> Option<Vec<[u8; 32]>> {
 /// bracket must be STRICT — any deviation is `Unproven` (fail-closed). Soundness rests on the issuer (a pinned,
 /// role-separated revocation authority) building a sorted tree; the bundle assembler cannot forge a false
 /// non-membership for a leaf that is actually present.
-fn check_revocation_proof(proof: &CanonValue, grant_id: &str, root: &[u8; 32], leaf_count: usize) -> ProofVerdict {
+fn check_revocation_proof(
+    proof: &CanonValue,
+    grant_id: &str,
+    root: &[u8; 32],
+    leaf_count: usize,
+) -> ProofVerdict {
     let q = revocation_leaf(grant_id);
     match proof.get("type").and_then(|v| v.as_str()).unwrap_or("") {
         "membership" => {
@@ -2860,14 +3004,22 @@ fn check_revocation_proof(proof: &CanonValue, grant_id: &str, root: &[u8; 32], l
             }
         }
         "nonmembership" => {
-            let lo = proof.get("lo").and_then(|v| v.as_str()).and_then(parse_hex32);
-            let hi = proof.get("hi").and_then(|v| v.as_str()).and_then(parse_hex32);
+            let lo = proof
+                .get("lo")
+                .and_then(|v| v.as_str())
+                .and_then(parse_hex32);
+            let hi = proof
+                .get("hi")
+                .and_then(|v| v.as_str())
+                .and_then(parse_hex32);
             let lo_index = proof.get("lo_index").and_then(|v| v.as_int());
             let hi_index = proof.get("hi_index").and_then(|v| v.as_int());
             let lo_path = parse_hex32_path(proof.get("lo_path"));
             let hi_path = parse_hex32_path(proof.get("hi_path"));
             match (lo, hi, lo_index, hi_index, lo_path, hi_path) {
-                (Some(lo), Some(hi), Some(li), Some(hi_i), Some(lp), Some(hp)) if li >= 0 && hi_i >= 0 => {
+                (Some(lo), Some(hi), Some(li), Some(hi_i), Some(lp), Some(hp))
+                    if li >= 0 && hi_i >= 0 =>
+                {
                     // adjacency: the two leaves must be CONSECUTIVE in the sorted tree. `li`/`hi_i` are
                     // attacker-controlled i64 from the unsigned proof, so use checked_add — `li == i64::MAX`
                     // would overflow `li + 1` and PANIC under the debug overflow-checks the shipped staticlib
@@ -2881,7 +3033,8 @@ fn check_revocation_proof(proof: &CanonValue, grant_id: &str, root: &[u8; 32], l
                     }
                     // both adjacent leaves must authenticate to the SAME signed root at their claimed indices.
                     if merkle_root_from_proof(&lo, li as usize, leaf_count, &lp) != Some(*root)
-                        || merkle_root_from_proof(&hi, hi_i as usize, leaf_count, &hp) != Some(*root)
+                        || merkle_root_from_proof(&hi, hi_i as usize, leaf_count, &hp)
+                            != Some(*root)
                     {
                         return ProofVerdict::Unproven;
                     }
@@ -2927,18 +3080,32 @@ fn evaluate_attestation(
     if opts.attestation_keys.is_empty() {
         return unevaluated(); // present, but the verifier pinned no issuer -> cannot evaluate
     }
-    let s_str = |o: &CanonValue, k: &str| o.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let s_str = |o: &CanonValue, k: &str| {
+        o.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     // surfaced fields (parsed up front so a `failed` verdict still reports what/by-whom/for-when).
     let claim_types: Vec<String> = att
         .get("claim_types")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
-    let subject_digest = att.get("subject").map(|s| crate::hashx::sha256_prefixed(s.serialize().as_bytes()));
+    let subject_digest = att
+        .get("subject")
+        .map(|s| crate::hashx::sha256_prefixed(s.serialize().as_bytes()));
     let (issued_at, not_after) = (s_str(att, "issued_at"), s_str(att, "not_after"));
     let mut eval = AttestationEval {
         status: "failed".to_string(), // default to failed once an attestation is present + evaluable
-        issuer_kid: att.get("issuer_kid").and_then(|v| v.as_str()).map(String::from),
+        issuer_kid: att
+            .get("issuer_kid")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         issued_at: Some(issued_at.clone()),
         not_after: Some(not_after.clone()),
         claim_types,
@@ -2969,14 +3136,18 @@ fn evaluate_attestation(
     {
         Some(vk) => vk,
         None => {
-            issues.push("deployment_attestation: sig does not verify under any pinned attestation key (D7)".into());
+            issues.push(
+                "deployment_attestation: sig does not verify under any pinned attestation key (D7)"
+                    .into(),
+            );
             return eval;
         }
     };
     // the CLAIMED issuer_kid must be the ACTUAL signer (else a reader's surfaced issuer is a lie).
     let signer_kid = cnf_kid(signer);
     if eval.issuer_kid.as_deref() != Some(signer_kid.as_str()) {
-        issues.push("deployment_attestation: issuer_kid does not match the signing key (D7)".into());
+        issues
+            .push("deployment_attestation: issuer_kid does not match the signing key (D7)".into());
         eval.issuer_kid = Some(signer_kid); // surface the truth, not the claim
         return eval;
     }
@@ -3008,7 +3179,10 @@ fn evaluate_attestation(
     // ...and CANONICAL (Codex): a malformed non-empty bound like "0".."z" sorts around a real timestamp and
     // would pass the lexicographic window check, so require the exact YYYY-MM-DDTHH:MM:SS.mmmZ shape and a
     // non-inverted window before comparing.
-    if !is_canonical_ts(&issued_at) || !is_canonical_ts(&not_after) || issued_at.as_str() > not_after.as_str() {
+    if !is_canonical_ts(&issued_at)
+        || !is_canonical_ts(&not_after)
+        || issued_at.as_str() > not_after.as_str()
+    {
         issues.push("deployment_attestation: issued_at/not_after are not canonical timestamps, or issued_at > not_after — malformed window (D7)".into());
         return eval;
     }
@@ -3028,7 +3202,11 @@ fn evaluate_attestation(
     let arr = |o: &CanonValue, k: &str| -> BTreeSet<String> {
         o.get(k)
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let manifest_digest = bundle
@@ -3072,16 +3250,30 @@ fn evaluate_attestation(
     // project_id MUST be a non-empty binding: an empty bundle project_id matching an empty subject field
     // would turn this substitution guard into a no-op, so an absent/empty project_id is always a mismatch.
     let bundle_project = project_id.unwrap_or_default();
-    if bundle_project.is_empty() || s_str(sub, "project_id") != bundle_project { mism.push("project_id"); }
-    if s_str(sub, "coverage_manifest_digest") != manifest_digest { mism.push("coverage_manifest_digest"); }
-    if s_str(sub, "checkpoint_hash") != latest.1 { mism.push("checkpoint_hash"); }
-    if s_str(sub, "broker_grant_head_root") != head_root { mism.push("broker_grant_head_root"); }
-    if arr(sub, "authority_kids") != kids { mism.push("authority_kids"); }
-    if &arr(sub, "resource_ids") != resource_ids { mism.push("resource_ids"); }
+    if bundle_project.is_empty() || s_str(sub, "project_id") != bundle_project {
+        mism.push("project_id");
+    }
+    if s_str(sub, "coverage_manifest_digest") != manifest_digest {
+        mism.push("coverage_manifest_digest");
+    }
+    if s_str(sub, "checkpoint_hash") != latest.1 {
+        mism.push("checkpoint_hash");
+    }
+    if s_str(sub, "broker_grant_head_root") != head_root {
+        mism.push("broker_grant_head_root");
+    }
+    if arr(sub, "authority_kids") != kids {
+        mism.push("authority_kids");
+    }
+    if &arr(sub, "resource_ids") != resource_ids {
+        mism.push("resource_ids");
+    }
     // #3: enforce the bound revocation_list digest ONLY when the (signed) subject carries the field — so a
     // pre-this-change attestation (no field) stays compatible, while a new attestation that committed a list
     // mismatches if the list is later stripped. The attacker cannot drop the subject field (it is sig-covered).
-    if sub.get("revocation_digest").is_some() && s_str(sub, "revocation_digest") != revocation_digest {
+    if sub.get("revocation_digest").is_some()
+        && s_str(sub, "revocation_digest") != revocation_digest
+    {
         mism.push("revocation_digest");
     }
     if !mism.is_empty() {
@@ -3353,7 +3545,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         };
         let authority = verify_authority(rec, auth_keys);
         // A grant verified ONLY because a cross_broker_cert vouched for its (unpinned) subject key is `transitive`.
-        let transitive_authority = cross_cert_key.is_some() && authority == AuthorityTrust::Verified;
+        let transitive_authority =
+            cross_cert_key.is_some() && authority == AuthorityTrust::Verified;
         if authority == AuthorityTrust::Failed {
             notes.push(format!(
                 "authority claims a verified source but its evidence_sig did not verify under a trusted {} authority key",
@@ -3454,7 +3647,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         let cp_frontier: Vec<String> = cp
             .get("frontier")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|h| h.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let head_field_present = cp.get("broker_grant_head").is_some();
         let cp_head = parse_grant_head(cp);
@@ -3504,7 +3701,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 match verify_anchor(&cph, anchor, &anchor_trust) {
                     Ok(ts) => {
                         this_anchored = true;
-                        anchored_cp_ids.push((cp_seq, cph.clone(), ts.clone(), cp_head.as_ref().map(|h| h.cumulative_root.clone())));
+                        anchored_cp_ids.push((
+                            cp_seq,
+                            cph.clone(),
+                            ts.clone(),
+                            cp_head.as_ref().map(|h| h.cumulative_root.clone()),
+                        ));
                         anchored.push((cp_seq, ts, cp_frontier.clone()));
                     }
                     Err(e) => issues.push(format!("checkpoint {i} anchor invalid: {e}")),
@@ -3853,10 +4055,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // match below — so the brokered path is byte-for-byte unchanged for every non-native grant (additive).
         if ev_str(rec, "grant_evidence", "mode").as_deref() == Some("token_exchange") {
             native_credential_present = true; // set even if malformed → excludes the brokered capstone
-            // Cross-mode compositions (native × cosig / native × delegation) are deferred (ADR 0005 §5 open
-            // question) — a native grant that ALSO carries cosignatures or delegation_assertions is fail-closed
-            // (NOT indexed as native), so its transcript dangles and the introspected capstone is unreachable,
-            // rather than silently skipping the cosig/delegation gates the brokered path would have enforced.
+                                              // Cross-mode compositions (native × cosig / native × delegation) are deferred (ADR 0005 §5 open
+                                              // question) — a native grant that ALSO carries cosignatures or delegation_assertions is fail-closed
+                                              // (NOT indexed as native), so its transcript dangles and the introspected capstone is unreachable,
+                                              // rather than silently skipping the cosig/delegation gates the brokered path would have enforced.
             if cosignatures_of(rec).is_some_and(|a| !a.is_empty())
                 || delegation_assertions_present(rec)
             {
@@ -3874,10 +4076,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 ev_str(rec, "grant_evidence", "resource_id"),
                 ev_str(rec, "grant_evidence", "action"),
             ) {
-                if taxonomy_info
-                    .as_ref()
-                    .is_some_and(|ti| ti.escalating.contains(&(n_resource.clone(), n_action.clone())))
-                {
+                if taxonomy_info.as_ref().is_some_and(|ti| {
+                    ti.escalating
+                        .contains(&(n_resource.clone(), n_action.clone()))
+                }) {
                     issues.push(format!(
                         "grant {} ({}): native (token_exchange) grant for action '{n_action}' on '{n_resource}' which the taxonomy marks escalating — mis-scoped (D4)",
                         rt.index, rt.record_id
@@ -4075,8 +4277,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // leaves the label↔credential gap a residual.
     let mut grant_labels: BTreeMap<&str, &CanonValue> = BTreeMap::new();
     for rt in &record_trust {
-        if rt.broker_role == BrokerRole::Broker.as_str() && rt.trust == TrustLevel::IntegrityProven {
-            grant_labels.entry(rt.record_id.as_str()).or_insert(&records[rt.index]);
+        if rt.broker_role == BrokerRole::Broker.as_str() && rt.trust == TrustLevel::IntegrityProven
+        {
+            grant_labels
+                .entry(rt.record_id.as_str())
+                .or_insert(&records[rt.index]);
         }
     }
     let mut cred_label_checks = 0usize;
@@ -4088,22 +4293,37 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         };
         cred_label_checks += 1;
         // (a) the disclosed descriptor must be THE credential the signed grant_evidence bound.
-        if crate::hashx::sha256_prefixed(descriptor_bytes) != ev_str(rec, "grant_evidence", "credential_binding").unwrap_or_default() {
+        if crate::hashx::sha256_prefixed(descriptor_bytes)
+            != ev_str(rec, "grant_evidence", "credential_binding").unwrap_or_default()
+        {
             issues.push(format!("grant {rid}: disclosed credential descriptor sha256 != grant_evidence.credential_binding — wrong or forged descriptor (D6.4)"));
             continue;
         }
         // (b) descriptor fields must agree with the signed grant labels.
-        let descriptor = match core::str::from_utf8(descriptor_bytes).ok().and_then(|s| CanonValue::parse(s).ok()) {
+        let descriptor = match core::str::from_utf8(descriptor_bytes)
+            .ok()
+            .and_then(|s| CanonValue::parse(s).ok())
+        {
             Some(d) => d,
             None => {
                 issues.push(format!("grant {rid}: disclosed credential descriptor is not valid canonical JSON (D6.4)"));
                 continue;
             }
         };
-        let ds = |k: &str| descriptor.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+        let ds = |k: &str| {
+            descriptor
+                .get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+        };
         let label = |f: &str| ev_str(rec, "grant_evidence", f).unwrap_or_default();
         let (act, aud, jti) = (ds("act"), ds("aud"), ds("jti"));
-        let (action, resource, gid, kidl) = (label("action"), label("resource_id"), label("grant_id"), label("cnf_kid"));
+        let (action, resource, gid, kidl) = (
+            label("action"),
+            label("resource_id"),
+            label("grant_id"),
+            label("cnf_kid"),
+        );
         let single = label("scope_class") == "single_operation";
         let single_use = match descriptor.get("single_use") {
             Some(CanonValue::Bool(b)) => Some(*b),
@@ -4115,22 +4335,52 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             .map(|vk| cnf_kid(&vk) == kidl)
             .unwrap_or(false);
         let mut mism: Vec<String> = Vec::new();
-        if act != action.as_str() { mism.push(format!("act '{act}' != action '{action}'")); }
-        if aud != resource.as_str() { mism.push(format!("aud '{aud}' != resource_id '{resource}'")); }
-        if jti != gid.as_str() { mism.push(format!("jti '{jti}' != grant_id '{gid}'")); }
-        if descriptor.get("exp").and_then(|v| v.as_int()) != ev_int(rec, "grant_evidence", "exp") { mism.push("exp != grant_evidence.exp".to_string()); }
-        if single_use != Some(single) { mism.push(format!("single_use != (scope_class=='single_operation' => {single})")); }
-        if !cnf_kid_ok { mism.push(format!("cnf does not derive cnf_kid '{kidl}'")); }
+        if act != action.as_str() {
+            mism.push(format!("act '{act}' != action '{action}'"));
+        }
+        if aud != resource.as_str() {
+            mism.push(format!("aud '{aud}' != resource_id '{resource}'"));
+        }
+        if jti != gid.as_str() {
+            mism.push(format!("jti '{jti}' != grant_id '{gid}'"));
+        }
+        if descriptor.get("exp").and_then(|v| v.as_int()) != ev_int(rec, "grant_evidence", "exp") {
+            mism.push("exp != grant_evidence.exp".to_string());
+        }
+        if single_use != Some(single) {
+            mism.push(format!(
+                "single_use != (scope_class=='single_operation' => {single})"
+            ));
+        }
+        if !cnf_kid_ok {
+            mism.push(format!("cnf does not derive cnf_kid '{kidl}'"));
+        }
         // EVERY capability-shaping claim the producer mirrors into BOTH the descriptor and grant_evidence must
         // agree (Codex): scope (a broad scope minted but a narrow scope LABELED is exactly the mislabel D6.4
         // exists to catch), sub↔agent_id (a credential for a different subject), and iat/nbf↔issued_at (a
         // back/post-dated validity). Checking only act/aud/jti/cnf/exp/single_use left scope+subject+timing
         // unbound — a real false-clean.
-        if ds("scope") != label("scope").as_str() { mism.push(format!("scope '{}' != grant_evidence.scope '{}'", ds("scope"), label("scope"))); }
-        if ds("sub") != label("agent_id").as_str() { mism.push(format!("sub '{}' != grant_evidence.agent_id '{}'", ds("sub"), label("agent_id"))); }
+        if ds("scope") != label("scope").as_str() {
+            mism.push(format!(
+                "scope '{}' != grant_evidence.scope '{}'",
+                ds("scope"),
+                label("scope")
+            ));
+        }
+        if ds("sub") != label("agent_id").as_str() {
+            mism.push(format!(
+                "sub '{}' != grant_evidence.agent_id '{}'",
+                ds("sub"),
+                label("agent_id")
+            ));
+        }
         let iss_at = ev_int(rec, "grant_evidence", "issued_at");
-        if descriptor.get("iat").and_then(|v| v.as_int()) != iss_at { mism.push("iat != grant_evidence.issued_at".to_string()); }
-        if descriptor.get("nbf").and_then(|v| v.as_int()) != iss_at { mism.push("nbf != grant_evidence.issued_at".to_string()); }
+        if descriptor.get("iat").and_then(|v| v.as_int()) != iss_at {
+            mism.push("iat != grant_evidence.issued_at".to_string());
+        }
+        if descriptor.get("nbf").and_then(|v| v.as_int()) != iss_at {
+            mism.push("nbf != grant_evidence.issued_at".to_string());
+        }
         // M1 (ADR 0005): for a bounded_reuse grant the cap is mirrored into BOTH the descriptor (which the
         // resource shim enforces at runtime) and grant_evidence (which THIS verifier caps from). They must
         // agree — a credential minted for more uses than the grant labels is the same mislabel/equivocation
@@ -4141,7 +4391,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // more uses than the signed grant_evidence authorizes — a descriptor minted with a larger cap can
         // only surface as overspend receipts, never as silent over-acceptance.
         if label("scope_class") == "bounded_reuse"
-            && descriptor.get("use_limit").and_then(|v| v.as_int()) != ev_int(rec, "grant_evidence", "use_limit")
+            && descriptor.get("use_limit").and_then(|v| v.as_int())
+                != ev_int(rec, "grant_evidence", "use_limit")
         {
             mism.push("use_limit (descriptor) != grant_evidence.use_limit".to_string());
         }
@@ -4171,11 +4422,23 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // deployment_attestation `latest != latest_cp_seq` guard. (No anchored checkpoint → handled inside the
     // evaluators as a distinct hard issue.)
     let anchored_is_latest = anchored_latest.map(|(seq, _, _, _)| *seq) == Some(latest_cp_seq);
-    let revocation = evaluate_revocation(bundle, opts, anchored_latest_ts, anchored_is_latest, &mut issues);
+    let revocation = evaluate_revocation(
+        bundle,
+        opts,
+        anchored_latest_ts,
+        anchored_is_latest,
+        &mut issues,
+    );
     // M5 Merkle-non-disclosure (ADR 0005): the signed root + the top-level per-grant proof map. When the root is
     // FRESH, every Tier-B use MUST carry a valid proof — a non-membership proof to proceed, else (membership or
     // missing/malformed) the use is blocked/fail-closed (the revoked set is not disclosed, so silence ≠ safe).
-    let merkle_rev = evaluate_merkle_revocation(bundle, opts, anchored_latest_ts, anchored_is_latest, &mut issues);
+    let merkle_rev = evaluate_merkle_revocation(
+        bundle,
+        opts,
+        anchored_latest_ts,
+        anchored_is_latest,
+        &mut issues,
+    );
     let revocation_proofs = bundle.get("revocation_proofs");
     let mut revoked_uses_blocked = 0usize;
     let mut revocation_nonmembership_verified = 0usize;
@@ -4186,7 +4449,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut intent_without_outcome = 0usize;
     let mut one_phase_use_present = false; // D8/MF3: any matched one-phase `use` blocks the capstone
     let broker_kind = |rec: &CanonValue| -> Option<String> {
-        rec.get("extensions").and_then(|e| e.get("broker")).and_then(|b| b.get("kind")).and_then(|v| v.as_str()).map(String::from)
+        rec.get("extensions")
+            .and_then(|e| e.get("broker"))
+            .and_then(|b| b.get("kind"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
     };
     // D5 pre-pass: a `use_outcome` (kind=use_outcome) COMPLETES a `use_intent`. The join key (intent_ref)
     // AND the grant_id are read from the SIGNED `use_outcome` PAYLOAD — bound by `authority.evidence_hash`
@@ -4206,7 +4473,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut outcomes: Vec<(String, String, String, usize, String)> = Vec::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
-        if rt.broker_role != BrokerRole::Resource.as_str() || broker_kind(rec).as_deref() != Some("use_outcome") {
+        if rt.broker_role != BrokerRole::Resource.as_str()
+            || broker_kind(rec).as_deref() != Some("use_outcome")
+        {
             continue;
         }
         if !closed.contains(rt.content_hash.as_str()) {
@@ -4243,7 +4512,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // instead of scanning every outcome (O(intents·outcomes) — a verifier DoS on adversarial bundles).
     let mut outcomes_by: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (i, (iref, ogid, _, _, _)) in outcomes.iter().enumerate() {
-        outcomes_by.entry((iref.clone(), ogid.clone())).or_default().push(i);
+        outcomes_by
+            .entry((iref.clone(), ogid.clone()))
+            .or_default()
+            .push(i);
     }
     let mut consumed_outcomes: BTreeSet<String> = BTreeSet::new();
     for rt in &record_trust {
@@ -4288,7 +4560,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if let (Some(top), Some(ua)) = (s(rec, "action"), &u_action) {
             if &top != ua {
                 unmatched_violation += 1;
-                violation(&mut issues, "top-level action diverges from use_evidence.action (MUST-FIX 1)".into());
+                violation(
+                    &mut issues,
+                    "top-level action diverges from use_evidence.action (MUST-FIX 1)".into(),
+                );
                 continue;
             }
         }
@@ -4319,7 +4594,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
         if ev_str(rec, "use_evidence", "nonce").is_none_or(|n| n.is_empty()) {
             unmatched_violation += 1;
-            violation(&mut issues, "use_evidence is missing the PoP nonce (R4) — violation".into());
+            violation(
+                &mut issues,
+                "use_evidence is missing the PoP nonce (R4) — violation".into(),
+            );
             continue;
         }
         let (gid, action, resource_id, jti, cnf_kid, used_at) = match (
@@ -4333,7 +4611,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)) => (a, b, c, d, e, f),
             _ => {
                 unmatched_violation += 1;
-                violation(&mut issues, "use_evidence is missing a required match field — violation".into());
+                violation(
+                    &mut issues,
+                    "use_evidence is missing a required match field — violation".into(),
+                );
                 continue;
             }
         };
@@ -4393,7 +4674,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             let verdict = merkle_rev
                 .root
                 .as_ref()
-                .map(|root| proof.map_or(ProofVerdict::Unproven, |p| check_revocation_proof(p, &gid, root, merkle_rev.leaf_count)))
+                .map(|root| {
+                    proof.map_or(ProofVerdict::Unproven, |p| {
+                        check_revocation_proof(p, &gid, root, merkle_rev.leaf_count)
+                    })
+                })
                 .unwrap_or(ProofVerdict::Unproven);
             match verdict {
                 ProofVerdict::NotRevoked => {
@@ -4426,7 +4711,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             || used_at >= g.effective_exp
         {
             unmatched_violation += 1;
-            violation(&mut issues, format!("action/resource/cnf/window does not match grant '{gid}' — violation"));
+            violation(
+                &mut issues,
+                format!("action/resource/cnf/window does not match grant '{gid}' — violation"),
+            );
             continue;
         }
         // Single-use (R5 rev 4): per-grant_id at most once, regardless of jti; jti must equal grant_id.
@@ -4439,12 +4727,21 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         let bounded = g.scope_class == "bounded_reuse";
         if (single || bounded) && jti != gid {
             unmatched_violation += 1;
-            violation(&mut issues, format!("{} grant '{gid}' requires use_evidence.jti == grant_id (R5) — violation", g.scope_class));
+            violation(
+                &mut issues,
+                format!(
+                    "{} grant '{gid}' requires use_evidence.jti == grant_id (R5) — violation",
+                    g.scope_class
+                ),
+            );
             continue;
         }
         if single && g.used >= 1 {
             unmatched_violation += 1;
-            violation(&mut issues, format!("single-use grant '{gid}' exercised more than once — double-spend (R5)"));
+            violation(
+                &mut issues,
+                format!("single-use grant '{gid}' exercised more than once — double-spend (R5)"),
+            );
             continue;
         }
         // M1: validate the bounded_reuse sequence number BEFORE counting; the usn is CONSUMED only when the
@@ -4500,7 +4797,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         && records[*oidx]
                             .get("causal_prev_hashes")
                             .and_then(|v| v.as_array())
-                            .is_some_and(|p| p.iter().any(|h| h.as_str() == Some(rt.content_hash.as_str())))
+                            .is_some_and(|p| {
+                                p.iter()
+                                    .any(|h| h.as_str() == Some(rt.content_hash.as_str()))
+                            })
                 })
             });
             if pending_consume.is_none() {
@@ -4593,7 +4893,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // fully re-walked + monotone) | `unverified` (≥1 chain failed sig/link/root or widened).
     let delegation_status = if delegation_chains_total == 0 {
         "absent"
-    } else if delegation_chains_verified == delegation_chains_total && delegation_monotonicity_violations == 0 {
+    } else if delegation_chains_verified == delegation_chains_total
+        && delegation_monotonicity_violations == 0
+    {
         "verified"
     } else {
         "unverified"
@@ -4619,7 +4921,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             let verdict = merkle_rev
                 .root
                 .as_ref()
-                .map(|root| proof.map_or(ProofVerdict::Unproven, |p| check_revocation_proof(p, gid, root, merkle_rev.leaf_count)))
+                .map(|root| {
+                    proof.map_or(ProofVerdict::Unproven, |p| {
+                        check_revocation_proof(p, gid, root, merkle_rev.leaf_count)
+                    })
+                })
                 .unwrap_or(ProofVerdict::Unproven);
             match verdict {
                 ProofVerdict::NotRevoked => revocation_nonmembership_verified += 1,
@@ -4640,8 +4946,15 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // M5 (ADR 0005): finalize revocation. revoked_grants_matched = closed grants whose grant_id is on the
     // (validly-signed) list; if a fresh list blocked any use OR native credential, the status becomes
     // `revoked_present`.
-    let revoked_grants_matched = grants_by_id.keys().filter(|gid| revocation.revoked.contains(*gid)).count();
-    let revocation_status = if revoked_uses_blocked > 0 { "revoked_present".to_string() } else { revocation.status };
+    let revoked_grants_matched = grants_by_id
+        .keys()
+        .filter(|gid| revocation.revoked.contains(*gid))
+        .count();
+    let revocation_status = if revoked_uses_blocked > 0 {
+        "revoked_present".to_string()
+    } else {
+        revocation.status
+    };
     // The Merkle-mode status is reported as evaluated (absent|fresh|stale); blocked/unproven uses already raise a
     // hard violation (→ !ok) and are counted in revoked_uses_blocked, so no separate "revoked_present" recolor.
     let revocation_merkle_status = merkle_rev.status.clone();
@@ -4666,7 +4979,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // OAuth-style scope subset over SPACE-delimited tokens: `sub` ⊆ `sup` iff every token of sub is a token of sup
     // (a real narrowing lattice — empty effective_scope is the maximal narrowing, trivially ⊆ anything).
     let scope_tokens = |sc: &str| -> BTreeSet<String> {
-        sc.split(' ').filter(|t| !t.is_empty()).map(String::from).collect()
+        sc.split(' ')
+            .filter(|t| !t.is_empty())
+            .map(String::from)
+            .collect()
     };
     for rt in &record_trust {
         let rec = &records[rt.index];
@@ -4683,7 +4999,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
         introspection_transcripts_total += 1;
         let violation = |issues: &mut Vec<String>, msg: String| {
-            issues.push(format!("introspection_transcript {} ({}): {msg}", rt.index, rt.record_id));
+            issues.push(format!(
+                "introspection_transcript {} ({}): {msg}",
+                rt.index, rt.record_id
+            ));
         };
         if rt.trust != TrustLevel::IntegrityProven
             || rt.authority != AuthorityTrust::Verified
@@ -4702,7 +5021,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_int(rec, "introspection_evidence", "effective_exp"),
             ev_str(rec, "introspection_evidence", "sig"),
         ) {
-            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) => (a, b, c, d, e, f, g),
+            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) => {
+                (a, b, c, d, e, f, g)
+            }
             _ => {
                 unmatched_violation += 1;
                 violation(&mut issues, "introspection_evidence is missing a required field (grant_id/credential_ref/effective_scope/resource_id/introspected_at/effective_exp/sig) — violation".into());
@@ -4726,13 +5047,28 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             Ok(b) => b,
             Err(_) => {
                 unmatched_violation += 1;
-                violation(&mut issues, "introspection_evidence.sig is not a base64url 64-byte signature — violation".into());
+                violation(
+                    &mut issues,
+                    "introspection_evidence.sig is not a base64url 64-byte signature — violation"
+                        .into(),
+                );
                 continue;
             }
         };
         let signature = Signature::from_bytes(&sig_bytes);
-        let challenge = introspection_transcript_challenge(&gid, &cred_ref, &eff_scope, &t_resource, introspected_at, eff_exp);
-        if !opts.resource_authority_keys.iter().any(|vk| vk.verify_strict(&challenge, &signature).is_ok()) {
+        let challenge = introspection_transcript_challenge(
+            &gid,
+            &cred_ref,
+            &eff_scope,
+            &t_resource,
+            introspected_at,
+            eff_exp,
+        );
+        if !opts
+            .resource_authority_keys
+            .iter()
+            .any(|vk| vk.verify_strict(&challenge, &signature).is_ok())
+        {
             unmatched_violation += 1;
             violation(&mut issues, "introspection sig does not verify under any pinned resource_authority_keys issuer over its (grant_id, credential_ref, effective_scope, resource_id, introspected_at, effective_exp) tuple — violation".into());
             continue;
@@ -4782,7 +5118,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         covered_native.remove(gid);
     }
     // Every native grant must be covered by ≥1 verified transcript for the introspected surface to be COMPLETE.
-    let native_grants_uncovered = native_grants_by_id.keys().filter(|gid| !covered_native.contains(*gid)).count();
+    let native_grants_uncovered = native_grants_by_id
+        .keys()
+        .filter(|gid| !covered_native.contains(*gid))
+        .count();
     // M3 artifact status: `absent` (no native credential) | `attested` (native present, every closed transcript
     // verified, every native grant covered, ≥1 transcript) | `unattested` (native present but a transcript failed
     // or a native grant is uncovered). The strictly-weaker introspected capstone keys on `attested`.
@@ -4888,15 +5227,29 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
         let rec = &records[rt.index];
         if let Some(r) = ev_str(rec, "grant_evidence", "resource_id") {
-            touched_pairs.insert((r.clone(), ev_str(rec, "grant_evidence", "action").unwrap_or_default()));
+            touched_pairs.insert((
+                r.clone(),
+                ev_str(rec, "grant_evidence", "action").unwrap_or_default(),
+            ));
             resource_ids.insert(r);
         }
         if let Some(r) = ev_str(rec, "use_evidence", "resource_id") {
-            touched_pairs.insert((r.clone(), ev_str(rec, "use_evidence", "action").unwrap_or_default()));
+            touched_pairs.insert((
+                r.clone(),
+                ev_str(rec, "use_evidence", "action").unwrap_or_default(),
+            ));
             resource_ids.insert(r);
         }
     }
-    let attest = evaluate_attestation(bundle, opts, project_id.as_deref(), &anchored_cp_ids, latest_cp_seq, &resource_ids, &mut issues);
+    let attest = evaluate_attestation(
+        bundle,
+        opts,
+        project_id.as_deref(),
+        &anchored_cp_ids,
+        latest_cp_seq,
+        &resource_ids,
+        &mut issues,
+    );
 
     let coverage_manifest = bundle.get("coverage_manifest").cloned();
 
@@ -4945,7 +5298,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
 
     // The trust label must never outrank the verdict: if the bundle is not `ok` (e.g. a broken checkpoint
     // chain, an unverified checkpoint, or any other failure), `broker_trust` cannot claim a reduction.
-    let broker_trust = if ok { broker_trust } else { "assumed".to_string() };
+    let broker_trust = if ok {
+        broker_trust
+    } else {
+        "assumed".to_string()
+    };
 
     VerifyReport {
         ok,
