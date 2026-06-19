@@ -113,9 +113,37 @@ export function stringify(value: unknown): string {
 
 export type Transport = (url: string, headers: Record<string, string>, body: string) => Promise<string>;
 
+/**
+ * Thrown when the server REJECTS a submission (non-2xx) or returns a response that is not a sealed record.
+ * This SDK records tamper-evident evidence: a rejected submission must surface as an error, never be returned
+ * as if a record were sealed — otherwise an agent would believe evidence exists when the server stored none.
+ */
+export class FeirError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly body?: string,
+  ) {
+    super(message);
+    this.name = "FeirError";
+  }
+}
+
 const fetchTransport: Transport = async (url, headers, body) => {
   const resp = await fetch(url, { method: "POST", headers, body });
-  return await resp.text();
+  const text = await resp.text();
+  if (!resp.ok) {
+    // Do NOT let a 4xx/5xx body (e.g. {"error":"unauthorized"}) flow back as a "record" — surface the rejection.
+    let msg = `feir server returned HTTP ${resp.status}`;
+    try {
+      const e = (JSON.parse(text) as { error?: unknown })?.error;
+      if (typeof e === "string") msg += `: ${e}`;
+    } catch {
+      // non-JSON error body; the status alone is the signal.
+    }
+    throw new FeirError(msg, resp.status, text);
+  }
+  return text;
 };
 
 export class Client {
@@ -147,7 +175,22 @@ export class Client {
     if (this.opts.apiKey) headers["Authorization"] = `Bearer ${this.opts.apiKey}`;
     const transport = this.opts.transport ?? fetchTransport;
     const resp = await transport(`${this.baseUrl}/v2/records`, headers, stringify(payload));
-    const parsed = JSON.parse(resp);
-    return parsed.results?.[0]?.record ?? parsed;
+    let parsed: { results?: Array<{ record?: Record<string, unknown> }>; error?: unknown };
+    try {
+      parsed = JSON.parse(resp);
+    } catch {
+      throw new FeirError("feir server returned a non-JSON response", undefined, resp);
+    }
+    // Backstop for a custom transport that does NOT check HTTP status (the built-in fetchTransport throws on
+    // non-2xx already): an {"error":...} body or a missing sealed record is a REJECTION, not a sealed record.
+    // The previous `?? parsed` fallback returned the error body AS the record — silently masking the rejection.
+    if (typeof parsed.error === "string") {
+      throw new FeirError(`feir server rejected the record: ${parsed.error}`, undefined, resp);
+    }
+    const record = parsed.results?.[0]?.record;
+    if (record == null) {
+      throw new FeirError("feir server response did not contain a sealed record", undefined, resp);
+    }
+    return record;
   }
 }

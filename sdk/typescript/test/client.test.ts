@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { buildRecord, stringify, Client } from "../src/index";
+import { buildRecord, stringify, Client, FeirError } from "../src/index";
 
 test("buildRecord basics + bigint cost", () => {
   const rec = buildRecord("p1", "s1", "db.query", { eventType: "tool_call", costMicrosUsd: 18000n });
@@ -46,6 +46,41 @@ test("client submits with idempotency key and returns the record", async () => {
   expect(captured.body.idempotency_key).toBe("fixed");
   expect((captured.body.extensions as any).content_preview.rationale).toBe("why");
   expect(out.content_hash).toBe("sha256:abc");
+});
+
+test("a server rejection is THROWN, never returned as a sealed record", async () => {
+  // A custom transport that does not check status returns the {"error":...} body. The SDK must NOT hand that
+  // back as if a record were sealed (the agent would believe unrecorded evidence exists).
+  const errBody = async () => JSON.stringify({ error: "unauthorized" });
+  const c = new Client("http://x", "p1", { transport: errBody });
+  await expect(c.record("s1", "a")).rejects.toThrow(FeirError);
+  await expect(c.record("s1", "a")).rejects.toThrow(/unauthorized/);
+});
+
+test("an unexpected (no sealed record) response is rejected", async () => {
+  const empty = async () => JSON.stringify({ results: [] });
+  const c = new Client("http://x", "p1", { transport: empty });
+  await expect(c.record("s1", "a")).rejects.toThrow(/did not contain a sealed record/);
+
+  const garbage = async () => "not json at all";
+  const c2 = new Client("http://x", "p1", { transport: garbage });
+  await expect(c2.record("s1", "a")).rejects.toThrow(/non-JSON/);
+});
+
+test("fetchTransport throws on a non-2xx HTTP status (surfacing the server error)", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ error: "idempotency_key is required" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+  try {
+    const c = new Client("http://x", "p1"); // default fetchTransport
+    await expect(c.record("s1", "a")).rejects.toThrow(FeirError);
+    await expect(c.record("s1", "a")).rejects.toThrow(/HTTP 400.*idempotency_key/s);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test("auto idempotency keys are unique", async () => {
