@@ -13,7 +13,7 @@
 //! asserted) downgrades a record to `Untrusted` **unless** an anchored checkpoint with anchor-time
 //! `≤ status_changed_at` transitively commits it (RCP §10.2, threat #9).
 
-use crate::anchor::verify_anchor;
+use crate::anchor::verify_anchor_keyed;
 use crate::authority::{verify_authority_with_key, AuthorityTrust};
 use crate::canon::CanonValue;
 use crate::checkpoint::{validate_chain, verify_checkpoint_sealed};
@@ -1272,7 +1272,9 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
             Ok(k) => k,
             Err(e) => return error_report(&e),
         };
-    let taxonomy_keys = match parse_pubkeys(&opts_val, "taxonomy_keys") {
+    // ADR 0006 §1: taxonomy issuers accept the rotation object form (compromised/revoked → untrusted; rotated
+    // keeps the digest-pinned taxonomy valid — defense-in-depth atop the dominant digest pin).
+    let taxonomy_keys = match parse_role_pubkeys(&opts_val, "taxonomy_keys", &mut role_key_status) {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
@@ -1292,7 +1294,9 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
             None => return error_report("taxonomy_version must be an integer"),
         },
     };
-    let tsa_keys = match parse_pubkeys(&opts_val, "tsa_keys") {
+    // ADR 0006 §1: test-anchor TSA keys accept the rotation object form (a compromised TSA mints any genTime →
+    // its anchors are never honored). RFC 3161 SPKIs (tsa_spki_b64) are not ed25519 role keys — out of scope.
+    let tsa_keys = match parse_role_pubkeys(&opts_val, "tsa_keys", &mut role_key_status) {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
@@ -1315,10 +1319,13 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         };
     // M6 (ADR 0005): pinned cosignature-approver keys, so the JSON/FFI path (the Go server + any external
     // auditor) can enforce M-of-N grant approval, not just the direct Rust API.
-    let revocation_keys = match parse_pubkeys(&opts_val, "revocation_keys") {
-        Ok(k) => k,
-        Err(e) => return error_report(&e),
-    };
+    // ADR 0006 §1: revocation issuers accept the rotation object form (a non-active issuer can't certify
+    // currency → stale; the disclosed revocations still block).
+    let revocation_keys =
+        match parse_role_pubkeys(&opts_val, "revocation_keys", &mut role_key_status) {
+            Ok(k) => k,
+            Err(e) => return error_report(&e),
+        };
     // ADR 0006 §1: cosig approvers accept the rotation object form (a compromised approver's approvals stop
     // counting for grants anchored after the compromise).
     let cosig_approver_keys =
@@ -2418,6 +2425,7 @@ fn validate_taxonomy(
     keys: &[VerifyingKey],
     pinned_digest: Option<&str>,
     pinned_version: Option<i64>,
+    role_status: &BTreeMap<[u8; 32], RoleKeyStatus>,
 ) -> Option<TaxonomyInfo> {
     // MF5: no pin ⇒ unprovable provenance ⇒ never `validated`. Require BOTH the digest and version pins
     // up front so an operator who forgets one cannot silently get a weaker check than they intended.
@@ -2431,10 +2439,16 @@ fn validate_taxonomy(
     if digest != pinned_digest {
         return None;
     }
-    if !keys
+    let signer = keys
         .iter()
-        .any(|vk| crate::sign::verify("feir.taxonomy.v1", &digest, sig, vk).is_ok())
-    {
+        .find(|vk| crate::sign::verify("feir.taxonomy.v1", &digest, sig, vk).is_ok())?;
+    // ADR 0006 §1 — taxonomy-key rotation (defense-in-depth). The auditor's `pinned_digest` already binds the
+    // EXACT vetted artifact, so a compromised key cannot SUBSTITUTE a different taxonomy (the dominant check).
+    // Still, an issuer the auditor flagged `compromised`/`revoked` is no longer a trusted source, so its
+    // taxonomy is not `validated` (untrusted → blocks D4 `action_verified` + the capstone, fail-closed). A
+    // cleanly `rotated` issuer keeps its digest-pinned taxonomy valid (the vetted artifact is unchanged). There
+    // is no clean self-asserted issue time on a taxonomy, so this gates on status alone, not a window.
+    if !role_key_honored(signer, role_status, |rks| rks.status == "rotated") {
         return None;
     }
     // The carried version must equal the pin (rollback anchor). `version` is part of the digest preimage,
@@ -3080,6 +3094,18 @@ fn evaluate_revocation(
         issues.push("revocation_list: issued_at/not_after missing, non-canonical, or inverted — malformed window (M5)".into());
         return stale_with_list();
     }
+    // ADR 0006 §1 — revocation-key rotation. The list is NOT anchor-committed (self-asserted issued_at), so a
+    // non-active issuer cannot CERTIFY currency → freshness drops to `stale` (blocking the capstone). The
+    // disclosed revocations are KEPT, NOT dropped: a signed revocation is monotone, and un-honoring it would
+    // UN-BLOCK a revoked grant — the only fail-OPEN direction here (a forged over-revocation merely DoS-blocks a
+    // good grant, which is the fail-CLOSED direction an evidence verifier prefers). compromised/revoked never
+    // certifies fresh; a cleanly rotated issuer certifies only a list issued at/before the rotation.
+    if !role_key_honored(signer, &opts.role_key_status, |rks| {
+        honored_clean_rotation(rks, issued_at)
+    }) {
+        issues.push("revocation_list: issuer key is rotated/compromised and the list is not provably before that status change — currency not certified (stale); listed revocations still block (ADR 0006 role-key rotation)".into());
+        return stale_with_list();
+    }
     let ts = match anchored_latest_ts {
         Some(t) => t,
         None => {
@@ -3234,6 +3260,16 @@ fn evaluate_merkle_revocation(
             "revocation_merkle_root: issued_at/not_after missing, non-canonical, or inverted (M5)"
                 .into(),
         );
+        return signed;
+    }
+    // ADR 0006 §1 — revocation-key rotation (Merkle variant): identical rule to the disclosed list. A non-active
+    // issuer cannot certify currency → `stale` (the per-use non-membership proof is still demanded since the
+    // root is kept). compromised/revoked never certifies fresh; rotated only for a root issued at/before the
+    // rotation.
+    if !role_key_honored(signer, &opts.role_key_status, |rks| {
+        honored_clean_rotation(rks, issued_at)
+    }) {
+        issues.push("revocation_merkle_root: issuer key is rotated/compromised and the root is not provably before that status change — currency not certified (stale) (ADR 0006 role-key rotation)".into());
         return signed;
     }
     let ts = match anchored_latest_ts {
@@ -3743,6 +3779,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             &opts.taxonomy_keys,
             opts.taxonomy_digest.as_deref(),
             opts.taxonomy_version,
+            &opts.role_key_status,
         )
     });
     let mut taxonomy_window_failed = false;
@@ -4056,16 +4093,35 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     rfc3161_tsa_spki: opts.trusted_tsa_spki.clone(),
                 };
                 let cph = s(cp, "checkpoint_hash").unwrap_or_default();
-                match verify_anchor(&cph, anchor, &anchor_trust) {
-                    Ok(ts) => {
-                        this_anchored = true;
-                        anchored_cp_ids.push((
-                            cp_seq,
-                            cph.clone(),
-                            ts.clone(),
-                            cp_head.as_ref().map(|h| h.cumulative_root.clone()),
-                        ));
-                        anchored.push((cp_seq, ts, cp_frontier.clone()));
+                match verify_anchor_keyed(&cph, anchor, &anchor_trust) {
+                    Ok((ts, tsa_vk)) => {
+                        // ADR 0006 §1 — TSA-key rotation (the foundational case). The TSA MINTS the genTime, so a
+                        // STOLEN key can forge a token with ANY genTime (backdating) — "genTime <= T" cannot be
+                        // trusted. So a `compromised`/`revoked` TSA key's anchors are NEVER honored (the
+                        // checkpoint becomes effectively UN-anchored, which correctly cascades: records committed
+                        // only by it are no longer `anchored_before` anything, defeating the very backdating that
+                        // would otherwise bypass every other rotation gate). A cleanly `rotated` TSA key's
+                        // anchors are honored only for genTime at/before the rotation. (RFC 3161 SPKIs are not
+                        // ed25519 role keys — tsa_vk is None there — so they pass; their rotation is out of scope.)
+                        let tsa_honored = tsa_vk.is_none_or(|vk| {
+                            role_key_honored(&vk, &opts.role_key_status, |rks| {
+                                honored_clean_rotation(rks, &ts)
+                            })
+                        });
+                        if !tsa_honored {
+                            issues.push(format!(
+                                "checkpoint {i} anchor: TSA key is rotated/compromised and the anchor genTime {ts} is not provably before that status change — anchor NOT trusted (ADR 0006 role-key rotation)"
+                            ));
+                        } else {
+                            this_anchored = true;
+                            anchored_cp_ids.push((
+                                cp_seq,
+                                cph.clone(),
+                                ts.clone(),
+                                cp_head.as_ref().map(|h| h.cumulative_root.clone()),
+                            ));
+                            anchored.push((cp_seq, ts, cp_frontier.clone()));
+                        }
                     }
                     Err(e) => issues.push(format!("checkpoint {i} anchor invalid: {e}")),
                 }

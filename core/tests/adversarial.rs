@@ -2938,6 +2938,46 @@ fn tier_b_taxonomy_validated_use_is_action_verified() {
 }
 
 #[test]
+fn role_key_rotation_taxonomy_compromised_untrusted_rotated_still_valid() {
+    // ADR 0006 §1 (taxonomy): the auditor's digest pin binds the EXACT vetted artifact (the dominant check), so
+    // a compromised key cannot substitute a different taxonomy. Rotation is defense-in-depth: a compromised/
+    // revoked issuer → not `validated` (untrusted); a cleanly rotated issuer keeps the digest-pinned taxonomy.
+    let (rec, res, tsa, tax) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+        signing_key_from_seed(&[11u8; 32]),
+    );
+    let bundle = d4_bundle(&rec, &res, &tsa);
+    let run = |status: Option<&str>| {
+        let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
+        let mut opts = pinned_roles_tax(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+            t,
+            tax.verifying_key(),
+        );
+        if let Some(s) = status {
+            opts.role_key_status =
+                role_status(tax.verifying_key(), s, Some("2026-06-15T10:00:00.000Z"));
+        }
+        verify_bundle_with(&bundle, &opts).taxonomy_status
+    };
+    assert_eq!(run(None), "validated", "control: active issuer");
+    assert_ne!(
+        run(Some("compromised")),
+        "validated",
+        "a compromised taxonomy issuer is not trusted (defense-in-depth)"
+    );
+    assert_eq!(
+        run(Some("rotated")),
+        "validated",
+        "a cleanly rotated issuer keeps the digest-pinned (vetted) taxonomy valid"
+    );
+}
+
+#[test]
 fn tier_b_taxonomy_unlisted_action_stays_unverified() {
     let (rec, res, tsa, tax) = (
         signing_key_from_seed(&[0u8; 32]),
@@ -4332,14 +4372,63 @@ fn role_key_rotation_json_parser_is_fail_closed() {
         "a valid rotation object must PARSE and verify"
     );
 
-    let tsa = format!(r#"{{"tsa_keys":[{{"key":"{key}","status":"compromised"}}]}}"#);
-    assert!(verify_bundle_with_json(bundle_json, &tsa).contains("must be a string"));
+    // signing_keys stays STRING-ONLY (its rotation is the richer Rust TrustedKey API, not the opts object), so
+    // the object form is still rejected there — whereas the deferred freshness-dated roles (tsa/attestation/
+    // cosig/revocation/taxonomy) now ACCEPT it (ADR 0006 §1 deferred roles).
+    let signing = format!(r#"{{"signing_keys":[{{"key":"{key}","status":"compromised"}}]}}"#);
+    assert!(verify_bundle_with_json(bundle_json, &signing).contains("must be a string"));
 
     // A misspelled/UNKNOWN field is rejected (fail-closed): silently dropping it would lose the auditor's
     // compromise pin (read as active) — exactly the silent fail-open the 5-lens review caught.
     let typo =
         format!(r#"{{"broker_authority_keys":[{{"key":"{key}","statuss":"compromised"}}]}}"#);
     assert!(verify_bundle_with_json(bundle_json, &typo).contains("unknown field"));
+}
+
+#[test]
+fn role_key_rotation_tsa_compromised_distrusts_anchor() {
+    // ADR 0006 §1 (TSA — the FOUNDATIONAL case). The TSA mints the genTime, so a STOLEN key forges any time →
+    // a compromised/revoked TSA key's anchors are NEVER trusted: the checkpoint becomes effectively unanchored
+    // (broker_trust cannot reach sequence_verified) and an issue fires (!ok). This is what stops a compromised
+    // TSA from backdating an anchor to make a post-compromise grant look anchored_before — which would bypass
+    // every other rotation gate. d6_clean anchors at 2026-06-15T10:10:01.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let bundle = d6_clean(&rec, &tsa);
+    let run = |rks: Option<(&str, &str)>| {
+        let mut opts = pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        );
+        if let Some((s, t)) = rks {
+            opts.role_key_status = role_status(tsa.verifying_key(), s, Some(t));
+        }
+        verify_bundle_with(&bundle, &opts)
+    };
+
+    let r0 = run(None);
+    assert!(r0.ok, "control: active TSA → anchored; {:?}", r0.issues);
+    assert_eq!(r0.broker_trust, "sequence_verified");
+
+    let rc = run(Some(("compromised", "2026-12-31T00:00:00.000Z")));
+    assert!(!rc.ok, "a compromised TSA's anchors must be distrusted");
+    assert!(rc
+        .issues
+        .iter()
+        .any(|i| i.contains("TSA key is rotated/compromised")));
+    assert_ne!(
+        rc.broker_trust, "sequence_verified",
+        "an effectively-unanchored head cannot reach sequence_verified"
+    );
+
+    // rotated, anchor genTime (10:10:01) BEFORE the rotation (10:20) → honored → ok.
+    assert!(run(Some(("rotated", "2026-06-15T10:20:00.000Z"))).ok);
+    // rotated, genTime AFTER the rotation (10:05) → the honest TSA had retired → distrusted → !ok.
+    assert!(!run(Some(("rotated", "2026-06-15T10:05:00.000Z"))).ok);
 }
 
 #[test]
@@ -7987,6 +8076,71 @@ fn revocation_bundle_verify(
     );
     opts.revocation_keys = vec![rev.verifying_key()];
     verify_bundle_with(&bundle, &opts)
+}
+
+#[test]
+fn role_key_rotation_revocation_compromised_issuer_downgrades_currency() {
+    // ADR 0006 §1 (revocation): the list is NOT anchor-committed, so a non-active issuer cannot CERTIFY
+    // currency → `stale` (blocks the capstone) + an issue (!ok). The list revokes nothing USED here, so the
+    // disclosed revocations are KEPT (never un-honored — that would be the fail-OPEN direction). issued_at is
+    // REV_FRESH_FROM (2026-06-15T00:00).
+    let (rec, res, tsa, rev) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+        signing_key_from_seed(&[77u8; 32]),
+    );
+    let revlist = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &["some-other-grant"]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = change_field(
+        &tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]),
+        "revocation_list",
+        revlist,
+    );
+    let run = |rks: Option<(&str, &str)>| {
+        let mut opts = pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        );
+        opts.revocation_keys = vec![rev.verifying_key()];
+        if let Some((s, t)) = rks {
+            opts.role_key_status = role_status(rev.verifying_key(), s, Some(t));
+        }
+        verify_bundle_with(&bundle, &opts)
+    };
+
+    let r0 = run(None);
+    assert_eq!(
+        r0.revocation_status, "fresh",
+        "control: active issuer → fresh"
+    );
+    assert!(r0.ok);
+
+    let rc = run(Some(("compromised", "2026-12-31T00:00:00.000Z")));
+    assert_eq!(
+        rc.revocation_status, "stale",
+        "compromised issuer cannot certify currency"
+    );
+    assert!(
+        !rc.ok,
+        "a compromised revocation issuer impairs the evidence → !ok"
+    );
+
+    // rotated, list issued_at (00:00) BEFORE the rotation (12:00) → clean-retirement window honors it → fresh.
+    assert_eq!(
+        run(Some(("rotated", "2026-06-15T12:00:00.000Z"))).revocation_status,
+        "fresh"
+    );
+    // rotated, list issued AFTER the rotation → the issuer had retired → not honored → stale.
+    assert_eq!(
+        run(Some(("rotated", "2026-06-14T00:00:00.000Z"))).revocation_status,
+        "stale"
+    );
 }
 
 #[test]

@@ -90,6 +90,17 @@ pub fn verify_anchor(
     anchor: &CanonValue,
     trust: &AnchorTrust,
 ) -> Result<String, AnchorError> {
+    verify_anchor_keyed(checkpoint_hash, anchor, trust).map(|(ts, _)| ts)
+}
+
+/// Like [`verify_anchor`], but also returns WHICH `test_anchor_keys` ed25519 key verified the token (so the
+/// caller can apply the TSA key's ADR 0006 §1 rotation lifecycle — a stolen TSA key forges any genTime, so its
+/// anchors must be distrusted). `None` for the RFC 3161 scheme (SPKI-pinned, not an ed25519 role key).
+pub fn verify_anchor_keyed(
+    checkpoint_hash: &str,
+    anchor: &CanonValue,
+    trust: &AnchorTrust,
+) -> Result<(String, Option<VerifyingKey>), AnchorError> {
     let scheme = anchor
         .get("scheme")
         .and_then(|v| v.as_str())
@@ -109,12 +120,12 @@ pub fn verify_anchor(
             let pre = anchor_preimage(checkpoint_hash, anchored_ts);
             for vk in &trust.test_anchor_keys {
                 if vk.verify_strict(&pre, &signature).is_ok() {
-                    return Ok(anchored_ts.to_string());
+                    return Ok((anchored_ts.to_string(), Some(*vk)));
                 }
             }
             Err(AnchorError::Untrusted)
         }
-        "rfc3161" => verify_rfc3161(checkpoint_hash, anchor, trust),
+        "rfc3161" => verify_rfc3161(checkpoint_hash, anchor, trust).map(|ts| (ts, None)),
         other => Err(AnchorError::BadScheme(other.to_string())),
     }
 }
