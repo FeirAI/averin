@@ -130,11 +130,20 @@ enum ActionCompleteness {
 }
 ```
 
-computed in `verify_bundle` (where every conjunct input is already in scope) and serialized FROM the field
-(one `match` → the existing strings, byte-identical). This makes the capstone a first-class, exhaustively-typed
-result instead of a string assembled at the edge — the compiler then enforces that every code path sets it,
-and the §2 `assemble_capstone` seam has a typed return. Behavior-preserving; the golden vectors pin the
-serialized strings.
+serialized as one `match` → the existing strings, byte-identical. This makes the capstone a first-class,
+exhaustively-typed result instead of a string assembled at the edge, and the §2 `assemble_capstone` seam has a
+typed return. Behavior-preserving; the golden vectors pin the serialized strings.
+
+> **Implemented (refined): a derived METHOD, not a stored field.** A stored `pub action_completeness` field
+> goes STALE the moment a caller mutates a conjunct field without recomputing — and the existing `tier_b_d8_*`
+> tests do exactly that (build a passing report, flip one field, assert the serialized capstone), so a cached
+> field broke 5 tests immediately. The capstone is purely DERIVED from the other report fields, so the correct
+> shape is `VerifyReport::action_completeness(&self) -> ActionCompleteness` (delegating to
+> `ActionCompleteness::of(&VerifyReport)`), with `report_to_canon` recomputing at serialization. This is
+> equally typed and ergonomic, byte-identical to the old inline path, and CANNOT go stale. A 4-lens adversarial
+> review (byte-identity / semantic-equivalence / API-soundness / test-quality) confirmed zero behavior
+> divergence and hardened the new test (independent literals over a tautology; all 4 variants + the mixed
+> native+PoP purity boundary). Shipped — see the `ActionCompleteness` enum + method in `verify.rs`.
 
 ---
 

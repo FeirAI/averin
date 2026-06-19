@@ -53,6 +53,114 @@ pub struct RecordTrust {
     pub notes: Vec<String>,
 }
 
+/// The D8 capstone verdict (ADR 0004 / ADR 0005), promoted from an inline serialization string to a typed,
+/// exhaustively-matched field. It is DERIVED from the rest of the report — `ActionCompleteness::of(&report)`
+/// runs as the final step over the fully-built report, so it can never go stale. ALWAYS read alongside
+/// `resource_trust` (MF1): even the strongest label means "complete over the surface IF the resource labeled
+/// it truthfully" (the irreducible resource TCB, D9) — never "everything the agent did".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionCompleteness {
+    /// No (non-null) coverage manifest, or some capstone conjunct failed — the baseline.
+    NotClaimed,
+    /// A non-null coverage manifest is present, but the full `attested_complete` conjunction did not hold.
+    ClaimedOverManifest,
+    /// The STANDARD capstone: every reduction held over a non-empty, PURELY-BROKERED (PoP) surface.
+    AttestedCompleteOverBrokeredSurface,
+    /// The PARALLEL, strictly-weaker M3 capstone: every reduction held over a PURELY-INTROSPECTED native surface.
+    AttestedCompleteOverIntrospectedSurface,
+}
+
+impl ActionCompleteness {
+    /// The canonical report string for this verdict — byte-identical to the prior inline serialization.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActionCompleteness::NotClaimed => "not_claimed",
+            ActionCompleteness::ClaimedOverManifest => "claimed_over_manifest",
+            ActionCompleteness::AttestedCompleteOverBrokeredSurface => {
+                "attested_complete_over_brokered_surface"
+            }
+            ActionCompleteness::AttestedCompleteOverIntrospectedSurface => {
+                "attested_complete_over_introspected_surface"
+            }
+        }
+    }
+
+    /// D8 (ADR 0004) — the `attested_complete` capstone: the CONJUNCTION of every reduction, derived from a
+    /// fully-built report. The label `attested_complete_over_brokered_surface` is reached ONLY when ALL hold:
+    /// the bundle verified (`ok` — all in-scope records L2-proven, DAG + chain valid, no issues); there is a
+    /// brokered surface (`uses_matched > 0`); EVERY matched use is a closed two-phase pair (MF3 —
+    /// `!one_phase_use_present`, `intent_without_outcome == 0`); every matched use is taxonomy-`validated` AND
+    /// action-verified (D4); every matched use was PoP-RE-verified offline (D2 —
+    /// `uses_pop_reverified == uses_matched`); the grant log is anchored + gapless (D6 —
+    /// `broker_trust=="sequence_verified"`); a fresh pinned-issuer deployment attestation binds this bundle
+    /// (D7 — `attestation_status=="attested_claims"`); and there is no unmatched violation or unexplained
+    /// in-flight use. The capstone is asserted over a `coverage_manifest`; absent one it is at most
+    /// `claimed_over_manifest`. It is ALWAYS qualified by `resource_trust:"assumed_truthful"` (MF1).
+    /// M3 (ADR 0005): native/STS credentials add the PARALLEL, strictly-weaker
+    /// `attested_complete_over_introspected_surface` over a PURELY-INTROSPECTED native surface; a MIXED
+    /// native+PoP bundle reaches NEITHER label (it is `claimed_over_manifest`), keeping each label's MF1
+    /// meaning crisp.
+    pub fn of(r: &VerifyReport) -> Self {
+        // a JSON `"coverage_manifest": null` deserializes to `Some(Null)`, which is NOT a real manifest
+        // (D7 already treats null as the empty digest) — the capstone must be asserted OVER a real scope
+        // claim, so require a NON-NULL manifest.
+        let has_manifest = r.coverage_manifest.as_ref().is_some_and(|m| !m.is_null());
+        // `base` is the conjunction SHARED by both capstone labels — every reduction EXCEPT the surface-shape
+        // conjuncts (`uses_matched`, native-vs-brokered) that distinguish the two labels.
+        let base = r.ok
+            && has_manifest
+            && !r.one_phase_use_present
+            && r.intent_without_outcome == 0
+            && r.taxonomy_status == "validated"
+            && r.uses_action_unverified == 0
+            && r.uses_pop_reverified == r.uses_matched
+            && r.broker_trust == "sequence_verified"
+            && r.attestation_status == "attested_claims"
+            && r.unmatched_violation == 0
+            && r.unmatched_pending == 0
+            // M1 (ADR 0005): no bounded_reuse grant overspent or had a replayed sequence number.
+            && r.bounded_reuse_overspent == 0
+            && r.bounded_reuse_seq_replays == 0
+            // M6 (ADR 0005): every cosigned grant met its M-of-N approval threshold.
+            && r.cosig_threshold_failures == 0
+            && (r.cosigned_grants_total == 0 || r.cosigned_grants_satisfied == r.cosigned_grants_total)
+            // M2 (ADR 0005): every present delegation chain fully re-walked (sigs + links + monotonic).
+            && (r.delegation_chains_total == 0
+                || r.delegation_chains_verified == r.delegation_chains_total)
+            && r.delegation_monotonicity_violations == 0
+            // M5 (ADR 0005): no fresh revocation list flagged a revoked use, and the list is not stale.
+            && r.revocation_status != "stale"
+            && r.revocation_status != "revoked_present"
+            && r.revoked_uses_blocked == 0
+            // M5 Merkle-non-disclosure: a present-but-stale signed root is too old to certify currency.
+            && r.revocation_merkle_status != "stale"
+            // M4 (ADR 0005): when federation is active, every per-broker_id head chain verified, none suppressed.
+            && r.cross_broker_suppression == 0
+            && r.brokers_seq_verified == r.brokers_total
+            // T6: the brokered surface stayed within the operator's AFFIRMATIVELY-declared side-effect closure
+            // (load-bearing beyond `r.ok` — a `not_declared` manifest does not force `!ok`).
+            && r.side_effect_closure_status == "closed";
+        // The STANDARD capstone: a non-empty BROKERED surface, every matched use PoP-reverified (in `base`),
+        // and NO native credential (M3 — `!native_credential_present` makes "purely brokered surface" load-bearing).
+        let brokered = base && r.uses_matched > 0 && !r.native_credential_present;
+        // M3: the parallel native-surface capstone — ZERO brokered PoP uses (purity), a native credential, and
+        // every closed introspection transcript verified + every native grant covered (`introspection_status`).
+        let introspected = base
+            && r.uses_matched == 0
+            && r.native_credential_present
+            && r.introspection_status == "attested";
+        if brokered {
+            ActionCompleteness::AttestedCompleteOverBrokeredSurface
+        } else if introspected {
+            ActionCompleteness::AttestedCompleteOverIntrospectedSurface
+        } else if has_manifest {
+            ActionCompleteness::ClaimedOverManifest
+        } else {
+            ActionCompleteness::NotClaimed
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VerifyReport {
     pub ok: bool,
@@ -287,6 +395,15 @@ pub struct VerifyReport {
     pub side_effect_closure_status: String,
     pub issues: Vec<String>,
     pub first_broken_link: Option<String>,
+}
+
+impl VerifyReport {
+    /// The D8 capstone verdict (typed) — DERIVED from the report's own fields, so it always reflects the
+    /// CURRENT state and can never go stale (a stored field would, if a caller mutates a conjunct field). The
+    /// `action_completeness` JSON key serializes this; see [`ActionCompleteness::of`] for the conjunction.
+    pub fn action_completeness(&self) -> ActionCompleteness {
+        ActionCompleteness::of(self)
+    }
 }
 
 /// An out-of-band pinned key. Beyond the public-key bytes it may carry the *authoritative* key
@@ -788,47 +905,107 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             "uses_action_unverified".into(),
             count(r.uses_action_unverified),
         ),
-        (
-            "uses_pop_reverified".into(),
-            count(r.uses_pop_reverified),
-        ),
-        (
-            "unmatched_violation".into(),
-            count(r.unmatched_violation),
-        ),
+        ("uses_pop_reverified".into(), count(r.uses_pop_reverified)),
+        ("unmatched_violation".into(), count(r.unmatched_violation)),
         ("unmatched_pending".into(), count(r.unmatched_pending)),
-        ("intent_without_outcome".into(), count(r.intent_without_outcome)),
+        (
+            "intent_without_outcome".into(),
+            count(r.intent_without_outcome),
+        ),
         ("grants_unused".into(), count(r.grants_unused)),
         ("bounded_reuse_grants".into(), count(r.bounded_reuse_grants)),
-        ("bounded_reuse_overspent".into(), count(r.bounded_reuse_overspent)),
-        ("bounded_reuse_seq_replays".into(), count(r.bounded_reuse_seq_replays)),
+        (
+            "bounded_reuse_overspent".into(),
+            count(r.bounded_reuse_overspent),
+        ),
+        (
+            "bounded_reuse_seq_replays".into(),
+            count(r.bounded_reuse_seq_replays),
+        ),
         // M6 (ADR 0005): cosig (M-of-N grant approval) accounting + the artifact-level status.
-        ("cosigned_grants_total".into(), count(r.cosigned_grants_total)),
-        ("cosigned_grants_satisfied".into(), count(r.cosigned_grants_satisfied)),
-        ("cosig_threshold_failures".into(), count(r.cosig_threshold_failures)),
-        ("cosig_status".into(), CanonValue::string(r.cosig_status.clone())),
+        (
+            "cosigned_grants_total".into(),
+            count(r.cosigned_grants_total),
+        ),
+        (
+            "cosigned_grants_satisfied".into(),
+            count(r.cosigned_grants_satisfied),
+        ),
+        (
+            "cosig_threshold_failures".into(),
+            count(r.cosig_threshold_failures),
+        ),
+        (
+            "cosig_status".into(),
+            CanonValue::string(r.cosig_status.clone()),
+        ),
         // M2 (ADR 0005): delegation (per-hop signed re-delegation) accounting + artifact status.
-        ("delegation_chains_total".into(), count(r.delegation_chains_total)),
-        ("delegation_chains_verified".into(), count(r.delegation_chains_verified)),
-        ("delegation_monotonicity_violations".into(), count(r.delegation_monotonicity_violations)),
-        ("delegation_status".into(), CanonValue::string(r.delegation_status.clone())),
+        (
+            "delegation_chains_total".into(),
+            count(r.delegation_chains_total),
+        ),
+        (
+            "delegation_chains_verified".into(),
+            count(r.delegation_chains_verified),
+        ),
+        (
+            "delegation_monotonicity_violations".into(),
+            count(r.delegation_monotonicity_violations),
+        ),
+        (
+            "delegation_status".into(),
+            CanonValue::string(r.delegation_status.clone()),
+        ),
         // M5 (ADR 0005): revocation (tiered signed-list) status + counts.
-        ("revocation_status".into(), CanonValue::string(r.revocation_status.clone())),
-        ("revoked_grants_matched".into(), count(r.revoked_grants_matched)),
+        (
+            "revocation_status".into(),
+            CanonValue::string(r.revocation_status.clone()),
+        ),
+        (
+            "revoked_grants_matched".into(),
+            count(r.revoked_grants_matched),
+        ),
         ("revoked_uses_blocked".into(), count(r.revoked_uses_blocked)),
-        ("revocation_merkle_status".into(), CanonValue::string(r.revocation_merkle_status.clone())),
-        ("revocation_nonmembership_verified".into(), count(r.revocation_nonmembership_verified)),
+        (
+            "revocation_merkle_status".into(),
+            CanonValue::string(r.revocation_merkle_status.clone()),
+        ),
+        (
+            "revocation_nonmembership_verified".into(),
+            count(r.revocation_nonmembership_verified),
+        ),
         // M3 (ADR 0005): native/STS introspection-transcript accounting + the artifact-level status.
-        ("native_credential_present".into(), CanonValue::Bool(r.native_credential_present)),
-        ("introspection_transcripts_total".into(), count(r.introspection_transcripts_total)),
-        ("introspection_transcripts_verified".into(), count(r.introspection_transcripts_verified)),
-        ("introspection_scope_narrowed".into(), count(r.introspection_scope_narrowed)),
-        ("introspection_status".into(), CanonValue::string(r.introspection_status.clone())),
+        (
+            "native_credential_present".into(),
+            CanonValue::Bool(r.native_credential_present),
+        ),
+        (
+            "introspection_transcripts_total".into(),
+            count(r.introspection_transcripts_total),
+        ),
+        (
+            "introspection_transcripts_verified".into(),
+            count(r.introspection_transcripts_verified),
+        ),
+        (
+            "introspection_scope_narrowed".into(),
+            count(r.introspection_scope_narrowed),
+        ),
+        (
+            "introspection_status".into(),
+            CanonValue::string(r.introspection_status.clone()),
+        ),
         // M4 (ADR 0005): federation (per-broker_id grant-transparency partition) status + counts.
-        ("federation_status".into(), CanonValue::string(r.federation_status.clone())),
+        (
+            "federation_status".into(),
+            CanonValue::string(r.federation_status.clone()),
+        ),
         ("brokers_total".into(), count(r.brokers_total)),
         ("brokers_seq_verified".into(), count(r.brokers_seq_verified)),
-        ("cross_broker_suppression".into(), count(r.cross_broker_suppression)),
+        (
+            "cross_broker_suppression".into(),
+            count(r.cross_broker_suppression),
+        ),
         ("transitive_grants".into(), count(r.transitive_grants)),
         (
             "per_broker_trust".into(),
@@ -876,125 +1053,53 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             "attestation_status".into(),
             CanonValue::string(r.attestation_status.clone()),
         ),
-        ("attestation_issuer_kid".into(), opt_str(&r.attestation_issuer_kid)),
-        ("attestation_issued_at".into(), opt_str(&r.attestation_issued_at)),
-        ("attestation_not_after".into(), opt_str(&r.attestation_not_after)),
-        ("attestation_claim_types".into(), str_array(&r.attestation_claim_types)),
-        ("attestation_subject_digest".into(), opt_str(&r.attestation_subject_digest)),
-        // D8 (ADR 0004) — the `attested_complete` capstone: the CONJUNCTION of every reduction. The label
-        // `attested_complete_over_brokered_surface` is emitted ONLY when ALL hold: the bundle verified
-        // (`ok` — all in-scope records L2-proven, DAG + chain valid, no issues); there is a brokered surface
-        // (`uses_matched > 0`); EVERY matched use is a closed two-phase pair (MF3 — `!one_phase_use_present`,
-        // and `intent_without_outcome == 0` so no recorded-but-incomplete intent); every matched use is
-        // taxonomy-`validated` AND action-verified (D4 — `taxonomy_status=="validated"` ∧
-        // `uses_action_unverified == 0`); every matched use was PoP-RE-verified offline (D2 —
-        // `uses_pop_reverified == uses_matched`, never the shim-asserted path); the grant log is anchored +
-        // gapless (D6 — `broker_trust=="sequence_verified"`); a fresh pinned-issuer deployment attestation
-        // binds this bundle (D7 — `attestation_status=="attested_claims"`); and there is no unmatched
-        // violation or unexplained in-flight use (`unmatched_violation == 0` ∧ `unmatched_pending == 0`).
-        // The capstone is asserted over a `coverage_manifest`; absent one it is at most `claimed_over_manifest`.
-        // It is ALWAYS qualified by `resource_trust:"assumed_truthful"` (MF1 — the irreducible resource TCB).
-        // M3 (ADR 0005): native/STS credentials add a PARALLEL, strictly-weaker fourth label,
-        // `attested_complete_over_introspected_surface`, over a PURELY-INTROSPECTED native surface (every other
-        // reduction, the brokered-PoP conjuncts vacuous, PLUS `native_credential_present` and
-        // `introspection_status=="attested"`). The standard label additionally requires `!native_credential_present`,
-        // so a MIXED native+PoP bundle (a brokered surface AND a native credential) reaches NEITHER label — it is
-        // `claimed_over_manifest` — keeping each label's MF1 meaning crisp (brokered-PoP surface vs. native surface).
-        ("action_completeness".into(), {
-            // a JSON `"coverage_manifest": null` deserializes to `Some(Null)`, which is NOT a real manifest
-            // (D7 already treats null as the empty digest) — the capstone must be asserted OVER a real scope
-            // claim, so require a NON-NULL manifest.
-            let has_manifest = r.coverage_manifest.as_ref().is_some_and(|m| !m.is_null());
-            // `base` is the conjunction SHARED by both capstone labels — every reduction EXCEPT the
-            // surface-shape conjuncts (`uses_matched`, native-vs-brokered) that distinguish the two labels.
-            let base = r.ok
-                && has_manifest
-                && !r.one_phase_use_present
-                && r.intent_without_outcome == 0
-                && r.taxonomy_status == "validated"
-                && r.uses_action_unverified == 0
-                && r.uses_pop_reverified == r.uses_matched
-                && r.broker_trust == "sequence_verified"
-                && r.attestation_status == "attested_claims"
-                && r.unmatched_violation == 0
-                && r.unmatched_pending == 0
-                // M1 (ADR 0005): no bounded_reuse grant was overspent or had a replayed sequence number.
-                // Surfacing-redundant with unmatched_violation (each anomaly is also a violation, so !ok),
-                // but kept explicit so the capstone's meaning is self-documenting over the N-Use surface.
-                && r.bounded_reuse_overspent == 0
-                && r.bounded_reuse_seq_replays == 0
-                // M6 (ADR 0005): every cosigned grant met its M-of-N approval threshold. A short cosigned
-                // grant is also NOT indexed (its use → unmatched_violation, so !ok), but the conjunct is kept
-                // explicit so the capstone self-documents that dual-control was satisfied over the surface.
-                && r.cosig_threshold_failures == 0
-                && (r.cosigned_grants_total == 0 || r.cosigned_grants_satisfied == r.cosigned_grants_total)
-                // M2 (ADR 0005): every present delegation chain fully re-walked (sigs + links + monotonic).
-                // A failed/non-monotone chain also un-indexes the grant (its use → unmatched_violation, so !ok),
-                // but the conjuncts are explicit so the capstone self-documents that re-delegation was verified.
-                && (r.delegation_chains_total == 0 || r.delegation_chains_verified == r.delegation_chains_total)
-                && r.delegation_monotonicity_violations == 0
-                // M5 (ADR 0005): no fresh revocation list flagged a revoked use, and the list is not stale. A
-                // revoked use is also a hard violation (→ !ok), but the conjunct is explicit so the capstone
-                // self-documents that no honored grant was revoked over the window. `absent`/`fresh` pass.
-                && r.revocation_status != "stale"
-                && r.revocation_status != "revoked_present"
-                && r.revoked_uses_blocked == 0
-                // M5 Merkle-non-disclosure: a present-but-stale signed root is too old to certify currency (a
-                // grant could have been revoked after the window), so it blocks the capstone exactly like a stale
-                // disclosed list. `absent`/`fresh` pass (a fresh root's blocked uses already raised the conjunct
-                // above + a hard violation).
-                && r.revocation_merkle_status != "stale"
-                // M4 (ADR 0005): when federation is active, EVERY broker's per-`broker_id` head chain verified and
-                // none was suppressed. A suppressed broker is also a hard violation (→ !ok), but the conjuncts are
-                // explicit so the capstone self-documents that no broker's grant log was suppressed. `absent`
-                // (single-broker) trivially passes: brokers_total==brokers_seq_verified==0 and no suppression.
-                && r.cross_broker_suppression == 0
-                && r.brokers_seq_verified == r.brokers_total
-                // T6: the brokered surface stayed within the operator's AFFIRMATIVELY-declared side-effect
-                // closure. This is load-bearing beyond `r.ok`: an `unclosed` surface already forces `!ok`, but
-                // a `not_declared` manifest (no closure asserted) does NOT — so without this conjunct an
-                // otherwise-perfect bundle that declares ZERO closure would reach the capstone. Requiring
-                // `closed` makes attested_complete mean "complete over the surface AND that surface is within
-                // the declared closure" (still bounded by resource_trust:assumed_truthful — declaration, not obedience).
-                && r.side_effect_closure_status == "closed";
-            // The STANDARD capstone: a non-empty BROKERED surface (`uses_matched > 0`), every matched use
-            // PoP-reverified (in `base`), and NO native credential (M3 — a token_exchange credential has no
-            // broker credential_binding / cnf PoP, so it can never satisfy `uses_pop_reverified == uses_matched`;
-            // the explicit `!native_credential_present` makes "purely brokered surface" load-bearing).
-            let brokered = base && r.uses_matched > 0 && !r.native_credential_present;
-            // M3 (ADR 0005): the PARALLEL, strictly-weaker capstone over a PURELY-INTROSPECTED native surface.
-            // Same `base`, but the surface is native rather than brokered: ZERO brokered PoP uses
-            // (`uses_matched == 0`, the PURITY conjunct), a native credential present, and every closed
-            // introspection transcript verified + every native grant covered (`introspection_status == "attested"`,
-            // which also requires ≥1 transcript). The PoP conjunct in `base` is vacuous here (0 == 0) — PoP is
-            // not load-bearing for the introspected surface; the resource-signed transcripts are. A MIXED
-            // native+PoP bundle has `uses_matched > 0` AND `native_credential_present`, so it satisfies NEITHER
-            // `brokered` (native present) NOR `introspected` (uses_matched != 0) — it falls to `claimed_over_manifest`,
-            // keeping each label's MF1 meaning crisp (still bounded by resource_trust:assumed_truthful).
-            let introspected = base
-                && r.uses_matched == 0
-                && r.native_credential_present
-                && r.introspection_status == "attested";
-            CanonValue::string(if brokered {
-                "attested_complete_over_brokered_surface"
-            } else if introspected {
-                "attested_complete_over_introspected_surface"
-            } else if has_manifest {
-                "claimed_over_manifest"
-            } else {
-                "not_claimed"
-            })
-        }),
+        (
+            "attestation_issuer_kid".into(),
+            opt_str(&r.attestation_issuer_kid),
+        ),
+        (
+            "attestation_issued_at".into(),
+            opt_str(&r.attestation_issued_at),
+        ),
+        (
+            "attestation_not_after".into(),
+            opt_str(&r.attestation_not_after),
+        ),
+        (
+            "attestation_claim_types".into(),
+            str_array(&r.attestation_claim_types),
+        ),
+        (
+            "attestation_subject_digest".into(),
+            opt_str(&r.attestation_subject_digest),
+        ),
+        // D8 (ADR 0004) — the `attested_complete` capstone, now derived by the typed
+        // [`VerifyReport::action_completeness`] / [`ActionCompleteness::of`] (see its doc for the full
+        // conjunction + the M1–M6 conjuncts). Recomputed here from the report, byte-identical to the prior
+        // inline block — deriving at serialization (not caching a field) keeps it from ever going stale.
+        (
+            "action_completeness".into(),
+            CanonValue::string(r.action_completeness().as_str()),
+        ),
         // MF1: the resource-truthful-labeling conditional, ALWAYS present so the capstone can never be read
         // as "everything the agent did" — only "everything over the brokered surface, IF the resource
         // labeled it truthfully" (the irreducible resource TCB, D9).
-        ("resource_trust".into(), CanonValue::string(r.resource_trust.clone())),
+        (
+            "resource_trust".into(),
+            CanonValue::string(r.resource_trust.clone()),
+        ),
         (
             "coverage_manifest".into(),
             r.coverage_manifest.clone().unwrap_or(CanonValue::Null),
         ),
-        ("unclosed_side_effects".into(), count(r.unclosed_side_effects)),
-        ("side_effect_closure_status".into(), CanonValue::string(r.side_effect_closure_status.clone())),
+        (
+            "unclosed_side_effects".into(),
+            count(r.unclosed_side_effects),
+        ),
+        (
+            "side_effect_closure_status".into(),
+            CanonValue::string(r.side_effect_closure_status.clone()),
+        ),
         ("issues".into(), str_array(&r.issues)),
         ("first_broken_link".into(), opt_str(&r.first_broken_link)),
         ("record_trust".into(), CanonValue::Array(records)),

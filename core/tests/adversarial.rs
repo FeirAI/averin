@@ -14,7 +14,7 @@ use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use feir_decision_core::verify::{
     cnf_kid, cosig_approval_challenge, delegation_hop_challenge, federation_cert_challenge,
     introspection_transcript_challenge, report_to_json, verify_bundle, verify_bundle_with,
-    TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
+    ActionCompleteness, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -8324,6 +8324,87 @@ fn tier_b_d8_capstone_when_all_conditions_hold() {
     assert!(
         out.contains(r#""resource_trust":"assumed_truthful""#),
         "resource_trust must always be present: {out}"
+    );
+}
+
+#[test]
+fn tier_b_d8_typed_action_completeness_covers_all_variants_and_never_stale() {
+    // The typed VerifyReport::action_completeness() must return the right ENUM variant AND serialize to the
+    // expected string. Each case is checked against an INDEPENDENT expected literal (NOT against the method's
+    // own round-tripped output — that would be tautological, since report_to_canon serializes via the SAME
+    // method). Because the verdict is DERIVED at serialization (not a cached field), each report is built by
+    // mutating a capstone_report() and BOTH the method and the JSON reflect the mutation in lockstep — the
+    // no-staleness property that motivated a method over a stored field (ADR 0006 item 3).
+    let ser = |r: &VerifyReport| -> String {
+        let json = report_to_json(r);
+        let key = r#""action_completeness":""#;
+        assert_eq!(
+            json.matches(key).count(),
+            1,
+            "action_completeness key must be unique"
+        );
+        let i = json.find(key).unwrap() + key.len();
+        json[i..].split('"').next().unwrap().to_string()
+    };
+    let check = |r: &VerifyReport, variant: ActionCompleteness, literal: &str| {
+        assert_eq!(
+            r.action_completeness(),
+            variant,
+            "typed verdict for {literal}"
+        );
+        assert_eq!(
+            r.action_completeness().as_str(),
+            literal,
+            "as_str() for {literal}"
+        );
+        assert_eq!(ser(r), literal, "serialized JSON for {literal}");
+    };
+
+    // 1/4 — the STANDARD capstone: every condition holds over a purely-brokered surface.
+    check(
+        &capstone_report(),
+        ActionCompleteness::AttestedCompleteOverBrokeredSurface,
+        "attested_complete_over_brokered_surface",
+    );
+
+    // 2/4 — manifest PRESENT but one conjunct dropped (D6): the 4th variant, exercised as a typed value.
+    let mut r_cm = capstone_report();
+    r_cm.broker_trust = "assumed".to_string();
+    check(
+        &r_cm,
+        ActionCompleteness::ClaimedOverManifest,
+        "claimed_over_manifest",
+    );
+
+    // 3/4 — no manifest (no scope claim): not_claimed (capstone_report WAS a capstone before this mutation,
+    // proving the verdict is recomputed, never stale).
+    let mut r_nc = capstone_report();
+    r_nc.coverage_manifest = None;
+    check(&r_nc, ActionCompleteness::NotClaimed, "not_claimed");
+
+    // 4/4 — the PARALLEL, weaker native-surface capstone (M3): zero brokered uses + a native credential +
+    // attested introspection.
+    let mut r_in = capstone_report();
+    r_in.uses_matched = 0;
+    r_in.uses_pop_reverified = 0;
+    r_in.native_credential_present = true;
+    r_in.introspection_status = "attested".to_string();
+    check(
+        &r_in,
+        ActionCompleteness::AttestedCompleteOverIntrospectedSurface,
+        "attested_complete_over_introspected_surface",
+    );
+
+    // BOUNDARY — a MIXED native+PoP bundle stresses the brokered PURITY conjunct `!native_credential_present`:
+    // a brokered surface (uses_matched>0) AND a native credential satisfies NEITHER brokered (native present)
+    // NOR introspected (uses_matched!=0), so it must fall to claimed_over_manifest. Without the purity conjunct
+    // this would WRONGLY read as the brokered capstone (a fail-open over-claim).
+    let mut r_mix = capstone_report();
+    r_mix.native_credential_present = true; // uses_matched stays 1
+    check(
+        &r_mix,
+        ActionCompleteness::ClaimedOverManifest,
+        "claimed_over_manifest",
     );
 }
 
