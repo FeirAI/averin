@@ -68,6 +68,42 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
 All keys are base64url-no-pad ed25519 public keys with an `ed25519pub:` prefix (the form
 `feir-server` logs at startup, and the form `core.PubKey()` returns).
 
+## Rotating / retiring a compromised role key (ADR 0006 §1)
+
+If you learn (out of band — a key-transparency record, an incident) that one of your pinned **authority** keys
+was **compromised** or **rotated** at a point in time, pin its lifecycle so grants/uses that key elevated
+*after* that point stop counting — without throwing away the legitimate ones it signed *before*. Replace the
+bare `"ed25519pub:…"` string with an object:
+
+```jsonc
+{
+  "broker_authority_keys": [
+    { "key": "ed25519pub:<broker-key>",
+      "status": "compromised",                       // active | rotated | compromised | revoked
+      "status_changed_at": "2026-06-15T10:05:00.000Z" } // RCP timestamp (fixed-ms UTC)
+  ]
+}
+```
+
+Semantics: a grant/use whose authority verified under a non-`active` key keeps `gateway_enforced` **only if it
+was transitively committed by a verified anchor at or before `status_changed_at`** (it predates the
+compromise). Otherwise its elevation is **withdrawn** — a *use* of a withdrawn grant then fails to match (a
+violation, `ok:false`); an unused grant simply drops to unaccountable. The status is **authoritative**: it
+comes from *your* opts, never the bundle, so a forger cannot self-assert it. A non-active status with **no**
+`status_changed_at` (or an unanchored record) withdraws **unconditionally** (fail-closed — an undatable
+compromise cannot be proven to predate anything).
+
+This applies to the **authority-elevation** roles — `broker_authority_keys`, `resource_authority_keys`,
+`authority_keys`, and each `federated_broker_keys` set (where it ALSO gates a transitive `cross_broker_cert`
+grant by the **issuer** key's lifecycle). A `cross_broker_cert` whose issuer key is compromised before the
+grant's anchor no longer elevates.
+
+> **Fail-closed, not silent.** The other roles — `tsa_keys`, `attestation_keys`, `cosig_approver_keys`,
+> `revocation_keys`, `taxonomy_keys` — do **not** yet accept the object/rotation form (their freshness is dated
+> differently). Supplying it on one of them is a **parse error**, not a silently-ignored directive — so you can
+> never get false comfort that a rotation took effect when it didn't. An UNKNOWN status, or a misspelled field
+> name, is likewise a parse error (never read as `active`).
+
 ## What each mode means in the report
 
 - `grant_accountability` — every credential grant verified under `broker_authority_keys` (Tier-A).
