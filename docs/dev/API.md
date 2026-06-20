@@ -1,0 +1,302 @@
+# API / wire reference
+
+The `feir-server` HTTP API, verified against `server/internal/api/server.go` (route table in
+`Routes()`) and the core object definitions in `core/src/record.rs` / `core/src/checkpoint.rs`.
+
+All bodies are JSON. Request bodies are bounded to **8 MiB** (`http.MaxBytesReader`). Numeric
+literals are decoded with `json.Number` (no float round-trip — RCP forbids floats in signed fields).
+
+## Authentication
+
+- When `FEIR_API_KEYS` is **unset**, the API is **unauthenticated** (`/v2/*` is open). Dev /
+  single-tenant only.
+- When `FEIR_API_KEYS` is set, every `/v2/*` route is gated by project-scoped API-key middleware;
+  `/healthz` stays open. Credentials are read from `Authorization: Bearer <token>` (scheme is
+  case-insensitive) **or** `X-Api-Key: <token>`; the project comes from the `?project=` query
+  parameter. A token not valid for that project gets a generic `401` (`{"error":"unauthorized"}`,
+  with `WWW-Authenticate: Bearer realm="feir"`). The check is constant-time and fails closed.
+- With auth on, a body `project_id` that does not match the authorized `?project=` is `403`.
+
+## Routes
+
+| Method | Path | Purpose | Enabled by |
+|--------|------|---------|------------|
+| GET | `/healthz` | Liveness (`ok`). | always |
+| POST | `/v2/records` | Ingest one record or a batch array. | always |
+| POST | `/v2/otel/traces` | Ingest OTel/OpenInference spans, mapped to records. | always |
+| POST | `/v2/checkpoints` | Seal the current frontier into the checkpoint chain. | always |
+| GET | `/v2/verify` | Server-side verification report for a project. | always |
+| GET | `/v2/export` | Export a verifiable bundle (proof / disclosure). | always |
+| GET | `/v2/dag` | A session's sealed records (trace-waterfall view). | always |
+| GET | `/v2/sessions` | List a project's session ids. | always |
+| GET | `/v2/usage` | Usage / billable counts for a project. | always |
+| POST | `/v2/grants` | Credential broker: issue a `gateway_enforced` grant (Tier-A). | `FEIR_BROKER_ISSUING_SEED` |
+| POST | `/v2/grants/prepare` | Two-phase grant, phase 1 (mint + reveal). | broker (+ cosig) |
+| POST | `/v2/grants/finalize` | Two-phase grant, phase 2 (attach approver sigs + commit). | broker (+ cosig) |
+| POST | `/v2/introspection` | Native/STS: record a resource introspection transcript. | resource gateway |
+| POST | `/v2/use` | Resource gateway: one-phase use receipt (Tier-B). | `FEIR_RESOURCE_SEED` |
+| POST | `/v2/use-intent` | Two-phase use, phase 1 (before the side effect). | resource gateway |
+| POST | `/v2/use-outcome` | Two-phase use, phase 2 (after the side effect). | resource gateway |
+| POST | `/v2/revoke` | Mark a `grant_id` revoked. | `FEIR_REVOCATION_SEED` |
+
+Routes whose feature is not enabled return **`501 Not Implemented`** with an `{"error":...}` telling
+you which env var to set.
+
+---
+
+## POST `/v2/records`
+
+Ingest. Accepts a single record **object** or a JSON **array** (batch). The server stamps every
+server-controlled field, defaults missing semantic fields, replaces low-entropy `input`/`output`/
+`rationale` with hiding commitments, links the record into the session DAG, signs it, and stores it.
+
+Required (per item): `project_id`, `session_id`, and an idempotency key — `idempotency_key` field
+or the `Idempotency-Key` header. The caller may also supply any of the allowed top-level fields
+(see [Record object](#record-object)); server-controlled fields are overwritten.
+
+Batch semantics: the **whole batch** is validated up front (decodability, project binding,
+idempotency, reserved-field checks, and an RCP-canonicalization dry-run). A malformed item rejects
+the entire batch with a deterministic `400` before any item is sealed.
+
+**Response `201`:**
+
+```json
+{ "results": [ { "created": true, "record": { /* the sealed record */ } } ] }
+```
+
+`created` is `false` for an idempotent collapse (a retry under the same key). Errors: `400`
+(invalid body, missing required field, reserved field/prefix, non-canonical field), `403`
+(project_id mismatch with auth).
+
+### Reserved fields (rejected on a generic record)
+
+- `idempotency_key` prefix `denial:` — reserved for the broker denied-grant log.
+- `record_id` prefix `use-`, `outcome-`, or `denial-` — reserved for the broker/resource endpoints.
+- `event_type == "credential_grant_denied"` — reserved for the broker denied-grant log.
+- `extensions.broker` and `extensions.broker_denial` — reserved for the broker/resource lifecycle.
+- `record_kind` (optional) must be one of `budget-exhausted`, `chargeback-posted`.
+
+---
+
+## POST `/v2/otel/traces`
+
+Maps OTel/OpenInference spans (request body) to records and ingests each, content-addressed for
+idempotency. Requires `?project=`.
+
+**Response `201`** (or `400` if all spans failed):
+`{ "ingested": <n>, "failed": <n>, "errors": [ ... ] }`
+
+---
+
+## POST `/v2/checkpoints?project=<id>`
+
+Seals the project's current frontier (the set of session heads) into the hash-chained checkpoint
+chain, and best-effort appends it to the configured witness. Empty JSON body.
+
+**Response `201`:** `{ "checkpoint": { /* sealed checkpoint */ } }`, with an optional
+`"warning"` if the checkpoint stored but witnessing is pending. Requires `?project=` (`400`
+otherwise).
+
+---
+
+## GET `/v2/verify?project=<id>`
+
+Returns the **server's self-view** verification report (built from the project's full bundle,
+self-pinning only the roles meaningful without an externally-held TSA key — broker/federation,
+resource, revocation, cosig; **not** attestation, which needs a pinned TSA). For an authoritative,
+independent verdict, export and verify offline with your own pinned keys.
+
+**Response `200`:** the [verification report](#verification-report) JSON.
+
+---
+
+## GET `/v2/export?project=<id>`
+
+Returns a verifiable [bundle](#bundle-object) for offline verification.
+
+Query parameters:
+
+- `mode` (default `proof_only`) — one of `proof_only`, `selective_disclosure`, `full_evidence`.
+  Disclosing modes attach a `disclosures` array (`{record_id, field, value_b64, nonce_hex}`) so an
+  offline verifier can open each committed field against its record's commitment.
+- `record_kind` (optional) — filter to a typed view. Must be a valid `record_kind`; an unknown value
+  is `400`. Adds a `filtered_records` array + a `record_kind_filter` echo. The canonical `records`/
+  `checkpoints` arrays are left intact (so the bundle still verifies); the filter is a typed *view*.
+
+---
+
+## GET `/v2/dag?project=<id>&session=<id>`
+
+A session's sealed records, in causal/display order, for the trace-waterfall view.
+
+**Response `200`:** `{ "records": [ /* sealed records */ ] }`. Both query params required (`400`).
+
+> Phase-1 authz limit: with `FEIR_API_KEYS` unset, any caller who can reach this endpoint can read
+> any project's data. Run single-tenant or behind your own auth until you configure project keys.
+
+---
+
+## GET `/v2/sessions?project=<id>`
+
+`{ "sessions": [ "<session-id>", ... ] }`.
+
+## GET `/v2/usage?project=<id>`
+
+`{ "usage": {...}, "free_tier": <n>, "billable_records": <n>, "billable_exports": <n> }`.
+
+---
+
+## POST `/v2/grants` (credential broker, Tier-A)
+
+Issues a grant: it **records** a signed `gateway_enforced` grant into the agent's session DAG
+**before** returning the minted, sender-constrained, single-use capability (record-before-issue).
+Idempotency key required (so a lost-response retry never double-issues).
+
+Request (`grantRequest`):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `idempotency_key` | string | Required (or `Idempotency-Key` header). Deterministically fixes `grant_id`. |
+| `project_id`, `session_id` | string | Required. |
+| `agent_id`, `action`, `resource`, `scope` | string | The operation being authorized. |
+| `scope_class` | string | Scope classification input (see broker `ScopeClass`). |
+| `use_limit` | int | `bounded_reuse` only (≥1): the cap N. |
+| `agent_pubkey`, `agent_sig` | string | Proof-of-possession (the cnf key + signature over the challenge). |
+| `authorizing_principal`, `delegation_chain` | string / []string | Authorization provenance. |
+| `justification` | string | |
+| `ttl_seconds` | int | Capability TTL. |
+| `mode` | string | `token_exchange` ⇒ a native/STS grant (no broker PoP; accountable only via a later introspection transcript). |
+| `lease_id` | string | Native mode only: the external credential reference a transcript must match. |
+
+**Response `201`:**
+
+```json
+{
+  "grant_id": "<uuid>",
+  "capability": "<minted sender-constrained token>",
+  "expires_at": "2026-...Z",
+  "scope_class": "single_use"
+}
+```
+
+Errors: `400` (validation, failed PoP, forbidden scope, malformed), `409` (idempotency key reused
+for a *different* grant request), `500` (store/seal failure), `501` (broker not enabled). When an
+M-of-N cosig policy is pinned, single-phase issuance is refused (`400`) — use prepare/finalize.
+
+---
+
+## POST `/v2/use` (resource gateway, Tier-B)
+
+The resource validates a presented capability + proof-of-possession at use time (capability sig,
+validity window, audience/action, PoP, consume-before-act ledger), then seals a resource-signed use
+receipt the offline verifier joins back to its grant.
+
+Request (`useRequest`): `idempotency_key`, `project_id`, `session_id`, `capability`, `use_sig`
+(base64url Ed25519 PoP), `action`, `params`, `nonce`, `params_nonce`, and `use_sequence_number`
+(bounded_reuse only).
+
+**Response `201`:**
+`{ "use_id": "use-<uuid>", "grant_id": "<uuid>", "record": { /* sealed receipt */ }, "idempotent": false }`
+
+`/v2/use-intent` and `/v2/use-outcome` are the two-phase variant (intent recorded *before* the side
+effect, outcome *after*, linked by a forced causal edge).
+
+---
+
+## POST `/v2/revoke`
+
+Marks a `grant_id` revoked (permissive by id — the id need not already exist locally, so a
+compromised/federated id can be revoked preemptively). The next `/v2/export` carries a signed,
+time-bounded `revocation_list`; the offline verifier then blocks any use of a revoked grant.
+
+Request: `{ "project_id": "...", "grant_id": "..." }` (both required).
+
+**Response `201`:**
+`{ "revoked": "<grant_id>", "project_id": "...", "revoked_total": <n>, "note": "..." }`.
+Errors: `400`, `403`, `429` (the per-project revoked-set cap is reached — explicit, never a silent
+fail-open), `501` (revocation not enabled).
+
+---
+
+## Record object (schema v2)
+
+The signed Decision Record. Closed top-level key set (`ALLOWED_TOP_KEYS` in `core/src/record.rs`);
+unknown top-level keys are **rejected** — only `extensions` may hold arbitrary keys.
+
+Required keys (`REQUIRED_TOP_KEYS`): `schema_version`, `canon_version`, `domain`, `record_id`,
+`project_id`, `agent_id`, `agent_version`, `session_id`, `span_id`, `parent_span_id`,
+`causal_prev_hashes`, `display_seq`, `agent_ts`, `received_ts`, `event_type`, `action`,
+`observed_via`, `status`, `content_hash`, `sig`, `key`.
+
+Server-stamped constants: `schema_version = "2"`, `canon_version = "rcp-1"`,
+`domain = "flightrecorder.record.v2"`. Server-controlled: `received_ts`, `display_seq`,
+`causal_prev_hashes` (the session's current heads), `content_hash`, `sig`, `key`, plus defaults for
+absent semantic fields (`agent_id`/`agent_version` → `unknown`, `event_type` → `decision`,
+`observed_via` → `sdk`, `status` → `ok`).
+
+Other allowed keys: `anchored_ts`, `record_kind`, `input_commit`, `output_commit`,
+`rationale_commit`, `credential_commit`, `tokens`, `cost_micros_usd`, `authority`, `content`,
+`framework`.
+
+- `content_hash`: `sha256:<hex>` over `SHA-256( LP(domain) ‖ LP(canon_version) ‖ RCP-serialize(body \ {content_hash, sig}) )`.
+- `sig`: `ed25519:<base64url-no-pad>` over the domain-tagged content hash (tag `feir.record.sig.v1`).
+- `key`: `{signing_key_id, key_epoch, key_valid_from, key_status}`.
+- `input_commit` / `output_commit` / `rationale_commit`:
+  `{alg: "sha256", commitment: "sha256:<hex>", low_entropy: bool}` — a hiding commitment; the raw
+  value lives in the content store and is revealed only via a disclosing export.
+
+### Enums
+
+- `observed_via`: `proxy`, `sdk`, `otel`, `broker` (Level-2 honesty — what each path captures;
+  `broker` is stamped by the server on every grant / use receipt / intent / outcome record).
+- `record_kind` (optional): `budget-exhausted`, `chargeback-posted`.
+- `authority.source`: `caller_declared` (the forgeable default), `policy_engine_signed`,
+  `human_signed`, `gateway_enforced` (the broker's own source). An evidence triple verifying under a
+  pinned key elevates from `caller_declared` to the matching source.
+- `key.key_status`: `active`, `retired`, `revoked`, `compromised` (the record's own signing-key
+  lifecycle; echoed verbatim into the verify report). Not to be confused with the `opts.json`
+  pinned-authority role-key rotation status (`active`/`rotated`/`compromised`/`revoked`, ADR 0006),
+  which is a separate mechanism that governs PINNED authority keys, not a record's `key` block.
+
+## Checkpoint object
+
+Domain `flightrecorder.checkpoint.v2`, canon `rcp-1`. Hash-chained via `prev_checkpoint_hash`; the
+`checkpoint_hash` strips `{anchor, checkpoint_hash, sig}` from the preimage (so a later anchor does
+not change the hash). Carries `checkpoint_id`, `checkpoint_seq`, `frontier` (the head content
+hashes), `record_count`, `created_ts`, `broker_grant_head` (the grant-transparency cumulative root),
+and an optional `anchor` (an RFC 3161 token, attached at export). The chain enforces: first seq is
+`0` with null prev; no seq gaps; no two distinct checkpoints sharing a seq or a prev (fork, threat
+#2); record_count non-decreasing; every frontier head present in the bundle (omission, threat #1);
+the latest frontier equals the actual DAG heads.
+
+## Bundle object
+
+`GET /v2/export` returns: `bundle_version`, `project_id`, `keys` (`[{signing_key_id, key_epoch,
+public_key, key_status}]`), `records[]`, `checkpoints[]`, `mode`, `gap_report`, and (when
+configured/applicable) `coverage_manifest`, `revocation_list`, `deployment_attestation`,
+`disclosures`, `filtered_records` + `record_kind_filter`.
+
+## Verification report
+
+Returned by `GET /v2/verify` and by the offline verifier (`VerifyReport` in `core/src/verify.rs`).
+Key fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `ok` | bool | The integrity verdict: every record sealed + linked + checkpoint-consistent, no hard violation. **Not** the accountability capstone. |
+| `keys_externally_pinned` | bool | `true` only when you passed an `opts.json` — i.e. authentic vs internal-consistency. |
+| `records_total`, `records_proven` | int | |
+| `dag_ok`, `dag_heads`, `collapsed_duplicates` | bool/int | DAG validity, head count, deduped retries (#8). |
+| `checkpoints_total`, `checkpoints_verified`, `checkpoints_anchored`, `chain_ok` | int/bool | |
+| `grant_accountability` | string | `not_applicable` / `incomplete` / `complete` (Tier-A). |
+| `broker_trust` | string | `assumed` / `sequence_verified`. |
+| `uses_matched`, `uses_pop_reverified`, `unmatched_violation`, `unmatched_pending`, `grants_unused` | int | Tier-B join. |
+| `action_completeness` | string | `not_claimed` / `claimed_over_manifest` / `attested_complete_over_brokered_surface` / `attested_complete_over_introspected_surface`. |
+| `resource_trust` | string | Always `assumed_truthful` (the irreducible resource-TCB conditional, MF1). |
+| `cosig_status`, `delegation_status`, `taxonomy_status`, `attestation_status`, `revocation_status`, `revocation_merkle_status`, `introspection_status`, `federation_status` | string | Mode gates: `absent` / `unevaluated` (no key pinned) → an evaluated verdict when the role's key set is pinned. |
+| `issues` | []string | Human-readable violations (omission/fork/tamper/role-overlap/…). |
+
+The CLI prints a digest of this and a `RESULT: PASS (integrity)` / `RESULT: FAIL` line. PASS is the
+**integrity** verdict; the `action_completeness` / `grant_accountability` / `broker_trust` capstone
+on the same line is the higher claim, and `not_claimed` / `incomplete` are normal when no role keys
+were pinned. Even a `*_complete` capstone is bounded by `resource_trust: assumed_truthful`.

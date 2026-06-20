@@ -8,6 +8,13 @@
 
 Accountability, not just observability. Apache-2.0, self-hostable.
 
+> **New here? Start with the developer docs:** [`docs/dev/`](docs/dev/README.md) —
+> [Quickstart](docs/dev/QUICKSTART.md) (build, run, an end-to-end curl example) ·
+> [Architecture](docs/dev/ARCHITECTURE.md) · [API](docs/dev/API.md) ·
+> [Configuration](docs/dev/CONFIGURATION.md) · [Security](docs/dev/SECURITY.md) ·
+> [Integration](docs/dev/INTEGRATION.md) · [Testing](docs/dev/TESTING.md). feir is usable
+> **standalone** — a single Go binary plus an offline verifier; the four-plane composition is optional.
+
 ## The claim we actually make (and its limits)
 
 A signed, hash-chained record proves **provenance and integrity**, not **reality**. We prove:
