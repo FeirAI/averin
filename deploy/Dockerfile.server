@@ -26,7 +26,10 @@ RUN CGO_ENABLED=1 go build -o /out/feir-server ./cmd/feir-server \
  && CGO_ENABLED=1 go build -o /out/feir-proxy  ./cmd/feir-proxy
 
 FROM debian:bookworm-slim
-RUN useradd -m feir
+# Pin a NUMERIC uid/gid so k8s `runAsNonRoot` + `runAsUser: 65532` can verify non-root (the
+# kubelet does not resolve USER names). Without a fixed uid, a name-only USER fails under
+# PodSecurity=restricted. 65532 matches the distroless `nonroot` convention used by the Go planes.
+RUN groupadd -g 65532 feir && useradd -u 65532 -g 65532 -m feir
 COPY --from=gobuild /out/feir-server /usr/local/bin/feir-server
 COPY --from=gobuild /out/feir-proxy  /usr/local/bin/feir-proxy
 COPY spec/fixtures /opt/feir/fixtures
