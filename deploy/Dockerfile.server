@@ -11,13 +11,16 @@ FROM rust:1-bookworm AS rustbuild
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY core ./core
-# debug profile path matches the cgo LDFLAGS (${SRCDIR}/../../../target/debug)
-RUN cargo build -p feir-decision-core
+# PROD: build the integrity core --release (optimized; the debug core is a perf/correctness
+# footgun for the trust root). We copy the RELEASE staticlib into the target/debug path the cgo
+# LDFLAGS (${SRCDIR}/../../../target/debug) expect, so the prod image links the optimized core
+# WITHOUT changing the source #cgo directive (local dev still builds debug unchanged).
+RUN cargo build --release -p feir-decision-core
 
 FROM golang:1.25-bookworm AS gobuild
 WORKDIR /src
 COPY . .
-COPY --from=rustbuild /src/target/debug/libfeir_decision_core.a ./target/debug/libfeir_decision_core.a
+COPY --from=rustbuild /src/target/release/libfeir_decision_core.a ./target/debug/libfeir_decision_core.a
 WORKDIR /src/server
 RUN CGO_ENABLED=1 go build -o /out/feir-server ./cmd/feir-server \
  && CGO_ENABLED=1 go build -o /out/feir-proxy  ./cmd/feir-proxy
