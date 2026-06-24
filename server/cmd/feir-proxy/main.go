@@ -3,9 +3,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/feir-dev/feir/server/internal/proxy"
@@ -35,7 +38,36 @@ func main() {
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	log.Fatal(httpSrv.ListenAndServe())
+	// Graceful shutdown: the proxy STREAMS long upstream completions, so an instant kill cuts an
+	// agent's in-flight response. On SIGINT/SIGTERM, Shutdown lets active streams finish, bounded by
+	// FEIR_SHUTDOWN_TIMEOUT (default 60s — longer than feir-server since completions stream). Keep it
+	// under the orchestrator's stop grace (k8s terminationGracePeriod / compose stop_grace_period).
+	drainTimeout := 60 * time.Second
+	if v := os.Getenv("FEIR_SHUTDOWN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			drainTimeout = d
+		} else {
+			log.Printf("feir-proxy: ignoring invalid FEIR_SHUTDOWN_TIMEOUT %q (using %s)", v, drainTimeout)
+		}
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpSrv.ListenAndServe() }()
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	select {
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatalf("serve: %v", err)
+		}
+	case sig := <-stop:
+		log.Printf("feir-proxy: received %s — draining in-flight streams (timeout %s)", sig, drainTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+		defer cancel()
+		if err := httpSrv.Shutdown(ctx); err != nil {
+			log.Printf("feir-proxy: graceful shutdown timed out (a stream was cut): %v", err)
+		}
+		log.Print("feir-proxy: shutdown complete")
+	}
 }
 
 func envOr(k, def string) string {

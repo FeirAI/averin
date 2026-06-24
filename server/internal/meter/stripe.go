@@ -1,10 +1,12 @@
 package meter
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,7 +20,9 @@ type StripeReporter struct {
 	exportMeter string // Stripe meter event_name for exports
 	endpoint    string
 	client      *http.Client
-	events      chan event // bounded async queue (one worker) — no unbounded goroutine fan-out
+	events      chan event    // bounded async queue (one worker) — no unbounded goroutine fan-out
+	done        chan struct{} // closed when the worker drains + exits (for graceful Close)
+	closeOnce   sync.Once
 }
 
 type event struct {
@@ -27,11 +31,11 @@ type event struct {
 }
 
 type StripeConfig struct {
-	APIKey            string
-	RecordEventName   string
-	ExportEventName   string
-	Endpoint          string // override for tests; defaults to Stripe
-	Client            *http.Client
+	APIKey          string
+	RecordEventName string
+	ExportEventName string
+	Endpoint        string // override for tests; defaults to Stripe
+	Client          *http.Client
 }
 
 func NewStripeReporter(base Meter, cfg StripeConfig) *StripeReporter {
@@ -53,6 +57,7 @@ func NewStripeReporter(base Meter, cfg StripeConfig) *StripeReporter {
 	}
 	if r.apiKey != "" {
 		r.events = make(chan event, 1024)
+		r.done = make(chan struct{})
 		go r.worker()
 	}
 	return r
@@ -87,8 +92,24 @@ func (s *StripeReporter) send(eventName, project string, value int64) {
 }
 
 func (s *StripeReporter) worker() {
+	defer close(s.done)
 	for e := range s.events {
 		s.post(e)
+	}
+}
+
+// Close drains the queued billable events (so a graceful shutdown does not silently drop revenue
+// metering) and waits for the worker to finish, bounded by ctx. It MUST be called only AFTER the
+// HTTP server has drained (no handler can still call send) — sending on the closed channel would
+// panic; the caller orders this after httpSrv.Shutdown. A no-op when no API key is configured.
+func (s *StripeReporter) Close(ctx context.Context) {
+	if s.events == nil {
+		return
+	}
+	s.closeOnce.Do(func() { close(s.events) })
+	select {
+	case <-s.done: // worker drained the buffer + exited
+	case <-ctx.Done(): // deadline hit — remaining events are best-effort lost (logged by the caller)
 	}
 }
 

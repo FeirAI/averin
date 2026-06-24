@@ -11,8 +11,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/feir-dev/feir/server/internal/api"
@@ -43,10 +45,12 @@ func main() {
 	st := selectStore()
 
 	srv := api.New(c, st, keyID)
-	// usage metering -> Stripe (the real revenue path). No key = local counting only.
-	srv.WithMeter(meter.NewStripeReporter(meter.NewMem(), meter.StripeConfig{
+	// usage metering -> Stripe (the real revenue path). No key = local counting only. Retained so
+	// graceful shutdown can drain its async queue (billable events) before exit.
+	meterReporter := meter.NewStripeReporter(meter.NewMem(), meter.StripeConfig{
 		APIKey: os.Getenv("STRIPE_API_KEY"),
-	}))
+	})
+	srv.WithMeter(meterReporter)
 
 	// project-scoped API keys: FEIR_API_KEYS="proj-a:tok1,tok2;proj-b:tok3". Unset = no auth (dev).
 	if raw := os.Getenv("FEIR_API_KEYS"); raw != "" {
@@ -253,7 +257,49 @@ func main() {
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	log.Fatal(httpSrv.ListenAndServe())
+	// Graceful shutdown: serve in a goroutine, then on SIGINT/SIGTERM drain in-flight requests
+	// before exiting. feir holds in-memory two-phase grant + revocation state (Phase 1), so a clean
+	// drain on a rollout / scale-down avoids dropping in-flight ingest and the request currently
+	// executing a finalize (the cross-request prepare->finalize window is still lost on any stop —
+	// full persistence is feir Phase 2). After the HTTP drain we flush the async Stripe meter queue
+	// and close the store pool, all within the same deadline.
+	//
+	// DEADLINE: keep it UNDER the orchestrator's stop grace or it gets SIGKILLed mid-drain. Default
+	// 25s, override with FEIR_SHUTDOWN_TIMEOUT. The Kubernetes manifest sets terminationGracePeriod=30s
+	// (no preStop, so the full grace covers the drain); for docker-compose set stop_grace_period >= this.
+	drainTimeout := 25 * time.Second
+	if v := os.Getenv("FEIR_SHUTDOWN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			drainTimeout = d
+		} else {
+			log.Printf("feir-server: ignoring invalid FEIR_SHUTDOWN_TIMEOUT %q (using %s)", v, drainTimeout)
+		}
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpSrv.ListenAndServe() }()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	select {
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatalf("serve: %v", err)
+		}
+	case sig := <-stop:
+		log.Printf("feir-server: received %s — draining (timeout %s)", sig, drainTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+		defer cancel()
+		if err := httpSrv.Shutdown(ctx); err != nil {
+			log.Printf("feir-server: HTTP graceful shutdown timed out (some in-flight work was cut): %v", err)
+		}
+		// Handlers have drained (no more send()) → flush the Stripe meter queue, then release the
+		// store pool, within whatever deadline remains.
+		meterReporter.Close(ctx)
+		if c, ok := st.(interface{ Close() }); ok {
+			c.Close()
+		}
+		log.Print("feir-server: shutdown complete")
+	}
 }
 
 // selectStore returns a Postgres store when FEIR_DATABASE_URL is set, else the in-memory store. For

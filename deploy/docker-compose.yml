@@ -28,6 +28,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.server
     command: ["feir-server"]
+    # feir-server drains in-flight requests for up to FEIR_SHUTDOWN_TIMEOUT (default 25s) on SIGTERM;
+    # the compose stop grace must EXCEED that or the drain is SIGKILLed (Docker's default is 10s).
+    stop_grace_period: 30s
     environment:
       # DEV DEFAULT — override with a real secret. Production backs signing with a KMS, not a seed.
       FEIR_SIGNING_SEED: ${FEIR_SIGNING_SEED:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
@@ -48,6 +51,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.server
     command: ["feir-proxy"]
+    # The proxy streams completions; it drains in-flight streams for up to FEIR_SHUTDOWN_TIMEOUT
+    # (default 60s) on SIGTERM, so the stop grace must exceed that.
+    stop_grace_period: 65s
     environment:
       FEIR_UPSTREAM: ${FEIR_UPSTREAM:-https://api.openai.com}
       FEIR_SERVER_URL: http://server:8080
