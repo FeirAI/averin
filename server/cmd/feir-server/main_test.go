@@ -63,22 +63,33 @@ func TestSecretEnvOrFile_HappyPaths(t *testing.T) {
 	if got := secretEnvOrFile(name); got != "cafebabe" {
 		t.Errorf("file only: got %q want %q", got, "cafebabe")
 	}
+
+	// whitespace-only inline is returned RAW (NOT silently trimmed to "" — that would disable an
+	// optional role); the caller's hex decoder then fails loud on the garbage.
+	t.Setenv(name+"_FILE", "")
+	t.Setenv(name, "   ")
+	if got := secretEnvOrFile(name); got == "" {
+		t.Error("whitespace-only inline must not resolve to empty (would silently disable an optional seed)")
+	}
 }
 
-// TestSecretEnvOrFile_Fatal proves the fail-loud paths (both forms set; a _FILE path
-// that does not exist) call log.Fatal. Each runs in a re-exec'd child of this test
-// binary and asserts a non-zero exit (log.Fatal => os.Exit(1)).
+// TestSecretEnvOrFile_Fatal proves every fail-loud path of the reader calls log.Fatal: both forms set,
+// a missing _FILE path, a set-but-blank _FILE, inline + a whitespace _FILE (still ambiguous), a
+// _FILE that is not a regular file (a directory/FIFO/device), and a _FILE over the size cap. Each runs
+// in a re-exec'd child of this test binary and asserts a non-zero exit (log.Fatal => os.Exit(1)).
 func TestSecretEnvOrFile_Fatal(t *testing.T) {
 	const name = "FEIR_TEST_SEED_FATAL"
 
-	// The child branch: scenario selected by FEIR_TEST_FATAL_CASE.
-	switch os.Getenv("FEIR_TEST_FATAL_CASE") {
-	case "both":
-		_ = secretEnvOrFile(name) // both name and name_FILE set by the parent => fatal
+	// Child branch: any configured scenario triggers the (fatal) read.
+	if os.Getenv("FEIR_TEST_FATAL_CASE") != "" {
+		_ = secretEnvOrFile(name)
 		return
-	case "missing":
-		_ = secretEnvOrFile(name) // name_FILE points at a non-existent path => fatal
-		return
+	}
+
+	dir := t.TempDir() // a directory is not a regular file
+	bigPath := filepath.Join(dir, "big")
+	if err := os.WriteFile(bigPath, make([]byte, maxSeedFileBytes+1), 0o600); err != nil {
+		t.Fatalf("write oversized: %v", err)
 	}
 
 	cases := []struct {
@@ -87,15 +98,19 @@ func TestSecretEnvOrFile_Fatal(t *testing.T) {
 	}{
 		{"both", []string{name + "=inline", name + "_FILE=/some/path"}},
 		{"missing", []string{name + "_FILE=/nonexistent/feir/seed/path"}},
+		{"blank_file", []string{name + "_FILE=   "}},                       // set-but-blank _FILE must not fall back
+		{"both_via_ws_file", []string{name + "=abcd", name + "_FILE=   "}}, // inline + whitespace _FILE is still both-set
+		{"nonregular", []string{name + "_FILE=" + dir}},                    // a directory is not a regular file
+		{"oversize", []string{name + "_FILE=" + bigPath}},                  // over the seed-file cap
 	}
 	for _, tc := range cases {
 		t.Run(tc.scenario, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=TestSecretEnvOrFile_Fatal")
 			cmd.Env = append(os.Environ(), "FEIR_TEST_FATAL_CASE="+tc.scenario)
 			cmd.Env = append(cmd.Env, tc.env...)
-			err := cmd.Run()
+			out, err := cmd.CombinedOutput()
 			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
-				t.Fatalf("scenario %q: expected non-zero exit from log.Fatal, got %v", tc.scenario, err)
+				t.Fatalf("scenario %q: expected non-zero exit from log.Fatal, got %v\n%s", tc.scenario, err, out)
 			}
 		})
 	}
@@ -164,6 +179,41 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 			}
 			if !strings.Contains(string(out), "R2 role separation") {
 				t.Fatalf("%s: exited non-zero but not via the R2 guard; output:\n%s", tc.name, out)
+			}
+		})
+	}
+}
+
+// TestRequireProdSecrets_FailsClosed proves the FEIR_REQUIRE_PROD_SECRETS gate refuses to start when a
+// prod-mandatory secret is empty/absent (empty FEIR_API_KEYS => unauthenticated API; empty
+// FEIR_DATABASE_URL => volatile in-memory store). Builds + runs the real binary (the gate is in main()).
+func TestRequireProdSecrets_FailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the cgo binary; skipped under -short")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "feir-server-rps")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Skipf("could not build feir-server (cgo toolchain?): %v\n%s", err, out)
+	}
+	seed := strings.Repeat("a1", 32)
+	cases := []struct {
+		name string
+		env  []string
+	}{
+		{"missing api keys", []string{"FEIR_REQUIRE_PROD_SECRETS=1", "FEIR_SIGNING_SEED=" + seed, "FEIR_DATABASE_URL=postgres://x"}},
+		{"missing db url", []string{"FEIR_REQUIRE_PROD_SECRETS=1", "FEIR_SIGNING_SEED=" + seed, "FEIR_API_KEYS=proj:tok"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(bin)
+			cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...)
+			out, err := cmd.CombinedOutput()
+			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
+				t.Fatalf("%s: expected fail-closed exit, got %v\n%s", tc.name, err, out)
+			}
+			if !strings.Contains(string(out), "FEIR_REQUIRE_PROD_SECRETS") {
+				t.Fatalf("%s: exited non-zero but not via the gate:\n%s", tc.name, out)
 			}
 		})
 	}

@@ -34,6 +34,24 @@ import (
 )
 
 func main() {
+	// FEIR_REQUIRE_PROD_SECRETS (prod): fail closed if a prod-mandatory secret is empty/absent. An empty
+	// CSI/KMS value otherwise satisfies envFrom and starts feir FAIL-OPEN: no FEIR_API_KEYS leaves the app
+	// API UNAUTHENTICATED, and no FEIR_DATABASE_URL leaves the store volatile in-memory (consumed
+	// jti/nonce + two-phase grants reset on restart, reopening a /v2/use replay window). Mirrors govder's
+	// GOVDER_REQUIRE_AUTHORITY_SEED and leria's LERIA_REQUIRE_PROD_SECRETS.
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("FEIR_REQUIRE_PROD_SECRETS"))); v == "1" || v == "true" {
+		var missing []string
+		if strings.TrimSpace(os.Getenv("FEIR_API_KEYS")) == "" {
+			missing = append(missing, "FEIR_API_KEYS (the app API would be UNAUTHENTICATED)")
+		}
+		if strings.TrimSpace(os.Getenv("FEIR_DATABASE_URL")) == "" {
+			missing = append(missing, "FEIR_DATABASE_URL (the store would be volatile in-memory — reopening a /v2/use replay window)")
+		}
+		if len(missing) > 0 {
+			log.Fatalf("FEIR_REQUIRE_PROD_SECRETS is set but required prod secret(s) are empty/absent: %s", strings.Join(missing, "; "))
+		}
+	}
+
 	seed := secretEnvOrFile("FEIR_SIGNING_SEED")
 	if seed == "" {
 		log.Fatal("FEIR_SIGNING_SEED (or FEIR_SIGNING_SEED_FILE) is required (64 hex chars = 32-byte Ed25519 seed)")
@@ -357,29 +375,53 @@ func envOr(k, def string) string {
 	return def
 }
 
+// maxSeedFileBytes caps a _FILE read. A 64-hex Ed25519 seed is 64 bytes; the generous cap rejects a
+// mispointed path at a device/huge file before it can consume memory, while tolerating a trailing
+// newline or a slightly larger secret.
+const maxSeedFileBytes = 4096
+
 // secretEnvOrFile resolves a sensitive value (an Ed25519 root seed) from EITHER name
 // (inline env) OR name+"_FILE" (a path to a mounted secret file — e.g. a CSI/Kubernetes
 // secret volume). The _FILE form keeps the seed OFF the process env block, where it
 // would otherwise be readable by any child process, leak into a crash dump / `ps e`, or
-// be captured by `kubectl exec ... env`. File contents are trimmed (mounted secrets
-// commonly carry a trailing newline). Setting both forms is a fatal config error
-// (ambiguous source must fail loud, consistent with the rest of startup).
+// be captured by `kubectl exec ... env`.
+//
+// FAIL-LOUD + FAIL-CLOSED (do not let a fumbled config silently disable a security role):
+//   - both forms set => fatal "set exactly one".
+//   - name_FILE set but blank/whitespace => fatal (a fumbled path must not silently fall back to env).
+//   - the _FILE target must be a REGULAR, size-bounded file (a FIFO/device/dir/huge file is fatal);
+//     symlinks ARE followed (k8s/CSI secret files are symlinks) — only the final target is checked.
+//   - file contents are trimmed (mounted secrets carry a trailing newline).
+//   - an inline value is returned RAW (never trimmed away): a whitespace/garbage value must reach the
+//     caller's decoder and fail loud, not silently resolve to "" and DISABLE an optional role.
 func secretEnvOrFile(name string) string {
 	rawInline := os.Getenv(name)
-	path := strings.TrimSpace(os.Getenv(name + "_FILE"))
-	if path == "" {
-		return strings.TrimSpace(rawInline)
-	}
-	// Use RAW presence for the both-set check: a whitespace-only inline + a _FILE is still an ambiguous
-	// "set exactly one" violation (fail loud), not silently the file form.
-	if rawInline != "" {
+	rawFile := os.Getenv(name + "_FILE")
+	if rawInline != "" && rawFile != "" {
 		log.Fatalf("%s and %s_FILE are both set — set exactly one (the _FILE form reads from a mounted secret file)", name, name)
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		log.Fatalf("%s_FILE (%s): %v", name, path, err)
+	if rawFile != "" {
+		path := strings.TrimSpace(rawFile)
+		if path == "" {
+			log.Fatalf("%s_FILE is set but blank — provide a path to a mounted secret file (or unset it)", name)
+		}
+		st, err := os.Stat(path) // follows symlinks (k8s/CSI secret files are symlinks) to the final target
+		if err != nil {
+			log.Fatalf("%s_FILE (%s): %v", name, path, err)
+		}
+		if !st.Mode().IsRegular() {
+			log.Fatalf("%s_FILE (%s) is not a regular file (mode %v) — refusing a FIFO/device/dir as a seed source", name, path, st.Mode())
+		}
+		if st.Size() > maxSeedFileBytes {
+			log.Fatalf("%s_FILE (%s) is %d bytes, over the %d-byte seed cap — refusing to read", name, path, st.Size(), maxSeedFileBytes)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			log.Fatalf("%s_FILE (%s): %v", name, path, err)
+		}
+		return strings.TrimSpace(string(b))
 	}
-	return strings.TrimSpace(string(b))
+	return rawInline
 }
 
 // parseCosigApprovers parses a comma-separated list of base64url-no-pad ed25519 public keys (each with an
