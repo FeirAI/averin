@@ -1,5 +1,10 @@
 // Command feir-server runs the ingestion + app API. Self-host: the signing seed is provided via
 // FEIR_SIGNING_SEED (64 hex chars). Production backs signing with a KMS instead.
+//
+// Every Ed25519 root seed (FEIR_SIGNING_SEED, FEIR_BROKER_ISSUING_SEED, FEIR_RESOURCE_SEED,
+// FEIR_REVOCATION_SEED) also accepts a <NAME>_FILE form pointing at a mounted secret file (e.g. a
+// CSI/Kubernetes secret volume), keeping the seed off the env block. Set at most one of
+// <NAME>/<NAME>_FILE per seed.
 package main
 
 import (
@@ -29,9 +34,9 @@ import (
 )
 
 func main() {
-	seed := os.Getenv("FEIR_SIGNING_SEED")
+	seed := secretEnvOrFile("FEIR_SIGNING_SEED")
 	if seed == "" {
-		log.Fatal("FEIR_SIGNING_SEED is required (64 hex chars = 32-byte Ed25519 seed)")
+		log.Fatal("FEIR_SIGNING_SEED (or FEIR_SIGNING_SEED_FILE) is required (64 hex chars = 32-byte Ed25519 seed)")
 	}
 	c, err := core.New(seed)
 	if err != nil {
@@ -135,8 +140,9 @@ func main() {
 	// credential broker (Level 3 Tier-A): POST /v2/grants. The issuing key signs the capabilities;
 	// the recording key (the server signing key) signs the gateway_enforced evidence. Unset = off.
 	brokerEnabled := false
-	var brokerPubKey string // ed25519pub:<b64url>, for the R2 broker∩resource disjointness check below
-	if seed := os.Getenv("FEIR_BROKER_ISSUING_SEED"); seed != "" {
+	var brokerPubKey string   // ed25519pub:<b64url>, for the R2 broker∩resource∩revocation disjointness checks below
+	var resourcePubKey string // ed25519pub:<b64url> when the resource gateway is enabled; "" otherwise (R2 vs revocation)
+	if seed := secretEnvOrFile("FEIR_BROKER_ISSUING_SEED"); seed != "" {
 		raw, err := hex.DecodeString(seed)
 		if err != nil || len(raw) != ed25519.SeedSize {
 			log.Fatal("FEIR_BROKER_ISSUING_SEED must be 64 hex chars (32-byte Ed25519 seed)")
@@ -181,7 +187,7 @@ func main() {
 	// evidence and MUST be DISTINCT from the server signing key and the broker key (R2 role separation;
 	// the verifier rejects a broker/resource key overlap). Requires the broker (capabilities are
 	// verified under the broker issuing key). Unset = off.
-	if rseed := os.Getenv("FEIR_RESOURCE_SEED"); rseed != "" {
+	if rseed := secretEnvOrFile("FEIR_RESOURCE_SEED"); rseed != "" {
 		if !brokerEnabled {
 			log.Fatal("FEIR_RESOURCE_SEED requires FEIR_BROKER_ISSUING_SEED (the resource verifies capabilities under the broker issuing key)")
 		}
@@ -204,6 +210,7 @@ func main() {
 		if rc.PubKey() == brokerPubKey {
 			log.Fatal("FEIR_RESOURCE_SEED must differ from FEIR_BROKER_ISSUING_SEED (keep the capability-issuing and use-recording key roles distinct)")
 		}
+		resourcePubKey = rc.PubKey() // for the R2 revocation∩resource disjointness check below
 		// Durable consume-before-act ledger when Postgres is configured; else the volatile MemLedger.
 		// WithLedger must precede WithResource (which installs the MemLedger default only if none is set).
 		if dsn := os.Getenv("FEIR_DATABASE_URL"); dsn != "" {
@@ -233,15 +240,30 @@ func main() {
 	// M5 (ADR 0005): optional revocation authority. POST /v2/revoke marks a grant_id revoked; every /v2/export
 	// then carries a signed, time-bounded revocation_list (the verifier blocks any use of a revoked grant). The
 	// key MUST be role-separated from the broker/resource/signing/attestation keys (the verifier enforces it).
-	if rvseed := os.Getenv("FEIR_REVOCATION_SEED"); rvseed != "" {
+	if rvseed := secretEnvOrFile("FEIR_REVOCATION_SEED"); rvseed != "" {
 		raw, err := hex.DecodeString(rvseed)
 		if err != nil || len(raw) != ed25519.SeedSize {
-			log.Fatal("FEIR_REVOCATION_SEED must be 64 hex chars (32-byte Ed25519 seed)")
+			log.Fatal("FEIR_REVOCATION_SEED (or FEIR_REVOCATION_SEED_FILE) must be 64 hex chars (32-byte Ed25519 seed)")
 		}
-		if rvseed == seed || rvseed == os.Getenv("FEIR_BROKER_ISSUING_SEED") || rvseed == os.Getenv("FEIR_RESOURCE_SEED") {
+		rvk := ed25519.NewKeyFromSeed(raw)
+		// R2 role separation: the revocation key MUST be disjoint from the signing/broker/resource keys.
+		// Compare DERIVED pubkeys, NOT raw seed hex: the broker/resource/revocation seeds can each now
+		// arrive via <NAME>_FILE and through different decoders, so an UPPERCASE-vs-lowercase hex form of
+		// the SAME key is byte-distinct as a string but identical as a key — a raw-string compare (the
+		// pre-_FILE form) would miss it, AND it read the broker/resource seeds via os.Getenv, which is
+		// empty when they are file-mounted, so a raw-string compare would silently skip this check. That
+		// is NOT an exploitable bypass — api.Server.WithRevocation independently re-derives + enforces R2
+		// (it panics on overlap), so a colliding key never installs; this check just turns that deep
+		// panic into a clean startup fatal (defense-in-depth + operator UX). brokerPubKey/resourcePubKey
+		// are "" when that role is disabled, so a disabled role never spuriously matches. (Same rationale
+		// as the resource-vs-broker pubkey compare above.)
+		rvPubKey := "ed25519pub:" + base64.RawURLEncoding.EncodeToString(rvk.Public().(ed25519.PublicKey))
+		if rvPubKey == c.PubKey() ||
+			(brokerPubKey != "" && rvPubKey == brokerPubKey) ||
+			(resourcePubKey != "" && rvPubKey == resourcePubKey) {
 			log.Fatal("FEIR_REVOCATION_SEED must differ from the signing/broker/resource seeds (R2 role separation)")
 		}
-		srv.WithRevocation(ed25519.NewKeyFromSeed(raw))
+		srv.WithRevocation(rvk)
 		log.Printf("revocation enabled (POST /v2/revoke; exports carry a signed revocation_list)")
 	}
 
@@ -333,6 +355,31 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// secretEnvOrFile resolves a sensitive value (an Ed25519 root seed) from EITHER name
+// (inline env) OR name+"_FILE" (a path to a mounted secret file — e.g. a CSI/Kubernetes
+// secret volume). The _FILE form keeps the seed OFF the process env block, where it
+// would otherwise be readable by any child process, leak into a crash dump / `ps e`, or
+// be captured by `kubectl exec ... env`. File contents are trimmed (mounted secrets
+// commonly carry a trailing newline). Setting both forms is a fatal config error
+// (ambiguous source must fail loud, consistent with the rest of startup).
+func secretEnvOrFile(name string) string {
+	rawInline := os.Getenv(name)
+	path := strings.TrimSpace(os.Getenv(name + "_FILE"))
+	if path == "" {
+		return strings.TrimSpace(rawInline)
+	}
+	// Use RAW presence for the both-set check: a whitespace-only inline + a _FILE is still an ambiguous
+	// "set exactly one" violation (fail loud), not silently the file form.
+	if rawInline != "" {
+		log.Fatalf("%s and %s_FILE are both set — set exactly one (the _FILE form reads from a mounted secret file)", name, name)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("%s_FILE (%s): %v", name, path, err)
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // parseCosigApprovers parses a comma-separated list of base64url-no-pad ed25519 public keys (each with an
