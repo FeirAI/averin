@@ -203,6 +203,7 @@ func TestRequireProdSecrets_FailsClosed(t *testing.T) {
 	}{
 		{"missing api keys", []string{"FEIR_REQUIRE_PROD_SECRETS=1", "FEIR_SIGNING_SEED=" + seed, "FEIR_DATABASE_URL=postgres://x"}},
 		{"missing db url", []string{"FEIR_REQUIRE_PROD_SECRETS=1", "FEIR_SIGNING_SEED=" + seed, "FEIR_API_KEYS=proj:tok"}},
+		{"dev signing seed", []string{"FEIR_REQUIRE_PROD_SECRETS=1", "FEIR_API_KEYS=proj:tok", "FEIR_DATABASE_URL=postgres://x", "FEIR_SIGNING_SEED=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -214,6 +215,29 @@ func TestRequireProdSecrets_FailsClosed(t *testing.T) {
 			}
 			if !strings.Contains(string(out), "FEIR_REQUIRE_PROD_SECRETS") {
 				t.Fatalf("%s: exited non-zero but not via the gate:\n%s", tc.name, out)
+			}
+		})
+	}
+}
+
+// TestIsDevSigningSeed pins the detector the FEIR_REQUIRE_PROD_SECRETS gate uses to reject the
+// well-known, globally-published dev seed (core_test.go:8) — pure, fast, no cgo/re-exec needed.
+func TestIsDevSigningSeed(t *testing.T) {
+	cases := []struct {
+		name string
+		seed string
+		want bool
+	}{
+		{"dev seed lowercase", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", true},
+		{"dev seed uppercased", "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", true},
+		{"dev seed with whitespace + trailing newline", "  000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n", true},
+		{"fresh distinct seed", strings.Repeat("a1", 32), false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDevSigningSeed(tc.seed); got != tc.want {
+				t.Fatalf("isDevSigningSeed(%q) = %v, want %v", tc.seed, got, tc.want)
 			}
 		})
 	}
