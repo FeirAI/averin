@@ -3,7 +3,8 @@
 Full stack from one command (exit criterion #6). From the repo root:
 
 ```bash
-export FEIR_SIGNING_SEED=$(openssl rand -hex 32)   # 32-byte Ed25519 seed; production uses a KMS
+export FEIR_SIGNING_SEED=$(openssl rand -hex 32)          # 32-byte Ed25519 seed; production uses a KMS
+export FEIR_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24)   # shared secret; agents send it as X-Feir-Proxy-Token / Bearer
 docker compose -f deploy/docker-compose.yml up --build
 ```
 
@@ -12,6 +13,12 @@ docker compose -f deploy/docker-compose.yml up --build
 | `web` | http://localhost:8088 | Svelte app (sessions, trace waterfall, verify, export) + the offline verifier at `/verifier/` |
 | `server` | http://localhost:8080 | ingestion + app API (`/v2/records`, `/v2/sessions`, `/v2/dag`, `/v2/verify`, `/v2/export`, `/v2/usage`) |
 | `proxy` | http://localhost:8081 | OpenAI-compatible recording proxy — point your agent's `base_url` here |
+
+All three ports bind to `127.0.0.1` only by default. To expose feir off-host, put it behind your own
+authenticated reverse proxy — the app API has no authz layer of its own yet (see Phase-1 limits below),
+so loopback binding is the load-bearing network control, not a login. If you later turn on `FEIR_API_KEYS`,
+also set `FEIR_PROXY_FEIR_TOKEN` to a valid token for `FEIR_PROJECT_ID` or the proxy's record posts will be
+silently 401'd.
 
 ## Try it
 
@@ -34,7 +41,7 @@ cargo run -p feir-decision-core --bin feir-verify -- bundle bundle.json
 
 | Env | Service | Default | Notes |
 |-----|---------|---------|-------|
-| `FEIR_SIGNING_SEED` | server | dev seed (**override!**) | 64 hex chars. Production: KMS-backed signing. |
+| `FEIR_SIGNING_SEED` | server | **required — no default** | 64 hex chars. Production: KMS-backed signing. |
 | `FEIR_SIGNING_KEY_ID` | server | `k0` | published in the bundle key list |
 | `FEIR_BROKER_ISSUING_SEED` | server | (none) | 64 hex chars. Enables the credential broker (`POST /v2/grants`); signs minted capabilities. Unset = off. |
 | `FEIR_RESOURCE_SEED` | server | (none) | 64 hex chars. Enables the resource gateway (`POST /v2/use`, Tier-B); signs use-receipt evidence. MUST differ from `FEIR_SIGNING_SEED` and `FEIR_BROKER_ISSUING_SEED` (R2 role separation). Requires the broker. Unset = off. |
@@ -50,7 +57,7 @@ cargo run -p feir-decision-core --bin feir-verify -- bundle bundle.json
 | `STRIPE_API_KEY` | server | (none) | enables usage-based metering reporting; no key = local counting only |
 | `FEIR_UPSTREAM` | proxy | `https://api.openai.com` | upstream LLM |
 | `FEIR_PROJECT_ID` | proxy | `default` | project the proxy records under |
-| `FEIR_PROXY_INBOUND_TOKEN` | proxy | (none) | shared secret inbound callers must present (`X-Feir-Proxy-Token` / `Bearer`). **Unset = OPEN RELAY + evidence-injection surface — bind to loopback or behind your own auth.** |
+| `FEIR_PROXY_INBOUND_TOKEN` | proxy | **required** (compose sets `:?`) | shared secret inbound callers must present (`X-Feir-Proxy-Token` / `Bearer`). **Unset = OPEN RELAY + evidence-injection surface — bind to loopback or behind your own auth.** |
 | `FEIR_PROXY_FEIR_TOKEN` | proxy | (none) | the feir API token the proxy sends (`X-Api-Key`) so records aren't silently 401'd when the feir server has `FEIR_API_KEYS` auth on. A recording failure is logged (the LLM call is then NOT in the trail). |
 
 ### Online grant flows (ADR-0005 M6 Cosig / M2 Delegation / M3 Native)
