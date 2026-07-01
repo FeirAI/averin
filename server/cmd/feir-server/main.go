@@ -34,11 +34,17 @@ import (
 )
 
 func main() {
-	// FEIR_REQUIRE_PROD_SECRETS (prod): fail closed if a prod-mandatory secret is empty/absent. An empty
-	// CSI/KMS value otherwise satisfies envFrom and starts feir FAIL-OPEN: no FEIR_API_KEYS leaves the app
-	// API UNAUTHENTICATED, and no FEIR_DATABASE_URL leaves the store volatile in-memory (consumed
-	// jti/nonce + two-phase grants reset on restart, reopening a /v2/use replay window). Mirrors govder's
-	// GOVDER_REQUIRE_AUTHORITY_SEED and leria's LERIA_REQUIRE_PROD_SECRETS.
+	seed := secretEnvOrFile("FEIR_SIGNING_SEED")
+	if seed == "" {
+		log.Fatal("FEIR_SIGNING_SEED (or FEIR_SIGNING_SEED_FILE) is required (64 hex chars = 32-byte Ed25519 seed)")
+	}
+
+	// FEIR_REQUIRE_PROD_SECRETS (prod): fail closed if a prod-mandatory secret is empty/absent OR is a
+	// globally-known dev value. An empty CSI/KMS value otherwise satisfies envFrom and starts feir
+	// FAIL-OPEN: no FEIR_API_KEYS leaves the app API UNAUTHENTICATED, and no FEIR_DATABASE_URL leaves the
+	// store volatile in-memory (consumed jti/nonce + two-phase grants reset on restart, reopening a
+	// /v2/use replay window). Mirrors govder's GOVDER_REQUIRE_AUTHORITY_SEED and leria's
+	// LERIA_REQUIRE_PROD_SECRETS.
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("FEIR_REQUIRE_PROD_SECRETS"))); v == "1" || v == "true" {
 		var missing []string
 		if strings.TrimSpace(os.Getenv("FEIR_API_KEYS")) == "" {
@@ -47,15 +53,17 @@ func main() {
 		if strings.TrimSpace(os.Getenv("FEIR_DATABASE_URL")) == "" {
 			missing = append(missing, "FEIR_DATABASE_URL (the store would be volatile in-memory — reopening a /v2/use replay window)")
 		}
+		// The signing seed is the integrity ROOT. The committed dev seed is globally known — anyone can
+		// forge/verify records under it — so REQUIRE_PROD_SECRETS must not boot on it (mirrors the empty-
+		// secret checks above; the value is public, rotate to a fresh `openssl rand -hex 32`).
+		if isDevSigningSeed(seed) {
+			missing = append(missing, "FEIR_SIGNING_SEED is the well-known committed dev seed (a globally-known, forgeable integrity root)")
+		}
 		if len(missing) > 0 {
 			log.Fatalf("FEIR_REQUIRE_PROD_SECRETS is set but required prod secret(s) are empty/absent: %s", strings.Join(missing, "; "))
 		}
 	}
 
-	seed := secretEnvOrFile("FEIR_SIGNING_SEED")
-	if seed == "" {
-		log.Fatal("FEIR_SIGNING_SEED (or FEIR_SIGNING_SEED_FILE) is required (64 hex chars = 32-byte Ed25519 seed)")
-	}
 	c, err := core.New(seed)
 	if err != nil {
 		log.Fatalf("signing key: %v", err)
@@ -373,6 +381,18 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// devSigningSeed is the well-known, globally-published dev signing seed baked into the self-host
+// quickstart and used as a test vector across the repo (deploy/docker-compose.yml, core/src/ffi.rs,
+// *_test.go). It is intentionally NOT secret — which is exactly why booting a FEIR_REQUIRE_PROD_SECRETS
+// deployment on it means running on a forgeable, globally-known integrity ROOT. The gate must reject it.
+const devSigningSeed = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" // == core_test.go:8
+
+// isDevSigningSeed reports whether seed is the well-known dev seed, tolerant of hex casing and the
+// trailing newline a _FILE-mounted secret carries (secretEnvOrFile trims _FILE but returns inline raw).
+func isDevSigningSeed(seed string) bool {
+	return strings.EqualFold(strings.TrimSpace(seed), devSigningSeed)
 }
 
 // maxSeedFileBytes caps a _FILE read. A 64-hex Ed25519 seed is 64 bytes; the generous cap rejects a

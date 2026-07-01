@@ -69,7 +69,8 @@ Python, TS, web, WASM verifier — all green.
 ```bash
 cargo test --workspace
 cargo run -p feir-decision-core --bin feir-verify -- bundle spec/fixtures/bundle-valid.json
-FEIR_SIGNING_SEED=$(openssl rand -hex 32) docker compose -f deploy/docker-compose.yml up --build
+FEIR_SIGNING_SEED=$(openssl rand -hex 32) FEIR_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24) \
+  docker compose -f deploy/docker-compose.yml up --build
 ```
 
 Every claim is bounded by [`docs/coverage-limits.md`](docs/coverage-limits.md) (Level 1 / 2 / 3).
