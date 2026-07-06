@@ -37,18 +37,18 @@ func TestInitializeAndToolsList(t *testing.T) {
 	}
 }
 
-func TestRecordDecisionToolCallsFeir(t *testing.T) {
+func TestRecordDecisionToolCallsAverin(t *testing.T) {
 	var gotPath, gotBody string
-	feir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	averin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		b := make([]byte, r.ContentLength)
 		r.Body.Read(b)
 		gotBody = string(b)
 		w.Write([]byte(`{"results":[{"created":true,"record":{"content_hash":"sha256:abc"}}]}`))
 	}))
-	defer feir.Close()
+	defer averin.Close()
 
-	s := New(feir.URL)
+	s := New(averin.URL)
 	resp := s.Handle(req(t, "tools/call",
 		`{"name":"record_decision","arguments":{"project_id":"p1","session_id":"s1","action":"db.write","rationale":"why"}}`))
 	if resp.Error != nil {
@@ -67,10 +67,10 @@ func TestRecordDecisionToolCallsFeir(t *testing.T) {
 }
 
 func TestRequestExportReturnsURL(t *testing.T) {
-	s := New("http://feir.example")
+	s := New("http://averin.example")
 	resp := s.Handle(req(t, "tools/call", `{"name":"request_export","arguments":{"project_id":"p1"}}`))
 	text := resp.Result.(map[string]any)["content"].([]map[string]any)[0]["text"].(string)
-	if !strings.Contains(text, "http://feir.example/v2/export?project=p1&mode=proof_only") {
+	if !strings.Contains(text, "http://averin.example/v2/export?project=p1&mode=proof_only") {
 		t.Fatalf("bad export url: %s", text)
 	}
 }

@@ -28,14 +28,14 @@ conjunction only ever gets MORE restrictive (or gains an explicit, weaker, label
 > Delegation + M3 Native/STS**. Cosig/Delegation are two-phase — `POST /v2/grants/prepare` mints + reveals the
 > challenge (the broker-minted credential_binding/exp), the approvers/delegators sign it, `POST
 > /v2/grants/finalize` binds the cosignatures/hops + commits (the gapless `broker_seq` is allocated at finalize,
-> so the D6 log invariant holds); `WithCosigPolicy` / `FEIR_COSIG_APPROVER_KEYS` pin the M-of-N. Native is
+> so the D6 log invariant holds); `WithCosigPolicy` / `AVERIN_COSIG_APPROVER_KEYS` pin the M-of-N. Native is
 > single-phase — `POST /v2/grants` with `mode:"token_exchange"` + `lease_id` issues the native grant (no PoP, no
 > capability), and `POST /v2/introspection` records the resource-signed transcript (the resource signs the
-> `feir.resource.introspection.v1` challenge with its raw key). Operator readiness: `feir-verify bundle b.json
+> `averin.resource.introspection.v1` challenge with its raw key). Operator readiness: `averin-verify bundle b.json
 > opts.json` pins the role-disjoint key sets (authentic verification + every mode gate) and surfaces all mode
 > statuses; `docs/operator-verification.md` is the operator guide. **All six modes + both optional tiers are now
-> implemented** — M4's `cross_broker_cert` transitive trust (`feir.broker.federation.cert.v1`; see §M4) and M5's
-> Merkle-non-disclosure revocation (`feir.broker.revocation.merkleroot.v1`; see §M5), each two-piece +
+> implemented** — M4's `cross_broker_cert` transitive trust (`averin.broker.federation.cert.v1`; see §M4) and M5's
+> Merkle-non-disclosure revocation (`averin.broker.revocation.merkleroot.v1`; see §M5), each two-piece +
 > triple-reviewed with a shared golden vector + Go→Rust FFI e2e. The only remaining deferral is the OPT-IN online
 > CRL (`online_crl_url`), a network feature outside the offline-verifier surface.
 
@@ -75,7 +75,7 @@ rather than rewriting them; the reuse inventory is called out per mode.
   interaction**.
 
 All new signature preimages follow the existing LP4-length-prefix / BE8-big-endian / domain-tag convention of
-`authority.rs` (`feir.authority.v2`), `resourceshim` (`feir.broker.use.pop.v1`, `feir.broker.use.ledger.v1`),
+`authority.rs` (`averin.authority.v2`), `resourceshim` (`averin.broker.use.pop.v1`, `averin.broker.use.ledger.v1`),
 and the grant-head root — `sha256(LP4(tag) ‖ …)`, signed by the noted key.
 
 ## 3. Per-mode design
@@ -115,7 +115,7 @@ Capstone → Signature domain → Residual*.
   conjuncts already enforce "two-phase + PoP-reverified"; add `bounded_reuse_overspent==0 &&
   bounded_reuse_seq_replays==0` (surfacing-redundant with `unmatched_violation` but self-documenting).
 - **Signature domain.** None required (fields ride inside the signed `grant_evidence`/`use_evidence`).
-  *Recommended* defense-in-depth: `feir.broker.use.pop.v2` appends `BE8(use_sequence_number)` so a captured
+  *Recommended* defense-in-depth: `averin.broker.use.pop.v2` appends `BE8(use_sequence_number)` so a captured
   PoP for use #2 can't be replayed as #3 before the ledger dedup fires.
 - **Residual.** Reopens a *bounded* slice of B3 (a credential reused N times within one window); stated as a
   Tier-A-style coarsening that is nonetheless Tier-B-eligible because action↔grant tightness is preserved
@@ -155,7 +155,7 @@ Capstone → Signature domain → Residual*.
 - **Capstone.** **Reachable**, gated by `(delegation_chains_total==0 || delegation_chains_verified ==
   delegation_chains_total) && delegation_monotonicity_violations==0` — every *present* chain must be fully
   chain-proven.
-- **Signature domain.** `feir.broker.delegation.hop.v1` = `sha256(LP4(tag) ‖ LP4(grant_id) ‖ BE8(hop_index) ‖
+- **Signature domain.** `averin.broker.delegation.hop.v1` = `sha256(LP4(tag) ‖ LP4(grant_id) ‖ BE8(hop_index) ‖
   LP4(delegator_cnf_kid) ‖ LP4(delegate_cnf_kid) ‖ LP4(scope) ‖ LP4(action) ‖ LP4(resource_id) ‖ BE8(exp))`.
 - **Residual.** Strengthens B9 (confused-deputy) from broker-attested labels to cryptographic hops. The
   monotonicity subset relation over scope strings remains a TCB on the scope vocabulary (D4 taxonomy).
@@ -170,7 +170,7 @@ Capstone → Signature domain → Residual*.
 > early-branch is fully additive (the brokered path is byte-for-byte unchanged). A resource-signed
 > `introspection_transcript` record (kind `introspection_transcript` → `classify_role` Resource) is the SOLE
 > native-use artifact; the M3 pre-pass verifies each closed transcript — the structured
-> `feir.resource.introspection.v1` sig under a pinned, role-separated `resource_authority_keys` issuer +
+> `averin.resource.introspection.v1` sig under a pinned, role-separated `resource_authority_keys` issuer +
 > grant-bind + `credential_ref == grant.lease_id` + resource match + `effective_scope ⊆ grant.scope`
 > (space-delimited OAuth token subset, no broadening) + `effective_exp <= grant.exp` + `introspected_at >=
 > issued_at` — every failure a hard `unmatched_violation` → `!ok`. **The native-use-matching question is
@@ -214,7 +214,7 @@ Capstone → Signature domain → Residual*.
   `attested_complete_over_introspected_surface` (every other conjunct PLUS
   `introspection_transcripts_verified==introspection_transcripts_total>0`). A *mixed* native+PoP bundle reaches
   neither full label (≤ `claimed_over_manifest`) — keeping each label's MF1 meaning crisp.
-- **Signature domain.** `feir.resource.introspection.v1` = `sha256(LP4(tag) ‖ LP4(grant_id) ‖ LP4(credential_ref)
+- **Signature domain.** `averin.resource.introspection.v1` = `sha256(LP4(tag) ‖ LP4(grant_id) ‖ LP4(credential_ref)
   ‖ LP4(effective_scope) ‖ LP4(resource_id) ‖ BE8(introspected_at) ‖ BE8(effective_exp))`, under
   `resource_authority_keys`.
 - **Residual.** The transcript is itself resource-signed → it **relocates, does not remove,** the resource TCB
@@ -255,7 +255,7 @@ Capstone → Signature domain → Residual*.
 >
 > **UPDATE — `cross_broker_cert` (the optional transitive tier) implemented.** A grant whose subject `broker_id`
 > is NOT pinned can elevate to `transitive` trust iff it carries a `grant_evidence.cross_broker_cert` signed by a
-> PINNED issuer broker vouching for the subject's KEY (`feir.broker.federation.cert.v1`, with `subject_kid` in
+> PINNED issuer broker vouching for the subject's KEY (`averin.broker.federation.cert.v1`, with `subject_kid` in
 > the preimage — see the signature-domain note below). Two-piece + triple-reviewed (finder + Opus + GLM): the
 > review caught a REAL high-severity fail-open both the finder and Opus independently confirmed — the cert-derived
 > subject key was elevated as broker authority with NO role-disjointness check (a pinned/compromised issuer could
@@ -278,7 +278,7 @@ Capstone → Signature domain → Residual*.
   from the *union* of all per-broker key sets; distinct brokers MAY share a root unless a cross-broker cert is
   active (then issuer≠subject).
 - **Capstone.** **Reachable**, gated by `cross_broker_suppression==0 && brokers_seq_verified==brokers_total`.
-- **Signature domain.** `feir.broker.federation.cert.v1` = `sha256(LP4(tag) ‖ LP4(issuer_broker_id) ‖
+- **Signature domain.** `averin.broker.federation.cert.v1` = `sha256(LP4(tag) ‖ LP4(issuer_broker_id) ‖
   LP4(subject_broker_id) ‖ LP4(subject_kid) ‖ LP4(scope) ‖ LP4(resource_id) ‖ BE8(not_after))` where
   `subject_kid = cnf_kid(subject_pubkey)`. **Binding `subject_kid` (the subject's KEY, not just its id) is
   load-bearing:** without it, the issuer's (public) cert could be replayed over a grant signed by ANY key
@@ -288,7 +288,7 @@ Capstone → Signature domain → Residual*.
   key). The cert-derived subject key is ALSO checked disjoint from every non-broker role
   (resource/tsa/taxonomy/attestation/cosig/revocation) — else a pinned (or compromised) issuer could vouch for
   a non-broker key and launder it into broker authority (a runtime backdoor around the startup R2 disjointness
-  fatal). The per-broker head reuses `feir.broker.grant_head.v1` unchanged (partitioning is in the log-fold, so
+  fatal). The per-broker head reuses `averin.broker.grant_head.v1` unchanged (partitioning is in the log-fold, so
   existing golden vectors stay valid).
 - **Residual.** Globally-consistent cross-broker equivocation is still an offline floor (ADR 0004 D9 floor 1) —
   only the out-of-band monitor catches a coordinated multi-broker rewrite.
@@ -297,7 +297,7 @@ Capstone → Signature domain → Residual*.
 
 > **Status: verifier + producer + FFI e2e IMPLEMENTED; online CRL + Merkle-non-disclosure deferred.** Verifier
 > `ae4b3b7`: `evaluate_revocation` (a top-level signed, time-bounded `revocation_list` under a pinned,
-> role-separated `revocation_keys` — sig domain `feir.revocation.v1` over the RCP-canonical list minus `sig`,
+> role-separated `revocation_keys` — sig domain `averin.revocation.v1` over the RCP-canonical list minus `sig`,
 > reusing the deployment_attestation pattern wholesale; freshness = latest anchored TSA time within
 > `[issued_at, not_after]`), the use-loop gate (a matched use of a grant on a FRESH list is blocked BEFORE it
 > is consumed/counted), the `revocation_keys` R2 + generic-authority disjointness extension, 3 report fields +
@@ -308,7 +308,7 @@ Capstone → Signature domain → Residual*.
 > Go e2e.
 >
 > **UPDATE — Merkle-non-disclosure mode implemented.** A top-level signed `revocation_merkle_root` (domain
-> `feir.broker.revocation.merkleroot.v1`, same canonical-minus-sig + freshness discipline as the disclosed list)
+> `averin.broker.revocation.merkleroot.v1`, same canonical-minus-sig + freshness discipline as the disclosed list)
 > commits to the SORTED, sentinel-bracketed set of `revocation_leaf(grant_id)` hashes WITHOUT disclosing it. Each
 > Tier-B use carries a per-grant proof in a top-level `revocation_proofs` map: a NON-membership proof (two
 > consecutive sorted leaves strictly bracketing the grant's leaf, both authenticating to the signed root via an
@@ -335,7 +335,7 @@ Capstone → Signature domain → Residual*.
 - **Capstone.** **Gated**: `revocation_status ∉ {stale, revoked_present} && revoked_uses_blocked==0`. `absent`
   does NOT block (a bundle with no list is the legitimate baseline, like pre-D6); `stale` blocks (the offline
   freshness limit, surfaced honestly); `online_fresh` affirmatively satisfies it.
-- **Signature domain.** `feir.broker.revocation.list.v1` = `sha256(LP4(tag) ‖ LP4(broker_id) ‖ BE8(issued_at) ‖
+- **Signature domain.** `averin.broker.revocation.list.v1` = `sha256(LP4(tag) ‖ LP4(broker_id) ‖ BE8(issued_at) ‖
   BE8(not_after) ‖ LP4(merkle_root))`, under `revocation_keys` (role-separated — a broker must not sign its own
   revocation list).
 - **Residual.** Revocation is inherently time-dependent: the bundled-list path is only as fresh as the list,
@@ -346,7 +346,7 @@ Capstone → Signature domain → Residual*.
 
 > **Status: verifier + producer + cross-language e2e IMPLEMENTED; online HTTP path deferred.** Verifier
 > semantics `55a21b2` (the `cosig_approver_keys` role-disjoint VerifyOption, the
-> `feir.broker.cosig.approval.v1` challenge, distinct-approver counting + the `>= M` indexing gate, the four
+> `averin.broker.cosig.approval.v1` challenge, distinct-approver counting + the `>= M` indexing gate, the four
 > report fields, the two capstone conjuncts, + a fail-closed guard for cosignatures-without-threshold). Go
 > producer `668e531`: `broker.CosigApprovalChallenge` (byte-identical to the verifier, pinned by the SHARED
 > golden vector) + `broker.AttachCosignatures` (the fail-closed phase-2 embed). FFI e2e `eb4e464`: a cosigned
@@ -370,7 +370,7 @@ Capstone → Signature domain → Residual*.
 - **Capstone.** **Gated**: `cosig_threshold_failures==0 && (cosigned_grants_total==0 ||
   cosigned_grants_satisfied==cosigned_grants_total)`. Cosig is an issuance-side gate, transparent to the
   capstone's meaning when satisfied.
-- **Signature domain.** `feir.broker.cosig.approval.v1` = `sha256(LP4(tag) ‖ LP4(grant_id) ‖ LP4(approver_kid) ‖
+- **Signature domain.** `averin.broker.cosig.approval.v1` = `sha256(LP4(tag) ‖ LP4(grant_id) ‖ LP4(approver_kid) ‖
   LP4(credential_binding) ‖ BE8(threshold_m) ‖ BE8(exp))` — binding `credential_binding` + `threshold_m`
   prevents an approval being replayed onto a re-minted grant or a different threshold.
 - **Residual.** Governance/dual-control at issuance; the approver set is a TCB (an approver who is also the
@@ -425,11 +425,11 @@ explicit so the capstone's meaning is self-documenting.
 | Mode | Producer hooks (file:fn) | Reserve | Verifier hooks (verify.rs) | Feature flag | Fixtures |
 |---|---|---|---|---|---|
 | N-Use | `broker.go` ClassifyScope/Prepare/Descriptor/grant_evidence; `resourceshim` Ledger key `(grant_id,seq)`; `server.go` grantRequest/buildUseRecord | `ScopeClass="bounded_reuse"`; `grant_evidence.use_limit`; `use_evidence.use_sequence_number` | match loop (per-class single-use), report fields | `WithBoundedReuse(maxN)` | `adversarial.rs` use_evidence_n(+seq): N ok / N+1 / dup-seq / past-exp |
-| Delegation | `broker.go` Request.DelegationAssertions + Prepare(monotonic); `grant_evidence.delegation_assertions` | tag `feir.broker.delegation.hop.v1`; `grant_evidence.delegation_assertions[]` | per-hop sig + scopeSubset; leaf cnf/exp bind | `WithDelegation()` | valid chain / widened hop / forged sig / missing hop |
+| Delegation | `broker.go` Request.DelegationAssertions + Prepare(monotonic); `grant_evidence.delegation_assertions` | tag `averin.broker.delegation.hop.v1`; `grant_evidence.delegation_assertions[]` | per-hop sig + scopeSubset; leaf cnf/exp bind | `WithDelegation()` | valid chain / widened hop / forged sig / missing hop |
 | Native/STS | `broker.go` Descriptor.mode/lease_id; new `POST /v2/introspection` + buildIntrospectionRecord | `Descriptor.lease_id`; kind `introspection_transcript`; evidence kind `introspection` | classify_role tuple; transcript↔grant bind | `WithNativeCredentials()` | grant+transcript Tier-B-eligible / wrong grant / missing transcript |
-| Federation | `broker.go` grant_evidence.{broker_id,issuer_kid,cross_broker_cert}; per-broker broker_seq | tag `feir.broker.federation.cert.v1`; those fields | per-`broker_id` head partition; multi-broker pin | `WithFederation(brokerID)` | two brokers gapless / cross-broker cert / per-broker gap |
+| Federation | `broker.go` grant_evidence.{broker_id,issuer_kid,cross_broker_cert}; per-broker broker_seq | tag `averin.broker.federation.cert.v1`; those fields | per-`broker_id` head partition; multi-broker pin | `WithFederation(brokerID)` | two brokers gapless / cross-broker cert / per-broker gap |
 | Revocation | new top-level `revocation_list` builder (attestation-style); optional use revocation_check | bundle key `revocation_list`; `revocation_keys` opt | revocation_status + revoked-use violation | `WithRevocationList(key)` | revoked-use in-window / stale / wrong issuer / substitution |
-| Cosig | `broker.go` Request.Cosignatures/CosigThreshold + Prepare(≥M); `grant_evidence.cosignatures` | tag `feir.broker.cosig.approval.v1`; those fields; `cosig_approver_keys` opt | ≥M-of-N check + disjointness FATAL | `WithCosignature(M,keys)` | M-of-N met / M−1 / approver⊆broker FATAL / forged cosig |
+| Cosig | `broker.go` Request.Cosignatures/CosigThreshold + Prepare(≥M); `grant_evidence.cosignatures` | tag `averin.broker.cosig.approval.v1`; those fields; `cosig_approver_keys` opt | ≥M-of-N check + disjointness FATAL | `WithCosignature(M,keys)` | M-of-N met / M−1 / approver⊆broker FATAL / forged cosig |
 
 **Cross-cutting reservations.** All new discriminators live under the open `extensions.broker` object and new
 evidence fields ride inside the signed, whole-payload-hashed evidence — so a pre-0005 verifier ignores unknown

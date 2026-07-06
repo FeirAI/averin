@@ -11,7 +11,7 @@ import (
 
 // delegationHopTag domain-separates the per-hop re-delegation challenge (ADR 0005 M2) from every other
 // signed preimage, so a hop assertion can never be repurposed in another context.
-const delegationHopTag = "feir.broker.delegation.hop.v1"
+const delegationHopTag = "averin.broker.delegation.hop.v1"
 
 // DelegationHop is one signed re-delegation step (ADR 0005 M2). DelegatorCnf/DelegateCnf are base64url-no-pad
 // ed25519 PUBLIC keys; Sig is the base64url-no-pad signature by the DELEGATOR's key over DelegationHopChallenge.

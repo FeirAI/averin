@@ -1,7 +1,7 @@
 /**
- * feir — flight recorder SDK for AI agents (TypeScript).
+ * averin — flight recorder SDK for AI agents (TypeScript).
  *
- * Submits records to a feir server, where the integrity core seals them. Integer money/token
+ * Submits records to a averin server, where the integrity core seals them. Integer money/token
  * fields are `bigint` so a value above 2^53 never loses precision through a JS `number` (RCP
  * forbids floats and uses i64); we serialize bigints as raw JSON integer tokens.
  */
@@ -118,14 +118,14 @@ export type Transport = (url: string, headers: Record<string, string>, body: str
  * This SDK records tamper-evident evidence: a rejected submission must surface as an error, never be returned
  * as if a record were sealed — otherwise an agent would believe evidence exists when the server stored none.
  */
-export class FeirError extends Error {
+export class AverinError extends Error {
   constructor(
     message: string,
     readonly status?: number,
     readonly body?: string,
   ) {
     super(message);
-    this.name = "FeirError";
+    this.name = "AverinError";
   }
 }
 
@@ -134,14 +134,14 @@ const fetchTransport: Transport = async (url, headers, body) => {
   const text = await resp.text();
   if (!resp.ok) {
     // Do NOT let a 4xx/5xx body (e.g. {"error":"unauthorized"}) flow back as a "record" — surface the rejection.
-    let msg = `feir server returned HTTP ${resp.status}`;
+    let msg = `averin server returned HTTP ${resp.status}`;
     try {
       const e = (JSON.parse(text) as { error?: unknown })?.error;
       if (typeof e === "string") msg += `: ${e}`;
     } catch {
       // non-JSON error body; the status alone is the signal.
     }
-    throw new FeirError(msg, resp.status, text);
+    throw new AverinError(msg, resp.status, text);
   }
   return text;
 };
@@ -179,17 +179,17 @@ export class Client {
     try {
       parsed = JSON.parse(resp);
     } catch {
-      throw new FeirError("feir server returned a non-JSON response", undefined, resp);
+      throw new AverinError("averin server returned a non-JSON response", undefined, resp);
     }
     // Backstop for a custom transport that does NOT check HTTP status (the built-in fetchTransport throws on
     // non-2xx already): an {"error":...} body or a missing sealed record is a REJECTION, not a sealed record.
     // The previous `?? parsed` fallback returned the error body AS the record — silently masking the rejection.
     if (typeof parsed.error === "string") {
-      throw new FeirError(`feir server rejected the record: ${parsed.error}`, undefined, resp);
+      throw new AverinError(`averin server rejected the record: ${parsed.error}`, undefined, resp);
     }
     const record = parsed.results?.[0]?.record;
     if (record == null) {
-      throw new FeirError("feir server response did not contain a sealed record", undefined, resp);
+      throw new AverinError("averin server response did not contain a sealed record", undefined, resp);
     }
     return record;
   }

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/feir-dev/feir/server/internal/broker"
+	"github.com/averin-dev/averin/server/internal/broker"
 )
 
 // pendingGrant is a minted-but-uncommitted grant held between /v2/grants/prepare and /v2/grants/finalize.
@@ -88,7 +88,7 @@ func (s *Server) prunePending(now time.Time) {
 // descriptor, so the revealed credential_binding/exp are stable). If the grant is already finalized, returns it.
 func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 	if s.brokerKey == nil {
-		writeErr(w, http.StatusNotImplemented, "credential broker not enabled (set FEIR_BROKER_ISSUING_SEED)")
+		writeErr(w, http.StatusNotImplemented, "credential broker not enabled (set AVERIN_BROKER_ISSUING_SEED)")
 		return
 	}
 	body, err := readBody(r)

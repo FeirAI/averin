@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/api"
-	"github.com/feir-dev/feir/server/internal/core"
-	"github.com/feir-dev/feir/server/internal/store"
+	"github.com/averin-dev/averin/server/internal/api"
+	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/store"
 )
 
 // TestDenialBudgetBoundsVaryingScopeSweep (#47): with the denied-grant log on AND a per-project budget of

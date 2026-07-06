@@ -51,7 +51,7 @@ for the credential descriptor (the closed RCP domain registry — `input`/`outpu
 the descriptor."
 
 **Mechanism:** add `credential` to the RCP `FieldDomain` registry (the domain-separation tag
-`feir.commit.v1`/domain string), the schema's `<field>_commit` slots, the FFI `feir_commit` domain
+`averin.commit.v1`/domain string), the schema's `<field>_commit` slots, the FFI `averin_commit` domain
 allowlist, the disclosure verifier (`FieldDomain::parse`), and the SDK field lists. The grant builder
 commits the descriptor under `credential`; the use builder keeps `input` for genuine op params.
 
@@ -365,7 +365,7 @@ TEE-style enforcement. **Residual (out-of-scope):** binding the attestation to a
 enforcement (TEE quote → measured boot → the running broker/resource binary) is real-infra work;
 documented as the boundary. **Build artifact [IMPLEMENTED, verifier side]:** a top-level
 `deployment_attestation` object `{issuer_kid, issued_at, not_after, claim_types[], subject{...}, sig}`
-signed (domain `feir.attestation.v1`) over its RCP-canonical bytes minus `sig`, verified under a pinned
+signed (domain `averin.attestation.v1`) over its RCP-canonical bytes minus `sig`, verified under a pinned
 `attestation_keys` issuer (role-separated — disjoint from broker/resource/taxonomy, a FATAL config error
 otherwise). The signed `subject` binds `project_id`, `coverage_manifest_digest`, the latest anchored
 `checkpoint_hash` + `broker_grant_head_root`, the `authority_kids` set (the **broker + resource**
@@ -379,7 +379,7 @@ Tests include the mandatory **substitution test** (a valid, fresh, pinned-issuer
 `subject` names a DIFFERENT project/checkpoint → `failed`, not `attested_claims`), bad-sig, issuer-kid
 mismatch, stale-window, absent (→`unevaluated`), and the role-separation fatal. **Producer [D7.2,
 IMPLEMENTED]:** `Server.WithAttestation(key)` makes `/v2/export` emit a top-level `deployment_attestation`
-signed (domain `feir.attestation.v1`, the digest = sha256 of the RCP-canonical attestation minus `sig`,
+signed (domain `averin.attestation.v1`, the digest = sha256 of the RCP-canonical attestation minus `sig`,
 signed in pure Go via the LP-prefixed preimage matching the Rust core) over a subject binding the project /
 latest checkpoint_hash + broker_grant_head_root / the authority key-id set / the resource-id set. The JSON
 opts path (`verify_bundle_with_json`) now parses `attestation_keys`, so the Go server / an external auditor

@@ -1,8 +1,8 @@
 // Package otel maps OpenTelemetry / OpenInference trace spans (an OTLP/JSON
-// ExportTraceServiceRequest) into feir record bodies tagged observed_via="otel".
+// ExportTraceServiceRequest) into averin record bodies tagged observed_via="otel".
 //
 // This is a Level-2 *observation* bridge: spans are third-party telemetry the agent emitted, not
-// records feir sealed at the decision point. We therefore translate honestly and conservatively —
+// records averin sealed at the decision point. We therefore translate honestly and conservatively —
 // every span becomes a record body whose semantic claims are only what the span itself asserts. We
 // never invent authority, never upgrade a declared event to a verified one, and we preserve the raw
 // OTel attributes verbatim under extensions.otel_attrs so a later auditor can see exactly what the
@@ -23,9 +23,9 @@ import (
 	"time"
 )
 
-// MapSpansToRecords parses an OTLP/JSON ExportTraceServiceRequest and returns one feir record body
+// MapSpansToRecords parses an OTLP/JSON ExportTraceServiceRequest and returns one averin record body
 // per span, suitable for POSTing to /v2/records. projectID is stamped onto every body (the OTLP
-// payload is not trusted to name its own feir project — that is a server-side authorization concern).
+// payload is not trusted to name its own averin project — that is a server-side authorization concern).
 //
 // Malformed JSON returns an error and never panics. Spans missing a name/spanId still map (with
 // empty strings) rather than aborting the whole batch, so one bad span can't drop a trace.
@@ -109,7 +109,7 @@ type attribute struct {
 	Value attributeValue `json:"value"`
 }
 
-// attributeValue covers the AnyValue cases feir cares about. intValue is a string in proto3 JSON;
+// attributeValue covers the AnyValue cases averin cares about. intValue is a string in proto3 JSON;
 // boolValue/doubleValue are kept for faithful otel_attrs preservation. Array/kvlist/bytes (and any
 // future) values are captured raw so they are never dropped. CRITICAL: every emitted value must be
 // an RCP-safe primitive (string/integer/bool) because the whole record body is canonicalized + sealed
@@ -161,23 +161,23 @@ func mapSpan(sp span, resAttrs map[string]any, projectID string) map[string]any 
 }
 
 // sessionID prefers an explicit session attribute, falling back to the OTel traceId so spans from
-// one trace still group into one feir session.
+// one trace still group into one averin session.
 func sessionID(attrs map[string]any, traceID string) string {
 	if v := strAttr(attrs, "session.id"); v != "" {
 		return v
 	}
-	if v := strAttr(attrs, "feir.session"); v != "" {
+	if v := strAttr(attrs, "averin.session"); v != "" {
 		return v
 	}
 	return traceID
 }
 
-// eventType maps the span to a feir event_type. An explicit "feir.event_type" attribute is
+// eventType maps the span to a averin event_type. An explicit "averin.event_type" attribute is
 // authoritative; otherwise we infer from the instrumentation conventions (OpenInference / gen_ai /
 // db). We DO NOT guess beyond these signals — an unrecognized span is a plain "decision", never a
 // fabricated tool/LLM call.
 func eventType(attrs map[string]any) string {
-	if v := strAttr(attrs, "feir.event_type"); v != "" {
+	if v := strAttr(attrs, "averin.event_type"); v != "" {
 		return v
 	}
 	if hasPrefixAttr(attrs, "tool") || hasPrefixAttr(attrs, "db") {

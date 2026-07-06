@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/feir-dev/feir/server/internal/broker"
+	"github.com/averin-dev/averin/server/internal/broker"
 )
 
 // BuildRevocationList constructs a signed, time-bounded revocation_list (ADR 0005 M5) — the top-level bundle
 // object the offline verifier evaluates under a pinned, role-separated `revocation_keys` issuer. It mirrors
-// buildDeploymentAttestation: the `sig` (domain feir.revocation.v1) is ed25519 over
+// buildDeploymentAttestation: the `sig` (domain averin.revocation.v1) is ed25519 over
 // sha256(RCP-canonical(list minus sig)) — so the disclosed `revoked_grant_ids` are authenticated directly,
 // and the verifier recomputes the identical digest via the same RCP canonicalizer. `revKey` is the revocation
 // authority's key (which MUST be role-separated from the broker/resource/etc. it governs — the verifier
@@ -39,13 +39,13 @@ func BuildRevocationList(canon Sealer, revKey ed25519.PrivateKey, issuedAt, notA
 	if err != nil {
 		return nil, fmt.Errorf("revocation_list digest: %w", err)
 	}
-	body["sig"] = signTagged("feir.revocation.v1", digest, revKey)
+	body["sig"] = signTagged("averin.revocation.v1", digest, revKey)
 	return body, nil
 }
 
 // BuildRevocationMerkleRoot constructs a signed revocation_merkle_root (ADR 0005 M5 Merkle-non-disclosure) — a
 // commitment to the SORTED revoked-grant set that does NOT disclose it. The `sig` (domain
-// feir.broker.revocation.merkleroot.v1) is ed25519 over sha256(RCP-canonical(root object minus sig)), exactly
+// averin.broker.revocation.merkleroot.v1) is ed25519 over sha256(RCP-canonical(root object minus sig)), exactly
 // mirroring BuildRevocationList; the verifier recomputes the identical digest and then checks each use's
 // per-grant proof (broker.RevocationTree.NonMembershipProof / MembershipProof) against the committed `root`.
 func BuildRevocationMerkleRoot(canon Sealer, revKey ed25519.PrivateKey, issuedAt, notAfter string, tree *broker.RevocationTree) (map[string]any, error) {
@@ -65,6 +65,6 @@ func BuildRevocationMerkleRoot(canon Sealer, revKey ed25519.PrivateKey, issuedAt
 	if err != nil {
 		return nil, fmt.Errorf("revocation_merkle_root digest: %w", err)
 	}
-	body["sig"] = signTagged("feir.broker.revocation.merkleroot.v1", digest, revKey)
+	body["sig"] = signTagged("averin.broker.revocation.merkleroot.v1", digest, revKey)
 	return body, nil
 }

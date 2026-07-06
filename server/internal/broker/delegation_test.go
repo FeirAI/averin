@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/feir-dev/feir/server/internal/goldenvec"
+	"github.com/averin-dev/averin/server/internal/goldenvec"
 )
 
 func TestDelegationHopChallengeGoldenVector(t *testing.T) {

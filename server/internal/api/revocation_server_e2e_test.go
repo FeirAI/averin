@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/api"
-	"github.com/feir-dev/feir/server/internal/core"
-	"github.com/feir-dev/feir/server/internal/store"
+	"github.com/averin-dev/averin/server/internal/api"
+	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/store"
 )
 
 // TestRevocationServerBlocksRevokedUseEndToEnd (M5 server wiring): a server WithRevocation records a grant_id as

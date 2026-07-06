@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { buildRecord, stringify, Client, FeirError } from "../src/index";
+import { buildRecord, stringify, Client, AverinError } from "../src/index";
 
 test("buildRecord basics + bigint cost", () => {
   const rec = buildRecord("p1", "s1", "db.query", { eventType: "tool_call", costMicrosUsd: 18000n });
@@ -53,7 +53,7 @@ test("a server rejection is THROWN, never returned as a sealed record", async ()
   // back as if a record were sealed (the agent would believe unrecorded evidence exists).
   const errBody = async () => JSON.stringify({ error: "unauthorized" });
   const c = new Client("http://x", "p1", { transport: errBody });
-  await expect(c.record("s1", "a")).rejects.toThrow(FeirError);
+  await expect(c.record("s1", "a")).rejects.toThrow(AverinError);
   await expect(c.record("s1", "a")).rejects.toThrow(/unauthorized/);
 });
 
@@ -77,7 +77,7 @@ test("fetchTransport throws on a non-2xx HTTP status (surfacing the server error
     })) as unknown as typeof fetch;
   try {
     const c = new Client("http://x", "p1"); // default fetchTransport
-    await expect(c.record("s1", "a")).rejects.toThrow(FeirError);
+    await expect(c.record("s1", "a")).rejects.toThrow(AverinError);
     await expect(c.record("s1", "a")).rejects.toThrow(/HTTP 400.*idempotency_key/s);
   } finally {
     globalThis.fetch = realFetch;

@@ -2,12 +2,12 @@
 //! checkpoint chain, used as the base for the adversarial acceptance tests (which derive tampered
 //! / omitted / forked variants from it). Run with `cargo run --example gen_fixtures`.
 
+use averin_decision_core::canon::CanonValue;
+use averin_decision_core::checkpoint::{checkpoint_body, seal_checkpoint};
+use averin_decision_core::commit::{commit, FieldDomain};
+use averin_decision_core::record::seal;
+use averin_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use ed25519_dalek::SigningKey;
-use feir_decision_core::canon::CanonValue;
-use feir_decision_core::checkpoint::{checkpoint_body, seal_checkpoint};
-use feir_decision_core::commit::{commit, FieldDomain};
-use feir_decision_core::record::seal;
-use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use std::path::PathBuf;
 
 // r2 carries hiding commitments over BOTH its `input` and `output` fields; the bundle discloses the
@@ -204,11 +204,11 @@ fn main() {
             ("field".into(), CanonValue::string(field)),
             (
                 "value_b64".into(),
-                CanonValue::string(feir_decision_core::b64::encode(value)),
+                CanonValue::string(averin_decision_core::b64::encode(value)),
             ),
             (
                 "nonce_hex".into(),
-                CanonValue::string(feir_decision_core::hashx::hex_lower(nonce)),
+                CanonValue::string(averin_decision_core::hashx::hex_lower(nonce)),
             ),
         ])
         .unwrap()

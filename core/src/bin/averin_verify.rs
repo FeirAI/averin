@@ -1,15 +1,15 @@
-//! `feir-verify` — offline verify CLI (wraps decision-core). Honest about what it proves.
+//! `averin-verify` — offline verify CLI (wraps decision-core). Honest about what it proves.
 //!
-//!   feir-verify bundle <bundle.json> [opts.json]   full offline verification (records + checkpoint
+//!   averin-verify bundle <bundle.json> [opts.json]   full offline verification (records + checkpoint
 //!                                                history + public keys); omission/fork/tamper.
 //!                                                With opts.json the role-disjoint authority key sets are
 //!                                                PINNED (authentic verification + the Tier-B/mode gates).
-//!   feir-verify record <record.json> [pubkey]   single record; without a key = integrity only.
+//!   averin-verify record <record.json> [pubkey]   single record; without a key = integrity only.
 
-use feir_decision_core::record::{validate_record_shape, verify_content_hash, verify_sealed};
-use feir_decision_core::sign::decode_pubkey;
-use feir_decision_core::verify::{report_to_canon, verify_bundle_json, verify_bundle_with_json};
-use feir_decision_core::CanonValue;
+use averin_decision_core::record::{validate_record_shape, verify_content_hash, verify_sealed};
+use averin_decision_core::sign::decode_pubkey;
+use averin_decision_core::verify::{report_to_canon, verify_bundle_json, verify_bundle_with_json};
+use averin_decision_core::CanonValue;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -19,8 +19,8 @@ fn main() -> ExitCode {
         Some("record") if args.len() >= 3 => verify_record_cmd(&args[2], args.get(3)),
         _ => {
             eprintln!("usage:");
-            eprintln!("  feir-verify bundle <bundle.json> [opts.json]   (opts.json pins role-disjoint keys)");
-            eprintln!("  feir-verify record <record.json> [ed25519pub:<key>]");
+            eprintln!("  averin-verify bundle <bundle.json> [opts.json]   (opts.json pins role-disjoint keys)");
+            eprintln!("  averin-verify record <record.json> [ed25519pub:<key>]");
             eprintln!();
             eprintln!("opts.json keys (each a role-disjoint set; omit a set to leave that mode unevaluated):");
             eprintln!("  broker_authority_keys, resource_authority_keys, tsa_keys, taxonomy/taxonomy_keys/");
@@ -79,7 +79,7 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
     let gi = |k: &str| report.get(k).and_then(|v| v.as_int()).unwrap_or(0);
     let gb = |k: &str| matches!(report.get(k), Some(CanonValue::Bool(true)));
 
-    println!("feir offline verification");
+    println!("averin offline verification");
     let pid = gs("project_id");
     if !pid.is_empty() {
         println!("  project:      {pid}");

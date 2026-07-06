@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/feir-dev/feir/server/internal/store"
+	"github.com/averin-dev/averin/server/internal/store"
 )
 
 // WithRevocation enables M5 revocation (ADR 0005): POST /v2/revoke records a grant_id as revoked, and every
@@ -70,7 +70,7 @@ type revokeRequest struct {
 // export's signed revocation_list — the verifier blocks any use of the revoked grant once that list is fresh.
 func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	if s.revocationKey == nil {
-		writeErr(w, http.StatusNotImplemented, "revocation not enabled (set FEIR_REVOCATION_SEED)")
+		writeErr(w, http.StatusNotImplemented, "revocation not enabled (set AVERIN_REVOCATION_SEED)")
 		return
 	}
 	body, err := readBody(r)

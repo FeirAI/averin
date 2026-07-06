@@ -1,12 +1,12 @@
 // Package core binds the Rust decision-core via cgo. Canonicalize / seal / verify live in Rust
 // (the single source of truth); Go never reimplements them. Build the library first with
-// `cargo build` (produces target/debug/libfeir_decision_core.a).
+// `cargo build` (produces target/debug/libaverin_decision_core.a).
 package core
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../../core/include
-#cgo LDFLAGS: ${SRCDIR}/../../../target/debug/libfeir_decision_core.a
-#include <feir_core.h>
+#cgo LDFLAGS: ${SRCDIR}/../../../target/debug/libaverin_decision_core.a
+#include <averin_core.h>
 #include <stdlib.h>
 */
 import "C"
@@ -31,7 +31,7 @@ type Core struct {
 func New(seedHex string) (*Core, error) {
 	cs := C.CString(seedHex)
 	defer C.free(unsafe.Pointer(cs))
-	pk := goStrFree(C.feir_pubkey_from_seed(cs))
+	pk := goStrFree(C.averin_pubkey_from_seed(cs))
 	if pk == "" || strings.Contains(pk, `"error"`) {
 		return nil, fmt.Errorf("invalid signing seed: %s", pk)
 	}
@@ -45,7 +45,7 @@ func (c *Core) PubKey() string { return c.pubKey }
 func (c *Core) RcpCanonicalize(jsonDoc string) string {
 	cs := C.CString(jsonDoc)
 	defer C.free(unsafe.Pointer(cs))
-	return goStrFree(C.feir_rcp_canonicalize(cs))
+	return goStrFree(C.averin_rcp_canonicalize(cs))
 }
 
 // RcpEvidenceHash returns "sha256:<hex>" over the RCP-v1 canonical form of payloadJSON — the single
@@ -56,7 +56,7 @@ func (c *Core) RcpCanonicalize(jsonDoc string) string {
 func (c *Core) RcpEvidenceHash(payloadJSON string) (string, error) {
 	cs := C.CString(payloadJSON)
 	defer C.free(unsafe.Pointer(cs))
-	return checkValue(goStrFree(C.feir_rcp_evidence_hash(cs)))
+	return checkValue(goStrFree(C.averin_rcp_evidence_hash(cs)))
 }
 
 // SealRecord seals a Decision Record body, returning the sealed JSON.
@@ -65,7 +65,7 @@ func (c *Core) SealRecord(bodyJSON string) (string, error) {
 	cs := C.CString(c.seedHex)
 	defer C.free(unsafe.Pointer(cb))
 	defer C.free(unsafe.Pointer(cs))
-	return checkSeal(goStrFree(C.feir_seal_record(cb, cs)))
+	return checkSeal(goStrFree(C.averin_seal_record(cb, cs)))
 }
 
 // SealCheckpoint seals a checkpoint body.
@@ -74,7 +74,7 @@ func (c *Core) SealCheckpoint(bodyJSON string) (string, error) {
 	cs := C.CString(c.seedHex)
 	defer C.free(unsafe.Pointer(cb))
 	defer C.free(unsafe.Pointer(cs))
-	return checkSeal(goStrFree(C.feir_seal_checkpoint(cb, cs)))
+	return checkSeal(goStrFree(C.averin_seal_checkpoint(cb, cs)))
 }
 
 // nulRejectReport is the fail-closed JSON report for a bundle that contains a NUL byte. A C string is
@@ -96,7 +96,7 @@ func (c *Core) VerifyBundle(bundleJSON string) string {
 	}
 	cb := C.CString(bundleJSON)
 	defer C.free(unsafe.Pointer(cb))
-	return goStrFree(C.feir_verify_bundle_json(cb))
+	return goStrFree(C.averin_verify_bundle_json(cb))
 }
 
 // VerifyBundleWith verifies a bundle with out-of-band pinned trust roots (optsJSON: arrays of
@@ -108,7 +108,7 @@ func (c *Core) VerifyBundleWith(bundleJSON, optsJSON string) string {
 	// Guard optsJSON too: C.CString stops at the first NUL, so a 0x00 in opts could silently truncate the
 	// pinned trust roots (e.g. drop a resource_authority_keys entry). Valid opts (ed25519pub:/base64url) never
 	// contain 0x00, so reject fail-closed rather than verify under a truncated trust set. (The truncation-proof
-	// ABI feir_verify_bundle_with_n is what the wasm verifier exports — the NUL-truncatable C-string variants are
+	// ABI averin_verify_bundle_with_n is what the wasm verifier exports — the NUL-truncatable C-string variants are
 	// compiled ONLY for native/cgo, where this Go-side guard covers them.)
 	if i := strings.IndexByte(optsJSON, 0); i >= 0 {
 		return nulRejectReport(i)
@@ -117,7 +117,7 @@ func (c *Core) VerifyBundleWith(bundleJSON, optsJSON string) string {
 	co := C.CString(optsJSON)
 	defer C.free(unsafe.Pointer(cb))
 	defer C.free(unsafe.Pointer(co))
-	return goStrFree(C.feir_verify_bundle_with(cb, co))
+	return goStrFree(C.averin_verify_bundle_with(cb, co))
 }
 
 // VerifyBundleWithAuthority verifies a bundle pinning the given recording keys (in self-host, the
@@ -155,7 +155,7 @@ func (c *Core) VerifyBundleWithRoles(bundleJSON string, brokerKeys, resourceKeys
 
 // RandomNonce mints a fresh 32-byte hiding-commitment nonce as 64 lowercase hex chars.
 func (c *Core) RandomNonce() (string, error) {
-	return checkValue(goStrFree(C.feir_random_nonce()))
+	return checkValue(goStrFree(C.averin_random_nonce()))
 }
 
 // Commit computes the hiding commitment "sha256:<hex>" over value under domain (one of
@@ -168,7 +168,7 @@ func (c *Core) Commit(domain string, value []byte, nonceHex string) (string, err
 	defer C.free(unsafe.Pointer(cd))
 	defer C.free(unsafe.Pointer(cv))
 	defer C.free(unsafe.Pointer(cn))
-	return checkValue(goStrFree(C.feir_commit(cd, cv, cn)))
+	return checkValue(goStrFree(C.averin_commit(cd, cv, cn)))
 }
 
 // SignEvidence signs an authority evidence statement bound to (source, projectID, recordID, evidenceHash)
@@ -192,7 +192,7 @@ func (c *Core) SignEvidence(source, projectID, recordID, evidenceHash string) (s
 	defer C.free(unsafe.Pointer(crid))
 	defer C.free(unsafe.Pointer(ceh))
 	defer C.free(unsafe.Pointer(cseed))
-	return checkValue(goStrFree(C.feir_sign_evidence(cs, cproj, crid, ceh, cseed)))
+	return checkValue(goStrFree(C.averin_sign_evidence(cs, cproj, crid, ceh, cseed)))
 }
 
 // VerifyCommitment reports whether the disclosed (value, nonce) opens commitment under domain.
@@ -205,7 +205,7 @@ func (c *Core) VerifyCommitment(commitment, domain string, value []byte, nonceHe
 	defer C.free(unsafe.Pointer(cd))
 	defer C.free(unsafe.Pointer(cv))
 	defer C.free(unsafe.Pointer(cn))
-	out, err := checkValue(goStrFree(C.feir_verify_commitment(cc, cd, cv, cn)))
+	out, err := checkValue(goStrFree(C.averin_verify_commitment(cc, cd, cv, cn)))
 	if err != nil {
 		return false, err
 	}
@@ -219,7 +219,7 @@ func goStrFree(p *C.char) string {
 		return ""
 	}
 	s := C.GoString(p)
-	C.feir_string_free(p)
+	C.averin_string_free(p)
 	return s
 }
 

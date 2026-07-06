@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@feir/web",
+      "name": "@averin/web",
       "devDependencies": {
         "@sveltejs/vite-plugin-svelte": "^4.0.0",
         "svelte": "^5.0.0",

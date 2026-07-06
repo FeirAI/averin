@@ -1,4 +1,4 @@
-// Package auth is project-scoped API-key authentication for the feir app/ingestion API.
+// Package auth is project-scoped API-key authentication for the averin app/ingestion API.
 //
 // Phase 1 shipped with NO authorization (any caller who could reach an endpoint could read or write
 // any project's data — see api/server.go handleDAG and docs/coverage-limits.md). This package is the
@@ -100,7 +100,7 @@ func (ks *MapStore) ValidFor(project, token string) bool {
 // openStore is the explicit, dev-only "allow everything" KeyStore. See NewOpenStore.
 type openStore struct{}
 
-// ParseKeys parses the FEIR_API_KEYS wire format "proj-a:tok1,tok2;proj-b:tok3" into a MapStore.
+// ParseKeys parses the AVERIN_API_KEYS wire format "proj-a:tok1,tok2;proj-b:tok3" into a MapStore.
 // Empty projects/tokens are skipped. Returns the store and the number of projects with >=1 key, so
 // callers can refuse to start in a silent deny-all (zero keys) configuration.
 func ParseKeys(raw string) (*MapStore, int) {
@@ -207,7 +207,7 @@ func cutBearer(h string) (token string, ok bool) {
 func unauthorized(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	// WWW-Authenticate advertises the scheme without leaking anything (RFC 7235).
-	w.Header().Set("WWW-Authenticate", `Bearer realm="feir"`)
+	w.Header().Set("WWW-Authenticate", `Bearer realm="averin"`)
 	w.WriteHeader(http.StatusUnauthorized)
 	// Static body, no token, no project name.
 	w.Write([]byte(`{"error":"unauthorized"}`))

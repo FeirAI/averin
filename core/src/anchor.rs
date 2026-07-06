@@ -18,7 +18,7 @@ use crate::hashx::lp_str_into;
 use crate::{b64, sign};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
-pub const ANCHOR_TAG: &str = "feir.anchor.v1";
+pub const ANCHOR_TAG: &str = "averin.anchor.v1";
 
 #[derive(Debug, PartialEq)]
 pub enum AnchorError {

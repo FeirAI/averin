@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/feir-dev/feir/server/internal/broker"
+	"github.com/averin-dev/averin/server/internal/broker"
 )
 
 // handoffWireRecord builds a sub-agent-handoff record using govder's mapper
@@ -18,10 +18,10 @@ import (
 // payload block govder's provisioner seals (govder/internal/connectors/
 // provisioner.go sealSubAgentHandoff). The hop is signed by the policy-engine
 // root exactly as govder's SignHandoffHop does (DerivePolicyEngineKey +
-// evidenceScopeDigest + SignHop), replicated here against feir's own
+// evidenceScopeDigest + SignHop), replicated here against averin's own
 // broker.DelegationHop / DelegationHopChallenge / KeyID (byte-identical to
 // govder's internal/delegation per ADR 0005 M2) so the test stays
-// self-contained in feir's package without a cross-module import.
+// self-contained in averin's package without a cross-module import.
 func handoffWireRecord(t *testing.T, root, leaf ed25519.PrivateKey, handoffID string) string {
 	t.Helper()
 	rootPub := root.Public().(ed25519.PublicKey)
@@ -71,17 +71,17 @@ func handoffWireRecord(t *testing.T, root, leaf ed25519.PrivateKey, handoffID st
 	return string(b)
 }
 
-// TestSubAgentHandoff_ViaGovderMapperWireValue_VerifiesAtFeir closes the loop
-// finding F18: govder's mapper maps EventSubAgentHandoff onto the feir wire
-// value "handoff" (govder/internal/feir/mapper.go:72), and the production
-// governor path is mapper -> POST /v2/records -> feir /v2/verify. The prior
-// feir-side test (TestGenericRecordVerifiesDelegationHopAgainstPinnedAuthority)
+// TestSubAgentHandoff_ViaGovderMapperWireValue_VerifiesAtAverin closes the loop
+// finding F18: govder's mapper maps EventSubAgentHandoff onto the averin wire
+// value "handoff" (govder/internal/averin/mapper.go:72), and the production
+// governor path is mapper -> POST /v2/records -> averin /v2/verify. The prior
+// averin-side test (TestGenericRecordVerifiesDelegationHopAgainstPinnedAuthority)
 // posted records DIRECTLY with event_type "spawn_child" and never exercised the
 // mapper's actual "handoff" wire value nor the /v2/verify elevation. This test
 // posts a handoff row carrying a policy_engine_signed-pinned delegation_hop with
-// the REAL "handoff" wire value, asserts 201, and then asserts feir's
+// the REAL "handoff" wire value, asserts 201, and then asserts averin's
 // /v2/verify reads the chain as ok with the record integrity-proven.
-func TestSubAgentHandoff_ViaGovderMapperWireValue_VerifiesAtFeir(t *testing.T) {
+func TestSubAgentHandoff_ViaGovderMapperWireValue_VerifiesAtAverin(t *testing.T) {
 	_, root, _ := ed25519.GenerateKey(nil)
 	_, leaf, _ := ed25519.GenerateKey(nil)
 	srv := newServer(t).WithPolicyEngineKey("policy_engine_signed", root.Public().(ed25519.PublicKey))
@@ -111,7 +111,7 @@ func TestSubAgentHandoff_ViaGovderMapperWireValue_VerifiesAtFeir(t *testing.T) {
 		t.Fatalf("expected 1 proven record (the sealed handoff) in /v2/verify report: %s", vreport)
 	}
 	// The sealed handoff record must read integrity_proven — its content_hash +
-	// signature verify under feir's signing key (the elevate target of the
+	// signature verify under averin's signing key (the elevate target of the
 	// closed-loop hop pinned to policy_engine_signed).
 	var report struct {
 		RecordTrust []struct {
@@ -140,7 +140,7 @@ func TestSubAgentHandoff_ViaGovderMapperWireValue_VerifiesAtFeir(t *testing.T) {
 
 	// Negative (i): a handoff row whose hop is signed by an ATTACKER key (not the
 	// pinned policy_engine_signed authority) is rejected at /v2/records (400) —
-	// feir's validateDelegationEvidence pins the delegator to the policy key.
+	// averin's validateDelegationEvidence pins the delegator to the policy key.
 	_, attacker, _ := ed25519.GenerateKey(nil)
 	code, _ := do(t, h, http.MethodPost, "/v2/records", handoffWireRecord(t, attacker, leaf, "handoff-e2e-2"))
 	if code != http.StatusBadRequest {

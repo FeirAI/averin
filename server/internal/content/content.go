@@ -4,7 +4,7 @@
 // because the key IS the hash of the content, there is no way to swap the bytes behind an address
 // without changing the address, and every read re-hashes the bytes and rejects any mismatch.
 //
-// IMPORTANT: this package does NOT compute the feir hiding commitments (Pedersen/blinded digests for
+// IMPORTANT: this package does NOT compute the averin hiding commitments (Pedersen/blinded digests for
 // selective disclosure) — that lives in the Rust core. Here we only store and fetch raw bytes by a
 // plain SHA-256 digest and hand back an immutable address. The address returned here is therefore
 // the *content* address, not a hiding commitment.

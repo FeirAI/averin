@@ -23,16 +23,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/feir-dev/feir/server/internal/broker"
+	"github.com/averin-dev/averin/server/internal/broker"
 )
 
 // usePoPTag domain-separates the use-time proof-of-possession challenge so a signature here cannot be
 // repurposed as a request-time PoP (broker.popTag) or any other signature.
-const usePoPTag = "feir.broker.use.pop.v1"
+const usePoPTag = "averin.broker.use.pop.v1"
 
 // ledgerTag domain-separates the ledger_commitment preimage from the PoP challenge (and any other
 // hash), so the two length-prefixed digests can never collide.
-const ledgerTag = "feir.broker.use.ledger.v1"
+const ledgerTag = "averin.broker.use.ledger.v1"
 
 // ErrConsumed reports that a single-use credential (jti) or a PoP nonce was already consumed — a
 // double-spend or a replay. It is returned by the ledger and surfaced by ValidateUse.

@@ -1,4 +1,4 @@
-// Thin client for the feir app API. The web app is rendered against this; the server routes all
+// Thin client for the averin app API. The web app is rendered against this; the server routes all
 // canonicalize/seal/verify through the Rust core.
 import type { Rec } from "./trace";
 

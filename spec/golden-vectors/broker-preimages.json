@@ -4,16 +4,25 @@
     {
       "name": "empty",
       "grants": [],
-      "expect": "sha256:ac2cfdddb12235d5eff3a497e169b50fec13c9e7052e3b53c2a29d9318f9126d"
+      "expect": "sha256:b807ef08eb667015cab8143ac303bcb60e23f6dc72c873d7f5119b12967e804f"
     },
     {
       "name": "three-ascending",
       "grants": [
-        { "seq": 1, "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111" },
-        { "seq": 2, "content_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222" },
-        { "seq": 3, "content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333" }
+        {
+          "seq": 1,
+          "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        {
+          "seq": 2,
+          "content_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        {
+          "seq": 3,
+          "content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+        }
       ],
-      "expect": "sha256:03becbd3622a271d2f4e144c3402c6a6de8f06dfa58f3b6be3d9248ea42bdaac"
+      "expect": "sha256:c74e0a410d5afe31030cbfc636554cfa1dfd46de8076a5c77611d133b2a4fb3f"
     }
   ],
   "ledger_commitment": [
@@ -21,7 +30,7 @@
       "jti": "jti-x",
       "nonce": "nonce-y",
       "used_at": 1718445700,
-      "expect": "sha256:b4566365dae04faf6e17e3ab8ab7183f7236b812fd1b957ef3fcd966ad6a163b"
+      "expect": "sha256:d542b86eead80421b9aa5181f5ad4b014393ab08a7a5f0c59955f503a3a496d8"
     }
   ],
   "use_pop_challenge": [
@@ -33,7 +42,7 @@
       "params_commitment": "pc",
       "credential_binding": "cb",
       "nonce": "n",
-      "expect_hex": "6e5f46c15724b1fa4af4c7e462d62a08fde27943e389171ff3e88993cdc1b4b5"
+      "expect_hex": "ea55b822189110918d850f1b64582311c844fd75b8e3ee6cbe9ff509b4c40a1d"
     },
     {
       "name": "multibyte-utf8",
@@ -43,7 +52,7 @@
       "params_commitment": "pc",
       "credential_binding": "cb",
       "nonce": "n",
-      "expect_hex": "a7dec20864a4b5b0c0bdcc79c9f8176100661498c763f04fa7106f88663073ce"
+      "expect_hex": "3f274a9c975514017ea1e324db94dc1fc018ded8bd733e26eddd113250672889"
     }
   ],
   "cnf_kid": [
@@ -60,7 +69,7 @@
       "credential_binding": "sha256:3d8cb08731ebf6063261f0da1bf47d8be3a17f9d2e24015f353d738ed22477c1",
       "threshold_m": 2,
       "exp": 1718449200,
-      "expect_hex": "e93a922c6417050a97335230292c4cd2f6a8dab9c476e9d41f6cfaf0f06b5fee"
+      "expect_hex": "e9c94416485e2d763c22093d7e96999ccefdf50621e8116a230e9c99412a4214"
     },
     {
       "name": "multibyte-utf8",
@@ -69,7 +78,7 @@
       "credential_binding": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "threshold_m": 3,
       "exp": 1718449200,
-      "expect_hex": "1ca6103ab46e8adc33b4bb0706e8b7699ab25f3114e38bfc134605ae42de418e"
+      "expect_hex": "acb2181094ce6ad1b88f5b3de6fd3c118c7e967b3e3cf0d061824bb5f04a7f5d"
     },
     {
       "_note": "two's-complement BE8 boundary: threshold_m=-1 (0xFFFF..FF), exp=i64::MIN (0x8000..00). Not a reachable verifier state (the gate requires threshold>=1) — it pins the int64->BE8 encoding identically across languages so a sign-handling drift breaks the file itself.",
@@ -79,7 +88,7 @@
       "credential_binding": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "threshold_m": -1,
       "exp": -9223372036854775808,
-      "expect_hex": "41e15553d63d095fd2cba56e43e0e21391d0d46157009d08464b080b286c1365"
+      "expect_hex": "882f93ece8ede7769e59173c222e71de32e01eb52ab937f99f4c23705af79a52"
     }
   ],
   "delegation_hop_challenge": [
@@ -93,7 +102,7 @@
       "action": "db.query:orders-ro",
       "resource_id": "orders-db",
       "exp": 1718449200,
-      "expect_hex": "487a73bc0ff7095c32d29ab06bccf8b277780df63b67ae6ab1b6569aa4debab7"
+      "expect_hex": "d32ae5ef24dc3f3f59bdbf01f05767aa84a1f10573326169c9e843247e76465b"
     },
     {
       "name": "multibyte-utf8",
@@ -105,7 +114,7 @@
       "action": "🔑",
       "resource_id": "資源",
       "exp": 1718449200,
-      "expect_hex": "0bde95025cd374379aac8d0fd918af379e5b98ffda98592a29997569e0918df3"
+      "expect_hex": "bdd874262c81a3c614a4e55aae9957e654d5219efc94f5e1e740336340af2854"
     },
     {
       "_note": "int64 BE8 boundary on hop_index + exp: pins the two's-complement encoding identically across languages.",
@@ -118,7 +127,7 @@
       "action": "a",
       "resource_id": "r",
       "exp": -9223372036854775808,
-      "expect_hex": "eb5dc1eb5db4a751b626e7637e0b7695cccd33c3a97a07614928c105369cb125"
+      "expect_hex": "0a3078783adb4a745da40e20f2a863e94dec41ddf3cab1a1a87dbc28d1ddaa6e"
     }
   ],
   "introspection_transcript_challenge": [
@@ -130,7 +139,7 @@
       "resource_id": "orders-db",
       "introspected_at": 1718445700,
       "effective_exp": 1718449200,
-      "expect_hex": "0e6784ecd962ed630c3da5b3e5069227bf3b33f53ecf1e9c398aaa0b72519700"
+      "expect_hex": "77343183f6c795429fc5167c4410c85acfea952cdd6e5bb04ae1f4610e784eed"
     },
     {
       "name": "multibyte-utf8",
@@ -140,7 +149,7 @@
       "resource_id": "資源",
       "introspected_at": 1718445700,
       "effective_exp": 1718449200,
-      "expect_hex": "703a3edab5c1badc3f4a2900c89f3ed6800052e851e7b3f7aa96f77a1188db4a"
+      "expect_hex": "9bd0db7805d09365030679637616621dab12e029f54bc8793b67ddb5685c2540"
     },
     {
       "_note": "int64 BE8 boundary on introspected_at + effective_exp = i64::MIN (0x8000..00): pins the two's-complement encoding identically across languages. Not a reachable verifier state (introspected_at >= issued_at) — it pins the int64->BE8 encoding.",
@@ -151,7 +160,7 @@
       "resource_id": "r",
       "introspected_at": -9223372036854775808,
       "effective_exp": -9223372036854775808,
-      "expect_hex": "16b2a46d0c9c07378460a24881b9dc39af34104be7b12f7af3ddb94810e6195b"
+      "expect_hex": "6f2468082b93ef4406a4a5be6b16aabb6220b2182c608057c8b3ba8884e1a65e"
     }
   ],
   "federation_cert_challenge": [
@@ -164,7 +173,7 @@
       "scope": "read:orders",
       "resource_id": "orders-db",
       "not_after": 1718449200,
-      "expect_hex": "c45fc9640967a2739c2381000b9887900dd4bc75568454152571ef28c2f52b8d"
+      "expect_hex": "1ebbe1924db6e7d17cc28113789bab4969f808eeb9813adcb42b9fd515991103"
     },
     {
       "name": "multibyte-utf8",
@@ -174,7 +183,7 @@
       "scope": "閲覧:注文",
       "resource_id": "資源データベース",
       "not_after": 1718449200,
-      "expect_hex": "73f93004ecd580666a11f0d4146e9855d5a66006811cf70356e51ac7d780868c"
+      "expect_hex": "e05069466af6dc0186b9c6b3db8e5bdcb553ea4af4aca7d5a2167badceb32148"
     },
     {
       "_note": "int64 BE8 boundary on not_after = i64::MIN (0x8000..00): pins the two's-complement encoding identically across languages.",
@@ -185,7 +194,7 @@
       "scope": "sc",
       "resource_id": "r",
       "not_after": -9223372036854775808,
-      "expect_hex": "26aced645332567b0f9d51bc112dc22d5a7a69776beca706446931ac32cf1f98"
+      "expect_hex": "f017f8f11513fc32dca78e16e8045bd2220a732f873fc0934c33be5fdb7ac217"
     }
   ],
   "revocation_leaf": [
@@ -193,17 +202,17 @@
       "_note": "ADR 0005 M5 Merkle-non-disclosure: the leaf VALUE for a grant_id = sha256(LP4(tag) ‖ LP4(grant_id)). expect_hex is the raw 32-byte hash (NOT 0x00-prefixed — that hashing happens inside the tree).",
       "name": "ascii",
       "grant_id": "grant-001",
-      "expect_hex": "d82024d002e8ca2d3adf478b3483a08691bddf8457ef1e1d583f529527f01f62"
+      "expect_hex": "8cfd5eeb0f0bf1bff3a559e522a90120f6e319be10259be66a858a88aba7dae8"
     },
     {
       "name": "multibyte-utf8",
       "grant_id": "資格-証明-é",
-      "expect_hex": "304acd3cbf9b1fb28c81d64da104f64fd9b7572368726897107eb9e9770c15cc"
+      "expect_hex": "cd4989b6bd863ff597a87c7d4ceb9fc222dfcb4f108baf80ac12b5f3a705ca3d"
     },
     {
       "name": "single-char",
       "grant_id": "g",
-      "expect_hex": "6746a7385acc0c8a76b97dea027c10576bb79dfc119b44986fd651c2a296a4f0"
+      "expect_hex": "aae827fc6efa623bbd638eda0fb8f173269caeeccd96a5ce1c2638ab55ef8e86"
     }
   ],
   "revocation_merkle_root": [
@@ -215,19 +224,30 @@
     },
     {
       "name": "single",
-      "revoked": ["grant-001"],
-      "expect": "sha256:1fb8f3484420de97262129bde8fc70c855ef3c727f64c953670a4e3300ddf1c3"
+      "revoked": [
+        "grant-001"
+      ],
+      "expect": "sha256:e47c034c986f54267290072cf4f12a4000d6a4e0e7eb4279fa9bdbda29e08020"
     },
     {
       "name": "three",
-      "revoked": ["grant-001", "grant-002", "grant-003"],
-      "expect": "sha256:12ecd84343ebea0a7e928937e8a869617fc9cd82a1908e67fe30a1b36ef0d0cd"
+      "revoked": [
+        "grant-001",
+        "grant-002",
+        "grant-003"
+      ],
+      "expect": "sha256:6c42a269419374ea7dc1432d8b13479e56a480b221711a425537731d6907e998"
     },
     {
       "_note": "an UNSORTED input — the producer sorts by leaf-hash byte order before folding, so the root is order-independent (this pins that both languages sort identically).",
       "name": "unsorted-four",
-      "revoked": ["zzz", "aaa", "mmm", "ggg"],
-      "expect": "sha256:56b0af74678c1697895a25e809232c882f5b23e8b0960b00e7d643bed9466c9b"
+      "revoked": [
+        "zzz",
+        "aaa",
+        "mmm",
+        "ggg"
+      ],
+      "expect": "sha256:2e2324dcc632ff2c1034ef0ef525a65a1fb5b206382cae645a02c3e2c7d00925"
     }
   ]
 }

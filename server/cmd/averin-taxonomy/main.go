@@ -1,4 +1,4 @@
-// Command feir-taxonomy signs an operation taxonomy (ADR 0004 D4 / threat F8) so a deployment can AUTHOR
+// Command averin-taxonomy signs an operation taxonomy (ADR 0004 D4 / threat F8) so a deployment can AUTHOR
 // and ROTATE the artifact the offline verifier pins. It prints the signed taxonomy JSON to stdout (or
 // --out) and the pinning triple (taxonomy_digest, taxonomy_version, taxonomy issuer public key) to stderr.
 // The issuer holds NO runtime authority over grants/uses — its key must be role-separated from the
@@ -7,7 +7,7 @@
 //
 // Example:
 //
-//	feir-taxonomy --key <64-hex-seed> --version 1 --from 1718000000 --until 1760000000 \
+//	averin-taxonomy --key <64-hex-seed> --version 1 --from 1718000000 --until 1760000000 \
 //	  --single orders-db=db.query:orders-ro --escalating orders-db=db.admin:drop
 package main
 
@@ -20,8 +20,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/feir-dev/feir/server/internal/core"
-	"github.com/feir-dev/feir/server/internal/taxonomy"
+	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/taxonomy"
 )
 
 // entryList collects repeatable resource_id=action flags into taxonomy entries.
@@ -76,6 +76,6 @@ func main() {
 }
 
 func fatal(msg string) {
-	fmt.Fprintln(os.Stderr, "feir-taxonomy: "+msg)
+	fmt.Fprintln(os.Stderr, "averin-taxonomy: "+msg)
 	os.Exit(1)
 }

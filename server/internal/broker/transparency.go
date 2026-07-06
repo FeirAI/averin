@@ -7,7 +7,7 @@ import (
 )
 
 // grantHeadTag domain-separates the cumulative grant-transparency hash chain (ADR 0004 D6 / MF2).
-const grantHeadTag = "feir.broker.grant_head.v1"
+const grantHeadTag = "averin.broker.grant_head.v1"
 
 // GrantSeqHash is one entry in the grant log: a broker_seq and the grant record's content_hash.
 type GrantSeqHash struct {
@@ -17,7 +17,7 @@ type GrantSeqHash struct {
 
 // GrantHeadRoot is the cumulative grant-transparency root (ADR 0004 D6 / MF2): a hash-CHAIN that folds
 // (broker_seq, grant content_hash) pairs in ASCENDING broker_seq order. It is byte-identical to Rust
-// feir_decision_core::verify::grant_head_root (pinned by the SHARED golden vector
+// averin_decision_core::verify::grant_head_root (pinned by the SHARED golden vector
 // spec/golden-vectors/broker-preimages.json, loaded by both languages' tests), so the offline
 // verifier re-derives the cumulative_root an anchored checkpoint's broker_grant_head carries — and a
 // dropped, renumbered, or forked grant fails the re-derivation.

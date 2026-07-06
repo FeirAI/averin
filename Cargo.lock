@@ -3,6 +3,24 @@
 version = 4
 
 [[package]]
+name = "averin-decision-core"
+version = "0.1.0"
+dependencies = [
+ "cms",
+ "const-oid",
+ "der",
+ "ecdsa",
+ "ed25519-dalek",
+ "getrandom",
+ "p256",
+ "sha2",
+ "signature",
+ "spki",
+ "unicode-normalization",
+ "x509-cert",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -197,24 +215,6 @@ dependencies = [
  "sec1",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "feir-decision-core"
-version = "0.1.0"
-dependencies = [
- "cms",
- "const-oid",
- "der",
- "ecdsa",
- "ed25519-dalek",
- "getrandom",
- "p256",
- "sha2",
- "signature",
- "spki",
- "unicode-normalization",
- "x509-cert",
 ]
 
 [[package]]

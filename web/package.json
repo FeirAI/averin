@@ -1,9 +1,9 @@
 {
-  "name": "@feir/web",
+  "name": "@averin/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "feir web app — browse/replay agent runs as a verifiable trace waterfall.",
+  "description": "averin web app — browse/replay agent runs as a verifiable trace waterfall.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

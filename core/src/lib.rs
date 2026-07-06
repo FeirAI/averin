@@ -1,4 +1,4 @@
-//! feir `decision-core` — the single source of truth for the integrity pipeline:
+//! averin `decision-core` — the single source of truth for the integrity pipeline:
 //! canonicalize → commit → hash → sign → DAG-link → checkpoint → verify.
 //!
 //! One crate, three build targets: rlib (CLI + tests), cdylib/staticlib (cgo FFI), and WASM

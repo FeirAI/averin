@@ -1,10 +1,10 @@
 //! Signing + commitment golden vectors (M1.3/M1.4). Ed25519 is deterministic (RFC 8032), so
 //! `sig` must reproduce byte-for-byte from the seed; commitments must reproduce from value+nonce.
 
-use feir_decision_core::canon::CanonValue;
-use feir_decision_core::commit::{commit, verify_commitment, FieldDomain};
-use feir_decision_core::record::{seal, verify_sealed, verify_signature};
-use feir_decision_core::sign::{decode_pubkey, signing_key_from_seed};
+use averin_decision_core::canon::CanonValue;
+use averin_decision_core::commit::{commit, verify_commitment, FieldDomain};
+use averin_decision_core::record::{seal, verify_sealed, verify_signature};
+use averin_decision_core::sign::{decode_pubkey, signing_key_from_seed};
 use std::path::PathBuf;
 
 fn vectors_dir() -> PathBuf {

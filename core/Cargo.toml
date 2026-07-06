@@ -1,20 +1,20 @@
 [package]
-name = "feir-decision-core"
+name = "averin-decision-core"
 version = "0.1.0"
-description = "feir integrity core: canonicalize -> commit -> hash -> sign -> DAG-link -> checkpoint -> verify. Single source of truth (lib + verify CLI + WASM)."
+description = "averin integrity core: canonicalize -> commit -> hash -> sign -> DAG-link -> checkpoint -> verify. Single source of truth (lib + verify CLI + WASM)."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
 [lib]
-name = "feir_decision_core"
+name = "averin_decision_core"
 # rlib: bin + tests; cdylib/staticlib: cgo FFI + wasm
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [[bin]]
-name = "feir-verify"
-path = "src/bin/feir_verify.rs"
+name = "averin-verify"
+path = "src/bin/averin_verify.rs"
 
 [features]
 default = ["std"]

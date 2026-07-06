@@ -3,18 +3,18 @@
 // the real Go-produced broker bundle + its pinned opts, asserting the fields index.html renders are present and
 // meaningful under pinning (grant accountability elevated, the use matched, keys externally pinned).
 import { test, expect } from "bun:test";
-import { initFeir } from "../feir.js";
+import { initAverin } from "../averin.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..", "..");
-const WASM = join(ROOT, "target", "wasm32-unknown-unknown", "release", "feir_decision_core.wasm");
+const WASM = join(ROOT, "target", "wasm32-unknown-unknown", "release", "averin_decision_core.wasm");
 const FIXTURE = JSON.parse(readFileSync(join(ROOT, "spec", "fixtures", "bundle-broker-valid.json"), "utf8"));
 
-const feir = () => initFeir(new Uint8Array(readFileSync(WASM)));
+const averin = () => initAverin(new Uint8Array(readFileSync(WASM)));
 
 test("pinned ROLE keys elevate accountability + expose the fields the UI renders", async () => {
-  const v = await feir();
+  const v = await averin();
   const r = v.verifyBundleWith(FIXTURE.bundle, FIXTURE.opts);
 
   // Integrity baseline still holds.
@@ -38,7 +38,7 @@ test("pinned ROLE keys elevate accountability + expose the fields the UI renders
 });
 
 test("WITHOUT pinned keys the SAME bundle is NOT elevated (the honest downgrade the UI shows)", async () => {
-  const v = await feir();
+  const v = await averin();
   const r = v.verifyBundle(JSON.stringify(FIXTURE.bundle));
   // No role pins -> accountability is not elevated: grants incomplete, the use unmatched, broker trust at the
   // export-consistency floor. keys_externally_pinned is false in BOTH cases (it is a different axis).

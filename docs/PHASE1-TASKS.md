@@ -1,4 +1,4 @@
-# Phase 1 Task List — "Flight Recorder for AI Agents" (feir)
+# Phase 1 Task List — "Flight Recorder for AI Agents" (averin)
 
 Derived from the Phase 1 Engineering Spec v2. Status legend: ☐ not started · ◔ in progress · ☑ done · ⏸ deferred (post-Phase-1).
 

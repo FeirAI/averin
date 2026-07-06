@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/feir-dev/feir/server/internal/broker"
-	"github.com/feir-dev/feir/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/broker"
+	"github.com/averin-dev/averin/server/internal/core"
 )
 
 // pubEncoded renders an ed25519 public key in the "ed25519pub:<b64url>" form the verifier opts expect.
@@ -78,7 +78,7 @@ func TestCosigGrantRoundTripsThroughRustVerifier(t *testing.T) {
 	}
 	recBody := map[string]any{
 		"schema_version": "2", "canon_version": "rcp-1", "domain": "flightrecorder.record.v2",
-		"record_id": grantID, "project_id": "proj-001", "agent_id": "agent-x", "agent_version": "feir-broker",
+		"record_id": grantID, "project_id": "proj-001", "agent_id": "agent-x", "agent_version": "averin-broker",
 		"session_id": "s1", "span_id": "sp-" + grantID, "parent_span_id": nil, "causal_prev_hashes": []string{},
 		"display_seq": 0, "agent_ts": "2026-06-15T10:00:00.000Z", "received_ts": "2026-06-15T10:00:00.000Z",
 		"event_type": "credential_grant", "action": req.Action, "observed_via": "broker", "status": "ok",

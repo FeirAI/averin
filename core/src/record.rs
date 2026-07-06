@@ -76,12 +76,12 @@ pub const ALLOWED_TOP_KEYS: &[&str] = &[
     "anchored_ts",
     "event_type",
     // Optional typed evidence kind, a SIBLING of `event_type` (does not replace it). Closed
-    // value-set {budget-exhausted, chargeback-posted}, kebab-case per feir convention. It is a
+    // value-set {budget-exhausted, chargeback-posted}, kebab-case per averin convention. It is a
     // normal signed top-level field (covered by content_hash/sig like any key — canon iterates
     // object keys), so it must be in ALLOWED_TOP_KEYS for validate_record_shape/verify_sealed to
     // accept it; it is NOT in REQUIRED_TOP_KEYS (optional). The JSON Schema pins the enum values;
     // the closed-key gate here only admits the field. See spec/decision-record.schema.json and
-    // leria's feir-integration-handoff.md.
+    // leria's averin-integration-handoff.md.
     "record_kind",
     "action",
     "observed_via",

@@ -2,11 +2,11 @@
 //! The committed vectors are the cross-implementation contract; `tests/golden.rs` asserts the
 //! core reproduces them byte-for-byte. Regenerate only on an intentional RCP change.
 
-use feir_decision_core::canon::CanonValue;
-use feir_decision_core::commit::{commit, FieldDomain};
-use feir_decision_core::hashx::hex_lower;
-use feir_decision_core::record::{compute_content_hash, seal};
-use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
+use averin_decision_core::canon::CanonValue;
+use averin_decision_core::commit::{commit, FieldDomain};
+use averin_decision_core::hashx::hex_lower;
+use averin_decision_core::record::{compute_content_hash, seal};
+use averin_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use std::path::PathBuf;
 
 fn spec_dir() -> PathBuf {

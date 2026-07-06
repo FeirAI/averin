@@ -3,20 +3,20 @@
 //! each: #1 omission, #2 fork, #3 backdating, #4 key pinning, #7 subset-frontier, #8 dup-collapse,
 //! #9 key compromise, plus integrity tamper.
 
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use feir_decision_core::anchor::{make_test_anchor, test_tsa_key};
-use feir_decision_core::authority::sign_evidence;
-use feir_decision_core::canon::CanonValue;
-use feir_decision_core::checkpoint::{attach_anchor, checkpoint_body, seal_checkpoint};
-use feir_decision_core::hashx::sha256_prefixed;
-use feir_decision_core::record::seal;
-use feir_decision_core::sign::{encode_pubkey, signing_key_from_seed};
-use feir_decision_core::verify::{
+use averin_decision_core::anchor::{make_test_anchor, test_tsa_key};
+use averin_decision_core::authority::sign_evidence;
+use averin_decision_core::canon::CanonValue;
+use averin_decision_core::checkpoint::{attach_anchor, checkpoint_body, seal_checkpoint};
+use averin_decision_core::hashx::sha256_prefixed;
+use averin_decision_core::record::seal;
+use averin_decision_core::sign::{encode_pubkey, signing_key_from_seed};
+use averin_decision_core::verify::{
     cnf_kid, cosig_approval_challenge, delegation_hop_challenge, federation_cert_challenge,
     introspection_transcript_challenge, report_to_json, verify_bundle, verify_bundle_with,
     verify_bundle_with_json, ActionCompleteness, RoleKeyStatus, TrustLevel, TrustedKey,
     VerifyOptions, VerifyReport,
 };
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -107,7 +107,7 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
     let mk_body = |broker_inner: &str, eh: &str, esig: &str| {
         format!(
             r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
-        "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"feir-broker",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"averin-broker",
         "session_id":"s","span_id":"sp","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
         "agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z",
         "event_type":"credential_grant","action":"db.query:orders-ro","observed_via":"broker","status":"ok",
@@ -177,7 +177,7 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
     assert_eq!(r2.grant_verified, 1);
 
     // The report JSON surfaces the Tier-A verdict.
-    let json = feir_decision_core::verify::report_to_json(&r2);
+    let json = averin_decision_core::verify::report_to_json(&r2);
     assert!(
         json.contains(r#""grant_accountability":"complete""#),
         "{json}"
@@ -340,7 +340,7 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
     );
 
     // verify_bundle_with_json fails CLOSED on a malformed pinned key (no silent drop to unpinned).
-    let report = feir_decision_core::verify::verify_bundle_with_json(
+    let report = averin_decision_core::verify::verify_bundle_with_json(
         &bundle.serialize(),
         r#"{"authority_keys":["not-a-key"]}"#,
     );
@@ -856,8 +856,8 @@ fn backdated_anchor_time_is_detected() {
 #[cfg(feature = "test-tsa")]
 #[test]
 fn real_rfc3161_anchor_salvages_compromised_key_in_bundle() {
-    use feir_decision_core::b64;
-    use feir_decision_core::rfc3161::make_test_token;
+    use averin_decision_core::b64;
+    use averin_decision_core::rfc3161::make_test_token;
 
     let b = fixture();
     let mut checkpoints = arr(&b, "checkpoints");
@@ -919,8 +919,8 @@ fn valid_anchor_on_unverified_checkpoint_does_not_upgrade() {
     // Threat: pair a valid TSA token with a checkpoint whose OWN signature fails. The anchor binds
     // the (unchanged) checkpoint_hash, but because the checkpoint isn't authenticated its frontier
     // is attacker-controlled — so it must NOT contribute to the #9 anchored-before upgrade.
-    use feir_decision_core::b64;
-    use feir_decision_core::rfc3161::make_test_token;
+    use averin_decision_core::b64;
+    use averin_decision_core::rfc3161::make_test_token;
 
     let b = fixture();
     let mut checkpoints = arr(&b, "checkpoints");
@@ -1057,7 +1057,7 @@ fn use_evidence_n(
         (
             // the real re-derivable ledger_commitment (D3): sha256(LP(tag)‖LP(jti)‖LP(nonce)‖BE8(used_at))
             "ledger_commitment".into(),
-            CanonValue::string(feir_decision_core::verify::ledger_commitment(
+            CanonValue::string(averin_decision_core::verify::ledger_commitment(
                 jti, nonce, used_at,
             )),
         ),
@@ -1091,7 +1091,7 @@ fn seal_grant_prev(
         CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
-        "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"feir-broker",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"averin-broker",
         "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":0,
         "agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z",
         "event_type":"credential_grant","action":"{action}","observed_via":"broker","status":"ok",
@@ -1123,7 +1123,7 @@ fn seal_use_full(
         CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
-        "record_id":"{record_id}","project_id":"proj-001","agent_id":"feir-resource","agent_version":"feir-resource",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"averin-resource","agent_version":"averin-resource",
         "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
         "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
         "event_type":"tool_call","action":"{top_action}","observed_via":"broker","status":"ok",
@@ -1178,7 +1178,7 @@ fn seal_intent(
         CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
-        "record_id":"{record_id}","project_id":"proj-001","agent_id":"feir-resource","agent_version":"feir-resource",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"averin-resource","agent_version":"averin-resource",
         "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
         "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
         "event_type":"tool_call","action":"{top_action}","observed_via":"broker","status":"ok",
@@ -1272,7 +1272,7 @@ fn seal_outcome_full(
         CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
-        "record_id":"{record_id}","project_id":"proj-001","agent_id":"feir-resource","agent_version":"feir-resource",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"averin-resource","agent_version":"averin-resource",
         "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":2,
         "agent_ts":"2026-06-15T10:00:06.000Z","received_ts":"2026-06-15T10:00:06.000Z",
         "event_type":"tool_call","action":"{ACTION}","observed_via":"broker","status":"ok",
@@ -1389,7 +1389,7 @@ fn tier_b_use_matches_closed_grant() {
     assert_eq!(r.unmatched_pending, 0);
     assert_eq!(r.grants_unused, 0);
     // the new Tier-B fields are present in the canonical report JSON (WASM/Go consumers read these).
-    let json = feir_decision_core::verify::report_to_json(&r);
+    let json = averin_decision_core::verify::report_to_json(&r);
     assert!(json.contains(r#""action_completeness":"not_claimed""#)); // no coverage_manifest
     for field in [
         r#""uses_total":1"#,
@@ -1547,7 +1547,7 @@ fn tier_b_bounded_reuse_within_cap_verifies() {
     assert_eq!(r.bounded_reuse_seq_replays, 0);
     assert_eq!(r.unmatched_violation, 0);
     assert_eq!(r.grants_unused, 0);
-    let json = feir_decision_core::verify::report_to_json(&r);
+    let json = averin_decision_core::verify::report_to_json(&r);
     for field in [
         r#""bounded_reuse_grants":1"#,
         r#""bounded_reuse_overspent":0"#,
@@ -2272,7 +2272,7 @@ fn tier_b_use_side_mislabel_fails_closed() {
 // use_evidence is mutated by `mutate`, and returns the report — for testing the MUST-FIX 4 field gates.
 fn verify_mangled_use(
     mutate: impl Fn(&CanonValue) -> CanonValue,
-) -> feir_decision_core::verify::VerifyReport {
+) -> averin_decision_core::verify::VerifyReport {
     let rec = signing_key_from_seed(&[0u8; 32]);
     let res = signing_key_from_seed(&[3u8; 32]);
     let tsa = test_tsa_key(&[200u8; 32]);
@@ -2440,7 +2440,7 @@ fn preimage_vectors() -> CanonValue {
 
 #[test]
 fn ledger_commitment_golden_vector() {
-    use feir_decision_core::verify::ledger_commitment;
+    use averin_decision_core::verify::ledger_commitment;
     let v = preimage_vectors();
     let cases = v.get("ledger_commitment").unwrap().as_array().unwrap();
     assert!(
@@ -2463,7 +2463,7 @@ fn ledger_commitment_golden_vector() {
 
 #[test]
 fn grant_head_root_golden_vector() {
-    use feir_decision_core::verify::grant_head_root;
+    use averin_decision_core::verify::grant_head_root;
     let v = preimage_vectors();
     let parse_grants = |case: &CanonValue| -> Vec<(i64, String)> {
         case.get("grants")
@@ -2502,9 +2502,9 @@ fn grant_head_root_golden_vector() {
 }
 
 // ---- D2: offline PoP re-verification fixtures (ADR 0004) ----
-use feir_decision_core::b64::encode as b64enc;
-use feir_decision_core::hashx::hex_lower;
-use feir_decision_core::verify::{cnf_kid as vk_cnf_kid, use_pop_challenge};
+use averin_decision_core::b64::encode as b64enc;
+use averin_decision_core::hashx::hex_lower;
+use averin_decision_core::verify::{cnf_kid as vk_cnf_kid, use_pop_challenge};
 
 // the credential_binding the grant_evidence helper carries (so a D2 use's PoP challenge matches it)
 fn test_credential_binding() -> String {
@@ -2544,7 +2544,7 @@ fn seal_d2_use(
         ("cnf_kid".into(), CanonValue::string(cnf_kid_str)),
         (
             "ledger_commitment".into(),
-            CanonValue::string(feir_decision_core::verify::ledger_commitment(
+            CanonValue::string(averin_decision_core::verify::ledger_commitment(
                 GID, &nonce, used_at,
             )),
         ),
@@ -2562,7 +2562,7 @@ fn seal_d2_use(
         CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
-        "record_id":"{record_id}","project_id":"proj-001","agent_id":"feir-resource","agent_version":"feir-resource",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"averin-resource","agent_version":"averin-resource",
         "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
         "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
         "event_type":"tool_call","action":"{ACTION}","observed_via":"broker","status":"ok",
@@ -2630,7 +2630,7 @@ fn tier_b_pop_reverified_under_carried_cnf() {
         r.uses_pop_reverified, 1,
         "the PoP should be independently re-run offline"
     );
-    assert!(feir_decision_core::verify::report_to_json(&r).contains(r#""uses_pop_reverified":1"#));
+    assert!(averin_decision_core::verify::report_to_json(&r).contains(r#""uses_pop_reverified":1"#));
 }
 
 #[test]
@@ -2793,7 +2793,7 @@ fn use_pop_challenge_and_cnf_kid_golden_vectors() {
     }
     for case in cnf_cases {
         let seed =
-            feir_decision_core::hashx::hex32(case.get("seed_hex").unwrap().as_str().unwrap())
+            averin_decision_core::hashx::hex32(case.get("seed_hex").unwrap().as_str().unwrap())
                 .expect("seed_hex is 32 bytes");
         let cnf = signing_key_from_seed(&seed).verifying_key();
         assert_eq!(
@@ -2856,7 +2856,7 @@ fn taxonomy_full(
     }
     let body = CanonValue::object(fields).unwrap();
     let digest = sha256_prefixed(body.serialize().as_bytes());
-    let sig = feir_decision_core::sign::sign("feir.taxonomy.v1", &digest, tax_sk);
+    let sig = averin_decision_core::sign::sign("averin.taxonomy.v1", &digest, tax_sk);
     change_field(&body, "sig", CanonValue::string(sig))
 }
 
@@ -2932,9 +2932,8 @@ fn tier_b_taxonomy_validated_use_is_action_verified() {
         "a taxonomy-validated use is action-verified"
     );
     assert_eq!(r.taxonomy_status, "validated");
-    assert!(
-        feir_decision_core::verify::report_to_json(&r).contains(r#""taxonomy_status":"validated""#)
-    );
+    assert!(averin_decision_core::verify::report_to_json(&r)
+        .contains(r#""taxonomy_status":"validated""#));
 }
 
 #[test]
@@ -3335,8 +3334,10 @@ fn tier_b_taxonomy_via_json_opts() {
         ("taxonomy_version".into(), CanonValue::Int(1)),
     ])
     .unwrap();
-    let report =
-        feir_decision_core::verify::verify_bundle_with_json(&bundle.serialize(), &opts.serialize());
+    let report = averin_decision_core::verify::verify_bundle_with_json(
+        &bundle.serialize(),
+        &opts.serialize(),
+    );
     assert!(
         report.contains(r#""taxonomy_status":"validated""#),
         "{report}"
@@ -3894,7 +3895,7 @@ fn tier_b_taxonomy_malformed_entry_is_untrusted() {
     ])
     .unwrap();
     let digest = sha256_prefixed(body.serialize().as_bytes());
-    let sig = feir_decision_core::sign::sign("feir.taxonomy.v1", &digest, &tax);
+    let sig = averin_decision_core::sign::sign("averin.taxonomy.v1", &digest, &tax);
     let t = change_field(&body, "sig", CanonValue::string(sig));
     let r = verify_bundle_with(
         &bundle,
@@ -3937,7 +3938,7 @@ fn tier_b_taxonomy_missing_version_is_untrusted() {
     ])
     .unwrap();
     let digest = sha256_prefixed(body.serialize().as_bytes());
-    let sig = feir_decision_core::sign::sign("feir.taxonomy.v1", &digest, &tax);
+    let sig = averin_decision_core::sign::sign("averin.taxonomy.v1", &digest, &tax);
     let t = change_field(&body, "sig", CanonValue::string(sig));
     let mut opts = pinned_roles_tax(
         rec.verifying_key(),
@@ -3990,7 +3991,7 @@ fn tier_b_taxonomy_json_pins_are_fail_closed() {
     let good_digest = CanonValue::string(tax_digest(&t));
     // non-string digest → error
     let bad_digest = base(CanonValue::Int(7), CanonValue::Int(1));
-    let r1 = feir_decision_core::verify::verify_bundle_with_json(
+    let r1 = averin_decision_core::verify::verify_bundle_with_json(
         &bundle.serialize(),
         &bad_digest.serialize(),
     );
@@ -4000,7 +4001,7 @@ fn tier_b_taxonomy_json_pins_are_fail_closed() {
     );
     // non-integer version → error
     let bad_version = base(good_digest, CanonValue::string("1"));
-    let r2 = feir_decision_core::verify::verify_bundle_with_json(
+    let r2 = averin_decision_core::verify::verify_bundle_with_json(
         &bundle.serialize(),
         &bad_version.serialize(),
     );
@@ -4123,7 +4124,7 @@ fn taxonomy_digest_golden_vector() {
 
 fn ghr(grants: &[(i64, &str)]) -> String {
     let v: Vec<(i64, String)> = grants.iter().map(|(s, h)| (*s, h.to_string())).collect();
-    feir_decision_core::verify::grant_head_root(&v)
+    averin_decision_core::verify::grant_head_root(&v)
 }
 
 fn grant_head_cv(max_seq: i64, prior: &str, root: &str) -> CanonValue {
@@ -4193,14 +4194,14 @@ fn verify_report_binds_the_input_digest() {
     let text = d6_clean(&rec, &tsa).serialize();
     let want = sha256_prefixed(text.as_bytes());
     // unpinned path
-    let r = CanonValue::parse(&feir_decision_core::verify::verify_bundle_to_json(&text)).unwrap();
+    let r = CanonValue::parse(&averin_decision_core::verify::verify_bundle_to_json(&text)).unwrap();
     assert_eq!(
         r.get("bundle_digest").and_then(|v| v.as_str()),
         Some(want.as_str()),
         "unpinned report must bind the input digest"
     );
     // pinned path (verify_bundle_with_json) binds the BUNDLE bytes (not opts)
-    let r2 = CanonValue::parse(&feir_decision_core::verify::verify_bundle_with_json(
+    let r2 = CanonValue::parse(&averin_decision_core::verify::verify_bundle_with_json(
         &text, "{}",
     ))
     .unwrap();
@@ -4211,7 +4212,7 @@ fn verify_report_binds_the_input_digest() {
     );
     // a parse-error report also binds the digest of what was supplied.
     let bad = "{not json";
-    let r3 = CanonValue::parse(&feir_decision_core::verify::verify_bundle_to_json(bad)).unwrap();
+    let r3 = CanonValue::parse(&averin_decision_core::verify::verify_bundle_to_json(bad)).unwrap();
     assert_eq!(
         r3.get("bundle_digest").and_then(|v| v.as_str()),
         Some(sha256_prefixed(bad.as_bytes()).as_str())
@@ -5241,7 +5242,7 @@ fn seal_grant_cred(
     let action = ge.get("action").unwrap().as_str().unwrap();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
-        "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"feir-broker",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"averin-broker",
         "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
         "agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z",
         "event_type":"credential_grant","action":"{action}","observed_via":"broker","status":"ok",
@@ -5271,7 +5272,7 @@ fn cred_descriptor(
         ("aud".into(), CanonValue::string(aud)),
         (
             "cnf".into(),
-            CanonValue::string(feir_decision_core::b64::encode(cnf_vk.as_bytes())),
+            CanonValue::string(averin_decision_core::b64::encode(cnf_vk.as_bytes())),
         ),
         ("exp".into(), CanonValue::Int(exp)),
         ("iat".into(), CanonValue::Int(ISSUED)),
@@ -5312,8 +5313,8 @@ fn cred_bundle(
 ) -> CanonValue {
     let dbytes = descriptor.serialize();
     let nonce = [0x11u8; 32];
-    let commitment = feir_decision_core::commit(
-        feir_decision_core::FieldDomain::parse("credential").unwrap(),
+    let commitment = averin_decision_core::commit(
+        averin_decision_core::FieldDomain::parse("credential").unwrap(),
         dbytes.as_bytes(),
         &nonce,
     )
@@ -5326,11 +5327,11 @@ fn cred_bundle(
         ("field".into(), CanonValue::string("credential")),
         (
             "value_b64".into(),
-            CanonValue::string(feir_decision_core::b64::encode(dbytes.as_bytes())),
+            CanonValue::string(averin_decision_core::b64::encode(dbytes.as_bytes())),
         ),
         (
             "nonce_hex".into(),
-            CanonValue::string(feir_decision_core::hashx::hex_lower(&nonce)),
+            CanonValue::string(averin_decision_core::hashx::hex_lower(&nonce)),
         ),
     ])
     .unwrap();
@@ -5348,7 +5349,7 @@ fn tier_b_cred_descriptor_match() {
         test_tsa_key(&[200u8; 32]),
     );
     let cnf = signing_key_from_seed(&[9u8; 32]);
-    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let kid = averin_decision_core::verify::cnf_kid(&cnf.verifying_key());
     let descriptor = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true);
     let binding = sha256_prefixed(descriptor.serialize().as_bytes());
     let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &binding));
@@ -5379,7 +5380,7 @@ fn tier_b_cred_descriptor_action_mismatch_is_violation() {
         test_tsa_key(&[200u8; 32]),
     );
     let cnf = signing_key_from_seed(&[9u8; 32]);
-    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let kid = averin_decision_core::verify::cnf_kid(&cnf.verifying_key());
     let descriptor = cred_descriptor(
         &cnf.verifying_key(),
         "db.admin:orders-rw",
@@ -5422,7 +5423,7 @@ fn tier_b_cred_descriptor_scope_mismatch_is_violation() {
         test_tsa_key(&[200u8; 32]),
     );
     let cnf = signing_key_from_seed(&[9u8; 32]);
-    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let kid = averin_decision_core::verify::cnf_kid(&cnf.verifying_key());
     let descriptor = change_field(
         &cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true),
         "scope",
@@ -5462,7 +5463,7 @@ fn tier_b_cred_descriptor_subject_mismatch_is_violation() {
         test_tsa_key(&[200u8; 32]),
     );
     let cnf = signing_key_from_seed(&[9u8; 32]);
-    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let kid = averin_decision_core::verify::cnf_kid(&cnf.verifying_key());
     let descriptor = change_field(
         &cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true),
         "sub",
@@ -5499,7 +5500,7 @@ fn tier_b_cred_descriptor_single_use_mismatch_is_violation() {
         test_tsa_key(&[200u8; 32]),
     );
     let cnf = signing_key_from_seed(&[9u8; 32]);
-    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let kid = averin_decision_core::verify::cnf_kid(&cnf.verifying_key());
     let descriptor = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, false); // single_use=false vs label single_operation
     let binding = sha256_prefixed(descriptor.serialize().as_bytes());
     let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &binding));
@@ -5533,7 +5534,7 @@ fn tier_b_cred_descriptor_binding_mismatch_is_violation() {
         test_tsa_key(&[200u8; 32]),
     );
     let cnf = signing_key_from_seed(&[9u8; 32]);
-    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let kid = averin_decision_core::verify::cnf_kid(&cnf.verifying_key());
     let descriptor = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true);
     let wrong_binding = sha256_prefixed(b"a-different-descriptor"); // != sha256(descriptor)
     let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &wrong_binding));
@@ -5566,7 +5567,7 @@ fn tier_b_cred_descriptor_absent_is_residual() {
         test_tsa_key(&[200u8; 32]),
     );
     let cnf = signing_key_from_seed(&[9u8; 32]);
-    let kid = feir_decision_core::verify::cnf_kid(&cnf.verifying_key());
+    let kid = averin_decision_core::verify::cnf_kid(&cnf.verifying_key());
     let descriptor = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true);
     let binding = sha256_prefixed(descriptor.serialize().as_bytes());
     // build the grant + commit but DO NOT disclose (strip the disclosures the helper adds).
@@ -5613,8 +5614,8 @@ fn honest_subject(rec: &SigningKey, res: &SigningKey, cph: &str, head_root: &str
         (
             "authority_kids".into(),
             CanonValue::Array(vec![
-                CanonValue::string(feir_decision_core::verify::cnf_kid(&rec.verifying_key())),
-                CanonValue::string(feir_decision_core::verify::cnf_kid(&res.verifying_key())),
+                CanonValue::string(averin_decision_core::verify::cnf_kid(&rec.verifying_key())),
+                CanonValue::string(averin_decision_core::verify::cnf_kid(&res.verifying_key())),
             ]),
         ),
         (
@@ -5649,7 +5650,7 @@ fn attestation(
     ])
     .unwrap();
     let digest = sha256_prefixed(body.serialize().as_bytes());
-    let sig = feir_decision_core::sign::sign("feir.attestation.v1", &digest, attest_sk);
+    let sig = averin_decision_core::sign::sign("averin.attestation.v1", &digest, attest_sk);
     change_field(&body, "sig", CanonValue::string(sig))
 }
 
@@ -5700,7 +5701,7 @@ fn tier_b_attestation_unevaluated_without_pinned_issuer() {
     );
     let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         ATT_NOT_AFTER,
         honest_subject(&rec, &res, &cph, &head_root),
@@ -5752,7 +5753,7 @@ fn tier_b_attestation_ignores_non_proven_injected_resource() {
     recs.push(evil);
     let bundle = change_field(&bundle, "records", CanonValue::Array(recs));
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         ATT_NOT_AFTER,
         honest_subject(&rec, &res, &cph, &head_root),
@@ -5777,7 +5778,7 @@ fn tier_b_attestation_attested_claims() {
     );
     let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         ATT_NOT_AFTER,
         honest_subject(&rec, &res, &cph, &head_root),
@@ -5793,7 +5794,7 @@ fn tier_b_attestation_attested_claims() {
     assert_eq!(r.attestation_status, "attested_claims");
     assert_eq!(
         r.attestation_issuer_kid.as_deref(),
-        Some(feir_decision_core::verify::cnf_kid(&attest.verifying_key()).as_str())
+        Some(averin_decision_core::verify::cnf_kid(&attest.verifying_key()).as_str())
     );
     assert!(r
         .attestation_claim_types
@@ -5814,7 +5815,7 @@ fn role_key_rotation_attestation_compromised_or_late_rotation_not_honored() {
     );
     let (base, cph, head_root) = d6_anchored(&rec, &tsa);
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         ATT_NOT_AFTER,
         honest_subject(&rec, &res, &cph, &head_root),
@@ -5872,7 +5873,7 @@ fn tier_b_attestation_bound_revocation_digest_detects_stripped_list() {
         CanonValue::string(&rev_digest),
     );
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         ATT_NOT_AFTER,
         subj,
@@ -5925,7 +5926,7 @@ fn tier_b_attestation_attested_claims_with_pinned_taxonomy() {
     let tax = signing_key_from_seed(&[13u8; 32]); // disjoint from broker/resource/attest/tsa
     let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         ATT_NOT_AFTER,
         honest_subject(&rec, &res, &cph, &head_root),
@@ -5954,7 +5955,7 @@ fn tier_b_attestation_bad_sig_is_failed() {
     let wrong = signing_key_from_seed(&[12u8; 32]);
     let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         ATT_NOT_AFTER,
         honest_subject(&rec, &res, &cph, &head_root),
@@ -6013,7 +6014,7 @@ fn tier_b_attestation_stale_window_is_failed() {
     let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
     // window ends BEFORE the anchored ts (ANCHOR_TS = 2026-06-15T10:10:01Z)
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         "2026-06-14T00:00:00.000Z",
         "2026-06-15T00:00:00.000Z",
         honest_subject(&rec, &res, &cph, &head_root),
@@ -6046,7 +6047,7 @@ fn tier_b_attestation_subject_substitution_is_failed() {
     let mut subject = honest_subject(&rec, &res, &cph, &head_root);
     subject = change_field(&subject, "project_id", CanonValue::string("proj-OTHER")); // signed, but wrong deployment
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         ATT_NOT_AFTER,
         subject,
@@ -6085,7 +6086,7 @@ fn tier_b_attestation_checkpoint_substitution_is_failed() {
         &head_root,
     );
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         ATT_NOT_AFTER,
         subject,
@@ -6168,7 +6169,7 @@ fn tier_b_attestation_empty_window_is_failed() {
     );
     let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         "",
         ATT_NOT_AFTER,
         honest_subject(&rec, &res, &cph, &head_root),
@@ -6199,7 +6200,7 @@ fn tier_b_attestation_malformed_window_is_failed() {
     );
     let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         "0",
         "z",
         honest_subject(&rec, &res, &cph, &head_root),
@@ -6230,7 +6231,7 @@ fn tier_b_attestation_shape_valid_but_impossible_window_is_failed() {
     );
     let (bundle, cph, head_root) = d6_anchored(&rec, &tsa);
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         "2026-99-99T99:99:99.999Z",
         honest_subject(&rec, &res, &cph, &head_root),
@@ -6289,7 +6290,7 @@ fn tier_b_attestation_stale_anchored_replayed_on_later_bundle_is_failed() {
     let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant], vec![cp0, cp1]);
     // the attestation honestly binds cp0 (the latest ANCHORED) — but cp1 sits beyond it.
     let att = attestation(
-        &feir_decision_core::verify::cnf_kid(&attest.verifying_key()),
+        &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
         ATT_ISSUED,
         ATT_NOT_AFTER,
         honest_subject(&rec, &res, &cp0h, &root),
@@ -7017,7 +7018,7 @@ fn approver(seed: u8) -> SigningKey {
 }
 
 // build a single_operation grant DECLARING cosig_threshold=M and carrying one cosignature per signer. Each
-// signer signs the real feir.broker.cosig.approval.v1 challenge (grant_id/its-kid/credential_binding/M/exp),
+// signer signs the real averin.broker.cosig.approval.v1 challenge (grant_id/its-kid/credential_binding/M/exp),
 // so the cosignatures are integrity-bound inside the signed grant_evidence (additive: an old verifier ignores
 // them and the evidence_hash still re-derives).
 fn cosigned_grant(rec: &SigningKey, threshold: i64, signers: &[&SigningKey]) -> CanonValue {
@@ -7038,7 +7039,7 @@ fn cosigned_grant_rid(
         .map(|sk| {
             let kid = cnf_kid(&sk.verifying_key());
             let challenge = cosig_approval_challenge(GID, &kid, &cb, threshold, EXP);
-            let sig = feir_decision_core::b64::encode(&sk.sign(&challenge).to_bytes());
+            let sig = averin_decision_core::b64::encode(&sk.sign(&challenge).to_bytes());
             CanonValue::object(vec![
                 ("approver_kid".into(), CanonValue::string(kid)),
                 ("sig".into(), CanonValue::string(sig)),
@@ -7268,7 +7269,7 @@ fn tier_b_cosig_forged_signature_does_not_count() {
     let cb = sha256_prefixed(b"test-credential-binding");
     let a1_kid = cnf_kid(&a1.verifying_key());
     let challenge = cosig_approval_challenge(GID, &a1_kid, &cb, 1, EXP);
-    let forged_sig = feir_decision_core::b64::encode(&imposter.sign(&challenge).to_bytes());
+    let forged_sig = averin_decision_core::b64::encode(&imposter.sign(&challenge).to_bytes());
     let cosig = CanonValue::object(vec![
         ("approver_kid".into(), CanonValue::string(a1_kid)),
         ("sig".into(), CanonValue::string(forged_sig)),
@@ -7379,7 +7380,7 @@ fn tier_b_cosig_cosignatures_without_threshold_fails_closed() {
     let cb = sha256_prefixed(b"test-credential-binding");
     let kid = cnf_kid(&a1.verifying_key());
     // threshold=1 used only to forge a well-formed-looking cosignature; the grant_evidence omits the threshold.
-    let sig = feir_decision_core::b64::encode(
+    let sig = averin_decision_core::b64::encode(
         &a1.sign(&cosig_approval_challenge(GID, &kid, &cb, 1, EXP))
             .to_bytes(),
     );
@@ -7642,7 +7643,7 @@ fn revocation_leaf_and_merkle_root_golden_vector() {
         "shared vector: revocation_leaf section is empty"
     );
     for case in leaf_cases {
-        let leaf = feir_decision_core::verify::revocation_leaf(
+        let leaf = averin_decision_core::verify::revocation_leaf(
             case.get("grant_id").unwrap().as_str().unwrap(),
         );
         assert_eq!(
@@ -7667,7 +7668,7 @@ fn revocation_leaf_and_merkle_root_golden_vector() {
             .map(|x| x.as_str().unwrap())
             .collect();
         assert_eq!(
-            feir_decision_core::verify::revocation_merkle_root(&revoked),
+            averin_decision_core::verify::revocation_merkle_root(&revoked),
             case.get("expect").unwrap().as_str().unwrap(),
             "revocation_merkle_root drifted from the shared vector (case {})",
             case.get("name").unwrap().as_str().unwrap()
@@ -7683,7 +7684,7 @@ fn kid_of(sk: &SigningKey) -> String {
     cnf_kid(&sk.verifying_key())
 }
 fn pub_b64(sk: &SigningKey) -> String {
-    feir_decision_core::b64::encode(sk.verifying_key().as_bytes())
+    averin_decision_core::b64::encode(sk.verifying_key().as_bytes())
 }
 
 // one signed delegation hop {delegator_cnf, delegate_cnf, scope, action, resource_id, exp, sig}.
@@ -7700,7 +7701,7 @@ fn dhop(
     let ekid = kid_of(delegate);
     let challenge =
         delegation_hop_challenge(GID, hop_index, &dkid, &ekid, scope, action, resource, exp);
-    let sig = feir_decision_core::b64::encode(&delegator.sign(&challenge).to_bytes());
+    let sig = averin_decision_core::b64::encode(&delegator.sign(&challenge).to_bytes());
     CanonValue::object(vec![
         (
             "delegator_cnf".into(),
@@ -7883,7 +7884,7 @@ fn tier_b_delegation_forged_hop_signature_is_a_violation() {
     let dkid = kid_of(&root);
     let ekid = kid_of(&leaf);
     let challenge = delegation_hop_challenge(GID, 0, &dkid, &ekid, DSCOPE, ACTION, RESOURCE, EXP);
-    let forged = feir_decision_core::b64::encode(&imposter.sign(&challenge).to_bytes());
+    let forged = averin_decision_core::b64::encode(&imposter.sign(&challenge).to_bytes());
     let hop = change_field(
         &dhop(0, &root, &leaf, DSCOPE, ACTION, RESOURCE, EXP),
         "sig",
@@ -8026,7 +8027,7 @@ fn tier_b_delegation_pop_reverified_under_leaf_key() {
 const REV_FRESH_FROM: &str = "2026-06-15T00:00:00.000Z"; // brackets the test anchor ts 2026-06-15T10:10:01Z
 const REV_FRESH_TO: &str = "2026-06-16T00:00:00.000Z";
 
-// build a signed revocation_list object (sig over the canonical list minus sig, domain feir.revocation.v1).
+// build a signed revocation_list object (sig over the canonical list minus sig, domain averin.revocation.v1).
 fn revocation_list(
     rev: &SigningKey,
     issued_at: &str,
@@ -8047,7 +8048,7 @@ fn revocation_list(
     ])
     .unwrap();
     let digest = sha256_prefixed(body.serialize().as_bytes());
-    let sig = feir_decision_core::sign::sign("feir.revocation.v1", &digest, rev);
+    let sig = averin_decision_core::sign::sign("averin.revocation.v1", &digest, rev);
     change_field(&body, "sig", CanonValue::string(sig))
 }
 
@@ -8374,13 +8375,13 @@ fn tier_b_revocation_key_overlapping_a_role_is_fatal() {
 fn mleaf(v: &[u8; 32]) -> [u8; 32] {
     let mut pre = vec![0x00u8];
     pre.extend_from_slice(v);
-    feir_decision_core::hashx::sha256(&pre)
+    averin_decision_core::hashx::sha256(&pre)
 }
 fn mnode(l: &[u8; 32], r: &[u8; 32]) -> [u8; 32] {
     let mut pre = vec![0x01u8];
     pre.extend_from_slice(l);
     pre.extend_from_slice(r);
-    feir_decision_core::hashx::sha256(&pre)
+    averin_decision_core::hashx::sha256(&pre)
 }
 fn merkle_levels(leaves: &[[u8; 32]]) -> Vec<Vec<[u8; 32]>> {
     let mut level: Vec<[u8; 32]> = leaves.iter().map(mleaf).collect();
@@ -8435,7 +8436,7 @@ fn path_cv(path: &[[u8; 32]]) -> CanonValue {
 fn rev_leaves(revoked: &[&str]) -> Vec<[u8; 32]> {
     let mut hs: Vec<[u8; 32]> = revoked
         .iter()
-        .map(|g| feir_decision_core::verify::revocation_leaf(g))
+        .map(|g| averin_decision_core::verify::revocation_leaf(g))
         .collect();
     hs.sort();
     let mut leaves = vec![[0u8; 32]];
@@ -8461,11 +8462,12 @@ fn merkle_root_obj(
     ])
     .unwrap();
     let digest = sha256_prefixed(body.serialize().as_bytes());
-    let sig = feir_decision_core::sign::sign("feir.broker.revocation.merkleroot.v1", &digest, rev);
+    let sig =
+        averin_decision_core::sign::sign("averin.broker.revocation.merkleroot.v1", &digest, rev);
     change_field(&body, "sig", CanonValue::string(sig))
 }
 fn nonmembership_proof(leaves: &[[u8; 32]], grant_id: &str) -> CanonValue {
-    let q = feir_decision_core::verify::revocation_leaf(grant_id);
+    let q = averin_decision_core::verify::revocation_leaf(grant_id);
     let i = leaves
         .windows(2)
         .position(|w| w[0] < q && q < w[1])
@@ -8482,7 +8484,7 @@ fn nonmembership_proof(leaves: &[[u8; 32]], grant_id: &str) -> CanonValue {
     .unwrap()
 }
 fn membership_proof(leaves: &[[u8; 32]], grant_id: &str) -> CanonValue {
-    let q = feir_decision_core::verify::revocation_leaf(grant_id);
+    let q = averin_decision_core::verify::revocation_leaf(grant_id);
     let i = leaves
         .iter()
         .position(|l| *l == q)
@@ -8670,7 +8672,7 @@ fn tier_b_merkle_revocation_revoked_grant_cannot_forge_nonmembership() {
     // lo<q<hi bound. We construct that forgery attempt and assert it is rejected (blocked, not matched).
     let (rec, res, tsa, rev) = rev_keys();
     let leaves = rev_leaves(&[GID, "aaa", "zzz"]); // GID is a leaf at some index j
-    let q = feir_decision_core::verify::revocation_leaf(GID);
+    let q = averin_decision_core::verify::revocation_leaf(GID);
     let j = leaves.iter().position(|l| *l == q).unwrap();
     // forge: claim the pair (j-1, j+1) brackets q — true values bracket q but the indices are NOT consecutive.
     let forged = CanonValue::object(vec![
@@ -9207,7 +9209,7 @@ fn native_grant_evidence(
 }
 
 // a resource's introspection_evidence: its signed statement of an externally-minted credential's effective scope.
-// `sig_sk` signs the structured feir.resource.introspection.v1 challenge (the resource key for a valid transcript;
+// `sig_sk` signs the structured averin.resource.introspection.v1 challenge (the resource key for a valid transcript;
 // an imposter to forge). The carried `transcript_hash` rides the record evidence hash but is not in the structured sig.
 fn introspection_evidence(
     sig_sk: &SigningKey,
@@ -9226,7 +9228,7 @@ fn introspection_evidence(
         introspected_at,
         effective_exp,
     );
-    let sig = feir_decision_core::b64::encode(&sig_sk.sign(&challenge).to_bytes());
+    let sig = averin_decision_core::b64::encode(&sig_sk.sign(&challenge).to_bytes());
     CanonValue::object(vec![
         (
             "kind".into(),
@@ -9264,7 +9266,7 @@ fn seal_introspection(
         CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
-        "record_id":"{record_id}","project_id":"proj-001","agent_id":"feir-resource","agent_version":"feir-resource",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"averin-resource","agent_version":"averin-resource",
         "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
         "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
         "event_type":"tool_call","action":"{ACTION}","observed_via":"broker","status":"ok",
@@ -11106,13 +11108,13 @@ fn cross_cert(
     let kid = cnf_kid(subject_vk);
     let challenge =
         federation_cert_challenge(issuer_id, subject_id, &kid, scope, resource, not_after);
-    let sig = feir_decision_core::b64::encode(&issuer_sk.sign(&challenge).to_bytes());
+    let sig = averin_decision_core::b64::encode(&issuer_sk.sign(&challenge).to_bytes());
     CanonValue::object(vec![
         ("issuer_broker_id".into(), CanonValue::string(issuer_id)),
         ("subject_broker_id".into(), CanonValue::string(subject_id)),
         (
             "subject_pubkey".into(),
-            CanonValue::string(feir_decision_core::b64::encode(subject_vk.as_bytes())),
+            CanonValue::string(averin_decision_core::b64::encode(subject_vk.as_bytes())),
         ),
         ("scope".into(), CanonValue::string(scope)),
         ("resource_id".into(), CanonValue::string(resource)),
@@ -11308,7 +11310,7 @@ fn tier_b_cross_broker_cert_subject_pubkey_swap_breaks_issuer_sig() {
     let forged = change_field(
         &cert,
         "subject_pubkey",
-        CanonValue::string(feir_decision_core::b64::encode(
+        CanonValue::string(averin_decision_core::b64::encode(
             attacker.verifying_key().as_bytes(),
         )),
     );

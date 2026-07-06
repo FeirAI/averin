@@ -1,4 +1,4 @@
-// Package api is the feir ingestion + app HTTP server. It assigns server-controlled fields,
+// Package api is the averin ingestion + app HTTP server. It assigns server-controlled fields,
 // derives the causal DAG links and the frontier, and routes all canonicalize/seal/verify work
 // through the Rust core (the single source of truth). The store is append-only.
 package api
@@ -23,14 +23,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/feir-dev/feir/server/internal/auth"
-	"github.com/feir-dev/feir/server/internal/broker"
-	"github.com/feir-dev/feir/server/internal/content"
-	"github.com/feir-dev/feir/server/internal/meter"
-	"github.com/feir-dev/feir/server/internal/otel"
-	"github.com/feir-dev/feir/server/internal/resourceshim"
-	"github.com/feir-dev/feir/server/internal/store"
-	"github.com/feir-dev/feir/server/internal/witness"
+	"github.com/averin-dev/averin/server/internal/auth"
+	"github.com/averin-dev/averin/server/internal/broker"
+	"github.com/averin-dev/averin/server/internal/content"
+	"github.com/averin-dev/averin/server/internal/meter"
+	"github.com/averin-dev/averin/server/internal/otel"
+	"github.com/averin-dev/averin/server/internal/resourceshim"
+	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/averin-dev/averin/server/internal/witness"
 )
 
 // Sealer is the subset of the Rust core the API needs.
@@ -103,7 +103,7 @@ type Server struct {
 	resourceID   string
 	ledger       resourceshim.Ledger
 	// M3 (ADR 0005 — Native/STS): the RAW resource recording key (the same key resourceCore wraps). The
-	// introspection-transcript producer needs it to sign the structured feir.resource.introspection.v1 challenge
+	// introspection-transcript producer needs it to sign the structured averin.resource.introspection.v1 challenge
 	// (over raw bytes), which the FFI core's tagged SignEvidence cannot do. nil = POST /v2/introspection disabled.
 	resourceRawKey ed25519.PrivateKey
 	// D7.2 (ADR 0004): the deployment-attestation issuing key (role-separated from broker/resource/TSA).
@@ -281,7 +281,7 @@ func (s *Server) WithPolicyEngineKey(source string, key ed25519.PublicKey) *Serv
 func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
 	// R2 (ADR 0003): the resource recording key MUST be disjoint from the server signing key and the
 	// broker issuing key, else a grant could forge its own use receipt. The offline verifier rejects an
-	// overlap as a fatal config error and feir-server checks it at startup — this fail-fasts an embedder
+	// overlap as a fatal config error and averin-server checks it at startup — this fail-fasts an embedder
 	// that constructs a Server directly. Compares the keys set so far (call WithBroker first for the
 	// broker check). A key collision here is a programming error, so it panics.
 	if rpub, err := decodePubKey(resourceCore.PubKey()); err == nil {
@@ -304,7 +304,7 @@ func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
 // protection). Call it BEFORE WithResource to override the default. The default MemLedger is VOLATILE —
 // consumed jti/nonce are lost on restart, reopening a replay window for a single-use capability — so a
 // durable, atomically-consistent ledger is a production requirement. internal/pgledger is the durable,
-// Postgres-backed implementation; feir-server injects it here automatically when FEIR_DATABASE_URL is set.
+// Postgres-backed implementation; averin-server injects it here automatically when AVERIN_DATABASE_URL is set.
 func (s *Server) WithLedger(ledger resourceshim.Ledger) *Server {
 	s.ledger = ledger
 	return s
@@ -437,7 +437,7 @@ func attestationWindow(createdTS string, now time.Time, issuedSkew, validity tim
 // buildDeploymentAttestation assembles the D7.2 attestation over the project's latest checkpoint. The
 // signed `subject` binds project_id / coverage_manifest_digest / latest checkpoint_hash +
 // broker_grant_head_root / the authority key-id set / the resource-id set; the digest is the verifier's
-// (sha256 of RCP-canonical attestation minus sig), signed under "feir.attestation.v1".
+// (sha256 of RCP-canonical attestation minus sig), signed under "averin.attestation.v1".
 func (s *Server) buildDeploymentAttestation(projectID string, recs []store.Record, checks []store.Checkpoint, revocationDigest string) (map[string]any, error) {
 	if len(checks) == 0 {
 		return nil, nil // nothing anchored to attest over yet
@@ -518,7 +518,7 @@ func (s *Server) buildDeploymentAttestation(projectID string, recs []store.Recor
 	if err != nil {
 		return nil, fmt.Errorf("attestation digest: %w", err)
 	}
-	att["sig"] = signTagged("feir.attestation.v1", digest, s.attestKey)
+	att["sig"] = signTagged("averin.attestation.v1", digest, s.attestKey)
 	return att, nil
 }
 
@@ -1088,7 +1088,7 @@ func uuidV5Shaped(namespace, projectID, idem string) string {
 // deterministicGrantID is the grant's UUIDv5-shaped id — re-derived on retry so a lost-response grant
 // never mints a second live credential (ADR 0002 idempotency).
 func deterministicGrantID(projectID, idem string) string {
-	return uuidV5Shaped("feir.grant.id.v1", projectID, idem)
+	return uuidV5Shaped("averin.grant.id.v1", projectID, idem)
 }
 
 // handleGrant issues a credential-broker grant: it RECORDS a signed gateway_enforced grant (sealed
@@ -1096,7 +1096,7 @@ func deterministicGrantID(projectID, idem string) string {
 // capability — so a credential never exists without a durable, anchored grant (record-before-issue).
 func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	if s.brokerKey == nil {
-		writeErr(w, http.StatusNotImplemented, "credential broker not enabled (set FEIR_BROKER_ISSUING_SEED)")
+		writeErr(w, http.StatusNotImplemented, "credential broker not enabled (set AVERIN_BROKER_ISSUING_SEED)")
 		return
 	}
 	body, err := readBody(r)
@@ -1439,15 +1439,15 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	// stable across restarts (Ed25519 is deterministic, so genuine retries still dedup), and one-way through
 	// the sha256-based uuidV5Shaped (observed record_ids never reveal it). The namespace reservation + the
 	// foreign-collision recovery remain as defense-in-depth.
-	salt := ed25519.Sign(s.brokerKey, []byte("feir.denial.salt.v1"))
+	salt := ed25519.Sign(s.brokerKey, []byte("averin.denial.salt.v1"))
 	probe, _ := json.Marshal([]string{base64.RawURLEncoding.EncodeToString(salt), string(reqJSON), reason})
-	denialID := "denial-" + uuidV5Shaped("feir.denial.id.v1", gr.ProjectID, string(probe))
+	denialID := "denial-" + uuidV5Shaped("averin.denial.id.v1", gr.ProjectID, string(probe))
 	rec := map[string]any{
 		"record_id":     denialID,
 		"project_id":    gr.ProjectID,
 		"session_id":    gr.SessionID,
 		"agent_id":      req.AgentID,
-		"agent_version": "feir-broker",
+		"agent_version": "averin-broker",
 		"event_type":    "credential_grant_denied", // NOT credential_grant -> the verifier never counts it as a grant
 		"observed_via":  "broker",
 		"action":        req.Action,
@@ -1558,7 +1558,7 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 		"project_id":    gr.ProjectID,
 		"session_id":    gr.SessionID,
 		"agent_id":      req.AgentID,
-		"agent_version": "feir-broker",
+		"agent_version": "averin-broker",
 		"event_type":    "credential_grant",
 		"observed_via":  "broker",
 		"action":        req.Action,
@@ -1622,7 +1622,7 @@ type useRequest struct {
 // deterministicUseID derives a stable use-receipt id from (project, idempotency_key), so an honest
 // retry collapses in the store rather than sealing a second receipt (and re-consuming the credential).
 func deterministicUseID(projectID, idem string) string {
-	return "use-" + uuidV5Shaped("feir.use.id.v1", projectID, idem)
+	return "use-" + uuidV5Shaped("averin.use.id.v1", projectID, idem)
 }
 
 // handleUse records a Tier-B USE RECEIPT: the resource validates a presented capability + PoP at use
@@ -1936,8 +1936,8 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 		"record_id":     useID,
 		"project_id":    ur.ProjectID,
 		"session_id":    ur.SessionID,
-		"agent_id":      "feir-resource",
-		"agent_version": "feir-resource",
+		"agent_id":      "averin-resource",
+		"agent_version": "averin-resource",
 		"event_type":    "tool_call",
 		"observed_via":  "broker",
 		"action":        ev.Action,
@@ -1973,7 +1973,7 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 }
 
 func deterministicOutcomeID(projectID, idem string) string {
-	return "outcome-" + uuidV5Shaped("feir.use_outcome.id.v1", projectID, idem)
+	return "outcome-" + uuidV5Shaped("averin.use_outcome.id.v1", projectID, idem)
 }
 
 type useOutcomeRequest struct {
@@ -2142,8 +2142,8 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 		"causal_prev_hashes": []string{intentHash},
 		"project_id":         projectID,
 		"session_id":         sessionID,
-		"agent_id":           "feir-resource",
-		"agent_version":      "feir-resource",
+		"agent_id":           "averin-resource",
+		"agent_version":      "averin-resource",
 		"event_type":         "tool_call",
 		"observed_via":       "broker",
 		"action":             "use_outcome",
@@ -2251,7 +2251,7 @@ func (s *Server) normalizeAuthority(rec map[string]any) {
 }
 
 // verifyAuthorityEvidence checks an authority evidence_sig exactly as the offline verifier does (core
-// authority.rs): ed25519 over LP4("feir.authority.v2") ‖ LP4(source) ‖ LP4(project_id) ‖ LP4(record_id) ‖
+// authority.rs): ed25519 over LP4("averin.authority.v2") ‖ LP4(source) ‖ LP4(project_id) ‖ LP4(record_id) ‖
 // utf8(evidence_hash), under `key`, with a well-formed sha256 evidence_hash and a non-empty project_id +
 // record_id (so a record the server stamps will actually elevate to `verified` offline, not `failed`).
 // project_id binds the evidence to its tenant so a verified triple cannot be replayed cross-project (Codex).
@@ -2280,7 +2280,7 @@ func verifyAuthorityEvidence(source, projectID, recordID, evidenceHash, evidence
 		pre = append(pre, b[:]...)
 		pre = append(pre, str...)
 	}
-	lp("feir.authority.v2")
+	lp("averin.authority.v2")
 	lp(source)
 	lp(projectID)
 	lp(recordID)
@@ -2737,7 +2737,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 // handleDAG returns a session's sealed records (the causal DAG) for the trace-waterfall view.
 //
 // PHASE-1 AUTHZ LIMIT: the app API has NO per-project authentication/authorization yet (RBAC/SSO is
-// explicitly Phase 2, spec §3). A deployment MUST put feir behind its own auth (or run it single-
+// explicitly Phase 2, spec §3). A deployment MUST put averin behind its own auth (or run it single-
 // tenant) until the authz layer lands — any caller who can reach this endpoint can read any
 // project's data. Documented in docs/coverage-limits.md.
 // handleListRecords returns a tenant's sealed records newest-first with truncation honesty.
@@ -2852,7 +2852,7 @@ func (s *Server) selfVerifyOpts() string {
 }
 
 // validRecordKind is the closed value-set for the optional typed `record_kind` field (kebab-case
-// per feir convention), mirroring spec/decision-record.schema.json and core/src/record.rs. leria
+// per averin convention), mirroring spec/decision-record.schema.json and core/src/record.rs. leria
 // seals spend-governance evidence under these kinds; a board/GRC pack filters /v2/export by them
 // without parsing `extensions`.
 func validRecordKind(k string) bool {

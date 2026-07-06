@@ -1,11 +1,11 @@
-# feir developer documentation
+# averin developer documentation
 
-Developer-facing docs for **feir**, the tamper-evident evidence service: hash-chained,
+Developer-facing docs for **averin**, the tamper-evident evidence service: hash-chained,
 signed decision records with offline verification, authority elevation, and selective-disclosure
 export. This set describes the **shipped implementation** (read against the source); the
 `docs/decisions/` ADRs and `spec/` cover the design *why*.
 
-feir is **usable standalone**. You build it from source, run a single Go binary, POST records,
+averin is **usable standalone**. You build it from source, run a single Go binary, POST records,
 and verify exported bundles offline with a CLI/WASM verifier — no other service required. The
 optional [Integration](INTEGRATION.md) section covers the client API and, separately, how it
 composes with sibling planes.
@@ -23,7 +23,7 @@ composes with sibling planes.
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Components, the domain model, the core algorithms (hash chain, DAG, checkpoints, commitments), and the storage model. |
 | [API.md](API.md) | Every HTTP route (method, path, auth), request/response shapes, the record/checkpoint/bundle objects, enums, and error codes. |
 | [CONFIGURATION.md](CONFIGURATION.md) | Every environment variable / flag each binary reads, its default, whether it's required, and fail-closed behavior. |
-| [SECURITY.md](SECURITY.md) | Threat model, invariants, authn/authz, trust boundaries, and what feir deliberately does **not** do. |
+| [SECURITY.md](SECURITY.md) | Threat model, invariants, authn/authz, trust boundaries, and what averin deliberately does **not** do. |
 | [INTEGRATION.md](INTEGRATION.md) | Standalone client integration (SDKs + raw API); optional cross-plane composition via the contracts. |
 | [TESTING.md](TESTING.md) | Running the tests + the offline-verifier conformance vectors; a contributing note. |
 
@@ -44,7 +44,7 @@ summarizes them for developers.
 
 | Path | What |
 |------|------|
-| `core/` | **Rust `feir-decision-core`** — canonicalize → commit → hash → sign → DAG-link → checkpoint → verify. One crate, three targets: the `feir-verify` CLI (`src/bin`), a cgo staticlib (FFI), and WASM. The single source of truth for all crypto. |
+| `core/` | **Rust `averin-decision-core`** — canonicalize → commit → hash → sign → DAG-link → checkpoint → verify. One crate, three targets: the `averin-verify` CLI (`src/bin`), a cgo staticlib (FFI), and WASM. The single source of truth for all crypto. |
 | `server/` | **Go** ingestion + app API (`internal/api`), the credential broker + resource gateway, OpenAI-compatible recording proxy (`internal/proxy`), MCP server, Postgres/in-memory stores. cgo-links the Rust core. Binaries in `server/cmd/`. |
 | `verifier/` | Frameworkless (vanilla JS + WASM) offline verifier. Same Rust core, in the browser. |
 | `web/` | Svelte 5 SPA — trace-waterfall run view. |

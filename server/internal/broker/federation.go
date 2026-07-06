@@ -10,7 +10,7 @@ import (
 // federationCertTag domain-separates the cross-broker certificate challenge (ADR 0005 M4, OPTIONAL transitive
 // trust) from every other signed preimage. A cross-broker cert is a statement by a PINNED issuer broker A that
 // an (otherwise-unpinned) subject broker B's KEY is authorized for a scope over a resource until not_after.
-const federationCertTag = "feir.broker.federation.cert.v1"
+const federationCertTag = "averin.broker.federation.cert.v1"
 
 // FederationCertChallenge re-derives the 32-byte digest the ISSUER broker signs to vouch for a subject broker's
 // key (ADR 0005 M4), byte-identically to the Rust verifier's federation_cert_challenge:

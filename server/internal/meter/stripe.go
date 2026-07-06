@@ -50,8 +50,8 @@ func NewStripeReporter(base Meter, cfg StripeConfig) *StripeReporter {
 	r := &StripeReporter{
 		Meter:       base,
 		apiKey:      cfg.APIKey,
-		recordMeter: orDefault(cfg.RecordEventName, "feir_record"),
-		exportMeter: orDefault(cfg.ExportEventName, "feir_export"),
+		recordMeter: orDefault(cfg.RecordEventName, "averin_record"),
+		exportMeter: orDefault(cfg.ExportEventName, "averin_export"),
 		endpoint:    ep,
 		client:      cl,
 	}

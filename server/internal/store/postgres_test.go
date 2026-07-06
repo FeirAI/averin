@@ -15,7 +15,7 @@ import (
 
 // These tests require a real Postgres. They are hermetic: each run creates a private, randomly
 // named schema, applies the REAL migrations/0001_init.sql into it, runs against it, and drops it.
-// Set FEIR_TEST_DATABASE_URL (e.g. postgres://postgres:postgres@localhost:5432/postgres) to enable.
+// Set AVERIN_TEST_DATABASE_URL (e.g. postgres://postgres:postgres@localhost:5432/postgres) to enable.
 //
 // We apply the actual migration file (not a copy) so the tests exercise the production schema and
 // cannot drift from it. Caveat: the migration's append-only REVOKE is a no-op for a superuser or the
@@ -28,9 +28,9 @@ import (
 // store whose pool defaults to that schema. The returned cleanup drops the schema and closes.
 func newTestStore(t *testing.T) (*Postgres, func()) {
 	t.Helper()
-	dsn := os.Getenv("FEIR_TEST_DATABASE_URL")
+	dsn := os.Getenv("AVERIN_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("set FEIR_TEST_DATABASE_URL to run Postgres store tests")
+		t.Skip("set AVERIN_TEST_DATABASE_URL to run Postgres store tests")
 	}
 	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0001_init.sql"))
 	if err != nil {
@@ -39,7 +39,7 @@ func newTestStore(t *testing.T) (*Postgres, func()) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	schema := fmt.Sprintf("feir_test_%d", time.Now().UnixNano())
+	schema := fmt.Sprintf("averin_test_%d", time.Now().UnixNano())
 
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestPostgresAppendOnlyRejectsMutation(t *testing.T) {
 	if err := p.pool.QueryRow(ctx, "SELECT current_schema()").Scan(&schema); err != nil {
 		t.Fatalf("current_schema: %v", err)
 	}
-	role := fmt.Sprintf("feir_ro_%d", time.Now().UnixNano())
+	role := fmt.Sprintf("averin_ro_%d", time.Now().UnixNano())
 	mustExec := func(sql string) {
 		if _, err := p.pool.Exec(ctx, sql); err != nil {
 			t.Fatalf("exec %q: %v", sql, err)

@@ -1,5 +1,5 @@
 [project]
-name = "feir"
+name = "averin"
 version = "0.1.0"
 description = "Flight recorder SDK for AI agents — record tamper-evident, authority-bound decision evidence."
 readme = "README.md"
@@ -12,4 +12,4 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["feir*"]
+include = ["averin*"]

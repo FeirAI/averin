@@ -11,7 +11,7 @@ import (
 
 // cosigApprovalTag domain-separates the M-of-N grant-approval challenge (ADR 0005 M6) from every other
 // signed preimage, so an approval signature can never be repurposed in another context.
-const cosigApprovalTag = "feir.broker.cosig.approval.v1"
+const cosigApprovalTag = "averin.broker.cosig.approval.v1"
 
 // Cosignature is one approver's M-of-N grant approval (ADR 0005 M6). ApproverKid is the KeyID of the
 // approver's pinned public key; Sig is the base64url-no-pad Ed25519 signature over CosigApprovalChallenge.

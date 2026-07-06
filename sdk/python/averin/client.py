@@ -1,4 +1,4 @@
-"""feir Python SDK client. Stdlib-only (urllib); the transport is injectable for testing."""
+"""averin Python SDK client. Stdlib-only (urllib); the transport is injectable for testing."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def build_record(
 
 
 class Client:
-    """A thin client that submits records to a feir server's ingestion API."""
+    """A thin client that submits records to a averin server's ingestion API."""
 
     def __init__(
         self,

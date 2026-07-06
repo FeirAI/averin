@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/core"
 )
 
 // testTSAKey is the hermetic test timestamp-authority key — distinct from the server signing key, the
@@ -32,10 +32,10 @@ func lp(s string) []byte {
 }
 
 // makeTestAnchor mints the hermetic "test-anchor" the Rust verifier trusts via a pinned tsa_keys entry:
-// Ed25519 over LP("feir.anchor.v1") ‖ LP(checkpoint_hash) ‖ LP(anchored_ts), token = b64url-nopad(sig).
+// Ed25519 over LP("averin.anchor.v1") ‖ LP(checkpoint_hash) ‖ LP(anchored_ts), token = b64url-nopad(sig).
 // (This is the same scheme the Rust adversarial suite uses; it needs no RFC 3161 / DER / network.)
 func makeTestAnchor(checkpointHash, anchoredTS, keyID string, tsa ed25519.PrivateKey) map[string]any {
-	pre := append(append(lp("feir.anchor.v1"), lp(checkpointHash)...), lp(anchoredTS)...)
+	pre := append(append(lp("averin.anchor.v1"), lp(checkpointHash)...), lp(anchoredTS)...)
 	sig := ed25519.Sign(tsa, pre)
 	return map[string]any{
 		"scheme":      "test-anchor",
@@ -83,7 +83,7 @@ func attachTestAnchor(t *testing.T, bundleJSON string, tsa ed25519.PrivateKey) s
 // the Rust adversarial suite could); it proves the Go producer's intent↔outcome join wiring end-to-end.
 func TestTwoPhaseUseMatchesUnderAnchor(t *testing.T) {
 	h := newBrokerResourceServer(t)
-	c, _ := core.New(seed)         // same key the server signs with (deterministic from the seed)
+	c, _ := core.New(seed) // same key the server signs with (deterministic from the seed)
 	rc, _ := core.New(resourceSeed)
 	tsa := testTSAKey()
 	ak := grantAgentKey()

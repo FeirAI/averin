@@ -7,7 +7,7 @@ R1 RCP-canonical re-derivable evidence_hash; R2 role-separated broker/resource a
 verifier use↔grant join over the closed set (R3) + `action_completeness` + the full match predicate.
 **Date:** 2026-06-15
 **Builds on:** ADR 0002 (the credential-broker architecture, hardened across 3 review rounds) and the
-shipped Tier-A prototype (`broker` pkg, `POST /v2/grants`, `feir_sign_evidence`, verifier
+shipped Tier-A prototype (`broker` pkg, `POST /v2/grants`, `averin_sign_evidence`, verifier
 `grant_accountability`).
 **Revision:** rev 4 — the four rev-2 MUST-FIXES are RESOLVED (below); rev 4 fixes one new blocker the
 rev-3 review surfaced: the single-use invariant is **per-`grant_id`**, not per-`jti`. The verifier now
@@ -149,7 +149,7 @@ values.** Therefore, for a grant or use to count:
 3. **All** match inputs are then read from that proven payload (per the schemas above); divergence
    from any duplicated record field is fatal.
 4. Consequently the broker/resource MUST compute `evidence_hash` the same way — via the core's RCP
-   canonicalizer (a new `feir_rcp_evidence_hash` helper, or `feir_rcp_canonicalize` + sha256), NOT Go
+   canonicalizer (a new `averin_rcp_evidence_hash` helper, or `averin_rcp_canonicalize` + sha256), NOT Go
    `json.Marshal`. (The shipped Tier-A grants use Go-json `evidence_hash`; Tier-B re-derivation is
    added for BOTH grants and uses — step 1 retires the Tier-A "evidence opaque" residual for any
    record that participates in a Tier-B match, since the carrier `grant_evidence` is now re-derivable.)
@@ -210,7 +210,7 @@ guarantees that *anchored* receipts cannot be retroactively hidden behind a wate
 ### R4 — PoP-at-use is mandatory, fully bound, and the binding is carried in the receipt (F6, MUST-FIX 4)
 
 `use_sig` is REQUIRED (no optional). The agent signs a `pop_challenge` with the `cnf` private key,
-where `pop_challenge = sha256(LP("feir.broker.use.pop.v1") ‖ grant_id ‖ resource_id ‖ action ‖
+where `pop_challenge = sha256(LP("averin.broker.use.pop.v1") ‖ grant_id ‖ resource_id ‖ action ‖
 params_commitment ‖ credential_binding ‖ nonce)`. The **resource generates a one-time `nonce`** and
 records it in a durable, auditable resource-side nonce ledger (R5) so a captured `use_sig` cannot be
 replayed for a different operation or a second time. A use with a missing/invalid `use_sig`, or a
@@ -335,7 +335,7 @@ unmatched_violation==0 ∧ no unexplained pending in the closed set.
 
 ## Build order (each commit adversarially reviewed)
 
-1. RCP evidence-hash helper (FFI `feir_rcp_evidence_hash` or canonicalize+sha256) + Go wrapper;
+1. RCP evidence-hash helper (FFI `averin_rcp_evidence_hash` or canonicalize+sha256) + Go wrapper;
    make Tier-A grant evidence_hash RCP-canonical and have the verifier re-derive it (R1 for grants).
 2. Verifier: role-separated `broker_authority_keys`/`resource_authority_keys` + re-derivation gate
    (R1/R2), no Tier-B counting yet.

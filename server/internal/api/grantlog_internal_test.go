@@ -3,7 +3,7 @@ package api
 import (
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/store"
+	"github.com/averin-dev/averin/server/internal/store"
 )
 
 // TestGrantLogClassificationAndBoundary exercises grantLog's D6 membership rule directly (it is

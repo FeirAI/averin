@@ -54,7 +54,7 @@ func TestProxyForwardsAndRecordsScrubbed(t *testing.T) {
 	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"my token is sk-zzzzzzzzzzzzzzzz1234"}]}`
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer sk-secret-upstream-key-123456")
-	req.Header.Set("X-Feir-Session-Id", "run-7")
+	req.Header.Set("X-Averin-Session-Id", "run-7")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestNonCompletionPathForwardedButNotRecorded(t *testing.T) {
 
 func TestHTTPRecorderErrorsOnNon2xxAndSendsToken(t *testing.T) {
 	var gotKey string
-	feir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	averin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotKey = r.Header.Get("X-Api-Key")
 		if gotKey == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -223,18 +223,18 @@ func TestHTTPRecorderErrorsOnNon2xxAndSendsToken(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusCreated)
 	}))
-	defer feir.Close()
+	defer averin.Close()
 
 	// no token -> 401 -> the failure is SURFACED (not silently dropped as success).
-	if err := (&HTTPRecorder{URL: feir.URL}).Record(map[string]any{"x": 1}); err == nil {
-		t.Fatal("a non-2xx from feir must return an error, not silent success")
+	if err := (&HTTPRecorder{URL: averin.URL}).Record(map[string]any{"x": 1}); err == nil {
+		t.Fatal("a non-2xx from averin must return an error, not silent success")
 	}
 	// with the token -> X-Api-Key sent -> 201 -> nil.
-	if err := (&HTTPRecorder{URL: feir.URL, Token: "secret-tok"}).Record(map[string]any{"x": 1}); err != nil {
+	if err := (&HTTPRecorder{URL: averin.URL, Token: "secret-tok"}).Record(map[string]any{"x": 1}); err != nil {
 		t.Fatalf("authenticated record must succeed: %v", err)
 	}
 	if gotKey != "secret-tok" {
-		t.Fatalf("recorder did not send the feir token: %q", gotKey)
+		t.Fatalf("recorder did not send the averin token: %q", gotKey)
 	}
 }
 
@@ -259,7 +259,7 @@ func TestInboundAuthRejectsUnauthenticated(t *testing.T) {
 	}
 	// with the token -> forwarded.
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{}`))
-	req.Header.Set("X-Feir-Proxy-Token", "the-secret")
+	req.Header.Set("X-Averin-Proxy-Token", "the-secret")
 	resp2, _ := http.DefaultClient.Do(req)
 	resp2.Body.Close()
 	if resp2.StatusCode == http.StatusUnauthorized || !upstreamHit {

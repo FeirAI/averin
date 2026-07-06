@@ -9,7 +9,7 @@ import (
 
 // introspectionTranscriptTag domain-separates the M3 native/STS introspection-transcript challenge (ADR 0005
 // M3) from every other signed preimage, so a resource's effective-scope attestation can never be repurposed.
-const introspectionTranscriptTag = "feir.resource.introspection.v1"
+const introspectionTranscriptTag = "averin.resource.introspection.v1"
 
 // IntrospectionTranscriptChallenge re-derives the 32-byte digest a RESOURCE signs to attest an externally-minted
 // (token_exchange/STS) credential's effective scope (ADR 0005 M3), byte-identically to the Rust verifier's

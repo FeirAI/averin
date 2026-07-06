@@ -1,24 +1,24 @@
-# feir — full self-host stack. From the repo root:
+# averin — full self-host stack. From the repo root:
 #
-#   FEIR_SIGNING_SEED=$(openssl rand -hex 32) FEIR_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24) \
+#   AVERIN_SIGNING_SEED=$(openssl rand -hex 32) AVERIN_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24) \
 #     docker compose -f deploy/docker-compose.yml up --build
 #
 # Then: web app at http://localhost:8088, offline verifier at /verifier/, ingestion API at :8080,
 # OpenAI-compatible proxy at :8081 (point your agent's base_url there). All three ports bind to
-# 127.0.0.1 only — put feir behind your own authenticated reverse proxy to expose it off-host.
-name: feir
+# 127.0.0.1 only — put averin behind your own authenticated reverse proxy to expose it off-host.
+name: averin
 
 services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: feir
-      POSTGRES_PASSWORD: ${FEIR_DB_PASSWORD:-feir}
-      POSTGRES_DB: feir
+      POSTGRES_USER: averin
+      POSTGRES_PASSWORD: ${AVERIN_DB_PASSWORD:-averin}
+      POSTGRES_DB: averin
     volumes:
-      - feir-pgdata:/var/lib/postgresql/data
+      - averin-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U feir -d feir"]
+      test: ["CMD-SHELL", "pg_isready -U averin -d averin"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -29,19 +29,19 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.server
-    command: ["feir-server"]
-    # feir-server drains in-flight requests for up to FEIR_SHUTDOWN_TIMEOUT (default 25s) on SIGTERM;
+    command: ["averin-server"]
+    # averin-server drains in-flight requests for up to AVERIN_SHUTDOWN_TIMEOUT (default 25s) on SIGTERM;
     # the compose stop grace must EXCEED that or the drain is SIGKILLed (Docker's default is 10s).
     stop_grace_period: 30s
     environment:
       # REQUIRED — no default. Generate a fresh 32-byte seed; production backs signing with a KMS/CSI.
-      FEIR_SIGNING_SEED: ${FEIR_SIGNING_SEED:?set a real 32-byte signing seed, e.g. export FEIR_SIGNING_SEED=$(openssl rand -hex 32)}
-      FEIR_SIGNING_KEY_ID: k0
-      FEIR_ADDR: ":8080"
+      AVERIN_SIGNING_SEED: ${AVERIN_SIGNING_SEED:?set a real 32-byte signing seed, e.g. export AVERIN_SIGNING_SEED=$(openssl rand -hex 32)}
+      AVERIN_SIGNING_KEY_ID: k0
+      AVERIN_ADDR: ":8080"
       # Durable append-only store. The server auto-applies the (idempotent) schema on startup. NOTE:
       # it connects as the table-owning role here, so the append-only REVOKE is a no-op (owner bypass)
       # — fine for self-host; DB-enforced append-only needs a separate least-privilege role.
-      FEIR_DATABASE_URL: postgres://feir:${FEIR_DB_PASSWORD:-feir}@db:5432/feir?sslmode=disable
+      AVERIN_DATABASE_URL: postgres://averin:${AVERIN_DB_PASSWORD:-averin}@db:5432/averin?sslmode=disable
     # loopback only — the app API is unauthenticated by Phase-1 design (docs/coverage-limits.md);
     # expose via your own authenticated reverse proxy.
     ports:
@@ -54,18 +54,18 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.server
-    command: ["feir-proxy"]
-    # The proxy streams completions; it drains in-flight streams for up to FEIR_SHUTDOWN_TIMEOUT
+    command: ["averin-proxy"]
+    # The proxy streams completions; it drains in-flight streams for up to AVERIN_SHUTDOWN_TIMEOUT
     # (default 60s) on SIGTERM, so the stop grace must exceed that.
     stop_grace_period: 65s
     environment:
-      FEIR_UPSTREAM: ${FEIR_UPSTREAM:-https://api.openai.com}
-      FEIR_SERVER_URL: http://server:8080
-      FEIR_PROJECT_ID: ${FEIR_PROJECT_ID:-default}
-      FEIR_PROXY_ADDR: ":8081"
+      AVERIN_UPSTREAM: ${AVERIN_UPSTREAM:-https://api.openai.com}
+      AVERIN_SERVER_URL: http://server:8080
+      AVERIN_PROJECT_ID: ${AVERIN_PROJECT_ID:-default}
+      AVERIN_PROXY_ADDR: ":8081"
       # REQUIRED — no default. Without this the proxy is an OPEN RELAY + evidence-injection surface
-      # (see feir-proxy's own startup WARN). Callers present it as X-Feir-Proxy-Token / Bearer.
-      FEIR_PROXY_INBOUND_TOKEN: ${FEIR_PROXY_INBOUND_TOKEN:?set an inbound token, e.g. export FEIR_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24); callers send it as X-Feir-Proxy-Token / Bearer}
+      # (see averin-proxy's own startup WARN). Callers present it as X-Averin-Proxy-Token / Bearer.
+      AVERIN_PROXY_INBOUND_TOKEN: ${AVERIN_PROXY_INBOUND_TOKEN:?set an inbound token, e.g. export AVERIN_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24); callers send it as X-Averin-Proxy-Token / Bearer}
     ports:
       - "127.0.0.1:8081:8081"
     depends_on:
@@ -81,4 +81,4 @@ services:
       - server
 
 volumes:
-  feir-pgdata:
+  averin-pgdata:

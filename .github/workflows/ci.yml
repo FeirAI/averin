@@ -30,9 +30,9 @@ jobs:
       - name: test rfc3161 + mini-TSA (real RFC 3161 token verify)
         run: cargo test --features test-tsa
       - name: build verify CLI
-        run: cargo build --release --bin feir-verify
+        run: cargo build --release --bin averin-verify
       - name: build verify CLI WITH rfc3161 (shippable real-TSA verifier stays green)
-        run: cargo build --release --bin feir-verify --features rfc3161
+        run: cargo build --release --bin averin-verify --features rfc3161
 
   core-32bit:
     name: rust decision-core on 32-bit (usize=u32 — wasm32 truncation gate)
@@ -66,7 +66,7 @@ jobs:
         with:
           go-version: '1.25'
       - name: build rust staticlib (cgo links it)
-        run: cargo build -p feir-decision-core
+        run: cargo build -p averin-decision-core
       - name: stale-staticlib guard (the cgo lib must match current core source, never a stale trust root)
         run: ./scripts/check-staticlib-fresh.sh
       - name: go vet + test
@@ -102,7 +102,7 @@ jobs:
         with:
           go-version: '1.25'
       # The store package is pure Go (no cgo/core dependency), so no rust staticlib build is needed.
-      # Setting FEIR_TEST_DATABASE_URL un-skips the Postgres tests: the SAME exercise*(t, Store) contract
+      # Setting AVERIN_TEST_DATABASE_URL un-skips the Postgres tests: the SAME exercise*(t, Store) contract
       # helpers that TestMem* run now also run against real Postgres (parity), and
       # TestPostgresAppendOnlyRejectsMutation proves UPDATE/DELETE/TRUNCATE are rejected (SQLSTATE 42501)
       # under a freshly-created non-owner least-privilege role — the deployment topology the append-only
@@ -110,7 +110,7 @@ jobs:
       - name: store tests against real Postgres (parity + non-owner append-only)
         working-directory: server
         env:
-          FEIR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+          AVERIN_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: go test -count=1 ./internal/store/... ./internal/pgledger/...
 
   web:

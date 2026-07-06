@@ -160,7 +160,7 @@ type Request struct {
 	BrokerID string
 }
 
-const popTag = "feir.broker.pop.v1"
+const popTag = "averin.broker.pop.v1"
 
 // Challenge is the deterministic bytes the agent must sign with its cnf private key to prove
 // possession (binding the request's identity + operation + the cnf key itself). Domain-separated so
@@ -298,7 +298,7 @@ func Prepare(req Request, grantID string, allocSeq func() (int64, error), now ti
 		"typ":        "capability",
 		"alg":        "ed25519",
 		"kid":        kid,
-		"iss":        "feir-broker",
+		"iss":        "averin-broker",
 		"sub":        req.AgentID,
 		"aud":        req.Resource,
 		"act":        req.Action,

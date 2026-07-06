@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/core"
 )
 
 // TestGenerateBrokerFixture regenerates spec/fixtures/bundle-broker-valid.json — a REAL Go-produced
@@ -19,10 +19,10 @@ import (
 // verification of the credential-broker surface is exercised against a real producer bundle — not only
 // natively in Rust. Skipped in normal runs; regenerate deterministically with:
 //
-//	FEIR_GEN_BROKER_FIXTURE=1 go test ./internal/api -run TestGenerateBrokerFixture
+//	AVERIN_GEN_BROKER_FIXTURE=1 go test ./internal/api -run TestGenerateBrokerFixture
 func TestGenerateBrokerFixture(t *testing.T) {
-	if os.Getenv("FEIR_GEN_BROKER_FIXTURE") == "" {
-		t.Skip("set FEIR_GEN_BROKER_FIXTURE=1 to regenerate spec/fixtures/bundle-broker-valid.json")
+	if os.Getenv("AVERIN_GEN_BROKER_FIXTURE") == "" {
+		t.Skip("set AVERIN_GEN_BROKER_FIXTURE=1 to regenerate spec/fixtures/bundle-broker-valid.json")
 	}
 	h := newBrokerResourceServer(t)
 	c, _ := core.New(seed)
@@ -65,8 +65,8 @@ func TestGenerateBrokerFixture(t *testing.T) {
 	wrapper := map[string]any{
 		"_comment": "Real Go-produced Tier-A/B broker bundle (gateway_enforced grant + two-phase use, " +
 			"test-anchored). The WASM/JS offline-verifier broker-path test (verifier/test/broker.test.js) " +
-			"verifies `bundle` via feir_verify_bundle_with(bundle, opts), pinning the broker/resource/tsa " +
-			"keys in `opts`. Regenerate: FEIR_GEN_BROKER_FIXTURE=1 go test ./internal/api -run TestGenerateBrokerFixture.",
+			"verifies `bundle` via averin_verify_bundle_with(bundle, opts), pinning the broker/resource/tsa " +
+			"keys in `opts`. Regenerate: AVERIN_GEN_BROKER_FIXTURE=1 go test ./internal/api -run TestGenerateBrokerFixture.",
 		"opts":   opts,
 		"bundle": json.RawMessage(anchored),
 	}

@@ -127,7 +127,7 @@ func TestEventTypeInference(t *testing.T) {
 		attrs map[string]any
 		want  string
 	}{
-		{"explicit feir.event_type wins", map[string]any{"feir.event_type": "checkpoint", "tool.name": "x"}, "checkpoint"},
+		{"explicit averin.event_type wins", map[string]any{"averin.event_type": "checkpoint", "tool.name": "x"}, "checkpoint"},
 		{"tool prefix -> tool_call", map[string]any{"tool.name": "search"}, "tool_call"},
 		{"db prefix -> tool_call", map[string]any{"db.system": "pg"}, "tool_call"},
 		{"llm prefix -> llm_call", map[string]any{"llm.model_name": "gpt-4"}, "llm_call"},
@@ -191,8 +191,8 @@ func TestSessionIDFallback(t *testing.T) {
 			"S-A",
 		},
 		{
-			"feir.session attr",
-			`{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"t-2","spanId":"s1","name":"op","attributes":[{"key":"feir.session","value":{"stringValue":"S-B"}}]}]}]}]}`,
+			"averin.session attr",
+			`{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"t-2","spanId":"s1","name":"op","attributes":[{"key":"averin.session","value":{"stringValue":"S-B"}}]}]}]}]}`,
 			"S-B",
 		},
 		{

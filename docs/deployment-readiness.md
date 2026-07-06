@@ -4,7 +4,7 @@ These are the **Tier-2** items: they need real infrastructure, hardware, an exte
 action, so they cannot be *finished* as a self-contained repo diff. This doc records, for each, the
 production design, what is already **scaffolded in-repo** (a hook/interface you wire up), what **external
 infra** must provide, the **readiness checklist**, and the explicit **operator action**. It is the honest
-boundary between "feir ships this" and "your deployment provides this."
+boundary between "averin ships this" and "your deployment provides this."
 
 | Item | In-repo today | Needs (external) | Status |
 |------|---------------|------------------|--------|
@@ -13,7 +13,7 @@ boundary between "feir ships this" and "your deployment provides this."
 | 3. Multi-instance `broker_seq` lock (D6) | per-project `pg_advisory_xact_lock` for seq | shared Postgres + ingest-path distributed lock | **Seq-lock done; ingest-lock design** |
 | 4. TEE/remote-attestation enforcement (D7) | signed `deployment_attestation` claim | TEE hardware + attestation service + quote-verify lib | **Assertion today; hardware-root design** |
 | 5. git remote + push | clean tree, `.gitignore` hardened | remote URL + push credentials | **Repo push-ready; operator action** |
-| 6. Durable consume-before-act ledger (R5) | Postgres-backed `internal/pgledger` (auto-injected when `FEIR_DATABASE_URL` is set) | shared Postgres | **Done** — survives restart + serializes across instances (`a9c4b9c`) |
+| 6. Durable consume-before-act ledger (R5) | Postgres-backed `internal/pgledger` (auto-injected when `AVERIN_DATABASE_URL` is set) | shared Postgres | **Done** — survives restart + serializes across instances (`a9c4b9c`) |
 
 ---
 
@@ -28,12 +28,12 @@ header) is **RBAC, SSO, scoped/expiring tokens, and per-route permissions**.
 
 **Production design.**
 - **Scoped + expiring tokens.** Replace the static token set with short-lived tokens (JWT/PASETO) carrying
-  `{project, role, exp}`. feir validates the signature + `exp` + audience instead of a string-set lookup.
+  `{project, role, exp}`. averin validates the signature + `exp` + audience instead of a string-set lookup.
 - **RBAC.** Gate routes by role: `reader` (`/v2/export`, `/v2/verify`, `/v2/dag`), `writer` (`/v2/records`,
   `/v2/grants`, `/v2/use*`), `admin` (`/v2/checkpoints`). The middleware already binds the request to the
   named `project`; add a per-route role requirement.
-- **SSO/SAML/OIDC.** An external IdP issues the tokens; feir is a resource server that validates them
-  (verify the IdP's JWT signature + claims). No password handling in feir.
+- **SSO/SAML/OIDC.** An external IdP issues the tokens; averin is a resource server that validates them
+  (verify the IdP's JWT signature + claims). No password handling in averin.
 
 **In-repo preparation (buildable now, no external dependency).**
 - An `Authorizer` interface that *extends* `KeyStore` to return `{project, role, exp}` instead of a bool, and
@@ -62,7 +62,7 @@ proves a stolen capability + a different key fails PoP — but the keys themselv
 keys**, so a host compromise can exfiltrate them.
 
 **Production design.** Make the private keys **non-exportable** and bound to hardware:
-- **Server/broker/resource keys** → a `Signer` backed by a PKCS#11 HSM, AWS/GCP KMS, or a TPM: feir asks the
+- **Server/broker/resource keys** → a `Signer` backed by a PKCS#11 HSM, AWS/GCP KMS, or a TPM: averin asks the
   device to sign; the key never leaves the device.
 - **Agent `cnf` key** → bound to a TPM / Secure Enclave / mobile secure element, non-exportable, so a stolen
   capability token cannot be exercised without the hardware. Attest the binding (TPM EK / platform attestation)
@@ -173,7 +173,7 @@ plans, transcripts), which was untracked but not ignored, so a `git add -A` woul
   vectors (intentional, non-secret); production keys come from env/KMS (ignored).
 
 **External / operator action (this one is genuinely yours).**
-- Provide a **remote URL** and **push credentials** (SSH key or token) — feir cannot push to a remote it has
+- Provide a **remote URL** and **push credentials** (SSH key or token) — averin cannot push to a remote it has
   no address or auth for.
 - Choose the **branch strategy**: push `main`, or cut a feature branch and open a PR. The session's commits are
   on `main`; if you want a PR flow, branch before pushing.

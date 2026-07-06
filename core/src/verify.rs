@@ -229,7 +229,7 @@ pub struct VerifyReport {
     /// M6 / ADR 0005 (Cosig — M-of-N grant approval / dual control at issuance). `cosigned_grants_total` =
     /// closed, verified broker grants whose signed `grant_evidence.cosig_threshold >= 1` (they DECLARE a
     /// cosig requirement); `cosigned_grants_satisfied` = those for which ≥ `cosig_threshold` DISTINCT pinned
-    /// `cosig_approver_keys` produced a valid `feir.broker.cosig.approval.v1` cosignature; `cosig_threshold_failures`
+    /// `cosig_approver_keys` produced a valid `averin.broker.cosig.approval.v1` cosignature; `cosig_threshold_failures`
     /// = cosigned grants that fell short (each is also NOT indexed → its use is an `unmatched_violation`, so
     /// `!ok`; surfaced separately so the D8 capstone can require `== 0` self-documentingly). `cosig_status` ∈
     /// {`absent` (no cosigned grants), `satisfied` (every cosigned grant met threshold), `unsatisfied` (≥1
@@ -325,7 +325,7 @@ pub struct VerifyReport {
     /// surfaces stay DISJOINT — a brokered use naming a native grant_id reads as `unmatched_violation`, and a
     /// transcript naming a brokered/absent grant_id is a violation). `introspection_transcripts_total` = closed
     /// `introspection_transcript` records; `introspection_transcripts_verified` = those whose structured
-    /// `feir.resource.introspection.v1` signature verifies under a pinned `resource_authority_keys` issuer, bind to
+    /// `averin.resource.introspection.v1` signature verifies under a pinned `resource_authority_keys` issuer, bind to
     /// a present native grant, and whose `effective_scope ⊆ grant.scope` (space-delimited OAuth token subset) with
     /// no time-broadening (`effective_exp <= grant.exp`) and `issued_at <= introspected_at`. A failing transcript
     /// (bad sig / dangling / scope- or time-broadening) is a hard `unmatched_violation` (→ `!ok`).
@@ -543,7 +543,7 @@ pub struct VerifyOptions {
     pub attestation_keys: Vec<VerifyingKey>,
     /// Trusted COSIGNATURE-APPROVER keys (ADR 0005 M6 — M-of-N grant approval / dual control). A grant
     /// whose signed `grant_evidence.cosig_threshold >= 1` is Tier-B-eligible ONLY if at least that many
-    /// DISTINCT keys in this set produced a valid `feir.broker.cosig.approval.v1` cosignature over it;
+    /// DISTINCT keys in this set produced a valid `averin.broker.cosig.approval.v1` cosignature over it;
     /// otherwise the grant is NOT indexed (its use reads as `unmatched_violation`). Role-separated — a
     /// FATAL config error on overlap with ANY other role (broker/resource/taxonomy/attestation/tsa) and
     /// with the generic `authority_keys`, so an approver cannot self-approve via another hat. Absent ⇒ a
@@ -1675,7 +1675,7 @@ fn be8(pre: &mut Vec<u8>, n: u64) {
 }
 
 /// Re-derive the resource ledger_commitment (ADR 0003 R5 / ADR 0004 D3) the SAME way the resource
-/// shim does: `sha256( LP4("feir.broker.use.ledger.v1") ‖ LP4(jti) ‖ LP4(nonce) ‖ BE8(used_at) )`,
+/// shim does: `sha256( LP4("averin.broker.use.ledger.v1") ‖ LP4(jti) ‖ LP4(nonce) ‖ BE8(used_at) )`,
 /// where LP4 is a 4-byte big-endian length prefix and BE8 an 8-byte big-endian integer. Returns
 /// `sha256:<lowercase hex>`. Kept byte-identical to Go `resourceshim.ledgerCommitment` via the SHARED
 /// golden vector `spec/golden-vectors/broker-preimages.json` — loaded by BOTH Go
@@ -1683,7 +1683,7 @@ fn be8(pre: &mut Vec<u8>, n: u64) {
 /// implementation breaks both suites against the one file (not two independently-hardcoded copies).
 pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
     let mut pre = Vec::new();
-    for part in ["feir.broker.use.ledger.v1", jti, nonce] {
+    for part in ["averin.broker.use.ledger.v1", jti, nonce] {
         lp4(&mut pre, part.as_bytes());
     }
     be8(&mut pre, used_at as u64);
@@ -1696,11 +1696,11 @@ pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
 /// checkpoint's `broker_grant_head` carries and a dropped/renumbered/forked grant fails the match.
 ///
 /// `acc_0 = sha256( LP4(tag) )`; `acc_i = sha256( LP4(tag) ‖ acc_{i-1}(32 raw bytes) ‖ BE8(seq_i) ‖
-/// LP4(content_hash_i) )`, tag = "feir.broker.grant_head.v1". The caller MUST pass the pairs already
+/// LP4(content_hash_i) )`, tag = "averin.broker.grant_head.v1". The caller MUST pass the pairs already
 /// sorted by `broker_seq` (the verifier sorts the closed grant set; the producer folds in issue order).
 /// Returns `sha256:<hex>` of the final accumulator. The empty log has a well-defined non-zero root.
 pub fn grant_head_root(grants: &[(i64, String)]) -> String {
-    const TAG: &str = "feir.broker.grant_head.v1";
+    const TAG: &str = "averin.broker.grant_head.v1";
     // acc_0 = sha256(LP4(tag)) — a fixed non-zero seed so an empty log is distinguishable from a forged one.
     let mut seed = Vec::new();
     lp4(&mut seed, TAG.as_bytes());
@@ -1717,14 +1717,14 @@ pub fn grant_head_root(grants: &[(i64, String)]) -> String {
 }
 
 /// M5 Merkle-non-disclosure revocation (ADR 0005): the domain-separated leaf VALUE for a (possibly) revoked
-/// grant_id: `sha256( LP4("feir.broker.revocation.leaf.v1") ‖ LP4(grant_id) )`. The revocation tree's leaves are
+/// grant_id: `sha256( LP4("averin.broker.revocation.leaf.v1") ‖ LP4(grant_id) )`. The revocation tree's leaves are
 /// the SORTED set of these 32-byte values, bracketed by the MIN (0x00*32) / MAX (0xff*32) sentinels so EVERY
 /// queried id has a strictly-bracketing CONSECUTIVE pair (eliminating the first/last edge case). A
 /// non-membership proof reveals only the two adjacent leaf VALUES (hashes), never the full revoked list — the
 /// non-disclosure win. Kept in sync with the Go producer via the shared golden vector.
 pub fn revocation_leaf(grant_id: &str) -> [u8; 32] {
     let mut pre = Vec::new();
-    lp4(&mut pre, b"feir.broker.revocation.leaf.v1");
+    lp4(&mut pre, b"averin.broker.revocation.leaf.v1");
     lp4(&mut pre, grant_id.as_bytes());
     crate::hashx::sha256(&pre)
 }
@@ -1818,7 +1818,7 @@ fn merkle_root_from_proof(
 /// Re-derive the use-time PoP challenge digest the resource shim signs over (ADR 0003 R4 / ADR 0004
 /// D2), byte-identically to Go `resourceshim.usePoPChallenge`: `sha256( LP4(tag) ‖ LP4(grant_id) ‖
 /// LP4(resource_id) ‖ LP4(action) ‖ LP4(params_commitment) ‖ LP4(credential_binding) ‖ LP4(nonce) )`,
-/// tag = "feir.broker.use.pop.v1". Returns the 32-byte digest the agent signs. Kept in sync with Go via
+/// tag = "averin.broker.use.pop.v1". Returns the 32-byte digest the agent signs. Kept in sync with Go via
 /// a shared golden vector.
 pub fn use_pop_challenge(
     grant_id: &str,
@@ -1830,7 +1830,7 @@ pub fn use_pop_challenge(
 ) -> [u8; 32] {
     let mut pre = Vec::new();
     for part in [
-        "feir.broker.use.pop.v1",
+        "averin.broker.use.pop.v1",
         grant_id,
         resource_id,
         action,
@@ -1845,7 +1845,7 @@ pub fn use_pop_challenge(
 
 /// Re-derive the cosignature-approval challenge an approver signs (ADR 0005 M6), byte-identically to the
 /// Go producer: `sha256( LP4(tag) ‖ LP4(grant_id) ‖ LP4(approver_kid) ‖ LP4(credential_binding) ‖
-/// BE8(threshold_m) ‖ BE8(exp) )`, tag = "feir.broker.cosig.approval.v1". Binding `approver_kid` makes an
+/// BE8(threshold_m) ‖ BE8(exp) )`, tag = "averin.broker.cosig.approval.v1". Binding `approver_kid` makes an
 /// approval non-transferable to a different approver; binding `credential_binding` + `threshold_m` + `exp`
 /// makes it non-replayable onto a re-minted grant, a different threshold, or a different expiry. Returns the
 /// 32-byte digest the approver signs (raw, like `use_pop_challenge`). Kept in sync with Go via the shared
@@ -1859,7 +1859,7 @@ pub fn cosig_approval_challenge(
 ) -> [u8; 32] {
     let mut pre = Vec::new();
     for part in [
-        "feir.broker.cosig.approval.v1",
+        "averin.broker.cosig.approval.v1",
         grant_id,
         approver_kid,
         credential_binding,
@@ -1959,7 +1959,7 @@ fn count_cosig_approvals(
 
 /// Re-derive the per-hop delegation challenge a delegator signs (ADR 0005 M2), byte-identically to the Go
 /// producer: `sha256( LP4(tag) ‖ LP4(grant_id) ‖ BE8(hop_index) ‖ LP4(delegator_kid) ‖ LP4(delegate_kid) ‖
-/// LP4(scope) ‖ LP4(action) ‖ LP4(resource_id) ‖ BE8(exp) )`, tag = "feir.broker.delegation.hop.v1". Binding
+/// LP4(scope) ‖ LP4(action) ‖ LP4(resource_id) ‖ BE8(exp) )`, tag = "averin.broker.delegation.hop.v1". Binding
 /// the kids + hop_index makes a hop assertion non-transferable to a different delegator/delegate/position;
 /// binding scope/action/resource/exp makes it non-replayable onto a different authority or window. Returns the
 /// 32-byte digest the delegator signs (raw, like `use_pop_challenge`). Kept in sync with Go via the shared
@@ -1976,7 +1976,7 @@ pub fn delegation_hop_challenge(
     exp: i64,
 ) -> [u8; 32] {
     let mut pre = Vec::new();
-    lp4(&mut pre, b"feir.broker.delegation.hop.v1");
+    lp4(&mut pre, b"averin.broker.delegation.hop.v1");
     lp4(&mut pre, grant_id.as_bytes());
     be8(&mut pre, hop_index as u64);
     lp4(&mut pre, delegator_kid.as_bytes());
@@ -1990,7 +1990,7 @@ pub fn delegation_hop_challenge(
 
 /// Re-derive the resource's introspection-transcript challenge (ADR 0005 M3), byte-identically to the Go
 /// producer: `sha256( LP4(tag) ‖ LP4(grant_id) ‖ LP4(credential_ref) ‖ LP4(effective_scope) ‖ LP4(resource_id)
-/// ‖ BE8(introspected_at) ‖ BE8(effective_exp) )`, tag = "feir.resource.introspection.v1". A native/STS
+/// ‖ BE8(introspected_at) ‖ BE8(effective_exp) )`, tag = "averin.resource.introspection.v1". A native/STS
 /// credential is minted by an external IdP/STS the broker never sees, so the verifier cannot recompute its
 /// effective scope; the RESOURCE signs this statement of the scope it observed (the `credential_ref` is the
 /// `lease_id`). Binding `grant_id` ties the transcript to the broker grant authorizing the exchange; binding
@@ -2007,7 +2007,7 @@ pub fn introspection_transcript_challenge(
     effective_exp: i64,
 ) -> [u8; 32] {
     let mut pre = Vec::new();
-    lp4(&mut pre, b"feir.resource.introspection.v1");
+    lp4(&mut pre, b"averin.resource.introspection.v1");
     lp4(&mut pre, grant_id.as_bytes());
     lp4(&mut pre, credential_ref.as_bytes());
     lp4(&mut pre, effective_scope.as_bytes());
@@ -2019,7 +2019,7 @@ pub fn introspection_transcript_challenge(
 
 /// Re-derive the cross-broker certificate challenge (ADR 0005 M4, OPTIONAL transitive-trust tier),
 /// byte-identically to the Go producer: `sha256( LP4(tag) ‖ LP4(issuer_broker_id) ‖ LP4(subject_broker_id)
-/// ‖ LP4(subject_kid) ‖ LP4(scope) ‖ LP4(resource_id) ‖ BE8(not_after) )`, tag = "feir.broker.federation.cert.v1".
+/// ‖ LP4(subject_kid) ‖ LP4(scope) ‖ LP4(resource_id) ‖ BE8(not_after) )`, tag = "averin.broker.federation.cert.v1".
 /// Issuer broker A — whose key the auditor PINS in `federated_broker_keys` — vouches that subject broker B is
 /// authorized for `scope` over `resource_id` until `not_after`. B is identified BY KEY via
 /// `subject_kid = cnf_kid(subject_pubkey)`, NOT by id alone: binding the subject's key is what makes the cert
@@ -2034,7 +2034,7 @@ pub fn federation_cert_challenge(
     not_after: i64,
 ) -> [u8; 32] {
     let mut pre = Vec::new();
-    lp4(&mut pre, b"feir.broker.federation.cert.v1");
+    lp4(&mut pre, b"averin.broker.federation.cert.v1");
     lp4(&mut pre, issuer_broker_id.as_bytes());
     lp4(&mut pre, subject_broker_id.as_bytes());
     lp4(&mut pre, subject_kid.as_bytes());
@@ -2441,7 +2441,7 @@ fn validate_taxonomy(
     }
     let signer = keys
         .iter()
-        .find(|vk| crate::sign::verify("feir.taxonomy.v1", &digest, sig, vk).is_ok())?;
+        .find(|vk| crate::sign::verify("averin.taxonomy.v1", &digest, sig, vk).is_ok())?;
     // ADR 0006 §1 — taxonomy-key rotation (defense-in-depth). The auditor's `pinned_digest` already binds the
     // EXACT vetted artifact, so a compromised key cannot SUBSTITUTE a different taxonomy (the dominant check).
     // Still, an issuer the auditor flagged `compromised`/`revoked` is no longer a trusted source, so its
@@ -2994,7 +2994,7 @@ struct RevocationEval {
 
 /// M5 (ADR 0005): evaluate a bundle's top-level `revocation_list` — a signed, time-bounded list of revoked
 /// grant_ids under a pinned, role-separated `revocation_keys` issuer. Reuses the deployment_attestation
-/// pattern wholesale: the `sig` (domain `feir.revocation.v1`) covers the canonical list minus `sig` (so the
+/// pattern wholesale: the `sig` (domain `averin.revocation.v1`) covers the canonical list minus `sig` (so the
 /// disclosed `revoked_grant_ids` are authenticated directly — a Merkle-root NON-disclosure mode is the future
 /// extension), and freshness is the latest anchored checkpoint TSA timestamp falling within
 /// `[issued_at, not_after]` (canonical ISO, the same temporal anchor D7 uses). `fresh` iff signed + the
@@ -3044,7 +3044,7 @@ fn evaluate_revocation(
     let signer = match opts
         .revocation_keys
         .iter()
-        .find(|vk| crate::sign::verify("feir.revocation.v1", &digest, sig, vk).is_ok())
+        .find(|vk| crate::sign::verify("averin.revocation.v1", &digest, sig, vk).is_ok())
     {
         Some(vk) => vk,
         None => {
@@ -3151,7 +3151,7 @@ struct MerkleRevEval {
 
 /// M5 Merkle-non-disclosure revocation (ADR 0005): evaluate a bundle's top-level `revocation_merkle_root` — a
 /// signed, time-bounded commitment to the SORTED revoked-grant set that does NOT disclose it. Mirrors
-/// `evaluate_revocation` exactly: the `sig` (domain `feir.broker.revocation.merkleroot.v1`) covers the canonical
+/// `evaluate_revocation` exactly: the `sig` (domain `averin.broker.revocation.merkleroot.v1`) covers the canonical
 /// object minus `sig`, verified under a pinned role-separated `revocation_keys` issuer; the claimed `issuer_kid`
 /// must be the signer; freshness is the latest anchored TSA time within `[issued_at, not_after]`. Unlike the
 /// disclosed list, the revoked set is NOT in the bundle — each USE proves its grant's (non-)membership against
@@ -3199,7 +3199,7 @@ fn evaluate_merkle_revocation(
     obj.retain(|(k, _)| k != "sig");
     let digest = crate::hashx::sha256_prefixed(CanonValue::Object(obj).serialize().as_bytes());
     let signer = match opts.revocation_keys.iter().find(|vk| {
-        crate::sign::verify("feir.broker.revocation.merkleroot.v1", &digest, sig, vk).is_ok()
+        crate::sign::verify("averin.broker.revocation.merkleroot.v1", &digest, sig, vk).is_ok()
     }) {
         Some(vk) => vk,
         None => {
@@ -3467,7 +3467,7 @@ fn evaluate_attestation(
     let signer = match opts
         .attestation_keys
         .iter()
-        .find(|vk| crate::sign::verify("feir.attestation.v1", &digest, sig, vk).is_ok())
+        .find(|vk| crate::sign::verify("averin.attestation.v1", &digest, sig, vk).is_ok())
     {
         Some(vk) => vk,
         None => {
@@ -5388,7 +5388,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // accountable ONLY via a resource-signed introspection transcript, never a brokered PoP receipt. Each CLOSED
     // `introspection_transcript` record must: be a validatable resource record (integrity + resource authority +
     // re-derivable `introspection_evidence`); bind to a present NATIVE grant by grant_id (a brokered/absent
-    // grant_id is dangling — the surfaces stay disjoint); carry a structured `feir.resource.introspection.v1`
+    // grant_id is dangling — the surfaces stay disjoint); carry a structured `averin.resource.introspection.v1`
     // signature verifying under a pinned `resource_authority_keys` issuer over its EXACT
     // (grant_id, credential_ref, effective_scope, resource_id, introspected_at, effective_exp) tuple; name the
     // grant's own resource_id; and prove `effective_scope ⊆ grant.scope` (space-delimited OAuth token subset — no

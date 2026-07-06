@@ -1,8 +1,8 @@
-// feir.js — load the feir decision-core WASM and verify export bundles, fully offline.
+// averin.js — load the averin decision-core WASM and verify export bundles, fully offline.
 //
 // No framework, no build step, no network: the whole verifier is this file + the .wasm + an HTML
 // page. The WASM is the SAME Rust integrity core as the CLI and the cgo FFI (threat #10), exposed
-// over a tiny C ABI (feir_alloc / feir_verify_bundle_json_n / feir_string_free / feir_dealloc). You
+// over a tiny C ABI (averin_alloc / averin_verify_bundle_json_n / averin_string_free / averin_dealloc). You
 // can read every line.
 
 /**
@@ -13,7 +13,7 @@
  * `verifier.wasmSha256` so a page can DISPLAY it for out-of-band comparison against the reproducible build
  * (see verifier/SUPPLY-CHAIN.md). Accepts a "sha256:"-prefixed or bare hex digest, case-insensitively.
  */
-export async function initFeir(wasmSource, opts = {}) {
+export async function initAverin(wasmSource, opts = {}) {
   let bytes;
   if (wasmSource instanceof Uint8Array) bytes = wasmSource;
   else if (wasmSource instanceof ArrayBuffer) bytes = new Uint8Array(wasmSource);
@@ -32,7 +32,7 @@ export async function initFeir(wasmSource, opts = {}) {
   }
   // The verify path is pure computation — it needs no host imports.
   const { instance } = await WebAssembly.instantiate(bytes, {});
-  const v = new FeirVerifier(instance);
+  const v = new AverinVerifier(instance);
   v.wasmSha256 = sha256;
   return v;
 }
@@ -50,7 +50,7 @@ function normalizeDigest(d) {
 
 const NUL = String.fromCharCode(0);
 
-class FeirVerifier {
+class AverinVerifier {
   constructor(instance) {
     this.x = instance.exports;
   }
@@ -64,7 +64,7 @@ class FeirVerifier {
     // Length-aware write: no NUL terminator. The callee is told the exact byte length and reads all of
     // it, so an interior 0x00 cannot truncate the input into a verified-only prefix. Used by verifyBundle.
     const bytes = new TextEncoder().encode(str);
-    const ptr = this.x.feir_alloc(bytes.length);
+    const ptr = this.x.averin_alloc(bytes.length);
     this._mem().set(bytes, ptr);
     return { ptr, len: bytes.length };
   }
@@ -76,7 +76,7 @@ class FeirVerifier {
     if (str.indexOf(NUL) !== -1) throw new Error("input contains a NUL byte (not valid RCP)");
     const bytes = new TextEncoder().encode(str);
     const size = bytes.length + 1;
-    const ptr = this.x.feir_alloc(size);
+    const ptr = this.x.averin_alloc(size);
     this._mem().set(bytes, ptr);
     this._mem()[ptr + bytes.length] = 0;
     return { ptr, size };
@@ -97,8 +97,8 @@ class FeirVerifier {
       return resultPtr === 0 ? null : this._readCString(resultPtr);
     } finally {
       // always free both buffers with their matching frees, even if the call traps.
-      if (resultPtr !== 0) this.x.feir_string_free(resultPtr);
-      this.x.feir_dealloc(ptr, size);
+      if (resultPtr !== 0) this.x.averin_string_free(resultPtr);
+      this.x.averin_dealloc(ptr, size);
     }
   }
 
@@ -106,16 +106,16 @@ class FeirVerifier {
   verifyBundle(bundleJson) {
     // Length-aware call: the verifier reads exactly `len` bytes, so an interior NUL (never present in
     // valid RCP) cannot truncate the artifact into a prefix-only "ok" — it is verified in full and
-    // fails closed. (The old NUL-terminated feir_verify_bundle_json truncated at the first 0x00.)
+    // fails closed. (The old NUL-terminated averin_verify_bundle_json truncated at the first 0x00.)
     const { ptr, len } = this._writeBytes(bundleJson);
     let resultPtr = 0;
     try {
-      resultPtr = this.x.feir_verify_bundle_json_n(ptr, len);
+      resultPtr = this.x.averin_verify_bundle_json_n(ptr, len);
       if (resultPtr === 0) throw new Error("verifier returned null (invalid input)");
       return JSON.parse(this._readCString(resultPtr));
     } finally {
-      if (resultPtr !== 0) this.x.feir_string_free(resultPtr);
-      this.x.feir_dealloc(ptr, len);
+      if (resultPtr !== 0) this.x.averin_string_free(resultPtr);
+      this.x.averin_dealloc(ptr, len);
     }
   }
 
@@ -127,7 +127,7 @@ class FeirVerifier {
    * and Tier-B action accountability (role-separated, ADR 0003 R2). Returns the parsed report.
    */
   verifyBundleWith(bundleJson, opts) {
-    // LENGTH-AWARE call (feir_verify_bundle_with_n): both the bundle AND the pinned opts are passed with their
+    // LENGTH-AWARE call (averin_verify_bundle_with_n): both the bundle AND the pinned opts are passed with their
     // exact byte lengths, so an interior 0x00 in either (never present in valid RCP / an ed25519pub: or base64url
     // value) cannot truncate the bundle to a verified prefix NOR silently drop the pinned trust roots — the full
     // input is verified and fails closed. The NUL-truncatable C-string entrypoints are not compiled into the wasm.
@@ -135,18 +135,18 @@ class FeirVerifier {
     const o = this._writeBytes(typeof opts === "string" ? opts : JSON.stringify(opts ?? {}));
     let resultPtr = 0;
     try {
-      resultPtr = this.x.feir_verify_bundle_with_n(a.ptr, a.len, o.ptr, o.len);
+      resultPtr = this.x.averin_verify_bundle_with_n(a.ptr, a.len, o.ptr, o.len);
       if (resultPtr === 0) throw new Error("verifier returned null (invalid input)");
       return JSON.parse(this._readCString(resultPtr));
     } finally {
-      if (resultPtr !== 0) this.x.feir_string_free(resultPtr);
-      this.x.feir_dealloc(a.ptr, a.len);
-      this.x.feir_dealloc(o.ptr, o.len);
+      if (resultPtr !== 0) this.x.averin_string_free(resultPtr);
+      this.x.averin_dealloc(a.ptr, a.len);
+      this.x.averin_dealloc(o.ptr, o.len);
     }
   }
 
   /** Canonicalize a JSON document under RCP v1 (or a string starting with "ERROR:"). */
   canonicalize(jsonDoc) {
-    return this._call1(this.x.feir_rcp_canonicalize, jsonDoc) ?? "ERROR: null input";
+    return this._call1(this.x.averin_rcp_canonicalize, jsonDoc) ?? "ERROR: null input";
   }
 }

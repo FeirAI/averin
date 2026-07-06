@@ -12,13 +12,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/api"
-	"github.com/feir-dev/feir/server/internal/core"
-	"github.com/feir-dev/feir/server/internal/store"
+	"github.com/averin-dev/averin/server/internal/api"
+	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/store"
 )
 
 // signAuthorityEvidence signs an authority statement the way the core does (authority.rs sign_evidence):
-// ed25519 over LP4("feir.authority.v2") ‖ LP4(source) ‖ LP4(project_id) ‖ LP4(record_id) ‖ utf8(evidence_hash).
+// ed25519 over LP4("averin.authority.v2") ‖ LP4(source) ‖ LP4(project_id) ‖ LP4(record_id) ‖ utf8(evidence_hash).
 func signAuthorityEvidence(source, projectID, recordID, evidenceHash string, pe ed25519.PrivateKey) string {
 	var pre []byte
 	lp := func(s string) {
@@ -27,7 +27,7 @@ func signAuthorityEvidence(source, projectID, recordID, evidenceHash string, pe 
 		pre = append(pre, b[:]...)
 		pre = append(pre, s...)
 	}
-	lp("feir.authority.v2")
+	lp("averin.authority.v2")
 	lp(source)
 	lp(projectID)
 	lp(recordID)

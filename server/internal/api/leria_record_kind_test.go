@@ -9,10 +9,10 @@ import (
 
 // The leria integration ask: an OPTIONAL typed top-level `record_kind` ∈ {budget-exhausted,
 // chargeback-posted}, a SIBLING of event_type (leria still sets event_type:"decision"). These tests
-// cover the acceptance criteria from leria/docs/_meta/feir-integration-handoff.md: a conforming
+// cover the acceptance criteria from leria/docs/_meta/averin-integration-handoff.md: a conforming
 // budget-exhausted / chargeback-posted record ingests, hash-chains, and (the seal-but-fail-verify
 // trap) VERIFIES — no UnknownField — and /v2/export is filterable by record_kind in proof_only and
-// full_evidence; feir signs with its own seed and normalizes any sent authority to caller_declared.
+// full_evidence; averin signs with its own seed and normalizes any sent authority to caller_declared.
 
 // a conforming budget-exhausted seal: required project_id/session_id/idempotency_key, the leria
 // payload under extensions, integer micros (no floats), record_kind set, event_type still "decision".
@@ -59,7 +59,7 @@ func TestLeriaBudgetExhaustedIngestsAndVerifies(t *testing.T) {
 		t.Fatalf("no record id returned: %v", rec)
 	}
 	if !strings.HasPrefix(asString(rec["sig"]), "ed25519:") {
-		t.Fatalf("not sealed with feir's signing key: %v", rec)
+		t.Fatalf("not sealed with averin's signing key: %v", rec)
 	}
 
 	// checkpoint then verify the whole project offline via the Rust core — must NOT raise UnknownField.
@@ -218,7 +218,7 @@ func TestLeriaExportFilterableByRecordKind(t *testing.T) {
 	}
 }
 
-// Acceptance #4: feir signs with its own seed; a sent authority block normalizes to caller_declared.
+// Acceptance #4: averin signs with its own seed; a sent authority block normalizes to caller_declared.
 // (record_kind does not change the authority model — the seam is one-directional, leria is an author.)
 func TestLeriaRecordKindAuthorityNormalizedToCallerDeclared(t *testing.T) {
 	h := newSrv(t)
@@ -239,7 +239,7 @@ func TestLeriaRecordKindAuthorityNormalizedToCallerDeclared(t *testing.T) {
 		t.Fatalf("a sent authority must normalize to caller_declared (leria is an author, not a signer): %v", rec["authority"])
 	}
 	if !strings.HasPrefix(asString(rec["sig"]), "ed25519:") {
-		t.Fatalf("feir must sign the record with its own seed: %v", rec)
+		t.Fatalf("averin must sign the record with its own seed: %v", rec)
 	}
 }
 

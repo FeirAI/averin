@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/core"
-	"github.com/feir-dev/feir/server/internal/store"
+	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/store"
 )
 
 // TestSelfVerifyOptsPinsMeaningfulRolesNotAttestation (#14): selfVerifyOpts must pin every trust root whose verdict

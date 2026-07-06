@@ -7,13 +7,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/broker"
-	"github.com/feir-dev/feir/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/broker"
+	"github.com/averin-dev/averin/server/internal/core"
 )
 
 // resourceKeyFromSeed derives the raw ed25519 key the resource signs the M3 introspection challenge with — the
 // SAME key core.New(resourceSeed) holds (so rc.PubKey() pins it), since core exposes only SignEvidence (a tagged
-// evidence-hash sig) and the structured feir.resource.introspection.v1 sig is over raw challenge bytes.
+// evidence-hash sig) and the structured averin.resource.introspection.v1 sig is over raw challenge bytes.
 func resourceKeyFromSeed(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	b, err := hex.DecodeString(resourceSeed)
@@ -38,7 +38,7 @@ func nativeGrantRecord(t *testing.T, c *core.Core, grantID string, ge map[string
 	}
 	recBody := map[string]any{
 		"schema_version": "2", "canon_version": "rcp-1", "domain": "flightrecorder.record.v2",
-		"record_id": grantID, "project_id": "proj-001", "agent_id": "feir-broker", "agent_version": "feir-broker",
+		"record_id": grantID, "project_id": "proj-001", "agent_id": "averin-broker", "agent_version": "averin-broker",
 		"session_id": "s1", "span_id": "sp-" + grantID, "parent_span_id": nil, "causal_prev_hashes": []string{},
 		"display_seq": 0, "agent_ts": "2026-06-15T10:00:00.000Z", "received_ts": "2026-06-15T10:00:00.000Z",
 		"event_type": "credential_grant", "action": ge["action"], "observed_via": "broker", "status": "ok",
@@ -73,7 +73,7 @@ func introspectionRecord(t *testing.T, c *core.Core, rc *core.Core, recordID, gr
 	}
 	recBody := map[string]any{
 		"schema_version": "2", "canon_version": "rcp-1", "domain": "flightrecorder.record.v2",
-		"record_id": recordID, "project_id": "proj-001", "agent_id": "feir-resource", "agent_version": "feir-resource",
+		"record_id": recordID, "project_id": "proj-001", "agent_id": "averin-resource", "agent_version": "averin-resource",
 		"session_id": "s1", "span_id": "sp-" + recordID, "parent_span_id": nil, "causal_prev_hashes": []string{prev},
 		"display_seq": 1, "agent_ts": "2026-06-15T10:00:05.000Z", "received_ts": "2026-06-15T10:00:05.000Z",
 		"event_type": "tool_call", "action": ie["effective_scope"], "observed_via": "broker", "status": "ok",
@@ -125,7 +125,7 @@ func assembleNativeBundle(t *testing.T, c *core.Core, tsa ed25519.PrivateKey, se
 
 // TestIntrospectionTranscriptRoundTripsThroughRustVerifier is the cross-language end-to-end proof for ADR 0005
 // M3: a native (token_exchange) grant + a resource-signed introspection_transcript produced ENTIRELY in Go
-// (broker.NativeGrantEvidence + broker.IntrospectionEvidence, the structured feir.resource.introspection.v1 sig
+// (broker.NativeGrantEvidence + broker.IntrospectionEvidence, the structured averin.resource.introspection.v1 sig
 // built in Go), sealed + anchored via the Rust core FFI, and verified by the SAME Rust verifier — confirming the
 // Go-canonicalized introspection_evidence is bound to the native grant and counted by the M3 pre-pass exactly as
 // the native Rust fixtures are (introspection_status:"attested"), with fail-closed negative controls.

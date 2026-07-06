@@ -10,11 +10,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/api"
-	"github.com/feir-dev/feir/server/internal/auth"
-	"github.com/feir-dev/feir/server/internal/core"
-	"github.com/feir-dev/feir/server/internal/store"
-	"github.com/feir-dev/feir/server/internal/witness"
+	"github.com/averin-dev/averin/server/internal/api"
+	"github.com/averin-dev/averin/server/internal/auth"
+	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/averin-dev/averin/server/internal/witness"
 )
 
 const seed = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"

@@ -2,9 +2,9 @@
 //! are the cross-implementation contract; this asserts the Rust core reproduces them
 //! byte-for-byte, and that RCP rejection rules hold.
 
-use feir_decision_core::canon::CanonValue;
-use feir_decision_core::hashx::hex_lower;
-use feir_decision_core::record::compute_content_hash;
+use averin_decision_core::canon::CanonValue;
+use averin_decision_core::hashx::hex_lower;
+use averin_decision_core::record::compute_content_hash;
 use std::path::PathBuf;
 
 fn vectors_dir() -> PathBuf {

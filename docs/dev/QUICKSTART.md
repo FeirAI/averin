@@ -1,4 +1,4 @@
-# Quickstart: build & run feir
+# Quickstart: build & run averin
 
 This walks you from a clean checkout to a running server and a verified record — standalone, no
 other service involved.
@@ -7,7 +7,7 @@ other service involved.
 
 | Tool | Version | Why |
 |------|---------|-----|
-| Rust toolchain | pinned by `rust-toolchain.toml` (**1.92.0**) | builds `feir-decision-core` (the crypto core). rustup auto-installs the pin + the `wasm32` / `i686` targets on first build. |
+| Rust toolchain | pinned by `rust-toolchain.toml` (**1.92.0**) | builds `averin-decision-core` (the crypto core). rustup auto-installs the pin + the `wasm32` / `i686` targets on first build. |
 | Go | **1.25+** (`server/go.mod` declares `go 1.25.0`) | builds the server (cgo-links the Rust staticlib). |
 | A C toolchain (cgo) | clang/gcc | the Go server uses cgo to call the Rust core. |
 | `openssl` (or any 32-byte hex source) | any | to mint a signing seed. |
@@ -22,25 +22,25 @@ The server cgo-links a **prebuilt** Rust staticlib, so the order matters: build 
 first, then the Go binary.
 
 ```bash
-# Rust integrity core -> target/debug/libfeir_decision_core.a (the cgo link target).
-cargo build -p feir-decision-core
+# Rust integrity core -> target/debug/libaverin_decision_core.a (the cgo link target).
+cargo build -p averin-decision-core
 
 # Go server (cgo links the staticlib built above).
-cd server && go build -o feir-server ./cmd/feir-server
+cd server && go build -o averin-server ./cmd/averin-server
 ```
 
 The `Makefile` wraps this so the staticlib is never stale (a real footgun — editing `core/` then
 running `go test` would link an **old** trust root):
 
 ```bash
-make core          # = cargo build -p feir-decision-core
+make core          # = cargo build -p averin-decision-core
 make check-staticlib   # fails if the .a is older than core/ source
 ```
 
 To build the offline verify CLI and run it against a shipped fixture (no server needed):
 
 ```bash
-cargo run -p feir-decision-core --bin feir-verify -- bundle spec/fixtures/bundle-valid.json
+cargo run -p averin-decision-core --bin averin-verify -- bundle spec/fixtures/bundle-valid.json
 ```
 
 Expected: `RESULT: PASS (integrity) — every record sealed, linked, and checkpoint-consistent.`
@@ -51,8 +51,8 @@ The only required input is a 64-hex (32-byte) Ed25519 signing **seed**. With not
 the server runs in dev mode: in-memory store, no auth (it logs loud warnings about both).
 
 ```bash
-FEIR_SIGNING_SEED=$(openssl rand -hex 32) ./feir-server
-# logs: feir-server listening on :8080 (pubkey ed25519pub:...)
+AVERIN_SIGNING_SEED=$(openssl rand -hex 32) ./averin-server
+# logs: averin-server listening on :8080 (pubkey ed25519pub:...)
 ```
 
 On startup it prints the public key — that is the verifying key an auditor pins. Health check:
@@ -150,7 +150,7 @@ Re-run `GET /v2/verify?project=demo` and `ok` is now `true`.
 
 ```bash
 curl -s 'localhost:8080/v2/export?project=demo' > export.json
-cargo run -p feir-decision-core --bin feir-verify -- bundle export.json
+cargo run -p averin-decision-core --bin averin-verify -- bundle export.json
 ```
 
 The export carries the records, the checkpoint history, the public keys, and (where configured)
@@ -163,7 +163,7 @@ unlock the role gates, pass an `opts.json` pinning the role-disjoint keys — se
 [`../operator-verification.md`](../operator-verification.md):
 
 ```bash
-cargo run -p feir-decision-core --bin feir-verify -- bundle export.json opts.json
+cargo run -p averin-decision-core --bin averin-verify -- bundle export.json opts.json
 ```
 
 ## Self-host the full stack (Docker Compose)
@@ -172,7 +172,7 @@ Brings up Postgres (durable append-only store), the server, the OpenAI-compatibl
 and the web SPA:
 
 ```bash
-FEIR_SIGNING_SEED=$(openssl rand -hex 32) docker compose -f deploy/docker-compose.yml up --build
+AVERIN_SIGNING_SEED=$(openssl rand -hex 32) docker compose -f deploy/docker-compose.yml up --build
 ```
 
 - web app: <http://localhost:8088>  (offline verifier under `/verifier/`)

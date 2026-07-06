@@ -1,7 +1,7 @@
 # Architecture, core concepts & algorithms
 
-feir is a tamper-evident evidence service. Agents (or a proxy/SDK) submit observed event records;
-feir canonicalizes, hash-chains, and signs them into a per-session causal DAG, periodically commits
+averin is a tamper-evident evidence service. Agents (or a proxy/SDK) submit observed event records;
+averin canonicalizes, hash-chains, and signs them into a per-session causal DAG, periodically commits
 the frontier into a hash-chained checkpoint chain, and exports a bundle that anyone can verify
 **offline** — re-deriving every hash, signature, and link with no trust in the server.
 
@@ -9,27 +9,27 @@ the frontier into a hash-chained checkpoint chain, and exports a bundle that any
 
 ```
                     ┌─────────────────────────────────────────────┐
-   agent / SDK ───▶ │  feir-server (Go, internal/api)             │
+   agent / SDK ───▶ │  averin-server (Go, internal/api)             │
    proxy / OTel     │   ingest · DAG-link · seal · checkpoint     │
                     │   broker · resource gateway · export        │
                     └──────────────┬──────────────────────────────┘
                                    │ cgo
                     ┌──────────────▼──────────────────────────────┐
-                    │  feir-decision-core (Rust)                  │   ← single source of truth
+                    │  averin-decision-core (Rust)                  │   ← single source of truth
                     │  canon · commit · record · sign · dag ·     │     for ALL crypto
                     │  checkpoint · verify · rfc3161 · ffi        │
                     └──────────────┬───────────────┬──────────────┘
                           staticlib │               │ wasm32
                               (FFI) │               │
                     ┌──────────────▼──┐    ┌────────▼──────────────┐
-                    │  feir-verify CLI │    │  /verifier/ (browser) │
+                    │  averin-verify CLI │    │  /verifier/ (browser) │
                     └──────────────────┘    └───────────────────────┘
 ```
 
 The **Rust core is the single source of truth**: the Go server, the CLI, and the browser verifier
 all execute the *same* canonicalization, hashing, signing, and verification code. The Go server
 never re-implements crypto — it calls the core via cgo (the `server/internal/core` cgo bridge links
-`target/debug/libfeir_decision_core.a`). This is what makes "verify offline, in your browser, on CI,
+`target/debug/libaverin_decision_core.a`). This is what makes "verify offline, in your browser, on CI,
 and on the server" produce byte-identical results, and why the toolchain is pinned (`rust-toolchain.toml`).
 
 Core modules (`core/src/`):
@@ -51,7 +51,7 @@ Core modules (`core/src/`):
 
 ### 1. RCP canonicalization (`canon.rs`)
 
-feir defines and implements its own canonical JSON profile (Record Canonical Profile v1; see
+averin defines and implements its own canonical JSON profile (Record Canonical Profile v1; see
 `spec/rcp-v1.md`) rather than reusing a lenient library, because the integrity guarantee requires
 behaviors general-purpose JSON does not give:
 
@@ -81,9 +81,9 @@ where `LP(s)` is a 4-byte big-endian length prefix of the UTF-8 string. Binding 
 sig = "ed25519:" + base64url-no-pad( Ed25519( sk, LP(tag) ‖ utf8(content_hash) ) )
 ```
 
-The domain tag (`feir.record.sig.v1` for records, `feir.checkpoint.sig.v1` for checkpoints) prevents
+The domain tag (`averin.record.sig.v1` for records, `averin.checkpoint.sig.v1` for checkpoints) prevents
 cross-context signature reuse. Public keys are encoded `ed25519pub:<base64url-no-pad>`. Authority and
-attestation evidence use their own tags (`feir.attestation.v1`, etc.).
+attestation evidence use their own tags (`averin.attestation.v1`, etc.).
 
 ### 4. Hiding commitments (`commit.rs`)
 
@@ -92,7 +92,7 @@ plaintext would otherwise be recoverable by a hash dictionary (threat #6). Inste
 32-byte nonce and commits:
 
 ```
-commitment = "sha256:" + hex( SHA-256( LP("feir.commit.v1") ‖ LP(field_domain) ‖ LB(nonce) ‖ LB(value) ) )
+commitment = "sha256:" + hex( SHA-256( LP("averin.commit.v1") ‖ LP(field_domain) ‖ LB(nonce) ‖ LB(value) ) )
 ```
 
 The signed record carries `{alg, commitment, low_entropy}`; the plaintext goes to the content store.
@@ -130,7 +130,7 @@ frontier is uncommitted.
 
 ### 7. Offline bundle verification (`verify.rs`)
 
-`feir-verify bundle <bundle.json> [opts.json]` (and the WASM/FFI entrypoints) re-derive everything
+`averin-verify bundle <bundle.json> [opts.json]` (and the WASM/FFI entrypoints) re-derive everything
 from the bundle alone. **Two postures:**
 
 - **Internal consistency** (no `opts`): every hash recomputes, every signature checks against the
@@ -171,7 +171,7 @@ The `store.Store` interface (`server/internal/store/store.go`) has two implement
 - **In-memory** (`store.NewMem`) — default. Correct within one process but **NOT durable** (lost on
   restart) and the `heads → seal → put` ingest path is not a single atomic transaction. Dev /
   single-process only.
-- **Postgres** (`store.NewPostgres`, selected when `FEIR_DATABASE_URL` is set) — **append-only at the
+- **Postgres** (`store.NewPostgres`, selected when `AVERIN_DATABASE_URL` is set) — **append-only at the
   database** (the migration `REVOKE`s UPDATE/DELETE/TRUNCATE, verified under a least-privilege role),
   with idempotency + content-hash collapse + a DAG-derived frontier computed in SQL, and the ingest
   critical section run in a **serializable** transaction (so concurrent ingests cannot read a stale

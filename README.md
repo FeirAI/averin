@@ -1,4 +1,4 @@
-# feir — Flight Recorder for AI Agents
+# averin — Flight Recorder for AI Agents
 
 > **Verifiable incident reconstruction for production agents.** When an agent costs you
 > $900 overnight, goes off-script, or does something destructive, you get a tamper-evident,
@@ -12,7 +12,7 @@ Accountability, not just observability. Apache-2.0, self-hostable.
 > [Quickstart](docs/dev/QUICKSTART.md) (build, run, an end-to-end curl example) ·
 > [Architecture](docs/dev/ARCHITECTURE.md) · [API](docs/dev/API.md) ·
 > [Configuration](docs/dev/CONFIGURATION.md) · [Security](docs/dev/SECURITY.md) ·
-> [Integration](docs/dev/INTEGRATION.md) · [Testing](docs/dev/TESTING.md). feir is usable
+> [Integration](docs/dev/INTEGRATION.md) · [Testing](docs/dev/TESTING.md). averin is usable
 > **standalone** — a single Go binary plus an offline verifier; the four-plane composition is optional.
 
 ## The claim we actually make (and its limits)
@@ -35,7 +35,7 @@ Three honest trust levels (used verbatim in product copy):
 
 | Path | What |
 |------|------|
-| `core/` | **Rust `decision-core`** — canonicalize → commit → hash → sign → DAG-link → checkpoint → verify. One crate → FFI lib + the `feir-verify` CLI (`src/bin`) + WASM. The single source of truth. |
+| `core/` | **Rust `decision-core`** — canonicalize → commit → hash → sign → DAG-link → checkpoint → verify. One crate → FFI lib + the `averin-verify` CLI (`src/bin`) + WASM. The single source of truth. |
 | `server/` | Go: app API + ingestion, OpenAI-compatible recording proxy (`internal/proxy`), credential broker + resource gateway, MCP server, export, anchoring. (Experimental x402 metering lives in `internal/x402`, not yet wired into the binary.) |
 | `web/` | Svelte 5 + Vite SPA (client-only) — trace-waterfall run view |
 | `verifier/` | Vanilla JS + WASM standalone offline verifier (no framework) |
@@ -68,8 +68,8 @@ Python, TS, web, WASM verifier — all green.
 
 ```bash
 cargo test --workspace
-cargo run -p feir-decision-core --bin feir-verify -- bundle spec/fixtures/bundle-valid.json
-FEIR_SIGNING_SEED=$(openssl rand -hex 32) FEIR_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24) \
+cargo run -p averin-decision-core --bin averin-verify -- bundle spec/fixtures/bundle-valid.json
+AVERIN_SIGNING_SEED=$(openssl rand -hex 32) AVERIN_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24) \
   docker compose -f deploy/docker-compose.yml up --build
 ```
 
@@ -81,12 +81,12 @@ Every claim is bounded by [`docs/coverage-limits.md`](docs/coverage-limits.md) (
 - ☑ **Production Postgres store** — append-only at the database (REVOKE UPDATE/DELETE/TRUNCATE, verified under a least-privilege role), idempotency + content-hash collapse + DAG-derived frontier in SQL; auto-migrates; `docker compose up` is turnkey. Validated against real Postgres 16.
 - ☑ **Content commitments + selective-disclosure export** (#6) — low-entropy `input`/`output`/`rationale` are hiding-committed at ingest (plaintext → content store, never the signed body); a `selective_disclosure` export reveals `(value, nonce)` the offline verifier checks against each record's commitment. Disclosure secrets are written atomically with the record.
 - ☑ **RFC 3161 checkpoint anchoring** (#3) — checkpoints are timestamp-anchored to a third-party TSA, decoupled (out of the checkpoint lock, back-anchorable) and joined into the bundle at export.
-- ☑ **Credential broker (Level 3 — the moat)** — design in [`docs/decisions/0002-credential-broker-level-3.md`](docs/decisions/0002-credential-broker-level-3.md) (Tier A grant-accountability vs Tier B action-accountability), with the implementation design [`docs/decisions/0003-tier-b-demonstrator.md`](docs/decisions/0003-tier-b-demonstrator.md) hardened across two more Codex rounds to **READY**. **Tier A** (`POST /v2/grants`): a signed `gateway_enforced` grant (record-before-issue, idempotent) + a sender-constrained, single-use, proof-of-possession capability. **Tier B** (`POST /v2/use`, built across five adversarially-reviewed commits): the resource gateway validates a capability + PoP-at-use and consumes it before acting (`resourceshim`, consume-before-act ledger), then seals a **resource-signed** use receipt; the offline verifier re-derives each `evidence_hash` from canonical `grant_evidence`/`use_evidence` (R1), enforces **role-separated** broker/resource authority keys (R2, disjoint-or-fatal), and **joins each use to its grant over the verified-anchored CLOSED set** (R3) under the full match predicate — reporting `uses_matched` / `unmatched_violation` / `unmatched_pending` / `grants_unused`. Honest residuals (resource is TCB, taxonomy/attestations unevaluated, never-anchored suppression) are stated, not papered over; the strongest `action_completeness` verdict is `attested_complete_over_brokered_surface` — and it is always paired with `resource_trust: assumed_truthful` (complete over the brokered surface *if* the resource labeled truthfully, never "everything the agent did"). **Since shipped** (each finder + Opus-adversarially reviewed): the **N-Use `bounded_reuse` mode** ([ADR 0005 §M1](docs/decisions/0005-deferred-producer-modes.md) — one credential good for N uses of the identical `(action, resource_id)`, deduped per `(grant_id, use_sequence_number)`, capstone-eligible); a **durable Postgres-backed consume-before-act ledger** (`internal/pgledger`, auto-injected when `FEIR_DATABASE_URL` is set — a single-use/bounded capability's consumption survives a restart and serializes across instances); and the **D8 capstone is now provable end-to-end from a real Go-produced bundle** (`WithCoverageManifest` → `attested_complete_over_brokered_surface`), not only in native Rust fixtures.
+- ☑ **Credential broker (Level 3 — the moat)** — design in [`docs/decisions/0002-credential-broker-level-3.md`](docs/decisions/0002-credential-broker-level-3.md) (Tier A grant-accountability vs Tier B action-accountability), with the implementation design [`docs/decisions/0003-tier-b-demonstrator.md`](docs/decisions/0003-tier-b-demonstrator.md) hardened across two more Codex rounds to **READY**. **Tier A** (`POST /v2/grants`): a signed `gateway_enforced` grant (record-before-issue, idempotent) + a sender-constrained, single-use, proof-of-possession capability. **Tier B** (`POST /v2/use`, built across five adversarially-reviewed commits): the resource gateway validates a capability + PoP-at-use and consumes it before acting (`resourceshim`, consume-before-act ledger), then seals a **resource-signed** use receipt; the offline verifier re-derives each `evidence_hash` from canonical `grant_evidence`/`use_evidence` (R1), enforces **role-separated** broker/resource authority keys (R2, disjoint-or-fatal), and **joins each use to its grant over the verified-anchored CLOSED set** (R3) under the full match predicate — reporting `uses_matched` / `unmatched_violation` / `unmatched_pending` / `grants_unused`. Honest residuals (resource is TCB, taxonomy/attestations unevaluated, never-anchored suppression) are stated, not papered over; the strongest `action_completeness` verdict is `attested_complete_over_brokered_surface` — and it is always paired with `resource_trust: assumed_truthful` (complete over the brokered surface *if* the resource labeled truthfully, never "everything the agent did"). **Since shipped** (each finder + Opus-adversarially reviewed): the **N-Use `bounded_reuse` mode** ([ADR 0005 §M1](docs/decisions/0005-deferred-producer-modes.md) — one credential good for N uses of the identical `(action, resource_id)`, deduped per `(grant_id, use_sequence_number)`, capstone-eligible); a **durable Postgres-backed consume-before-act ledger** (`internal/pgledger`, auto-injected when `AVERIN_DATABASE_URL` is set — a single-use/bounded capability's consumption survives a restart and serializes across instances); and the **D8 capstone is now provable end-to-end from a real Go-produced bundle** (`WithCoverageManifest` → `attested_complete_over_brokered_surface`), not only in native Rust fixtures.
 
 ## Verify an export offline
 
 ```
-feir-verify bundle ./export.json        # records + checkpoint history + TSA tokens + public keys
+averin-verify bundle ./export.json        # records + checkpoint history + TSA tokens + public keys
 ```
 
 No network, no trust in the vendor. The same Rust core runs in your browser (WASM) and on CI.

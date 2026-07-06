@@ -10,7 +10,7 @@ import (
 
 // revocationLeafTag domain-separates a revocation leaf hash (ADR 0005 M5 Merkle-non-disclosure) from every other
 // preimage. A leaf VALUE binds a grant_id; the tree's leaves are the SORTED set of these, sentinel-bracketed.
-const revocationLeafTag = "feir.broker.revocation.leaf.v1"
+const revocationLeafTag = "averin.broker.revocation.leaf.v1"
 
 // RevocationLeaf = sha256( LP4(tag) ‖ LP4(grant_id) ): the 32-byte leaf VALUE for a (possibly) revoked grant_id,
 // byte-identical to the Rust verifier's revocation_leaf. The tree leaves are the SORTED set of these, bracketed

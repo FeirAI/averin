@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 
-// Client-only SPA (not SvelteKit). The dev server proxies /v2 to the feir server.
+// Client-only SPA (not SvelteKit). The dev server proxies /v2 to the averin server.
 export default defineConfig({
   plugins: [svelte()],
   server: {

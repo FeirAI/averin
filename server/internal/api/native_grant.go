@@ -8,13 +8,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/feir-dev/feir/server/internal/broker"
+	"github.com/averin-dev/averin/server/internal/broker"
 )
 
 // WithIntrospection enables POST /v2/introspection (ADR 0005 M3 — Native/STS): the resource records a signed
 // introspection transcript attesting an externally-minted credential's effective scope. rawResourceKey is the
 // RAW resource recording key (the SAME key WithResource's resourceCore wraps) — needed to sign the structured
-// feir.resource.introspection.v1 challenge over raw bytes (which the FFI core's tagged SignEvidence cannot do).
+// averin.resource.introspection.v1 challenge over raw bytes (which the FFI core's tagged SignEvidence cannot do).
 // Requires WithResource first; panics on a key mismatch (a configuration error).
 func (s *Server) WithIntrospection(rawResourceKey ed25519.PrivateKey) *Server {
 	if s.resourceCore == nil {
@@ -122,7 +122,7 @@ func (s *Server) buildNativeGrantRecord(gr grantRequest, grantID string, evidenc
 		"project_id":    gr.ProjectID,
 		"session_id":    gr.SessionID,
 		"agent_id":      gr.AgentID,
-		"agent_version": "feir-broker",
+		"agent_version": "averin-broker",
 		"event_type":    "credential_grant",
 		"observed_via":  "broker",
 		"action":        gr.Action,
@@ -160,7 +160,7 @@ type introspectionRequest struct {
 // handleIntrospection records a resource-signed introspection transcript (ADR 0005 M3) for a native grant.
 func (s *Server) handleIntrospection(w http.ResponseWriter, r *http.Request) {
 	if s.resourceCore == nil || s.resourceRawKey == nil {
-		writeErr(w, http.StatusNotImplemented, "introspection not enabled (set FEIR_RESOURCE_SEED + WithIntrospection)")
+		writeErr(w, http.StatusNotImplemented, "introspection not enabled (set AVERIN_RESOURCE_SEED + WithIntrospection)")
 		return
 	}
 	body, err := readBody(r)
@@ -198,9 +198,9 @@ func (s *Server) handleIntrospection(w http.ResponseWriter, r *http.Request) {
 		}
 		transcriptHash = h
 	}
-	recordID := uuidV5Shaped("feir.introspection.id.v1", ir.ProjectID, ir.IdempotencyKey)
+	recordID := uuidV5Shaped("averin.introspection.id.v1", ir.ProjectID, ir.IdempotencyKey)
 
-	// The resource signs the structured feir.resource.introspection.v1 challenge with its RAW key.
+	// The resource signs the structured averin.resource.introspection.v1 challenge with its RAW key.
 	ie := broker.IntrospectionEvidence(s.resourceRawKey, ir.GrantID, ir.CredentialRef, ir.EffectiveScope, s.resourceID, transcriptHash, introspectedAt, ir.EffectiveExp)
 
 	var sealed string
@@ -260,8 +260,8 @@ func (s *Server) buildIntrospectionRecord(ir introspectionRequest, recordID stri
 		"record_id":     recordID,
 		"project_id":    ir.ProjectID,
 		"session_id":    ir.SessionID,
-		"agent_id":      "feir-resource",
-		"agent_version": "feir-resource",
+		"agent_id":      "averin-resource",
+		"agent_version": "averin-resource",
 		"event_type":    "tool_call",
 		"observed_via":  "broker",
 		"action":        ir.EffectiveScope,

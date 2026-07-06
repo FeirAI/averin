@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/goldenvec"
+	"github.com/averin-dev/averin/server/internal/goldenvec"
 )
 
 func TestFederationCertChallengeGoldenVector(t *testing.T) {

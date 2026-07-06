@@ -1,4 +1,4 @@
-# Coverage limits — what feir proves, and what it does not
+# Coverage limits — what averin proves, and what it does not
 
 This document is **normative for product copy, UI, and docs** (spec §0, §14.9). The honest claim
 is narrow on purpose. State it; never imply more.
@@ -16,7 +16,7 @@ they're unchanged — not that the bytes describe what truly happened in the wor
 
 ## The three trust levels
 
-| Level | Claim | feir today |
+| Level | Claim | averin today |
 |-------|-------|------------|
 | **1 — Record integrity** | "This record was sealed by this key and hasn't changed since, and sits in a verifiable, externally-anchored history." | **Yes.** Proven by `decision-core` (canonicalize → commit → hash → sign → DAG-link → checkpoint → anchor → verify), offline, across CLI/WASM/FFI. |
 | **2 — Event observation** | "This event was observed by us." | **Partial — and we say so per event.** Every record carries `observed_via` (`proxy`/`sdk`/`otel`). We see *only* what those paths capture. |
@@ -51,7 +51,7 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   detectable from a single bundle** — that needs the witness store, and ultimately Level 3.
 - **No per-project authz yet (Phase-1 limit).** The app API (`/v2/sessions`, `/v2/dag`,
   `/v2/verify`, `/v2/export`) has **no authentication/authorization** — RBAC/SSO/SAML is explicitly
-  Phase 2 (spec §3). Any caller who can reach the API can read any project's data. Deploy feir
+  Phase 2 (spec §3). Any caller who can reach the API can read any project's data. Deploy averin
   behind your own auth (or single-tenant) until the authz layer lands. (This does not affect the
   cryptographic guarantees — offline verification needs no server trust.)
 - **Uninstrumented actions (#13).** See above — a Level-2 limit by construction.
@@ -60,9 +60,9 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   *verified*. The UI must visibly distinguish "declared by agent" from "verified from policy
   engine." Never present declared authority as verified.
 - **Authority signature is project-bound (v2), with a one-time pre-release cutover.** The authority
-  `evidence_sig` preimage binds `project_id` (`feir.authority.v2`) so a verified triple cannot be replayed
+  `evidence_sig` preimage binds `project_id` (`averin.authority.v2`) so a verified triple cannot be replayed
   across tenants. This is a **hard cutover** from the pre-release `v1` (no `project_id`): the verifier
-  accepts only v2. It is safe because feir has shipped no v1-signed records (nothing to migrate). **Forward
+  accepts only v2. It is safe because averin has shipped no v1-signed records (nothing to migrate). **Forward
   policy:** authority evidence is append-only and cannot be re-signed in place, so any preimage change
   *after deployment* must verify the newest version first and fall back to older versions under an
   explicitly downgraded/legacy status — never a silent hard cutover that drops historical verification.

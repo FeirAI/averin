@@ -46,7 +46,7 @@
 
 <main>
   <header>
-    <h1>feir</h1>
+    <h1>averin</h1>
     <p class="tag">verifiable incident reconstruction for production agents</p>
   </header>
 

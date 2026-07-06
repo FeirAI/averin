@@ -41,7 +41,7 @@ func entriesJSON(es []Entry) []map[string]any {
 // an auditor must pin as taxonomy_digest / taxonomy_version. The digest is sha256_prefixed of the
 // RCP-canonical body MINUS sig — computed by the core (h.RcpEvidenceHash), NEVER Go json.Marshal, since RCP
 // canonicalization (NFC keys, UTF-16 key sort, integer-only) is the single cross-language source of truth.
-// The sig is ed25519 over LP4("feir.taxonomy.v1") ‖ utf8(digest), byte-identical to the Rust verifier's
+// The sig is ed25519 over LP4("averin.taxonomy.v1") ‖ utf8(digest), byte-identical to the Rust verifier's
 // sign::sign. taxKey MUST be role-separated from the broker/resource/tsa/attestation keys (the verifier
 // treats an overlap as a fatal configuration error).
 func Sign(h Hasher, taxKey ed25519.PrivateKey, version, effectiveFrom, effectiveUntil int64, single, escalating []Entry) (taxJSON, digest string, ver int64, err error) {
@@ -77,12 +77,12 @@ func Sign(h Hasher, taxKey ed25519.PrivateKey, version, effectiveFrom, effective
 	return string(out), digest, version, nil
 }
 
-// signTaxonomy = ed25519(taxKey, LP4("feir.taxonomy.v1") ‖ utf8(digest)) -> "ed25519:"+base64url-no-pad,
-// byte-identical to the Rust core's sign::sign over the feir.taxonomy.v1 domain (RCP §9.2). The signed
+// signTaxonomy = ed25519(taxKey, LP4("averin.taxonomy.v1") ‖ utf8(digest)) -> "ed25519:"+base64url-no-pad,
+// byte-identical to the Rust core's sign::sign over the averin.taxonomy.v1 domain (RCP §9.2). The signed
 // message is the digest STRING (not the body bytes). Cross-language agreement is exercised by the e2e test
 // that verifies a Go-signed taxonomy under the Rust verifier.
 func signTaxonomy(digest string, sk ed25519.PrivateKey) string {
-	const tag = "feir.taxonomy.v1"
+	const tag = "averin.taxonomy.v1"
 	pre := make([]byte, 0, 4+len(tag)+len(digest))
 	var lp [4]byte
 	binary.BigEndian.PutUint32(lp[:], uint32(len(tag)))

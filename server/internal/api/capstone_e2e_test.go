@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/api"
-	"github.com/feir-dev/feir/server/internal/core"
-	"github.com/feir-dev/feir/server/internal/store"
-	"github.com/feir-dev/feir/server/internal/taxonomy"
+	"github.com/averin-dev/averin/server/internal/api"
+	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/averin-dev/averin/server/internal/taxonomy"
 )
 
 // TestCapstoneAttestedCompleteEndToEnd proves the D8 capstone end-to-end from a REAL Go-produced bundle:
@@ -152,7 +152,7 @@ func TestCapstoneOverBoundedReuseEndToEnd(t *testing.T) {
 		`"ok":true`,
 		`"action_completeness":"attested_complete_over_brokered_surface"`,
 		`"bounded_reuse_grants":1`,
-		`"uses_matched":2`,      // BOTH exercises of the one N-Use credential matched
+		`"uses_matched":2`,        // BOTH exercises of the one N-Use credential matched
 		`"uses_pop_reverified":2`, // each was independently PoP-reverified
 		`"bounded_reuse_overspent":0`,
 		`"bounded_reuse_seq_replays":0`,

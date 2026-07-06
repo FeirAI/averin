@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/core"
-	"github.com/feir-dev/feir/server/internal/taxonomy"
+	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/taxonomy"
 )
 
 // taxonomyKey is the operation-taxonomy issuer — distinct from the server/broker/resource/tsa keys (the
@@ -22,7 +22,7 @@ func taxonomyKey() ed25519.PrivateKey {
 // TestTaxonomyValidatesActionUnderAnchor (T8): a Go-SIGNED operation taxonomy, pinned into the verify opts,
 // elevates a matched single_operation use to action_verified (uses_action_unverified:0). This proves the Go
 // signer produces the EXACT artifact the Rust verifier validates cross-language — the RCP-canonical digest
-// + the feir.taxonomy.v1 Ed25519 signature. Like T9 it needs a crypto-valid anchor (attachTestAnchor) to
+// + the averin.taxonomy.v1 Ed25519 signature. Like T9 it needs a crypto-valid anchor (attachTestAnchor) to
 // reach use-matching, since taxonomy verification only applies to matched, closed uses.
 func TestTaxonomyValidatesActionUnderAnchor(t *testing.T) {
 	h := newBrokerResourceServer(t)

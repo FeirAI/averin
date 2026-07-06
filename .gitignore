@@ -39,5 +39,5 @@ verifier/*.wasm
 web/dist
 web/node_modules
 
-# built server binary (go build ./cmd/feir-server)
-/server/feir-server
+# built server binary (go build ./cmd/averin-server)
+/server/averin-server

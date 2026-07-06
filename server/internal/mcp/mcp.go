@@ -1,6 +1,6 @@
-// Package mcp is an experimental Model Context Protocol server (stdio, JSON-RPC 2.0) exposing feir
+// Package mcp is an experimental Model Context Protocol server (stdio, JSON-RPC 2.0) exposing averin
 // to agents as tools: record_decision, get_session_trace, verify_record, request_export. It is a
-// thin client over the feir app API — all sealing/verification still runs in the Rust core.
+// thin client over the averin app API — all sealing/verification still runs in the Rust core.
 package mcp
 
 import (
@@ -37,12 +37,12 @@ type rpcError struct {
 }
 
 type Server struct {
-	feirURL string
-	client  *http.Client
+	averinURL string
+	client    *http.Client
 }
 
-func New(feirURL string) *Server {
-	return &Server{feirURL: strings.TrimRight(feirURL, "/"), client: &http.Client{Timeout: 15 * time.Second}}
+func New(averinURL string) *Server {
+	return &Server{averinURL: strings.TrimRight(averinURL, "/"), client: &http.Client{Timeout: 15 * time.Second}}
 }
 
 // Serve runs the stdio loop: newline-delimited JSON-RPC in, newline-delimited out.
@@ -75,7 +75,7 @@ func (s *Server) Handle(req Request) *Response {
 		return ok(req.ID, map[string]any{
 			"protocolVersion": protocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "feir", "version": "0.1.0"},
+			"serverInfo":      map[string]any{"name": "averin", "version": "0.1.0"},
 		})
 	case "notifications/initialized":
 		return nil // notification
@@ -147,7 +147,7 @@ func (s *Server) callTool(req Request) *Response {
 			mode = "proof_only"
 		}
 		exportURL := fmt.Sprintf("%s/v2/export?project=%s&mode=%s",
-			s.feirURL, url.QueryEscape(arg("project_id")), url.QueryEscape(mode))
+			s.averinURL, url.QueryEscape(arg("project_id")), url.QueryEscape(mode))
 		return s.toolResult(req.ID, `{"export_url":"`+exportURL+`"}`, nil)
 	default:
 		return fail(req.ID, -32602, "unknown tool: "+p.Name)
@@ -163,7 +163,7 @@ func (s *Server) toolResult(id json.RawMessage, text string, err error) *Respons
 
 func (s *Server) post(path string, body map[string]any) (string, error) {
 	b, _ := json.Marshal(body)
-	resp, err := s.client.Post(s.feirURL+path, "application/json", bytes.NewReader(b))
+	resp, err := s.client.Post(s.averinURL+path, "application/json", bytes.NewReader(b))
 	if err != nil {
 		return "", err
 	}
@@ -173,7 +173,7 @@ func (s *Server) post(path string, body map[string]any) (string, error) {
 }
 
 func (s *Server) get(path string) (string, error) {
-	resp, err := s.client.Get(s.feirURL + path)
+	resp, err := s.client.Get(s.averinURL + path)
 	if err != nil {
 		return "", err
 	}

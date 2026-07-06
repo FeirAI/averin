@@ -1,5 +1,5 @@
 {
-  "name": "@feir/sdk",
+  "name": "@averin/sdk",
   "version": "0.1.0",
   "description": "Flight recorder SDK for AI agents — tamper-evident, authority-bound decision evidence.",
   "license": "Apache-2.0",

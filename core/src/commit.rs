@@ -1,6 +1,6 @@
 //! Hiding commitments for low-entropy fields (RCP §9.3, threat #6).
 //!
-//! `commitment = sha256:hex( SHA-256( LP("feir.commit.v1") ‖ LP(field_domain) ‖ LB(nonce) ‖ LB(value) ) )`
+//! `commitment = sha256:hex( SHA-256( LP("averin.commit.v1") ‖ LP(field_domain) ‖ LB(nonce) ‖ LB(value) ) )`
 //!
 //! Nonce and value are bound as **raw byte strings** (length-prefixed), never re-encoded, so
 //! there is no encoding ambiguity. The commitment hides the value (the 32-byte nonce defeats a
@@ -8,7 +8,7 @@
 
 use crate::hashx::{lp_into, lp_str_into, sha256_prefixed};
 
-pub const COMMIT_TAG: &str = "feir.commit.v1";
+pub const COMMIT_TAG: &str = "averin.commit.v1";
 pub const NONCE_LEN: usize = 32;
 
 /// The closed registry of commit field domains (RCP §9.3). Derived from the containing field:
@@ -95,7 +95,7 @@ pub fn verify_commitment(
 }
 
 /// Generate a fresh 32-byte nonce from the OS CSPRNG, or `None` if the CSPRNG is unavailable.
-/// The FFI (`feir_random_nonce`) uses this fallible form so a CSPRNG failure becomes a clean
+/// The FFI (`averin_random_nonce`) uses this fallible form so a CSPRNG failure becomes a clean
 /// `{"error":...}` instead of a panic unwinding across the C/cgo boundary (UB in the debug
 /// staticlib Go links). Only with the `std` feature — the WASM verifier never mints nonces.
 #[cfg(feature = "std")]

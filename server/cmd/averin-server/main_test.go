@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/core"
 )
 
 // TestRevocationPubKeyEncodingMatchesCore pins the cross-language format contract the R2 guard relies
@@ -38,7 +38,7 @@ func TestRevocationPubKeyEncodingMatchesCore(t *testing.T) {
 // TestSecretEnvOrFile_HappyPaths covers the non-fatal resolutions of the
 // env-or-file seed reader: inline-only, file-only (trimmed), and neither-set.
 func TestSecretEnvOrFile_HappyPaths(t *testing.T) {
-	const name = "FEIR_TEST_SEED_HAPPY"
+	const name = "AVERIN_TEST_SEED_HAPPY"
 
 	// neither set → empty (the caller decides whether empty is fatal).
 	t.Setenv(name, "")
@@ -78,10 +78,10 @@ func TestSecretEnvOrFile_HappyPaths(t *testing.T) {
 // _FILE that is not a regular file (a directory/FIFO/device), and a _FILE over the size cap. Each runs
 // in a re-exec'd child of this test binary and asserts a non-zero exit (log.Fatal => os.Exit(1)).
 func TestSecretEnvOrFile_Fatal(t *testing.T) {
-	const name = "FEIR_TEST_SEED_FATAL"
+	const name = "AVERIN_TEST_SEED_FATAL"
 
 	// Child branch: any configured scenario triggers the (fatal) read.
-	if os.Getenv("FEIR_TEST_FATAL_CASE") != "" {
+	if os.Getenv("AVERIN_TEST_FATAL_CASE") != "" {
 		_ = secretEnvOrFile(name)
 		return
 	}
@@ -97,7 +97,7 @@ func TestSecretEnvOrFile_Fatal(t *testing.T) {
 		env      []string
 	}{
 		{"both", []string{name + "=inline", name + "_FILE=/some/path"}},
-		{"missing", []string{name + "_FILE=/nonexistent/feir/seed/path"}},
+		{"missing", []string{name + "_FILE=/nonexistent/averin/seed/path"}},
 		{"blank_file", []string{name + "_FILE=   "}},                       // set-but-blank _FILE must not fall back
 		{"both_via_ws_file", []string{name + "=abcd", name + "_FILE=   "}}, // inline + whitespace _FILE is still both-set
 		{"nonregular", []string{name + "_FILE=" + dir}},                    // a directory is not a regular file
@@ -106,7 +106,7 @@ func TestSecretEnvOrFile_Fatal(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.scenario, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=TestSecretEnvOrFile_Fatal")
-			cmd.Env = append(os.Environ(), "FEIR_TEST_FATAL_CASE="+tc.scenario)
+			cmd.Env = append(os.Environ(), "AVERIN_TEST_FATAL_CASE="+tc.scenario)
 			cmd.Env = append(cmd.Env, tc.env...)
 			out, err := cmd.CombinedOutput()
 			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
@@ -118,8 +118,8 @@ func TestSecretEnvOrFile_Fatal(t *testing.T) {
 
 // TestRevocationR2Disjoint_UnderFileMountedSeeds proves the R2 role-separation guard still FATALS when
 // the broker/resource seed it must be disjoint from is supplied via its <NAME>_FILE form. The pre-#40
-// guard compared FEIR_REVOCATION_SEED against raw os.Getenv("FEIR_BROKER_ISSUING_SEED") /
-// os.Getenv("FEIR_RESOURCE_SEED"); once those seeds moved to secretEnvOrFile, a file-mounted seed read
+// guard compared AVERIN_REVOCATION_SEED against raw os.Getenv("AVERIN_BROKER_ISSUING_SEED") /
+// os.Getenv("AVERIN_RESOURCE_SEED"); once those seeds moved to secretEnvOrFile, a file-mounted seed read
 // as "" and the disjointness fatal was silently skipped. This builds + runs the real binary so it
 // exercises main()'s actual seed resolution + the derived-pubkey comparison. (It would PASS-incorrectly
 // — no fatal — on the pre-fix code.)
@@ -133,10 +133,10 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 	seedBroker := strings.Repeat("c3", 32)
 
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "feir-server-test")
+	bin := filepath.Join(dir, "averin-server-test")
 	build := exec.Command("go", "build", "-o", bin, ".")
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Skipf("could not build feir-server (cgo toolchain unavailable?): %v\n%s", err, out)
+		t.Skipf("could not build averin-server (cgo toolchain unavailable?): %v\n%s", err, out)
 	}
 	sharedFile := filepath.Join(dir, "shared.seed")
 	if err := os.WriteFile(sharedFile, []byte(seedShared+"\n"), 0o600); err != nil {
@@ -151,20 +151,20 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 			// broker seed file-mounted == inline revocation seed → R2 fatal.
 			name: "broker-via-file",
 			env: []string{
-				"FEIR_SIGNING_SEED=" + seedSigning,
-				"FEIR_BROKER_ISSUING_SEED_FILE=" + sharedFile,
-				"FEIR_REVOCATION_SEED=" + seedShared,
+				"AVERIN_SIGNING_SEED=" + seedSigning,
+				"AVERIN_BROKER_ISSUING_SEED_FILE=" + sharedFile,
+				"AVERIN_REVOCATION_SEED=" + seedShared,
 			},
 		},
 		{
 			// resource seed file-mounted == inline revocation seed → R2 fatal (broker enabled separately).
 			name: "resource-via-file",
 			env: []string{
-				"FEIR_SIGNING_SEED=" + seedSigning,
-				"FEIR_BROKER_ISSUING_SEED=" + seedBroker,
-				"FEIR_RESOURCE_SEED_FILE=" + sharedFile,
-				"FEIR_RESOURCE_ID=res-test",
-				"FEIR_REVOCATION_SEED=" + seedShared,
+				"AVERIN_SIGNING_SEED=" + seedSigning,
+				"AVERIN_BROKER_ISSUING_SEED=" + seedBroker,
+				"AVERIN_RESOURCE_SEED_FILE=" + sharedFile,
+				"AVERIN_RESOURCE_ID=res-test",
+				"AVERIN_REVOCATION_SEED=" + seedShared,
 			},
 		},
 	}
@@ -184,26 +184,26 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 	}
 }
 
-// TestRequireProdSecrets_FailsClosed proves the FEIR_REQUIRE_PROD_SECRETS gate refuses to start when a
-// prod-mandatory secret is empty/absent (empty FEIR_API_KEYS => unauthenticated API; empty
-// FEIR_DATABASE_URL => volatile in-memory store). Builds + runs the real binary (the gate is in main()).
+// TestRequireProdSecrets_FailsClosed proves the AVERIN_REQUIRE_PROD_SECRETS gate refuses to start when a
+// prod-mandatory secret is empty/absent (empty AVERIN_API_KEYS => unauthenticated API; empty
+// AVERIN_DATABASE_URL => volatile in-memory store). Builds + runs the real binary (the gate is in main()).
 func TestRequireProdSecrets_FailsClosed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the cgo binary; skipped under -short")
 	}
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "feir-server-rps")
+	bin := filepath.Join(dir, "averin-server-rps")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Skipf("could not build feir-server (cgo toolchain?): %v\n%s", err, out)
+		t.Skipf("could not build averin-server (cgo toolchain?): %v\n%s", err, out)
 	}
 	seed := strings.Repeat("a1", 32)
 	cases := []struct {
 		name string
 		env  []string
 	}{
-		{"missing api keys", []string{"FEIR_REQUIRE_PROD_SECRETS=1", "FEIR_SIGNING_SEED=" + seed, "FEIR_DATABASE_URL=postgres://x"}},
-		{"missing db url", []string{"FEIR_REQUIRE_PROD_SECRETS=1", "FEIR_SIGNING_SEED=" + seed, "FEIR_API_KEYS=proj:tok"}},
-		{"dev signing seed", []string{"FEIR_REQUIRE_PROD_SECRETS=1", "FEIR_API_KEYS=proj:tok", "FEIR_DATABASE_URL=postgres://x", "FEIR_SIGNING_SEED=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}},
+		{"missing api keys", []string{"AVERIN_REQUIRE_PROD_SECRETS=1", "AVERIN_SIGNING_SEED=" + seed, "AVERIN_DATABASE_URL=postgres://x"}},
+		{"missing db url", []string{"AVERIN_REQUIRE_PROD_SECRETS=1", "AVERIN_SIGNING_SEED=" + seed, "AVERIN_API_KEYS=proj:tok"}},
+		{"dev signing seed", []string{"AVERIN_REQUIRE_PROD_SECRETS=1", "AVERIN_API_KEYS=proj:tok", "AVERIN_DATABASE_URL=postgres://x", "AVERIN_SIGNING_SEED=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,14 +213,14 @@ func TestRequireProdSecrets_FailsClosed(t *testing.T) {
 			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
 				t.Fatalf("%s: expected fail-closed exit, got %v\n%s", tc.name, err, out)
 			}
-			if !strings.Contains(string(out), "FEIR_REQUIRE_PROD_SECRETS") {
+			if !strings.Contains(string(out), "AVERIN_REQUIRE_PROD_SECRETS") {
 				t.Fatalf("%s: exited non-zero but not via the gate:\n%s", tc.name, out)
 			}
 		})
 	}
 }
 
-// TestIsDevSigningSeed pins the detector the FEIR_REQUIRE_PROD_SECRETS gate uses to reject the
+// TestIsDevSigningSeed pins the detector the AVERIN_REQUIRE_PROD_SECRETS gate uses to reject the
 // well-known, globally-published dev seed (core_test.go:8) — pure, fast, no cgo/re-exec needed.
 func TestIsDevSigningSeed(t *testing.T) {
 	cases := []struct {

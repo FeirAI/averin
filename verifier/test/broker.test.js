@@ -1,19 +1,19 @@
-// Broker-path coverage for the standalone WASM/JS offline verifier (feir's "verify in your browser"
+// Broker-path coverage for the standalone WASM/JS offline verifier (averin's "verify in your browser"
 // surface). Before this, the WASM verifier was only tested against a 3-record NON-broker bundle and
-// feir.js could not even pin broker keys. This exercises the Tier-A/B credential-broker path against a
+// averin.js could not even pin broker keys. This exercises the Tier-A/B credential-broker path against a
 // real Go-produced bundle (spec/fixtures/bundle-broker-valid.json), through the same WASM core as the
 // CLI/FFI, with pinned broker/resource/tsa roles — plus the fail-closed direction.
 import { test, expect } from "bun:test";
-import { initFeir } from "../feir.js";
+import { initAverin } from "../averin.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..", "..");
-const WASM = join(ROOT, "target", "wasm32-unknown-unknown", "release", "feir_decision_core.wasm");
+const WASM = join(ROOT, "target", "wasm32-unknown-unknown", "release", "averin_decision_core.wasm");
 const FIXTURE = join(ROOT, "spec", "fixtures", "bundle-broker-valid.json");
 
-async function feir() {
-  return initFeir(new Uint8Array(readFileSync(WASM)));
+async function averin() {
+  return initAverin(new Uint8Array(readFileSync(WASM)));
 }
 
 function fixture() {
@@ -21,7 +21,7 @@ function fixture() {
 }
 
 test("verifies a Tier-A/B broker bundle offline in wasm with pinned roles", async () => {
-  const v = await feir();
+  const v = await averin();
   const f = fixture();
   const r = v.verifyBundleWith(JSON.stringify(f.bundle), f.opts);
   expect(r.ok).toBe(true);
@@ -31,7 +31,7 @@ test("verifies a Tier-A/B broker bundle offline in wasm with pinned roles", asyn
 });
 
 test("fail-closed: broker/resource key-set overlap is rejected (R2 disjointness)", async () => {
-  const v = await feir();
+  const v = await averin();
   const f = fixture();
   // Pin the SAME key as BOTH the broker and resource authority. The verifier rejects this as a fatal
   // config error (R2: the broker and resource recording-key sets MUST be disjoint, or a broker key
@@ -42,7 +42,7 @@ test("fail-closed: broker/resource key-set overlap is rejected (R2 disjointness)
 });
 
 test("fail-closed: a tampered grant record fails verification", async () => {
-  const v = await feir();
+  const v = await averin();
   const f = fixture();
   // Flip a byte inside the signed grant body — breaks its content_hash / authority sig.
   const tampered = JSON.stringify(f.bundle).replace("credential_grant", "credentialXgrant");
@@ -51,7 +51,7 @@ test("fail-closed: a tampered grant record fails verification", async () => {
 });
 
 test("fail-closed: WITHOUT pinned broker/resource keys the grant does not elevate", async () => {
-  const v = await feir();
+  const v = await averin();
   const f = fixture();
   // No pinned authority keys -> the grant cannot reach gateway_enforced / grant_verified.
   const r = v.verifyBundleWith(JSON.stringify(f.bundle), {});

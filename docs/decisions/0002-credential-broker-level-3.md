@@ -1,7 +1,7 @@
 # ADR 0002 — The credential broker (Level 3: complete action accountability)
 
 **Status:** Accepted — the **Tier-A grant-verification prototype is built** (the `broker` package,
-`POST /v2/grants` record-before-issue issuance, `feir_sign_evidence`, and the verifier's
+`POST /v2/grants` record-before-issue issuance, `averin_sign_evidence`, and the verifier's
 `grant_accountability` under a pinned broker key); the **Tier-B (Level 3) demonstrator** — resource
 use-receipts, attestation evaluation, and the broker-TCB reduction — remains gated on a design-partner
 pull (ADR 0001 / spec §12).
@@ -17,7 +17,7 @@ residual). Hardened across three adversarial-review rounds.
 
 ## Context — the gap Level 3 closes
 
-feir today proves **Level 1** (record integrity) and **partial Level 2** (event observation: we see
+averin today proves **Level 1** (record integrity) and **partial Level 2** (event observation: we see
 only what `observed_via` ∈ {proxy, sdk, otel} captures). The honest hole, stated in
 [`coverage-limits.md`](../coverage-limits.md) and threat **#13** (uninstrumented action):
 
@@ -114,9 +114,9 @@ resources, conditional on three deployment attestations**:
   token+key transfer attempt. Where the sender-key is software-resident, (iii) covers token theft
   only and key-exfiltration is a **stated residual**, not a defended threat.
 
-What feir proves **cryptographically from the bundle** (Tier A): every issued credential has a
+What averin proves **cryptographically from the bundle** (Tier A): every issued credential has a
 recorded, signed, checkpoint-committed, anchored grant, and the grant log is tamper-evident and
-non-backdatable. What feir **cannot** prove from the bundle (and must surface, never assume):
+non-backdatable. What averin **cannot** prove from the bundle (and must surface, never assume):
 
 - That (i)/(ii)/(iii) hold — **out-of-band attestations** (a signed deployment manifest digest at
   minimum; a TEE/measured-boot quote at best). The bundle carries a **coverage manifest** enumerating
@@ -167,7 +167,7 @@ Absent one of these, broker integrity is an assumption; the verifier labels Tier
 agent (no standing creds, sender identity = mTLS/workload key)
    │  1. POST /v2/grants  { agent_identity, action, resource, scope, justification, idempotency_key }
    ▼
-┌──────────────────────── feir-broker ─────────────────────────┐
+┌──────────────────────── averin-broker ─────────────────────────┐
 │  a. authenticate agent_identity (mTLS / signed workload JWT)  │
 │  b. policy decision; REJECT scopes broader than               │
 │     single_operation for Tier B (forbidden-scope check)       │
@@ -187,8 +187,8 @@ resource / gateway shim — validates broker signature + sender constraint + sco
    rejects out-of-scope/expired/replayed use (B3/B4/B8/B10).
 ```
 
-`feir-broker` is a new service (or a mode of `feir-server`) that is **both** a token-exchange
-authorization server **and** a feir ingestion client; every issuance is an ingest reusing the
+`averin-broker` is a new service (or a mode of `averin-server`) that is **both** a token-exchange
+authorization server **and** a averin ingestion client; every issuance is an ingest reusing the
 seal → DAG → checkpoint → anchor spine.
 
 **Failure-atomic issuance recovery (New Finding 3).** Naming the states is not enough; every crash
@@ -339,7 +339,7 @@ is the broker recording key), additive outputs:
    (reuse seal/DAG/store) → broker-signed **sender-constrained, single-use** capability (`cnf` = agent
    key, `jti = grant_id`, max-TTL-capped) → `issuance_status` under `extensions.broker`. (Agent auth
    is the PoP; mTLS/agent-JWT transport is a deployment concern.)
-3. ☑ Broker recording key pinned by the verifier (`feir_verify_bundle_with`); grants verify to
+3. ☑ Broker recording key pinned by the verifier (`averin_verify_bundle_with`); grants verify to
    `gateway_enforced` only when the record is ALSO integrity-proven.
 4. ☑ Verifier `grant_total`/`grant_verified`, `grant_accountability`, `coverage_manifest` echo,
    `attestation_status: unevaluated`, `broker_trust: assumed`, and the **Tier-A** verdict only.

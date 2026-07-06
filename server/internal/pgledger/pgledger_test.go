@@ -10,15 +10,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/feir-dev/feir/server/internal/pgledger"
-	"github.com/feir-dev/feir/server/internal/resourceshim"
+	"github.com/averin-dev/averin/server/internal/pgledger"
+	"github.com/averin-dev/averin/server/internal/resourceshim"
 )
 
-// Set FEIR_TEST_DATABASE_URL (e.g. postgres://postgres:postgres@localhost:5432/postgres) to enable.
+// Set AVERIN_TEST_DATABASE_URL (e.g. postgres://postgres:postgres@localhost:5432/postgres) to enable.
 func TestPostgresLedger(t *testing.T) {
-	dsn := os.Getenv("FEIR_TEST_DATABASE_URL")
+	dsn := os.Getenv("AVERIN_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("set FEIR_TEST_DATABASE_URL to run the Postgres ledger test")
+		t.Skip("set AVERIN_TEST_DATABASE_URL to run the Postgres ledger test")
 	}
 	ctx := context.Background()
 	l, err := pgledger.New(ctx, dsn)

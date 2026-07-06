@@ -1,4 +1,4 @@
-# feir server + proxy. Multi-stage: build the Rust integrity core (staticlib), then the cgo Go
+# averin server + proxy. Multi-stage: build the Rust integrity core (staticlib), then the cgo Go
 # binaries, then a slim runtime. The Go services link the SAME Rust core the CLI/WASM use.
 #
 # SUPPLY CHAIN — pin base images by digest for production. The tags below float (a `:1-bookworm` can be
@@ -15,25 +15,25 @@ COPY core ./core
 # footgun for the trust root). We copy the RELEASE staticlib into the target/debug path the cgo
 # LDFLAGS (${SRCDIR}/../../../target/debug) expect, so the prod image links the optimized core
 # WITHOUT changing the source #cgo directive (local dev still builds debug unchanged).
-RUN cargo build --release -p feir-decision-core
+RUN cargo build --release -p averin-decision-core
 
 FROM golang:1.25-bookworm AS gobuild
 WORKDIR /src
 COPY . .
-COPY --from=rustbuild /src/target/release/libfeir_decision_core.a ./target/debug/libfeir_decision_core.a
+COPY --from=rustbuild /src/target/release/libaverin_decision_core.a ./target/debug/libaverin_decision_core.a
 WORKDIR /src/server
-RUN CGO_ENABLED=1 go build -o /out/feir-server ./cmd/feir-server \
- && CGO_ENABLED=1 go build -o /out/feir-proxy  ./cmd/feir-proxy
+RUN CGO_ENABLED=1 go build -o /out/averin-server ./cmd/averin-server \
+ && CGO_ENABLED=1 go build -o /out/averin-proxy  ./cmd/averin-proxy
 
 FROM debian:bookworm-slim
 # Pin a NUMERIC uid/gid so k8s `runAsNonRoot` + `runAsUser: 65532` can verify non-root (the
 # kubelet does not resolve USER names). Without a fixed uid, a name-only USER fails under
 # PodSecurity=restricted. 65532 matches the distroless `nonroot` convention used by the Go planes.
-RUN groupadd -g 65532 feir && useradd -u 65532 -g 65532 -m feir
-COPY --from=gobuild /out/feir-server /usr/local/bin/feir-server
-COPY --from=gobuild /out/feir-proxy  /usr/local/bin/feir-proxy
-COPY spec/fixtures /opt/feir/fixtures
-USER feir
+RUN groupadd -g 65532 averin && useradd -u 65532 -g 65532 -m averin
+COPY --from=gobuild /out/averin-server /usr/local/bin/averin-server
+COPY --from=gobuild /out/averin-proxy  /usr/local/bin/averin-proxy
+COPY spec/fixtures /opt/averin/fixtures
+USER averin
 EXPOSE 8080 8081
-ENV FEIR_ADDR=:8080
-CMD ["feir-server"]
+ENV AVERIN_ADDR=:8080
+CMD ["averin-server"]

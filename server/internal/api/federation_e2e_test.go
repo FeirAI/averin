@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/feir-dev/feir/server/internal/broker"
-	"github.com/feir-dev/feir/server/internal/core"
+	"github.com/averin-dev/averin/server/internal/broker"
+	"github.com/averin-dev/averin/server/internal/core"
 )
 
 // prepareFedGrantEvidence mints a federated (broker_id-tagged) single_operation grant via the REAL producer
@@ -95,7 +95,7 @@ func fedGrantRecord(t *testing.T, c *core.Core, brokerCore *core.Core, grantID s
 	}
 	recBody := map[string]any{
 		"schema_version": "2", "canon_version": "rcp-1", "domain": "flightrecorder.record.v2",
-		"record_id": grantID, "project_id": "proj-001", "agent_id": "feir-broker", "agent_version": "feir-broker",
+		"record_id": grantID, "project_id": "proj-001", "agent_id": "averin-broker", "agent_version": "averin-broker",
 		"session_id": "s1", "span_id": "sp-" + grantID, "parent_span_id": nil, "causal_prev_hashes": []string{},
 		"display_seq": 0, "agent_ts": "2026-06-15T10:00:00.000Z", "received_ts": "2026-06-15T10:00:00.000Z",
 		"event_type": "credential_grant", "action": ge["action"], "observed_via": "broker", "status": "ok",

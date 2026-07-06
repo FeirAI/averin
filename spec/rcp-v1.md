@@ -133,7 +133,7 @@ declared context, so a body cannot be reinterpreted under a different profile/do
 ### 9.2 Record `sig`
 
 ```
-sig_preimage = LP("feir.record.sig.v1") ‖ utf8(content_hash)
+sig_preimage = LP("averin.record.sig.v1") ‖ utf8(content_hash)
 sig          = "ed25519:" ‖ base64url_nopad( Ed25519-sign(sk, sig_preimage) )
 ```
 
@@ -152,7 +152,7 @@ field_domain ∈ { "input", "output", "rationale", "credential" } // CLOSED regi
 value_bytes = the exact octet sequence of the field content as stored in the content store;
               for an inline text value, NFC-normalized UTF-8 of the string
 commitment  = "sha256:" ‖ lowerhex( SHA-256(
-                 LP("feir.commit.v1") ‖ LP(field_domain) ‖ LB(nonce) ‖ LB(value_bytes) ) )
+                 LP("averin.commit.v1") ‖ LP(field_domain) ‖ LB(nonce) ‖ LB(value_bytes) ) )
 ```
 
 Nonce and value are bound as **raw byte strings** (`LB`), never re-encoded to base64 first, so
@@ -165,7 +165,7 @@ additionally protected by encryption + access control.
 A checkpoint body carries its own `schema_version: "2"`, `canon_version: "rcp-1"`, and
 `domain: "flightrecorder.checkpoint.v2"`. The `anchor` block, `checkpoint_hash`, and `sig` are
 **excluded** from the body before hashing (the anchor is filled in *after* signing). Otherwise
-identical to §9.1/§9.2 with the checkpoint `domain` and sig tag `"feir.checkpoint.sig.v1"`.
+identical to §9.1/§9.2 with the checkpoint `domain` and sig tag `"averin.checkpoint.sig.v1"`.
 
 ---
 

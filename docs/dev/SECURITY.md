@@ -1,6 +1,6 @@
 # Security model
 
-feir's value is a **precise, defensible** claim. This page states the threat model, the invariants
+averin's value is a **precise, defensible** claim. This page states the threat model, the invariants
 it upholds, the trust boundaries, and — explicitly — what it does **not** do. The normative,
 product-facing version lives in [`../coverage-limits.md`](../coverage-limits.md) and
 [`../decisions/0001-who-is-the-evidence-for.md`](../decisions/0001-who-is-the-evidence-for.md); this
@@ -26,7 +26,7 @@ what truly happened in the world.
 | **2 — Event observation** | this event was observed by us | **Partial — and stated per event** (each record carries `observed_via`). We see only what the proxy/SDK/OTel path captures. |
 | **3 — Complete accountability** | this is *everything* the agent did | **Demonstrated over the brokered surface** (credential broker Tier-A + resource gateway Tier-B); full coverage still needs deployment attestations + a reduced broker TCB. Never claimed as "everything." |
 
-## Invariants feir upholds
+## Invariants averin upholds
 
 - **Append-only, tamper-evident.** A record's `content_hash` + `sig` make any post-seal byte change
   detectable; this cryptographic guarantee is the **primary** tamper-evidence and holds regardless of
@@ -55,7 +55,7 @@ what truly happened in the world.
 - **Authority is declared by default; elevation is verified.** `authority.source: caller_declared`
   is forgeable and presented as such. Elevation to `policy_engine_signed` / `human_signed` /
   `gateway_enforced` requires an `evidence_sig` that verifies under a pinned key; the preimage binds
-  `project_id` (`feir.authority.v2`) so a verified triple cannot be replayed across tenants.
+  `project_id` (`averin.authority.v2`) so a verified triple cannot be replayed across tenants.
 - **Role separation is enforced.** The signing, broker, resource, revocation, attestation, cosig,
   and taxonomy keys must be pairwise disjoint. The server fail-fasts (panics/`log.Fatal`s) on an
   overlap at startup; the offline verifier rejects an overlapping `opts.json` as a fatal config
@@ -68,13 +68,13 @@ what truly happened in the world.
 
 - **Record authenticity** is cryptographic and offline: pin the signer's `ed25519pub:` key (logged
   at startup, or carried in the bundle's `keys`) and verify — no server trust needed.
-- **API authn** (`server/internal/auth`): optional project-scoped API keys (`FEIR_API_KEYS`). When
+- **API authn** (`server/internal/auth`): optional project-scoped API keys (`AVERIN_API_KEYS`). When
   configured, every `/v2/*` route requires a valid token for the `?project=`; comparison is
   constant-time over SHA-256 digests; it **fails closed** (unknown project / empty token ⇒ deny); a
   zero-key config refuses to start (no silent deny-all); tokens are never logged. The dev-only
   open-store mode is explicit and warned about.
 - **API authz is Phase-1 limited.** This answers only "is this token valid for this project?" Full
-  RBAC/SSO/scoped-and-expiring tokens/per-route permissions are Phase 2. With `FEIR_API_KEYS` unset
+  RBAC/SSO/scoped-and-expiring tokens/per-route permissions are Phase 2. With `AVERIN_API_KEYS` unset
   the app API is fully unauthenticated.
 
 ## Trust boundaries
@@ -87,11 +87,11 @@ what truly happened in the world.
   capstone is always paired with `resource_trust: assumed_truthful`: it proves every resource-signed
   receipt over the brokered surface *if the resource labeled truthfully* — never "everything the agent
   did." This is irreducible (MF1).
-- **External authorities hold their own private keys off-box.** feir only *verifies* their
+- **External authorities hold their own private keys off-box.** averin only *verifies* their
   `evidence_sig` under the pinned public key; the policy engine / human-approval service stays out of
-  feir's TCB.
+  averin's TCB.
 
-## What feir deliberately does NOT do (honest non-goals / limits)
+## What averin deliberately does NOT do (honest non-goals / limits)
 
 - **It does not prove reality** — only provenance + integrity of the *bytes it was given*.
 - **It does not see uninstrumented actions** (threat #13). An action outside the proxy/SDK/OTel

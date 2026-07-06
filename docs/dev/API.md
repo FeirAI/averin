@@ -1,6 +1,6 @@
 # API / wire reference
 
-The `feir-server` HTTP API, verified against `server/internal/api/server.go` (route table in
+The `averin-server` HTTP API, verified against `server/internal/api/server.go` (route table in
 `Routes()`) and the core object definitions in `core/src/record.rs` / `core/src/checkpoint.rs`.
 
 All bodies are JSON. Request bodies are bounded to **8 MiB** (`http.MaxBytesReader`). Numeric
@@ -8,13 +8,13 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 
 ## Authentication
 
-- When `FEIR_API_KEYS` is **unset**, the API is **unauthenticated** (`/v2/*` is open). Dev /
+- When `AVERIN_API_KEYS` is **unset**, the API is **unauthenticated** (`/v2/*` is open). Dev /
   single-tenant only.
-- When `FEIR_API_KEYS` is set, every `/v2/*` route is gated by project-scoped API-key middleware;
+- When `AVERIN_API_KEYS` is set, every `/v2/*` route is gated by project-scoped API-key middleware;
   `/healthz` stays open. Credentials are read from `Authorization: Bearer <token>` (scheme is
   case-insensitive) **or** `X-Api-Key: <token>`; the project comes from the `?project=` query
   parameter. A token not valid for that project gets a generic `401` (`{"error":"unauthorized"}`,
-  with `WWW-Authenticate: Bearer realm="feir"`). The check is constant-time and fails closed.
+  with `WWW-Authenticate: Bearer realm="averin"`). The check is constant-time and fails closed.
 - With auth on, a body `project_id` that does not match the authorized `?project=` is `403`.
 
 ## Routes
@@ -30,14 +30,14 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | GET | `/v2/dag` | A session's sealed records (trace-waterfall view). | always |
 | GET | `/v2/sessions` | List a project's session ids. | always |
 | GET | `/v2/usage` | Usage / billable counts for a project. | always |
-| POST | `/v2/grants` | Credential broker: issue a `gateway_enforced` grant (Tier-A). | `FEIR_BROKER_ISSUING_SEED` |
+| POST | `/v2/grants` | Credential broker: issue a `gateway_enforced` grant (Tier-A). | `AVERIN_BROKER_ISSUING_SEED` |
 | POST | `/v2/grants/prepare` | Two-phase grant, phase 1 (mint + reveal). | broker (+ cosig) |
 | POST | `/v2/grants/finalize` | Two-phase grant, phase 2 (attach approver sigs + commit). | broker (+ cosig) |
 | POST | `/v2/introspection` | Native/STS: record a resource introspection transcript. | resource gateway |
-| POST | `/v2/use` | Resource gateway: one-phase use receipt (Tier-B). | `FEIR_RESOURCE_SEED` |
+| POST | `/v2/use` | Resource gateway: one-phase use receipt (Tier-B). | `AVERIN_RESOURCE_SEED` |
 | POST | `/v2/use-intent` | Two-phase use, phase 1 (before the side effect). | resource gateway |
 | POST | `/v2/use-outcome` | Two-phase use, phase 2 (after the side effect). | resource gateway |
-| POST | `/v2/revoke` | Mark a `grant_id` revoked. | `FEIR_REVOCATION_SEED` |
+| POST | `/v2/revoke` | Mark a `grant_id` revoked. | `AVERIN_REVOCATION_SEED` |
 
 Routes whose feature is not enabled return **`501 Not Implemented`** with an `{"error":...}` telling
 you which env var to set.
@@ -131,7 +131,7 @@ A session's sealed records, in causal/display order, for the trace-waterfall vie
 
 **Response `200`:** `{ "records": [ /* sealed records */ ] }`. Both query params required (`400`).
 
-> Phase-1 authz limit: with `FEIR_API_KEYS` unset, any caller who can reach this endpoint can read
+> Phase-1 authz limit: with `AVERIN_API_KEYS` unset, any caller who can reach this endpoint can read
 > any project's data. Run single-tenant or behind your own auth until you configure project keys.
 
 ---
@@ -239,7 +239,7 @@ Other allowed keys: `anchored_ts`, `record_kind`, `input_commit`, `output_commit
 `framework`.
 
 - `content_hash`: `sha256:<hex>` over `SHA-256( LP(domain) ‖ LP(canon_version) ‖ RCP-serialize(body \ {content_hash, sig}) )`.
-- `sig`: `ed25519:<base64url-no-pad>` over the domain-tagged content hash (tag `feir.record.sig.v1`).
+- `sig`: `ed25519:<base64url-no-pad>` over the domain-tagged content hash (tag `averin.record.sig.v1`).
 - `key`: `{signing_key_id, key_epoch, key_valid_from, key_status}`.
 - `input_commit` / `output_commit` / `rationale_commit`:
   `{alg: "sha256", commitment: "sha256:<hex>", low_entropy: bool}` — a hiding commitment; the raw

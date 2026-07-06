@@ -1,10 +1,10 @@
 //! C FFI surface for cgo (the Go services call the Rust core through this — spec §5 "Go ↔ Rust:
-//! cgo FFI"). Same core as the CLI and WASM. Header: `core/include/feir_core.h`.
+//! cgo FFI"). Same core as the CLI and WASM. Header: `core/include/averin_core.h`.
 //!
 //! Memory contract: every non-null `*mut c_char` returned MUST be freed by the caller with
-//! [`feir_string_free`]. This same C-ABI serves BOTH cgo (native staticlib/cdylib) and the browser
+//! [`averin_string_free`]. This same C-ABI serves BOTH cgo (native staticlib/cdylib) and the browser
 //! (wasm32 cdylib): the standalone verifier writes a null-terminated JSON string into wasm memory
-//! via [`feir_alloc`], calls [`feir_verify_bundle_json`], reads the result, then frees both.
+//! via [`averin_alloc`], calls [`averin_verify_bundle_json`], reads the result, then frees both.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -23,44 +23,44 @@ fn catch_verify(f: impl FnOnce() -> String) -> String {
 }
 
 /// Allocate `size` bytes of wasm/native memory and return the pointer (for the browser verifier to
-/// write an input string into). Pair with [`feir_dealloc`].
+/// write an input string into). Pair with [`averin_dealloc`].
 #[no_mangle]
-pub extern "C" fn feir_alloc(size: usize) -> *mut u8 {
+pub extern "C" fn averin_alloc(size: usize) -> *mut u8 {
     let mut buf = Vec::<u8>::with_capacity(size);
     let ptr = buf.as_mut_ptr();
     std::mem::forget(buf);
     ptr
 }
 
-/// Free memory allocated by [`feir_alloc`].
+/// Free memory allocated by [`averin_alloc`].
 ///
 /// # Safety
-/// `ptr`/`size` must come from a prior [`feir_alloc`] call and not be used afterwards.
+/// `ptr`/`size` must come from a prior [`averin_alloc`] call and not be used afterwards.
 #[no_mangle]
-pub unsafe extern "C" fn feir_dealloc(ptr: *mut u8, size: usize) {
+pub unsafe extern "C" fn averin_dealloc(ptr: *mut u8, size: usize) {
     if !ptr.is_null() && size > 0 {
         drop(Vec::from_raw_parts(ptr, 0, size));
     }
 }
 
 /// Verify an export bundle (null-terminated UTF-8 JSON). Returns a newly-allocated, null-terminated
-/// JSON report string (free with [`feir_string_free`]), or null if `input` is null or not UTF-8.
+/// JSON report string (free with [`averin_string_free`]), or null if `input` is null or not UTF-8.
 ///
 /// **Untrusted input:** because a C string ends at the first NUL, any `0x00` byte in `input` silently
 /// truncates verification to the prefix before it — and a valid prefix would then be reported `ok`
 /// over a file whose tail was never read. A valid RCP bundle never contains `0x00`, so this is only
 /// reachable with a malformed/adversarial artifact, but for any bundle you did not produce yourself
-/// prefer [`feir_verify_bundle_json_n`], which reads an explicit length and cannot be truncated.
+/// prefer [`averin_verify_bundle_json_n`], which reads an explicit length and cannot be truncated.
 ///
 /// # Safety
 /// `input` must be a valid null-terminated C string for the duration of the call.
 ///
 /// NOT compiled for `wasm32`: the browser verifier (the auditor-facing surface) must expose ONLY the
-/// length-aware [`feir_verify_bundle_json_n`], so a third party loading the `.wasm` cannot reach a
+/// length-aware [`averin_verify_bundle_json_n`], so a third party loading the `.wasm` cannot reach a
 /// NUL-truncatable verify entrypoint. The cgo path (native) keeps this symbol and guards NUL on the Go side.
 #[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]
-pub unsafe extern "C" fn feir_verify_bundle_json(input: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn averin_verify_bundle_json(input: *const c_char) -> *mut c_char {
     if input.is_null() {
         return std::ptr::null_mut();
     }
@@ -76,18 +76,18 @@ pub unsafe extern "C" fn feir_verify_bundle_json(input: *const c_char) -> *mut c
 }
 
 /// Verify an export bundle from an explicit `(ptr, len)` byte span — the length-aware,
-/// truncation-proof counterpart to [`feir_verify_bundle_json`]. Use this for UNTRUSTED input.
+/// truncation-proof counterpart to [`averin_verify_bundle_json`]. Use this for UNTRUSTED input.
 ///
 /// It reads exactly `len` bytes and does NOT stop at an interior NUL, so a buffer containing a `0x00`
 /// (never present in valid RCP) is verified IN FULL and fails closed at canonicalization, instead of
 /// being truncated at the first NUL and reported valid over only its prefix. Returns a
-/// newly-allocated, null-terminated JSON report (free with [`feir_string_free`]); null if `ptr` is
+/// newly-allocated, null-terminated JSON report (free with [`averin_string_free`]); null if `ptr` is
 /// null or the `len` bytes are not valid UTF-8.
 ///
 /// # Safety
 /// `ptr` must point to at least `len` initialized bytes that stay valid for the duration of the call.
 #[no_mangle]
-pub unsafe extern "C" fn feir_verify_bundle_json_n(ptr: *const u8, len: usize) -> *mut c_char {
+pub unsafe extern "C" fn averin_verify_bundle_json_n(ptr: *const u8, len: usize) -> *mut c_char {
     let text = match bytes_to_str(ptr, len) {
         Some(t) => t,
         None => return std::ptr::null_mut(),
@@ -99,21 +99,21 @@ pub unsafe extern "C" fn feir_verify_bundle_json_n(ptr: *const u8, len: usize) -
 /// optional arrays pin keys: `authority_keys`/`signing_keys`/`tsa_keys` (`ed25519pub:` strings) and
 /// `tsa_spki_b64` (base64url DER). Used to elevate a credential-broker grant to `gateway_enforced`
 /// (pin the broker recording key as `authority_keys`). Returns the same JSON report as
-/// [`feir_verify_bundle_json`]; null if either pointer is null or not UTF-8.
+/// [`averin_verify_bundle_json`]; null if either pointer is null or not UTF-8.
 ///
 /// NUL caveat: both arguments are read as C strings and stop at the first `0x00`. For an UNTRUSTED
-/// bundle OR opts, prefer [`feir_verify_bundle_with_n`], which reads explicit lengths and cannot be
+/// bundle OR opts, prefer [`averin_verify_bundle_with_n`], which reads explicit lengths and cannot be
 /// truncated (a `0x00` in `opts_json` would otherwise silently truncate the pinned trust roots).
 ///
 /// # Safety
 /// `bundle` and `opts_json` must be valid null-terminated C strings for the duration of the call.
 ///
-/// NOT compiled for `wasm32` (see [`feir_verify_bundle_json`]): the browser verifier exposes only the
-/// length-aware [`feir_verify_bundle_with_n`], so a `0x00` in the pinned `opts_json` cannot silently truncate
+/// NOT compiled for `wasm32` (see [`averin_verify_bundle_json`]): the browser verifier exposes only the
+/// length-aware [`averin_verify_bundle_with_n`], so a `0x00` in the pinned `opts_json` cannot silently truncate
 /// the trust roots in the auditor's `.wasm`. The cgo path keeps this symbol and guards NUL on the Go side.
 #[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]
-pub unsafe extern "C" fn feir_verify_bundle_with(
+pub unsafe extern "C" fn averin_verify_bundle_with(
     bundle: *const c_char,
     opts_json: *const c_char,
 ) -> *mut c_char {
@@ -131,7 +131,7 @@ pub unsafe extern "C" fn feir_verify_bundle_with(
 }
 
 /// Verify an export bundle with pinned trust roots from explicit `(ptr, len)` byte spans — the
-/// length-aware, truncation-proof counterpart to [`feir_verify_bundle_with`]. Reads exactly the given
+/// length-aware, truncation-proof counterpart to [`averin_verify_bundle_with`]. Reads exactly the given
 /// lengths and does NOT stop at an interior NUL in EITHER the bundle or the opts, so a `0x00` (never
 /// present in valid RCP / an `ed25519pub:` or base64url opts value) cannot truncate the bundle to a
 /// verified prefix nor silently drop the pinned trust roots; the full input is verified and fails closed
@@ -140,7 +140,7 @@ pub unsafe extern "C" fn feir_verify_bundle_with(
 /// # Safety
 /// `bundle_ptr` and `opts_ptr` must each point to at least their `len` initialized bytes, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn feir_verify_bundle_with_n(
+pub unsafe extern "C" fn averin_verify_bundle_with_n(
     bundle_ptr: *const u8,
     bundle_len: usize,
     opts_ptr: *const u8,
@@ -160,13 +160,13 @@ pub unsafe extern "C" fn feir_verify_bundle_with_n(
 }
 
 /// Canonicalize a JSON document under RCP v1. Returns a newly-allocated string (free with
-/// [`feir_string_free`]); the result begins with `ERROR:` on a parse error. Null if input is null
+/// [`averin_string_free`]); the result begins with `ERROR:` on a parse error. Null if input is null
 /// or not UTF-8.
 ///
 /// # Safety
 /// `input` must be a valid null-terminated C string for the duration of the call.
 #[no_mangle]
-pub unsafe extern "C" fn feir_rcp_canonicalize(input: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn averin_rcp_canonicalize(input: *const c_char) -> *mut c_char {
     if input.is_null() {
         return std::ptr::null_mut();
     }
@@ -195,7 +195,7 @@ pub unsafe extern "C" fn feir_rcp_canonicalize(input: *const c_char) -> *mut c_c
 /// # Safety
 /// `input` must be a valid null-terminated C string for the duration of the call.
 #[no_mangle]
-pub unsafe extern "C" fn feir_rcp_evidence_hash(input: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn averin_rcp_evidence_hash(input: *const c_char) -> *mut c_char {
     let text = match cstr(input) {
         Some(t) => t,
         None => return std::ptr::null_mut(),
@@ -215,7 +215,7 @@ pub unsafe extern "C" fn feir_rcp_evidence_hash(input: *const c_char) -> *mut c_
 /// # Safety
 /// `body` and `seed_hex` must be valid null-terminated C strings.
 #[no_mangle]
-pub unsafe extern "C" fn feir_seal_record(
+pub unsafe extern "C" fn averin_seal_record(
     body: *const c_char,
     seed_hex: *const c_char,
 ) -> *mut c_char {
@@ -228,7 +228,7 @@ pub unsafe extern "C" fn feir_seal_record(
 /// # Safety
 /// `body` and `seed_hex` must be valid null-terminated C strings.
 #[no_mangle]
-pub unsafe extern "C" fn feir_seal_checkpoint(
+pub unsafe extern "C" fn averin_seal_checkpoint(
     body: *const c_char,
     seed_hex: *const c_char,
 ) -> *mut c_char {
@@ -241,7 +241,7 @@ pub unsafe extern "C" fn feir_seal_checkpoint(
 /// # Safety
 /// `seed_hex` must be a valid null-terminated C string.
 #[no_mangle]
-pub unsafe extern "C" fn feir_pubkey_from_seed(seed_hex: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn averin_pubkey_from_seed(seed_hex: *const c_char) -> *mut c_char {
     if seed_hex.is_null() {
         return std::ptr::null_mut();
     }
@@ -295,7 +295,7 @@ unsafe fn seal_impl(body: *const c_char, seed_hex: *const c_char, checkpoint: bo
 /// meaningful with the `std` feature (the WASM verifier never mints nonces); returns `{"error":...}`
 /// otherwise.
 #[no_mangle]
-pub extern "C" fn feir_random_nonce() -> *mut c_char {
+pub extern "C" fn averin_random_nonce() -> *mut c_char {
     #[cfg(feature = "std")]
     {
         // Fallible: a CSPRNG failure must NOT panic-unwind across the C/cgo boundary (UB).
@@ -317,7 +317,7 @@ pub extern "C" fn feir_random_nonce() -> *mut c_char {
 /// # Safety
 /// All three pointers must be valid null-terminated C strings.
 #[no_mangle]
-pub unsafe extern "C" fn feir_commit(
+pub unsafe extern "C" fn averin_commit(
     domain: *const c_char,
     value_b64: *const c_char,
     nonce_hex: *const c_char,
@@ -337,7 +337,7 @@ pub unsafe extern "C" fn feir_commit(
 /// # Safety
 /// All four pointers must be valid null-terminated C strings.
 #[no_mangle]
-pub unsafe extern "C" fn feir_verify_commitment(
+pub unsafe extern "C" fn averin_verify_commitment(
     commitment: *const c_char,
     domain: *const c_char,
     value_b64: *const c_char,
@@ -371,7 +371,7 @@ pub unsafe extern "C" fn feir_verify_commitment(
 /// # Safety
 /// All five pointers must be valid null-terminated C strings.
 #[no_mangle]
-pub unsafe extern "C" fn feir_sign_evidence(
+pub unsafe extern "C" fn averin_sign_evidence(
     source: *const c_char,
     project_id: *const c_char,
     record_id: *const c_char,
@@ -490,10 +490,10 @@ fn into_cstring(s: String) -> *mut c_char {
 /// Free a string returned by this library.
 ///
 /// # Safety
-/// `ptr` must be a pointer previously returned by a `feir_*` function (or null), and must not be
+/// `ptr` must be a pointer previously returned by a `averin_*` function (or null), and must not be
 /// used afterwards.
 #[no_mangle]
-pub unsafe extern "C" fn feir_string_free(ptr: *mut c_char) {
+pub unsafe extern "C" fn averin_string_free(ptr: *mut c_char) {
     if !ptr.is_null() {
         drop(CString::from_raw(ptr));
     }
@@ -529,7 +529,7 @@ mod tests {
                 return None;
             }
             let s = CStr::from_ptr(out).to_string_lossy().into_owned();
-            feir_string_free(out);
+            averin_string_free(out);
             Some(s)
         }
     }
@@ -544,11 +544,11 @@ mod tests {
 
     #[test]
     fn verify_valid_and_tampered() {
-        let ok = call(feir_verify_bundle_json, &bundle()).unwrap();
+        let ok = call(averin_verify_bundle_json, &bundle()).unwrap();
         assert!(ok.contains("\"ok\":true"), "{ok}");
         assert!(ok.contains("\"records_proven\":3"));
         let bad = call(
-            feir_verify_bundle_json,
+            averin_verify_bundle_json,
             &bundle().replace("billing-agent", "evilxx-agent"),
         )
         .unwrap();
@@ -558,12 +558,12 @@ mod tests {
     /// Call the length-aware verify entrypoint with raw bytes that MAY contain an interior NUL.
     fn call_n(bytes: &[u8]) -> Option<String> {
         unsafe {
-            let out = feir_verify_bundle_json_n(bytes.as_ptr(), bytes.len());
+            let out = averin_verify_bundle_json_n(bytes.as_ptr(), bytes.len());
             if out.is_null() {
                 return None;
             }
             let s = CStr::from_ptr(out).to_string_lossy().into_owned();
-            feir_string_free(out);
+            averin_string_free(out);
             Some(s)
         }
     }
@@ -577,7 +577,7 @@ mod tests {
 
         // `‹valid bundle› 0x00 ‹arbitrary bytes›`: the length-aware entrypoint reads the FULL input,
         // so the interior NUL is seen and canonicalization fails closed — it is NOT truncated to an
-        // "ok" prefix the way the NUL-terminated `feir_verify_bundle_json` would be. This is the
+        // "ok" prefix the way the NUL-terminated `averin_verify_bundle_json` would be. This is the
         // regression lock for the FFI/WASM truncation fail-open.
         let mut attack = clean.into_bytes();
         attack.push(0);
@@ -592,13 +592,17 @@ mod tests {
     /// Call the length-aware WITH entrypoint with raw bundle + opts spans (either MAY contain a NUL).
     fn call_with_n(bundle: &[u8], opts: &[u8]) -> Option<String> {
         unsafe {
-            let out =
-                feir_verify_bundle_with_n(bundle.as_ptr(), bundle.len(), opts.as_ptr(), opts.len());
+            let out = averin_verify_bundle_with_n(
+                bundle.as_ptr(),
+                bundle.len(),
+                opts.as_ptr(),
+                opts.len(),
+            );
             if out.is_null() {
                 return None;
             }
             let s = CStr::from_ptr(out).to_string_lossy().into_owned();
-            feir_string_free(out);
+            averin_string_free(out);
             Some(s)
         }
     }
@@ -610,7 +614,7 @@ mod tests {
         let ok = call_with_n(clean.as_bytes(), b"{}").unwrap();
         assert!(ok.contains("\"ok\":true"), "{ok}");
 
-        // opts = `{}` ‹0x00› ‹junk›: the NUL-terminated `feir_verify_bundle_with` would stop at the NUL and
+        // opts = `{}` ‹0x00› ‹junk›: the NUL-terminated `averin_verify_bundle_with` would stop at the NUL and
         // verify under the truncated, valid `{}` (no pinned trust roots). The length-aware entrypoint reads
         // the FULL opts span, so the interior NUL is seen and the opts parse fails CLOSED — the pinned trust
         // roots can never be silently truncated. Regression lock for the optsJSON truncation gap.
@@ -627,10 +631,10 @@ mod tests {
     #[test]
     fn canonicalize_and_errors() {
         assert_eq!(
-            call(feir_rcp_canonicalize, r#"{"b":1,"a":2}"#).unwrap(),
+            call(averin_rcp_canonicalize, r#"{"b":1,"a":2}"#).unwrap(),
             r#"{"a":2,"b":1}"#
         );
-        assert!(call(feir_rcp_canonicalize, r#"{"a":1.5}"#)
+        assert!(call(averin_rcp_canonicalize, r#"{"a":1.5}"#)
             .unwrap()
             .starts_with("ERROR:"));
     }
@@ -639,18 +643,18 @@ mod tests {
     fn rcp_evidence_hash_is_canonical_and_order_independent() {
         // The same evidence in different key order hashes identically — this is what lets the offline
         // verifier re-derive the broker/resource-computed evidence_hash regardless of serialization.
-        let a = call(feir_rcp_evidence_hash, r#"{"b":1,"a":2}"#).unwrap();
-        let b = call(feir_rcp_evidence_hash, r#"{"a":2,"b":1}"#).unwrap();
+        let a = call(averin_rcp_evidence_hash, r#"{"b":1,"a":2}"#).unwrap();
+        let b = call(averin_rcp_evidence_hash, r#"{"a":2,"b":1}"#).unwrap();
         assert_eq!(a, b, "evidence hash must be key-order independent");
         assert!(
             a.starts_with("sha256:") && a.len() == "sha256:".len() + 64,
             "{a}"
         );
         // It equals SHA-256 over the RCP canonical bytes (the verifier's own re-derivation path).
-        let canon = call(feir_rcp_canonicalize, r#"{"a":2,"b":1}"#).unwrap();
+        let canon = call(averin_rcp_canonicalize, r#"{"a":2,"b":1}"#).unwrap();
         assert_eq!(a, crate::hashx::sha256_prefixed(canon.as_bytes()));
         // RCP forbids floats — a parse error is surfaced as an error object, never a silent hash.
-        assert!(call(feir_rcp_evidence_hash, r#"{"a":1.5}"#)
+        assert!(call(averin_rcp_evidence_hash, r#"{"a":1.5}"#)
             .unwrap()
             .contains("error"));
     }
@@ -658,8 +662,8 @@ mod tests {
     #[test]
     fn null_input_is_handled() {
         unsafe {
-            assert!(feir_verify_bundle_json(std::ptr::null()).is_null());
-            feir_string_free(std::ptr::null_mut()); // safe no-op
+            assert!(averin_verify_bundle_json(std::ptr::null()).is_null());
+            averin_string_free(std::ptr::null_mut()); // safe no-op
         }
     }
 
@@ -673,7 +677,7 @@ mod tests {
         unsafe {
             let out = f(ca.as_ptr(), cb.as_ptr());
             let s = CStr::from_ptr(out).to_string_lossy().into_owned();
-            feir_string_free(out);
+            averin_string_free(out);
             s
         }
     }
@@ -683,33 +687,33 @@ mod tests {
     #[test]
     fn seal_record_and_verify_roundtrip() {
         let body = r#"{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2","record_id":"r","project_id":"p","agent_id":"a","agent_version":"1","session_id":"s","span_id":"sp","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,"agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z","event_type":"tool_call","action":"x","observed_via":"sdk","status":"ok","key":{"signing_key_id":"k0","key_epoch":0,"key_status":"active"}}"#;
-        let sealed = call2(feir_seal_record, body, SEED);
+        let sealed = call2(averin_seal_record, body, SEED);
         assert!(sealed.contains("\"content_hash\":\"sha256:"));
         assert!(sealed.contains("\"sig\":\"ed25519:"));
 
         // the published pubkey verifies the sealed record
-        let pk = call(feir_pubkey_from_seed_one, SEED);
+        let pk = call(averin_pubkey_from_seed_one, SEED);
         let _ = pk; // see helper below
     }
 
     // wrapper so `call` (single-arg) can exercise pubkey_from_seed
-    unsafe extern "C" fn feir_pubkey_from_seed_one(s: *const c_char) -> *mut c_char {
-        feir_pubkey_from_seed(s)
+    unsafe extern "C" fn averin_pubkey_from_seed_one(s: *const c_char) -> *mut c_char {
+        averin_pubkey_from_seed(s)
     }
 
     #[test]
     fn pubkey_from_seed_and_bad_seed() {
-        let pk = call(feir_pubkey_from_seed_one, SEED).unwrap();
+        let pk = call(averin_pubkey_from_seed_one, SEED).unwrap();
         assert!(pk.starts_with("ed25519pub:"), "{pk}");
-        assert!(call(feir_pubkey_from_seed_one, "tooshort")
+        assert!(call(averin_pubkey_from_seed_one, "tooshort")
             .unwrap()
             .contains("error"));
     }
 
     #[test]
     fn seal_rejects_bad_seed_and_body() {
-        assert!(call2(feir_seal_record, "{}", "nothex").contains("error"));
-        assert!(call2(feir_seal_record, "{not json", SEED).contains("error"));
+        assert!(call2(averin_seal_record, "{}", "nothex").contains("error"));
+        assert!(call2(averin_seal_record, "{not json", SEED).contains("error"));
     }
 
     // base64url-no-pad of b"hello" — the raw value bytes the Go side commits over.
@@ -717,52 +721,52 @@ mod tests {
 
     #[test]
     fn random_nonce_is_64_hex() {
-        let n = call(feir_random_nonce_zero, "ignored").unwrap();
+        let n = call(averin_random_nonce_zero, "ignored").unwrap();
         assert_eq!(n.len(), 64, "{n}");
         assert!(n.bytes().all(|b| b.is_ascii_hexdigit()), "{n}");
         // two draws differ (CSPRNG, not a constant)
-        let m = call(feir_random_nonce_zero, "ignored").unwrap();
+        let m = call(averin_random_nonce_zero, "ignored").unwrap();
         assert_ne!(n, m);
     }
 
     // wrapper so single-arg `call` can drive the no-arg nonce minter.
-    unsafe extern "C" fn feir_random_nonce_zero(_: *const c_char) -> *mut c_char {
-        feir_random_nonce()
+    unsafe extern "C" fn averin_random_nonce_zero(_: *const c_char) -> *mut c_char {
+        averin_random_nonce()
     }
 
     #[test]
     fn commit_and_verify_roundtrip() {
-        let nonce = call(feir_random_nonce_zero, "ignored").unwrap();
-        let c = call3(feir_commit, "input", HELLO_B64, &nonce);
+        let nonce = call(averin_random_nonce_zero, "ignored").unwrap();
+        let c = call3(averin_commit, "input", HELLO_B64, &nonce);
         assert!(c.starts_with("sha256:"), "{c}");
 
         // disclosing the same (value, nonce) verifies true...
         assert_eq!(
-            call4(feir_verify_commitment, &c, "input", HELLO_B64, &nonce),
+            call4(averin_verify_commitment, &c, "input", HELLO_B64, &nonce),
             "true"
         );
         // ...wrong domain, value, or nonce all verify false (binding holds).
         assert_eq!(
-            call4(feir_verify_commitment, &c, "output", HELLO_B64, &nonce),
+            call4(averin_verify_commitment, &c, "output", HELLO_B64, &nonce),
             "false"
         );
         assert_eq!(
-            call4(feir_verify_commitment, &c, "input", "d29ybGQ", &nonce),
+            call4(averin_verify_commitment, &c, "input", "d29ybGQ", &nonce),
             "false"
         );
-        let other = call(feir_random_nonce_zero, "ignored").unwrap();
+        let other = call(averin_random_nonce_zero, "ignored").unwrap();
         assert_eq!(
-            call4(feir_verify_commitment, &c, "input", HELLO_B64, &other),
+            call4(averin_verify_commitment, &c, "input", HELLO_B64, &other),
             "false"
         );
     }
 
     #[test]
     fn commit_rejects_malformed_inputs() {
-        let nonce = call(feir_random_nonce_zero, "ignored").unwrap();
-        assert!(call3(feir_commit, "bogus", HELLO_B64, &nonce).contains("error"));
-        assert!(call3(feir_commit, "input", "not base64!!", &nonce).contains("error"));
-        assert!(call3(feir_commit, "input", HELLO_B64, "shortnonce").contains("error"));
+        let nonce = call(averin_random_nonce_zero, "ignored").unwrap();
+        assert!(call3(averin_commit, "bogus", HELLO_B64, &nonce).contains("error"));
+        assert!(call3(averin_commit, "input", "not base64!!", &nonce).contains("error"));
+        assert!(call3(averin_commit, "input", HELLO_B64, "shortnonce").contains("error"));
     }
 
     fn call3(
@@ -777,7 +781,7 @@ mod tests {
         unsafe {
             let out = f(ca.as_ptr(), cb.as_ptr(), cc.as_ptr());
             let s = CStr::from_ptr(out).to_string_lossy().into_owned();
-            feir_string_free(out);
+            averin_string_free(out);
             s
         }
     }
@@ -788,7 +792,7 @@ mod tests {
         use crate::sign::signing_key_from_seed;
         let eh = crate::hashx::sha256_prefixed(b"grant-evidence-bytes");
         let sig = call5(
-            feir_sign_evidence,
+            averin_sign_evidence,
             "gateway_enforced",
             "proj-1",
             "rec-1",
@@ -833,7 +837,7 @@ mod tests {
     fn sign_evidence_rejects_malformed() {
         let eh = crate::hashx::sha256_prefixed(b"x");
         assert!(call5(
-            feir_sign_evidence,
+            averin_sign_evidence,
             "gateway_enforced",
             "proj-1",
             "rec-1",
@@ -843,7 +847,7 @@ mod tests {
         .contains("error"));
         // empty record_id OR empty project_id is unbindable -> refused.
         assert!(call5(
-            feir_sign_evidence,
+            averin_sign_evidence,
             "gateway_enforced",
             "proj-1",
             "",
@@ -852,7 +856,7 @@ mod tests {
         )
         .contains("error"));
         assert!(call5(
-            feir_sign_evidence,
+            averin_sign_evidence,
             "gateway_enforced",
             "",
             "rec-1",
@@ -861,7 +865,7 @@ mod tests {
         )
         .contains("error"));
         assert!(call5(
-            feir_sign_evidence,
+            averin_sign_evidence,
             "gateway_enforced",
             "proj-1",
             "rec-1",
@@ -871,7 +875,7 @@ mod tests {
         .contains("error"));
         // Refuse to mint an inert signature for a source verify_authority can never elevate.
         assert!(call5(
-            feir_sign_evidence,
+            averin_sign_evidence,
             "caller_declared",
             "proj-1",
             "rec-1",
@@ -880,7 +884,7 @@ mod tests {
         )
         .contains("error"));
         assert!(call5(
-            feir_sign_evidence,
+            averin_sign_evidence,
             "gateway-enforced",
             "proj-1",
             "rec-1",
@@ -888,10 +892,10 @@ mod tests {
             SEED
         )
         .contains("error")); // typo
-        assert!(call5(feir_sign_evidence, "", "proj-1", "rec-1", &eh, SEED).contains("error"));
+        assert!(call5(averin_sign_evidence, "", "proj-1", "rec-1", &eh, SEED).contains("error"));
         // policy_engine_signed / human_signed are valid elevating sources.
         assert!(call5(
-            feir_sign_evidence,
+            averin_sign_evidence,
             "policy_engine_signed",
             "proj-1",
             "rec-1",
@@ -900,7 +904,7 @@ mod tests {
         )
         .starts_with("ed25519:"));
         assert!(call5(
-            feir_sign_evidence,
+            averin_sign_evidence,
             "human_signed",
             "proj-1",
             "rec-1",
@@ -929,7 +933,7 @@ mod tests {
         unsafe {
             let out = f(ca.as_ptr(), cb.as_ptr(), cc.as_ptr(), cd.as_ptr());
             let s = CStr::from_ptr(out).to_string_lossy().into_owned();
-            feir_string_free(out);
+            averin_string_free(out);
             s
         }
     }
@@ -965,7 +969,7 @@ mod tests {
                 ce.as_ptr(),
             );
             let s = CStr::from_ptr(out).to_string_lossy().into_owned();
-            feir_string_free(out);
+            averin_string_free(out);
             s
         }
     }

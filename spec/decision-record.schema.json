@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://feir.dev/spec/decision-record.schema.json",
-  "title": "feir Decision Record v2",
+  "$id": "https://averin.dev/spec/decision-record.schema.json",
+  "title": "averin Decision Record v2",
   "description": "Machine-checkable shape of a Decision Record. The hard canonicalization/crypto rules live in RCP v1 (rcp-1.md) and are enforced by decision-core; this schema documents structure and types. NOTE: JSON Schema cannot express RCP rules (no-floats, NFC, duplicate-key rejection, domain-separated preimages) — those are golden-vector tested.",
   "type": "object",
   "additionalProperties": false,

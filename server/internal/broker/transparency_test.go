@@ -3,12 +3,12 @@ package broker
 import (
 	"testing"
 
-	"github.com/feir-dev/feir/server/internal/goldenvec"
+	"github.com/averin-dev/averin/server/internal/goldenvec"
 )
 
 func TestGrantHeadRootGoldenVector(t *testing.T) {
 	// Cross-language pinned vectors from the SHARED file (spec/golden-vectors/broker-preimages.json),
-	// also loaded by core/tests/adversarial.rs — MUST equal Rust feir_decision_core::verify::grant_head_root.
+	// also loaded by core/tests/adversarial.rs — MUST equal Rust averin_decision_core::verify::grant_head_root.
 	// Drift in the LP4/BE8 layout fails here AND in Rust against the same file.
 	v, err := goldenvec.Load()
 	if err != nil {

@@ -1,11 +1,11 @@
-# feir — Python SDK
+# averin — Python SDK
 
-Record tamper-evident, authority-bound decision evidence from your AI agents to a feir server.
+Record tamper-evident, authority-bound decision evidence from your AI agents to a averin server.
 
 ```python
-import feir
+import averin
 
-fr = feir.Client("http://localhost:8080", project_id="proj-1")
+fr = averin.Client("http://localhost:8080", project_id="proj-1")
 fr.record(
     session_id="run-42",
     action="db.query",

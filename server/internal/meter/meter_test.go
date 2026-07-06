@@ -45,7 +45,7 @@ func TestStripeReporterPostsMeterEvents(t *testing.T) {
 	rep.ExportIssued("cust-1")
 	select {
 	case f := <-got:
-		if f.Get("event_name") != "feir_export" || f.Get("payload[stripe_customer_id]") != "cust-1" {
+		if f.Get("event_name") != "averin_export" || f.Get("payload[stripe_customer_id]") != "cust-1" {
 			t.Fatalf("bad export event: %v", f)
 		}
 	case <-time.After(2 * time.Second):
@@ -56,7 +56,7 @@ func TestStripeReporterPostsMeterEvents(t *testing.T) {
 	rep.RecordsIngested("cust-1", FreeTierRecords+10)
 	select {
 	case f := <-got:
-		if f.Get("event_name") != "feir_record" {
+		if f.Get("event_name") != "averin_record" {
 			t.Fatalf("bad record event: %v", f)
 		}
 	case <-time.After(2 * time.Second):

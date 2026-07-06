@@ -133,7 +133,7 @@ BEGIN
     EXECUTE format('REVOKE UPDATE,         TRUNCATE ON broker_seq  FROM %I', CURRENT_USER);
     EXECUTE format('REVOKE         DELETE, TRUNCATE ON display_seq FROM %I', CURRENT_USER);
     IF (SELECT rolsuper FROM pg_roles WHERE rolname = CURRENT_USER) THEN
-        RAISE NOTICE 'feir: migrating role % is a SUPERUSER, so REVOKE is a no-op and append-only is NOT database-enforced. Run the application under a dedicated least-privilege, non-owner role.', CURRENT_USER;
+        RAISE NOTICE 'averin: migrating role % is a SUPERUSER, so REVOKE is a no-op and append-only is NOT database-enforced. Run the application under a dedicated least-privilege, non-owner role.', CURRENT_USER;
     END IF;
 END
 $$;

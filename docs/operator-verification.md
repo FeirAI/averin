@@ -1,6 +1,6 @@
 # Operator guide: offline verification + role-disjoint key pinning
 
-feir's guarantees are enforced **offline**, by a verifier that needs no server. A bundle
+averin's guarantees are enforced **offline**, by a verifier that needs no server. A bundle
 (`GET /v2/export`) carries the records, the checkpoint history, and the public keys; the verifier
 re-derives every hash, signature, DAG edge, checkpoint chain, anchor, and the Tier-B / ADR-0005 mode
 gates from the bundle alone. The server is never in the trust path.
@@ -9,8 +9,8 @@ There are two verification postures:
 
 | Posture | How | Proves |
 |---|---|---|
-| **Internal consistency** | `feir-verify bundle b.json` (no opts) | the bundle is self-consistent under **its own** key claims — integrity, DAG, checkpoint chain, omission/fork/tamper. It does **not** authenticate against an out-of-band trust root. |
-| **Pinned (authentic)** | `feir-verify bundle b.json opts.json` | the above **plus** every role's evidence verifies under the keys **you** pinned out-of-band, which is what unlocks the Tier-B / mode gates (cosig, revocation, federation, native, attestation, taxonomy) and the `attested_complete_*` capstone. |
+| **Internal consistency** | `averin-verify bundle b.json` (no opts) | the bundle is self-consistent under **its own** key claims — integrity, DAG, checkpoint chain, omission/fork/tamper. It does **not** authenticate against an out-of-band trust root. |
+| **Pinned (authentic)** | `averin-verify bundle b.json opts.json` | the above **plus** every role's evidence verifies under the keys **you** pinned out-of-band, which is what unlocks the Tier-B / mode gates (cosig, revocation, federation, native, attestation, taxonomy) and the `attested_complete_*` capstone. |
 
 Browser (`/verifier/`) and FFI (`core.VerifyBundleWith`) take the same `opts` object.
 
@@ -28,7 +28,7 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
   "broker_authority_keys": ["ed25519pub:<broker-recording-key>"],
 
   // Tier-B use receipts (ADR 0003 R2): the resource gateway's recording key(s). Also the M3
-  // native introspection-transcript signer (feir.resource.introspection.v1).
+  // native introspection-transcript signer (averin.resource.introspection.v1).
   "resource_authority_keys": ["ed25519pub:<resource-recording-key>"],
 
   // D3/D7 time anchoring: the TSA key(s) (or "tsa_spki_b64" for an RFC 3161 TSA's DER SPKI).
@@ -66,7 +66,7 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
 ```
 
 All keys are base64url-no-pad ed25519 public keys with an `ed25519pub:` prefix (the form
-`feir-server` logs at startup, and the form `core.PubKey()` returns).
+`averin-server` logs at startup, and the form `core.PubKey()` returns).
 
 ## Rotating / retiring a compromised role key (ADR 0006 §1)
 
@@ -135,11 +135,11 @@ Most modes are produced automatically by the broker/resource on the recording pa
 `/v2/grants/*`, `/v2/use*`, `/v2/introspection` flows). Two OPTIONAL tiers are assembled at bundle/checkpoint
 time from a role-separated key:
 
-- **Disclosed revocation (M5) — server-native.** Set `FEIR_REVOCATION_SEED` (a key disjoint from the broker,
+- **Disclosed revocation (M5) — server-native.** Set `AVERIN_REVOCATION_SEED` (a key disjoint from the broker,
   resource, attestation, and cosig keys). `POST /v2/revoke {project_id, grant_id}` marks a grant revoked; every
   `/v2/export` then carries a signed, time-bounded `revocation_list` (its freshness window anchored to the latest
   checkpoint). Verify with `revocation_keys` pinned → a revoked grant's use (brokered OR native) is blocked.
-- **Federation (M4) — server-native.** Set `FEIR_BROKER_ID`; the server tags its grants with `broker_id` and
+- **Federation (M4) — server-native.** Set `AVERIN_BROKER_ID`; the server tags its grants with `broker_id` and
   emits a per-broker_id `broker_grant_heads` map in each checkpoint. Verify with `federated_broker_keys[<id>]`
   pinned → `federation_status: sequence_verified`. (One server = one broker_id; combine bundles from multiple
   brokers to verify a multi-broker federation.)
@@ -161,13 +161,13 @@ time from a role-separated key:
 
 ```bash
 # build the CLI once
-cargo build --release --bin feir-verify
+cargo build --release --bin averin-verify
 
 # internal consistency
-target/release/feir-verify bundle bundle.json
+target/release/averin-verify bundle bundle.json
 
-# authentic + mode gates (pin the keys you printed from feir-server's startup log / your KMS)
-target/release/feir-verify bundle bundle.json opts.json
+# authentic + mode gates (pin the keys you printed from averin-server's startup log / your KMS)
+target/release/averin-verify bundle bundle.json opts.json
 ```
 
 A non-zero exit = FAIL. The keys you pin here are the out-of-band trust root — distribute them through a

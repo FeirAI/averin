@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://feir.dev/spec/checkpoint.schema.json",
-  "title": "feir Checkpoint v2",
+  "$id": "https://averin.dev/spec/checkpoint.schema.json",
+  "title": "averin Checkpoint v2",
   "description": "Frontier checkpoint: commits the set of head content-hashes for one project, hash-chained and externally anchored. Structure only — RCP §9.4/§10 defines canonical bytes, frontier computation, and the offline verification algorithm. The `anchor` block is added AFTER signing and is excluded from checkpoint_hash/sig.",
   "type": "object",
   "additionalProperties": false,
