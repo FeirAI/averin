@@ -139,12 +139,40 @@ func main() {
 	// durable content store for committed low-entropy values (raw input/output/rationale). No dir =
 	// in-memory (NOT durable; disclosures won't survive a restart).
 	if dir := os.Getenv("AVERIN_CONTENT_DIR"); dir != "" {
-		cs, err := content.NewFSStore(dir)
+		key, err := hex.DecodeString(secretEnvOrFile("AVERIN_CONTENT_MASTER_KEY"))
+		if err != nil || len(key) != 32 {
+			log.Fatal("AVERIN_CONTENT_MASTER_KEY must be 64 hex chars (32 bytes) when AVERIN_CONTENT_DIR is set")
+		}
+		cs, err := content.NewEncryptedFSStore(dir, key)
 		if err != nil {
 			log.Fatalf("content store: %v", err)
 		}
+		retentionDays := 30
+		if raw := strings.TrimSpace(os.Getenv("AVERIN_RAW_RETENTION_DAYS")); raw != "" {
+			parsed, parseErr := strconv.Atoi(raw)
+			if parseErr != nil || parsed < 1 {
+				log.Fatal("AVERIN_RAW_RETENTION_DAYS must be a positive integer")
+			}
+			retentionDays = parsed
+		}
+		purge := func() {
+			removed, purgeErr := cs.PurgeOlderThan(time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour))
+			if purgeErr != nil {
+				log.Printf("WARNING: raw payload retention purge failed: %v", purgeErr)
+			} else if removed > 0 {
+				log.Printf("raw payload retention purge removed %d expired blobs", removed)
+			}
+		}
+		purge()
+		go func() {
+			ticker := time.NewTicker(24 * time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				purge()
+			}
+		}()
 		srv.WithContent(cs)
-		log.Printf("content store -> %s", dir)
+		log.Printf("tenant-encrypted content store -> %s (raw retention: %d days)", dir, retentionDays)
 	} else {
 		log.Printf("WARNING: no AVERIN_CONTENT_DIR set — committed raw values are in-memory (not durable)")
 	}

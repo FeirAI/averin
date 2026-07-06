@@ -12,6 +12,10 @@ package content
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -21,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Address is the immutable, content-derived handle for a stored blob. Because content-addressed
@@ -56,6 +61,21 @@ type Store interface {
 	// fails with ErrIntegrity if they do not match the requested digest (substitution detection),
 	// ErrNotFound if the digest is absent, and ErrInvalidDigest if the digest is malformed.
 	Get(ctx context.Context, digest string) ([]byte, error)
+}
+
+type tenantContextKey struct{}
+
+// WithTenant binds durable content encryption to a tenant/project identity.
+func WithTenant(ctx context.Context, tenant string) context.Context {
+	return context.WithValue(ctx, tenantContextKey{}, strings.TrimSpace(tenant))
+}
+
+func tenantFrom(ctx context.Context) (string, error) {
+	tenant, _ := ctx.Value(tenantContextKey{}).(string)
+	if tenant == "" {
+		return "", errors.New("content: tenant context is required")
+	}
+	return tenant, nil
 }
 
 // Digest computes the content address ("sha256:<hex>") of data.
@@ -241,4 +261,156 @@ func (f *FSStore) Get(_ context.Context, digest string) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+// EncryptedFSStore stores tenant-encrypted AES-256-GCM envelopes while the
+// public Address remains bound to the plaintext digest sealed in proof records.
+type EncryptedFSStore struct {
+	root   string
+	master [32]byte
+}
+
+func NewEncryptedFSStore(dir string, masterKey []byte) (*EncryptedFSStore, error) {
+	if len(masterKey) != 32 {
+		return nil, errors.New("content: encryption master key must be exactly 32 bytes")
+	}
+	if dir == "" {
+		return nil, errors.New("content: empty root dir")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("content: create encrypted root: %w", err)
+	}
+	s := &EncryptedFSStore{root: dir}
+	copy(s.master[:], masterKey)
+	return s, nil
+}
+
+func (s *EncryptedFSStore) tenantKey(tenant string) []byte {
+	h := hmac.New(sha256.New, s.master[:])
+	_, _ = h.Write([]byte("averin-content-v1\x00" + tenant))
+	return h.Sum(nil)
+}
+
+func (s *EncryptedFSStore) path(tenant, digest string) (string, error) {
+	hexPart, err := parseDigest(digest)
+	if err != nil {
+		return "", err
+	}
+	tenantHash := sha256.Sum256([]byte(tenant))
+	dir := filepath.Join(s.root, "tenant-"+hex.EncodeToString(tenantHash[:16]))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "sha256-"+hexPart), nil
+}
+
+func (s *EncryptedFSStore) Put(ctx context.Context, data []byte) (Address, error) {
+	tenant, err := tenantFrom(ctx)
+	if err != nil {
+		return Address{}, err
+	}
+	digest := Digest(data)
+	dst, err := s.path(tenant, digest)
+	if err != nil {
+		return Address{}, err
+	}
+	if _, err := os.Stat(dst); err == nil {
+		return addressFor(digest, len(data)), nil
+	}
+	block, err := aes.NewCipher(s.tenantKey(tenant))
+	if err != nil {
+		return Address{}, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return Address{}, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return Address{}, err
+	}
+	envelope := append([]byte("AVENC1"), nonce...)
+	envelope = gcm.Seal(envelope, nonce, data, []byte(tenant+"\x00"+digest))
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "tmp-*")
+	if err != nil {
+		return Address{}, err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(envelope); err != nil {
+		_ = tmp.Close()
+		return Address{}, err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return Address{}, err
+	}
+	if err := tmp.Close(); err != nil {
+		return Address{}, err
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		return Address{}, err
+	}
+	return addressFor(digest, len(data)), nil
+}
+
+func (s *EncryptedFSStore) Get(ctx context.Context, digest string) ([]byte, error) {
+	tenant, err := tenantFrom(ctx)
+	if err != nil {
+		return nil, err
+	}
+	p, err := s.path(tenant, digest)
+	if err != nil {
+		return nil, err
+	}
+	envelope, err := os.ReadFile(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(s.tenantKey(tenant))
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(envelope) < 6+gcm.NonceSize() || string(envelope[:6]) != "AVENC1" {
+		return nil, ErrIntegrity
+	}
+	nonce := envelope[6 : 6+gcm.NonceSize()]
+	plain, err := gcm.Open(nil, nonce, envelope[6+gcm.NonceSize():], []byte(tenant+"\x00"+digest))
+	if err != nil || verify(digest, plain) != nil {
+		return nil, ErrIntegrity
+	}
+	return plain, nil
+}
+
+// PurgeOlderThan deletes raw encrypted payloads after retention. Proof metadata
+// keeps its sealed digest and remains verifiable after this deletion.
+func (s *EncryptedFSStore) PurgeOlderThan(cutoff time.Time) (int, error) {
+	removed := 0
+	err := filepath.WalkDir(s.root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasPrefix(d.Name(), "sha256-") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			removed++
+		}
+		return nil
+	})
+	return removed, err
 }

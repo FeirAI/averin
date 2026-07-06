@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -118,6 +119,32 @@ func TestMapSpans_TwoSpans(t *testing.T) {
 		if got := llm[k]; got != want {
 			t.Errorf("llm[%q] = %#v, want %#v", k, got, want)
 		}
+	}
+}
+
+func TestFeirVisiblePayloadsAreExtractedAndSecretsScrubbed(t *testing.T) {
+	otlp := `{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"t","spanId":"s","name":"model","attributes":[` +
+		`{"key":"feir.agent_id","value":{"stringValue":"agent-1"}},` +
+		`{"key":"feir.assurance","value":{"stringValue":"framework-enforced"}},` +
+		`{"key":"gen_ai.prompt","value":{"stringValue":"use sk-proj-abcdefghijklmnop"}},` +
+		`{"key":"gen_ai.completion","value":{"stringValue":"visible output"}},` +
+		`{"key":"http.request.header.authorization","value":{"stringValue":"Bearer abcdefghijklmnop"}}]}]}]}]}`
+	rec := mustMap(t, otlp, "tenant")[0]
+	if rec["agent_id"] != "agent-1" {
+		t.Fatalf("agent_id = %#v", rec["agent_id"])
+	}
+	if strings.Contains(rec["input"].(string), "sk-proj-") {
+		t.Fatal("prompt secret was not scrubbed")
+	}
+	if rec["output"] != "visible output" {
+		t.Fatalf("output = %#v", rec["output"])
+	}
+	attrs := rec["extensions"].(map[string]any)["otel_attrs"].(map[string]any)
+	if _, ok := attrs["gen_ai.prompt"]; ok {
+		t.Fatal("prompt duplicated into plaintext attributes")
+	}
+	if attrs["http.request.header.authorization"] != "[REDACTED:attribute]" {
+		t.Fatal("authorization header not redacted")
 	}
 }
 

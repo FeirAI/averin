@@ -1354,7 +1354,7 @@ func (s *Server) reconstructCapability(projectID, grantID string) (string, error
 	}
 	for _, d := range secrets {
 		if d.RecordID == grantID && d.Field == "credential" {
-			raw, err := s.content.Get(context.Background(), d.ValueDigest)
+			raw, err := s.content.Get(content.WithTenant(context.Background(), projectID), d.ValueDigest)
 			if err != nil {
 				return "", err
 			}
@@ -1536,7 +1536,7 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 	// a grant no longer overloads `input`): store the bytes content-addressed, mint a nonce, and commit.
 	// Selective disclosure can later reveal the descriptor to prove the grant↔credential binding
 	// without publishing it in the signed body.
-	addr, err := s.content.Put(context.Background(), p.DescriptorBytes)
+	addr, err := s.content.Put(content.WithTenant(context.Background(), gr.ProjectID), p.DescriptorBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("store credential descriptor: %w", err)
 	}
@@ -1919,7 +1919,7 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 	// Store the raw params content-addressed for selective disclosure. D2: input_commit IS the agent's
 	// PoP-bound hiding commitment (over (params, params_nonce)) — the SAME value the offline verifier
 	// reconstructs the PoP challenge from. The disclosure opens it with the agent's params_nonce.
-	addr, err := s.content.Put(context.Background(), rawParams)
+	addr, err := s.content.Put(content.WithTenant(context.Background(), ur.ProjectID), rawParams)
 	if err != nil {
 		return nil, nil, fmt.Errorf("store use params: %w", err)
 	}
@@ -2183,7 +2183,8 @@ func (s *Server) commitLowEntropyFields(rec map[string]any, recordID string) ([]
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", field, err)
 		}
-		addr, err := s.content.Put(context.Background(), raw)
+		projectID, _ := rec["project_id"].(string)
+		addr, err := s.content.Put(content.WithTenant(context.Background(), projectID), raw)
 		if err != nil {
 			return nil, fmt.Errorf("store %s content: %w", field, err)
 		}
@@ -2984,7 +2985,7 @@ func (s *Server) buildDisclosures(projectID string) ([]map[string]any, error) {
 	}
 	out := make([]map[string]any, 0, len(secrets))
 	for _, d := range secrets {
-		raw, err := s.content.Get(context.Background(), d.ValueDigest)
+		raw, err := s.content.Get(content.WithTenant(context.Background(), projectID), d.ValueDigest)
 		if err != nil {
 			return nil, fmt.Errorf("disclose %s/%s: %w", d.RecordID, d.Field, err)
 		}

@@ -252,6 +252,40 @@ func TestNewFSStoreEmptyDir(t *testing.T) {
 	}
 }
 
+func TestEncryptedFSStoreTenantIsolationAndCiphertext(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, 32)
+	st, err := NewEncryptedFSStore(t.TempDir(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxA := WithTenant(context.Background(), "tenant-a")
+	ctxB := WithTenant(context.Background(), "tenant-b")
+	plain := []byte("visible model output")
+	addr, err := st.Put(ctxA, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Get(ctxA, addr.Digest)
+	if err != nil || !bytes.Equal(got, plain) {
+		t.Fatalf("round trip: %q %v", got, err)
+	}
+	if _, err := st.Get(ctxB, addr.Digest); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant read = %v", err)
+	}
+	_ = filepath.WalkDir(st.root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasPrefix(d.Name(), "sha256-") {
+			raw, _ := os.ReadFile(path)
+			if bytes.Contains(raw, plain) {
+				t.Error("plaintext is present in encrypted blob")
+			}
+		}
+		return nil
+	})
+	if _, err := st.Put(context.Background(), plain); err == nil {
+		t.Fatal("missing tenant context accepted")
+	}
+}
+
 // TestFSStorePermissions checks the root and blob files are not world/group readable (raw blobs may
 // hold sensitive input/output).
 func TestFSStorePermissions(t *testing.T) {

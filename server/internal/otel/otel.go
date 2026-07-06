@@ -20,7 +20,10 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/averin-dev/averin/server/internal/scrub"
 )
 
 // MapSpansToRecords parses an OTLP/JSON ExportTraceServiceRequest and returns one averin record body
@@ -137,6 +140,10 @@ func mapSpan(sp span, resAttrs map[string]any, projectID string) map[string]any 
 	for k, v := range attrs {
 		merged[k] = v
 	}
+	input := takeFirstString(merged, "gen_ai.input.messages", "gen_ai.prompt", "llm.prompts", "tool.arguments", "input.value")
+	output := takeFirstString(merged, "gen_ai.output.messages", "gen_ai.completion", "llm.completions", "tool.result", "output.value")
+	rationale := takeFirstString(merged, "feir.reasoning_summary")
+	scrubAttributes(merged)
 
 	status := "ok"
 	if isError(sp.Status) {
@@ -157,7 +164,45 @@ func mapSpan(sp span, resAttrs map[string]any, projectID string) map[string]any 
 		// what was reported (we never silently drop signal — we just don't act on unknown attrs).
 		"extensions": map[string]any{"otel_attrs": merged},
 	}
+	if agentID := strAttr(merged, "feir.agent_id"); agentID != "" {
+		body["agent_id"] = agentID
+	}
+	if input != "" {
+		body["input"] = scrub.Redact(input)
+	}
+	if output != "" {
+		body["output"] = scrub.Redact(output)
+	}
+	if rationale != "" {
+		body["rationale"] = scrub.Redact(rationale)
+	}
 	return body
+}
+
+func takeFirstString(attrs map[string]any, keys ...string) string {
+	var selected string
+	for _, key := range keys {
+		if value, ok := attrs[key].(string); ok && selected == "" {
+			selected = value
+		}
+		delete(attrs, key) // payload is committed/encrypted, never duplicated in attrs
+	}
+	return selected
+}
+
+func scrubAttributes(attrs map[string]any) {
+	for key, value := range attrs {
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "authorization") || strings.Contains(lower, "api_key") ||
+			strings.Contains(lower, "access_token") || strings.Contains(lower, "refresh_token") ||
+			strings.Contains(lower, "password") || strings.Contains(lower, "secret") {
+			attrs[key] = "[REDACTED:attribute]"
+			continue
+		}
+		if text, ok := value.(string); ok {
+			attrs[key] = scrub.Redact(text)
+		}
+	}
 }
 
 // sessionID prefers an explicit session attribute, falling back to the OTel traceId so spans from
@@ -177,6 +222,9 @@ func sessionID(attrs map[string]any, traceID string) string {
 // db). We DO NOT guess beyond these signals — an unrecognized span is a plain "decision", never a
 // fabricated tool/LLM call.
 func eventType(attrs map[string]any) string {
+	if v := strAttr(attrs, "feir.event_type"); v != "" {
+		return v
+	}
 	if v := strAttr(attrs, "averin.event_type"); v != "" {
 		return v
 	}
