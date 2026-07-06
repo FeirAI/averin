@@ -61,6 +61,31 @@ func DelegationHopChallenge(grantID string, hopIndex int64, delegatorKid, delega
 	return h.Sum(nil)
 }
 
+// VerifyDelegationHop validates one standalone hop and returns its delegator
+// public key so an ingestion boundary can bind it to a pinned authority root.
+func VerifyDelegationHop(grantID string, hopIndex int64, hop DelegationHop) (ed25519.PublicKey, error) {
+	delegatorPub, err := decodeAgentKey(hop.DelegatorCnf)
+	if err != nil {
+		return nil, fmt.Errorf("delegator_cnf: %w", err)
+	}
+	delegatePub, err := decodeAgentKey(hop.DelegateCnf)
+	if err != nil {
+		return nil, fmt.Errorf("delegate_cnf: %w", err)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(hop.Sig)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return nil, errors.New("sig must be a base64url-no-pad ed25519 signature (64 bytes)")
+	}
+	challenge := DelegationHopChallenge(
+		grantID, hopIndex, KeyID(delegatorPub), KeyID(delegatePub),
+		hop.Scope, hop.Action, hop.ResourceID, hop.Exp,
+	)
+	if !ed25519.Verify(delegatorPub, challenge, sig) {
+		return nil, errors.New("signature does not verify under the delegator key")
+	}
+	return delegatorPub, nil
+}
+
 // AttachDelegation embeds a verified re-delegation chain into an already-prepared grant's evidence (ADR 0005
 // M2). It is the second phase of the delegation flow: Prepare mints the grant (fixing cnf_kid / scope /
 // action / resource_id / exp), the agents sign their hops out-of-band over DelegationHopChallenge, then the

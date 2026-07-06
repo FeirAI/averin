@@ -106,7 +106,7 @@ pub fn verify_authority_with_key(
     match source {
         "" => (AuthorityTrust::None, None),
         "caller_declared" => (AuthorityTrust::Declared, None),
-        "policy_engine_signed" | "human_signed" | "gateway_enforced" => {
+        "policy_engine_signed" | "human_signed" | "delegate_signed" | "gateway_enforced" => {
             let record_id = record
                 .get("record_id")
                 .and_then(|v| v.as_str())
@@ -271,6 +271,34 @@ mod tests {
         ));
         assert_eq!(
             verify_authority(&relabelled, &[key.verifying_key()]),
+            AuthorityTrust::Failed
+        );
+    }
+
+    #[test]
+    fn delegate_signed_elevates_like_other_verified_sources() {
+        // Plan 031 D8: "delegate_signed" is a recognized verified-source — it elevates to Verified under a
+        // pinned key (mirroring policy_engine_signed/human_signed), fails under a wrong key, and is Unverifiable
+        // with no keys configured. A signature for delegate_signed must NOT verify under the preimage of
+        // another source (re-label) — source is bound.
+        let k = signing_key_from_seed(&[88u8; 32]);
+        let rec = signed_record("delegate_signed", "rec-d1", &k);
+        assert_eq!(
+            verify_authority(&rec, &[k.verifying_key()]),
+            AuthorityTrust::Verified
+        );
+        assert_eq!(
+            verify_authority(&rec, &[signing_key_from_seed(&[1u8; 32]).verifying_key()]),
+            AuthorityTrust::Failed
+        );
+        assert_eq!(verify_authority(&rec, &[]), AuthorityTrust::Unverifiable);
+        // re-label: a delegate_signed sig relabelled as policy_engine_signed must NOT verify.
+        let ds_sig = sign_evidence("delegate_signed", PROJ, "rec-d2", EH, &k);
+        let relabelled = rec_with_authority(&format!(
+            r#"{{"project_id":"{PROJ}","record_id":"rec-d2","authority":{{"source":"policy_engine_signed","evidence_hash":"{EH}","evidence_sig":"{ds_sig}"}}}}"#
+        ));
+        assert_eq!(
+            verify_authority(&relabelled, &[k.verifying_key()]),
             AuthorityTrust::Failed
         );
     }

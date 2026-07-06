@@ -1,0 +1,7 @@
+# Keep the Docker build context small. deploy/Dockerfile.server uses `COPY . .`, so without this the
+# host's multi-GB Rust build artifacts (target/) get dragged into the context on EVERY build — which
+# fills the Docker disk and corrupts the image store. Exclude build artifacts + VCS history; the
+# Dockerfile rebuilds everything it needs inside the image from the source it explicitly copies.
+target/
+**/target/
+.git/

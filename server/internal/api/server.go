@@ -18,6 +18,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -229,22 +230,25 @@ func (s *Server) WithDeniedGrantLog() *Server {
 }
 
 // WithPolicyEngineKey (T7) pins an EXTERNAL authority's published verifying key + the authority source it
-// vouches for ("policy_engine_signed" or "human_signed"). It may be called ONCE PER SOURCE: pin the policy
-// engine's key for policy_engine_signed AND (separately) a human-approval service's key for human_signed, so
-// a record signed by the matching key elevates to ITS source. At ingest, a generic record whose authority
-// carries a pinned source plus a {evidence_hash, evidence_sig} that verifies under that source's key over the
-// canonical authority preimage is elevated to that source (so an offline verifier pinning the SAME keys as
-// authority_keys reads it as `verified`); anything else — an unpinned source, or a mismatched/forged key —
-// falls back to forgeable `caller_declared` (threat #4). Model: each authority signs with its OWN key off-box
-// and the server only VERIFIES — keeping those authorities out of the server TCB. Every pinned key MUST be
-// role-separated (the verifier does not fold authority_keys into its disjointness check, so we reject the
-// obvious overlaps: the server's own signing key, and re-using one key across two authority sources).
+// vouches for ("policy_engine_signed", "human_signed", or "delegate_signed"). It may be called ONCE PER
+// SOURCE: pin the policy engine's key for policy_engine_signed AND (separately) a human-approval service's
+// key for human_signed AND a delegate-agent authority's key for delegate_signed, so a record signed by the
+// matching key elevates to ITS source. At ingest, a generic record whose authority carries a pinned source
+// plus a {evidence_hash, evidence_sig} that verifies under that source's key over the canonical authority
+// preimage is elevated to that source (so an offline verifier pinning the SAME keys as authority_keys reads
+// it as `verified`); anything else — an unpinned source, or a mismatched/forged key — falls back to forgeable
+// `caller_declared` (threat #4). Model: each authority signs with its OWN key off-box and the server only
+// VERIFIES — keeping those authorities out of the server TCB. Every pinned key MUST be role-separated (the
+// verifier does not fold authority_keys into its disjointness check, so we reject the obvious overlaps: the
+// server's own signing key, and re-using one key across two authority sources).
 func (s *Server) WithPolicyEngineKey(source string, key ed25519.PublicKey) *Server {
-	// The offline verifier only elevates these two generic authority sources; pinning any other source would
+	// The offline verifier only elevates these three generic authority sources; pinning any other source would
 	// make the server stamp records the verifier reads as `declared`, not `verified` (gateway_enforced is the
 	// broker's own source, not a generic policy-engine one).
-	if source != "policy_engine_signed" && source != "human_signed" {
-		panic("WithPolicyEngineKey: source must be policy_engine_signed or human_signed")
+	switch source {
+	case "policy_engine_signed", "human_signed", "delegate_signed":
+	default:
+		panic("WithPolicyEngineKey: source must be policy_engine_signed, human_signed, or delegate_signed")
 	}
 	if serverPub, err := decodePubKey(s.core.PubKey()); err == nil && key.Equal(serverPub) {
 		panic("WithPolicyEngineKey: the authority key must be role-separated from the server signing key")
@@ -547,6 +551,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("POST /v2/records", s.handleRecords)
+	mux.HandleFunc("GET /v2/records", s.handleListRecords)
 	mux.HandleFunc("POST /v2/grants", s.handleGrant)
 	mux.HandleFunc("POST /v2/grants/prepare", s.handleGrantPrepare)   // M6/M2 online two-phase: phase 1 (mint+reveal)
 	mux.HandleFunc("POST /v2/grants/finalize", s.handleGrantFinalize) // M6/M2 online two-phase: phase 2 (attach+commit)
@@ -658,7 +663,7 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, fmt.Sprintf("idempotency_key prefix %q is reserved for the broker denied-grant log", denialIdemPrefix))
 			return
 		}
-		if err := validateGenericRecordItem(probe); err != nil {
+		if err := s.validateGenericRecordItem(probe); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -753,9 +758,12 @@ func canonProbe(probe map[string]any) map[string]any {
 // rejects with a 400. It is shared by ingestOne and the batch up-front pre-pass (F14: a malformed item
 // must reject the WHOLE batch before any earlier item is sealed) so the two cannot diverge. It does NOT
 // mutate the record (the caller assigns record_id / normalizes authority after).
-func validateGenericRecordItem(rec map[string]any) error {
+func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	if stringField(rec, "project_id") == "" || stringField(rec, "session_id") == "" {
 		return fmt.Errorf("project_id and session_id are required")
+	}
+	if err := s.validateDelegationEvidence(rec); err != nil {
+		return err
 	}
 	// The "use-"/"outcome-"/"denial-" prefixes are RESERVED for the resource-gateway / denial endpoints
 	// (deterministic ids from the idempotency key): a generic caller must not pre-seed one, else a later
@@ -799,6 +807,110 @@ func validateGenericRecordItem(rec map[string]any) error {
 	return nil
 }
 
+// validateDelegationEvidence makes a carried govder delegation hop load-bearing:
+// the signature must verify and its delegator must be this project's pinned
+// policy-engine authority key. A self-signed attacker-selected root is rejected.
+func (s *Server) validateDelegationEvidence(rec map[string]any) error {
+	ext, _ := rec["extensions"].(map[string]any)
+	gov, _ := ext["govder"].(map[string]any)
+	payload, _ := gov["payload"].(map[string]any)
+	hopValue, present := payload["delegation_hop"]
+	if !present {
+		claimsDelegation := stringField(rec, "event_type") == "handoff" ||
+			stringField(rec, "event_type") == "sub-agent-handoff" ||
+			stringField(payload, "artifact_type") == "delegation-attestation" ||
+			stringField(payload, "handoff_kind") == "sub-agent-spawn"
+		if claimsDelegation {
+			return errors.New("delegation evidence requires a signed delegation_hop")
+		}
+		return nil
+	}
+	id := stringField(payload, "grant_id")
+	if id == "" {
+		id = stringField(payload, "handoff_id")
+	}
+	if id == "" {
+		return errors.New("delegation_hop requires grant_id or handoff_id")
+	}
+	raw, err := json.Marshal(hopValue)
+	if err != nil {
+		return fmt.Errorf("delegation_hop: %w", err)
+	}
+	var hop broker.DelegationHop
+	if err := json.Unmarshal(raw, &hop); err != nil {
+		return fmt.Errorf("delegation_hop: %w", err)
+	}
+	delegator, err := broker.VerifyDelegationHop(id, 0, hop)
+	if err != nil {
+		return fmt.Errorf("delegation_hop verification failed: %w", err)
+	}
+	// Plan 031 D8: a delegation_hop is pinned to its record's authority source. A sub-agent-handoff /
+	// delegation-attestation (sealed by govder's policy-engine key) pins to policy_engine_signed; a record whose
+	// authority is delegate_signed (carrying a delegate-agent decision) pins to the delegate key — so a
+	// policy-engine-level compromise cannot forge a delegate decision's hop, and vice versa. An unpinned source
+	// is rejected closed (a self-signed attacker-selected root never passes).
+	claimedSrc, _ := rec["authority"].(map[string]any)
+	claimedSource, _ := claimedSrc["source"].(string)
+	pinnedSource := "policy_engine_signed"
+	if claimedSource == "delegate_signed" {
+		pinnedSource = "delegate_signed"
+	}
+	pinned := s.policyEngineKeys[pinnedSource]
+	if len(pinned) != ed25519.PublicKeySize || !pinned.Equal(delegator) {
+		return fmt.Errorf("delegation_hop delegator is not the pinned %s authority", pinnedSource)
+	}
+	if hop.Exp != 0 && time.Now().Unix() >= hop.Exp {
+		return errors.New("delegation_hop is expired at ingest")
+	}
+	if stringField(payload, "handoff_id") != "" {
+		from := stringField(payload, "from_agent_id")
+		to := stringField(payload, "to_agent_id")
+		if from == "" || to == "" || hop.Action != "spawn_child" || hop.ResourceID != from+"->"+to {
+			return errors.New("delegation_hop does not bind the carried parent->child edge")
+		}
+		expected, err := delegationEvidenceScopeDigest(map[string]any{
+			"from_agent_id": from, "to_agent_id": to,
+			"delegated_scope": payload["delegated_scope"],
+		})
+		if err != nil || hop.Scope != expected {
+			return errors.New("delegation_hop does not bind the complete carried handoff scope")
+		}
+	} else {
+		delegate := stringField(payload, "delegate_agent_id")
+		if delegate == "" || hop.Action != "delegate-approval" || hop.ResourceID != delegate {
+			return errors.New("delegation_hop does not bind the carried delegation grant")
+		}
+		expected, err := delegationEvidenceScopeDigest(map[string]any{
+			"delegator":         stringField(payload, "delegator"),
+			"delegate_agent_id": delegate,
+			"scope":             payload["scope"],
+		})
+		if err != nil || hop.Scope != expected {
+			return errors.New("delegation_hop does not bind the complete carried grant scope")
+		}
+	}
+	return nil
+}
+
+func delegationEvidenceScopeDigest(v any) (string, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	var canonical any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&canonical); err != nil {
+		return "", err
+	}
+	raw, err = json.Marshal(canonical)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
 func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) {
 	var rec map[string]any
 	if err := decode(raw, &rec); err != nil {
@@ -821,7 +933,7 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 
 	// The deterministic body validations the generic path rejects with a 400 — shared with the batch
 	// up-front pre-pass (F14) so a malformed item rejects the WHOLE batch before any item is sealed.
-	if err := validateGenericRecordItem(rec); err != nil {
+	if err := s.validateGenericRecordItem(rec); err != nil {
 		return "", false, err
 	}
 	projectID := stringField(rec, "project_id")
@@ -2628,6 +2740,48 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 // explicitly Phase 2, spec §3). A deployment MUST put feir behind its own auth (or run it single-
 // tenant) until the authz layer lands — any caller who can reach this endpoint can read any
 // project's data. Documented in docs/coverage-limits.md.
+// handleListRecords returns a tenant's sealed records newest-first with truncation honesty.
+func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
+	projectID := r.URL.Query().Get("project")
+	if projectID == "" {
+		writeErr(w, http.StatusBadRequest, "project query param is required")
+		return
+	}
+	limitStr := r.URL.Query().Get("limit")
+	limit := 100
+	if limitStr != "" {
+		n, err := strconv.Atoi(limitStr)
+		if err != nil || n < 1 {
+			writeErr(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		if n > 1000 {
+			n = 1000
+		}
+		limit = n
+	}
+	recs, err := s.st.AllRecords(projectID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	total := len(recs)
+	start := 0
+	if total > limit {
+		start = total - limit
+	}
+	slice := recs[start:]
+	out := make([]json.RawMessage, len(slice))
+	for i, rec := range slice {
+		out[len(slice)-1-i] = json.RawMessage(rec.JSON)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records":   out,
+		"total":     total,
+		"truncated": total > limit,
+	})
+}
+
 func (s *Server) handleDAG(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
 	sessionID := r.URL.Query().Get("session")
