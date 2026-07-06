@@ -24,7 +24,7 @@ test-core:
 test-server: core
 	cd server && go vet ./... && go test ./...
 
-test-verifier:
+test-verifier: wasm
 	cd verifier && bun test
 
 test: test-core test-server test-verifier

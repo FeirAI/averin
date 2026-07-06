@@ -6,7 +6,7 @@ Most of the work is **leria's** (it reshapes its records to averin's existing sc
 thing**: a typed `record_kind`.
 
 **Authoritative spec (verified against averin source, with file:line):**
-[`/Users/dzcodes/Projects/leria/docs/_meta/averin-integration-handoff.md`](/Users/dzcodes/Projects/leria/docs/_meta/averin-integration-handoff.md).
+[`/Users/dzcodes/Projects/feir-ai/leria/docs/_meta/averin-integration-handoff.md`](/Users/dzcodes/Projects/feir-ai/leria/docs/_meta/averin-integration-handoff.md).
 
 ## Why
 
