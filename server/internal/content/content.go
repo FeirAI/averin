@@ -315,6 +315,12 @@ func (s *EncryptedFSStore) Put(ctx context.Context, data []byte) (Address, error
 		return Address{}, err
 	}
 	if _, err := os.Stat(dst); err == nil {
+		// Refresh mtime on the dedup hit: PurgeOlderThan keys retention on mtime, so a
+		// re-committed blob must restart its retention window instead of inheriting the
+		// first Put's age and being purged early. Best-effort — a failed touch only
+		// shortens retention, never breaks proof integrity.
+		now := time.Now()
+		_ = os.Chtimes(dst, now, now)
 		return addressFor(digest, len(data)), nil
 	}
 	block, err := aes.NewCipher(s.tenantKey(tenant))

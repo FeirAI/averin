@@ -231,8 +231,11 @@ func scrubAttributes(attrs map[string]any) {
 	for key, value := range attrs {
 		lower := strings.ToLower(key)
 		if strings.Contains(lower, "authorization") || strings.Contains(lower, "api_key") ||
-			strings.Contains(lower, "access_token") || strings.Contains(lower, "refresh_token") ||
-			strings.Contains(lower, "password") || strings.Contains(lower, "secret") {
+			strings.Contains(lower, "api-key") || strings.Contains(lower, "api_token") ||
+			strings.Contains(lower, "api-token") || strings.Contains(lower, "access_token") ||
+			strings.Contains(lower, "refresh_token") || strings.Contains(lower, "password") ||
+			strings.Contains(lower, "secret") || strings.Contains(lower, "cookie") ||
+			strings.Contains(lower, "credential") {
 			attrs[key] = "[REDACTED:attribute]"
 			continue
 		}

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stores returns each Store implementation under test, so every behavioral test runs against both
@@ -317,4 +318,43 @@ func TestFSStorePermissions(t *testing.T) {
 		}
 	}
 	_ = addr
+}
+
+// PurgeOlderThan keys retention on file mtime, and Put dedups on an existing blob — a
+// re-committed blob must have its retention window RESTARTED (mtime touched), or content
+// still in active use is purged as if it were only as old as the first Put.
+func TestPutRefreshesMtimeSoRecommitRestartsRetention(t *testing.T) {
+	st, err := NewEncryptedFSStore(t.TempDir(), bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithTenant(context.Background(), "tenant-a")
+	plain := []byte("re-committed payload")
+	addr, err := st.Put(ctx, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Backdate the blob past the cutoff, then re-commit the same content.
+	old := time.Now().Add(-48 * time.Hour)
+	if err := filepath.WalkDir(st.root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasPrefix(d.Name(), "sha256-") {
+			return err
+		}
+		return os.Chtimes(path, old, old)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Put(ctx, plain); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := st.PurgeOlderThan(time.Now().Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("re-committed blob purged early: removed=%d", removed)
+	}
+	if got, err := st.Get(ctx, addr.Digest); err != nil || !bytes.Equal(got, plain) {
+		t.Fatalf("blob must survive purge after re-commit: %q %v", got, err)
+	}
 }

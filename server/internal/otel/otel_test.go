@@ -148,6 +148,23 @@ func TestFeirVisiblePayloadsAreExtractedAndSecretsScrubbed(t *testing.T) {
 	}
 }
 
+// Cookie/credential-shaped keys carry secrets that don't match value-shape scrub regexes
+// (a session cookie is short and unstructured) — the key denylist must catch them.
+func TestCookieAndCredentialAttributesAreRedacted(t *testing.T) {
+	otlp := `{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"t","spanId":"s","name":"http","attributes":[` +
+		`{"key":"http.request.header.cookie","value":{"stringValue":"session=8f3a"}},` +
+		`{"key":"http.response.header.set-cookie","value":{"stringValue":"sid=abc; HttpOnly"}},` +
+		`{"key":"http.request.header.x-api-token","value":{"stringValue":"tok"}},` +
+		`{"key":"aws.credential","value":{"stringValue":"AKIA"}}]}]}]}]}`
+	attrs := mustMap(t, otlp, "tenant")[0]["extensions"].(map[string]any)["otel_attrs"].(map[string]any)
+	for _, key := range []string{"http.request.header.cookie", "http.response.header.set-cookie",
+		"http.request.header.x-api-token", "aws.credential"} {
+		if attrs[key] != "[REDACTED:attribute]" {
+			t.Fatalf("secret-bearing attribute %q not redacted: %#v", key, attrs[key])
+		}
+	}
+}
+
 // OpenInference and older GenAI semconv emit prompts/completions as INDEXED attributes.
 // They must be folded into the committed payload, never left in plaintext otel_attrs —
 // otherwise the raw prompt is sealed in cleartext in the record body, bypassing the
