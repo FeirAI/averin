@@ -88,7 +88,7 @@ replay window reopens on restart).
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_REVOCATION_SEED` | unset ⇒ revocation off | No | 64-hex (32-byte) Ed25519 seed for the revocation issuer. Bad value ⇒ fatal. **Must differ from the signing/broker/resource seeds** (role separation) ⇒ fatal otherwise. When set, `POST /v2/revoke` marks a `grant_id` revoked and every `/v2/export` carries a signed, time-bounded `revocation_list`. The revoked set is in-memory in Phase 1 (a production deployment persists it). |
+| `AVERIN_REVOCATION_SEED` | unset ⇒ revocation off | No | 64-hex (32-byte) Ed25519 seed for the revocation issuer. Bad value ⇒ fatal. **Must differ from the signing/broker/resource seeds** (role separation) ⇒ fatal otherwise. When set, `POST /v2/revoke` marks a `grant_id` revoked and every `/v2/export` carries a signed, time-bounded `revocation_list`. The revoked set (and, when the M6/M2 online two-phase grant flow is used, the pending prepare→finalize mint state) is **durable Postgres-backed** if `AVERIN_DATABASE_URL` is set — a revoke or an in-flight cosig/delegation approval survives a pod restart or `SIGTERM` — else in-memory only (a revoke issued or a mint prepared just before restart is forgotten). |
 
 ### Metering (Stripe)
 

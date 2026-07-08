@@ -28,6 +28,7 @@ import (
 	"github.com/averin-dev/averin/server/internal/content"
 	"github.com/averin-dev/averin/server/internal/core"
 	"github.com/averin-dev/averin/server/internal/meter"
+	"github.com/averin-dev/averin/server/internal/pgdurable"
 	"github.com/averin-dev/averin/server/internal/pgledger"
 	"github.com/averin-dev/averin/server/internal/scrub"
 	"github.com/averin-dev/averin/server/internal/store"
@@ -305,6 +306,7 @@ func main() {
 	// M5 (ADR 0005): optional revocation authority. POST /v2/revoke marks a grant_id revoked; every /v2/export
 	// then carries a signed, time-bounded revocation_list (the verifier blocks any use of a revoked grant). The
 	// key MUST be role-separated from the broker/resource/signing/attestation keys (the verifier enforces it).
+	revocationEnabled := false
 	if rvseed := secretEnvOrFile("AVERIN_REVOCATION_SEED"); rvseed != "" {
 		raw, err := hex.DecodeString(rvseed)
 		if err != nil || len(raw) != ed25519.SeedSize {
@@ -329,7 +331,35 @@ func main() {
 			log.Fatal("AVERIN_REVOCATION_SEED must differ from the signing/broker/resource seeds (R2 role separation)")
 		}
 		srv.WithRevocation(rvk)
+		revocationEnabled = true
 		log.Printf("revocation enabled (POST /v2/revoke; exports carry a signed revocation_list)")
+	}
+
+	// M5/M6/M2 durability: back the revoked-grant set and the pending two-phase grant mint state with
+	// Postgres when AVERIN_DATABASE_URL is set, so a pod restart or SIGTERM does not silently forget a
+	// revoke or lose a mint awaiting cosig/delegation approval (both were in-memory-only in Phase 1). Must
+	// run AFTER srv.WithRevocation (which (re)initializes the in-memory revoked set that WithDurable then
+	// rehydrates). A failed connection/rehydrate is fatal — same fail-closed posture as selectStore/pgledger:
+	// starting with a silently-empty revoked set would let an operator believe a revoke is enforced when it
+	// is not.
+	var durableStore *pgdurable.Store
+	if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
+		dctx, dcancel := context.WithTimeout(context.Background(), 30*time.Second)
+		pd, err := pgdurable.New(dctx, dsn)
+		dcancel()
+		if err != nil {
+			log.Fatalf("durable revocation/two-phase state: Postgres requested but unavailable: %v", err)
+		}
+		durableStore = pd
+		srv.WithDurable(pd)
+		log.Printf("revocation + two-phase grant state -> Postgres (durable; survives restart)")
+	} else {
+		if revocationEnabled {
+			log.Printf("WARNING: no AVERIN_DATABASE_URL set — the revoked-grant set (M5) is in-memory (volatile): a revoke issued just before a restart is forgotten. Set AVERIN_DATABASE_URL for durable revocation.")
+		}
+		if brokerEnabled {
+			log.Printf("WARNING: no AVERIN_DATABASE_URL set — pending two-phase grant state (M6/M2 prepare→finalize) is in-memory (volatile): a restart during the cosig/delegation approval window loses the pending mint (the caller must re-prepare). Set AVERIN_DATABASE_URL for durable two-phase state.")
+		}
 	}
 
 	log.Printf("averin-server listening on %s (pubkey %s)", addr, c.PubKey())
@@ -345,11 +375,12 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 	// Graceful shutdown: serve in a goroutine, then on SIGINT/SIGTERM drain in-flight requests
-	// before exiting. averin holds in-memory two-phase grant + revocation state (Phase 1), so a clean
-	// drain on a rollout / scale-down avoids dropping in-flight ingest and the request currently
-	// executing a finalize (the cross-request prepare->finalize window is still lost on any stop —
-	// full persistence is averin Phase 2). After the HTTP drain we flush the async Stripe meter queue
-	// and close the store pool, all within the same deadline.
+	// before exiting. A clean drain on a rollout / scale-down avoids dropping in-flight ingest and the
+	// request currently executing a finalize. With AVERIN_DATABASE_URL set, the cross-request
+	// prepare->finalize window (and the revoked-grant set) now survive a restart too — see WithDurable
+	// above; without it, both stay in-memory only and the drain is what limits the blast radius of a
+	// stop. After the HTTP drain we flush the async Stripe meter queue and close the store pool, all
+	// within the same deadline.
 	//
 	// DEADLINE: keep it UNDER the orchestrator's stop grace or it gets SIGKILLed mid-drain. Default
 	// 25s, override with AVERIN_SHUTDOWN_TIMEOUT. The Kubernetes manifest sets terminationGracePeriod=30s
@@ -384,6 +415,9 @@ func main() {
 		meterReporter.Close(ctx)
 		if c, ok := st.(interface{ Close() }); ok {
 			c.Close()
+		}
+		if durableStore != nil {
+			durableStore.Close()
 		}
 		log.Print("averin-server: shutdown complete")
 	}

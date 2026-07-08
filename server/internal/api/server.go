@@ -28,6 +28,7 @@ import (
 	"github.com/averin-dev/averin/server/internal/content"
 	"github.com/averin-dev/averin/server/internal/meter"
 	"github.com/averin-dev/averin/server/internal/otel"
+	"github.com/averin-dev/averin/server/internal/pgdurable"
 	"github.com/averin-dev/averin/server/internal/resourceshim"
 	"github.com/averin-dev/averin/server/internal/store"
 	"github.com/averin-dev/averin/server/internal/witness"
@@ -77,11 +78,20 @@ type Server struct {
 	// M5 (ADR 0005): the revocation authority key (role-separated from broker/resource/signing/attestation/TSA).
 	// When set, POST /v2/revoke records a grant_id as revoked, and each /v2/export carries a signed, time-bounded
 	// revocation_list over the project's revoked set (the verifier blocks any use of a revoked grant). nil =
-	// revocation disabled. The revoked set is IN-MEMORY (Phase-1; a production deployment persists it).
-	revocationKey      ed25519.PrivateKey
-	revoked            map[string]map[string]struct{} // projectID -> set of revoked grant_ids
+	// revocation disabled. `revoked` is the in-memory READ cache; when `durable` is set (AVERIN_DATABASE_URL),
+	// every revoke is persisted to Postgres FIRST (fail-closed) and the cache is rehydrated from it at boot —
+	// see WithDurable. With no durable store configured it stays in-memory only, as before.
+	revocationKey ed25519.PrivateKey
+	revoked       map[string]map[string]struct{} // projectID -> set of revoked grant_ids
+	// revokedMu guards STRUCTURAL access to `revoked` ONLY (get-or-create the top-level per-project entry) —
+	// it is never held across the durable Revoke() Postgres round-trip. The cap-check-then-persist-then-write
+	// for a SINGLE project must still stay atomic (finding C), so handleRevoke and buildRevocationListForExport
+	// instead serialize per-project via revokeLocks, which IS held across that round-trip; different projects'
+	// revokes/exports run fully concurrently under it (a slow/degraded Postgres no longer stalls every project's
+	// /v2/revoke process-wide).
 	revokedMu          sync.Mutex
-	revokeCapWarnAt    time.Time // throttles the at-capacity WARNING (guarded by revokedMu)
+	revokeLocks        keyedMutex
+	revokeCapWarnAt    time.Time // throttles the at-capacity WARNING (guarded by revokeLocks, keyed by project_id)
 	revocationValidity time.Duration
 	denyLog            bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
@@ -127,13 +137,30 @@ type Server struct {
 	// credential_binding/exp, so an approver/delegator can only sign AFTER the broker prepares + reveals it.
 	// `pending` holds the minted-but-uncommitted broker.Prepared between the two phases, keyed by project:idem,
 	// WITHOUT a broker_seq (the seq is allocated at FINALIZE, under ingestMu, so the seq order == the record
-	// commit order and the D6 grant log stays a gapless prefix). In-memory: requires a single instance and does
-	// not survive a restart mid-approval (a production deployment persists this). cosigApprovers/cosigThreshold
-	// are the SERVER-pinned M-of-N policy a finalize's cosignatures are validated against (never client-supplied).
-	pending        map[string]*pendingGrant
-	pendingMu      sync.Mutex
-	cosigThreshold int
-	cosigApprovers []ed25519.PublicKey
+	// commit order and the D6 grant log stays a gapless prefix). `pending` is the in-memory READ cache; when
+	// `durable` is set (AVERIN_DATABASE_URL), every fresh mint is persisted to Postgres FIRST (fail-closed)
+	// before it is cached, and the cache is rehydrated from it at boot — see WithDurable. With no durable
+	// store configured it stays in-memory only, as before: a restart mid-approval loses the pending mint. With
+	// a durable store, a same-idem-key mint race across REPLICAS sharing one AVERIN_DATABASE_URL is now also
+	// coordinated: pgdurable.PutPending detects the conflict and the loser serves the winner's durable
+	// challenge instead of its own (see handleGrantPrepare) — but WITHIN a single process, same-key prepares
+	// still fully serialize via pendingKeyLocks below, and different instances still mint independently rather
+	// than negotiating who mints at all (only the after-the-fact conflict is resolved, not prevented).
+	// cosigApprovers/cosigThreshold are the SERVER-pinned M-of-N policy a finalize's cosignatures are
+	// validated against (never client-supplied).
+	pending map[string]*pendingGrant
+	// pendingMu guards STRUCTURAL access to `pending` ONLY (lookup/insert/delete) — it is never held across
+	// the durable PutPending Postgres round-trip. The idempotent-mint-check-then-persist-then-cache for a
+	// SINGLE idem key must still stay atomic (finding C), so handleGrantPrepare instead serializes per-idem-key
+	// via pendingKeyLocks, which IS held across that round-trip; different idem keys' prepares run fully
+	// concurrently under it (a slow/degraded Postgres no longer stalls every prepare process-wide).
+	pendingMu       sync.Mutex
+	pendingKeyLocks keyedMutex
+	cosigThreshold  int
+	cosigApprovers  []ed25519.PublicKey
+	// durable optionally backs `revoked` and `pending` with Postgres (AVERIN_DATABASE_URL) — see WithDurable.
+	// nil = both stay in-memory only (dev/single-process), matching the pre-durability behavior exactly.
+	durable *pgdurable.Store
 	// ingestMu serializes the heads->seal->put critical section so concurrent ingests cannot read
 	// a stale frontier and fork the DAG (the Postgres store will do this in a serializable tx).
 	ingestMu sync.Mutex

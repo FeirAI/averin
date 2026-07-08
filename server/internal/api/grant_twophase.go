@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -11,12 +12,15 @@ import (
 )
 
 // pendingGrant is a minted-but-uncommitted grant held between /v2/grants/prepare and /v2/grants/finalize.
-// It carries NO committed broker_seq — that is allocated at finalize (see handleGrantFinalize).
+// It carries NO committed broker_seq — that is allocated at finalize (see handleGrantFinalize). idemKey is
+// carried alongside (not just implied by the `pending` map key) so a durable-store delete/prune can name
+// the row without re-splitting pendingKey's project:idem encoding.
 type pendingGrant struct {
 	prepared broker.Prepared
 	req      broker.Request
 	gr       grantRequest
 	created  time.Time
+	idemKey  string
 }
 
 // WithCosigPolicy pins the SERVER-side M-of-N cosignature-approval policy for the online two-phase grant flow
@@ -71,12 +75,29 @@ func copyEvidence(m map[string]any) map[string]any {
 	return c
 }
 
-// prunePending drops pending grants older than pendingTTL (an abandoned prepare must not leak memory). The
-// caller holds pendingMu.
+// prunePending drops pending grants older than pendingTTL (an abandoned prepare must not leak memory). It
+// takes pendingMu itself (callers must NOT already hold it) and only for the brief in-memory sweep — the
+// durable deletes below run AFTER releasing it, so a slow/degraded Postgres pruning one stale entry cannot
+// stall the pendingMu-guarded map for every other in-flight prepare/finalize (finding C). When a durable
+// store is configured each pruned row is also dropped there — best-effort (a failed delete just leaves a
+// stale row that WithDurable's boot-time TTL check prunes again later; it is never rehydrated as live
+// because it is already past pendingTTL by then too).
 func (s *Server) prunePending(now time.Time) {
+	s.pendingMu.Lock()
+	var expired []*pendingGrant
 	for k, p := range s.pending {
 		if now.Sub(p.created) > pendingTTL {
 			delete(s.pending, k)
+			expired = append(expired, p)
+		}
+	}
+	s.pendingMu.Unlock()
+	if s.durable == nil {
+		return
+	}
+	for _, p := range expired {
+		if err := s.durable.DeletePending(p.gr.ProjectID, p.idemKey); err != nil {
+			log.Printf("WARNING: durable two-phase grants: prune expired pending row (project=%q idem=%q): %v", p.gr.ProjectID, p.idemKey, err)
 		}
 	}
 }
@@ -138,12 +159,26 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.pendingMu.Lock()
-	defer s.pendingMu.Unlock()
-	s.prunePending(s.now())
 	pk := pendingKey(gr.ProjectID, idem)
+
+	// Best-effort sweep of expired entries. Self-locking (takes pendingMu itself, briefly, and does any
+	// durable deletes AFTER releasing it) — safe to call before we take the per-key lock below.
+	s.prunePending(s.now())
+
+	// Serialize per-idem-key across the check-then-mint-then-persist-then-cache critical section below
+	// (finding C): a slow/degraded Postgres round-trip inside PutPending then only blocks another caller
+	// racing for THIS SAME idem key, not every /v2/grants/prepare on the process. Different idem keys run
+	// fully concurrently under this lock.
+	unlockKey := s.pendingKeyLocks.Lock(pk)
+	defer unlockKey()
+
 	// Idempotent prepare: an already-pending mint returns the SAME challenge (stable credential_binding/exp).
+	// pendingMu here guards only the STRUCTURAL map read (a concurrent prepare/finalize for a DIFFERENT idem
+	// key may be reading/writing `pending` at the same time) — it is held only for this lookup, not across
+	// the mint/persist work below.
+	s.pendingMu.Lock()
 	p, ok := s.pending[pk]
+	s.pendingMu.Unlock()
 	if !ok {
 		// Mint WITHOUT a real broker_seq (the dummy 1 just satisfies Prepare's seq>=1 validation; it is
 		// OVERWRITTEN with the gapless seq at finalize, so the seq order == the record commit order, D6).
@@ -152,8 +187,39 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, e.Error())
 			return
 		}
-		p = &pendingGrant{prepared: prepared, req: req, gr: gr, created: s.now()}
+		p = &pendingGrant{prepared: prepared, req: req, gr: gr, created: s.now(), idemKey: idem}
+		// Persist-then-cache, fail-closed (M6/M2 durability): when a durable store is configured, the mint
+		// must be DURABLE before it is handed to the caller as a live challenge — otherwise a restart between
+		// this response and finalize would lose it while the caller believes prepare succeeded. A Postgres
+		// write failure is surfaced as an error and the pending entry is NOT cached (so a retry re-attempts
+		// cleanly rather than serving a challenge this instance cannot survive a restart to finalize).
+		if s.durable != nil {
+			payload, merr := json.Marshal(dtoFromPending(p))
+			if merr != nil {
+				writeErr(w, http.StatusInternalServerError, "encode pending grant: "+merr.Error())
+				return
+			}
+			durablePayload, _, perr := s.durable.PutPending(gr.ProjectID, idem, grantID, payload, p.created)
+			if perr != nil {
+				writeErr(w, http.StatusServiceUnavailable, "pending grant could not be durably persisted — NOT issued (fail-closed): "+perr.Error())
+				return
+			}
+			// Serve/cache whatever is NOW durable for this idem key. On the normal (single-writer) path this
+			// is exactly the payload just marshaled above. Under a race with ANOTHER replica sharing this
+			// AVERIN_DATABASE_URL, PutPending instead returns that OTHER writer's row (pending_grants' payload
+			// bakes in call-time now, so two mints of the same idem key produce different challenges) —
+			// decoding whatever came back (rather than keeping the local `p`) guarantees the challenge handed
+			// to this caller is the one that will still be there to finalize against after a restart.
+			var dto pendingGrantDTO
+			if uerr := json.Unmarshal(durablePayload, &dto); uerr != nil {
+				writeErr(w, http.StatusInternalServerError, "decode durable pending grant: "+uerr.Error())
+				return
+			}
+			p = dto.toPendingGrant(idem)
+		}
+		s.pendingMu.Lock()
 		s.pending[pk] = p
+		s.pendingMu.Unlock()
 	}
 	resp := map[string]any{
 		"grant_id":           p.prepared.GrantID,
@@ -302,6 +368,15 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 	s.pendingMu.Lock()
 	delete(s.pending, pk)
 	s.pendingMu.Unlock()
+	// Best-effort durable cleanup: the grant is now durably committed in the MAIN store (the source of
+	// truth), so a pending_grants row surviving this delete is harmless — RecordByIdem is checked before the
+	// pending map on both prepare and finalize, so a stale rehydrated entry for an already-committed grant is
+	// simply never reached.
+	if s.durable != nil {
+		if err := s.durable.DeletePending(fr.ProjectID, idem); err != nil {
+			log.Printf("WARNING: durable two-phase grants: cleanup of finalized pending row (project=%q idem=%q) failed (harmless — the grant is already committed): %v", fr.ProjectID, idem, err)
+		}
+	}
 
 	s.respondFinalized(w, fr.ProjectID, grantID, sealed, created)
 }
