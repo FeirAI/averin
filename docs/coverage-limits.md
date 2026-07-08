@@ -19,7 +19,7 @@ they're unchanged — not that the bytes describe what truly happened in the wor
 | Level | Claim | averin today |
 |-------|-------|------------|
 | **1 — Record integrity** | "This record was sealed by this key and hasn't changed since, and sits in a verifiable, externally-anchored history." | **Yes.** Proven by `decision-core` (canonicalize → commit → hash → sign → DAG-link → checkpoint → anchor → verify), offline, across CLI/WASM/FFI. |
-| **2 — Event observation** | "This event was observed by us." | **Partial — and we say so per event.** Every record carries `observed_via` (`proxy`/`sdk`/`otel`). We see *only* what those paths capture. |
+| **2 — Event observation** | "This event was observed by us." | **Partial — and we say so per event.** Every record carries `observed_via` (`proxy`/`sdk`/`otel`/`broker` — the last stamped on credential-broker grant/use records). We see *only* what those paths capture. |
 | **3 — Complete action accountability** | "This is everything the agent did, and nothing else happened." | **Not yet.** Requires a chokepoint (credential broker / tool gateway / egress control). The schema reserves room for it; we do not claim it. |
 
 ## What each ingestion path sees (Level-2 honesty)
@@ -29,6 +29,7 @@ they're unchanged — not that the bytes describe what truly happened in the wor
 | OpenAI-compatible proxy | LLM request/response I/O, streaming | tool execution, DB/SaaS/shell/file/credential actions, rationale, authority |
 | OTel / OpenInference | whatever the team instruments | whatever they don't |
 | SDK `record()` | tool calls, rationale, authority block | anything the developer doesn't wrap; trusts caller honesty |
+| Credential broker (`observed_via: broker`) | grant/use/intent/outcome of broker-mediated credential actions, gateway-enforced authority | any action taken outside the broker's mediation |
 
 **The hard truth:** none of these sees an action the agent takes *outside* them — e.g. a direct DB
 call the SDK didn't wrap (threat #13). That is a Level-3 gap, closed only by the credential broker
@@ -74,9 +75,11 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   `wasm32-unknown-unknown` backend), so a WASM verifier reports an `rfc3161` anchor as `Unsupported`
   — **never a silent pass** — and production-anchored bundles are verified by the native/CLI verifier.
   The remaining open item is the production Go anchoring round-trip against a real third-party TSA.
-- **Best-effort secret scrubbing.** The proxy and SDK ingestion paths run captured I/O through
-  regex-based credential/PII redaction (`server/internal/scrub`) before anything is stored or hashed.
-  This is **best-effort defense in depth** — Go's RE2 regexes are linear-time (no ReDoS) but **cannot
+- **Best-effort secret scrubbing.** The proxy, SDK, and OTel ingestion paths run captured I/O through
+  regex-based credential/PII redaction (`server/internal/scrub`) before anything is stored or hashed;
+  the OTel path additionally drops attributes whose key names a credential (authorization / api key /
+  api token / access or refresh token / password / secret / cookie / credential). This is
+  **best-effort defense in depth** — Go's RE2 regexes are linear-time (no ReDoS) but **cannot
   catch every secret shape**. The primary protection is that in self-host the data never leaves customer
   infra; customers should not put secrets in agent prompts. The redaction rules are not a guarantee
   against all credential or PII patterns.

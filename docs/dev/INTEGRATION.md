@@ -66,7 +66,11 @@ upstream LLM and records `llm_call` evidence (secret-scrubbed) to a averin serve
 
 If you already emit OpenTelemetry/OpenInference spans, POST them with `?project=<id>` and averin maps
 each span to a record (content-addressed for idempotency). You record only what you instrument
-(Level-2 honesty).
+(Level-2 honesty). Prompt/completion/tool payloads (both the exact semconv keys and the indexed
+`llm.input_messages.*` / `gen_ai.prompt.*` / `gen_ai.completion.*` / … forms) are folded into the
+record's `input`/`output`/`rationale` so they follow the top-level commitment path rather than riding
+verbatim in `extensions.otel_attrs`; credential-bearing attribute keys are redacted first. See
+[API.md](API.md#post-v2oteltraces).
 
 ### 4. Raw HTTP
 

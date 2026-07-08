@@ -83,6 +83,15 @@ the entire batch with a deterministic `400` before any item is sealed.
 Maps OTel/OpenInference spans (request body) to records and ingests each, content-addressed for
 idempotency. Requires `?project=`.
 
+Prompt/completion/tool payloads are extracted from the span attributes — both the exact semconv keys
+(`gen_ai.input.messages`, `gen_ai.completion`, `tool.arguments`, `input.value`, …) and the indexed
+forms (`llm.input_messages.*`, `gen_ai.prompt.*`, `gen_ai.completion.*`, `llm.output_messages.*`,
+`llm.prompts.*`, `llm.completions.*`) — and folded into the record's `input`/`output`/`rationale` so
+they follow the commitment/encryption path, never left in plaintext under `extensions.otel_attrs`.
+Attribute keys whose name contains a credential marker (`authorization`, `api_key`/`api-key`,
+`api_token`/`api-token`, `access_token`, `refresh_token`, `password`, `secret`, `cookie`,
+`credential`) are redacted; other string attributes still pass through the scrubber.
+
 **Response `201`** (or `400` if all spans failed):
 `{ "ingested": <n>, "failed": <n>, "errors": [ ... ] }`
 
@@ -118,7 +127,10 @@ Query parameters:
 
 - `mode` (default `proof_only`) — one of `proof_only`, `selective_disclosure`, `full_evidence`.
   Disclosing modes attach a `disclosures` array (`{record_id, field, value_b64, nonce_hex}`) so an
-  offline verifier can open each committed field against its record's commitment.
+  offline verifier can open each committed field against its record's commitment. A field whose raw
+  payload has been purged by retention is simply omitted from `disclosures` (the sealed record still
+  verifies from its commitment); `gap_report.raw_content_available` reflects whether any raw value was
+  disclosable.
 - `record_kind` (optional) — filter to a typed view. Must be a valid `record_kind`; an unknown value
   is `400`. Adds a `filtered_records` array + a `record_kind_filter` echo. The canonical `records`/
   `checkpoints` arrays are left intact (so the bundle still verifies); the filter is a typed *view*.
@@ -243,7 +255,14 @@ Other allowed keys: `anchored_ts`, `record_kind`, `input_commit`, `output_commit
 - `key`: `{signing_key_id, key_epoch, key_valid_from, key_status}`.
 - `input_commit` / `output_commit` / `rationale_commit`:
   `{alg: "sha256", commitment: "sha256:<hex>", low_entropy: bool}` — a hiding commitment; the raw
-  value lives in the content store and is revealed only via a disclosing export.
+  value lives in the content store (encrypted at rest) and is revealed only via a disclosing export.
+- When a low-entropy field is committed, the server also stamps `extensions.feir_evidence`:
+  `payloads[field] = {commitment, payload_reference: "averin-commit:<commitment>", retention_class}`,
+  plus `capture_authority` (= the record's `observed_via`) and a `lineage`
+  (`{session_id, span_id, parent_span_id}`). The exported reference is the **hiding commitment**, never
+  a plain digest of the raw value — an unsalted `sha256` of a low-entropy value in the always-exported
+  signed body would be dictionary-reversible (threat #6). The plain content digest lives **only** in the
+  server-private disclosure store.
 
 ### Enums
 

@@ -47,7 +47,13 @@ what truly happened in the world.
 - **Low-entropy fields are hidden, not stored.** When `input`/`output`/`rationale` are sent at the
   **top level** of a record, the server replaces each with a hiding commitment so the plaintext never
   enters the signed body (threat #6); the raw value lives in the content store and disclosure is
-  checkable. **Bound:** this conversion (`commitLowEntropyFields`) covers only those three top-level
+  checkable. The durable content store (`AVERIN_CONTENT_DIR`) additionally encrypts the raw value
+  **at rest** (AES-256-GCM, per-tenant key) and retention-purges it after
+  `AVERIN_RAW_RETENTION_DAYS`, after which the record still verifies from its commitment. The
+  reference the signed record exports (`extensions.feir_evidence.payloads[field]`) is the hiding
+  **commitment**, never a plain digest — an unsalted digest of a low-entropy value in the
+  always-exported body would be dictionary-reversible, undoing exactly what the commitment hides.
+  **Bound:** this conversion (`commitLowEntropyFields`) covers only those three top-level
   fields. Content the SDKs and proxy place under `extensions.content_preview` is **not** committed —
   it is signed verbatim under `extensions` (the proxy regex-scrubs secrets first, but does not hide
   the body). To hide content, send it at the top level (or pre-commit it). See

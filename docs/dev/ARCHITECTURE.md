@@ -95,9 +95,12 @@ plaintext would otherwise be recoverable by a hash dictionary (threat #6). Inste
 commitment = "sha256:" + hex( SHA-256( LP("averin.commit.v1") ‖ LP(field_domain) ‖ LB(nonce) ‖ LB(value) ) )
 ```
 
-The signed record carries `{alg, commitment, low_entropy}`; the plaintext goes to the content store.
-A disclosing export reveals `(value, nonce)`, which the offline verifier recomputes and compares
-(constant-time) against the record's commitment.
+The signed record carries `{alg, commitment, low_entropy}`; the plaintext goes to the content store
+(encrypted at rest — see [Storage model](#storage-model)). A disclosing export reveals `(value,
+nonce)`, which the offline verifier recomputes and compares (constant-time) against the record's
+commitment. The record's own exported reference to the payload
+(`extensions.feir_evidence.payloads[field]`) is the hiding commitment, never a plain content digest,
+so nothing in the always-exported body is dictionary-reversible.
 
 ### 5. Causal DAG (`dag.rs`)
 
@@ -181,3 +184,13 @@ Append-only is the integrity invariant: records are written once, keyed by `(pro
 key)`; a retry collapses onto the existing row rather than duplicating. Disclosure secrets are
 written **atomically** with the record they open. The Rust core never touches storage — it only
 canonicalizes/seals/verifies the bytes the store persists.
+
+The raw low-entropy payloads (`input`/`output`/`rationale`) live in a **separate content store**
+(`content.Store`), not in `store.Store`. Its durable implementation (`content.EncryptedFSStore`,
+selected by `AVERIN_CONTENT_DIR`) is content-addressed by the plaintext SHA-256 but stores each blob
+**AES-256-GCM encrypted at rest** under a per-tenant subdirectory; the per-tenant key is HMAC-derived
+from `AVERIN_CONTENT_MASTER_KEY` with tenant+digest bound as GCM AAD. A daily retention purge
+(`AVERIN_RAW_RETENTION_DAYS`, mtime-based; re-committing identical content restarts the window)
+deletes the raw opening material while the sealed record keeps its commitment — so a purged field
+just drops out of `disclosures` and the export reports `raw_content_available:false`, proofs
+unaffected. Unset ⇒ an in-memory content store (volatile).
