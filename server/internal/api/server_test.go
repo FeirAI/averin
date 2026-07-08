@@ -2,16 +2,20 @@ package api_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/averin-dev/averin/server/internal/api"
 	"github.com/averin-dev/averin/server/internal/auth"
+	"github.com/averin-dev/averin/server/internal/content"
 	"github.com/averin-dev/averin/server/internal/core"
 	"github.com/averin-dev/averin/server/internal/store"
 	"github.com/averin-dev/averin/server/internal/witness"
@@ -120,6 +124,29 @@ func TestContentCommitmentAndSelectiveDisclosure(t *testing.T) {
 	if _, ok := rec["output_commit"]; !ok {
 		t.Fatalf("no output_commit: %v", rec)
 	}
+	extensions, _ := rec["extensions"].(map[string]any)
+	evidence, _ := extensions["feir_evidence"].(map[string]any)
+	payloads, _ := evidence["payloads"].(map[string]any)
+	inputRef, _ := payloads["input"].(map[string]any)
+	if !strings.HasPrefix(asString(inputRef["commitment"]), "sha256:") {
+		t.Fatalf("signed record is missing the retained input commitment: %v", rec)
+	}
+	// The retained reference must be the NONCE'D commitment, never the plain content digest:
+	// an unsalted sha256 of a low-entropy value in the always-exported body is dictionary-
+	// reversible (threat #6). Grumble if the plain digest sneaks back into the sealed body.
+	plainDigest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("SELECT balance FROM accounts WHERE id=42")))
+	if recJSON, _ := json.Marshal(rec); strings.Contains(string(recJSON), plainDigest) {
+		t.Fatalf("sealed record contains the plain content digest of a low-entropy value: %s", recJSON)
+	}
+	// Lineage/authority are stamped after the server defaults, so the sealed evidence block
+	// must agree with the record's own span_id/observed_via (no null lineage on the SDK path).
+	lineage, _ := evidence["lineage"].(map[string]any)
+	if asString(lineage["span_id"]) == "" || asString(lineage["span_id"]) != asString(rec["span_id"]) {
+		t.Fatalf("sealed lineage span_id %v disagrees with record span_id %v", lineage["span_id"], rec["span_id"])
+	}
+	if asString(evidence["capture_authority"]) != asString(rec["observed_via"]) {
+		t.Fatalf("sealed capture_authority %v disagrees with record observed_via %v", evidence["capture_authority"], rec["observed_via"])
+	}
 
 	// A retry under the same idempotency key must NOT create a second set of disclosures.
 	if _, created := postRecord(t, h, `{"idempotency_key":"k1","project_id":"p1","session_id":"s1","action":"db.query","input":"SELECT balance FROM accounts WHERE id=42","output":"balance=1204"}`); created {
@@ -162,6 +189,36 @@ func TestContentCommitmentAndSelectiveDisclosure(t *testing.T) {
 		t.Fatalf("a tampered disclosure must fail the bundle, got ok:true: %s", rep)
 	} else if !strings.Contains(rep, "does not match") {
 		t.Fatalf("expected a commitment-mismatch issue, got: %s", rep)
+	}
+}
+
+func TestSelectiveDisclosureSurvivesRawRetentionDeletion(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	contentStore, err := content.NewEncryptedFSStore(t.TempDir(), []byte("01234567890123456789012345678901"))
+	if err != nil {
+		t.Fatalf("content store: %v", err)
+	}
+	srv := api.New(c, store.NewMem(), "k0").WithContent(contentStore)
+	h := srv.Routes()
+	postRecord(t, h, `{"idempotency_key":"retention-1","project_id":"p1","session_id":"s1","action":"llm.call","input":"visible prompt"}`)
+	if removed, err := contentStore.PurgeOlderThan(time.Now().Add(time.Hour)); err != nil || removed != 1 {
+		t.Fatalf("purge removed=%d err=%v", removed, err)
+	}
+	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint (%d): %s", code, resp)
+	}
+	code, exported := do(t, h, "GET", "/v2/export?project=p1&mode=selective_disclosure", "")
+	if code != http.StatusOK {
+		t.Fatalf("post-retention export failed (%d): %s", code, exported)
+	}
+	if strings.Contains(exported, `"value_b64"`) || !strings.Contains(exported, `"raw_content_available":false`) {
+		t.Fatalf("post-retention export must retain proof without claiming raw availability: %s", exported)
+	}
+	if !strings.Contains(exported, `"payload_reference":"averin-commit:sha256:`) {
+		t.Fatalf("post-retention proof lost its sealed payload reference: %s", exported)
 	}
 }
 

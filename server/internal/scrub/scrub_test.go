@@ -61,3 +61,16 @@ func TestHasSecret(t *testing.T) {
 		t.Fatal("false positive")
 	}
 }
+
+func TestConfiguredPatternsFailClosedAndRedact(t *testing.T) {
+	defer func() { _ = ConfigurePatterns(nil) }()
+	if err := ConfigurePatterns([]string{`tenant-secret-[0-9]+`}); err != nil {
+		t.Fatal(err)
+	}
+	if got := Redact("value tenant-secret-42"); strings.Contains(got, "tenant-secret-42") {
+		t.Fatalf("configured secret leaked: %s", got)
+	}
+	if err := ConfigurePatterns([]string{"["}); err == nil {
+		t.Fatal("invalid configured pattern was silently accepted")
+	}
+}

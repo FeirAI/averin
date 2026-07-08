@@ -148,6 +148,48 @@ func TestFeirVisiblePayloadsAreExtractedAndSecretsScrubbed(t *testing.T) {
 	}
 }
 
+// OpenInference and older GenAI semconv emit prompts/completions as INDEXED attributes.
+// They must be folded into the committed payload, never left in plaintext otel_attrs —
+// otherwise the raw prompt is sealed in cleartext in the record body, bypassing the
+// commitment/encryption path entirely.
+func TestIndexedPayloadAttributesAreFoldedNotLeaked(t *testing.T) {
+	otlp := `{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"t","spanId":"s","name":"model","attributes":[` +
+		`{"key":"llm.input_messages.0.message.content","value":{"stringValue":"full secret prompt"}},` +
+		`{"key":"llm.input_messages.0.message.role","value":{"stringValue":"user"}},` +
+		`{"key":"gen_ai.completion.0.content","value":{"stringValue":"full completion text"}},` +
+		`{"key":"llm.model_name","value":{"stringValue":"gpt-4.1"}}]}]}]}]}`
+	rec := mustMap(t, otlp, "tenant")[0]
+	input, _ := rec["input"].(string)
+	if !strings.Contains(input, "full secret prompt") || !strings.Contains(input, "llm.input_messages.0.message.content") {
+		t.Fatalf("indexed prompt not folded into input: %#v", rec["input"])
+	}
+	output, _ := rec["output"].(string)
+	if !strings.Contains(output, "full completion text") {
+		t.Fatalf("indexed completion not folded into output: %#v", rec["output"])
+	}
+	attrs := rec["extensions"].(map[string]any)["otel_attrs"].(map[string]any)
+	for key := range attrs {
+		if strings.HasPrefix(key, "llm.input_messages.") || strings.HasPrefix(key, "gen_ai.completion.") {
+			t.Fatalf("indexed payload attribute %q left in plaintext otel_attrs", key)
+		}
+	}
+	if attrs["llm.model_name"] != "gpt-4.1" {
+		t.Fatalf("non-payload attribute must be preserved: %#v", attrs["llm.model_name"])
+	}
+	// The exact-key extraction still wins when both shapes are present.
+	both := `{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"t","spanId":"s2","name":"model","attributes":[` +
+		`{"key":"gen_ai.prompt","value":{"stringValue":"canonical prompt"}},` +
+		`{"key":"gen_ai.prompt.0.content","value":{"stringValue":"indexed duplicate"}}]}]}]}]}`
+	rec2 := mustMap(t, both, "tenant")[0]
+	if rec2["input"] != "canonical prompt" {
+		t.Fatalf("exact key must win over indexed fallback: %#v", rec2["input"])
+	}
+	attrs2 := rec2["extensions"].(map[string]any)["otel_attrs"].(map[string]any)
+	if _, ok := attrs2["gen_ai.prompt.0.content"]; ok {
+		t.Fatal("indexed duplicate left in plaintext otel_attrs when exact key present")
+	}
+}
+
 func TestEventTypeInference(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -993,6 +993,19 @@ func (s *Server) sealAndStore(projectID, sessionID, idem string, rec map[string]
 	setDefault(rec, "observed_via", "sdk")
 	setDefault(rec, "status", "ok")
 
+	// feir_evidence lineage/authority are stamped HERE — after the span_id/observed_via
+	// defaults above — so the sealed evidence block can never disagree with the record's
+	// own top-level fields (the commit pass runs before these defaults exist).
+	if extensions, _ := rec["extensions"].(map[string]any); extensions != nil {
+		if evidence, _ := extensions["feir_evidence"].(map[string]any); evidence != nil {
+			evidence["capture_authority"] = rec["observed_via"]
+			evidence["lineage"] = map[string]any{
+				"session_id": rec["session_id"], "span_id": rec["span_id"],
+				"parent_span_id": rec["parent_span_id"],
+			}
+		}
+	}
+
 	// causal DAG links = the session's current heads (server-derived, never client-trusted).
 	// NOTE: heads+seal+put are not yet one atomic transaction in the in-memory store; the Postgres
 	// store performs this in a single serializable transaction.
@@ -2201,6 +2214,34 @@ func (s *Server) commitLowEntropyFields(rec map[string]any, recordID string) ([]
 			"commitment":  commitment,
 			"low_entropy": true,
 		}
+		// The encrypted raw blob may be deleted by retention, but the hiding commitment,
+		// lineage and capture authority remain inside the signed record. This makes the
+		// post-retention proof independently auditable without pretending the raw payload
+		// is still available for disclosure. The retained reference is the NONCE'D
+		// commitment, never the plain content digest: an unsalted sha256 of a low-entropy
+		// value in the always-exported body would be dictionary-reversible (threat #6),
+		// undoing exactly what the commitment above hides. The plain digest lives only in
+		// the server-private disclosure store. (lineage/capture_authority are stamped by
+		// sealAndStore, after the server defaults for span_id/observed_via exist.)
+		extensions, _ := rec["extensions"].(map[string]any)
+		if extensions == nil {
+			extensions = map[string]any{}
+			rec["extensions"] = extensions
+		}
+		evidence, _ := extensions["feir_evidence"].(map[string]any)
+		if evidence == nil {
+			evidence = map[string]any{}
+			extensions["feir_evidence"] = evidence
+		}
+		payloads, _ := evidence["payloads"].(map[string]any)
+		if payloads == nil {
+			payloads = map[string]any{}
+			evidence["payloads"] = payloads
+		}
+		payloads[field] = map[string]any{
+			"commitment": commitment, "payload_reference": "averin-commit:" + commitment,
+			"retention_class": "raw_payload",
+		}
 		delete(rec, field)
 		out = append(out, store.DisclosureSecret{
 			RecordID: recordID, Field: field, ValueDigest: addr.Digest, NonceHex: nonce,
@@ -2986,6 +3027,12 @@ func (s *Server) buildDisclosures(projectID string) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(secrets))
 	for _, d := range secrets {
 		raw, err := s.content.Get(content.WithTenant(context.Background(), projectID), d.ValueDigest)
+		if errors.Is(err, content.ErrNotFound) {
+			// Retention intentionally removes the opening material. The signed
+			// record still carries the digest/reference added at ingest, so omit
+			// only this optional disclosure rather than failing the whole bundle.
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("disclose %s/%s: %w", d.RecordID, d.Field, err)
 		}

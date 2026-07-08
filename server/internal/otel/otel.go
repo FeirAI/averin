@@ -143,6 +143,18 @@ func mapSpan(sp span, resAttrs map[string]any, projectID string) map[string]any 
 	input := takeFirstString(merged, "gen_ai.input.messages", "gen_ai.prompt", "llm.prompts", "tool.arguments", "input.value")
 	output := takeFirstString(merged, "gen_ai.output.messages", "gen_ai.completion", "llm.completions", "tool.result", "output.value")
 	rationale := takeFirstString(merged, "feir.reasoning_summary")
+	// OpenInference and older GenAI semconv also emit the SAME payloads as indexed keys
+	// (llm.input_messages.0.message.content, gen_ai.prompt.0.content, …). Fold them into the
+	// committed/encrypted payload too — leaving them in otel_attrs would seal the raw prompt
+	// in plaintext inside the record body, bypassing the commitment path entirely.
+	inputIndexed := takeKeysWithPrefix(merged, "gen_ai.prompt.", "llm.input_messages.", "llm.prompts.")
+	outputIndexed := takeKeysWithPrefix(merged, "gen_ai.completion.", "llm.output_messages.", "llm.completions.")
+	if input == "" {
+		input = inputIndexed
+	}
+	if output == "" {
+		output = outputIndexed
+	}
 	scrubAttributes(merged)
 
 	status := "ok"
@@ -188,6 +200,31 @@ func takeFirstString(attrs map[string]any, keys ...string) string {
 		delete(attrs, key) // payload is committed/encrypted, never duplicated in attrs
 	}
 	return selected
+}
+
+// takeKeysWithPrefix removes every attribute under the given indexed-payload prefixes and
+// returns them as one deterministic JSON object (encoding/json sorts map keys), so the
+// payload is preserved for commitment instead of leaking in plaintext otel_attrs. Returns
+// "" when no key matched.
+func takeKeysWithPrefix(attrs map[string]any, prefixes ...string) string {
+	taken := map[string]any{}
+	for key, value := range attrs {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(key, prefix) {
+				taken[key] = value
+				delete(attrs, key)
+				break
+			}
+		}
+	}
+	if len(taken) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(taken)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func scrubAttributes(attrs map[string]any) {

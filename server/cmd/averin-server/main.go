@@ -12,6 +12,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"github.com/averin-dev/averin/server/internal/core"
 	"github.com/averin-dev/averin/server/internal/meter"
 	"github.com/averin-dev/averin/server/internal/pgledger"
+	"github.com/averin-dev/averin/server/internal/scrub"
 	"github.com/averin-dev/averin/server/internal/store"
 	"github.com/averin-dev/averin/server/internal/witness"
 	"github.com/averin-dev/averin/server/migrations"
@@ -37,6 +39,15 @@ func main() {
 	seed := secretEnvOrFile("AVERIN_SIGNING_SEED")
 	if seed == "" {
 		log.Fatal("AVERIN_SIGNING_SEED (or AVERIN_SIGNING_SEED_FILE) is required (64 hex chars = 32-byte Ed25519 seed)")
+	}
+	if raw := strings.TrimSpace(os.Getenv("AVERIN_SECRET_PATTERNS")); raw != "" {
+		var patterns []string
+		if err := json.Unmarshal([]byte(raw), &patterns); err != nil {
+			log.Fatalf("AVERIN_SECRET_PATTERNS must be a JSON string array: %v", err)
+		}
+		if err := scrub.ConfigurePatterns(patterns); err != nil {
+			log.Fatalf("AVERIN_SECRET_PATTERNS: %v", err)
+		}
 	}
 
 	// AVERIN_REQUIRE_PROD_SECRETS (prod): fail closed if a prod-mandatory secret is empty/absent OR is a

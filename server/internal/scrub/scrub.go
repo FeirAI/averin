@@ -8,7 +8,11 @@
 // SSE streams before redacting so a secret split across deltas cannot be reconstructed.
 package scrub
 
-import "regexp"
+import (
+	"fmt"
+	"regexp"
+	"sync"
+)
 
 type rule struct {
 	re   *regexp.Regexp
@@ -39,9 +43,37 @@ var rules = []rule{
 	{regexp.MustCompile(`\b[A-Fa-f0-9]{40,}\b`), "[REDACTED:hex-secret]"},
 }
 
+var extra struct {
+	sync.RWMutex
+	rules []rule
+}
+
+// ConfigurePatterns atomically replaces operator-supplied RE2 patterns. An
+// invalid pattern rejects the whole update so a typo cannot silently create a
+// secret-capture gap.
+func ConfigurePatterns(patterns []string) error {
+	compiled := make([]rule, 0, len(patterns))
+	for i, pattern := range patterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return fmt.Errorf("secret pattern %d: %w", i, err)
+		}
+		compiled = append(compiled, rule{re: re, repl: "[REDACTED:configured]"})
+	}
+	extra.Lock()
+	extra.rules = compiled
+	extra.Unlock()
+	return nil
+}
+
 // Redact replaces credential-shaped substrings with a typed `[REDACTED:...]` marker.
 func Redact(s string) string {
 	for _, r := range rules {
+		s = r.re.ReplaceAllString(s, r.repl)
+	}
+	extra.RLock()
+	defer extra.RUnlock()
+	for _, r := range extra.rules {
 		s = r.re.ReplaceAllString(s, r.repl)
 	}
 	return s
@@ -50,6 +82,13 @@ func Redact(s string) string {
 // HasSecret reports whether s appears to contain a credential.
 func HasSecret(s string) bool {
 	for _, r := range rules {
+		if r.re.MatchString(s) {
+			return true
+		}
+	}
+	extra.RLock()
+	defer extra.RUnlock()
+	for _, r := range extra.rules {
 		if r.re.MatchString(s) {
 			return true
 		}
