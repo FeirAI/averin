@@ -54,7 +54,7 @@ func handoffWireRecord(t *testing.T, root, leaf ed25519.PrivateKey, handoffID st
 		"session_id":      "delegation-handoff",
 		"event_type":      "handoff",
 		"extensions": map[string]any{"govder": map[string]any{
-			"payload": map[string]any{
+			"body": map[string]any{
 				"handoff_id":      handoffID,
 				"from_agent_id":   "parent@1",
 				"to_agent_id":     "child@1",
@@ -154,7 +154,7 @@ func TestSubAgentHandoff_ViaGovderMapperWireValue_VerifiesAtAverin(t *testing.T)
 	if err := json.Unmarshal([]byte(handoffWireRecord(t, root, leaf, "handoff-e2e-3")), &tampered); err != nil {
 		t.Fatal(err)
 	}
-	payload := tampered["extensions"].(map[string]any)["govder"].(map[string]any)["payload"].(map[string]any)
+	payload := tampered["extensions"].(map[string]any)["govder"].(map[string]any)["body"].(map[string]any)
 	payload["delegated_scope"] = []string{"cap-admin"}
 	tb, _ := json.Marshal(tampered)
 	code, _ = do(t, h, http.MethodPost, "/v2/records", string(tb))

@@ -45,7 +45,7 @@ func signedDelegationRecord(t *testing.T, root, leaf ed25519.PrivateKey, id stri
 		"session_id":      "delegation",
 		"event_type":      "spawn_child",
 		"extensions": map[string]any{"govder": map[string]any{
-			"payload": map[string]any{
+			"body": map[string]any{
 				"handoff_id": id, "from_agent_id": "parent@1", "to_agent_id": "child@1",
 				"delegated_scope": []string{"cap-read"},
 				"delegation_hop":  hop,
@@ -97,7 +97,7 @@ func TestGenericRecordVerifiesDelegationHopAgainstPinnedAuthority(t *testing.T) 
 	if err := json.Unmarshal([]byte(signedDelegationRecord(t, root, leaf, "handoff-3")), &tampered); err != nil {
 		t.Fatal(err)
 	}
-	payload := tampered["extensions"].(map[string]any)["govder"].(map[string]any)["payload"].(map[string]any)
+	payload := tampered["extensions"].(map[string]any)["govder"].(map[string]any)["body"].(map[string]any)
 	payload["delegated_scope"] = []string{"cap-admin"}
 	b, _ := json.Marshal(tampered)
 	code, _ = do(t, srv.Routes(), http.MethodPost, "/v2/records", string(b))
@@ -111,7 +111,7 @@ func TestGenericRecordRejectsUnsignedDelegationClaim(t *testing.T) {
 	record := map[string]any{
 		"idempotency_key": "unsigned-handoff", "project_id": "p1", "session_id": "delegation",
 		"event_type": "sub-agent-handoff",
-		"extensions": map[string]any{"govder": map[string]any{"payload": map[string]any{
+		"extensions": map[string]any{"govder": map[string]any{"body": map[string]any{
 			"handoff_id": "h1", "handoff_kind": "sub-agent-spawn",
 		}}},
 	}

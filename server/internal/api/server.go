@@ -840,7 +840,13 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 func (s *Server) validateDelegationEvidence(rec map[string]any) error {
 	ext, _ := rec["extensions"].(map[string]any)
 	gov, _ := ext["govder"].(map[string]any)
-	payload, _ := gov["payload"].(map[string]any)
+	// govder's payload-envelope mapper carries the normalized body under
+	// extensions.govder.BODY (internal/averin/mapper.go: gov["body"]=decoded), NOT
+	// "payload". Reading the wrong key made the delegation_hop always look absent,
+	// so EVERY real sub-agent-handoff seal was rejected ("requires a signed
+	// delegation_hop") even though govder signed + carried it — the delegation path
+	// was only ever tested with hand-built "payload" records, never real govder output.
+	payload, _ := gov["body"].(map[string]any)
 	hopValue, present := payload["delegation_hop"]
 	if !present {
 		claimsDelegation := stringField(rec, "event_type") == "handoff" ||
