@@ -1185,6 +1185,17 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	// credential_binding, no cnf PoP — so it takes the separate native path (no agent_sig required, no minted
 	// capability). Its use is later accountable ONLY via a resource-signed introspection transcript (/v2/introspection).
 	if gr.Mode == "token_exchange" {
+		// M6 fail-closed (averin#0): a native/token_exchange grant carries NO cosignatures and
+		// there is no cosigned two-phase path for native issuance (prepare/finalize is built
+		// entirely around broker-minted capabilities). So while an M-of-N cosig policy is pinned,
+		// a project-token holder self-issuing a token_exchange grant would silently bypass the
+		// independent-approval gate the operator required. Refuse it. Gated on >0 so a no-cosig
+		// deployment (the default) is unaffected. This needs its OWN message: the two-phase flow
+		// the brokered-path error below points at cannot serve a native grant.
+		if s.cosigThreshold > 0 {
+			writeErr(w, http.StatusBadRequest, "this broker pins an M-of-N cosig policy — native (token_exchange) grants cannot be cosigned (there is no cosigned native issuance path), so they are refused while a cosig policy is pinned; issue a brokered grant via the two-phase POST /v2/grants/prepare + POST /v2/grants/finalize flow instead")
+			return
+		}
 		s.handleNativeGrant(w, gr, idem, grantID)
 		return
 	}

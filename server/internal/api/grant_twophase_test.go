@@ -68,6 +68,41 @@ func mustCore(t *testing.T) *core.Core {
 	return c
 }
 
+// nativeGrantBody is a token_exchange (native) grant request — no agent PoP, no minted
+// capability (mirrors native_grant_test.go's body).
+func nativeGrantBody(idem string) string {
+	b, _ := json.Marshal(map[string]any{
+		"idempotency_key": idem, "project_id": "p1", "session_id": "s1",
+		"agent_id": "agent-x", "action": "db.query:orders-ro", "resource": "orders-db",
+		"scope": "read:orders", "mode": "token_exchange", "lease_id": "lease-sts-1", "ttl_seconds": 3600,
+	})
+	return string(b)
+}
+
+// TestNativeGrantRejectedUnderCosigPolicy (averin#0): the M-of-N cosig gate was bypassable by
+// selecting mode:token_exchange — the native branch returned before the cosig check, so a
+// project-token holder could self-issue a sealed gateway_enforced grant with ZERO approver
+// signatures. A native grant carries no cosignatures and there is no cosigned native path, so
+// under a pinned policy it must be REFUSED (fail-closed), not silently issued.
+func TestNativeGrantRejectedUnderCosigPolicy(t *testing.T) {
+	a1, a2 := seedKey(40), seedKey(41)
+	approvers := []ed25519.PublicKey{a1.Public().(ed25519.PublicKey), a2.Public().(ed25519.PublicKey)}
+	h := newCosigBrokerServer(t, 2, approvers)
+	code, resp := do(t, h, "POST", "/v2/grants", nativeGrantBody("native-under-cosig"))
+	if code != http.StatusBadRequest {
+		t.Fatalf("native (token_exchange) issuance under a cosig policy must be rejected (got %d): %s", code, resp)
+	}
+	if !strings.Contains(resp, "cosig") || !strings.Contains(resp, "native") {
+		t.Fatalf("rejection should name the cosig policy AND that native cannot be cosigned: %s", resp)
+	}
+	// CONTROL: without a cosig policy (threshold 0, the default) native issuance still works —
+	// the guard is >0-gated so a no-cosig deployment is unaffected.
+	hNoCosig := api.New(mustCore(t), store.NewMem(), "k0").WithBroker(brokerIssuingKey()).Routes()
+	if code, r := do(t, hNoCosig, "POST", "/v2/grants", nativeGrantBody("native-no-cosig")); code != http.StatusCreated {
+		t.Fatalf("native issuance without a cosig policy must work (got %d): %s", code, r)
+	}
+}
+
 // TestOnlineCosigGrantPrepareFinalize is the M6 online two-phase flow: prepare reveals the challenge, the
 // approvers sign it, finalize binds the cosignatures + commits the grant.
 func TestOnlineCosigGrantPrepareFinalize(t *testing.T) {
