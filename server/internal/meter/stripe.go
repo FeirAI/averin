@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,7 @@ type StripeReporter struct {
 	events      chan event    // bounded async queue (one worker) — no unbounded goroutine fan-out
 	done        chan struct{} // closed when the worker drains + exits (for graceful Close)
 	closeOnce   sync.Once
+	dropped     int64 // atomic: events dropped because the bounded queue was full (see send). Read via Dropped().
 }
 
 type event struct {
@@ -88,8 +90,14 @@ func (s *StripeReporter) send(eventName, project string, value int64) {
 	select {
 	case s.events <- event{eventName, project, value}:
 	default: // drop under back-pressure — metering must never block recording
+		atomic.AddInt64(&s.dropped, 1)
 	}
 }
+
+// Dropped returns the total number of billable events dropped because the bounded async queue was
+// full (a Stripe outage / overload). Exposed for /metrics (a nonzero, growing rate means metering
+// events — and thus revenue — are being silently lost).
+func (s *StripeReporter) Dropped() int64 { return atomic.LoadInt64(&s.dropped) }
 
 func (s *StripeReporter) worker() {
 	defer close(s.done)

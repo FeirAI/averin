@@ -88,6 +88,20 @@ func main() {
 	st := selectStore()
 
 	srv := api.New(c, st, keyID)
+	// GET /readyz probes the Postgres store's pool (short-timeout Ping); GET /metrics gets its live
+	// connection-pool gauges. The in-memory store (no AVERIN_DATABASE_URL) registers neither — nothing
+	// to be unready about, nothing to gauge.
+	if pg, ok := st.(*store.Postgres); ok {
+		srv.WithReadiness("store", pg)
+		srv.WithGauge("averin_store_pool_total_conns", "Store Postgres pool: total connections.",
+			func() float64 { return float64(pg.PoolStat().TotalConns) })
+		srv.WithGauge("averin_store_pool_acquired_conns", "Store Postgres pool: connections currently acquired.",
+			func() float64 { return float64(pg.PoolStat().AcquiredConns) })
+		srv.WithGauge("averin_store_pool_idle_conns", "Store Postgres pool: idle connections.",
+			func() float64 { return float64(pg.PoolStat().IdleConns) })
+		srv.WithGauge("averin_store_pool_max_conns", "Store Postgres pool: configured max connections.",
+			func() float64 { return float64(pg.PoolStat().MaxConns) })
+	}
 	// usage metering -> Stripe (the real revenue path). No key = local counting only. Retained so
 	// graceful shutdown can drain its async queue (billable events) before exit.
 	meterReporter := meter.NewStripeReporter(meter.NewMem(), meter.StripeConfig{
@@ -287,6 +301,15 @@ func main() {
 				log.Fatalf("resource ledger: Postgres requested but unavailable: %v", err)
 			}
 			srv.WithLedger(pl)
+			srv.WithReadiness("resource_ledger", pl)
+			srv.WithGauge("averin_ledger_pool_total_conns", "Resource ledger Postgres pool: total connections.",
+				func() float64 { return float64(pl.PoolStat().TotalConns) })
+			srv.WithGauge("averin_ledger_pool_acquired_conns", "Resource ledger Postgres pool: connections currently acquired.",
+				func() float64 { return float64(pl.PoolStat().AcquiredConns) })
+			srv.WithGauge("averin_ledger_pool_idle_conns", "Resource ledger Postgres pool: idle connections.",
+				func() float64 { return float64(pl.PoolStat().IdleConns) })
+			srv.WithGauge("averin_ledger_pool_max_conns", "Resource ledger Postgres pool: configured max connections.",
+				func() float64 { return float64(pl.PoolStat().MaxConns) })
 			log.Printf("consume-before-act ledger -> Postgres (durable)")
 		} else {
 			log.Printf("WARNING: the consume-before-act ledger is in-memory (volatile) — consumed single-use jti/nonce reset on restart, reopening a replay window for /v2/use. Set AVERIN_DATABASE_URL for the durable Postgres-backed ledger.")
@@ -352,6 +375,15 @@ func main() {
 		}
 		durableStore = pd
 		srv.WithDurable(pd)
+		srv.WithReadiness("durable", pd)
+		srv.WithGauge("averin_durable_pool_total_conns", "Durable (revocation/two-phase) Postgres pool: total connections.",
+			func() float64 { return float64(pd.PoolStat().TotalConns) })
+		srv.WithGauge("averin_durable_pool_acquired_conns", "Durable (revocation/two-phase) Postgres pool: connections currently acquired.",
+			func() float64 { return float64(pd.PoolStat().AcquiredConns) })
+		srv.WithGauge("averin_durable_pool_idle_conns", "Durable (revocation/two-phase) Postgres pool: idle connections.",
+			func() float64 { return float64(pd.PoolStat().IdleConns) })
+		srv.WithGauge("averin_durable_pool_max_conns", "Durable (revocation/two-phase) Postgres pool: configured max connections.",
+			func() float64 { return float64(pd.PoolStat().MaxConns) })
 		log.Printf("revocation + two-phase grant state -> Postgres (durable; survives restart)")
 	} else {
 		if revocationEnabled {

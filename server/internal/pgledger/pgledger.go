@@ -57,6 +57,32 @@ func New(ctx context.Context, dsn string) (*Ledger, error) {
 // Close releases the connection pool.
 func (l *Ledger) Close() { l.pool.Close() }
 
+// Ping reports whether the pool can reach the database, bounded by ctx. Used by /readyz — callers
+// MUST pass a short-timeout ctx so a hung/degraded database fails the probe fast rather than hanging
+// the readiness check.
+func (l *Ledger) Ping(ctx context.Context) error {
+	return l.pool.Ping(ctx)
+}
+
+// PoolStat is a point-in-time snapshot of the connection pool's health, exposed for /metrics gauges.
+type PoolStat struct {
+	TotalConns    int32
+	AcquiredConns int32
+	IdleConns     int32
+	MaxConns      int32
+}
+
+// PoolStat returns a snapshot of the pool's connection counts.
+func (l *Ledger) PoolStat() PoolStat {
+	st := l.pool.Stat()
+	return PoolStat{
+		TotalConns:    st.TotalConns(),
+		AcquiredConns: st.AcquiredConns(),
+		IdleConns:     st.IdleConns(),
+		MaxConns:      st.MaxConns(),
+	}
+}
+
 // consume atomically claims (kind, consume_key). ON CONFLICT DO NOTHING + RETURNING: a returned row
 // means THIS statement inserted the row (the first claim — consumed now); pgx.ErrNoRows means the row
 // already existed (a replay / double-spend -> ErrConsumed). A real DB error is surfaced so the caller

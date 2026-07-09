@@ -85,6 +85,32 @@ func (s *Store) Close() {
 	}
 }
 
+// Ping reports whether the pool can reach the database, bounded by ctx. Used by /readyz — callers
+// MUST pass a short-timeout ctx so a hung/degraded database fails the probe fast rather than hanging
+// the readiness check.
+func (s *Store) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
+// PoolStat is a point-in-time snapshot of the connection pool's health, exposed for /metrics gauges.
+type PoolStat struct {
+	TotalConns    int32
+	AcquiredConns int32
+	IdleConns     int32
+	MaxConns      int32
+}
+
+// PoolStat returns a snapshot of the pool's connection counts.
+func (s *Store) PoolStat() PoolStat {
+	st := s.pool.Stat()
+	return PoolStat{
+		TotalConns:    st.TotalConns(),
+		AcquiredConns: st.AcquiredConns(),
+		IdleConns:     st.IdleConns(),
+		MaxConns:      st.MaxConns(),
+	}
+}
+
 // Revoke durably records grant_id revoked for a project. Idempotent (ON CONFLICT DO NOTHING) —
 // revocation is monotone-add, so a re-revoke of an already-revoked id is a safe no-op.
 func (s *Store) Revoke(projectID, grantID string) error {

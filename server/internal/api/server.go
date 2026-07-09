@@ -27,6 +27,7 @@ import (
 	"github.com/averin-dev/averin/server/internal/broker"
 	"github.com/averin-dev/averin/server/internal/content"
 	"github.com/averin-dev/averin/server/internal/meter"
+	"github.com/averin-dev/averin/server/internal/metrics"
 	"github.com/averin-dev/averin/server/internal/otel"
 	"github.com/averin-dev/averin/server/internal/pgdurable"
 	"github.com/averin-dev/averin/server/internal/resourceshim"
@@ -167,9 +168,39 @@ type Server struct {
 	// checkpointMu serializes checkpoint creation so concurrent calls cannot read the same
 	// NextCheckpointSeq and fork the checkpoint chain.
 	checkpointMu sync.Mutex
+
+	// readiness is the set of dependencies GET /readyz probes (each with a short per-request timeout)
+	// before reporting 200 — see WithReadiness. Empty (dev / in-memory store, no Postgres configured)
+	// means /readyz has nothing to be unready about and always reports ready.
+	readiness []readinessTarget
+
+	// metrics is the hand-rolled Prometheus-text registry served at GET /metrics (no
+	// prometheus/client_golang — averin stays pgx-only). Never nil (set in New).
+	metrics              *metrics.Registry
+	mRecordsSealed       *metrics.Counter
+	mRecordsSealFailed   *metrics.Counter
+	mCheckpointsSealed   *metrics.Counter
+	mWitnessFailures     *metrics.Counter
+	mAnchorFailures      *metrics.Counter
+	mAuthorityDowngrades *metrics.Counter
+	mDenialBudgetDrops   *metrics.Counter
+	mUseOutcome          *metrics.CounterVec // labeled "outcome": allow | deny
+}
+
+// Pinger is a short-timeout dependency health check for GET /readyz (e.g. a pgx pool's Ping).
+// Implemented by store.Postgres, pgdurable.Store, and pgledger.Ledger.
+type Pinger interface {
+	Ping(ctx context.Context) error
+}
+
+// readinessTarget names one dependency /readyz probes.
+type readinessTarget struct {
+	name string
+	ping Pinger
 }
 
 func New(core Sealer, st store.Store, signingKeyID string) *Server {
+	reg := metrics.NewRegistry()
 	return &Server{
 		core:         core,
 		st:           st,
@@ -179,6 +210,26 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		keyValidFrom: "2026-01-01T00:00:00.000Z",
 		now:          time.Now,
 		pending:      make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
+
+		metrics: reg,
+		mRecordsSealed: reg.Counter("averin_records_sealed_total",
+			"Total records successfully sealed by the Rust core (generic ingest, grants, denials, use receipts)."),
+		mRecordsSealFailed: reg.Counter("averin_records_seal_failed_total",
+			"Total record seal attempts that failed at the Rust core."),
+		mCheckpointsSealed: reg.Counter("averin_checkpoints_sealed_total",
+			"Total checkpoints successfully sealed."),
+		mWitnessFailures: reg.Counter("averin_witness_append_failures_total",
+			"Total checkpoint witness-append failures (checkpoint stored un-witnessed, backfillable)."),
+		mAnchorFailures: reg.Counter("averin_checkpoint_anchor_failures_total",
+			"Total TSA anchor failures (checkpoint stored un-anchored, backfillable)."),
+		mAuthorityDowngrades: reg.Counter("averin_authority_downgrades_total",
+			"Total records whose caller-claimed elevated authority source (policy_engine_signed/human_signed/"+
+				"delegate_signed) was forced back to caller_declared — an unpinned source or a key-misalignment "+
+				"(evidence_sig failed to verify under the pinned key)."),
+		mDenialBudgetDrops: reg.Counter("averin_denial_budget_drops_total",
+			"Total best-effort B11 denied-grant seals dropped by the per-project/global denial budget."),
+		mUseOutcome: reg.CounterVec("averin_use_requests_total",
+			"Total POST /v2/use (and /v2/use-intent) requests by capability-authorization outcome.", "outcome"),
 	}
 }
 
@@ -189,9 +240,36 @@ func (s *Server) WithContent(c content.Store) *Server {
 	return s
 }
 
-// WithMeter swaps in a usage meter (e.g. a Stripe reporter). Returns the server for chaining.
+// WithMeter swaps in a usage meter (e.g. a Stripe reporter). Returns the server for chaining. When m
+// is a *meter.StripeReporter, its best-effort async-queue drop count is also exposed on GET /metrics
+// (a nonzero, growing rate means billable events — and thus revenue — are being silently lost).
 func (s *Server) WithMeter(m meter.Meter) *Server {
 	s.meter = m
+	if sr, ok := m.(*meter.StripeReporter); ok {
+		s.metrics.CounterFunc("averin_meter_queue_drops_total",
+			"Total usage-metering events dropped from the async reporter queue under back-pressure.",
+			sr.Dropped)
+	}
+	return s
+}
+
+// WithReadiness registers a named dependency that GET /readyz probes (each with a short per-request
+// timeout) before reporting ready. Call once per real out-of-process dependency (a Postgres-backed
+// store/ledger/durable-state pool). p == nil is a no-op (so a caller can pass a possibly-nil pointer
+// without an extra guard). A deployment that registers none (in-memory store, dev/single-process) has
+// nothing to be unready about — /readyz always reports 200 in that case.
+func (s *Server) WithReadiness(name string, p Pinger) *Server {
+	if p == nil {
+		return s
+	}
+	s.readiness = append(s.readiness, readinessTarget{name: name, ping: p})
+	return s
+}
+
+// WithGauge registers a named Prometheus-text gauge on GET /metrics backed by fn, read fresh on every
+// scrape (e.g. a pgx pool's live connection counts via PoolStat).
+func (s *Server) WithGauge(name, help string, fn func() float64) *Server {
+	s.metrics.GaugeFunc(name, help, fn)
 	return s
 }
 
@@ -560,6 +638,36 @@ func (s *Server) WithTSA(t witness.TSA) *Server {
 
 func healthz(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) }
 
+// readyzTimeout bounds the WHOLE /readyz probe (all registered dependencies), not just one — so a
+// short timeout still holds even as more Postgres-backed components (store/durable/ledger) are
+// registered. Short and fixed so a degraded dependency fails the probe fast (fail-closed) rather than
+// hanging the readiness check or flapping the whole pod out of rotation on a slow-but-alive blip.
+const readyzTimeout = 3 * time.Second
+
+// readyz reports 200 only once every registered dependency answers a cheap Ping within
+// readyzTimeout; the first failing dependency reports 503 naming itself, so an operator/alert can
+// tell WHICH component is unready without guessing. Deliberately: (1) never fails open — a Ping
+// error or a ctx deadline is reported not-ready, never swallowed into 200; (2) never probes the full
+// dependency graph — only the direct pool Pings registered via WithReadiness (cheap liveness, not a
+// downstream health cascade), so one blip cannot flap an entire tier out of rotation; (3) an
+// in-memory (dev, no Postgres configured) deployment registers nothing and is always ready — there is
+// no dependency to be unready about.
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), readyzTimeout)
+	defer cancel()
+	for _, t := range s.readiness {
+		if err := t.ping.Ping(ctx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status":    "not-ready",
+				"component": t.name,
+				"error":     err.Error(),
+			})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
 func (s *Server) Routes() http.Handler {
 	// Role separation (T7, Codex): every pinned authority key must be disjoint from the RESOURCE key too —
 	// checked HERE (not only in WithPolicyEngineKey) so it holds regardless of option order (WithResource can
@@ -577,6 +685,8 @@ func (s *Server) Routes() http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
+	mux.HandleFunc("GET /readyz", s.readyz)
+	mux.HandleFunc("GET /metrics", s.metrics.Handler())
 	mux.HandleFunc("POST /v2/records", s.handleRecords)
 	mux.HandleFunc("GET /v2/records", s.handleListRecords)
 	mux.HandleFunc("POST /v2/grants", s.handleGrant)
@@ -598,10 +708,13 @@ func (s *Server) Routes() http.Handler {
 	if s.auth == nil || auth.IsOpen(s.auth) {
 		return mux // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
 	}
-	// gate every /v2/* route behind project-scoped auth; /healthz stays open.
+	// gate every /v2/* route behind project-scoped auth; /healthz, /readyz, /metrics stay open (health/
+	// observability endpoints are unauthenticated by design, matching /healthz's existing posture).
 	gate := auth.Middleware(s.auth, "project")
 	guarded := http.NewServeMux()
 	guarded.HandleFunc("GET /healthz", healthz)
+	guarded.HandleFunc("GET /readyz", s.readyz)
+	guarded.HandleFunc("GET /metrics", s.metrics.Handler())
 	guarded.Handle("/v2/", gate(mux))
 	return guarded
 }
@@ -1074,8 +1187,10 @@ func (s *Server) sealAndStore(projectID, sessionID, idem string, rec map[string]
 	}
 	sealed, err := s.core.SealRecord(string(bodyJSON))
 	if err != nil {
+		s.mRecordsSealFailed.Inc()
 		return "", false, fmt.Errorf("seal: %w", err)
 	}
+	s.mRecordsSealed.Inc()
 
 	ch, parents, sess := recordMeta(sealed)
 	stored, created, err := s.st.PutRecord(projectID, idem, store.Record{
@@ -1436,6 +1551,7 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	// budget. The check runs BEFORE taking ingestMu, so a rate-limited probe never enters the seal critical section.
 	if s.denialBudget != nil {
 		if ok, logDrop := s.denialBudget.allow(gr.ProjectID); !ok {
+			s.mDenialBudgetDrops.Inc()
 			if logDrop {
 				log.Printf("WARNING: B11 denial seals are being dropped — per-project/global denial budget exhausted (varying-scope sweep DoS bound; this log is throttled to ~1/sec)")
 			}
@@ -1826,6 +1942,10 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		return
 	}
 	if validateErr != nil {
+		// The actual capability-authorization decision (a forged/expired/replayed/wrong-scope use) —
+		// as opposed to conflictErr (a reused idempotency key, no authorization performed) or storeErr
+		// (an infra failure), neither of which is an allow/deny outcome.
+		s.mUseOutcome.WithLabelValue("deny").Inc()
 		writeErr(w, http.StatusBadRequest, "use rejected: "+validateErr.Error())
 		return
 	}
@@ -1833,6 +1953,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		writeErr(w, http.StatusInternalServerError, "store use receipt: "+storeErr.Error())
 		return
 	}
+	s.mUseOutcome.WithLabelValue("allow").Inc()
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"use_id":     useID,
 		"grant_id":   grantID,
@@ -2313,11 +2434,18 @@ func (s *Server) normalizeAuthority(rec map[string]any) {
 		return
 	}
 	claimed, _ := a["source"].(string)
+	// A record with no elevated claim at all (empty, or already caller_declared) has nothing to
+	// downgrade FROM — only an ATTEMPTED elevation that fails counts toward mAuthorityDowngrades below
+	// (the silent key-misalignment signal), so ordinary caller_declared traffic does not swamp it.
+	attemptedElevation := claimed != "" && claimed != "caller_declared"
 	// Phase-1 default, or a source with no pinned key: authority is forgeable -> caller_declared (threat #4).
 	// Looking the key up BY the claimed source is what lets policy_engine_signed AND human_signed coexist —
 	// each elevates only under the key pinned for that exact source.
 	key, pinned := s.policyEngineKeys[claimed]
 	if !pinned {
+		if attemptedElevation {
+			s.mAuthorityDowngrades.Inc()
+		}
 		a["source"] = "caller_declared"
 		rec["authority"] = a
 		return
@@ -2331,6 +2459,9 @@ func (s *Server) normalizeAuthority(rec map[string]any) {
 	if verifyAuthorityEvidence(claimed, projectID, recordID, eh, es, key) {
 		a["source"] = claimed // verified; evidence_hash/evidence_sig retained for the offline verifier
 	} else {
+		// A source IS pinned but the evidence failed to verify under it — a genuine key-misalignment
+		// (wrong signature, wrong preimage, or a forged claim), not just an unconfigured source.
+		s.mAuthorityDowngrades.Inc()
 		a["source"] = "caller_declared"
 	}
 	rec["authority"] = a
@@ -2756,6 +2887,7 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	if err := s.st.PutCheckpoint(projectID, store.Checkpoint{JSON: sealed, CheckpointHash: cp.CheckpointHash, Seq: cp.Seq}); err != nil {
 		return "", nil, err
 	}
+	s.mCheckpointsSealed.Inc()
 	var warns []string
 	// best-effort witness append (bounded so a hung witness can't block); a failure leaves the
 	// checkpoint stored-but-un-witnessed (reported, backfillable) rather than wedging the chain.
@@ -2763,6 +2895,7 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		if err := s.witness.Append(wctx, projectID, []byte(sealed)); err != nil {
 			warns = append(warns, fmt.Sprintf("witness append failed (backfill needed): %v", err))
+			s.mWitnessFailures.Inc()
 		}
 		cancel()
 	}
@@ -2775,6 +2908,7 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	if s.tsa != nil {
 		if err := s.anchorCheckpoint(ctx, projectID, cp.Seq, cp.CheckpointHash); err != nil {
 			warns = append(warns, fmt.Sprintf("checkpoint stored un-anchored (TSA failed, backfillable): %v", err))
+			s.mAnchorFailures.Inc()
 		}
 	}
 

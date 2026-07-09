@@ -59,6 +59,32 @@ func (p *Postgres) Close() {
 	}
 }
 
+// Ping reports whether the pool can reach the database, bounded by ctx. Used by /readyz — callers
+// MUST pass a short-timeout ctx so a hung/degraded database fails the probe fast rather than hanging
+// the readiness check (fail-closed, not fail-open, but bounded — never a k8s liveness check).
+func (p *Postgres) Ping(ctx context.Context) error {
+	return p.pool.Ping(ctx)
+}
+
+// PoolStat is a point-in-time snapshot of the connection pool's health, exposed for /metrics gauges.
+type PoolStat struct {
+	TotalConns    int32
+	AcquiredConns int32
+	IdleConns     int32
+	MaxConns      int32
+}
+
+// PoolStat returns a snapshot of the pool's connection counts.
+func (p *Postgres) PoolStat() PoolStat {
+	st := p.pool.Stat()
+	return PoolStat{
+		TotalConns:    st.TotalConns(),
+		AcquiredConns: st.AcquiredConns(),
+		IdleConns:     st.IdleConns(),
+		MaxConns:      st.MaxConns(),
+	}
+}
+
 // Migrate applies the schema SQL (migrations.Schema). The schema is idempotent (CREATE ... IF NOT
 // EXISTS), so this is safe to call on every startup. NOTE: the migration's append-only REVOKE only
 // constrains a non-owner, non-superuser role; when the server connects as the role that owns the
