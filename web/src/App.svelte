@@ -1,13 +1,35 @@
 <script lang="ts">
-  import { listSessions, sessionDAG, verifyProject, exportURL } from "./lib/api";
+  import {
+    listSessions,
+    sessionDAG,
+    verifyProject,
+    downloadExport,
+    getToken,
+    setToken,
+  } from "./lib/api";
   import { buildWaterfall, recLabel, type Rec } from "./lib/trace";
 
   let project = $state("proj-001");
+  // API token for AVERIN_API_KEYS-authenticated servers. Empty = authless dev server (averin#19).
+  let token = $state(getToken());
   let sessions = $state<string[]>([]);
   let selected = $state<string | null>(null);
   let rows = $state<ReturnType<typeof buildWaterfall>>([]);
   let report = $state<any>(null);
   let error = $state<string>("");
+
+  function applyToken() {
+    setToken(token);
+  }
+
+  async function doExport(mode: string) {
+    error = "";
+    try {
+      await downloadExport(project, mode);
+    } catch (e) {
+      error = String(e);
+    }
+  }
 
   async function loadSessions() {
     error = "";
@@ -52,10 +74,18 @@
 
   <section class="bar">
     <input bind:value={project} placeholder="project id" />
+    <input
+      class="token"
+      type="password"
+      bind:value={token}
+      oninput={applyToken}
+      placeholder="API token (if auth on)"
+      title="Sent as Authorization: Bearer on every request. Leave blank for an authless dev server. Stored in this browser only (averin#19)."
+    />
     <button onclick={loadSessions}>Load sessions</button>
     <button onclick={verify}>Verify project</button>
-    <a class="btn" href={exportURL(project, "proof_only")}>Export (proof_only)</a>
-    <a class="btn" href={exportURL(project, "full_evidence")}>Export (full)</a>
+    <button onclick={() => doExport("proof_only")}>Export (proof_only)</button>
+    <button onclick={() => doExport("full_evidence")}>Export (full)</button>
   </section>
 
   {#if error}<p class="err">{error}</p>{/if}
@@ -114,7 +144,8 @@
   .tag { color: #9aa4b2; margin: 2px 0 18px; }
   .bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
   input { background: #171a21; border: 1px solid #262b35; color: #e6e9ef; border-radius: 8px; padding: 8px 12px; }
-  button, .btn { background: #7c9cff; color: #0b0d12; border: 0; border-radius: 8px; padding: 8px 14px;
+  .token { min-width: 190px; }
+  button { background: #7c9cff; color: #0b0d12; border: 0; border-radius: 8px; padding: 8px 14px;
     font-weight: 600; cursor: pointer; text-decoration: none; font-size: 14px; }
   .err { color: #f87171; font-family: ui-monospace, monospace; }
   .panel { background: #171a21; border: 1px solid #262b35; border-radius: 12px; padding: 14px; margin: 18px 0; }

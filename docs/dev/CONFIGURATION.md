@@ -15,11 +15,20 @@ e.g. a typo'd authority pubkey must not silently drop you back to forgeable `cal
 
 The ingestion + app API. Started with `./averin-server`.
 
+> Every Ed25519 root seed below (`AVERIN_SIGNING_SEED`, `AVERIN_BROKER_ISSUING_SEED`,
+> `AVERIN_RESOURCE_SEED`, `AVERIN_REVOCATION_SEED` — plus the AES master key
+> `AVERIN_CONTENT_MASTER_KEY`) also accepts a `<NAME>_FILE` form pointing at a mounted secret
+> file (e.g. a CSI/Kubernetes secret volume), keeping the seed off the env block. **Setting
+> both the inline and `_FILE` form for the same name is fatal** ("set exactly one"); the
+> `_FILE` target must be a regular, size-bounded file (a FIFO/device/dir/oversized file is
+> fatal — symlinks are followed, so k8s/CSI secret files work); file contents are trimmed
+> (mounted secrets carry a trailing newline).
+
 ### Core
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_SIGNING_SEED` | — | **Yes** | 64 hex chars = 32-byte Ed25519 seed; the key all records/checkpoints are signed with. **Missing ⇒ fatal** (`log.Fatal`). Invalid (bad hex / wrong length) ⇒ fatal. Production backs signing with a KMS instead of a raw seed. |
+| `AVERIN_SIGNING_SEED` (or `_FILE`) | — | **Yes** | 64 hex chars = 32-byte Ed25519 seed; the key all records/checkpoints are signed with. **Missing ⇒ fatal** (`log.Fatal`). Invalid (bad hex / wrong length) ⇒ fatal. Production backs signing with a KMS instead of a raw seed. |
 | `AVERIN_SIGNING_KEY_ID` | `k0` | No | The `signing_key_id` stamped into each record's `key` block and the export key descriptor. |
 | `AVERIN_ADDR` | `:8080` | No | Listen address (`host:port`). |
 
@@ -95,7 +104,7 @@ the pinned-key id — so a govder/averin key misalignment is visible in both met
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_BROKER_ISSUING_SEED` | unset ⇒ broker disabled | No | 64-hex (32-byte) Ed25519 seed; the key that signs the minted capabilities. Bad value ⇒ fatal. Unset ⇒ `POST /v2/grants` returns `501 Not Implemented`. The recording key for the grant's `gateway_enforced` evidence is the server's own signing key (Tier-A `broker_trust: assumed`). |
+| `AVERIN_BROKER_ISSUING_SEED` (or `_FILE`) | unset ⇒ broker disabled | No | 64-hex (32-byte) Ed25519 seed; the key that signs the minted capabilities. Bad value ⇒ fatal. Unset ⇒ `POST /v2/grants` returns `501 Not Implemented`. The recording key for the grant's `gateway_enforced` evidence is the server's own signing key (Tier-A `broker_trust: assumed`). |
 | `AVERIN_BROKER_ID` | unset | No | This broker's federation identity (ADR 0005 M4). When set, grants carry `grant_evidence.broker_id` and checkpoints carry a per-broker `broker_grant_heads` map (verify under `federated_broker_keys[<id>]`). Requires the broker. |
 
 ### Online M-of-N cosign policy (`POST /v2/grants/prepare` + `/finalize`)
@@ -109,7 +118,7 @@ the pinned-key id — so a govder/averin key misalignment is visible in both met
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_RESOURCE_SEED` | unset ⇒ `/v2/use` disabled | No | 64-hex (32-byte) Ed25519 seed for the resource recording key, which signs use-receipt evidence. **Must be role-separated**: distinct from `AVERIN_SIGNING_SEED` and `AVERIN_BROKER_ISSUING_SEED` (checked by derived pubkey — fatal on overlap). Requires the broker (fatal otherwise). Also enables `POST /v2/introspection` (native/STS, M3) with the raw resource key. |
+| `AVERIN_RESOURCE_SEED` (or `_FILE`) | unset ⇒ `/v2/use` disabled | No | 64-hex (32-byte) Ed25519 seed for the resource recording key, which signs use-receipt evidence. **Must be role-separated**: distinct from `AVERIN_SIGNING_SEED` and `AVERIN_BROKER_ISSUING_SEED` (checked by derived pubkey — fatal on overlap). Requires the broker (fatal otherwise). Also enables `POST /v2/introspection` (native/STS, M3) with the raw resource key. |
 | `AVERIN_RESOURCE_ID` | — | **Yes** when `AVERIN_RESOURCE_SEED` is set | This resource's audience id. Missing (with the seed set) ⇒ fatal. |
 
 When the resource gateway is on, the consume-before-act ledger is **durable Postgres-backed** if
@@ -124,7 +133,7 @@ replay window reopens on restart).
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_REVOCATION_SEED` | unset ⇒ revocation off | No | 64-hex (32-byte) Ed25519 seed for the revocation issuer. Bad value ⇒ fatal. **Must differ from the signing/broker/resource seeds** (role separation) ⇒ fatal otherwise. When set, `POST /v2/revoke` marks a `grant_id` revoked and every `/v2/export` carries a signed, time-bounded `revocation_list`. The revoked set (and, when the M6/M2 online two-phase grant flow is used, the pending prepare→finalize mint state) is **durable Postgres-backed** if `AVERIN_DATABASE_URL` is set — a revoke or an in-flight cosig/delegation approval survives a pod restart or `SIGTERM` — else in-memory only (a revoke issued or a mint prepared just before restart is forgotten). |
+| `AVERIN_REVOCATION_SEED` (or `_FILE`) | unset ⇒ revocation off | No | 64-hex (32-byte) Ed25519 seed for the revocation issuer. Bad value ⇒ fatal. **Must differ from the signing/broker/resource seeds** (role separation) ⇒ fatal otherwise. When set, `POST /v2/revoke` marks a `grant_id` revoked and every `/v2/export` carries a signed, time-bounded `revocation_list`. The revoked set (and, when the M6/M2 online two-phase grant flow is used, the pending prepare→finalize mint state) is **durable Postgres-backed** if `AVERIN_DATABASE_URL` is set — a revoke or an in-flight cosig/delegation approval survives a pod restart or `SIGTERM` — else in-memory only (a revoke issued or a mint prepared just before restart is forgotten). |
 
 ### Metering (Stripe)
 
@@ -151,6 +160,14 @@ deliberate loss modes:
 **Deferred (documented, not built):** a durable per-project counter (a Postgres table beside the store,
 surviving restart) + **idempotent, retried** Stripe delivery (meter-event ids) would close all three
 losses. Until then treat metering as advisory and reconcile against Stripe.
+
+### Operational hardening (prod secret gate, egress scrubbing, graceful shutdown)
+
+| Variable | Default | Required | Behavior |
+|----------|---------|----------|----------|
+| `AVERIN_REQUIRE_PROD_SECRETS` | `0` (off) | No | **Fail-closed prod gate.** When on (`1`/`true`), refuses to start unless `AVERIN_API_KEYS` is set (else the app API would be UNAUTHENTICATED), `AVERIN_DATABASE_URL` is set (else the store would be volatile in-memory, reopening a `/v2/use` replay window), and `AVERIN_SIGNING_SEED` is **not** the well-known committed dev seed (a globally-known, forgeable integrity root). Any of the three missing/failing is fatal (`log.Fatal`, names each missing one). Mirrors govder's `GOVDER_REQUIRE_AUTHORITY_SEED` and leria's `LERIA_REQUIRE_PROD_SECRETS`. Off preserves the fail-open Phase-1 default (each condition individually just logs a WARNING). |
+| `AVERIN_SECRET_PATTERNS` | unset ⇒ built-in patterns only | No | JSON string array of extra RE2 regexes, atomically appended to the built-in credential-scrubbing rules (`server/internal/scrub`) that redact provider API keys, PEM private keys, JWTs, `Bearer`/`Basic` auth, generic `key: value` secrets, and high-entropy hex from captured I/O before it is stored or hashed. Each match is replaced with `[REDACTED:configured]`. **A malformed pattern (bad regex) is fatal at startup** — a typo must not silently create a secret-capture gap. Scrubbing is defense-in-depth (RE2 is linear-time / no ReDoS, but cannot catch every secret shape); the primary protection is that self-hosted data never leaves customer infra. |
+| `AVERIN_SHUTDOWN_TIMEOUT` | `25s` | No | Graceful-drain deadline on SIGINT/SIGTERM: `http.Server.Shutdown` lets in-flight requests (and, with `AVERIN_DATABASE_URL` set, the cross-request prepare→finalize window) finish before exit, then flushes the async Stripe meter queue and closes the store pool — all within this deadline. An unparseable or non-positive value logs a warning and keeps the default. **Must stay under the orchestrator's stop grace** (the shipped Kubernetes manifest sets `terminationGracePeriod=30s`; for docker-compose set `stop_grace_period >=` this) or the process is SIGKILLed mid-drain. `averin-proxy` reads the same variable with a different default (`60s`, below — it streams long completions and needs more room to drain). |
 
 ### Deployment hard requirements (rate limit + storage growth)
 
@@ -190,6 +207,7 @@ OpenAI-compatible reverse proxy that records `llm_call` evidence to a averin ser
 | `AVERIN_PROXY_ADDR` | `:8081` | No | Inbound listen address. |
 | `AVERIN_PROXY_AVERIN_TOKEN` | unset | No | API token used when recording to the averin server (needed if the server has `AVERIN_API_KEYS` set). |
 | `AVERIN_PROXY_INBOUND_TOKEN` | unset | No | If set, inbound auth is REQUIRED (`X-Averin-Proxy-Token` or `Authorization: Bearer`). **Unset ⇒ OPEN RELAY + evidence-injection surface** (logs a WARNING — bind to loopback or place behind your own auth). |
+| `AVERIN_SHUTDOWN_TIMEOUT` | `60s` | No | Graceful-drain deadline on SIGINT/SIGTERM: `http.Server.Shutdown` lets active streamed completions finish before exit (an instant kill would cut an agent's in-flight response). Longer than `averin-server`'s default (25s) since completions stream. An unparseable or non-positive value logs a warning and keeps the default. Must stay under the orchestrator's stop grace. |
 
 ---
 
@@ -242,4 +260,11 @@ mode gates). The `opts.json` keys are documented in [`../operator-verification.m
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `AVERIN_DB_PASSWORD` | `averin` | Postgres password (and folded into the server's `AVERIN_DATABASE_URL`). |
-| `AVERIN_SIGNING_SEED` | a dev default (override!) | Server signing seed. |
+| `AVERIN_SIGNING_SEED` | **none — required** | Server signing seed. Compose uses `${AVERIN_SIGNING_SEED:?...}`, so `docker compose up` refuses to start without it; generate a fresh one with `openssl rand -hex 32`. |
+| `AVERIN_PROXY_INBOUND_TOKEN` | **none — required** | Inbound auth token for `averin-proxy`. Compose uses `${AVERIN_PROXY_INBOUND_TOKEN:?...}`, so the stack refuses to start without it (without it the proxy would be an open relay); generate one with `openssl rand -hex 24`. |
+| `AVERIN_UPSTREAM` | `https://api.openai.com` | Overrides the proxy's upstream LLM base URL. |
+| `AVERIN_PROJECT_ID` | `default` | Overrides the project the proxied calls are recorded under. |
+
+`stop_grace_period` is set per service to exceed `AVERIN_SHUTDOWN_TIMEOUT`'s default for that
+binary (`server`: 30s > the 25s default; `proxy`: 65s > the 60s default) — raise both together if
+you override `AVERIN_SHUTDOWN_TIMEOUT`.

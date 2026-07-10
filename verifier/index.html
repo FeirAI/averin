@@ -7,7 +7,7 @@
     <style>
       :root {
         --bg: #0f1115; --panel: #171a21; --ink: #e6e9ef; --mut: #9aa4b2;
-        --ok: #34d399; --bad: #f87171; --line: #262b35; --accent: #7c9cff;
+        --ok: #34d399; --bad: #f87171; --warn: #fbbf24; --line: #262b35; --accent: #7c9cff;
       }
       * { box-sizing: border-box; }
       body { margin: 0; background: var(--bg); color: var(--ink);
@@ -27,7 +27,13 @@
       .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
         padding: 18px; margin-top: 22px; }
       .verdict { font-size: 26px; font-weight: 700; }
-      .pass { color: var(--ok); } .fail { color: var(--bad); }
+      .pass { color: var(--ok); } .fail { color: var(--bad); } .qual { color: var(--warn); }
+      .vsub { color: var(--mut); font-size: 13px; margin: 4px 0 2px; line-height: 1.45; max-width: 720px; }
+      .vsub.ok { color: var(--ok); }
+      .vsub b { color: var(--ink); }
+      .warnbox { background: rgba(251, 191, 36, .08); border: 1px solid var(--warn); color: var(--warn);
+        border-radius: 8px; padding: 10px 12px; margin: 14px 0; font-size: 13px; line-height: 1.5; }
+      .warnbox b { color: var(--ink); } .warnbox code { color: var(--warn); }
       .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 16px 0; }
       .stat { background: #0e1117; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
       .stat b { display: block; font-size: 18px; } .stat span { color: var(--mut); font-size: 12px; }
@@ -63,14 +69,23 @@
       <details class="adv">
         <summary>Pin trust roots (optional) — paste an <code>opts.json</code> of role-disjoint keys</summary>
         <p class="sub" style="margin:8px 0">
-          Without pinned keys, a PASS proves <b>internal consistency under the bundle's own key claims</b>, not
-          authenticity. Paste the role-disjoint authority key sets you obtained <b>out of band</b>
-          (<code>broker_authority_keys</code>, <code>resource_authority_keys</code>, <code>tsa_keys</code>,
-          <code>attestation_keys</code>, <code>cosig_approver_keys</code>, <code>revocation_keys</code>,
-          <code>federated_broker_keys</code> — all <code>ed25519pub:</code> strings) to verify <b>authenticity</b>
-          and elevate the Tier-A/Tier-B accountability gates.
+          Without pinned keys the verdict is only <b>CONSISTENT (unauthenticated)</b> — internal consistency
+          under the bundle's <b>own</b> key claims, not authenticity. Two distinct trust axes lift it, and they
+          are <b>not</b> interchangeable:
         </p>
-        <textarea id="opts" placeholder='{"broker_authority_keys":["ed25519pub:…"],"resource_authority_keys":["ed25519pub:…"]}' style="height:120px"></textarea>
+        <ul class="sub" style="margin:0 0 8px; padding-left:20px">
+          <li><b>Record authenticity</b> — pin <code>signing_keys</code> (the record-signing keys). This is the
+            <b>only</b> option that flips the trust root to <code>pinned</code> and turns the verdict into a green
+            <b>PASS</b>: each record is proven signed by a key you obtained out of band, not merely self-consistent.</li>
+          <li><b>Accountability</b> — pin the role-disjoint authority keys (<code>broker_authority_keys</code>,
+            <code>resource_authority_keys</code>, <code>tsa_keys</code>, <code>attestation_keys</code>,
+            <code>cosig_approver_keys</code>, <code>revocation_keys</code>, <code>federated_broker_keys</code>).
+            These elevate <b>who is answerable</b> for grants/uses and enable the Tier-A/Tier-B gates
+            (and <code>revocation_keys</code> is what makes a revocation list actually <b>bite</b> — see below).</li>
+        </ul>
+        <p class="sub" style="margin:0 0 8px">All values are <code>ed25519pub:</code> strings, obtained
+          <b>out of band</b> (never from the bundle itself).</p>
+        <textarea id="opts" placeholder='{"signing_keys":["ed25519pub:…"],"broker_authority_keys":["ed25519pub:…"],"resource_authority_keys":["ed25519pub:…"],"revocation_keys":["ed25519pub:…"],"tsa_keys":["ed25519pub:…"]}' style="height:120px"></textarea>
       </details>
 
       <div id="out"></div>
@@ -123,12 +138,50 @@
           }
         }
         catch (err) { $("out").innerHTML = `<div class="panel"><span class="fail">verify error: ${esc(String(err))}</span></div>`; return; }
-        render(report);
+        render(report, analyzeBundle(text, optsText));
       });
 
       function esc(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 
-      function render(r) {
+      // Surface a few things the WASM report cannot say on its own, computed offline from the pasted bytes:
+      //  - causalRoots: parentless (detached) roots the DAG has. The bundle cannot prove a detached-root
+      //    INJECTION is illegitimate (averin-verifier#4), but an unexpected root count is the only signal an
+      //    auditor gets — so we display it. Deduplicated by content_hash to match the core's node set.
+      //  - hasRevList / hasRevMerkle: a top-level revocation structure the DEFAULT flow silently treats as
+      //    absent unless revocation_keys is pinned (averin-verifier#2) — so we can warn it was not evaluated.
+      //  - tsaPinned: whether tsa trust was supplied, so the anchor stat can say whether presence was
+      //    cryptographically verified or not (averin-verifier#3).
+      function analyzeBundle(bundleText, optsText) {
+        const ctx = { causalRoots: null, hasRevList: false, hasRevMerkle: false, tsaPinned: false };
+        try {
+          const b = JSON.parse(bundleText);
+          ctx.hasRevList = !!(b && b.revocation_list != null);
+          ctx.hasRevMerkle = !!(b && b.revocation_merkle_root != null);
+          const recs = b && Array.isArray(b.records) ? b.records : null;
+          if (recs) {
+            const seen = new Set();
+            let roots = 0;
+            for (const rec of recs) {
+              const ch = rec && rec.content_hash;
+              if (typeof ch === "string") { if (seen.has(ch)) continue; seen.add(ch); }
+              const p = rec && rec.causal_prev_hashes;
+              if (!(Array.isArray(p) && p.length > 0)) roots++; // parentless == a causal root
+            }
+            ctx.causalRoots = roots;
+          }
+        } catch { /* unparseable bundle — the core report already surfaced the parse error; leave nulls */ }
+        try {
+          if (optsText) {
+            const o = JSON.parse(optsText);
+            const nonEmptyArr = (a) => Array.isArray(a) && a.length > 0;
+            const nonEmptyStr = (s) => typeof s === "string" && s.trim() !== "";
+            ctx.tsaPinned = !!(o && (nonEmptyArr(o.tsa_keys) || nonEmptyArr(o.tsa_spki_b64) || nonEmptyStr(o.tsa_spki_b64)));
+          }
+        } catch { /* opts was already validated above before verify ran; ignore */ }
+        return ctx;
+      }
+
+      function render(r, ctx = {}) {
         if (r.error) { $("out").innerHTML = `<div class="panel"><span class="fail">${esc(r.error)}</span></div>`; return; }
         const recs = (r.record_trust || []).map((t) => {
           const ok = t.trust === "integrity_proven";
@@ -162,13 +215,60 @@
           .map(([label, v]) => `<div class="mode ${BAD.test(v) ? "bad" : "good"}">${label}: <b>${esc(v)}</b></div>`)
           .join("");
 
+        // ---- Verdict reflects the TRUST AXIS, not just internal consistency (averin-verifier#0). ----
+        // A green PASS is reserved for a bundle whose record signing keys were EXTERNALLY pinned
+        // (keys_externally_pinned = true) — i.e. authenticity was verified against a trust root the auditor
+        // supplied out of band. The default flow, whose ONLY trust root is the bundle's own embedded keys
+        // (a self-signed bundle satisfies it), gets a visually distinct amber "CONSISTENT" verdict with the
+        // caveat above the fold — NOT a plain green PASS.
+        const pinned = !!r.keys_externally_pinned;
+        const verdictClass = !r.ok ? "fail" : pinned ? "pass" : "qual";
+        const verdictWord = !r.ok ? "FAIL" : pinned ? "PASS" : "CONSISTENT";
+        const verdictCaveat = !r.ok
+          ? ""
+          : pinned
+            ? `<div class="vsub ok">Trust roots externally pinned — record <b>authenticity</b> is proven against keys you supplied out of band.</div>`
+            : `<div class="vsub">Structure valid &amp; internally consistent — but trust roots were <b>NOT externally pinned</b> (the only trust root is the bundle's own embedded keys, so a fully self-signed bundle reaches this same state). <b>Authenticity is unverified.</b> Pin <code>signing_keys</code> below to earn a green PASS.</div>`;
+
+        // ---- Revocation present but never evaluated (averin-verifier#2). ----
+        // When a top-level revocation structure is in the bundle but revocation_keys was NOT pinned, the core
+        // returns status "absent" — indistinguishable from a bundle with no revocation at all. Surface it so an
+        // auditor cannot mistake an UNEVALUATED revocation list for a revocation-clean bundle.
+        const revNotEval = [];
+        if (ctx.hasRevList && r.revocation_status === "absent") revNotEval.push("<code>revocation_list</code>");
+        if (ctx.hasRevMerkle && r.revocation_merkle_status === "absent") revNotEval.push("<code>revocation_merkle_root</code>");
+        const revWarn = revNotEval.length
+          ? `<div class="warnbox"><b>Revocation present but NOT evaluated.</b> This bundle carries a top-level ${revNotEval.join(" and ")}, but no <code>revocation_keys</code> were pinned — so the default flow did <b>not</b> check it. A use of a <b>revoked</b> grant is therefore indistinguishable from a clean bundle here. Pin <code>revocation_keys</code> (obtained out of band) in the panel above to make revocation bite.</div>`
+          : "";
+
+        // ---- Detached-root visibility (averin-verifier#4). ----
+        // The bundle cannot prove a detached-root INJECTION illegitimate, but an unexpected number of
+        // parentless (causal) roots is the auditor's only signal — so display the count and flag > 1.
+        const roots = ctx.causalRoots;
+        const rootsLabel = roots == null ? "" : ` · ${roots} causal ${roots === 1 ? "root" : "roots"}`;
+        const rootWarn =
+          roots != null && roots > 1
+            ? `<div class="warnbox"><b>${roots} causal roots.</b> A single-project chain normally has <b>one</b> genesis root; multiple parentless (detached) roots may be legitimate concurrency <b>or</b> a detached-root injection the offline verifier cannot otherwise flag. Confirm the count matches what you expect for this project.</div>`
+            : "";
+
+        // ---- Anchor honesty (averin-verifier#3). ----
+        // checkpoints_anchored counts anchor PRESENCE, not cryptographic anchor verification (which the default
+        // flow never does — it needs pinned tsa_keys). Label it as presence, and say UNVERIFIED when TSA trust
+        // was not supplied, so "N anchored" can never read as "N timestamps verified".
+        const anchorLabel = ctx.tsaPinned
+          ? `${r.checkpoints_anchored} anchors present`
+          : `${r.checkpoints_anchored} anchors present · UNVERIFIED — pin tsa_keys`;
+
         $("out").innerHTML = `<div class="panel">
-          <div class="verdict ${r.ok ? "pass" : "fail"}">${r.ok ? "PASS" : "FAIL"}</div>
+          <div class="verdict ${verdictClass}">${verdictWord}</div>
+          ${verdictCaveat}
+          ${revWarn}
+          ${rootWarn}
           <div class="sec">integrity &amp; provenance</div>
           <div class="stats">
             ${stat(`${r.records_proven}/${r.records_total}`, "records integrity-proven")}
-            ${stat(r.dag_ok ? "valid" : "INVALID", `DAG · ${r.dag_heads} heads`)}
-            ${stat(`${r.checkpoints_verified}/${r.checkpoints_total}`, `checkpoints · ${r.checkpoints_anchored} anchored`)}
+            ${stat(r.dag_ok ? "valid" : "INVALID", `DAG · ${r.dag_heads} heads${rootsLabel}`)}
+            ${stat(`${r.checkpoints_verified}/${r.checkpoints_total}`, `checkpoints · ${anchorLabel}`)}
             ${stat(r.chain_ok ? "ok" : "BROKEN", "checkpoint chain")}
             ${stat(r.keys_externally_pinned ? "pinned" : "bundle-supplied", "trust root")}
           </div>
@@ -177,8 +277,9 @@
           ${recs}
           ${r.first_broken_link ? `<div class="issues">first broken link:\n${esc(r.first_broken_link)}</div>` : ""}
           <div class="note">
-            ${r.keys_externally_pinned ? "Record signing keys were externally pinned: record-level <b>authenticity</b> is proven against your trust roots." : "Record signing keys were NOT pinned: record integrity is proven under the bundle's own key claims, not authenticity."} Grant/use accountability elevates separately when you pin <code>broker_authority_keys</code> / <code>resource_authority_keys</code> — the <code>broker trust</code> value above is the signal (<code>sequence_verified</code> = pinned &amp; elevated; <code>sequence_consistent_export</code> = unpinned). Paste an <b>opts.json</b> above to pin trust roots.<br/>
-            A PASS proves <b>integrity &amp; provenance</b> (Level 1) — the <b>accountability</b> row is the higher claim (who is answerable; whether the account is <b>complete</b>). <code>action_completeness</code> is the capstone; <code>not_claimed</code> is normal and not a failure.
+            ${r.keys_externally_pinned ? "Record signing keys were externally pinned: record-level <b>authenticity</b> is proven against your trust roots." : "Record signing keys were NOT pinned: record integrity is proven under the bundle's own key claims, not authenticity — pin <code>signing_keys</code> to prove authenticity."} Grant/use accountability elevates separately when you pin <code>broker_authority_keys</code> / <code>resource_authority_keys</code> — the <code>broker trust</code> value above is the signal (<code>sequence_verified</code> = pinned &amp; elevated; <code>sequence_consistent_export</code> = unpinned). Paste an <b>opts.json</b> above to pin trust roots.<br/>
+            A PASS proves <b>integrity &amp; provenance</b> (Level 1) — the <b>accountability</b> row is the higher claim (who is answerable; whether the account is <b>complete</b>). <code>action_completeness</code> is the capstone; <code>not_claimed</code> is normal and not a failure.<br/>
+            Checkpoint <b>anchors</b> are counted by <b>presence</b>; cryptographic anchor (timestamp) verification requires pinned <code>tsa_keys</code> and is not performed by default. The <b>causal roots</b> count is shown so an unexpected number of detached (parentless) roots is visible — the offline verifier cannot by itself prove a detached-root injection illegitimate.
           </div>
         </div>`;
       }

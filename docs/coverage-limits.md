@@ -20,7 +20,7 @@ they're unchanged — not that the bytes describe what truly happened in the wor
 |-------|-------|------------|
 | **1 — Record integrity** | "This record was sealed by this key and hasn't changed since, and sits in a verifiable, externally-anchored history." | **Yes.** Proven by `decision-core` (canonicalize → commit → hash → sign → DAG-link → checkpoint → anchor → verify), offline, across CLI/WASM/FFI. |
 | **2 — Event observation** | "This event was observed by us." | **Partial — and we say so per event.** Every record carries `observed_via` (`proxy`/`sdk`/`otel`/`broker` — the last stamped on credential-broker grant/use records). We see *only* what those paths capture. |
-| **3 — Complete action accountability** | "This is everything the agent did, and nothing else happened." | **Not yet.** Requires a chokepoint (credential broker / tool gateway / egress control). The schema reserves room for it; we do not claim it. |
+| **3 — Complete action accountability** | "This is everything the agent did, and nothing else happened." | **Demonstrated over the brokered surface** (credential broker Tier-A + resource gateway Tier-B). Full coverage still needs deployment attestations + a reduced broker TCB. Never claimed as "everything." |
 
 ## What each ingestion path sees (Level-2 honesty)
 
@@ -50,10 +50,14 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   anchored* session detectable, and out-of-band key/TSA pinning lets a third party refuse the
   customer's self-asserted keys. But **suppressing a parallel chain that was never anchored is not
   detectable from a single bundle** — that needs the witness store, and ultimately Level 3.
-- **No per-project authz yet (Phase-1 limit).** The app API (`/v2/sessions`, `/v2/dag`,
-  `/v2/verify`, `/v2/export`) has **no authentication/authorization** — RBAC/SSO/SAML is explicitly
-  Phase 2 (spec §3). Any caller who can reach the API can read any project's data. Deploy averin
-  behind your own auth (or single-tenant) until the authz layer lands. (This does not affect the
+- **No full per-project authz yet (Phase-1 limit).** The app API (`/v2/sessions`, `/v2/dag`,
+  `/v2/verify`, `/v2/export`) supports **optional project-scoped API keys** (`AVERIN_API_KEYS`) —
+  when configured, every `/v2/*` route requires a valid token for the target project (fails closed:
+  unknown project / empty token ⇒ deny) — but it is **unauthenticated by default**, and even when
+  configured this only answers "is this token valid for this project?"; full RBAC/SSO/SAML/scoped-
+  and-expiring tokens is explicitly Phase 2 (spec §3). With no keys configured, any caller who can
+  reach the API can read any project's data. Deploy averin behind your own auth (or single-tenant,
+  or with `AVERIN_API_KEYS` set) until the full authz layer lands. (This does not affect the
   cryptographic guarantees — offline verification needs no server trust.)
 - **Uninstrumented actions (#13).** See above — a Level-2 limit by construction.
 - **Authority is *declared* by default.** `authority.source: caller_declared` is forgeable. Only
