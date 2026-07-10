@@ -1,0 +1,189 @@
+package pgschema
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// These tests require a real Postgres. They are hermetic: each creates a private, randomly named schema
+// (via search_path so the migration's unqualified table names resolve there), runs against it, and drops
+// it. Set AVERIN_TEST_DATABASE_URL (e.g. postgres://postgres:postgres@localhost:5432/postgres) to enable.
+
+// newTestSchema creates an isolated schema and returns a DSN scoped to it (for Migrate), a pool also
+// scoped to it (for assertions), and a cleanup that closes the pool and drops the schema.
+func newTestSchema(t *testing.T) (scopedDSN string, admin *pgxpool.Pool, cleanup func()) {
+	t.Helper()
+	base := os.Getenv("AVERIN_TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("set AVERIN_TEST_DATABASE_URL to run Postgres-backed pgschema tests")
+	}
+	schema := fmt.Sprintf("averin_pgschema_test_%d", time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	root, err := pgxpool.New(ctx, base)
+	if err != nil {
+		t.Fatalf("connect (root): %v", err)
+	}
+	if _, err := root.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+schema); err != nil {
+		root.Close()
+		t.Fatalf("create schema: %v", err)
+	}
+
+	scopedDSN = base + "&search_path=" + schema
+	admin, err = pgxpool.New(ctx, scopedDSN)
+	if err != nil {
+		root.Close()
+		t.Fatalf("connect (scoped): %v", err)
+	}
+	cleanup = func() {
+		admin.Close()
+		dctx, dcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer dcancel()
+		if _, err := root.Exec(dctx, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Logf("cleanup: drop schema %s: %v", schema, err)
+		}
+		root.Close()
+	}
+	return scopedDSN, admin, cleanup
+}
+
+func maxVersion(t *testing.T, admin *pgxpool.Pool) int {
+	t.Helper()
+	var v int
+	if err := admin.QueryRow(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&v); err != nil {
+		t.Fatalf("read max version: %v", err)
+	}
+	return v
+}
+
+func regExists(t *testing.T, admin *pgxpool.Pool, name string) bool {
+	t.Helper()
+	var reg *string
+	if err := admin.QueryRow(context.Background(), `SELECT to_regclass($1)::text`, name).Scan(&reg); err != nil {
+		t.Fatalf("to_regclass(%q): %v", name, err)
+	}
+	return reg != nil
+}
+
+// TestMigrateFreshAdoptsCurrentAndIsIdempotent: a fresh DB migrates to CurrentSchemaVersion, creating
+// every baseline table, and a SECOND migrate is a steady-state no-op — it issues no DDL and does NOT
+// re-stamp (the row count and the v1 applied_at are unchanged), which is what lets the runtime role drop
+// CREATE/ALTER.
+func TestMigrateFreshAdoptsCurrentAndIsIdempotent(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatalf("first migrate: %v", err)
+	}
+	if got := maxVersion(t, admin); got != CurrentSchemaVersion {
+		t.Fatalf("version after migrate = %d, want %d", got, CurrentSchemaVersion)
+	}
+	// Every baseline table from all three folded stores must exist under the single version.
+	for _, tbl := range []string{"records", "checkpoints", "anchors", "disclosures", "display_seq", "broker_seq", "consume_ledger", "revocations", "pending_grants"} {
+		if !regExists(t, admin, tbl) {
+			t.Fatalf("baseline table %q missing after migrate", tbl)
+		}
+	}
+
+	// Capture the steady-state fingerprint: one stamp per version, and v1's applied_at.
+	var rowCount int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&rowCount); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if rowCount != CurrentSchemaVersion {
+		t.Fatalf("schema_migrations row count = %d, want %d (exactly one stamp per applied version)", rowCount, CurrentSchemaVersion)
+	}
+	var appliedAt time.Time
+	if err := admin.QueryRow(ctx, `SELECT applied_at FROM schema_migrations WHERE version=$1`, CurrentSchemaVersion).Scan(&appliedAt); err != nil {
+		t.Fatalf("read applied_at: %v", err)
+	}
+
+	// Steady state: a second migrate must succeed as a pure no-op — no new stamp, no changed timestamp.
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatalf("second (steady-state) migrate: %v", err)
+	}
+	var rowCount2 int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&rowCount2); err != nil {
+		t.Fatalf("count rows (2): %v", err)
+	}
+	if rowCount2 != rowCount {
+		t.Fatalf("steady-state migrate changed schema_migrations row count %d -> %d (it re-stamped)", rowCount, rowCount2)
+	}
+	var appliedAt2 time.Time
+	if err := admin.QueryRow(ctx, `SELECT applied_at FROM schema_migrations WHERE version=$1`, CurrentSchemaVersion).Scan(&appliedAt2); err != nil {
+		t.Fatalf("read applied_at (2): %v", err)
+	}
+	if !appliedAt2.Equal(appliedAt) {
+		t.Fatalf("steady-state migrate re-stamped v%d (applied_at %v -> %v); it must be a no-op", CurrentSchemaVersion, appliedAt, appliedAt2)
+	}
+}
+
+// TestMigrateBaselineAdoptIsNoOpOnExistingData: an existing UNSTAMPED store (today's baseline DDL applied
+// directly, carrying data, with no schema_migrations) reads as v0 and adopts v1 WITHOUT touching data —
+// the adopt must never rebuild or drop, because the v1 step is exactly today's idempotent DDL.
+func TestMigrateBaselineAdoptIsNoOpOnExistingData(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Simulate a pre-migration averin DB: today's baseline DDL applied directly, no version stamp.
+	if _, err := admin.Exec(ctx, baselineV1); err != nil {
+		t.Fatalf("apply baseline (existing store): %v", err)
+	}
+	if _, err := admin.Exec(ctx, `INSERT INTO records (project_id, idempotency_key, content_hash, session_id, parents, json)
+		VALUES ('p','k','sha256:pre','s','{}','{}')`); err != nil {
+		t.Fatalf("seed pre-existing record: %v", err)
+	}
+	if regExists(t, admin, "schema_migrations") {
+		t.Fatal("precondition failed: schema_migrations must not exist yet (this simulates an unstamped store)")
+	}
+
+	// Adopt the stamp (v0 -> v1). Must be a no-op on data.
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatalf("adopt migrate: %v", err)
+	}
+	if got := maxVersion(t, admin); got != CurrentSchemaVersion {
+		t.Fatalf("version after adopt = %d, want %d", got, CurrentSchemaVersion)
+	}
+	var n int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM records WHERE content_hash='sha256:pre'`).Scan(&n); err != nil {
+		t.Fatalf("count pre-existing record: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pre-existing record lost on adopt (count=%d, want 1) — baseline adopt must be non-destructive", n)
+	}
+}
+
+// TestMigrateNewerVersionFailsClosed: a DB stamped by a NEWER averin than this binary must be a loud,
+// fail-CLOSED refusal — never re-migrated backward, never silently opened. The stored (future) stamp
+// must be left untouched.
+func TestMigrateNewerVersionFailsClosed(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatalf("initial migrate: %v", err)
+	}
+	// Stamp a version above what this binary understands, as a newer averin release would.
+	future := CurrentSchemaVersion + 1
+	if _, err := admin.Exec(ctx, `INSERT INTO schema_migrations (version) VALUES ($1)`, future); err != nil {
+		t.Fatalf("insert future version: %v", err)
+	}
+
+	if err := Migrate(ctx, scoped); err == nil {
+		t.Fatal("migrate against a NEWER stored version must fail closed, got nil error")
+	}
+	// Fail-closed means refuse-and-leave: the future stamp must not have been rewritten or removed.
+	if got := maxVersion(t, admin); got != future {
+		t.Fatalf("version after fail-closed refusal = %d, want %d (must not mutate the ledger)", got, future)
+	}
+}

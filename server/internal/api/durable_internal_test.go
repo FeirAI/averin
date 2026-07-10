@@ -16,6 +16,7 @@ import (
 	"github.com/averin-dev/averin/server/internal/broker"
 	"github.com/averin-dev/averin/server/internal/core"
 	"github.com/averin-dev/averin/server/internal/pgdurable"
+	"github.com/averin-dev/averin/server/internal/pgschema"
 	"github.com/averin-dev/averin/server/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -45,6 +46,12 @@ func newTestDurable(t *testing.T) (pd *pgdurable.Store, dsn string, cleanup func
 	}
 
 	scopedDSN := base + "&search_path=" + schema
+	// pgdurable.New no longer applies DDL — run the versioned migration runner exactly as main() does on
+	// boot, creating the durable tables (and the rest of the averin schema) in this private schema.
+	if err := pgschema.Migrate(ctx, scopedDSN); err != nil {
+		admin.Close()
+		t.Fatalf("pgschema.Migrate: %v", err)
+	}
 	pd, err = pgdurable.New(ctx, scopedDSN)
 	if err != nil {
 		admin.Close()

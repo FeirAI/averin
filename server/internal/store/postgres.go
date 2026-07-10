@@ -85,12 +85,14 @@ func (p *Postgres) PoolStat() PoolStat {
 	}
 }
 
-// Migrate applies the schema SQL (migrations.Schema). The schema is idempotent (CREATE ... IF NOT
-// EXISTS), so this is safe to call on every startup. NOTE: the migration's append-only REVOKE only
-// constrains a non-owner, non-superuser role; when the server connects as the role that owns the
-// tables (e.g. auto-migrate in single-credential self-host), the REVOKE is a no-op and the migration
-// RAISE NOTICEs — see the migration header. For DB-enforced append-only, run migrations as a
-// privileged role and the server as a separate least-privilege role.
+// Migrate applies the schema SQL (migrations.Schema) directly. The schema is idempotent (CREATE ...
+// IF NOT EXISTS). NOTE: the server no longer calls this at startup — the versioned migration runner
+// (internal/pgschema.Migrate) owns boot-time migration, folding this schema with the ledger/durable
+// schemas under a single schema_migrations version. This method is retained as an un-versioned
+// primitive for standalone/tooling use. The migration's append-only REVOKE only constrains a
+// non-owner, non-superuser role; when connecting as the table owner (e.g. single-credential self-host)
+// the REVOKE is a no-op and the migration RAISE NOTICEs — see the migration header. For DB-enforced
+// append-only, run migrations as a privileged role and the server as a separate least-privilege role.
 func (p *Postgres) Migrate(ctx context.Context, schemaSQL string) error {
 	if _, err := p.pool.Exec(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/averin-dev/averin/server/internal/pgledger"
 	"github.com/averin-dev/averin/server/internal/resourceshim"
 )
@@ -21,6 +23,20 @@ func TestPostgresLedger(t *testing.T) {
 		t.Skip("set AVERIN_TEST_DATABASE_URL to run the Postgres ledger test")
 	}
 	ctx := context.Background()
+
+	// pgledger.New no longer applies DDL — the versioned migration runner (internal/pgschema) owns it.
+	// Ensure the ledger table exists (idempotent) before exercising the ledger. This mirrors what New
+	// used to do implicitly, so the test's semantics are unchanged.
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, pgledger.SchemaSQL); err != nil {
+		admin.Close()
+		t.Fatalf("apply ledger schema: %v", err)
+	}
+	admin.Close()
+
 	l, err := pgledger.New(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)

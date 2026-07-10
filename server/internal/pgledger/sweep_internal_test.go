@@ -24,6 +24,12 @@ func TestSweepConsumedDeletesOnlyAgedRows(t *testing.T) {
 	}
 	defer l.Close()
 
+	// New no longer applies DDL (the versioned migration runner internal/pgschema owns it); ensure the
+	// ledger table exists (idempotent) before inserting rows directly through the pool.
+	if _, err := l.pool.Exec(ctx, SchemaSQL); err != nil {
+		t.Fatalf("apply ledger schema: %v", err)
+	}
+
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	oldKey := "sweep-old-" + suffix
 	freshKey := "sweep-fresh-" + suffix

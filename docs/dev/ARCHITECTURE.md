@@ -176,8 +176,11 @@ The `store.Store` interface (`server/internal/store/store.go`) has two implement
   single-process only.
 - **Postgres** (`store.NewPostgres`, selected when `AVERIN_DATABASE_URL` is set) — **append-only at the
   database** (the migration `REVOKE`s UPDATE/DELETE/TRUNCATE, verified under a least-privilege role),
-  with idempotency + content-hash collapse + a DAG-derived frontier computed in SQL. The schema
-  auto-applies on startup (`docker compose up` is turnkey).
+  with idempotency + content-hash collapse + a DAG-derived frontier computed in SQL. A single versioned
+  migration (`server/internal/pgschema`, advisory-lock-guarded, folding the store + ledger + durable
+  schemas under one `schema_migrations` version) auto-applies on first startup (`docker compose up` is
+  turnkey); a steady-state boot issues zero DDL, and a DB newer than the binary is a fail-closed refusal
+  to start. See CONFIGURATION.md → "Schema versioning & upgrades".
 
   **Single-writer-per-project, in-process only (NOT a DB serializable transaction).** The `heads → seal
   → put` ingest critical section is serialized by a **process-local mutex** (`ingestMu` in

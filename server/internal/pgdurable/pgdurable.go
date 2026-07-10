@@ -29,8 +29,9 @@ import (
 // hanging a /v2/revoke or /v2/grants/prepare request forever. Mirrors pgledger's opTimeout.
 const opTimeout = 10 * time.Second
 
-// schemaSQL is applied idempotently at startup (CREATE ... IF NOT EXISTS), matching the store and
-// pgledger packages' auto-migrate-on-boot pattern so `docker compose up` / a k8s rollout stays turnkey.
+// SchemaSQL is this package's baseline DDL. It is applied ONCE by the versioned migration runner
+// (internal/pgschema), which folds it with the store and pgledger schemas under a single
+// schema_migrations version — New no longer applies it, so a steady-state boot issues no DDL.
 //
 // Neither table is integrity-bearing (the DAG + anchor remain the sole integrity root; a signed,
 // exported revocation_list is what the offline verifier trusts, not this table directly) — these are
@@ -38,7 +39,7 @@ const opTimeout = 10 * time.Second
 // insert-only/idempotent (revocation is monotone-add, never un-revoked). pending_grants IS mutated by
 // DELETE once a grant finalizes or its TTL expires — that is expected churn, not a security concern
 // (the finalized grant's durable record of truth is the sealed Decision Record in the main store).
-const schemaSQL = `
+const SchemaSQL = `
 CREATE TABLE IF NOT EXISTS revocations (
 	project_id text        NOT NULL,
 	grant_id   text        NOT NULL,
@@ -61,7 +62,9 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
-// New connects to dsn, applies the (idempotent) schema, and returns a ready Store.
+// New connects to dsn and returns a ready Store. The tables are created by the versioned migration
+// runner (internal/pgschema.Migrate) at startup, not here — so a steady-state boot issues no DDL and
+// the runtime role needs no CREATE. We still Ping to fail fast (fail-CLOSED) if the DSN is unreachable.
 func New(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -70,10 +73,6 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("pgdurable: ping: %w", err)
-	}
-	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("pgdurable: schema: %w", err)
 	}
 	return &Store{pool: pool}, nil
 }

@@ -23,9 +23,13 @@ import (
 // healthy consume is sub-millisecond, so this only fires on a genuine outage, where failing is correct.
 const opTimeout = 10 * time.Second
 
+// SchemaSQL is the ledger's baseline DDL. It is applied ONCE by the versioned migration runner
+// (internal/pgschema), which folds it with the store and pgdurable schemas under a single
+// schema_migrations version — New no longer applies it, so a steady-state boot issues no DDL.
+//
 // The ledger is OPERATIONAL state (consumed nonces/jtis), not evidence — it permits DELETE (the
 // pre-persistence Release rollback), so unlike the evidence store it is NOT append-only / REVOKE'd.
-const schemaSQL = `
+const SchemaSQL = `
 CREATE TABLE IF NOT EXISTS consume_ledger (
 	kind        text        NOT NULL,  -- 'nonce' (PoP replay) | 'jti' (double-spend key: grant_id or grant_id#usn)
 	consume_key text        NOT NULL,
@@ -43,16 +47,18 @@ type Ledger struct {
 
 var _ resourceshim.Ledger = (*Ledger)(nil)
 
-// New opens a connection pool to dsn and ensures the ledger table exists (idempotent, so it is safe
-// under `docker compose up`). The caller must Close it.
+// New opens a connection pool to dsn. The ledger table is created by the versioned migration runner
+// (internal/pgschema.Migrate) at startup, not here — so a steady-state boot issues no DDL and the
+// runtime role needs no CREATE. pgxpool.New is lazy, so we Ping to fail fast (fail-CLOSED) if the DSN
+// is unreachable rather than surfacing it on the first consume. The caller must Close it.
 func New(ctx context.Context, dsn string) (*Ledger, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("pgledger: connect: %w", err)
 	}
-	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
+	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("pgledger: schema: %w", err)
+		return nil, fmt.Errorf("pgledger: ping: %w", err)
 	}
 	return &Ledger{pool: pool}, nil
 }

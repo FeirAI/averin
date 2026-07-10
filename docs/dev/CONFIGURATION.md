@@ -27,12 +27,39 @@ The ingestion + app API. Started with `./averin-server`.
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_DATABASE_URL` | unset ⇒ **in-memory** | No (but see note) | Postgres DSN. When set, uses the append-only Postgres store (auto-applies the idempotent schema on startup, runs the ingest critical section in a serializable transaction). **Connection failure is fatal** — it refuses to silently fall back to a volatile store and lose evidence. Unset ⇒ in-memory store (NOT durable; logs a loud WARNING). Also enables the durable consume-before-act ledger for the resource gateway when that is configured. |
+| `AVERIN_DATABASE_URL` | unset ⇒ **in-memory** | No (but see note) | Postgres DSN. When set, uses the append-only Postgres store (runs the ingest critical section in a serializable transaction). At startup a single **versioned migration** (see "Schema versioning & upgrades" below) brings the DB to the current schema under an advisory lock, then the store runs the ingest critical section in a serializable transaction. **Connection failure — or a DB newer than this binary — is fatal**: it refuses to silently fall back to a volatile store and lose evidence, and refuses to open a DB it might misread. Unset ⇒ in-memory store (NOT durable; logs a loud WARNING). Also enables the durable consume-before-act ledger for the resource gateway when that is configured. |
 | `AVERIN_CONTENT_DIR` | unset ⇒ in-memory | No | Filesystem directory for the durable content store (the raw low-entropy `input`/`output`/`rationale` values committed at ingest, revealed on selective disclosure). Blobs are stored **AES-256-GCM encrypted at rest**, under a per-tenant subdirectory (`<dir>/tenant-<hash>/sha256-<hex>`); the per-tenant key is derived from `AVERIN_CONTENT_MASTER_KEY` via HMAC, with tenant+plaintext-digest as GCM additional-authenticated-data. Encryption is **at-rest only** — a disclosing export still ships the plaintext value, so offline verification is unchanged. A bad/uncreatable dir is fatal. Unset ⇒ in-memory (disclosures don't survive a restart; logs a WARNING). |
 | `AVERIN_CONTENT_MASTER_KEY` (or `_FILE`) | — | **Yes** when `AVERIN_CONTENT_DIR` is set | 64 hex chars = 32-byte master key from which each tenant's content-encryption key is derived. **Missing/invalid with the dir set ⇒ fatal** (`log.Fatal`) — the content store never runs unencrypted. The `_FILE` form reads the value from a mounted secret file (setting both the inline and `_FILE` form is fatal). No effect when the content store is in-memory. |
 | `AVERIN_RAW_RETENTION_DAYS` | `30` | No | Retention window for the encrypted raw payloads: a daily purge deletes blobs older than N days (by file mtime). Must be a positive integer (else fatal). Re-committing identical content refreshes its mtime, restarting the window. Purging removes only the raw opening material — the sealed record keeps its hiding commitment, so a post-purge export reports `raw_content_available:false` while the proofs stay verifiable. Only applies when `AVERIN_CONTENT_DIR` is set. |
 | `AVERIN_WITNESS_DIR` | unset ⇒ no witness | No | Filesystem directory for a customer-controlled append-only checkpoint witness (`<dir>/<project>/checkpoint-<seq>.json`). Best-effort: a witness write failure is a warning, not fatal. Defends omission/rewrite (threats #1/#15). |
 | `AVERIN_TSA_URL` | unset ⇒ no anchoring | No | URL of a third-party RFC 3161 timestamp authority. When set, sealed checkpoints are anchored with an RFC 3161 token (attached at export), defending backdating (threat #3). The verifier must pin this TSA's cert out-of-band (`tsa_keys` in `opts.json`) to trust the anchor. |
+
+#### Schema versioning & upgrades
+
+averin's three Postgres-backed stores — the append-only evidence store, the consume-before-act ledger,
+and the durable revocation / two-phase grant state — share the one `AVERIN_DATABASE_URL`. At startup a
+single **versioned migration runner** (`server/internal/pgschema`) brings that DB to the schema version
+this binary understands, under a `pg_advisory_xact_lock` so two replicas booting against one DB (a
+rolling deploy) cannot race the DDL. It writes one `schema_migrations(version int PRIMARY KEY, applied_at
+timestamptz)` ledger for the whole averin DB, so an operator sees **one** version, not three. (It is
+named `schema_migrations`, distinct from the flight-recorder record's own `schema_version` field.)
+
+The runner reads the stored version (an existing **unstamped** DB reads as `0`) and:
+
+- **stored < binary** ⇒ applies the ordered forward steps and stamps each in the same transaction as its
+  DDL (a crash can never leave version-ahead-of-schema). An unstamped DB adopts version 1, whose step is
+  exactly today's idempotent `CREATE ... IF NOT EXISTS` baseline — **a no-op on existing data** (no
+  rebuild, no drop); just take a backup first, as always.
+- **stored == binary** ⇒ no-op; a steady-state boot issues **zero DDL**. This is what lets the runtime
+  role drop `CREATE`/`ALTER` (run migrations as a privileged role, the server as a least-privilege one;
+  see the append-only role split in `migrations/0001_init.sql`).
+- **stored > binary** ⇒ **fatal, fail-closed refusal to start.** averin's evidence is immutable, so a
+  binary older than the DB never re-migrates it backward or risks misreading it. **Downgrades are not
+  supported**: to roll back a schema change, roll the DB back from a backup taken before the upgrade,
+  then start the older binary against it.
+
+**To add a migration:** bump `CurrentSchemaVersion` and append one ordered DDL step in
+`server/internal/pgschema` — it is a version stamp, not a framework.
 
 ### Authentication (project-scoped API keys)
 

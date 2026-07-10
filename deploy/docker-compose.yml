@@ -38,9 +38,11 @@ services:
       AVERIN_SIGNING_SEED: ${AVERIN_SIGNING_SEED:?set a real 32-byte signing seed, e.g. export AVERIN_SIGNING_SEED=$(openssl rand -hex 32)}
       AVERIN_SIGNING_KEY_ID: k0
       AVERIN_ADDR: ":8080"
-      # Durable append-only store. The server auto-applies the (idempotent) schema on startup. NOTE:
-      # it connects as the table-owning role here, so the append-only REVOKE is a no-op (owner bypass)
-      # — fine for self-host; DB-enforced append-only needs a separate least-privilege role.
+      # Durable append-only store. On startup the server runs a single versioned migration (under an
+      # advisory lock) that brings the DB to its schema version; a steady-state boot issues zero DDL, and
+      # a DB newer than the binary is a fail-closed refusal to start. NOTE: it connects as the
+      # table-owning role here, so the append-only REVOKE is a no-op (owner bypass) — fine for self-host;
+      # DB-enforced append-only needs a separate least-privilege role (which can then drop CREATE/ALTER).
       AVERIN_DATABASE_URL: postgres://averin:${AVERIN_DB_PASSWORD:-averin}@db:5432/averin?sslmode=disable
     # loopback only — the app API is unauthenticated by Phase-1 design (docs/coverage-limits.md);
     # expose via your own authenticated reverse proxy.

@@ -32,7 +32,22 @@ func newTestStore(t *testing.T) (*Store, func()) {
 		t.Fatalf("create schema: %v", err)
 	}
 
-	s, err := New(ctx, base+"&search_path="+schema)
+	scoped := base + "&search_path=" + schema
+	// New no longer applies DDL (the versioned runner internal/pgschema owns it now), so create the
+	// package's tables in the private schema for this unit test, via a pool scoped to that schema.
+	setup, err := pgxpool.New(ctx, scoped)
+	if err != nil {
+		admin.Close()
+		t.Fatalf("connect (setup): %v", err)
+	}
+	if _, err := setup.Exec(ctx, SchemaSQL); err != nil {
+		setup.Close()
+		admin.Close()
+		t.Fatalf("apply schema: %v", err)
+	}
+	setup.Close()
+
+	s, err := New(ctx, scoped)
 	if err != nil {
 		admin.Close()
 		t.Fatalf("New: %v", err)

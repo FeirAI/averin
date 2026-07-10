@@ -30,10 +30,10 @@ import (
 	"github.com/averin-dev/averin/server/internal/meter"
 	"github.com/averin-dev/averin/server/internal/pgdurable"
 	"github.com/averin-dev/averin/server/internal/pgledger"
+	"github.com/averin-dev/averin/server/internal/pgschema"
 	"github.com/averin-dev/averin/server/internal/scrub"
 	"github.com/averin-dev/averin/server/internal/store"
 	"github.com/averin-dev/averin/server/internal/witness"
-	"github.com/averin-dev/averin/server/migrations"
 )
 
 func main() {
@@ -85,6 +85,24 @@ func main() {
 
 	// Storage: Postgres when AVERIN_DATABASE_URL is set (production / persistent self-host), else the
 	// in-memory store (dev / single-process, NOT durable). Postgres is append-only (see migrations).
+	//
+	// Schema migration runs ONCE here, under an advisory lock, BEFORE any of averin's three Postgres
+	// stores (evidence store + consume-before-act ledger + durable revocation/two-phase state) opens its
+	// pool — they all share this one DSN and now run against an already-migrated DB, applying no DDL of
+	// their own. A stored version NEWER than this binary is a loud, fail-CLOSED refusal (averin's
+	// immutable evidence is never re-migrated backward across a downgrade); a steady-state boot issues
+	// zero DDL. No-op when storage is in-memory (no AVERIN_DATABASE_URL).
+	// Use the SAME raw DSN the stores connect with (selectStore/pgledger/pgdurable read os.Getenv
+	// untrimmed) so migrate and connect operate on a byte-identical string.
+	if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
+		mctx, mcancel := context.WithTimeout(context.Background(), 60*time.Second)
+		err := pgschema.Migrate(mctx, dsn)
+		mcancel()
+		if err != nil {
+			log.Fatalf("storage: schema migration: %v", err)
+		}
+		log.Printf("storage: schema migrated (averin DB at version %d)", pgschema.CurrentSchemaVersion)
+	}
 	st := selectStore()
 
 	srv := api.New(c, st, keyID)
@@ -485,10 +503,11 @@ func main() {
 	}
 }
 
-// selectStore returns a Postgres store when AVERIN_DATABASE_URL is set, else the in-memory store. For
-// Postgres it applies the (idempotent) schema on startup so `docker compose up` is turnkey. A failed
-// DB connection is fatal — if the operator asked for Postgres, silently falling back to a volatile
-// in-memory store would lose evidence, so we refuse to start instead.
+// selectStore returns a Postgres store when AVERIN_DATABASE_URL is set, else the in-memory store. The
+// schema is applied by the versioned migration runner (pgschema.Migrate) BEFORE this is called, so the
+// store just opens its pool against an already-migrated DB. A failed DB connection is fatal — if the
+// operator asked for Postgres, silently falling back to a volatile in-memory store would lose evidence,
+// so we refuse to start instead.
 func selectStore() store.Store {
 	dsn := os.Getenv("AVERIN_DATABASE_URL")
 	if dsn == "" {
@@ -503,9 +522,6 @@ func selectStore() store.Store {
 	pg, err := store.NewPostgres(ctx, dsn)
 	if err != nil {
 		log.Fatalf("storage: Postgres requested but unavailable: %v", err)
-	}
-	if err := pg.Migrate(ctx, migrations.Schema); err != nil {
-		log.Fatalf("storage: migrate: %v", err)
 	}
 	log.Printf("storage: Postgres (append-only)")
 	return pg
