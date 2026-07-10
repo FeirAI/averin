@@ -55,9 +55,14 @@ two valid sources are `policy_engine_signed` and `human_signed`.
 | `AVERIN_POLICY_ENGINE_SOURCE` | `policy_engine_signed` | No | The source the above key vouches for. |
 | `AVERIN_HUMAN_SIGNED_PUBKEY` | unset | No | Pins one key for the `human_signed` source (e.g. a separate human-approval service, signing with a different key than the policy engine). Bad value ⇒ fatal. |
 | `AVERIN_AUTHORITY_KEYS` | unset | No | General `source=pubkey,source=pubkey` list (sources: `policy_engine_signed`, `human_signed`). A malformed entry, an unknown source, or a duplicate source is fatal. Pinning the **same** source twice across any of these three forms is a fatal config error. |
+| `AVERIN_REQUIRE_PINNED_AUTHORITY` | `0` (off) | No | **Fail-closed authority posture.** When on (`1`/`true`), a record that CLAIMS an elevated source (`policy_engine_signed`/`human_signed`/`delegate_signed`) whose `evidence_sig` fails to verify under the pinned key — or that names an **unpinned** source — is **REJECTED** with a retryable `500` instead of silently sealed downgraded to the forgeable `caller_declared`. Turn it on for a signed kill/approval feed (e.g. govder's `human_signed` records) so a pinned-key **misalignment** fails loudly rather than permanently recording a kill/audit at forgeable authority. **Off preserves the Phase-1 default** (silent downgrade + a rate-limited WARNING + the `averin_authority_downgrades_total` counter). Ordinary `caller_declared` traffic is never affected either way. |
 
 Every pinned authority key must be role-separated (it is rejected if it equals the server signing
 key or the resource key, or if one key is reused across two sources).
+
+Whether or not the fail-closed toggle is on, a **failed** elevation increments
+`averin_authority_downgrades_total` and emits a rate-limited `WARNING` naming the claimed source and
+the pinned-key id — so a govder/averin key misalignment is visible in both metrics and logs.
 
 ### Credential broker (Level 3 Tier-A — `POST /v2/grants`)
 
@@ -83,6 +88,10 @@ key or the resource key, or if one key is reused across two sources).
 When the resource gateway is on, the consume-before-act ledger is **durable Postgres-backed** if
 `AVERIN_DATABASE_URL` is set, else an in-memory (volatile) ledger (logs a WARNING that a single-use
 replay window reopens on restart).
+
+| Variable | Default | Required | Behavior |
+|----------|---------|----------|----------|
+| `AVERIN_LEDGER_RETENTION` | `720h` (30 days) | No | TTL for the Postgres consume-before-act ledger. A background hourly sweep deletes consumed `nonce`/`jti` rows older than this (the ledger otherwise grows one row per PoP nonce + per credential double-spend key, forever). **This is a correctness parameter, not tuning:** it MUST exceed the longest credential validity window (`broker.MaxTTL` = 1h) — a value that prunes a still-live nonce/jti would reopen the single-use replay this ledger closes. A configured value **below the 24h safe floor is fatal at startup**; a non-positive/malformed duration is fatal. Only applies with the durable (Postgres) ledger. |
 
 ### Revocation authority (`POST /v2/revoke`)
 

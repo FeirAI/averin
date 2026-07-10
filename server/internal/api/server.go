@@ -169,6 +169,24 @@ type Server struct {
 	// NextCheckpointSeq and fork the checkpoint chain.
 	checkpointMu sync.Mutex
 
+	// requirePinnedAuthority (AVERIN_REQUIRE_PINNED_AUTHORITY, default OFF) makes an authority-BEARING
+	// record whose CLAIMED elevation (policy_engine_signed / human_signed / delegate_signed) FAILS key
+	// verification REJECT the ingest (fail-closed) instead of silently sealing it downgraded to the
+	// forgeable caller_declared. Off preserves the Phase-1 default (silent downgrade, back-compat); on is
+	// for deployments (e.g. govder's signed kill/approval feed) where a pinned-key MISALIGNMENT must fail
+	// loudly, never permanently record a kill/audit at forgeable authority. See normalizeAuthority.
+	requirePinnedAuthority bool
+	// authorityDowngradeLogAt throttles the WARNING that names a failed authority elevation (a govder/averin
+	// key misalignment can otherwise spam it on every ingest). Guarded by ingestMu: normalizeAuthority — its
+	// only writer — is only ever called from ingestOne while ingestMu is held, so it needs no extra lock.
+	authorityDowngradeLogAt time.Time
+	// bundleSem caps concurrent whole-project bundle builds (GET /v2/export + /v2/verify). Each buildBundle
+	// materializes the project's full record+checkpoint history in RAM (see docs/dev/LIMITATIONS.md), so a
+	// burst of large exports could otherwise exhaust memory. A full-scan build under this cap is also lifted
+	// off the server's finite WriteTimeout (per-handler deadline) so a large-but-legitimate export is not
+	// hard-killed mid-write. Buffered to maxConcurrentBundleReads; a saturated cap yields 503.
+	bundleSem chan struct{}
+
 	// readiness is the set of dependencies GET /readyz probes (each with a short per-request timeout)
 	// before reporting 200 — see WithReadiness. Empty (dev / in-memory store, no Postgres configured)
 	// means /readyz has nothing to be unready about and always reports ready.
@@ -210,6 +228,7 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		keyValidFrom: "2026-01-01T00:00:00.000Z",
 		now:          time.Now,
 		pending:      make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
+		bundleSem:    make(chan struct{}, maxConcurrentBundleReads),
 
 		metrics: reg,
 		mRecordsSealed: reg.Counter("averin_records_sealed_total",
@@ -331,6 +350,17 @@ func (s *Server) WithBrokerID(brokerID string) *Server {
 // posture needs.
 func (s *Server) WithDeniedGrantLog() *Server {
 	s.denyLog = true
+	return s
+}
+
+// WithRequirePinnedAuthority (AVERIN_REQUIRE_PINNED_AUTHORITY) flips the fail-closed authority posture: when
+// on, a record that CLAIMS an elevated authority source (policy_engine_signed / human_signed / delegate_signed)
+// whose evidence does NOT verify under the pinned key — or that names an UNPINNED source — is REJECTED (a
+// retryable ingest error) rather than silently sealed downgraded to caller_declared. Default off preserves the
+// Phase-1 back-compat behavior (silent downgrade). Ordinary caller_declared traffic is never affected either way
+// (it claims no elevation to fail). See normalizeAuthority.
+func (s *Server) WithRequirePinnedAuthority(v bool) *Server {
+	s.requirePinnedAuthority = v
 	return s
 }
 
@@ -828,6 +858,14 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 	for _, raw := range items {
 		sealed, created, err := s.ingestOne(raw, headerIdem)
 		if err != nil {
+			// A rejected authority elevation (AVERIN_REQUIRE_PINNED_AUTHORITY) is an infrastructure/config
+			// fail-closed, not caller-bad-input: surface it as a retryable 500 (idempotency makes the retry
+			// safe once the operator aligns the pinned key), distinct from the deterministic 400-class
+			// validation errors ingestOne returns for a malformed record.
+			if errors.Is(err, errAuthorityRejected) {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1087,8 +1125,12 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	if stringField(rec, "record_id") == "" {
 		rec["record_id"] = newUUID()
 	}
-	// authority is declared by default — never silently presented as verified (threat #4).
-	s.normalizeAuthority(rec)
+	// authority is declared by default — never silently presented as verified (threat #4). With
+	// AVERIN_REQUIRE_PINNED_AUTHORITY on, a claimed elevation that fails key verification returns
+	// errAuthorityRejected here (fail-closed) rather than sealing downgraded to caller_declared.
+	if err := s.normalizeAuthority(rec); err != nil {
+		return "", false, err
+	}
 
 	// Replace any raw input/output/rationale with a hiding commitment (RCP §9.3, threat #6); the
 	// plaintext goes to the content store and never enters the signed body. The disclosure secrets
@@ -1128,7 +1170,14 @@ func (s *Server) sealAndStore(projectID, sessionID, idem string, rec map[string]
 	if _, ok := rec["parent_span_id"]; !ok {
 		rec["parent_span_id"] = nil
 	}
-	seq, _ := s.st.NextDisplaySeq(projectID, sessionID)
+	// FAIL-CLOSED on the frontier reads: this store is append-only + signed, so a record sealed against a
+	// silently-defaulted frontier is a permanent defect. A NextDisplaySeq error must abort (never seal with a
+	// bogus display_seq), mirroring createCheckpoint's fail-closed snapshot reads. Callers treat a sealAndStore
+	// error as a retryable 5xx and idempotency makes the retry safe (a released credential re-validates).
+	seq, err := s.st.NextDisplaySeq(projectID, sessionID)
+	if err != nil {
+		return "", false, fmt.Errorf("seal: read display seq: %w", err)
+	}
 	rec["display_seq"] = seq
 
 	// sensible defaults for required semantic fields so a minimal record is still valid
@@ -1155,7 +1204,13 @@ func (s *Server) sealAndStore(projectID, sessionID, idem string, rec map[string]
 	// causal DAG links = the session's current heads (server-derived, never client-trusted).
 	// NOTE: heads+seal+put are not yet one atomic transaction in the in-memory store; the Postgres
 	// store performs this in a single serializable transaction.
-	heads, _ := s.st.Heads(projectID, sessionID)
+	// FAIL-CLOSED (security-load-bearing): a swallowed Heads() error would leave heads=nil → parents=[] →
+	// the record sealed as a DETACHED, parentless DAG root — permanently forging a break in the causal
+	// chain the verifier relies on. A read failure MUST abort the seal, never manufacture a detached root.
+	heads, err := s.st.Heads(projectID, sessionID)
+	if err != nil {
+		return "", false, fmt.Errorf("seal: read session heads: %w", err)
+	}
 	// A caller (the use_outcome producer) may pre-set causal_prev_hashes to FORCE a parent edge that must
 	// persist even when the target is no longer a session head — the outcome MUST link to its intent so the
 	// verifier's before-act DAG-consistency check holds even if a record was appended between the two phases.
@@ -2424,19 +2479,36 @@ func rawValueBytes(v any) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-// normalizeAuthority enforces honest authority labeling. In Phase 1 the server does not yet verify
-// `evidence_sig` against a policy engine's published key, so it NEVER labels authority as
-// `policy_engine_signed`/`human_signed` on the client's say-so — it forces `caller_declared` while
-// retaining any evidence fields for a future verifier to upgrade. (spec §11; coverage-limits.md)
-func (s *Server) normalizeAuthority(rec map[string]any) {
+// errAuthorityRejected is returned by normalizeAuthority when AVERIN_REQUIRE_PINNED_AUTHORITY is on and a
+// record's CLAIMED elevated authority (an authority-bearing kill/approval/policy/delegation claim) fails key
+// verification. Rather than silently sealing it downgraded to the forgeable caller_declared (the default,
+// back-compat behavior), the ingest is REJECTED so a govder/averin key MISALIGNMENT surfaces loudly instead of
+// permanently recording a kill/audit at forgeable authority. Callers map it to a retryable 500 — idempotency
+// makes the retry safe, and once the operator aligns the pinned key the same record elevates and seals.
+var errAuthorityRejected = errors.New("authority elevation rejected (AVERIN_REQUIRE_PINNED_AUTHORITY): claimed source failed key verification")
+
+// authorityDowngradeLogInterval throttles the failed-elevation WARNING so a persistent key misalignment
+// (which fires on every ingest) cannot flood the log; the metrics counter carries the exact count.
+const authorityDowngradeLogInterval = time.Minute
+
+// normalizeAuthority enforces honest authority labeling. The server never labels authority as an elevated
+// source on the client's say-so: a claimed policy_engine_signed / human_signed / delegate_signed elevates only
+// if its evidence_sig verifies under the key pinned FOR THAT source (T7); otherwise the source is unpinned or
+// the evidence fails, which is a FAILED elevation. On a failed elevation the default (back-compat) behavior is
+// to downgrade to the forgeable caller_declared and seal anyway; with AVERIN_REQUIRE_PINNED_AUTHORITY on it
+// instead REJECTS the ingest (fail-closed) so a key MISALIGNMENT never permanently records an authority-bearing
+// record at forgeable authority. A record with no elevated claim (empty/caller_declared) is untouched by either
+// mode. (spec §11; coverage-limits.md)
+func (s *Server) normalizeAuthority(rec map[string]any) error {
 	a, ok := rec["authority"].(map[string]any)
 	if !ok {
-		return
+		return nil
 	}
 	claimed, _ := a["source"].(string)
 	// A record with no elevated claim at all (empty, or already caller_declared) has nothing to
 	// downgrade FROM — only an ATTEMPTED elevation that fails counts toward mAuthorityDowngrades below
-	// (the silent key-misalignment signal), so ordinary caller_declared traffic does not swamp it.
+	// (the silent key-misalignment signal), so ordinary caller_declared traffic does not swamp it, and the
+	// fail-closed toggle never rejects plain caller_declared Phase-1 traffic.
 	attemptedElevation := claimed != "" && claimed != "caller_declared"
 	// Phase-1 default, or a source with no pinned key: authority is forgeable -> caller_declared (threat #4).
 	// Looking the key up BY the claimed source is what lets policy_engine_signed AND human_signed coexist —
@@ -2445,10 +2517,13 @@ func (s *Server) normalizeAuthority(rec map[string]any) {
 	if !pinned {
 		if attemptedElevation {
 			s.mAuthorityDowngrades.Inc()
+			if err := s.onFailedElevation(claimed, "unpinned"); err != nil {
+				return err
+			}
 		}
 		a["source"] = "caller_declared"
 		rec["authority"] = a
-		return
+		return nil
 	}
 	// T7 model (b): elevate to the claimed source ONLY if the caller-supplied evidence_sig verifies under that
 	// source's pinned key over the canonical authority preimage; else fall back to caller_declared.
@@ -2462,9 +2537,45 @@ func (s *Server) normalizeAuthority(rec map[string]any) {
 		// A source IS pinned but the evidence failed to verify under it — a genuine key-misalignment
 		// (wrong signature, wrong preimage, or a forged claim), not just an unconfigured source.
 		s.mAuthorityDowngrades.Inc()
+		if err := s.onFailedElevation(claimed, authorityKeyID(key)); err != nil {
+			return err
+		}
 		a["source"] = "caller_declared"
 	}
 	rec["authority"] = a
+	return nil
+}
+
+// onFailedElevation is the companion to the mAuthorityDowngrades counter: it emits a rate-limited WARNING that
+// NAMES the claimed source and the pinned-key id (or "unpinned") — so a silent govder/averin key misalignment
+// is visible in logs, not only in metrics — and, when AVERIN_REQUIRE_PINNED_AUTHORITY is on, returns
+// errAuthorityRejected so the caller REJECTS the ingest instead of sealing the record downgraded to
+// caller_declared. The reject is NOT rate-limited (every failing record must fail closed); only the log line is.
+// Called under ingestMu (via normalizeAuthority ← ingestOne), so authorityDowngradeLogAt needs no extra lock.
+func (s *Server) onFailedElevation(claimed, keyID string) error {
+	now := s.now()
+	if now.Sub(s.authorityDowngradeLogAt) >= authorityDowngradeLogInterval {
+		s.authorityDowngradeLogAt = now
+		disposition := "downgraded to forgeable caller_declared and sealed"
+		if s.requirePinnedAuthority {
+			disposition = "REJECTED (AVERIN_REQUIRE_PINNED_AUTHORITY on)"
+		}
+		log.Printf("WARNING: authority elevation FAILED key verification (claimed source=%q, pinned_key=%s) — record %s. A govder/averin authority-key MISALIGNMENT can affect every kill/approval/policy record; verify the pinned authority pubkey. (count: averin_authority_downgrades_total)", claimed, keyID, disposition)
+	}
+	if s.requirePinnedAuthority {
+		return fmt.Errorf("%w: source %q, pinned_key %s", errAuthorityRejected, claimed, keyID)
+	}
+	return nil
+}
+
+// authorityKeyID renders a short, log-safe fingerprint of a pinned authority verifying key (a base64url
+// prefix), so a WARNING can name WHICH pinned key an elevation was checked against without dumping the key.
+func authorityKeyID(key ed25519.PublicKey) string {
+	enc := base64.RawURLEncoding.EncodeToString(key)
+	if len(enc) > 12 {
+		return enc[:12] + "..."
+	}
+	return enc
 }
 
 // verifyAuthorityEvidence checks an authority evidence_sig exactly as the offline verifier does (core
@@ -2795,12 +2906,22 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	// grant/record insert can interleave between the frontier read and the grant-log read (D6). Otherwise
 	// the signed broker_grant_head could fold a grant the checkpoint frontier does not commit, and the
 	// offline D6 recomputation over the closed set would falsely report suppression. Lock order is always
-	// checkpointMu → ingestMu (no path takes them the other way), so there is no deadlock; the reads are
-	// O(records) but bounded by the same lock the ingest path already serializes on.
+	// checkpointMu → ingestMu (no path takes them the other way), so there is no deadlock.
+	//
+	// GrantRecords replaces the prior AllRecords full-scan: grantLog only folds grant-tuple records, so we no
+	// longer materialize the WHOLE project history in RAM per checkpoint — only the grant records. It stays
+	// UNDER ingestMu (same D6 single-snapshot guarantee — the read cannot interleave with a grant insert), and
+	// is a SUPERSET of grantLog's membership set (it filters on the tuple's necessary marker
+	// extensions.broker.kind=="grant"; grantLog re-applies the exact rule incl. enforcement_point+broker_seq),
+	// so it can never MISS a grant → no suppression. NOTE this is a RAM/parse reduction, not a lock-latency one:
+	// without an index on the grant marker the DB still scans O(records). A truly O(grants) indexed read (a
+	// durable incremental grant head off broker_seq + a content_hash column) is a DEFERRED rearchitecture — it
+	// needs a schema migration/backfill (collides with averin#22's single-init-file constraint) and is not
+	// worth reopening a grant-suppression race here.
 	s.ingestMu.Lock()
 	heads, headsErr := s.st.ProjectHeads(projectID)
 	count, countErr := s.st.RecordCount(projectID)
-	allRecs, recErr := s.st.AllRecords(projectID)
+	grantRecs, recErr := s.st.GrantRecords(projectID)
 	s.ingestMu.Unlock()
 	// Surface any snapshot-read error: signing a checkpoint with an empty frontier (heads=nil) while the
 	// grant head folds a non-empty grant set would anchor a frontier that disagrees with the grant set it
@@ -2826,7 +2947,7 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	// The cumulative_root folds every recorded grant's (broker_seq, content_hash) in seq order, chained
 	// to the previous checkpoint's cumulative_root — so a dropped/renumbered/forked grant fails the
 	// verifier's re-derivation.
-	gl, err := grantLog(allRecs)
+	gl, err := grantLog(grantRecs)
 	if err != nil {
 		return "", nil, err
 	}
@@ -2896,6 +3017,9 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 		if err := s.witness.Append(wctx, projectID, []byte(sealed)); err != nil {
 			warns = append(warns, fmt.Sprintf("witness append failed (backfill needed): %v", err))
 			s.mWitnessFailures.Inc()
+			// Also LOG (not only return to the HTTP caller): an un-witnessed checkpoint is an operational gap
+			// an operator must backfill, and the /v2/checkpoints response is often not watched.
+			log.Printf("WARNING: checkpoint %s (project %s) stored UN-WITNESSED — witness append failed, backfill needed: %v", cp.CheckpointHash, projectID, err)
 		}
 		cancel()
 	}
@@ -2909,6 +3033,9 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 		if err := s.anchorCheckpoint(ctx, projectID, cp.Seq, cp.CheckpointHash); err != nil {
 			warns = append(warns, fmt.Sprintf("checkpoint stored un-anchored (TSA failed, backfillable): %v", err))
 			s.mAnchorFailures.Inc()
+			// Also LOG: an un-anchored checkpoint has no third-party timestamp (threat #3 backdating window)
+			// until back-anchored; surface it beyond the (often-unwatched) HTTP warning.
+			log.Printf("WARNING: checkpoint %s (project %s) stored UN-ANCHORED — TSA stamp failed, back-anchor needed: %v", cp.CheckpointHash, projectID, err)
 		}
 	}
 
@@ -2980,25 +3107,37 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	recs, err := s.st.AllRecords(projectID)
+	// Optional offset for paging deeper than the newest page (default 0 keeps the prior behavior byte-for-byte).
+	offset := 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		n, err := strconv.Atoi(offsetStr)
+		if err != nil || n < 0 {
+			writeErr(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		}
+		offset = n
+	}
+	// Page IN THE STORE (SQL LIMIT/OFFSET on Postgres) rather than loading the whole project history into RAM
+	// and slicing — a large tenant no longer materializes every record per list call. RecordsPage returns
+	// newest-first; RecordCount is a cheap indexed count for the truncation-honesty total.
+	total, err := s.st.RecordCount(projectID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	total := len(recs)
-	start := 0
-	if total > limit {
-		start = total - limit
+	page, err := s.st.RecordsPage(projectID, limit, offset)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-	slice := recs[start:]
-	out := make([]json.RawMessage, len(slice))
-	for i, rec := range slice {
-		out[len(slice)-1-i] = json.RawMessage(rec.JSON)
+	out := make([]json.RawMessage, len(page))
+	for i, rec := range page {
+		out[i] = json.RawMessage(rec.JSON) // already newest-first
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"records":   out,
 		"total":     total,
-		"truncated": total > limit,
+		"truncated": offset+len(page) < total,
 	})
 }
 
@@ -3018,6 +3157,11 @@ func (s *Server) handleDAG(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+	release, ok := s.acquireBundleSlot(w)
+	if !ok {
+		return
+	}
+	defer release()
 	projectID := r.URL.Query().Get("project")
 	bundle, err := s.buildBundle(projectID, false)
 	if err != nil {
@@ -3085,6 +3229,11 @@ func validRecordKind(k string) bool {
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
+	release, ok := s.acquireBundleSlot(w)
+	if !ok {
+		return
+	}
+	defer release()
 	projectID := r.URL.Query().Get("project")
 	mode := r.URL.Query().Get("mode")
 	if mode == "" {
@@ -3222,6 +3371,37 @@ func (s *Server) buildDisclosures(projectID string) ([]map[string]any, error) {
 		})
 	}
 	return out, nil
+}
+
+// maxConcurrentBundleReads caps concurrent whole-project bundle builds (GET /v2/export + /v2/verify). Each
+// build materializes the project's full record + checkpoint history in RAM (see docs/dev/LIMITATIONS.md), so
+// an unbounded burst of large exports could exhaust memory; a saturated cap returns 503 (retryable).
+const maxConcurrentBundleReads = 4
+
+// bundleWriteTimeout is the per-handler write deadline used for /v2/export + /v2/verify, replacing the
+// server's global 60s WriteTimeout for JUST these two long-response routes (main.go keeps the finite timeout
+// for every other route, preserving Slowloris protection). Generous so a large-but-legitimate export is not
+// hard-killed mid-write; a full cursor-streaming export (constant memory, no whole-history materialization) is
+// a DEFERRED design item — see docs/dev/LIMITATIONS.md.
+const bundleWriteTimeout = 10 * time.Minute
+
+// acquireBundleSlot admits a whole-project bundle build (export/verify) under maxConcurrentBundleReads and
+// lifts the finite WriteTimeout for this response (via a per-handler deadline). Returns ok=false — having
+// already written a 503 — when the cap is saturated. The caller MUST defer release() when ok.
+func (s *Server) acquireBundleSlot(w http.ResponseWriter) (release func(), ok bool) {
+	select {
+	case s.bundleSem <- struct{}{}:
+	default:
+		writeErr(w, http.StatusServiceUnavailable, "too many concurrent export/verify requests; retry shortly")
+		return nil, false
+	}
+	// Lift the server's finite WriteTimeout for THIS response only: a large export can legitimately take
+	// longer than 60s to serialize. http.ResponseController plumbs the deadline to the underlying conn; the
+	// error (e.g. httptest recorders that don't support deadlines) is best-effort and safely ignored.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(bundleWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		log.Printf("WARNING: could not extend write deadline for a bundle response: %v", err)
+	}
+	return func() { <-s.bundleSem }, true
 }
 
 // buildBundle assembles the export/verify bundle: published key, all sealed records, and the full

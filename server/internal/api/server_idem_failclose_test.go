@@ -57,6 +57,53 @@ func TestUseFailsClosedOnIdemStoreError(t *testing.T) {
 	}
 }
 
+// failHeadsStore injects a Heads() read error, to prove sealAndStore FAILS CLOSED on a frontier-read failure
+// (averin#4): a swallowed Heads() error would seal the record as a DETACHED, parentless DAG root — a permanent
+// forgery of the causal chain. The error must instead abort the seal.
+type failHeadsStore struct {
+	store.Store
+	fail bool
+}
+
+func (f *failHeadsStore) Heads(projectID, sessionID string) ([]string, error) {
+	if f.fail {
+		return nil, errors.New("injected Heads failure")
+	}
+	return f.Store.Heads(projectID, sessionID)
+}
+
+// TestSealFailsClosedOnHeadsStoreError (averin#4): a Heads() store error inside sealAndStore must abort the
+// seal with 500 — NEVER seal a record against an empty (nil→[]) frontier as a detached parentless root. Driven
+// via /v2/use (sealAndStore's Heads() call is on every seal path); the error is pre-commit, so the consumed
+// credential is released and the SAME credential re-validates + seals once the store recovers (proof nothing
+// was sealed during the failed attempt).
+func TestSealFailsClosedOnHeadsStoreError(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatalf("core: %v", err)
+	}
+	rc, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatalf("resource core: %v", err)
+	}
+	fh := &failHeadsStore{Store: store.NewMem()}
+	h := api.New(c, fh, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+
+	ak := grantAgentKey()
+	grantID, cap := mkGrant(t, h, ak, "idem-grant") // grant seals while Heads is healthy
+
+	fh.fail = true
+	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusInternalServerError {
+		t.Fatalf("a Heads() store error must fail closed as 500 (no detached-root seal), got %d: %s", code, r)
+	}
+
+	// nothing was sealed and the credential was NOT consumed: with the store healthy the SAME nonce seals.
+	fh.fail = false
+	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusCreated {
+		t.Fatalf("after the store recovers, the un-consumed credential must seal a receipt, got %d: %s", code, r)
+	}
+}
+
 // failContentStore injects a content-store Put failure, to drive a buildUseRecord error AFTER ValidateUse
 // has consumed the credential (the use receipt stores its params content-addressed during construction).
 type failContentStore struct {

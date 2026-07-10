@@ -12,7 +12,7 @@ composes with sibling planes.
 
 > Status: **alpha** (`v0.1.0`, Apache-2.0). Phase 1 (integrity core, ingest, verify, export) is
 > built, tested, and reviewed; Phase 2 (authority verification, credential broker, resource
-> gateway, Postgres durability) is largely landed. See [Limitations](#limitations) for the honest
+> gateway, Postgres durability) is largely landed. See [LIMITATIONS.md](LIMITATIONS.md) for the honest
 > v1 bounds.
 
 ## Contents
@@ -26,6 +26,7 @@ composes with sibling planes.
 | [SECURITY.md](SECURITY.md) | Threat model, invariants, authn/authz, trust boundaries, and what averin deliberately does **not** do. |
 | [INTEGRATION.md](INTEGRATION.md) | Standalone client integration (SDKs + raw API); optional cross-plane composition via the contracts. |
 | [TESTING.md](TESTING.md) | Running the tests + the offline-verifier conformance vectors; a contributing note. |
+| [LIMITATIONS.md](LIMITATIONS.md) | Shipped-behavior bounds: the in-memory export/verify size bound (+ concurrency cap and write-timeout exemption), the paged list read, the filtered checkpoint grant-head read, OTel scrub scope, and consume-ledger retention. |
 
 ## The claim, precisely
 

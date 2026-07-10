@@ -5,6 +5,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"sort"
 	"sync"
@@ -67,6 +68,16 @@ type Store interface {
 	Sessions(projectID string) ([]string, error)
 	SessionRecords(projectID, sessionID string) ([]Record, error)
 	AllRecords(projectID string) ([]Record, error)
+	// RecordsPage returns up to `limit` records NEWEST-FIRST, skipping the newest `offset`, WITHOUT loading
+	// the whole project history into memory (Postgres pages in SQL). It backs the paged app list endpoint so
+	// a large tenant is not fully materialized per list call. limit<=0 returns an empty page; offset<0 == 0.
+	RecordsPage(projectID string, limit, offset int) ([]Record, error)
+	// GrantRecords returns the project's credential-broker GRANT records (a superset of the transparency-log
+	// membership set — it filters on the necessary marker extensions.broker.kind=="grant"; api.grantLog
+	// re-applies the exact D6 rule). It exists so checkpoint creation folds the grant head from the grant
+	// records alone instead of a full-history scan; it MUST never omit a real grant (that would be
+	// suppression), so implementations filter LOOSELY (superset) and let grantLog tighten. Never nil.
+	GrantRecords(projectID string) ([]Record, error)
 	RecordCount(projectID string) (int, error)
 
 	PutCheckpoint(projectID string, cp Checkpoint) error
@@ -274,6 +285,59 @@ func (m *Mem) AllRecords(projectID string) ([]Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]Record(nil), m.proj(projectID).records...), nil
+}
+
+// RecordsPage returns up to `limit` records newest-first, skipping the newest `offset`. The Mem store holds
+// records oldest-first in insertion order, so we walk from the end. (Postgres does the same via SQL
+// ORDER BY ... DESC LIMIT/OFFSET — this is the dev/test parity path, not the memory-bounded one.)
+func (m *Mem) RecordsPage(projectID string, limit, offset int) ([]Record, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		return []Record{}, nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	recs := m.proj(projectID).records
+	total := len(recs)
+	// newest-first index i (0 = newest) maps to recs[total-1-i].
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	out := make([]Record, 0, end-start)
+	for i := start; i < end; i++ {
+		out = append(out, recs[total-1-i])
+	}
+	return out, nil
+}
+
+// GrantRecords returns the project's grant-tuple records (a superset for api.grantLog). Mem filters on the
+// necessary marker extensions.broker.kind=="grant" so it matches the Postgres implementation's superset; a
+// non-grant is dropped and grantLog re-verifies enforcement_point+broker_seq. Parse failures are conservatively
+// INCLUDED (never silently dropped) so a malformed grant can never be suppressed from the transparency log.
+func (m *Mem) GrantRecords(projectID string) ([]Record, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []Record{}
+	for _, r := range m.proj(projectID).records {
+		var parsed struct {
+			Extensions struct {
+				Broker struct {
+					Kind string `json:"kind"`
+				} `json:"broker"`
+			} `json:"extensions"`
+		}
+		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil || parsed.Extensions.Broker.Kind == "grant" {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 func (m *Mem) RecordCount(projectID string) (int, error) {

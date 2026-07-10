@@ -162,6 +162,17 @@ func main() {
 			log.Printf("T7 authority key pinned (source=%s, via AVERIN_AUTHORITY_KEYS): a verifying authority evidence_sig elevates to %s", source, source)
 		}
 	}
+	// AVERIN_REQUIRE_PINNED_AUTHORITY (default OFF, back-compat): when on, a record that CLAIMS an elevated
+	// authority source (policy_engine_signed/human_signed/delegate_signed) whose evidence fails to verify under
+	// the pinned key — or that names an UNPINNED source — is REJECTED (a retryable 500) instead of silently
+	// sealed downgraded to the forgeable caller_declared. Turn it on for a signed kill/approval feed (e.g.
+	// govder) so a pinned-key MISALIGNMENT fails loudly, never permanently records a kill/audit at forgeable
+	// authority. Off preserves the Phase-1 default (silent downgrade); ordinary caller_declared traffic is
+	// unaffected either way.
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("AVERIN_REQUIRE_PINNED_AUTHORITY"))); v == "1" || v == "true" {
+		srv.WithRequirePinnedAuthority(true)
+		log.Printf("AVERIN_REQUIRE_PINNED_AUTHORITY on: a claimed authority elevation that fails key verification is REJECTED (fail-closed), not downgraded to caller_declared")
+	}
 	// durable content store for committed low-entropy values (raw input/output/rationale). No dir =
 	// in-memory (NOT durable; disclosures won't survive a restart).
 	if dir := os.Getenv("AVERIN_CONTENT_DIR"); dir != "" {
@@ -301,6 +312,25 @@ func main() {
 				log.Fatalf("resource ledger: Postgres requested but unavailable: %v", err)
 			}
 			srv.WithLedger(pl)
+			// Periodic TTL sweep of the consume_ledger (it otherwise grows one row per PoP nonce + per jti
+			// forever; only a Release ever deletes). AVERIN_LEDGER_RETENTION sets how long a consumed
+			// nonce/jti is kept — a CORRECTNESS parameter, NOT tuning: it MUST exceed the longest credential
+			// validity window (broker.MaxTTL = 1h) or a pruned-but-still-live nonce/jti becomes replayable.
+			// Default 720h (30d) is ~720x MaxTTL; a floor rejects a dangerously small value at startup.
+			retention := 720 * time.Hour
+			const ledgerRetentionFloor = 24 * time.Hour // >> broker.MaxTTL (1h); a value under this reopens replay
+			if raw := strings.TrimSpace(os.Getenv("AVERIN_LEDGER_RETENTION")); raw != "" {
+				d, perr := time.ParseDuration(raw)
+				if perr != nil || d <= 0 {
+					log.Fatalf("AVERIN_LEDGER_RETENTION must be a positive Go duration (e.g. 720h): %v", perr)
+				}
+				if d < ledgerRetentionFloor {
+					log.Fatalf("AVERIN_LEDGER_RETENTION %s is below the safe floor %s — pruning a nonce/jti still inside a live credential's validity window would reopen the single-use replay this ledger closes", d, ledgerRetentionFloor)
+				}
+				retention = d
+			}
+			pl.StartSweeper(context.Background(), retention, time.Hour)
+			log.Printf("consume_ledger TTL sweep enabled (retention %s, hourly)", retention)
 			srv.WithReadiness("resource_ledger", pl)
 			srv.WithGauge("averin_ledger_pool_total_conns", "Resource ledger Postgres pool: total connections.",
 				func() float64 { return float64(pl.PoolStat().TotalConns) })

@@ -115,6 +115,76 @@ func TestPostgresPutRecordIdempotency(t *testing.T) {
 	}
 }
 
+// TestPostgresGrantRecords (averin#5b) proves the SQL grant-tuple filter returns exactly the grant-kind
+// records (a superset of api.grantLog's set) and excludes non-grant records — so checkpoint creation folds
+// the grant head from the grant rows alone without a full-history scan, and NEVER omits a real grant.
+func TestPostgresGrantRecords(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+
+	grant := func(hash string, seq int64) Record {
+		return Record{
+			JSON:        fmt.Sprintf(`{"authority":{"enforcement_point":"credential_broker"},"extensions":{"broker":{"kind":"grant","grant_evidence":{"broker_seq":%d}}}}`, seq),
+			ContentHash: hash, SessionID: "s1",
+		}
+	}
+	generic := func(hash string) Record {
+		return Record{JSON: `{"authority":{"source":"caller_declared"},"action":"db.read"}`, ContentHash: hash, SessionID: "s1"}
+	}
+
+	if _, _, err := p.PutRecord("proj", "g1", grant("sha256:g1", 1)); err != nil {
+		t.Fatalf("put g1: %v", err)
+	}
+	if _, _, err := p.PutRecord("proj", "r1", generic("sha256:r1")); err != nil {
+		t.Fatalf("put r1: %v", err)
+	}
+	if _, _, err := p.PutRecord("proj", "g2", grant("sha256:g2", 2)); err != nil {
+		t.Fatalf("put g2: %v", err)
+	}
+
+	got, err := p.GrantRecords("proj")
+	if err != nil {
+		t.Fatalf("grant records: %v", err)
+	}
+	hashes := map[string]bool{}
+	for _, r := range got {
+		hashes[r.ContentHash] = true
+	}
+	if !hashes["sha256:g1"] || !hashes["sha256:g2"] {
+		t.Fatalf("GrantRecords must include every grant, got %v", hashes)
+	}
+	if hashes["sha256:r1"] {
+		t.Fatalf("GrantRecords must exclude non-grant records, got %v", hashes)
+	}
+}
+
+// TestPostgresRecordsPage (averin#5a) proves the SQL LIMIT/OFFSET page returns records newest-first and pages
+// correctly, so the app list endpoint no longer loads the whole history into RAM.
+func TestPostgresRecordsPage(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+
+	for i, h := range []string{"sha256:a", "sha256:b", "sha256:c"} { // inserted oldest->newest (a, b, c)
+		if _, _, err := p.PutRecord("proj", fmt.Sprintf("idem-%d", i), rec(h, "s1")); err != nil {
+			t.Fatalf("put %s: %v", h, err)
+		}
+	}
+	page, err := p.RecordsPage("proj", 2, 0)
+	if err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	if len(page) != 2 || page[0].ContentHash != "sha256:c" || page[1].ContentHash != "sha256:b" {
+		t.Fatalf("newest-first page of 2 want [c b], got %+v", page)
+	}
+	next, err := p.RecordsPage("proj", 2, 2)
+	if err != nil {
+		t.Fatalf("page offset 2: %v", err)
+	}
+	if len(next) != 1 || next[0].ContentHash != "sha256:a" {
+		t.Fatalf("offset=2 want [a], got %+v", next)
+	}
+}
+
 // TestPostgresAppendOnlyRejectsMutation proves the headline security property: the database itself
 // rejects UPDATE/DELETE/TRUNCATE on the history tables. The hermetic harness connects as the schema
 // owner (so REVOKE on the owner is a no-op), but `SET ROLE` to a freshly-created least-privilege

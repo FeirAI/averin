@@ -227,21 +227,60 @@ func takeKeysWithPrefix(attrs map[string]any, prefixes ...string) string {
 	return string(b)
 }
 
+// scrubAttributes redacts secrets in the attribute map IN PLACE before it is sealed (into the record body)
+// and exported. Two mechanisms compose: (1) a KEY denylist — any secret-shaped key (authorization, api_key,
+// cookie, credential, …) has its ENTIRE value replaced regardless of the value's type, so a token nested under
+// e.g. `authorization: {scheme, token}` cannot leak through a structured value; (2) VALUE scrubbing — every
+// STRING value, at ANY depth (inside nested maps/arrays), is run through scrub.Redact so a secret-shaped value
+// under a benign key is caught too. It recurses into map[string]any / []any: a secret nested inside a
+// structured value — not just a top-level string — is redacted BEFORE the append-only, signed record is
+// sealed (a leaked secret in a sealed record is permanent — it cannot be retroactively scrubbed).
 func scrubAttributes(attrs map[string]any) {
 	for key, value := range attrs {
-		lower := strings.ToLower(key)
-		if strings.Contains(lower, "authorization") || strings.Contains(lower, "api_key") ||
-			strings.Contains(lower, "api-key") || strings.Contains(lower, "api_token") ||
-			strings.Contains(lower, "api-token") || strings.Contains(lower, "access_token") ||
-			strings.Contains(lower, "refresh_token") || strings.Contains(lower, "password") ||
-			strings.Contains(lower, "secret") || strings.Contains(lower, "cookie") ||
-			strings.Contains(lower, "credential") {
+		if isSecretKey(key) {
 			attrs[key] = "[REDACTED:attribute]"
 			continue
 		}
-		if text, ok := value.(string); ok {
-			attrs[key] = scrub.Redact(text)
+		attrs[key] = scrubValue(value)
+	}
+}
+
+// isSecretKey reports whether an attribute key is secret-shaped (the value under it must be fully redacted
+// regardless of type). Matched case-insensitively as a substring so nested/prefixed keys are caught too.
+func isSecretKey(key string) bool {
+	lower := strings.ToLower(key)
+	return strings.Contains(lower, "authorization") || strings.Contains(lower, "api_key") ||
+		strings.Contains(lower, "api-key") || strings.Contains(lower, "api_token") ||
+		strings.Contains(lower, "api-token") || strings.Contains(lower, "access_token") ||
+		strings.Contains(lower, "refresh_token") || strings.Contains(lower, "password") ||
+		strings.Contains(lower, "secret") || strings.Contains(lower, "cookie") ||
+		strings.Contains(lower, "credential")
+}
+
+// scrubValue recursively redacts secrets in a value: a string via scrub.Redact; a map by re-applying the key
+// denylist + recursing into each value; an array by recursing into each element. Non-string primitives
+// (numbers/bools) are returned unchanged — scrub.Redact operates on string shapes, and a bare number/bool
+// carries no secret to redact (a secret-shaped KEY over such a value is already caught by the denylist above).
+func scrubValue(value any) any {
+	switch v := value.(type) {
+	case string:
+		return scrub.Redact(v)
+	case map[string]any:
+		for k, sub := range v {
+			if isSecretKey(k) {
+				v[k] = "[REDACTED:attribute]"
+				continue
+			}
+			v[k] = scrubValue(sub)
 		}
+		return v
+	case []any:
+		for i, sub := range v {
+			v[i] = scrubValue(sub)
+		}
+		return v
+	default:
+		return value
 	}
 }
 

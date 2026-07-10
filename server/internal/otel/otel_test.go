@@ -148,6 +148,54 @@ func TestFeirVisiblePayloadsAreExtractedAndSecretsScrubbed(t *testing.T) {
 	}
 }
 
+// TestNestedSecretsAreScrubbedRecursively (averin#2): scrubAttributes must descend into nested maps/arrays so a
+// secret-SHAPED value or a secret-SHAPED key BELOW the top level is redacted BEFORE the attrs are sealed into
+// the append-only (permanent) record body — the old string-only branch left nested structures unscrubbed.
+func TestNestedSecretsAreScrubbedRecursively(t *testing.T) {
+	attrs := map[string]any{
+		"benign": "hello",
+		"nested": map[string]any{
+			"authorization": "Bearer sk-proj-abcdefghijklmnop", // secret-shaped KEY, nested
+			"note":          "use sk-proj-abcdefghijklmnop",     // secret-shaped VALUE under a benign nested key
+			"deeper": map[string]any{
+				"api_key": "AKIAsecretvalue123456",
+			},
+		},
+		"list": []any{
+			"sk-proj-abcdefghijklmnop",                 // secret-shaped value in an array
+			map[string]any{"password": "hunter2super"}, // secret-shaped key in an array element
+		},
+		"count": int64(3), // a number under a benign key stays untouched
+	}
+	scrubAttributes(attrs)
+
+	nested := attrs["nested"].(map[string]any)
+	if nested["authorization"] != "[REDACTED:attribute]" {
+		t.Fatalf("nested secret-shaped KEY not redacted: %#v", nested["authorization"])
+	}
+	if s, _ := nested["note"].(string); strings.Contains(s, "sk-proj-") {
+		t.Fatalf("nested secret-shaped VALUE not scrubbed: %#v", nested["note"])
+	}
+	deeper := nested["deeper"].(map[string]any)
+	if deeper["api_key"] != "[REDACTED:attribute]" {
+		t.Fatalf("doubly-nested secret-shaped KEY not redacted: %#v", deeper["api_key"])
+	}
+	list := attrs["list"].([]any)
+	if s, _ := list[0].(string); strings.Contains(s, "sk-proj-") {
+		t.Fatalf("secret-shaped value in array not scrubbed: %#v", list[0])
+	}
+	elem := list[1].(map[string]any)
+	if elem["password"] != "[REDACTED:attribute]" {
+		t.Fatalf("secret-shaped key in array element not redacted: %#v", elem["password"])
+	}
+	if attrs["count"] != int64(3) {
+		t.Fatalf("a number under a benign key must be untouched: %#v", attrs["count"])
+	}
+	if attrs["benign"] != "hello" {
+		t.Fatalf("a benign string must survive: %#v", attrs["benign"])
+	}
+}
+
 // Cookie/credential-shaped keys carry secrets that don't match value-shape scrub regexes
 // (a session cookie is short and unstructured) — the key denylist must catch them.
 func TestCookieAndCredentialAttributesAreRedacted(t *testing.T) {

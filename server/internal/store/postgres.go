@@ -414,6 +414,55 @@ func (p *Postgres) AllRecords(projectID string) ([]Record, error) {
 	return collectRecords(rows)
 }
 
+// RecordsPage returns up to `limit` records NEWEST-FIRST, skipping the newest `offset`, via SQL LIMIT/OFFSET
+// so a large tenant's list call never materializes the whole history in RAM. Ordering mirrors AllRecords'
+// (inserted_at, ctid) but DESC, so the newest record is first. Never nil.
+func (p *Postgres) RecordsPage(projectID string, limit, offset int) ([]Record, error) {
+	if limit <= 0 {
+		return []Record{}, nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	ctx := background()
+	rows, err := p.pool.Query(ctx, `
+		SELECT json, content_hash, session_id, parents
+		FROM records
+		WHERE project_id = $1
+		ORDER BY inserted_at DESC, ctid DESC
+		LIMIT $2 OFFSET $3
+	`, projectID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("store: records page: %w", err)
+	}
+	return collectRecords(rows)
+}
+
+// GrantRecords returns the project's credential-broker grant records — filtered SERVER-SIDE on the necessary
+// grant marker extensions.broker.kind == "grant" — so checkpoint creation folds the grant head without a
+// full-history scan into RAM. This is a SUPERSET of api.grantLog's membership set (grantLog additionally
+// requires authority.enforcement_point=="credential_broker" and broker_seq>=1); the loose filter guarantees a
+// real grant can NEVER be omitted (which would be transparency-log suppression). Never nil.
+//
+// NOTE: `json` is a text column, so this casts per row (::jsonb) — an O(records) scan, not an indexed lookup.
+// It reduces RAM/parse (only grant rows cross the wire + get materialized), not scan latency; a truly
+// O(grants) indexed grant head is a deferred rearchitecture (needs a schema migration). The `#>>` path yields
+// NULL (≠ 'grant') for any record lacking the marker, so only grant-kind rows match.
+func (p *Postgres) GrantRecords(projectID string) ([]Record, error) {
+	ctx := background()
+	rows, err := p.pool.Query(ctx, `
+		SELECT json, content_hash, session_id, parents
+		FROM records
+		WHERE project_id = $1
+		  AND json::jsonb #>> '{extensions,broker,kind}' = 'grant'
+		ORDER BY inserted_at, ctid
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("store: grant records: %w", err)
+	}
+	return collectRecords(rows)
+}
+
 func collectRecords(rows pgx.Rows) ([]Record, error) {
 	defer rows.Close()
 	out := []Record{}

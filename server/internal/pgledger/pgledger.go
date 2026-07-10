@@ -31,7 +31,10 @@ CREATE TABLE IF NOT EXISTS consume_ledger (
 	consume_key text        NOT NULL,
 	consumed_at timestamptz NOT NULL DEFAULT now(),
 	PRIMARY KEY (kind, consume_key)
-);`
+);
+-- Index consumed_at for the periodic TTL sweep (SweepConsumed): a range DELETE of aged rows is otherwise a
+-- full scan on a ledger that only ever grows between sweeps.
+CREATE INDEX IF NOT EXISTS consume_ledger_consumed_at_idx ON consume_ledger (consumed_at);`
 
 // Ledger is a Postgres-backed resourceshim.Ledger.
 type Ledger struct {
@@ -127,3 +130,50 @@ func (l *Ledger) release(kind, key string) {
 // ReleaseNonce rolls back a ConsumeNonce. ReleaseJTI rolls back a ConsumeJTI.
 func (l *Ledger) ReleaseNonce(nonce string) { l.release("nonce", nonce) }
 func (l *Ledger) ReleaseJTI(jti string)     { l.release("jti", jti) }
+
+// SweepConsumed deletes ledger entries whose consumed_at is older than `retention`, returning the number
+// removed. It bounds the ledger's otherwise-unbounded growth (one row per PoP nonce + per jti, forever) using
+// the consumed_at column that was placed for exactly this purpose.
+//
+// CORRECTNESS CONSTRAINT (load-bearing, not tuning): `retention` MUST exceed the LONGEST credential validity
+// window. A consumed nonce/jti only needs to stay recorded while a credential that could replay it is still
+// valid; once every credential minted before the cutoff has expired, the entry can never gate a live replay, so
+// pruning it is safe. Set `retention` BELOW the max credential lifetime and a still-live nonce/jti is deleted —
+// reopening the single-use replay window this ledger exists to close. Callers enforce a safe floor (see main.go
+// AVERIN_LEDGER_RETENTION; broker.MaxTTL is 1h, so the default is orders of magnitude larger).
+func (l *Ledger) SweepConsumed(ctx context.Context, retention time.Duration) (int64, error) {
+	// DB-side now() (not a Go-computed cutoff) so the comparison is immune to app↔DB clock skew.
+	tag, err := l.pool.Exec(ctx,
+		`DELETE FROM consume_ledger WHERE consumed_at < now() - make_interval(secs => $1)`,
+		retention.Seconds())
+	if err != nil {
+		return 0, fmt.Errorf("pgledger: sweep consumed: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// StartSweeper runs SweepConsumed on a background ticker every `interval` until ctx is cancelled (process
+// exit). `retention` MUST satisfy SweepConsumed's correctness constraint. Best-effort: a sweep failure is
+// LOGGED, never fatal — a deferred prune only defers reclaiming space, it can never reopen a replay window (the
+// aged rows simply remain). Returns immediately; the ticker runs in its own goroutine.
+func (l *Ledger) StartSweeper(ctx context.Context, retention, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sctx, cancel := context.WithTimeout(ctx, opTimeout)
+				n, err := l.SweepConsumed(sctx, retention)
+				cancel()
+				if err != nil {
+					log.Printf("WARNING: consume_ledger sweep failed (aged rows retained; no replay risk, only deferred space reclaim): %v", err)
+				} else if n > 0 {
+					log.Printf("consume_ledger sweep removed %d entries older than %s", n, retention)
+				}
+			}
+		}
+	}()
+}
