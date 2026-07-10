@@ -81,7 +81,7 @@ jobs:
           govulncheck ./...
 
   store-postgres:
-    name: store parity + append-only (Mem semantics ↔ real Postgres, non-owner role)
+    name: store parity + append-only + pgdurable (Mem semantics ↔ real Postgres, non-owner role)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -107,11 +107,16 @@ jobs:
       # TestPostgresAppendOnlyRejectsMutation proves UPDATE/DELETE/TRUNCATE are rejected (SQLSTATE 42501)
       # under a freshly-created non-owner least-privilege role — the deployment topology the append-only
       # claim depends on, exercised end to end. The superuser `postgres` role can CREATE ROLE for that test.
-      - name: store tests against real Postgres (parity + non-owner append-only)
+      # pgdurable is INCLUDED here too: it is the durable-revocation + two-phase-grant store whose own doc
+      # calls a lost revoke "a fail-open — the verifier would then accept a grant an operator believed was
+      # blocked", and TestPutPendingConflictReturnsWinningRow arbitrates multi-replica pending-grant races.
+      # Its Postgres tests self-skip without a DSN, so the SAME CI-style DSN (no '?') that broke its harness's
+      # search_path concatenation now exercises the robust separator fix — see pgdurable_test.go.
+      - name: store + pgdurable tests against real Postgres (parity + non-owner append-only + durable revocation)
         working-directory: server
         env:
           AVERIN_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: go test -count=1 ./internal/store/... ./internal/pgledger/...
+        run: go test -count=1 ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/...
 
   web:
     name: web app (svelte build + trace unit tests)

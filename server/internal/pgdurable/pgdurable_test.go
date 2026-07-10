@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,7 +33,18 @@ func newTestStore(t *testing.T) (*Store, func()) {
 		t.Fatalf("create schema: %v", err)
 	}
 
-	scoped := base + "&search_path=" + schema
+	// Append search_path as a query param, choosing the separator by whether the DSN already carries
+	// a query string. The CI-style DSN (postgres://user:pw@host:5432/db) has NO '?', so a blind '&'
+	// produced an INVALID connstring (search_path swallowed into the path/dbname) and every
+	// Postgres-backed pgdurable test errored out — the exact break this test never ran against in CI.
+	// pgxpool.New -> ParseConfig turns an unrecognized query param into a startup RuntimeParam, so a
+	// well-formed '?search_path=<schema>' pins the schema for both the setup pool and the store's own
+	// New(dsn) pool (same mechanism the store tests use via cfg.ConnConfig.RuntimeParams).
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	scoped := base + sep + "search_path=" + schema
 	// New no longer applies DDL (the versioned runner internal/pgschema owns it now), so create the
 	// package's tables in the private schema for this unit test, via a pool scoped to that schema.
 	setup, err := pgxpool.New(ctx, scoped)
