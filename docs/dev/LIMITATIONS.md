@@ -137,3 +137,22 @@ validity (`broker.MaxTTL` = 1h) — pruning a nonce/jti that is still inside a l
 would reopen the single-use replay the ledger exists to close. A configured value below the 24h safe
 floor is fatal at startup. A sweep failure is logged, never fatal: it only defers reclaiming space, it
 can never reopen a replay window.
+
+## Revocation is audit-time, not a live kill-switch (averin#1)
+
+averin does NOT enforce a revocation at the live `/v2/use` gateway — a revoked capability is caught
+when the evidence is later verified (the offline verifier evaluates the revocation list when the
+auditor pins `revocation_keys`), not blocked in-path at use time. averin PROVES; it does not ENFORCE.
+The live kill-switch is govder/vultrino token revoke (the credential-broker plane), which stops the
+credential at `/execute`. Product copy must not claim averin gives "live"/"immediate" per-action
+revocation — the accurate bound is: govder/vultrino revoke the credential live; averin's revocation
+list makes a use-after-revoke provable after the fact.
+
+## Two-phase grant prepare/finalize is single-replica (or sticky) under HA (averin#13)
+
+The two-phase grant flow keeps the `prepare` challenge in an in-memory pending cache. A `finalize`
+that lands on a *different* replica than served the `prepare` 409s (the pending entry is not there).
+Run the two-phase-grant issuer as a single replica, or pin prepare+finalize to the same replica with a
+sticky-session/consistent-hash route, until the pending cache is made shared/durable (deferred). The
+single-phase and native (token_exchange) grant paths are unaffected — this bound is specific to the
+online cosigned two-phase flow.
