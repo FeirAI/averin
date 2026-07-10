@@ -65,6 +65,70 @@ existing record's plaintext `otel_attrs` **cannot be retroactively scrubbed**. S
 best-effort pattern/keyword matching, not a guarantee that every possible secret shape is caught;
 treat the raw OTel attribute bridge as a lower-trust ingest path (Level-2 observation).
 
+## Ingest is serialized by a process-global mutex (head-of-line latency bound)
+
+The `/v2/use` (+ `/v2/use-intent`, `/v2/use-outcome`) enforcement path and generic ingest run their
+whole `RecordByIdem → ValidateUse → buildUseRecord → seal → PutRecord` critical section under a **single
+process-global mutex** (`ingestMu` in `server/internal/api/server.go`). `ValidateUse` performs the
+consume-before-act ledger writes (two ~10s-bounded Postgres consumes: the nonce and the double-spend
+key), and `buildUseRecord` does content-store I/O — **all while holding `ingestMu`**. Because the lock
+is process-global (not per-project), **one stuck ledger/content dependency stalls ALL ingest, grants,
+and checkpoints for every project** for up to the dependency timeout (~tens of seconds). This bounds
+throughput to one in-flight seal at a time and makes tail latency sensitive to the slowest dependency.
+
+This is the single-writer invariant that prevents DAG forks (see *Storage model* in
+[ARCHITECTURE.md](ARCHITECTURE.md)) — correctness is preserved; the cost is contention. Item-5's
+checkpoint-scan narrowing already removed the whole-history grant-head scan from the checkpoint path's
+share of this lock (see *Checkpoint grant-head read* above), so checkpoints no longer hold `ingestMu`
+for an `O(records)` parse. **Deferred:** splitting the lock so the ledger consumes + content I/O run
+under a **per-idempotency-key** lock while `ingestMu` covers only `heads → seal → put` would let
+different projects' ingests proceed concurrently. It is deliberately NOT attempted as a quick reorder:
+it is on the hot enforcement path and the D6 single-snapshot `heads → seal → put` invariant (and the
+replay/double-spend ordering — `ValidateUse`'s consume must stay before the seal) must be preserved, so
+a wrong split reopens DAG-fork or replay. Treated as a design item, not a patch.
+
+## Cross-replica ingest is not coordinated (single-writer-per-project required)
+
+`ingestMu` is in-process only. Two averin replicas pointed at the **same** `AVERIN_DATABASE_URL` do not
+share it, so concurrent ingests across replicas can read the same frontier and **silently fork a
+project's DAG**. Deploy averin as a **single writer per project** — one replica, or shard projects so no
+project is written by more than one replica. **Deferred:** a real per-project `pg_advisory_xact_lock`
+over the ingest frontier (the sole advisory lock today covers only `broker_seq` allocation) would make
+multi-replica ingest safe; until then single-writer-per-project is a **hard deploy requirement**.
+
+## Storage growth is unbounded and append-only (monitoring is a hard deploy requirement)
+
+The record store is **append-only by design** (the migration `REVOKE`s UPDATE/DELETE/TRUNCATE) and the
+app API is **Phase-1** — it has no per-project authentication/authorization or storage quota of its own
+(see [SECURITY.md](SECURITY.md) and `docs/coverage-limits.md`). Every accepted ingest therefore grows
+the database **permanently**; nothing in averin caps total per-project record count or bytes, and
+records cannot be deleted (that is the integrity invariant). **Two operator controls are HARD deploy
+requirements, not options:**
+
+- **A reverse-proxy / API-gateway rate limit in front of averin** is the PRIMARY control against a
+  leaked token (or an unauthenticated dev-posture deploy) driving unbounded billable, append-only
+  growth. averin ships an **opt-in** in-process backstop (`WithIngestBudget`, a coarse per-project +
+  global token bucket that answers `429` on `POST /v2/*` ingest — see
+  [CONFIGURATION.md](CONFIGURATION.md)); it is **defense-in-depth**, not a substitute for the gateway
+  limit, and is **off by default** (so no existing deployment is throttled).
+- **Database-growth monitoring + capacity alerting.** Because storage only ever grows, operators MUST
+  monitor DB size / per-project record counts and alert well before exhaustion. There is no in-store
+  eviction to fall back on.
+
+**Deferred:** a first-class configurable per-project record/byte quota (a `429`/`507` at ingest) and
+per-project authz are Phase-2 items.
+
+## Usage metering is best-effort and volatile (bounded revenue loss)
+
+The billing meter's base counter is **in-memory** (`meter.Mem`); the Stripe reporter forwards billable
+events best-effort over a bounded async queue. This bounds metering accuracy — see
+[CONFIGURATION.md](CONFIGURATION.md) *Metering loss bounds* for the exact failure modes (restart
+re-grants the free tier; a full queue or a non-2xx/transport delivery failure drops the event with no
+retry) and the `/metrics` counters that make the loss observable
+(`averin_meter_queue_drops_total`, `averin_meter_post_failures_total`). **Deferred:** a durable
+per-project counter (a Postgres table beside the store, surviving restart) plus **idempotent, retried**
+Stripe delivery (meter-event ids) would close the loss; it is documented, not built.
+
 ## Consume-ledger retention is a correctness parameter
 
 The Postgres consume-before-act ledger is swept on an hourly ticker

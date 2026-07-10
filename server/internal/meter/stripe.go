@@ -2,6 +2,8 @@ package meter
 
 import (
 	"context"
+	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,6 +27,7 @@ type StripeReporter struct {
 	done        chan struct{} // closed when the worker drains + exits (for graceful Close)
 	closeOnce   sync.Once
 	dropped     int64 // atomic: events dropped because the bounded queue was full (see send). Read via Dropped().
+	postFailed  int64 // atomic: events whose Stripe delivery failed (transport error or non-2xx). Read via PostFailures().
 }
 
 type event struct {
@@ -99,6 +102,13 @@ func (s *StripeReporter) send(eventName, project string, value int64) {
 // events — and thus revenue — are being silently lost).
 func (s *StripeReporter) Dropped() int64 { return atomic.LoadInt64(&s.dropped) }
 
+// PostFailures returns the total number of billable events whose Stripe delivery FAILED — a transport
+// error or a non-2xx response (most often an unmapped project→stripe_customer_id, since post() maps
+// project verbatim onto stripe_customer_id). These events are NOT retried (durable retried delivery is a
+// DEFERRED item — see docs/dev/CONFIGURATION.md §Metering), so a nonzero, growing count is silent
+// under-billing. Exposed on /metrics as averin_meter_post_failures_total.
+func (s *StripeReporter) PostFailures() int64 { return atomic.LoadInt64(&s.postFailed) }
+
 func (s *StripeReporter) worker() {
 	defer close(s.done)
 	for e := range s.events {
@@ -121,7 +131,10 @@ func (s *StripeReporter) Close(ctx context.Context) {
 	}
 }
 
-// post sends one meter event (https://docs.stripe.com/billing/usage-based). Errors are swallowed.
+// post sends one meter event (https://docs.stripe.com/billing/usage-based). Delivery is best-effort and
+// NOT retried; a transport error or a non-2xx response is counted (PostFailures, surfaced on /metrics) and
+// logged rather than swallowed, so silent under-billing is observable. A non-2xx is most often an unmapped
+// project→stripe_customer_id (this maps project verbatim onto stripe_customer_id).
 func (s *StripeReporter) post(e event) {
 	form := url.Values{}
 	form.Set("event_name", e.name)
@@ -129,12 +142,24 @@ func (s *StripeReporter) post(e event) {
 	form.Set("payload[value]", strconv.FormatInt(e.value, 10))
 	req, err := http.NewRequest("POST", s.endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
+		atomic.AddInt64(&s.postFailed, 1)
+		log.Printf("WARNING: build Stripe meter-event %q for project %q failed: %v (billable event LOST, not retried)", e.name, e.project, err)
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if resp, err := s.client.Do(req); err == nil {
-		resp.Body.Close()
+	resp, err := s.client.Do(req)
+	if err != nil {
+		atomic.AddInt64(&s.postFailed, 1)
+		log.Printf("WARNING: POST Stripe meter-event %q for project %q failed: %v (billable event LOST, not retried)", e.name, e.project, err)
+		return
+	}
+	// Drain then close so the keep-alive connection can be reused.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		atomic.AddInt64(&s.postFailed, 1)
+		log.Printf("WARNING: Stripe meter-event %q for project %q returned HTTP %d (billable event LOST, not retried; check the project→stripe_customer_id mapping)", e.name, e.project, resp.StatusCode)
 	}
 }
 

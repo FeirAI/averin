@@ -176,9 +176,20 @@ The `store.Store` interface (`server/internal/store/store.go`) has two implement
   single-process only.
 - **Postgres** (`store.NewPostgres`, selected when `AVERIN_DATABASE_URL` is set) — **append-only at the
   database** (the migration `REVOKE`s UPDATE/DELETE/TRUNCATE, verified under a least-privilege role),
-  with idempotency + content-hash collapse + a DAG-derived frontier computed in SQL, and the ingest
-  critical section run in a **serializable** transaction (so concurrent ingests cannot read a stale
-  frontier and fork the DAG). The schema auto-applies on startup (`docker compose up` is turnkey).
+  with idempotency + content-hash collapse + a DAG-derived frontier computed in SQL. The schema
+  auto-applies on startup (`docker compose up` is turnkey).
+
+  **Single-writer-per-project, in-process only (NOT a DB serializable transaction).** The `heads → seal
+  → put` ingest critical section is serialized by a **process-local mutex** (`ingestMu` in
+  `server/internal/api/server.go`), so concurrent ingests within ONE server process cannot read a stale
+  frontier and fork the DAG. `PutRecord` itself runs at Postgres's default (read-committed) isolation —
+  it is NOT a `SERIALIZABLE` transaction. The only DB-level advisory lock (`pg_advisory_xact_lock`,
+  `store/postgres.go` `AllocateBrokerSeq`) covers **broker_seq allocation**, not the record frontier.
+  **Consequence (deploy-critical):** running **two averin replicas against the same
+  `AVERIN_DATABASE_URL` can silently fork a project's DAG** — the in-process mutex does not span
+  processes. Run averin as a **single writer per project** (one replica, or shard projects across
+  replicas so no project is written by more than one). A real cross-replica frontier lock is a DEFERRED
+  item; see `docs/dev/LIMITATIONS.md`.
 
 Append-only is the integrity invariant: records are written once, keyed by `(project, idempotency
 key)`; a retry collapses onto the existing row rather than duplicating. Disclosure secrets are

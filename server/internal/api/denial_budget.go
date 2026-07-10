@@ -156,3 +156,45 @@ func (s *Server) WithDeniedGrantBudget(cfg DenialBudget) *Server {
 	s.denialBudget = newDenialBudget(ppRate, ppBurst, gRate, gBurst, maxProjects, func() time.Time { return s.now() })
 	return s
 }
+
+// IngestBudget configures the coarse per-project + global rate limit on state-mutating POST /v2/* ingest
+// (averin#20). Any non-positive field takes a GENEROUS default (so an enabled-but-unsized budget throttles
+// only a runaway, not a busy legitimate agent). Like DenialBudget, the GLOBAL bucket is the hard, project_id-
+// cardinality-independent ceiling and the PER-PROJECT bucket (in a maxProjects-bounded map) adds fairness.
+type IngestBudget struct {
+	PerProjectPerSec float64 // sustained per-project ingest rate (default 50)
+	PerProjectBurst  int     // per-project burst allowance (default 200)
+	GlobalPerSec     float64 // sustained server-wide ingest rate (default 500)
+	GlobalBurst      int     // server-wide burst allowance (default 2000)
+	MaxProjects      int     // bound on tracked per-project buckets (default 4096)
+}
+
+// WithIngestBudget installs a coarse per-project + global token bucket on the state-mutating POST /v2/* ingest
+// routes, so a leaked token (or an unauthenticated default deploy) cannot drive unbounded billable, append-only
+// DB growth — a saturated bucket answers 429. OPT-IN: with no ingest budget set the routes are unlimited (the
+// prior behavior), so no existing deployment is throttled and no boot is bricked. This is defense-in-depth; a
+// reverse-proxy / API-gateway rate limit remains the PRIMARY, HARD deploy control (see CONFIGURATION.md).
+func (s *Server) WithIngestBudget(cfg IngestBudget) *Server {
+	ppRate := cfg.PerProjectPerSec
+	if ppRate <= 0 {
+		ppRate = 50
+	}
+	ppBurst := cfg.PerProjectBurst
+	if ppBurst <= 0 {
+		ppBurst = 200
+	}
+	gRate := cfg.GlobalPerSec
+	if gRate <= 0 {
+		gRate = 500
+	}
+	gBurst := cfg.GlobalBurst
+	if gBurst <= 0 {
+		gBurst = 2000
+	}
+	maxProjects := cfg.MaxProjects
+	if maxProjects <= 0 {
+		maxProjects = 4096
+	}
+	s.ingestBudget = newDenialBudget(ppRate, ppBurst, gRate, gBurst, maxProjects, func() time.Time { return s.now() })
+	return s
+}

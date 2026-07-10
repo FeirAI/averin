@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/averin-dev/averin/server/internal/scrub"
 )
@@ -61,6 +62,12 @@ func (p *Proxy) Handler() http.Handler {
 const (
 	maxReqBody = 16 << 20  // 16 MiB request cap
 	maxCapture = 512 << 10 // only buffer this much of the response for the recorded preview
+	// maxPreview hard-caps each sealed extensions.content_preview side (input/output). These bodies are
+	// append-only and permanently un-erasable (NOT routed through commitLowEntropyFields / the retention
+	// purge — see SECURITY.md §Data retention & erasure), so a large prompt/completion would otherwise bloat
+	// the store forever. Truncation only shortens the human-readable preview; it never affects verification
+	// (content_preview is not committed or signed).
+	maxPreview = 16 << 10 // 16 KiB per preview side
 )
 
 // hopByHop headers must not be forwarded to the upstream (RFC 7230 §6.1).
@@ -153,6 +160,7 @@ func (p *Proxy) recordCall(r *http.Request, reqBody, respBody []byte, httpStatus
 	} else {
 		outText = scrub.Redact(string(respBody))
 	}
+	outText = truncatePreview(outText)
 
 	status := statusWord(httpStatus)
 	eventType := "llm_call"
@@ -171,7 +179,7 @@ func (p *Proxy) recordCall(r *http.Request, reqBody, respBody []byte, httpStatus
 		"agent_id":     model,
 		"extensions": map[string]any{
 			"content_preview": map[string]any{
-				"input":  scrub.Redact(string(reqBody)),
+				"input":  truncatePreview(scrub.Redact(string(reqBody))),
 				"output": outText,
 			},
 		},
@@ -220,6 +228,20 @@ func (c *capWriter) Write(p []byte) (int, error) {
 		c.truncated = true
 	}
 	return len(p), nil
+}
+
+// truncatePreview hard-caps a content_preview side to maxPreview bytes, trimming back to a UTF-8 rune
+// boundary (so a stored preview never ends in a split multi-byte sequence) and appending a visible marker.
+// These previews are permanent/un-erasable, so this is the ONLY bound on their stored size.
+func truncatePreview(s string) string {
+	if len(s) <= maxPreview {
+		return s
+	}
+	cut := maxPreview
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…[averin: preview truncated]"
 }
 
 // assembleSSE concatenates the streamed completion text from an OpenAI-style SSE body. Returns

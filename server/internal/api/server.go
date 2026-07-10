@@ -98,6 +98,11 @@ type Server struct {
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
 	// inflate stored records without bound (the prerequisite for default-on). nil = unbounded (prior behavior).
 	denialBudget *denialBudget
+	// averin#20: optional coarse per-project + global token bucket on state-mutating POST /v2/* ingest, so a
+	// leaked token (or an unauthenticated default deploy) cannot drive unbounded billable, append-only DB growth.
+	// Reuses the denial_budget.go two-level bucket. nil = unlimited (the prior behavior — this is opt-in
+	// defense-in-depth; a reverse-proxy/gateway limit remains the PRIMARY, HARD control, see CONFIGURATION.md).
+	ingestBudget *denialBudget
 	// T7 (ADR 0002 / coverage-limits #4): pinned EXTERNAL authority verifying keys, keyed by the authority
 	// source they vouch for ("policy_engine_signed" and/or "human_signed"). When a generic record carries a
 	// matching source plus an authority evidence_sig that verifies under that source's pinned key, it is
@@ -268,6 +273,11 @@ func (s *Server) WithMeter(m meter.Meter) *Server {
 		s.metrics.CounterFunc("averin_meter_queue_drops_total",
 			"Total usage-metering events dropped from the async reporter queue under back-pressure.",
 			sr.Dropped)
+		// averin#15: a delivery failure (transport error or non-2xx, most often an unmapped
+		// project→stripe_customer_id) is not retried, so a growing count is silent under-billing.
+		s.metrics.CounterFunc("averin_meter_post_failures_total",
+			"Total usage-metering events whose Stripe delivery failed (transport error or non-2xx response); not retried.",
+			sr.PostFailures)
 	}
 	return s
 }
@@ -735,8 +745,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v2/export", s.handleExport)
 	mux.HandleFunc("GET /v2/usage", s.handleUsage)
 
+	// averin#20: an opt-in coarse ingest rate limit wraps the mux INNERMOST (so in the guarded path it runs
+	// AFTER auth — an unauthenticated request is 401, not 429 — and applies in the dev/no-auth path too). Unset
+	// (the default) leaves the routes unlimited, exactly as before.
+	var handler http.Handler = mux
+	if s.ingestBudget != nil {
+		handler = s.rateLimitIngest(mux)
+	}
 	if s.auth == nil || auth.IsOpen(s.auth) {
-		return mux // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
+		return handler // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
 	}
 	// gate every /v2/* route behind project-scoped auth; /healthz, /readyz, /metrics stay open (health/
 	// observability endpoints are unauthenticated by design, matching /healthz's existing posture).
@@ -745,8 +762,31 @@ func (s *Server) Routes() http.Handler {
 	guarded.HandleFunc("GET /healthz", healthz)
 	guarded.HandleFunc("GET /readyz", s.readyz)
 	guarded.HandleFunc("GET /metrics", s.metrics.Handler())
-	guarded.Handle("/v2/", gate(mux))
+	guarded.Handle("/v2/", gate(handler))
 	return guarded
+}
+
+// rateLimitIngest wraps h with the opt-in per-project + global ingest token bucket (averin#20). It governs ONLY
+// state-mutating POST /v2/* requests (record/grant/use/checkpoint ingest — the routes that grow the append-only
+// store and bill); GET reads pass through untouched. A saturated per-project or global bucket answers 429 with a
+// Retry-After so a leaked token cannot drive unbounded billable DB growth. The project is read from the same
+// ?project= param auth scopes on. Drop logging is bucket-throttled (denialBudget.allow) so a sweep cannot turn
+// each 429 into a log write.
+func (s *Server) rateLimitIngest(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			project := r.URL.Query().Get("project")
+			if ok, logDrop := s.ingestBudget.allow(project); !ok {
+				if logDrop {
+					log.Printf("WARNING: ingest rate limit throttling project %q (429); a reverse-proxy/gateway limit is the primary control", project)
+				}
+				w.Header().Set("Retry-After", "1")
+				writeErr(w, http.StatusTooManyRequests, "ingest rate limit exceeded for this project; retry shortly")
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 func ts(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
@@ -2099,10 +2139,13 @@ func storedOutcomeMatchesRequest(recordJSON, intentRef, status string) bool {
 // completes (a lookup by referenced record_id, NOT an idempotency-key retry: retries are keyed on `idem`
 // via RecordByIdem). A generic record can never set extensions.broker (reserved), so a pre-seeded generic
 // row with a matching record_id is NOT resolvable as an intent. Caller holds ingestMu.
-func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, string, bool) {
+func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, string, bool, error) {
 	recs, err := s.st.SessionRecords(projectID, sessionID)
 	if err != nil {
-		return "", "", false
+		// FAIL CLOSED (averin#14): a SessionRecords read error is NOT "intent not found" — propagate it so the
+		// caller answers a retryable 500, not a 400 that makes the client abandon the outcome (breaking the
+		// intent→outcome pairing and leaving a permanent intent_without_outcome).
+		return "", "", false, err
 	}
 	for _, rec := range recs {
 		var probe struct {
@@ -2121,10 +2164,10 @@ func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, st
 		// record_id is NOT treated as a use/outcome retry — the gateway validation (PoP, consume-before-act)
 		// is never skipped on a spoofed record. (Reserved record_id prefixes also block the pre-seed.)
 		if json.Unmarshal([]byte(rec.JSON), &probe) == nil && probe.RecordID == useID && probe.Extensions.Broker.Kind != "" {
-			return rec.JSON, probe.Authority.GrantID, true
+			return rec.JSON, probe.Authority.GrantID, true, nil
 		}
 	}
-	return "", "", false
+	return "", "", false, nil
 }
 
 // buildUseRecord assembles the unsealed use-receipt Decision Record: a tool_gateway-role authority
@@ -2290,7 +2333,10 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		}
 		// resolve the intent this outcome completes: it must be a use_intent recorded in this session, and
 		// we read its content_hash to bind the before-act ordering into the resource-signed payload.
-		intentJSON, _, ok := s.existingReceipt(or.ProjectID, or.SessionID, or.IntentRecordID)
+		intentJSON, _, ok, re := s.existingReceipt(or.ProjectID, or.SessionID, or.IntentRecordID)
+		if re != nil {
+			return re // FAIL CLOSED (averin#14): a SessionRecords read error → retryable 500, not a 400 "not found"
+		}
 		if !ok {
 			clientErr = fmt.Errorf("intent_record_id %q not found in this session", or.IntentRecordID)
 			return nil
@@ -3065,7 +3111,13 @@ func (s *Server) anchorCheckpoint(ctx context.Context, projectID string, seq int
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
-	sessions, _ := s.st.Sessions(projectID)
+	sessions, err := s.st.Sessions(projectID)
+	if err != nil {
+		// FAIL CLOSED (averin#3): surface a store read error as 500 rather than an empty 200 that would let a
+		// caller read "no sessions" during a transient outage.
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
@@ -3148,7 +3200,13 @@ func (s *Server) handleDAG(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project and session query params are required")
 		return
 	}
-	recs, _ := s.st.SessionRecords(projectID, sessionID)
+	recs, err := s.st.SessionRecords(projectID, sessionID)
+	if err != nil {
+		// FAIL CLOSED (averin#3): surface a store read error as 500 rather than an empty 200 that would let a
+		// caller read "no records" (an apparently-empty DAG) during a transient outage.
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	out := make([]json.RawMessage, len(recs))
 	for i, rec := range recs {
 		out[i] = json.RawMessage(rec.JSON)
@@ -3407,8 +3465,17 @@ func (s *Server) acquireBundleSlot(w http.ResponseWriter) (release func(), ok bo
 // buildBundle assembles the export/verify bundle: published key, all sealed records, and the full
 // checkpoint history.
 func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
-	recs, _ := s.st.AllRecords(projectID)
-	checks, _ := s.st.Checkpoints(projectID)
+	// FAIL CLOSED (averin#3): a transient read failure must NOT collapse into an empty bundle — the callers
+	// (handleExport/handleVerify) 500 on this error and meter AFTER, so returning the error keeps billing/self-
+	// verify from ever running over a silently-truncated (zero-record) history. Mirrors the Anchors handling below.
+	recs, err := s.st.AllRecords(projectID)
+	if err != nil {
+		return "", err
+	}
+	checks, err := s.st.Checkpoints(projectID)
+	if err != nil {
+		return "", err
+	}
 	anchors, err := s.st.Anchors(projectID)
 	if err != nil {
 		return "", err

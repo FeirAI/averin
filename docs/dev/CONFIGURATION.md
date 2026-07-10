@@ -105,11 +105,49 @@ replay window reopens on restart).
 |----------|---------|----------|----------|
 | `STRIPE_API_KEY` | unset ⇒ local counting only | No | When set, usage (records ingested, exports issued) is reported to Stripe. Unset ⇒ usage is counted locally only (visible via `GET /v2/usage`). |
 
+**Metering loss bounds (best-effort, volatile — read before relying on it for revenue).** The base
+usage counter is **in-memory** (`meter.Mem`) and the Stripe reporter is best-effort. The exact,
+deliberate loss modes:
+
+- **Restart re-grants the free tier.** The counter is not durable, so on a process restart every
+  project's `records` count resets to 0 and the first `FreeTierRecords` (1000) records are billed as
+  free **again**. Under-billing is bounded by `free_tier × restarts`.
+- **Queue-full drops.** Billable events are forwarded over a bounded async queue; under a Stripe
+  outage/overload the queue fills and further events are **dropped, not retried**. Surfaced on
+  `GET /metrics` as **`averin_meter_queue_drops_total`** (a growing value ⇒ silently lost revenue).
+- **Delivery-failure drops.** A meter-event POST that gets a transport error or a **non-2xx** (most
+  often an unmapped `project → stripe_customer_id` — averin maps `project` verbatim onto
+  `stripe_customer_id`) is logged and **dropped, not retried**. Surfaced on `GET /metrics` as
+  **`averin_meter_post_failures_total`**. Map every project to a real Stripe customer id out-of-band
+  and **alert on both counters**.
+
+**Deferred (documented, not built):** a durable per-project counter (a Postgres table beside the store,
+surviving restart) + **idempotent, retried** Stripe delivery (meter-event ids) would close all three
+losses. Until then treat metering as advisory and reconcile against Stripe.
+
+### Deployment hard requirements (rate limit + storage growth)
+
+The app API is **Phase-1**: no per-project authz or storage quota of its own, and the record store is
+**append-only** (nothing can be deleted). Two operator controls are therefore **hard requirements**, not
+options (see [LIMITATIONS.md](LIMITATIONS.md) *Storage growth is unbounded*):
+
+- **Put a reverse-proxy / API-gateway rate limit in front of averin.** This is the PRIMARY defense
+  against a leaked token (or an unauthenticated dev-posture deploy) driving unbounded billable,
+  append-only DB growth. As an **opt-in** in-process backstop the server library exposes
+  `WithIngestBudget(IngestBudget{...})` — a coarse per-project + global token bucket that answers `429`
+  on state-mutating `POST /v2/*` ingest (GET reads pass through). It is **off by default** (so no
+  existing deployment is throttled) and is **defense-in-depth**, never a substitute for the gateway
+  limit. Not yet exposed as an `averin-server` env var — wire it via an embedder (like `WithDeniedGrantLog`).
+- **Monitor database growth and alert on capacity.** Storage only ever grows; there is no in-store
+  eviction. Watch DB size / per-project record counts and alert well before exhaustion.
+
 > Note on options not exposed as env vars in the binary: the server library
 > (`server/internal/api`) also supports `WithAttestation` (deployment-attestation export) and
 > `WithCoverageManifest` (the operator-declared `side_effect_closure`, required for the
-> `attested_complete_over_brokered_surface` capstone) and `WithDeniedGrantLog` (B11). These are
-> wired by embedders / the e2e harness, not by a `averin-server` env var in the current `main.go`.
+> `attested_complete_over_brokered_surface` capstone), `WithDeniedGrantLog` (B11), and the two rate
+> backstops `WithIngestBudget` (coarse per-project ingest `429`, above) and `WithDeniedGrantBudget`
+> (bounds best-effort B11 denial seals). These are wired by embedders / the e2e harness, not by a
+> `averin-server` env var in the current `main.go`.
 
 ---
 

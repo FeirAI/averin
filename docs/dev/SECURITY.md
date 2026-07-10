@@ -55,9 +55,10 @@ what truly happened in the world.
   always-exported body would be dictionary-reversible, undoing exactly what the commitment hides.
   **Bound:** this conversion (`commitLowEntropyFields`) covers only those three top-level
   fields. Content the SDKs and proxy place under `extensions.content_preview` is **not** committed —
-  it is signed verbatim under `extensions` (the proxy regex-scrubs secrets first, but does not hide
-  the body). To hide content, send it at the top level (or pre-commit it). See
-  [INTEGRATION.md](INTEGRATION.md).
+  it is signed verbatim under `extensions` (the proxy regex-scrubs secrets first and hard-truncates
+  each side to a bounded length, but does not hide or erase the body). To hide content, send it at the
+  top level (or pre-commit it). This has a retention/erasure consequence — see
+  *Data retention & erasure* below — and [INTEGRATION.md](INTEGRATION.md).
 - **Authority is declared by default; elevation is verified.** `authority.source: caller_declared`
   is forgeable and presented as such. Elevation to `policy_engine_signed` / `human_signed` /
   `gateway_enforced` requires an `evidence_sig` that verifies under a pinned key; the preimage binds
@@ -124,6 +125,35 @@ what truly happened in the world.
 - **In-memory deployments lose evidence on restart** and are not serializable; use Postgres for any
   durability/integrity guarantee. The in-memory consume-before-act ledger reopens a single-use replay
   window on restart (warned about) — use the Postgres-backed ledger in production.
+
+## Data retention & erasure (append-only — no in-store deletion)
+
+averin's record store is **append-only by design** — its integrity invariant. The Postgres migration
+`REVOKE`s `UPDATE`/`DELETE`/`TRUNCATE` (enforced under a least-privilege role), and verification
+re-derives the hash-chained DAG over the **closed set** of records, so a record cannot be edited or
+deleted after sealing without breaking the very chain the product exists to prove. This has a hard,
+deliberate consequence you must design around before recording personal data:
+
+- **Sealed record bodies are permanently un-erasable.** There is **no in-store remedy for a GDPR
+  Art. 17 (right to erasure) / CCPA deletion request** against a sealed record. The only remedy is
+  physical: **cryptographically shred the whole store** (destroy the backing volume/DB) or, for the raw
+  low-entropy plaintext, let the content-store retention purge run (below). averin does not, and by
+  construction cannot, selectively delete one record.
+- **The commitment path IS the erasure path for `input`/`output`/`rationale`.** When these are sent at
+  the **top level**, only a hiding **commitment** enters the signed body; the raw value lives in the
+  content store, is encrypted at rest, and is **retention-purged** after `AVERIN_RAW_RETENTION_DAYS`
+  (after which the record still verifies from its commitment). This is the closest thing to erasure
+  averin offers — and it works **only** for top-level committed fields.
+- **`extensions.content_preview` (the flagship proxy/SDK path) is the un-erasable case.** Prompt/
+  completion bodies the OpenAI-compatible proxy and the SDKs place under `extensions.content_preview`
+  are signed **verbatim** — **not** committed, **not** in the encrypted content store, and **not**
+  covered by the `AVERIN_RAW_RETENTION_DAYS` purge. They are therefore **permanent, always-exported,
+  and un-erasable**. The proxy regex-scrubs secrets and **hard-truncates** each preview side to a
+  bounded length (`maxPreview`, 16 KiB) so a large body cannot bloat the store without bound, but
+  truncation is a size cap, **not** erasure or hiding. **To keep personal/regulated content erasable,
+  do not rely on `content_preview` — send the content at the top level (or pre-commit it) so it lives
+  in the purgeable, encrypted content store.** Full commitment-hiding of `content_preview` is a
+  **deferred** design item; see [INTEGRATION.md](INTEGRATION.md).
 
 ## Reporting
 
