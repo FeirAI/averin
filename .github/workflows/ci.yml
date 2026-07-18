@@ -84,7 +84,9 @@ jobs:
       - name: govulncheck (Go stdlib + module CVE scan; cgo needs the staticlib built above)
         working-directory: server
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # Pinned deliberately (was @latest — the only unpinned tool install across the five repos).
+          # Bump on a schedule when reviewing supply-chain CI; do not float back to @latest.
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           govulncheck ./...
 
   store-postgres:
