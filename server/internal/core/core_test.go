@@ -164,6 +164,42 @@ func TestSignEvidence(t *testing.T) {
 	}
 }
 
+// TestSignEvidenceRejectsNUL guards the cgo boundary: C.CString truncates at the first NUL, which
+// would silently sign a truncated preimage while the verifier reconstructs the full string from the
+// canonical record. Fail closed before crossing into Rust (parity with VerifyBundle).
+func TestSignEvidenceRejectsNUL(t *testing.T) {
+	c, _ := New(seed)
+	eh := "sha256:" + strings.Repeat("ab", 32)
+
+	sig, err := c.SignEvidence("gateway_enforced", "proj\x00hidden", "rec-1", eh)
+	if err == nil {
+		t.Fatal("expected error for NUL in projectID")
+	}
+	if sig != "" {
+		t.Fatalf("expected empty signature on NUL reject, got %q", sig)
+	}
+	if !strings.Contains(err.Error(), "NUL byte") {
+		t.Fatalf("error should mention NUL byte, got %v", err)
+	}
+
+	sig, err = c.SignEvidence("gateway_enforced", "proj-1", "rec\x00hidden", eh)
+	if err == nil {
+		t.Fatal("expected error for NUL in recordID")
+	}
+	if sig != "" {
+		t.Fatalf("expected empty signature on NUL reject, got %q", sig)
+	}
+
+	// clean inputs still sign successfully
+	sig, err = c.SignEvidence("gateway_enforced", "proj-1", "rec-1", eh)
+	if err != nil {
+		t.Fatalf("clean SignEvidence: %v", err)
+	}
+	if sig == "" || !strings.HasPrefix(sig, "ed25519:") {
+		t.Fatalf("expected non-empty ed25519: signature, got %q", sig)
+	}
+}
+
 func TestCommitRejectsBadInput(t *testing.T) {
 	c, _ := New(seed)
 	nonce, _ := c.RandomNonce()
