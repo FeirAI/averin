@@ -161,7 +161,20 @@ func (c *Core) RandomNonce() (string, error) {
 // Commit computes the hiding commitment "sha256:<hex>" over value under domain (one of
 // "input"/"output"/"rationale"), hidden by a 64-hex-char nonce. The value is sent base64url-no-pad
 // (the FFI's wire form); the commitment binds the raw bytes, not the encoding.
+//
+// nonceHex is client-reachable (POST /v2/use params_nonce): a C string is NUL-terminated, so an
+// interior 0x00 would truncate domain/nonceHex at the FFI boundary and let Rust commit over only the
+// prefix while the FULL untruncated value is stored for later disclosure — a commitment that can
+// never be reopened offline. Reject fail-closed here, where the true Go-string length is known,
+// mirroring VerifyBundle/VerifyBundleWith's NUL guard above. domain is small and server-controlled,
+// but guarding it too is cheap and keeps the two inputs to this call consistent.
 func (c *Core) Commit(domain string, value []byte, nonceHex string) (string, error) {
+	if i := strings.IndexByte(domain, 0); i >= 0 {
+		return "", fmt.Errorf("commit: NUL byte at offset %d in domain (would truncate the committed preimage)", i)
+	}
+	if i := strings.IndexByte(nonceHex, 0); i >= 0 {
+		return "", fmt.Errorf("commit: NUL byte at offset %d in nonce (would truncate the committed preimage)", i)
+	}
 	cd := C.CString(domain)
 	cv := C.CString(base64.RawURLEncoding.EncodeToString(value))
 	cn := C.CString(nonceHex)

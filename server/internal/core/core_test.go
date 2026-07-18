@@ -174,3 +174,50 @@ func TestCommitRejectsBadInput(t *testing.T) {
 		t.Fatal("expected error for bad nonce")
 	}
 }
+
+// TestCommitRejectsInteriorNUL covers the FFI-truncation gap: nonceHex is client-reachable
+// (POST /v2/use params_nonce), and a C string is NUL-terminated, so an interior 0x00 would truncate
+// domain/nonceHex at the cgo boundary. Rust would then validate+commit over only the prefix while the
+// FULL untruncated value is stored for later disclosure — a commitment that can never be reopened
+// offline. Commit must reject this fail-closed (empty string, non-nil error), mirroring
+// VerifyBundle/VerifyBundleWith's existing NUL guard.
+func TestCommitRejectsInteriorNUL(t *testing.T) {
+	c, _ := New(seed)
+
+	// A well-formed 64-hex-char nonce followed by an embedded NUL and more junk: if the NUL guard were
+	// missing, C.CString would truncate at the NUL, Rust would see (and validate) only the clean 64-hex
+	// prefix, and the commit would SUCCEED — even though the caller believes the full string was
+	// committed. That must not happen.
+	validPrefix := strings.Repeat("ab", 32) // 64 lowercase hex chars
+	nonceWithNUL := validPrefix + "\x00" + "extra-junk-that-would-be-silently-dropped"
+
+	got, err := c.Commit("input", []byte("x"), nonceWithNUL)
+	if err == nil {
+		t.Fatalf("expected error for nonce with embedded NUL, got success: %q", got)
+	}
+	if got != "" {
+		t.Fatalf("expected empty result on NUL-nonce rejection, got %q", got)
+	}
+	if !strings.Contains(err.Error(), "NUL byte") {
+		t.Fatalf("expected a NUL-byte rejection message, got: %v", err)
+	}
+
+	// An embedded NUL in domain must also fail closed, not just nonceHex.
+	nonce, _ := c.RandomNonce()
+	domainWithNUL := "input\x00rationale"
+	got2, err2 := c.Commit(domainWithNUL, []byte("x"), nonce)
+	if err2 == nil {
+		t.Fatalf("expected error for domain with embedded NUL, got success: %q", got2)
+	}
+	if got2 != "" {
+		t.Fatalf("expected empty result on NUL-domain rejection, got %q", got2)
+	}
+	if !strings.Contains(err2.Error(), "NUL byte") {
+		t.Fatalf("expected a NUL-byte rejection message, got: %v", err2)
+	}
+
+	// The good path (no NUL bytes) must still work.
+	if _, err := c.Commit("input", []byte("x"), nonce); err != nil {
+		t.Fatalf("good-path commit should still succeed: %v", err)
+	}
+}
