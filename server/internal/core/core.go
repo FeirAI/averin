@@ -182,6 +182,15 @@ func (c *Core) Commit(domain string, value []byte, nonceHex string) (string, err
 // evidenceHash == sha256(the real canonical evidence). The caller (broker) must guarantee that
 // binding (the broker TCB — ADR 0002 broker_trust: assumed).
 func (c *Core) SignEvidence(source, projectID, recordID, evidenceHash string) (string, error) {
+	// projectID/recordID are client-reachable (parsed from request bodies); C.CString truncates at the
+	// first NUL, which would silently sign over a truncated preimage while the verifier reconstructs the
+	// full untruncated string from the canonical record, permanently failing verification. Mirrors the
+	// VerifyBundle guard above; guard all four inputs uniformly rather than trusting caller discipline.
+	for _, s := range []string{source, projectID, recordID, evidenceHash} {
+		if i := strings.IndexByte(s, 0); i >= 0 {
+			return "", fmt.Errorf("sign evidence: NUL byte at offset %d in input (would truncate the signed preimage)", i)
+		}
+	}
 	cs := C.CString(source)
 	cproj := C.CString(projectID)
 	crid := C.CString(recordID)
