@@ -61,8 +61,17 @@ what truly happened in the world.
   *Data retention & erasure* below — and [INTEGRATION.md](INTEGRATION.md).
 - **Authority is declared by default; elevation is verified.** `authority.source: caller_declared`
   is forgeable and presented as such. Elevation to `policy_engine_signed` / `human_signed` /
-  `gateway_enforced` requires an `evidence_sig` that verifies under a pinned key; the preimage binds
-  `project_id` (`averin.authority.v2`) so a verified triple cannot be replayed across tenants.
+  `delegate_signed` / `gateway_enforced` requires an `evidence_sig` that verifies under a pinned key;
+  the preimage binds `project_id` (`averin.authority.v2`) so a verified triple cannot be replayed
+  across tenants.
+- **A claimed elevation that cannot be verified fails CLOSED (default).** Authority keys are pinned per
+  `(project, source)`; a record claiming an elevated source whose evidence does not verify under that
+  project's pinned key — or whose source is unpinned for that project — is **rejected** at ingest
+  (retryable `500`), never sealed downgraded to the forgeable `caller_declared`.
+  `AVERIN_REQUIRE_PINNED_AUTHORITY=0` is an explicit, logged opt-out that restores the old silent
+  downgrade. NOTE the `project_id` binding in the preimage stops a signed triple being **copied** across
+  projects; it is the per-project **pin** that stops one tenant's key **minting** valid authority in
+  another tenant's project.
 - **Role separation is enforced.** The signing, broker, resource, revocation, attestation, cosig,
   and taxonomy keys must be pairwise disjoint. The server fail-fasts (panics/`log.Fatal`s) on an
   overlap at startup; the offline verifier rejects an overlapping `opts.json` as a fatal config

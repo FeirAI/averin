@@ -61,9 +61,20 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   cryptographic guarantees — offline verification needs no server trust.)
 - **Uninstrumented actions (#13).** See above — a Level-2 limit by construction.
 - **Authority is *declared* by default.** `authority.source: caller_declared` is forgeable. Only
-  `policy_engine_signed` / `human_signed` (with `evidence_sig` from the authority system) is
-  *verified*. The UI must visibly distinguish "declared by agent" from "verified from policy
+  `policy_engine_signed` / `human_signed` / `delegate_signed` (with `evidence_sig` from the authority
+  system) is *verified*. The UI must visibly distinguish "declared by agent" from "verified from policy
   engine." Never present declared authority as verified.
+- **A claimed elevation averin cannot verify is REJECTED, not downgraded (default).** Ingest fails closed:
+  a record claiming `policy_engine_signed` / `human_signed` / `delegate_signed` whose `evidence_sig` does
+  not verify under the key pinned for its `(project, source)` — or whose source is unpinned for that
+  project — is refused with a retryable `500`. `AVERIN_REQUIRE_PINNED_AUTHORITY=0` is an explicit,
+  logged opt-out that restores the old silent downgrade-and-seal; evidence recorded in that mode is not
+  cryptographically distinguishable from a forgery. See CONFIGURATION.md.
+- **Authority keys are pinned per (project, source).** govder derives its signing key per
+  `(tenant, role)` and a govder tenant is an averin project, so a multi-tenant deployment must pin each
+  tenant's key against its project (`AVERIN_AUTHORITY_KEYS="<project>:<source>=<pubkey>,..."`). An
+  un-prefixed pin is the global default and is authoritative in every project that has no scoped pin —
+  do not use one global pin to serve several tenants.
 - **Authority signature is project-bound (v2), with a one-time pre-release cutover.** The authority
   `evidence_sig` preimage binds `project_id` (`averin.authority.v2`) so a verified triple cannot be replayed
   across tenants. This is a **hard cutover** from the pre-release `v1` (no `project_id`): the verifier

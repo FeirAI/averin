@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -149,47 +150,68 @@ func main() {
 	//                                 records are human_signed, signed by a DIFFERENT key than the
 	//                                 policy engine — this is what lets them elevate, not normalize
 	//                                 down to caller_declared on verify/export).
-	//   AVERIN_AUTHORITY_KEYS         — a general "source=pubkey,source=pubkey" list (the two sources
-	//                                 are policy_engine_signed and human_signed).
+	//   AVERIN_DELEGATE_SIGNED_PUBKEY — one key for the delegate_signed source (govder's delegate-agent
+	//                                 approval records, plan 031 D8). This is the third value
+	//                                 `govder-derive-pubkeys` prints; without it EVERY delegate-agent
+	//                                 approval record sealed at the forgeable caller_declared (F2).
+	//   AVERIN_AUTHORITY_KEYS         — a general "[project:]source=pubkey,..." list. `source` is one of
+	//                                 policy_engine_signed / human_signed / delegate_signed. With a
+	//                                 `project:` prefix the key is pinned for THAT averin project only and
+	//                                 wins over the un-prefixed global default for the same source.
+	//
+	// MULTI-TENANT (F1). The upstream authority (govder) derives its signing key per (tenant, role), and a
+	// govder tenant IS an averin project. A single GLOBAL key per source can therefore only elevate ONE
+	// tenant — every other tenant's policy_engine_signed / human_signed / delegate_signed records fail key
+	// verification. Pin each tenant's key against its project:
+	//
+	//   AVERIN_AUTHORITY_KEYS="acme:policy_engine_signed=<hex>,acme:human_signed=<hex>,acme:delegate_signed=<hex>,\
+	//                          globex:policy_engine_signed=<hex>,globex:human_signed=<hex>,globex:delegate_signed=<hex>"
+	//
+	// (run `GOVDER_AUTHORITY_SEED=... go run ./cmd/govder-derive-pubkeys <tenant>` in govder once per tenant).
 	//
 	// Each pubkey is the 32-byte ed25519 public key, hex- OR base64url-encoded (the
 	// "ed25519pub:<base64url>" published form is accepted with the prefix stripped). Each external
-	// authority holds the PRIVATE half out of this server. None set = Phase-1 default (every generic
-	// authority is caller_declared). Pinning the SAME source twice across these forms is a fatal
-	// config error (WithPolicyEngineKey rejects a duplicate source).
-	if raw := os.Getenv("AVERIN_POLICY_ENGINE_PUBKEY"); raw != "" {
-		pub, err := decodeAuthorityPubKey(raw)
-		if err != nil {
-			log.Fatalf("AVERIN_POLICY_ENGINE_PUBKEY: %v", err)
+	// authority holds the PRIVATE half out of this server. None set = every generic authority is
+	// caller_declared — which, with the now-default-ON AVERIN_REQUIRE_PINNED_AUTHORITY below, means an
+	// authority-CLAIMING record is REJECTED rather than silently downgraded. Pinning the SAME
+	// (project, source) twice across these forms is a fatal config error.
+	//
+	// The four env forms are resolved by authorityPinsFromEnv (a pure function over a getenv seam) so the
+	// COMPLETE pin set the binary installs is directly testable — the F2 defect was exactly an env var that
+	// the operator tooling printed, the docs implied, and main() never read.
+	for _, p := range authorityPinsFromEnv(os.Getenv) {
+		srv.WithProjectAuthorityKey(p.pin.project, p.pin.source, p.key)
+		scope := "all projects"
+		if p.pin.project != "" {
+			scope = "project=" + p.pin.project
 		}
-		source := envOr("AVERIN_POLICY_ENGINE_SOURCE", "policy_engine_signed")
-		srv.WithPolicyEngineKey(source, pub)
-		log.Printf("T7 authority key pinned (source=%s): a verifying authority evidence_sig elevates to %s", source, source)
+		log.Printf("T7 authority key pinned (source=%s, %s, via %s): a verifying authority evidence_sig elevates to %s",
+			p.pin.source, scope, p.env, p.pin.source)
 	}
-	if raw := os.Getenv("AVERIN_HUMAN_SIGNED_PUBKEY"); raw != "" {
-		pub, err := decodeAuthorityPubKey(raw)
-		if err != nil {
-			log.Fatalf("AVERIN_HUMAN_SIGNED_PUBKEY: %v", err)
-		}
-		srv.WithPolicyEngineKey("human_signed", pub)
-		log.Printf("T7 authority key pinned (source=human_signed): a verifying authority evidence_sig elevates to human_signed")
+	// AVERIN_REQUIRE_PINNED_AUTHORITY (default ON since F3): a record that CLAIMS an elevated authority
+	// source (policy_engine_signed/human_signed/delegate_signed) whose evidence fails to verify under the
+	// pinned key — or that names a source UNPINNED for its project — is REJECTED (a retryable 500) instead
+	// of silently sealed downgraded to the forgeable caller_declared.
+	//
+	// WHY THE DEFAULT FLIPPED. Off-by-default was what made F1 and F2 SILENT: a multi-tenant deployment, or
+	// any deployment recording delegate-agent approvals, permanently recorded kill/approval/policy evidence
+	// at forgeable authority and said nothing but a rate-limited WARNING. No shipped config ever set this
+	// variable, so nothing in the product was fail-closed here. Ordinary caller_declared traffic is
+	// unaffected in either mode (it claims no elevation to fail), so the flip only bites a producer that
+	// CLAIMS authority averin cannot verify — which is precisely the case that must not be sealed silently.
+	//
+	// OPTING OUT is explicit and loud: AVERIN_REQUIRE_PINNED_AUTHORITY=0 restores the Phase-1 silent
+	// downgrade and logs a WARNING naming what that means. Use it only as a migration step while the
+	// AVERIN_*_PUBKEY / AVERIN_AUTHORITY_KEYS pins are being aligned.
+	requirePinned, err := requirePinnedAuthorityFromEnv(os.Getenv("AVERIN_REQUIRE_PINNED_AUTHORITY"))
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
-	if raw := os.Getenv("AVERIN_AUTHORITY_KEYS"); raw != "" {
-		for source, pub := range parseAuthorityKeys(raw) {
-			srv.WithPolicyEngineKey(source, pub)
-			log.Printf("T7 authority key pinned (source=%s, via AVERIN_AUTHORITY_KEYS): a verifying authority evidence_sig elevates to %s", source, source)
-		}
-	}
-	// AVERIN_REQUIRE_PINNED_AUTHORITY (default OFF, back-compat): when on, a record that CLAIMS an elevated
-	// authority source (policy_engine_signed/human_signed/delegate_signed) whose evidence fails to verify under
-	// the pinned key — or that names an UNPINNED source — is REJECTED (a retryable 500) instead of silently
-	// sealed downgraded to the forgeable caller_declared. Turn it on for a signed kill/approval feed (e.g.
-	// govder) so a pinned-key MISALIGNMENT fails loudly, never permanently records a kill/audit at forgeable
-	// authority. Off preserves the Phase-1 default (silent downgrade); ordinary caller_declared traffic is
-	// unaffected either way.
-	if v := strings.ToLower(strings.TrimSpace(os.Getenv("AVERIN_REQUIRE_PINNED_AUTHORITY"))); v == "1" || v == "true" {
-		srv.WithRequirePinnedAuthority(true)
-		log.Printf("AVERIN_REQUIRE_PINNED_AUTHORITY on: a claimed authority elevation that fails key verification is REJECTED (fail-closed), not downgraded to caller_declared")
+	srv.WithRequirePinnedAuthority(requirePinned)
+	if requirePinned {
+		log.Printf("AVERIN_REQUIRE_PINNED_AUTHORITY on (default): a claimed authority elevation that fails key verification is REJECTED (fail-closed), not downgraded to caller_declared")
+	} else {
+		log.Printf("WARNING: AVERIN_REQUIRE_PINNED_AUTHORITY=0 — FAIL-OPEN authority posture explicitly selected. A record CLAIMING policy_engine_signed/human_signed/delegate_signed whose evidence does not verify under a pinned key (or whose source is unpinned for its project) will be PERMANENTLY SEALED at the forgeable caller_declared instead of rejected. Kill/approval/policy evidence recorded in this mode is not cryptographically distinguishable from a forgery.")
 	}
 	// durable content store for committed low-entropy values (raw input/output/rationale). No dir =
 	// in-memory (NOT durable; disclosures won't survive a restart).
@@ -620,29 +642,143 @@ func parseCosigApprovers(raw string) []ed25519.PublicKey {
 // unknown source, or a duplicate source within the list is fatal (fail-closed: a typo'd pin must not
 // silently disable elevation). The returned map is then fed one-per-source into WithPolicyEngineKey,
 // which also fatals on a source already pinned by AVERIN_POLICY_ENGINE_PUBKEY/AVERIN_HUMAN_SIGNED_PUBKEY.
-func parseAuthorityKeys(raw string) map[string]ed25519.PublicKey {
-	out := make(map[string]ed25519.PublicKey, 2)
+// authorityPinEnv is one parsed AVERIN_AUTHORITY_KEYS entry: the averin project the key is authoritative
+// for ("" = the global default, authoritative in any project with no project-scoped pin for that source)
+// and the authority source it vouches for.
+type authorityPinEnv struct {
+	project string
+	source  string
+}
+
+// resolvedAuthorityPin is one pin the binary will install, plus the env var it came from (named in the
+// startup log so an operator can see WHICH variable produced WHICH pin).
+type resolvedAuthorityPin struct {
+	pin authorityPinEnv
+	key ed25519.PublicKey
+	env string
+}
+
+// requirePinnedAuthorityFromEnv resolves the AVERIN_REQUIRE_PINNED_AUTHORITY posture.
+//
+// F3: the DEFAULT (unset) is now ON — fail-closed. Off-by-default was what made the F1 multi-tenant gap and
+// the F2 missing delegate_signed config path SILENT: an authority-claiming record averin could not verify was
+// permanently sealed at the forgeable caller_declared with nothing but a rate-limited WARNING, and no shipped
+// config ever set this variable. Only "0"/"false" opts out, and an unrecognized value is a FATAL config error
+// rather than a guessed posture (a typo like "yes" or "on" must never silently select fail-open).
+func requirePinnedAuthorityFromEnv(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "1", "true":
+		return true, nil
+	case "0", "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("AVERIN_REQUIRE_PINNED_AUTHORITY must be one of 1/true/0/false (got %q) — refusing to guess a fail-open authority posture", raw)
+	}
+}
+
+// authorityPinsFromEnv resolves EVERY authority-key env form into the complete set of pins the server will
+// install, in a deterministic order. `getenv` is the seam that makes this testable.
+//
+//	AVERIN_POLICY_ENGINE_PUBKEY   -> global pin for AVERIN_POLICY_ENGINE_SOURCE (default policy_engine_signed)
+//	AVERIN_HUMAN_SIGNED_PUBKEY    -> global pin for human_signed
+//	AVERIN_DELEGATE_SIGNED_PUBKEY -> global pin for delegate_signed        (F2: previously read by NOTHING)
+//	AVERIN_AUTHORITY_KEYS         -> "[project:]source=pubkey,..."          (F1: per-project pins)
+//
+// A malformed value is fatal (fail-closed: a typo'd pin must never silently disable elevation, which under
+// the default fail-closed posture would turn into a blanket ingest rejection rather than a silent downgrade —
+// loud either way, but the operator gets the precise variable name here).
+func authorityPinsFromEnv(getenv func(string) string) []resolvedAuthorityPin {
+	var out []resolvedAuthorityPin
+	single := func(envName, source string) {
+		raw := getenv(envName)
+		if strings.TrimSpace(raw) == "" {
+			return
+		}
+		pub, err := decodeAuthorityPubKey(raw)
+		if err != nil {
+			log.Fatalf("%s: %v", envName, err)
+		}
+		out = append(out, resolvedAuthorityPin{pin: authorityPinEnv{source: source}, key: pub, env: envName})
+	}
+	peSource := strings.TrimSpace(getenv("AVERIN_POLICY_ENGINE_SOURCE"))
+	if peSource == "" {
+		peSource = "policy_engine_signed"
+	}
+	single("AVERIN_POLICY_ENGINE_PUBKEY", peSource)
+	single("AVERIN_HUMAN_SIGNED_PUBKEY", "human_signed")
+	// F2: delegate_signed is a first-class verified source in the core AND in WithPolicyEngineKey, and
+	// govder's operator tool `govder-derive-pubkeys` prints exactly this variable — but nothing read it, so
+	// every delegate-agent approval record on every shipped deployment sealed at the forgeable
+	// caller_declared. AVERIN_AUTHORITY_KEYS additionally rejected the source outright.
+	single("AVERIN_DELEGATE_SIGNED_PUBKEY", "delegate_signed")
+	if raw := getenv("AVERIN_AUTHORITY_KEYS"); strings.TrimSpace(raw) != "" {
+		pins := parseAuthorityKeys(raw)
+		keys := make([]authorityPinEnv, 0, len(pins))
+		for pin := range pins {
+			keys = append(keys, pin)
+		}
+		// Deterministic install order so a duplicate-pin fatal is reproducible (map iteration is random).
+		sort.Slice(keys, func(i, j int) bool {
+			if keys[i].project != keys[j].project {
+				return keys[i].project < keys[j].project
+			}
+			return keys[i].source < keys[j].source
+		})
+		for _, pin := range keys {
+			out = append(out, resolvedAuthorityPin{pin: pin, key: pins[pin], env: "AVERIN_AUTHORITY_KEYS"})
+		}
+	}
+	return out
+}
+
+// parseAuthorityKeys parses AVERIN_AUTHORITY_KEYS: a comma-separated list of `[<project>:]<source>=<pubkey>`.
+//
+// Without a `project:` prefix the key is the GLOBAL default for that source (the historical form —
+// unchanged, and source names contain no ':' so an existing value cannot be re-read as project-scoped).
+// With one, the key is pinned for THAT averin project only and wins over the global default (F1: govder
+// derives its authority key per (tenant, role) and its tenant is the averin project, so one global key per
+// source can only ever elevate a single tenant).
+//
+// `delegate_signed` is accepted here (F2): it is a first-class verified source in the core and in
+// WithPolicyEngineKey, and rejecting it left govder's delegate-agent approval records with no way to be
+// pinned at all.
+func parseAuthorityKeys(raw string) map[authorityPinEnv]ed25519.PublicKey {
+	out := make(map[authorityPinEnv]ed25519.PublicKey, 2)
 	for _, part := range strings.Split(raw, ",") {
 		entry := strings.TrimSpace(part)
 		if entry == "" {
 			continue
 		}
-		source, key, ok := strings.Cut(entry, "=")
-		source = strings.TrimSpace(source)
-		if !ok || source == "" {
-			log.Fatalf("AVERIN_AUTHORITY_KEYS: %q is not a source=pubkey pair", part)
+		lhs, key, ok := strings.Cut(entry, "=")
+		lhs = strings.TrimSpace(lhs)
+		if !ok || lhs == "" {
+			log.Fatalf("AVERIN_AUTHORITY_KEYS: %q is not a [project:]source=pubkey pair", part)
 		}
-		if source != "policy_engine_signed" && source != "human_signed" {
-			log.Fatalf("AVERIN_AUTHORITY_KEYS: unknown source %q (want policy_engine_signed or human_signed)", source)
+		// Optional `project:` prefix. Project ids carry no ':' (AVERIN_API_KEYS already uses ':' as the
+		// project/token separator), so the split is unambiguous.
+		project := ""
+		source := lhs
+		if p, s, hasProject := strings.Cut(lhs, ":"); hasProject {
+			project = strings.TrimSpace(p)
+			source = strings.TrimSpace(s)
+			if project == "" {
+				log.Fatalf("AVERIN_AUTHORITY_KEYS: %q has an empty project (use source=pubkey for the global default)", part)
+			}
 		}
-		if _, dup := out[source]; dup {
-			log.Fatalf("AVERIN_AUTHORITY_KEYS: source %q listed more than once", source)
+		switch source {
+		case "policy_engine_signed", "human_signed", "delegate_signed":
+		default:
+			log.Fatalf("AVERIN_AUTHORITY_KEYS: unknown source %q (want policy_engine_signed, human_signed, or delegate_signed)", source)
+		}
+		pin := authorityPinEnv{project: project, source: source}
+		if _, dup := out[pin]; dup {
+			log.Fatalf("AVERIN_AUTHORITY_KEYS: source %q listed more than once for project %q", source, project)
 		}
 		pub, err := decodeAuthorityPubKey(strings.TrimSpace(key))
 		if err != nil {
 			log.Fatalf("AVERIN_AUTHORITY_KEYS (%s): %v", source, err)
 		}
-		out[source] = pub
+		out[pin] = pub
 	}
 	return out
 }

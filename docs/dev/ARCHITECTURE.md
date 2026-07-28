@@ -155,8 +155,10 @@ is integrity-level; the capstone is the higher, separately-stated claim.
   `authority` block, optional hiding-committed fields, and the seal (`content_hash`, `sig`, `key`).
 - **Authority** — *under whose declared (and, where a key is pinned, verified) authority* an action
   happened. `source` defaults to the forgeable `caller_declared`; an evidence triple
-  (`evidence_hash`/`evidence_sig`) that verifies under a pinned key elevates to `policy_engine_signed`
-  / `human_signed` / `gateway_enforced`. The triple is record-id-bound so it can't be replayed.
+  (`evidence_hash`/`evidence_sig`) that verifies under the key pinned for the record's
+  `(project_id, source)` elevates to `policy_engine_signed` / `human_signed` / `delegate_signed` /
+  `gateway_enforced`. The triple is project- and record-id-bound so it can't be replayed. A claimed
+  elevation that fails verification is **rejected at ingest** by default, not sealed downgraded.
 - **Session DAG** — the causal history for one `(project, session)`.
 - **Checkpoint** — a signed, hash-chained commitment to a frontier at a point in time; the "as-of"
   line, optionally RFC 3161-anchored.

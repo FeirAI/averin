@@ -220,8 +220,13 @@ func TestLeriaExportFilterableByRecordKind(t *testing.T) {
 
 // Acceptance #4: averin signs with its own seed; a sent authority block normalizes to caller_declared.
 // (record_kind does not change the authority model — the seam is one-directional, leria is an author.)
+//
+// F3: the record below CLAIMS policy_engine_signed with no evidence and no pinned key, so under the DEFAULT
+// fail-closed posture it is now REJECTED. The normalize-to-caller_declared behavior this acceptance pins is
+// the explicit fail-OPEN opt-out (AVERIN_REQUIRE_PINNED_AUTHORITY=0), selected here; the rejection under the
+// default is asserted at the end.
 func TestLeriaRecordKindAuthorityNormalizedToCallerDeclared(t *testing.T) {
-	h := newSrv(t)
+	h := newServer(t).WithRequirePinnedAuthority(false).Routes()
 	withAuthority := `{
       "project_id": "tenant_acme",
       "session_id": "budget:bdg_9",
@@ -240,6 +245,13 @@ func TestLeriaRecordKindAuthorityNormalizedToCallerDeclared(t *testing.T) {
 	}
 	if !strings.HasPrefix(asString(rec["sig"]), "ed25519:") {
 		t.Fatalf("averin must sign the record with its own seed: %v", rec)
+	}
+
+	// F3: the SAME body against a DEFAULT server (fail-closed) is refused, not downgraded-and-sealed — a
+	// leria-shaped record that claims an authority averin cannot verify never enters the ledger.
+	hDefault := newSrv(t)
+	if code, resp := do(t, hDefault, "POST", "/v2/records", withAuthority); code != http.StatusInternalServerError {
+		t.Fatalf("by default an unverifiable policy_engine_signed claim must be REJECTED (500), got %d: %s", code, resp)
 	}
 }
 

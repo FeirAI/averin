@@ -65,10 +65,15 @@ func TestRequirePinnedAuthorityRejectsMisalignedElevation(t *testing.T) {
 	}
 }
 
-// TestFailedElevationDefaultsToCallerDeclared (averin#6, back-compat): the SAME misalignment, with the toggle
-// OFF (the default), preserves the Phase-1 behavior — the record seals (201) downgraded to caller_declared,
-// exactly as before. This proves default-off changes nothing.
-func TestFailedElevationDefaultsToCallerDeclared(t *testing.T) {
+// TestFailedElevationUnderFailOpenOptOutDowngradesToCallerDeclared (averin#6, back-compat): the SAME
+// misalignment with the fail-OPEN opt-out EXPLICITLY selected (AVERIN_REQUIRE_PINNED_AUTHORITY=0) preserves
+// the Phase-1 behavior — the record seals (201) downgraded to caller_declared.
+//
+// F3: this test was named ...DefaultsToCallerDeclared and asserted the downgrade *as the default*. That is
+// precisely the assertion that made the fail-open default read as intended behavior instead of a defect, so
+// the default flip had to be renamed here, not just reconfigured. The default posture is now pinned by
+// TestDefaultPostureIsFailClosed below.
+func TestFailedElevationUnderFailOpenOptOutDowngradesToCallerDeclared(t *testing.T) {
 	c, err := core.New(seed)
 	if err != nil {
 		t.Fatalf("core: %v", err)
@@ -76,15 +81,75 @@ func TestFailedElevationDefaultsToCallerDeclared(t *testing.T) {
 	pinned := ed25519.NewKeyFromSeed(peSeed(0x51))
 	wrong := ed25519.NewKeyFromSeed(peSeed(0x52))
 	h := api.New(c, store.NewMem(), "k0").
-		WithPolicyEngineKey("human_signed", pinned.Public().(ed25519.PublicKey)).Routes() // toggle OFF (default)
+		WithPolicyEngineKey("human_signed", pinned.Public().(ed25519.PublicKey)).
+		WithRequirePinnedAuthority(false).Routes() // EXPLICIT fail-open opt-out
 
 	body := forgedHumanSignedBody("k1", "p1", "kill-1", wrong)
 	code, r := do(t, h, "POST", "/v2/records", body)
 	if code != http.StatusCreated {
-		t.Fatalf("with the toggle off, a failed elevation must still seal (back-compat), got %d: %s", code, r)
+		t.Fatalf("with the fail-open opt-out, a failed elevation must still seal (back-compat), got %d: %s", code, r)
 	}
 	if !strings.Contains(r, `"source":"caller_declared"`) {
 		t.Fatalf("a failed elevation must downgrade to caller_declared: %s", r)
+	}
+}
+
+// TestDefaultPostureIsFailClosed (F3) is the regression test for the fail-OPEN default itself: a server built
+// with NO authority options at all — exactly what api.New gives an embedder, and what averin-server produces
+// when AVERIN_REQUIRE_PINNED_AUTHORITY is unset — must REJECT a record claiming an elevated source it cannot
+// verify, and seal nothing. It also pins the misalignment case (a pinned key, wrong signer).
+//
+// Before F3 the guard existed but defaulted OFF and was set in no shipped config, so the whole product ran
+// fail-open: this test asserts the DEFAULT, which is the only thing production actually uses.
+func TestDefaultPostureIsFailClosed(t *testing.T) {
+	newDefault := func(t *testing.T, opts ...func(*api.Server) *api.Server) http.Handler {
+		t.Helper()
+		c, err := core.New(seed)
+		if err != nil {
+			t.Fatalf("core: %v", err)
+		}
+		srv := api.New(c, store.NewMem(), "k0") // NO WithRequirePinnedAuthority call at all
+		for _, o := range opts {
+			srv = o(srv)
+		}
+		return srv.Routes()
+	}
+	assertRejectedAndEmpty := func(t *testing.T, h http.Handler, body, what string) {
+		t.Helper()
+		if code, r := do(t, h, "POST", "/v2/records", body); code != http.StatusInternalServerError {
+			t.Fatalf("%s: default posture must REJECT with 500, got %d: %s", what, code, r)
+		}
+		code, list := do(t, h, "GET", "/v2/records?project=p1", "")
+		if code != http.StatusOK {
+			t.Fatalf("list: %d %s", code, list)
+		}
+		var out struct {
+			Total int `json:"total"`
+		}
+		_ = json.Unmarshal([]byte(list), &out)
+		if out.Total != 0 {
+			t.Fatalf("%s: a rejected elevation must seal NOTHING, got total=%d: %s", what, out.Total, list)
+		}
+	}
+
+	// (a) UNPINNED source (no authority key configured at all) — the shipped-config case (F2/F3).
+	unsigned := ed25519.NewKeyFromSeed(peSeed(0x53))
+	assertRejectedAndEmpty(t, newDefault(t),
+		forgedHumanSignedBody("k1", "p1", "kill-1", unsigned), "unpinned human_signed")
+
+	// (b) PINNED but misaligned key (govder/averin key drift) — must also reject by default.
+	pinned := ed25519.NewKeyFromSeed(peSeed(0x51))
+	wrong := ed25519.NewKeyFromSeed(peSeed(0x52))
+	assertRejectedAndEmpty(t,
+		newDefault(t, func(s *api.Server) *api.Server {
+			return s.WithPolicyEngineKey("human_signed", pinned.Public().(ed25519.PublicKey))
+		}),
+		forgedHumanSignedBody("k2", "p1", "kill-2", wrong), "misaligned human_signed")
+
+	// (c) an honest caller_declared record is untouched by the default posture.
+	h := newDefault(t)
+	if code, r := do(t, h, "POST", "/v2/records", `{"idempotency_key":"ok","project_id":"p1","session_id":"s1","action":"db.read"}`); code != http.StatusCreated {
+		t.Fatalf("ordinary caller_declared traffic must still seal under the default posture, got %d: %s", code, r)
 	}
 }
 

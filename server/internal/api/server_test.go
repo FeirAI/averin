@@ -255,11 +255,24 @@ func TestIdempotencyCollapsesRetries(t *testing.T) {
 }
 
 func TestAuthorityIsDeclaredNotSilentlyVerified(t *testing.T) {
+	// A client LIES that authority is policy_engine_signed, with a bogus evidence_sig and NO key pinned.
+	// F3: under the DEFAULT (fail-closed) posture this is REJECTED outright — the forged claim never enters
+	// the append-only store at all. Previously this test asserted only that the lie was *downgraded* and
+	// sealed, which is exactly why the fail-open default went unnoticed: the assertion passed either way.
+	body := `{"idempotency_key":"a1","project_id":"p1","session_id":"s1","authority":{"source":"policy_engine_signed","decision_basis":"policy_allowed","evidence_sig":"ed25519:bogus"}}`
 	h := newSrv(t)
-	// client LIES that authority is policy_engine_signed — even WITH a bogus evidence_sig the server
-	// must not promote it (no server-side evidence verification in Phase 1).
-	rec, _ := postRecord(t, h,
-		`{"idempotency_key":"a1","project_id":"p1","session_id":"s1","authority":{"source":"policy_engine_signed","decision_basis":"policy_allowed","evidence_sig":"ed25519:bogus"}}`)
+	if code, resp := do(t, h, "POST", "/v2/records", body); code != http.StatusInternalServerError {
+		t.Fatalf("by DEFAULT an unverifiable elevated-authority claim must be REJECTED (500), got %d: %s", code, resp)
+	}
+	_, list := do(t, h, "GET", "/v2/records?project=p1", "")
+	if !strings.Contains(list, `"total":0`) {
+		t.Fatalf("a rejected forged-authority claim must seal NOTHING: %s", list)
+	}
+
+	// With the explicit fail-OPEN opt-out (AVERIN_REQUIRE_PINNED_AUTHORITY=0) the Phase-1 behavior is
+	// preserved: the record seals, but never at the claimed source — it is forced to caller_declared.
+	hOpen := newServer(t).WithRequirePinnedAuthority(false).Routes()
+	rec, _ := postRecord(t, hOpen, body)
 	auth, _ := rec["authority"].(map[string]any)
 	if auth["source"] != "caller_declared" {
 		t.Fatalf("unverified authority must be caller_declared, got %v", auth["source"])

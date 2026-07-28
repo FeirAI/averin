@@ -96,10 +96,17 @@ If you run your own policy engine or human-approval service, you can get records
 forgeable `caller_declared`:
 
 1. Have that service sign the authority evidence triple with its own key (off the averin server).
-2. Pin its public key on the server: `AVERIN_POLICY_ENGINE_PUBKEY` (source `policy_engine_signed`)
-   and/or `AVERIN_HUMAN_SIGNED_PUBKEY` (source `human_signed`).
+2. Pin its public key on the server: `AVERIN_POLICY_ENGINE_PUBKEY` (source `policy_engine_signed`),
+   `AVERIN_HUMAN_SIGNED_PUBKEY` (source `human_signed`), and/or `AVERIN_DELEGATE_SIGNED_PUBKEY`
+   (source `delegate_signed`). If the signing key differs **per averin project** (it does for govder,
+   which derives per `(tenant, role)`), pin per project:
+   `AVERIN_AUTHORITY_KEYS="<project>:<source>=<pubkey>,..."`.
 3. Records carrying that source + a verifying `evidence_sig` are stamped the elevated source at
    ingest; an auditor pinning the same keys reads them as `verified`.
+4. **A claim that does not verify is rejected, not downgraded.** By default
+   (`AVERIN_REQUIRE_PINNED_AUTHORITY`, now `1`) a record claiming an elevated source averin cannot
+   verify for its project gets a retryable `500` and is not sealed at all. Align the pins **before**
+   pointing a signing producer at averin, or the producer's seals will fail loudly.
 
 The credential broker (`POST /v2/grants`) + resource gateway (`POST /v2/use`) are also fully usable
 standalone if you want Tier-A grant accountability and Tier-B use receipts for your own resources —
@@ -123,8 +130,9 @@ enforced, or metered. The composition is just the standalone client API above, c
   micros only** (no floats — the RCP canonicalizer rejects them).
 - **Elevate authority:** the plane signs the authority `evidence_sig` with its own key, and the averin
   operator pins that key via `AVERIN_POLICY_ENGINE_PUBKEY` / `AVERIN_HUMAN_SIGNED_PUBKEY` /
-  `AVERIN_AUTHORITY_KEYS` so the seals elevate to `policy_engine_signed` / `human_signed` rather than
-  `caller_declared`.
+  `AVERIN_DELEGATE_SIGNED_PUBKEY` / `AVERIN_AUTHORITY_KEYS` (per `(project, source)`) so the seals
+  elevate to `policy_engine_signed` / `human_signed` / `delegate_signed`. An unpinned or misaligned
+  claim is **rejected** at ingest by default, not silently downgraded to `caller_declared`.
 - **Typed evidence categories:** the optional `record_kind` field (`budget-exhausted`,
   `chargeback-posted`) is preserved through verify/export, so a board view can filter
   `GET /v2/export?record_kind=budget-exhausted` without parsing `extensions`.
@@ -139,13 +147,23 @@ evidence. Background: [`../HANDOFF-leria-records.md`](../HANDOFF-leria-records.m
 
 ### govder (DECIDE) → averin  *(elevation contract)*
 
-govder's runtime seals budget verdicts under `policy_engine_signed` and kill/approval legs under
-`human_signed`, signed with per-(tenant, role) authority keys. The averin operator pins the matching
-public keys (`AVERIN_POLICY_ENGINE_PUBKEY` + `AVERIN_HUMAN_SIGNED_PUBKEY`) so every seal **elevates to
-verified** at ingest rather than normalizing down to `caller_declared`. This pattern (one key per
-source, role-separated) is exactly the four-plane end-to-end harness wiring (see govder's
-`e2e/bootstrap_test.go`, which is the authoritative example of how averin-server is built, configured,
-and run in composition).
+govder's runtime seals budget verdicts under `policy_engine_signed`, kill/approval legs under
+`human_signed`, and delegate-agent approvals under `delegate_signed` — signed with **per-(tenant, role)**
+authority keys. The averin operator pins the matching public keys so every seal **elevates to verified**
+at ingest rather than being rejected (or, under the fail-open opt-out, normalizing down to
+`caller_declared`). Derive them with `GOVDER_AUTHORITY_SEED=... go run ./cmd/govder-derive-pubkeys
+<tenant>` in govder, which prints `AVERIN_POLICY_ENGINE_PUBKEY`, `AVERIN_HUMAN_SIGNED_PUBKEY`, and
+`AVERIN_DELEGATE_SIGNED_PUBKEY`.
+
+> **Multi-tenant.** A govder tenant *is* an averin project and the key is derived per `(tenant, role)`,
+> so the three single-key variables above are only sufficient for a **single-tenant** deployment. With
+> more than one tenant, run `govder-derive-pubkeys` once per tenant and pin per project:
+> `AVERIN_AUTHORITY_KEYS="acmeco:policy_engine_signed=<hex>,acmeco:human_signed=<hex>,acmeco:delegate_signed=<hex>,globex:..."`.
+> A single global pin can only ever elevate one tenant.
+
+The four-plane end-to-end harness (govder's `e2e/bootstrap_test.go`) is the authoritative example of how
+averin-server is built, configured, and run in composition — note that it is a **single-tenant** wiring,
+so it exercises the global-pin form only.
 
 ### vultrino (ENFORCE) ↔ averin  *(design note, not yet wired)*
 

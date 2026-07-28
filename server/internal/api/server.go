@@ -103,15 +103,25 @@ type Server struct {
 	// Reuses the denial_budget.go two-level bucket. nil = unlimited (the prior behavior — this is opt-in
 	// defense-in-depth; a reverse-proxy/gateway limit remains the PRIMARY, HARD control, see CONFIGURATION.md).
 	ingestBudget *denialBudget
-	// T7 (ADR 0002 / coverage-limits #4): pinned EXTERNAL authority verifying keys, keyed by the authority
-	// source they vouch for ("policy_engine_signed" and/or "human_signed"). When a generic record carries a
-	// matching source plus an authority evidence_sig that verifies under that source's pinned key, it is
-	// stamped with that elevated source (else forced to caller_declared). An empty map = Phase-1 default
-	// (every generic authority is caller_declared). Each external authority holds the private half OUT of
-	// this server. Distinct sources MAY be served by distinct keys (e.g. the policy engine signs
-	// policy_engine_signed, a separate human-approval service signs human_signed) so a record signed by the
-	// matching key elevates to ITS source — exactly the verifier's per-source trusted_authority_keys model.
-	policyEngineKeys map[string]ed25519.PublicKey
+	// T7 (ADR 0002 / coverage-limits #4): pinned EXTERNAL authority verifying keys, keyed by
+	// (project, source). When a generic record carries a matching source plus an authority evidence_sig
+	// that verifies under the key pinned for THAT (project, source), it is stamped with that elevated
+	// source (else forced to caller_declared). An empty map = Phase-1 default (every generic authority is
+	// caller_declared). Each external authority holds the private half OUT of this server. Distinct
+	// sources MAY be served by distinct keys (e.g. the policy engine signs policy_engine_signed, a
+	// separate human-approval service signs human_signed) so a record signed by the matching key elevates
+	// to ITS source — exactly the verifier's per-source trusted_authority_keys model.
+	//
+	// PROJECT SCOPING (F1). A pin with project=="" is the GLOBAL default (the historical, single-key
+	// behavior). A pin with a non-empty project applies to THAT project only and WINS over the global
+	// default. This exists because the upstream authority (govder) derives its signing key per
+	// (tenant, role) and govder's tenant IS the averin project — so a single global key per source can
+	// only ever elevate ONE tenant's records. Every other tenant's policy_engine_signed / human_signed /
+	// delegate_signed records failed key verification and were silently sealed at the forgeable
+	// caller_declared. A global-only pin is also authoritative in EVERY project, so the project_id bound
+	// into the authority preimage stopped a signed block being COPIED across projects but did not stop
+	// the holder of one tenant's key from minting a fresh, valid block for another tenant's project.
+	policyEngineKeys map[authorityPin]ed25519.PublicKey
 	// Tier-B resource side (ADR 0003): the resource recording key signs use-receipt authority evidence
 	// (role-separated from the broker key, R2); resourceID is this resource's audience; ledger is the
 	// consume-before-act jti/nonce store. nil resourceCore = /v2/use disabled.
@@ -174,12 +184,15 @@ type Server struct {
 	// NextCheckpointSeq and fork the checkpoint chain.
 	checkpointMu sync.Mutex
 
-	// requirePinnedAuthority (AVERIN_REQUIRE_PINNED_AUTHORITY, default OFF) makes an authority-BEARING
-	// record whose CLAIMED elevation (policy_engine_signed / human_signed / delegate_signed) FAILS key
-	// verification REJECT the ingest (fail-closed) instead of silently sealing it downgraded to the
-	// forgeable caller_declared. Off preserves the Phase-1 default (silent downgrade, back-compat); on is
-	// for deployments (e.g. govder's signed kill/approval feed) where a pinned-key MISALIGNMENT must fail
-	// loudly, never permanently record a kill/audit at forgeable authority. See normalizeAuthority.
+	// requirePinnedAuthority (AVERIN_REQUIRE_PINNED_AUTHORITY, default ON since F3) makes an
+	// authority-BEARING record whose CLAIMED elevation (policy_engine_signed / human_signed /
+	// delegate_signed) FAILS key verification REJECT the ingest (fail-closed) instead of silently sealing it
+	// downgraded to the forgeable caller_declared. Off restores the Phase-1 silent downgrade — an explicit,
+	// logged fail-OPEN opt-out.
+	//
+	// The default lives in New() (NOT in the zero value) and is ON, so an embedder and the shipped
+	// averin-server binary get the SAME posture — a test suite running fail-open while production runs
+	// fail-closed would be testing a different server than the one that ships. See normalizeAuthority.
 	requirePinnedAuthority bool
 	// authorityDowngradeLogAt throttles the WARNING that names a failed authority elevation (a govder/averin
 	// key misalignment can otherwise spam it on every ingest). Guarded by ingestMu: normalizeAuthority — its
@@ -234,6 +247,10 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		now:          time.Now,
 		pending:      make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
 		bundleSem:    make(chan struct{}, maxConcurrentBundleReads),
+		// F3: fail-CLOSED authority posture by default. A record CLAIMING an elevated source that averin
+		// cannot verify under a pinned key is REJECTED, never silently sealed at the forgeable
+		// caller_declared. WithRequirePinnedAuthority(false) is the explicit opt-out.
+		requirePinnedAuthority: true,
 
 		metrics: reg,
 		mRecordsSealed: reg.Counter("averin_records_sealed_total",
@@ -363,23 +380,48 @@ func (s *Server) WithDeniedGrantLog() *Server {
 	return s
 }
 
-// WithRequirePinnedAuthority (AVERIN_REQUIRE_PINNED_AUTHORITY) flips the fail-closed authority posture: when
+// WithRequirePinnedAuthority (AVERIN_REQUIRE_PINNED_AUTHORITY) sets the fail-closed authority posture: when
 // on, a record that CLAIMS an elevated authority source (policy_engine_signed / human_signed / delegate_signed)
-// whose evidence does NOT verify under the pinned key — or that names an UNPINNED source — is REJECTED (a
-// retryable ingest error) rather than silently sealed downgraded to caller_declared. Default off preserves the
-// Phase-1 back-compat behavior (silent downgrade). Ordinary caller_declared traffic is never affected either way
-// (it claims no elevation to fail). See normalizeAuthority.
+// whose evidence does NOT verify under the key pinned for its (project, source) — or whose source is UNPINNED
+// for that project — is REJECTED (a retryable ingest error) rather than silently sealed downgraded to
+// caller_declared. It is ON by default (New); passing false is the explicit fail-OPEN opt-out that restores the
+// Phase-1 silent downgrade. Ordinary caller_declared traffic is never affected either way (it claims no
+// elevation to fail). See normalizeAuthority.
 func (s *Server) WithRequirePinnedAuthority(v bool) *Server {
 	s.requirePinnedAuthority = v
 	return s
 }
 
+// authorityPin identifies ONE pinned external authority key: the averin project it is authoritative for
+// and the authority source it vouches for. Project "" is the GLOBAL default pin (authoritative in any
+// project that has no project-scoped pin for the same source) — the historical single-key behavior.
+type authorityPin struct {
+	project string
+	source  string
+}
+
+// authorityKeyFor resolves the pinned verifying key for (project, source): the project-scoped pin wins,
+// then the global (project=="") default. A miss means the source is UNPINNED for this project, which is a
+// FAILED elevation (downgrade, or reject under requirePinnedAuthority) — never a silent pass.
+//
+// This is the F1 fix: govder derives its authority key per (tenant, role) and govder's tenant is the
+// averin project, so a lookup keyed by source ALONE could only ever elevate one tenant.
+func (s *Server) authorityKeyFor(project, source string) (ed25519.PublicKey, bool) {
+	if key, ok := s.policyEngineKeys[authorityPin{project: project, source: source}]; ok {
+		return key, true
+	}
+	key, ok := s.policyEngineKeys[authorityPin{source: source}]
+	return key, ok
+}
+
 // WithPolicyEngineKey (T7) pins an EXTERNAL authority's published verifying key + the authority source it
-// vouches for ("policy_engine_signed", "human_signed", or "delegate_signed"). It may be called ONCE PER
-// SOURCE: pin the policy engine's key for policy_engine_signed AND (separately) a human-approval service's
-// key for human_signed AND a delegate-agent authority's key for delegate_signed, so a record signed by the
-// matching key elevates to ITS source. At ingest, a generic record whose authority carries a pinned source
-// plus a {evidence_hash, evidence_sig} that verifies under that source's key over the canonical authority
+// vouches for ("policy_engine_signed", "human_signed", or "delegate_signed") as the GLOBAL default for
+// every project. Use WithProjectAuthorityKey to pin a key for ONE project (multi-tenant: the upstream
+// authority derives a distinct key per tenant). It may be called ONCE PER SOURCE: pin the policy engine's
+// key for policy_engine_signed AND (separately) a human-approval service's key for human_signed AND a
+// delegate-agent authority's key for delegate_signed, so a record signed by the matching key elevates to
+// ITS source. At ingest, a generic record whose authority carries a pinned source plus a
+// {evidence_hash, evidence_sig} that verifies under that source's key over the canonical authority
 // preimage is elevated to that source (so an offline verifier pinning the SAME keys as authority_keys reads
 // it as `verified`); anything else — an unpinned source, or a mismatched/forged key — falls back to forgeable
 // `caller_declared` (threat #4). Model: each authority signs with its OWN key off-box and the server only
@@ -387,6 +429,18 @@ func (s *Server) WithRequirePinnedAuthority(v bool) *Server {
 // verifier does not fold authority_keys into its disjointness check, so we reject the obvious overlaps: the
 // server's own signing key, and re-using one key across two authority sources).
 func (s *Server) WithPolicyEngineKey(source string, key ed25519.PublicKey) *Server {
+	return s.WithProjectAuthorityKey("", source, key)
+}
+
+// WithProjectAuthorityKey pins an external authority verifying key for ONE project (F1). It is the
+// multi-tenant form of WithPolicyEngineKey: govder derives its authority signing key per (tenant, role) and
+// its tenant is the averin project, so a deployment recording more than one tenant MUST pin that tenant's
+// key against that tenant's project. A project-scoped pin WINS over the global default for the same source;
+// a project with no scoped pin still falls back to the global default (back-compat), and a project with
+// neither leaves the source UNPINNED — a failed elevation, never a silent pass.
+//
+// project "" pins the global default (exactly what WithPolicyEngineKey does).
+func (s *Server) WithProjectAuthorityKey(project, source string, key ed25519.PublicKey) *Server {
 	// The offline verifier only elevates these three generic authority sources; pinning any other source would
 	// make the server stamp records the verifier reads as `declared`, not `verified` (gateway_enforced is the
 	// broker's own source, not a generic policy-engine one).
@@ -399,20 +453,23 @@ func (s *Server) WithPolicyEngineKey(source string, key ed25519.PublicKey) *Serv
 		panic("WithPolicyEngineKey: the authority key must be role-separated from the server signing key")
 	}
 	if s.policyEngineKeys == nil {
-		s.policyEngineKeys = make(map[string]ed25519.PublicKey, 2)
+		s.policyEngineKeys = make(map[authorityPin]ed25519.PublicKey, 2)
 	}
-	if _, dup := s.policyEngineKeys[source]; dup {
-		panic("WithPolicyEngineKey: source " + source + " already pinned (pin at most one key per source)")
+	pin := authorityPin{project: project, source: source}
+	if _, dup := s.policyEngineKeys[pin]; dup {
+		panic("WithPolicyEngineKey: source " + source + " already pinned for project " + strconv.Quote(project) + " (pin at most one key per project+source)")
 	}
-	// Reuse of ONE key across two authority sources would let a record signed for one source be re-labeled with
+	// Reuse of ONE key across two authority SOURCES would let a record signed for one source be re-labeled with
 	// the other's source by a caller (the verifier binds source into the preimage, so this is only a
 	// defense-in-depth guard, but it keeps the pinned set as cleanly role-separated as the verifier expects).
-	for existingSource, existing := range s.policyEngineKeys {
-		if existing.Equal(key) {
-			panic("WithPolicyEngineKey: this key is already pinned for source " + existingSource + " (one key per source)")
+	// Re-using one key across two PROJECTS for the SAME source is allowed: the preimage binds project_id, and a
+	// single-tenant authority legitimately serves several averin projects.
+	for existing, existingKey := range s.policyEngineKeys {
+		if existing.source != source && existingKey.Equal(key) {
+			panic("WithPolicyEngineKey: this key is already pinned for source " + existing.source + " (one key per source)")
 		}
 	}
-	s.policyEngineKeys[source] = key
+	s.policyEngineKeys[pin] = key
 	return s
 }
 
@@ -716,9 +773,9 @@ func (s *Server) Routes() http.Handler {
 	// check now also fatals on. Fail fast at setup, like the other WithPolicyEngineKey guards.
 	if len(s.policyEngineKeys) > 0 && s.resourceCore != nil {
 		if rpub, err := decodePubKey(s.resourceCore.PubKey()); err == nil {
-			for source, key := range s.policyEngineKeys {
+			for pin, key := range s.policyEngineKeys {
 				if key.Equal(rpub) {
-					panic("the " + source + " authority key must be role-separated from the resource key")
+					panic("the " + pin.source + " authority key must be role-separated from the resource key")
 				}
 			}
 		}
@@ -851,6 +908,14 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 	// whole-batch retry collapses the already-sealed items rather than duplicating them.
 	queryProject := r.URL.Query().Get("project")
 	headerIdem := r.Header.Get("Idempotency-Key")
+	// F5: within ONE batch, two items that resolve to the SAME (project_id, idempotency_key) would collapse
+	// in the store — PutRecord returns the FIRST item's row for the second, created=false, and the second
+	// item's DISTINCT evidence is silently DISCARDED while the 201 response still lists a record for it. That
+	// is evidence loss in an append-only flight recorder, and it is the default outcome for a multi-item batch
+	// posted with only an `Idempotency-Key` HEADER (every item inherits the one key). Reject the WHOLE batch
+	// up front (deterministic 400, nothing sealed) rather than silently dropping records: a batch of distinct
+	// records needs a distinct idempotency_key per item.
+	batchIdem := make(map[string]struct{}, len(items))
 	for _, raw := range items {
 		var probe map[string]any
 		if decode(raw, &probe) != nil {
@@ -872,6 +937,19 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 		if reservedIdem(idem) {
 			writeErr(w, http.StatusBadRequest, fmt.Sprintf("idempotency_key prefix %q is reserved for the broker denied-grant log", denialIdemPrefix))
 			return
+		}
+		// F5: the store dedups per (project_id, idempotency_key), so two items in one batch under the same
+		// pair collapse and the later item's evidence is dropped. Reject before anything is sealed.
+		if len(items) > 1 {
+			dedupKey := stringField(probe, "project_id") + "\x00" + idem
+			if _, dup := batchIdem[dedupKey]; dup {
+				writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+					"two records in this batch share idempotency_key %q under the same project_id — they would collapse "+
+						"onto one stored record and silently DROP the later record's evidence; give each batch item its own "+
+						"idempotency_key (an Idempotency-Key HEADER applies to every item, so it cannot key a multi-item batch)", idem))
+				return
+			}
+			batchIdem[dedupKey] = struct{}{}
 		}
 		if err := s.validateGenericRecordItem(probe); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
@@ -1079,7 +1157,9 @@ func (s *Server) validateDelegationEvidence(rec map[string]any) error {
 	if claimedSource == "delegate_signed" {
 		pinnedSource = "delegate_signed"
 	}
-	pinned := s.policyEngineKeys[pinnedSource]
+	// F1: resolve the pin for THIS record's project (project-scoped pin first, then the global default) —
+	// a global-only lookup would accept tenant A's delegator on a tenant-B record.
+	pinned, _ := s.authorityKeyFor(stringField(rec, "project_id"), pinnedSource)
 	if len(pinned) != ed25519.PublicKeySize || !pinned.Equal(delegator) {
 		return fmt.Errorf("delegation_hop delegator is not the pinned %s authority", pinnedSource)
 	}
@@ -2557,9 +2637,12 @@ func (s *Server) normalizeAuthority(rec map[string]any) error {
 	// fail-closed toggle never rejects plain caller_declared Phase-1 traffic.
 	attemptedElevation := claimed != "" && claimed != "caller_declared"
 	// Phase-1 default, or a source with no pinned key: authority is forgeable -> caller_declared (threat #4).
-	// Looking the key up BY the claimed source is what lets policy_engine_signed AND human_signed coexist —
-	// each elevates only under the key pinned for that exact source.
-	key, pinned := s.policyEngineKeys[claimed]
+	// Looking the key up BY (project, claimed source) is what lets policy_engine_signed AND human_signed
+	// coexist — each elevates only under the key pinned for that exact source — AND what makes a multi-tenant
+	// deployment work: the upstream authority derives its key per (tenant, role) and its tenant is the averin
+	// project, so a source-only lookup could elevate exactly ONE tenant and silently downgraded the rest (F1).
+	recProjectID, _ := rec["project_id"].(string)
+	key, pinned := s.authorityKeyFor(recProjectID, claimed)
 	if !pinned {
 		if attemptedElevation {
 			s.mAuthorityDowngrades.Inc()
@@ -2574,10 +2657,9 @@ func (s *Server) normalizeAuthority(rec map[string]any) error {
 	// T7 model (b): elevate to the claimed source ONLY if the caller-supplied evidence_sig verifies under that
 	// source's pinned key over the canonical authority preimage; else fall back to caller_declared.
 	recordID, _ := rec["record_id"].(string)
-	projectID, _ := rec["project_id"].(string)
 	eh, _ := a["evidence_hash"].(string)
 	es, _ := a["evidence_sig"].(string)
-	if verifyAuthorityEvidence(claimed, projectID, recordID, eh, es, key) {
+	if verifyAuthorityEvidence(claimed, recProjectID, recordID, eh, es, key) {
 		a["source"] = claimed // verified; evidence_hash/evidence_sig retained for the offline verifier
 	} else {
 		// A source IS pinned but the evidence failed to verify under it — a genuine key-misalignment

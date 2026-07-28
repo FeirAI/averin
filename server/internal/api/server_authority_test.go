@@ -47,7 +47,12 @@ func TestPolicyEngineSignedAuthorityElevates(t *testing.T) {
 		t.Fatalf("core: %v", err)
 	}
 	pe := ed25519.NewKeyFromSeed(peSeed(0x44)) // the external policy engine (distinct from the server key)
-	h := api.New(c, store.NewMem(), "k0").WithPolicyEngineKey("policy_engine_signed", pe.Public().(ed25519.PublicKey)).Routes()
+	// F3: this test drives the DOWNGRADE path (forged sig / cross-project replay / non-canonical hash must
+	// seal as caller_declared), which is the explicit fail-OPEN opt-out. Under the default fail-closed
+	// posture those same records are REJECTED — covered by TestDefaultPostureIsFailClosed.
+	h := api.New(c, store.NewMem(), "k0").
+		WithPolicyEngineKey("policy_engine_signed", pe.Public().(ed25519.PublicKey)).
+		WithRequirePinnedAuthority(false).Routes()
 
 	sum := sha256.Sum256([]byte("authority-claim"))
 	eh := "sha256:" + hex.EncodeToString(sum[:])
@@ -133,6 +138,7 @@ func TestMultipleAuthorityKeysElevatePerSource(t *testing.T) {
 	h := api.New(c, store.NewMem(), "k0").
 		WithPolicyEngineKey("policy_engine_signed", pe.Public().(ed25519.PublicKey)).
 		WithPolicyEngineKey("human_signed", human.Public().(ed25519.PublicKey)).
+		WithRequirePinnedAuthority(false). // F3: this test asserts the DOWNGRADE path (fail-open opt-out)
 		Routes()
 
 	sum := sha256.Sum256([]byte("authority-claim"))
@@ -247,6 +253,7 @@ func TestDelegateSignedAuthorityElevates(t *testing.T) {
 	policy := ed25519.NewKeyFromSeed(peSeed(0x44))   // the policy-engine key (cross-source test)
 	h := api.New(c, store.NewMem(), "k0").
 		WithPolicyEngineKey("delegate_signed", delegate.Public().(ed25519.PublicKey)).
+		WithRequirePinnedAuthority(false). // F3: this test asserts the DOWNGRADE path (fail-open opt-out)
 		Routes()
 
 	sum := sha256.Sum256([]byte("delegate-decision"))

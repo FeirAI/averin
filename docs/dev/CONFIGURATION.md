@@ -82,19 +82,47 @@ These pin **external** authorities' published verifying keys so a generic record
 `authority.source` + a verifying `evidence_sig` is **elevated** to that verified source at ingest
 (else it is forced to the forgeable `caller_declared`, threat #4). Each key may be hex (64 chars) or
 base64url-no-pad (optionally with the `ed25519pub:` prefix). The private half stays out of this
-server — averin only **verifies**. **A bad pubkey or a duplicate-pinned source is fatal.** The only
-two valid sources are `policy_engine_signed` and `human_signed`.
+server — averin only **verifies**. **A bad pubkey or a duplicate-pinned (project, source) is fatal.**
+The three valid sources are `policy_engine_signed`, `human_signed`, and `delegate_signed`.
+
+Pins are keyed by **(project, source)**. An un-prefixed pin is the **global default** for that source
+(the historical single-key behavior); a `project:`-prefixed pin applies to that averin project only and
+**wins** over the global default. This matters because govder derives its authority signing key per
+**(tenant, role)** and a govder tenant *is* an averin project: a deployment recording more than one
+tenant MUST pin each tenant's key against its project, or every tenant but one has its
+kill/approval/policy evidence rejected (or, under the explicit fail-open opt-out, silently sealed at
+`caller_declared`). Derive a tenant's three pubkeys with
+`GOVDER_AUTHORITY_SEED=... go run ./cmd/govder-derive-pubkeys <tenant>` in govder.
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_POLICY_ENGINE_PUBKEY` | unset | No | Pins one key for the source named by `AVERIN_POLICY_ENGINE_SOURCE`. Bad value ⇒ fatal. |
+| `AVERIN_POLICY_ENGINE_PUBKEY` | unset | No | Pins one **global** key for the source named by `AVERIN_POLICY_ENGINE_SOURCE`. Bad value ⇒ fatal. |
 | `AVERIN_POLICY_ENGINE_SOURCE` | `policy_engine_signed` | No | The source the above key vouches for. |
-| `AVERIN_HUMAN_SIGNED_PUBKEY` | unset | No | Pins one key for the `human_signed` source (e.g. a separate human-approval service, signing with a different key than the policy engine). Bad value ⇒ fatal. |
-| `AVERIN_AUTHORITY_KEYS` | unset | No | General `source=pubkey,source=pubkey` list (sources: `policy_engine_signed`, `human_signed`). A malformed entry, an unknown source, or a duplicate source is fatal. Pinning the **same** source twice across any of these three forms is a fatal config error. |
-| `AVERIN_REQUIRE_PINNED_AUTHORITY` | `0` (off) | No | **Fail-closed authority posture.** When on (`1`/`true`), a record that CLAIMS an elevated source (`policy_engine_signed`/`human_signed`/`delegate_signed`) whose `evidence_sig` fails to verify under the pinned key — or that names an **unpinned** source — is **REJECTED** with a retryable `500` instead of silently sealed downgraded to the forgeable `caller_declared`. Turn it on for a signed kill/approval feed (e.g. govder's `human_signed` records) so a pinned-key **misalignment** fails loudly rather than permanently recording a kill/audit at forgeable authority. **Off preserves the Phase-1 default** (silent downgrade + a rate-limited WARNING + the `averin_authority_downgrades_total` counter). Ordinary `caller_declared` traffic is never affected either way. |
+| `AVERIN_HUMAN_SIGNED_PUBKEY` | unset | No | Pins one **global** key for the `human_signed` source (e.g. a separate human-approval service, signing with a different key than the policy engine). Bad value ⇒ fatal. |
+| `AVERIN_DELEGATE_SIGNED_PUBKEY` | unset | No | Pins one **global** key for the `delegate_signed` source (govder's delegate-agent approval records, plan 031 D8). This is the third value `govder-derive-pubkeys` prints. Bad value ⇒ fatal. |
+| `AVERIN_AUTHORITY_KEYS` | unset | No | General `[project:]source=pubkey,...` list (sources: `policy_engine_signed`, `human_signed`, `delegate_signed`). Without a `project:` prefix the key is the global default for that source; with one it is pinned for that project only. A malformed entry, an unknown source, an empty project, or a duplicate `(project, source)` is fatal. Pinning the **same** `(project, source)` twice across any of these forms is a fatal config error. |
+| `AVERIN_REQUIRE_PINNED_AUTHORITY` | **`1` (on)** | No | **Fail-closed authority posture (the default).** A record that CLAIMS an elevated source (`policy_engine_signed`/`human_signed`/`delegate_signed`) whose `evidence_sig` fails to verify under the key pinned for its `(project, source)` — or whose source is **unpinned for that project** — is **REJECTED** with a retryable `500` instead of silently sealed downgraded to the forgeable `caller_declared`. `0`/`false` is the **explicit fail-OPEN opt-out** (restores the Phase-1 silent downgrade + a rate-limited WARNING + the `averin_authority_downgrades_total` counter) and logs a loud WARNING naming what that means; any other value is **fatal** (a typo must not select a security posture). Ordinary `caller_declared` traffic is never affected either way. |
 
 Every pinned authority key must be role-separated (it is rejected if it equals the server signing
-key or the resource key, or if one key is reused across two sources).
+key or the resource key, or if one key is reused across two **sources**; the same key across two
+**projects** for the same source is allowed — the preimage binds `project_id`).
+
+#### Migration: the fail-closed default (was off before)
+
+`AVERIN_REQUIRE_PINNED_AUTHORITY` used to default to `0`, and no shipped config set it. Upgrading a
+running deployment therefore **changes behavior** wherever a producer claims an authority averin cannot
+verify: what was a silent downgrade-and-seal is now a `500` and no record. Before upgrading:
+
+1. **Inventory the producers.** Only records whose `authority.source` is `policy_engine_signed`,
+   `human_signed`, or `delegate_signed` are affected. Plain `caller_declared` traffic (SDKs, OTel spans)
+   is not. `averin_authority_downgrades_total` on the running server counts exactly the records that
+   would now be rejected — **if it is 0, the flip is a no-op for you.**
+2. **Pin every producing (project, source).** For govder: run `govder-derive-pubkeys` **per tenant** and
+   pin the three pubkeys with the `project:` prefix. `delegate_signed` in particular had no configuration
+   path at all before this release, so any deployment recording delegate-agent approvals must add it.
+3. **Only if you cannot align the pins immediately**, set `AVERIN_REQUIRE_PINNED_AUTHORITY=0` as a
+   temporary, explicit step — and understand that kill/approval/policy evidence recorded in that mode is
+   not cryptographically distinguishable from a forgery.
 
 Whether or not the fail-closed toggle is on, a **failed** elevation increments
 `averin_authority_downgrades_total` and emits a rate-limited `WARNING` naming the claimed source and

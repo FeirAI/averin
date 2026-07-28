@@ -58,6 +58,13 @@ Batch semantics: the **whole batch** is validated up front (decodability, projec
 idempotency, reserved-field checks, and an RCP-canonicalization dry-run). A malformed item rejects
 the entire batch with a deterministic `400` before any item is sealed.
 
+**Every item in a multi-item batch needs its OWN `idempotency_key`.** Two items resolving to the same
+`(project_id, idempotency_key)` would collapse in the append-only store — the second would return the
+FIRST item's record with `created:false` and its own evidence would be silently discarded — so the
+whole batch is rejected with a `400`. Note this means an `Idempotency-Key` **header** cannot key a
+multi-item batch (it applies to every item); the header remains the supported way to key a **single**
+record. The same key under two different `project_id`s does not collide and is accepted.
+
 **Response `201`:**
 
 ```json
@@ -270,8 +277,11 @@ Other allowed keys: `anchored_ts`, `record_kind`, `input_commit`, `output_commit
   `broker` is stamped by the server on every grant / use receipt / intent / outcome record).
 - `record_kind` (optional): `budget-exhausted`, `chargeback-posted`.
 - `authority.source`: `caller_declared` (the forgeable default), `policy_engine_signed`,
-  `human_signed`, `gateway_enforced` (the broker's own source). An evidence triple verifying under a
-  pinned key elevates from `caller_declared` to the matching source.
+  `human_signed`, `delegate_signed`, `gateway_enforced` (the broker's own source). An evidence triple
+  verifying under the key pinned for the record's `(project_id, source)` elevates from
+  `caller_declared` to the matching source. A claim that does **not** verify — or whose source is
+  unpinned for that project — is **rejected with a retryable `500`** by default
+  (`AVERIN_REQUIRE_PINNED_AUTHORITY`); set it to `0` to restore the legacy silent downgrade.
 - `key.key_status`: `active`, `retired`, `revoked`, `compromised` (the record's own signing-key
   lifecycle; echoed verbatim into the verify report). Not to be confused with the `opts.json`
   pinned-authority role-key rotation status (`active`/`rotated`/`compromised`/`revoked`, ADR 0006),
