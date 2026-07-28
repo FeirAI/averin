@@ -10,6 +10,7 @@ use averin_decision_core::checkpoint::{attach_anchor, checkpoint_body, seal_chec
 use averin_decision_core::hashx::sha256_prefixed;
 use averin_decision_core::record::seal;
 use averin_decision_core::sign::{encode_pubkey, signing_key_from_seed};
+use averin_decision_core::authority::AuthorityTrust;
 use averin_decision_core::verify::{
     cnf_kid, cosig_approval_challenge, delegation_hop_challenge, federation_cert_challenge,
     introspection_transcript_challenge, report_to_json, verify_bundle, verify_bundle_with,
@@ -347,6 +348,199 @@ fn credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key() {
     assert!(
         report.contains(r#""ok":false"#) && report.contains("authority_keys[0]"),
         "malformed pinned key should be a fail-closed error: {report}"
+    );
+}
+
+/// GOVDER EVIDENCE BINDING (ADR 0003 R1, threat #4 — the govder analogue of
+/// `credential_grant_verifies_to_gateway_enforced_under_pinned_broker_key`'s R1 cases above).
+///
+/// This is a REAL cross-language fixture, not a hand-waved shape: `evidence_hash`,
+/// `evidence_sig`, and `record_id` below are byte-for-byte output from govder's OWN signer
+/// (govder/internal/averin, `TestDumpGoldenSealedRecord`, seed bytes 1..32, tenant "acme", a
+/// sub-agent-handoff row carrying `previous_parent_id:"parent-old"`) — the exact
+/// `evidenceForRow` CanonValue, RCP-canonicalized and sha256'd by GO, signed by GO. If this
+/// test's baseline case did not verify, that would mean govder's and averin's canonical
+/// serializers have DIVERGED (a much bigger problem than this fix) — it is not tuned to pass.
+///
+/// Before this fix: authority.evidence_hash for a govder record was signed but re-derived by
+/// NOTHING (neither this Rust verifier nor govder's own Go-side check, internal/authority/verify.go,
+/// which classifies signature validity only). A record could carry any payload in
+/// extensions.govder while the signed hash committed to different, never-shown evidence, and it
+/// would still read `authority: verified`. This test proves both halves: the untampered record
+/// verifies AND re-derives cleanly (baseline), and a record whose extensions.govder.outcome is
+/// changed AFTER signing — so the signature still checks out, but the visible decision no longer
+/// matches what was signed — is caught by govder_evidence_rederivable and surfaces as an issue,
+/// even though `authority` itself still classifies Verified (the raw signature IS still valid;
+/// the content binding is what fails — the same distinction the broker R1 cases above draw).
+#[test]
+fn govder_record_evidence_binding_r1() {
+    let seed: [u8; 32] = std::array::from_fn(|i| (i + 1) as u8);
+    let govder_key = signing_key_from_seed(&seed);
+    let vk = govder_key.verifying_key();
+    let seal_key = signing_key_from_seed(&[0u8; 32]); // unrelated to the authority key; just seals the chain
+
+    let record_id = "4d3a57f4-5b82-5faf-869d-e73e6da96a30";
+    let evidence_hash = "sha256:a20754fd8f24a5f64f1cda3c0576f431d39f09f2915dfde135c64ae6227f1058";
+    let evidence_sig = "ed25519:J-8vokp4wqNrGzYbr3jcDDpXK-4Nc03VuZWJvP0ll1NGl0zwTXAHfePpcKCDkcZWZmu71S8acewI5M68gyVyCg";
+
+    let mk_body = |outcome: &str| {
+        format!(
+            r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"acme","agent_id":"ag-golden","agent_version":"govder",
+        "session_id":"agent:ag-golden","span_id":"","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
+        "agent_ts":"2026-07-29T12:00:00.000Z","received_ts":"2026-07-29T12:00:00.000Z",
+        "event_type":"handoff","action":"sub-agent-handoff","observed_via":"sdk","status":"ok",
+        "authority":{{"source":"policy_engine_signed","enforcement_point":"sdk",
+            "evidence_hash":"{evidence_hash}","evidence_sig":"{evidence_sig}"}},
+        "extensions":{{"govder":{{"v":"1.0.0","type":"sub-agent-handoff","event_id":"ev-golden-1",
+            "outcome":"{outcome}","occurred_at":"2026-07-29T12:00:00.000Z",
+            "links":{{"trace_id":"","span_id":""}},
+            "body":{{"handoff_kind":"re-parent","previous_parent_id":"parent-old"}}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#
+        )
+    };
+    let key_entry = CanonValue::object(vec![
+        ("signing_key_id".into(), CanonValue::string("k0")),
+        ("key_epoch".into(), CanonValue::Int(0)),
+        ("public_key".into(), CanonValue::string(encode_pubkey(&seal_key.verifying_key()))),
+        ("key_status".into(), CanonValue::string("active")),
+    ])
+    .unwrap();
+    let bundle_of = |rec: CanonValue| {
+        CanonValue::object(vec![
+            ("bundle_version".into(), CanonValue::string("1")),
+            ("project_id".into(), CanonValue::string("acme")),
+            ("keys".into(), CanonValue::Array(vec![key_entry.clone()])),
+            ("records".into(), CanonValue::Array(vec![rec])),
+            ("checkpoints".into(), CanonValue::Array(vec![])),
+        ])
+        .unwrap()
+    };
+    let pinned = || VerifyOptions {
+        trusted_authority_keys: vec![vk],
+        ..Default::default()
+    };
+
+    // Baseline: the untampered, really-signed-by-govder record verifies AND re-derives cleanly.
+    // (Scoped to THIS check, not overall bundle.ok/issues: an empty-checkpoints test bundle like
+    // this one — the same minimal shape the broker R1 tests above use — legitimately trips the
+    // UNRELATED "non-empty run must be checkpoint-committed" invariant, which is not what this
+    // test is about.)
+    let good = seal(&CanonValue::parse(&mk_body("ok")).unwrap(), &seal_key).unwrap();
+    let r_good = verify_bundle_with(&bundle_of(good), &pinned());
+    assert!(
+        !r_good
+            .issues
+            .iter()
+            .any(|i| i.contains("not re-derivable") && i.contains("govder")),
+        "the real govder golden vector must re-derive cleanly, got issues: {:?}",
+        r_good.issues
+    );
+    assert_eq!(r_good.record_trust.len(), 1);
+    assert_eq!(
+        r_good.record_trust[0].authority,
+        AuthorityTrust::Verified,
+        "the real signature must classify Verified"
+    );
+
+    // R1: extensions.govder.outcome changed AFTER signing (the signature was computed over
+    // "ok"). The signature still verifies (govder's real key, unchanged bytes) — authority stays
+    // Verified — but the re-derivation must catch that the VISIBLE decision no longer matches
+    // what was signed.
+    let tampered = seal(&CanonValue::parse(&mk_body("error")).unwrap(), &seal_key).unwrap();
+    let r_bad = verify_bundle_with(&bundle_of(tampered), &pinned());
+    assert_eq!(
+        r_bad.record_trust[0].authority,
+        AuthorityTrust::Verified,
+        "the signature is untouched and must still classify Verified — this is the whole finding: \
+         a valid signature over the WRONG evidence still reads 'verified'"
+    );
+    assert!(
+        r_bad
+            .issues
+            .iter()
+            .any(|i| i.contains("not re-derivable") && i.contains("govder")),
+        "expected a govder R1 re-derivation issue, got: {:?}",
+        r_bad.issues
+    );
+}
+
+/// The SECOND cross-language golden vector, and it exists because the first one
+/// (`govder_record_evidence_binding_r1`, agent_id="ag-golden") could not have caught this on
+/// its own: an approval/sign-off record with no requester/principal seals with an EMPTY
+/// agent_id, which govder's `json:",omitempty"` DROPS from the wire ENTIRELY — a real shape,
+/// not a hypothetical (measured: it broke govder's own approval sign-off test suite the first
+/// time this fix landed, because `agent_id` was originally required-present here, same as
+/// `evidence_hash`/`extensions.govder`, rather than optional). `s(rec, "agent_id")` returns
+/// `None` for such a record — this test is what made `.unwrap_or_default()` the correct call
+/// instead of `None => return false`. Real signed output from govder's
+/// TestGoldenSealedRecordWithNoAgentIDMatchesRustFixture (internal/averin), same seed.
+#[test]
+fn govder_record_with_no_agent_id_evidence_binding() {
+    let seed: [u8; 32] = std::array::from_fn(|i| (i + 1) as u8);
+    let govder_key = signing_key_from_seed(&seed);
+    let vk = govder_key.verifying_key();
+    let seal_key = signing_key_from_seed(&[0u8; 32]);
+
+    let record_id = "a1d4dcdd-a9c9-511b-92b7-37437226a5d3";
+    let evidence_hash = "sha256:c762bbd7dfb94a354ed8775204f1610f8195a9e01c2aa2f7b9af1d4bb1c075dc";
+    let evidence_sig = "ed25519:7-1uxXuJZYaDSKcPJW90snQkGxvQv7gKYjMfl2b0gvQSDeRwfHc_eYmWxzp-DvJejdAvn5vmSMA0Iy5r1HA7AQ";
+
+    // NOTE: no "agent_id" key at all — govder's omitempty dropped it. That absence is the
+    // whole point of this fixture.
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+    "record_id":"{record_id}","project_id":"acme","agent_version":"govder",
+    "session_id":"tenant:acme","span_id":"","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
+    "agent_ts":"2026-07-29T13:00:00.000Z","received_ts":"2026-07-29T13:00:00.000Z",
+    "event_type":"approval_gate","action":"approval","observed_via":"sdk","status":"ok",
+    "authority":{{"source":"policy_engine_signed","enforcement_point":"sdk",
+        "evidence_hash":"{evidence_hash}","evidence_sig":"{evidence_sig}"}},
+    "extensions":{{"govder":{{"v":"1.0.0","type":"approval","event_id":"ev-approval-golden-2",
+        "outcome":"approved","occurred_at":"2026-07-29T13:00:00.000Z",
+        "links":{{"trace_id":"","span_id":""}}}}}},
+    "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#
+    );
+    let key_entry = CanonValue::object(vec![
+        ("signing_key_id".into(), CanonValue::string("k0")),
+        ("key_epoch".into(), CanonValue::Int(0)),
+        (
+            "public_key".into(),
+            CanonValue::string(encode_pubkey(&seal_key.verifying_key())),
+        ),
+        ("key_status".into(), CanonValue::string("active")),
+    ])
+    .unwrap();
+    let rec = seal(&CanonValue::parse(&body).unwrap(), &seal_key).unwrap();
+    let bundle = CanonValue::object(vec![
+        ("bundle_version".into(), CanonValue::string("1")),
+        ("project_id".into(), CanonValue::string("acme")),
+        ("keys".into(), CanonValue::Array(vec![key_entry])),
+        ("records".into(), CanonValue::Array(vec![rec])),
+        ("checkpoints".into(), CanonValue::Array(vec![])),
+    ])
+    .unwrap();
+    let r = verify_bundle_with(
+        &bundle,
+        &VerifyOptions {
+            trusted_authority_keys: vec![vk],
+            ..Default::default()
+        },
+    );
+    assert_eq!(r.record_trust.len(), 1);
+    assert_eq!(
+        r.record_trust[0].authority,
+        AuthorityTrust::Verified,
+        "a real govder signature over a no-agent_id record must still classify Verified"
+    );
+    assert!(
+        !r.issues
+            .iter()
+            .any(|i| i.contains("not re-derivable") && i.contains("govder")),
+        "a record with NO agent_id (omitempty-dropped, a legitimate govder shape for an \
+         approval/sign-off with no requester/principal) must re-derive cleanly — an absent key \
+         is a valid empty value here, not a reconstruction failure. Got issues: {:?}",
+        r.issues
     );
 }
 

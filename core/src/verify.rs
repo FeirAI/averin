@@ -1658,6 +1658,103 @@ fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Re-derive a GOVDER record's `evidence_hash` and confirm it equals the signed
+/// `authority.evidence_hash` (ADR 0003 R1, threat #4 — the govder analogue of
+/// `evidence_rederivable` above). Without this, `authority.evidence_hash` for every govder
+/// record was signed but never checked against anything: a record could carry any payload in
+/// `extensions.govder.body` while the signed hash committed to different, never-shown evidence,
+/// the signature would still verify, and the record would still read `verified`.
+///
+/// UNLIKE a broker record, govder never emits one self-contained sub-object holding exactly
+/// what it hashed — `evidenceForRow` (govder/internal/averin/adapter.go) builds the evidence
+/// from fields SCATTERED across the record, under DIFFERENT names than the evidence's own keys.
+/// This reconstructs the identical shape from those fields, verified against a real signed
+/// record (govder internal/averin's golden vector; the reconstruction below matches it exactly):
+///
+///   evidence key    | read from
+///   ----------------|------------------------------------------------------------------
+///   event_type      | extensions.govder.type   (govder's fine-grained event type string —
+///                    | NOT the record's own top-level event_type, which is averin's own
+///                    | coarser mapped classification and a DIFFERENT string)
+///   event_id        | extensions.govder.event_id
+///   agent_id        | record.agent_id           (top-level; MAY BE ABSENT from the wire —
+///                    | omitempty — for an approval/sign-off record with no requester/principal;
+///                    | treated as "" in that case, matching evidenceForRow, never a hard failure)
+///   tenant_id       | record.project_id         (top-level — govder's tenant IS the averin
+///                    | project axis)
+///   outcome         | extensions.govder.outcome
+///   occurred_at     | extensions.govder.occurred_at
+///   previous_parent_id / attempted_new_parent_id / reverted_to_parent_id
+///                    | extensions.govder.body.<key>, each OPTIONAL and included only when
+///                    | present and non-empty (mirrors govder's stringFieldFromPayload; most
+///                    | event types carry none of the three)
+///
+/// Returns false if `extensions.govder` is absent, any REQUIRED field above is missing, the
+/// signed hash is absent, or the two hashes differ.
+fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
+    let signed = match rec
+        .get("authority")
+        .and_then(|a| a.get("evidence_hash"))
+        .and_then(|v| v.as_str())
+    {
+        Some(h) => h,
+        None => return false,
+    };
+    let gov = match rec.get("extensions").and_then(|e| e.get("govder")) {
+        Some(g) => g,
+        None => return false,
+    };
+    // agent_id, unlike the fields below, may be LEGITIMATELY ABSENT from the wire: govder's
+    // Record.AgentID carries `json:",omitempty"`, and an approval/sign-off record with neither
+    // a Requester nor a Principal set (runtime/seals.go firstNonEmpty) seals with an empty
+    // agent_id — which evidenceForRow (adapter.go) includes verbatim either way (pair("agent_id",
+    // row.AgentID), never conditionally omitted). Treating an absent key here as a hard failure
+    // would reject every such record even though govder signed it correctly (measured: this
+    // broke govder's own approval sign-off test suite before the fix — see the golden vector
+    // test below, which does NOT cover this case on its own since its fixture happens to carry
+    // a non-empty agent_id).
+    let agent_id = s(rec, "agent_id").unwrap_or_default();
+    let tenant_id = match s(rec, "project_id") {
+        Some(v) => v,
+        None => return false,
+    };
+    let event_type = match s(gov, "type") {
+        Some(v) => v,
+        None => return false,
+    };
+    let event_id = match s(gov, "event_id") {
+        Some(v) => v,
+        None => return false,
+    };
+    let outcome = match s(gov, "outcome") {
+        Some(v) => v,
+        None => return false,
+    };
+    let occurred_at = match s(gov, "occurred_at") {
+        Some(v) => v,
+        None => return false,
+    };
+    let mut pairs = vec![
+        ("event_type".to_string(), CanonValue::string(event_type)),
+        ("event_id".to_string(), CanonValue::string(event_id)),
+        ("agent_id".to_string(), CanonValue::string(agent_id)),
+        ("tenant_id".to_string(), CanonValue::string(tenant_id)),
+        ("outcome".to_string(), CanonValue::string(outcome)),
+        ("occurred_at".to_string(), CanonValue::string(occurred_at)),
+    ];
+    let body = gov.get("body");
+    for key in ["previous_parent_id", "attempted_new_parent_id", "reverted_to_parent_id"] {
+        if let Some(v) = body.and_then(|b| s(b, key)).filter(|v| !v.is_empty()) {
+            pairs.push((key.to_string(), CanonValue::string(v)));
+        }
+    }
+    let evidence = match CanonValue::object(pairs) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    crate::hashx::sha256_prefixed(evidence.serialize().as_bytes()) == signed
+}
+
 /// Length-prefixed framing (LP4) shared by EVERY broker/resource challenge + Merkle-leaf preimage below: a
 /// 4-byte big-endian length prefix then the bytes. Defined ONCE (was re-inlined as a per-function closure or
 /// loop ~8×) so the framing rule lives in a single place — a divergent copy would silently break the
@@ -3953,6 +4050,25 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if claims_role && broker_role == BrokerRole::None {
             let msg = format!(
                 "record {i}: extensions.broker.kind set but (kind, enforcement_point) is not a recognized broker/resource role (R2 fail-closed)"
+            );
+            notes.push(msg.clone());
+            issues.push(msg);
+        }
+        // GOVDER EVIDENCE BINDING (ADR 0003 R1, threat #4 — the govder analogue of the broker
+        // grant/use checks' evidence_rederivable calls elsewhere in this function). A govder
+        // record (extensions.govder present) whose signature verified must ALSO have its signed
+        // evidence_hash re-derivable from the record's own fields, or the visible governance
+        // decision is cryptographically unbound from the signed one — see
+        // govder_evidence_rederivable's doc comment. Gated on Verified (not just claims_role,
+        // which has no govder equivalent) so an already-Failed/Declared/Unverifiable record does
+        // not double-report; gated on extensions.govder present so no non-govder record is
+        // affected.
+        if authority == AuthorityTrust::Verified
+            && rec.get("extensions").and_then(|e| e.get("govder")).is_some()
+            && !govder_evidence_rederivable(rec)
+        {
+            let msg = format!(
+                "record {i}: authority.evidence_hash is not re-derivable from the govder record's own fields (payload absent or divergent — R1, threat #4)"
             );
             notes.push(msg.clone());
             issues.push(msg);
