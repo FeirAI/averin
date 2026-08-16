@@ -10,10 +10,9 @@ import (
 	"github.com/averin-dev/averin/server/internal/store"
 )
 
-// TestSelfVerifyOptsPinsMeaningfulRolesNotAttestation (#14): selfVerifyOpts must pin every trust root whose verdict
-// is meaningful WITHOUT the externally-held TSA key (broker/federation, resource, revocation, cosig) and must NOT
-// pin the attestation role (its D7 freshness is unreachable without a TSA key, so self-pinning could only ever
-// yield a false-alarm `failed`). The TSA itself is never self-pinned (the server does not hold it).
+// TestSelfVerifyOptsPinsMeaningfulRolesNotAttestation (#14): without an explicitly installed external
+// verification pair, selfVerifyOpts pins every trust root whose verdict is meaningful without a TSA and leaves
+// attestation unevaluated.
 func TestSelfVerifyOptsPinsMeaningfulRolesNotAttestation(t *testing.T) {
 	const serverSeed = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 	const resSeed = "0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100"
@@ -69,6 +68,9 @@ func TestSelfVerifyOptsPinsMeaningfulRolesNotAttestation(t *testing.T) {
 	if opts["tsa_keys"] != nil {
 		t.Fatalf("the TSA key is external and must never be self-pinned: %v", opts)
 	}
+	if opts["tsa_spki_b64"] != nil {
+		t.Fatalf("an RFC 3161 TSA SPKI must be explicitly operator-pinned: %v", opts)
+	}
 
 	// Non-federated server: the broker key pins under the flat broker_authority_keys, no federation map.
 	s2 := New(c, store.NewMem(), "k0").WithBroker(brokerIssue).WithResource(rc, "orders-db")
@@ -81,5 +83,67 @@ func TestSelfVerifyOptsPinsMeaningfulRolesNotAttestation(t *testing.T) {
 	}
 	if opts2["federated_broker_keys"] != nil {
 		t.Fatalf("non-federated server must not set federated_broker_keys: %v", opts2)
+	}
+}
+
+func TestSelfVerifyOptsIncludesCompleteExternalAttestationPair(t *testing.T) {
+	c, err := core.New("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, att, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki := []byte{0x30, 0x03, 0x01, 0x02, 0x03}
+	s := New(c, store.NewMem(), "k0").WithExternalVerificationRoots(
+		[]ed25519.PublicKey{att.Public().(ed25519.PublicKey)},
+		[][]byte{spki},
+	)
+	var opts map[string]any
+	if err := json.Unmarshal([]byte(s.selfVerifyOpts()), &opts); err != nil {
+		t.Fatal(err)
+	}
+	if opts["attestation_keys"] == nil || opts["tsa_spki_b64"] == nil {
+		t.Fatalf("complete external roots must enable D7 verification: %v", opts)
+	}
+
+	// A partial pair must never turn evaluation on.
+	partial := New(c, store.NewMem(), "k0").WithExternalVerificationRoots(
+		[]ed25519.PublicKey{att.Public().(ed25519.PublicKey)}, nil,
+	)
+	opts = nil
+	if err := json.Unmarshal([]byte(partial.selfVerifyOpts()), &opts); err != nil {
+		t.Fatal(err)
+	}
+	if opts["attestation_keys"] != nil || opts["tsa_spki_b64"] != nil {
+		t.Fatalf("partial external roots must leave D7 unevaluated: %v", opts)
+	}
+}
+
+func TestSelfVerifyOptsIncludesCompleteExternalTaxonomyTuple(t *testing.T) {
+	c, err := core.New("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+	s := New(c, store.NewMem(), "k0").WithExternalTaxonomy(
+		[]byte(`{"taxonomy_version":7}`), []ed25519.PublicKey{pub}, digest, 7,
+	)
+	var opts map[string]any
+	if err := json.Unmarshal([]byte(s.selfVerifyOpts()), &opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"taxonomy", "taxonomy_keys", "taxonomy_digest", "taxonomy_version"} {
+		if opts[key] == nil {
+			t.Fatalf("complete external taxonomy tuple must pin %s: %v", key, opts)
+		}
+	}
+	if got := int64(opts["taxonomy_version"].(float64)); got != 7 {
+		t.Fatalf("taxonomy_version=%d, want 7", got)
 	}
 }

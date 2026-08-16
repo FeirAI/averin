@@ -5,8 +5,8 @@
 //!   1. parse `ContentInfo` -> `SignedData`; confirm eContentType is id-ct-TSTInfo;
 //!   2. parse `TSTInfo` -> messageImprint (alg + hash) + genTime;
 //!   3. verify the single `SignerInfo` signature over the signed attributes (or eContent) using the
-//!      embedded TSA certificate's public key (ECDSA P-256 / SHA-256 in this build);
-//!   4. confirm the message-digest signed attribute equals SHA-256(eContent).
+//!      operator-pinned TSA public key (ECDSA P-256/SHA-256 or P-384/SHA-512);
+//!   4. confirm the message-digest signed attribute equals the SignerInfo digest of eContent.
 //!
 //! Trust of the TSA certificate itself reduces to a fingerprint the verifier pins out-of-band
 //! (we do not walk an X.509 chain here — the relying party supplies the trusted TSA SPKI/cert).
@@ -19,8 +19,10 @@ use der::{Decode, Encode, Sequence};
 const ID_SIGNED_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.2");
 const ID_CT_TST_INFO: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.1.4");
 const ID_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
+const ID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
 const ID_MESSAGE_DIGEST: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.4");
 const ID_ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
+const ID_ECDSA_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4");
 
 #[derive(Debug, PartialEq)]
 pub enum Rfc3161Error {
@@ -141,11 +143,15 @@ pub fn verify_token(token_der: &[u8], tsa_spki_der: &[u8]) -> Result<Verified, R
         .first()
         .ok_or(Rfc3161Error::NoSignerInfo)?;
 
-    // pin the algorithms declared in the SignerInfo (this build verifies only ECDSA-P256/SHA-256).
-    if si.digest_alg.oid != ID_SHA256 {
+    // Pin the supported TSA signing profiles. The timestamp request's messageImprint remains SHA-256;
+    // this digest is the CMS SignerInfo digest over TSTInfo and may independently be SHA-512.
+    if si.digest_alg.oid != ID_SHA256 && si.digest_alg.oid != ID_SHA512 {
         return Err(Rfc3161Error::UnsupportedHash);
     }
-    if si.signature_algorithm.oid != ID_ECDSA_SHA256 {
+    let profile_ok = (si.signature_algorithm.oid == ID_ECDSA_SHA256
+        && si.digest_alg.oid == ID_SHA256)
+        || (si.signature_algorithm.oid == ID_ECDSA_SHA512 && si.digest_alg.oid == ID_SHA512);
+    if !profile_ok {
         return Err(Rfc3161Error::UnsupportedSigAlg);
     }
 
@@ -153,7 +159,12 @@ pub fn verify_token(token_der: &[u8], tsa_spki_der: &[u8]) -> Result<Verified, R
     let tbs: Vec<u8> = match &si.signed_attrs {
         Some(attrs) => {
             // verify message-digest attr == sha256(eContent TSTInfo bytes)
-            let want = sha256(tst_bytes);
+            let want = if si.digest_alg.oid == ID_SHA256 {
+                sha256(tst_bytes).to_vec()
+            } else {
+                use sha2::Digest;
+                sha2::Sha512::digest(tst_bytes).to_vec()
+            };
             let mut md_ok = false;
             for attr in attrs.iter() {
                 if attr.oid == ID_MESSAGE_DIGEST {
@@ -174,7 +185,11 @@ pub fn verify_token(token_der: &[u8], tsa_spki_der: &[u8]) -> Result<Verified, R
 
     // We verify against the pinned TSA SPKI supplied out-of-band, not the (optional) embedded cert
     // chain — chain validation is the relying party's policy.
-    verify_ecdsa_p256(tsa_spki_der, &tbs, si.signature.as_bytes())?;
+    if si.signature_algorithm.oid == ID_ECDSA_SHA256 {
+        verify_ecdsa_p256(tsa_spki_der, &tbs, si.signature.as_bytes())?;
+    } else {
+        verify_ecdsa_p384(tsa_spki_der, &tbs, si.signature.as_bytes())?;
+    }
 
     Ok(Verified { gen_time, imprint })
 }
@@ -193,6 +208,24 @@ fn verify_ecdsa_p256(spki_der: &[u8], msg: &[u8], sig_der: &[u8]) -> Result<(), 
         VerifyingKey::from_sec1_bytes(pub_bytes).map_err(|_| Rfc3161Error::UnsupportedSigAlg)?;
     let sig = DerSignature::from_bytes(sig_der).map_err(|_| Rfc3161Error::SignatureInvalid)?;
     vk.verify(msg, &sig)
+        .map_err(|_| Rfc3161Error::SignatureInvalid)
+}
+
+fn verify_ecdsa_p384(spki_der: &[u8], msg: &[u8], sig_der: &[u8]) -> Result<(), Rfc3161Error> {
+    use p384::ecdsa::signature::hazmat::PrehashVerifier;
+    use p384::ecdsa::{Signature, VerifyingKey};
+    use sha2::Digest;
+    use spki::SubjectPublicKeyInfoRef;
+
+    let spki = SubjectPublicKeyInfoRef::from_der(spki_der).map_err(der)?;
+    let pub_bytes = spki
+        .subject_public_key
+        .as_bytes()
+        .ok_or(Rfc3161Error::UnsupportedSigAlg)?;
+    let vk =
+        VerifyingKey::from_sec1_bytes(pub_bytes).map_err(|_| Rfc3161Error::UnsupportedSigAlg)?;
+    let sig = Signature::from_der(sig_der).map_err(|_| Rfc3161Error::SignatureInvalid)?;
+    vk.verify_prehash(&sha2::Sha512::digest(msg), &sig)
         .map_err(|_| Rfc3161Error::SignatureInvalid)
 }
 
@@ -337,6 +370,31 @@ fn gen_time_to_asn1(ts: &str) -> GeneralizedTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn p384_sha512_signature_profile_verifies() {
+        use p384::ecdsa::signature::hazmat::PrehashSigner;
+        use p384::ecdsa::{Signature, SigningKey};
+        use p384::pkcs8::EncodePublicKey;
+        use sha2::Digest;
+
+        let sk = SigningKey::from_bytes((&[11u8; 48]).into()).expect("fixed P-384 key");
+        let msg = b"freeTSA-style CMS signed attributes";
+        let sig: Signature = sk
+            .sign_prehash(&sha2::Sha512::digest(msg))
+            .expect("P-384/SHA-512 sign");
+        let spki = sk
+            .verifying_key()
+            .to_public_key_der()
+            .expect("P-384 SPKI");
+        let sig_der = sig.to_der();
+        verify_ecdsa_p384(spki.as_bytes(), msg, sig_der.as_bytes())
+            .expect("P-384/SHA-512 verifies");
+        assert_eq!(
+            verify_ecdsa_p384(spki.as_bytes(), b"changed", sig_der.as_bytes()),
+            Err(Rfc3161Error::SignatureInvalid)
+        );
+    }
 
     #[test]
     fn real_token_round_trips_and_binds() {

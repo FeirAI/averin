@@ -82,7 +82,8 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   policy:** authority evidence is append-only and cannot be re-signed in place, so any preimage change
   *after deployment* must verify the newest version first and fall back to older versions under an
   explicitly downgraded/legacy status — never a silent hard cutover that drops historical verification.
-- **RFC 3161 wire format.** The DER/CMS `TimeStampToken` parser + verifier is implemented and
+- **RFC 3161 wire format.** The DER/CMS `TimeStampToken` parser + verifier is implemented for the
+  ECDSA P-256/SHA-256 and P-384/SHA-512 TSA profiles and
   feature-gated (`rfc3161`); it ships in the native verify CLI (built with the feature in CI) and is
   exercised end to end by the hermetic `test-anchor`/mini-TSA suite. It is **intentionally native-only**:
   the in-browser WASM verifier is built `--no-default-features` to stay lean and RNG-free (the P-256

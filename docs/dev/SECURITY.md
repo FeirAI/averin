@@ -121,7 +121,8 @@ what truly happened in the world.
   (`server/internal/scrub`, linear-time RE2, no ReDoS) before storing/hashing — but it **cannot
   catch every secret shape**. The primary protection is that self-host data never leaves customer
   infra; do not put secrets in prompts.
-- **RFC 3161 verification is native-only.** The DER/CMS token parser ships under the `rfc3161`
+- **RFC 3161 verification is native-only.** The DER/CMS token parser supports the ECDSA
+  P-256/SHA-256 and P-384/SHA-512 TSA profiles and ships under the `rfc3161`
   feature in the native CLI; the in-browser WASM verifier is built `--no-default-features` (RNG-free,
   lean) and reports an `rfc3161` anchor as **Unsupported — never a silent pass**. Production-anchored
   bundles are verified by the native/CLI verifier. The production Go anchoring round-trip against a

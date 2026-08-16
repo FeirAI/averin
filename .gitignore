@@ -1,6 +1,7 @@
 # Rust
 /target
 **/target
+/feir-os/
 Cargo.lock.bak
 
 # Go

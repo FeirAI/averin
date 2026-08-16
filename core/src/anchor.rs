@@ -26,6 +26,7 @@ pub enum AnchorError {
     BadScheme(String),
     BadToken(String),
     Untrusted,
+    UntrustedDetail(String),
     Unsupported(String),
 }
 
@@ -37,6 +38,9 @@ impl std::fmt::Display for AnchorError {
             AnchorError::BadToken(e) => write!(f, "bad anchor token: {e}"),
             AnchorError::Untrusted => {
                 write!(f, "anchor token not signed by any trusted TSA key")
+            }
+            AnchorError::UntrustedDetail(e) => {
+                write!(f, "anchor token not signed by any trusted TSA key: {e}")
             }
             AnchorError::Unsupported(s) => {
                 write!(f, "anchor scheme '{s}' not supported in this build")
@@ -142,13 +146,17 @@ fn verify_rfc3161(
         .and_then(|v| v.as_str())
         .ok_or(AnchorError::MissingField("token_b64"))?;
     let der = b64::decode(token).map_err(AnchorError::BadToken)?;
+    let mut last_error = None;
     for spki in &trust.rfc3161_tsa_spki {
-        if let Ok(gen_time) = crate::rfc3161::verify_binding(&der, spki, checkpoint_hash.as_bytes())
-        {
-            return Ok(gen_time);
+        match crate::rfc3161::verify_binding(&der, spki, checkpoint_hash.as_bytes()) {
+            Ok(gen_time) => return Ok(gen_time),
+            Err(err) => last_error = Some(err.to_string()),
         }
     }
-    Err(AnchorError::Untrusted)
+    Err(match last_error {
+        Some(err) => AnchorError::UntrustedDetail(err),
+        None => AnchorError::Untrusted,
+    })
 }
 
 #[cfg(not(feature = "rfc3161"))]

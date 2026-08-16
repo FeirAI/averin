@@ -2,7 +2,7 @@
 // AVERIN_SIGNING_SEED (64 hex chars). Production backs signing with a KMS instead.
 //
 // Every Ed25519 root seed (AVERIN_SIGNING_SEED, AVERIN_BROKER_ISSUING_SEED, AVERIN_RESOURCE_SEED,
-// AVERIN_REVOCATION_SEED) also accepts a <NAME>_FILE form pointing at a mounted secret file (e.g. a
+// AVERIN_REVOCATION_SEED, AVERIN_ATTESTATION_SEED) also accepts a <NAME>_FILE form pointing at a mounted secret file (e.g. a
 // CSI/Kubernetes secret volume), keeping the seed off the env block. Set at most one of
 // <NAME>/<NAME>_FILE per seed.
 package main
@@ -464,6 +464,80 @@ func main() {
 		}
 	}
 
+	// D7 deployment attestation. The issuer private key is role-separated from every evidence/enforcement
+	// role. The product-facing verifier only evaluates this claim when the deployment also supplies BOTH
+	// public out-of-band auditor pins below (issuer key + RFC 3161 TSA SPKI).
+	if aseed := secretEnvOrFile("AVERIN_ATTESTATION_SEED"); aseed != "" {
+		raw, err := hex.DecodeString(aseed)
+		if err != nil || len(raw) != ed25519.SeedSize {
+			log.Fatal("AVERIN_ATTESTATION_SEED (or AVERIN_ATTESTATION_SEED_FILE) must be 64 hex chars (32-byte Ed25519 seed)")
+		}
+		srv.WithAttestation(ed25519.NewKeyFromSeed(raw))
+		log.Printf("deployment attestation enabled (exports bind the latest checkpoint under a role-separated issuer)")
+	}
+	if manifest := strings.TrimSpace(os.Getenv("AVERIN_COVERAGE_MANIFEST")); manifest != "" {
+		var parsed any
+		if err := json.Unmarshal([]byte(manifest), &parsed); err != nil {
+			log.Fatalf("AVERIN_COVERAGE_MANIFEST must be valid JSON: %v", err)
+		}
+		srv.WithCoverageManifest(manifest)
+		log.Printf("deployment coverage manifest enabled")
+	}
+	verifyAttestation := strings.TrimSpace(os.Getenv("AVERIN_VERIFY_ATTESTATION_PUBKEY"))
+	verifyTSA := strings.TrimSpace(os.Getenv("AVERIN_VERIFY_TSA_SPKI_B64"))
+	if (verifyAttestation == "") != (verifyTSA == "") {
+		log.Fatal("AVERIN_VERIFY_ATTESTATION_PUBKEY and AVERIN_VERIFY_TSA_SPKI_B64 must be configured together — partial D7 trust roots cannot evaluate attestation")
+	}
+	if verifyAttestation != "" {
+		attestationKeys := parsePublicKeys("AVERIN_VERIFY_ATTESTATION_PUBKEY", verifyAttestation)
+		var tsaSPKI [][]byte
+		for _, part := range strings.Split(verifyTSA, ",") {
+			encoded := strings.TrimSpace(part)
+			if encoded == "" {
+				continue
+			}
+			der, err := base64.RawURLEncoding.DecodeString(encoded)
+			if err != nil || len(der) == 0 {
+				log.Fatalf("AVERIN_VERIFY_TSA_SPKI_B64: %q is not base64url-no-pad DER SubjectPublicKeyInfo", part)
+			}
+			tsaSPKI = append(tsaSPKI, der)
+		}
+		if len(tsaSPKI) == 0 {
+			log.Fatal("AVERIN_VERIFY_TSA_SPKI_B64 is set but parsed to zero keys")
+		}
+		srv.WithExternalVerificationRoots(attestationKeys, tsaSPKI)
+		log.Printf("external D7 verification roots pinned (%d attestation issuer, %d RFC 3161 TSA SPKI)", len(attestationKeys), len(tsaSPKI))
+	}
+
+	// D4/D8 signed operation taxonomy. This is an all-or-nothing independent pinning tuple:
+	// the server must never derive a taxonomy from the same records it is verifying.
+	taxonomyFile := strings.TrimSpace(os.Getenv("AVERIN_VERIFY_TAXONOMY_FILE"))
+	taxonomyPub := strings.TrimSpace(os.Getenv("AVERIN_VERIFY_TAXONOMY_PUBKEY"))
+	taxonomyDigest := strings.TrimSpace(os.Getenv("AVERIN_VERIFY_TAXONOMY_DIGEST"))
+	taxonomyVersionRaw := strings.TrimSpace(os.Getenv("AVERIN_VERIFY_TAXONOMY_VERSION"))
+	taxonomySet := 0
+	for _, value := range []string{taxonomyFile, taxonomyPub, taxonomyDigest, taxonomyVersionRaw} {
+		if value != "" {
+			taxonomySet++
+		}
+	}
+	if taxonomySet != 0 && taxonomySet != 4 {
+		log.Fatal("AVERIN_VERIFY_TAXONOMY_FILE, _PUBKEY, _DIGEST, and _VERSION must be configured together — partial D4 roots cannot validate an operation taxonomy")
+	}
+	if taxonomySet == 4 {
+		taxonomyJSON, err := os.ReadFile(taxonomyFile)
+		if err != nil {
+			log.Fatalf("AVERIN_VERIFY_TAXONOMY_FILE: %v", err)
+		}
+		version, err := strconv.ParseInt(taxonomyVersionRaw, 10, 64)
+		if err != nil || version <= 0 {
+			log.Fatal("AVERIN_VERIFY_TAXONOMY_VERSION must be a positive integer")
+		}
+		taxonomyKeys := parsePublicKeys("AVERIN_VERIFY_TAXONOMY_PUBKEY", taxonomyPub)
+		srv.WithExternalTaxonomy(taxonomyJSON, taxonomyKeys, taxonomyDigest, version)
+		log.Printf("external D4 taxonomy pinned (version=%d, %d issuer key(s))", version, len(taxonomyKeys))
+	}
+
 	log.Printf("averin-server listening on %s (pubkey %s)", addr, c.PubKey())
 	// Explicit timeouts (http.ListenAndServe leaves them at 0 = unbounded → Slowloris / slow-body / idle
 	// keep-alive connection exhaustion). The server reads bounded bodies (8 MiB) and does not stream long
@@ -621,6 +695,10 @@ func secretEnvOrFile(name string) string {
 // optional "ed25519pub:" prefix) into the M6 cosig approver set. A malformed entry is fatal (fail-closed —
 // a typo'd governance key must not silently shrink the approver set).
 func parseCosigApprovers(raw string) []ed25519.PublicKey {
+	return parsePublicKeys("AVERIN_COSIG_APPROVER_KEYS", raw)
+}
+
+func parsePublicKeys(name, raw string) []ed25519.PublicKey {
 	var out []ed25519.PublicKey
 	for _, part := range strings.Split(raw, ",") {
 		s := strings.TrimPrefix(strings.TrimSpace(part), "ed25519pub:")
@@ -629,7 +707,7 @@ func parseCosigApprovers(raw string) []ed25519.PublicKey {
 		}
 		b, err := base64.RawURLEncoding.DecodeString(s)
 		if err != nil || len(b) != ed25519.PublicKeySize {
-			log.Fatalf("AVERIN_COSIG_APPROVER_KEYS: %q is not a base64url-no-pad ed25519 public key (32 bytes)", part)
+			log.Fatalf("%s: %q is not a base64url-no-pad ed25519 public key (32 bytes)", name, part)
 		}
 		out = append(out, ed25519.PublicKey(b))
 	}

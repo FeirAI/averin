@@ -140,6 +140,19 @@ type Server struct {
 	// Set by WithAttestation; overridable via WithAttestationWindow.
 	attestIssuedSkew time.Duration
 	attestValidity   time.Duration
+	// externalVerifyAttestationKeys / externalVerifyTSASPKI are PUBLIC, operator-pinned auditor
+	// roots used by the product-facing /v2/verify view. They are deliberately separate from the
+	// producer's private attestation key and TSA client: without both external roots configured,
+	// selfVerifyOpts leaves D7 unevaluated exactly as before.
+	externalVerifyAttestationKeys []ed25519.PublicKey
+	externalVerifyTSASPKI         [][]byte
+	// D4/D8 operation-taxonomy roots used by the product-facing self-view. The signed
+	// artifact and every pin are operator/auditor supplied; the producer never derives
+	// them from observed records (which would make the coverage claim self-validating).
+	externalVerifyTaxonomy        json.RawMessage
+	externalVerifyTaxonomyKeys    []ed25519.PublicKey
+	externalVerifyTaxonomyDigest  string
+	externalVerifyTaxonomyVersion int64
 	// T6/D8 (ADR 0004): the operator-declared coverage_manifest (raw JSON, e.g. a side_effect_closure).
 	// Emitted verbatim in every export bundle, and its RCP-canonical digest is bound into the
 	// deployment_attestation subject so the two cannot diverge. Empty = no manifest (capstone stays at most
@@ -518,6 +531,21 @@ func (s *Server) WithLedger(ledger resourceshim.Ledger) *Server {
 // ids / resource ids. A verifier that pins this key (out of band) elevates `attestation_status` toward
 // `attested_claims`; the attestation asserts a CLAIM exists, never runtime enforcement (ADR 0004 D7).
 func (s *Server) WithAttestation(key ed25519.PrivateKey) *Server {
+	pub := key.Public().(ed25519.PublicKey)
+	if cpub, err := decodePubKey(s.core.PubKey()); err == nil && bytes.Equal(pub, cpub) {
+		panic("WithAttestation: attestation key must differ from the server signing key (role separation)")
+	}
+	if s.brokerKey != nil && bytes.Equal(pub, s.brokerKey.Public().(ed25519.PublicKey)) {
+		panic("WithAttestation: attestation key must differ from the broker issuing key (role separation)")
+	}
+	if s.resourceCore != nil {
+		if rpub, err := decodePubKey(s.resourceCore.PubKey()); err == nil && bytes.Equal(pub, rpub) {
+			panic("WithAttestation: attestation key must differ from the resource recording key (role separation)")
+		}
+	}
+	if s.revocationKey != nil && bytes.Equal(pub, s.revocationKey.Public().(ed25519.PublicKey)) {
+		panic("WithAttestation: attestation key must differ from the revocation key (role separation)")
+	}
 	s.attestKey = key
 	if s.attestIssuedSkew == 0 {
 		s.attestIssuedSkew = time.Hour // small skew below the checkpoint time for TSA/clock jitter
@@ -555,6 +583,78 @@ func (s *Server) WithAttestationWindow(issuedSkew, validity time.Duration) *Serv
 	}
 	s.attestIssuedSkew = issuedSkew
 	s.attestValidity = validity
+	return s
+}
+
+// WithExternalVerificationRoots installs PUBLIC trust roots pinned by the deployment operator for
+// the product-facing /v2/verify view. Supplying both an attestation issuer and an RFC 3161 TSA SPKI
+// makes D7 independently evaluable: the verifier checks the deployment-attestation signature and
+// the externally timestamped checkpoint it binds. A partial pair is intentionally ignored here;
+// averin-server rejects partial environment configuration at startup.
+func (s *Server) WithExternalVerificationRoots(attestationKeys []ed25519.PublicKey, tsaSPKI [][]byte) *Server {
+	s.externalVerifyAttestationKeys = append([]ed25519.PublicKey(nil), attestationKeys...)
+	s.externalVerifyTSASPKI = make([][]byte, len(tsaSPKI))
+	for i, spki := range tsaSPKI {
+		s.externalVerifyTSASPKI[i] = append([]byte(nil), spki...)
+	}
+	return s
+}
+
+// WithExternalTaxonomy installs the signed D4 operation taxonomy and its independent
+// auditor pins for the product-facing /v2/verify view. The complete pinning tuple is
+// required: artifact, issuer key(s), canonical digest, and positive version. The
+// verifier re-checks the signature/digest/version and rejects role overlap; this setter
+// validates the deployment shape before accepting it.
+func (s *Server) WithExternalTaxonomy(taxonomyJSON []byte, keys []ed25519.PublicKey, digest string, version int64) *Server {
+	if len(taxonomyJSON) == 0 || len(keys) == 0 || digest == "" || version <= 0 {
+		panic("WithExternalTaxonomy: artifact, issuer keys, digest, and positive version are all required")
+	}
+	var parsed any
+	if err := json.Unmarshal(taxonomyJSON, &parsed); err != nil {
+		panic("WithExternalTaxonomy: taxonomy artifact must be valid JSON")
+	}
+	if !strings.HasPrefix(digest, "sha256:") || len(digest) != len("sha256:")+64 {
+		panic("WithExternalTaxonomy: taxonomy digest must be canonical sha256:<64hex>")
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(digest, "sha256:")); err != nil {
+		panic("WithExternalTaxonomy: taxonomy digest must be canonical sha256:<64hex>")
+	}
+	for _, key := range keys {
+		if len(key) != ed25519.PublicKeySize {
+			panic("WithExternalTaxonomy: taxonomy issuer key must be 32-byte Ed25519")
+		}
+		if cpub, err := decodePubKey(s.core.PubKey()); err == nil && bytes.Equal(key, cpub) {
+			panic("WithExternalTaxonomy: taxonomy issuer key must differ from the server/broker key")
+		}
+		if s.brokerKey != nil && bytes.Equal(key, s.brokerKey.Public().(ed25519.PublicKey)) {
+			panic("WithExternalTaxonomy: taxonomy issuer key must differ from the broker issuing key")
+		}
+		if s.resourceCore != nil {
+			if rpub, err := decodePubKey(s.resourceCore.PubKey()); err == nil && bytes.Equal(key, rpub) {
+				panic("WithExternalTaxonomy: taxonomy issuer key must differ from the resource recording key")
+			}
+		}
+		if s.attestKey != nil && bytes.Equal(key, s.attestKey.Public().(ed25519.PublicKey)) {
+			panic("WithExternalTaxonomy: taxonomy issuer key must differ from the attestation key")
+		}
+		if s.revocationKey != nil && bytes.Equal(key, s.revocationKey.Public().(ed25519.PublicKey)) {
+			panic("WithExternalTaxonomy: taxonomy issuer key must differ from the revocation key")
+		}
+		for _, approver := range s.cosigApprovers {
+			if bytes.Equal(key, approver) {
+				panic("WithExternalTaxonomy: taxonomy issuer key must differ from every cosign approver key")
+			}
+		}
+		for _, attest := range s.externalVerifyAttestationKeys {
+			if bytes.Equal(key, attest) {
+				panic("WithExternalTaxonomy: taxonomy issuer key must differ from every attestation issuer key")
+			}
+		}
+	}
+	s.externalVerifyTaxonomy = append(json.RawMessage(nil), taxonomyJSON...)
+	s.externalVerifyTaxonomyKeys = append([]ed25519.PublicKey(nil), keys...)
+	s.externalVerifyTaxonomyDigest = digest
+	s.externalVerifyTaxonomyVersion = version
 	return s
 }
 
@@ -3311,8 +3411,8 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// Self-verify under the trust roots this server holds that are MEANINGFUL without the externally-held TSA key —
 	// broker (or per-broker federation), resource, revocation, and cosig — so every such mode is EVALUATED rather
 	// than read as a benign `absent`/`unevaluated` (false comfort). This is the server's SELF-VIEW; an INDEPENDENT
-	// auditor pins all roles INCLUDING the RFC3161 TSA out-of-band (the real check). See selfVerifyOpts on why the
-	// attestation role is deliberately NOT self-pinned.
+	// auditor pins all roles INCLUDING the RFC3161 TSA out-of-band (the real check). Attestation remains
+	// unevaluated unless the operator explicitly installs both public D7 roots; see selfVerifyOpts.
 	report := s.core.VerifyBundleWith(bundle, s.selfVerifyOpts())
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(report))
@@ -3324,10 +3424,10 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 // elevation (no temporal dependency), revocation (the membership gate blocks a revoked use independent of list
 // currency — see verify.rs M5), and cosig (a signature, no anchor dependency).
 //
-// The attestation role is deliberately EXCLUDED: its D7 freshness requires a VERIFIED+anchored checkpoint, which is
-// unreachable without a pinned TSA key. Self-pinning it could therefore only ever yield `failed` (never `fresh`),
-// flipping a fully-valid pre-anchor bundle to ok:false — a FALSE ALARM, the inverse of the false comfort this
-// endpoint exists to remove. Only an auditor who pins the TSA can meaningfully evaluate the attestation.
+// The attestation role is excluded by default. It is included only when the operator explicitly installs BOTH
+// public out-of-band roots via WithExternalVerificationRoots: an attestation issuer and an RFC 3161 TSA SPKI.
+// This keeps the default self-view from self-pinning a producer key while allowing the product view to surface a
+// real auditor-pinned D7 verdict when the deployment has actually configured the full trust path.
 func (s *Server) selfVerifyOpts() string {
 	enc := func(pub ed25519.PublicKey) string {
 		return "ed25519pub:" + base64.RawURLEncoding.EncodeToString(pub)
@@ -3350,6 +3450,28 @@ func (s *Server) selfVerifyOpts() string {
 			ak[i] = enc(a)
 		}
 		opts["cosig_approver_keys"] = ak
+	}
+	if len(s.externalVerifyAttestationKeys) > 0 && len(s.externalVerifyTSASPKI) > 0 {
+		ak := make([]string, len(s.externalVerifyAttestationKeys))
+		for i, key := range s.externalVerifyAttestationKeys {
+			ak[i] = enc(key)
+		}
+		spki := make([]string, len(s.externalVerifyTSASPKI))
+		for i, der := range s.externalVerifyTSASPKI {
+			spki[i] = base64.RawURLEncoding.EncodeToString(der)
+		}
+		opts["attestation_keys"] = ak
+		opts["tsa_spki_b64"] = spki
+	}
+	if len(s.externalVerifyTaxonomy) > 0 && len(s.externalVerifyTaxonomyKeys) > 0 {
+		tk := make([]string, len(s.externalVerifyTaxonomyKeys))
+		for i, key := range s.externalVerifyTaxonomyKeys {
+			tk[i] = enc(key)
+		}
+		opts["taxonomy"] = s.externalVerifyTaxonomy
+		opts["taxonomy_keys"] = tk
+		opts["taxonomy_digest"] = s.externalVerifyTaxonomyDigest
+		opts["taxonomy_version"] = s.externalVerifyTaxonomyVersion
 	}
 	b, _ := json.Marshal(opts)
 	return string(b)
@@ -3414,7 +3536,14 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// verifier can confirm each disclosure against its record's commitment (RCP §9.3). proof_only
 	// ships commitments only.
 	rawAvailable := false
-	gaps := []string{"Level-2 observation scope is per-record; Level-3 completeness not claimed"}
+	// The bundle itself is the authority for the completeness wording.  A D8-capable
+	// deployment may now prove the strongest bounded verdict, so the old unconditional
+	// "not claimed" sentence would contradict the verifier.  Re-run the same pinned
+	// verifier used by /v2/verify and change the line only when the complete capstone is
+	// actually present.  The wording retains the two load-bearing bounds: brokered surface
+	// (not every action an agent might take) and assumed-truthful resource reporting.
+	verificationReport := s.core.VerifyBundleWith(bundle, s.selfVerifyOpts())
+	gaps := []string{completenessGapLine(verificationReport)}
 	if mode == "selective_disclosure" || mode == "full_evidence" {
 		disclosures, err := s.buildDisclosures(projectID)
 		if err != nil {
@@ -3449,6 +3578,29 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	out, _ := json.Marshal(obj)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(out)
+}
+
+const completenessNotClaimed = "Level-2 observation scope is per-record; Level-3 completeness not claimed"
+const completenessBrokeredSurface = "Level-3 completeness is attested over the brokered surface only (resource trust is assumed truthful); actions outside that surface are not claimed"
+
+// completenessGapLine projects the verifier's bounded D8 verdict into the export's
+// human-readable gap report.  It deliberately requires the whole conjunction visible
+// at this boundary: the report must be OK, name the brokered-surface capstone, and carry
+// the irreducible resource-TCB qualifier.  Malformed, partial, or future-unknown reports
+// retain the conservative pre-D8 sentence.
+func completenessGapLine(reportJSON string) string {
+	var report struct {
+		OK                 bool   `json:"ok"`
+		ActionCompleteness string `json:"action_completeness"`
+		ResourceTrust      string `json:"resource_trust"`
+	}
+	if json.Unmarshal([]byte(reportJSON), &report) == nil &&
+		report.OK &&
+		report.ActionCompleteness == "attested_complete_over_brokered_surface" &&
+		report.ResourceTrust == "assumed_truthful" {
+		return completenessBrokeredSurface
+	}
+	return completenessNotClaimed
 }
 
 // filterRecordsByKind returns the subset of the bundle's sealed records whose signed top-level

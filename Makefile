@@ -7,8 +7,10 @@
 all: test
 
 # Rust integrity core -> the cgo staticlib (debug profile; matches the cgo LDFLAGS path).
+# The server's product-facing verifier evaluates real RFC 3161 anchors, so the native
+# cgo trust root must include that feature (the intentionally lean WASM build does not).
 core:
-	cargo build -p averin-decision-core
+	cargo build -p averin-decision-core --features rfc3161
 
 # Verifier trust root: rebuild the wasm, refresh its pinned digest + the in-page pin (see SUPPLY-CHAIN.md).
 wasm:
@@ -22,7 +24,7 @@ test-core:
 
 # Rebuild the staticlib FIRST so the linked core is never stale, then run the Go suite.
 test-server: core
-	cd server && go vet ./... && go test ./...
+	cd server && go vet ./... && go test -a ./...
 
 test-verifier: wasm
 	cd verifier && bun test
