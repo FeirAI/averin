@@ -264,6 +264,7 @@ CLI tool that mints a **signed operation taxonomy** artifact (D4). Flags (`flag`
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `-key` | — | Taxonomy issuer signing key: 64 hex chars (a 32-byte Ed25519 seed). |
+| `-key-file` | — | Owner-only regular file (mode `0600`) containing the 64-hex seed. Exactly one of `-key` or `-key-file` is required; deployments should use the file form so the seed never enters argv. |
 | `-version` | `1` | Taxonomy version (bump to rotate; pinned as `taxonomy_version`). |
 | `-from` | `0` | `effective_from`, unix seconds. |
 | `-until` | `0` | `effective_until`, unix seconds (must be `>= from`). |
