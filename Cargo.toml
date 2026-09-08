@@ -8,6 +8,14 @@ license = "Apache-2.0"
 repository = "https://github.com/averin-dev/averin"
 rust-version = "1.85"
 
+# The Go server links this profile's static FFI library in every supported
+# `make test-server`/local deployment. Full-record verification is production
+# work, not a debug-only hot path; leaving Rust and its crypto/JSON dependencies
+# at Cargo's opt-level 0 made a few thousand records take longer than the HTTP
+# safety deadline. Keep debug assertions and symbols, but optimize execution.
+[profile.dev]
+opt-level = 3
+
 # Small, self-contained release artifacts (lean WASM verifier bundle + static FFI lib).
 [profile.release]
 opt-level = "z"

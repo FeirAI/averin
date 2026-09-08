@@ -217,6 +217,11 @@ type Server struct {
 	// off the server's finite WriteTimeout (per-handler deadline) so a large-but-legitimate export is not
 	// hard-killed mid-write. Buffered to maxConcurrentBundleReads; a saturated cap yields 503.
 	bundleSem chan struct{}
+	// verifyFlights coalesces concurrent self-verifications for the same project and trust-root configuration.
+	// It deliberately has no completed-result cache: writes can land at any time, so a later request must build
+	// and verify fresh project state. A flight's work continues independently if one HTTP caller disconnects;
+	// otherwise cancellation by one waiter could strand every other waiter or leave an unverified response cached.
+	verifyFlights verifyFlightGroup
 
 	// readiness is the set of dependencies GET /readyz probes (each with a short per-request timeout)
 	// before reporting 200 — see WithReadiness. Empty (dev / in-memory store, no Postgres configured)
@@ -3397,25 +3402,56 @@ func (s *Server) handleDAG(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
-	release, ok := s.acquireBundleSlot(w)
-	if !ok {
-		return
-	}
-	defer release()
+	setBundleWriteDeadline(w)
 	projectID := r.URL.Query().Get("project")
-	bundle, err := s.buildBundle(projectID, false)
+	// The work is coalesced before taking a bundle slot. A Telegram/browser refresh storm for one project
+	// therefore consumes one build slot, not one slot per waiting HTTP request.
+	report, err := s.verifyProject(r.Context(), projectID)
 	if err != nil {
+		if errors.Is(err, errVerifyOverloaded) {
+			writeErr(w, http.StatusServiceUnavailable, "too many concurrent verification requests; retry shortly")
+			return
+		}
+		// A disconnected client cannot receive an error response. The shared verification is intentionally
+		// allowed to finish for the remaining waiters; do not turn one cancellation into a failed flight.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Self-verify under the trust roots this server holds that are MEANINGFUL without the externally-held TSA key —
-	// broker (or per-broker federation), resource, revocation, and cosig — so every such mode is EVALUATED rather
-	// than read as a benign `absent`/`unevaluated` (false comfort). This is the server's SELF-VIEW; an INDEPENDENT
-	// auditor pins all roles INCLUDING the RFC3161 TSA out-of-band (the real check). Attestation remains
-	// unevaluated unless the operator explicitly installs both public D7 roots; see selfVerifyOpts.
-	report := s.core.VerifyBundleWith(bundle, s.selfVerifyOpts())
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(report))
+	_, _ = w.Write([]byte(report))
+}
+
+// verifyProject builds and self-verifies one project's current bundle. The coordinator key includes the
+// project and the trust-root options, so requests from different tenants (or with different verifier
+// configuration) can never share a result. The result is shared only while the work is in flight; errors and
+// integrity-failure reports are never retained as a reassuring answer for a later request.
+func (s *Server) verifyProject(ctx context.Context, projectID string) (string, error) {
+	verifyOpts := s.selfVerifyOpts()
+	key := verificationKey(projectID, verifyOpts)
+	return s.verifyFlights.run(ctx, key, func() (string, error) {
+		// Unlike acquireBundleSlot, this worker has no ResponseWriter. It waits for capacity so a burst of
+		// unrelated exports cannot cause a duplicate verification or make the first request fail spuriously.
+		s.bundleSem <- struct{}{}
+		defer func() { <-s.bundleSem }()
+
+		bundle, err := s.buildBundle(projectID, false)
+		if err != nil {
+			return "", err
+		}
+		// Self-verify under the trust roots this server holds that are MEANINGFUL without the externally-held TSA
+		// key — broker (or per-broker federation), resource, revocation, and cosig — so every such mode is
+		// EVALUATED rather than read as a benign `absent`/`unevaluated` (false comfort). This is the server's
+		// SELF-VIEW; an INDEPENDENT auditor pins all roles INCLUDING the RFC3161 TSA out-of-band (the real check).
+		// Attestation remains unevaluated unless both public D7 roots are configured; see selfVerifyOpts.
+		return s.core.VerifyBundleWith(bundle, verifyOpts), nil
+	})
+}
+
+func verificationKey(projectID, verifyOpts string) string {
+	return projectID + "\x00" + fmt.Sprintf("%x", sha256.Sum256([]byte(verifyOpts)))
 }
 
 // selfVerifyOpts builds the pinned-trust-root opts JSON from the server's configured keys, for the self-verify
@@ -3687,13 +3723,19 @@ func (s *Server) acquireBundleSlot(w http.ResponseWriter) (release func(), ok bo
 		writeErr(w, http.StatusServiceUnavailable, "too many concurrent export/verify requests; retry shortly")
 		return nil, false
 	}
-	// Lift the server's finite WriteTimeout for THIS response only: a large export can legitimately take
-	// longer than 60s to serialize. http.ResponseController plumbs the deadline to the underlying conn; the
-	// error (e.g. httptest recorders that don't support deadlines) is best-effort and safely ignored.
+	setBundleWriteDeadline(w)
+	return func() { <-s.bundleSem }, true
+}
+
+// setBundleWriteDeadline lifts the server's finite WriteTimeout for a verify/export response. Verify work may
+// be performed by a background coalesced flight, but the eventual waiter still needs the same long response
+// deadline that the pre-coalescing handler had.
+func setBundleWriteDeadline(w http.ResponseWriter) {
+	// http.ResponseController plumbs the deadline to the underlying conn; the error (e.g. httptest recorders
+	// that do not support deadlines) is best-effort and safely ignored.
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(bundleWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		log.Printf("WARNING: could not extend write deadline for a bundle response: %v", err)
 	}
-	return func() { <-s.bundleSem }, true
 }
 
 // buildBundle assembles the export/verify bundle: published key, all sealed records, and the full
