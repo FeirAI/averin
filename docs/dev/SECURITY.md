@@ -167,5 +167,5 @@ deliberate consequence you must design around before recording personal data:
 
 ## Reporting
 
-This is alpha software. Report security issues per the repository's policy; do not file
-publicly-exploitable details in a public issue.
+This is alpha software. Report security issues privately using the channel in the root
+[`SECURITY.md`](../../SECURITY.md); do not file publicly-exploitable details in a public issue.
