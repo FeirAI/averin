@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/goldenvec"
+	"github.com/feirai/averin/server/internal/goldenvec"
 )
 
 func TestCosigApprovalChallengeGoldenVector(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/broker"
-	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/core"
 )
 
 // resourceKeyFromSeed derives the raw ed25519 key the resource signs the M3 introspection challenge with — the

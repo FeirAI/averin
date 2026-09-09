@@ -40,9 +40,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/averin-dev/averin/server/internal/pgdurable"
-	"github.com/averin-dev/averin/server/internal/pgledger"
-	"github.com/averin-dev/averin/server/migrations"
+	"github.com/feirai/averin/server/internal/pgdurable"
+	"github.com/feirai/averin/server/internal/pgledger"
+	"github.com/feirai/averin/server/migrations"
 )
 
 // CurrentSchemaVersion is the schema version this binary understands. A stored version above this is a

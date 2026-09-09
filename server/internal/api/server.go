@@ -23,16 +23,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/auth"
-	"github.com/averin-dev/averin/server/internal/broker"
-	"github.com/averin-dev/averin/server/internal/content"
-	"github.com/averin-dev/averin/server/internal/meter"
-	"github.com/averin-dev/averin/server/internal/metrics"
-	"github.com/averin-dev/averin/server/internal/otel"
-	"github.com/averin-dev/averin/server/internal/pgdurable"
-	"github.com/averin-dev/averin/server/internal/resourceshim"
-	"github.com/averin-dev/averin/server/internal/store"
-	"github.com/averin-dev/averin/server/internal/witness"
+	"github.com/feirai/averin/server/internal/auth"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/content"
+	"github.com/feirai/averin/server/internal/meter"
+	"github.com/feirai/averin/server/internal/metrics"
+	"github.com/feirai/averin/server/internal/otel"
+	"github.com/feirai/averin/server/internal/pgdurable"
+	"github.com/feirai/averin/server/internal/resourceshim"
+	"github.com/feirai/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/witness"
 )
 
 // Sealer is the subset of the Rust core the API needs.

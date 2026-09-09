@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // TestRevokeSetSizeCap (white-box): the in-memory revoked set is bounded per project so a caller cannot flood it

@@ -3,9 +3,9 @@ package api
 import (
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/resourceshim"
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/resourceshim"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // TestWithLedgerSeam verifies the consume-before-act ledger injection seam (Finding 7/44): WithResource

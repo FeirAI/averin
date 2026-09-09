@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/api"
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/store"
-	"github.com/averin-dev/averin/server/internal/taxonomy"
+	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/taxonomy"
 )
 
 // TestCapstoneAttestedCompleteEndToEnd proves the D8 capstone end-to-end from a REAL Go-produced bundle:

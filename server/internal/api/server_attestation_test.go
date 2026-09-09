@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/api"
-	"github.com/averin-dev/averin/server/internal/broker"
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // attestationKey is the D7.2 deployment-attestation issuer — distinct from the server signing key, the

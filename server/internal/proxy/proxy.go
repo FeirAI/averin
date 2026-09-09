@@ -18,7 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/averin-dev/averin/server/internal/scrub"
+	"github.com/feirai/averin/server/internal/scrub"
 )
 
 // Recorder submits a record body to the averin ingestion API.

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/api"
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/resourceshim"
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/resourceshim"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // resourceSeed is the RESOURCE recording key — DISTINCT from the server signing key (seed) and the

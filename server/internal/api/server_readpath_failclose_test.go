@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/api"
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // failReadStore injects read errors on the export/session/DAG/use-outcome read paths, to prove they FAIL

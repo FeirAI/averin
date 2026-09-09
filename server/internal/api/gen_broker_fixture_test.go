@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/core"
 )
 
 // TestGenerateBrokerFixture regenerates spec/fixtures/bundle-broker-valid.json — a REAL Go-produced

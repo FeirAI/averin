@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 func TestVerifyFlightGroupCoalescesConcurrentWork(t *testing.T) {

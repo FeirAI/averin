@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/api"
-	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/core"
 )
 
 func revocationKey() ed25519.PrivateKey {

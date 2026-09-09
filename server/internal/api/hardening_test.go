@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/api"
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // TestWithResourcePanicsOnSigningKeyOverlap (F12): WithResource fail-fasts an embedder that reuses the

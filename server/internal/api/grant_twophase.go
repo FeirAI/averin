@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/broker"
 )
 
 // pendingGrant is a minted-but-uncommitted grant held between /v2/grants/prepare and /v2/grants/finalize.

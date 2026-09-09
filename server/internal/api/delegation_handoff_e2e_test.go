@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/broker"
 )
 
 // handoffWireRecord builds a sub-agent-handoff record using govder's mapper

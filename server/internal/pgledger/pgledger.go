@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/averin-dev/averin/server/internal/resourceshim"
+	"github.com/feirai/averin/server/internal/resourceshim"
 )
 
 // opTimeout bounds each ledger op so a hung/severely-degraded DB fails the consume (and thus the use)

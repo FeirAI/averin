@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/broker"
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/pgdurable"
-	"github.com/averin-dev/averin/server/internal/pgschema"
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/pgdurable"
+	"github.com/feirai/averin/server/internal/pgschema"
+	"github.com/feirai/averin/server/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/api"
-	"github.com/averin-dev/averin/server/internal/content"
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/content"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // failIdemStore wraps a store and can inject a RecordByIdem read error, to prove the use paths FAIL CLOSED

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/broker"
-	"github.com/averin-dev/averin/server/internal/goldenvec"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/goldenvec"
 )
 
 func keyFromByte(b byte) ed25519.PrivateKey {

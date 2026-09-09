@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/core"
 )
 
 // TestRevocationPubKeyEncodingMatchesCore pins the cross-language format contract the R2 guard relies

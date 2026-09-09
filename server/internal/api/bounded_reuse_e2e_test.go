@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/broker"
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/resourceshim"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/resourceshim"
 )
 
 // boundedGrantBody is grantBody for a bounded_reuse grant capped at useLimit (ADR 0005 M1). The PoP

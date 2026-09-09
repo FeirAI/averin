@@ -24,17 +24,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/api"
-	"github.com/averin-dev/averin/server/internal/auth"
-	"github.com/averin-dev/averin/server/internal/content"
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/meter"
-	"github.com/averin-dev/averin/server/internal/pgdurable"
-	"github.com/averin-dev/averin/server/internal/pgledger"
-	"github.com/averin-dev/averin/server/internal/pgschema"
-	"github.com/averin-dev/averin/server/internal/scrub"
-	"github.com/averin-dev/averin/server/internal/store"
-	"github.com/averin-dev/averin/server/internal/witness"
+	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/auth"
+	"github.com/feirai/averin/server/internal/content"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/meter"
+	"github.com/feirai/averin/server/internal/pgdurable"
+	"github.com/feirai/averin/server/internal/pgledger"
+	"github.com/feirai/averin/server/internal/pgschema"
+	"github.com/feirai/averin/server/internal/scrub"
+	"github.com/feirai/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/witness"
 )
 
 func main() {

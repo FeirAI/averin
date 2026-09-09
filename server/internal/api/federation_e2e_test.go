@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/broker"
-	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/core"
 )
 
 // prepareFedGrantEvidence mints a federated (broker_id-tagged) single_operation grant via the REAL producer

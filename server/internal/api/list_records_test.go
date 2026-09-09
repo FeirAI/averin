@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/auth"
+	"github.com/feirai/averin/server/internal/auth"
 )
 
 func TestListRecordsNewestFirstAndTruncation(t *testing.T) {

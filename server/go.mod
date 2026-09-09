@@ -1,4 +1,4 @@
-module github.com/averin-dev/averin/server
+module github.com/feirai/averin/server
 
 go 1.25.0
 

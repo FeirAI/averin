@@ -20,8 +20,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/taxonomy"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/taxonomy"
 )
 
 // entryList collects repeatable resource_id=action flags into taxonomy entries.

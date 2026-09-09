@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // These tests exercise the finding-C fix directly: handleGrantPrepare/handleRevoke used to hold a SINGLE

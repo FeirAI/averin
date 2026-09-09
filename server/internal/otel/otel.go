@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/scrub"
+	"github.com/feirai/averin/server/internal/scrub"
 )
 
 // MapSpansToRecords parses an OTLP/JSON ExportTraceServiceRequest and returns one averin record body

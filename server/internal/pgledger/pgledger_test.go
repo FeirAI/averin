@@ -12,8 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/averin-dev/averin/server/internal/pgledger"
-	"github.com/averin-dev/averin/server/internal/resourceshim"
+	"github.com/feirai/averin/server/internal/pgledger"
+	"github.com/feirai/averin/server/internal/resourceshim"
 )
 
 // Set AVERIN_TEST_DATABASE_URL (e.g. postgres://postgres:postgres@localhost:5432/postgres) to enable.

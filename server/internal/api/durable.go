@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/broker"
-	"github.com/averin-dev/averin/server/internal/pgdurable"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/pgdurable"
 )
 
 // WithDurable backs the M5 revoked-grant set and the M6/M2 pending two-phase grant state with Postgres

@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/api"
-	"github.com/averin-dev/averin/server/internal/auth"
-	"github.com/averin-dev/averin/server/internal/content"
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/store"
-	"github.com/averin-dev/averin/server/internal/witness"
+	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/auth"
+	"github.com/feirai/averin/server/internal/content"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/witness"
 )
 
 const seed = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"

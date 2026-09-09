@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/api"
-	"github.com/averin-dev/averin/server/internal/auth"
+	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/auth"
 )
 
 // fakePinger is a stub api.Pinger for /readyz tests — it never touches a real database, it just

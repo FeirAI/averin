@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/broker"
-	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/core"
 )
 
 // pubEncoded renders an ed25519 public key in the "ed25519pub:<b64url>" form the verifier opts expect.

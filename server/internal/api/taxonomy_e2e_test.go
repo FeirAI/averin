@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/core"
-	"github.com/averin-dev/averin/server/internal/taxonomy"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/taxonomy"
 )
 
 // taxonomyKey is the operation-taxonomy issuer — distinct from the server/broker/resource/tsa keys (the

@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/broker"
 )
 
 // WithIntrospection enables POST /v2/introspection (ADR 0005 M3 — Native/STS): the resource records a signed

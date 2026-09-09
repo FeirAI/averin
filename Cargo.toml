@@ -5,7 +5,7 @@ members = ["core"]
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/averin-dev/averin"
+repository = "https://github.com/feirai/averin"
 rust-version = "1.85"
 
 # The Go server links this profile's static FFI library in every supported

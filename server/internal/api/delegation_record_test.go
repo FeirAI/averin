@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/broker"
 )
 
 func signedDelegationRecord(t *testing.T, root, leaf ed25519.PrivateKey, id string) string {

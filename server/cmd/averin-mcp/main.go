@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/averin-dev/averin/server/internal/mcp"
+	"github.com/feirai/averin/server/internal/mcp"
 )
 
 func main() {

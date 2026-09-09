@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/proxy"
+	"github.com/feirai/averin/server/internal/proxy"
 )
 
 func main() {

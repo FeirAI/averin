@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // WithRevocation enables M5 revocation (ADR 0005): POST /v2/revoke records a grant_id as revoked, and every

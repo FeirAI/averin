@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/metrics"
+	"github.com/feirai/averin/server/internal/metrics"
 )
 
 func TestCounterIncAndValue(t *testing.T) {

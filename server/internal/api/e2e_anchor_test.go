@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/core"
 )
 
 // testTSAKey is the hermetic test timestamp-authority key — distinct from the server signing key, the

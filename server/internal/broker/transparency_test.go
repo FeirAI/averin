@@ -3,7 +3,7 @@ package broker
 import (
 	"testing"
 
-	"github.com/averin-dev/averin/server/internal/goldenvec"
+	"github.com/feirai/averin/server/internal/goldenvec"
 )
 
 func TestGrantHeadRootGoldenVector(t *testing.T) {

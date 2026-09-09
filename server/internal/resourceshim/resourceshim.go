@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/averin-dev/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/broker"
 )
 
 // usePoPTag domain-separates the use-time proof-of-possession challenge so a signature here cannot be

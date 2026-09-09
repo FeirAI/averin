@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/averin-dev/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/broker"
 )
 
 // BuildRevocationList constructs a signed, time-bounded revocation_list (ADR 0005 M5) — the top-level bundle
