@@ -17,7 +17,7 @@ COPY core ./core
 # WITHOUT changing the source #cgo directive (local dev still builds debug unchanged).
 RUN cargo build --release -p averin-decision-core
 
-FROM golang:1.25-bookworm AS gobuild
+FROM golang:1.25.13-bookworm AS gobuild
 WORKDIR /src
 COPY . .
 COPY --from=rustbuild /src/target/release/libaverin_decision_core.a ./target/debug/libaverin_decision_core.a
