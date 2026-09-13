@@ -61,7 +61,7 @@ const advisoryLockKey int64 = 0x41564552494e5343 // "AVERINSC"
 // DB is a no-op on data — adopting the v1 stamp never rebuilds or drops anything.
 //
 //   - migrations.Schema     — records, checkpoints, anchors, disclosures, display_seq, broker_seq +
-//                             the append-only REVOKE block (internal/store).
+//     the append-only REVOKE block (internal/store).
 //   - pgledger.SchemaSQL    — consume_ledger (internal/pgledger).
 //   - pgdurable.SchemaSQL   — revocations, pending_grants (internal/pgdurable).
 var baselineV1 = migrations.Schema + "\n" + pgledger.SchemaSQL + "\n" + pgdurable.SchemaSQL

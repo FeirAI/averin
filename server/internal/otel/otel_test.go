@@ -156,7 +156,7 @@ func TestNestedSecretsAreScrubbedRecursively(t *testing.T) {
 		"benign": "hello",
 		"nested": map[string]any{
 			"authorization": "Bearer sk-proj-abcdefghijklmnop", // secret-shaped KEY, nested
-			"note":          "use sk-proj-abcdefghijklmnop",     // secret-shaped VALUE under a benign nested key
+			"note":          "use sk-proj-abcdefghijklmnop",    // secret-shaped VALUE under a benign nested key
 			"deeper": map[string]any{
 				"api_key": "AKIAsecretvalue123456",
 			},

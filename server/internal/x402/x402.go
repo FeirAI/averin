@@ -105,10 +105,10 @@ func (g *Guard) require(w http.ResponseWriter, reason string) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"error": reason,
 		"accepts": []map[string]any{{
-			"scheme":       "x402-usdc",
+			"scheme":        "x402-usdc",
 			"amount_micros": g.PriceMicros,
-			"asset":        g.Asset,
-			"experimental": true,
+			"asset":         g.Asset,
+			"experimental":  true,
 		}},
 	})
 }

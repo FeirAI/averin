@@ -207,7 +207,7 @@ func (r *authBindingRecorder) Record(map[string]any) error {
 func TestAuthBindingProxyCredentialSeparation(t *testing.T) {
 	cases := []struct {
 		name, configured, xToken, bearer, wantAuth string
-		wantStatus, wantCalls                     int
+		wantStatus, wantCalls                      int
 	}{
 		{"bearer", "proxy-key", "", "Bearer proxy-key", "", 200, 1},
 		{"bearer-case-space", "proxy-key", " \t", "bEaReR   proxy-key  ", "", 200, 1},

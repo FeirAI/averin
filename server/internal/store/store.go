@@ -139,15 +139,15 @@ type Mem struct {
 }
 
 type project struct {
-	records      []Record
-	idem         map[string]int // idempotency key -> record index
-	byHash       map[string]struct{}
-	checks       []Checkpoint
-	seqBySess    map[string]int64
-	disclosure   []DisclosureSecret
-	discSeen     map[string]struct{} // record_id\x00field -> present (dedupe)
-	anchors    map[int64]string // checkpoint seq -> token_b64
-	brokerSeq  map[string]int64 // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
+	records    []Record
+	idem       map[string]int // idempotency key -> record index
+	byHash     map[string]struct{}
+	checks     []Checkpoint
+	seqBySess  map[string]int64
+	disclosure []DisclosureSecret
+	discSeen   map[string]struct{} // record_id\x00field -> present (dedupe)
+	anchors    map[int64]string    // checkpoint seq -> token_b64
+	brokerSeq  map[string]int64    // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
 }
 
 func NewMem() *Mem { return &Mem{projects: map[string]*project{}} }
