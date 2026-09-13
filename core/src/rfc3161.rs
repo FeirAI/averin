@@ -383,10 +383,7 @@ mod tests {
         let sig: Signature = sk
             .sign_prehash(&sha2::Sha512::digest(msg))
             .expect("P-384/SHA-512 sign");
-        let spki = sk
-            .verifying_key()
-            .to_public_key_der()
-            .expect("P-384 SPKI");
+        let spki = sk.verifying_key().to_public_key_der().expect("P-384 SPKI");
         let sig_der = sig.to_der();
         verify_ecdsa_p384(spki.as_bytes(), msg, sig_der.as_bytes())
             .expect("P-384/SHA-512 verifies");

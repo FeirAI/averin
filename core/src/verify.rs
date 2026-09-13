@@ -1743,7 +1743,11 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
         ("occurred_at".to_string(), CanonValue::string(occurred_at)),
     ];
     let body = gov.get("body");
-    for key in ["previous_parent_id", "attempted_new_parent_id", "reverted_to_parent_id"] {
+    for key in [
+        "previous_parent_id",
+        "attempted_new_parent_id",
+        "reverted_to_parent_id",
+    ] {
         if let Some(v) = body.and_then(|b| s(b, key)).filter(|v| !v.is_empty()) {
             pairs.push((key.to_string(), CanonValue::string(v)));
         }
@@ -4064,7 +4068,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // not double-report; gated on extensions.govder present so no non-govder record is
         // affected.
         if authority == AuthorityTrust::Verified
-            && rec.get("extensions").and_then(|e| e.get("govder")).is_some()
+            && rec
+                .get("extensions")
+                .and_then(|e| e.get("govder"))
+                .is_some()
             && !govder_evidence_rederivable(rec)
         {
             let msg = format!(

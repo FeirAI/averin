@@ -168,7 +168,9 @@ func (s *Store) LoadRevocations(ctx context.Context) (map[string]map[string]stru
 func (s *Store) PutPending(projectID, idemKey, grantID string, payload []byte, created time.Time) ([]byte, time.Time, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 	defer cancel()
-	created = created.UTC()
+	// timestamptz stores microseconds; truncate so the winner's returned created_at equals the durable row
+	// a losing replica reads back (Linux clocks carry nanoseconds, which Postgres would silently round away).
+	created = created.UTC().Truncate(time.Microsecond)
 
 	var won bool
 	err := s.pool.QueryRow(ctx, `

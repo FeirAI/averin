@@ -5,12 +5,12 @@
 
 use averin_decision_core::anchor::{make_test_anchor, test_tsa_key};
 use averin_decision_core::authority::sign_evidence;
+use averin_decision_core::authority::AuthorityTrust;
 use averin_decision_core::canon::CanonValue;
 use averin_decision_core::checkpoint::{attach_anchor, checkpoint_body, seal_checkpoint};
 use averin_decision_core::hashx::sha256_prefixed;
 use averin_decision_core::record::seal;
 use averin_decision_core::sign::{encode_pubkey, signing_key_from_seed};
-use averin_decision_core::authority::AuthorityTrust;
 use averin_decision_core::verify::{
     cnf_kid, cosig_approval_challenge, delegation_hop_challenge, federation_cert_challenge,
     introspection_transcript_challenge, report_to_json, verify_bundle, verify_bundle_with,
@@ -402,7 +402,10 @@ fn govder_record_evidence_binding_r1() {
     let key_entry = CanonValue::object(vec![
         ("signing_key_id".into(), CanonValue::string("k0")),
         ("key_epoch".into(), CanonValue::Int(0)),
-        ("public_key".into(), CanonValue::string(encode_pubkey(&seal_key.verifying_key()))),
+        (
+            "public_key".into(),
+            CanonValue::string(encode_pubkey(&seal_key.verifying_key())),
+        ),
         ("key_status".into(), CanonValue::string("active")),
     ])
     .unwrap();
