@@ -151,7 +151,7 @@ func main() {
 	//                                 policy engine — this is what lets them elevate, not normalize
 	//                                 down to caller_declared on verify/export).
 	//   AVERIN_DELEGATE_SIGNED_PUBKEY — one key for the delegate_signed source (govder's delegate-agent
-	//                                 approval records, plan 031 D8). This is the third value
+	//                                 approval records). This is the third value
 	//                                 `govder-derive-pubkeys` prints; without it EVERY delegate-agent
 	//                                 approval record sealed at the forgeable caller_declared (F2).
 	//   AVERIN_AUTHORITY_KEYS         — a general "[project:]source=pubkey,..." list. `source` is one of

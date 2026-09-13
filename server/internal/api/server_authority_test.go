@@ -238,7 +238,7 @@ func TestAuthorityKeyRejectsDuplicateSourceAndReusedKey(t *testing.T) {
 	})
 }
 
-// TestDelegateSignedAuthorityElevates (plan 031 D8): with an external delegate-agent key pinned for the
+// TestDelegateSignedAuthorityElevates: with an external delegate-agent key pinned for the
 // "delegate_signed" source, a generic record carrying a delegate_signed evidence_sig that verifies under it is
 // elevated from the forgeable caller_declared to delegate_signed; an offline verifier pinning the SAME key as
 // authority_keys reads it as `verified`. A forged sig (wrong key), a sig signed for a DIFFERENT source
