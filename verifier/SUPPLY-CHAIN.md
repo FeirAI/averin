@@ -6,9 +6,27 @@ attacker can serve you a *different* `.wasm`, it can report `ok:true` over a for
 bundle. That is a fail-open one level above every check the core makes. `index.html` and `averin.js` are small
 enough to read in full; the `.wasm` is not, so it is pinned by digest instead.
 
+## Source-only checkout
+
+The tracked tree contains `index.html`, `averin.js` and
+`averin_decision_core.wasm.sha256`, but not `averin_decision_core.wasm`.
+The WASM binary is ignored by Git and must be built locally before using the
+browser verifier. `./verifier/build.sh` builds and copies the binary, then
+rewrites both the tracked `.wasm.sha256` file and the `WASM_SHA256` value in
+`index.html` to match the local bytes. Those tracked files may therefore differ
+from the checkout after a build; matching a freshly written local pin is not
+independent verification of the committed reference pin.
+
+The script requires the pinned Rust toolchain and target plus build utilities;
+missing toolchain/dependency inputs may require acquisition. This source-only
+alpha provides no Docker image. Both `deploy/Dockerfile.server` and
+`deploy/Dockerfile.web` remain as source recipes, not certified build paths.
+
 ## What is pinned, and what that defends against
 
-- `averin_decision_core.wasm.sha256` records the SHA-256 of the published binary.
+- The committed `averin_decision_core.wasm.sha256` records a dev-host reference
+  digest. A local build rewrites it to match the binary that build produced;
+  the source-only alpha does not supply that binary.
 - `index.html` embeds the same digest as `WASM_SHA256` and passes it to `initAverin(..., { expectedSha256 })`.
   The loader digests the fetched bytes and **refuses to instantiate on a mismatch** (fail-closed: the
   *Verify* button stays disabled). The matching digest is shown in the status line for at-a-glance confirmation.
@@ -20,48 +38,53 @@ run.
 It does **not**, by itself, defend against an attacker who controls the whole origin and rewrites
 `index.html` (they can change the pinned constant too). The defense there is **out-of-band verification**:
 obtain the expected digest from a channel you trust (this repository / a signed release), and confirm the
-`WASM_SHA256` you were served — shown in the page — equals it. Reproducing the build from source (below)
-closes the loop: it proves the pinned digest corresponds to auditable source, not an opaque blob.
+`WASM_SHA256` you were served — shown in the page — equals it. Rebuilding from
+source can help establish correspondence to an independently trusted artifact
+when the producing environment and inputs are recorded and matched, and its
+bytes are actually compared. A newly self-generated pin alone is not that check.
 
 ## Two distinct properties — don't conflate them
 
-1. **Load-time tamper detection (the fail-closed pin).** The build that PRODUCES the served `.wasm` also writes
-   its digest into the served `index.html` (`build.sh` locally; `Dockerfile.web` for the deployment). So
-   `served == pinned` **by construction** — it does NOT depend on the build being reproducible. A binary swapped
-   *after* the build (a CDN/cache/MitM replacing only the `.wasm`) no longer matches the served pin → the loader
-   refuses to run. This works on every machine.
+1. **Load-time tamper detection (the fail-closed pin).** By design, `build.sh`
+   writes a binary and a matching pin in `index.html`; `Dockerfile.web` is also
+   retained as a deployment recipe, not a certified build path. The loader's
+   pin check is intended to reject a later binary-only substitution when the
+   genuine page and loader are retained. Self-pinning is not independent
+   source-to-binary verification and makes no all-machines guarantee.
 2. **Source transparency (reproduce-from-source).** Proving the pinned digest corresponds to *auditable source*,
    not an opaque blob. This DOES require reproducing the build — but only in a **matching build environment**.
 
-## Reproduce the digest from source
+## Local build and path remapping
 
-The toolchain is pinned in `rust-toolchain.toml` (exact `rustc` version + target). `build.sh` additionally
-**remaps the three absolute path roots** rustc would embed in panic-location strings (workspace, cargo
-registry, sysroot) to fixed labels — so the digest is identical across *directories* on the same OS/arch:
+The toolchain is pinned in `rust-toolchain.toml`. `build.sh` remaps workspace,
+cargo-registry and sysroot paths that rustc could embed. Reducing build-directory
+differences is the design goal, not a guarantee of identical bytes for every
+host, directory or build input. Record the reference environment when comparing
+against a separately trusted digest.
 
 ```
 ./verifier/build.sh           # builds, remaps paths, writes .sha256 + rewrites the WASM_SHA256 pin
 ```
 
-> **Cross-machine reality:** `wasm32-unknown-unknown` codegen is **not** bit-identical across build *hosts* —
-> the same pinned `rustc` on macOS-arm64 vs linux-amd64 yields different `.wasm` bytes (host-dependent codegen,
-> not just paths; the remap removes only the path component). So the committed pin is a **dev-host reference**,
-> and the **deployment self-pins what it builds** (it never trusts the committed pin). To verify source
-> transparency, reproduce in the **same environment** as the published artifact — the canonical builder is the
-> pinned Linux image:
-> ```
-> docker run --rm --platform linux/amd64 -v "$PWD":/src:ro rust:1.92-bookworm bash -c '
->   set -e; mkdir /w && tar -C /src --exclude=./target --exclude=./.git -cf - . | tar -C /w -xf -
->   cd /w/core && rustup target add wasm32-unknown-unknown
->   cargo build --release --locked --target wasm32-unknown-unknown --no-default-features
->   sha256sum /w/target/wasm32-unknown-unknown/release/averin_decision_core.wasm'
-> ```
-> and compare against the digest the deployment serves (shown in the verifier page). Bumping the toolchain
-> changes the digest — regenerate in the same change.
+> **Reference pin and build environment:** the committed pin is a dev-host
+> reference, not a cross-host reproducibility guarantee. A local build writes
+> its own pin. To investigate source correspondence for an independently
+> obtained binary, preserve that binary and its trusted expected digest and
+> record the producing toolchain, host and build inputs before comparing.
+> A rebuilt binary matching its newly generated pin does not establish that
+> it matches the independently obtained binary or the committed reference.
+> The retained `Dockerfile.web` recipe describes a deployment build, but its
+> existence does not establish successful reproduction or an approved image.
+> Toolchain changes require a reviewed decision on the reference environment
+> and regenerated tracked pins; do not silently substitute a new reference.
 
 ## When you change the core
 
-Any edit to `core/` changes the `.wasm`. Run `./verifier/build.sh` and commit the refreshed
-`averin_decision_core.wasm`, `averin_decision_core.wasm.sha256`, and the rewritten `WASM_SHA256` in `index.html`
-together — a stale pin makes the page refuse to load (fail-closed), which is the intended safety property, not
-a silent downgrade.
+When core or build inputs change, regenerate the verifier in the reviewed
+reference environment and inspect the resulting binary and both tracked pins.
+`./verifier/build.sh` rewrites `averin_decision_core.wasm.sha256` and the
+`WASM_SHA256` value in `index.html`. Keep those two tracked references consistent
+in any reviewed pin update; do not force-add the ignored `.wasm` binary to this
+source-only distribution. A load-time binary/pin mismatch is meant to fail
+closed, not to be bypassed by disabling the pin. A reference-pin update and a
+consumer's local self-pinned build are different operations.

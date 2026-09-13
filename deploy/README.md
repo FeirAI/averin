@@ -1,9 +1,24 @@
 # Self-host averin
 
-Full stack from one command (exit criterion #6). From the repo root:
+## Source-only alpha boundary
+
+No Docker image is supplied with this first alpha. `Dockerfile.server`,
+`Dockerfile.web` and `docker-compose.yml` remain as source recipes, but their
+image build, runtime dependencies and deployment behaviour have not been
+validated for this alpha. This page is recipe documentation, not a turnkey
+or production-readiness claim. The open Docker feature/linkage and real-TSA
+validation limits are not closed by choosing source-only.
+
+For native-build instructions, see [Quickstart](../docs/dev/QUICKSTART.md).
+Toolchain and dependency prerequisites still apply; source-only does not mean
+an offline or dependency-free build. The recipe command below is retained for
+reference, not a validated alpha quickstart. Do not use it as evidence that
+an image build or deployment has passed:
+
+From the repo root, the existing recipe command is:
 
 ```bash
-export AVERIN_SIGNING_SEED=$(openssl rand -hex 32)          # 32-byte Ed25519 seed; production uses a KMS
+export AVERIN_SIGNING_SEED=$(openssl rand -hex 32)          # local seed example; no KMS integration validated
 export AVERIN_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24)   # shared secret; agents send it as X-Averin-Proxy-Token / Bearer
 docker compose -f deploy/docker-compose.yml up --build
 ```
@@ -14,13 +29,36 @@ docker compose -f deploy/docker-compose.yml up --build
 | `server` | http://localhost:8080 | ingestion + app API (`/v2/records`, `/v2/sessions`, `/v2/dag`, `/v2/verify`, `/v2/export`, `/v2/usage`) |
 | `proxy` | http://localhost:8081 | OpenAI-compatible recording proxy — point your agent's `base_url` here |
 
-All three ports bind to `127.0.0.1` only by default. To expose averin off-host, put it behind your own
-authenticated reverse proxy — the app API has no authz layer of its own yet (see Phase-1 limits below),
-so loopback binding is the load-bearing network control, not a login. If you later turn on `AVERIN_API_KEYS`,
-also set `AVERIN_PROXY_AVERIN_TOKEN` to a valid token for `AVERIN_PROJECT_ID` or the proxy's record posts will be
-silently 401'd.
+### Authentication boundaries
 
-## Try it
+Configure network exposure and access controls explicitly; this guide does not certify safe
+off-host deployment or observed listener bindings. With `AVERIN_API_KEYS` configured, the server's
+`/v2/` router requires a `project` query parameter and a matching project key. A recognized
+`Authorization: Bearer` header takes precedence over `X-Api-Key`. An unset configuration bypasses
+this gate; a nonempty configuration that parses to zero projects prevents server startup.
+`GET /healthz`, `/readyz` and `/metrics` remain outside the project-token gate. This is not a
+claim of RBAC, SSO or a complete authorization audit of every handler.
+
+Proxy inbound authentication and recorder authentication are separate. A configured
+`AVERIN_PROXY_INBOUND_TOKEN` gates relay requests; the proxy's `GET /healthz` remains outside
+that check. Without the inbound token, the relay is open. When the upstream needs its own
+`Authorization` credential, supply the proxy credential through `X-Averin-Proxy-Token`.
+The proxy removes `X-Averin-*` headers from the constructed upstream request. If it instead
+consumes a Bearer header as the configured inbound credential, it removes that header too;
+a separate upstream `Authorization` header supplied alongside the proxy-token header is retained.
+
+For an auth-enabled recorder, configure `AVERIN_PROXY_AVERIN_TOKEN` as a valid key for
+`AVERIN_PROJECT_ID`. The current HTTP recorder sets the request's `project` query from the
+record body's `project_id` and sends its recorder token as `X-Api-Key`. Recording failures,
+including non-2xx responses, are returned as errors and logged by the proxy after forwarding;
+they do not make a successful upstream response proof of captured evidence. These source paths
+and targeted handler/transport tests do not establish a live authenticated recording deployment.
+
+## Illustrative requests (not a validated walkthrough)
+
+These examples assume independently built and configured services. No compose startup,
+port binding, authenticated-recording or end-to-end result is established by their
+inclusion here; a source checkout alone does not supply the browser's WASM binary.
 
 ```bash
 # 1) record a decision
@@ -41,7 +79,7 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 
 | Env | Service | Default | Notes |
 |-----|---------|---------|-------|
-| `AVERIN_SIGNING_SEED` | server | **required — no default** | 64 hex chars. Production: KMS-backed signing. |
+| `AVERIN_SIGNING_SEED` | server | **required — no default** | 64 hex chars. KMS-backed signing is not established by this alpha validation. |
 | `AVERIN_SIGNING_KEY_ID` | server | `k0` | published in the bundle key list |
 | `AVERIN_BROKER_ISSUING_SEED` | server | (none) | 64 hex chars. Enables the credential broker (`POST /v2/grants`); signs minted capabilities. Unset = off. |
 | `AVERIN_RESOURCE_SEED` | server | (none) | 64 hex chars. Enables the resource gateway (`POST /v2/use`, Tier-B); signs use-receipt evidence. MUST differ from `AVERIN_SIGNING_SEED` and `AVERIN_BROKER_ISSUING_SEED` (R2 role separation). Requires the broker. Unset = off. |
@@ -50,7 +88,7 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 | `AVERIN_COSIG_THRESHOLD` | server | = #approvers | M, the cosig threshold (1 ≤ M ≤ #approvers). |
 | `AVERIN_BROKER_ID` | server | (none) | M4 federation identity. Grants are tagged with this `broker_id` and checkpoints carry a per-broker_id `broker_grant_heads` map — verify with `federated_broker_keys[<id>]`. Requires the broker. Unset = single-broker. |
 | `AVERIN_REVOCATION_SEED` | server | (none) | 64 hex chars. Enables M5 revocation (`POST /v2/revoke`); exports carry a signed `revocation_list`. MUST be role-separated from the signing/broker/resource/attestation/cosig keys. Unset = off. |
-| `AVERIN_DATABASE_URL` | server | (none) | Postgres DSN. Set for the **durable, serializable, append-only** store + ledger (production). Unset = in-memory (dev, NOT durable). |
+| `AVERIN_DATABASE_URL` | server | (none) | Postgres DSN for the database-backed store and ledger. One synthetic configuration was tested at `8ac16313`; production durability/isolation are not established. Unset = in-memory (dev, NOT durable). |
 | `AVERIN_API_KEYS` | server | (none) | `proj-a:tok1,tok2;proj-b:tok3` — per-project API-key auth. **Unset = unauthenticated** (dev/single-tenant only). |
 | `AVERIN_TSA_URL` | server | (none) | RFC 3161 TSA URL — anchors every checkpoint (threat #3 backdating). The verifier pins the TSA out-of-band (`tsa_keys`/`tsa_spki_b64`). |
 | `AVERIN_CONTENT_DIR` / `AVERIN_WITNESS_DIR` | server | (none) | durable content-store / append-only checkpoint-witness directories. |
@@ -89,10 +127,14 @@ transitive tier. The verifier prints `revocation_merkle_status` / `transitive_gr
 when those modes are active. `docs/operator-verification.md` has a "Producing the optional artifacts" section for
 building a Merkle revocation root or a cross-broker cert.
 
-> **Phase-1 limits (see `docs/coverage-limits.md`):** no per-project auth yet (deploy behind your
-> own auth or single-tenant); the in-memory store is single-node (Postgres + content store are the
-> production swap); raw content blobs are not bundled (commitments only). The cryptographic
-> guarantees never depend on the server — verify offline.
+> **Coverage and deployment limits:** project-token checks are optional and configuration-dependent,
+> as described above; they are not a general production-security or authorization guarantee.
+> The in-memory configuration is not durable. Choosing a database-backed configuration does not
+> by itself establish production durability or isolation. Consult
+> [coverage limits](../docs/coverage-limits.md) for evidence boundaries. Offline checks cover the
+> supplied evidence under the verifier's trust assumptions, not event truth or complete action
+> capture; authenticating signers requires independently trusted keys. This guide does not
+> certify the retained commands, asset loading, network exposure or a live deployment.
 
 ## Experimental rails (off the critical path)
 

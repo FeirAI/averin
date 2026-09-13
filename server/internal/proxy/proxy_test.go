@@ -226,11 +226,11 @@ func TestHTTPRecorderErrorsOnNon2xxAndSendsToken(t *testing.T) {
 	defer averin.Close()
 
 	// no token -> 401 -> the failure is SURFACED (not silently dropped as success).
-	if err := (&HTTPRecorder{URL: averin.URL}).Record(map[string]any{"x": 1}); err == nil {
+	if err := (&HTTPRecorder{URL: averin.URL}).Record(map[string]any{"x": 1, "project_id": "p1"}); err == nil {
 		t.Fatal("a non-2xx from averin must return an error, not silent success")
 	}
 	// with the token -> X-Api-Key sent -> 201 -> nil.
-	if err := (&HTTPRecorder{URL: averin.URL, Token: "secret-tok"}).Record(map[string]any{"x": 1}); err != nil {
+	if err := (&HTTPRecorder{URL: averin.URL, Token: "secret-tok"}).Record(map[string]any{"x": 1, "project_id": "p1"}); err != nil {
 		t.Fatalf("authenticated record must succeed: %v", err)
 	}
 	if gotKey != "secret-tok" {

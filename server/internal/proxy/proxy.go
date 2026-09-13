@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -84,6 +85,8 @@ func (p *Proxy) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized (set X-Averin-Proxy-Token or Authorization: Bearer)", http.StatusUnauthorized)
 		return
 	}
+	// A successful fallback consumed Authorization as OUR credential, not the upstream's.
+	stripProxyBearer := p.inboundToken != "" && strings.TrimSpace(r.Header.Get("X-Averin-Proxy-Token")) == ""
 	// cap the request: read one extra byte to detect (and reject) over-limit bodies rather than
 	// silently forwarding a truncated request.
 	reqBody, _ := io.ReadAll(io.LimitReader(r.Body, maxReqBody+1))
@@ -102,7 +105,7 @@ func (p *Proxy) handle(w http.ResponseWriter, r *http.Request) {
 	// hop-by-hop headers, Host, and our own X-Averin-* control headers.
 	for k, vs := range r.Header {
 		lk := strings.ToLower(k)
-		if hopByHop[lk] || lk == "host" || strings.HasPrefix(lk, "x-averin-") {
+		if hopByHop[lk] || lk == "host" || strings.HasPrefix(lk, "x-averin-") || (stripProxyBearer && lk == "authorization") {
 			continue
 		}
 		for _, v := range vs {
@@ -354,15 +357,38 @@ type HTTPRecorder struct {
 }
 
 func (h *HTTPRecorder) Record(body map[string]any) error {
+	project, ok := body["project_id"].(string)
+	if !ok || strings.TrimSpace(project) == "" {
+		return fmt.Errorf("record requires a nonempty string project_id")
+	}
+	u, err := url.Parse(h.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Opaque != "" || u.Fragment != "" {
+		return fmt.Errorf("invalid recorder base URL")
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return fmt.Errorf("invalid recorder base query")
+	}
+	q.Set("project", project)
+	u.RawQuery = q.Encode()
+	escapedPath := strings.TrimRight(u.EscapedPath(), "/") + "/v2/records"
+	u.Path, err = url.PathUnescape(escapedPath)
+	if err != nil {
+		return fmt.Errorf("invalid recorder base path")
+	}
+	u.RawPath = escapedPath
 	if body["idempotency_key"] == nil {
 		body["idempotency_key"] = randIdem()
 	}
-	b, _ := json.Marshal(body)
+	b, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("record body is not JSON-encodable")
+	}
 	c := h.Client
 	if c == nil {
 		c = &http.Client{Timeout: 10 * time.Second}
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(h.URL, "/")+"/v2/records", bytes.NewReader(b))
+	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewReader(b))
 	if err != nil {
 		return err
 	}

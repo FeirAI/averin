@@ -12,9 +12,10 @@ other service involved.
 | A C toolchain (cgo) | clang/gcc | the Go server uses cgo to call the Rust core. |
 | `openssl` (or any 32-byte hex source) | any | to mint a signing seed. |
 
-For the full self-host stack you also need **Docker + Docker Compose** (bundles Postgres, the web
-SPA, and the recording proxy). For the verifier/SDK suites: **Bun** (verifier + TS SDK),
-**Python 3 + pytest** (Python SDK).
+Docker Compose files remain as source recipes, not a validated image-build or deployment
+path for this source-only alpha. The stack examples below are not a turnkey walkthrough.
+For the verifier/SDK suites: **Bun** (verifier + TS SDK), **Python 3 + pytest** (Python SDK).
+Their prerequisites and local dependency acquisition still apply.
 
 ## 1. Build from source
 
@@ -55,7 +56,8 @@ AVERIN_SIGNING_SEED=$(openssl rand -hex 32) ./averin-server
 # logs: averin-server listening on :8080 (pubkey ed25519pub:...)
 ```
 
-On startup it prints the public key — that is the verifying key an auditor pins. Health check:
+On startup the server displays a public key. Authenticate that key through an independently
+trusted channel before treating it as an auditor's trust root; display alone is not authentication. Health check:
 
 ```bash
 curl -s localhost:8080/healthz      # -> ok
@@ -153,10 +155,11 @@ curl -s 'localhost:8080/v2/export?project=demo' > export.json
 cargo run -p averin-decision-core --bin averin-verify -- bundle export.json
 ```
 
-The export carries the records, the checkpoint history, the public keys, and (where configured)
-anchors / disclosures / attestations. The verifier re-derives every hash, signature, DAG edge, and
-checkpoint link with **no network and no trust in the server**. The same Rust core runs in the
-browser (WASM, under `verifier/`) and on CI.
+The export carries records, checkpoint history and public keys, plus configured optional
+anchors, disclosures and attestations. Local verification checks the supplied evidence;
+bundle-supplied keys establish consistency, not independently authenticated identity.
+Native RFC 3161 verification needs its build feature; browser/WASM reports those anchors
+as `Unsupported`. This is not a guarantee about dependency acquisition or asset-loading egress.
 
 To **authenticate** against an out-of-band trust root (rather than the bundle's own key claims) and
 unlock the role gates, pass an `opts.json` pinning the role-disjoint keys — see
@@ -166,10 +169,11 @@ unlock the role gates, pass an `opts.json` pinning the role-disjoint keys — se
 cargo run -p averin-decision-core --bin averin-verify -- bundle export.json opts.json
 ```
 
-## Self-host the full stack (Docker Compose)
+## Docker Compose source recipes (not validated for this alpha)
 
-Brings up Postgres (durable append-only store), the server, the OpenAI-compatible recording proxy,
-and the web SPA:
+The following command and service URLs describe the retained recipe, not a tested
+image-build, clean-machine setup or deployment path. Services must be independently
+built and configured before using examples that depend on them.
 
 ```bash
 AVERIN_SIGNING_SEED=$(openssl rand -hex 32) docker compose -f deploy/docker-compose.yml up --build
