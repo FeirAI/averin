@@ -1,7 +1,6 @@
 # Rust
 /target
 **/target
-/feir-os/
 Cargo.lock.bak
 
 # Go
@@ -28,7 +27,6 @@ __pycache__/
 *.key
 !spec/**/*.key   # test-only deterministic keys live under spec/
 
-# Claude Code harness state (scheduled-task locks, plans, transcripts) — never commit/push
 .claude/
 
 # OS / editor

@@ -252,7 +252,7 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 		if err := s.ledger.ConsumeJTI(consumeKey(claims.Jti, useSeq)); err != nil {
 			// The nonce was just consumed but this use fails here (double-spend) and produces no receipt —
 			// release it so a definitively-pre-persistence failure leaves the consume-before-act ledger
-			// consistent (mirror the handler's RollbackUse on later failures; Codex). The key stays consumed.
+			// consistent (mirror the handler's RollbackUse on later failures; adversarial review). The key stays consumed.
 			s.ledger.ReleaseNonce(nonce)
 			return UseEvidence{}, fmt.Errorf("resourceshim: double-spend (R5): %w", err)
 		}

@@ -540,7 +540,7 @@ func TestGrantAmbiguousCommitDoesNotReleaseSeq(t *testing.T) {
 
 // TestGrantIdempotencyConflictOnShapingFields proves a reused idem key with a DIFFERENT scope_class or TTL
 // (fields that change capability semantics: single_use, exp) is a 409 — not a collapse onto a
-// semantically-different stored capability (ADR 0004 D6; Codex hardening).
+// semantically-different stored capability (ADR 0004 D6; adversarial review hardening).
 func TestGrantIdempotencyConflictOnShapingFields(t *testing.T) {
 	h := newBrokerServer(t)
 	ak := grantAgentKey()

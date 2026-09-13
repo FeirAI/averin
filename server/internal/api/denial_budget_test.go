@@ -108,7 +108,7 @@ func TestDenialBudgetMapIsBounded(t *testing.T) {
 func TestDenialBudgetHashesOversizedProjectKeys(t *testing.T) {
 	clk := newClock()
 	// per-project burst 1, global generous, cap 4. project_id is caller-supplied and the ingest body cap allows
-	// multi-MB values; the map must store a FIXED-SIZE sha256 key, not the raw string (Codex: else the
+	// multi-MB values; the map must store a FIXED-SIZE sha256 key, not the raw string (adversarial review: else the
 	// entry-bounded map is still a byte-unbounded memory DoS).
 	b := newDenialBudget(0.0001, 1, 1000, 1_000_000, 4, clk.now)
 	huge := strings.Repeat("A", 1<<20) // 1 MiB caller-supplied project_id

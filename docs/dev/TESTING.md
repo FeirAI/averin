@@ -102,7 +102,7 @@ tag), but it is a useful, real, end-to-end smoke of the API.
 ## Contributing
 
 - Every change to `core/` must keep the golden vectors green and the three targets byte-identical —
-  add a golden/adversarial fixture for any new behavior. Codex/adversarial review of each commit is
+  add a golden/adversarial fixture for any new behavior. Adversarial review of each commit is
   the project norm.
 - Run `make test` (and `make supply-chain` for dependency changes) before sending a change. Keep
   `cargo fmt`/`clippy` clean — CI enforces both under the pinned toolchain.

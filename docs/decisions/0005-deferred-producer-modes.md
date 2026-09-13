@@ -182,7 +182,7 @@ Capstone → Signature domain → Residual*.
 > closed transcript verified AND every native grant covered, total>0). A MIXED native+PoP bundle reaches NEITHER
 > label (`claimed_over_manifest`). D4×M3: a native grant for a taxonomy-escalating `(resource,action)` is
 > mis-scoped (fail-closed); native×cosig/delegation is a deferred composition (fail-closed). Triple-reviewed
-> SOUND (read-only finder + Opus + GLM 5.2/opencode, no fail-open; the `credential_ref`↔`lease_id` and native-D4
+> SOUND (read-only finder + a second reviewer + GLM 5.2/opencode, no fail-open; the `credential_ref`↔`lease_id` and native-D4
 > binding gaps both reviewers flagged were TDD-fixed pre-commit). Producer `13c3839`:
 > `broker.IntrospectionTranscriptChallenge` (byte-identical, pinned by the SHARED golden vector incl. multibyte +
 > int64-edge) + `broker.NativeGrantEvidence` + `broker.IntrospectionEvidence`, with an FFI e2e where a
@@ -246,7 +246,7 @@ Capstone → Signature domain → Residual*.
 > reusing the existing cross-language-pinned `GrantHeadRoot` fold — NO new signature domain or golden vector). FFI
 > e2e: a two-broker Go-built bundle reaches `federation_status:"sequence_verified"` under the Rust verifier (V1
 > shared-root + V2 per-broker-key variants), with dropped-head suppression + cross-broker-forgery negative
-> controls. TRIPLE-reviewed per piece (finder + Opus + GLM) AND a WHOLE-FEATURE aggregate review (Opus + GLM SHIP,
+> controls. TRIPLE-reviewed per piece (finder + a second reviewer + GLM) AND a WHOLE-FEATURE aggregate review (the second reviewer + GLM SHIP,
 > no fail-open; the third reviewer's NO-SHIP was verified a false positive — pre-existing legacy integrity/authority
 > separation, not relay-reachable, no false capstone). 23 Rust federation adversarial tests + 2 Go FFI e2e + 5
 > aggregate-review coverage additions. **Residual (ADR floor):** a globally-consistent cross-broker equivocation
@@ -256,8 +256,8 @@ Capstone → Signature domain → Residual*.
 > **UPDATE — `cross_broker_cert` (the optional transitive tier) implemented.** A grant whose subject `broker_id`
 > is NOT pinned can elevate to `transitive` trust iff it carries a `grant_evidence.cross_broker_cert` signed by a
 > PINNED issuer broker vouching for the subject's KEY (`averin.broker.federation.cert.v1`, with `subject_kid` in
-> the preimage — see the signature-domain note below). Two-piece + triple-reviewed (finder + Opus + GLM): the
-> review caught a REAL high-severity fail-open both the finder and Opus independently confirmed — the cert-derived
+> the preimage — see the signature-domain note below). Two-piece + triple-reviewed (finder + a second reviewer + GLM): the
+> review caught a REAL high-severity fail-open both the finder and the second reviewer independently confirmed — the cert-derived
 > subject key was elevated as broker authority with NO role-disjointness check (a pinned/compromised issuer could
 > vouch for a resource/tsa/etc. key → role confusion); fixed TDD (failing regression → guard → re-review). New
 > report field `transitive_grants`; the federation capstone is unaffected (per-broker suppression still applies).
@@ -314,8 +314,8 @@ Capstone → Signature domain → Residual*.
 > consecutive sorted leaves strictly bracketing the grant's leaf, both authenticating to the signed root via an
 > RFC6962 audit path) lets the use proceed; a MEMBERSHIP proof blocks it; a missing/forged proof is FAIL-CLOSED
 > (the set is hidden, so silence ≠ safe). Soundness: when a grant's leaf is genuinely present, NO consecutive
-> pair can strictly bracket it — so a revoked grant's use can never be laundered (Opus brute-forced thousands of
-> random sorted trees: zero forgeries). Two-piece, TRIPLE-reviewed (finder + Opus + GLM, SHIP); report fields
+> pair can strictly bracket it — so a revoked grant's use can never be laundered (a second reviewer brute-forced thousands of
+> random sorted trees: zero forgeries). Two-piece, TRIPLE-reviewed (finder + a second reviewer + GLM, SHIP); report fields
 > `revocation_merkle_status` + `revocation_nonmembership_verified`; a stale root blocks the capstone like a stale
 > list. 8 Rust adversarial tests + a shared `revocation_leaf`/`revocation_merkle_root` golden vector (Go ↔ Rust
 > byte-identical) + a Go→Rust FFI e2e (non-membership proceeds, membership blocks, missing-proof fail-closed).

@@ -164,7 +164,7 @@ expected binary measurement.
 **Current state.** Local-only: **no remote configured**, branch `main`, working tree clean. `.gitignore`
 already excludes build artifacts (`target/`, `node_modules`, `dist`, `*.test`) and secrets (`.env`, `.env.*`,
 `*.pem`, `*.key`, with a deliberate `!spec/**/*.key` exception for the deterministic, non-secret test vectors).
-The one gap — now closed in this change — was `.claude/` (Claude Code harness state: scheduled-task locks,
+The one gap — now closed in this change — was `.claude/` (AI coding-assistant harness state: scheduled-task locks,
 plans, transcripts), which was untracked but not ignored, so a `git add -A` would have staged it.
 
 **Readiness / in-repo preparation.**

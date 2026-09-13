@@ -93,7 +93,7 @@ func TestPoPFailureSealsDenialButMalformedDoesNot(t *testing.T) {
 	}
 }
 
-// TestTTLExceededDenialRecordsProvenCnf (B11, Codex convergence): the TTL cap is now a POLICY check applied
+// TestTTLExceededDenialRecordsProvenCnf (B11, adversarial review convergence): the TTL cap is now a POLICY check applied
 // only AFTER proof-of-possession, so a ttl_exceeded denial GUARANTEES PoP passed (a forged sig now fails as
 // pop_failed, never ttl_exceeded). The denial therefore records the PROVEN cnf_kid — like forbidden_scope —
 // not the claimed pubkey.
@@ -120,7 +120,7 @@ func TestTTLExceededDenialRecordsProvenCnf(t *testing.T) {
 	}
 }
 
-// TestGenericIngestCannotForgeDenialEvidence (Codex C2): a denial is sealed by the server signing key like
+// TestGenericIngestCannotForgeDenialEvidence (adversarial review C2): a denial is sealed by the server signing key like
 // every record, so the verifier cannot tell a broker-produced denial from a generic-forged one — the
 // reservation must live at ingest. A generic /v2/records caller must NOT be able to forge B11 denial
 // evidence via the event_type, the extensions.broker_denial payload, or a reserved denial- record_id.
@@ -132,7 +132,7 @@ func TestGenericIngestCannotForgeDenialEvidence(t *testing.T) {
 		`{"idempotency_key":"i3","project_id":"p1","session_id":"s1","event_type":"decision","status":"ok","action":"x","record_id":"denial-spoof"}`,
 		// squat the broker's "denial:"-prefixed idempotency-key namespace: pre-seeding a benign record under a
 		// denial's deterministic key would make the later denied grant's PutRecord collapse onto it and silently
-		// suppress the B11 evidence (Codex C2b). The prefix is reserved at ingest.
+		// suppress the B11 evidence (adversarial review C2b). The prefix is reserved at ingest.
 		`{"idempotency_key":"denial:spoof","project_id":"p1","session_id":"s1","event_type":"decision","status":"ok","action":"x"}`,
 	}
 	for i, body := range cases {
@@ -142,7 +142,7 @@ func TestGenericIngestCannotForgeDenialEvidence(t *testing.T) {
 	}
 }
 
-// TestVaryingProbeFieldsLogDistinctDenials (Codex C3): the denial id derives from the FULL requested probe
+// TestVaryingProbeFieldsLogDistinctDenials (adversarial review C3): the denial id derives from the FULL requested probe
 // identity, not the idempotency key — so two probes reusing one idem key + scope + reason but differing in
 // another requested field (here the agent key) are logged as TWO distinct denials, not collapsed to one.
 func TestVaryingProbeFieldsLogDistinctDenials(t *testing.T) {
@@ -166,7 +166,7 @@ func TestVaryingProbeFieldsLogDistinctDenials(t *testing.T) {
 	}
 }
 
-// TestDenialIdResistsDelimiterInjection (Codex C3b): the denial id encodes the probe tuple as a JSON array,
+// TestDenialIdResistsDelimiterInjection (adversarial review C3b): the denial id encodes the probe tuple as a JSON array,
 // so a caller embedding the U+001F delimiter in a field cannot collide two DISTINCT probes into one id. The
 // two probes below join-collide under a raw \x1f separator (action="a",resource="b\x1fX" vs
 // action="a\x1fb",resource="X") but must still log as TWO distinct denials.
@@ -215,7 +215,7 @@ func customGrant(t *testing.T, h http.Handler, ak ed25519.PrivateKey, idem, sess
 	}
 }
 
-// TestDenialIdIncludesSessionAndTTL (Codex C3c): the denial id covers the FULL request, so varying any
+// TestDenialIdIncludesSessionAndTTL (adversarial review C3c): the denial id covers the FULL request, so varying any
 // distinguishing field — here session_id (forbidden-scope probes) and ttl_seconds (over-cap TTL probes),
 // both under a fixed idempotency key + otherwise-identical tuple — logs DISTINCT denials rather than
 // collapsing onto the first. Old subset-based id ignored session_id and ttl_seconds → would log only 2.
@@ -235,7 +235,7 @@ func TestDenialIdIncludesSessionAndTTL(t *testing.T) {
 	}
 }
 
-// TestMalformedOverTTLGrantDoesNotLogDenial (Codex convergence): the TTL cap is a POLICY check applied only
+// TestMalformedOverTTLGrantDoesNotLogDenial (adversarial review convergence): the TTL cap is a POLICY check applied only
 // AFTER structural validation + PoP, so a malformed/unsigned request with an over-cap TTL is plain malformed
 // input — it must NOT seal a ttl_exceeded denial (else an unauthenticated caller could inject durable B11
 // evidence with arbitrary metadata). A VALID-PoP over-cap-TTL request still seals one (the fix is surgical).
@@ -260,7 +260,7 @@ func TestMalformedOverTTLGrantDoesNotLogDenial(t *testing.T) {
 	}
 }
 
-// TestBrokerEndpointsRejectReservedDenialIdem (Codex C2c): the "denial:" idempotency-key namespace must be
+// TestBrokerEndpointsRejectReservedDenialIdem (adversarial review C2c): the "denial:" idempotency-key namespace must be
 // reserved at EVERY caller-supplied entry point, not only generic/OTel ingest. A valid grant/use/outcome
 // pre-seeded under denial:<computed denialID> would otherwise collapse the later denial and silently
 // suppress the B11 evidence. Each broker endpoint rejects the prefix before any other processing.
@@ -303,7 +303,7 @@ func (s *squatStore) PutRecord(projectID, idemKey string, rec store.Record) (sto
 	return s.Store.PutRecord(projectID, idemKey, rec)
 }
 
-// TestDenialRecoversFromPreSeededReservedKey (Codex C2d): if a FOREIGN row already occupies a denial's
+// TestDenialRecoversFromPreSeededReservedKey (adversarial review C2d): if a FOREIGN row already occupies a denial's
 // reserved "denial:" key (a row pre-dating the hardening, which the entry-point guards can't retract), the
 // denial must be RECOVERED under a fresh collision-proof key — never silently suppressed by the collapse.
 func TestDenialRecoversFromPreSeededReservedKey(t *testing.T) {
@@ -349,7 +349,7 @@ func denialRecordID(t *testing.T, exportJSON string) string {
 	return ""
 }
 
-// TestDenialIdIsServerSecret (Codex C2e, root fix): the denial id mixes a server secret (a deterministic
+// TestDenialIdIsServerSecret (adversarial review C2e, root fix): the denial id mixes a server secret (a deterministic
 // signature under the broker private key), so a caller cannot precompute denial:<denialID> to pre-seed/forge
 // a row under it. Two deployments that differ ONLY in broker key produce DIFFERENT denial ids for the SAME
 // denied request — proving the id is not publicly computable.
@@ -378,7 +378,7 @@ func TestDenialIdIsServerSecret(t *testing.T) {
 	}
 }
 
-// TestPoPFailureDistinctSignaturesLogDistinctDenials (Codex C2f): agent_sig stays in the denial identity, so
+// TestPoPFailureDistinctSignaturesLogDistinctDenials (adversarial review C2f): agent_sig stays in the denial identity, so
 // two pop_failure attempts for the SAME operation but with DISTINCT failing signatures are logged as two
 // distinct denials (each a distinct failed proof) — a PoP brute-force leaves one record per attempt, not one
 // collapsed record. (forbidden_scope retries still dedup: their valid sig is deterministic.)
@@ -405,7 +405,7 @@ func TestPoPFailureDistinctSignaturesLogDistinctDenials(t *testing.T) {
 	}
 }
 
-// TestDenialIdCanonicalizesBase64 (Codex pass-8 medium): the broker's base64 decode is non-strict, so the
+// TestDenialIdCanonicalizesBase64 (adversarial review pass-8 medium): the broker's base64 decode is non-strict, so the
 // SAME agent_pubkey bytes under canonical vs non-canonical spellings must collapse to ONE denial — else a
 // caller inflates denied_grants without a distinct key. Two forbidden-scope probes, same key bytes, differing
 // only in the pubkey's base64 padding bit, must log a single denial.

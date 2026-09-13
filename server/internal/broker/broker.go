@@ -208,7 +208,7 @@ func (r Request) Validate() error {
 	if !ed25519.Verify(ed25519.PublicKey(pub), r.Challenge(), sig) {
 		return ErrPoPFailed
 	}
-	// The TTL CAP is a POLICY check applied only AFTER structural validation + PoP succeed (Codex): the
+	// The TTL CAP is a POLICY check applied only AFTER structural validation + PoP succeed (adversarial review): the
 	// broker seals a B11 ttl_exceeded denial on this error, so it must never fire for a malformed/unsigned
 	// request — else an unauthenticated caller could inject durable denied-grant evidence with arbitrary
 	// metadata. (The positive-TTL check above is a shape error, never logged.)

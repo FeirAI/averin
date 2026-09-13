@@ -11,7 +11,7 @@ use crate::canon::CanonValue;
 use crate::hashx::{lp_str_into, parse_sha256};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
-// `v2` binds `project_id` into the preimage (tenant isolation; T7/Codex). It is a HARD cutover from `v1`:
+// `v2` binds `project_id` into the preimage (tenant isolation; T7/adversarial review). It is a HARD cutover from `v1`:
 // the verifier accepts ONLY v2, so a v1 signature (no project_id) does not verify. This is safe as a
 // PRE-DEPLOYMENT break — averin has shipped no v1-signed records (the golden vectors carry no authority sig),
 // so there is nothing to migrate and adding a v1-accept fallback would only reintroduce a (downgraded)
@@ -52,7 +52,7 @@ impl AuthorityTrust {
 /// Preimage the authority system signs:
 /// `LP(tag) ‖ LP(source) ‖ LP(project_id) ‖ LP(record_id) ‖ utf8(evidence_hash)`.
 /// Binding `source` prevents re-labelling; binding `project_id` AND `record_id` prevents replaying a valid
-/// evidence triple onto an unrelated record OR a record in a DIFFERENT project (cross-tenant replay, Codex).
+/// evidence triple onto an unrelated record OR a record in a DIFFERENT project (cross-tenant replay, adversarial review).
 /// `record_id` alone is caller-chosen and the verifier's duplicate-record_id rejection is only WITHIN a
 /// bundle, so `project_id` is the load-bearing tenant-isolation binding.
 fn preimage(source: &str, project_id: &str, record_id: &str, evidence_hash: &str) -> Vec<u8> {
@@ -112,7 +112,7 @@ pub fn verify_authority_with_key(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             // The authority sig binds project_id (tenant isolation): a verified evidence triple from one
-            // project must NOT verify when replayed into another (Codex). project_id is read from the record.
+            // project must NOT verify when replayed into another (adversarial review). project_id is read from the record.
             let project_id = record
                 .get("project_id")
                 .and_then(|v| v.as_str())
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn evidence_triple_cannot_be_replayed_to_another_project() {
-        // Codex: a verified policy_engine_signed authority block from project P1 must NOT verify when replayed
+        // adversarial review: a verified policy_engine_signed authority block from project P1 must NOT verify when replayed
         // into a DIFFERENT project P2 with the SAME record_id/evidence_hash/evidence_sig (cross-tenant replay).
         let k = signing_key_from_seed(&[77u8; 32]);
         let rec_p1 = signed_record_p("policy_engine_signed", "proj-1", "rec-X", &k);

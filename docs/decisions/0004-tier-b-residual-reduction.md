@@ -1,6 +1,6 @@
 # ADR 0004 — Tier-B residual reduction: toward honest Level-3 completeness
 
-**Status:** Accepted (design; **rev 3** — Codex review READY TO BUILD across 3 rounds: 5 rev-1
+**Status:** Accepted (design; **rev 3** — adversarial review READY TO BUILD across 3 rounds: 5 rev-1
 MUST-FIXES + the rev-2 D7 subject-binding blocker all resolved). Building D1–D8 piece-by-piece, each
 commit adversarially code-reviewed before commit.
 **Date:** 2026-06-15
@@ -8,7 +8,7 @@ commit adversarially code-reviewed before commit.
 ADR addresses the **deferred items / accepted residuals** ADR 0003 enumerated, reducing each as far as
 software honestly can and stating precisely what stays residual.
 
-**rev 2 changes (Codex review round 1):**
+**rev 2 changes (review round 1):**
 - **MF1 (D8/D9):** the capstone does NOT close resource *truthful-labeling* — a resource can sign a
   valid intent/outcome pair for action A while performing action B. Added `resource_trust:
   assumed_truthful` to the report (always surfaced), moved resource mislabeling + side-effect closure

@@ -26,7 +26,7 @@ func (f *failIdemStore) RecordByIdem(projectID, idemKey string) (store.Record, b
 	return f.Store.RecordByIdem(projectID, idemKey)
 }
 
-// TestUseFailsClosedOnIdemStoreError (Codex C1): a RecordByIdem store error during /v2/use must abort with
+// TestUseFailsClosedOnIdemStoreError (adversarial review C1): a RecordByIdem store error during /v2/use must abort with
 // 500 BEFORE ValidateUse consumes the single-use credential — so a transient read failure never burns a
 // nonce/jti and leave no receipt. After the store recovers, the SAME credential still validates (proof it
 // was never consumed during the failed attempt).
@@ -132,7 +132,7 @@ func (f *failPutStore) PutRecord(projectID, idemKey string, rec store.Record) (s
 	return f.Store.PutRecord(projectID, idemKey, rec)
 }
 
-// TestUseReleasesCredentialOnPreCommitPutFailure (Codex pass-10 high): a PutRecord error that is NOT
+// TestUseReleasesCredentialOnPreCommitPutFailure (adversarial review pass-10 high): a PutRecord error that is NOT
 // store.ErrCommitAmbiguous persists nothing (a begin/select/insert/disclosure failure), so the consumed
 // nonce/jti must be RELEASED — only a genuinely commit-ambiguous fresh-insert commit is held.
 func TestUseReleasesCredentialOnPreCommitPutFailure(t *testing.T) {
@@ -174,7 +174,7 @@ func (f *failSealCore) SealRecord(bodyJSON string) (string, error) {
 	return f.Sealer.SealRecord(bodyJSON)
 }
 
-// TestUseReleasesCredentialOnSealFailure (Codex pass-9 high): a SealRecord failure inside sealAndStore is a
+// TestUseReleasesCredentialOnSealFailure (adversarial review pass-9 high): a SealRecord failure inside sealAndStore is a
 // PRE-commit error (nothing reached PutRecord), so — like a buildUseRecord failure — the consumed nonce/jti
 // must be released. ValidateUse succeeds, then SealRecord fails; the credential must survive for an honest retry.
 func TestUseReleasesCredentialOnSealFailure(t *testing.T) {
@@ -202,7 +202,7 @@ func TestUseReleasesCredentialOnSealFailure(t *testing.T) {
 	}
 }
 
-// TestUseReleasesCredentialOnReceiptBuildFailure (Codex pass-8 high): if receipt construction fails AFTER
+// TestUseReleasesCredentialOnReceiptBuildFailure (adversarial review pass-8 high): if receipt construction fails AFTER
 // ValidateUse consumed the single-use credential but BEFORE anything persisted (here the content store fails
 // while storing the use params), the nonce/jti must be RELEASED — the caller got a 500 and never acted, so a
 // retry must be able to re-validate. Otherwise a transient build error burns the credential.

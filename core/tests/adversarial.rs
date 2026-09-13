@@ -1646,7 +1646,7 @@ fn tier_b_grant_id_equivocation_without_d6_is_a_violation() {
 
 #[test]
 fn tier_b_grant_id_equivocation_unanchored_is_a_violation() {
-    // Adversarial-review finding (GLM/Codex substitute): the original F8 ran inside the closed-gated grant
+    // Adversarial-review finding (GLM used as a reviewer substitute): the original F8 ran inside the closed-gated grant
     // ACCOUNTING loop, so a D6-absent equivocation committed only by a verified-but-UNANCHORED checkpoint
     // was NOT closed -> F8 skipped it, yet grant counting (un-gated) reported ok:true + grant_verified=2 over
     // one equivocated grant_id. The injectivity check must run over ALL verified broker grants, independent of
@@ -3282,7 +3282,7 @@ fn tier_b_t6_undeclared_touched_resource_is_unclosed() {
     );
 }
 
-// T6 (action-bound, Codex): a resource declared via may_touch UNDER THE SAME action that touches it is closed.
+// T6 (action-bound, adversarial review): a resource declared via may_touch UNDER THE SAME action that touches it is closed.
 // The surface touches (RESOURCE, ACTION); RESOURCE is declared as the may_touch of `other-primary` under the
 // SAME ACTION, so (RESOURCE, ACTION) is in the declared closure -> closed.
 #[test]
@@ -3310,7 +3310,7 @@ fn tier_b_t6_may_touch_under_same_action_is_closed() {
     assert_eq!(r.side_effect_closure_status, "closed");
 }
 
-// T6 (action-bound, Codex regression): a resource declared ONLY under an UNRELATED action must NOT close it
+// T6 (action-bound, adversarial review regression): a resource declared ONLY under an UNRELATED action must NOT close it
 // for the action actually acting on it. The surface touches (RESOURCE, ACTION); the manifest declares RESOURCE
 // only under "billing:charge" (as primary AND as may_touch) — neither covers (RESOURCE, ACTION) -> unclosed.
 #[test]
@@ -3385,7 +3385,7 @@ fn tier_b_t6_malformed_closure_fails_closed() {
     );
 }
 
-// T6 (Codex hardening): an entry with an EMPTY action is malformed -> fail closed. An empty action must never
+// T6 (adversarial review hardening): an entry with an EMPTY action is malformed -> fail closed. An empty action must never
 // enter the declared set, else an `action:""` entry could "close" a malformed action-less grant.
 #[test]
 fn tier_b_t6_empty_action_fails_closed() {
@@ -3542,7 +3542,7 @@ fn tier_b_taxonomy_via_json_opts() {
     assert!(report.contains(r#""uses_action_unverified":0"#), "{report}");
 }
 
-// ---- D4 negative coverage: role separation (Codex AREA 1) + pinned digest/version (Codex AREA 3) ----
+// ---- D4 negative coverage: role separation (adversarial review AREA 1) + pinned digest/version (adversarial review AREA 3) ----
 
 // A taxonomy_keys set that overlaps the broker authority keys is a FATAL config error: that broker key
 // could self-validate a D4 taxonomy to fabricate `taxonomy_status:"validated"`.
@@ -3607,7 +3607,7 @@ fn tier_b_taxonomy_keys_overlapping_resource_is_fatal() {
     );
 }
 
-// T7 (Codex convergence): an `authority_keys` set (the generic policy_engine_signed/human_signed elevation
+// T7 (adversarial review convergence): an `authority_keys` set (the generic policy_engine_signed/human_signed elevation
 // keys) that overlaps the RESOURCE authority keys is a FATAL config error — else a resource key could sign a
 // generic record's evidence_sig and have it read as `verified` (forged generic authority).
 #[test]
@@ -3824,7 +3824,7 @@ fn tier_b_taxonomy_absent_baseline() {
     );
 }
 
-// ---- D4: resource-binding (Codex AREA 2) + mis-scope rejection + remaining coverage ----
+// ---- D4: resource-binding (adversarial review AREA 2) + mis-scope rejection + remaining coverage ----
 
 // A taxonomy that lists the action FOR A DIFFERENT resource must NOT validate the use on RESOURCE — the
 // listing is resource-bound, so a colliding action name on another resource stays unverified.
@@ -5103,7 +5103,7 @@ fn tier_b_broker_trust_stale_subset_head_is_violation() {
 
 #[test]
 fn tier_b_broker_trust_fraudulent_historical_head_is_violation() {
-    // CRITICAL (Codex round-2): cp0's FRONTIER commits grants 1 AND 2 but cp0's head covers only grant 1
+    // CRITICAL (adversarial review round-2): cp0's FRONTIER commits grants 1 AND 2 but cp0's head covers only grant 1
     // (a historical suppression); a later cp1 carries a correct FULL head chaining to cp0's fraudulent
     // root. Validating EACH head against its OWN frontier (not only the latest) must catch cp0's fraud.
     let (rec, res, tsa) = (
@@ -5227,7 +5227,7 @@ fn tier_b_broker_trust_seqless_broker_grant_is_violation() {
 
 #[test]
 fn tier_b_broker_trust_historical_headless_checkpoint_is_violation() {
-    // CRITICAL (Codex round-3): an EARLIER verified checkpoint commits a D6 grant but carries NO head,
+    // CRITICAL (adversarial review round-3): an EARLIER verified checkpoint commits a D6 grant but carries NO head,
     // while a later checkpoint has a correct full head. The earlier checkpoint binds a grant into the
     // anchored chain WITHOUT a transparency head — must be flagged, not skipped.
     let (rec, res, tsa) = (
@@ -5287,7 +5287,7 @@ fn tier_b_broker_trust_historical_headless_checkpoint_is_violation() {
 
 #[test]
 fn tier_b_broker_trust_malformed_head_is_violation() {
-    // Codex round-5: a checkpoint whose broker_grant_head FIELD is present but UNPARSEABLE (max_seq is a
+    // adversarial review round-5: a checkpoint whose broker_grant_head FIELD is present but UNPARSEABLE (max_seq is a
     // string, not an int) is a tampered D6 head — pre-D6 checkpoints never carry the field. It must ACTIVATE
     // strict D6 and FAIL, never silently demote to a benign headless checkpoint that would let the committed
     // seq-less grant slip through the no-D6 early return.
@@ -5334,7 +5334,7 @@ fn tier_b_broker_trust_malformed_head_is_violation() {
 
 #[test]
 fn tier_b_broker_trust_duplicate_checkpoint_is_not_a_fork() {
-    // Codex round-5: validate_chain tolerates a byte-identical DUPLICATE checkpoint (idempotent re-export);
+    // adversarial review round-5: validate_chain tolerates a byte-identical DUPLICATE checkpoint (idempotent re-export);
     // D6 must too. Before the cp_heads dedup, chaining the same head twice made the 2nd copy's prior_head_hash
     // mismatch the 1st copy's cumulative_root and fabricated a fork/restart — falsely rejecting a valid bundle.
     let (rec, res, tsa) = (
@@ -5612,7 +5612,7 @@ fn tier_b_cred_descriptor_action_mismatch_is_violation() {
 
 #[test]
 fn tier_b_cred_descriptor_scope_mismatch_is_violation() {
-    // Codex: the broker mints a credential with a BROADER `scope` than the grant LABELS — the hash still
+    // adversarial review: the broker mints a credential with a BROADER `scope` than the grant LABELS — the hash still
     // matches credential_binding (it IS the minted credential) but the labeled scope lies. Must be a violation.
     let (rec, res, tsa) = (
         signing_key_from_seed(&[0u8; 32]),
@@ -5652,7 +5652,7 @@ fn tier_b_cred_descriptor_scope_mismatch_is_violation() {
 
 #[test]
 fn tier_b_cred_descriptor_subject_mismatch_is_violation() {
-    // Codex: the credential's `sub` (the bound agent) differs from the grant's agent_id — a credential minted
+    // adversarial review: the credential's `sub` (the bound agent) differs from the grant's agent_id — a credential minted
     // for a DIFFERENT subject than labeled (subject confusion). Must be a violation.
     let (rec, res, tsa) = (
         signing_key_from_seed(&[0u8; 32]),
@@ -6387,7 +6387,7 @@ fn tier_b_attestation_empty_window_is_failed() {
 
 #[test]
 fn tier_b_attestation_malformed_window_is_failed() {
-    // Codex: a non-empty but MALFORMED bound ("0".."z") sorts lexicographically around a real anchor
+    // adversarial review: a non-empty but MALFORMED bound ("0".."z") sorts lexicographically around a real anchor
     // timestamp and would pass the window comparison — require canonical YYYY-MM-DDThh:mm:ss.mmmZ bounds.
     let (rec, res, tsa, attest) = (
         signing_key_from_seed(&[0u8; 32]),
@@ -6418,7 +6418,7 @@ fn tier_b_attestation_malformed_window_is_failed() {
 
 #[test]
 fn tier_b_attestation_shape_valid_but_impossible_window_is_failed() {
-    // Codex round-2: a bound that PASSES the 24-char shape but names an impossible date/time
+    // adversarial review round-2: a bound that PASSES the 24-char shape but names an impossible date/time
     // (2026-99-99T99:99:99.999Z) must be rejected — is_canonical_ts validates field RANGES, not just shape.
     let (rec, res, tsa, attest) = (
         signing_key_from_seed(&[0u8; 32]),
@@ -6449,7 +6449,7 @@ fn tier_b_attestation_shape_valid_but_impossible_window_is_failed() {
 
 #[test]
 fn tier_b_attestation_stale_anchored_replayed_on_later_bundle_is_failed() {
-    // Codex: an attestation bound to the latest ANCHORED checkpoint (cp0) must NOT pass when a LATER verified
+    // adversarial review: an attestation bound to the latest ANCHORED checkpoint (cp0) must NOT pass when a LATER verified
     // checkpoint (cp1, unanchored) has extended the bundle beyond it — the attestation does not cover the
     // bundle's true frontier (old anchored attestation replayed onto a later, unanchored-tail bundle).
     let (rec, res, tsa, attest) = (
@@ -6704,7 +6704,7 @@ fn tier_b_two_phase_mismatched_intent_ref_does_not_complete() {
 
 #[test]
 fn tier_b_two_phase_unsigned_sibling_intent_ref_does_not_complete() {
-    // Codex + finder: the verifier MUST join on the SIGNED use_outcome.intent_ref, not the unsigned sibling
+    // adversarial review + finder: the verifier MUST join on the SIGNED use_outcome.intent_ref, not the unsigned sibling
     // extensions.broker.intent_ref. Here the resource signed a payload referencing a PHANTOM intent, but the
     // sibling points at the real intent-1 (as a relay holding the record key would forge). The intent must
     // NOT complete — proving the join key is bound to the resource authority signature.
@@ -6778,7 +6778,7 @@ fn tier_b_two_phase_outcome_for_other_grant_does_not_complete() {
 
 #[test]
 fn tier_b_two_phase_orphan_outcome_is_violation() {
-    // Codex round-2: a valid resource-signed use_outcome with NO matching use_intent is a completion with NO
+    // adversarial review round-2: a valid resource-signed use_outcome with NO matching use_intent is a completion with NO
     // anchored pre-action intent (the resource skipped the before-act recording two-phase exists to require).
     // An outcome-only bundle must NOT read clean.
     let (rec, res, tsa) = (
@@ -6828,7 +6828,7 @@ fn tier_b_two_phase_orphan_outcome_is_violation() {
 
 #[test]
 fn tier_b_two_phase_outcome_signed_payload_wrong_kind_is_violation() {
-    // Codex round-2: the SIGNED use_outcome payload must itself assert kind="use_outcome" — the role
+    // adversarial review round-2: the SIGNED use_outcome payload must itself assert kind="use_outcome" — the role
     // discriminator that routed it here is the UNSIGNED sibling. A relabeled signed payload (kind="use")
     // must NOT complete the intent and must be flagged.
     let (rec, res, tsa) = (
@@ -6874,7 +6874,7 @@ fn tier_b_two_phase_outcome_signed_payload_wrong_kind_is_violation() {
 
 #[test]
 fn tier_b_two_phase_duplicate_outcomes_account_separately() {
-    // Codex round-3: two closed validated outcomes for the SAME intent_ref — one attesting the right grant,
+    // adversarial review round-3: two closed validated outcomes for the SAME intent_ref — one attesting the right grant,
     // one a WRONG grant — must each account independently REGARDLESS of record order (no last-write-wins
     // collapse): the right-grant outcome completes the intent, the wrong-grant one is an orphan violation.
     let (rec, res, tsa) = (
@@ -6961,7 +6961,7 @@ fn tier_b_two_phase_duplicate_outcomes_account_separately() {
 
 #[test]
 fn tier_b_two_phase_outcome_not_after_intent_does_not_complete() {
-    // Codex round-4: the outcome must causally FOLLOW the intent (the before-act guarantee). Here the outcome
+    // adversarial review round-4: the outcome must causally FOLLOW the intent (the before-act guarantee). Here the outcome
     // links to the GRANT, not the intent, so there is no causal edge intent->outcome (an unordered/backfilled
     // pair). It must NOT complete the intent; the outcome is an orphan.
     let (rec, res, tsa) = (
@@ -7025,7 +7025,7 @@ fn tier_b_two_phase_outcome_not_after_intent_does_not_complete() {
 
 #[test]
 fn tier_b_two_phase_failed_pop_intent_does_not_consume_outcome() {
-    // Codex round-4: an intent that PICKS its outcome but then FAILS pop_reverify must NOT consume the
+    // adversarial review round-4: an intent that PICKS its outcome but then FAILS pop_reverify must NOT consume the
     // outcome (consume only AFTER all acceptance checks) — else a failed-PoP intent would mask a validated
     // outcome from orphan accounting. The carried cnf_pub's kid != the use_evidence.cnf_kid -> PoP fails.
     let (rec, res, tsa) = (
@@ -7096,7 +7096,7 @@ fn tier_b_two_phase_failed_pop_intent_does_not_consume_outcome() {
 
 #[test]
 fn tier_b_two_phase_backfilled_causal_edge_does_not_complete() {
-    // Codex round-5: the before-act ordering must be bound to the RESOURCE signature, not the relay-controlled
+    // adversarial review round-5: the before-act ordering must be bound to the RESOURCE signature, not the relay-controlled
     // top-level causal_prev_hashes. Here the resource-signed payload's intent_hash names a DIFFERENT intent,
     // but the record-signing key (a relay) BACKFILLED the top-level causal_prev to point at the real intent.
     // The SIGNED binding must govern -> the intent does NOT complete (the relay cannot forge the ordering).
@@ -9190,7 +9190,7 @@ fn tier_b_d8_each_condition_is_load_bearing() {
     let mutators: Vec<(&str, fn(&mut VerifyReport))> = vec![
         ("not ok", |r| r.ok = false),
         // isolate the brokered-surface conjunct: zero uses_matched AND uses_pop_reverified together, so
-        // PoP-equality (0==0) still holds and ONLY `uses_matched > 0` is violated (Codex).
+        // PoP-equality (0==0) still holds and ONLY `uses_matched > 0` is violated (adversarial review).
         ("no brokered surface", |r| {
             r.uses_matched = 0;
             r.uses_pop_reverified = 0;
@@ -9310,7 +9310,7 @@ fn tier_b_d8_no_manifest_is_not_claimed() {
 
 #[test]
 fn tier_b_d8_null_manifest_is_not_a_capstone() {
-    // Codex: a JSON `"coverage_manifest": null` deserializes to Some(Null) — NOT a real manifest. With every
+    // adversarial review: a JSON `"coverage_manifest": null` deserializes to Some(Null) — NOT a real manifest. With every
     // OTHER conjunct passing it must NOT reach the capstone (and is not_claimed, not claimed_over_manifest).
     let mut r = capstone_report();
     r.coverage_manifest = Some(CanonValue::Null);

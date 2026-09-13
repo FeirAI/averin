@@ -187,7 +187,7 @@ func (c *Core) Commit(domain string, value []byte, nonceHex string) (string, err
 // SignEvidence signs an authority evidence statement bound to (source, projectID, recordID, evidenceHash)
 // with the held key — the credential broker (and policy engine) uses this to produce the `evidence_sig`
 // that elevates a record to `verified` under the pinned authority key. projectID binds the evidence to its
-// tenant so a verified triple cannot be replayed into another project (Codex). source must be one of
+// tenant so a verified triple cannot be replayed into another project (adversarial review). source must be one of
 // "policy_engine_signed"|"human_signed"|"gateway_enforced" (others are rejected — they could never
 // verify). evidenceHash must be "sha256:<64 LOWERCASE hex>". Returns "ed25519:<base64url>".
 //

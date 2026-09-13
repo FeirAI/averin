@@ -203,7 +203,7 @@ func TestSingleUseDoubleSpendRejected(t *testing.T) {
 	}
 }
 
-// TestDoubleSpendReleasesNonce (Codex convergence): a use that consumes the nonce and then fails at
+// TestDoubleSpendReleasesNonce (adversarial review convergence): a use that consumes the nonce and then fails at
 // ConsumeJTI (double-spend) produces no receipt, so it must RELEASE the just-consumed nonce — leaving the
 // consume-before-act ledger consistent. Without the release the nonce is permanently burned.
 func TestDoubleSpendReleasesNonce(t *testing.T) {

@@ -143,7 +143,7 @@ leria seals spend-governance evidence — budget exhaustion and chargeback — a
 `extensions`, using the typed `record_kind` (`budget-exhausted` / `chargeback-posted`). averin needs no
 special-casing: there is **no source allowlist** (`authority.source` is a trust-level enum, not an
 identity), so leria seals like any caller and its records verify/export as first-class typed
-evidence. Background: [`../HANDOFF-leria-records.md`](../HANDOFF-leria-records.md).
+evidence.
 
 ### govder (DECIDE) → averin  *(elevation contract)*
 
@@ -161,9 +161,8 @@ at ingest rather than being rejected (or, under the fail-open opt-out, normalizi
 > `AVERIN_AUTHORITY_KEYS="acmeco:policy_engine_signed=<hex>,acmeco:human_signed=<hex>,acmeco:delegate_signed=<hex>,globex:..."`.
 > A single global pin can only ever elevate one tenant.
 
-The four-plane end-to-end harness (govder's `e2e/bootstrap_test.go`) is the authoritative example of how
-averin-server is built, configured, and run in composition — note that it is a **single-tenant** wiring,
-so it exercises the global-pin form only.
+Cross-plane integration tests exercising this wiring live in the FeirOS repositories, not in this
+repo; that harness is a **single-tenant** wiring, so it exercises the global-pin form only.
 
 ### vultrino (ENFORCE) ↔ averin  *(design note, not yet wired)*
 

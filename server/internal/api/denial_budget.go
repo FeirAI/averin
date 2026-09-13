@@ -56,7 +56,7 @@ type denialBudget struct {
 	global      tokenBucket
 	// keyed by sha256(project_id), NOT the raw project_id: project_id is caller-supplied and the ingest body
 	// cap allows multi-megabyte values, so storing raw keys would make this DoS-control a memory-DoS itself
-	// (entry-bounded but not byte-bounded). A 32-byte collision-resistant hash bounds each key (Codex).
+	// (entry-bounded but not byte-bounded). A 32-byte collision-resistant hash bounds each key (adversarial review).
 	perProject  map[[32]byte]*tokenBucket
 	lastDropLog time.Time
 }

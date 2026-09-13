@@ -8,7 +8,7 @@ other service involved.
 | Tool | Version | Why |
 |------|---------|-----|
 | Rust toolchain | pinned by `rust-toolchain.toml` (**1.92.0**) | builds `averin-decision-core` (the crypto core). rustup auto-installs the pin + the `wasm32` / `i686` targets on first build. |
-| Go | **1.25+** (`server/go.mod` declares `go 1.25.0`) | builds the server (cgo-links the Rust staticlib). |
+| Go | **1.25.13** (pinned in `server/go.mod`) | builds the server (cgo-links the Rust staticlib). |
 | A C toolchain (cgo) | clang/gcc | the Go server uses cgo to call the Rust core. |
 | `openssl` (or any 32-byte hex source) | any | to mint a signing seed. |
 
@@ -52,9 +52,11 @@ The only required input is a 64-hex (32-byte) Ed25519 signing **seed**. With not
 the server runs in dev mode: in-memory store, no auth (it logs loud warnings about both).
 
 ```bash
-AVERIN_SIGNING_SEED=$(openssl rand -hex 32) ./averin-server
-# logs: averin-server listening on :8080 (pubkey ed25519pub:...)
+AVERIN_SIGNING_SEED=$(openssl rand -hex 32) AVERIN_ADDR=127.0.0.1:8080 ./averin-server
+# logs: averin-server listening on 127.0.0.1:8080 (pubkey ed25519pub:...)
 ```
+
+Without `AVERIN_API_KEYS` set, the API is unauthenticated, so keep it on loopback.
 
 On startup the server displays a public key. Authenticate that key through an independently
 trusted channel before treating it as an auditor's trust root; display alone is not authentication. Health check:

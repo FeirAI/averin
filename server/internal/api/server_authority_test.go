@@ -81,7 +81,7 @@ func TestPolicyEngineSignedAuthorityElevates(t *testing.T) {
 	if !strings.Contains(resp2, `"source":"caller_declared"`) {
 		t.Fatalf("a forged policy-engine evidence_sig must fall back to caller_declared: %s", resp2)
 	}
-	// CROSS-PROJECT REPLAY (Codex): a block validly signed for project p1 (same record_id/evidence_hash/sig),
+	// CROSS-PROJECT REPLAY (adversarial review): a block validly signed for project p1 (same record_id/evidence_hash/sig),
 	// replayed into project p2, must NOT elevate — project_id is bound into the authority preimage.
 	respX := post("p2", "i4", "policy-rec-1", signAuthorityEvidence("policy_engine_signed", "p1", "policy-rec-1", eh, pe))
 	if !strings.Contains(respX, `"source":"caller_declared"`) {
@@ -288,7 +288,7 @@ func TestDelegateSignedAuthorityElevates(t *testing.T) {
 	if !strings.Contains(resp3, `"source":"caller_declared"`) {
 		t.Fatalf("a delegate_signed claim signed by the policy key must stay caller_declared: %s", resp3)
 	}
-	// CROSS-PROJECT REPLAY (Codex): a block validly signed for project p1, replayed into project p2, must NOT elevate.
+	// CROSS-PROJECT REPLAY (adversarial review): a block validly signed for project p1, replayed into project p2, must NOT elevate.
 	respX := post("p2", "d4", "delegate-rec-1", "delegate_signed", signAuthorityEvidence("delegate_signed", "p1", "delegate-rec-1", eh, delegate))
 	if !strings.Contains(respX, `"source":"caller_declared"`) {
 		t.Fatalf("a p1-signed delegate_signed block replayed into p2 must fall back to caller_declared: %s", respX)
@@ -337,7 +337,7 @@ func TestAuthorityRejectsUnknownPinnedSource(t *testing.T) {
 	})
 }
 
-// TestPolicyEngineKeyMustBeDisjointFromResource (T7, Codex convergence): pinning a policy-engine key that
+// TestPolicyEngineKeyMustBeDisjointFromResource (T7, adversarial review convergence): pinning a policy-engine key that
 // equals the RESOURCE key must fail fast at Routes() — in BOTH option orders (the guard cannot live only in
 // WithPolicyEngineKey, since WithResource may run after it). Else a resource key could elevate generic
 // authority, which the offline verifier's authority_keys disjointness check now also fatals on.

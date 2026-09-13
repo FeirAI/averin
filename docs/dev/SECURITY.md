@@ -92,6 +92,7 @@ what truly happened in the world.
 - **API authz is Phase-1 limited.** This answers only "is this token valid for this project?" Full
   RBAC/SSO/scoped-and-expiring tokens/per-route permissions are Phase 2. With `AVERIN_API_KEYS` unset
   the app API is fully unauthenticated.
+- Without `AVERIN_API_KEYS` set, the API is unauthenticated, so keep it on loopback.
 
 ## Trust boundaries
 

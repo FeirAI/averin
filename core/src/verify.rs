@@ -259,7 +259,7 @@ pub struct VerifyReport {
     /// (an unlisted action or a non-`single_operation` grant leaves `validated` intact while incrementing
     /// `uses_action_unverified`). The per-use signal is `uses_action_unverified`; a correct D4/D8 gate
     /// requires BOTH `taxonomy_status == "validated"` AND `uses_action_unverified == 0`, never the status
-    /// alone (Codex AREA 1).
+    /// alone (adversarial review AREA 1).
     pub taxonomy_status: String,
     /// Grant-transparency trust (ADR 0004 D6 / MF2), one of: `assumed` (no `broker_grant_head` in any
     /// checkpoint — the bundle cannot prove the broker recorded every grant), `sequence_consistent_export`
@@ -700,7 +700,7 @@ fn worst_status(a: &str, b: &str) -> String {
 /// fields (month 01-12, day 01-31, hour 00-23, min/sec 00-59) — not merely the right SHAPE. Lexical `<=`
 /// on two such strings equals chronological order, an invariant that only holds for in-range fields
 /// (a shape-only `2026-13-01` would lexically sort AFTER `2026-02-01` yet name no real month). Range
-/// validation (Codex D7) also stops a signed-but-malformed attestation window like `2026-99-99T99:99:99.999Z`
+/// validation (adversarial review D7) also stops a signed-but-malformed attestation window like `2026-99-99T99:99:99.999Z`
 /// from passing the freshness check. (Day is 01-31, not month-length/leap-aware — impossible values are
 /// rejected; a harmless 02-30 is not, which does not affect ordering.)
 fn is_canonical_ts(s: &str) -> bool {
@@ -2443,7 +2443,7 @@ fn parse_grant_head(cp: &CanonValue) -> Option<GrantHead> {
 
 struct TaxonomyInfo {
     /// (resource_id, action) pairs the issuer asserts ARE single-operation. RESOURCE-BOUND (an entry
-    /// vetted for one resource must not validate the same action name on another — Codex AREA 2).
+    /// vetted for one resource must not validate the same action name on another — adversarial review AREA 2).
     actions: BTreeSet<(String, String)>,
     /// (resource_id, action) pairs the issuer affirmatively marks as escalating / NOT single-operation:
     /// a grant claiming `single_operation` scope for one of these is mis-scoped and is rejected (D4).
@@ -2488,7 +2488,7 @@ fn side_effect_closure_resources(manifest: &CanonValue) -> Option<BTreeSet<(Stri
     for e in arr {
         // Reject EMPTY resource_id/action (fail-closed): an `action:""` entry would otherwise declare a
         // ("",..)/(.., "") pair that could "close" a malformed action-less grant whose own action parsed
-        // empty — so an empty action can never appear in the declared set (Codex hardening).
+        // empty — so an empty action can never appear in the declared set (adversarial review hardening).
         let r = e
             .get("resource_id")
             .and_then(|x| x.as_str())
@@ -3609,7 +3609,7 @@ fn evaluate_attestation(
             return eval;
         }
     };
-    // the attestation must cover the bundle's TRUE frontier (Codex): if a checkpoint exists BEYOND the latest
+    // the attestation must cover the bundle's TRUE frontier (adversarial review): if a checkpoint exists BEYOND the latest
     // anchored one the subject binds, the bundle has moved on (records/head the attestation never covered) —
     // an old anchored attestation replayed onto a later, unanchored-tail bundle. attested_claims requires the
     // latest anchored checkpoint to BE the latest checkpoint overall.
@@ -3624,7 +3624,7 @@ fn evaluate_attestation(
         issues.push("deployment_attestation: missing/empty issued_at or not_after — no bounded freshness window (D7)".into());
         return eval;
     }
-    // ...and CANONICAL (Codex): a malformed non-empty bound like "0".."z" sorts around a real timestamp and
+    // ...and CANONICAL (adversarial review): a malformed non-empty bound like "0".."z" sorts around a real timestamp and
     // would pass the lexicographic window check, so require the exact YYYY-MM-DDTHH:MM:SS.mmmZ shape and a
     // non-inverted window before comparing.
     if !is_canonical_ts(&issued_at)
@@ -3779,7 +3779,7 @@ fn check_role_disjointness(
             }
         }
     }
-    // T7 (Codex): `authority_keys` MAY equal `broker_authority_keys`, but a key in any NON-broker role that
+    // T7 (adversarial review): `authority_keys` MAY equal `broker_authority_keys`, but a key in any NON-broker role that
     // ALSO elevates a generic record's authority to `verified` is role confusion.
     for (name, set) in [
         ("resource_authority_keys", &opts.resource_authority_keys),
@@ -4904,7 +4904,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             mism.push(format!("cnf does not derive cnf_kid '{kidl}'"));
         }
         // EVERY capability-shaping claim the producer mirrors into BOTH the descriptor and grant_evidence must
-        // agree (Codex): scope (a broad scope minted but a narrow scope LABELED is exactly the mislabel D6.4
+        // agree (adversarial review): scope (a broad scope minted but a narrow scope LABELED is exactly the mislabel D6.4
         // exists to catch), sub↔agent_id (a credential for a different subject), and iat/nbf↔issued_at (a
         // back/post-dated validity). Checking only act/aud/jti/cnf/exp/single_use left scope+subject+timing
         // unbound — a real false-clean.
@@ -5384,7 +5384,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // grant's action FOR THIS RESOURCE — otherwise it stays a demonstrator artifact
         // (uses_action_unverified) that can never reach the attested_complete upgrade. The listing is
         // resource-BOUND so a taxonomy vetted for one resource cannot validate a colliding action name on
-        // another (Codex AREA 2). M1: bounded_reuse is action-verifiable too — it fixes one
+        // another (adversarial review AREA 2). M1: bounded_reuse is action-verifiable too — it fixes one
         // (action, resource_id) exactly like single_operation (action↔grant tightness preserved).
         let action_verified = (single || bounded)
             && taxonomy_info.as_ref().is_some_and(|ti| {
@@ -5805,7 +5805,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // surface. The operator declares, in the D7-digest-bound coverage_manifest, per `(resource_id, action)`,
     // which resources each acted action may transitively touch; every `(resource_id, action)` the bundle's
     // grants/uses actually exercise (`touched_pairs`) must fall within that ACTION-BOUND declared closure —
-    // a resource declared only under a DIFFERENT action does NOT close it for the action acting on it (Codex).
+    // a resource declared only under a DIFFERENT action does NOT close it for the action acting on it (adversarial review).
     // Note touched_pairs is built from EVERY grant_evidence AND use_evidence pair above — so a grant that was
     // ISSUED BUT NEVER USED still contributes its `(resource_id, action)`, and the operator must declare
     // closure for it too. This is intentional: a grant's mere existence widened the authorized surface (the

@@ -728,7 +728,7 @@ const attestFallbackSkew = 30 * 24 * time.Hour
 // attestationWindow computes the [issued_at, not_after] freshness window for a deployment attestation.
 // The offline verifier checks the latest ANCHORED checkpoint's TSA genTime (≈ the checkpoint's createdTS)
 // against this window — it has no wall clock of its own — so the window is bracketed on createdTS, NOT on
-// export time. Anchoring to export now() fails whenever a checkpoint is exported after its seal (Codex D7.2).
+// export time. Anchoring to export now() fails whenever a checkpoint is exported after its seal (adversarial review D7.2).
 // When createdTS is missing/unparseable we cannot bracket the real anchor time, so issued_at is widened to
 // attestFallbackSkew below export time rather than fail an honest attestation closed.
 func attestationWindow(createdTS string, now time.Time, issuedSkew, validity time.Duration) (string, string) {
@@ -871,7 +871,7 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Routes() http.Handler {
-	// Role separation (T7, Codex): every pinned authority key must be disjoint from the RESOURCE key too —
+	// Role separation (T7, adversarial review): every pinned authority key must be disjoint from the RESOURCE key too —
 	// checked HERE (not only in WithPolicyEngineKey) so it holds regardless of option order (WithResource can
 	// be called after WithPolicyEngineKey). Else a resource key could sign a generic record's evidence_sig and
 	// have the server stamp it `verified` — exactly what the offline verifier's authority_keys disjointness
@@ -1844,7 +1844,7 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 		"scope_class": string(req.ScopeClass), "agent_id": req.AgentID,
 	}
 	// cnf_kid is recorded as PROVEN possession for forbidden_scope AND ttl_exceeded — both reach a denial only
-	// AFTER req.Validate()'s PoP check passes (the TTL cap is now a post-PoP policy check; Codex). Only a
+	// AFTER req.Validate()'s PoP check passes (the TTL cap is now a post-PoP policy check; adversarial review). Only a
 	// pop_failed denial reaches here with an UNPROVEN key, so it records the CLAIMED pubkey — never a verified
 	// cnf (else an attacker could bind a victim's pubkey into the evidence as a "proven" key).
 	if reason == "forbidden_scope" || reason == "ttl_exceeded" {
@@ -2167,7 +2167,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		}
 		if found {
 			rid, sess, kind, gid := useReceiptIdentity(prior.JSON)
-			// EXACT-request match (Codex): (record_id, session, kind) is NOT sufficient — useID is derived from
+			// EXACT-request match (adversarial review): (record_id, session, kind) is NOT sufficient — useID is derived from
 			// (project, idem) so it always matches on key reuse. A reused idem key carrying a DIFFERENT use
 			// (capability/action/params/nonce/use_sig) must NOT collapse onto this receipt and return 201 while
 			// SKIPPING ValidateUse (which is what authorizes + consumes the credential), so also require the
@@ -2270,7 +2270,7 @@ func useReceiptIdentity(recJSON string) (recordID, sessionID, kind, grantID stri
 // ed25519 PoP over the challenge binding grant_id/resource_id/action/params_commitment/credential_binding/
 // nonce, so matching it (plus the explicit fields) is a cryptographic match of the whole operation. Used to
 // keep an idem-key reuse that carries a DIFFERENT use from collapsing onto this receipt and skipping the
-// credential-consuming ValidateUse (Codex convergence). A malformed/non-canonical use_sig cannot match the
+// credential-consuming ValidateUse (adversarial review convergence). A malformed/non-canonical use_sig cannot match the
 // stored canonical one → not a match (fail closed to 409).
 func storedUseMatchesRequest(recordJSON string, ur useRequest, paramsCommitment string) bool {
 	var p struct {
@@ -2300,7 +2300,7 @@ func storedUseMatchesRequest(recordJSON string, ur useRequest, paramsCommitment 
 
 // storedOutcomeMatchesRequest reports whether the stored use_outcome receipt completes the SAME intent with
 // the SAME status — so a reused outcome idem key carrying a different intent_ref/status is a 409, not a 201
-// echoing an unrelated outcome (Codex convergence).
+// echoing an unrelated outcome (adversarial review convergence).
 func storedOutcomeMatchesRequest(recordJSON, intentRef, status string) bool {
 	var p struct {
 		Extensions struct {
@@ -2506,7 +2506,7 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		}
 		if found {
 			rid, sess, kind, _ := useReceiptIdentity(prior.JSON)
-			// EXACT-request match (Codex): also require the stored outcome to complete the SAME intent with the
+			// EXACT-request match (adversarial review): also require the stored outcome to complete the SAME intent with the
 			// SAME status, so a reused idem key carrying a different intent_ref/status is a 409, not a 201 that
 			// echoes an unrelated outcome.
 			if rid == outcomeID && sess == or.SessionID && kind == "use_outcome" && storedOutcomeMatchesRequest(prior.JSON, or.IntentRecordID, status) {
@@ -2593,7 +2593,7 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 	}
 	// Do NOT seal an outcome carrying an unsigned/invalid evidence_sig into the append-only log: propagate a
 	// sign failure so the caller gets a 500 and can retry. The intent is already recorded, so a missing valid
-	// outcome surfaces as intent_without_outcome — never a permanently-unverifiable record (Codex).
+	// outcome surfaces as intent_without_outcome — never a permanently-unverifiable record (adversarial review).
 	evidenceSig, err := s.resourceCore.SignEvidence("gateway_enforced", projectID, outcomeID, evidenceHash)
 	if err != nil {
 		return nil, fmt.Errorf("use-outcome evidence sign: %w", err)
@@ -2815,7 +2815,7 @@ func authorityKeyID(key ed25519.PublicKey) string {
 // authority.rs): ed25519 over LP4("averin.authority.v2") ‖ LP4(source) ‖ LP4(project_id) ‖ LP4(record_id) ‖
 // utf8(evidence_hash), under `key`, with a well-formed sha256 evidence_hash and a non-empty project_id +
 // record_id (so a record the server stamps will actually elevate to `verified` offline, not `failed`).
-// project_id binds the evidence to its tenant so a verified triple cannot be replayed cross-project (Codex).
+// project_id binds the evidence to its tenant so a verified triple cannot be replayed cross-project (adversarial review).
 func verifyAuthorityEvidence(source, projectID, recordID, evidenceHash, evidenceSig string, key ed25519.PublicKey) bool {
 	if projectID == "" || recordID == "" || !strings.HasPrefix(evidenceSig, "ed25519:") || !strings.HasPrefix(evidenceHash, "sha256:") {
 		return false

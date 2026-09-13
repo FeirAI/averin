@@ -1,6 +1,6 @@
 # ADR 0003 — Tier-B (Level 3) demonstrator: implementation design
 
-**Status:** Implemented (rev 4; Codex review READY TO BUILD — all four rev-2 MUST-FIXES resolved + the
+**Status:** Implemented (rev 4; adversarial review READY TO BUILD — all four rev-2 MUST-FIXES resolved + the
 rev-3 R5 per-`grant_id` blocker closed). Built across five adversarially-reviewed commits `tierb[1..5]`:
 R1 RCP-canonical re-derivable evidence_hash; R2 role-separated broker/resource authority keys;
 `resourceshim` (PoP-at-use + consume-before-act ledger, R4/R5); `POST /v2/use` resource-signed receipts;

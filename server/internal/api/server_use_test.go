@@ -282,7 +282,7 @@ func TestUseOutcomeRejectsNonIntent(t *testing.T) {
 	}
 }
 
-// TestTwoPhaseOutcomeLinksIntentDespiteInterveningRecord (Codex/finder D5.2): the outcome must link to its
+// TestTwoPhaseOutcomeLinksIntentDespiteInterveningRecord (adversarial review/finder D5.2): the outcome must link to its
 // intent even if a record is appended in the same session BETWEEN the two phases (which drops the intent out
 // of session heads). The producer FORCES the intent content_hash into the outcome's causal_prev_hashes.
 func TestTwoPhaseOutcomeLinksIntentDespiteInterveningRecord(t *testing.T) {
@@ -328,7 +328,7 @@ func TestTwoPhaseOutcomeLinksIntentDespiteInterveningRecord(t *testing.T) {
 	}
 }
 
-// TestGenericRecordRejectsReservedIDPrefix (Codex D5.2): a generic /v2/records caller must not pre-seed a
+// TestGenericRecordRejectsReservedIDPrefix (adversarial review D5.2): a generic /v2/records caller must not pre-seed a
 // "use-"/"outcome-" record_id — that would let a later gateway retry short-circuit past PoP validation.
 func TestGenericRecordRejectsReservedIDPrefix(t *testing.T) {
 	h := newBrokerResourceServer(t)
@@ -370,7 +370,7 @@ func TestUseIsIdempotentOnRetry(t *testing.T) {
 	}
 }
 
-// TestUseIdemKeyReuseWithDifferentOperationConflicts (Codex convergence): reusing a successful /v2/use
+// TestUseIdemKeyReuseWithDifferentOperationConflicts (adversarial review convergence): reusing a successful /v2/use
 // idempotency key with a DIFFERENT operation (here different params -> different use_sig + params commitment)
 // must be a 409, NOT a 201 that echoes the old receipt while SKIPPING the credential-consuming ValidateUse —
 // which would "authorize" an operation the gateway never validated, with a receipt for the wrong operation.
@@ -391,7 +391,7 @@ func TestUseIdemKeyReuseWithDifferentOperationConflicts(t *testing.T) {
 	}
 }
 
-// TestUseOutcomeIdemKeyReuseWithDifferentStatusConflicts (Codex convergence): the use-outcome path has the
+// TestUseOutcomeIdemKeyReuseWithDifferentStatusConflicts (adversarial review convergence): the use-outcome path has the
 // same shape — reusing a use-outcome idem key with a DIFFERENT status (or intent) must be a 409, not a 201
 // echoing an unrelated outcome.
 func TestUseOutcomeIdemKeyReuseWithDifferentStatusConflicts(t *testing.T) {
@@ -426,7 +426,7 @@ func TestUseOutcomeIdemKeyReuseWithDifferentStatusConflicts(t *testing.T) {
 	}
 }
 
-// TestUsePreseededGenericIdemConflicts (Codex D5.2 round-2, HIGH): a generic /v2/records row already
+// TestUsePreseededGenericIdemConflicts (adversarial review D5.2 round-2, HIGH): a generic /v2/records row already
 // occupying the use's idempotency key (with a different, random record_id the old session-scan-by-useID
 // missed) must make /v2/use a 409 conflict — NOT a 201 that re-consumed the credential in ValidateUse and
 // then silently collapsed the seal onto the foreign row in PutRecord (an action with no persisted receipt).
@@ -452,7 +452,7 @@ func TestUsePreseededGenericIdemConflicts(t *testing.T) {
 	}
 }
 
-// TestUsePhasesDoNotShareIdemKey (Codex D5.2 round-2, MEDIUM): /v2/use and /v2/use-intent derive the same
+// TestUsePhasesDoNotShareIdemKey (adversarial review D5.2 round-2, MEDIUM): /v2/use and /v2/use-intent derive the same
 // deterministic record_id from (project, idempotency_key), so reusing one key across the two phases must
 // 409 — NOT silently return the use_intent as if it satisfied a one-phase /v2/use (skipping validation).
 func TestUsePhasesDoNotShareIdemKey(t *testing.T) {
@@ -471,7 +471,7 @@ func TestUsePhasesDoNotShareIdemKey(t *testing.T) {
 	}
 }
 
-// TestUseOutcomePreseededGenericIdemConflicts (Codex D5.2 round-2): the same guard covers /v2/use-outcome —
+// TestUseOutcomePreseededGenericIdemConflicts (adversarial review D5.2 round-2): the same guard covers /v2/use-outcome —
 // a generic row squatting the outcome's idempotency key must 409, not collapse the outcome onto it.
 func TestUseOutcomePreseededGenericIdemConflicts(t *testing.T) {
 	h := newBrokerResourceServer(t)
