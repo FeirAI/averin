@@ -1,5 +1,8 @@
 # averin — Flight Recorder for AI Agents
 
+**Try it in your browser:** https://verify.feir.ai (paste a bundle, or load a sample; runs entirely
+offline, in WASM, no server involved).
+
 > **Verifiable incident reconstruction for AI agents.** When an agent costs you
 > $900 overnight, goes off-script, or does something destructive, you get a tamper-evident,
 > replayable record of *what was observed, why, and under whose declared authority* — that

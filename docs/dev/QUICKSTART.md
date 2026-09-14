@@ -1,5 +1,8 @@
 # Quickstart: build & run averin
 
+**Try it in your browser first:** https://verify.feir.ai lets you verify a sample (or your own)
+export bundle entirely offline, no build or server needed, before you set any of this up.
+
 This walks you from a clean checkout to a running server and a verified record — standalone, no
 other service involved.
 
