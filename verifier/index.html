@@ -125,7 +125,7 @@
       <div id="out"></div>
 
       <footer>
-        Pinned wasm digest: <code id="pinnedDigest">sha256:7d727c3480695d05d853f7b6dfe45b4448cf12d0d94f9860f73b1a659d862b7b</code><br/>
+        Pinned wasm digest: <code id="pinnedDigest">(loading)</code><br/>
         <a href="https://github.com/FeirAI/averin/blob/main/verifier/SUPPLY-CHAIN.md" target="_blank" rel="noopener noreferrer">How this pin works and what it defends against</a>
         &middot;
         <a href="https://github.com/FeirAI/averin/releases/tag/v0.1.0-alpha" target="_blank" rel="noopener noreferrer">v0.1.0-alpha release</a>
@@ -143,6 +143,8 @@
 
       const $ = (id) => document.getElementById(id);
       let averin = null;
+      // Single source of truth: the footer shows the same constant build.sh rewrites and the loader enforces.
+      $("pinnedDigest").textContent = WASM_SHA256;
 
       initAverin("./averin_decision_core.wasm", { expectedSha256: WASM_SHA256 })
         .then((v) => {
