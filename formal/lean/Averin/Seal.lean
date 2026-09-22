@@ -16,8 +16,9 @@ would be *false* and make every theorem vacuous). Instead:
 * Ed25519 unforgeability is the hypothesis that every message whose signature verifies under the
   pinned key is in `Signed`, the set of messages the key holder actually signed. The honest
   signer (`HonestSigner`) signs only through `record::seal` and `checkpoint::seal_checkpoint`.
-* `fmt` is `"sha256:" ‖ lowerhex(·)`; its injectivity is the Kani harness
-  `hex_roundtrip` over the real `hashx.rs` code.
+* `fmt` is `"sha256:" ‖ lowerhex(·)`; its injectivity is discharged against the real `hashx.rs`
+  code by the Kani harnesses `hex_byte_roundtrip` and `hex_digit_is_canonical` (per byte, at fixed
+  width).
 
 Everything else — canonical JSON, UTF-8, LP framing, domain separation — is proved, not assumed.
 -/

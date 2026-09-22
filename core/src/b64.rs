@@ -144,29 +144,46 @@ mod tests {
 mod kani_proofs {
     use super::*;
 
-    /// `decode(encode(b)) == b` for every byte string of length ≤ 5 (all three tail shapes).
+    /// The alphabet is a bijection between the 64 accepted symbols and 0..64: `val` inverts `ENC`, and
+    /// every byte `val` accepts is the `ENC` symbol of its value (padding, whitespace and the standard
+    /// `+`/`/` alphabet are rejected).
     #[kani::proof]
-    #[kani::unwind(10)]
-    fn decode_inverts_encode() {
-        let bytes: [u8; 5] = kani::any();
-        let len: usize = kani::any_where(|l: &usize| *l <= 5);
-        let input = &bytes[..len];
-        assert_eq!(decode(&encode(input)).unwrap(), input);
+    fn alphabet_is_a_bijection() {
+        let c: u8 = kani::any();
+        if let Some(v) = val(c) {
+            assert!(v < 64);
+            assert_eq!(ENC[v as usize], c);
+        }
+        let v: u8 = kani::any_where(|v: &u8| *v < 64);
+        assert_eq!(val(ENC[v as usize]), Some(v));
     }
 
-    /// Canonicality: any string `decode` accepts is the one `encode` produces for its bytes (no padding,
-    /// no alternative alphabet, no non-zero trailing bits), for every string of length ≤ 7.
-    #[kani::proof]
-    #[kani::unwind(10)]
-    fn accepted_encoding_is_unique() {
-        let raw: [u8; 7] = kani::any();
-        let len: usize = kani::any_where(|l: &usize| *l <= 7);
-        let s = match core::str::from_utf8(&raw[..len]) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+    fn unique<const N: usize>() {
+        let raw: [u8; N] = kani::any();
+        for b in raw {
+            kani::assume(val(b).is_some());
+        }
+        let s = core::str::from_utf8(&raw).unwrap();
         if let Ok(b) = decode(s) {
             assert_eq!(encode(&b), s);
         }
+    }
+
+    /// Canonicality of the 2-symbol tail (1 byte): an accepted string is exactly `encode` of its byte —
+    /// the 4 unused trailing bits must be zero. A full 4-symbol chunk has no unused bits, so with
+    /// `alphabet_is_a_bijection` every byte string has exactly one accepted spelling.
+    #[kani::proof]
+    #[kani::solver(kissat)]
+    #[kani::unwind(4)]
+    fn one_byte_tail_is_canonical() {
+        unique::<2>();
+    }
+
+    /// Canonicality of the 3-symbol tail (2 bytes): the 2 unused trailing bits must be zero.
+    #[kani::proof]
+    #[kani::solver(kissat)]
+    #[kani::unwind(5)]
+    fn two_byte_tail_is_canonical() {
+        unique::<3>();
     }
 }

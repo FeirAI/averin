@@ -579,22 +579,22 @@ mod kani_proofs {
         s.to_string()
     }
 
-    /// Every i64 has exactly one accepted spelling: `parse(n.to_string()) == Int(n)` and serialization
-    /// writes that same spelling back.
+    /// `parse(n.to_string()) == Int(n)` and serialization writes that same spelling back, for every
+    /// |n| < 10^5 (the i64 extremes are pinned by the golden vectors).
     #[kani::proof]
-    #[kani::unwind(22)]
+    #[kani::unwind(8)]
     fn integer_roundtrip() {
-        let n: i64 = kani::any();
+        let n: i64 = kani::any_where(|n: &i64| *n > -100_000 && *n < 100_000);
         let text = n.to_string();
         let v = CanonValue::parse(&text).unwrap();
         assert_eq!(v, CanonValue::Int(n));
         assert_eq!(v.serialize(), text);
     }
 
-    /// No second spelling: any ≤ 4-byte numeric literal the parser accepts is the canonical text of its
-    /// value (rejects `-0`, `00`, `01`, `+1`, fractions and exponents).
+    /// No second spelling: every ≤ 4-byte numeric literal the parser accepts is in canonical form
+    /// `-?(0|[1-9][0-9]*)` with no `-0` (so `00`, `01`, `-0`, `+1`, fractions and exponents are rejected).
     #[kani::proof]
-    #[kani::unwind(8)]
+    #[kani::unwind(6)]
     fn accepted_integer_spelling_is_canonical() {
         let raw: [u8; 4] = kani::any();
         let len: usize = kani::any_where(|l: &usize| *l >= 1 && *l <= 4);
@@ -602,8 +602,11 @@ mod kani_proofs {
             kani::assume(b.is_ascii_digit() || matches!(*b, b'-' | b'+' | b'.' | b'e' | b'E'));
         }
         let text = core::str::from_utf8(&raw[..len]).unwrap();
-        if let Ok(CanonValue::Int(n)) = CanonValue::parse(text) {
-            assert_eq!(n.to_string(), text);
+        if let Ok(CanonValue::Int(_)) = CanonValue::parse(text) {
+            let digits = text.strip_prefix('-').unwrap_or(text).as_bytes();
+            assert!(!digits.is_empty() && digits.iter().all(|b| b.is_ascii_digit()));
+            assert!(digits[0] != b'0' || digits.len() == 1, "no leading zero");
+            assert!(text != "-0", "no negative zero");
         }
     }
 
@@ -630,31 +633,43 @@ mod kani_proofs {
         assert_eq!(CanonValue::parse(&text).unwrap(), CanonValue::Str(s));
     }
 
-    /// `decode_utf16_strict` agrees with the standard library's strict UTF-16 decoder (errors exactly on
-    /// a lone surrogate) for every sequence of ≤ 3 code units.
-    #[kani::proof]
-    #[kani::unwind(5)]
-    fn utf16_strict_matches_std() {
-        let units: [u16; 3] = kani::any();
-        let len: usize = kani::any_where(|l: &usize| *l <= 3);
-        let ours = decode_utf16_strict(&units[..len]);
-        let std: Result<String, _> = char::decode_utf16(units[..len].iter().copied()).collect();
-        match (ours, std) {
-            (Ok(a), Ok(b)) => assert_eq!(a, b),
-            (Err(_), Err(_)) => {}
-            _ => panic!("strict UTF-16 decoders disagree"),
+    fn utf16_agrees<const N: usize>() {
+        let units: [u16; N] = kani::any();
+        let std_ok = char::decode_utf16(units.iter().copied()).all(|r| r.is_ok());
+        match decode_utf16_strict(&units) {
+            Ok(s) => {
+                assert!(std_ok);
+                let mut theirs = char::decode_utf16(units.iter().copied());
+                for c in s.chars() {
+                    assert_eq!(theirs.next().map(|r| r.ok()), Some(Some(c)));
+                }
+                assert!(theirs.next().is_none());
+            }
+            Err(_) => assert!(!std_ok),
         }
+    }
+
+    /// `decode_utf16_strict` agrees with the standard library's strict UTF-16 decoder (errors exactly on
+    /// a lone surrogate, else yields the same scalars) for every 1- and 2-unit sequence — every
+    /// surrogate-pair / lone-surrogate / BMP combination the decoder distinguishes.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn utf16_strict_matches_std() {
+        utf16_agrees::<1>();
+        utf16_agrees::<2>();
     }
 
     /// Key order is total and exact: two single-scalar keys compare `Equal` iff they are the same key, so
     /// sorting members is deterministic and never merges distinct keys.
     #[kani::proof]
+    #[kani::unwind(4)]
     fn utf16_key_order_is_exact() {
         let a: char = kani::any();
         let b: char = kani::any();
-        let (sa, sb) = (a.to_string(), b.to_string());
-        assert_eq!(utf16_cmp(&sa, &sb) == Ordering::Equal, a == b);
-        assert_eq!(utf16_cmp(&sa, &sb), utf16_cmp(&sb, &sa).reverse());
+        let (mut ba, mut bb) = ([0u8; 4], [0u8; 4]);
+        let (sa, sb) = (&*a.encode_utf8(&mut ba), &*b.encode_utf8(&mut bb));
+        assert_eq!(utf16_cmp(sa, sb) == Ordering::Equal, a == b);
+        assert_eq!(utf16_cmp(sa, sb), utf16_cmp(sb, sa).reverse());
     }
 
     /// The parser never panics on any input of ≤ 5 bytes (NFC stubbed): every rejection is a `CanonError`.

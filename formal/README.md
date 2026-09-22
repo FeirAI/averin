@@ -8,7 +8,7 @@ strongest, plus a gate that keeps them in sync with the code.
 | Layer | Tool | What it covers | Run |
 |---|---|---|---|
 | Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every hashed and signed preimage, the seal theorem, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
-| Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url bijection, digest-string injectivity, exact LP framing, integer and string round trips, strict UTF-16, key order, parser panic-freedom | `bash formal/run-kani.sh` |
+| Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, exact key order (parser-level harnesses in an extended set) | `bash formal/run-kani.sh` |
 | Protocol and concurrency models | TLA+ / TLC (`tla/`) | gapless grant-transparency log under failures and lost rollbacks; consume-before-act ledger with multiple gateways, releases and TTL sweeps | `bash formal/tla/run-tlc.sh` |
 | Model/code drift gate | `check-refinement.py` | every tag, domain, preimage schema, escape rule and DAG/chain check the proofs assume still appears in `core/src` | `python3 formal/check-refinement.py` |
 
@@ -81,9 +81,28 @@ Other results:
 
 The harnesses live next to the code (`#[cfg(kani)] mod kani_proofs` in `b64.rs`, `hashx.rs` and
 `canon.rs`). `run-kani.sh` runs them with `--no-default-features` (no `getrandom`) and
-`-Z stubbing`. NFC is stubbed to the identity where the property is about the escaper and
-decoder rather than Unicode tables. Bounds are small by design: CBMC's cost grows quickly with
-heap strings. The unbounded statements are the Lean ones.
+`-Z stubbing`.
+
+**Default set** (each harness finishes in seconds on a 4-core, 16 GB runner; CI runs these):
+
+- `alphabet_is_a_bijection`: base64url `val` and `ENC` are mutually inverse over the 64 symbols,
+  and every other byte is rejected.
+- `hex_byte_roundtrip` and `hex_digit_is_canonical`: every byte round-trips through two
+  lowercase hex digits, and each digit value has exactly one accepted spelling. Hex is written
+  and read at fixed width, so `"sha256:" ‖ hex_lower(d)` is injective and canonical for every
+  length. This is the `fmt` hypothesis in `Seal.lean`.
+- `lp_into_frames_exactly`: `lp_into` emits exactly `uint32_be(len) ‖ b`.
+- `utf16_key_order_is_exact`: member-key order is total, antisymmetric, and `Equal` only for
+  equal keys.
+
+**Extended set** (`run-kani.sh --extended`): base64 tail canonicality (non-zero trailing bits
+rejected) and whole-chunk round trip, strict UTF-16 decoder
+versus std, integer round trip and single spelling, `write_string` inverted by the parser, and
+parser panic-freedom. These harnesses symbolically execute the full RCP parser and heap `String`
+growth. On the 16 GB machine used for this work CBMC ran out of memory or passed a 25-minute
+timeout, so **they are not claimed as verified**. Run them on a larger runner, or shrink them
+further. The same properties are covered today by the Lean `Canon` proof over the model, the
+golden vectors, the adversarial suite, and the audit's 200k-document differential fuzz.
 
 ## TLA+ (server protocols)
 

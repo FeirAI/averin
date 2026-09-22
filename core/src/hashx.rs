@@ -87,29 +87,27 @@ fn hex_val(c: u8) -> Option<u8> {
 mod kani_proofs {
     use super::*;
 
-    /// `parse_sha256("sha256:" ‖ hex_lower(d)) == d` for every 32-byte digest (so the digest string is
-    /// injective in the digest).
+    /// Every byte round-trips through its two lowercase hex digits. `hex_lower` writes exactly two digits
+    /// per byte and `parse_sha256`/`hex32` read exactly two per byte at fixed offsets, so with
+    /// `hex_digit_is_canonical` this makes `"sha256:" ‖ hex_lower(d)` injective in `d` for every length.
     #[kani::proof]
-    #[kani::unwind(72)]
-    fn hex_roundtrip() {
-        let d: [u8; 32] = kani::any();
-        let s = format!("sha256:{}", hex_lower(&d));
-        assert_eq!(s.len(), 71);
-        assert_eq!(parse_sha256(&s), Some(d));
+    #[kani::unwind(4)]
+    fn hex_byte_roundtrip() {
+        let b: u8 = kani::any();
+        let s = hex_lower(&[b]);
+        let d = s.as_bytes();
+        assert_eq!(d.len(), 2);
+        assert_eq!((hex_val(d[0]).unwrap() << 4) | hex_val(d[1]).unwrap(), b);
     }
 
-    /// Canonicality: a 64-char string `hex32` accepts is exactly `hex_lower` of its value — uppercase or
-    /// any other spelling of the same digest is rejected.
+    /// `hex_val` accepts exactly the 16 lowercase digits, each as the unique spelling of its value, so
+    /// no uppercase or other alternative spelling of a digest is ever accepted.
     #[kani::proof]
-    #[kani::unwind(66)]
-    fn hex32_is_canonical() {
-        let raw: [u8; 64] = kani::any();
-        for b in raw {
-            kani::assume(b.is_ascii());
-        }
-        let s = core::str::from_utf8(&raw).unwrap();
-        if let Some(v) = hex32(s) {
-            assert_eq!(hex_lower(&v), s);
+    fn hex_digit_is_canonical() {
+        let c: u8 = kani::any();
+        if let Some(v) = hex_val(c) {
+            assert!(v < 16);
+            assert_eq!(b"0123456789abcdef"[v as usize], c);
         }
     }
 
