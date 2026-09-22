@@ -659,17 +659,70 @@ mod kani_proofs {
         utf16_agrees::<2>();
     }
 
-    /// Key order is total and exact: two single-scalar keys compare `Equal` iff they are the same key, so
-    /// sorting members is deterministic and never merges distinct keys.
+    /// A key of one or two symbolic scalars, spelled into a caller buffer (no heap), together with the
+    /// reference order key: its UTF-16 code units computed independently of `utf16_cmp`, per scalar, by
+    /// `char::encode_utf16`.
+    fn key<'a>(buf: &'a mut [u8; 8], units: &mut [u16; 4]) -> (&'a str, usize) {
+        let c1: char = kani::any();
+        let c2: char = kani::any();
+        let two: bool = kani::any();
+        let n1 = c1.len_utf8();
+        c1.encode_utf8(&mut buf[..4]);
+        let mut u = c1.encode_utf16(&mut units[..2]).len();
+        let mut n = n1;
+        if two {
+            let n2 = c2.len_utf8();
+            c2.encode_utf8(&mut buf[n1..n1 + 4]);
+            u += c2.encode_utf16(&mut units[u..u + 2]).len();
+            n += n2;
+        }
+        // SAFETY: `buf[..n]` is exactly the UTF-8 encoding of one or two scalars written just above
+        // (skipping `from_utf8` keeps its validation loop out of the model).
+        (unsafe { core::str::from_utf8_unchecked(&buf[..n]) }, u)
+    }
+
+    /// Key order is exactly RFC 8785 / RCP §2 order: for every pair of keys of one or two scalars,
+    /// `utf16_cmp` equals the lexicographic order of their UTF-16 code units. The order is checked against
+    /// that reference (not merely for antisymmetry), and one case is pinned to the BMP-above-surrogates vs
+    /// astral region, where UTF-8 byte order and UTF-16 order disagree (U+E000..U+FFFF sorts AFTER every
+    /// astral scalar in UTF-16, before it in UTF-8), so a byte-order `utf16_cmp` fails here with a
+    /// counterexample rather than an unwinding assertion.
     #[kani::proof]
-    #[kani::unwind(4)]
+    #[kani::unwind(10)]
     fn utf16_key_order_is_exact() {
-        let a: char = kani::any();
-        let b: char = kani::any();
-        let (mut ba, mut bb) = ([0u8; 4], [0u8; 4]);
-        let (sa, sb) = (&*a.encode_utf8(&mut ba), &*b.encode_utf8(&mut bb));
-        assert_eq!(utf16_cmp(sa, sb) == Ordering::Equal, a == b);
-        assert_eq!(utf16_cmp(sa, sb), utf16_cmp(sb, sa).reverse());
+        let (mut ba, mut bb) = ([0u8; 8], [0u8; 8]);
+        let (mut ua, mut ub) = ([0u16; 4], [0u16; 4]);
+        let (sa, na) = key(&mut ba, &mut ua);
+        let (sb, nb) = key(&mut bb, &mut ub);
+        assert_eq!(utf16_cmp(sa, sb), ua[..na].cmp(&ub[..nb]));
+
+        // Steered case: a single BMP scalar at or above U+E000 against a single astral scalar.
+        let hi: char = kani::any();
+        let astral: char = kani::any();
+        kani::assume(('\u{E000}'..='\u{FFFF}').contains(&hi) && astral as u32 >= 0x10000);
+        let (mut bh, mut bs) = ([0u8; 4], [0u8; 4]);
+        let (sh, ss) = (&*hi.encode_utf8(&mut bh), &*astral.encode_utf8(&mut bs));
+        assert_eq!(utf16_cmp(sh, ss), Ordering::Greater);
+        assert_eq!(utf16_cmp(ss, sh), Ordering::Less);
+    }
+
+    /// Key order is transitive (so sorting members is well defined): for any three single-scalar keys,
+    /// `a ≤ b` and `b ≤ c` imply `a ≤ c`, and `Equal` holds only between identical keys.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn utf16_key_order_is_transitive() {
+        let (a, b, c): (char, char, char) = (kani::any(), kani::any(), kani::any());
+        let (mut ba, mut bb, mut bc) = ([0u8; 4], [0u8; 4], [0u8; 4]);
+        let (sa, sb, sc) = (
+            &*a.encode_utf8(&mut ba),
+            &*b.encode_utf8(&mut bb),
+            &*c.encode_utf8(&mut bc),
+        );
+        let (ab, bc_, ac) = (utf16_cmp(sa, sb), utf16_cmp(sb, sc), utf16_cmp(sa, sc));
+        if ab != Ordering::Greater && bc_ != Ordering::Greater {
+            assert!(ac != Ordering::Greater);
+        }
+        assert_eq!(ab == Ordering::Equal, a == b);
     }
 
     /// The parser never panics on any input of ≤ 5 bytes (NFC stubbed): every rejection is a `CanonError`.

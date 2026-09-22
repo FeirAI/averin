@@ -2,7 +2,7 @@
 # Bounded model checking (Kani/CBMC) of the integrity core's encoders and parser, over the Rust code as
 # written. Complements the unbounded Lean model in formal/lean (see formal/README.md).
 #
-#   bash formal/run-kani.sh              # default set: verified on a 4-core / 16 GB runner (seconds each)
+#   bash formal/run-kani.sh              # default set: verified on a 4-core / 16 GB runner (each < 2 min)
 #   bash formal/run-kani.sh --extended   # also the parser-level harnesses (need more memory: CBMC
 #                                        # symbolically executes the full RCP parser / heap strings)
 set -euo pipefail
@@ -19,8 +19,10 @@ run_harness alphabet_is_a_bijection
 run_harness hex_byte_roundtrip
 run_harness hex_digit_is_canonical
 run_harness lp_into_frames_exactly
-# canon.rs — member-key order is total and exact.
+# canon.rs — member-key order is exactly UTF-16 code-unit order (checked against a reference order,
+# including the BMP-vs-astral region where byte order disagrees) and is transitive.
 run_harness utf16_key_order_is_exact
+run_harness utf16_key_order_is_transitive
 
 if [ "${1:-}" = "--extended" ]; then
   run_harness one_byte_tail_is_canonical
