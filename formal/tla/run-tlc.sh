@@ -5,8 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-TLA_VERSION="v1.8.0"
-TLA_SHA256="9d36716ffb5e49d1ba8fae4651eba59f3189887e12eb90e204a42d2e6e993fef"
+TLA_VERSION="v1.7.4"  # a stable, immutable release (v1.8.0 is a rolling pre-release that is re-published)
+TLA_SHA256="936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
 JAR="${TLA2TOOLS_JAR:-${XDG_CACHE_HOME:-$HOME/.cache}/averin-formal/tla2tools-${TLA_VERSION}.jar}"
 if [ ! -f "$JAR" ]; then
   mkdir -p "$(dirname "$JAR")"
@@ -17,13 +17,18 @@ echo "${TLA_SHA256}  ${JAR}" | sha256sum -c --quiet - || { echo "tla2tools.jar c
 
 check() { # spec config expected: pass | <invariant or temporal property that must be violated>
   local out
-  out="$(java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -cleanup -noGenerateSpecTE \
+  out="$(java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -cleanup \
     -config "$2" "$1" 2>&1 || true)"
   if [ "$3" = pass ]; then
     echo "$out" | grep -q "No error has been found" || { echo "$out" | tail -30; echo "FAIL: $2 expected to pass" >&2; exit 1; }
   else
-    echo "$out" | grep -qE "(Invariant|Temporal property) $3 (is|was) violated" \
-      || { echo "$out" | tail -30; echo "FAIL: $2 expected a $3 violation" >&2; exit 1; }
+    # TLC names a violated invariant; for liveness it reports "Temporal properties were violated", so
+    # a liveness config must declare exactly the one expected property.
+    if echo "$out" | grep -qE "Invariant $3 is violated"; then :
+    elif [ "$(grep -E '^PROPERTIES' "$2")" = "PROPERTIES $3" ] \
+      && echo "$out" | grep -qE "Temporal propert(y $3 was|ies were) violated"; then :
+    else echo "$out" | tail -30; echo "FAIL: $2 expected a $3 violation" >&2; exit 1
+    fi
   fi
   echo "ok  $2 (${3})"
 }
