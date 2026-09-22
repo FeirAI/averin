@@ -222,6 +222,16 @@ func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
 	return nil
 }
 
+// MaxBrokerSeq returns the highest allocated broker_seq for the project (0 if none).
+func (p *Postgres) MaxBrokerSeq(projectID string) (int64, error) {
+	ctx := background()
+	var max int64
+	if err := p.pool.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM broker_seq WHERE project_id = $1`, projectID).Scan(&max); err != nil {
+		return 0, fmt.Errorf("store: max broker seq: %w", err)
+	}
+	return max, nil
+}
+
 func (p *Postgres) RecordByIdem(projectID, idemKey string) (Record, bool, error) {
 	ctx := background()
 	row := p.pool.QueryRow(ctx, `

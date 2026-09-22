@@ -329,7 +329,8 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 
 	// Commit under the ingest lock: allocate the gapless broker_seq HERE (so seq order == commit order, D6),
 	// overwrite the placeholder seq in the signed grant_evidence, build + seal + store. Mirrors handleGrant's
-	// commit-ambiguity handling (a store error leaves the seq RESERVED, never released, so a retry reclaims it).
+	// failure handling (settleFailedGrantSeq): a failure that persisted nothing releases the seq; only a
+	// commit-ambiguous store error leaves it RESERVED, so a retry reclaims it.
 	sessionID := p.gr.SessionID
 	var sealed string
 	var created bool
@@ -346,7 +347,7 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		prepared.Evidence["broker_seq"] = seq // OVERWRITE the prepare-time placeholder with the real gapless seq
 		rec, disclosures, e := s.buildGrantRecord(grantID, p.gr, p.req, prepared)
 		if e != nil {
-			return e
+			return s.settleFailedGrantSeq(fr.ProjectID, grantID, e) // nothing persisted → release the seq
 		}
 		var se error
 		sealed, created, se = s.sealAndStore(fr.ProjectID, sessionID, idem, rec, disclosures)
@@ -355,7 +356,8 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 				sealed, created = r2.JSON, false
 				return nil
 			}
-			return fmt.Errorf("%w — broker_seq left RESERVED (commit-ambiguous; a retry of this finalize reclaims it)", se)
+			// Released unless commit-ambiguous (then RESERVED; a retry of this finalize reclaims it).
+			return s.settleFailedGrantSeq(fr.ProjectID, grantID, se)
 		}
 		return nil
 	}()

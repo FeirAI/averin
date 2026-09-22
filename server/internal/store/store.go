@@ -113,10 +113,16 @@ type Store interface {
 	// swallow it). A surfaced orphan SELF-HEALS — the deterministic grant_id makes AllocateBrokerSeq
 	// idempotent, so a retry of the same grant reuses the orphaned seq and records it. A PERMANENT gap
 	// therefore needs the narrow triple of {failure after allocation, failed rollback, client never
-	// retries}, which surfaces as a transparency anomaly the operator investigates. The full production
+	// retries}, which surfaces as a transparency anomaly the operator investigates — and the api's checkpoint
+	// creation refuses to sign while any allocated seq (MaxBrokerSeq) lacks a recorded grant, so such a gap is
+	// never ANCHORED (checkpoints are append-only; an anchored gap would fail verification forever). The full production
 	// hardening is to make allocation and record insertion ONE transaction (held across the cgo signing),
 	// which also subsumes the multi-instance ordering lock — out of scope for the single-instance demo.
 	ReleaseBrokerSeq(projectID, grantID string) error
+	// MaxBrokerSeq returns the highest broker_seq currently ALLOCATED for the project (0 if none). Checkpoint
+	// creation compares it against the recorded grant set under the ingest lock and refuses to sign when an
+	// allocated seq has no recorded grant (a reserved/orphaned seq), so a gap can never be anchored.
+	MaxBrokerSeq(projectID string) (int64, error)
 
 	// Disclosures returns every disclosure secret for the project (for selective_disclosure export),
 	// in canonical (record_id, field) order. Disclosure secrets are written atomically with their
@@ -391,6 +397,18 @@ func (m *Mem) ReleaseBrokerSeq(projectID, grantID string) error {
 	defer m.mu.Unlock()
 	delete(m.proj(projectID).brokerSeq, grantID)
 	return nil
+}
+
+func (m *Mem) MaxBrokerSeq(projectID string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var max int64
+	for _, s := range m.proj(projectID).brokerSeq {
+		if s > max {
+			max = s
+		}
+	}
+	return max, nil
 }
 
 func (m *Mem) LatestCheckpointHash(projectID string) (string, bool, error) {

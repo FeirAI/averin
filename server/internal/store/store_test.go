@@ -147,6 +147,17 @@ func exerciseBrokerSeq(t *testing.T, s Store) {
 	if err := s.ReleaseBrokerSeq("p", "never-allocated"); err != nil {
 		t.Fatalf("release of unallocated grant must be a no-op: %v", err)
 	}
+	// MaxBrokerSeq reports the highest ALLOCATED seq per project (0 when none) — what checkpoint creation
+	// compares against the recorded grant count to refuse anchoring a gap.
+	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 5 {
+		t.Fatalf("MaxBrokerSeq(p) = %d err=%v; want 5", max, err)
+	}
+	if max, err := s.MaxBrokerSeq("other"); err != nil || max != 1 {
+		t.Fatalf("MaxBrokerSeq(other) = %d err=%v; want 1", max, err)
+	}
+	if max, err := s.MaxBrokerSeq("empty"); err != nil || max != 0 {
+		t.Fatalf("MaxBrokerSeq(empty) = %d err=%v; want 0", max, err)
+	}
 }
 
 func TestMemBrokerSeq(t *testing.T) {

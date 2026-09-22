@@ -1698,21 +1698,17 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 			}
 			return seq, aerr
 		}, s.now(), s.brokerKey)
-		// rollback frees a not-yet-recorded allocation and FOLDS a rollback-DELETE failure into the error so
-		// it is surfaced (not silently swallowed). A surfaced orphan self-heals: the deterministic grantID
-		// makes AllocateBrokerSeq idempotent, so a retry of THIS grant reuses the orphaned seq and records it
-		// (no gap). A permanent gap needs the narrow triple of: a failure after allocation, a failed
-		// rollback, AND the client never retrying — a documented Postgres residual (Mem rollback cannot
-		// fail). Full atomicity (one transaction across signing) is the production hardening; see the store
-		// ReleaseBrokerSeq doc.
+		// rollback disposes of a not-yet-recorded allocation via settleFailedGrantSeq: released for every
+		// failure that persisted no record, kept RESERVED only for a commit-ambiguous store error. A failed
+		// release is folded into the error (surfaced, not swallowed) and self-heals on a retry of THIS grant
+		// (the deterministic grantID makes AllocateBrokerSeq idempotent); until then createCheckpoint refuses
+		// to anchor the resulting gap. Full atomicity (one transaction across signing) is the production
+		// hardening; see the store ReleaseBrokerSeq doc.
 		rollback := func(cause error) error {
 			if !allocated {
 				return cause
 			}
-			if re := s.st.ReleaseBrokerSeq(gr.ProjectID, grantID); re != nil {
-				return fmt.Errorf("%w; broker_seq rollback ALSO failed (seq orphaned until a retry of this grant reclaims it): %v", cause, re)
-			}
-			return cause
+			return s.settleFailedGrantSeq(gr.ProjectID, grantID, cause)
 		}
 		if e != nil {
 			if allocErr == nil {
@@ -1728,19 +1724,17 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		}
 		sealed, created, e = s.sealAndStore(gr.ProjectID, gr.SessionID, idem, rec, disclosures)
 		if e != nil {
-			// A store error AT THE COMMIT POINT is AMBIGUOUS: an immediate absence is NOT proof the commit
-			// did not (or will not) become durable (an in-flight/visibility-delayed Postgres commit can
-			// later land). Releasing the seq on a not-yet-visible commit could let a later grant REUSE a
-			// number a durable grant already recorded → duplicate broker_seq → poisoned head. So we NEVER
-			// release here: keeping the broker_seq row ORPHANED reserves the number (it is never reused), and
-			// the deterministic grantID makes a retry idempotent — it reclaims the same seq and reconstructs
-			// the record (if it committed) or records it (if it did not). If the record is ALREADY visibly
-			// durable, surface success; otherwise return the error and let the client retry (seq stays reserved).
+			// If the record is ALREADY visibly durable (a commit whose ack was lost), surface success and keep
+			// the seq it holds. Otherwise only a store error AT THE COMMIT POINT (store.ErrCommitAmbiguous) is
+			// ambiguous — an in-flight Postgres commit can still land, so its seq stays RESERVED (never reused)
+			// and a retry of the deterministic grantID reclaims it. Every OTHER failure (display-seq/heads read,
+			// marshal, seal, begin/insert/disclosure) persisted nothing, so its seq is RELEASED — keeping it
+			// would leave a permanent hole in the recorded [1..N] set for a later checkpoint to anchor.
 			if r2, found2, re := s.st.RecordByIdem(gr.ProjectID, idem); re == nil && found2 {
 				sealed, created = r2.JSON, false
 				return nil // committed + visible
 			}
-			return fmt.Errorf("%w — broker_seq left RESERVED (commit-ambiguous; never released, to avoid reuse; a retry of this grant reclaims it)", e)
+			return rollback(e)
 		}
 		if !created {
 			// defensive: a brand-new grant collapsed (impossible — content is unique). The record exists, so
@@ -1794,6 +1788,27 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		"created":     created,
 		"record":      json.RawMessage(sealed),
 	})
+}
+
+// settleFailedGrantSeq disposes of a broker_seq allocated for a grant whose record did NOT (visibly) commit and
+// returns the error to surface. The caller MUST hold ingestMu (the allocation's serialization) and must already
+// have ruled out a visibly-durable record under the grant's idempotency key.
+//
+//   - store.ErrCommitAmbiguous (a fresh insert whose commit outcome is unknown): the record may still become
+//     durable, and releasing its seq could let a later grant REUSE a number a durable grant holds → duplicate
+//     broker_seq → poisoned head. The seq is left RESERVED; the deterministic grant_id makes a retry reclaim it.
+//   - ANY other error persisted no record (the store contract, see store.ErrCommitAmbiguous), so the seq is
+//     RELEASED. Keeping it would leave a permanent hole in the recorded [1..N] set that a later checkpoint would
+//     anchor forever (the offline verifier reports a non-gapless broker_seq prefix). A failed release is folded
+//     into the error; createCheckpoint independently refuses to sign over any such gap.
+func (s *Server) settleFailedGrantSeq(projectID, grantID string, cause error) error {
+	if errors.Is(cause, store.ErrCommitAmbiguous) {
+		return fmt.Errorf("%w — broker_seq left RESERVED (commit-ambiguous; never released, to avoid reuse; a retry of this grant reclaims it)", cause)
+	}
+	if re := s.st.ReleaseBrokerSeq(projectID, grantID); re != nil {
+		return fmt.Errorf("%w; broker_seq rollback ALSO failed (seq orphaned until a retry of this grant reclaims it; checkpoints refuse to sign until then): %v", cause, re)
+	}
+	return cause
 }
 
 // reconstructCapability re-mints the original capability for an existing grant from its stored
@@ -3074,6 +3089,20 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 	return log, nil
 }
 
+// checkGaplessGrantLog reports an error unless the seq-sorted grant log is exactly [1..N] AND the store's
+// allocated max broker_seq equals N — i.e. every allocated seq is held by exactly one recorded grant.
+func checkGaplessGrantLog(gl []broker.GrantSeqHash, maxAllocated int64) error {
+	for i, g := range gl {
+		if g.Seq != int64(i+1) {
+			return fmt.Errorf("recorded grant broker_seq set is not a gapless [1..N] prefix (position %d holds seq %d)", i+1, g.Seq)
+		}
+	}
+	if n := int64(len(gl)); maxAllocated != n {
+		return fmt.Errorf("allocated broker_seq max %d != %d recorded grants (a reserved or orphaned seq has no recorded grant; retry that grant before checkpointing)", maxAllocated, n)
+	}
+	return nil
+}
+
 // priorGrantHeadRoot returns the cumulative_root of the LATEST stored checkpoint's broker_grant_head, to
 // chain the next head to it (ADR 0004 D6). A project with no checkpoint yet — or whose latest checkpoint
 // predates D6 (no head) — chains from the empty-log root.
@@ -3155,6 +3184,10 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	heads, headsErr := s.st.ProjectHeads(projectID)
 	count, countErr := s.st.RecordCount(projectID)
 	grantRecs, recErr := s.st.GrantRecords(projectID)
+	// The allocated max broker_seq is read in the SAME snapshot: every allocate→seal→insert runs under ingestMu,
+	// so outside it an allocated seq with no recorded grant is never "in flight" — it is a reserved
+	// (commit-ambiguous) or orphaned (failed release) seq, i.e. a real gap the fail-closed check below refuses.
+	maxAlloc, maxAllocErr := s.st.MaxBrokerSeq(projectID)
 	s.ingestMu.Unlock()
 	// Surface any snapshot-read error: signing a checkpoint with an empty frontier (heads=nil) while the
 	// grant head folds a non-empty grant set would anchor a frontier that disagrees with the grant set it
@@ -3164,7 +3197,7 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	// Surface ANY snapshot/chain read error: signing a checkpoint with a defaulted frontier/seq/prev (e.g.
 	// seq silently 0, or prev_checkpoint_hash omitted while broker_grant_head.prior_head_hash still points
 	// at the prior head) would anchor a broken/forked checkpoint, so a read failure must abort, not degrade.
-	for _, e := range []error{headsErr, countErr, recErr, seqErr, prevErr} {
+	for _, e := range []error{headsErr, countErr, recErr, maxAllocErr, seqErr, prevErr} {
 		if e != nil {
 			return "", nil, fmt.Errorf("checkpoint: read project snapshot: %w", e)
 		}
@@ -3183,6 +3216,13 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	gl, err := grantLog(grantRecs)
 	if err != nil {
 		return "", nil, err
+	}
+	// FAIL CLOSED on a broker_seq gap (ADR 0004 D6): checkpoints are append-only, so a head signed over a
+	// recorded set that is not exactly [1..N] — or while an allocated seq above N has no recorded grant — would
+	// anchor a PERMANENT "not a gapless [1..N] prefix" verifier failure. Refuse to sign instead; the gap closes
+	// when the reserved grant is retried (its deterministic grant_id reclaims the seq) or the orphan is released.
+	if err := checkGaplessGrantLog(gl, maxAlloc); err != nil {
+		return "", nil, fmt.Errorf("checkpoint refused: %w", err)
 	}
 	prior, err := s.priorGrantHeadRoot(projectID)
 	if err != nil {
