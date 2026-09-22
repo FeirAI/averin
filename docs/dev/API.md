@@ -56,7 +56,10 @@ or the `Idempotency-Key` header. The caller may also supply any of the allowed t
 
 Batch semantics: the **whole batch** is validated up front (decodability, project binding,
 idempotency, reserved-field checks, and an RCP-canonicalization dry-run). A malformed item rejects
-the entire batch with a deterministic `400` before any item is sealed.
+the entire batch with a deterministic `400` before any item is sealed. The pinned-authority decision
+(`AVERIN_REQUIRE_PINNED_AUTHORITY`, below) and `record_id` uniqueness are also dry-run up front: an
+item whose authority elevation would be rejected fails the whole batch with the documented `500`, and a
+`record_id` collision with the `409`, in both cases with nothing sealed.
 
 **Every item in a multi-item batch needs its OWN `idempotency_key`.** Two items resolving to the same
 `(project_id, idempotency_key)` would collapse in the append-only store — the second would return the

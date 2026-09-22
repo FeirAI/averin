@@ -1087,6 +1087,22 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// With AVERIN_REQUIRE_PINNED_AUTHORITY on, a failed authority elevation makes ingestOne REJECT the item —
+		// a deterministic outcome for a given body + pinned keys, so a later item failing it would otherwise leave
+		// the earlier items committed (and the retry fail identically). Dry-run the SAME decision here
+		// (checkAuthority is pure) and reject the whole batch before anything is sealed, with the same retryable
+		// 500 + metric/WARNING ingestOne would produce. A record with no record_id cannot verify either way
+		// (ingestOne would assign a fresh random one), so the dry-run's verdict matches.
+		if _, isMap := probe["authority"].(map[string]any); isMap && s.requirePinnedAuthority {
+			if v := s.checkAuthority(probe); v.failedElevation {
+				s.ingestMu.Lock() // onFailedElevation's log throttle is guarded by ingestMu
+				s.mAuthorityDowngrades.Inc()
+				err := s.onFailedElevation(v.claimed, v.keyID)
+				s.ingestMu.Unlock()
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
 		// F14: the seal RCP-canonicalizes the record and HARD-rejects floats, out-of-range integers, and
 		// interior NULs (canon.rs) — deterministic 400s the shallow checks above miss. Without this dry-run a
 		// bad field in a LATER batch item would fail only at seal time, AFTER earlier items are already stored
@@ -2845,9 +2861,39 @@ func (s *Server) normalizeAuthority(rec map[string]any) error {
 	if !ok {
 		return nil
 	}
+	v := s.checkAuthority(rec)
+	if v.elevate {
+		a["source"] = v.claimed // verified; evidence_hash/evidence_sig retained for the offline verifier
+		rec["authority"] = a
+		return nil
+	}
+	if v.failedElevation {
+		s.mAuthorityDowngrades.Inc()
+		if err := s.onFailedElevation(v.claimed, v.keyID); err != nil {
+			return err
+		}
+	}
+	a["source"] = "caller_declared"
+	rec["authority"] = a
+	return nil
+}
+
+// authorityVerdict is checkAuthority's side-effect-free decision for one record's authority block.
+type authorityVerdict struct {
+	claimed         string // the caller-claimed authority.source
+	keyID           string // the pinned key's log-safe id, or "unpinned"
+	elevate         bool   // the claim verified under the key pinned for (project, source): seal it as claimed
+	failedElevation bool   // an elevation was attempted and FAILED (normalizeAuthority downgrades or rejects it)
+}
+
+// checkAuthority is the PURE core of normalizeAuthority — no metric, no log, no mutation — so the batch pre-pass
+// can dry-run it (a deterministic authority rejection must reject the WHOLE batch before any item is sealed).
+// rec must carry a map authority.
+func (s *Server) checkAuthority(rec map[string]any) authorityVerdict {
+	a, _ := rec["authority"].(map[string]any)
 	claimed, _ := a["source"].(string)
 	// A record with no elevated claim at all (empty, or already caller_declared) has nothing to
-	// downgrade FROM — only an ATTEMPTED elevation that fails counts toward mAuthorityDowngrades below
+	// downgrade FROM — only an ATTEMPTED elevation that fails counts toward mAuthorityDowngrades
 	// (the silent key-misalignment signal), so ordinary caller_declared traffic does not swamp it, and the
 	// fail-closed toggle never rejects plain caller_declared Phase-1 traffic.
 	attemptedElevation := claimed != "" && claimed != "caller_declared"
@@ -2859,15 +2905,7 @@ func (s *Server) normalizeAuthority(rec map[string]any) error {
 	recProjectID, _ := rec["project_id"].(string)
 	key, pinned := s.authorityKeyFor(recProjectID, claimed)
 	if !pinned {
-		if attemptedElevation {
-			s.mAuthorityDowngrades.Inc()
-			if err := s.onFailedElevation(claimed, "unpinned"); err != nil {
-				return err
-			}
-		}
-		a["source"] = "caller_declared"
-		rec["authority"] = a
-		return nil
+		return authorityVerdict{claimed: claimed, keyID: "unpinned", failedElevation: attemptedElevation}
 	}
 	// T7 model (b): elevate to the claimed source ONLY if the caller-supplied evidence_sig verifies under that
 	// source's pinned key over the canonical authority preimage; else fall back to caller_declared.
@@ -2875,18 +2913,11 @@ func (s *Server) normalizeAuthority(rec map[string]any) error {
 	eh, _ := a["evidence_hash"].(string)
 	es, _ := a["evidence_sig"].(string)
 	if verifyAuthorityEvidence(claimed, recProjectID, recordID, eh, es, key) {
-		a["source"] = claimed // verified; evidence_hash/evidence_sig retained for the offline verifier
-	} else {
-		// A source IS pinned but the evidence failed to verify under it — a genuine key-misalignment
-		// (wrong signature, wrong preimage, or a forged claim), not just an unconfigured source.
-		s.mAuthorityDowngrades.Inc()
-		if err := s.onFailedElevation(claimed, authorityKeyID(key)); err != nil {
-			return err
-		}
-		a["source"] = "caller_declared"
+		return authorityVerdict{claimed: claimed, elevate: true}
 	}
-	rec["authority"] = a
-	return nil
+	// A source IS pinned but the evidence failed to verify under it — a genuine key-misalignment
+	// (wrong signature, wrong preimage, or a forged claim), not just an unconfigured source.
+	return authorityVerdict{claimed: claimed, keyID: authorityKeyID(key), failedElevation: true}
 }
 
 // onFailedElevation is the companion to the mAuthorityDowngrades counter: it emits a rate-limited WARNING that
