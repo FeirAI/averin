@@ -39,3 +39,19 @@ vuln:
 	cd server && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 supply-chain: deny vuln
+
+# Formal verification gates (see formal/README.md). Needs elan/Lean 4.30.0, cargo-kani 0.68, Java.
+.PHONY: formal formal-lean formal-refinement formal-kani formal-tla
+formal: formal-lean formal-refinement formal-kani formal-tla
+
+formal-lean:
+	cd formal/lean && lake build --wfail && ./check-axioms.sh
+
+formal-refinement:
+	python3 formal/check-refinement.py
+
+formal-kani:
+	bash formal/run-kani.sh
+
+formal-tla:
+	bash formal/tla/run-tlc.sh

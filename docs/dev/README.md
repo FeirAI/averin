@@ -26,6 +26,7 @@ composes with sibling planes.
 | [SECURITY.md](SECURITY.md) | Threat model, invariants, authn/authz, trust boundaries, and what averin deliberately does **not** do. |
 | [INTEGRATION.md](INTEGRATION.md) | Standalone client integration (SDKs + raw API); optional cross-plane composition via the contracts. |
 | [TESTING.md](TESTING.md) | Running the tests + the offline-verifier conformance vectors; a contributing note. |
+| [../../formal/README.md](../../formal/README.md) | **Formal verification**: what is machine-proved (Lean seal/canon/DAG/chain theorems, TLA+ server models, Kani harnesses), the trust boundary, and the open gaps. |
 | [LIMITATIONS.md](LIMITATIONS.md) | Shipped-behavior bounds: the in-memory export/verify size bound (+ concurrency cap and write-timeout exemption), the paged list read, the filtered checkpoint grant-head read, OTel scrub scope, and consume-ledger retention. |
 
 ## The claim, precisely
@@ -53,3 +54,4 @@ summarizes them for developers.
 | `spec/` | schema v2, RCP v1, golden vectors, adversarial fixtures. |
 | `deploy/` | `docker compose` self-host. |
 | `docs/` | coverage limits, operator verification, ADRs, and this `dev/` set. |
+| `formal/` | Lean 4 proofs, TLA+ models, Kani harness runner, and the Rust↔Lean refinement gate. |

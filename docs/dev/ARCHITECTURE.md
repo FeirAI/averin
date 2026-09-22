@@ -148,6 +148,21 @@ from the bundle alone. **Two postures:**
 The verdict is a typed report (see [API.md → Verification report](API.md#verification-report)). PASS
 is integrity-level; the capstone is the higher, separately-stated claim.
 
+### Formal model
+
+Algorithms 1–6 have a Lean 4 counterpart in [`formal/lean/Averin/`](../../formal/lean/Averin):
+
+| Algorithm | Model | Proof |
+|---|---|---|
+| 1 | `Canon.lean` | `ser_injective` |
+| 2, 3 | `Preimage.lean`, `Seal.lean` | `record_seal_sound`, `checkpoint_seal_sound`, `signed_families_disjoint` |
+| 4 | `Seal.lean` | `commitment_binding` |
+| 5 | `Dag.lean` | `bundle_eq_closure` |
+| 6 | `Chain.lean` | `unique_history` |
+
+`formal/check-refinement.py` keeps the models in step with this code. Algorithm 7's verdict logic
+is covered by the adversarial suite; it is not formally modelled yet.
+
 ## Domain model
 
 - **Record** — one observed event (schema v2, closed top-level key set). Carries identity
