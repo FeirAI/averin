@@ -23,6 +23,13 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 PREIMAGE = ROOT / "formal" / "lean" / "Averin" / "Preimage.lean"
+CATALOGUE = ROOT / "formal" / "lean" / "Averin" / "Catalogue.lean"
+
+# Whole-tree sweep: every averin.*.vN / flightrecorder.*.vN string literal in production code (tests
+# excluded, comments stripped) must be a Preimage family tag or a Catalogue tag. This catches a new
+# context introduced anywhere (a new sign/hash call site, a new id namespace, a new evidence domain).
+SWEEP_ROOTS = [("core/src", "*.rs"), ("server/internal", "*.go"), ("server/cmd", "*.go")]
+TAG_LITERAL = re.compile(r'"((?:averin|flightrecorder)\.[a-z0-9_.]+\.v[0-9]+)"')
 
 NAMED_TAGS = {
     "recordSig": ("core/src/sign.rs", r'RECORD_SIG_TAG: &str = "([^"]+)"'),
@@ -43,7 +50,9 @@ TAG_SITES = [
     ("core/src/verify.rs", r'const TAG: &str = "([^"]+)"'),
 ]
 
-ALLOWLIST: dict[str, str] = {}
+ALLOWLIST: dict[str, str] = {
+    # RFC 3161 tokens are parsed and verified, never produced; they carry no averin tag.
+}
 
 errors: list[str] = []
 
@@ -52,6 +61,15 @@ lean = {
     for m in re.finditer(r'def (\w+) : Family :=\s*⟨"[^"]*",\s*"([^"]+)"', PREIMAGE.read_text())
 }
 lean_tags = set(lean.values())
+cat_block = re.search(r"def catalogueTags : List String :=(.*?)(?:\n\n|/--)", CATALOGUE.read_text(), re.S)
+ns_block = re.search(r"def serverIdNamespaces : List String :=(.*?)\n\n", CATALOGUE.read_text(), re.S)
+catalogue_tags = set()
+for blk in (cat_block, ns_block):
+    if not blk:
+        errors.append(f"could not parse catalogueTags / serverIdNamespaces in {CATALOGUE}")
+    else:
+        catalogue_tags |= set(re.findall(r'"([^"]+)"', blk.group(1)))
+lean_tags |= catalogue_tags
 if not lean:
     errors.append(f"no Family definitions found in {PREIMAGE}")
 
@@ -72,9 +90,26 @@ for path, rx in TAG_SITES:
     for m in re.finditer(rx, (ROOT / path).read_text()):
         rust_tags.setdefault(m.group(1), path)
 
+swept = 0
+for root, pattern in SWEEP_ROOTS:
+    for f in sorted((ROOT / root).rglob(pattern)):
+        if f.name.endswith("_test.go") or "/tests/" in str(f) or "/testdata/" in str(f):
+            continue
+        rel = f.relative_to(ROOT)
+        for n, line in enumerate(f.read_text().splitlines(), 1):
+            code = line.split("//", 1)[0]
+            for m in TAG_LITERAL.finditer(code):
+                swept += 1
+                rust_tags.setdefault(m.group(1), f"{rel}:{n}")
+
+for tag in sorted(catalogue_tags):
+    if tag not in rust_tags:
+        errors.append(f"Catalogue.lean: tag {tag!r} no longer appears in core/src or server/ (stale model)")
+
 for tag, where in sorted(rust_tags.items()):
     if tag not in lean_tags and tag not in ALLOWLIST:
-        errors.append(f"{where}: tag {tag!r} has no Family in Preimage.lean (add one, or allowlist it with a reason)")
+        errors.append(f"{where}: tag {tag!r} has no Family in Preimage.lean or entry in Catalogue.lean "
+                      "(add one, or allowlist it with a reason)")
 
 for fam, tag in sorted(lean.items()):
     if tag not in rust_tags:
@@ -84,4 +119,5 @@ if errors:
     for e in errors:
         print(f"tag inventory: FAIL: {e}", file=sys.stderr)
     sys.exit(1)
-print(f"tag inventory: OK ({len(lean)} Lean families, {len(rust_tags)} Rust tags)")
+print(f"tag inventory: OK ({len(lean)} Lean families + {len(catalogue_tags)} catalogue tags; "
+      f"{len(rust_tags)} distinct tags in the code, {swept} literal sites swept)")

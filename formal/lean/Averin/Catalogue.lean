@@ -238,12 +238,31 @@ theorem server_id_nul_collision :
     ∃ ns p i p' i', p ≠ p' ∧ serverIdInput ns p i = serverIdInput ns p' i' :=
   ⟨[1], [97], [98, 0, 99], [97, 0, 98], [99], by decide, by decide⟩
 
-theorem namespaces_nul_free : ∀ ns ∈ ["averin.grant.id.v1", "averin.use.id.v1",
-    "averin.denial.id.v1", "averin.use_outcome.id.v1", "averin.introspection.id.v1"],
-    0 ∉ ascii ns := by decide
+def serverIdNamespaces : List String :=
+  ["averin.grant.id.v1", "averin.use.id.v1", "averin.denial.id.v1", "averin.use_outcome.id.v1",
+   "averin.introspection.id.v1"]
 
-theorem namespaces_distinct : (["averin.grant.id.v1", "averin.use.id.v1", "averin.denial.id.v1",
-    "averin.use_outcome.id.v1", "averin.introspection.id.v1"].map ascii).Pairwise (· ≠ ·) := by
+theorem namespaces_nul_free : ∀ ns ∈ serverIdNamespaces, 0 ∉ ascii ns := by decide
+
+theorem namespaces_distinct : (serverIdNamespaces.map ascii).Pairwise (· ≠ ·) := by decide
+
+/-! ## The complete tag inventory
+
+`catalogueTags` lists every domain string that is not the leading `LP` tag of a `Preimage.Family`:
+the grant PoP challenge's `"tag"` field (inside its JSON), the grant-void tombstone's evidence
+`domain` (inside a canonical-JSON evidence payload, first byte `{`, so `json_disjoint_from_framed`
+separates it from every framed family), the denial-salt message, and the server id namespaces.
+`formal/check-refinement.py` fails unless every `averin.*.vN` literal in `core/src` and
+`server/internal` is a `Family` tag or appears here. -/
+def catalogueTags : List String :=
+  ["averin.broker.pop.v1", "averin.broker.grant_void.v1", "averin.denial.salt.v1"] ++
+    serverIdNamespaces
+
+/-- No catalogue domain string reuses a framed-family tag, and they are pairwise distinct. -/
+theorem catalogue_tags_fresh :
+    (catalogueTags.map ascii).Pairwise (· ≠ ·) ∧
+    ∀ t ∈ catalogueTags, ∀ F ∈ signedFamilies ++ hashFamilies ++ [grantHeadSeed],
+      ascii t ≠ ascii F.tag := by
   decide
 
 end Averin.Catalogue

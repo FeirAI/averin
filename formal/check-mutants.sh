@@ -40,7 +40,7 @@ kani_harness() {
 fresh_tree() {
   rm -rf "$tree"
   mkdir -p "$tree/formal"
-  cp -R core spec Cargo.toml Cargo.lock rust-toolchain.toml "$tree/"
+  cp -R core spec server Cargo.toml Cargo.lock rust-toolchain.toml "$tree/"
   # formal/ minus build outputs (the Lean .lake dir is large and irrelevant here).
   (cd formal && find . -path ./lean/.lake -prune -o -type f -print) | while read -r f; do
     mkdir -p "$tree/formal/$(dirname "$f")"

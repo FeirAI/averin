@@ -8,9 +8,9 @@ that keeps the gates honest.
 
 | Layer | Tool | What it covers | Run |
 |---|---|---|---|
-| Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every hashed and signed preimage, the seal theorem, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
+| Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every hashed and signed preimage (full catalogue, including JSON challenges, raw keys, Merkle nodes and server id derivations), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
 | Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order and transitive (parser-level and base64 chunk harnesses in an extended set) | `bash formal/run-kani.sh` |
-| Protocol and concurrency models | TLA+ / TLC (`tla/`) | gapless grant-transparency log under failures and lost rollbacks; consume-before-act ledger with multiple gateways, releases and TTL sweeps | `bash formal/tla/run-tlc.sh` |
+| Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log under failures, ambiguous commits, lost rollbacks and the operator `grant_void` tombstone (no anchored gap, no duplicate seq, no permanent checkpoint outage); consume-before-act ledger with multiple gateways, releases and TTL sweeps | `bash formal/tla/run-tlc.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
 | Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | eight known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
 
@@ -18,8 +18,14 @@ that keeps the gates honest.
 
 `Averin.Seal.record_seal_sound` (and `checkpoint_seal_sound`):
 
-> If a record body's signature verifies under the pinned key, the body is **exactly** one the key
-> holder sealed, unless SHA-256 has a collision.
+> A signature cannot be replayed across contexts even if roles share a key: if a record body's
+> signature verifies under the pinned key, the body is **exactly** one the key holder sealed,
+> unless SHA-256 has a collision.
+
+The signer model (`Seal.HonestSigner`) lets the same key also sign checkpoints, every other
+signed family with *arbitrary* field values, raw 32-byte challenge digests, the JSON grant PoP
+challenge and the denial salt. So the "shared key" sentence is the theorem, not a gloss on it.
+Giving two signed families the same tag breaks the build.
 
 Everything between "signature verifies" and "same body" is proved, not assumed:
 
@@ -30,6 +36,16 @@ Everything between "signature verifies" and "same body" is proved, not assumed:
    role-key disjointness is defence in depth. `signed_message_long` adds that, given the
    verifier's own digest validation, none of them can equal the raw 32-byte digests that the
    broker challenge families sign.
+   `Catalogue.lean` covers every remaining byte string averin hashes or signs: the JSON grant PoP
+   challenge, the denial salt, the raw key under `cnf_kid`, the credential-binding descriptor,
+   the `uuidV5Shaped` server ids, and the RFC 6962 Merkle leaf and node. It proves each one
+   disjoint from every framed family, by first byte or by length. That argument used to live
+   only in prose.
+   It also proves the server ids injective *only* for NUL-free project ids and exhibits the
+   collision otherwise. The server therefore rejects NUL in `project_id`, `idempotency_key` and
+   `record_id`.
+   `check-refinement.py` sweeps every `averin.*.vN` literal in `core/src` and `server/`, and fails
+   unless each is a Lean family or catalogue tag.
 2. **No delimiter injection** (`Encoding.encodeFields_inj`, `Family.msg_inj`). Every preimage
    is `LP(tag) ‖ fields ‖ tail?`, and equal bytes imply equal fields.
 3. **Canonical JSON is injective** (`Canon.ser_injective`). The model covers `write_string`'s
@@ -43,8 +59,11 @@ Everything between "signature verifies" and "same body" is proved, not assumed:
 
 Cryptography is never axiomatised as injective. SHA-256 compresses, so that axiom would be false
 and every theorem vacuous. Hash results carry an explicit collision disjunct. Ed25519
-unforgeability is a hypothesis about which messages were signed. `check-axioms.sh` fails the
-build if any headline theorem depends on more than Lean's three standard axioms.
+unforgeability is a hypothesis about which messages were signed. `check-axioms.sh` audits **every**
+declaration in the `Averin` namespace (currently 455), not a hand-picked list. The build fails if
+any of them depends on anything beyond `propext`, `Classical.choice` and `Quot.sound`, which
+also catches `sorry` and `native_decide`, both of which are axioms. It also rejects `axiom`,
+`admit`, `implemented_by` and `extern` tokens.
 
 Other results:
 
@@ -175,24 +194,39 @@ golden vectors, the adversarial suite, and the audit's 200k-document differentia
 
 ## TLA+ (server protocols)
 
-`tla/GrantLog.tla` models the broker_seq grant-transparency log. Allocate, seal and insert run
-under `ingestMu`. Failures may lose their rollback, clients may retry or give up, and
-`createCheckpoint` signs the recorded set. Each configuration fixes one implementation variant:
+`tla/GrantLog.tla` models the broker_seq grant-transparency log:
 
-| Config | Variant | Result |
+- Allocate, seal and insert run under `ingestMu`.
+- A commit can be *ambiguous*: it lands, but the server sees an error.
+- Releases can be lost.
+- Clients may retry or give up.
+- `createCheckpoint` signs the recorded set.
+- An operator may void a reserved, unrecorded seq with a signed `grant_void` tombstone. The voided
+  seq stays in the allocation max, and the voided grant id can never record it.
+
+Each configuration fixes one implementation variant and asserts **one** outcome:
+
+| Config | Variant | Expected result |
 |---|---|---|
 | `GrantLog_current.cfg` | pre-fix server (no release on error) | **violates** `AnchoredGapless`: grant A fails after allocating 1, B records 2, the checkpoint signs `{2}`, and the project fails verification forever |
-| `GrantLog_release_lost.cfg` | release on error, but the Postgres DELETE can fail | **violates** `AnchoredGapless` |
-| `GrantLog_failclosed.cfg` | plus fail-closed checkpoint, unconditional release | **violates** `HoleFree`: an orphaned seq, released later while higher seqs exist, becomes a permanent mid-sequence hole, so no gapless checkpoint can ever be signed again. The audit missed this; TLC found it. |
-| `GrantLog_fixed.cfg` | release on error, only while the seq is still the max, plus fail-closed checkpoint | all invariants hold (3,350 states) |
+| `GrantLog_release_lost.cfg` | release on error, but the Postgres DELETE can fail, no fail-closed checkpoint | **violates** `AnchoredGapless` |
+| `GrantLog_failclosed.cfg` | fail-closed checkpoint, release not restricted to the max or to freshly allocated seqs | **violates** `HoleFree`: an orphan released while higher seqs exist becomes a permanent mid-sequence hole |
+| `GrantLog_reuse_release.cfg` | release a seq that a retry *reused* after an ambiguous commit | **violates** `NoDuplicateSeq`: the late commit and the next grant share a seq |
+| `GrantLog_fixed.cfg` | shipped design: release only fresh, max seqs; fail-closed checkpoint; operator void | `AnchoredGapless` and `NoDuplicateSeq` hold, exhaustively for 3 grants (10.6M states) |
+| `GrantLog_wedge.cfg` | no void; clients may never retry | **violates** `CheckpointRecovers`: an orphaned seq wedges checkpointing forever |
+| `GrantLog_fair_retry.cfg` | no void; every client retries until it commits | `CheckpointRecovers` holds |
+| `GrantLog_fixed_live.cfg` | operator void; clients may never retry | `CheckpointRecovers` holds, with strong fairness on the operator, for 2 grants (the 3-grant space is too slow for liveness checking in CI) |
 
 `tla/ConsumeLedger.tla` models consume-before-act. Several gateways race on one ledger through
 `INSERT … ON CONFLICT DO NOTHING`, release on provable non-action, and run the TTL sweep.
-`AtMostOncePerKey` holds when `Retention ≥ MaxTTL`, which is the floor `main.go` enforces. With a
-shorter retention, TLC finds a live key pruned mid-flight.
+`AtMostOncePerKey` holds when `Retention ≥ MaxTTL`, which is the floor `main.go` enforces
+(`ConsumeLedger_safe.cfg`). With a shorter retention, TLC finds the **replay**, where the
+resource acts twice on one key (`ConsumeLedger_short_retention_replay.cfg`). It also finds a live
+in-flight key being pruned (`ConsumeLedger_short_retention.cfg`).
 
 `tla/run-tlc.sh` runs every configuration and checks its **expected** outcome. The fixed designs
-must pass, and each unsafe variant must still produce its counterexample.
+must pass, and each unsafe variant must still produce the counterexample named above. TLC is
+pinned to the immutable `v1.7.4` release and verified by sha256.
 
 ## Tool choice: why not K, and why not a separate Z3 layer
 

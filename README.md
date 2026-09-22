@@ -127,19 +127,22 @@ cargo test  --workspace          # golden vectors + adversarial fixtures (the ac
 The Level-1 claim, *"sealed by this key, unchanged since, in a verifiable history"*, rests on a few
 properties. These are checked by machine in [`formal/`](formal/README.md), not only by tests:
 
-- **Lean 4** (no `sorry`; only Lean's three standard axioms):
+- **Lean 4** (no `sorry`; every declaration audited to depend only on Lean's three standard axioms):
   - **the seal theorem.** If a record or checkpoint verifies under the pinned key, its body is
-    *exactly* one the key holder sealed, unless SHA-256 has a collision;
+    *exactly* one the key holder sealed, unless SHA-256 has a collision. This holds even when the
+    same key also signs every other kind of message averin signs, so a signature cannot be
+    replayed across contexts even if roles share a key;
   - canonical JSON (RCP v1) is injective;
-  - every hashed or signed preimage family is domain-separated from every other, so a signature
-    cannot be replayed across contexts even if roles share a key;
+  - every byte string averin hashes or signs is in a proved-disjoint catalogue: framed families,
+    JSON challenges, raw keys, Merkle nodes and server id derivations;
   - hiding commitments are binding;
   - **no omission, no injection.** A verified bundle is exactly the signed ancestor-closure of the
     latest checkpoint;
   - the checkpoint history is unique.
-- **TLA+** models the gapless grant-transparency log and the consume-before-act ledger.
-  Model checking reproduced one grant-sequence bug found in the audit and found a second one,
-  both fixed.
+- **TLA+** models the grant-transparency log and the consume-before-act ledger. Every
+  counterexample for a pre-fix design is kept as an expected failure. The shipped design has no
+  anchored gap, no duplicate sequence number, and no permanent checkpoint outage, given the
+  operator `grant_void` remediation.
 - **Kani** checks the real Rust encoders (base64url, `sha256:<hex>`, LP framing, key order).
 - **An executable Lean oracle** runs the model over a corpus (every C0 control, DEL, U+2028,
   BMP-vs-astral key order, i64 extremes, one sample per preimage family), and CI fails when the
