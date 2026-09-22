@@ -145,8 +145,9 @@ time from a role-separated key:
 
 - **Disclosed revocation (M5) — server-native.** Set `AVERIN_REVOCATION_SEED` (a key disjoint from the broker,
   resource, attestation, and cosig keys). `POST /v2/revoke {project_id, grant_id}` marks a grant revoked; every
-  `/v2/export` then carries a signed, time-bounded `revocation_list` (its freshness window anchored to the latest
-  checkpoint). Verify with `revocation_keys` pinned → a revoked grant's use (brokered OR native) is blocked.
+  `/v2/export` carries a signed, time-bounded `revocation_list` (its freshness window anchored to the latest
+  checkpoint) — an empty one while nothing is revoked, so a verifier pinning `revocation_keys` reads `fresh`
+  rather than `missing`. Verify with `revocation_keys` pinned → a revoked grant's use (brokered OR native) is blocked.
 - **Federation (M4) — server-native.** Set `AVERIN_BROKER_ID`; the server tags its grants with `broker_id` and
   emits a per-broker_id `broker_grant_heads` map in each checkpoint. Verify with `federated_broker_keys[<id>]`
   pinned → `federation_status: sequence_verified`. (One server = one broker_id; combine bundles from multiple

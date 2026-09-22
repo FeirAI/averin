@@ -253,7 +253,10 @@ Marks a `grant_id` revoked (permissive by id — the id need not already exist l
 compromised/federated id can be revoked preemptively). From the moment it returns `201`, `/v2/use` and
 `/v2/use-intent` reject (`400`, before consuming the credential) any capability of that grant. The next
 `/v2/export` carries a signed, time-bounded `revocation_list`; the offline verifier then blocks any use
-of a revoked grant. (Known limit: the verifier evaluates a use against the list *as of the export*, so a
+of a revoked grant. Whenever revocation is enabled, every export carries a signed `revocation_list`, an
+**empty** one (`"revoked_grant_ids": []`) when nothing is revoked. A verifier that pins `revocation_keys`
+reads a bundle with no list as `revocation_status: missing` (which blocks the capstone), so "nothing is
+revoked" is an affirmative, signed statement rather than an absent field. (Known limit: the verifier evaluates a use against the list *as of the export*, so a
 use recorded **before** the revoke is also reported blocked; distinguishing pre-revocation uses needs a
 verifier-side change.)
 

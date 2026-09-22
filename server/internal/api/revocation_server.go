@@ -198,7 +198,8 @@ func (s *Server) isRevoked(projectID, grantID string) bool {
 
 // buildRevocationListForExport produces the signed revocation_list for a project's revoked set, with a freshness
 // window anchored to the latest checkpoint's created_ts (the same basis the deployment_attestation uses), so the
-// verifier reads it `fresh` for THIS bundle and `stale` for a much-later one. Returns nil when nothing is revoked.
+// verifier reads it `fresh` for THIS bundle and `stale` for a much-later one. Never nil: an empty revoked set
+// yields a signed list with `revoked_grant_ids: []`.
 func (s *Server) buildRevocationListForExport(projectID string, checks []store.Checkpoint) (map[string]any, error) {
 	// Read the published immutable snapshot (copy-on-write, see handleRevoke): ranging it needs no lock.
 	s.revokedMu.Lock()
@@ -208,9 +209,10 @@ func (s *Server) buildRevocationListForExport(projectID string, checks []store.C
 	for id := range set {
 		ids = append(ids, id)
 	}
-	if len(ids) == 0 {
-		return nil, nil
-	}
+	// An EMPTY list is still emitted (and signed): with a revocation key pinned, the verifier reads a bundle with
+	// no revocation evidence as `missing` (a stripped list must not read as a clean `absent`), so "nothing is
+	// revoked" has to be an affirmative, signed, dated statement — otherwise every export of a deployment with
+	// revocation configured and zero revocations would be blocked from the capstone.
 	sort.Strings(ids) // deterministic order (the list is canonicalized + signed)
 
 	createdTS := ""

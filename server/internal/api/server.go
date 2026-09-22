@@ -4012,8 +4012,9 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 	if s.coverageManifest != "" {
 		bundle["coverage_manifest"] = json.RawMessage(s.coverageManifest)
 	}
-	// M5 (ADR 0005): emit a signed, time-bounded revocation_list over the project's revoked grant_ids, when a
-	// revocation authority key is configured and there is at least one revoked grant. Its freshness window is
+	// M5 (ADR 0005): emit a signed, time-bounded revocation_list over the project's revoked grant_ids whenever a
+	// revocation authority key is configured — EMPTY when nothing is revoked, because a verifier pinning that key
+	// reads a bundle with no list as `missing` (blocks the capstone). Its freshness window is
 	// derived from the latest checkpoint's created_ts (same anchor the attestation uses), so the verifier reads
 	// it `fresh` for this bundle and `stale` for a much-later one. Built BEFORE the attestation so the
 	// attestation can bind its digest (#3 strip-downgrade defense).

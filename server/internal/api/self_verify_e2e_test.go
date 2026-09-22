@@ -34,12 +34,16 @@ func TestSelfVerifyEvaluatesRevocationMembership(t *testing.T) {
 		t.Fatalf("checkpoint: %d %s", code, r)
 	}
 
-	// BEFORE the revoke: the self-view pins the revocation key but the export carries no revocation_list, so the
-	// status is `missing` (fail-closed: with a revocation key pinned, absent revocation evidence blocks the
-	// capstone rather than reading as a clean `absent` that stripping the list could forge).
+	// BEFORE the revoke: the self-view pins the revocation key and the export carries a signed EMPTY
+	// revocation_list, so the list is EVALUATED — never `missing` (which blocks the capstone for every deployment
+	// with revocation configured and zero revocations) and never `absent`. The self-view has no TSA anchor to date
+	// the list, so it reads `stale` here; the anchored path reads `fresh` (TestCapstoneWithRevocationConfigured).
 	_, before := do(t, h, "GET", "/v2/verify?project=p1", "")
-	if !strings.Contains(before, `"revocation_status":"missing"`) {
-		t.Fatalf("pre-revoke self-view should report the revocation list as missing: %s", before)
+	if strings.Contains(before, `"revocation_status":"missing"`) || strings.Contains(before, `"revocation_status":"absent"`) {
+		t.Fatalf("pre-revoke self-view must evaluate the signed empty revocation_list (not missing/absent): %s", before)
+	}
+	if !strings.Contains(before, `"revocation_status":"stale"`) || !strings.Contains(before, `"revoked_uses_blocked":0`) {
+		t.Fatalf("pre-revoke self-view: an evaluated, empty, un-anchored list (stale, nothing blocked): %s", before)
 	}
 
 	// Revoke the grant.

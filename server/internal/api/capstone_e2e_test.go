@@ -86,6 +86,71 @@ func TestCapstoneAttestedCompleteEndToEnd(t *testing.T) {
 	}
 }
 
+// TestCapstoneWithRevocationConfigured (review finding 2): a deployment with a revocation authority configured
+// (AVERIN_REVOCATION_SEED) and ZERO revocations must still reach the capstone. The verifier pins revocation_keys and
+// reads a bundle with no revocation evidence as `missing` (which blocks the capstone), so the producer must emit a
+// signed EMPTY revocation_list — which the attestation then binds — and the verifier must read it `fresh`.
+func TestCapstoneWithRevocationConfigured(t *testing.T) {
+	c, _ := core.New(seed)
+	rc, _ := core.New(resourceSeed)
+	att := attestationKey()
+	taxKey := taxonomyKey()
+	tsa := testTSAKey()
+	rev := revocationKey()
+	ak := grantAgentKey()
+
+	manifest := `{"side_effect_closure":[{"resource_id":"orders-db","action":"db.query:orders-ro","may_touch":[]}]}`
+	h := api.New(c, store.NewMem(), "k0").
+		WithBroker(brokerIssuingKey()).
+		WithResource(rc, "orders-db").
+		WithAttestation(att).
+		WithCoverageManifest(manifest).
+		WithRevocation(rev).
+		Routes()
+
+	grantID, cap := mkGrant(t, h, ak, "idem-grant")
+	code, resp := do(t, h, "POST", "/v2/use-intent", useBody(t, "idem-intent", cap, grantID, ak, "SELECT 1", "nonce-1"))
+	if code != http.StatusCreated {
+		t.Fatalf("use-intent (%d): %s", code, resp)
+	}
+	var intent struct {
+		UseID string `json:"use_id"`
+	}
+	json.Unmarshal([]byte(resp), &intent)
+	ob, _ := json.Marshal(map[string]any{"idempotency_key": "idem-outcome", "project_id": "p1", "session_id": "s1", "intent_record_id": intent.UseID, "status": "ok"})
+	if code, r := do(t, h, "POST", "/v2/use-outcome", string(ob)); code != http.StatusCreated {
+		t.Fatalf("use-outcome (%d): %s", code, r)
+	}
+	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint: %d %s", code, r)
+	}
+	_, exp := do(t, h, "GET", "/v2/export?project=p1", "")
+	if !strings.Contains(exp, `"revoked_grant_ids":[]`) {
+		t.Fatalf("with revocation configured and nothing revoked, the export must carry a signed empty revocation_list:\n%s", exp)
+	}
+	anchored := attachTestAnchor(t, exp, tsa)
+
+	taxJSON, digest, ver, err := taxonomy.Sign(c, taxKey, 1, 0, 9_999_999_999,
+		[]taxonomy.Entry{{ResourceID: "orders-db", Action: "db.query:orders-ro"}}, nil)
+	if err != nil {
+		t.Fatalf("taxonomy.Sign: %v", err)
+	}
+	opts := fmt.Sprintf(`{"broker_authority_keys":[%q],"resource_authority_keys":[%q],"tsa_keys":[%q],"attestation_keys":[%q],"revocation_keys":[%q],"taxonomy":%s,"taxonomy_keys":[%q],"taxonomy_digest":%q,"taxonomy_version":%d}`,
+		c.PubKey(), rc.PubKey(), tsaPubEncoded(tsa), attestPubEncoded(att), attestPubEncoded(rev), taxJSON, attestPubEncoded(taxKey), digest, ver)
+	rep := c.VerifyBundleWith(anchored, opts)
+	for _, want := range []string{
+		`"ok":true`,
+		`"revocation_status":"fresh"`,
+		`"revoked_uses_blocked":0`,
+		`"attestation_status":"attested_claims"`,
+		`"action_completeness":"attested_complete_over_brokered_surface"`,
+	} {
+		if !strings.Contains(rep, want) {
+			t.Fatalf("capstone with revocation configured must verify with %s\nreport: %s", want, rep)
+		}
+	}
+}
+
 // TestCapstoneOverBoundedReuseEndToEnd proves the capstone over an N-Use (bounded_reuse) credential: one
 // grant exercised TWICE via two-phase PoP uses (usn 1 and 2) reaches attested_complete_over_brokered_surface
 // with bounded_reuse_grants:1 and no overspend/replay — the cross-cutting bounded_reuse × capstone path.
