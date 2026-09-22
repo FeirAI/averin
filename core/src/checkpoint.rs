@@ -195,6 +195,16 @@ pub fn verify_checkpoint_sealed(cp: &CanonValue, vk: &VerifyingKey) -> Result<()
     if domain != CHECKPOINT_DOMAIN {
         return Err(CheckpointError::DomainMismatch(domain.to_string()));
     }
+    // Pin the canonical profile exactly as `record::verify_content_hash` does: the Lean seal theorem
+    // (`Seal.checkpointHashOf`) models the preimage with `canon_version = "rcp-1"`, so a body declaring
+    // any other profile is outside what the proof covers and must not verify.
+    let cv = str_field(cp, "canon_version")?;
+    if cv != CHECKPOINT_CANON_VERSION {
+        return Err(CheckpointError::Hash(RecordError::CanonVersionMismatch {
+            expected: CHECKPOINT_CANON_VERSION.to_string(),
+            found: cv.to_string(),
+        }));
+    }
     let stored = str_field(cp, "checkpoint_hash")?.to_string();
     let computed = compute_checkpoint_hash(cp).map_err(CheckpointError::Hash)?;
     if stored != computed {
@@ -377,6 +387,34 @@ mod tests {
             r#"{{"content_hash":"{ch}","causal_prev_hashes":[{plist}]}}"#
         ))
         .unwrap()
+    }
+
+    /// A checkpoint sealed under a foreign `canon_version` is internally consistent (hash and sig both
+    /// check) but is outside the profile the seal theorem models, so it must not verify — the same pin
+    /// `record::verify_content_hash` applies to records.
+    #[test]
+    fn foreign_canon_version_is_rejected() {
+        let sk = signing_key_from_seed(&[8u8; 32]);
+        let body = checkpoint_body(
+            "cp0",
+            "proj",
+            0,
+            None,
+            &[h(1)],
+            1,
+            "2026-06-15T10:00:00.000Z",
+            key_block(),
+        )
+        .unwrap();
+        let foreign = set_field(&body, "canon_version", CanonValue::string("rcp-2"));
+        let sealed = seal_checkpoint(&foreign, &sk).unwrap();
+        assert_eq!(
+            verify_checkpoint_sealed(&sealed, &sk.verifying_key()),
+            Err(CheckpointError::Hash(RecordError::CanonVersionMismatch {
+                expected: "rcp-1".into(),
+                found: "rcp-2".into(),
+            }))
+        );
     }
 
     #[test]
