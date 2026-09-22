@@ -11,7 +11,9 @@
 //! report sets `keys_externally_pinned = false` and proves only *internal consistency under the
 //! bundle's own key claims*. A `revoked`/`compromised` status (worst of record-asserted and bundle-
 //! asserted) downgrades a record to `Untrusted` **unless** an anchored checkpoint with anchor-time
-//! `≤ status_changed_at` transitively commits it (RCP §10.2, threat #9).
+//! `≤ status_changed_at` transitively commits it (RCP §10.2, threat #9). The same rule applies to a
+//! CHECKPOINT's signing key: a checkpoint signed by a revoked/compromised key is trusted only when a
+//! verified anchor at or before the status change commits it (itself, or a later checkpoint chaining to it).
 
 use crate::anchor::verify_anchor_keyed;
 use crate::authority::{verify_authority_with_key, AuthorityTrust};
@@ -602,6 +604,16 @@ struct Pending {
     /// directly pinned). Counted for observability; the grant is otherwise treated as any verified broker grant.
     transitive_authority: bool,
     notes: Vec<String>,
+}
+
+/// Per-checkpoint pre-pass result (see the checkpoint loop in `verify_bundle_with`): the seal check under the
+/// resolved (and, under pinning, trusted) key (`None` = no usable key), the RCP §10.2 gate for a non-active
+/// signing key (`(effective status, authoritative status_changed_at)`, `None` = active/retired), and — only on a
+/// sealed checkpoint with TSA trust pinned — the anchor check (`(genTime, test-anchor TSA key)`).
+struct CpPre {
+    seal: Option<Result<(), crate::checkpoint::CheckpointError>>,
+    gate: Option<(String, Option<String>)>,
+    anchor: Option<Result<(String, Option<VerifyingKey>), String>>,
 }
 
 /// A record's broker/resource role (ADR 0003 R2), classified fail-closed from the
@@ -4248,6 +4260,112 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // head — pre-D6 checkpoints never carry the field, so it is a D6 activation signal (and a violation),
     // distinct from a checkpoint with no head field at all. Tracked so D6 cannot be dodged by garbling it.
     let mut verified_malformed_head = false;
+    // Pre-pass: each checkpoint's seal check and (on a sealed checkpoint) anchor check, done ONCE up front so the
+    // RCP §10.2 key-status gate below can see anchors on LATER checkpoints before any checkpoint is accepted.
+    let any_tsa_trust = !opts.trusted_tsa_keys.is_empty() || !opts.trusted_tsa_spki.is_empty();
+    let anchor_trust = crate::anchor::AnchorTrust {
+        test_anchor_keys: opts.trusted_tsa_keys.clone(),
+        rfc3161_tsa_spki: opts.trusted_tsa_spki.clone(),
+    };
+    let cp_pre: Vec<CpPre> = checkpoints
+        .iter()
+        .map(|cp| {
+            let entry = cp
+                .get("key")
+                .and_then(|k| s(k, "signing_key_id"))
+                .zip(
+                    cp.get("key")
+                        .and_then(|k| k.get("key_epoch"))
+                        .and_then(|v| v.as_int()),
+                )
+                .and_then(|(id, ep)| keys.get(&(id, ep)))
+                .filter(|e| !keys_externally_pinned || is_trusted(&e.vk));
+            let seal = entry.map(|e| verify_checkpoint_sealed(cp, &e.vk));
+            let sealed = matches!(seal, Some(Ok(())));
+            // RCP §10.2 applied to the CHECKPOINT key exactly as to a record key: the worst of the checkpoint's
+            // own asserted key_status (when present), the bundle key entry's, and the authoritative pinned status;
+            // under pinning ONLY the pinned compromise time counts (a bundle cannot future-date it).
+            let gate = entry.and_then(|e| {
+                let pin = pinned_for(&e.vk);
+                let mut eff = e.status.clone();
+                if let Some(cs) = cp.get("key").and_then(|k| s(k, "key_status")) {
+                    eff = worst_status(&eff, &cs);
+                }
+                if let Some(ps) = pin.and_then(|t| t.status.as_deref()) {
+                    eff = worst_status(&eff, ps);
+                }
+                if matches!(eff.as_str(), "active" | "retired") {
+                    return None;
+                }
+                let changed_at = if keys_externally_pinned {
+                    pin.and_then(|t| t.status_changed_at.clone())
+                } else {
+                    e.status_changed_at.clone()
+                };
+                Some((eff, changed_at))
+            });
+            // Only an anchor on a SEALED checkpoint can contribute (else an attacker pairs an unsigned
+            // checkpoint — arbitrary frontier — with a valid TSA token).
+            let anchor = match cp.get("anchor") {
+                Some(a) if sealed && any_tsa_trust => Some(
+                    verify_anchor_keyed(
+                        &s(cp, "checkpoint_hash").unwrap_or_default(),
+                        a,
+                        &anchor_trust,
+                    )
+                    .map_err(|e| e.to_string()),
+                ),
+                _ => None,
+            };
+            CpPre { seal, gate, anchor }
+        })
+        .collect();
+    // An anchor honored under the TSA-key rotation rule (ADR 0006 §1 — see the main loop) — its genTime.
+    let honored_anchor_ts = |pre: &CpPre| -> Option<String> {
+        match &pre.anchor {
+            Some(Ok((ts, tsa_vk))) => tsa_vk
+                .is_none_or(|vk| {
+                    role_key_honored(&vk, &opts.role_key_status, |rks| {
+                        honored_clean_rotation(rks, ts)
+                    })
+                })
+                .then(|| ts.clone()),
+            _ => None,
+        }
+    };
+    // Earliest honored anchor time that COMMITS each checkpoint: its own anchor, or one on a LATER sealed
+    // checkpoint whose `prev_checkpoint_hash` chain reaches it (an anchor over a checkpoint hash commits every
+    // earlier checkpoint hash it chains to — the anchor proves those bytes existed at genTime, whoever signed the
+    // later checkpoint). Anchors are visited in ascending time and each walk stops at a checkpoint already dated,
+    // so every checkpoint is dated at most once (linear, cycle-safe).
+    let mut cp_committed_at: Vec<Option<String>> = vec![None; checkpoints.len()];
+    {
+        let mut by_hash: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, cp) in checkpoints.iter().enumerate() {
+            if matches!(cp_pre[i].seal, Some(Ok(()))) {
+                if let Some(h) = s(cp, "checkpoint_hash") {
+                    by_hash.entry(h).or_insert(i);
+                }
+            }
+        }
+        let mut dated: Vec<(String, usize)> = cp_pre
+            .iter()
+            .enumerate()
+            .filter_map(|(i, pre)| honored_anchor_ts(pre).map(|ts| (ts, i)))
+            .filter(|(ts, _)| is_canonical_ts(ts))
+            .collect();
+        dated.sort();
+        for (ts, j) in dated {
+            let mut k = j;
+            while cp_committed_at[k].is_none() {
+                cp_committed_at[k] = Some(ts.clone());
+                match s(&checkpoints[k], "prev_checkpoint_hash").and_then(|h| by_hash.get(&h)) {
+                    Some(&prev) => k = prev,
+                    None => break,
+                }
+            }
+        }
+    }
     for (i, cp) in checkpoints.iter().enumerate() {
         if let Some(pid) = &binding_project_id {
             if s(cp, "project_id").as_deref() != Some(pid.as_str()) {
@@ -4273,48 +4391,45 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         let fed_head_field_present = cp.get("broker_grant_heads").is_some();
         let cp_fed_head = parse_grant_heads_map(cp);
         let mut this_anchored = false;
-        let vk = cp
-            .get("key")
-            .and_then(|k| s(k, "signing_key_id"))
-            .zip(
-                cp.get("key")
-                    .and_then(|k| k.get("key_epoch"))
-                    .and_then(|v| v.as_int()),
-            )
-            .and_then(|(id, ep)| keys.get(&(id, ep)))
-            .filter(|e| !keys_externally_pinned || is_trusted(&e.vk))
-            .map(|e| e.vk);
-        let cp_verified = match vk {
-            Some(vk) => match verify_checkpoint_sealed(cp, &vk) {
-                Ok(()) => {
-                    checkpoints_verified += 1;
-                    true
+        let pre = &cp_pre[i];
+        let cp_verified = match (&pre.seal, &pre.gate) {
+            (Some(Ok(())), None) => true,
+            // RCP §10.2 for CHECKPOINTS (threat #9 omission): a checkpoint signed by a revoked/compromised key is
+            // trusted ONLY if a verified anchor at/before the key's status change commits it. Otherwise a thief
+            // holding the key could drop a session and re-sign a fresh, internally-consistent chain — the record
+            // rule alone never saw it, since the surviving records may be signed by a different, active key.
+            (Some(Ok(())), Some((status, changed_at))) => {
+                let predates = changed_at.as_deref().is_some_and(|c| {
+                    is_canonical_ts(c) && cp_committed_at[i].as_deref().is_some_and(|t| t <= c)
+                });
+                if !predates {
+                    issues.push(format!(
+                        "checkpoint {i}: signed by a {status} key and NOT anchored before its status change — untrusted (RCP §10.2, threat #9)"
+                    ));
                 }
-                Err(e) => {
-                    issues.push(format!("checkpoint {i} invalid: {e}"));
-                    false
-                }
-            },
-            None => {
+                predates
+            }
+            (Some(Err(e)), _) => {
+                issues.push(format!("checkpoint {i} invalid: {e}"));
+                false
+            }
+            (None, _) => {
                 issues.push(format!("checkpoint {i}: no trusted public key to verify"));
                 false
             }
         };
-        if let Some(anchor) = cp.get("anchor") {
+        if cp_verified {
+            checkpoints_verified += 1;
+        }
+        if cp.get("anchor").is_some() {
             // PRESENCE only — `checkpoints_anchored` is incremented below solely for an anchor that verified.
             checkpoints_anchors_attached += 1;
-            let any_tsa_trust =
-                !opts.trusted_tsa_keys.is_empty() || !opts.trusted_tsa_spki.is_empty();
             // Only an anchor on a *verified* checkpoint can contribute to trust — otherwise an
             // attacker pairs an unsigned checkpoint (arbitrary frontier) with a valid TSA token.
-            if cp_verified && any_tsa_trust {
-                let anchor_trust = crate::anchor::AnchorTrust {
-                    test_anchor_keys: opts.trusted_tsa_keys.clone(),
-                    rfc3161_tsa_spki: opts.trusted_tsa_spki.clone(),
-                };
+            if cp_verified {
                 let cph = s(cp, "checkpoint_hash").unwrap_or_default();
-                match verify_anchor_keyed(&cph, anchor, &anchor_trust) {
-                    Ok((ts, tsa_vk)) => {
+                match &pre.anchor {
+                    Some(Ok((ts, _))) => {
                         // ADR 0006 §1 — TSA-key rotation (the foundational case). The TSA MINTS the genTime, so a
                         // STOLEN key can forge a token with ANY genTime (backdating) — "genTime <= T" cannot be
                         // trusted. So a `compromised`/`revoked` TSA key's anchors are NEVER honored (the
@@ -4323,12 +4438,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         // would otherwise bypass every other rotation gate). A cleanly `rotated` TSA key's
                         // anchors are honored only for genTime at/before the rotation. (RFC 3161 SPKIs are not
                         // ed25519 role keys — tsa_vk is None there — so they pass; their rotation is out of scope.)
-                        let tsa_honored = tsa_vk.is_none_or(|vk| {
-                            role_key_honored(&vk, &opts.role_key_status, |rks| {
-                                honored_clean_rotation(rks, &ts)
-                            })
-                        });
-                        if !tsa_honored {
+                        if honored_anchor_ts(pre).is_none() {
                             issues.push(format!(
                                 "checkpoint {i} anchor: TSA key is rotated/compromised and the anchor genTime {ts} is not provably before that status change — anchor NOT trusted (ADR 0006 role-key rotation)"
                             ));
@@ -4341,10 +4451,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                                 ts.clone(),
                                 cp_head.as_ref().map(|h| h.cumulative_root.clone()),
                             ));
-                            anchored.push((cp_seq, ts, cp_frontier.clone()));
+                            anchored.push((cp_seq, ts.clone(), cp_frontier.clone()));
                         }
                     }
-                    Err(e) => issues.push(format!("checkpoint {i} anchor invalid: {e}")),
+                    Some(Err(e)) => issues.push(format!("checkpoint {i} anchor invalid: {e}")),
+                    None => {}
                 }
             }
         }

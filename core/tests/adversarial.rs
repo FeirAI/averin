@@ -12305,3 +12305,121 @@ fn signing_keys_json_object_form_carries_compromise() {
     );
     assert!(typo.contains("unknown field"), "{typo}");
 }
+
+// ---- B: RCP §10.2 applies to CHECKPOINT keys, not only record keys ----
+
+// A two-checkpoint chain over two records (g1 <- g2), both checkpoints signed by `cp_sk` under key id "kc"; cp1
+// optionally carries a test anchor at `anchor_ts`. Records are signed by `rec` ("k0").
+fn kc_chain_bundle(
+    rec: &SigningKey,
+    cp_sk: &SigningKey,
+    anchor: Option<(&SigningKey, &str)>,
+) -> CanonValue {
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let g1 = seal_grant(rec, rec, "g-1", &ge);
+    let g2 = seal_grant_prev(rec, rec, "g-2", &ge, &[content_hash_of(&g1)]);
+    let key_block =
+        CanonValue::parse(r#"{"signing_key_id":"kc","key_epoch":0,"key_status":"active"}"#)
+            .unwrap();
+    let cp0 = seal_checkpoint(
+        &checkpoint_body(
+            "cp0",
+            "proj-001",
+            0,
+            None,
+            &[content_hash_of(&g1)],
+            1,
+            "2026-06-15T10:05:00.000Z",
+            key_block.clone(),
+        )
+        .unwrap(),
+        cp_sk,
+    )
+    .unwrap();
+    let cp0_hash = checkpoint_hash(&cp0);
+    let mut cp1 = seal_checkpoint(
+        &checkpoint_body(
+            "cp1",
+            "proj-001",
+            1,
+            Some(&cp0_hash),
+            &[content_hash_of(&g2)],
+            2,
+            "2026-06-15T10:10:00.000Z",
+            key_block,
+        )
+        .unwrap(),
+        cp_sk,
+    )
+    .unwrap();
+    if let Some((tsa, ts)) = anchor {
+        let a = make_test_anchor(&checkpoint_hash(&cp1), ts, tsa, "tsa-1");
+        cp1 = attach_anchor(&cp1, a);
+    }
+    let key_entry = |id: &str, vk: &VerifyingKey| {
+        CanonValue::object(vec![
+            ("signing_key_id".into(), CanonValue::string(id)),
+            ("key_epoch".into(), CanonValue::Int(0)),
+            ("public_key".into(), CanonValue::string(encode_pubkey(vk))),
+            ("key_status".into(), CanonValue::string("active")), // the bundle's (attacker's) claim
+        ])
+        .unwrap()
+    };
+    rebuild(
+        vec![
+            key_entry("k0", &rec.verifying_key()),
+            key_entry("kc", &cp_sk.verifying_key()),
+        ],
+        vec![g1, g2],
+        vec![cp0, cp1],
+    )
+}
+
+#[test]
+fn checkpoint_signed_by_compromised_pinned_key_is_untrusted() {
+    // B: the auditor pins K0 (active — it signs the records) and Kc (a checkpoint key, compromised in 2020). An
+    // attacker holding ONLY Kc drops a session and re-signs a fresh, internally consistent checkpoint chain. The
+    // checkpoint key was filtered only by `is_trusted`, so the forged chain verified (omission, threat #1/#9).
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let kc = signing_key_from_seed(&[42u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let opts = |changed_at: &str| VerifyOptions {
+        trusted_keys: Some(vec![
+            rec.verifying_key().into(),
+            TrustedKey {
+                vk: kc.verifying_key(),
+                status: Some("compromised".into()),
+                status_changed_at: Some(changed_at.into()),
+            },
+        ]),
+        trusted_tsa_keys: vec![tsa.verifying_key()],
+        ..Default::default()
+    };
+
+    let forged = kc_chain_bundle(&rec, &kc, None);
+    let r = verify_bundle_with(&forged, &opts("2020-01-01T00:00:00.000Z"));
+    assert!(!r.ok, "a chain signed by a compromised key must not verify");
+    assert_eq!(r.checkpoints_verified, 0);
+    assert!(
+        r.issues.iter().any(|i| i.contains("RCP §10.2")),
+        "{:?}",
+        r.issues
+    );
+    // anchored, but AFTER the compromise: still untrusted.
+    let late = kc_chain_bundle(&rec, &kc, Some((&tsa, "2026-06-15T10:10:01.000Z")));
+    assert!(!verify_bundle_with(&late, &opts("2020-01-01T00:00:00.000Z")).ok);
+
+    // control: an anchor at/before the status change commits cp1 AND (via prev_checkpoint_hash) cp0 -> trusted.
+    let r = verify_bundle_with(&late, &opts("2026-06-15T10:20:00.000Z"));
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.checkpoints_verified, 2);
+    // control: no status pinned for Kc -> active -> the unanchored chain verifies as before.
+    let r = verify_bundle_with(
+        &forged,
+        &VerifyOptions {
+            trusted_keys: Some(vec![rec.verifying_key().into(), kc.verifying_key().into()]),
+            ..Default::default()
+        },
+    );
+    assert!(r.ok, "{:?}", r.issues);
+}

@@ -27,7 +27,7 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
   // AUTHENTICITY: the record-signing key(s). Omitted => internal consistency only (keys from the bundle);
   // an EMPTY [] is a config error. Each entry is a string or an RCP §10.2 object carrying the authoritative
   // compromise time: {"key": "ed25519pub:…", "status": "compromised", "status_changed_at": "…"}
-  // (status: active | retired | revoked | compromised). A record signed by a revoked/compromised
+  // (status: active | retired | revoked | compromised). A record OR checkpoint signed by a revoked/compromised
   // key is trusted only if a verified anchor at or before status_changed_at commits it. MAY equal the
   // broker/authority keys (ADR 0002); must be disjoint from every other role.
   "signing_keys": ["ed25519pub:<record-signing-key>"],
