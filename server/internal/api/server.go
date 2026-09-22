@@ -3910,15 +3910,21 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 	// FAIL CLOSED (averin#3): a transient read failure must NOT collapse into an empty bundle — the callers
 	// (handleExport/handleVerify) 500 on this error and meter AFTER, so returning the error keeps billing/self-
 	// verify from ever running over a silently-truncated (zero-record) history. Mirrors the Anchors handling below.
-	recs, err := s.st.AllRecords(projectID)
-	if err != nil {
-		return "", err
-	}
+	//
+	// READ ORDER (torn-snapshot safety): checkpoints, then anchors, then records — with no lock held, a record +
+	// checkpoint can be created between the reads. The store is append-only and every checkpoint's frontier only
+	// references records stored BEFORE it was sealed, so reading records LAST guarantees they are a superset of
+	// every exported checkpoint's frontier (a newer record is just an un-checkpointed tail). The reverse order
+	// could export a checkpoint whose frontier references records missing from the bundle — a false failure.
 	checks, err := s.st.Checkpoints(projectID)
 	if err != nil {
 		return "", err
 	}
 	anchors, err := s.st.Anchors(projectID)
+	if err != nil {
+		return "", err
+	}
+	recs, err := s.st.AllRecords(projectID)
 	if err != nil {
 		return "", err
 	}
