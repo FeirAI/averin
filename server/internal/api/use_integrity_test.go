@@ -64,6 +64,80 @@ func TestRevokedGrantUseRejected(t *testing.T) {
 	}
 }
 
+// staleIdemStore hides chosen idempotency keys from RecordByIdem (PutRecord still sees them), reproducing a
+// same-key insert that raced past the handler's up-front idempotency check (e.g. another instance) — the
+// seal then COLLAPSES onto the existing row with created=false.
+type staleIdemStore struct {
+	store.Store
+	hide map[string]bool
+}
+
+func (s *staleIdemStore) RecordByIdem(p, k string) (store.Record, bool, error) {
+	if s.hide[k] {
+		return store.Record{}, false, nil
+	}
+	return s.Store.RecordByIdem(p, k)
+}
+
+func newStaleIdemServer(t *testing.T) (http.Handler, *staleIdemStore) {
+	t.Helper()
+	rc, _ := core.New(resourceSeed)
+	st := &staleIdemStore{Store: store.NewMem(), hide: map[string]bool{}}
+	return api.New(mustCore(t), st, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes(), st
+}
+
+// TestUseCollapseOntoForeignReceiptIs409: when the seal collapses (created=false) onto a row stored under the same
+// idempotency key by a DIFFERENT operation, /v2/use used to return 201 with THAT record's receipt — reporting an
+// action with no receipt of its own. It must 409 and release the credential it consumed.
+func TestUseCollapseOntoForeignReceiptIs409(t *testing.T) {
+	h, st := newStaleIdemServer(t)
+	ak := grantAgentKey()
+	gA, capA := mkGrant(t, h, ak, "idem-grant-a")
+	gB, capB := mkGrant(t, h, ak, "idem-grant-b")
+	if code, resp := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", capA, gA, ak, "SELECT 1", "nonce-a")); code != http.StatusCreated {
+		t.Fatalf("use A (%d): %s", code, resp)
+	}
+	st.hide["idem-use"] = true
+	code, resp := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", capB, gB, ak, "SELECT 2", "nonce-b"))
+	if code != http.StatusConflict {
+		t.Fatalf("a use whose seal collapsed onto another operation's receipt must 409, got %d: %s", code, resp)
+	}
+	st.hide["idem-use"] = false
+	// B's credential + nonce were released: the same operation under a fresh key still validates.
+	if code, resp := do(t, h, "POST", "/v2/use", useBody(t, "idem-use-b", capB, gB, ak, "SELECT 2", "nonce-b")); code != http.StatusCreated {
+		t.Fatalf("the rejected use must not have consumed B's credential (%d): %s", code, resp)
+	}
+}
+
+// TestUseOutcomeCollapseOntoForeignOutcomeIs409: the /v2/use-outcome analogue — a collapse onto ANOTHER intent's
+// outcome must 409, not echo that outcome as this intent's.
+func TestUseOutcomeCollapseOntoForeignOutcomeIs409(t *testing.T) {
+	h, st := newStaleIdemServer(t)
+	ak := grantAgentKey()
+	intent := func(grantIdem, idem, nonce string) string {
+		gid, capb := mkGrant(t, h, ak, grantIdem)
+		code, resp := do(t, h, "POST", "/v2/use-intent", useBody(t, idem, capb, gid, ak, "SELECT 1", nonce))
+		if code != http.StatusCreated {
+			t.Fatalf("use-intent (%d): %s", code, resp)
+		}
+		var in struct {
+			UseID string `json:"use_id"`
+		}
+		json.Unmarshal([]byte(resp), &in)
+		return in.UseID
+	}
+	i1 := intent("g1", "intent-1", "n1")
+	i2 := intent("g2", "intent-2", "n2")
+	if code, resp := do(t, h, "POST", "/v2/use-outcome", outcomeBody("idem-out", i1, "ok")); code != http.StatusCreated {
+		t.Fatalf("outcome 1 (%d): %s", code, resp)
+	}
+	st.hide["idem-out"] = true
+	code, resp := do(t, h, "POST", "/v2/use-outcome", outcomeBody("idem-out", i2, "ok"))
+	if code != http.StatusConflict {
+		t.Fatalf("an outcome whose seal collapsed onto another intent's outcome must 409, got %d: %s", code, resp)
+	}
+}
+
 // TestUseOutcomeExactlyOncePerIntent: a SECOND use_outcome for the same intent under a different idempotency key
 // (e.g. "ok" then "failed") used to 201 too, and the anchored bundle then failed verification. It must be a 409
 // that seals nothing, while the honest retry of the ORIGINAL outcome still returns it idempotently.

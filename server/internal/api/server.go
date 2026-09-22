@@ -2282,8 +2282,31 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			shim.RollbackUse(ev)
 			return e
 		}
-		sealed, _, e = s.sealAndStore(ur.ProjectID, ur.SessionID, idem, rec, disclosures)
+		var created bool
+		sealed, created, e = s.sealAndStore(ur.ProjectID, ur.SessionID, idem, rec, disclosures)
+		if e == nil && !created {
+			// PutRecord COLLAPSED onto an already-stored row (a same-key insert that raced past the RecordByIdem
+			// check above, e.g. another instance): THIS receipt was not persisted. Answer with that row only if it
+			// is this exact operation; otherwise it is another record's receipt — returning it as ours would report
+			// an action that has no receipt of its own. Nothing of ours persisted and the caller has not acted, so
+			// release the consumed credential and 409.
+			if rid, sess, kind, _ := useReceiptIdentity(sealed); rid == useID && sess == ur.SessionID && kind == brokerKind && storedUseMatchesRequest(sealed, ur, paramsCommitment) {
+				idempotent = true
+				return nil
+			}
+			shim.RollbackUse(ev)
+			sealed, grantID = "", ""
+			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
+			return nil
+		}
 		if e != nil {
+			if errors.Is(e, store.ErrRecordIDConflict) {
+				// A different record already holds this deterministic use id (persisted nothing): a conflict, not
+				// an infra failure — release the credential (the caller has not acted) and 409.
+				shim.RollbackUse(ev)
+				conflictErr = e
+				return nil
+			}
 			if !errors.Is(e, store.ErrCommitAmbiguous) {
 				// Definitively PRE-persistence (marshal/seal, or a store begin/select/insert/disclosure failure
 				// — NOT a post-insert commit): nothing persisted and the caller never acted, so RELEASE the
@@ -2677,8 +2700,27 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		if be != nil {
 			return be // 500: never seal an outcome whose evidence could not be hashed/signed
 		}
-		sealed, _, err = s.sealAndStore(or.ProjectID, or.SessionID, idem, rec, nil)
-		return err
+		stored, created, se := s.sealAndStore(or.ProjectID, or.SessionID, idem, rec, nil)
+		if errors.Is(se, store.ErrRecordIDConflict) {
+			conflictErr = se // a different record already holds this deterministic outcome id; nothing persisted
+			return nil
+		}
+		if se != nil {
+			return se
+		}
+		if !created {
+			// PutRecord COLLAPSED onto an already-stored row (a same-key insert that raced past the RecordByIdem
+			// check above): this outcome was not persisted. Only the SAME outcome may be echoed back; anything
+			// else is another record's receipt → 409 (mirrors the up-front idempotency check).
+			if rid, sess, kind, _ := useReceiptIdentity(stored); rid == outcomeID && sess == or.SessionID && kind == "use_outcome" && storedOutcomeMatchesRequest(stored, or.IntentRecordID, status) {
+				sealed, idempotent = stored, true
+				return nil
+			}
+			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
+			return nil
+		}
+		sealed = stored
+		return nil
 	}()
 	if conflictErr != nil {
 		writeErr(w, http.StatusConflict, "use-outcome rejected: "+conflictErr.Error())
