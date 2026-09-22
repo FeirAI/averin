@@ -80,6 +80,22 @@ what truly happened in the world.
 - **Consume-before-act.** A Tier-B use is recorded and its single-use/bounded capability is consumed
   in the ledger *before* the resource acts. (Durable only with the Postgres ledger — see below.)
 
+## Machine-checked evidence for these invariants
+
+[`formal/`](../../formal/README.md) proves the load-bearing parts of the list above. Lean covers:
+
+- the seal: a body that verifies is exactly a sealed body, unless SHA-256 has a collision;
+- canonical-JSON injectivity;
+- domain separation of every hashed and signed preimage;
+- commitment binding;
+- no omission and no injection: a verified bundle is exactly the signed closure of the latest
+  frontier;
+- checkpoint-chain uniqueness.
+
+Kani checks the real encoders and parser. TLA+ covers the gapless grant log and the
+consume-before-act ledger. The same README lists what is *not* yet proved, including the verifier
+verdict logic and authority-evidence binding.
+
 ## Authentication & authorization
 
 - **Record authenticity** is cryptographic and offline: pin the signer's `ed25519pub:` key (logged

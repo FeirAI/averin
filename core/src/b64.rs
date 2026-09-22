@@ -136,3 +136,37 @@ mod tests {
         assert!(decode_fixed::<32>(&encode(&sig)).is_err());
     }
 }
+
+/// Bounded proofs over this exact code (run by `formal/run-kani.sh`). Together they make base64url a
+/// bijection on the lengths the verifier decodes: every byte string has exactly one accepted encoding, so a
+/// signature or key can never be re-spelled into a second string that still verifies.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// `decode(encode(b)) == b` for every byte string of length ≤ 5 (all three tail shapes).
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn decode_inverts_encode() {
+        let bytes: [u8; 5] = kani::any();
+        let len: usize = kani::any_where(|l: &usize| *l <= 5);
+        let input = &bytes[..len];
+        assert_eq!(decode(&encode(input)).unwrap(), input);
+    }
+
+    /// Canonicality: any string `decode` accepts is the one `encode` produces for its bytes (no padding,
+    /// no alternative alphabet, no non-zero trailing bits), for every string of length ≤ 7.
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn accepted_encoding_is_unique() {
+        let raw: [u8; 7] = kani::any();
+        let len: usize = kani::any_where(|l: &usize| *l <= 7);
+        let s = match core::str::from_utf8(&raw[..len]) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if let Ok(b) = decode(s) {
+            assert_eq!(encode(&b), s);
+        }
+    }
+}

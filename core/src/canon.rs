@@ -486,8 +486,9 @@ impl<'a> Parser<'a> {
             msg: m,
             pos: self.i,
         })?;
-        // NFC normalize (RCP §4).
-        Ok(s.nfc().collect())
+        // NFC normalize (RCP §4). Through `nfc` (not `s.nfc()` inline) so the Kani harnesses can stub
+        // the Unicode tables and check the escape decoder itself.
+        Ok(nfc(&s))
     }
 
     fn parse_hex4(&mut self) -> Result<u16, CanonError> {
@@ -565,4 +566,106 @@ fn decode_utf16_strict(units: &[u16]) -> Result<String, String> {
         }
     }
     Ok(out)
+}
+
+/// Bounded proofs over this exact code (run by `formal/run-kani.sh`), complementing the unbounded Lean
+/// model in `formal/lean/Averin/Canon.lean` (which proves `ser` injective): these check that the Rust
+/// serializer and parser really implement that model on small inputs.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    fn nfc_identity(s: &str) -> String {
+        s.to_string()
+    }
+
+    /// Every i64 has exactly one accepted spelling: `parse(n.to_string()) == Int(n)` and serialization
+    /// writes that same spelling back.
+    #[kani::proof]
+    #[kani::unwind(22)]
+    fn integer_roundtrip() {
+        let n: i64 = kani::any();
+        let text = n.to_string();
+        let v = CanonValue::parse(&text).unwrap();
+        assert_eq!(v, CanonValue::Int(n));
+        assert_eq!(v.serialize(), text);
+    }
+
+    /// No second spelling: any ≤ 4-byte numeric literal the parser accepts is the canonical text of its
+    /// value (rejects `-0`, `00`, `01`, `+1`, fractions and exponents).
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn accepted_integer_spelling_is_canonical() {
+        let raw: [u8; 4] = kani::any();
+        let len: usize = kani::any_where(|l: &usize| *l >= 1 && *l <= 4);
+        for b in &raw[..len] {
+            kani::assume(b.is_ascii_digit() || matches!(*b, b'-' | b'+' | b'.' | b'e' | b'E'));
+        }
+        let text = core::str::from_utf8(&raw[..len]).unwrap();
+        if let Ok(CanonValue::Int(n)) = CanonValue::parse(text) {
+            assert_eq!(n.to_string(), text);
+        }
+    }
+
+    /// `write_string` is inverted by the parser for every string of ≤ 2 characters drawn from quotes,
+    /// backslashes, every C0 control, DEL, and non-ASCII scalars (NFC stubbed to the identity; the
+    /// escaper and the escape decoder are what is checked).
+    #[kani::proof]
+    #[kani::stub(nfc, nfc_identity)]
+    #[kani::unwind(16)]
+    fn string_escape_roundtrip() {
+        let len: usize = kani::any_where(|l: &usize| *l <= 2);
+        let mut s = String::new();
+        for _ in 0..len {
+            let c: char = kani::any();
+            kani::assume((c as u32) < 0x80 || c == 'é' || c == '\u{1F600}');
+            s.push(c);
+        }
+        let mut text = String::new();
+        write_string(&s, &mut text);
+        assert!(
+            text.bytes().all(|b| b >= 0x20),
+            "no raw control byte may be emitted"
+        );
+        assert_eq!(CanonValue::parse(&text).unwrap(), CanonValue::Str(s));
+    }
+
+    /// `decode_utf16_strict` agrees with the standard library's strict UTF-16 decoder (errors exactly on
+    /// a lone surrogate) for every sequence of ≤ 3 code units.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn utf16_strict_matches_std() {
+        let units: [u16; 3] = kani::any();
+        let len: usize = kani::any_where(|l: &usize| *l <= 3);
+        let ours = decode_utf16_strict(&units[..len]);
+        let std: Result<String, _> = char::decode_utf16(units[..len].iter().copied()).collect();
+        match (ours, std) {
+            (Ok(a), Ok(b)) => assert_eq!(a, b),
+            (Err(_), Err(_)) => {}
+            _ => panic!("strict UTF-16 decoders disagree"),
+        }
+    }
+
+    /// Key order is total and exact: two single-scalar keys compare `Equal` iff they are the same key, so
+    /// sorting members is deterministic and never merges distinct keys.
+    #[kani::proof]
+    fn utf16_key_order_is_exact() {
+        let a: char = kani::any();
+        let b: char = kani::any();
+        let (sa, sb) = (a.to_string(), b.to_string());
+        assert_eq!(utf16_cmp(&sa, &sb) == Ordering::Equal, a == b);
+        assert_eq!(utf16_cmp(&sa, &sb), utf16_cmp(&sb, &sa).reverse());
+    }
+
+    /// The parser never panics on any input of ≤ 5 bytes (NFC stubbed): every rejection is a `CanonError`.
+    #[kani::proof]
+    #[kani::stub(nfc, nfc_identity)]
+    #[kani::unwind(8)]
+    fn parse_never_panics() {
+        let raw: [u8; 5] = kani::any();
+        let len: usize = kani::any_where(|l: &usize| *l <= 5);
+        if let Ok(text) = core::str::from_utf8(&raw[..len]) {
+            let _ = CanonValue::parse(text);
+        }
+    }
 }

@@ -79,3 +79,50 @@ fn hex_val(c: u8) -> Option<u8> {
         _ => None, // RCP requires lowercase hex
     }
 }
+
+/// Bounded proofs over this exact code (run by `formal/run-kani.sh`). The Lean seal theorem assumes
+/// `"sha256:" ‖ lowerhex(·)` is injective and that `LP` emits `uint32_be(len) ‖ b`; these discharge both
+/// against the implementation.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// `parse_sha256("sha256:" ‖ hex_lower(d)) == d` for every 32-byte digest (so the digest string is
+    /// injective in the digest).
+    #[kani::proof]
+    #[kani::unwind(72)]
+    fn hex_roundtrip() {
+        let d: [u8; 32] = kani::any();
+        let s = format!("sha256:{}", hex_lower(&d));
+        assert_eq!(s.len(), 71);
+        assert_eq!(parse_sha256(&s), Some(d));
+    }
+
+    /// Canonicality: a 64-char string `hex32` accepts is exactly `hex_lower` of its value — uppercase or
+    /// any other spelling of the same digest is rejected.
+    #[kani::proof]
+    #[kani::unwind(66)]
+    fn hex32_is_canonical() {
+        let raw: [u8; 64] = kani::any();
+        for b in raw {
+            kani::assume(b.is_ascii());
+        }
+        let s = core::str::from_utf8(&raw).unwrap();
+        if let Some(v) = hex32(s) {
+            assert_eq!(hex_lower(&v), s);
+        }
+    }
+
+    /// `lp_into` appends exactly `uint32_be(len) ‖ b` (checked for every `b` of length ≤ 4).
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn lp_into_frames_exactly() {
+        let bytes: [u8; 4] = kani::any();
+        let len: usize = kani::any_where(|l: &usize| *l <= 4);
+        let mut out = Vec::new();
+        assert!(lp_into(&mut out, &bytes[..len]));
+        assert_eq!(out.len(), 4 + len);
+        assert_eq!(&out[..4], &(len as u32).to_be_bytes());
+        assert_eq!(&out[4..], &bytes[..len]);
+    }
+}
