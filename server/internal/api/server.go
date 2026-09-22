@@ -2207,6 +2207,11 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		return
 	}
 	shim := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, s.ledger)
+	if s.revocationKey != nil {
+		// M5: enforce revocation AT USE TIME (rejected before consuming), not only in the next export's signed
+		// revocation_list — otherwise a revoked grant keeps working at the resource until it expires.
+		shim.WithRevocationCheck(func(grantID string) bool { return s.isRevoked(ur.ProjectID, grantID) })
+	}
 
 	// The idempotency resolution, the capability validation+consume, and the seal run as ONE critical
 	// section. Idempotency is keyed on `idem` — the SAME key sealAndStore→PutRecord dedupes on — resolved

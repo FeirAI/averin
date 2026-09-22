@@ -38,6 +38,10 @@ const ledgerTag = "averin.broker.use.ledger.v1"
 // double-spend or a replay. It is returned by the ledger and surfaced by ValidateUse.
 var ErrConsumed = errors.New("resourceshim: credential jti or nonce already consumed")
 
+// ErrRevoked reports that the presented capability's grant has been revoked (ADR 0005 M5). ValidateUse returns
+// it BEFORE consuming anything, so a revoked credential is never exercised and never burns a nonce.
+var ErrRevoked = errors.New("resourceshim: the capability's grant is revoked")
+
 // Ledger is the durable consume-before-act store. Consumption is marked BEFORE the resource performs
 // the side effect, so a crash after consumption cannot leave a live credential.
 type Ledger interface {
@@ -163,12 +167,22 @@ type Shim struct {
 	issuingPub ed25519.PublicKey
 	resourceID string
 	ledger     Ledger
+	isRevoked  func(grantID string) bool // nil = no use-time revocation check
 }
 
 // New constructs a Shim. resourceID is this resource's audience id (capabilities whose aud differs are
 // rejected); issuingPub is the broker's capability-signing public key.
 func New(issuingPub ed25519.PublicKey, resourceID string, ledger Ledger) *Shim {
 	return &Shim{issuingPub: issuingPub, resourceID: resourceID, ledger: ledger}
+}
+
+// WithRevocationCheck makes ValidateUse consult the revoked set at use time: a capability whose grant_id (== the
+// verified jti) isRevoked reports as revoked is rejected with ErrRevoked BEFORE anything is consumed. Without it
+// a revoked grant stays usable at the resource until its expiry (the offline verifier only flags the use after
+// the fact).
+func (s *Shim) WithRevocationCheck(isRevoked func(grantID string) bool) *Shim {
+	s.isRevoked = isRevoked
+	return s
 }
 
 // RollbackUse releases the nonce and (single-use) jti a prior ValidateUse consumed. Call it ONLY when the
@@ -239,6 +253,11 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 		if useSeq < 1 || useSeq > claims.UseLimit {
 			return UseEvidence{}, fmt.Errorf("resourceshim: use_sequence_number %d outside [1, %d] for bounded_reuse", useSeq, claims.UseLimit)
 		}
+	}
+	// 4.6 M5 revocation: a revoked grant must not be exercised. Checked on the SIGNATURE-VERIFIED jti (== the
+	// grant_id) and BEFORE consuming, so a revoked credential burns neither its nonce nor its jti.
+	if s.isRevoked != nil && s.isRevoked(claims.Jti) {
+		return UseEvidence{}, fmt.Errorf("%w: grant %s", ErrRevoked, claims.Jti)
 	}
 	// 5. Consume-before-act (R5): mark the nonce (replay) and the credential's double-spend key consumed
 	// BEFORE the caller performs the side effect. The key is the bare jti for single_operation and

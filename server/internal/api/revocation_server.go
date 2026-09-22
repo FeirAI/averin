@@ -78,8 +78,9 @@ type revokeRequest struct {
 	Reason    string `json:"reason"` // optional, audit-only (not bound into the list)
 }
 
-// handleRevoke marks a grant_id revoked for a project (M5). Idempotent. The revocation takes effect in the NEXT
-// export's signed revocation_list — the verifier blocks any use of the revoked grant once that list is fresh.
+// handleRevoke marks a grant_id revoked for a project (M5). Idempotent. The resource gateway rejects any later
+// /v2/use[-intent] of the grant immediately (isRevoked, before consuming), and the NEXT export carries it in the
+// signed revocation_list — the verifier blocks any use of the revoked grant once that list is fresh.
 func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	if s.revocationKey == nil {
 		writeErr(w, http.StatusNotImplemented, "revocation not enabled (set AVERIN_REVOCATION_SEED)")
@@ -176,8 +177,22 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		"revoked":       rr.GrantID,
 		"project_id":    rr.ProjectID,
 		"revoked_total": n,
-		"note":          "takes effect in the next /v2/export's signed revocation_list",
+		"note":          "enforced at /v2/use immediately; carried in the next /v2/export's signed revocation_list",
 	})
+}
+
+// isRevoked reports whether grantID is in the project's revoked set. It takes the SAME per-project lock
+// handleRevoke holds while persisting-then-adding, so a revoke that has returned 201 is always observed. Called
+// from the use path under ingestMu; the lock order ingestMu → revokeLocks is safe because no revokeLocks holder
+// ever takes ingestMu (handleRevoke / buildRevocationListForExport do not).
+func (s *Server) isRevoked(projectID, grantID string) bool {
+	unlock := s.revokeLocks.Lock(projectID)
+	defer unlock()
+	s.revokedMu.Lock()
+	set := s.revoked[projectID]
+	s.revokedMu.Unlock()
+	_, revoked := set[grantID]
+	return revoked
 }
 
 // buildRevocationListForExport produces the signed revocation_list for a project's revoked set, with a freshness

@@ -236,8 +236,12 @@ second `/v2/use-outcome` for an intent that already has one (under a different `
 ## POST `/v2/revoke`
 
 Marks a `grant_id` revoked (permissive by id — the id need not already exist locally, so a
-compromised/federated id can be revoked preemptively). The next `/v2/export` carries a signed,
-time-bounded `revocation_list`; the offline verifier then blocks any use of a revoked grant.
+compromised/federated id can be revoked preemptively). From the moment it returns `201`, `/v2/use` and
+`/v2/use-intent` reject (`400`, before consuming the credential) any capability of that grant. The next
+`/v2/export` carries a signed, time-bounded `revocation_list`; the offline verifier then blocks any use
+of a revoked grant. (Known limit: the verifier evaluates a use against the list *as of the export*, so a
+use recorded **before** the revoke is also reported blocked; distinguishing pre-revocation uses needs a
+verifier-side change.)
 
 Request: `{ "project_id": "...", "grant_id": "..." }` (both required).
 
