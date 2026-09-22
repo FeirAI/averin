@@ -412,7 +412,9 @@ Key fields:
 | `keys_externally_pinned` | bool | `true` only when you passed an `opts.json` — i.e. authentic vs internal-consistency. |
 | `records_total`, `records_proven` | int | |
 | `dag_ok`, `dag_heads`, `collapsed_duplicates` | bool/int | DAG validity, head count, deduped retries (#8). |
-| `checkpoints_total`, `checkpoints_verified`, `checkpoints_anchored`, `chain_ok` | int/bool | |
+| `checkpoints_total`, `checkpoints_verified`, `chain_ok` | int/bool | |
+| `checkpoints_anchored` | int | Checkpoints whose anchor **verified** under a pinned TSA (`tsa_keys` / `tsa_spki_b64`) on a verified checkpoint. `0` whenever no TSA trust is pinned. (Changed: it used to count every checkpoint carrying an `anchor` field, verified or not.) |
+| `checkpoints_anchors_attached` | int | Checkpoints that merely **carry** an `anchor` field. Unverified: anyone can attach one, so never read it as timestamp evidence. |
 | `grant_accountability` | string | `not_applicable` / `incomplete` / `complete` (Tier-A). |
 | `broker_trust` | string | `assumed` / `sequence_verified`. |
 | `uses_matched`, `uses_pop_reverified`, `unmatched_violation`, `unmatched_pending`, `grants_unused` | int | Tier-B join. |

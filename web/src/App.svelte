@@ -96,7 +96,8 @@
       {report.records_proven}/{report.records_total} records proven ·
       DAG {report.dag_ok ? "ok" : "INVALID"} ·
       checkpoints {report.checkpoints_verified}/{report.checkpoints_total}
-      ({report.checkpoints_anchored} anchored) ·
+      ({report.checkpoints_anchors_attached ?? report.checkpoints_anchored} anchors attached,
+      {report.checkpoints_anchored} verified-anchored) ·
       chain {report.chain_ok ? "ok" : "BROKEN"}
       {#if report.first_broken_link}<div class="broken">{report.first_broken_link}</div>{/if}
       {#if !report.keys_externally_pinned}
