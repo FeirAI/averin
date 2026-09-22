@@ -27,7 +27,10 @@ run_harness utf16_key_order_is_transitive
 if [ "${1:-}" = "--extended" ]; then
   run_harness one_byte_tail_is_canonical
   run_harness two_byte_tail_is_canonical
-  run_harness decode_inverts_encode
+  # Full 4-symbol chunk. Heap-light (no from_utf8, no formatted asserts), but decode's error path still
+  # formats a char with {:?}, which drags Unicode tables into CBMC: out of memory under an 8 GB cap after
+  # ~12 min on a 16 GB box, so it is extended-only until a larger runner verifies it.
+  run_harness full_chunk_is_canonical
   run_harness utf16_strict_matches_std
   run_harness integer_roundtrip
   run_harness accepted_integer_spelling_is_canonical

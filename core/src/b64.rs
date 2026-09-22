@@ -186,4 +186,30 @@ mod kani_proofs {
     fn two_byte_tail_is_canonical() {
         unique::<3>();
     }
+
+    /// A full 4-symbol chunk (3 bytes, no unused bits): every accepted spelling is exactly `encode` of the
+    /// bytes it decodes to. With the two tail harnesses this checks "every byte string has exactly one
+    /// accepted spelling" chunk by chunk against the code, instead of arguing the full-chunk case from
+    /// `alphabet_is_a_bijection`.
+    ///
+    /// Written heap-light rather than as `unique::<4>()`: no `from_utf8` validation loop (every byte is an
+    /// alphabet symbol, hence ASCII) and no formatted assertion messages.
+    #[kani::proof]
+    #[kani::solver(kissat)]
+    #[kani::unwind(6)]
+    fn full_chunk_is_canonical() {
+        let raw: [u8; 4] = kani::any();
+        for b in raw {
+            kani::assume(val(b).is_some());
+        }
+        // SAFETY: every byte is a base64url alphabet symbol, i.e. ASCII.
+        let s = unsafe { core::str::from_utf8_unchecked(&raw) };
+        match decode(s) {
+            Ok(b) => {
+                assert!(b.len() == 3);
+                assert!(encode(&b).as_bytes() == raw);
+            }
+            Err(_) => panic!("a full chunk of alphabet symbols always decodes"),
+        }
+    }
 }
