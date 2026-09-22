@@ -110,25 +110,17 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	// observed. Gating on existence would turn a security action into a fail-open ("unknown grant_id" read as
 	// "nothing to worry about"). Abuse is bounded by auth (project-scoped) + the per-project size cap below.
 
-	// Serialize per-project across the cap-check-then-persist-then-write critical section below (finding C):
-	// a slow/degraded Postgres round-trip inside Revoke then only blocks another revoke/export racing for
-	// THIS SAME project, not every /v2/revoke on the process. Different projects run fully concurrently under
-	// this lock. buildRevocationListForExport takes the SAME per-project lock before reading `set` below,
-	// since `set` (not just the top-level `revoked` map) is mutated here — the two must never touch the same
-	// project's set unsynchronized.
+	// Serialize per-project across the cap-check-then-persist-then-publish critical section below (finding C):
+	// a slow/degraded Postgres round-trip inside Revoke then only blocks another revoke racing for THIS SAME
+	// project, not every /v2/revoke on the process. Different projects run fully concurrently under this lock.
+	// Readers (isRevoked, buildRevocationListForExport) never take it: they read the published immutable set.
 	unlock := s.revokeLocks.Lock(rr.ProjectID)
 	defer unlock()
 
-	// revokedMu here guards only the STRUCTURAL top-level map access (get-or-create this project's set) — a
-	// concurrent revoke/export for a DIFFERENT project may be reading/writing `revoked` at the same time. It
-	// is held only for this lookup, not across the cap-check/persist/write below (those are already exclusive
-	// per-project via revokeLocks).
+	// Snapshot this project's CURRENT published set (immutable — never written after publication). Only
+	// revokedMu is taken, and only for the pointer read.
 	s.revokedMu.Lock()
 	set := s.revoked[rr.ProjectID]
-	if set == nil {
-		set = map[string]struct{}{}
-		s.revoked[rr.ProjectID] = set
-	}
 	s.revokedMu.Unlock()
 
 	// Bound the in-memory set so a caller cannot flood it with fabricated grant_ids (unbounded memory + export
@@ -168,10 +160,21 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Safe unsynchronized-by-revokedMu write: this project's `set` is exclusively owned by whoever holds
-	// revokeLocks(rr.ProjectID), which this goroutine still does (deferred unlock above).
-	set[rr.GrantID] = struct{}{}
+	// Copy-on-write publish: build old ∪ {id} and swap it in under revokedMu, so a concurrent reader sees either
+	// the old or the new set, never a map being written. The publish happens BEFORE the 201, so a revoke that has
+	// returned is always observed by the next /v2/use. (An idempotent re-revoke publishes nothing.)
 	n := len(set)
+	if !exists {
+		next := make(map[string]struct{}, len(set)+1)
+		for id := range set {
+			next[id] = struct{}{}
+		}
+		next[rr.GrantID] = struct{}{}
+		s.revokedMu.Lock()
+		s.revoked[rr.ProjectID] = next
+		s.revokedMu.Unlock()
+		n = len(next)
+	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"revoked":       rr.GrantID,
@@ -181,13 +184,11 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// isRevoked reports whether grantID is in the project's revoked set. It takes the SAME per-project lock
-// handleRevoke holds while persisting-then-adding, so a revoke that has returned 201 is always observed. Called
-// from the use path under ingestMu; the lock order ingestMu → revokeLocks is safe because no revokeLocks holder
-// ever takes ingestMu (handleRevoke / buildRevocationListForExport do not).
+// isRevoked reports whether grantID is in the project's revoked set. It reads the published IMMUTABLE snapshot
+// under revokedMu only — never revokeLocks, which handleRevoke holds across the durable Postgres write. It is
+// called from the use path under the process-wide ingestMu, so waiting on a slow revoke here would stall every
+// record/grant/use/checkpoint on the process. A revoke that has returned 201 has already published its set.
 func (s *Server) isRevoked(projectID, grantID string) bool {
-	unlock := s.revokeLocks.Lock(projectID)
-	defer unlock()
 	s.revokedMu.Lock()
 	set := s.revoked[projectID]
 	s.revokedMu.Unlock()
@@ -199,11 +200,7 @@ func (s *Server) isRevoked(projectID, grantID string) bool {
 // window anchored to the latest checkpoint's created_ts (the same basis the deployment_attestation uses), so the
 // verifier reads it `fresh` for THIS bundle and `stale` for a much-later one. Returns nil when nothing is revoked.
 func (s *Server) buildRevocationListForExport(projectID string, checks []store.Checkpoint) (map[string]any, error) {
-	// Take the SAME per-project lock handleRevoke holds while mutating this project's `set` — ranging over it
-	// here while a concurrent revoke writes to it would be a data race, not just a stale read. Different
-	// projects still export/revoke fully concurrently (finding C).
-	unlock := s.revokeLocks.Lock(projectID)
-	defer unlock()
+	// Read the published immutable snapshot (copy-on-write, see handleRevoke): ranging it needs no lock.
 	s.revokedMu.Lock()
 	set := s.revoked[projectID]
 	s.revokedMu.Unlock()

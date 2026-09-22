@@ -30,7 +30,6 @@ import (
 	"github.com/feirai/averin/server/internal/meter"
 	"github.com/feirai/averin/server/internal/metrics"
 	"github.com/feirai/averin/server/internal/otel"
-	"github.com/feirai/averin/server/internal/pgdurable"
 	"github.com/feirai/averin/server/internal/resourceshim"
 	"github.com/feirai/averin/server/internal/store"
 	"github.com/feirai/averin/server/internal/witness"
@@ -84,13 +83,14 @@ type Server struct {
 	// every revoke is persisted to Postgres FIRST (fail-closed) and the cache is rehydrated from it at boot —
 	// see WithDurable. With no durable store configured it stays in-memory only, as before.
 	revocationKey ed25519.PrivateKey
-	revoked       map[string]map[string]struct{} // projectID -> set of revoked grant_ids
-	// revokedMu guards STRUCTURAL access to `revoked` ONLY (get-or-create the top-level per-project entry) —
-	// it is never held across the durable Revoke() Postgres round-trip. The cap-check-then-persist-then-write
-	// for a SINGLE project must still stay atomic (finding C), so handleRevoke and buildRevocationListForExport
-	// instead serialize per-project via revokeLocks, which IS held across that round-trip; different projects'
-	// revokes/exports run fully concurrently under it (a slow/degraded Postgres no longer stalls every project's
-	// /v2/revoke process-wide).
+	revoked       map[string]map[string]struct{} // projectID -> IMMUTABLE set of revoked grant_ids (copy-on-write)
+	// revokedMu guards the top-level `revoked` map ONLY — it is never held across the durable Revoke() Postgres
+	// round-trip. Each per-project set is IMMUTABLE once published: handleRevoke builds a new set (old ∪ {id})
+	// and swaps it in under revokedMu, so readers (isRevoked on the /v2/use path, the export) take ONLY
+	// revokedMu for a pointer read and then range the snapshot lock-free. The cap-check-then-persist-then-publish
+	// for a SINGLE project must still stay atomic (finding C), so handleRevoke serializes per-project via
+	// revokeLocks, which IS held across the durable round-trip — but no reader ever takes revokeLocks, so a slow
+	// revoke can never stall /v2/use (which runs under the process-wide ingestMu).
 	revokedMu          sync.Mutex
 	revokeLocks        keyedMutex
 	revokeCapWarnAt    time.Time // throttles the at-capacity WARNING (guarded by revokeLocks, keyed by project_id)
@@ -190,7 +190,7 @@ type Server struct {
 	cosigApprovers  []ed25519.PublicKey
 	// durable optionally backs `revoked` and `pending` with Postgres (AVERIN_DATABASE_URL) — see WithDurable.
 	// nil = both stay in-memory only (dev/single-process), matching the pre-durability behavior exactly.
-	durable *pgdurable.Store
+	durable durableWriter
 	// ingestMu serializes the heads->seal->put critical section so concurrent ingests cannot read
 	// a stale frontier and fork the DAG (the Postgres store will do this in a serializable tx).
 	ingestMu sync.Mutex
