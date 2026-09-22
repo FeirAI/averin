@@ -141,21 +141,32 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 	}
 	grantID := deterministicGrantID(gr.ProjectID, idem)
 
-	// Already finalized? (a prepare after a completed finalize) — return the committed grant, idempotently.
-	if existing, found, le := s.st.RecordByIdem(gr.ProjectID, idem); le == nil && found {
-		s.respondPreparedFromSealed(w, grantID, existing.JSON, true)
-		return
-	}
-
 	req := grantRequestToBroker(gr)
 	req.BrokerID = s.brokerID // M4: tag the grant with this broker's federation id ("" = single-broker)
-	// Validate proof-of-possession + scope BEFORE minting (same gate as the single-phase /v2/grants).
+	// Validate proof-of-possession + scope BEFORE anything else (same gate as the single-phase /v2/grants) — so
+	// an unsigned/forbidden request can never read back a committed grant or a pending challenge by reusing a
+	// known idempotency key.
 	if e := req.Validate(); e != nil {
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
 	if _, e := broker.ClassifyScope(req.Scope, req.ScopeClass); e != nil {
 		writeErr(w, http.StatusBadRequest, e.Error())
+		return
+	}
+
+	// Already finalized? (a prepare after a completed finalize) — return the committed grant, idempotently, but
+	// ONLY to the same PoP-validated grant request (mirroring the single-phase storedGrantMatchesRequest gate);
+	// any other record under this key — a different grant, or not a grant at all — is a 409.
+	if existing, found, le := s.st.RecordByIdem(gr.ProjectID, idem); le != nil {
+		writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+le.Error())
+		return
+	} else if found {
+		if same, pe := storedGrantMatchesRequest(existing.JSON, req); pe != nil || !same {
+			writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
+			return
+		}
+		s.respondPreparedFromSealed(w, grantID, existing.JSON, true)
 		return
 	}
 
@@ -221,6 +232,13 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		s.pending[pk] = p
 		s.pendingMu.Unlock()
 	}
+	if ok {
+		// A pending mint under this key is only re-served to the SAME grant request that minted it.
+		if same, pe := pendingGrantMatchesRequest(p, req); pe != nil || !same {
+			writeErr(w, http.StatusConflict, "idempotency_key already has a pending grant for a different grant request")
+			return
+		}
+	}
 	resp := map[string]any{
 		"grant_id":           p.prepared.GrantID,
 		"credential_binding": p.prepared.CredentialBinding,
@@ -234,13 +252,27 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// grantFinalizeRequest is the POST /v2/grants/finalize wire shape (ADR 0005 M6/M2).
+// grantFinalizeRequest is the POST /v2/grants/finalize wire shape (ADR 0005 M6/M2): the SAME grant request body
+// posted to prepare (idempotency_key, project_id, session_id, the operation fields, and the agent_pubkey/
+// agent_sig proof-of-possession) plus the collected approvals. The grant request is re-validated (PoP) and must
+// match the pending mint / committed grant, so knowing an idempotency key alone never yields a capability.
 type grantFinalizeRequest struct {
-	IdempotencyKey string                 `json:"idempotency_key"`
-	ProjectID      string                 `json:"project_id"`
-	SessionID      string                 `json:"session_id"`
+	grantRequest
 	Cosignatures   []broker.Cosignature   `json:"cosignatures"`    // M6: collected over CosigApprovalChallenge
 	DelegationHops []broker.DelegationHop `json:"delegation_hops"` // M2: collected over DelegationHopChallenge
+}
+
+// pendingGrantMatchesRequest reports whether req is the SAME grant request that minted the pending grant — the
+// identical field-by-field rule storedGrantMatchesRequest applies to a committed grant, run over the pending
+// mint's grant_evidence (so prepare-retry, finalize, and single-phase issuance share one definition of "same").
+func pendingGrantMatchesRequest(p *pendingGrant, req broker.Request) (bool, error) {
+	wrapped, err := json.Marshal(map[string]any{
+		"extensions": map[string]any{"broker": map[string]any{"kind": "grant", "grant_evidence": p.prepared.Evidence}},
+	})
+	if err != nil {
+		return false, err
+	}
+	return storedGrantMatchesRequest(string(wrapped), req)
 }
 
 // handleGrantFinalize is PHASE 2: it loads the pending mint, binds the collected cosignatures (M6) and/or
@@ -276,8 +308,26 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 	}
 	grantID := deterministicGrantID(fr.ProjectID, idem)
 
-	// Idempotent re-finalize: the grant already committed — return it (do NOT re-allocate a seq).
-	if existing, found, le := s.st.RecordByIdem(fr.ProjectID, idem); le == nil && found {
+	// Proof-of-possession FIRST (mirroring single-phase /v2/grants): finalize returns a live capability, so the
+	// caller must present the SAME PoP-signed grant request it prepared — project_id + idempotency_key alone
+	// (both guessable/observable) must never retrieve or commit someone else's grant.
+	req := grantRequestToBroker(fr.grantRequest)
+	req.BrokerID = s.brokerID
+	if e := req.Validate(); e != nil {
+		writeErr(w, http.StatusBadRequest, "finalize must carry the prepared grant request with a valid agent_sig: "+e.Error())
+		return
+	}
+
+	// Idempotent re-finalize: the grant already committed — return it (do NOT re-allocate a seq), but only when
+	// the stored record IS a grant for this exact request (storedGrantMatchesRequest); anything else is a 409.
+	if existing, found, le := s.st.RecordByIdem(fr.ProjectID, idem); le != nil {
+		writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+le.Error())
+		return
+	} else if found {
+		if same, pe := storedGrantMatchesRequest(existing.JSON, req); pe != nil || !same {
+			writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
+			return
+		}
 		s.respondFinalized(w, fr.ProjectID, grantID, existing.JSON, false)
 		return
 	}
@@ -288,6 +338,10 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 	s.pendingMu.Unlock()
 	if !ok {
 		writeErr(w, http.StatusConflict, "no pending grant for this idempotency_key — call /v2/grants/prepare first (or it expired / the server restarted)")
+		return
+	}
+	if same, pe := pendingGrantMatchesRequest(p, req); pe != nil || !same {
+		writeErr(w, http.StatusConflict, "the pending grant under this idempotency_key was prepared for a different grant request")
 		return
 	}
 

@@ -231,10 +231,13 @@ func TestDurablePendingTwoPhaseGrantSurvivesRestart(t *testing.T) {
 		sig := ed25519.Sign(ap, broker.CosigApprovalChallenge(pr.GrantID, kid, pr.CredentialBinding, 2, pr.Exp))
 		return broker.Cosignature{ApproverKid: kid, Sig: base64.RawURLEncoding.EncodeToString(sig)}
 	}
-	finBody, _ := json.Marshal(map[string]any{
-		"idempotency_key": "idem-restart-1", "project_id": "p1", "session_id": "s1",
-		"cosignatures": []broker.Cosignature{mkCosig(a1), mkCosig(a2)},
-	})
+	// finalize carries the SAME PoP-signed grant request as prepare, plus the collected cosignatures.
+	var finMap map[string]any
+	if err := json.Unmarshal([]byte(grantChallengeBody("idem-restart-1", "read:orders", agentKey)), &finMap); err != nil {
+		t.Fatalf("decode grant body: %v", err)
+	}
+	finMap["cosignatures"] = []broker.Cosignature{mkCosig(a1), mkCosig(a2)}
+	finBody, _ := json.Marshal(finMap)
 
 	// "Restart": a fresh Server (fresh in-memory pending map AND a fresh main store — this test targets only
 	// pgdurable, not the main store's independent Postgres durability), a fresh pgdurable.Store reconnecting

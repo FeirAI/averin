@@ -3132,6 +3132,7 @@ func storedGrantMatchesRequest(recordJSON string, req broker.Request) (bool, err
 	var p struct {
 		Extensions struct {
 			Broker struct {
+				Kind          string `json:"kind"`
 				GrantEvidence struct {
 					AgentID         string   `json:"agent_id"`
 					Action          string   `json:"action"`
@@ -3150,6 +3151,9 @@ func storedGrantMatchesRequest(recordJSON string, req broker.Request) (bool, err
 	}
 	if e := json.Unmarshal([]byte(recordJSON), &p); e != nil {
 		return false, fmt.Errorf("read stored grant match fields: %w", e)
+	}
+	if p.Extensions.Broker.Kind != "grant" {
+		return false, nil // not a grant record (e.g. a use/denial/generic row under this key): never a match
 	}
 	ge := p.Extensions.Broker.GrantEvidence
 	pub, e := base64.RawURLEncoding.DecodeString(req.AgentPubKey)

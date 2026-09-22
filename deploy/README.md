@@ -103,7 +103,7 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 A cosigned/delegated grant is inherently two-phase (the approver/delegator signs a challenge that binds
 the broker-minted credential): `POST /v2/grants/prepare` mints + reveals `{grant_id, credential_binding,
 exp, cnf_kid, cosig_threshold}`; the approvers/delegators sign it; `POST /v2/grants/finalize` submits the
-`cosignatures` (M6) / `delegation_hops` (M2) and commits.
+same PoP-signed grant request plus the `cosignatures` (M6) / `delegation_hops` (M2) and commits.
 
 A **native (M3)** grant is single-phase: `POST /v2/grants` with `mode:"token_exchange"` + `lease_id`
 issues a grant for an externally-minted IdP/STS credential (no PoP, no minted capability); the resource

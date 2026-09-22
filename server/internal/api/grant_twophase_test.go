@@ -59,6 +59,18 @@ func TestSinglePhaseGrantRejectedUnderCosigPolicy(t *testing.T) {
 	}
 }
 
+// finalizeBody is a /v2/grants/finalize body: the SAME PoP-signed grant request posted to prepare (grantJSON)
+// plus the collected approvals in extra (cosignatures / delegation_hops).
+func finalizeBody(grantJSON string, extra map[string]any) string {
+	var m map[string]any
+	_ = json.Unmarshal([]byte(grantJSON), &m)
+	for k, v := range extra {
+		m[k] = v
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
 func mustCore(t *testing.T) *core.Core {
 	t.Helper()
 	c, err := core.New(seed)
@@ -130,13 +142,12 @@ func TestOnlineCosigGrantPrepareFinalize(t *testing.T) {
 		sig := ed25519.Sign(ap, broker.CosigApprovalChallenge(pr.GrantID, kid, pr.CredentialBinding, 2, pr.Exp))
 		return broker.Cosignature{ApproverKid: kid, Sig: base64.RawURLEncoding.EncodeToString(sig)}
 	}
-	finBody, _ := json.Marshal(map[string]any{
-		"idempotency_key": "idem-cosig-1", "project_id": "p1", "session_id": "s1",
+	finBody := finalizeBody(grantBody("idem-cosig-1", "read:orders", ak, ak), map[string]any{
 		"cosignatures": []broker.Cosignature{mkCosig(a1), mkCosig(a2)},
 	})
 
 	// PHASE 2: finalize -> bind cosignatures + commit.
-	code, resp = do(t, h, "POST", "/v2/grants/finalize", string(finBody))
+	code, resp = do(t, h, "POST", "/v2/grants/finalize", finBody)
 	if code != http.StatusCreated {
 		t.Fatalf("finalize (%d): %s", code, resp)
 	}
@@ -148,7 +159,7 @@ func TestOnlineCosigGrantPrepareFinalize(t *testing.T) {
 	}
 
 	// idempotent re-finalize returns the same committed grant.
-	code2, resp2 := do(t, h, "POST", "/v2/grants/finalize", string(finBody))
+	code2, resp2 := do(t, h, "POST", "/v2/grants/finalize", finBody)
 	if code2 != http.StatusCreated || !strings.Contains(resp2, pr.GrantID) {
 		t.Fatalf("re-finalize must be idempotent (%d): %s", code2, resp2)
 	}
@@ -168,11 +179,10 @@ func TestOnlineCosigBelowThresholdRejected(t *testing.T) {
 	json.Unmarshal([]byte(resp), &pr)
 	kid := broker.KeyID(a1.Public().(ed25519.PublicKey))
 	sig := ed25519.Sign(a1, broker.CosigApprovalChallenge(pr.GrantID, kid, pr.CredentialBinding, 2, pr.Exp))
-	finBody, _ := json.Marshal(map[string]any{
-		"idempotency_key": "idem-cosig-2", "project_id": "p1", "session_id": "s1",
+	finBody := finalizeBody(grantBody("idem-cosig-2", "read:orders", ak, ak), map[string]any{
 		"cosignatures": []broker.Cosignature{{ApproverKid: kid, Sig: base64.RawURLEncoding.EncodeToString(sig)}}, // only 1 of 2
 	})
-	code, resp = do(t, h, "POST", "/v2/grants/finalize", string(finBody))
+	code, resp = do(t, h, "POST", "/v2/grants/finalize", finBody)
 	if code != http.StatusBadRequest || !strings.Contains(resp, "cosignatures rejected") {
 		t.Fatalf("a sub-threshold finalize must be rejected (%d): %s", code, resp)
 	}
@@ -180,8 +190,8 @@ func TestOnlineCosigBelowThresholdRejected(t *testing.T) {
 
 func TestOnlineFinalizeWithoutPrepareRejected(t *testing.T) {
 	h := newCosigBrokerServer(t, 1, []ed25519.PublicKey{seedKey(40).Public().(ed25519.PublicKey)})
-	finBody, _ := json.Marshal(map[string]any{"idempotency_key": "never-prepared", "project_id": "p1", "session_id": "s1"})
-	code, resp := do(t, h, "POST", "/v2/grants/finalize", string(finBody))
+	ak := grantAgentKey()
+	code, resp := do(t, h, "POST", "/v2/grants/finalize", finalizeBody(grantBody("never-prepared", "read:orders", ak, ak), nil))
 	if code != http.StatusConflict || !strings.Contains(resp, "no pending grant") {
 		t.Fatalf("finalize without prepare must 409 (%d): %s", code, resp)
 	}
@@ -197,8 +207,8 @@ func TestOnlineCosigPolicyRequiresCosignatures(t *testing.T) {
 	if code, resp := do(t, h, "POST", "/v2/grants/prepare", grantBody("idem-cosig-empty", "read:orders", ak, ak)); code != http.StatusOK {
 		t.Fatalf("prepare (%d): %s", code, resp)
 	}
-	finBody, _ := json.Marshal(map[string]any{"idempotency_key": "idem-cosig-empty", "project_id": "p1", "session_id": "s1"}) // no cosignatures
-	code, resp := do(t, h, "POST", "/v2/grants/finalize", string(finBody))
+	finBody := finalizeBody(grantBody("idem-cosig-empty", "read:orders", ak, ak), nil) // no cosignatures
+	code, resp := do(t, h, "POST", "/v2/grants/finalize", finBody)
 	if code != http.StatusBadRequest || !strings.Contains(resp, "requires cosignatures") {
 		t.Fatalf("an empty-cosignatures finalize under a pinned policy must be rejected (%d): %s", code, resp)
 	}
@@ -223,8 +233,7 @@ func TestOnlineFinalizeConcurrentSameKey(t *testing.T) {
 		sig := ed25519.Sign(ap, broker.CosigApprovalChallenge(pr.GrantID, kid, pr.CredentialBinding, 2, pr.Exp))
 		return broker.Cosignature{ApproverKid: kid, Sig: base64.RawURLEncoding.EncodeToString(sig)}
 	}
-	finBody, _ := json.Marshal(map[string]any{
-		"idempotency_key": "idem-race", "project_id": "p1", "session_id": "s1",
+	finBody := finalizeBody(grantBody("idem-race", "read:orders", ak, ak), map[string]any{
 		"cosignatures": []broker.Cosignature{mkCosig(a1), mkCosig(a2)},
 	})
 
@@ -236,7 +245,7 @@ func TestOnlineFinalizeConcurrentSameKey(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			c, r := do(t, h, "POST", "/v2/grants/finalize", string(finBody))
+			c, r := do(t, h, "POST", "/v2/grants/finalize", finBody)
 			codes[i] = c
 			created[i] = strings.Contains(r, `"created":true`)
 		}(i)
@@ -253,6 +262,65 @@ func TestOnlineFinalizeConcurrentSameKey(t *testing.T) {
 	}
 	if createdCount != 1 {
 		t.Fatalf("exactly one finalize must create the grant; got created=%d", createdCount)
+	}
+}
+
+// TestFinalizeRequiresPoPAndMatchingRequest: finalize used to return a committed grant's live capability (and
+// commit a pending one) given ONLY project_id + idempotency_key — no proof-of-possession, no request match. It
+// must require the SAME PoP-signed grant request prepared: a bare key is a 400, and another agent's validly
+// signed request under the victim's key is a 409 (pending AND committed), leaking no capability.
+func TestFinalizeRequiresPoPAndMatchingRequest(t *testing.T) {
+	h := newBrokerServer(t)
+	victim, attacker := grantAgentKey(), seedKey(77)
+	if code, resp := do(t, h, "POST", "/v2/grants/prepare", grantBody("idem-v", "read:orders", victim, victim)); code != http.StatusOK {
+		t.Fatalf("prepare (%d): %s", code, resp)
+	}
+	bare := `{"idempotency_key":"idem-v","project_id":"p1","session_id":"s1"}`
+	stolen := finalizeBody(grantBody("idem-v", "read:orders", attacker, attacker), nil)
+	check := func(phase string) {
+		t.Helper()
+		if code, resp := do(t, h, "POST", "/v2/grants/finalize", bare); code != http.StatusBadRequest || strings.Contains(resp, `"capability"`) {
+			t.Fatalf("%s: a finalize with no PoP must 400 without a capability, got %d: %s", phase, code, resp)
+		}
+		if code, resp := do(t, h, "POST", "/v2/grants/finalize", stolen); code != http.StatusConflict || strings.Contains(resp, `"capability"`) {
+			t.Fatalf("%s: another agent's request under the victim's key must 409 without a capability, got %d: %s", phase, code, resp)
+		}
+	}
+	check("pending")
+	if code, resp := do(t, h, "POST", "/v2/grants/finalize", finalizeBody(grantBody("idem-v", "read:orders", victim, victim), nil)); code != http.StatusCreated {
+		t.Fatalf("the victim's own finalize (%d): %s", code, resp)
+	}
+	check("committed")
+}
+
+// TestPrepareOnlyEchoesMatchingGrant: prepare used to echo ANY record stored under the idempotency key — before
+// validating PoP, and even a non-grant record. It must validate PoP first and only echo a committed grant to the
+// SAME request (409 otherwise), and only re-serve a pending challenge to the request that minted it.
+func TestPrepareOnlyEchoesMatchingGrant(t *testing.T) {
+	h := newBrokerServer(t)
+	victim, attacker := grantAgentKey(), seedKey(77)
+	// a generic record squatting an idempotency key, then a prepare under it.
+	postRecord(t, h, `{"idempotency_key":"idem-generic","project_id":"p1","session_id":"s1"}`)
+	if code, resp := do(t, h, "POST", "/v2/grants/prepare", grantBody("idem-generic", "read:orders", victim, victim)); code != http.StatusConflict {
+		t.Fatalf("prepare over a NON-grant record must 409, got %d: %s", code, resp)
+	}
+	// a pending mint is not re-served to another agent.
+	if code, resp := do(t, h, "POST", "/v2/grants/prepare", grantBody("idem-v", "read:orders", victim, victim)); code != http.StatusOK {
+		t.Fatalf("prepare (%d): %s", code, resp)
+	}
+	if code, resp := do(t, h, "POST", "/v2/grants/prepare", grantBody("idem-v", "read:orders", attacker, attacker)); code != http.StatusConflict {
+		t.Fatalf("a pending challenge must not be re-served to a different request, got %d: %s", code, resp)
+	}
+	// a committed grant is only echoed to the same request; an unsigned probe is a 400.
+	do(t, h, "POST", "/v2/grants/finalize", finalizeBody(grantBody("idem-v", "read:orders", victim, victim), nil))
+	if code, resp := do(t, h, "POST", "/v2/grants/prepare", grantBody("idem-v", "read:orders", attacker, attacker)); code != http.StatusConflict {
+		t.Fatalf("a committed grant must not be echoed to a different request, got %d: %s", code, resp)
+	}
+	if code, resp := do(t, h, "POST", "/v2/grants/prepare", `{"idempotency_key":"idem-v","project_id":"p1","session_id":"s1"}`); code != http.StatusBadRequest {
+		t.Fatalf("an unsigned prepare probe must 400, got %d: %s", code, resp)
+	}
+	if code, resp := do(t, h, "POST", "/v2/grants/prepare", grantBody("idem-v", "read:orders", victim, victim)); code != http.StatusOK || !strings.Contains(resp, `"finalized":true`) {
+		t.Fatalf("the same request's prepare-after-finalize must still return the committed grant (%d): %s", code, resp)
 	}
 }
 
@@ -281,11 +349,10 @@ func TestOnlineDelegationGrantPrepareFinalize(t *testing.T) {
 		Scope:        scope, Action: action, ResourceID: resource, Exp: pr.Exp,
 		Sig: base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, ch)),
 	}
-	finBody, _ := json.Marshal(map[string]any{
-		"idempotency_key": "idem-deleg-1", "project_id": "p1", "session_id": "s1",
+	finBody := finalizeBody(grantBody("idem-deleg-1", "read:orders", ak, ak), map[string]any{
 		"delegation_hops": []broker.DelegationHop{hop},
 	})
-	code, resp = do(t, h, "POST", "/v2/grants/finalize", string(finBody))
+	code, resp = do(t, h, "POST", "/v2/grants/finalize", finBody)
 	if code != http.StatusCreated {
 		t.Fatalf("finalize (%d): %s", code, resp)
 	}

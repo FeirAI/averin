@@ -214,6 +214,17 @@ Errors: `400` (validation, failed PoP, forbidden scope, malformed), `409` (idemp
 for a *different* grant request), `500` (store/seal failure), `501` (broker not enabled). When an
 M-of-N cosig policy is pinned, single-phase issuance is refused (`400`) — use prepare/finalize.
 
+### POST `/v2/grants/prepare` and `/v2/grants/finalize` (two-phase)
+
+`prepare` takes the same `grantRequest` body (PoP-validated first), mints the credential without
+committing, and returns the challenge inputs (`grant_id`, `credential_binding`, `cnf_kid`, `exp`,
+`cosig_threshold`). `finalize` takes **the same `grantRequest` body again** (including `agent_pubkey` /
+`agent_sig`) plus `cosignatures` and/or `delegation_hops`, re-validates the proof-of-possession, and
+commits. Both phases answer only the request that prepared the grant: an already-pending or committed
+grant under the same `idempotency_key` is returned only when the request matches it (the same rule as a
+`/v2/grants` retry), else `409`; a body without a valid `agent_sig` is a `400`. `finalize` with no
+prior `prepare` is a `409`.
+
 ---
 
 ## POST `/v2/use` (resource gateway, Tier-B)
