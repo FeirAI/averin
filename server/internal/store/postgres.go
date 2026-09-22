@@ -271,7 +271,10 @@ func (p *Postgres) HasRecordID(projectID, recordID string) (bool, error) {
 	ctx := background()
 	var held bool
 	if err := p.pool.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM records WHERE project_id = $1 AND (json::jsonb ->> 'record_id') = $2)
+		SELECT EXISTS (
+			SELECT 1 FROM records
+			WHERE project_id = $1 AND md5(json::jsonb ->> 'record_id') = md5($2) AND (json::jsonb ->> 'record_id') = $2
+		)
 	`, projectID, recordID).Scan(&held); err != nil {
 		return false, fmt.Errorf("store: has record_id: %w", err)
 	}
@@ -321,13 +324,15 @@ func selectByIdem(ctx context.Context, tx pgx.Tx, projectID, idemKey string) (Re
 }
 
 // recordIDHeldByOther reports whether a record with a DIFFERENT content_hash already holds recordID in the
-// project. The predicate matches the migration-0002 expression index exactly, so it is an index lookup.
+// project. The md5 predicate matches the migration-0002 expression index (an index lookup); the full record_id
+// comparison keeps it exact.
 func recordIDHeldByOther(ctx context.Context, tx pgx.Tx, projectID, recordID, contentHash string) (bool, error) {
 	var held bool
 	err := tx.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM records
-			WHERE project_id = $1 AND (json::jsonb ->> 'record_id') = $2 AND content_hash <> $3
+			WHERE project_id = $1 AND md5(json::jsonb ->> 'record_id') = md5($2)
+			  AND (json::jsonb ->> 'record_id') = $2 AND content_hash <> $3
 		)
 	`, projectID, recordID, contentHash).Scan(&held)
 	if err != nil {

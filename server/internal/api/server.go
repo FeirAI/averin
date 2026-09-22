@@ -1223,6 +1223,10 @@ func reservedRecordID(rid string) bool {
 	return uuidV5Pattern.MatchString(rid)
 }
 
+// maxRecordIDBytes caps a caller-supplied record_id (see validateGenericRecordItem; documented in docs/dev/API.md).
+// Every server-derived id (UUIDs, use-/outcome-/denial- ids) is far below it.
+const maxRecordIDBytes = 256
+
 // validateGenericRecordItem runs the deterministic, body-only validations the generic /v2/records path
 // rejects with a 400. It is shared by ingestOne and the batch up-front pre-pass (F14: a malformed item
 // must reject the WHOLE batch before any earlier item is sealed) so the two cannot diverge. It does NOT
@@ -1238,6 +1242,12 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	// (deterministic ids from the idempotency key): a generic caller must not pre-seed one, else a later
 	// /v2/use[-intent|-outcome] retry with the matching idempotency key could short-circuit to the
 	// pre-seeded record and SKIP PoP validation / consume-before-act (a forged-capability use as success).
+	// record_id is capped (bytes): it is indexed (the store's per-project uniqueness backstop) and echoed in every
+	// export, so an unbounded caller-chosen id is both an index-row-limit hazard and an amplification vector. The
+	// check is here — before any store — so Mem and Postgres reject an overlong id identically (400).
+	if rid := stringField(rec, "record_id"); len(rid) > maxRecordIDBytes {
+		return fmt.Errorf("record_id is %d bytes; the maximum is %d", len(rid), maxRecordIDBytes)
+	}
 	if rid := stringField(rec, "record_id"); reservedRecordID(rid) {
 		return fmt.Errorf("record_id %q is in a namespace reserved for the broker/resource endpoints (use-/outcome-/denial-/introspection-/revocation- prefixes and the deterministic UUIDv5 grant/introspection ids)", rid)
 	}

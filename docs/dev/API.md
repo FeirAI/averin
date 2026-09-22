@@ -85,6 +85,12 @@ would fail offline verification forever and lose its disclosure secret). An exac
 `idempotency_key`) still collapses onto the stored record. In a batch, a collision — with a stored record
 or between two items — rejects the whole batch before any item is sealed.
 
+**`record_id` is at most 256 bytes** (UTF-8). A longer caller-supplied id is a `400` (the whole batch,
+before anything is sealed), identically on the in-memory and Postgres stores. Server-derived ids are well
+under the cap. The Postgres uniqueness backstop indexes `md5(record_id)` rather than the raw id, so a
+longer id stored before the cap existed never exceeds the index row limit (migration `0002` cannot fail
+on it).
+
 ### Reserved fields (rejected on a generic record)
 
 - `idempotency_key` prefix `denial:` — reserved for the broker denied-grant log.

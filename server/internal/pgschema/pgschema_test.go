@@ -2,6 +2,8 @@ package pgschema
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"testing"
@@ -228,6 +230,37 @@ func TestMigrateV2RecordIDUniqueness(t *testing.T) {
 		}
 		if err := insert(admin, "sha256:b", "r1"); err == nil {
 			t.Fatal("the database must reject a second record under the same (project_id, record_id)")
+		}
+	})
+	t.Run("long historical record_id", func(t *testing.T) {
+		// Review finding 4: a pre-cap record with a 3200-byte INCOMPRESSIBLE record_id exceeds the btree row limit
+		// (~2704 bytes), so an index over the raw id aborted this step and every replica refused to boot. The index
+		// is over md5(record_id): the migration must succeed and the UNIQUE backstop must still hold for it.
+		scoped, admin, cleanup := newTestSchema(t)
+		defer cleanup()
+		stampV1(t, admin)
+		raw := make([]byte, 1600)
+		if _, err := rand.Read(raw); err != nil {
+			t.Fatal(err)
+		}
+		long := hex.EncodeToString(raw) // 3200 random hex chars: pglz cannot compress it under the limit
+		if err := insert(admin, "sha256:a", long); err != nil {
+			t.Fatalf("seed long record_id: %v", err)
+		}
+		if err := Migrate(ctx, scoped); err != nil {
+			t.Fatalf("a long historical record_id must NOT make the migration refuse to boot: %v", err)
+		}
+		if got := maxVersion(t, admin); got != 2 {
+			t.Fatalf("version = %d, want 2", got)
+		}
+		if !regExists(t, admin, "records_project_record_id_uniq") {
+			t.Fatal("a clean DB with a long record_id must still get the UNIQUE record_id index")
+		}
+		if err := insert(admin, "sha256:b", long); err == nil {
+			t.Fatal("the database must reject a second record under the same long record_id")
+		}
+		if err := insert(admin, "sha256:c", long+"x"); err != nil {
+			t.Fatalf("a DIFFERENT long record_id must insert: %v", err)
 		}
 	})
 	t.Run("historical duplicate", func(t *testing.T) {

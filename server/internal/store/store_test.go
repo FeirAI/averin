@@ -1,6 +1,8 @@
 package store
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"testing"
 )
@@ -279,6 +281,25 @@ func exerciseRecordIDUnique(t *testing.T, s Store) {
 	}
 	if _, created, err := s.PutRecord("other", "k2", b); err != nil || !created {
 		t.Fatalf("the same record_id in ANOTHER project must be accepted: created=%v err=%v", created, err)
+	}
+
+	// A record_id past the btree row limit (a pre-cap historical id; the api now caps new ids at 256 bytes) must
+	// still store and stay unique: the Postgres backstop indexes md5(record_id), never the raw value.
+	raw := make([]byte, 1600)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	long := hex.EncodeToString(raw)
+	la := Record{JSON: `{"record_id":"` + long + `","v":1}`, ContentHash: "sha256:la", SessionID: "s"}
+	lb := Record{JSON: `{"record_id":"` + long + `","v":2}`, ContentHash: "sha256:lb", SessionID: "s"}
+	if _, created, err := s.PutRecord("p", "kl1", la); err != nil || !created {
+		t.Fatalf("a 3200-byte record_id must store: created=%v err=%v", created, err)
+	}
+	if _, _, err := s.PutRecord("p", "kl2", lb); !errors.Is(err, ErrRecordIDConflict) {
+		t.Fatalf("a different record under the long record_id must fail with ErrRecordIDConflict, got %v", err)
+	}
+	if has, err := s.HasRecordID("p", long); err != nil || !has {
+		t.Fatalf("HasRecordID(p, long) = %v err=%v; want true", has, err)
 	}
 }
 

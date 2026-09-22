@@ -88,3 +88,27 @@ func TestRecordIDBrokerNamespacesReserved(t *testing.T) {
 		t.Fatal("a caller-chosen UUIDv4 record_id must still be accepted")
 	}
 }
+
+// TestRecordIDLengthCap (review finding 4): record_id had no length cap, so a long id sealed fine on Mem but hit
+// the Postgres btree row limit (a raw 400/500 from the database) — and a long HISTORICAL id aborted migration 0002.
+// The api now caps record_id at 256 bytes, before any store, so both backends answer an overlong id with the same
+// deterministic 400 (single record and batch alike), while an id at the cap is accepted.
+func TestRecordIDLengthCap(t *testing.T) {
+	h := newSrv(t)
+	atCap := strings.Repeat("r", 256)
+	if _, created := postRecord(t, h, `{"idempotency_key":"k1","project_id":"p1","session_id":"s1","record_id":"`+atCap+`"}`); !created {
+		t.Fatal("a 256-byte record_id must be accepted")
+	}
+	over := strings.Repeat("r", 257)
+	if code, resp := do(t, h, "POST", "/v2/records", `{"idempotency_key":"k2","project_id":"p1","session_id":"s1","record_id":"`+over+`"}`); code != http.StatusBadRequest || !strings.Contains(resp, "maximum is 256") {
+		t.Fatalf("a 257-byte record_id must 400, got %d: %s", code, resp)
+	}
+	batch := `[{"idempotency_key":"k3","project_id":"p1","session_id":"s1","record_id":"ok"},
+	           {"idempotency_key":"k4","project_id":"p1","session_id":"s1","record_id":"` + over + `"}]`
+	if code, resp := do(t, h, "POST", "/v2/records", batch); code != http.StatusBadRequest {
+		t.Fatalf("a batch with an overlong record_id must 400 as a whole, got %d: %s", code, resp)
+	}
+	if _, created := postRecord(t, h, `{"idempotency_key":"k3","project_id":"p1","session_id":"s1","record_id":"ok"}`); !created {
+		t.Fatal("the first item of the rejected batch must NOT have been committed")
+	}
+}
