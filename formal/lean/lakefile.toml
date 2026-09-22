@@ -1,0 +1,6 @@
+name = "Averin"
+version = "0.1.0"
+defaultTargets = ["Averin"]
+
+[[lean_lib]]
+name = "Averin"
