@@ -8,6 +8,7 @@
 
 use core::cmp::Ordering;
 use core::fmt;
+use std::collections::BTreeSet;
 use unicode_normalization::UnicodeNormalization;
 
 /// A value restricted to the RCP canonical model (RCP §1).
@@ -66,9 +67,12 @@ impl CanonValue {
     /// Preferred over `Object(..)` for programmatic building (e.g. checkpoint bodies).
     pub fn object(pairs: Vec<(String, CanonValue)>) -> Result<CanonValue, CanonError> {
         let mut members: Vec<(String, CanonValue)> = Vec::with_capacity(pairs.len());
+        // A key set alongside the ordered members: a linear `members.iter().any(..)` per key made
+        // construction quadratic in the member count (a verifier DoS on wide objects).
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         for (k, v) in pairs {
             let key = nfc(&k);
-            if members.iter().any(|(existing, _)| *existing == key) {
+            if !seen.insert(key.clone()) {
                 return Err(CanonError {
                     msg: format!("duplicate object key after NFC normalization: {key:?}"),
                     pos: 0,
@@ -387,6 +391,9 @@ impl<'a> Parser<'a> {
         self.expect(b'{')?;
         self.enter()?;
         let mut members: Vec<(String, CanonValue)> = Vec::new();
+        // Duplicate detection via a key set (O(log n) per key) — a linear scan of `members` per key was
+        // quadratic in the key count, so one attacker-supplied wide object stalled the verifier for seconds.
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         self.skip_ws();
         if self.peek() == Some(b'}') {
             self.i += 1;
@@ -401,7 +408,7 @@ impl<'a> Parser<'a> {
             let key_pos = self.i;
             let key = self.parse_string()?; // already NFC-normalized
                                             // RCP §5: reject duplicate keys, checked AFTER NFC normalization.
-            if members.iter().any(|(k, _)| *k == key) {
+            if !seen.insert(key.clone()) {
                 return Err(CanonError {
                     msg: format!("duplicate object key after NFC normalization: {key:?}"),
                     pos: key_pos,

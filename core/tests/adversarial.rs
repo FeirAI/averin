@@ -11963,3 +11963,58 @@ fn tier_b_federation_capstone_blocked_by_suppression() {
         "{out}"
     );
 }
+
+// ---- F: canonical-JSON duplicate-key detection must be sub-quadratic ----
+
+#[test]
+fn canon_wide_object_parses_in_subquadratic_time() {
+    // RCP §5 duplicate-key detection used to scan every prior member per key (O(n^2)): a single 80k-key object
+    // took ~10s, a verifier DoS from one attacker-supplied bundle field. 100k keys must now parse promptly (the
+    // dev profile is opt-level 3), and a post-NFC duplicate at the tail must still be rejected with the SAME
+    // message and byte position as before.
+    const N: usize = 100_000;
+    let mut s = String::with_capacity(N * 16);
+    s.push('{');
+    for i in 0..N {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("\"k{i}\":{i}"));
+    }
+    s.push('}');
+    let t = std::time::Instant::now();
+    let v = CanonValue::parse(&s).expect("a wide unique-key object parses");
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "100k-key parse took {:?} (quadratic duplicate detection?)",
+        t.elapsed()
+    );
+    assert_eq!(v.as_object().unwrap().len(), N);
+
+    // the checked constructor must scale the same way.
+    let pairs: Vec<(String, CanonValue)> = (0..N)
+        .map(|i| (format!("k{i}"), CanonValue::Int(i as i64)))
+        .collect();
+    let t = std::time::Instant::now();
+    assert!(CanonValue::object(pairs).is_ok());
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "100k-key CanonValue::object took {:?}",
+        t.elapsed()
+    );
+
+    // behavior unchanged: a duplicate (here after NFC: "e\u{301}" == "é") is still rejected at the key's position.
+    let mut dup = s[..s.len() - 1].to_string();
+    dup.push_str(",\"\u{e9}\":1,");
+    let pos = dup.len();
+    dup.push_str("\"e\u{301}\":2}");
+    let err = CanonValue::parse(&dup).unwrap_err();
+    assert_eq!(err.pos, pos);
+    assert_eq!(
+        err.msg,
+        format!(
+            "duplicate object key after NFC normalization: {:?}",
+            "\u{e9}"
+        )
+    );
+}
