@@ -3745,7 +3745,8 @@ fn evaluate_attestation(
 /// authority self-minting a freshness timestamp inside its own window; an approver that is also the broker
 /// self-approving a grant; a broker signing its own revocation list). Separately, `authority_keys` MAY equal
 /// `broker_authority_keys` (the self-host model — Go pins them equal) but MUST be disjoint from every
-/// NON-broker role (T7). Any overlap is a FATAL configuration error: abort before evaluating any record over an
+/// NON-broker role (T7); the pinned record-signing keys (`trusted_keys`) follow the same rule (broker overlap
+/// allowed, every non-broker role disjoint). Any overlap is a FATAL configuration error: abort before evaluating any record over an
 /// ambiguous key universe. Returns `Some(report)` — the fatal report to abort with — on any overlap, or `None`
 /// to proceed. (VerifyingKey equality is raw-bytes, which also settles the derived key id.)
 fn check_role_disjointness(
@@ -3799,6 +3800,29 @@ fn check_role_disjointness(
                 project_id,
                 &format!("authority_keys and {name} must be disjoint (a non-broker role key must not also elevate generic authority) — fatal configuration error"),
             ));
+        }
+    }
+    // The pinned RECORD-SIGNING keys (`trusted_keys` / opts `signing_keys`) must be disjoint from every
+    // NON-broker role too (docs/dev/SECURITY.md "Role separation"). The sharpest case is TSA: a thief holding a
+    // compromised signing key that is ALSO a pinned TSA key self-anchors every checkpoint "before" the
+    // compromise, salvaging all its forgeries (RCP §10.2). As with `authority_keys`, the broker overlap stays
+    // allowed — the broker recording key IS the record-signing key by design (ADR 0002), and self-host pins the
+    // generic `authority_keys` equal to it.
+    if let Some(signing) = &opts.trusted_keys {
+        for (name, set) in [
+            ("resource_authority_keys", &opts.resource_authority_keys),
+            ("taxonomy_keys", &opts.taxonomy_keys),
+            ("attestation_keys", &opts.attestation_keys),
+            ("trusted_tsa_keys", &opts.trusted_tsa_keys),
+            ("cosig_approver_keys", &opts.cosig_approver_keys),
+            ("revocation_keys", &opts.revocation_keys),
+        ] {
+            if signing.iter().any(|t| set.contains(&t.vk)) {
+                return Some(fatal_config_report(
+                    project_id,
+                    &format!("signing_keys and {name} must be disjoint (a record-signing key must not also act in a non-broker role) — fatal configuration error"),
+                ));
+            }
         }
     }
     None

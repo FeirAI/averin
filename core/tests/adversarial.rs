@@ -12154,3 +12154,109 @@ fn bundle_without_project_id_still_binds_one_project() {
     let r = verify_bundle(&clean);
     assert!(r.ok, "{:?}", r.issues);
 }
+
+#[test]
+fn signing_key_overlapping_tsa_key_is_fatal() {
+    // C: the record-signing keys were missing from the role-disjointness matrix. With the SAME key pinned as a
+    // (compromised) signing key and as a TSA key, a thief holding it self-anchors every checkpoint "before" the
+    // compromise and the whole bundle PASSES. Signing keys must be disjoint from every non-broker role.
+    let k0 = signing_key_from_seed(&[0u8; 32]);
+    let b = fixture();
+    let mut checkpoints = arr(&b, "checkpoints");
+    let a = make_test_anchor(
+        &checkpoint_hash(&checkpoints[1]),
+        "2026-06-15T10:02:00.000Z", // backdated by the thief, who holds k0
+        &k0,
+        "self",
+    );
+    checkpoints[1] = attach_anchor(&checkpoints[1], a);
+    let bundle = rebuild(arr(&b, "keys"), arr(&b, "records"), checkpoints);
+    let r = verify_bundle_with(
+        &bundle,
+        &VerifyOptions {
+            trusted_keys: Some(vec![pinned_compromised("2026-06-15T10:10:00.000Z")]),
+            trusted_tsa_keys: vec![k0.verifying_key()],
+            ..Default::default()
+        },
+    );
+    assert!(
+        !r.ok,
+        "a signing key doubling as the TSA must not self-anchor"
+    );
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("signing_keys") && i.contains("disjoint")),
+        "{:?}",
+        r.issues
+    );
+
+    // every other non-broker role is likewise disjoint from the signing keys...
+    let vk = k0.verifying_key();
+    let pin = || Some(vec![TrustedKey::from(vk)]);
+    for (name, opts) in [
+        (
+            "resource_authority_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                resource_authority_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "taxonomy_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                taxonomy_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "attestation_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                attestation_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "cosig_approver_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                cosig_approver_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "revocation_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                revocation_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+    ] {
+        let r = verify_bundle_with(&fixture(), &opts);
+        assert!(!r.ok, "{name}");
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.contains("signing_keys") && i.contains(name)),
+            "{name}: {:?}",
+            r.issues
+        );
+    }
+
+    // ...but the broker recording key IS the record-signing key by design (ADR 0002), as is the generic
+    // authority set in self-host: that overlap stays allowed.
+    let r = verify_bundle_with(
+        &fixture(),
+        &VerifyOptions {
+            trusted_keys: pin(),
+            broker_authority_keys: vec![vk],
+            trusted_authority_keys: vec![vk],
+            ..Default::default()
+        },
+    );
+    assert!(r.ok, "{:?}", r.issues);
+}
