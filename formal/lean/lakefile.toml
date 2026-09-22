@@ -4,3 +4,10 @@ defaultTargets = ["Averin"]
 
 [[lean_lib]]
 name = "Averin"
+
+# Executable oracle: runs the model over formal/oracle/inputs.json and writes
+# formal/oracle/expected.json, which core/tests/oracle.rs checks the Rust against byte-for-byte.
+#   lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json
+[[lean_exe]]
+name = "oracle"
+root = "Oracle.Main"

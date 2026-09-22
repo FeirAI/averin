@@ -50,7 +50,10 @@ impl std::fmt::Display for AnchorError {
 }
 impl std::error::Error for AnchorError {}
 
-fn anchor_preimage(checkpoint_hash: &str, anchored_ts: &str) -> Vec<u8> {
+/// `LP("averin.anchor.v1") ‖ LP(checkpoint_hash) ‖ LP(anchored_ts)`: what a test-anchor TSA key signs.
+/// Hidden `pub` for the Lean-oracle differential test (`core/tests/oracle.rs`).
+#[doc(hidden)]
+pub fn anchor_preimage(checkpoint_hash: &str, anchored_ts: &str) -> Vec<u8> {
     let mut p = Vec::with_capacity(16 + checkpoint_hash.len() + anchored_ts.len());
     lp_str_into(&mut p, ANCHOR_TAG);
     lp_str_into(&mut p, checkpoint_hash);

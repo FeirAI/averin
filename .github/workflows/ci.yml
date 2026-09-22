@@ -217,11 +217,32 @@ jobs:
         run: bash ./check-axioms.sh
 
   formal-refinement:
-    name: formal — Rust ↔ Lean refinement gate
+    name: formal — Rust ↔ Lean refinement gate (executable Lean oracle + tag inventory)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 formal/check-refinement.py
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: formal/lean
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: false
+      - name: tag inventory (every Rust domain tag is a Lean family, and vice versa)
+        run: python3 formal/check-refinement.py
+      - name: build the executable Lean oracle
+        working-directory: formal/lean
+        run: lake build --wfail oracle
+      - name: regenerate expected.json from the model; the committed file must be its exact output
+        working-directory: formal/lean
+        run: |
+          lake exe oracle ../oracle/inputs.json ../oracle/expected.json
+          git diff --exit-code -- ../oracle/expected.json
+      - name: Rust produces the model's bytes (canon, escapes, framing, every preimage family)
+        run: cargo test -p averin-decision-core --test oracle
 
   formal-kani:
     name: formal — Kani bounded proofs over the real encoders/parser

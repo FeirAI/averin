@@ -4,8 +4,8 @@
 
 use crate::canon::CanonValue;
 use crate::dag::Dag;
-use crate::hashx::parse_sha256;
-use crate::record::{hash_body, RecordError};
+use crate::hashx::{parse_sha256, sha256_prefixed};
+use crate::record::{hash_body_preimage, RecordError};
 use crate::sign::{self, CHECKPOINT_SIG_TAG};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
@@ -120,7 +120,14 @@ fn int_field(o: &CanonValue, k: &'static str) -> Result<i64, CheckpointError> {
 }
 
 pub fn compute_checkpoint_hash(cp: &CanonValue) -> Result<String, RecordError> {
-    hash_body(cp, STRIP)
+    Ok(sha256_prefixed(&checkpoint_hash_preimage(cp)?))
+}
+
+/// The exact bytes [`compute_checkpoint_hash`] feeds SHA-256 (`anchor`/`checkpoint_hash`/`sig`
+/// stripped). Hidden `pub` for the Lean-oracle differential test (`core/tests/oracle.rs`).
+#[doc(hidden)]
+pub fn checkpoint_hash_preimage(cp: &CanonValue) -> Result<Vec<u8>, RecordError> {
+    hash_body_preimage(cp, STRIP)
 }
 
 /// Build a frontier-checkpoint body from heads + chain metadata (helper for producers/tests).
