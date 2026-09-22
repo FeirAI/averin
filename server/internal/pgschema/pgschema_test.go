@@ -187,3 +187,67 @@ func TestMigrateNewerVersionFailsClosed(t *testing.T) {
 		t.Fatalf("version after fail-closed refusal = %d, want %d (must not mutate the ledger)", got, future)
 	}
 }
+
+// TestMigrateV2RecordIDUniqueness: the v1→v2 step builds the per-project record_id UNIQUE backstop on a clean
+// DB (a second record under the same (project_id, record_id) is then rejected by the database itself), and on
+// a DB that ALREADY holds a historical duplicate it must still migrate (never refuse to boot over immutable
+// evidence) — building the non-unique index instead.
+func TestMigrateV2RecordIDUniqueness(t *testing.T) {
+	ctx := context.Background()
+	stampV1 := func(t *testing.T, admin *pgxpool.Pool) {
+		t.Helper()
+		if _, err := admin.Exec(ctx, baselineV1); err != nil {
+			t.Fatalf("apply v1 baseline: %v", err)
+		}
+		if _, err := admin.Exec(ctx, `CREATE TABLE schema_migrations (version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+			INSERT INTO schema_migrations (version) VALUES (1)`); err != nil {
+			t.Fatalf("stamp v1: %v", err)
+		}
+	}
+	insert := func(admin *pgxpool.Pool, hash, recordID string) error {
+		_, err := admin.Exec(ctx, `INSERT INTO records (project_id, idempotency_key, content_hash, session_id, parents, json)
+			VALUES ('p', $1, $1, 's', '{}', $2)`, hash, fmt.Sprintf(`{"record_id":%q}`, recordID))
+		return err
+	}
+
+	t.Run("clean", func(t *testing.T) {
+		scoped, admin, cleanup := newTestSchema(t)
+		defer cleanup()
+		stampV1(t, admin)
+		if err := insert(admin, "sha256:a", "r1"); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := Migrate(ctx, scoped); err != nil {
+			t.Fatalf("migrate v1->v2: %v", err)
+		}
+		if got := maxVersion(t, admin); got != 2 {
+			t.Fatalf("version = %d, want 2", got)
+		}
+		if !regExists(t, admin, "records_project_record_id_uniq") {
+			t.Fatal("clean DB must get the UNIQUE record_id index")
+		}
+		if err := insert(admin, "sha256:b", "r1"); err == nil {
+			t.Fatal("the database must reject a second record under the same (project_id, record_id)")
+		}
+	})
+	t.Run("historical duplicate", func(t *testing.T) {
+		scoped, admin, cleanup := newTestSchema(t)
+		defer cleanup()
+		stampV1(t, admin)
+		if err := insert(admin, "sha256:a", "r1"); err != nil {
+			t.Fatalf("seed a: %v", err)
+		}
+		if err := insert(admin, "sha256:b", "r1"); err != nil {
+			t.Fatalf("seed historical duplicate: %v", err)
+		}
+		if err := Migrate(ctx, scoped); err != nil {
+			t.Fatalf("a historical duplicate must NOT make the migration refuse to boot: %v", err)
+		}
+		if got := maxVersion(t, admin); got != 2 {
+			t.Fatalf("version = %d, want 2", got)
+		}
+		if regExists(t, admin, "records_project_record_id_uniq") || !regExists(t, admin, "records_project_record_id_idx") {
+			t.Fatal("a DB with a historical duplicate must get the NON-unique record_id index")
+		}
+	})
+}

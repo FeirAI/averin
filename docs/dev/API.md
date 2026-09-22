@@ -73,12 +73,21 @@ record. The same key under two different `project_id`s does not collide and is a
 
 `created` is `false` for an idempotent collapse (a retry under the same key). Errors: `400`
 (invalid body, missing required field, reserved field/prefix, non-canonical field), `403`
-(project_id mismatch with auth).
+(project_id mismatch with auth), `409` (the `record_id` is already held by a different record in the
+project — see below).
+
+**`record_id` is unique per project.** A caller may choose its own `record_id`, but a second, different
+record under an id the project already holds is rejected with `409` and nothing is stored (a duplicate
+would fail offline verification forever and lose its disclosure secret). An exact idempotent replay (same
+`idempotency_key`) still collapses onto the stored record. In a batch, a collision — with a stored record
+or between two items — rejects the whole batch before any item is sealed.
 
 ### Reserved fields (rejected on a generic record)
 
 - `idempotency_key` prefix `denial:` — reserved for the broker denied-grant log.
-- `record_id` prefix `use-`, `outcome-`, or `denial-` — reserved for the broker/resource endpoints.
+- `record_id` prefix `use-`, `outcome-`, `denial-`, `introspection-`, or `revocation-`, and any
+  lowercase UUIDv5-shaped `record_id` (the form of the broker's deterministic grant and introspection
+  ids) — reserved for the broker/resource endpoints.
 - `event_type == "credential_grant_denied"` — reserved for the broker denied-grant log.
 - `extensions.broker` and `extensions.broker_denial` — reserved for the broker/resource lifecycle.
 - `record_kind` (optional) must be one of `budget-exhausted`, `chargeback-posted`.

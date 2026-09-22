@@ -7,6 +7,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 )
@@ -50,15 +51,38 @@ var ErrNotFound = errors.New("not found")
 // NOT roll back on this one (releasing a durable-but-invisible receipt's credential would allow a double-spend).
 var ErrCommitAmbiguous = errors.New("store: commit outcome unknown (a record insert may or may not have persisted)")
 
+// ErrRecordIDConflict is returned by PutRecord when a DIFFERENT record (different content_hash, different or no
+// idempotency key) already holds the new record's record_id in the project. record_id is unique per project: the
+// offline verifier rejects a bundle carrying a duplicate record_id, and disclosure secrets are keyed
+// (record_id, field), so a second record under an existing id would poison verification forever and lose its
+// opening secret. Nothing is persisted on this error (it is NOT commit-ambiguous). An exact idempotent replay
+// (same idempotency key, or byte-identical content) still collapses onto the stored row as before.
+var ErrRecordIDConflict = errors.New("store: record_id already used by a different record in this project")
+
+// recordIDOf extracts the record_id carried in a sealed record's JSON ("" if absent/unparseable — such a record
+// does not participate in the uniqueness check, matching the Postgres expression index, where NULL never conflicts).
+func recordIDOf(recordJSON string) string {
+	var p struct {
+		RecordID string `json:"record_id"`
+	}
+	_ = json.Unmarshal([]byte(recordJSON), &p)
+	return p.RecordID
+}
+
 // Store is append-only: records and checkpoints are never mutated or removed.
 type Store interface {
 	// PutRecord stores a record under an idempotency key. If the key was already used, it returns
-	// the previously stored record and created=false (threat #8: retry duplication collapses).
+	// the previously stored record and created=false (threat #8: retry duplication collapses). A NEW record
+	// whose record_id is already held by a different record in the project fails with ErrRecordIDConflict.
 	PutRecord(projectID, idemKey string, rec Record) (stored Record, created bool, err error)
 	// RecordByIdem returns the record previously stored under an idempotency key, if any. The broker
 	// uses it to detect an idempotent (or pre-D6 legacy) grant retry BEFORE allocating a broker_seq, so
 	// a replay can never burn a seq it then fails to record and manufacture a false transparency gap (D6).
 	RecordByIdem(projectID, idemKey string) (rec Record, found bool, err error)
+	// HasRecordID reports whether a record carrying recordID is already stored in the project. The api's batch
+	// pre-pass uses it to reject a record_id collision BEFORE any batch item is sealed (all-or-nothing); the
+	// authoritative check is PutRecord's ErrRecordIDConflict.
+	HasRecordID(projectID, recordID string) (bool, error)
 	// Heads returns the current head content_hashes for a session (records not referenced as a
 	// causal parent within that session), byte-sorted.
 	Heads(projectID, sessionID string) ([]string, error)
@@ -148,6 +172,7 @@ type project struct {
 	records    []Record
 	idem       map[string]int // idempotency key -> record index
 	byHash     map[string]struct{}
+	byRecordID map[string]struct{} // record_id -> present (per-project uniqueness)
 	checks     []Checkpoint
 	seqBySess  map[string]int64
 	disclosure []DisclosureSecret
@@ -162,12 +187,13 @@ func (m *Mem) proj(id string) *project {
 	p := m.projects[id]
 	if p == nil {
 		p = &project{
-			idem:      map[string]int{},
-			byHash:    map[string]struct{}{},
-			seqBySess: map[string]int64{},
-			discSeen:  map[string]struct{}{},
-			anchors:   map[int64]string{},
-			brokerSeq: map[string]int64{},
+			idem:       map[string]int{},
+			byHash:     map[string]struct{}{},
+			byRecordID: map[string]struct{}{},
+			seqBySess:  map[string]int64{},
+			discSeen:   map[string]struct{}{},
+			anchors:    map[int64]string{},
+			brokerSeq:  map[string]int64{},
 		}
 		m.projects[id] = p
 	}
@@ -197,9 +223,20 @@ func (m *Mem) PutRecord(projectID, idemKey string, rec Record) (Record, bool, er
 			}
 		}
 	}
+	// record_id is unique per project (checked AFTER the idem/content collapses above, so an exact replay still
+	// returns the stored row). A different record under an already-held record_id persists nothing.
+	rid := recordIDOf(rec.JSON)
+	if rid != "" {
+		if _, taken := p.byRecordID[rid]; taken {
+			return Record{}, false, fmt.Errorf("%w: %q", ErrRecordIDConflict, rid)
+		}
+	}
 	p.records = append(p.records, rec)
 	idx := len(p.records) - 1
 	p.byHash[rec.ContentHash] = struct{}{}
+	if rid != "" {
+		p.byRecordID[rid] = struct{}{}
+	}
 	if idemKey != "" {
 		p.idem[idemKey] = idx
 	}
@@ -224,6 +261,13 @@ func (m *Mem) RecordByIdem(projectID, idemKey string) (Record, bool, error) {
 		return p.records[i], true, nil
 	}
 	return Record{}, false, nil
+}
+
+func (m *Mem) HasRecordID(projectID, recordID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.proj(projectID).byRecordID[recordID]
+	return ok, nil
 }
 
 func headsOf(recs []Record) []string {

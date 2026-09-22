@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1021,6 +1022,7 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 	// up front (deterministic 400, nothing sealed) rather than silently dropping records: a batch of distinct
 	// records needs a distinct idempotency_key per item.
 	batchIdem := make(map[string]struct{}, len(items))
+	batchRecordIDs := make(map[string]struct{}, len(items))
 	for _, raw := range items {
 		var probe map[string]any
 		if decode(raw, &probe) != nil {
@@ -1060,6 +1062,31 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// record_id is unique per project (store.ErrRecordIDConflict → 409). Reject a collision — within this
+		// batch, or with an already-stored record — HERE, before any item is sealed, so a later item's conflict
+		// cannot leave the earlier items committed. An idempotent replay (its idempotency_key already bound)
+		// collapses onto its stored row and is exempt. PutRecord remains the authoritative check.
+		if rid := stringField(probe, "record_id"); rid != "" {
+			pid := stringField(probe, "project_id")
+			ridKey := pid + "\x00" + rid
+			if _, dup := batchRecordIDs[ridKey]; dup {
+				writeErr(w, http.StatusConflict, fmt.Sprintf("two records in this batch share record_id %q under the same project_id (record_id is unique per project)", rid))
+				return
+			}
+			batchRecordIDs[ridKey] = struct{}{}
+			if _, replay, err := s.st.RecordByIdem(pid, idem); err != nil {
+				writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+err.Error())
+				return
+			} else if !replay {
+				if taken, err := s.st.HasRecordID(pid, rid); err != nil {
+					writeErr(w, http.StatusInternalServerError, "record_id lookup: "+err.Error())
+					return
+				} else if taken {
+					writeErr(w, http.StatusConflict, fmt.Sprintf("%v: %q", store.ErrRecordIDConflict, rid))
+					return
+				}
+			}
+		}
 		// F14: the seal RCP-canonicalizes the record and HARD-rejects floats, out-of-range integers, and
 		// interior NULs (canon.rs) — deterministic 400s the shallow checks above miss. Without this dry-run a
 		// bad field in a LATER batch item would fail only at seal time, AFTER earlier items are already stored
@@ -1087,6 +1114,11 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			// validation errors ingestOne returns for a malformed record.
 			if errors.Is(err, errAuthorityRejected) {
 				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			// A different record already holds this record_id (a race past the pre-pass): nothing persisted.
+			if errors.Is(err, store.ErrRecordIDConflict) {
+				writeErr(w, http.StatusConflict, err.Error())
 				return
 			}
 			writeErr(w, http.StatusBadRequest, err.Error())
@@ -1155,6 +1187,26 @@ func canonProbe(probe map[string]any) map[string]any {
 	return out
 }
 
+// uuidV5Pattern matches exactly the lowercase UUIDv5 shape uuidV5Shaped emits — the form of every
+// deterministic grant_id (deterministicGrantID) and introspection record_id.
+var uuidV5Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// reservedRecordID reports whether a CALLER-supplied record_id falls in a namespace the broker/resource
+// endpoints derive their own ids from. record_id is unique per project (store.ErrRecordIDConflict), so a
+// generic record pre-seeded under one of these ids would squat it: the later grant/use/outcome/denial/
+// introspection whose deterministic id it is (grant ids are PUBLIC functions of project + idempotency key)
+// would then be refused. Reserved: the use-/outcome-/denial- prefixes, the introspection-/revocation- prefixes
+// ADR 0005 §7 reserves, and the lowercase UUIDv5 shape of deterministic grant/introspection ids. Server-assigned
+// ids (newUUID) are v4, so a record with no caller record_id is never affected.
+func reservedRecordID(rid string) bool {
+	for _, p := range []string{"use-", "outcome-", "denial-", "introspection-", "revocation-"} {
+		if strings.HasPrefix(rid, p) {
+			return true
+		}
+	}
+	return uuidV5Pattern.MatchString(rid)
+}
+
 // validateGenericRecordItem runs the deterministic, body-only validations the generic /v2/records path
 // rejects with a 400. It is shared by ingestOne and the batch up-front pre-pass (F14: a malformed item
 // must reject the WHOLE batch before any earlier item is sealed) so the two cannot diverge. It does NOT
@@ -1170,8 +1222,8 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	// (deterministic ids from the idempotency key): a generic caller must not pre-seed one, else a later
 	// /v2/use[-intent|-outcome] retry with the matching idempotency key could short-circuit to the
 	// pre-seeded record and SKIP PoP validation / consume-before-act (a forged-capability use as success).
-	if rid := stringField(rec, "record_id"); strings.HasPrefix(rid, "use-") || strings.HasPrefix(rid, "outcome-") || strings.HasPrefix(rid, "denial-") {
-		return fmt.Errorf("record_id prefix of %q is reserved for the broker/resource endpoints", rid)
+	if rid := stringField(rec, "record_id"); reservedRecordID(rid) {
+		return fmt.Errorf("record_id %q is in a namespace reserved for the broker/resource endpoints (use-/outcome-/denial-/introspection-/revocation- prefixes and the deterministic UUIDv5 grant/introspection ids)", rid)
 	}
 	// credential_grant_denied is the B11 denied-grant marker the verifier counts (denied_grants) by
 	// event_type alone. A denial is sealed by the server signing key like every record, so the verifier

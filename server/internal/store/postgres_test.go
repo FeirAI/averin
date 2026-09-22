@@ -61,6 +61,17 @@ func newTestStore(t *testing.T) (*Postgres, func()) {
 		pool.Close()
 		t.Fatalf("apply migration: %v", err)
 	}
+	// Apply every later versioned step too (0002: the record_id uniqueness index), so the tests exercise the
+	// full production schema.
+	migration2, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0002_record_id_unique.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0002: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration2)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0002: %v", err)
+	}
 
 	p := &Postgres{pool: pool}
 	cleanup := func() {
@@ -288,6 +299,12 @@ func TestPostgresIdemBinding(t *testing.T) {
 	p, done := newTestStore(t)
 	defer done()
 	exerciseIdemBinding(t, p)
+}
+
+func TestPostgresRecordIDUnique(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseRecordIDUnique(t, p)
 }
 
 func TestPostgresDuplicateContentHashCollapse(t *testing.T) {

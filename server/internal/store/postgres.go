@@ -111,6 +111,7 @@ func background() context.Context { return context.Background() }
 //   - If idemKey was already used for this project, return the stored row, created=false.
 //   - Otherwise, if the content_hash already exists (identical sealed bytes), collapse to that row,
 //     return it with created=false (and bind idemKey to it for future retries).
+//   - Otherwise, if a DIFFERENT record already holds rec's record_id, fail with ErrRecordIDConflict.
 //   - Otherwise insert and return rec, created=true.
 //
 // Concurrency: we never read-then-write. A single INSERT ... ON CONFLICT DO NOTHING claims the row
@@ -148,8 +149,22 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 		}
 	}
 
-	// Attempt the insert. ON CONFLICT DO NOTHING (no target) covers BOTH unique indexes
-	// (idempotency_key and content_hash) and suppresses the unique_violation, so a conflict yields
+	// record_id is unique per project (see ErrRecordIDConflict). Probed AFTER the idem fast path (an exact replay
+	// still returns its row) and before the insert: a row holding this record_id with a DIFFERENT content_hash is
+	// a conflict (nothing is written); the SAME content_hash is byte-identical content, which the insert below
+	// collapses. The probe uses the migration-0002 expression index. A racing insert that slips past the probe is
+	// caught by that UNIQUE index (it surfaces below as an unresolvable ON CONFLICT → re-probed).
+	rid := recordIDOf(rec.JSON)
+	if rid != "" {
+		if taken, err := recordIDHeldByOther(ctx, tx, projectID, rid, rec.ContentHash); err != nil {
+			return Record{}, false, err
+		} else if taken {
+			return Record{}, false, fmt.Errorf("%w: %q", ErrRecordIDConflict, rid)
+		}
+	}
+
+	// Attempt the insert. ON CONFLICT DO NOTHING (no target) covers EVERY unique index
+	// (idempotency_key, content_hash, record_id) and suppresses the unique_violation, so a conflict yields
 	// pgx.ErrNoRows rather than an error; a RETURNING row means this statement actually inserted —
 	// our authoritative "created" signal under concurrency.
 	var inserted bool
@@ -200,6 +215,15 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 		return Record{}, false, err
 	}
 	if !ok {
+		// Neither the idem key nor the content_hash resolves, so the conflict was on the record_id index (a
+		// racing insert of a DIFFERENT record under the same record_id).
+		if rid != "" {
+			if taken, err := recordIDHeldByOther(ctx, tx, projectID, rid, rec.ContentHash); err != nil {
+				return Record{}, false, err
+			} else if taken {
+				return Record{}, false, fmt.Errorf("%w: %q", ErrRecordIDConflict, rid)
+			}
+		}
 		// Should not happen: ON CONFLICT waits for the racing tx to finish, so the conflicting row is
 		// committed and visible by now. Surface it rather than silently returning a zero Record.
 		return Record{}, false, fmt.Errorf("store: put record: conflict with no resolvable row")
@@ -220,6 +244,18 @@ func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
 		return fmt.Errorf("store: release broker seq: %w", err)
 	}
 	return nil
+}
+
+// HasRecordID reports whether a record carrying recordID exists in the project (a migration-0002 index lookup).
+func (p *Postgres) HasRecordID(projectID, recordID string) (bool, error) {
+	ctx := background()
+	var held bool
+	if err := p.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM records WHERE project_id = $1 AND (json::jsonb ->> 'record_id') = $2)
+	`, projectID, recordID).Scan(&held); err != nil {
+		return false, fmt.Errorf("store: has record_id: %w", err)
+	}
+	return held, nil
 }
 
 // MaxBrokerSeq returns the highest allocated broker_seq for the project (0 if none).
@@ -262,6 +298,22 @@ func selectByIdem(ctx context.Context, tx pgx.Tx, projectID, idemKey string) (Re
 		return Record{}, false, fmt.Errorf("store: select by idem: %w", err)
 	}
 	return rec, true, nil
+}
+
+// recordIDHeldByOther reports whether a record with a DIFFERENT content_hash already holds recordID in the
+// project. The predicate matches the migration-0002 expression index exactly, so it is an index lookup.
+func recordIDHeldByOther(ctx context.Context, tx pgx.Tx, projectID, recordID, contentHash string) (bool, error) {
+	var held bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM records
+			WHERE project_id = $1 AND (json::jsonb ->> 'record_id') = $2 AND content_hash <> $3
+		)
+	`, projectID, recordID, contentHash).Scan(&held)
+	if err != nil {
+		return false, fmt.Errorf("store: probe record_id: %w", err)
+	}
+	return held, nil
 }
 
 func selectByContentHash(ctx context.Context, tx pgx.Tx, projectID, hash string) (Record, bool, error) {

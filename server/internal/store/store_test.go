@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // exerciseDisclosures runs the disclosure-store contract against any Store implementation, so Mem
 // (TestMemDisclosures) and Postgres (TestPostgresDisclosures) are proven to behave identically.
@@ -200,4 +203,51 @@ func exerciseIdemBinding(t *testing.T, s Store) {
 
 func TestMemIdemBinding(t *testing.T) {
 	exerciseIdemBinding(t, NewMem())
+}
+
+// exerciseRecordIDUnique pins the per-project record_id uniqueness contract shared by Mem and Postgres: a
+// DIFFERENT record under an already-held record_id is rejected with ErrRecordIDConflict and persists nothing
+// (no row, no idem binding, no disclosure secret), while an exact replay — same idempotency key, or
+// byte-identical content under a new key — still collapses onto the stored row, and another project is
+// unaffected.
+func exerciseRecordIDUnique(t *testing.T, s Store) {
+	t.Helper()
+	a := Record{JSON: `{"record_id":"r1","v":1}`, ContentHash: "sha256:ra", SessionID: "s",
+		Disclosures: []DisclosureSecret{{RecordID: "r1", Field: "input", ValueDigest: "sha256:va", NonceHex: "aa"}}}
+	b := Record{JSON: `{"record_id":"r1","v":2}`, ContentHash: "sha256:rb", SessionID: "s",
+		Disclosures: []DisclosureSecret{{RecordID: "r1", Field: "input", ValueDigest: "sha256:vb", NonceHex: "bb"}}}
+	if _, created, err := s.PutRecord("p", "k1", a); err != nil || !created {
+		t.Fatalf("put a: created=%v err=%v", created, err)
+	}
+	if got, created, err := s.PutRecord("p", "k1", a); err != nil || created || got.ContentHash != a.ContentHash {
+		t.Fatalf("exact replay (same idem) must collapse: created=%v err=%v got=%s", created, err, got.ContentHash)
+	}
+	if got, created, err := s.PutRecord("p", "k3", a); err != nil || created || got.ContentHash != a.ContentHash {
+		t.Fatalf("byte-identical content under a new key must collapse: created=%v err=%v", created, err)
+	}
+	if _, _, err := s.PutRecord("p", "k2", b); !errors.Is(err, ErrRecordIDConflict) {
+		t.Fatalf("a different record under record_id r1 must fail with ErrRecordIDConflict, got %v", err)
+	}
+	if n, _ := s.RecordCount("p"); n != 1 {
+		t.Fatalf("record count after the rejected duplicate = %d, want 1", n)
+	}
+	if _, found, _ := s.RecordByIdem("p", "k2"); found {
+		t.Fatalf("the rejected record's idempotency key must not be bound")
+	}
+	if has, err := s.HasRecordID("p", "r1"); err != nil || !has {
+		t.Fatalf("HasRecordID(p, r1) = %v err=%v; want true", has, err)
+	}
+	if has, err := s.HasRecordID("p", "nope"); err != nil || has {
+		t.Fatalf("HasRecordID(p, nope) = %v err=%v; want false", has, err)
+	}
+	if d, _ := s.Disclosures("p"); len(d) != 1 || d[0].ValueDigest != "sha256:va" {
+		t.Fatalf("disclosures = %+v; want only the FIRST record's secret", d)
+	}
+	if _, created, err := s.PutRecord("other", "k2", b); err != nil || !created {
+		t.Fatalf("the same record_id in ANOTHER project must be accepted: created=%v err=%v", created, err)
+	}
+}
+
+func TestMemRecordIDUnique(t *testing.T) {
+	exerciseRecordIDUnique(t, NewMem())
 }

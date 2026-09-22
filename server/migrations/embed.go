@@ -9,3 +9,9 @@ import _ "embed"
 //
 //go:embed 0001_init.sql
 var Schema string
+
+// RecordIDUnique is the full contents of 0002_record_id_unique.sql: the per-project record_id uniqueness
+// backstop (schema version 2). Idempotent (IF NOT EXISTS).
+//
+//go:embed 0002_record_id_unique.sql
+var RecordIDUnique string
