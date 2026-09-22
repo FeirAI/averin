@@ -12722,4 +12722,9 @@ fn tier_b_stripping_anchors_only_demotes_positive_claims() {
         s.grants_unused, 0,
         "an unanchored grant is not a clean unused grant"
     );
+    // With NO Tier-B authority pinned (the default, pin-nothing integrity flow) no receipt can validate, so the
+    // committed extension does not apply: the bundle stays ok with its use pending, as before.
+    let d = verify_bundle(&bundle);
+    assert!(d.ok, "{:?}", d.issues);
+    assert_eq!((d.uses_matched, d.unmatched_pending), (0, 1));
 }

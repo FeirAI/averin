@@ -4790,9 +4790,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         .iter()
         .flat_map(|(_, set)| set.iter().map(String::as_str))
         .collect();
+    // The COMMITTED extension applies once the auditor pins a Tier-B authority (broker, per-broker, or resource
+    // keys) — i.e. asks for Tier-B evaluation at all. With NONE pinned no grant/use can ever validate, so every
+    // committed receipt would read "not validatable" and fail the default, pin-nothing integrity flow (the web
+    // verifier's) on every broker bundle; there the join stays over CLOSED exactly as before. This gate reads
+    // only the auditor's opts, never attacker-removable bundle data, so monotonicity is preserved.
+    let tier_b_pinned = !opts.broker_authority_keys.is_empty()
+        || !opts.resource_authority_keys.is_empty()
+        || !opts.federated_broker_keys.is_empty();
     let committed: BTreeSet<String> = match dag_opt.as_ref() {
-        Some(d) => committed_set(records, &d.by_hash, &verified_frontiers),
-        None => BTreeSet::new(),
+        Some(d) if tier_b_pinned => committed_set(records, &d.by_hash, &verified_frontiers),
+        _ => closed.iter().map(|h| h.to_string()).collect(),
     };
 
     // Index closed, fully-verified grants by grant_id, reading match fields ONLY from the proven
