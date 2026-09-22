@@ -23,6 +23,10 @@ fn main() -> ExitCode {
             eprintln!("  averin-verify record <record.json> [ed25519pub:<key>]");
             eprintln!();
             eprintln!("opts.json keys (each a role-disjoint set; omit a set to leave that mode unevaluated):");
+            eprintln!("  signing_keys — the RECORD-SIGNING keys; pin them for AUTHENTIC verification (omitted =>");
+            eprintln!("    internal consistency only; an empty [] is an error). Each is an ed25519pub: string or a");
+            eprintln!("    {{key, status: active|retired|revoked|compromised, status_changed_at}} object (the");
+            eprintln!("    authoritative RCP §10.2 compromise time). Disjoint from every role below but the broker.");
             eprintln!("  broker_authority_keys, resource_authority_keys, tsa_keys, taxonomy/taxonomy_keys/");
             eprintln!("  taxonomy_digest/taxonomy_version, attestation_keys, cosig_approver_keys, revocation_keys,");
             eprintln!("  federated_broker_keys (a {{broker_id: [keys]}} map), authority_keys — all base64url");

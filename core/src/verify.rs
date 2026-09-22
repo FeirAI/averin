@@ -1245,8 +1245,9 @@ pub fn verify_bundle(bundle: &CanonValue) -> VerifyReport {
 /// Verify a bundle (JSON) with out-of-band pinned trust roots supplied as a JSON options object, and
 /// return the report JSON — the shape the FFI/CLI use to pass pinned keys for authority elevation
 /// (the broker recording key for `gateway_enforced` grants) and key/TSA pinning. All option keys are
-/// optional arrays: `authority_keys`/`signing_keys`/`tsa_keys` are `ed25519pub:` strings;
-/// `tsa_spki_b64` are base64url-no-pad DER SubjectPublicKeyInfos.
+/// optional arrays: `authority_keys`/`tsa_keys` are `ed25519pub:` strings (or rotation objects, ADR 0006);
+/// `signing_keys` are `ed25519pub:` strings or `{key,status,status_changed_at}` objects (see
+/// `parse_signing_keys`); `tsa_spki_b64` are base64url-no-pad DER SubjectPublicKeyInfos.
 pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
     if bundle_text.len() > MAX_BUNDLE_BYTES {
         return over_cap_report(bundle_text.len());
@@ -1263,8 +1264,8 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
     // who supplied keys must not be downgraded to unpinned verification (signing keys) or get a
     // confusing grant_verified:0 (authority keys) because a key was pasted in the wrong encoding.
     // ADR 0006 §1: the authority-elevation roles accept a string-OR-object rotation form; their lifecycle is
-    // collected here (keyed by raw key bytes) and consulted at the pass-2 elevation gate. The freshness-dated
-    // roles below stay string-only via parse_pubkeys, so a rotation directive on them is a clear parse error.
+    // collected here (keyed by raw key bytes) and consulted at the pass-2 elevation gate. The record-signing
+    // keys take their own RCP §10.2 object form (`parse_signing_keys` — key_status vocabulary, not `rotated`).
     let mut role_key_status: BTreeMap<[u8; 32], RoleKeyStatus> = BTreeMap::new();
     let authority = match parse_role_pubkeys(&opts_val, "authority_keys", &mut role_key_status) {
         Ok(k) => k,
@@ -1312,7 +1313,7 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
-    let signing = match parse_pubkeys(&opts_val, "signing_keys") {
+    let signing = match parse_signing_keys(&opts_val) {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
@@ -1348,7 +1349,7 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
             Ok(m) => m,
             Err(e) => return error_report(&e),
         };
-    let mut opts = VerifyOptions {
+    let opts = VerifyOptions {
         trusted_authority_keys: authority,
         broker_authority_keys: broker_authority,
         resource_authority_keys: resource_authority,
@@ -1363,34 +1364,88 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         attestation_keys,
         cosig_approver_keys,
         revocation_keys,
-        ..Default::default()
+        trusted_keys: signing,
     };
-    if !signing.is_empty() {
-        // No out-of-band status/compromise override here — that is the richer Rust API's job.
-        opts.trusted_keys = Some(signing.into_iter().map(TrustedKey::from).collect());
-    }
     report_json_with_digest(&verify_bundle_with(&bundle, &opts), bundle_text.as_bytes())
 }
 
-/// Parse an optional array of `ed25519pub:` strings. Absent ⇒ empty; present-but-malformed ⇒ Err
-/// (fail-closed, with the offending index + reason — never a silent drop).
-fn parse_pubkeys(opts: &CanonValue, key: &str) -> Result<Vec<VerifyingKey>, String> {
-    let arr = match opts.get(key) {
-        None | Some(CanonValue::Null) => return Ok(Vec::new()),
-        Some(v) => v
-            .as_array()
-            .ok_or_else(|| format!("{key} must be an array of ed25519pub: strings"))?,
+/// Parse the pinned RECORD-SIGNING keys (`signing_keys`) into [`TrustedKey`]s. Each element is an `ed25519pub:`
+/// string (no out-of-band status) OR an object `{"key":"ed25519pub:…","status":"active"|"retired"|"revoked"|
+/// "compromised","status_changed_at":"…"}` carrying the AUTHORITATIVE RCP §10.2 key status + compromise time
+/// (the same override the Rust [`TrustedKey`] API has — previously unreachable from JSON/CLI/FFI). Absent/null ⇒
+/// `None` (unpinned: internal consistency only). Fail-closed: an EMPTY array is a config error (it used to fall
+/// back silently to UNPINNED verification — the opposite of what a caller who supplied the field asked for), as
+/// is a malformed key, an unknown field or status (never silently active), or a non-string field.
+fn parse_signing_keys(opts: &CanonValue) -> Result<Option<Vec<TrustedKey>>, String> {
+    const KEY: &str = "signing_keys";
+    let arr = match opts.get(KEY) {
+        None | Some(CanonValue::Null) => return Ok(None),
+        Some(v) => v.as_array().ok_or_else(|| {
+            format!("{KEY} must be an array of ed25519pub: strings or {{key,status,status_changed_at}} objects")
+        })?,
     };
+    if arr.is_empty() {
+        return Err(format!(
+            "{KEY} is present but empty — pinning no signing key would silently verify UNPINNED; omit the field for internal-consistency-only verification"
+        ));
+    }
     let mut out = Vec::with_capacity(arr.len());
     for (i, v) in arr.iter().enumerate() {
-        let s = v
-            .as_str()
-            .ok_or_else(|| format!("{key}[{i}] must be a string"))?;
-        let vk = decode_pubkey(s)
-            .map_err(|e| format!("{key}[{i}] is not a valid ed25519pub key: {e}"))?;
-        out.push(vk);
+        let ctx = format!("{KEY}[{i}]");
+        if let Some(s) = v.as_str() {
+            let vk = decode_pubkey(s)
+                .map_err(|e| format!("{ctx} is not a valid ed25519pub key: {e}"))?;
+            out.push(TrustedKey::from(vk));
+            continue;
+        }
+        let obj = v.as_object().ok_or_else(|| {
+            format!(
+                "{ctx} must be an ed25519pub: string or a {{key,status,status_changed_at}} object"
+            )
+        })?;
+        for (k, _) in obj {
+            if !matches!(k.as_str(), "key" | "status" | "status_changed_at") {
+                return Err(format!(
+                    "{ctx} has unknown field {k:?} (allowed: key, status, status_changed_at)"
+                ));
+            }
+        }
+        let ks = v
+            .get("key")
+            .and_then(|k| k.as_str())
+            .ok_or_else(|| format!("{ctx}.key must be an ed25519pub: string"))?;
+        let vk = decode_pubkey(ks)
+            .map_err(|e| format!("{ctx}.key is not a valid ed25519pub key: {e}"))?;
+        let status = match v.get("status") {
+            None | Some(CanonValue::Null) => None,
+            Some(sv) => {
+                let st = sv
+                    .as_str()
+                    .ok_or_else(|| format!("{ctx}.status must be a string"))?;
+                // The RCP §10.2 key_status vocabulary (NOT the role-key `rotated`).
+                if !matches!(st, "active" | "retired" | "revoked" | "compromised") {
+                    return Err(format!(
+                        "{ctx}.status {st:?} is not one of active|retired|revoked|compromised"
+                    ));
+                }
+                Some(st.to_string())
+            }
+        };
+        let status_changed_at = match v.get("status_changed_at") {
+            None | Some(CanonValue::Null) => None,
+            Some(cv) => Some(
+                cv.as_str()
+                    .map(String::from)
+                    .ok_or_else(|| format!("{ctx}.status_changed_at must be a string"))?,
+            ),
+        };
+        out.push(TrustedKey {
+            vk,
+            status,
+            status_changed_at,
+        });
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// Parse ONE authority-elevation role-key element (ADR 0006 §1 rotation): an `ed25519pub:` string (status

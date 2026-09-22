@@ -4570,11 +4570,11 @@ fn role_key_rotation_json_parser_is_fail_closed() {
         "a valid rotation object must PARSE and verify"
     );
 
-    // signing_keys stays STRING-ONLY (its rotation is the richer Rust TrustedKey API, not the opts object), so
-    // the object form is still rejected there — whereas the deferred freshness-dated roles (tsa/attestation/
-    // cosig/revocation/taxonomy) now ACCEPT it (ADR 0006 §1 deferred roles).
-    let signing = format!(r#"{{"signing_keys":[{{"key":"{key}","status":"compromised"}}]}}"#);
-    assert!(verify_bundle_with_json(bundle_json, &signing).contains("must be a string"));
+    // signing_keys takes its OWN object form — the RCP §10.2 key_status vocabulary (see
+    // signing_keys_json_object_form_carries_compromise), so a role-key `rotated` status is rejected there.
+    let signing = format!(r#"{{"signing_keys":[{{"key":"{key}","status":"rotated"}}]}}"#);
+    assert!(verify_bundle_with_json(bundle_json, &signing)
+        .contains("is not one of active|retired|revoked|compromised"));
 
     // A misspelled/UNKNOWN field is rejected (fail-closed): silently dropping it would lose the auditor's
     // compromise pin (read as active) — exactly the silent fail-open the 5-lens review caught.
@@ -12259,4 +12259,49 @@ fn signing_key_overlapping_tsa_key_is_fatal() {
         },
     );
     assert!(r.ok, "{:?}", r.issues);
+}
+
+#[test]
+fn signing_keys_json_object_form_carries_compromise() {
+    // E: the JSON/CLI/FFI path built `TrustedKey::from(vk)` with NO status, and rejected the object form, so an
+    // auditor could not express "this signing key was compromised at T" outside the Rust API. The object form now
+    // carries the authoritative RCP §10.2 status + compromise time exactly like `TrustedKey`.
+    let (b, tsa_vk) = compromised_bundle("2026-06-15T10:02:00.000Z");
+    let bundle_json = b.serialize();
+    let key = encode_pubkey(&signing_key_from_seed(&[0u8; 32]).verifying_key());
+    let tsa = encode_pubkey(&tsa_vk);
+    let opts = |changed_at: &str| {
+        format!(
+            r#"{{"signing_keys":[{{"key":"{key}","status":"compromised","status_changed_at":"{changed_at}"}}],"tsa_keys":["{tsa}"]}}"#
+        )
+    };
+    // compromise AFTER the 10:02 anchor: every record predates it -> trusted (mirrors the Rust API test).
+    let after = verify_bundle_with_json(&bundle_json, &opts("2026-06-15T10:10:00.000Z"));
+    assert!(after.contains(r#""ok":true"#), "{after}");
+    assert!(
+        after.contains(r#""keys_externally_pinned":true"#),
+        "{after}"
+    );
+    // compromise BEFORE the anchor: nothing is anchored before it -> untrusted (threat #9).
+    let before = verify_bundle_with_json(&bundle_json, &opts("2026-06-15T10:01:00.000Z"));
+    assert!(before.contains(r#""ok":false"#), "{before}");
+    assert!(before.contains("threat #9"), "{before}");
+
+    // an EXPLICITLY empty signing_keys used to fall back SILENTLY to unpinned verification — now a config error.
+    let empty = verify_bundle_with_json(&bundle_json, r#"{"signing_keys":[]}"#);
+    assert!(
+        empty.contains(r#""ok":false"#) && empty.contains("signing_keys is present but empty"),
+        "{empty}"
+    );
+    // plain strings still work, and malformed objects fail closed.
+    let plain = verify_bundle_with_json(&bundle_json, &format!(r#"{{"signing_keys":["{key}"]}}"#));
+    assert!(
+        plain.contains(r#""keys_externally_pinned":true"#),
+        "{plain}"
+    );
+    let typo = verify_bundle_with_json(
+        &bundle_json,
+        &format!(r#"{{"signing_keys":[{{"key":"{key}","statuss":"compromised"}}]}}"#),
+    );
+    assert!(typo.contains("unknown field"), "{typo}");
 }

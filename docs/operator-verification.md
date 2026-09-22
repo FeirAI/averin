@@ -24,6 +24,14 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
 
 ```jsonc
 {
+  // AUTHENTICITY: the record-signing key(s). Omitted => internal consistency only (keys from the bundle);
+  // an EMPTY [] is a config error. Each entry is a string or an RCP §10.2 object carrying the authoritative
+  // compromise time: {"key": "ed25519pub:…", "status": "compromised", "status_changed_at": "…"}
+  // (status: active | retired | revoked | compromised). A record signed by a revoked/compromised
+  // key is trusted only if a verified anchor at or before status_changed_at commits it. MAY equal the
+  // broker/authority keys (ADR 0002); must be disjoint from every other role.
+  "signing_keys": ["ed25519pub:<record-signing-key>"],
+
   // Tier-A grant accountability (ADR 0002/0003): the credential broker's recording key(s).
   "broker_authority_keys": ["ed25519pub:<broker-recording-key>"],
 
@@ -93,8 +101,8 @@ comes from *your* opts, never the bundle, so a forger cannot self-assert it. A n
 `status_changed_at` (or an unanchored record) withdraws **unconditionally** (fail-closed — an undatable
 compromise cannot be proven to predate anything).
 
-The object form works for **every** role key (`signing_keys` excepted — its lifecycle is the richer Rust
-`TrustedKey` API). The exact rule differs by what the role signs:
+The object form works for **every** role key (`signing_keys` uses the RCP §10.2 `key_status` vocabulary —
+`active|retired|revoked|compromised` — see the options block above). The exact rule differs by what the role signs:
 
 - **Authority-elevation** (`broker_authority_keys`, `resource_authority_keys`, `authority_keys`, each
   `federated_broker_keys` set) and **`cosig_approver_keys`** — the signed artifact is committed by an anchor, so
@@ -112,7 +120,7 @@ The object form works for **every** role key (`signing_keys` excepted — its li
   defense-in-depth: `compromised`/`revoked` → the taxonomy is `untrusted`; `rotated` keeps the digest-pinned
   taxonomy valid.
 
-> **Fail-closed, not silent.** An UNKNOWN status, a misspelled field name, or the object form on `signing_keys`
+> **Fail-closed, not silent.** An UNKNOWN status, a misspelled field name, or an empty `signing_keys` array
 > is a **parse error** (never silently read as `active`) — you can never get false comfort that a rotation took
 > effect when it didn't.
 

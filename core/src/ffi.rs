@@ -96,7 +96,8 @@ pub unsafe extern "C" fn averin_verify_bundle_json_n(ptr: *const u8, len: usize)
 }
 
 /// Verify an export bundle with out-of-band pinned trust roots. `opts_json` is a JSON object whose
-/// optional arrays pin keys: `authority_keys`/`signing_keys`/`tsa_keys` (`ed25519pub:` strings) and
+/// optional arrays pin keys: `authority_keys`/`signing_keys`/`tsa_keys` (`ed25519pub:` strings; `signing_keys`
+/// also accepts `{key,status,status_changed_at}` objects, and an empty `signing_keys` is an error) and
 /// `tsa_spki_b64` (base64url DER). Used to elevate a credential-broker grant to `gateway_enforced`
 /// (pin the broker recording key as `authority_keys`). Returns the same JSON report as
 /// [`averin_verify_bundle_json`]; null if either pointer is null or not UTF-8.
