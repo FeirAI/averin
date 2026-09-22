@@ -1,0 +1,12 @@
+Mutant: The string serializer silently drops DEL (U+007F): ser is no longer injective.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -203,6 +203,7 @@
+         match c {
+             '"' => out.push_str("\\\""),
+             '\\' => out.push_str("\\\\"),
++            '\u{7F}' => {}
+             '\u{08}' => out.push_str("\\b"),
+             '\u{09}' => out.push_str("\\t"),
+             '\u{0A}' => out.push_str("\\n"),

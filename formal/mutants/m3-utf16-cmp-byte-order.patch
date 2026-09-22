@@ -1,0 +1,13 @@
+Mutant: Object members sorted by UTF-8 byte order instead of UTF-16 code units (RCP section 2).
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -188,7 +188,7 @@
+ 
+ /// Compare two strings by their UTF-16 code-unit sequences (RFC 8785 §3.2.3 / RCP §2).
+ fn utf16_cmp(a: &str, b: &str) -> Ordering {
+-    a.encode_utf16().cmp(b.encode_utf16())
++    a.cmp(b)
+ }
+ 
+ /// NFC-normalize a string (RCP §4). Idempotent on already-normalized input.
