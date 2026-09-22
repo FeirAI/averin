@@ -41,14 +41,20 @@ vuln:
 supply-chain: deny vuln
 
 # Formal verification gates (see formal/README.md). Needs elan/Lean 4.30.0, cargo-kani 0.68, Java.
-.PHONY: formal formal-lean formal-refinement formal-kani formal-tla
-formal: formal-lean formal-refinement formal-kani formal-tla
+.PHONY: formal formal-lean formal-refinement formal-mutants formal-kani formal-tla
+formal: formal-lean formal-refinement formal-mutants formal-kani formal-tla
 
 formal-lean:
 	cd formal/lean && lake build --wfail && ./check-axioms.sh
 
 formal-refinement:
 	python3 formal/check-refinement.py
+	cd formal/lean && lake build --wfail oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json
+	git diff --exit-code -- formal/oracle/expected.json
+	cargo test -p averin-decision-core --test oracle
+
+formal-mutants:
+	bash formal/check-mutants.sh
 
 formal-kani:
 	bash formal/run-kani.sh

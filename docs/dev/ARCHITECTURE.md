@@ -160,7 +160,9 @@ Algorithms 1–6 have a Lean 4 counterpart in [`formal/lean/Averin/`](../../form
 | 5 | `Dag.lean` | `bundle_eq_closure` |
 | 6 | `Chain.lean` | `unique_history` |
 
-`formal/check-refinement.py` keeps the models in step with this code. Algorithm 7's verdict logic
+The executable Lean oracle (`formal/lean/Oracle`, checked by `core/tests/oracle.rs`) and the tag
+inventory in `formal/check-refinement.py` keep the models in step with this code; `formal/check-mutants.sh`
+checks that those gates catch known drifts. Algorithm 7's verdict logic
 is covered by the adversarial suite; it is not formally modelled yet.
 
 ## Domain model

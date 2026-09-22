@@ -75,19 +75,25 @@ commit.
 
 ## Formal verification
 
-The proofs are CI gates (`formal-lean`, `formal-refinement`, `formal-kani` and `formal-tla` in
-`.github/workflows/ci.yml`). Run them locally with `make formal`, or one at a time:
+The proofs are CI gates (`formal-lean`, `formal-refinement`, `formal-mutants`, `formal-kani` and
+`formal-tla` in `.github/workflows/ci.yml`). Run them locally with `make formal`, or one at a time:
 
 ```bash
 cd formal/lean && lake build --wfail && ./check-axioms.sh   # Lean 4.30.0 (pinned in lean-toolchain)
-python3 formal/check-refinement.py                          # fails if core/src drifts from the Lean model
+python3 formal/check-refinement.py                          # tag inventory: Rust tags <-> Lean families
+(cd formal/lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json)
+cargo test -p averin-decision-core --test oracle            # Rust bytes == executable Lean model
+bash formal/check-mutants.sh                                # every known drift is caught by some gate
 bash formal/run-kani.sh                                     # Kani 0.68 bounded proofs (default set)
 bash formal/tla/run-tlc.sh                                  # TLC; downloads a pinned tla2tools.jar, needs Java
 ```
 
-**When you change a preimage, tag, domain, escape rule or DAG/chain check in `core/src`**,
-`check-refinement.py` fails until you update the matching Lean definition in `formal/lean/Averin/`
-and re-prove it. The gate is doing its job when that happens: a proof about a format the code no
+**When you change a preimage, tag, domain, escape rule or serializer in `core/src`**, the oracle
+test (`core/tests/oracle.rs`) fails because the Rust no longer produces the bytes the Lean model
+computes, and `check-refinement.py` fails on a tag no `Family` models. Update the matching Lean
+definition in `formal/lean/Averin/`, re-prove it, regenerate `formal/oracle/expected.json` with the
+oracle (CI rejects a hand-edited file), and add corpus rows to `formal/oracle/inputs.json` for any
+new family. The gate is doing its job when that happens: a proof about a format the code no
 longer uses is worthless. `run-tlc.sh` asserts *expected* outcomes. The fixed designs must pass,
 and each pre-fix variant must still produce its counterexample. See
 [`formal/README.md`](../../formal/README.md) for what each layer proves and what it does not.

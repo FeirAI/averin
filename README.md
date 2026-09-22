@@ -141,7 +141,11 @@ properties. These are checked by machine in [`formal/`](formal/README.md), not o
   Model checking reproduced one grant-sequence bug found in the audit and found a second one,
   both fixed.
 - **Kani** checks the real Rust encoders (base64url, `sha256:<hex>`, LP framing, key order).
-- **`formal/check-refinement.py`** fails CI when the Rust drifts from what the proofs model.
+- **An executable Lean oracle** runs the model over a corpus (every C0 control, DEL, U+2028,
+  BMP-vs-astral key order, i64 extremes, one sample per preimage family), and CI fails when the
+  Rust's bytes differ from the model's. A tag inventory ties every Rust domain tag to a Lean family,
+  and a mutation suite (`formal/check-mutants.sh`) checks that these gates catch eight known drifts.
+  This is differential testing over a corpus, not a mechanised refinement proof.
 
 What is *not* proved yet (verifier verdict logic, authority-evidence body binding, and a
 mechanised Rust↔Lean refinement) is listed in [`formal/README.md`](formal/README.md).
@@ -150,7 +154,9 @@ mechanised Rust↔Lean refinement) is listed in [`formal/README.md`](formal/READ
 cd formal/lean && lake build --wfail && ./check-axioms.sh   # Lean proofs
 bash formal/tla/run-tlc.sh                                  # TLA+ models (expected outcomes)
 bash formal/run-kani.sh                                     # Kani bounded proofs
-python3 formal/check-refinement.py                          # model/code drift gate
+python3 formal/check-refinement.py                          # tag inventory
+cargo test -p averin-decision-core --test oracle            # Rust bytes == Lean oracle output
+bash formal/check-mutants.sh                                # the gates catch known drifts
 ```
 
 ## Security model

@@ -3,14 +3,16 @@
 averin's product claim is Level 1 of `docs/coverage-limits.md`: *a record sealed by this key has
 not been altered since, and sits in a verifiable history.* This directory holds machine-checked
 evidence for the assumptions that claim rests on. There are three layers, each used where it is
-strongest, plus a gate that keeps them in sync with the code.
+strongest, plus a refinement gate that keeps them in sync with the code and a mutation suite
+that keeps the gates honest.
 
 | Layer | Tool | What it covers | Run |
 |---|---|---|---|
 | Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every hashed and signed preimage, the seal theorem, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
-| Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, exact key order (parser-level harnesses in an extended set) | `bash formal/run-kani.sh` |
+| Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order and transitive (parser-level and base64 chunk harnesses in an extended set) | `bash formal/run-kani.sh` |
 | Protocol and concurrency models | TLA+ / TLC (`tla/`) | gapless grant-transparency log under failures and lost rollbacks; consume-before-act ledger with multiple gateways, releases and TTL sweeps | `bash formal/tla/run-tlc.sh` |
-| Model/code drift gate | `check-refinement.py` | every tag, domain, preimage schema, escape rule and DAG/chain check the proofs assume still appears in `core/src` | `python3 formal/check-refinement.py` |
+| Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
+| Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | eight known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
 
 ## The seal, precisely
 
@@ -62,10 +64,13 @@ Other results:
 * **NFC.** The model starts from post-NFC scalar values. NFC-equivalent inputs are
   *intentionally* the same record (RCP §4). Anything that deduplicates or authorizes on raw,
   un-normalized bytes will disagree with `content_hash`.
-* **The link from each Lean definition to its Rust function.** This is checked in three ways:
-  textually by `check-refinement.py`, on small inputs by Kani, and byte-for-byte by the golden
-  vectors. It is not a mechanised refinement proof. To get one, translate `canon.rs`/`hashx.rs`
-  into Lean with Aeneas or prove them in place with Verus (see below).
+* **The link from each Lean definition to its Rust function.** This is checked by running the
+  model: the executable oracle evaluates the Lean definitions over a fixed corpus and the Rust must
+  reproduce the bytes (see "Refinement gate" below). Kani adds symbolic checks on small inputs, and
+  the golden vectors pin cross-implementation bytes. This is differential testing over a corpus, not
+  a mechanised refinement proof: a drift the corpus does not exercise can pass. To get a proof,
+  translate `canon.rs`/`hashx.rs` into Lean with Aeneas or prove them in place with Verus (see
+  below).
 * **Offline-verifier verdict logic** (`verify.rs` Tier-B joins, capstone, key status). This is
   covered by the adversarial suite and the audit fixes, not by a proof yet. The monotonicity
   property is the natural next theorem: *deleting unsigned data (anchors, revocation data,
@@ -77,13 +82,68 @@ Other results:
   `record_id` and it still reads `verified`. Closing this needs an `averin.authority.v3` preimage
   that adds a body commitment. That is a coordinated producer change and has not been made yet.
 
+## Refinement gate (CI job `formal-refinement`)
+
+Three checks, each doing what it is good at:
+
+1. **Executable Lean oracle.** `lean/Oracle/Main.lean` is a `lean_exe` that imports the model and
+   evaluates the same definitions the theorems are about (`Canon.ser`, `Canon.escChar`,
+   `Canon.serInt`, `lp`, `be32`, `be64`, `Family.msg` for every family in `Preimage.lean`, and the
+   record/checkpoint hash preimages inside `Seal.recordHashOf`/`checkpointHashOf`) over
+   `oracle/inputs.json`, and writes the bytes as hex to `oracle/expected.json`. CI rebuilds the
+   oracle, regenerates the file and fails on `git diff`, so the committed expectations are exactly
+   the model's output. `core/tests/oracle.rs` then asserts that the real Rust functions produce the
+   same bytes. Preimages are compared before SHA-256 wherever the Rust exposes them (hidden `pub`
+   builders in `record.rs`, `checkpoint.rs`, `commit.rs`, `sign.rs`, `authority.rs`, `anchor.rs`,
+   which the hash functions themselves call). The `verify.rs` challenge builders only return
+   digests, so for those the test compares against SHA-256 of the model's preimage.
+   * The oracle makes the two choices the model leaves to its caller. It sorts object members by
+     UTF-16 code unit (implemented independently of `canon.rs`). It encodes UTF-8 with the
+     runtime's `String.toUTF8`, and `Oracle.utf8c_eq` proves that encoder equal to the model's
+     `Averin.utf8`. `recordPre_spec`/`checkpointPre_spec` prove the emitted preimages are the ones
+     inside `Seal`.
+   * The corpus covers every C0 control, DEL, U+2028/U+2029, the U+E000..U+FFFF vs astral key
+     order (where UTF-8 byte order and UTF-16 order disagree), nested empty arrays and objects,
+     i64 extremes, a record with every top-level key, a checkpoint, and one sample per preimage
+     family with distinct field values, so a swapped field changes bytes. The oracle fails if a
+     family in the catalogue has no sample, and the Rust test fails on a family it has no
+     builder for.
+   * The test also checks that the verifier rejects any record or checkpoint outside the model's
+     pinned `domain` and `canon_version = "rcp-1"`.
+2. **Tag inventory** (`check-refinement.py`). Every domain-separation tag literal in the Rust
+   (named constants and the inline tags in `verify.rs`) must be a `Family` tag in `Preimage.lean`,
+   and every family's tag must still be used by the Rust. This is the one check that is textual by
+   design.
+3. **Golden vectors** (`cargo test --test golden`), the committed cross-implementation contract.
+
+## Mutation suite (CI job `formal-mutants`)
+
+`check-mutants.sh` applies each `mutants/*.patch` to a scratch copy of `core/`, `spec/` and
+`formal/`, runs the gates, and passes only if every mutant is killed. It first checks that every
+gate passes on the unmutated tree, so a broken gate cannot count as a kill. For m3 and m4 the named
+Kani harness must itself report `VERIFICATION:- FAILED`.
+
+| Mutant | Drift | Killed by (local run) |
+|---|---|---|
+| m1 | authority preimage: `LP(project_id)` and `LP(record_id)` swapped | oracle |
+| m2 | `write_string` drops DEL (`ser` no longer injective) | oracle |
+| m3 | `utf16_cmp` replaced by byte order | Kani `utf16_key_order_is_exact`, oracle, golden |
+| m4 | `lp_into` writes a 2-byte length | Kani `lp_into_frames_exactly`, oracle, golden |
+| m5 | commitment preimage drops `LP(field_domain)` | oracle |
+| m6 | `compute_content_hash` strips an extra field | oracle, golden |
+| m7 | `verify_content_hash` stops pinning `canon_version` | oracle (pinned-constants check) |
+| m8 | `verify.rs` taxonomy tag renamed | tag inventory |
+
+A new drift class gets a new patch here before the gate that catches it is called done.
+
 ## Kani (bounded, real code)
 
 The harnesses live next to the code (`#[cfg(kani)] mod kani_proofs` in `b64.rs`, `hashx.rs` and
 `canon.rs`). `run-kani.sh` runs them with `--no-default-features` (no `getrandom`) and
 `-Z stubbing`.
 
-**Default set** (each harness finishes in seconds on a 4-core, 16 GB runner; CI runs these):
+**Default set** (each harness finishes in under two minutes on a 4-core, 16 GB runner; CI runs
+these):
 
 - `alphabet_is_a_bijection`: base64url `val` and `ENC` are mutually inverse over the 64 symbols,
   and every other byte is rejected.
@@ -92,11 +152,20 @@ The harnesses live next to the code (`#[cfg(kani)] mod kani_proofs` in `b64.rs`,
   and read at fixed width, so `"sha256:" ‖ hex_lower(d)` is injective and canonical for every
   length. This is the `fmt` hypothesis in `Seal.lean`.
 - `lp_into_frames_exactly`: `lp_into` emits exactly `uint32_be(len) ‖ b`.
-- `utf16_key_order_is_exact`: member-key order is total, antisymmetric, and `Equal` only for
-  equal keys.
+- `utf16_key_order_is_exact`: for every pair of keys of one or two scalars, `utf16_cmp` equals
+  the lexicographic order of their UTF-16 code units, computed independently per scalar. One case
+  is pinned to U+E000..U+FFFF against astral scalars, where byte order disagrees. Loops are fully
+  unrolled, so a byte-order `utf16_cmp` (mutant m3) fails with a counterexample, not an unwinding
+  bound.
+- `utf16_key_order_is_transitive`: `a ≤ b ∧ b ≤ c ⇒ a ≤ c` for any three single-scalar keys, and
+  `Equal` only for equal keys, so sorting members is well defined.
 
 **Extended set** (`run-kani.sh --extended`): base64 tail canonicality (non-zero trailing bits
-rejected) and whole-chunk round trip, strict UTF-16 decoder
+rejected), the full 4-symbol chunk (`full_chunk_is_canonical`: every accepted 4-symbol spelling
+is `encode` of the 3 bytes it decodes to, which completes "every byte string has exactly one
+accepted spelling" chunk by chunk; it ran out of memory under an 8 GB cap after about 12 minutes
+locally because `decode`'s error path formats a `char`, which pulls Unicode tables into CBMC),
+strict UTF-16 decoder
 versus std, integer round trip and single spelling, `write_string` inverted by the parser, and
 parser panic-freedom. These harnesses symbolically execute the full RCP parser and heap `String`
 growth. On the 16 GB machine used for this work CBMC ran out of memory or passed a 25-minute
@@ -139,7 +208,7 @@ must pass, and each unsafe variant must still produce its counterexample.
   the semantics.
 * **What *would* add value next:**
   1. **Aeneas** (Rust → Lean) or **Verus** for `canon.rs`, `hashx.rs`, `b64.rs` and
-     `record.rs`. This replaces the textual refinement gate with a mechanised proof that the Rust
+     `record.rs`. This replaces the corpus-based oracle gate with a mechanised proof that the Rust
      *is* the Lean model. It is the one real gap left in the seal argument.
   2. A Lean model of the verifier verdict. Prove monotonicity under deletion of unsigned fields,
      and that the capstone implies `ok ∧ keys_externally_pinned`. This would have caught audit
