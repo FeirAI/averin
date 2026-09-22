@@ -12018,3 +12018,38 @@ fn canon_wide_object_parses_in_subquadratic_time() {
         )
     );
 }
+
+#[test]
+fn tier_b_merkle_revocation_multibyte_or_signed_hex_does_not_panic() {
+    // SAFETY (DoS): the proof's `lo`/`hi`/path nodes ride the UNSIGNED revocation_proofs map. A 64-BYTE string whose
+    // first char is multibyte ("€" = 3 bytes + 61 ASCII) passed the byte-length check and then sliced mid-char —
+    // a panic (and UB across cgo). A "+a" pair was accepted by from_str_radix. Both are just an invalid proof
+    // (Unproven → fail-closed), never a panic and never a parsed node.
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let good = nonmembership_proof(&leaves, GID);
+    let multibyte = format!("€{}", "a".repeat(61));
+    assert_eq!(multibyte.len(), 64);
+    let lo = good.get("lo").unwrap().as_str().unwrap().to_string();
+    // non-canonical encodings of the SAME bytes, which the old from_str_radix decode accepted: uppercase hex, and
+    // (when the first byte's high nibble is 0) a "+X" sign-prefixed pair.
+    let mut bads = vec![multibyte, lo.to_uppercase()];
+    if let Some(rest) = lo.strip_prefix('0') {
+        bads.push(format!("+{rest}"));
+    }
+    for bad_lo in bads {
+        let proof = change_field(&good, "lo", CanonValue::string(bad_lo.clone()));
+        let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+        let r = merkle_rev_bundle_verify(
+            &rec,
+            &res,
+            &tsa,
+            &rev,
+            root_obj,
+            vec![(GID.to_string(), proof)],
+        );
+        assert!(!r.ok, "malformed hex {bad_lo:?} must fail closed");
+        assert_eq!(r.revoked_uses_blocked, 1, "{bad_lo:?}");
+        assert_eq!(r.uses_matched, 0);
+    }
+}

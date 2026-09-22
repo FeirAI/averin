@@ -3232,15 +3232,11 @@ fn evaluate_revocation(
 
 /// Parse a 64-char lowercase-hex string into 32 raw bytes (the Merkle leaf VALUES / audit-path nodes are raw
 /// hashes, not the `sha256:` content-hash form). Fail-closed (`None`) on wrong length or a non-hex digit.
+/// Decodes BYTE-wise over ASCII lowercase hex only: these strings ride the UNSIGNED `revocation_proofs` map, and
+/// the former `from_str_radix(&s[2i..2i+2])` both PANICKED on a multibyte char straddling a slice boundary (a
+/// 64-byte "€aaa…") and accepted non-canonical pairs like "+a" / uppercase.
 fn parse_hex32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
-    }
-    Some(out)
+    crate::hashx::hex32(s)
 }
 
 /// Outcome of evaluating a top-level `revocation_merkle_root` (M5 Merkle-non-disclosure mode).
