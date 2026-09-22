@@ -629,6 +629,10 @@ struct CpPre {
 enum BrokerRole {
     Broker,
     Resource,
+    /// An operator-voided broker_seq (a signed `grant_void` tombstone, `(grant_void, credential_broker)`): it fills
+    /// its seq in the D6/M4 transparency log so a reserved-but-never-recorded seq stops wedging the gapless prefix,
+    /// but it is NEVER a grant — not counted, not joinable by a use, never Tier-B eligible (see `check_grant_voids`).
+    Void,
     None,
 }
 
@@ -637,6 +641,7 @@ impl BrokerRole {
         match self {
             BrokerRole::Broker => "broker",
             BrokerRole::Resource => "resource",
+            BrokerRole::Void => "grant_void",
             BrokerRole::None => "none",
         }
     }
@@ -660,6 +665,7 @@ fn classify_role(rec: &CanonValue) -> (BrokerRole, bool) {
         .and_then(|v| v.as_str());
     let role = match (kind, ep) {
         (Some("grant"), Some("credential_broker")) => BrokerRole::Broker,
+        (Some("grant_void"), Some("credential_broker")) => BrokerRole::Void,
         // D5 (ADR 0004): a two-phase use is a `use_intent` (recorded BEFORE the side effect) + a
         // `use_outcome` (AFTER); both are resource-signed records under the tool gateway, alongside the
         // one-phase `use` (ADR 0003, still accepted for back-compat).
@@ -2661,6 +2667,8 @@ fn validate_taxonomy(
 /// single-broker transparency log); `Some(bid)` restricts to one broker's partition (the M4 federation
 /// per-broker log) — federation is the per-broker generalization of D6, so both derive the log identically
 /// here (one place to keep byte-aligned with the producer's grantLog) and diverge only in their head folding.
+/// A `grant_void` tombstone (`BrokerRole::Void`) is a log entry too: it fills its seq exactly as a grant would
+/// (the producer folds it identically), so an operator-voided reservation keeps the prefix gapless.
 fn committed_broker_log(
     record_trust: &[RecordTrust],
     records: &[CanonValue],
@@ -2671,29 +2679,127 @@ fn committed_broker_log(
     let committed = committed_set(records, by_hash, frontier);
     let mut log: Vec<(i64, String)> = record_trust
         .iter()
-        .filter(|rt| {
-            rt.broker_role == BrokerRole::Broker.as_str()
-                && committed.contains(&rt.content_hash)
+        .filter_map(|rt| log_payload_key(&rt.broker_role).map(|key| (rt, key)))
+        .filter(|(rt, key)| {
+            committed.contains(&rt.content_hash)
                 && match broker_id {
                     None => true,
                     // empty broker_id never matches a (non-empty) partition id — it is a smuggling signal the
                     // caller flags separately, exactly as the prior broker_id_of(rt) filter did.
                     Some(bid) => {
-                        ev_str(&records[rt.index], "grant_evidence", "broker_id")
+                        ev_str(&records[rt.index], key, "broker_id")
                             .filter(|b| !b.is_empty())
                             .as_deref()
                             == Some(bid)
                     }
                 }
         })
-        .filter_map(|rt| {
-            ev_int(&records[rt.index], "grant_evidence", "broker_seq")
+        .filter_map(|(rt, key)| {
+            ev_int(&records[rt.index], key, "broker_seq")
                 .filter(|seq| *seq >= 1)
                 .map(|seq| (seq, rt.content_hash.clone()))
         })
         .collect();
     log.sort_by_key(|(seq, _)| *seq);
     log
+}
+
+/// The evidence payload carrying a transparency-log entry's `broker_seq`/`broker_id`: `grant_evidence` for a grant,
+/// `void_evidence` for a `grant_void` tombstone, `None` for every other role (not a log entry).
+fn log_payload_key(role: &str) -> Option<&'static str> {
+    if role == BrokerRole::Broker.as_str() {
+        Some("grant_evidence")
+    } else if role == BrokerRole::Void.as_str() {
+        Some("void_evidence")
+    } else {
+        None
+    }
+}
+
+/// Report every `broker_seq` held by more than one DISTINCT committed log entry — a grant and a `grant_void`
+/// tombstone (a real grant claiming a voided seq), or two of either. `log` is seq-sorted. Returns true when clean.
+fn check_duplicate_seqs(log: &[(i64, String)], scope: &str, issues: &mut Vec<String>) -> bool {
+    let mut ok = true;
+    for w in log.windows(2) {
+        if w[0].0 == w[1].0 && w[0].1 != w[1].1 {
+            issues.push(format!(
+                "{scope}broker_seq {} is claimed by more than one committed record (a grant and a grant_void tombstone, or two of either) — duplicate seq (D6)",
+                w[0].0
+            ));
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// The domain tag every `grant_void` tombstone's `void_evidence` carries, so its canonical bytes (and therefore its
+/// signed `evidence_hash`) can never coincide with a `grant_evidence` payload's.
+const GRANT_VOID_DOMAIN: &str = "averin.broker.grant_void.v1";
+
+/// Validate every `grant_void` tombstone (ADR 0004 D6 operator remediation). A tombstone fills its `broker_seq` in the
+/// gapless log, so a malformed or unsigned one must never be accepted as doing so: its `void_evidence` must carry the
+/// domain tag, a `broker_seq >= 1`, and bind the record's own `project_id` and `record_id` (== the voided grant_id);
+/// its signed `evidence_hash` must re-derive from that payload; under a pinned broker key set it must verify; and no
+/// Broker grant anywhere in the bundle may carry the voided grant_id (a voided reservation that was nonetheless
+/// issued). Each failure is a hard issue. Returns the number of valid tombstones.
+fn check_grant_voids(
+    record_trust: &[RecordTrust],
+    records: &[CanonValue],
+    opts: &VerifyOptions,
+    issues: &mut Vec<String>,
+) -> usize {
+    let granted: BTreeSet<String> = record_trust
+        .iter()
+        .filter(|rt| rt.broker_role == BrokerRole::Broker.as_str())
+        .filter_map(|rt| ev_str(&records[rt.index], "grant_evidence", "grant_id"))
+        .collect();
+    let broker_keys_pinned =
+        !opts.broker_authority_keys.is_empty() || !opts.federated_broker_keys.is_empty();
+    let mut valid = 0usize;
+    for rt in record_trust
+        .iter()
+        .filter(|rt| rt.broker_role == BrokerRole::Void.as_str())
+    {
+        let rec = &records[rt.index];
+        let mut bad: Vec<&str> = Vec::new();
+        if ev_str(rec, "void_evidence", "domain").as_deref() != Some(GRANT_VOID_DOMAIN) {
+            bad.push("void_evidence.domain is not averin.broker.grant_void.v1");
+        }
+        if ev_int(rec, "void_evidence", "broker_seq").is_none_or(|seq| seq < 1) {
+            bad.push("void_evidence carries no broker_seq >= 1");
+        }
+        let gid = ev_str(rec, "void_evidence", "grant_id");
+        if gid.is_none() || gid.as_deref() != s(rec, "record_id").as_deref() {
+            bad.push("void_evidence.grant_id does not equal the tombstone's record_id");
+        }
+        if ev_str(rec, "void_evidence", "project_id") != s(rec, "project_id") {
+            bad.push("void_evidence.project_id does not equal the tombstone's project_id");
+        }
+        if !evidence_rederivable(rec, "void_evidence") {
+            bad.push(
+                "authority.evidence_hash is not re-derivable from extensions.broker.void_evidence",
+            );
+        }
+        if broker_keys_pinned && rt.authority != AuthorityTrust::Verified {
+            bad.push("its authority does not verify under a pinned broker key");
+        }
+        if gid.as_ref().is_some_and(|g| granted.contains(g)) {
+            bad.push(
+                "a grant with the voided grant_id is also present (a voided reservation was issued)",
+            );
+        }
+        if bad.is_empty() {
+            valid += 1;
+        } else {
+            issues.push(format!(
+                "grant_void tombstone {} ({}): {} — it cannot fill its broker_seq (D6)",
+                rt.index,
+                rt.record_id,
+                bad.join("; ")
+            ));
+        }
+    }
+    valid
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2723,7 +2829,9 @@ fn compute_broker_trust(
     if cp_heads.is_empty() && full_log.is_empty() && !malformed_head {
         return "assumed".to_string();
     }
-    let mut ok = true;
+    // a grant claiming a voided seq (or any two distinct entries sharing one seq) is a hard violation of its own,
+    // named as such rather than only as the gap it also causes.
+    let mut ok = check_duplicate_seqs(&full_log, "", issues);
 
     // A verified checkpoint carrying a present-but-malformed broker_grant_head is a tampered/garbled D6 head:
     // a hard violation (and the activation signal above), never silently demoted to a benign headless cp.
@@ -2975,6 +3083,27 @@ fn compute_federation_trust(
         }
     }
 
+    // A committed grant_void tombstone fills a seq in ITS broker's partition (its signed void_evidence.broker_id).
+    // One without a broker_id fills no partition while federation is active — fail closed, like a grant.
+    for rt in record_trust {
+        if rt.broker_role != BrokerRole::Void.as_str() || !full_committed.contains(&rt.content_hash)
+        {
+            continue;
+        }
+        match ev_str(&records[rt.index], "void_evidence", "broker_id").filter(|b| !b.is_empty()) {
+            Some(b) => {
+                brokers.insert(b);
+            }
+            None => {
+                issues.push(format!(
+                    "committed grant_void tombstone {} carries no broker_id while federation is active — it fills no per-broker partition (M4)",
+                    rt.content_hash
+                ));
+                smuggled = true;
+            }
+        }
+    }
+
     // grant_id INJECTIVITY across the whole committed log: broker_id is part of the credential identity, so a
     // grant_id bound to >1 distinct (broker_id, broker_seq, content_hash) tuple is equivocated (one credential
     // identity double-bound, incl. the same grant_id reused under two brokers). Locally decidable (co-committed).
@@ -3064,6 +3193,9 @@ fn compute_federation_trust(
     // whose map lacks its head binds them without a head (suppression).
     let empty_root = grant_head_root(&[]);
     for b in &brokers {
+        if !check_duplicate_seqs(&log_for(dag_heads, b), &format!("broker '{b}': "), issues) {
+            suppressed.insert(b.clone());
+        }
         let mut entries: Vec<(i64, &GrantHead, &Vec<String>)> = Vec::new();
         for (cseq, _, map, frontier) in cp_fed_heads {
             match map.get(b) {
@@ -4165,6 +4297,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 }
             }
             BrokerRole::Broker => &opts.broker_authority_keys,
+            // A grant_void tombstone is the broker's statement, so it elevates only under the broker key set of
+            // its partition (never a cross_broker_cert: voiding is not delegable).
+            BrokerRole::Void if !opts.federated_broker_keys.is_empty() => {
+                match ev_str(rec, "void_evidence", "broker_id").filter(|b| !b.is_empty()) {
+                    Some(bid) => opts
+                        .federated_broker_keys
+                        .get(&bid)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]),
+                    None => &opts.broker_authority_keys,
+                }
+            }
+            BrokerRole::Void => &opts.broker_authority_keys,
             BrokerRole::Resource => &opts.resource_authority_keys,
             BrokerRole::None => &opts.trusted_authority_keys,
         };
@@ -4666,6 +4811,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             notes: p.notes,
         });
     }
+
+    // D6 operator remediation: every grant_void tombstone must be well-formed, bound and (under pinned broker keys)
+    // broker-signed before it may fill its seq; a bad one is a hard issue (it never counts as a grant either way).
+    check_grant_voids(&record_trust, records, opts, &mut issues);
 
     // Level 3 Tier-A: count credential-broker grants and how many are fully accountable. A grant only
     // counts as VERIFIED when ALL of: the record is integrity-proven (its own seal is valid —

@@ -220,10 +220,10 @@ func TestMigrateV2RecordIDUniqueness(t *testing.T) {
 			t.Fatalf("seed: %v", err)
 		}
 		if err := Migrate(ctx, scoped); err != nil {
-			t.Fatalf("migrate v1->v2: %v", err)
+			t.Fatalf("migrate v1->current: %v", err)
 		}
-		if got := maxVersion(t, admin); got != 2 {
-			t.Fatalf("version = %d, want 2", got)
+		if got := maxVersion(t, admin); got != CurrentSchemaVersion {
+			t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
 		}
 		if !regExists(t, admin, "records_project_record_id_uniq") {
 			t.Fatal("clean DB must get the UNIQUE record_id index")
@@ -250,8 +250,8 @@ func TestMigrateV2RecordIDUniqueness(t *testing.T) {
 		if err := Migrate(ctx, scoped); err != nil {
 			t.Fatalf("a long historical record_id must NOT make the migration refuse to boot: %v", err)
 		}
-		if got := maxVersion(t, admin); got != 2 {
-			t.Fatalf("version = %d, want 2", got)
+		if got := maxVersion(t, admin); got != CurrentSchemaVersion {
+			t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
 		}
 		if !regExists(t, admin, "records_project_record_id_uniq") {
 			t.Fatal("a clean DB with a long record_id must still get the UNIQUE record_id index")
@@ -276,11 +276,45 @@ func TestMigrateV2RecordIDUniqueness(t *testing.T) {
 		if err := Migrate(ctx, scoped); err != nil {
 			t.Fatalf("a historical duplicate must NOT make the migration refuse to boot: %v", err)
 		}
-		if got := maxVersion(t, admin); got != 2 {
-			t.Fatalf("version = %d, want 2", got)
+		if got := maxVersion(t, admin); got != CurrentSchemaVersion {
+			t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
 		}
 		if regExists(t, admin, "records_project_record_id_uniq") || !regExists(t, admin, "records_project_record_id_idx") {
 			t.Fatal("a DB with a historical duplicate must get the NON-unique record_id index")
 		}
 	})
+}
+
+// TestMigrateV3BrokerSeqVoid: the v2→v3 step adds broker_seq.allocated_at (existing reservations take the migration
+// time, so a pre-upgrade orphan becomes voidable one safety age later) and the insert-only broker_seq_void marker,
+// without touching existing broker_seq rows.
+func TestMigrateV3BrokerSeqVoid(t *testing.T) {
+	ctx := context.Background()
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	if _, err := admin.Exec(ctx, baselineV1+"\n"+steps[1]); err != nil {
+		t.Fatalf("apply v1+v2: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `CREATE TABLE schema_migrations (version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+		INSERT INTO schema_migrations (version) VALUES (1), (2);
+		INSERT INTO broker_seq (project_id, grant_id, seq) VALUES ('p', 'g-orphan', 1)`); err != nil {
+		t.Fatalf("stamp v2 + seed an orphan reservation: %v", err)
+	}
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatalf("migrate v2->v3: %v", err)
+	}
+	if got := maxVersion(t, admin); got != 3 {
+		t.Fatalf("version = %d, want 3", got)
+	}
+	var seq int64
+	var allocatedAt time.Time
+	if err := admin.QueryRow(ctx, `SELECT seq, allocated_at FROM broker_seq WHERE project_id='p' AND grant_id='g-orphan'`).Scan(&seq, &allocatedAt); err != nil {
+		t.Fatalf("the pre-existing reservation must survive with an allocated_at: %v", err)
+	}
+	if seq != 1 || allocatedAt.IsZero() {
+		t.Fatalf("reservation = seq %d allocated_at %v", seq, allocatedAt)
+	}
+	if !regExists(t, admin, "broker_seq_void") {
+		t.Fatal("v3 must create broker_seq_void")
+	}
 }

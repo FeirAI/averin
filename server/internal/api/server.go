@@ -76,6 +76,9 @@ type Server struct {
 	// can be combined with OTHER brokers' bundles without one broker's grants masking another's. "" = single-broker
 	// (legacy byte-identical path — no broker_id, no map).
 	brokerID string
+	// brokerSeqVoidMinAge is the safety age a reserved broker_seq must reach before POST /v2/broker-seq/void may
+	// fill it with a grant_void tombstone (AVERIN_BROKER_SEQ_VOID_MIN_AGE; DefaultBrokerSeqVoidMinAge).
+	brokerSeqVoidMinAge time.Duration
 	// M5 (ADR 0005): the revocation authority key (role-separated from broker/resource/signing/attestation/TSA).
 	// When set, POST /v2/revoke records a grant_id as revoked, and each /v2/export carries a signed, time-bounded
 	// revocation_list over the project's revoked set (the verifier blocks any use of a revoked grant). nil =
@@ -265,7 +268,9 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		keyValidFrom: "2026-01-01T00:00:00.000Z",
 		now:          time.Now,
 		pending:      make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
-		bundleSem:    make(chan struct{}, maxConcurrentBundleReads),
+		// D6 operator remediation (POST /v2/broker-seq/void): a conservative default safety age.
+		brokerSeqVoidMinAge: DefaultBrokerSeqVoidMinAge,
+		bundleSem:           make(chan struct{}, maxConcurrentBundleReads),
 		// F3: fail-CLOSED authority posture by default. A record CLAIMING an elevated source that averin
 		// cannot verify under a pinned key is REJECTED, never silently sealed at the forgeable
 		// caller_declared. WithRequirePinnedAuthority(false) is the explicit opt-out.
@@ -897,6 +902,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v2/grants/finalize", s.handleGrantFinalize) // M6/M2 online two-phase: phase 2 (attach+commit)
 	mux.HandleFunc("POST /v2/introspection", s.handleIntrospection)   // M3 native/STS: record a resource introspection transcript
 	mux.HandleFunc("POST /v2/revoke", s.handleRevoke)                 // M5: mark a grant_id revoked (export carries a signed revocation_list)
+	mux.HandleFunc("POST /v2/broker-seq/void", s.handleBrokerSeqVoid) // D6 remediation: fill a reserved, never-recorded broker_seq with a signed tombstone
 	mux.HandleFunc("POST /v2/use", s.handleUse)
 	mux.HandleFunc("POST /v2/use-intent", s.handleUseIntent)
 	mux.HandleFunc("POST /v2/use-outcome", s.handleUseOutcome)
@@ -1042,7 +1048,7 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if reservedIdem(idem) {
-			writeErr(w, http.StatusBadRequest, fmt.Sprintf("idempotency_key prefix %q is reserved for the broker denied-grant log", denialIdemPrefix))
+			writeErr(w, http.StatusBadRequest, reservedIdemMsg)
 			return
 		}
 		if err := rejectNUL("idempotency_key", idem); err != nil {
@@ -1157,7 +1163,14 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 // here, via sealAndStore, which bypasses these handler guards.
 const denialIdemPrefix = "denial:"
 
-func reservedIdem(idem string) bool { return strings.HasPrefix(idem, denialIdemPrefix) }
+// reservedIdemMsg is the 400 every caller-facing entry point returns for a reserved idempotency_key prefix.
+const reservedIdemMsg = `idempotency_key prefixes "denial:" and "grant-void:" are reserved for the broker (denied-grant log, grant_void tombstones)`
+
+// reservedIdem also covers grantVoidIdemPrefix: a record pre-seeded under grant-void:<seq> would make the operator's
+// tombstone for that seq collapse onto it (and never fill the seq).
+func reservedIdem(idem string) bool {
+	return strings.HasPrefix(idem, denialIdemPrefix) || strings.HasPrefix(idem, grantVoidIdemPrefix)
+}
 
 // rejectNUL returns an error naming the first (name, value) pair whose value contains U+0000. project_id,
 // idempotency_key and record_id feed NUL-DELIMITED derivations — the deterministic grant/use/outcome/introspection
@@ -1448,7 +1461,7 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 		return "", false, fmt.Errorf("idempotency_key is required (field or Idempotency-Key header)")
 	}
 	if reservedIdem(idem) { // see denialIdemPrefix: no caller may squat the denied-grant log namespace
-		return "", false, fmt.Errorf("idempotency_key prefix %q is reserved for the broker denied-grant log", denialIdemPrefix)
+		return "", false, errors.New(reservedIdemMsg)
 	}
 	if err := rejectNUL("idempotency_key", idem); err != nil {
 		return "", false, err
@@ -1686,7 +1699,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if reservedIdem(idem) { // a grant under denial:<denialID> would later collapse a denial and suppress it
-		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
 		return
 	}
 	if err := rejectNUL("project_id", gr.ProjectID, "idempotency_key", idem); err != nil {
@@ -1868,6 +1881,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if allocErr != nil {
+		if isVoidedGrant(allocErr) {
+			writeErr(w, http.StatusConflict, allocErr.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "allocate broker_seq: "+allocErr.Error())
 		return
 	}
@@ -2268,7 +2285,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		return
 	}
 	if reservedIdem(idem) { // a use under denial:<denialID> would later collapse a denial and suppress it
-		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
 		return
 	}
 	if err := rejectNUL("project_id", ur.ProjectID, "idempotency_key", idem); err != nil {
@@ -2686,7 +2703,7 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if reservedIdem(idem) { // an outcome under denial:<denialID> would later collapse a denial and suppress it
-		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
 		return
 	}
 	if err := rejectNUL("project_id", or.ProjectID, "idempotency_key", idem); err != nil {
@@ -3296,11 +3313,22 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 					GrantEvidence struct {
 						BrokerSeq int64 `json:"broker_seq"`
 					} `json:"grant_evidence"`
+					VoidEvidence struct {
+						BrokerSeq int64 `json:"broker_seq"`
+					} `json:"void_evidence"`
 				} `json:"broker"`
 			} `json:"extensions"`
 		}
 		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil {
 			return nil, fmt.Errorf("grant log: parse record %s: %w", r.ContentHash, err)
+		}
+		// A grant_void tombstone (POST /v2/broker-seq/void) fills its seq in the log EXACTLY as a grant would — the
+		// verifier's committed_broker_log folds it identically — so an operator-voided reservation closes the gap.
+		if parsed.Extensions.Broker.Kind == "grant_void" && parsed.Authority.EnforcementPoint == "credential_broker" {
+			if seq := parsed.Extensions.Broker.VoidEvidence.BrokerSeq; seq >= 1 {
+				log = append(log, broker.GrantSeqHash{Seq: seq, ContentHash: r.ContentHash})
+			}
+			continue
 		}
 		// Identify a grant EXACTLY as the offline verifier's classify_role does — the tuple
 		// (extensions.broker.kind=="grant", authority.enforcement_point=="credential_broker"). MEMBERSHIP
@@ -3334,13 +3362,18 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 // checkGaplessGrantLog reports an error unless the seq-sorted grant log is exactly [1..N] AND the store's
 // allocated max broker_seq equals N — i.e. every allocated seq is held by exactly one recorded grant.
 func checkGaplessGrantLog(gl []broker.GrantSeqHash, maxAllocated int64) error {
+	for i := 1; i < len(gl); i++ {
+		if gl[i].Seq == gl[i-1].Seq {
+			return fmt.Errorf("broker_seq %d is held by two recorded entries (%s, %s) — duplicate seq", gl[i].Seq, gl[i-1].ContentHash, gl[i].ContentHash)
+		}
+	}
 	for i, g := range gl {
 		if g.Seq != int64(i+1) {
 			return fmt.Errorf("recorded grant broker_seq set is not a gapless [1..N] prefix (position %d holds seq %d)", i+1, g.Seq)
 		}
 	}
 	if n := int64(len(gl)); maxAllocated != n {
-		return fmt.Errorf("allocated broker_seq max %d != %d recorded grants (a reserved or orphaned seq has no recorded grant; retry that grant before checkpointing)", maxAllocated, n)
+		return fmt.Errorf("allocated broker_seq max %d != %d recorded grants (a reserved or orphaned seq has no recorded grant; retry that grant before checkpointing, or void the seq with POST /v2/broker-seq/void once it is older than AVERIN_BROKER_SEQ_VOID_MIN_AGE)", maxAllocated, n)
 	}
 	return nil
 }

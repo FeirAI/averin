@@ -136,7 +136,7 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if reservedIdem(idem) {
-		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
 		return
 	}
 	if err := rejectNUL("project_id", gr.ProjectID, "idempotency_key", idem); err != nil {
@@ -424,6 +424,10 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}()
 	if commitErr != nil {
+		if isVoidedGrant(commitErr) {
+			writeErr(w, http.StatusConflict, commitErr.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "finalize grant: "+commitErr.Error())
 		return
 	}

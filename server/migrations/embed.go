@@ -15,3 +15,9 @@ var Schema string
 //
 //go:embed 0002_record_id_unique.sql
 var RecordIDUnique string
+
+// BrokerSeqVoid is the full contents of 0003_broker_seq_void.sql: broker_seq.allocated_at + the insert-only
+// broker_seq_void marker table behind the operator's grant_void remediation (schema version 3). Idempotent.
+//
+//go:embed 0003_broker_seq_void.sql
+var BrokerSeqVoid string

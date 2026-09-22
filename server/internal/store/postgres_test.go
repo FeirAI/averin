@@ -72,6 +72,15 @@ func newTestStore(t *testing.T) (*Postgres, func()) {
 		pool.Close()
 		t.Fatalf("apply migration 0002: %v", err)
 	}
+	migration3, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0003_broker_seq_void.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0003: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration3)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0003: %v", err)
+	}
 
 	p := &Postgres{pool: pool}
 	cleanup := func() {
@@ -305,6 +314,12 @@ func TestPostgresReleaseKeepsNonMaxSeq(t *testing.T) {
 	p, done := newTestStore(t)
 	defer done()
 	exerciseReleaseKeepsNonMaxSeq(t, p)
+}
+
+func TestPostgresBrokerSeqVoid(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseBrokerSeqVoid(t, p)
 }
 
 func TestPostgresRecordIDUnique(t *testing.T) {

@@ -207,6 +207,57 @@ func TestMemReleaseKeepsNonMaxSeq(t *testing.T) {
 	exerciseReleaseKeepsNonMaxSeq(t, NewMem())
 }
 
+// exerciseBrokerSeqVoid pins the operator-void contract shared by Mem and Postgres (formal/tla/GrantLog.tla): a
+// voided reservation is KEPT in the allocation ledger (MaxBrokerSeq still counts it, so MAX+1 never re-issues the
+// voided number), ReleaseBrokerSeq never deletes it, and its grant_id is retired — AllocateBrokerSeq refuses it with
+// ErrBrokerSeqVoided rather than handing the voided seq back or allocating a fresh one.
+func exerciseBrokerSeqVoid(t *testing.T, s Store) {
+	t.Helper()
+	for _, gid := range []string{"g1", "g2"} {
+		if _, _, err := s.AllocateBrokerSeq("p", gid); err != nil {
+			t.Fatalf("alloc %s: %v", gid, err)
+		}
+	}
+	res, found, err := s.BrokerSeqAt("p", 1)
+	if err != nil || !found || res.GrantID != "g1" || res.Seq != 1 || res.Voided || res.AllocatedAt.IsZero() {
+		t.Fatalf("BrokerSeqAt(1) = %+v found=%v err=%v; want g1, unvoided, with an allocation time", res, found, err)
+	}
+	if _, found, err := s.BrokerSeqAt("p", 99); err != nil || found {
+		t.Fatalf("BrokerSeqAt(99) found=%v err=%v; want not found", found, err)
+	}
+	if err := s.VoidBrokerSeq("p", "g2", 1); err == nil {
+		t.Fatal("voiding seq 1 under a grant that does not hold it must fail")
+	}
+	for i := 0; i < 2; i++ { // idempotent
+		if err := s.VoidBrokerSeq("p", "g1", 1); err != nil {
+			t.Fatalf("void g1@1 (#%d): %v", i+1, err)
+		}
+	}
+	if res, _, _ := s.BrokerSeqAt("p", 1); !res.Voided {
+		t.Fatalf("BrokerSeqAt(1) after void = %+v; want voided", res)
+	}
+	if _, _, err := s.AllocateBrokerSeq("p", "g1"); !errors.Is(err, ErrBrokerSeqVoided) {
+		t.Fatalf("re-allocating a voided grant_id must fail with ErrBrokerSeqVoided, got %v", err)
+	}
+	// voiding the MAX then releasing it must keep the row: the next grant gets 3, never the voided 2.
+	if err := s.VoidBrokerSeq("p", "g2", 2); err != nil {
+		t.Fatalf("void g2@2: %v", err)
+	}
+	if err := s.ReleaseBrokerSeq("p", "g2"); err != nil {
+		t.Fatalf("release of a voided seq must be a no-op: %v", err)
+	}
+	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 2 {
+		t.Fatalf("MaxBrokerSeq after voiding = %d err=%v; want 2 (voided rows stay allocated)", max, err)
+	}
+	if seq, fresh, err := s.AllocateBrokerSeq("p", "g3"); err != nil || seq != 3 || !fresh {
+		t.Fatalf("alloc g3 = %d fresh=%v err=%v; want a fresh 3 (a voided seq is never re-issued)", seq, fresh, err)
+	}
+}
+
+func TestMemBrokerSeqVoid(t *testing.T) {
+	exerciseBrokerSeqVoid(t, NewMem())
+}
+
 // exerciseIdemBinding pins the converged idempotency-key-binding contract shared by Mem and Postgres
 // (append-only): when a record collapses on content_hash under a NEW idempotency key, that new key is NOT
 // bound to the collapsed row — RecordByIdem(newKey) is found=false on BOTH stores. Mem used to bind it

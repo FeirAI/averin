@@ -128,6 +128,9 @@ The object form works for **every** role key (`signing_keys` uses the RCP §10.2
 
 - `grant_accountability` — every credential grant verified under `broker_authority_keys` (Tier-A).
 - `broker_trust: sequence_verified` — the grant-transparency log is a gapless, anchored prefix (D6); no suppression.
+  A `grant_void` tombstone (see below) fills its seq in that prefix but is never counted as a grant; a malformed,
+  unbound or (under pinned `broker_authority_keys`) unsigned tombstone, or a grant claiming a voided seq, is a hard
+  failure.
 - `cosig_status: satisfied` — every cosigned grant met its M-of-N (M6).
 - `delegation_status: verified` — every per-hop delegation chain re-walked + monotone (M2).
 - `revocation_status` — disclosed-list mode (M5): `fresh`/`absent` pass; `stale`/`revoked_present` block the capstone, as does `missing` (revocation_keys pinned but the bundle carries neither a `revocation_list` nor a `revocation_merkle_root`).
@@ -136,6 +139,32 @@ The object form works for **every** role key (`signing_keys` uses the RCP §10.2
 - `federation_status: sequence_verified` — every broker's per-`broker_id` log verified, no `cross_broker_suppression` (M4).
 - `transitive_grants` — grants from an UNPINNED subject broker that elevated to `transitive` trust via a `cross_broker_cert` signed by a PINNED issuer broker (M4 optional). The cert binds the subject's KEY (not just its id), and the subject key is rejected if it collides with any non-broker role.
 - `action_completeness` — the D8 capstone (`attested_complete_over_brokered_surface` / `..._introspected_surface` / `claimed_over_manifest` / `not_claimed`), **always** bounded by `resource_trust: assumed_truthful` (MF1 — the irreducible resource TCB).
+
+## Unwedging a refused checkpoint: `grant_void` tombstones (D6)
+
+The server refuses to sign a checkpoint while a `broker_seq` is reserved but no grant records it
+(`checkpoint refused: allocated broker_seq max M != N recorded grants`), because an anchored gap would fail
+verification forever. The usual cause is a grant whose commit was ambiguous (or whose seq release failed) and
+whose client never retried. **Upgrade hazard:** before this release any post-allocation failure left the seq
+reserved, so a project that ever hit a transient grant error can start refusing checkpoints as soon as this
+build is deployed (no new anchoring; after the revocation validity window its exported `revocation_list` reads
+`stale`).
+
+Remediation, per unrecorded seq `k` in `[1..M]`:
+
+1. If the grant's client is still around, have it retry under its original `idempotency_key`: the retry
+   reclaims seq `k` and the gap closes.
+2. Otherwise, once the reservation is older than `AVERIN_BROKER_SEQ_VOID_MIN_AGE` (default `1h`), call
+   `POST /v2/broker-seq/void?project=<id>` with `{"project_id":"<id>","broker_seq":k,"reason":"..."}`. The
+   server confirms from the store that nothing records seq `k` (a seq whose ambiguous commit actually landed is
+   refused), retires the reserved `grant_id` (a later retry of it is a `409`; re-issue under a new key), and
+   seals a broker-signed `grant_void` tombstone binding the project, `k` and that `grant_id`.
+3. `POST /v2/checkpoints` now signs. The offline verifier accepts the tombstone as filling seq `k`
+   (`broker_trust: sequence_verified`), does not count it in `grant_total`, and never matches a use to it.
+
+A tombstone is the broker's signed statement that seq `k` was never issued. An auditor who holds a credential
+carrying seq `k`, or finds a grant record claiming it, has evidence of equivocation: the verifier reports a
+bundle carrying both as a duplicate `broker_seq`.
 
 ## Producing the optional M4/M5 artifacts
 

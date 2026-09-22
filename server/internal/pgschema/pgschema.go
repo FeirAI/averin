@@ -47,7 +47,7 @@ import (
 
 // CurrentSchemaVersion is the schema version this binary understands. A stored version above this is a
 // fail-closed refusal to open; a stored version below it is migrated forward, step by step, to this.
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 // advisoryLockKey serializes the check-and-migrate across concurrently-booting replicas sharing one
 // AVERIN_DATABASE_URL. Its value is an arbitrary, stable, averin-private token (the ASCII of "AVERINSC")
@@ -71,9 +71,12 @@ var baselineV1 = migrations.Schema + "\n" + pgledger.SchemaSQL + "\n" + pgdurabl
 //
 //   - v2 (migrations.RecordIDUnique): per-project record_id uniqueness backstop — an expression index over the
 //     sealed JSON's record_id (UNIQUE unless historical duplicates already exist; see the migration header).
+//   - v3 (migrations.BrokerSeqVoid): broker_seq.allocated_at + the insert-only broker_seq_void table behind the
+//     operator's POST /v2/broker-seq/void remediation for a reserved-but-never-recorded broker_seq.
 var steps = []string{
 	baselineV1,
 	migrations.RecordIDUnique,
+	migrations.BrokerSeqVoid,
 }
 
 // Migrate brings the averin Postgres DB at dsn up to CurrentSchemaVersion under a single advisory lock,

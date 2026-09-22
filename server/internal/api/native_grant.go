@@ -84,6 +84,10 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 		return nil
 	}()
 	if commitErr != nil {
+		if isVoidedGrant(commitErr) {
+			writeErr(w, http.StatusConflict, commitErr.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "native grant: "+commitErr.Error())
 		return
 	}

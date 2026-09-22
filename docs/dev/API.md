@@ -38,6 +38,7 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | POST | `/v2/use-intent` | Two-phase use, phase 1 (before the side effect). | resource gateway |
 | POST | `/v2/use-outcome` | Two-phase use, phase 2 (after the side effect). | resource gateway |
 | POST | `/v2/revoke` | Mark a `grant_id` revoked. | `AVERIN_REVOCATION_SEED` |
+| POST | `/v2/broker-seq/void` | Operator remediation: fill a reserved, never-recorded `broker_seq` with a signed `grant_void` tombstone. | broker |
 
 Routes whose feature is not enabled return **`501 Not Implemented`** with an `{"error":...}` telling
 you which env var to set.
@@ -136,6 +137,13 @@ chain, and best-effort appends it to the configured witness. Empty JSON body.
 **Response `201`:** `{ "checkpoint": { /* sealed checkpoint */ } }`, with an optional
 `"warning"` if the checkpoint stored but witnessing is pending. Requires `?project=` (`400`
 otherwise).
+
+A checkpoint is **refused** (`500`, `checkpoint refused: ...`) while the project's grant log is not a
+gapless `[1..N]` prefix: a `broker_seq` is reserved but no grant (or tombstone) records it. This happens
+when a grant's commit was ambiguous (or its seq release failed) and its client never retried. Retry the
+grant under its original `idempotency_key` (it reclaims the reserved seq), or, once the reservation is
+older than `AVERIN_BROKER_SEQ_VOID_MIN_AGE`, void it with
+[`POST /v2/broker-seq/void`](#post-v2broker-seqvoidprojectid).
 
 ---
 
@@ -278,6 +286,50 @@ Request: `{ "project_id": "...", "grant_id": "..." }` (both required).
 `{ "revoked": "<grant_id>", "project_id": "...", "revoked_total": <n>, "note": "..." }`.
 Errors: `400`, `403`, `429` (the per-project revoked-set cap is reached — explicit, never a silent
 fail-open), `501` (revocation not enabled).
+
+---
+
+## POST `/v2/broker-seq/void?project=<id>`
+
+Operator remediation for a **wedged** grant-transparency log (ADR 0004 D6). A `broker_seq` that was
+reserved for a grant which never recorded leaves the recorded log short of `[1..max]`, and every
+`POST /v2/checkpoints` is refused until it is filled. This seals a **signed `grant_void` tombstone** that
+fills exactly that seq:
+
+- It binds `project_id`, `broker_seq` and the reserved `grant_id` in `extensions.broker.void_evidence`
+  (domain `averin.broker.grant_void.v1`), is signed like a grant's authority (`gateway_enforced`,
+  `evidence_sig` over `sha256(RCP(void_evidence))`), and its `record_id` is the reserved `grant_id`.
+- It is folded into `broker_grant_head` exactly like a grant, so the next checkpoint signs. The offline
+  verifier accepts it as filling its seq, **never** counts it as a grant or matches a use to it, and
+  reports a real grant claiming the same seq as a duplicate-seq violation.
+- The reservation stays in the allocation ledger (the voided number is never re-issued), and the
+  reserved `grant_id` is retired: a later retry of that grant is a `409`. Re-issue it under a new
+  `idempotency_key`.
+
+Only a seq that meets **all** of these is voided:
+
+1. It is currently allocated (`404` otherwise).
+2. It is **not recorded**: no record holds the reserved `grant_id` and no grant or tombstone carries that
+   `broker_seq`. The store read decides this, so a seq whose ambiguous commit actually landed is refused
+   whatever its age (`409`).
+3. It does not back a live two-phase pending grant (`409`, retry its finalize or wait 15 minutes).
+4. It is at least `AVERIN_BROKER_SEQ_VOID_MIN_AGE` old (default `1h`; `409` otherwise).
+
+Request: `{ "project_id": "...", "broker_seq": <n>, "session_id": "...", "reason": "..." }`
+(`project_id` and `broker_seq` required; `session_id` defaults to `broker-seq-void`; `reason` is
+bound into the signed evidence).
+
+**Response `201`:** `{ "voided_broker_seq": <n>, "grant_id": "...", "created": true, "record": { /* tombstone */ } }`.
+A repeat of a completed void returns the same tombstone with `200` and `"created": false`. Errors:
+`400`, `403`, `404`, `409`, `500`, `501` (broker not enabled). Project-scoped auth applies like every
+`/v2/` route.
+
+**Upgrade note.** Before this release, any failure after a seq was allocated could leave it reserved, so
+a project that ever hit a transient grant seal or insert error may refuse every checkpoint once this
+build (which fails closed on the gap) is deployed. Find the seq in the `checkpoint refused` message
+(`allocated broker_seq max M != N recorded grants`) and void each unrecorded seq in `[1..M]`. On
+Postgres, reservations that predate migration `0003` are dated at the migration, so they become voidable
+one safety age after the upgrade.
 
 ---
 

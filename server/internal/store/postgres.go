@@ -253,15 +253,69 @@ func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, projectID); err != nil {
 		return fmt.Errorf("store: release broker seq lock: %w", err)
 	}
+	// A VOIDED reservation is never deleted: its tombstone fills the seq, and deleting the row would let the next
+	// MAX(seq)+1 re-issue the voided number (a duplicate broker_seq).
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM broker_seq
 		WHERE project_id = $1 AND grant_id = $2
 		  AND seq = (SELECT MAX(seq) FROM broker_seq WHERE project_id = $1)
+		  AND NOT EXISTS (SELECT 1 FROM broker_seq_void v WHERE v.project_id = $1 AND v.grant_id = $2)
 	`, projectID, grantID); err != nil {
 		return fmt.Errorf("store: release broker seq: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("store: release broker seq commit: %w", err)
+	}
+	return nil
+}
+
+// BrokerSeqAt returns the allocation row holding seq (a UNIQUE (project_id, seq) lookup) and whether it is voided.
+func (p *Postgres) BrokerSeqAt(projectID string, seq int64) (BrokerSeqReservation, bool, error) {
+	ctx := background()
+	var res BrokerSeqReservation
+	err := p.pool.QueryRow(ctx, `
+		SELECT b.grant_id, b.seq, b.allocated_at,
+		       EXISTS (SELECT 1 FROM broker_seq_void v WHERE v.project_id = b.project_id AND v.grant_id = b.grant_id)
+		FROM broker_seq b WHERE b.project_id = $1 AND b.seq = $2
+	`, projectID, seq).Scan(&res.GrantID, &res.Seq, &res.AllocatedAt, &res.Voided)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return BrokerSeqReservation{}, false, nil
+	}
+	if err != nil {
+		return BrokerSeqReservation{}, false, fmt.Errorf("store: broker seq at: %w", err)
+	}
+	return res, true, nil
+}
+
+// VoidBrokerSeq inserts the (insert-only) broker_seq_void marker for a reservation, under the same per-project
+// advisory lock as allocation/release. The broker_seq row itself is kept (see the Store doc).
+func (p *Postgres) VoidBrokerSeq(projectID, grantID string, seq int64) error {
+	ctx := background()
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin void broker seq: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, projectID); err != nil {
+		return fmt.Errorf("store: void broker seq lock: %w", err)
+	}
+	var held bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM broker_seq WHERE project_id = $1 AND grant_id = $2 AND seq = $3)
+	`, projectID, grantID, seq).Scan(&held); err != nil {
+		return fmt.Errorf("store: void broker seq probe: %w", err)
+	}
+	if !held {
+		return fmt.Errorf("store: broker_seq %d is not reserved by grant %s", seq, grantID)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO broker_seq_void (project_id, grant_id, seq) VALUES ($1, $2, $3)
+		ON CONFLICT (project_id, grant_id) DO NOTHING
+	`, projectID, grantID, seq); err != nil {
+		return fmt.Errorf("store: void broker seq: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: void broker seq commit: %w", err)
 	}
 	return nil
 }
@@ -543,7 +597,7 @@ func (p *Postgres) GrantRecords(projectID string) ([]Record, error) {
 		SELECT json, content_hash, session_id, parents
 		FROM records
 		WHERE project_id = $1
-		  AND json::jsonb #>> '{extensions,broker,kind}' = 'grant'
+		  AND json::jsonb #>> '{extensions,broker,kind}' IN ('grant', 'grant_void')
 		ORDER BY inserted_at, ctid
 	`, projectID)
 	if err != nil {
@@ -655,6 +709,16 @@ func (p *Postgres) AllocateBrokerSeq(projectID, grantID string) (int64, bool, er
 	// purely an internal serialization token, never persisted, so its exact hash does not matter).
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, projectID); err != nil {
 		return 0, false, fmt.Errorf("store: broker seq lock: %w", err)
+	}
+	// A voided grant_id is retired: never hand its seq back, never allocate it a new one.
+	var voided bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM broker_seq_void WHERE project_id = $1 AND grant_id = $2)
+	`, projectID, grantID).Scan(&voided); err != nil {
+		return 0, false, fmt.Errorf("store: broker seq void probe: %w", err)
+	}
+	if voided {
+		return 0, false, ErrBrokerSeqVoided
 	}
 	// RETURNING yields a row only when THIS statement inserted (a fresh allocation); on the grant_id conflict it
 	// yields none and the existing reservation is read back below (fresh=false).
