@@ -34,10 +34,12 @@ func TestSelfVerifyEvaluatesRevocationMembership(t *testing.T) {
 		t.Fatalf("checkpoint: %d %s", code, r)
 	}
 
-	// BEFORE the revoke: the self-view has no revocation_list to evaluate -> revocation_status absent.
+	// BEFORE the revoke: the self-view pins the revocation key but the export carries no revocation_list, so the
+	// status is `missing` (fail-closed: with a revocation key pinned, absent revocation evidence blocks the
+	// capstone rather than reading as a clean `absent` that stripping the list could forge).
 	_, before := do(t, h, "GET", "/v2/verify?project=p1", "")
-	if !strings.Contains(before, `"revocation_status":"absent"`) {
-		t.Fatalf("pre-revoke self-view should carry no revocation_list: %s", before)
+	if !strings.Contains(before, `"revocation_status":"missing"`) {
+		t.Fatalf("pre-revoke self-view should report the revocation list as missing: %s", before)
 	}
 
 	// Revoke the grant.
