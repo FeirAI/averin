@@ -238,10 +238,30 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 // the next AllocateBrokerSeq's MAX(seq)+1 reuses it. Append-only is not violated: a broker_seq row that
 // never had a committed grant is rolled back, not a recorded one mutated. Called under the api ingest
 // lock, so no concurrent allocation observes the gap.
+//
+// Only the project's CURRENT MAX is deleted (see the Store doc): a non-max allocation (an earlier release was
+// lost and higher seqs were allocated since) is kept so a retry of the grant refills that exact seq, instead of
+// punching an unrefillable hole mid-sequence. Runs under the same per-project advisory lock as the allocation,
+// so the MAX it compares against cannot move underneath it.
 func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
 	ctx := background()
-	if _, err := p.pool.Exec(ctx, `DELETE FROM broker_seq WHERE project_id = $1 AND grant_id = $2`, projectID, grantID); err != nil {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin release broker seq: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, projectID); err != nil {
+		return fmt.Errorf("store: release broker seq lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM broker_seq
+		WHERE project_id = $1 AND grant_id = $2
+		  AND seq = (SELECT MAX(seq) FROM broker_seq WHERE project_id = $1)
+	`, projectID, grantID); err != nil {
 		return fmt.Errorf("store: release broker seq: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: release broker seq commit: %w", err)
 	}
 	return nil
 }

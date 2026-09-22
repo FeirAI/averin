@@ -167,6 +167,40 @@ func TestMemBrokerSeq(t *testing.T) {
 	exerciseBrokerSeq(t, NewMem())
 }
 
+// exerciseReleaseKeepsNonMaxSeq pins the TLA+-found rule (formal/tla/GrantLog.tla): ReleaseBrokerSeq deletes an
+// allocation ONLY while it is the project's current max. g1=1 stays reserved (its earlier release was lost)
+// while g2 takes seq 2 and commits; a later release of g1 must KEEP the reservation — deleting it would leave a
+// permanent hole at 1 (the next allocation for g1 would be MAX+1=3) — so g1's retry reclaims seq 1.
+func exerciseReleaseKeepsNonMaxSeq(t *testing.T, s Store) {
+	t.Helper()
+	if seq, err := s.AllocateBrokerSeq("p", "g1"); err != nil || seq != 1 {
+		t.Fatalf("alloc g1 = %d err=%v; want 1", seq, err)
+	}
+	if seq, err := s.AllocateBrokerSeq("p", "g2"); err != nil || seq != 2 {
+		t.Fatalf("alloc g2 = %d err=%v; want 2", seq, err)
+	}
+	if err := s.ReleaseBrokerSeq("p", "g1"); err != nil {
+		t.Fatalf("release g1: %v", err)
+	}
+	if seq, err := s.AllocateBrokerSeq("p", "g1"); err != nil || seq != 1 {
+		t.Fatalf("after releasing the NON-max g1, its retry got seq %d err=%v; want the kept reservation 1", seq, err)
+	}
+	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 2 {
+		t.Fatalf("MaxBrokerSeq = %d err=%v; want 2", max, err)
+	}
+	// the max (g2) is still releasable.
+	if err := s.ReleaseBrokerSeq("p", "g2"); err != nil {
+		t.Fatalf("release g2: %v", err)
+	}
+	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 1 {
+		t.Fatalf("after releasing the max g2, MaxBrokerSeq = %d err=%v; want 1", max, err)
+	}
+}
+
+func TestMemReleaseKeepsNonMaxSeq(t *testing.T) {
+	exerciseReleaseKeepsNonMaxSeq(t, NewMem())
+}
+
 // exerciseIdemBinding pins the converged idempotency-key-binding contract shared by Mem and Postgres
 // (append-only): when a record collapses on content_hash under a NEW idempotency key, that new key is NOT
 // bound to the collapsed row — RecordByIdem(newKey) is found=false on BOTH stores. Mem used to bind it

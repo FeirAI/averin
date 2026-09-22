@@ -84,6 +84,42 @@ func TestGrantTransientSealErrorReleasesSeq(t *testing.T) {
 	}
 }
 
+// TestNonMaxReservedSeqIsRefilledNotReleased (TLA+ GrantLog.tla): grant g1 keeps seq 1 RESERVED (ambiguous
+// commit), g2 then takes and records seq 2, and g1's next retry fails with a plain (releasable) error. Releasing
+// g1's seq now would punch a hole at 1 that no allocation refills (g1's next allocation would be MAX+1=3) —
+// checkpoints could never be signed again. The store must KEEP it, so g1's successful retry records seq 1.
+func TestNonMaxReservedSeqIsRefilledNotReleased(t *testing.T) {
+	fs := &flakyGrantStore{Store: store.NewMem()}
+	h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).Routes()
+	ak := grantAgentKey()
+
+	fs.ambiguousPut = true
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusInternalServerError {
+		t.Fatalf("g1 ambiguous commit must 500 (got %d): %s", code, resp)
+	}
+	code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g2", "read:orders", ak, ak))
+	if code != http.StatusCreated || grantSeqOf(t, resp) != 2 {
+		t.Fatalf("g2 must record seq 2 while g1 holds 1 (%d): %s", code, resp)
+	}
+	fs.failHeads = true // g1's retry fails with a NON-ambiguous error → release attempted on a non-max seq
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusInternalServerError {
+		t.Fatalf("g1 retry with a transient failure must 500 (got %d): %s", code, resp)
+	}
+	code, resp = do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak))
+	if code != http.StatusCreated {
+		t.Fatalf("g1 retry (%d): %s", code, resp)
+	}
+	if seq := grantSeqOf(t, resp); seq != 1 {
+		t.Fatalf("g1 retry broker_seq = %d, want the kept reservation 1 (a released non-max seq leaves a permanent hole)", seq)
+	}
+	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint over the gapless {1,2} (%d): %s", code, resp)
+	}
+	if code, report := do(t, h, "GET", "/v2/verify?project=p1", ""); code != http.StatusOK || !strings.Contains(report, `"ok":true`) {
+		t.Fatalf("bundle must verify (%d): %s", code, report)
+	}
+}
+
 // TestCheckpointRefusesReservedSeqGap: a commit-AMBIGUOUS failure correctly keeps its seq RESERVED, but until the
 // grant is retried that seq has no recorded grant — a checkpoint signed now would anchor the gap forever. It must
 // FAIL CLOSED (refuse to sign); once the retry records the grant, checkpointing succeeds and verifies.

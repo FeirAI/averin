@@ -129,8 +129,14 @@ type Store interface {
 	// ReleaseBrokerSeq rolls back an allocation whose grant was NOT recorded (a failure after allocation
 	// but before the record committed), so the durable max sequence only advances for grants that exist —
 	// keeping the recorded log gapless. Safe to call when no allocation was made (no-op). MUST be called
-	// under the same per-project serialization as the allocation (the api's ingest lock), so the released
-	// seq is the current max and is cleanly reusable by the next allocation.
+	// under the same per-project serialization as the allocation (the api's ingest lock).
+	//
+	// ONLY THE CURRENT MAX IS RELEASED. If the grant's seq is no longer the project's max (an earlier release of
+	// it was lost — e.g. a failed Postgres DELETE — and higher seqs have since been allocated), deleting it would
+	// punch a hole in the MIDDLE of [1..N] that no allocation can ever refill (the next allocation for this
+	// grant_id would get MAX+1), so no gapless checkpoint could be signed again. Such a non-max allocation is
+	// instead KEPT (a no-op, nil error): the grant's idempotent retry reclaims that exact seq and fills the hole.
+	// (Found by TLA+ model checking, formal/tla/GrantLog.tla.)
 	//
 	// ROLLBACK is BEST-EFFORT, not atomic with the allocation: the Mem store never errors here (so the Mem
 	// path is fully gapless), but a Postgres DELETE can fail. The api SURFACES that failure (it does not
@@ -439,7 +445,17 @@ func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, error) {
 func (m *Mem) ReleaseBrokerSeq(projectID, grantID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.proj(projectID).brokerSeq, grantID)
+	bs := m.proj(projectID).brokerSeq
+	seq, ok := bs[grantID]
+	if !ok {
+		return nil
+	}
+	for _, s := range bs {
+		if s > seq {
+			return nil // not the current max: keep the reservation (see ReleaseBrokerSeq) so a retry refills it
+		}
+	}
+	delete(bs, grantID)
 	return nil
 }
 

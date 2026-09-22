@@ -1867,8 +1867,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 //     broker_seq → poisoned head. The seq is left RESERVED; the deterministic grant_id makes a retry reclaim it.
 //   - ANY other error persisted no record (the store contract, see store.ErrCommitAmbiguous), so the seq is
 //     RELEASED. Keeping it would leave a permanent hole in the recorded [1..N] set that a later checkpoint would
-//     anchor forever (the offline verifier reports a non-gapless broker_seq prefix). A failed release is folded
-//     into the error; createCheckpoint independently refuses to sign over any such gap.
+//     anchor forever (the offline verifier reports a non-gapless broker_seq prefix). The store releases only the
+//     project's current MAX: a seq that is no longer the max (an earlier release was lost and later grants took
+//     higher seqs) stays reserved so this grant's retry refills it rather than leaving an unrefillable mid-hole.
+//     A failed release is folded into the error; createCheckpoint independently refuses to sign over any gap.
 func (s *Server) settleFailedGrantSeq(projectID, grantID string, cause error) error {
 	if errors.Is(cause, store.ErrCommitAmbiguous) {
 		return fmt.Errorf("%w — broker_seq left RESERVED (commit-ambiguous; never released, to avoid reuse; a retry of this grant reclaims it)", cause)

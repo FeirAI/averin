@@ -301,6 +301,12 @@ func TestPostgresIdemBinding(t *testing.T) {
 	exerciseIdemBinding(t, p)
 }
 
+func TestPostgresReleaseKeepsNonMaxSeq(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseReleaseKeepsNonMaxSeq(t, p)
+}
+
 func TestPostgresRecordIDUnique(t *testing.T) {
 	p, done := newTestStore(t)
 	defer done()
