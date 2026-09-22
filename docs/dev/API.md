@@ -101,6 +101,12 @@ on it).
 - `extensions.broker` and `extensions.broker_denial` — reserved for the broker/resource lifecycle.
 - `record_kind` (optional) must be one of `budget-exhausted`, `chargeback-posted`.
 
+**No NUL in identifiers (every route).** A `project_id`, `idempotency_key`, `record_id` (and the
+`/v2/revoke` `grant_id`) containing U+0000 (for example an escaped `\u0000` in the JSON body), a `?project=`
+query parameter containing `%00`, or an `Idempotency-Key` header containing NUL is a `400`. The server
+derives deterministic ids and keys by joining these values with a NUL separator, so a NUL inside one would
+let two different `(project_id, idempotency_key)` pairs derive the same grant, use or outcome id.
+
 ---
 
 ## POST `/v2/otel/traces`

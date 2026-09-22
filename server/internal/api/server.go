@@ -916,7 +916,7 @@ func (s *Server) Routes() http.Handler {
 		handler = s.rateLimitIngest(mux)
 	}
 	if s.auth == nil || auth.IsOpen(s.auth) {
-		return handler // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
+		return rejectNULParams(handler) // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
 	}
 	// gate every /v2/* route behind project-scoped auth; /healthz, /readyz, /metrics stay open (health/
 	// observability endpoints are unauthenticated by design, matching /healthz's existing posture).
@@ -926,7 +926,7 @@ func (s *Server) Routes() http.Handler {
 	guarded.HandleFunc("GET /readyz", s.readyz)
 	guarded.HandleFunc("GET /metrics", s.metrics.Handler())
 	guarded.Handle("/v2/", gate(handler))
-	return guarded
+	return rejectNULParams(guarded)
 }
 
 // rateLimitIngest wraps h with the opt-in per-project + global ingest token bucket (averin#20). It governs ONLY
@@ -1045,6 +1045,10 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, fmt.Sprintf("idempotency_key prefix %q is reserved for the broker denied-grant log", denialIdemPrefix))
 			return
 		}
+		if err := rejectNUL("idempotency_key", idem); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		// F5: the store dedups per (project_id, idempotency_key), so two items in one batch under the same
 		// pair collapse and the later item's evidence is dropped. Reject before anything is sealed.
 		if len(items) > 1 {
@@ -1155,6 +1159,33 @@ const denialIdemPrefix = "denial:"
 
 func reservedIdem(idem string) bool { return strings.HasPrefix(idem, denialIdemPrefix) }
 
+// rejectNUL returns an error naming the first (name, value) pair whose value contains U+0000. project_id,
+// idempotency_key and record_id feed NUL-DELIMITED derivations — the deterministic grant/use/outcome/introspection
+// ids (uuidV5Shaped hashes namespace‖0‖project‖0‖idem), the two-phase pendingKey, the batch dedup keys and the
+// verify cache key — so (project "a", idem "b\x00c") and (project "a\x00b", idem "c") would derive the SAME id
+// and pending key across projects. The RCP parser accepts an escaped \u0000, so reject it at every entry point.
+func rejectNUL(pairs ...string) error {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if strings.IndexByte(pairs[i+1], 0) >= 0 {
+			return fmt.Errorf("%s must not contain a NUL (U+0000) character", pairs[i])
+		}
+	}
+	return nil
+}
+
+// rejectNULParams is the outermost handler: it refuses a NUL in the ?project= query parameter or the
+// Idempotency-Key header on EVERY route (the same 400 whether or not auth is enabled), before auth scoping,
+// rate limiting or any handler derives a key from them. Body fields are checked by each handler (rejectNUL).
+func rejectNULParams(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := rejectNUL("project", r.URL.Query().Get("project"), "Idempotency-Key", r.Header.Get("Idempotency-Key")); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 // canonProbe projects a decoded record down to exactly the fields whose CALLER-supplied value reaches the
 // seal verbatim, so the batch pre-pass (F14) can dry-run the RCP canonicalizer and reject a deterministic
 // seal-time failure (float / out-of-range int / interior NUL) UP FRONT — without false-rejecting a batch the
@@ -1234,6 +1265,9 @@ const maxRecordIDBytes = 256
 func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	if stringField(rec, "project_id") == "" || stringField(rec, "session_id") == "" {
 		return fmt.Errorf("project_id and session_id are required")
+	}
+	if err := rejectNUL("project_id", stringField(rec, "project_id"), "record_id", stringField(rec, "record_id")); err != nil {
+		return err
 	}
 	if err := s.validateDelegationEvidence(rec); err != nil {
 		return err
@@ -1415,6 +1449,9 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 	}
 	if reservedIdem(idem) { // see denialIdemPrefix: no caller may squat the denied-grant log namespace
 		return "", false, fmt.Errorf("idempotency_key prefix %q is reserved for the broker denied-grant log", denialIdemPrefix)
+	}
+	if err := rejectNUL("idempotency_key", idem); err != nil {
+		return "", false, err
 	}
 	delete(rec, "idempotency_key") // not part of the signed record
 
@@ -1650,6 +1687,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	if reservedIdem(idem) { // a grant under denial:<denialID> would later collapse a denial and suppress it
 		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+		return
+	}
+	if err := rejectNUL("project_id", gr.ProjectID, "idempotency_key", idem); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	grantID := deterministicGrantID(gr.ProjectID, idem) // also the credential jti + record_id
@@ -2221,6 +2262,10 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
 		return
 	}
+	if err := rejectNUL("project_id", ur.ProjectID, "idempotency_key", idem); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	useID := deterministicUseID(ur.ProjectID, idem)
 
 	// D2 (ADR 0004): the PoP binds a HIDING params commitment (the agent's params_nonce) which is ALSO
@@ -2633,6 +2678,10 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 	}
 	if reservedIdem(idem) { // an outcome under denial:<denialID> would later collapse a denial and suppress it
 		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+		return
+	}
+	if err := rejectNUL("project_id", or.ProjectID, "idempotency_key", idem); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	status := or.Status

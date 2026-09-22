@@ -182,6 +182,10 @@ func (s *Server) handleIntrospection(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project_id, session_id, idempotency_key, grant_id, credential_ref, effective_scope are required")
 		return
 	}
+	if err := rejectNUL("project_id", ir.ProjectID, "idempotency_key", ir.IdempotencyKey); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if ir.EffectiveExp <= 0 {
 		writeErr(w, http.StatusBadRequest, "effective_exp (unix seconds) is required")
 		return

@@ -104,6 +104,10 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project_id and grant_id are required")
 		return
 	}
+	if err := rejectNUL("project_id", rr.ProjectID, "grant_id", rr.GrantID); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// Revocation is intentionally PERMISSIVE by grant_id: we do NOT require the id to already exist in this
 	// server's store. The primitive is "block any use of this id," and an operator must be able to revoke a
 	// compromised id preemptively (or a federated grant minted by a peer broker) that this instance has not yet

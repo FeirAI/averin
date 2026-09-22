@@ -139,6 +139,10 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
 		return
 	}
+	if err := rejectNUL("project_id", gr.ProjectID, "idempotency_key", idem); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	grantID := deterministicGrantID(gr.ProjectID, idem)
 
 	req := grantRequestToBroker(gr)
@@ -304,6 +308,10 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 	}
 	if fr.ProjectID == "" || idem == "" {
 		writeErr(w, http.StatusBadRequest, "project_id and idempotency_key are required")
+		return
+	}
+	if err := rejectNUL("project_id", fr.ProjectID, "idempotency_key", idem); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	grantID := deterministicGrantID(fr.ProjectID, idem)
