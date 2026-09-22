@@ -2422,6 +2422,34 @@ func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, st
 	return "", "", false, nil
 }
 
+// outcomeForIntent returns the record_id of a use_outcome in the session that already completes intentRef (read
+// from the SIGNED use_outcome payload the verifier pairs on, not the unsigned extensions.broker sibling), if any.
+// A read error propagates (fail closed → retryable 500). Caller holds ingestMu.
+func (s *Server) outcomeForIntent(projectID, sessionID, intentRef string) (string, bool, error) {
+	recs, err := s.st.SessionRecords(projectID, sessionID)
+	if err != nil {
+		return "", false, err
+	}
+	for _, rec := range recs {
+		var probe struct {
+			RecordID   string `json:"record_id"`
+			Extensions struct {
+				Broker struct {
+					Kind       string `json:"kind"`
+					UseOutcome struct {
+						IntentRef string `json:"intent_ref"`
+					} `json:"use_outcome"`
+				} `json:"broker"`
+			} `json:"extensions"`
+		}
+		if json.Unmarshal([]byte(rec.JSON), &probe) == nil && probe.Extensions.Broker.Kind == "use_outcome" &&
+			probe.Extensions.Broker.UseOutcome.IntentRef == intentRef {
+			return probe.RecordID, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // buildUseRecord assembles the unsealed use-receipt Decision Record: a tool_gateway-role authority
 // with a RESOURCE-signed evidence_sig over the re-derivable use_evidence (R1/R2), a hiding commitment
 // over the operation params, and the use lifecycle under extensions.broker (kind=use → resource role).
@@ -2612,6 +2640,16 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		}
 		if probe.Extensions.Broker.Kind != "use_intent" {
 			clientErr = fmt.Errorf("record %q is not a use_intent (kind=%q)", or.IntentRecordID, probe.Extensions.Broker.Kind)
+			return nil
+		}
+		// An intent has EXACTLY ONE outcome: a second use_outcome for the same intent (e.g. "ok" then "failed"
+		// under a different idempotency key) would make the anchored bundle fail verification. The honest retry
+		// of the SAME outcome was already answered above via its idempotency key, so any other outcome already
+		// completing this intent is a conflict → 409, checked under ingestMu so two racing outcomes cannot both land.
+		if prior, found, oe := s.outcomeForIntent(or.ProjectID, or.SessionID, or.IntentRecordID); oe != nil {
+			return oe
+		} else if found {
+			conflictErr = fmt.Errorf("intent %q already has a recorded use_outcome (%s); an intent is completed exactly once", or.IntentRecordID, prior)
 			return nil
 		}
 		rec, be := s.buildUseOutcomeRecord(outcomeID, or.ProjectID, or.SessionID, probe.Extensions.Broker.UseEvidence.GrantID, or.IntentRecordID, probe.ContentHash, status)

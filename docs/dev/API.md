@@ -227,7 +227,9 @@ Request (`useRequest`): `idempotency_key`, `project_id`, `session_id`, `capabili
 `{ "use_id": "use-<uuid>", "grant_id": "<uuid>", "record": { /* sealed receipt */ }, "idempotent": false }`
 
 `/v2/use-intent` and `/v2/use-outcome` are the two-phase variant (intent recorded *before* the side
-effect, outcome *after*, linked by a forced causal edge).
+effect, outcome *after*, linked by a forced causal edge). An intent is completed **exactly once**: a
+second `/v2/use-outcome` for an intent that already has one (under a different `idempotency_key`) is a
+`409`; a retry of the original outcome under its own key returns it with `"idempotent": true`.
 
 ---
 
