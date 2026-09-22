@@ -12109,3 +12109,48 @@ fn garbage_anchor_tokens_are_not_counted_as_anchored() {
     assert_eq!(r.checkpoints_anchored, 1);
     assert_eq!(r.checkpoints_anchors_attached, 1);
 }
+
+#[test]
+fn bundle_without_project_id_still_binds_one_project() {
+    // I: with no top-level `project_id`, every project-binding check was skipped, so records (and checkpoints)
+    // from DIFFERENT projects could be spliced into one bundle and verify clean. The verifier now derives the
+    // binding project from the bundle's own records/checkpoints and requires them all to share it.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let g1 = seal_grant(&rec, &rec, "g-1", &ge);
+    let g2 = {
+        let other = seal_grant(&rec, &rec, "g-2", &ge);
+        let moved = change_field(&other, "project_id", CanonValue::string("proj-OTHER"));
+        seal(&moved, &rec).unwrap()
+    };
+    let cp = checkpoint_over(&rec, &[content_hash_of(&g1), content_hash_of(&g2)], 2, None);
+    let without_pid = |b: CanonValue| {
+        let mut m = b.as_object().unwrap().clone();
+        m.retain(|(k, _)| k != "project_id");
+        CanonValue::Object(m)
+    };
+    let spliced = without_pid(tier_b_bundle(
+        &rec.verifying_key(),
+        vec![g1.clone(), g2],
+        vec![cp],
+    ));
+    let r = verify_bundle(&spliced);
+    assert!(
+        !r.ok,
+        "a cross-project splice must not verify just because the bundle omits project_id"
+    );
+    assert!(
+        r.record_trust.iter().any(|t| t
+            .notes
+            .iter()
+            .any(|n| n.contains("project_id does not match"))),
+        "{:?}",
+        r.issues
+    );
+
+    // control: a single-project bundle that merely omits the top-level project_id still verifies.
+    let cp = checkpoint_over(&rec, &[content_hash_of(&g1)], 1, None);
+    let clean = without_pid(tier_b_bundle(&rec.verifying_key(), vec![g1], vec![cp]));
+    let r = verify_bundle(&clean);
+    assert!(r.ok, "{:?}", r.issues);
+}

@@ -3900,6 +3900,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     if bundle.get("records").is_none() {
         issues.push("bundle has no records".into());
     }
+    // The project every record and checkpoint must be bound to. A bundle that OMITS the top-level `project_id`
+    // must not skip the binding (records/checkpoints from different projects could then be spliced into one
+    // bundle and verify clean): derive it from the first record (else checkpoint) carrying one, so the per-record
+    // and per-checkpoint checks below still require ONE shared project. The report and the D7 attestation
+    // subject keep using the bundle's STATED `project_id` (an absent one never satisfies the attestation).
+    let binding_project_id: Option<String> = project_id.clone().or_else(|| {
+        records
+            .iter()
+            .chain(checkpoints.iter())
+            .find_map(|v| s(v, "project_id"))
+    });
 
     // Seam 2 — the bundle's signing-key store ((signing_key_id, key_epoch) -> KeyEntry).
     let keys = build_key_store(key_entries, &mut issues);
@@ -3917,7 +3928,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut pending: Vec<Pending> = Vec::with_capacity(records.len());
     for (i, rec) in records.iter().enumerate() {
         let mut notes = Vec::new();
-        let project_ok = match &project_id {
+        let project_ok = match &binding_project_id {
             Some(pid) => {
                 let m = s(rec, "project_id").as_deref() == Some(pid.as_str());
                 if !m {
@@ -4159,7 +4170,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // distinct from a checkpoint with no head field at all. Tracked so D6 cannot be dodged by garbling it.
     let mut verified_malformed_head = false;
     for (i, cp) in checkpoints.iter().enumerate() {
-        if let Some(pid) = &project_id {
+        if let Some(pid) = &binding_project_id {
             if s(cp, "project_id").as_deref() != Some(pid.as_str()) {
                 issues.push(format!("checkpoint {i} project_id does not match bundle"));
             }
