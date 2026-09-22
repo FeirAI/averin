@@ -41,12 +41,23 @@ noncomputable def checkpointHashOf (body : CV) : Bytes :=
 
 def Collision : Prop := ∃ x y, x ≠ y ∧ H x = H y
 
-/-- The key holder's signing policy: it signs record and checkpoint seals and nothing else. -/
+/--
+Everything the key may ever sign. The key signs record and checkpoint seals, and — because roles
+can share a key — also any message of every *other* signed family (taxonomy, revocation, Merkle
+root, attestation, authority evidence, test anchor), any raw 32-byte challenge digest (use PoP,
+cosig, delegation, introspection, federation), any canonical-JSON message (the broker grant PoP
+challenge, first byte `{`), and the fixed denial-salt string. No restriction is placed on the
+fields of those other messages.
+-/
 def HonestSigner (Signed : Bytes → Prop) (records checkpoints : List CV) : Prop :=
   ∀ m, Signed m →
     (∃ B ∈ records, m = recordSig.msg [] (recordHashOf H fmt B)) ∨
-    (∃ C ∈ checkpoints, m = checkpointSig.msg [] (checkpointHashOf H fmt C))
-
+    (∃ C ∈ checkpoints, m = checkpointSig.msg [] (checkpointHashOf H fmt C)) ∨
+    (∃ (i : Nat) (hi : i < signedFamilies.length) (vs : List Bytes) (t : Bytes),
+      2 ≤ i ∧ m = signedFamilies[i].msg vs t) ∨
+    m.length = 32 ∨
+    (∃ rest, m = 123 :: rest) ∨
+    m = ascii "averin.denial.salt.v1"
 end
 
 theorem ascii_short (s : String) (h : (ascii s).length < 256) : (ascii s).length < lpLimit := by
@@ -102,36 +113,78 @@ theorem recordSig_ne_checkpointSig (x y : Bytes) :
     recordSig.msg [] x ≠ checkpointSig.msg [] y :=
   signed_families_disjoint (i := 0) (j := 1) (by decide) (by decide) (by decide) [] [] x y
 
+theorem seal_head_zero (tag : Family) (htag : (ascii tag.tag).length < 256) (x : Bytes) :
+    (tag.msg [] x).head? = some 0 := framed_head_zero tag htag [] x
+
+/-- The seal message has length `4 + |tag| + 71`, never 32. -/
+theorem seal_msg_length (F : Family) (hs : F.schema = []) (ht : F.tailed = true) (x : Bytes) :
+    (F.msg [] x).length = 4 + (ascii F.tag).length + x.length := by
+  simp only [Family.msg, encodeFields, Field.encode, lp, hs, ht, if_true, List.length_append,
+    be32_length]
+
+/-- A seal message can only be the seal it is: every other disjunct of `HonestSigner` is excluded. -/
+theorem seal_excludes_others (F : Family) (i0 : Nat) (hi0 : i0 < signedFamilies.length)
+    (hF : signedFamilies[i0] = F) (hs : F.schema = []) (ht : F.tailed = true)
+    (x : Bytes) (hx : x.length = 71) (m : Bytes) (hm : m = F.msg [] x) :
+    (∀ (i : Nat) (hi : i < signedFamilies.length) (vs : List Bytes) (t : Bytes),
+        i ≠ i0 → m ≠ signedFamilies[i].msg vs t) ∧
+    m.length ≠ 32 ∧ (∀ rest, m ≠ 123 :: rest) ∧ m ≠ ascii "averin.denial.salt.v1" := by
+  have hshort : (ascii F.tag).length < 256 := by
+    rw [← hF]; exact (tags_short _ (by simp [List.getElem_mem])).2
+  have hhead := seal_head_zero F hshort x
+  refine ⟨fun i hi vs t hne h => ?_, ?_, fun rest h => ?_, fun h => ?_⟩
+  · have := signed_families_disjoint hi0 hi (Ne.symm hne) [] vs x t
+    rw [hF] at this; exact this (hm ▸ h)
+  · rw [hm, seal_msg_length F hs ht, hx]; omega
+  · rw [hm] at h; rw [h] at hhead; simp at hhead
+  · rw [hm] at h; rw [h] at hhead; simp [ascii] at hhead
+
 /--
-**Record seal theorem.** If a record body's signature verifies under the pinned key (so, absent an
-Ed25519 forgery, the key holder signed its message) then the body is *exactly* one the key holder
-sealed — or SHA-256 has a collision. In particular no checkpoint signature can be replayed as a
-record signature, and no second body can share a sealed body's signature.
+**Record seal theorem.** A signature cannot be replayed across contexts even if roles share a key:
+if a record body's signature verifies under the pinned key — which, absent an Ed25519 forgery, means
+the key holder signed its message — then the body is *exactly* one the key holder sealed, or SHA-256
+has a collision. This holds even though the same key may also sign checkpoints, every other signed
+family with arbitrary fields, raw 32-byte challenge digests, JSON PoP challenges and the denial salt
+(`HonestSigner`).
 -/
 theorem record_seal_sound (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x = fmt y → x = y)
+    (hlen : ∀ x, (fmt (H x)).length = 71)
     (Signed : Bytes → Prop) (records checkpoints : List CV)
     (honest : HonestSigner H fmt Signed records checkpoints)
     (body : CV) (verified : Signed (recordSig.msg [] (recordHashOf H fmt body))) :
     body ∈ records ∨ Collision H := by
-  rcases honest _ verified with ⟨B, hB, hm⟩ | ⟨C, _, hm⟩
+  have ex := seal_excludes_others recordSig 0 (by decide) rfl rfl rfl (recordHashOf H fmt body)
+    (hlen _) _ rfl
+  rcases honest _ verified with ⟨B, hB, hm⟩ | ⟨C, _, hm⟩ | ⟨i, hi, vs, t, h2, hm⟩ | hm | ⟨r, hm⟩ | hm
   · have := (recordSig.msg_inj (by decide) nil_admits_rs nil_admits_rs hm).2 rfl
     rcases recordHashOf_binding H fmt hfmt this with h | h
     · exact Or.inl (h ▸ hB)
     · exact Or.inr h
   · exact absurd hm (recordSig_ne_checkpointSig _ _)
+  · exact absurd hm (ex.1 i hi vs t (by omega))
+  · exact absurd hm ex.2.1
+  · exact absurd hm (ex.2.2.1 r)
+  · exact absurd hm ex.2.2.2
 
-/-- **Checkpoint seal theorem** (same statement for checkpoint bodies). -/
+/-- **Checkpoint seal theorem** (same statement and signer model for checkpoint bodies). -/
 theorem checkpoint_seal_sound (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x = fmt y → x = y)
+    (hlen : ∀ x, (fmt (H x)).length = 71)
     (Signed : Bytes → Prop) (records checkpoints : List CV)
     (honest : HonestSigner H fmt Signed records checkpoints)
     (body : CV) (verified : Signed (checkpointSig.msg [] (checkpointHashOf H fmt body))) :
     body ∈ checkpoints ∨ Collision H := by
-  rcases honest _ verified with ⟨B, _, hm⟩ | ⟨C, hC, hm⟩
+  have ex := seal_excludes_others checkpointSig 1 (by decide) rfl rfl rfl
+    (checkpointHashOf H fmt body) (hlen _) _ rfl
+  rcases honest _ verified with ⟨B, _, hm⟩ | ⟨C, hC, hm⟩ | ⟨i, hi, vs, t, h2, hm⟩ | hm | ⟨r, hm⟩ | hm
   · exact absurd hm.symm (recordSig_ne_checkpointSig _ _)
   · have := (checkpointSig.msg_inj (by decide) nil_admits_cs nil_admits_cs hm).2 rfl
     rcases checkpointHashOf_binding H fmt hfmt this with h | h
     · exact Or.inl (h ▸ hC)
     · exact Or.inr h
+  · exact absurd hm (ex.1 i hi vs t (by omega))
+  · exact absurd hm ex.2.1
+  · exact absurd hm (ex.2.2.1 r)
+  · exact absurd hm ex.2.2.2
 
 /-! ## Hiding commitments are binding -/
 
