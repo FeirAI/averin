@@ -130,7 +130,7 @@ The object form works for **every** role key (`signing_keys` uses the RCP §10.2
 - `broker_trust: sequence_verified` — the grant-transparency log is a gapless, anchored prefix (D6); no suppression.
 - `cosig_status: satisfied` — every cosigned grant met its M-of-N (M6).
 - `delegation_status: verified` — every per-hop delegation chain re-walked + monotone (M2).
-- `revocation_status` — disclosed-list mode (M5): `fresh`/`absent` pass; `stale`/`revoked_present` block the capstone.
+- `revocation_status` — disclosed-list mode (M5): `fresh`/`absent` pass; `stale`/`revoked_present` block the capstone, as does `missing` (revocation_keys pinned but the bundle carries neither a `revocation_list` nor a `revocation_merkle_root`).
 - `revocation_merkle_status` — Merkle-non-disclosure mode (M5): when `fresh`, EVERY Tier-B use **and** every native credential must carry a per-grant proof in the bundle's `revocation_proofs` map — a non-membership proof to proceed, a membership/missing/forged proof blocks it (fail-closed; the revoked set is never disclosed). `stale` blocks the capstone; `absent` is the baseline. `revocation_nonmembership_verified` counts grants proven NOT revoked.
 - `introspection_status: attested` — every native (token_exchange) credential's resource-signed transcript verified (M3); the native surface reaches `attested_complete_over_introspected_surface`. A native credential that a fresh revocation list/root marks revoked is blocked here too (it can never be `attested`).
 - `federation_status: sequence_verified` — every broker's per-`broker_id` log verified, no `cross_broker_suppression` (M4).

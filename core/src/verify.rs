@@ -133,6 +133,8 @@ impl ActionCompleteness {
             // M5 (ADR 0005): no fresh revocation list flagged a revoked use, and the list is not stale.
             && r.revocation_status != "stale"
             && r.revocation_status != "revoked_present"
+            // M5: revocation keys were pinned but the bundle carries no revocation artifact at all (stripped).
+            && r.revocation_status != "missing"
             && r.revoked_uses_blocked == 0
             // M5 Merkle-non-disclosure: a present-but-stale signed root is too old to certify currency.
             && r.revocation_merkle_status != "stale"
@@ -301,8 +303,10 @@ pub struct VerifyReport {
     pub attestation_not_after: Option<String>,
     pub attestation_claim_types: Vec<String>,
     pub attestation_subject_digest: Option<String>,
-    /// M5 / ADR 0005 (Revocation — tiered). `revocation_status` ∈ {`absent` (no signed `revocation_list` in the
-    /// bundle, or no `revocation_keys` pinned — not evaluated, the legitimate baseline), `fresh` (a list signed
+    /// M5 / ADR 0005 (Revocation — tiered). `revocation_status` ∈ {`absent` (no `revocation_keys` pinned — not
+    /// evaluated, the legitimate baseline — or a Merkle-mode bundle carrying only a `revocation_merkle_root`),
+    /// `missing` (`revocation_keys` ARE pinned but the bundle carries neither a `revocation_list` nor a
+    /// `revocation_merkle_root` — e.g. stripped; blocks the capstone), `fresh` (a list signed
     /// under a pinned role-separated `revocation_keys` issuer whose disclosed `revoked_grant_ids` re-derive its
     /// signed `merkle_root`, with the latest anchored checkpoint timestamp inside `[issued_at, not_after]`),
     /// `stale` (validly signed but the anchored time is outside the window — too old to trust for currency, OR
@@ -310,7 +314,7 @@ pub struct VerifyReport {
     /// against a revoked grant_id — a use of a revoked credential)}. `revoked_grants_matched` = closed grants in
     /// this bundle whose grant_id is in the (valid) list; `revoked_uses_blocked` = matched-candidate uses
     /// rejected because their grant was revoked inside the window (each also a hard violation → `!ok`). `absent`
-    /// and `fresh` do NOT block the capstone; `stale` and `revoked_present` do (the offline freshness limit).
+    /// and `fresh` do NOT block the capstone; `stale`, `revoked_present` and `missing` do.
     pub revocation_status: String,
     pub revoked_grants_matched: usize,
     pub revoked_uses_blocked: usize,
@@ -3189,13 +3193,26 @@ fn evaluate_revocation(
         status: "absent".to_string(),
         revoked: BTreeSet::new(),
     };
+    if opts.revocation_keys.is_empty() {
+        return absent; // no pinned issuer -> not evaluated (a present list's revocations are not honored)
+    }
     let rl = match bundle.get("revocation_list") {
         Some(a) if !a.is_null() => a,
-        _ => return absent,
+        // The operator PINNED a revocation authority, so revocation evidence is EXPECTED: a bundle carrying
+        // neither a `revocation_list` nor a `revocation_merkle_root` is `missing`, not the benign `absent` —
+        // otherwise deleting the (unsigned-at-bundle-level) revocation artifacts would be a free downgrade that
+        // un-blocks every revoked use while the capstone stays reachable. `missing` blocks the capstone. (A
+        // Merkle-mode bundle carries only the root, so the disclosed list is legitimately absent there.)
+        _ => {
+            let has_merkle_root = bundle
+                .get("revocation_merkle_root")
+                .is_some_and(|r| !r.is_null());
+            return RevocationEval {
+                status: if has_merkle_root { "absent" } else { "missing" }.to_string(),
+                revoked: BTreeSet::new(),
+            };
+        }
     };
-    if opts.revocation_keys.is_empty() {
-        return absent; // present but the verifier pinned no issuer -> not evaluated (revocations not honored)
-    }
     let stale_empty = || RevocationEval {
         status: "stale".to_string(),
         revoked: BTreeSet::new(),
@@ -3745,6 +3762,12 @@ fn evaluate_attestation(
         .filter(|m| !m.is_null())
         .map(|m| crate::hashx::sha256_prefixed(m.serialize().as_bytes()))
         .unwrap_or_default();
+    // M5 Merkle mode: the same strip-downgrade defense for the signed `revocation_merkle_root` ("" when absent).
+    let revocation_merkle_digest = bundle
+        .get("revocation_merkle_root")
+        .filter(|m| !m.is_null())
+        .map(|m| crate::hashx::sha256_prefixed(m.serialize().as_bytes()))
+        .unwrap_or_default();
     let head_root = latest.3.clone().unwrap_or_else(|| grant_head_root(&[]));
     // `authority_kids` binds the deployment's GRANT/USE authorities — the broker and resource roles ONLY.
     // taxonomy_keys is deliberately NOT folded in: the operation taxonomy is a separate verifier-pinned
@@ -3791,10 +3814,20 @@ fn evaluate_attestation(
     // #3: enforce the bound revocation_list digest ONLY when the (signed) subject carries the field — so a
     // pre-this-change attestation (no field) stays compatible, while a new attestation that committed a list
     // mismatches if the list is later stripped. The attacker cannot drop the subject field (it is sig-covered).
-    if sub.get("revocation_digest").is_some()
+    // When the auditor PINS revocation keys, the field is REQUIRED (an attestation that never committed to the
+    // revocation evidence cannot vouch that none was stripped).
+    if (sub.get("revocation_digest").is_some() || !opts.revocation_keys.is_empty())
         && s_str(sub, "revocation_digest") != revocation_digest
     {
         mism.push("revocation_digest");
+    }
+    // The Merkle-mode root is bound the same way when the (signed) subject carries `revocation_merkle_digest`.
+    // It stays optional even under pinned revocation keys, since existing producers do not emit it; the
+    // `missing` revocation status covers stripping BOTH artifacts regardless.
+    if sub.get("revocation_merkle_digest").is_some()
+        && s_str(sub, "revocation_merkle_digest") != revocation_merkle_digest
+    {
+        mism.push("revocation_merkle_digest");
     }
     if !mism.is_empty() {
         issues.push(format!("deployment_attestation: subject does not match the bundle under review — substitution/replay (D7): {}", mism.join(", ")));

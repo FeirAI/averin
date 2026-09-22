@@ -12423,3 +12423,132 @@ fn checkpoint_signed_by_compromised_pinned_key_is_untrusted() {
     );
     assert!(r.ok, "{:?}", r.issues);
 }
+
+// ---- D: stripping the revocation artifacts must not read as the benign `absent` when revocation keys are pinned ----
+
+#[test]
+fn tier_b_revocation_artifacts_stripped_under_pinned_keys_is_missing() {
+    // D: with `revocation_keys` pinned, a bundle whose `revocation_list` / `revocation_merkle_root` was DELETED read
+    // `absent` — the "not evaluated" baseline — and the capstone stayed reachable, so stripping the (bundle-level)
+    // revocation evidence un-blocked every revoked use for free. It is now `missing`, which blocks the capstone.
+    let (rec, res, tsa, rev) = rev_keys();
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let stripped = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let mut opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    opts.revocation_keys = vec![rev.verifying_key()];
+    let r = verify_bundle_with(&stripped, &opts);
+    assert_eq!(r.revocation_status, "missing");
+    assert!(report_to_json(&r).contains(r#""revocation_status":"missing""#));
+
+    // unpinned revocation authority: still the legitimate `absent` baseline.
+    opts.revocation_keys = vec![];
+    assert_eq!(
+        verify_bundle_with(&stripped, &opts).revocation_status,
+        "absent"
+    );
+
+    // a Merkle-mode bundle carries only the root: the disclosed list is legitimately absent there.
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let proofs = vec![(GID.to_string(), nonmembership_proof(&leaves, GID))];
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, proofs);
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.revocation_status, "absent");
+    assert_eq!(r.revocation_merkle_status, "fresh");
+
+    // capstone: `missing` blocks it (a fully-clean capstone report otherwise).
+    let mut c = capstone_report();
+    assert_eq!(
+        c.action_completeness(),
+        ActionCompleteness::AttestedCompleteOverBrokeredSurface
+    );
+    c.revocation_status = "missing".to_string();
+    assert_eq!(
+        c.action_completeness(),
+        ActionCompleteness::ClaimedOverManifest
+    );
+}
+
+#[test]
+fn tier_b_attestation_binds_revocation_evidence_when_revocation_keys_pinned() {
+    // D (attestation half): under pinned revocation keys the signed subject MUST carry `revocation_digest` (else
+    // it never committed to the revocation evidence and cannot vouch nothing was stripped), and an optional
+    // `revocation_merkle_digest` binds the Merkle-mode root the same way.
+    let (rec, res, tsa, attest, rev) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+        signing_key_from_seed(&[11u8; 32]),
+        signing_key_from_seed(&[77u8; 32]),
+    );
+    let (base, cph, head_root) = d6_anchored(&rec, &tsa);
+    let revlist = revocation_list(&rev, ATT_ISSUED, ATT_NOT_AFTER, &["some-other-grant"]);
+    let with_list = change_field(&base, "revocation_list", revlist.clone());
+    let att_over = |subj: CanonValue| {
+        attestation(
+            &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
+            ATT_ISSUED,
+            ATT_NOT_AFTER,
+            subj,
+            &attest,
+        )
+    };
+    let mut opts = attest_opts(&rec, &res, &tsa, &attest);
+    opts.revocation_keys = vec![rev.verifying_key()];
+
+    // an attestation that never bound revocation_digest no longer attests a revocation-pinned bundle.
+    let unbound = att_over(honest_subject(&rec, &res, &cph, &head_root));
+    let r = verify_bundle_with(
+        &change_field(&with_list, "deployment_attestation", unbound),
+        &opts,
+    );
+    assert_ne!(r.attestation_status, "attested_claims");
+    assert!(
+        r.issues.iter().any(|i| i.contains("revocation_digest")),
+        "{:?}",
+        r.issues
+    );
+
+    // bound revocation_digest + a bound revocation_merkle_digest: stripping the root breaks the subject match.
+    let leaves = rev_leaves(&["other-1"]);
+    let root_obj = merkle_root_obj(&rev, ATT_ISSUED, ATT_NOT_AFTER, &leaves);
+    let subj = change_field(
+        &change_field(
+            &honest_subject(&rec, &res, &cph, &head_root),
+            "revocation_digest",
+            CanonValue::string(sha256_prefixed(revlist.serialize().as_bytes())),
+        ),
+        "revocation_merkle_digest",
+        CanonValue::string(sha256_prefixed(root_obj.serialize().as_bytes())),
+    );
+    let att = att_over(subj);
+    let full = change_field(
+        &change_field(&with_list, "revocation_merkle_root", root_obj),
+        "deployment_attestation",
+        att.clone(),
+    );
+    assert_eq!(
+        verify_bundle_with(&full, &opts).attestation_status,
+        "attested_claims"
+    );
+    let r = verify_bundle_with(
+        &change_field(&with_list, "deployment_attestation", att),
+        &opts,
+    );
+    assert_ne!(r.attestation_status, "attested_claims");
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("revocation_merkle_digest")),
+        "{:?}",
+        r.issues
+    );
+}
