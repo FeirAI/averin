@@ -341,7 +341,9 @@ pub fn validate_chain<'a>(
             });
         }
         let stated = int_field(latest, "record_count")?;
-        if stated < 0 || stated as usize != dag.by_hash.len() {
+        // Checked conversion, NOT `stated as usize`: on the wasm32 verifier `usize == u32`, so a signed count of
+        // 2^32 + n would truncate to n and match an n-record DAG (a platform-dependent verdict).
+        if usize::try_from(stated).ok() != Some(dag.by_hash.len()) {
             return Err(CheckpointError::RecordCountMismatch {
                 seq,
                 stated,
@@ -443,6 +445,34 @@ mod tests {
             matches!(err, CheckpointError::FrontierMemberMissing { .. }),
             "{err}"
         );
+    }
+
+    #[test]
+    fn record_count_does_not_truncate_on_32bit() {
+        // `stated as usize` truncated on wasm32/i686 (usize == u32): record_count 2^32 + 1 read as 1 and matched a
+        // one-record DAG. It must be a mismatch on every target (the i686 CI job runs this as the wasm32 stand-in).
+        let sk = signing_key_from_seed(&[8u8; 32]);
+        let dag = dag::build(&[rec(&h(1), &[])]).unwrap();
+        let body = |count: i64| {
+            checkpoint_body(
+                "cp0",
+                "p",
+                0,
+                None,
+                &[h(1)],
+                count,
+                "2026-06-15T10:00:00.000Z",
+                key_block(),
+            )
+            .unwrap()
+        };
+        let ok = seal_checkpoint(&body(1), &sk).unwrap();
+        assert!(validate_chain(&[ok], &dag).is_ok());
+        let wrapped = seal_checkpoint(&body((1i64 << 32) + 1), &sk).unwrap();
+        assert!(matches!(
+            validate_chain(&[wrapped], &dag),
+            Err(CheckpointError::RecordCountMismatch { .. })
+        ));
     }
 
     #[test]
