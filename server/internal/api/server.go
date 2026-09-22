@@ -2513,49 +2513,23 @@ func storedOutcomeMatchesRequest(recordJSON, intentRef, status string) bool {
 	return uo.IntentRef == intentRef && uo.Status == status
 }
 
-// existingReceipt returns the sealed record (and its authority.grant_id) for a broker/resource record
-// whose record_id matches `useID` in the session — used by /v2/use-outcome to RESOLVE the use_intent it
-// completes (a lookup by referenced record_id, NOT an idempotency-key retry: retries are keyed on `idem`
-// via RecordByIdem). A generic record can never set extensions.broker (reserved), so a pre-seeded generic
-// row with a matching record_id is NOT resolvable as an intent. Caller holds ingestMu.
-func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, string, bool, error) {
+// intentAndOutcome resolves, in ONE pass over the session's records, (a) the broker/resource record whose record_id
+// is intentRef (the use_intent an outcome completes) and (b) the record_id of a use_outcome that already completes
+// intentRef, read from the SIGNED use_outcome payload the verifier pairs on (not the unsigned extensions.broker
+// sibling). /v2/use-outcome runs under the process-wide ingestMu, so it scans the session once, not once per question.
+// A read error propagates (fail closed → retryable 500). Caller holds ingestMu.
+//
+// A matching record must be a real broker/resource record (it carries extensions.broker.kind). A generic record can
+// never set extensions.broker (reserved), so a pre-seeded generic record with a matching record_id is NOT treated as
+// the intent — the gateway validation (PoP, consume-before-act) is never skipped on a spoofed record. (Reserved
+// record_id prefixes also block the pre-seed.)
+func (s *Server) intentAndOutcome(projectID, sessionID, intentRef string) (intentJSON string, intentFound bool, outcomeID string, outcomeFound bool, err error) {
 	recs, err := s.st.SessionRecords(projectID, sessionID)
 	if err != nil {
 		// FAIL CLOSED (averin#14): a SessionRecords read error is NOT "intent not found" — propagate it so the
 		// caller answers a retryable 500, not a 400 that makes the client abandon the outcome (breaking the
 		// intent→outcome pairing and leaving a permanent intent_without_outcome).
-		return "", "", false, err
-	}
-	for _, rec := range recs {
-		var probe struct {
-			RecordID  string `json:"record_id"`
-			Authority struct {
-				GrantID string `json:"grant_id"`
-			} `json:"authority"`
-			Extensions struct {
-				Broker struct {
-					Kind string `json:"kind"`
-				} `json:"broker"`
-			} `json:"extensions"`
-		}
-		// A valid retry must be a real broker/resource record (it carries extensions.broker.kind). A generic
-		// record can never set extensions.broker (reserved), so a pre-seeded generic record with a matching
-		// record_id is NOT treated as a use/outcome retry — the gateway validation (PoP, consume-before-act)
-		// is never skipped on a spoofed record. (Reserved record_id prefixes also block the pre-seed.)
-		if json.Unmarshal([]byte(rec.JSON), &probe) == nil && probe.RecordID == useID && probe.Extensions.Broker.Kind != "" {
-			return rec.JSON, probe.Authority.GrantID, true, nil
-		}
-	}
-	return "", "", false, nil
-}
-
-// outcomeForIntent returns the record_id of a use_outcome in the session that already completes intentRef (read
-// from the SIGNED use_outcome payload the verifier pairs on, not the unsigned extensions.broker sibling), if any.
-// A read error propagates (fail closed → retryable 500). Caller holds ingestMu.
-func (s *Server) outcomeForIntent(projectID, sessionID, intentRef string) (string, bool, error) {
-	recs, err := s.st.SessionRecords(projectID, sessionID)
-	if err != nil {
-		return "", false, err
+		return "", false, "", false, err
 	}
 	for _, rec := range recs {
 		var probe struct {
@@ -2569,12 +2543,20 @@ func (s *Server) outcomeForIntent(projectID, sessionID, intentRef string) (strin
 				} `json:"broker"`
 			} `json:"extensions"`
 		}
-		if json.Unmarshal([]byte(rec.JSON), &probe) == nil && probe.Extensions.Broker.Kind == "use_outcome" &&
-			probe.Extensions.Broker.UseOutcome.IntentRef == intentRef {
-			return probe.RecordID, true, nil
+		if json.Unmarshal([]byte(rec.JSON), &probe) != nil || probe.Extensions.Broker.Kind == "" {
+			continue
+		}
+		if !intentFound && probe.RecordID == intentRef {
+			intentJSON, intentFound = rec.JSON, true
+		}
+		if !outcomeFound && probe.Extensions.Broker.Kind == "use_outcome" && probe.Extensions.Broker.UseOutcome.IntentRef == intentRef {
+			outcomeID, outcomeFound = probe.RecordID, true
+		}
+		if intentFound && outcomeFound {
+			break
 		}
 	}
-	return "", false, nil
+	return intentJSON, intentFound, outcomeID, outcomeFound, nil
 }
 
 // buildUseRecord assembles the unsealed use-receipt Decision Record: a tool_gateway-role authority
@@ -2744,7 +2726,7 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		}
 		// resolve the intent this outcome completes: it must be a use_intent recorded in this session, and
 		// we read its content_hash to bind the before-act ordering into the resource-signed payload.
-		intentJSON, _, ok, re := s.existingReceipt(or.ProjectID, or.SessionID, or.IntentRecordID)
+		intentJSON, ok, priorOutcome, outcomeDone, re := s.intentAndOutcome(or.ProjectID, or.SessionID, or.IntentRecordID)
 		if re != nil {
 			return re // FAIL CLOSED (averin#14): a SessionRecords read error → retryable 500, not a 400 "not found"
 		}
@@ -2777,10 +2759,8 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		// under a different idempotency key) would make the anchored bundle fail verification. The honest retry
 		// of the SAME outcome was already answered above via its idempotency key, so any other outcome already
 		// completing this intent is a conflict → 409, checked under ingestMu so two racing outcomes cannot both land.
-		if prior, found, oe := s.outcomeForIntent(or.ProjectID, or.SessionID, or.IntentRecordID); oe != nil {
-			return oe
-		} else if found {
-			conflictErr = fmt.Errorf("intent %q already has a recorded use_outcome (%s); an intent is completed exactly once", or.IntentRecordID, prior)
+		if outcomeDone {
+			conflictErr = fmt.Errorf("intent %q already has a recorded use_outcome (%s); an intent is completed exactly once", or.IntentRecordID, priorOutcome)
 			return nil
 		}
 		rec, be := s.buildUseOutcomeRecord(outcomeID, or.ProjectID, or.SessionID, probe.Extensions.Broker.UseEvidence.GrantID, or.IntentRecordID, probe.ContentHash, status)
