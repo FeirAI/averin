@@ -174,7 +174,11 @@ pub struct VerifyReport {
     pub collapsed_duplicates: usize,
     pub checkpoints_total: usize,
     pub checkpoints_verified: usize,
+    /// Checkpoints whose external anchor VERIFIED under a pinned TSA (on a verified checkpoint, TSA key honored)
+    /// — the anchors that actually contribute trust. `checkpoints_anchors_attached` counts mere PRESENCE of an
+    /// `anchor` field (unverified: anyone can attach garbage), so the two are never conflated.
     pub checkpoints_anchored: usize,
+    pub checkpoints_anchors_attached: usize,
     pub chain_ok: bool,
     /// Selective-disclosure entries in the bundle, and how many matched their record's commitment.
     pub disclosures_total: usize,
@@ -962,6 +966,10 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("checkpoints_total".into(), count(r.checkpoints_total)),
         ("checkpoints_verified".into(), count(r.checkpoints_verified)),
         ("checkpoints_anchored".into(), count(r.checkpoints_anchored)),
+        (
+            "checkpoints_anchors_attached".into(),
+            count(r.checkpoints_anchors_attached),
+        ),
         ("chain_ok".into(), CanonValue::Bool(r.chain_ok)),
         ("disclosures_total".into(), count(r.disclosures_total)),
         ("disclosures_verified".into(), count(r.disclosures_verified)),
@@ -1559,6 +1567,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         checkpoints_total: 0,
         checkpoints_verified: 0,
         checkpoints_anchored: 0,
+        checkpoints_anchors_attached: 0,
         chain_ok: false,
         disclosures_total: 0,
         disclosures_verified: 0,
@@ -4128,6 +4137,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // ---- 4. checkpoints + anchors ----
     let mut checkpoints_verified = 0usize;
     let mut checkpoints_anchored = 0usize;
+    let mut checkpoints_anchors_attached = 0usize;
     // (seq, anchored_ts, frontier) for each checkpoint with a verified anchor
     let mut anchored: Vec<(i64, String, Vec<String>)> = Vec::new();
     // D7: (seq, checkpoint_hash, anchored_ts, head cumulative_root) of each verified+anchored checkpoint,
@@ -4201,7 +4211,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             }
         };
         if let Some(anchor) = cp.get("anchor") {
-            checkpoints_anchored += 1;
+            // PRESENCE only — `checkpoints_anchored` is incremented below solely for an anchor that verified.
+            checkpoints_anchors_attached += 1;
             let any_tsa_trust =
                 !opts.trusted_tsa_keys.is_empty() || !opts.trusted_tsa_spki.is_empty();
             // Only an anchor on a *verified* checkpoint can contribute to trust — otherwise an
@@ -4233,6 +4244,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                             ));
                         } else {
                             this_anchored = true;
+                            checkpoints_anchored += 1;
                             anchored_cp_ids.push((
                                 cp_seq,
                                 cph.clone(),
@@ -5861,6 +5873,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         checkpoints_total: checkpoints.len(),
         checkpoints_verified,
         checkpoints_anchored,
+        checkpoints_anchors_attached,
         chain_ok,
         disclosures_total,
         disclosures_verified,

@@ -107,11 +107,14 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         if gb("dag_ok") { "valid" } else { "INVALID" },
         gi("dag_heads")
     );
+    // `checkpoints_anchored` counts anchors that VERIFIED under a pinned TSA; `checkpoints_anchors_attached` is
+    // mere presence (an unverified token anyone can attach) — never print presence as "anchored".
     println!(
-        "  checkpoints:  {}/{} verified, {} anchored, chain {}",
+        "  checkpoints:  {}/{} verified, {} anchored (verified; {} attached), chain {}",
         gi("checkpoints_verified"),
         gi("checkpoints_total"),
         gi("checkpoints_anchored"),
+        gi("checkpoints_anchors_attached"),
         if gb("chain_ok") { "ok" } else { "BROKEN" }
     );
     // Tier-B / ADR-0005 mode gates (only meaningful when the relevant key set was pinned via opts.json).

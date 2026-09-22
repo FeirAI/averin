@@ -320,12 +320,13 @@
             : "";
 
         // ---- Anchor honesty (averin-verifier#3). ----
-        // checkpoints_anchored counts anchor PRESENCE, not cryptographic anchor verification (which the default
-        // flow never does, it needs pinned tsa_keys). Label it as presence, and say UNVERIFIED when TSA trust
-        // was not supplied, so "N anchored" can never read as "N timestamps verified".
+        // checkpoints_anchors_attached counts anchor PRESENCE; checkpoints_anchored counts only anchors that
+        // VERIFIED under pinned tsa_keys (the default flow pins none). Show both, and say UNVERIFIED when TSA
+        // trust was not supplied, so "N anchored" can never read as "N timestamps verified".
+        const anchorsAttached = r.checkpoints_anchors_attached ?? r.checkpoints_anchored;
         const anchorLabel = ctx.tsaPinned
-          ? `${r.checkpoints_anchored} anchors present`
-          : `${r.checkpoints_anchored} anchors present · UNVERIFIED: pin tsa_keys`;
+          ? `${anchorsAttached} anchors present · ${r.checkpoints_anchored} verified`
+          : `${anchorsAttached} anchors present · UNVERIFIED: pin tsa_keys`;
 
         $("out").innerHTML = `<div class="panel">
           <div class="verdict ${verdictClass}">${verdictWord}</div>

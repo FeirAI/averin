@@ -12053,3 +12053,59 @@ fn tier_b_merkle_revocation_multibyte_or_signed_hex_does_not_panic() {
         assert_eq!(r.uses_matched, 0);
     }
 }
+
+#[test]
+fn garbage_anchor_tokens_are_not_counted_as_anchored() {
+    // H: `checkpoints_anchored` counted anchor PRESENCE before verifying it, so two garbage `anchor` blobs read as
+    // "2 anchored" (the CLI printed it as such). Only a VERIFIED anchor counts; presence is reported separately.
+    let b = fixture();
+    let garbage = CanonValue::parse(r#"{"scheme":"test-anchor","token":"not-a-token"}"#).unwrap();
+    let checkpoints: Vec<CanonValue> = arr(&b, "checkpoints")
+        .iter()
+        .map(|cp| attach_anchor(cp, garbage.clone()))
+        .collect();
+    let bundle = rebuild(arr(&b, "keys"), arr(&b, "records"), checkpoints);
+    for tsa_pinned in [false, true] {
+        let tsa = test_tsa_key(&[200u8; 32]);
+        let r = verify_bundle_with(
+            &bundle,
+            &VerifyOptions {
+                trusted_tsa_keys: if tsa_pinned {
+                    vec![tsa.verifying_key()]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.checkpoints_anchored, 0, "tsa_pinned={tsa_pinned}");
+        assert_eq!(r.checkpoints_anchors_attached, 2, "tsa_pinned={tsa_pinned}");
+        let json = report_to_json(&r);
+        assert!(json.contains(r#""checkpoints_anchored":0"#), "{json}");
+        assert!(
+            json.contains(r#""checkpoints_anchors_attached":2"#),
+            "{json}"
+        );
+    }
+
+    // control: a REAL anchor on the latest checkpoint counts as anchored once pinned.
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let mut checkpoints = arr(&b, "checkpoints");
+    let a = make_test_anchor(
+        &checkpoint_hash(&checkpoints[1]),
+        "2026-06-15T10:05:00.000Z",
+        &tsa,
+        "t",
+    );
+    checkpoints[1] = attach_anchor(&checkpoints[1], a);
+    let r = verify_bundle_with(
+        &rebuild(arr(&b, "keys"), arr(&b, "records"), checkpoints),
+        &VerifyOptions {
+            trusted_tsa_keys: vec![tsa.verifying_key()],
+            ..Default::default()
+        },
+    );
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.checkpoints_anchored, 1);
+    assert_eq!(r.checkpoints_anchors_attached, 1);
+}
