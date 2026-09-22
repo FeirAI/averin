@@ -195,14 +195,16 @@ pub struct VerifyReport {
     /// request that was refused AND recorded as evidence, opt-in producer side). NOT a grant (never folded
     /// into `grant_total`/`grant_accountability`); a generic BrokerRole::None record.
     pub denied_grants: usize,
-    /// Tier-B use↔grant join (ADR 0003 step 5), computed over the CLOSED set (records committed by a
-    /// verified, anchored checkpoint, R3). `uses_total` = resource-role use receipts; `uses_matched` =
-    /// closed uses bound to a closed grant under the full predicate; `uses_action_unverified` = matched
+    /// Tier-B use↔grant join (ADR 0003 step 5, R3). Violations are evaluated over the COMMITTED set (records
+    /// committed by ANY verified checkpoint), positive claims over the CLOSED set (committed by a verified,
+    /// ANCHORED checkpoint) — so deleting the unsigned `anchor` can only weaken the verdict. `uses_total` =
+    /// resource-role use receipts; `uses_matched` = closed uses bound to a closed grant under the full
+    /// predicate; `uses_action_unverified` = matched
     /// uses NOT action-verified — i.e. a non-`single_operation` grant, or no `validated`, in-window
     /// taxonomy listing the grant's `(resource_id, action)` (ADR 0004 D4; `0` ⇔ every matched use is
-    /// action-verified); `unmatched_violation` = a closed use with no/again a matching grant, or one
-    /// honoring a mis-scoped grant (hard fail); `unmatched_pending` = a use not yet closed (in-flight);
-    /// `grants_unused` = closed grants with no matching use.
+    /// action-verified); `unmatched_violation` = a committed use with no/again a matching grant, or one
+    /// honoring a mis-scoped grant (hard fail); `unmatched_pending` = a use that passed every check but is not
+    /// yet closed (in-flight); `grants_unused` = closed grants with no matching use.
     pub uses_total: usize,
     pub uses_matched: usize,
     pub uses_action_unverified: usize,
@@ -4293,6 +4295,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // head — pre-D6 checkpoints never carry the field, so it is a D6 activation signal (and a violation),
     // distinct from a checkpoint with no head field at all. Tracked so D6 cannot be dodged by garbling it.
     let mut verified_malformed_head = false;
+    // The frontiers of EVERY verified (signature-checked, key-honored) checkpoint, anchored or not — the
+    // `committed` set the Tier-B join evaluates its NEGATIVE findings over (see the R3 note at the join).
+    let mut verified_frontiers: Vec<String> = Vec::new();
     // Pre-pass: each checkpoint's seal check and (on a sealed checkpoint) anchor check, done ONCE up front so the
     // RCP §10.2 key-status gate below can see anchors on LATER checkpoints before any checkpoint is accepted.
     let any_tsa_trust = !opts.trusted_tsa_keys.is_empty() || !opts.trusted_tsa_spki.is_empty();
@@ -4453,6 +4458,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         };
         if cp_verified {
             checkpoints_verified += 1;
+            verified_frontiers.extend(cp_frontier.iter().cloned());
         }
         if cp.get("anchor").is_some() {
             // PRESENCE only — `checkpoints_anchored` is incremented below solely for an anchor that verified.
@@ -4757,16 +4763,37 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
     }
 
-    // ---- Tier-B (ADR 0003 step 5): use↔grant join over the CLOSED set (R3) ----
-    // CLOSED = a record's content_hash is transitively committed by a verified, ANCHORED checkpoint
-    // (the union of the anchored committed sets). Tier-B outcomes are computed over closed records
-    // only; a use not yet closed is `unmatched_pending` (in-flight), never a violation. Replacing an
-    // exporter watermark with this cryptographic boundary closes the watermark-specific suppression
-    // path (MUST-FIX 2); never-anchored use suppression remains an accepted residual.
+    // ---- Tier-B (ADR 0003 step 5): use↔grant join (R3) ----
+    // CLOSED = a record's content_hash is transitively committed by a verified, ANCHORED checkpoint (the union of
+    // the anchored committed sets). COMMITTED = transitively committed by ANY verified (signed, key-honored)
+    // checkpoint, anchored or not; CLOSED ⊆ COMMITTED.
+    //
+    // MONOTONICITY (the reason for the split): `anchor` is outside the checkpoint hash (checkpoint.rs STRIP), so
+    // it is UNSIGNED, optional data — anyone can delete it and the checkpoints still verify. When the join ran
+    // over CLOSED alone, deleting every anchor turned every closed use into `unmatched_pending` (never a
+    // violation), so an action-without-credential, a double-spend, a revoked use, a cosig/delegation failure or a
+    // mis-scoped grant all read `ok:true` with no key at all. Removing unsigned data must never IMPROVE the
+    // verdict. So:
+    //   * NEGATIVE findings (violations, blocked uses, grant-issuance rejections) are evaluated over COMMITTED
+    //     records — this is ADR 0003 R3's own wording ("a use NOT yet committed by a verified checkpoint ⇒
+    //     pending"). The checkpoint signer can only ADD evidence against itself this way: every grant/use it
+    //     commits is independently broker-/resource-signed, and dropping the anchor no longer hides it.
+    //   * POSITIVE claims (`uses_matched`, PoP re-verification, action verification, `grants_unused`, native
+    //     coverage) still require CLOSURE: a committed use that passes every check but whose use/grant/outcome
+    //     is not anchored-closed is `unmatched_pending` (in-flight), exactly as before. It still CONSUMES its
+    //     single-use/bounded grant and its outcome, so a second committed spend is a violation, never pending.
+    //   * A CLOSED use whose grant is committed but NOT closed stays a violation ("no matching closed grant"),
+    //     unchanged — closure is never inherited from an unanchored peer.
+    // Replacing an exporter watermark with this cryptographic boundary closes the watermark-specific
+    // suppression path (MUST-FIX 2); never-committed use suppression remains an accepted residual.
     let closed: BTreeSet<&str> = anchored_committed
         .iter()
         .flat_map(|(_, set)| set.iter().map(String::as_str))
         .collect();
+    let committed: BTreeSet<String> = match dag_opt.as_ref() {
+        Some(d) => committed_set(records, &d.by_hash, &verified_frontiers),
+        None => BTreeSet::new(),
+    };
 
     // Index closed, fully-verified grants by grant_id, reading match fields ONLY from the proven
     // grant_evidence (R1). `used` tracks matched uses (single-use ≤1 per grant_id, and grants_unused).
@@ -4789,6 +4816,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         /// matches a re-delegated grant. (For an undelegated grant these equal the root cnf_kid / grant exp.)
         effective_cnf_kid: String,
         effective_exp: i64,
+        /// R3: the grant record is anchored-CLOSED (not merely committed) — required for a positive match.
+        closed: bool,
     }
     let mut grants_by_id: BTreeMap<String, GrantInfo> = BTreeMap::new();
     // D4 (ADR 0004): grant_ids flagged mis-scoped at issuance (a single_operation grant for an action a
@@ -4823,6 +4852,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         lease_id: String,
         issued_at: i64,
         exp: i64,
+        /// R3: anchored-CLOSED (required for the positive `covered_native` claim).
+        closed: bool,
     }
     let mut native_grants_by_id: BTreeMap<String, NativeGrant> = BTreeMap::new();
     let mut native_credential_present = false;
@@ -4832,10 +4863,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             && rt.trust == TrustLevel::IntegrityProven
             && rt.authority == AuthorityTrust::Verified
             && evidence_rederivable(rec, "grant_evidence")
-            && closed.contains(rt.content_hash.as_str());
+            && committed.contains(&rt.content_hash);
         if !qualifies {
             continue;
         }
+        let grant_closed = closed.contains(rt.content_hash.as_str());
         // M3 (ADR 0005): native/STS early branch. Detected from the SIGNED grant_evidence (riding the evidence
         // hash, so it cannot be stripped without breaking `evidence_rederivable` above). A native grant is
         // accounted on the separate `native_grants_by_id` channel and NEVER falls through to the brokered 8-tuple
@@ -4889,6 +4921,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         lease_id,
                         issued_at,
                         exp,
+                        closed: grant_closed,
                     });
                 }
                 _ => issues.push(format!(
@@ -5042,6 +5075,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     used_seqs: BTreeSet::new(),
                     effective_cnf_kid,
                     effective_exp,
+                    closed: grant_closed,
                 });
             }
             // A verified, closed broker grant whose grant_evidence is missing a required match field is
@@ -5260,7 +5294,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // validated outcome is tracked as a DISTINCT record (intent_ref, grant_id, record_id, index) — NOT a
     // map keyed by intent_ref, which would let a second outcome for the same intent_ref overwrite the first
     // (hiding an extra unauthorized outcome, or dropping the legitimate one — order-dependent).
-    let mut outcomes: Vec<(String, String, String, usize, String)> = Vec::new();
+    // (intent_ref, grant_id, record_id, index, signed intent_hash, anchored-CLOSED)
+    #[allow(clippy::type_complexity)]
+    let mut outcomes: Vec<(String, String, String, usize, String, bool)> = Vec::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str()
@@ -5268,8 +5304,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         {
             continue;
         }
-        if !closed.contains(rt.content_hash.as_str()) {
-            continue; // in-flight outcome: not yet anchored, completes nothing
+        if !committed.contains(&rt.content_hash) {
+            continue; // in-flight outcome: not yet committed by a verified checkpoint, completes nothing
         }
         if rt.trust != TrustLevel::IntegrityProven
             || rt.authority != AuthorityTrust::Verified
@@ -5290,7 +5326,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_str(rec, "use_outcome", "intent_hash"),
         ) {
             (Some(k), Some(iref), Some(ogid), Some(ihash)) if k == "use_outcome" => {
-                outcomes.push((iref, ogid, rt.record_id.clone(), rt.index, ihash));
+                let oclosed = closed.contains(rt.content_hash.as_str());
+                outcomes.push((iref, ogid, rt.record_id.clone(), rt.index, ihash, oclosed));
             }
             _ => {
                 unmatched_violation += 1;
@@ -5301,7 +5338,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // index outcomes by (intent_ref, grant_id) -> positions, so each intent pops at most one candidate
     // instead of scanning every outcome (O(intents·outcomes) — a verifier DoS on adversarial bundles).
     let mut outcomes_by: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-    for (i, (iref, ogid, _, _, _)) in outcomes.iter().enumerate() {
+    for (i, (iref, ogid, _, _, _, _)) in outcomes.iter().enumerate() {
         outcomes_by
             .entry((iref.clone(), ogid.clone()))
             .or_default()
@@ -5327,11 +5364,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             continue; // verbatim-duplicate use deduped (not double-counted)
         }
         uses_total += 1;
-        if !closed.contains(rt.content_hash.as_str()) {
-            unmatched_pending += 1; // in-flight: not yet committed by a verified anchored checkpoint
+        if !committed.contains(&rt.content_hash) {
+            unmatched_pending += 1; // in-flight: not yet committed by any verified checkpoint
             continue;
         }
-        // A CLOSED use must be cryptographically validatable (integrity + resource-role authority +
+        // R3 split (see the CLOSED/COMMITTED note above): every check below runs for a COMMITTED use, but it can
+        // only count as MATCHED when it (and its grant/outcome) is anchored-CLOSED; otherwise it ends as pending.
+        let use_closed = closed.contains(rt.content_hash.as_str());
+        // A COMMITTED use must be cryptographically validatable (integrity + resource-role authority +
         // re-derivable use_evidence) before its match fields can be trusted — otherwise fail closed.
         let violation = |issues: &mut Vec<String>, msg: String| {
             issues.push(format!("use {} ({}): {msg}", rt.index, rt.record_id));
@@ -5433,10 +5473,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             continue;
         }
         let g = match grants_by_id.get_mut(&gid) {
-            Some(g) => g,
-            None => {
+            // a CLOSED use needs a CLOSED grant (unchanged R3 semantics); a committed-only use may pair with a
+            // committed-only grant, but can then only end as pending.
+            Some(g) if g.closed || !use_closed => g,
+            _ => {
                 unmatched_violation += 1;
-                violation(&mut issues, format!("no matching closed grant '{gid}' — action without a credential (Tier-B violation)"));
+                violation(&mut issues, format!("no matching {} grant '{gid}' — action without a credential (Tier-B violation)", if use_closed { "closed" } else { "committed" }));
                 continue;
             }
         };
@@ -5581,7 +5623,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             let key = (rt.record_id.clone(), gid.clone());
             pending_consume = outcomes_by.get(&key).and_then(|idxs| {
                 idxs.iter().copied().find(|&i| {
-                    let (_, _, orec, oidx, ihash) = &outcomes[i];
+                    let (_, _, orec, oidx, ihash, _) = &outcomes[i];
                     !consumed_outcomes.contains(orec)
                         && ihash.as_str() == rt.content_hash.as_str()
                         && records[*oidx]
@@ -5593,26 +5635,56 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                             })
                 })
             });
-            if pending_consume.is_none() {
-                intent_without_outcome += 1;
-                continue;
+            match pending_consume {
+                // no outcome at all: a CLOSED intent is the D5 anomaly; a committed-only one is still in flight.
+                None => {
+                    if use_closed {
+                        intent_without_outcome += 1;
+                    } else {
+                        unmatched_pending += 1;
+                    }
+                    continue;
+                }
+                // a CLOSED intent whose outcome is only committed (not anchored): completion is not yet
+                // established over the closed set — the D5 anomaly, as before (when the outcome was invisible).
+                // The outcome is consumed so it is not ALSO reported as an orphan.
+                Some(i) if use_closed && !outcomes[i].5 => {
+                    consumed_outcomes.insert(outcomes[i].2.clone());
+                    intent_without_outcome += 1;
+                    continue;
+                }
+                Some(_) => {}
             }
         }
         // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
         // reconstructing the challenge from the proven fields + this grant's credential_binding + the
         // record's input_commit. A claimed re-verification that FAILS is a violation; a receipt that
         // carries neither stays `shim_asserted` (legacy ADR-0003 path).
-        match pop_reverify(rec, &g.credential_binding) {
-            Ok(true) => uses_pop_reverified += 1,
-            Ok(false) => {}
+        let pop_reverified = match pop_reverify(rec, &g.credential_binding) {
+            Ok(r) => r,
             Err(msg) => {
                 unmatched_violation += 1;
                 violation(&mut issues, format!("offline PoP re-verification: {msg}"));
                 continue;
             }
-        }
+        };
         if let Some(i) = pending_consume {
             consumed_outcomes.insert(outcomes[i].2.clone()); // accepted intent → consume its outcome now
+        }
+        // R3: a use that passed every check but is not anchored-CLOSED (nor, for a two-phase pair, its outcome —
+        // handled above, nor its grant — `!g.closed` implies `!use_closed` here) is in-flight: pending, not
+        // matched. It still CONSUMES the grant (and its sequence number / outcome), so a second committed spend
+        // of a single-use grant is a double-spend violation rather than a second pending use.
+        if !use_closed || !g.closed {
+            g.used += 1;
+            if let Some(usn) = use_seq {
+                g.used_seqs.insert(usn);
+            }
+            unmatched_pending += 1;
+            continue;
+        }
+        if pop_reverified {
+            uses_pop_reverified += 1;
         }
         if bkind == "use" {
             one_phase_use_present = true; // D8/MF3: a matched one-phase receipt blocks the capstone
@@ -5650,7 +5722,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // D5: a validated `use_outcome` that NO closed matching `use_intent` consumed is an ORPHAN — a recorded
     // completion with no anchored pre-action intent (the resource skipped the before-act recording that two-
     // phase exists to require). Flag it; otherwise an outcome-only bundle would read clean (false-clean).
-    for (iref, ogid, orec, _, _) in &outcomes {
+    for (iref, ogid, orec, _, _, _) in &outcomes {
         if !consumed_outcomes.contains(orec) {
             unmatched_violation += 1;
             issues.push(format!("use_outcome {orec}: references intent '{iref}' (grant {ogid}) but no closed matching use_intent consumed it — completion without a recorded intent (D5)"));
@@ -5660,12 +5732,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // (whose use was skipped, leaving used==0) is not mis-reported as a clean unused grant.
     let grants_unused = grants_by_id
         .iter()
-        .filter(|(gid, g)| g.used == 0 && !misscoped.contains(*gid))
+        .filter(|(gid, g)| g.closed && g.used == 0 && !misscoped.contains(*gid))
         .count();
     // M1: closed grants bounded to N uses of one (action, resource_id).
     let bounded_reuse_grants = grants_by_id
         .values()
-        .filter(|g| g.scope_class == "bounded_reuse")
+        .filter(|g| g.closed && g.scope_class == "bounded_reuse")
         .count();
 
     // M6 (ADR 0005): cosig artifact status. `absent` (no grant declared a cosig requirement) | `satisfied`
@@ -5737,8 +5809,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // (validly-signed) list; if a fresh list blocked any use OR native credential, the status becomes
     // `revoked_present`.
     let revoked_grants_matched = grants_by_id
-        .keys()
-        .filter(|gid| revocation.revoked.contains(*gid))
+        .iter()
+        .filter(|(gid, g)| g.closed && revocation.revoked.contains(*gid))
         .count();
     let revocation_status = if revoked_uses_blocked > 0 {
         "revoked_present".to_string()
@@ -5781,8 +5853,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         {
             continue;
         }
-        if !closed.contains(rt.content_hash.as_str()) {
-            continue; // in-flight transcript: not yet anchored, attests nothing over the closed set
+        if !committed.contains(&rt.content_hash) {
+            continue; // in-flight transcript: not committed by a verified checkpoint, attests nothing
         }
         if !introspected_seen.insert(rt.content_hash.as_str()) {
             continue; // verbatim-duplicate transcript deduped (not double-counted)
@@ -5900,7 +5972,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if sub != sup {
             introspection_scope_narrowed += 1; // a proper subset: the resource attested a real narrowing
         }
-        covered_native.insert(gid);
+        // R3: COVERAGE is a positive claim — only an anchored-CLOSED transcript of a CLOSED grant covers it (a
+        // committed-only one was still fully checked above, so its violations are never hidden).
+        if g.closed && closed.contains(rt.content_hash.as_str()) {
+            covered_native.insert(gid);
+        }
     }
     // M5 (ADR 0005): a REVOKED native grant (computed above) is forced OUT of coverage — so even a fully-verified
     // transcript cannot make a revoked credential's surface `attested` (it counts as uncovered → `unattested`).

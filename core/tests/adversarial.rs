@@ -12552,3 +12552,174 @@ fn tier_b_attestation_binds_revocation_evidence_when_revocation_keys_pinned() {
         r.issues
     );
 }
+
+// ---- A: deleting the (unsigned) `anchor` must never improve the Tier-B verdict (monotonicity) ----
+
+// Drop every checkpoint's `anchor` — it is outside the checkpoint hash (checkpoint.rs STRIP), so the stripped
+// checkpoints still verify: exactly what an attacker holding no key at all can do to a bundle.
+fn strip_anchors(bundle: &CanonValue) -> CanonValue {
+    let cps: Vec<CanonValue> = arr(bundle, "checkpoints")
+        .iter()
+        .map(|cp| {
+            let mut m = cp.as_object().unwrap().clone();
+            m.retain(|(k, _)| k != "anchor");
+            CanonValue::Object(m)
+        })
+        .collect();
+    change_field(bundle, "checkpoints", CanonValue::Array(cps))
+}
+
+#[test]
+fn tier_b_stripping_anchors_does_not_hide_violations() {
+    // A: the Tier-B join ran over the ANCHORED-closed set only, so deleting `anchor` turned every closed use into
+    // `unmatched_pending` (never a violation): an action without a credential, a double-spend, a revoked use and a
+    // cosig failure all flipped to ok:true with no key. Negative findings now run over every record committed by a
+    // SIGNED checkpoint; only positive claims still need anchoring.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let rev = signing_key_from_seed(&[77u8; 32]);
+    // revocation keys are pinned only for the revoked-use case (a pinned issuer with no list would itself block).
+    let opts = |revocation: bool| {
+        let mut o = pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        );
+        if revocation {
+            o.revocation_keys = vec![rev.verifying_key()];
+        }
+        o
+    };
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let use_of = |id: &str, prev: &[String], used_at: i64| {
+        seal_use(
+            &rec,
+            &res,
+            id,
+            prev,
+            ACTION,
+            &use_evidence(GID, ACTION, RESOURCE, GID, CNF, used_at),
+        )
+    };
+    // 1. action without a credential (the auditor's repro).
+    let lone = use_of("use-1", &[], USED);
+    let b1 = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![lone.clone()],
+        vec![checkpoint_over(
+            &rec,
+            &[content_hash_of(&lone)],
+            1,
+            Some(&tsa),
+        )],
+    );
+    // 2. single-use double-spend.
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let gch = content_hash_of(&grant);
+    let (u1, u2) = (
+        use_of("use-1", std::slice::from_ref(&gch), USED),
+        use_of("use-2", std::slice::from_ref(&gch), USED + 1),
+    );
+    let b2 = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant.clone(), u1.clone(), u2.clone()],
+        vec![checkpoint_over(
+            &rec,
+            &[content_hash_of(&u1), content_hash_of(&u2)],
+            3,
+            Some(&tsa),
+        )],
+    );
+    // 3. a use of a grant the signed revocation_list revokes (already caught pre-fix via the undatable list,
+    //    kept here so the revoked-use block itself is shown to survive the strip).
+    let b3 = change_field(
+        &tier_b_bundle(
+            &rec.verifying_key(),
+            vec![grant.clone(), u1.clone()],
+            vec![checkpoint_over(
+                &rec,
+                &[content_hash_of(&u1)],
+                2,
+                Some(&tsa),
+            )],
+        ),
+        "revocation_list",
+        revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[GID]),
+    );
+    // 4. a grant declaring cosig_threshold 1 with no approvals (M6), and a use of it.
+    let cosig_grant = seal_grant(
+        &rec,
+        &rec,
+        GID,
+        &change_field(&ge, "cosig_threshold", CanonValue::Int(1)),
+    );
+    let cu = use_of("use-1", &[content_hash_of(&cosig_grant)], USED);
+    let b4 = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![cosig_grant, cu.clone()],
+        vec![checkpoint_over(
+            &rec,
+            &[content_hash_of(&cu)],
+            2,
+            Some(&tsa),
+        )],
+    );
+
+    for (name, b, revocation, needle) in [
+        ("no credential", b1, false, "action without a credential"),
+        ("double-spend", b2, false, "double-spend"),
+        ("revoked use", b3, true, "marks REVOKED"),
+        ("cosig failure", b4, false, "cosig threshold not met"),
+    ] {
+        let anchored = verify_bundle_with(&b, &opts(revocation));
+        assert!(!anchored.ok, "{name}: anchored baseline must fail");
+        let stripped = verify_bundle_with(&strip_anchors(&b), &opts(revocation));
+        assert!(
+            !stripped.ok,
+            "{name}: deleting the anchors must not turn a violation into a PASS; issues: {:?}",
+            stripped.issues
+        );
+        assert!(
+            stripped.issues.iter().any(|i| i.contains(needle)),
+            "{name}: {:?}",
+            stripped.issues
+        );
+        assert_eq!(stripped.uses_matched, 0, "{name}");
+    }
+}
+
+#[test]
+fn tier_b_stripping_anchors_only_demotes_positive_claims() {
+    // A (the other half): a CLEAN anchored bundle stays ok when its anchors are stripped, but its positive claim
+    // falls back to pending — the verdict can only get weaker, never stronger.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let a = verify_bundle_with(&bundle, &opts);
+    assert!(a.ok, "{:?}", a.issues);
+    assert_eq!(
+        (a.uses_matched, a.unmatched_pending, a.grants_unused),
+        (1, 0, 0)
+    );
+    let s = verify_bundle_with(&strip_anchors(&bundle), &opts);
+    assert!(s.ok, "{:?}", s.issues);
+    assert_eq!(s.uses_matched, 0);
+    assert_eq!(s.unmatched_pending, 1);
+    assert_eq!(s.unmatched_violation, 0);
+    assert_eq!(
+        s.grants_unused, 0,
+        "an unanchored grant is not a clean unused grant"
+    );
+}
