@@ -231,8 +231,22 @@ Request (`grantRequest`):
 ```
 
 Errors: `400` (validation, failed PoP, forbidden scope, malformed), `409` (idempotency key reused
-for a *different* grant request), `500` (store/seal failure), `501` (broker not enabled). When an
+for a *different* grant request, or the grant's reserved `broker_seq` was voided by the operator —
+re-issue under a new `idempotency_key`), `500` (store/seal failure), `501` (broker not enabled). When an
 M-of-N cosig policy is pinned, single-phase issuance is refused (`400`) — use prepare/finalize.
+
+**What `agent_sig` binds.** `agent_sig` is an Ed25519 signature, under the key in `agent_pubkey`, over
+the JSON object `{"tag":"averin.broker.pop.v1","agent_id","action","resource","scope","agent_pubkey"}`
+(keys sorted). It proves the caller holds the cnf key and binds the operation to it. It does **not**
+bind a nonce, an expiry, the `project_id`, the `session_id`, the `idempotency_key`, `scope_class`,
+`use_limit`, `ttl_seconds`, the principal or the delegation chain. So a captured request body is
+replayable: under a new `idempotency_key` (or in another project the replayer can write to) it yields
+another grant for the same operation, bound to the same agent key, which only the holder of that key can
+use (resources re-check PoP at use time). Against the two-phase flow, a captured body lets a third party
+drive `prepare`/`finalize` for that agent's pending grant under its `idempotency_key`; it cannot change
+what the grant authorizes or which key it is bound to. Treat grant request bodies as sensitive in transit
+and logs. Binding the project and idempotency key into the challenge (with a new tag) is a planned
+wire-format change.
 
 ### POST `/v2/grants/prepare` and `/v2/grants/finalize` (two-phase)
 

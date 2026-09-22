@@ -134,6 +134,15 @@ The object form works for **every** role key (`signing_keys` uses the RCP §10.2
 - `cosig_status: satisfied` — every cosigned grant met its M-of-N (M6).
 - `delegation_status: verified` — every per-hop delegation chain re-walked + monotone (M2).
 - `revocation_status` — disclosed-list mode (M5): `fresh`/`absent` pass; `stale`/`revoked_present` block the capstone, as does `missing` (revocation_keys pinned but the bundle carries neither a `revocation_list` nor a `revocation_merkle_root`).
+- `attestation_status` with `revocation_keys` pinned (behaviour change) — the deployment attestation's signed
+  subject must carry a `revocation_digest` equal to the digest of the bundle's `revocation_list` (`""` when the
+  bundle has none), so stripping or swapping the list cannot keep the attestation valid. An attestation signed
+  before its producer bound that field has none, so on a bundle that **carries** a `revocation_list` it now fails
+  as `deployment_attestation: subject does not match the bundle under review — substitution/replay (D7):
+  revocation_digest`, which is a hard failure (`ok: false`), not merely `attestation_status` short of
+  `attested_claims`. Without `revocation_keys` pinned, a subject with no `revocation_digest` is still accepted.
+  Remedy: re-export from a current server (it signs a fresh attestation per export, binding the list it emits), or
+  verify an archived pre-upgrade bundle without `revocation_keys` and record why.
 - `revocation_merkle_status` — Merkle-non-disclosure mode (M5): when `fresh`, EVERY Tier-B use **and** every native credential must carry a per-grant proof in the bundle's `revocation_proofs` map — a non-membership proof to proceed, a membership/missing/forged proof blocks it (fail-closed; the revoked set is never disclosed). `stale` blocks the capstone; `absent` is the baseline. `revocation_nonmembership_verified` counts grants proven NOT revoked.
 - `introspection_status: attested` — every native (token_exchange) credential's resource-signed transcript verified (M3); the native surface reaches `attested_complete_over_introspected_surface`. A native credential that a fresh revocation list/root marks revoked is blocked here too (it can never be `attested`).
 - `federation_status: sequence_verified` — every broker's per-`broker_id` log verified, no `cross_broker_suppression` (M4).
