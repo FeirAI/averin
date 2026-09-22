@@ -643,36 +643,44 @@ func (p *Postgres) NextCheckpointSeq(projectID string) (int64, error) {
 // issuances cannot read the same MAX(seq) and mint two grants at the same number; the lock auto-releases
 // at COMMIT/ROLLBACK. The INSERT ... ON CONFLICT (project_id, grant_id) DO NOTHING makes a retry of the
 // same deterministic grant_id a no-op, and the trailing SELECT returns the existing-or-just-inserted seq.
-func (p *Postgres) AllocateBrokerSeq(projectID, grantID string) (int64, error) {
+func (p *Postgres) AllocateBrokerSeq(projectID, grantID string) (int64, bool, error) {
 	ctx := background()
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("store: begin broker seq: %w", err)
+		return 0, false, fmt.Errorf("store: begin broker seq: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op.
 
 	// Serialize allocation per project (hashtext is stable within a PG major version; the lock value is
 	// purely an internal serialization token, never persisted, so its exact hash does not matter).
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, projectID); err != nil {
-		return 0, fmt.Errorf("store: broker seq lock: %w", err)
+		return 0, false, fmt.Errorf("store: broker seq lock: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
+	// RETURNING yields a row only when THIS statement inserted (a fresh allocation); on the grant_id conflict it
+	// yields none and the existing reservation is read back below (fresh=false).
+	var seq int64
+	fresh := true
+	err = tx.QueryRow(ctx, `
 		INSERT INTO broker_seq (project_id, grant_id, seq)
 		SELECT $1, $2, COALESCE(MAX(seq), 0) + 1 FROM broker_seq WHERE project_id = $1
 		ON CONFLICT (project_id, grant_id) DO NOTHING
-	`, projectID, grantID); err != nil {
-		return 0, fmt.Errorf("store: broker seq insert: %w", err)
-	}
-	var seq int64
-	if err := tx.QueryRow(ctx, `
-		SELECT seq FROM broker_seq WHERE project_id = $1 AND grant_id = $2
-	`, projectID, grantID).Scan(&seq); err != nil {
-		return 0, fmt.Errorf("store: broker seq select: %w", err)
+		RETURNING seq
+	`, projectID, grantID).Scan(&seq)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		fresh = false
+		if err := tx.QueryRow(ctx, `
+			SELECT seq FROM broker_seq WHERE project_id = $1 AND grant_id = $2
+		`, projectID, grantID).Scan(&seq); err != nil {
+			return 0, false, fmt.Errorf("store: broker seq select: %w", err)
+		}
+	case err != nil:
+		return 0, false, fmt.Errorf("store: broker seq insert: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("store: broker seq commit: %w", err)
+		return 0, false, fmt.Errorf("store: broker seq commit: %w", err)
 	}
-	return seq, nil
+	return seq, fresh, nil
 }
 
 // insertDisclosures writes a record's disclosure secrets inside the caller's transaction. Insert-only

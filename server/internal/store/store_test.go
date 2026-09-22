@@ -118,34 +118,38 @@ func TestMemAnchors(t *testing.T) {
 func exerciseBrokerSeq(t *testing.T, s Store) {
 	t.Helper()
 	for i, gid := range []string{"g1", "g2", "g3"} {
-		seq, err := s.AllocateBrokerSeq("p", gid)
+		seq, fresh, err := s.AllocateBrokerSeq("p", gid)
 		if err != nil {
 			t.Fatalf("alloc %s: %v", gid, err)
+		}
+		if !fresh {
+			t.Fatalf("alloc %s: a first allocation must report fresh=true", gid)
 		}
 		if want := int64(i + 1); seq != want {
 			t.Fatalf("alloc %s = %d; want %d (gapless [1..N])", gid, seq, want)
 		}
 	}
 	// idempotent on grant_id: re-allocating an existing grant returns its original seq, no advance.
-	if seq, err := s.AllocateBrokerSeq("p", "g2"); err != nil || seq != 2 {
-		t.Fatalf("re-alloc g2 = %d err=%v; want idempotent 2", seq, err)
+	// fresh=false: a caller must never release a reservation it did not create (api.settleFailedGrantSeq).
+	if seq, fresh, err := s.AllocateBrokerSeq("p", "g2"); err != nil || seq != 2 || fresh {
+		t.Fatalf("re-alloc g2 = %d fresh=%v err=%v; want idempotent 2, fresh=false", seq, fresh, err)
 	}
 	// the next NEW grant continues gapless (the idempotent retry above did not consume a number).
-	if seq, err := s.AllocateBrokerSeq("p", "g4"); err != nil || seq != 4 {
+	if seq, _, err := s.AllocateBrokerSeq("p", "g4"); err != nil || seq != 4 {
 		t.Fatalf("alloc g4 = %d err=%v; want 4 (gapless after idempotent retry)", seq, err)
 	}
 	// per-project isolation: a different project starts its own sequence at 1.
-	if seq, err := s.AllocateBrokerSeq("other", "g1"); err != nil || seq != 1 {
+	if seq, _, err := s.AllocateBrokerSeq("other", "g1"); err != nil || seq != 1 {
 		t.Fatalf("alloc other/g1 = %d err=%v; want 1 (per-project)", seq, err)
 	}
 	// ReleaseBrokerSeq frees a not-yet-recorded allocation; the freed (highest) seq is REUSED gaplessly.
-	if seq, err := s.AllocateBrokerSeq("p", "g5"); err != nil || seq != 5 {
+	if seq, _, err := s.AllocateBrokerSeq("p", "g5"); err != nil || seq != 5 {
 		t.Fatalf("alloc g5 = %d err=%v; want 5", seq, err)
 	}
 	if err := s.ReleaseBrokerSeq("p", "g5"); err != nil {
 		t.Fatalf("release g5: %v", err)
 	}
-	if seq, err := s.AllocateBrokerSeq("p", "g6"); err != nil || seq != 5 {
+	if seq, _, err := s.AllocateBrokerSeq("p", "g6"); err != nil || seq != 5 {
 		t.Fatalf("after releasing g5, alloc g6 = %d err=%v; want reused 5 (gapless rollback)", seq, err)
 	}
 	// releasing an unallocated grant is a safe no-op.
@@ -175,16 +179,16 @@ func TestMemBrokerSeq(t *testing.T) {
 // permanent hole at 1 (the next allocation for g1 would be MAX+1=3) — so g1's retry reclaims seq 1.
 func exerciseReleaseKeepsNonMaxSeq(t *testing.T, s Store) {
 	t.Helper()
-	if seq, err := s.AllocateBrokerSeq("p", "g1"); err != nil || seq != 1 {
+	if seq, _, err := s.AllocateBrokerSeq("p", "g1"); err != nil || seq != 1 {
 		t.Fatalf("alloc g1 = %d err=%v; want 1", seq, err)
 	}
-	if seq, err := s.AllocateBrokerSeq("p", "g2"); err != nil || seq != 2 {
+	if seq, _, err := s.AllocateBrokerSeq("p", "g2"); err != nil || seq != 2 {
 		t.Fatalf("alloc g2 = %d err=%v; want 2", seq, err)
 	}
 	if err := s.ReleaseBrokerSeq("p", "g1"); err != nil {
 		t.Fatalf("release g1: %v", err)
 	}
-	if seq, err := s.AllocateBrokerSeq("p", "g1"); err != nil || seq != 1 {
+	if seq, _, err := s.AllocateBrokerSeq("p", "g1"); err != nil || seq != 1 {
 		t.Fatalf("after releasing the NON-max g1, its retry got seq %d err=%v; want the kept reservation 1", seq, err)
 	}
 	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 2 {

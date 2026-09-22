@@ -1802,9 +1802,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		// New grant: allocate (after validation, inside the lock), build, seal+store. Roll back the seq on
 		// ANY failure after allocation but before the record commits, so an uncommitted grant never burns a
 		// number (the rollback is safe under ingestMu — no other grant allocates in between).
-		allocated := false
+		allocated, fresh := false, false
 		prepared, e = broker.Prepare(req, grantID, func() (int64, error) {
-			seq, aerr := s.st.AllocateBrokerSeq(gr.ProjectID, grantID)
+			seq, isFresh, aerr := s.st.AllocateBrokerSeq(gr.ProjectID, grantID)
+			fresh = isFresh
 			if aerr == nil && seq < 1 {
 				// a store-contract violation (non-positive seq with no error) is a 500 dependency bug,
 				// NOT caller-bad-input — synthesize an error so it routes to allocErr (500), not 400.
@@ -1827,7 +1828,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 			if !allocated {
 				return cause
 			}
-			return s.settleFailedGrantSeq(gr.ProjectID, grantID, cause)
+			return s.settleFailedGrantSeq(gr.ProjectID, grantID, fresh, cause)
 		}
 		if e != nil {
 			if allocErr == nil {
@@ -1913,6 +1914,11 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 // returns the error to surface. The caller MUST hold ingestMu (the allocation's serialization) and must already
 // have ruled out a visibly-durable record under the grant's idempotency key.
 //
+//   - fresh == false (AllocateBrokerSeq returned an EXISTING reservation for this grant_id): the seq belongs to a
+//     PRIOR attempt of this grant whose outcome this request cannot know — its commit may have been ambiguous and
+//     may still land (an in-flight Postgres commit is not yet visible to RecordByIdem). Releasing it here would let
+//     the next grant reuse a number a durable grant holds → duplicate broker_seq. It is left RESERVED whatever the
+//     error; a later retry of this grant reclaims it.
 //   - store.ErrCommitAmbiguous (a fresh insert whose commit outcome is unknown): the record may still become
 //     durable, and releasing its seq could let a later grant REUSE a number a durable grant holds → duplicate
 //     broker_seq → poisoned head. The seq is left RESERVED; the deterministic grant_id makes a retry reclaim it.
@@ -1922,7 +1928,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 //     project's current MAX: a seq that is no longer the max (an earlier release was lost and later grants took
 //     higher seqs) stays reserved so this grant's retry refills it rather than leaving an unrefillable mid-hole.
 //     A failed release is folded into the error; createCheckpoint independently refuses to sign over any gap.
-func (s *Server) settleFailedGrantSeq(projectID, grantID string, cause error) error {
+func (s *Server) settleFailedGrantSeq(projectID, grantID string, fresh bool, cause error) error {
+	if !fresh {
+		return fmt.Errorf("%w — broker_seq left RESERVED (reused from a prior attempt of this grant whose commit may still land; never released by a retry)", cause)
+	}
 	if errors.Is(cause, store.ErrCommitAmbiguous) {
 		return fmt.Errorf("%w — broker_seq left RESERVED (commit-ambiguous; never released, to avoid reuse; a retry of this grant reclaims it)", cause)
 	}

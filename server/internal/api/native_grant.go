@@ -56,7 +56,7 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 			sealed, created = existing.JSON, false
 			return nil
 		}
-		seq, aerr := s.st.AllocateBrokerSeq(gr.ProjectID, grantID)
+		seq, fresh, aerr := s.st.AllocateBrokerSeq(gr.ProjectID, grantID)
 		if aerr != nil {
 			return fmt.Errorf("allocate broker_seq: %w", aerr)
 		}
@@ -69,7 +69,7 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 		}
 		rec, e := s.buildNativeGrantRecord(gr, grantID, evidence)
 		if e != nil {
-			return s.settleFailedGrantSeq(gr.ProjectID, grantID, e) // nothing persisted → release the seq
+			return s.settleFailedGrantSeq(gr.ProjectID, grantID, fresh, e) // nothing persisted → release the seq
 		}
 		var se error
 		sealed, created, se = s.sealAndStore(gr.ProjectID, gr.SessionID, idem, rec, nil)
@@ -79,7 +79,7 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 				return nil
 			}
 			// Released unless commit-ambiguous (then RESERVED; a retry reclaims it).
-			return s.settleFailedGrantSeq(gr.ProjectID, grantID, se)
+			return s.settleFailedGrantSeq(gr.ProjectID, grantID, fresh, se)
 		}
 		return nil
 	}()

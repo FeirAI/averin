@@ -151,3 +151,71 @@ func TestCheckpointRefusesReservedSeqGap(t *testing.T) {
 		t.Fatalf("bundle must verify (%d): %s", code, report)
 	}
 }
+
+// heldCommit is a record whose commit was acknowledged as ambiguous and has not landed yet.
+type heldCommit struct {
+	project, idem string
+	rec           store.Record
+}
+
+// lateCommitStore models a Postgres commit whose ack is lost but which DOES land later: PutRecord returns
+// store.ErrCommitAmbiguous and holds the record back (invisible to RecordByIdem) until land() persists it.
+type lateCommitStore struct {
+	flakyGrantStore
+	holdNext bool
+	held     []heldCommit
+}
+
+func (l *lateCommitStore) PutRecord(p, k string, rec store.Record) (store.Record, bool, error) {
+	if l.holdNext {
+		l.holdNext = false
+		l.held = append(l.held, heldCommit{p, k, rec})
+		return store.Record{}, false, fmt.Errorf("%w: injected (commit in flight)", store.ErrCommitAmbiguous)
+	}
+	return l.flakyGrantStore.PutRecord(p, k, rec)
+}
+
+func (l *lateCommitStore) land(t *testing.T) {
+	t.Helper()
+	for _, h := range l.held {
+		if _, _, err := l.flakyGrantStore.Store.PutRecord(h.project, h.idem, h.rec); err != nil {
+			t.Fatalf("land held commit: %v", err)
+		}
+	}
+	l.held = nil
+}
+
+// TestRetryNeverReleasesReusedSeq (review finding 5): g1's commit is ambiguous at seq 1 (the max) and is still in
+// flight. The client retries at once: RecordByIdem cannot see the row yet, AllocateBrokerSeq hands back the SAME
+// reserved seq 1, and the retry then fails with a plain (non-ambiguous) error. Releasing seq 1 there deleted a
+// number the in-flight commit still holds: once it lands, the next grant was allocated seq 1 AGAIN — a duplicate
+// broker_seq no checkpoint could ever sign over. A retry must only release a seq it freshly allocated.
+func TestRetryNeverReleasesReusedSeq(t *testing.T) {
+	ls := &lateCommitStore{flakyGrantStore: flakyGrantStore{Store: store.NewMem()}}
+	h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).Routes()
+	ak := grantAgentKey()
+
+	ls.holdNext = true
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusInternalServerError {
+		t.Fatalf("g1 ambiguous commit must 500 (got %d): %s", code, resp)
+	}
+	ls.failHeads = true // the immediate retry reuses seq 1, then fails with a releasable-looking error
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusInternalServerError {
+		t.Fatalf("g1 retry with a transient failure must 500 (got %d): %s", code, resp)
+	}
+	ls.land(t) // the original commit becomes durable, holding seq 1
+
+	code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g2", "read:orders", ak, ak))
+	if code != http.StatusCreated {
+		t.Fatalf("g2 (%d): %s", code, resp)
+	}
+	if seq := grantSeqOf(t, resp); seq != 2 {
+		t.Fatalf("g2 broker_seq = %d, want 2 (seq 1 is held by g1's landed commit; releasing it on the retry re-issued it)", seq)
+	}
+	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("checkpoint over {1,2} (%d): %s", code, resp)
+	}
+	if code, report := do(t, h, "GET", "/v2/verify?project=p1", ""); code != http.StatusOK || !strings.Contains(report, `"ok":true`) {
+		t.Fatalf("bundle must verify (no duplicate broker_seq) (%d): %s", code, report)
+	}
+}

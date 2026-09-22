@@ -399,7 +399,7 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 	commitErr := func() error {
 		s.ingestMu.Lock()
 		defer s.ingestMu.Unlock()
-		seq, aerr := s.st.AllocateBrokerSeq(fr.ProjectID, grantID)
+		seq, fresh, aerr := s.st.AllocateBrokerSeq(fr.ProjectID, grantID)
 		if aerr != nil {
 			return fmt.Errorf("allocate broker_seq: %w", aerr)
 		}
@@ -409,7 +409,7 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		prepared.Evidence["broker_seq"] = seq // OVERWRITE the prepare-time placeholder with the real gapless seq
 		rec, disclosures, e := s.buildGrantRecord(grantID, p.gr, p.req, prepared)
 		if e != nil {
-			return s.settleFailedGrantSeq(fr.ProjectID, grantID, e) // nothing persisted → release the seq
+			return s.settleFailedGrantSeq(fr.ProjectID, grantID, fresh, e) // nothing persisted → release the seq
 		}
 		var se error
 		sealed, created, se = s.sealAndStore(fr.ProjectID, sessionID, idem, rec, disclosures)
@@ -419,7 +419,7 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 			// Released unless commit-ambiguous (then RESERVED; a retry of this finalize reclaims it).
-			return s.settleFailedGrantSeq(fr.ProjectID, grantID, se)
+			return s.settleFailedGrantSeq(fr.ProjectID, grantID, fresh, se)
 		}
 		return nil
 	}()

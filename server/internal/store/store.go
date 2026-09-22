@@ -125,7 +125,11 @@ type Store interface {
 	// sharing one store must additionally hold a DISTRIBUTED per-project lock across allocate→seal→insert
 	// (extend the Postgres advisory lock here to span the record insert), or two instances could record
 	// seq N+1 before seq N and a checkpoint could anchor a transient false gap.
-	AllocateBrokerSeq(projectID, grantID string) (int64, error)
+	//
+	// fresh reports whether THIS call created the allocation (true) or returned an existing reservation for the
+	// grant_id (false). Only a fresh allocation may be released by the caller that made it: an existing one may
+	// belong to a prior attempt whose commit was ambiguous and may still land (see api.settleFailedGrantSeq).
+	AllocateBrokerSeq(projectID, grantID string) (seq int64, fresh bool, err error)
 	// ReleaseBrokerSeq rolls back an allocation whose grant was NOT recorded (a failure after allocation
 	// but before the record committed), so the durable max sequence only advances for grants that exist —
 	// keeping the recorded log gapless. Safe to call when no allocation was made (no-op). MUST be called
@@ -422,12 +426,12 @@ func (m *Mem) NextCheckpointSeq(projectID string) (int64, error) {
 	return int64(len(m.proj(projectID).checks)), nil
 }
 
-func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, error) {
+func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
 	if seq, ok := p.brokerSeq[grantID]; ok {
-		return seq, nil // idempotent: a retry of the same grant_id gets its original seq (no gap)
+		return seq, false, nil // idempotent: a retry of the same grant_id gets its original seq (no gap)
 	}
 	// Derive next from the CURRENT max in the map (not a monotonic counter) so a ReleaseBrokerSeq of the
 	// highest seq is reusable — keeping the recorded sequence gapless even when a grant fails after
@@ -439,7 +443,7 @@ func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, error) {
 		}
 	}
 	p.brokerSeq[grantID] = max + 1
-	return max + 1, nil
+	return max + 1, true, nil
 }
 
 func (m *Mem) ReleaseBrokerSeq(projectID, grantID string) error {
