@@ -32,9 +32,10 @@
 (*                          attempt of the same grant_id                    *)
 (*   VoidEnabled          - the operator tombstone remediation exists       *)
 (*   UniqueIndex          - records has UNIQUE(project, record_id): the     *)
-(*                          tombstone waits on an in-flight insert of the   *)
-(*                          same record_id, and a late insert after the     *)
-(*                          tombstone fails (migration 0002 fallback: FALSE)*)
+(*                          tombstone and the grant's insert share a        *)
+(*                          record_id, so at most one lands; the void does  *)
+(*                          NOT wait for in-flight inserts, a late insert   *)
+(*                          after the tombstone aborts (0002 fallback: FALSE)*)
 (*   AgeFromLastAttempt   - the void's minimum age is measured from the     *)
 (*                          grant's LAST attempt (so no attempt of it can   *)
 (*                          still be in flight); FALSE = from the original  *)
@@ -161,8 +162,9 @@ Retry(g) ==
 \*   - AgeFromLastAttempt: the minimum age exceeds any commit's lifetime, measured from the grant's
 \*     last attempt, so no attempt of it is still in flight. Measured from the allocation instead,
 \*     it only guarantees that the FIRST (fresh) attempt is resolved; a later retry may be open.
-\*   - UniqueIndex: the tombstone's insert waits on an in-flight insert of the same record_id; if
-\*     that lands, the seq is recorded and the void is refused (409), otherwise it proceeds.
+\*   - UniqueIndex adds no guard here: it acts in Land, where an in-flight insert of a retired
+\*     grant can no longer land (the tombstone holds its record_id), so it can only abort. The two
+\*     guards are independent mechanisms, and the index configs exercise that backstop.
 VoidSeq(g) ==
   /\ VoidEnabled
   /\ lock = Free
@@ -172,7 +174,6 @@ VoidSeq(g) ==
   /\ seqOf[g] \notin Recorded
   /\ AgeFromLastAttempt => ~InFlight(g)
   /\ ~\E e \in inflight : e[2] = g /\ e[3]
-  /\ UniqueIndex => ~InFlight(g)
   /\ rec' = rec \cup {<<seqOf[g], Void>>}
   /\ voided' = voided \cup {seqOf[g]}
   /\ retired' = retired \cup {g}
@@ -226,6 +227,10 @@ HoleFree == \A n \in 1..MaxSeq : n \in Recorded \/ \E g \in Grants : seqOf[g] = 
 (* NON-VACUITY: expected VIOLATED in the shipped design. The guards still let the operator void a
    grant whose ambiguous commit has resolved, so the passing safety configs exercise the void. *)
 NoVoid == retired = {}
+
+(* BACKSTOP REACHABILITY: expected VIOLATED under the index alone, i.e. a grant is voided while an
+   attempt of it is still in flight, and only the UNIQUE index stops that attempt landing. *)
+NoVoidDuringFlight == \A g \in retired : ~InFlight(g)
 
 (* The Begin guard never disables an allocation, so bounding the model cuts no behaviour. *)
 BoundNotBinding == MaxSeq < Bound

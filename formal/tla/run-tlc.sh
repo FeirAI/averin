@@ -45,8 +45,9 @@ check GrantLog.tla GrantLog_release_lost.cfg AnchoredGapless   # a lost release,
 check GrantLog.tla GrantLog_failclosed.cfg HoleFree            # release of a non-max orphan leaves a hole
 check GrantLog.tla GrantLog_reuse_release.cfg NoDuplicateSeq   # release of a seq reused after an ambiguous commit
 check GrantLog.tla GrantLog_void_race.cfg NoDuplicateSeq      # void age from allocation, no UNIQUE index: void races a retry
-check GrantLog.tla GrantLog_void_age_only.cfg pass             # ...either guard alone closes it: age from the last attempt
+check GrantLog.tla GrantLog_void_age_only.cfg pass             # ...either guard alone closes it: age from the last attempt (one process)
 check GrantLog.tla GrantLog_void_index_only.cfg pass           # ...or the UNIQUE record_id index
+check GrantLog.tla GrantLog_void_backstop.cfg NoVoidDuringFlight # ...which really is exercised: the void races an in-flight retry
 check GrantLog.tla GrantLog_void_reachable.cfg NoVoid           # non-vacuity: the guarded void does happen
 check GrantLog.tla GrantLog_fixed.cfg pass                     # shipped design: no anchored gap, no duplicate seq
 check GrantLog.tla GrantLog_wedge.cfg CheckpointRecovers       # without void, a client that never retries wedges checkpoints
