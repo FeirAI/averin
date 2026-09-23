@@ -385,11 +385,7 @@ func (s *Server) buildGrantVoidRecord(vr brokerSeqVoidRequest, grantID string) (
 	if err != nil {
 		return nil, fmt.Errorf("derive void evidence_hash: %w", err)
 	}
-	evidenceSig, err := s.core.SignEvidence("gateway_enforced", vr.ProjectID, grantID, evidenceHash)
-	if err != nil {
-		return nil, fmt.Errorf("sign void evidence: %w", err)
-	}
-	return map[string]any{
+	rec := map[string]any{
 		"record_id":     grantID,
 		"project_id":    vr.ProjectID,
 		"session_id":    vr.SessionID,
@@ -404,7 +400,6 @@ func (s *Server) buildGrantVoidRecord(vr brokerSeqVoidRequest, grantID string) (
 			"enforcement_point": "credential_broker",
 			"grant_id":          grantID,
 			"evidence_hash":     evidenceHash,
-			"evidence_sig":      evidenceSig,
 			"evaluated_at":      now,
 		},
 		"extensions": map[string]any{
@@ -413,7 +408,11 @@ func (s *Server) buildGrantVoidRecord(vr brokerSeqVoidRequest, grantID string) (
 				"void_evidence": evidence,
 			},
 		},
-	}, nil
+	}
+	if err := s.signLocalAuthorityV3(rec, s.core); err != nil {
+		return nil, err
+	}
+	return rec, nil
 }
 
 // isVoidedGrant reports whether err is the store's refusal to allocate for a voided grant_id (mapped to 409).

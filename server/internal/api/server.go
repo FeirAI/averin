@@ -27,6 +27,7 @@ import (
 	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/broker"
 	"github.com/feirai/averin/server/internal/content"
+	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/meter"
 	"github.com/feirai/averin/server/internal/metrics"
 	"github.com/feirai/averin/server/internal/otel"
@@ -56,6 +57,8 @@ type Sealer interface {
 	Commit(domain string, value []byte, nonceHex string) (string, error)
 	// authority evidence: the credential broker signs a gateway_enforced grant (RCP §11).
 	SignEvidence(source, projectID, recordID, evidenceHash string) (string, error)
+	SignAuthorityRecordV3(recordJSON string) (core.V3AuthorityProof, error)
+	VerifyAuthorityRecord(recordJSON, publicKey string) (string, error)
 	// RcpEvidenceHash derives evidence_hash = sha256(RCP-canonicalize(payload)) so the verifier can
 	// re-derive it from the embedded grant_evidence (ADR 0003 R1).
 	RcpEvidenceHash(payloadJSON string) (string, error)
@@ -1095,6 +1098,10 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if err := validateExternalV3Subject(probe); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		// record_id is unique per project (store.ErrRecordIDConflict → 409). Reject a collision — within this
 		// batch, or with an already-stored record — HERE, before any item is sealed, so a later item's conflict
 		// cannot leave the earlier items committed. An idempotent replay (its idempotency_key already bound)
@@ -1126,7 +1133,11 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 		// (checkAuthority is pure) and reject the whole batch before anything is sealed, with the same retryable
 		// 500 + metric/WARNING ingestOne would produce. A record with no record_id cannot verify either way
 		// (ingestOne would assign a fresh random one), so the dry-run's verdict matches.
-		if _, isMap := probe["authority"].(map[string]any); isMap && s.requirePinnedAuthority {
+		if authorityV3Claim(probe) {
+			delete(probe, "idempotency_key")
+			finalizeSemanticRecord(probe, s.now())
+		}
+		if _, isMap := probe["authority"].(map[string]any); isMap && (s.requirePinnedAuthority || authorityV3Claim(probe)) {
 			if v := s.checkAuthority(probe); v.failedElevation {
 				s.ingestMu.Lock() // onFailedElevation's log throttle is guarded by ingestMu
 				s.mAuthorityDowngrades.Inc()
@@ -1493,10 +1504,16 @@ func (s *Server) ingestOne(ctx context.Context, raw []byte, headerIdem string) (
 	if err := s.validateGenericRecordItem(rec); err != nil {
 		return "", false, err
 	}
+	if err := validateExternalV3Subject(rec); err != nil {
+		return "", false, err
+	}
 	projectID := stringField(rec, "project_id")
 	sessionID := stringField(rec, "session_id")
 	if stringField(rec, "record_id") == "" {
 		rec["record_id"] = newUUID()
+	}
+	if authorityV3Claim(rec) {
+		finalizeSemanticRecord(rec, s.now())
 	}
 	// authority is declared by default — never silently presented as verified (threat #4). With
 	// AVERIN_REQUIRE_PINNED_AUTHORITY on, a claimed elevation that fails key verification returns
@@ -1536,23 +1553,11 @@ func (s *Server) ingestOne(ctx context.Context, raw []byte, headerIdem string) (
 // the broker's verified authority being clobbered back to caller_declared.
 func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string, rec map[string]any, disclosures []store.DisclosureSecret) (string, bool, error) {
 	now := s.now()
-	// server-controlled fields (override anything the caller sent)
-	rec["schema_version"] = "2"
-	rec["canon_version"] = "rcp-1"
-	rec["domain"] = "flightrecorder.record.v2"
+	// Every semantic default and lineage field is finalized before v3 signing.
+	// For legacy records this remains the server's ordinary defaulting path.
+	finalizeSemanticRecord(rec, now)
+	// Recorder-controlled envelope is outside the authority subject.
 	rec["received_ts"] = ts(now)
-	if stringField(rec, "agent_ts") == "" {
-		rec["agent_ts"] = ts(now) // agent clock untrusted; default to receipt if absent
-	}
-	if stringField(rec, "record_id") == "" {
-		rec["record_id"] = newUUID() // safety net; callers normally set it before committing fields
-	}
-	if stringField(rec, "span_id") == "" {
-		rec["span_id"] = "span-" + newUUID()
-	}
-	if _, ok := rec["parent_span_id"]; !ok {
-		rec["parent_span_id"] = nil
-	}
 	// FAIL-CLOSED on the frontier reads: this store is append-only + signed, so a record sealed against a
 	// silently-defaulted frontier is a permanent defect. A NextDisplaySeq error must abort (never seal with a
 	// bogus display_seq), mirroring createCheckpoint's fail-closed snapshot reads. Callers treat a sealAndStore
@@ -1562,27 +1567,6 @@ func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string,
 		return "", false, fmt.Errorf("seal: read display seq: %w", err)
 	}
 	rec["display_seq"] = seq
-
-	// sensible defaults for required semantic fields so a minimal record is still valid
-	setDefault(rec, "agent_id", "unknown")
-	setDefault(rec, "agent_version", "unknown")
-	setDefault(rec, "event_type", "decision")
-	setDefault(rec, "action", "")
-	setDefault(rec, "observed_via", "sdk")
-	setDefault(rec, "status", "ok")
-
-	// feir_evidence lineage/authority are stamped HERE — after the span_id/observed_via
-	// defaults above — so the sealed evidence block can never disagree with the record's
-	// own top-level fields (the commit pass runs before these defaults exist).
-	if extensions, _ := rec["extensions"].(map[string]any); extensions != nil {
-		if evidence, _ := extensions["feir_evidence"].(map[string]any); evidence != nil {
-			evidence["capture_authority"] = rec["observed_via"]
-			evidence["lineage"] = map[string]any{
-				"session_id": rec["session_id"], "span_id": rec["span_id"],
-				"parent_span_id": rec["parent_span_id"],
-			}
-		}
-	}
 
 	// causal DAG links = the session's current heads (server-derived, never client-trusted).
 	// NOTE: heads+seal+put are not yet one atomic transaction in the in-memory store; the Postgres
@@ -1617,6 +1601,9 @@ func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string,
 		"key_epoch":      0,
 		"key_valid_from": s.keyValidFrom,
 		"key_status":     "active",
+	}
+	if err := s.assertFinalAuthorityV3(rec); err != nil {
+		return "", false, fmt.Errorf("seal: %w", err)
 	}
 
 	bodyJSON, err := json.Marshal(rec)
@@ -2145,11 +2132,6 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 	if err != nil {
 		return nil, nil, fmt.Errorf("derive grant evidence_hash: %w", err)
 	}
-	// Sign the gateway_enforced evidence (record_id-bound) — this is what the verifier elevates.
-	evidenceSig, err := s.core.SignEvidence("gateway_enforced", gr.ProjectID, grantID, evidenceHash)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sign grant evidence: %w", err)
-	}
 	// Commit the credential descriptor (hiding) under the dedicated `credential` domain (ADR 0004 D1 —
 	// a grant no longer overloads `input`): store the bytes content-addressed, mint a nonce, and commit.
 	// Selective disclosure can later reveal the descriptor to prove the grant↔credential binding
@@ -2189,7 +2171,6 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 			"authorizing_principal": req.Principal,
 			"delegation_chain":      delegation,
 			"evidence_hash":         evidenceHash,
-			"evidence_sig":          evidenceSig,
 			"evaluated_at":          p.EvaluatedAt,
 			"expires_at":            p.ExpiresAt,
 		},
@@ -2214,6 +2195,9 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 	}
 	disclosures := []store.DisclosureSecret{
 		{RecordID: grantID, Field: "credential", ValueDigest: addr.Digest, NonceHex: nonce},
+	}
+	if err := s.signLocalAuthorityV3(rec, s.core); err != nil {
+		return nil, nil, err
 	}
 	return rec, disclosures, nil
 }
@@ -2574,10 +2558,6 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 	if err != nil {
 		return nil, nil, fmt.Errorf("derive use evidence_hash: %w", err)
 	}
-	evidenceSig, err := s.resourceCore.SignEvidence("gateway_enforced", ur.ProjectID, useID, evidenceHash)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sign use evidence (resource key): %w", err)
-	}
 	// Store the raw params content-addressed for selective disclosure. D2: input_commit IS the agent's
 	// PoP-bound hiding commitment (over (params, params_nonce)) — the SAME value the offline verifier
 	// reconstructs the PoP challenge from. The disclosure opens it with the agent's params_nonce.
@@ -2609,7 +2589,6 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 			"enforcement_point": "tool_gateway",
 			"grant_id":          ev.GrantID,
 			"evidence_hash":     evidenceHash,
-			"evidence_sig":      evidenceSig,
 			"evaluated_at":      ts(s.now()),
 		},
 		"input_commit": map[string]any{
@@ -2630,6 +2609,9 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 	}
 	disclosures := []store.DisclosureSecret{
 		{RecordID: useID, Field: "input", ValueDigest: addr.Digest, NonceHex: nonce},
+	}
+	if err := s.signLocalAuthorityV3(rec, s.resourceCore); err != nil {
+		return nil, nil, err
 	}
 	return rec, disclosures, nil
 }
@@ -2824,11 +2806,7 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 	// Do NOT seal an outcome carrying an unsigned/invalid evidence_sig into the append-only log: propagate a
 	// sign failure so the caller gets a 500 and can retry. The intent is already recorded, so a missing valid
 	// outcome surfaces as intent_without_outcome — never a permanently-unverifiable record (adversarial review).
-	evidenceSig, err := s.resourceCore.SignEvidence("gateway_enforced", projectID, outcomeID, evidenceHash)
-	if err != nil {
-		return nil, fmt.Errorf("use-outcome evidence sign: %w", err)
-	}
-	return map[string]any{
+	rec := map[string]any{
 		"record_id": outcomeID,
 		// FORCE the causal edge to the intent (unioned with session heads in sealAndStore) so the outcome
 		// links to its intent even if a record was appended between the two phases — the verifier requires
@@ -2847,7 +2825,6 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 			"enforcement_point": "tool_gateway",
 			"grant_id":          grantID,
 			"evidence_hash":     evidenceHash,
-			"evidence_sig":      evidenceSig,
 			"evaluated_at":      ts(s.now()),
 		},
 		"extensions": map[string]any{
@@ -2858,7 +2835,11 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 				"use_outcome": payload,
 			},
 		},
-	}, nil
+	}
+	if err := s.signLocalAuthorityV3(rec, s.resourceCore); err != nil {
+		return nil, err
+	}
+	return rec, nil
 }
 
 // commitLowEntropyFields replaces each raw input/output/rationale field in rec with a hiding
@@ -2973,6 +2954,9 @@ func (s *Server) normalizeAuthority(rec map[string]any) error {
 	}
 	if v.failedElevation {
 		s.mAuthorityDowngrades.Inc()
+		if authorityV3Claim(rec) {
+			return fmt.Errorf("%w: v3 proof failed or authority key is not pinned", errAuthorityRejected)
+		}
 		if err := s.onFailedElevation(v.claimed, v.keyID); err != nil {
 			return err
 		}
@@ -3010,6 +2994,16 @@ func (s *Server) checkAuthority(rec map[string]any) authorityVerdict {
 	key, pinned := s.authorityKeyFor(recProjectID, claimed)
 	if !pinned {
 		return authorityVerdict{claimed: claimed, keyID: "unpinned", failedElevation: attemptedElevation}
+	}
+	if authorityV3Claim(rec) {
+		raw, err := json.Marshal(rec)
+		if err == nil {
+			status, verifyErr := s.core.VerifyAuthorityRecord(string(raw), "ed25519pub:"+base64.RawURLEncoding.EncodeToString(key))
+			if verifyErr == nil && status == "verified" {
+				return authorityVerdict{claimed: claimed, elevate: true}
+			}
+		}
+		return authorityVerdict{claimed: claimed, keyID: authorityKeyID(key), failedElevation: true}
 	}
 	// T7 model (b): elevate to the claimed source ONLY if the caller-supplied evidence_sig verifies under that
 	// source's pinned key over the canonical authority preimage; else fall back to caller_declared.
