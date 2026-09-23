@@ -30,12 +30,18 @@ func (s *countingContentStore) Put(ctx context.Context, data []byte) (content.Ad
 }
 
 func popTestServer(t *testing.T, clock func() time.Time) http.Handler {
+	h, _ := popTestServerWithStore(t, clock)
+	return h
+}
+
+func popTestServerWithStore(t *testing.T, clock func() time.Time) (http.Handler, store.Store) {
 	t.Helper()
 	c, err := core.New(seed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithClock(clock).Routes()
+	st := store.NewMem()
+	return api.New(c, st, "k0").WithBroker(brokerIssuingKey()).WithClock(clock).Routes(), st
 }
 
 func mutateGrantBody(t *testing.T, body, field string, value any) string {
@@ -78,7 +84,7 @@ func resignCapabilityField(t *testing.T, token, field string, value any) string 
 
 func TestGrantPoPV2RouteRejectsEveryUnsignedSubstitution(t *testing.T) {
 	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
-	h := popTestServer(t, func() time.Time { return now })
+	h, st := popTestServerWithStore(t, func() time.Time { return now })
 	ak := grantAgentKey()
 	body := grantBodyAt("idem-original", "read:orders", ak, ak, now)
 	changes := map[string]any{
@@ -102,6 +108,12 @@ func TestGrantPoPV2RouteRejectsEveryUnsignedSubstitution(t *testing.T) {
 		_, exported := do(t, h, "GET", "/v2/export?project="+project, "")
 		if strings.Contains(exported, `"credential_grant"`) || strings.Contains(exported, `"credential_grant_denied"`) {
 			t.Fatalf("rejected proof persisted a record under %s: %s", project, exported)
+		}
+		if n, err := st.RecordCount(project); err != nil || n != 0 {
+			t.Fatalf("rejected proof persisted %d records under %s: %v", n, project, err)
+		}
+		if seq, err := st.MaxBrokerSeq(project); err != nil || seq != 0 {
+			t.Fatalf("rejected proof reserved broker sequence %d under %s: %v", seq, project, err)
 		}
 	}
 }
