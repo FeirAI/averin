@@ -60,7 +60,7 @@ Everything between "signature verifies" and "same body" is proved, not assumed:
 Cryptography is never axiomatised as injective. SHA-256 compresses, so that axiom would be false
 and every theorem vacuous. Hash results carry an explicit collision disjunct. Ed25519
 unforgeability is a hypothesis about which messages were signed. `check-axioms.sh` audits **every**
-declaration in the `Averin` namespace (currently 455), not a hand-picked list. The build fails if
+declaration in the `Averin` namespace (the script prints the count), not a hand-picked list. The build fails if
 any of them depends on anything beyond `propext`, `Classical.choice` and `Quot.sound`, which
 also catches `sorry` and `native_decide`, both of which are axioms. It also rejects `axiom`,
 `admit`, `implemented_by` and `extern` tokens.
