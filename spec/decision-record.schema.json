@@ -52,7 +52,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["source"],
       "properties": {
-        "source": { "enum": ["caller_declared","policy_engine_signed","human_signed","gateway_enforced"] },
+        "source": { "enum": ["caller_declared","policy_engine_signed","human_signed","delegate_signed","gateway_enforced"] },
         "enforcement_point": { "enum": ["sdk","proxy","tool_gateway","credential_broker","external"] },
         "decision_basis": { "enum": ["auto","human_approved","policy_allowed","policy_denied"] },
         "policy_hash": { "$ref": "#/$defs/sha256" },
@@ -66,6 +66,9 @@
         "delegation_chain": { "type": "array", "items": { "type": "string" } },
         "evidence_hash": { "$ref": "#/$defs/sha256" },
         "evidence_sig": { "anyOf": [ { "$ref": "#/$defs/ed25519" }, { "type": "null" } ] },
+        "proof_version": { "const": "v3" },
+        "subject_projection": { "const": "averin.authority.subject.v1" },
+        "subject_digest": { "$ref": "#/$defs/sha256" },
         "evaluated_at": { "$ref": "#/$defs/ts" },
         "expires_at": { "$ref": "#/$defs/ts" },
         "nonce": { "type": "string" }

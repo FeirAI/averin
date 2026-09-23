@@ -61,12 +61,16 @@ def attestationSig : Family := ⟨"attestation", "averin.attestation.v1", [], tr
 /-- `authority.rs::preimage`: `LP(tag) ‖ LP(source) ‖ LP(project_id) ‖ LP(record_id) ‖ utf8(evidence_hash)`. -/
 def authoritySig : Family :=
   ⟨"authority evidence", "averin.authority.v2", [.framed, .framed, .framed], true⟩
+/-- `authority.rs::preimage_v3`: every member is LP-framed. -/
+def authoritySigV3 : Family :=
+  ⟨"body-bound authority evidence", "averin.authority.v3",
+   [.framed, .framed, .framed, .framed, .framed, .framed], false⟩
 /-- `anchor.rs::anchor_preimage` (test anchors): `LP(tag) ‖ LP(checkpoint_hash) ‖ LP(anchored_ts)`. -/
 def testAnchorSig : Family := ⟨"test anchor", "averin.anchor.v1", [.framed, .framed], false⟩
 
 def signedFamilies : List Family :=
   [recordSig, checkpointSig, taxonomySig, revocationSig, merkleRootSig, attestationSig,
-   authoritySig, testAnchorSig]
+   authoritySig, authoritySigV3, testAnchorSig]
 
 /-! ## Challenge families (SHA-256 of the preimage; the raw 32-byte digest is what is signed) -/
 
@@ -100,6 +104,9 @@ def checkpointHash : Family :=
   ⟨"checkpoint_hash", "flightrecorder.checkpoint.v2", [.framed], true⟩
 /-- `commit.rs::commit`: `LP(tag) ‖ LP(field_domain) ‖ LB(nonce) ‖ LB(value)`. -/
 def commitment : Family := ⟨"hiding commitment", "averin.commit.v1", [.framed, .framed, .framed], false⟩
+/-- `authority.rs::subject_digest`: LP(tag) || LP(projection) || RCP(subject). -/
+def authoritySubjectDigest : Family :=
+  ⟨"authority subject digest", "averin.authority.subject.digest.v1", [.framed], true⟩
 /-- `verify.rs::ledger_commitment`. -/
 def ledger : Family := ⟨"use ledger", "averin.broker.use.ledger.v1", [.framed, .framed, .fixed 8], false⟩
 /-- `verify.rs::grant_head_root` seed `acc_0 = H(LP(tag))`. -/
@@ -113,7 +120,8 @@ def revocationLeaf : Family := ⟨"revocation leaf", "averin.broker.revocation.l
 /-- Every LP-framed SHA-256 input family whose leading tag is unique. (`grantHeadSeed` shares its
 tag with `grantHeadStep` and is separated by length in `grant_head_seed_ne_step`.) -/
 def hashFamilies : List Family :=
-  [usePop, cosig, delegationHop, introspection, federation, recordHash, checkpointHash, commitment,
+  [usePop, cosig, delegationHop, introspection, federation, recordHash, checkpointHash,
+   authoritySubjectDigest, commitment,
    ledger, grantHeadStep, revocationLeaf]
 
 /-! ## Within-family injectivity -/
@@ -133,6 +141,20 @@ theorem Family.msg_inj (F : Family) {vs ws : List Bytes} {t u : Bytes}
   have h2 := this.2
   simp only [ht, if_true] at h2
   exact h2
+
+/-- A changed subject-digest field changes the v3 signature message, even when
+source, project, record and evidence hash are held fixed. The subject hash itself
+is treated as a cryptographic commitment, never as an injective function. -/
+theorem authority_v3_digest_bound (projection source project record evidence d₁ d₂ : Bytes)
+    (h₁ : authoritySigV3.Admits [projection, source, project, record, evidence, d₁])
+    (h₂ : authoritySigV3.Admits [projection, source, project, record, evidence, d₂])
+    (hd : d₁ ≠ d₂) :
+    authoritySigV3.msg [projection, source, project, record, evidence, d₁] [] ≠
+      authoritySigV3.msg [projection, source, project, record, evidence, d₂] [] := by
+  intro h
+  have heq := (Family.msg_inj authoritySigV3 (by decide) h₁ h₂ h).1
+  simp only [List.cons.injEq, and_true] at heq
+  exact hd heq
 
 /-- **Cross-family disjointness.** Distinct leading tags ⇒ distinct messages, for any fields. -/
 theorem Family.msg_disjoint (F G : Family) (vs ws : List Bytes) (t u : Bytes)
@@ -196,7 +218,9 @@ theorem encodeFields_length_ge : ∀ (fs : List Field) (vs : List Bytes) (t : By
 /-- The verifier-side shape of a signed message: every tail it signs over is a `sha256:<hex>`
 string (71 bytes), and a test anchor frames a checkpoint hash (71 bytes) first. -/
 def ValidatedSigned (F : Family) (vs : List Bytes) (t : Bytes) : Prop :=
-  (F.tailed = true → t.length = 71) ∧ (F.tailed = false → ∃ v rest, vs = v :: rest ∧ v.length = 71)
+  (F.tailed = true → t.length = 71) ∧
+  (F.tailed = false → ∃ v rest, vs = v :: rest ∧
+    (v.length = 71 ∨ (F = authoritySigV3 ∧ v.length = 27)))
 
 /--
 **Raw-digest separation.** A validated LP-framed signed message is always longer than 32 bytes,
@@ -213,13 +237,13 @@ theorem signed_message_long (F : Family) (hF : F ∈ signedFamilies) (vs : List 
     subst hvs
     have hs : F.schema ≠ [] := by
       simp only [signedFamilies, List.mem_cons, List.not_mem_nil, or_false] at hF
-      rcases hF with h | h | h | h | h | h | h | h <;> subst h <;> simp_all [recordSig,
+      rcases hF with h | h | h | h | h | h | h | h | h <;> subst h <;> simp_all [recordSig,
         checkpointSig, taxonomySig, revocationSig, merkleRootSig, attestationSig, authoritySig,
-        testAnchorSig]
+        authoritySigV3, testAnchorSig]
     match hsch : F.schema, hs with
     | f :: fs, _ =>
       simp only [encodeFields, Field.encode, lp, List.length_append, be32_length]
-      cases f <;> simp [] <;> omega
+      cases f <;> simp [] <;> rcases hvl with hvl | ⟨_, hvl⟩ <;> omega
   · simp only [encodeFields, Field.encode, lp, List.length_append, be32_length, if_true]
     have := encodeFields_length_ge F.schema vs t
     have := hv.1 ht

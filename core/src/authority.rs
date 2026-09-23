@@ -8,7 +8,7 @@
 
 use crate::b64;
 use crate::canon::CanonValue;
-use crate::hashx::{lp_str_into, parse_sha256};
+use crate::hashx::{lp_str_into, parse_sha256, sha256_prefixed};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
 // `v2` binds `project_id` into the preimage (tenant isolation; T7/adversarial review). It is a HARD cutover from `v1`:
@@ -20,6 +20,39 @@ use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 // NOT hard-cutover — it must verify the newest version first and fall back to older versions under an
 // explicitly downgraded/legacy status, never silently dropping historical authority verification.
 pub const AUTHORITY_SIG_TAG: &str = "averin.authority.v2";
+pub const AUTHORITY_SIG_TAG_V3: &str = "averin.authority.v3";
+pub const SUBJECT_PROJECTION: &str = "averin.authority.subject.v1";
+pub const SUBJECT_HASH_TAG: &str = "averin.authority.subject.digest.v1";
+
+/// Only recorder-envelope and recursive proof fields are omitted. Every other
+/// top-level field, including future admitted fields and all extensions, binds.
+pub const SUBJECT_TOP_EXCLUSIONS: &[&str] = &[
+    "received_ts",
+    "display_seq",
+    "causal_prev_hashes",
+    "key",
+    "content_hash",
+    "sig",
+];
+const SUBJECT_AUTHORITY_EXCLUSIONS: &[&str] = &["evidence_sig", "subject_digest"];
+const SUBJECT_REQUIRED: &[&str] = &[
+    "schema_version",
+    "canon_version",
+    "domain",
+    "record_id",
+    "project_id",
+    "agent_id",
+    "agent_version",
+    "session_id",
+    "span_id",
+    "parent_span_id",
+    "agent_ts",
+    "event_type",
+    "action",
+    "observed_via",
+    "status",
+    "authority",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorityTrust {
@@ -29,6 +62,8 @@ pub enum AuthorityTrust {
     Declared,
     /// An `evidence_sig` verified under a pinned authority key.
     Verified,
+    /// A valid historical v2 signature binds evidence identity but not record content.
+    LegacyUnbound,
     /// A verified-source claim with evidence, but no authority keys were configured to check it —
     /// distinct from `Failed` so callers don't over-flag legitimately-signed evidence.
     Unverifiable,
@@ -43,10 +78,185 @@ impl AuthorityTrust {
             AuthorityTrust::None => "none",
             AuthorityTrust::Declared => "declared",
             AuthorityTrust::Verified => "verified",
+            AuthorityTrust::LegacyUnbound => "legacy_unbound",
             AuthorityTrust::Unverifiable => "unverifiable",
             AuthorityTrust::Failed => "failed",
         }
     }
+}
+
+/// Construct the non-circular subject from a fully finalized semantic record.
+/// The recorder may add only the enumerated excluded envelope after approval.
+pub fn subject_projection(record: &CanonValue) -> Result<CanonValue, &'static str> {
+    let members = record
+        .as_object()
+        .ok_or("authority subject must be an object")?;
+    for required in SUBJECT_REQUIRED {
+        if record.get(required).is_none() {
+            return Err("authority subject is missing a required semantic field");
+        }
+    }
+    if record.get("schema_version").and_then(CanonValue::as_str) != Some("2")
+        || record.get("canon_version").and_then(CanonValue::as_str) != Some("rcp-1")
+        || record.get("domain").and_then(CanonValue::as_str) != Some("flightrecorder.record.v2")
+    {
+        return Err("authority subject has an unsupported record profile");
+    }
+    for id in [
+        "record_id",
+        "project_id",
+        "session_id",
+        "span_id",
+        "agent_ts",
+    ] {
+        if record
+            .get(id)
+            .and_then(CanonValue::as_str)
+            .unwrap_or("")
+            .is_empty()
+        {
+            return Err("authority subject has an empty required semantic value");
+        }
+    }
+    for field in [
+        "agent_id",
+        "agent_version",
+        "event_type",
+        "action",
+        "observed_via",
+        "status",
+    ] {
+        if record.get(field).and_then(CanonValue::as_str).is_none() {
+            return Err("authority subject has a non-string semantic field");
+        }
+    }
+    if let Some(parent) = record.get("parent_span_id") {
+        if !parent.is_null() && parent.as_str().is_none() {
+            return Err("authority subject has an invalid parent span");
+        }
+    }
+    let authority = record
+        .get("authority")
+        .and_then(CanonValue::as_object)
+        .ok_or("authority subject is missing authority object")?;
+    if record
+        .get("authority")
+        .and_then(|a| a.get("proof_version"))
+        .and_then(CanonValue::as_str)
+        != Some("v3")
+        || record
+            .get("authority")
+            .and_then(|a| a.get("subject_projection"))
+            .and_then(CanonValue::as_str)
+            != Some(SUBJECT_PROJECTION)
+    {
+        return Err("authority subject has an unsupported proof profile");
+    }
+    let stripped_authority = CanonValue::Object(
+        authority
+            .iter()
+            .filter(|(key, _)| !SUBJECT_AUTHORITY_EXCLUSIONS.contains(&key.as_str()))
+            .cloned()
+            .collect(),
+    );
+    Ok(CanonValue::Object(
+        members
+            .iter()
+            .filter_map(|(key, value)| {
+                if SUBJECT_TOP_EXCLUSIONS.contains(&key.as_str()) {
+                    None
+                } else if key == "authority" {
+                    Some((key.clone(), stripped_authority.clone()))
+                } else {
+                    Some((key.clone(), value.clone()))
+                }
+            })
+            .collect(),
+    ))
+}
+
+/// Digest bytes: LP(subject-digest-domain) || LP(projection-id) || RCP(subject).
+pub fn subject_digest(record: &CanonValue) -> Result<String, &'static str> {
+    let subject = subject_projection(record)?;
+    Ok(sha256_prefixed(&subject_digest_preimage(&subject)?))
+}
+
+/// Hidden byte helper for the executable Lean oracle. The caller supplies the
+/// already-projected canonical subject; production callers use `subject_digest`.
+#[doc(hidden)]
+pub fn subject_digest_preimage(subject: &CanonValue) -> Result<Vec<u8>, &'static str> {
+    let mut bytes = Vec::new();
+    if !lp_str_into(&mut bytes, SUBJECT_HASH_TAG) || !lp_str_into(&mut bytes, SUBJECT_PROJECTION) {
+        return Err("authority subject framing overflow");
+    }
+    bytes.extend_from_slice(subject.serialize().as_bytes());
+    Ok(bytes)
+}
+
+/// Every v3 preimage member is length-framed, including the two digest strings.
+pub fn preimage_v3(
+    source: &str,
+    project_id: &str,
+    record_id: &str,
+    evidence_hash: &str,
+    digest: &str,
+) -> Result<Vec<u8>, &'static str> {
+    let mut bytes = Vec::new();
+    for value in [
+        AUTHORITY_SIG_TAG_V3,
+        SUBJECT_PROJECTION,
+        source,
+        project_id,
+        record_id,
+        evidence_hash,
+        digest,
+    ] {
+        if !lp_str_into(&mut bytes, value) {
+            return Err("authority v3 preimage framing overflow");
+        }
+    }
+    Ok(bytes)
+}
+
+/// Sign an actual structured subject; callers cannot supply a blind digest.
+pub fn sign_evidence_v3(
+    record: &CanonValue,
+    sk: &SigningKey,
+) -> Result<(String, String), &'static str> {
+    use ed25519_dalek::Signer;
+    let authority = record.get("authority").ok_or("missing authority")?;
+    let source = authority
+        .get("source")
+        .and_then(CanonValue::as_str)
+        .ok_or("missing source")?;
+    let project = record
+        .get("project_id")
+        .and_then(CanonValue::as_str)
+        .ok_or("missing project")?;
+    let record_id = record
+        .get("record_id")
+        .and_then(CanonValue::as_str)
+        .ok_or("missing record ID")?;
+    let evidence_hash = authority
+        .get("evidence_hash")
+        .and_then(CanonValue::as_str)
+        .ok_or("missing evidence hash")?;
+    if !matches!(
+        source,
+        "policy_engine_signed" | "human_signed" | "delegate_signed" | "gateway_enforced"
+    ) || parse_sha256(evidence_hash).is_none()
+    {
+        return Err("invalid authority source or evidence hash");
+    }
+    let digest = subject_digest(record)?;
+    let sig = sk.sign(&preimage_v3(
+        source,
+        project,
+        record_id,
+        evidence_hash,
+        &digest,
+    )?);
+    Ok((digest, format!("ed25519:{}", b64::encode(&sig.to_bytes()))))
 }
 
 /// Preimage the authority system signs:
@@ -136,15 +346,47 @@ pub fn verify_authority_with_key(
                 Some(r) => r,
                 None => return (AuthorityTrust::Failed, None),
             };
-            // honest: with no authority keys configured we cannot check the signature.
+            let proof_version = authority.get("proof_version");
+            let v3_fields_present = authority.get("subject_projection").is_some()
+                || authority.get("subject_digest").is_some();
+            let (pre, trust) = match proof_version.and_then(CanonValue::as_str) {
+                Some("v3") => {
+                    if authority
+                        .get("subject_projection")
+                        .and_then(CanonValue::as_str)
+                        != Some(SUBJECT_PROJECTION)
+                    {
+                        return (AuthorityTrust::Failed, None);
+                    }
+                    let Some(digest) = authority.get("subject_digest").and_then(CanonValue::as_str)
+                    else {
+                        return (AuthorityTrust::Failed, None);
+                    };
+                    if parse_sha256(digest).is_none()
+                        || subject_digest(record).ok().as_deref() != Some(digest)
+                    {
+                        return (AuthorityTrust::Failed, None);
+                    }
+                    let Ok(pre) = preimage_v3(source, project_id, record_id, eh, digest) else {
+                        return (AuthorityTrust::Failed, None);
+                    };
+                    (pre, AuthorityTrust::Verified)
+                }
+                None if proof_version.is_none() && !v3_fields_present => (
+                    preimage(source, project_id, record_id, eh),
+                    AuthorityTrust::LegacyUnbound,
+                ),
+                _ => return (AuthorityTrust::Failed, None),
+            };
+            // A malformed v3 claim fails even without pinned keys; a complete
+            // claim with no key remains honestly unverifiable.
             if trusted.is_empty() {
                 return (AuthorityTrust::Unverifiable, None);
             }
             let sig = Signature::from_bytes(&raw);
-            let pre = preimage(source, project_id, record_id, eh);
             for vk in trusted {
                 if vk.verify_strict(&pre, &sig).is_ok() {
-                    return (AuthorityTrust::Verified, Some(*vk));
+                    return (trust, Some(*vk));
                 }
             }
             (AuthorityTrust::Failed, None)
@@ -201,7 +443,7 @@ mod tests {
         let rec = signed_record("policy_engine_signed", "rec-1", &k);
         assert_eq!(
             verify_authority(&rec, &[k.verifying_key()]),
-            AuthorityTrust::Verified
+            AuthorityTrust::LegacyUnbound
         );
         // a configured-but-wrong key -> Failed; no keys -> Unverifiable (honest distinction)
         assert_eq!(
@@ -244,7 +486,7 @@ mod tests {
         // sanity: the SAME block in its OWN project still verifies.
         assert_eq!(
             verify_authority(&rec_p1, &[k.verifying_key()]),
-            AuthorityTrust::Verified
+            AuthorityTrust::LegacyUnbound
         );
     }
 
@@ -288,7 +530,7 @@ mod tests {
         let rec = signed_record("delegate_signed", "rec-d1", &k);
         assert_eq!(
             verify_authority(&rec, &[k.verifying_key()]),
-            AuthorityTrust::Verified
+            AuthorityTrust::LegacyUnbound
         );
         assert_eq!(
             verify_authority(&rec, &[signing_key_from_seed(&[1u8; 32]).verifying_key()]),
@@ -302,6 +544,77 @@ mod tests {
         ));
         assert_eq!(
             verify_authority(&relabelled, &[k.verifying_key()]),
+            AuthorityTrust::Failed
+        );
+    }
+
+    #[test]
+    fn v3_binds_semantic_body_but_not_recorder_envelope() {
+        let key = signing_key_from_seed(&[42u8; 32]);
+        let unsigned = rec_with_authority(&format!(
+            r#"{{
+            "schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+            "record_id":"r1","project_id":"p1","session_id":"s1","agent_id":"a1",
+            "agent_version":"1","span_id":"sp1","parent_span_id":null,
+            "agent_ts":"2026-01-01T00:00:00.000Z","event_type":"decision",
+            "action":"approve","observed_via":"sdk","status":"ok",
+            "input_commit":{{"commitment":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}},
+            "extensions":{{"govder":{{"body":{{"reason":"é"}}}}}},
+            "authority":{{"source":"human_signed","enforcement_point":"sdk",
+                "proof_version":"v3","subject_projection":"{SUBJECT_PROJECTION}",
+                "evidence_hash":"{EH}"}},
+            "received_ts":"2026-01-01T00:00:01.000Z","display_seq":1,
+            "causal_prev_hashes":[],"key":{{"signing_key_id":"k1"}}
+        }}"#
+        ));
+        let (digest, sig) = sign_evidence_v3(&unsigned, &key).unwrap();
+        let sealed = rec_with_authority(&unsigned.serialize().replace(
+            &format!("\"evidence_hash\":\"{EH}\""),
+            &format!("\"evidence_hash\":\"{EH}\",\"subject_digest\":\"{digest}\",\"evidence_sig\":\"{sig}\""),
+        ));
+        assert_eq!(
+            verify_authority(&sealed, &[key.verifying_key()]),
+            AuthorityTrust::Verified
+        );
+        for (from, to) in [
+            ("\"action\":\"approve\"", "\"action\":\"deny\""),
+            ("\"status\":\"ok\"", "\"status\":\"blocked\""),
+            ("\"reason\":\"é\"", "\"reason\":\"different\""),
+            ("\"enforcement_point\":\"sdk\"", "\"enforcement_point\":\"external\""),
+            ("\"commitment\":\"sha256:2222222222222222222222222222222222222222222222222222222222222222\"",
+             "\"commitment\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\""),
+        ] {
+            let changed = rec_with_authority(&sealed.serialize().replace(from, to));
+            assert_eq!(verify_authority(&changed, &[key.verifying_key()]), AuthorityTrust::Failed, "{from}");
+        }
+        for (from, to) in [
+            ("\"display_seq\":1", "\"display_seq\":2"),
+            (
+                "\"received_ts\":\"2026-01-01T00:00:01.000Z\"",
+                "\"received_ts\":\"2026-01-01T00:00:02.000Z\"",
+            ),
+            ("\"signing_key_id\":\"k1\"", "\"signing_key_id\":\"k2\""),
+        ] {
+            let changed = rec_with_authority(&sealed.serialize().replace(from, to));
+            assert_eq!(
+                verify_authority(&changed, &[key.verifying_key()]),
+                AuthorityTrust::Verified,
+                "{from}"
+            );
+        }
+        let without_digest = rec_with_authority(
+            &sealed
+                .serialize()
+                .replace(&format!(",\"subject_digest\":\"{digest}\""), ""),
+        );
+        assert_eq!(
+            verify_authority(&without_digest, &[key.verifying_key()]),
+            AuthorityTrust::Failed
+        );
+        let without_version =
+            rec_with_authority(&sealed.serialize().replace("\"proof_version\":\"v3\",", ""));
+        assert_eq!(
+            verify_authority(&without_version, &[key.verifying_key()]),
             AuthorityTrust::Failed
         );
     }
