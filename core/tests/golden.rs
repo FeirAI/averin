@@ -195,3 +195,18 @@ fn nfc_equivalent_inputs_have_equal_content_hash() {
         compute_content_hash(&b).unwrap()
     );
 }
+
+#[test]
+fn unicode17_combining_mark_has_pinned_nfc_result() {
+    // U+1ADD acquired combining class 220 after Unicode 15. Go 1.25's x/text
+    // tables treat it as class 0, so Go-only NFC checks would accept this
+    // spelling even though the shipped Rust RCP core composes a + acute.
+    let raw = "a\u{1add}\u{301}";
+    let canonical = "\u{e1}\u{1add}";
+    assert_ne!(raw, canonical);
+    assert_eq!(
+        CanonValue::parse(r#""a\u1add\u0301""#).unwrap().as_str(),
+        Some(canonical)
+    );
+    assert_eq!(CanonValue::string(raw).as_str(), Some(canonical));
+}

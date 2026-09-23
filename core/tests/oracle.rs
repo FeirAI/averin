@@ -431,8 +431,19 @@ fn revocation_merkle_hash_inputs_match_model() {
             _ => panic!("unknown Merkle kind {kind}"),
         };
         check(kind, &pre, s(&e, "hex"));
-        assert_eq!(sha256(&pre), sha256(&unhex(s(&e, "hex"))));
     }
+
+    // The actual empty-set producer folds the two sentinel leaves into one node.
+    // The node inputs here are derived only from the independently modeled Lean
+    // leaf bytes, so this catches a caller that stops using the checked helpers.
+    let modeled = section("merkle");
+    let min_leaf = sha256(&unhex(s(&modeled[0].1, "hex")));
+    let max_leaf = sha256(&unhex(s(&modeled[1].1, "hex")));
+    let expected = sha256(&[&[1u8][..], &min_leaf[..], &max_leaf[..]].concat());
+    assert_eq!(
+        verify::revocation_merkle_root(&[]),
+        format!("sha256:{}", hex_lower(&expected))
+    );
 }
 
 #[test]

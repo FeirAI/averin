@@ -97,6 +97,9 @@ idempotency resolution or sealing. It compares decoded string values, preserving
 escape differences. These boundaries reject decomposed IDs rather than rewrite existing IDs;
 human-facing record content still receives RCP NFC normalization at seal time. The SDKs send
 caller strings unchanged, leaving opaque-identity validation to the server.
+The pinned version-skew vector is `a + U+1ADD + U+0301`: Rust Unicode 17 NFC yields
+`U+00E1 + U+1ADD`, while the older Go table treats the original sequence as NFC. Rust and
+Go route tests assert this exact distinction through the shipped FFI boundary.
 
 At the API boundary, project/session/record/span/agent IDs, idempotency keys, grant/intent
 references, delegation lineage IDs and native credential references are opaque lookup keys.

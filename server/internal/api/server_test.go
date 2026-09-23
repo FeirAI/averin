@@ -19,6 +19,7 @@ import (
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/store"
 	"github.com/feirai/averin/server/internal/witness"
+	"golang.org/x/text/unicode/norm"
 )
 
 const seed = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
@@ -91,6 +92,26 @@ func TestOpaqueIdentityRejectsNonNFCBeforeIngest(t *testing.T) {
 	rec, _ := postRecord(t, h, `{"idempotency_key":"é","project_id":"p","session_id":"s","record_id":"ré","content":{"note":"e\u0301"}}`)
 	if got := rec["content"].(map[string]any)["note"]; got != "é" {
 		t.Fatalf("structured text was not NFC-normalized at seal: %v", got)
+	}
+}
+
+func TestUnicode17IdentityUsesRustNFCBoundary(t *testing.T) {
+	// Go 1.25's x/text tables are Unicode 15: they consider this sequence NFC.
+	// The Rust RCP core uses Unicode 17 and composes a + acute across U+1ADD.
+	raw := "a\u1add\u0301"
+	canonical := "\u00e1\u1add"
+	if !norm.NFC.IsNormalString(raw) || raw == canonical {
+		t.Fatal("Unicode version-skew vector no longer distinguishes Go and Rust")
+	}
+	h := newSrv(t)
+	bad := `{"idempotency_key":"k1","project_id":"a\u1add\u0301","session_id":"s"}`
+	if code, resp := do(t, h, "POST", "/v2/records", bad); code != http.StatusBadRequest || !strings.Contains(resp, "NFC") {
+		t.Fatalf("Rust Unicode-17 boundary accepted skewed identity (%d): %s", code, resp)
+	}
+	good := `{"idempotency_key":"k2","project_id":"á\u1add","session_id":"s"}`
+	rec, _ := postRecord(t, h, good)
+	if rec["project_id"] != canonical {
+		t.Fatalf("canonical project id changed: %v", rec["project_id"])
 	}
 }
 

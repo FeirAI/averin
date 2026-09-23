@@ -1875,6 +1875,7 @@ pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
 }
 
 /// Exact bytes hashed by the production ledger commitment builder.
+#[doc(hidden)]
 pub fn ledger_commitment_preimage(jti: &str, nonce: &str, used_at: i64) -> Vec<u8> {
     let mut pre = Vec::new();
     for part in ["averin.broker.use.ledger.v1", jti, nonce] {
@@ -1902,6 +1903,7 @@ pub fn grant_head_root(grants: &[(i64, String)]) -> String {
 }
 
 /// Exact seed bytes hashed by the production grant-head chain.
+#[doc(hidden)]
 pub fn grant_head_seed_preimage() -> Vec<u8> {
     let mut seed = Vec::new();
     lp4(&mut seed, b"averin.broker.grant_head.v1");
@@ -1909,6 +1911,7 @@ pub fn grant_head_seed_preimage() -> Vec<u8> {
 }
 
 /// Exact per-step bytes hashed by the production grant-head chain.
+#[doc(hidden)]
 pub fn grant_head_step_preimage(acc: &[u8; 32], seq: i64, content_hash: &str) -> Vec<u8> {
     let mut pre = grant_head_seed_preimage();
     pre.extend_from_slice(acc); // raw 32-byte accumulator, NOT length-prefixed
@@ -1928,6 +1931,7 @@ pub fn revocation_leaf(grant_id: &str) -> [u8; 32] {
 }
 
 /// Exact bytes hashed by the production revocation-leaf builder.
+#[doc(hidden)]
 pub fn revocation_leaf_preimage(grant_id: &str) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.broker.revocation.leaf.v1");
@@ -1974,6 +1978,7 @@ fn merkle_leaf_hash(v: &[u8; 32]) -> [u8; 32] {
 }
 
 /// Exact bytes hashed for an RFC6962 revocation-tree leaf.
+#[doc(hidden)]
 pub fn merkle_leaf_preimage(v: &[u8; 32]) -> Vec<u8> {
     let mut pre = Vec::with_capacity(33);
     pre.push(0x00);
@@ -1987,6 +1992,7 @@ fn merkle_node_hash(l: &[u8; 32], r: &[u8; 32]) -> [u8; 32] {
 }
 
 /// Exact bytes hashed for an RFC6962 revocation-tree node.
+#[doc(hidden)]
 pub fn merkle_node_preimage(l: &[u8; 32], r: &[u8; 32]) -> Vec<u8> {
     let mut pre = Vec::with_capacity(65);
     pre.push(0x01);
@@ -2055,6 +2061,7 @@ pub fn use_pop_challenge(
 }
 
 /// Exact bytes hashed by the production use-time PoP challenge builder.
+#[doc(hidden)]
 pub fn use_pop_preimage(
     grant_id: &str,
     resource_id: &str,
@@ -2102,6 +2109,7 @@ pub fn cosig_approval_challenge(
 }
 
 /// Exact bytes hashed by the production cosignature challenge builder.
+#[doc(hidden)]
 pub fn cosig_approval_preimage(
     grant_id: &str,
     approver_kid: &str,
@@ -2241,6 +2249,7 @@ pub fn delegation_hop_challenge(
 
 /// Exact bytes hashed by the production delegation-hop challenge builder.
 #[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
 pub fn delegation_hop_preimage(
     grant_id: &str,
     hop_index: i64,
@@ -2294,6 +2303,7 @@ pub fn introspection_transcript_challenge(
 
 /// Exact bytes hashed by the production introspection transcript builder.
 #[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
 pub fn introspection_transcript_preimage(
     grant_id: &str,
     credential_ref: &str,
@@ -2341,6 +2351,7 @@ pub fn federation_cert_challenge(
 
 /// Exact bytes hashed by the production federation certificate builder.
 #[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
 pub fn federation_cert_preimage(
     issuer_broker_id: &str,
     subject_broker_id: &str,
