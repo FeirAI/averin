@@ -579,19 +579,45 @@ mod tests {
         let recorder = signing_key_from_seed(&[43u8; 32]);
         let recorder_sealed = crate::record::seal(&sealed, &recorder).unwrap();
         assert!(crate::record::verify_sealed(&recorder_sealed, &recorder.verifying_key()).is_ok());
-        let changed_receipt = rec_with_authority(&recorder_sealed.serialize().replace(
-            "\"received_ts\":\"2026-01-01T00:00:01.000Z\"",
-            "\"received_ts\":\"2026-01-01T00:00:02.000Z\"",
-        ));
-        assert_eq!(
-            verify_authority(&changed_receipt, &[key.verifying_key()]),
-            AuthorityTrust::Verified,
-            "recorder envelope is outside authority approval"
-        );
-        assert!(
-            crate::record::verify_sealed(&changed_receipt, &recorder.verifying_key()).is_err(),
-            "an unsigned recorder-envelope change must fail record integrity"
-        );
+        for (name, from, to) in [
+            (
+                "received_ts",
+                "\"received_ts\":\"2026-01-01T00:00:01.000Z\"",
+                "\"received_ts\":\"2026-01-01T00:00:02.000Z\"",
+            ),
+            ("display_seq", "\"display_seq\":1", "\"display_seq\":2"),
+            (
+                "causal_prev_hashes",
+                "\"causal_prev_hashes\":[]",
+                "\"causal_prev_hashes\":[\"sha256:1111111111111111111111111111111111111111111111111111111111111111\"]",
+            ),
+            (
+                "key",
+                "\"signing_key_id\":\"k1\"",
+                "\"signing_key_id\":\"k2\"",
+            ),
+        ] {
+            let original_json = recorder_sealed.serialize();
+            let changed_json = original_json.replace(from, to);
+            assert_ne!(changed_json, original_json, "{name} mutation was a no-op");
+            let changed = rec_with_authority(&changed_json);
+            assert_eq!(
+                verify_authority(&changed, &[key.verifying_key()]),
+                AuthorityTrust::Verified,
+                "{name} is recorder-only envelope"
+            );
+            assert!(
+                crate::record::verify_sealed(&changed, &recorder.verifying_key()).is_err(),
+                "unsigned {name} tamper must fail record integrity"
+            );
+            let resealed = crate::record::seal(&changed, &recorder).unwrap();
+            assert!(crate::record::verify_sealed(&resealed, &recorder.verifying_key()).is_ok());
+            assert_eq!(
+                verify_authority(&resealed, &[key.verifying_key()]),
+                AuthorityTrust::Verified,
+                "legitimate recorder re-seal of {name} preserves authority"
+            );
+        }
         for (from, to) in [
             ("\"action\":\"approve\"", "\"action\":\"deny\""),
             ("\"status\":\"ok\"", "\"status\":\"blocked\""),
@@ -602,21 +628,6 @@ mod tests {
         ] {
             let changed = rec_with_authority(&sealed.serialize().replace(from, to));
             assert_eq!(verify_authority(&changed, &[key.verifying_key()]), AuthorityTrust::Failed, "{from}");
-        }
-        for (from, to) in [
-            ("\"display_seq\":1", "\"display_seq\":2"),
-            (
-                "\"received_ts\":\"2026-01-01T00:00:01.000Z\"",
-                "\"received_ts\":\"2026-01-01T00:00:02.000Z\"",
-            ),
-            ("\"signing_key_id\":\"k1\"", "\"signing_key_id\":\"k2\""),
-        ] {
-            let changed = rec_with_authority(&sealed.serialize().replace(from, to));
-            assert_eq!(
-                verify_authority(&changed, &[key.verifying_key()]),
-                AuthorityTrust::Verified,
-                "{from}"
-            );
         }
         let without_digest = rec_with_authority(
             &sealed
