@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -18,7 +20,139 @@ import (
 // application role, so integrity does not rely on application correctness — the database itself
 // rejects mutation. See that file for the append-only rationale.
 type Postgres struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	tx        pgx.Tx // non-nil only on the callback-bound view
+	projectID string
+	ctx       context.Context
+}
+
+func (p *Postgres) callContext() context.Context {
+	if p.ctx != nil {
+		return p.ctx
+	}
+	return background()
+}
+
+func (p *Postgres) checkProject(projectID string) error {
+	if p.tx != nil && projectID != p.projectID {
+		return fmt.Errorf("store: transaction for project %q cannot access %q", p.projectID, projectID)
+	}
+	return nil
+}
+
+type pgQueries interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (p *Postgres) queries() pgQueries {
+	if p.tx != nil {
+		return p.tx
+	}
+	return p.pool
+}
+
+// lockProject must be the first project operation in a write transaction.
+// The guard row is operational state; no signed evidence is mutated.
+func lockProject(ctx context.Context, tx pgx.Tx, projectID string) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO project_write_guard (project_id) VALUES ($1) ON CONFLICT DO NOTHING`, projectID); err != nil {
+		return fmt.Errorf("store: create project guard: %w", err)
+	}
+	var held string
+	if err := tx.QueryRow(ctx, `SELECT project_id FROM project_write_guard WHERE project_id=$1 FOR UPDATE`, projectID).Scan(&held); err != nil {
+		return fmt.Errorf("store: lock project: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) projectTx(projectID string) (pgx.Tx, bool, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, false, err
+	}
+	if p.tx != nil {
+		return p.tx, false, nil
+	}
+	ctx := p.callContext()
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := lockProject(ctx, tx, projectID); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, false, err
+	}
+	return tx, true, nil
+}
+
+func (p *Postgres) finishProjectTx(ctx context.Context, tx pgx.Tx, own bool) error {
+	if !own {
+		return nil
+	}
+	return tx.Commit(ctx)
+}
+
+func (p *Postgres) WithProjectWrite(ctx context.Context, projectID string, fn func(Store) error) error {
+	if p.tx != nil {
+		return errors.New("store: nested project transaction")
+	}
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return fmt.Errorf("store: begin project write: %w", err)
+	}
+	defer func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rctx)
+	}()
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '10000ms'`); err != nil {
+		return fmt.Errorf("store: set project lock timeout: %w", err)
+	}
+	if err := lockProject(ctx, tx, projectID); err != nil {
+		return err
+	}
+	bound := &Postgres{pool: p.pool, tx: tx, projectID: projectID, ctx: ctx}
+	unique, err := bound.RecordIDUniqueEnforced()
+	if err != nil {
+		return err
+	}
+	if !unique {
+		return errors.New("store: write refused: required per-project record_id UNIQUE index is absent, invalid, or has the wrong definition")
+	}
+	if err := fn(bound); err != nil {
+		return err
+	}
+	// Once COMMIT is sent, cancellation or connection loss leaves the result
+	// unknown. Reconcile by the same operation identity; never assume rollback.
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := tx.Commit(cctx); err != nil {
+		return fmt.Errorf("%w: %v", ErrCommitAmbiguous, err)
+	}
+	return nil
+}
+
+func (p *Postgres) WithProjectRead(ctx context.Context, projectID string, fn func(Store) error) error {
+	if p.tx != nil {
+		return errors.New("store: nested project transaction")
+	}
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return fmt.Errorf("store: begin project read: %w", err)
+	}
+	defer func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rctx)
+	}()
+	bound := &Postgres{pool: p.pool, tx: tx, projectID: projectID, ctx: ctx}
+	if err := fn(bound); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit project read: %w", err)
+	}
+	return nil
 }
 
 // compile-time assertion that *Postgres implements Store.
@@ -94,7 +228,7 @@ func (p *Postgres) PoolStat() PoolStat {
 // the REVOKE is a no-op and the migration RAISE NOTICEs — see the migration header. For DB-enforced
 // append-only, run migrations as a privileged role and the server as a separate least-privilege role.
 func (p *Postgres) Migrate(ctx context.Context, schemaSQL string) error {
-	if _, err := p.pool.Exec(ctx, schemaSQL); err != nil {
+	if _, err := p.queries().Exec(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
 	return nil
@@ -118,7 +252,10 @@ func background() context.Context { return context.Background() }
 // atomically; "created" is decided by whether THAT insert produced a row (RETURNING) — so two racing
 // callers with the same key see exactly one created=true, the other created=false.
 func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, bool, error) {
-	ctx := background()
+	ctx := p.callContext()
+	if err := p.checkProject(projectID); err != nil {
+		return Record{}, false, err
+	}
 
 	// parents is `NOT NULL DEFAULT '{}'`. A nil slice binds as SQL NULL (not an omitted column, so
 	// the DEFAULT does not apply) and violates the constraint — root records (no causal parents)
@@ -129,11 +266,30 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 	}
 
 	// One transaction so the post-conflict lookup sees a consistent view with the insert attempt.
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		return Record{}, false, fmt.Errorf("store: begin: %w", err)
+	tx := p.tx
+	if tx == nil {
+		var err error
+		tx, err = p.pool.Begin(ctx)
+		if err != nil {
+			return Record{}, false, fmt.Errorf("store: begin: %w", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+		if err := lockProject(ctx, tx, projectID); err != nil {
+			return Record{}, false, err
+		}
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op.
+	finish := func(fresh bool) error {
+		if p.tx != nil {
+			return nil
+		}
+		if err := tx.Commit(ctx); err != nil {
+			if fresh {
+				return fmt.Errorf("%w: %v", ErrCommitAmbiguous, err)
+			}
+			return fmt.Errorf("store: commit: %w", err)
+		}
+		return nil
+	}
 
 	// Fast path: a prior insert already used this idempotency key -> return that row verbatim.
 	if idemKey != "" {
@@ -142,8 +298,8 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 			return Record{}, false, err
 		}
 		if ok {
-			if err := tx.Commit(ctx); err != nil {
-				return Record{}, false, fmt.Errorf("store: commit: %w", err)
+			if err := finish(false); err != nil {
+				return Record{}, false, err
 			}
 			return existing, false, nil
 		}
@@ -168,7 +324,7 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 	// pgx.ErrNoRows rather than an error; a RETURNING row means this statement actually inserted —
 	// our authoritative "created" signal under concurrency.
 	var inserted bool
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		INSERT INTO records (project_id, idempotency_key, content_hash, session_id, parents, json)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT DO NOTHING
@@ -181,12 +337,8 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 		if err := insertDisclosures(ctx, tx, projectID, rec.Disclosures); err != nil {
 			return Record{}, false, err
 		}
-		if err := tx.Commit(ctx); err != nil {
-			// The ONLY commit-AMBIGUOUS path: a fresh record was inserted and this commit's outcome is unknown,
-			// so the record may or may not be durable. Flag it so a caller that consumed an irreversible
-			// resource does NOT roll back here. Every other error above (begin/select/insert/disclosure) and
-			// the read-only/collapse commits below write NO new row, so they stay plain — safe to roll back.
-			return Record{}, false, fmt.Errorf("%w: %v", ErrCommitAmbiguous, err)
+		if err := finish(true); err != nil {
+			return Record{}, false, err
 		}
 		return rec, true, nil
 	case errors.Is(err, pgx.ErrNoRows):
@@ -204,8 +356,8 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 		if existing, ok, err := selectByIdem(ctx, tx, projectID, idemKey); err != nil {
 			return Record{}, false, err
 		} else if ok {
-			if err := tx.Commit(ctx); err != nil {
-				return Record{}, false, fmt.Errorf("store: commit: %w", err)
+			if err := finish(false); err != nil {
+				return Record{}, false, err
 			}
 			return existing, false, nil
 		}
@@ -228,8 +380,8 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 		// committed and visible by now. Surface it rather than silently returning a zero Record.
 		return Record{}, false, fmt.Errorf("store: put record: conflict with no resolvable row")
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Record{}, false, fmt.Errorf("store: commit: %w", err)
+	if err := finish(false); err != nil {
+		return Record{}, false, err
 	}
 	return existing, false, nil
 }
@@ -244,15 +396,14 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 // punching an unrefillable hole mid-sequence. Runs under the same per-project advisory lock as the allocation,
 // so the MAX it compares against cannot move underneath it.
 func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
-	ctx := background()
-	tx, err := p.pool.Begin(ctx)
+	ctx := p.callContext()
+	tx, own, err := p.projectTx(projectID)
 	if err != nil {
 		return fmt.Errorf("store: begin release broker seq: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, projectID); err != nil {
-		return fmt.Errorf("store: release broker seq lock: %w", err)
-	}
+	if own {
+		defer tx.Rollback(ctx)
+	} //nolint:errcheck
 	// A VOIDED reservation is never deleted: its tombstone fills the seq, and deleting the row would let the next
 	// MAX(seq)+1 re-issue the voided number (a duplicate broker_seq). Nor is one whose grant_id is already HELD by a
 	// record (the grant itself, or a grant_void tombstone sealed before its void marker was written — the void seals
@@ -269,7 +420,7 @@ func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
 	`, projectID, grantID); err != nil {
 		return fmt.Errorf("store: release broker seq: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := p.finishProjectTx(ctx, tx, own); err != nil {
 		return fmt.Errorf("store: release broker seq commit: %w", err)
 	}
 	return nil
@@ -277,9 +428,9 @@ func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
 
 // BrokerSeqAt returns the allocation row holding seq (a UNIQUE (project_id, seq) lookup) and whether it is voided.
 func (p *Postgres) BrokerSeqAt(projectID string, seq int64) (BrokerSeqReservation, bool, error) {
-	ctx := background()
+	ctx := p.callContext()
 	var res BrokerSeqReservation
-	err := p.pool.QueryRow(ctx, `
+	err := p.queries().QueryRow(ctx, `
 		SELECT b.grant_id, b.seq, b.allocated_at,
 		       EXISTS (SELECT 1 FROM broker_seq_void v WHERE v.project_id = b.project_id AND v.grant_id = b.grant_id)
 		FROM broker_seq b WHERE b.project_id = $1 AND b.seq = $2
@@ -293,20 +444,24 @@ func (p *Postgres) BrokerSeqAt(projectID string, seq int64) (BrokerSeqReservatio
 	return res, true, nil
 }
 
-// RecordIDUniqueEnforced reports whether migration 0002 built the UNIQUE record_id index
-// (records_project_record_id_uniq, valid and indisunique) on THIS schema's records table. On a DB that already held
-// a historical duplicate, 0002 falls back to the NON-unique records_project_record_id_idx (RAISE WARNING) and this
-// returns false: only the api's process-local probe then guards record_id uniqueness. 'records'::regclass resolves
-// through the connection's search_path, so it names the same table every other query here uses.
+// RecordIDUniqueEnforced checks the actual index contract, not just its name.
+// A renamed equivalent is safe; a same-named partial, invalid, non-ready or
+// wrong-expression index is not. Historical duplicate projects remain readable
+// but cannot enter the transaction write path until the backstop is repaired.
 func (p *Postgres) RecordIDUniqueEnforced() (bool, error) {
-	ctx := background()
+	ctx := p.callContext()
 	var ok bool
-	if err := p.pool.QueryRow(ctx, `
+	if err := p.queries().QueryRow(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+			SELECT 1 FROM pg_index i
+			JOIN pg_class c ON c.oid = i.indexrelid
+			JOIN pg_am a ON a.oid = c.relam
 			WHERE i.indrelid = 'records'::regclass
-			  AND c.relname = 'records_project_record_id_uniq'
-			  AND i.indisunique AND i.indisvalid
+			  AND a.amname = 'btree'
+			  AND i.indisunique AND i.indisvalid AND i.indisready AND i.indislive
+			  AND i.indpred IS NULL AND i.indnkeyatts = 2 AND i.indnatts = 2
+			  AND i.indkey::text = '1 0'
+			  AND pg_get_expr(i.indexprs, i.indrelid) = 'md5(((json)::jsonb ->> ''record_id''::text))'
 		)
 	`).Scan(&ok); err != nil {
 		return false, fmt.Errorf("store: record_id unique index probe: %w", err)
@@ -317,15 +472,14 @@ func (p *Postgres) RecordIDUniqueEnforced() (bool, error) {
 // VoidBrokerSeq inserts the (insert-only) broker_seq_void marker for a reservation, under the same per-project
 // advisory lock as allocation/release. The broker_seq row itself is kept (see the Store doc).
 func (p *Postgres) VoidBrokerSeq(projectID, grantID string, seq int64) error {
-	ctx := background()
-	tx, err := p.pool.Begin(ctx)
+	ctx := p.callContext()
+	tx, own, err := p.projectTx(projectID)
 	if err != nil {
 		return fmt.Errorf("store: begin void broker seq: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, projectID); err != nil {
-		return fmt.Errorf("store: void broker seq lock: %w", err)
-	}
+	if own {
+		defer tx.Rollback(ctx)
+	} //nolint:errcheck
 	var held bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM broker_seq WHERE project_id = $1 AND grant_id = $2 AND seq = $3)
@@ -341,7 +495,7 @@ func (p *Postgres) VoidBrokerSeq(projectID, grantID string, seq int64) error {
 	`, projectID, grantID, seq); err != nil {
 		return fmt.Errorf("store: void broker seq: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := p.finishProjectTx(ctx, tx, own); err != nil {
 		return fmt.Errorf("store: void broker seq commit: %w", err)
 	}
 	return nil
@@ -349,9 +503,9 @@ func (p *Postgres) VoidBrokerSeq(projectID, grantID string, seq int64) error {
 
 // HasRecordID reports whether a record carrying recordID exists in the project (a migration-0002 index lookup).
 func (p *Postgres) HasRecordID(projectID, recordID string) (bool, error) {
-	ctx := background()
+	ctx := p.callContext()
 	var held bool
-	if err := p.pool.QueryRow(ctx, `
+	if err := p.queries().QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM records
 			WHERE project_id = $1 AND md5(json::jsonb ->> 'record_id') = md5($2) AND (json::jsonb ->> 'record_id') = $2
@@ -364,17 +518,17 @@ func (p *Postgres) HasRecordID(projectID, recordID string) (bool, error) {
 
 // MaxBrokerSeq returns the highest allocated broker_seq for the project (0 if none).
 func (p *Postgres) MaxBrokerSeq(projectID string) (int64, error) {
-	ctx := background()
+	ctx := p.callContext()
 	var max int64
-	if err := p.pool.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM broker_seq WHERE project_id = $1`, projectID).Scan(&max); err != nil {
+	if err := p.queries().QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM broker_seq WHERE project_id = $1`, projectID).Scan(&max); err != nil {
 		return 0, fmt.Errorf("store: max broker seq: %w", err)
 	}
 	return max, nil
 }
 
 func (p *Postgres) RecordByIdem(projectID, idemKey string) (Record, bool, error) {
-	ctx := background()
-	row := p.pool.QueryRow(ctx, `
+	ctx := p.callContext()
+	row := p.queries().QueryRow(ctx, `
 		SELECT json, content_hash, session_id, parents
 		FROM records WHERE project_id = $1 AND idempotency_key = $2
 	`, projectID, idemKey)
@@ -442,8 +596,8 @@ func selectByContentHash(ctx context.Context, tx pgx.Tx, projectID, hash string)
 // as a causal parent by any record in the SAME session. De-duplicated and byte-sorted ascending,
 // never nil. Heads are derived here (not trusted from the client) — this is the frontier authority.
 func (p *Postgres) Heads(projectID, sessionID string) ([]string, error) {
-	ctx := background()
-	rows, err := p.pool.Query(ctx, `
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
 		SELECT DISTINCT r.content_hash
 		FROM records r
 		WHERE r.project_id = $1 AND r.session_id = $2
@@ -464,8 +618,8 @@ func (p *Postgres) Heads(projectID, sessionID string) ([]string, error) {
 // records whose content_hash is not referenced as a causal parent by any record in the project.
 // De-duplicated and byte-sorted ascending, never nil.
 func (p *Postgres) ProjectHeads(projectID string) ([]string, error) {
-	ctx := background()
-	rows, err := p.pool.Query(ctx, `
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
 		SELECT DISTINCT r.content_hash
 		FROM records r
 		WHERE r.project_id = $1
@@ -504,11 +658,32 @@ func collectHashes(rows pgx.Rows) ([]string, error) {
 // increments it. It starts at 0 (the first call returns 0, the next returns 1, ...). The UPSERT is
 // atomic, so concurrent callers each get a distinct, monotonically increasing value.
 func (p *Postgres) NextDisplaySeq(projectID, sessionID string) (int64, error) {
-	ctx := background()
+	if p.tx == nil {
+		tx, own, err := p.projectTx(projectID)
+		if err != nil {
+			return 0, err
+		}
+		if own {
+			defer tx.Rollback(p.callContext())
+		}
+		bound := &Postgres{pool: p.pool, tx: tx, projectID: projectID, ctx: p.callContext()}
+		seq, err := bound.NextDisplaySeq(projectID, sessionID)
+		if err != nil {
+			return 0, err
+		}
+		if err := p.finishProjectTx(p.callContext(), tx, own); err != nil {
+			return 0, err
+		}
+		return seq, nil
+	}
+	if err := p.checkProject(projectID); err != nil {
+		return 0, err
+	}
+	ctx := p.callContext()
 	var current int64
 	// On first call the row is inserted with next=0 and we return 0 (next becomes 1). On subsequent
 	// calls the conflict path bumps and RETURNS the pre-increment value via the arithmetic below.
-	err := p.pool.QueryRow(ctx, `
+	err := p.queries().QueryRow(ctx, `
 		INSERT INTO display_seq (project_id, session_id, next)
 		VALUES ($1, $2, 1)
 		ON CONFLICT (project_id, session_id)
@@ -524,10 +699,10 @@ func (p *Postgres) NextDisplaySeq(projectID, sessionID string) (int64, error) {
 // Sessions returns the distinct session ids that have at least one record, in first-seen
 // (insertion) order to match Mem. Never nil.
 func (p *Postgres) Sessions(projectID string) ([]string, error) {
-	ctx := background()
+	ctx := p.callContext()
 	// DISTINCT ON keeps each session once; ordering by the earliest row reproduces Mem's first-seen
 	// iteration order. ctid breaks ties deterministically for rows inserted in the same instant.
-	rows, err := p.pool.Query(ctx, `
+	rows, err := p.queries().Query(ctx, `
 		SELECT session_id FROM (
 			SELECT DISTINCT ON (session_id) session_id, inserted_at, ctid
 			FROM records
@@ -556,8 +731,8 @@ func (p *Postgres) Sessions(projectID string) ([]string, error) {
 
 // SessionRecords returns all records in a session, in insertion order. Never nil.
 func (p *Postgres) SessionRecords(projectID, sessionID string) ([]Record, error) {
-	ctx := background()
-	rows, err := p.pool.Query(ctx, `
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
 		SELECT json, content_hash, session_id, parents
 		FROM records
 		WHERE project_id = $1 AND session_id = $2
@@ -571,8 +746,8 @@ func (p *Postgres) SessionRecords(projectID, sessionID string) ([]Record, error)
 
 // AllRecords returns every record in the project, in insertion order. Never nil.
 func (p *Postgres) AllRecords(projectID string) ([]Record, error) {
-	ctx := background()
-	rows, err := p.pool.Query(ctx, `
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
 		SELECT json, content_hash, session_id, parents
 		FROM records
 		WHERE project_id = $1
@@ -594,8 +769,8 @@ func (p *Postgres) RecordsPage(projectID string, limit, offset int) ([]Record, e
 	if offset < 0 {
 		offset = 0
 	}
-	ctx := background()
-	rows, err := p.pool.Query(ctx, `
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
 		SELECT json, content_hash, session_id, parents
 		FROM records
 		WHERE project_id = $1
@@ -619,8 +794,8 @@ func (p *Postgres) RecordsPage(projectID string, limit, offset int) ([]Record, e
 // O(grants) indexed grant head is a deferred rearchitecture (needs a schema migration). The `#>>` path yields
 // NULL (≠ 'grant') for any record lacking the marker, so only grant-kind rows match.
 func (p *Postgres) GrantRecords(projectID string) ([]Record, error) {
-	ctx := background()
-	rows, err := p.pool.Query(ctx, `
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
 		SELECT json, content_hash, session_id, parents
 		FROM records
 		WHERE project_id = $1
@@ -653,9 +828,9 @@ func collectRecords(rows pgx.Rows) ([]Record, error) {
 // which counts unique content, not insert attempts). Because (project_id, content_hash) is unique,
 // this equals the row count, but DISTINCT keeps the semantics explicit.
 func (p *Postgres) RecordCount(projectID string) (int, error) {
-	ctx := background()
+	ctx := p.callContext()
 	var n int
-	err := p.pool.QueryRow(ctx, `
+	err := p.queries().QueryRow(ctx, `
 		SELECT count(DISTINCT content_hash) FROM records WHERE project_id = $1
 	`, projectID).Scan(&n)
 	if err != nil {
@@ -667,8 +842,25 @@ func (p *Postgres) RecordCount(projectID string) (int, error) {
 // PutCheckpoint inserts a checkpoint. Insert-only: the schema forbids UPDATE/DELETE on checkpoints,
 // and (project_id, seq) is the primary key, so a re-used seq is rejected rather than overwriting.
 func (p *Postgres) PutCheckpoint(projectID string, cp Checkpoint) error {
-	ctx := background()
-	_, err := p.pool.Exec(ctx, `
+	if p.tx == nil {
+		tx, own, err := p.projectTx(projectID)
+		if err != nil {
+			return err
+		}
+		if own {
+			defer tx.Rollback(p.callContext())
+		}
+		bound := &Postgres{pool: p.pool, tx: tx, projectID: projectID, ctx: p.callContext()}
+		if err := bound.PutCheckpoint(projectID, cp); err != nil {
+			return err
+		}
+		return p.finishProjectTx(p.callContext(), tx, own)
+	}
+	if err := p.checkProject(projectID); err != nil {
+		return err
+	}
+	ctx := p.callContext()
+	_, err := p.queries().Exec(ctx, `
 		INSERT INTO checkpoints (project_id, seq, checkpoint_hash, json)
 		VALUES ($1, $2, $3, $4)
 	`, projectID, cp.Seq, cp.CheckpointHash, cp.JSON)
@@ -680,8 +872,8 @@ func (p *Postgres) PutCheckpoint(projectID string, cp Checkpoint) error {
 
 // Checkpoints returns all checkpoints for the project ordered by seq ascending. Never nil.
 func (p *Postgres) Checkpoints(projectID string) ([]Checkpoint, error) {
-	ctx := background()
-	rows, err := p.pool.Query(ctx, `
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
 		SELECT json, checkpoint_hash, seq
 		FROM checkpoints
 		WHERE project_id = $1
@@ -708,9 +900,9 @@ func (p *Postgres) Checkpoints(projectID string) ([]Checkpoint, error) {
 // NextCheckpointSeq returns the next checkpoint sequence number: the count of existing checkpoints
 // for the project (0-based, matching Mem). This is the value the caller passes as Checkpoint.Seq.
 func (p *Postgres) NextCheckpointSeq(projectID string) (int64, error) {
-	ctx := background()
+	ctx := p.callContext()
 	var n int64
-	err := p.pool.QueryRow(ctx, `
+	err := p.queries().QueryRow(ctx, `
 		SELECT count(*) FROM checkpoints WHERE project_id = $1
 	`, projectID).Scan(&n)
 	if err != nil {
@@ -725,18 +917,14 @@ func (p *Postgres) NextCheckpointSeq(projectID string) (int64, error) {
 // at COMMIT/ROLLBACK. The INSERT ... ON CONFLICT (project_id, grant_id) DO NOTHING makes a retry of the
 // same deterministic grant_id a no-op, and the trailing SELECT returns the existing-or-just-inserted seq.
 func (p *Postgres) AllocateBrokerSeq(projectID, grantID string) (int64, bool, error) {
-	ctx := background()
-	tx, err := p.pool.Begin(ctx)
+	ctx := p.callContext()
+	tx, own, err := p.projectTx(projectID)
 	if err != nil {
 		return 0, false, fmt.Errorf("store: begin broker seq: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op.
-
-	// Serialize allocation per project (hashtext is stable within a PG major version; the lock value is
-	// purely an internal serialization token, never persisted, so its exact hash does not matter).
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, projectID); err != nil {
-		return 0, false, fmt.Errorf("store: broker seq lock: %w", err)
-	}
+	if own {
+		defer tx.Rollback(ctx)
+	} //nolint:errcheck
 	// A voided grant_id is retired: never hand its seq back, never allocate it a new one.
 	var voided bool
 	if err := tx.QueryRow(ctx, `
@@ -768,7 +956,7 @@ func (p *Postgres) AllocateBrokerSeq(projectID, grantID string) (int64, bool, er
 	case err != nil:
 		return 0, false, fmt.Errorf("store: broker seq insert: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := p.finishProjectTx(ctx, tx, own); err != nil {
 		return 0, false, fmt.Errorf("store: broker seq commit: %w", err)
 	}
 	return seq, fresh, nil
@@ -793,8 +981,25 @@ func insertDisclosures(ctx context.Context, tx pgx.Tx, projectID string, ds []Di
 // PutAnchor records a checkpoint's RFC 3161 token (base64url) by seq. Insert-only and idempotent on
 // (project_id, seq): ON CONFLICT DO NOTHING (the anchor for a seq is immutable once set).
 func (p *Postgres) PutAnchor(projectID string, seq int64, tokenB64 string) error {
-	ctx := background()
-	_, err := p.pool.Exec(ctx, `
+	if p.tx == nil {
+		tx, own, err := p.projectTx(projectID)
+		if err != nil {
+			return err
+		}
+		if own {
+			defer tx.Rollback(p.callContext())
+		}
+		bound := &Postgres{pool: p.pool, tx: tx, projectID: projectID, ctx: p.callContext()}
+		if err := bound.PutAnchor(projectID, seq, tokenB64); err != nil {
+			return err
+		}
+		return p.finishProjectTx(p.callContext(), tx, own)
+	}
+	if err := p.checkProject(projectID); err != nil {
+		return err
+	}
+	ctx := p.callContext()
+	_, err := p.queries().Exec(ctx, `
 		INSERT INTO anchors (project_id, seq, token_b64)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (project_id, seq) DO NOTHING
@@ -807,8 +1012,8 @@ func (p *Postgres) PutAnchor(projectID string, seq int64, tokenB64 string) error
 
 // Anchors returns seq -> token_b64 for the project. Never nil.
 func (p *Postgres) Anchors(projectID string) (map[int64]string, error) {
-	ctx := background()
-	rows, err := p.pool.Query(ctx, `SELECT seq, token_b64 FROM anchors WHERE project_id = $1`, projectID)
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `SELECT seq, token_b64 FROM anchors WHERE project_id = $1`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("store: anchors: %w", err)
 	}
@@ -830,11 +1035,11 @@ func (p *Postgres) Anchors(projectID string) (map[int64]string, error) {
 
 // Disclosures returns every disclosure secret for the project, ordered by insertion. Never nil.
 func (p *Postgres) Disclosures(projectID string) ([]DisclosureSecret, error) {
-	ctx := background()
+	ctx := p.callContext()
 	// Order canonically by the (record_id, field) key — unique within a project, so the result is
 	// fully deterministic and identical to Mem regardless of insertion timing (a same-timestamp tie
 	// must not reorder the export vs. the in-memory store).
-	rows, err := p.pool.Query(ctx, `
+	rows, err := p.queries().Query(ctx, `
 		SELECT record_id, field, value_digest, nonce_hex
 		FROM disclosures
 		WHERE project_id = $1
@@ -862,9 +1067,9 @@ func (p *Postgres) Disclosures(projectID string) ([]DisclosureSecret, error) {
 // are no checkpoints yet. (Mem returns its last-appended checkpoint; with monotonic seq that is the
 // max-seq row.)
 func (p *Postgres) LatestCheckpointHash(projectID string) (string, bool, error) {
-	ctx := background()
+	ctx := p.callContext()
 	var hash string
-	err := p.pool.QueryRow(ctx, `
+	err := p.queries().QueryRow(ctx, `
 		SELECT checkpoint_hash
 		FROM checkpoints
 		WHERE project_id = $1

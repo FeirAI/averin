@@ -21,3 +21,8 @@ var RecordIDUnique string
 //
 //go:embed 0003_broker_seq_void.sql
 var BrokerSeqVoid string
+
+// ProjectTransactions creates the operational per-project serialization row.
+//
+//go:embed 0004_project_transactions.sql
+var ProjectTransactions string
