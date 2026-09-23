@@ -303,8 +303,8 @@ func TestMigrateV3BrokerSeqVoid(t *testing.T) {
 	if err := Migrate(ctx, scoped); err != nil {
 		t.Fatalf("migrate v2->v3: %v", err)
 	}
-	if got := maxVersion(t, admin); got != 3 {
-		t.Fatalf("version = %d, want 3", got)
+	if got := maxVersion(t, admin); got != CurrentSchemaVersion {
+		t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
 	}
 	var seq int64
 	var allocatedAt time.Time

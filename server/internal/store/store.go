@@ -5,9 +5,11 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"sync"
 	"time"
@@ -77,6 +79,12 @@ type BrokerSeqReservation struct {
 	Voided      bool
 }
 
+type PendingGrant struct {
+	GrantID string
+	Payload []byte
+	Created time.Time
+}
+
 // recordIDOf extracts the record_id carried in a sealed record's JSON ("" if absent/unparseable — such a record
 // does not participate in the uniqueness check, matching the Postgres expression index, where NULL never conflicts).
 func recordIDOf(recordJSON string) string {
@@ -89,6 +97,21 @@ func recordIDOf(recordJSON string) string {
 
 // Store is append-only: records and checkpoints are never mutated or removed.
 type Store interface {
+	// WithProjectWrite runs fn while holding the project's database serialization
+	// guard. Every method on the Store passed to fn uses the same transaction and
+	// connection. Returning an error rolls the transaction back. A successful
+	// callback is not success until commit has been acknowledged.
+	WithProjectWrite(ctx context.Context, projectID string, fn func(Store) error) error
+	// WithProjectRead gives fn one repeatable-read snapshot of project state.
+	// It is intended for exports; it never takes the writer guard.
+	WithProjectRead(ctx context.Context, projectID string, fn func(Store) error) error
+	PendingGrant(projectID, idemKey string) (PendingGrant, bool, error)
+	PutPendingGrant(projectID, idemKey string, row PendingGrant) (PendingGrant, bool, error)
+	DeletePendingGrant(projectID, idemKey string) error
+	PendingGrantLive(projectID, grantID string, now time.Time, ttl time.Duration) (bool, error)
+	IsRevoked(projectID, grantID string) (bool, error)
+	RevokeGrant(projectID, grantID string) (bool, error)
+	RevokedGrantIDs(projectID string) ([]string, error)
 	// PutRecord stores a record under an idempotency key. If the key was already used, it returns
 	// the previously stored record and created=false (threat #8: retry duplication collapses). A NEW record
 	// whose record_id is already held by a different record in the project fails with ErrRecordIDConflict.
@@ -215,9 +238,100 @@ type Store interface {
 
 // Mem is an in-memory Store for tests and single-node dev.
 type Mem struct {
-	mu       sync.Mutex
-	projects map[string]*project
-	now      func() time.Time // the store's clock (broker_seq allocated_at); WithClock injects one for tests
+	mu           sync.Mutex
+	projectLocks sync.Map // project ID -> *sync.Mutex; never held for another project
+	projects     map[string]*project
+	now          func() time.Time // the store's clock (broker_seq allocated_at); WithClock injects one for tests
+	boundProject string
+	readOnly     bool
+	inTx         bool
+}
+
+func (m *Mem) checkProject(projectID string) error {
+	if m.inTx && m.boundProject != projectID {
+		return fmt.Errorf("store: transaction for project %q cannot access %q", m.boundProject, projectID)
+	}
+	return nil
+}
+
+func (m *Mem) mutation(projectID string) (func(), error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
+	if m.readOnly {
+		return nil, errors.New("store: read-only project snapshot")
+	}
+	if m.inTx {
+		return func() {}, nil
+	}
+	v, _ := m.projectLocks.LoadOrStore(projectID, &sync.Mutex{})
+	l := v.(*sync.Mutex)
+	l.Lock()
+	return l.Unlock, nil
+}
+
+// memSnapshot makes the transaction's mutations private until a successful
+// callback. Its maps and slices must not alias the committed project.
+func memSnapshot(p *project) *project {
+	records := make([]Record, len(p.records))
+	for i, r := range p.records {
+		r.Parents = append([]string(nil), r.Parents...)
+		r.Disclosures = append([]DisclosureSecret(nil), r.Disclosures...)
+		records[i] = r
+	}
+	pending := make(map[string]PendingGrant, len(p.pending))
+	for k, row := range p.pending {
+		row.Payload = append([]byte(nil), row.Payload...)
+		pending[k] = row
+	}
+	return &project{
+		records: records,
+		idem:    maps.Clone(p.idem), byHash: maps.Clone(p.byHash),
+		byRecordID: maps.Clone(p.byRecordID), checks: append([]Checkpoint(nil), p.checks...),
+		seqBySess: maps.Clone(p.seqBySess), disclosure: append([]DisclosureSecret(nil), p.disclosure...),
+		discSeen: maps.Clone(p.discSeen), anchors: maps.Clone(p.anchors),
+		brokerSeq: maps.Clone(p.brokerSeq), brokerAt: maps.Clone(p.brokerAt), voided: maps.Clone(p.voided),
+		pending: pending, revoked: maps.Clone(p.revoked),
+	}
+}
+
+func (m *Mem) WithProjectWrite(ctx context.Context, projectID string, fn func(Store) error) error {
+	if m.inTx {
+		return errors.New("store: nested project transaction")
+	}
+	v, _ := m.projectLocks.LoadOrStore(projectID, &sync.Mutex{})
+	l := v.(*sync.Mutex)
+	l.Lock()
+	defer l.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	tmp := &Mem{projects: map[string]*project{projectID: memSnapshot(m.proj(projectID))}, now: m.now, boundProject: projectID, inTx: true}
+	m.mu.Unlock()
+	if err := fn(tmp); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.projects[projectID] = tmp.projects[projectID]
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Mem) WithProjectRead(ctx context.Context, projectID string, fn func(Store) error) error {
+	if m.inTx {
+		return errors.New("store: nested project transaction")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	tmp := &Mem{projects: map[string]*project{projectID: memSnapshot(m.proj(projectID))}, now: m.now, boundProject: projectID, readOnly: true, inTx: true}
+	m.mu.Unlock()
+	return fn(tmp)
 }
 
 type project struct {
@@ -233,6 +347,8 @@ type project struct {
 	brokerSeq  map[string]int64     // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
 	brokerAt   map[string]time.Time // grant_id -> allocation time (the operator void's safety age)
 	voided     map[string]struct{}  // grant_id -> voided (row kept in brokerSeq; never released or re-allocated)
+	pending    map[string]PendingGrant
+	revoked    map[string]struct{}
 }
 
 func NewMem() *Mem { return &Mem{projects: map[string]*project{}, now: time.Now} }
@@ -262,6 +378,8 @@ func (m *Mem) proj(id string) *project {
 			brokerSeq:  map[string]int64{},
 			brokerAt:   map[string]time.Time{},
 			voided:     map[string]struct{}{},
+			pending:    map[string]PendingGrant{},
+			revoked:    map[string]struct{}{},
 		}
 		m.projects[id] = p
 	}
@@ -269,6 +387,11 @@ func (m *Mem) proj(id string) *project {
 }
 
 func (m *Mem) PutRecord(projectID, idemKey string, rec Record) (Record, bool, error) {
+	unlock, err := m.mutation(projectID)
+	if err != nil {
+		return Record{}, false, err
+	}
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
@@ -322,6 +445,9 @@ func (m *Mem) PutRecord(projectID, idemKey string, rec Record) (Record, bool, er
 }
 
 func (m *Mem) RecordByIdem(projectID, idemKey string) (Record, bool, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return Record{}, false, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
@@ -332,6 +458,9 @@ func (m *Mem) RecordByIdem(projectID, idemKey string) (Record, bool, error) {
 }
 
 func (m *Mem) HasRecordID(projectID, recordID string) (bool, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return false, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, ok := m.proj(projectID).byRecordID[recordID]
@@ -355,16 +484,27 @@ func headsOf(recs []Record) []string {
 }
 
 func (m *Mem) Heads(projectID, sessionID string) ([]string, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	recs, _ := m.SessionRecords(projectID, sessionID)
 	return headsOf(recs), nil
 }
 
 func (m *Mem) ProjectHeads(projectID string) ([]string, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	recs, _ := m.AllRecords(projectID)
 	return headsOf(recs), nil
 }
 
 func (m *Mem) NextDisplaySeq(projectID, sessionID string) (int64, error) {
+	unlock, err := m.mutation(projectID)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
@@ -374,6 +514,9 @@ func (m *Mem) NextDisplaySeq(projectID, sessionID string) (int64, error) {
 }
 
 func (m *Mem) Sessions(projectID string) ([]string, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	seen := map[string]struct{}{}
@@ -388,6 +531,9 @@ func (m *Mem) Sessions(projectID string) ([]string, error) {
 }
 
 func (m *Mem) SessionRecords(projectID, sessionID string) ([]Record, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []Record
@@ -400,6 +546,9 @@ func (m *Mem) SessionRecords(projectID, sessionID string) ([]Record, error) {
 }
 
 func (m *Mem) AllRecords(projectID string) ([]Record, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]Record(nil), m.proj(projectID).records...), nil
@@ -409,6 +558,9 @@ func (m *Mem) AllRecords(projectID string) ([]Record, error) {
 // records oldest-first in insertion order, so we walk from the end. (Postgres does the same via SQL
 // ORDER BY ... DESC LIMIT/OFFSET — this is the dev/test parity path, not the memory-bounded one.)
 func (m *Mem) RecordsPage(projectID string, limit, offset int) ([]Record, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if limit <= 0 {
@@ -440,6 +592,9 @@ func (m *Mem) RecordsPage(projectID string, limit, offset int) ([]Record, error)
 // non-grant is dropped and grantLog re-verifies enforcement_point+broker_seq. Parse failures are conservatively
 // INCLUDED (never silently dropped) so a malformed grant can never be suppressed from the transparency log.
 func (m *Mem) GrantRecords(projectID string) ([]Record, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := []Record{}
@@ -459,12 +614,20 @@ func (m *Mem) GrantRecords(projectID string) ([]Record, error) {
 }
 
 func (m *Mem) RecordCount(projectID string) (int, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return 0, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.proj(projectID).byHash), nil
 }
 
 func (m *Mem) PutCheckpoint(projectID string, cp Checkpoint) error {
+	unlock, err := m.mutation(projectID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
@@ -473,18 +636,29 @@ func (m *Mem) PutCheckpoint(projectID string, cp Checkpoint) error {
 }
 
 func (m *Mem) Checkpoints(projectID string) ([]Checkpoint, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]Checkpoint(nil), m.proj(projectID).checks...), nil
 }
 
 func (m *Mem) NextCheckpointSeq(projectID string) (int64, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return 0, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return int64(len(m.proj(projectID).checks)), nil
 }
 
 func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, bool, error) {
+	unlock, err := m.mutation(projectID)
+	if err != nil {
+		return 0, false, err
+	}
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
@@ -509,6 +683,11 @@ func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, bool, error) 
 }
 
 func (m *Mem) ReleaseBrokerSeq(projectID, grantID string) error {
+	unlock, err := m.mutation(projectID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
@@ -534,6 +713,9 @@ func (m *Mem) ReleaseBrokerSeq(projectID, grantID string) error {
 }
 
 func (m *Mem) BrokerSeqAt(projectID string, seq int64) (BrokerSeqReservation, bool, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return BrokerSeqReservation{}, false, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
@@ -547,6 +729,11 @@ func (m *Mem) BrokerSeqAt(projectID string, seq int64) (BrokerSeqReservation, bo
 }
 
 func (m *Mem) VoidBrokerSeq(projectID, grantID string, seq int64) error {
+	unlock, err := m.mutation(projectID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
@@ -558,6 +745,9 @@ func (m *Mem) VoidBrokerSeq(projectID, grantID string, seq int64) error {
 }
 
 func (m *Mem) MaxBrokerSeq(projectID string) (int64, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return 0, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var max int64
@@ -570,6 +760,9 @@ func (m *Mem) MaxBrokerSeq(projectID string) (int64, error) {
 }
 
 func (m *Mem) LatestCheckpointHash(projectID string) (string, bool, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return "", false, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
@@ -580,6 +773,11 @@ func (m *Mem) LatestCheckpointHash(projectID string) (string, bool, error) {
 }
 
 func (m *Mem) PutAnchor(projectID string, seq int64, tokenB64 string) error {
+	unlock, err := m.mutation(projectID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a := m.proj(projectID).anchors
@@ -591,6 +789,9 @@ func (m *Mem) PutAnchor(projectID string, seq int64, tokenB64 string) error {
 }
 
 func (m *Mem) Anchors(projectID string) (map[int64]string, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	src := m.proj(projectID).anchors
@@ -602,6 +803,9 @@ func (m *Mem) Anchors(projectID string) (map[int64]string, error) {
 }
 
 func (m *Mem) Disclosures(projectID string) ([]DisclosureSecret, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// Non-nil empty (not nil) to match Postgres and so the export layer marshals [] not null.
