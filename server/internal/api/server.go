@@ -1647,21 +1647,24 @@ func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string,
 
 // grantRequest is the POST /v2/grants wire shape.
 type grantRequest struct {
-	IdempotencyKey  string   `json:"idempotency_key"`
-	ProjectID       string   `json:"project_id"`
-	SessionID       string   `json:"session_id"`
-	AgentID         string   `json:"agent_id"`
-	Action          string   `json:"action"`
-	Resource        string   `json:"resource"`
-	Scope           string   `json:"scope"`
-	ScopeClass      string   `json:"scope_class"`
-	UseLimit        int      `json:"use_limit"` // bounded_reuse only (ADR 0005 M1): the cap N (>= 1)
-	AgentPubKey     string   `json:"agent_pubkey"`
-	AgentSig        string   `json:"agent_sig"`
-	Principal       string   `json:"authorizing_principal"`
-	DelegationChain []string `json:"delegation_chain"`
-	Justification   string   `json:"justification"`
-	TTLSeconds      int      `json:"ttl_seconds"`
+	IdempotencyKey   string   `json:"idempotency_key"`
+	PoPVersion       int      `json:"pop_version"`
+	IssuedAt         int64    `json:"issued_at"`
+	RequestExpiresAt int64    `json:"request_expires_at"`
+	ProjectID        string   `json:"project_id"`
+	SessionID        string   `json:"session_id"`
+	AgentID          string   `json:"agent_id"`
+	Action           string   `json:"action"`
+	Resource         string   `json:"resource"`
+	Scope            string   `json:"scope"`
+	ScopeClass       string   `json:"scope_class"`
+	UseLimit         int      `json:"use_limit"` // bounded_reuse only (ADR 0005 M1): the cap N (>= 1)
+	AgentPubKey      string   `json:"agent_pubkey"`
+	AgentSig         string   `json:"agent_sig"`
+	Principal        string   `json:"authorizing_principal"`
+	DelegationChain  []string `json:"delegation_chain"`
+	Justification    string   `json:"justification"`
+	TTLSeconds       int      `json:"ttl_seconds"`
 	// M3 (ADR 0005 — Native/STS): when Mode == "token_exchange", this is a NATIVE grant for an externally
 	// minted (IdP/STS) credential — no broker credential_binding / cnf PoP (agent_pubkey/agent_sig are not
 	// required). LeaseID is the external credential reference a later introspection transcript must match.
@@ -1706,9 +1709,12 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// With auth enabled the project is bound by ?project= (middleware); a body project_id must match.
-	if qp := r.URL.Query().Get("project"); qp != "" && gr.ProjectID != qp {
-		writeErr(w, http.StatusForbidden, "project_id does not match the authorized ?project=")
-		return
+	if qp := r.URL.Query().Get("project"); qp != "" {
+		if gr.ProjectID != "" && gr.ProjectID != qp {
+			writeErr(w, http.StatusForbidden, "project_id does not match the authorized ?project=")
+			return
+		}
+		gr.ProjectID = qp
 	}
 	if gr.ProjectID == "" || gr.SessionID == "" {
 		writeErr(w, http.StatusBadRequest, "project_id and session_id are required")
@@ -1717,9 +1723,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	// Idempotency is REQUIRED for issuance: without it a lost-response retry would mint a SECOND live
 	// single-use credential. The key (body or Idempotency-Key header) deterministically fixes the
 	// grant_id, so a retry collapses to the original grant + capability.
-	idem := gr.IdempotencyKey
-	if idem == "" {
-		idem = r.Header.Get("Idempotency-Key")
+	idem, idemErr := grantIdem(gr, r)
+	if idemErr != nil {
+		writeErr(w, http.StatusBadRequest, idemErr.Error())
+		return
 	}
 	if idem == "" {
 		writeErr(w, http.StatusBadRequest, "idempotency_key is required (field or Idempotency-Key header) so a retry cannot double-issue a credential")
@@ -1763,39 +1770,33 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req := broker.Request{
-		AgentID:         gr.AgentID,
-		Action:          gr.Action,
-		Resource:        gr.Resource,
-		Scope:           gr.Scope,
-		ScopeClass:      broker.ScopeClass(gr.ScopeClass),
-		UseLimit:        gr.UseLimit,
-		AgentPubKey:     gr.AgentPubKey,
-		AgentSig:        gr.AgentSig,
-		Principal:       gr.Principal,
-		DelegationChain: gr.DelegationChain,
-		Justification:   gr.Justification,
-		TTL:             time.Duration(gr.TTLSeconds) * time.Second,
-		BrokerID:        s.brokerID, // M4: tag the grant with this broker's federation id ("" = single-broker)
+	if gr.Mode != "" && gr.Mode != "capability" || gr.LeaseID != "" {
+		writeErr(w, http.StatusBadRequest, "brokered grants require capability mode and no lease_id")
+		return
 	}
+	if gr.TTLSeconds <= 0 || int64(gr.TTLSeconds) > (1<<63-1)/int64(time.Second) {
+		writeErr(w, http.StatusBadRequest, "ttl_seconds must be positive and fit the server duration")
+		return
+	}
+	gr.IdempotencyKey = idem
+	req := grantRequestToBroker(gr)
+	req.BrokerID = s.brokerID
 	// Validate the request — proof-of-possession (agent_sig) + forbidden-scope — BEFORE anything else, so
 	// a malformed / unsigned / forbidden request can NEVER retrieve a stored capability by reusing a known
 	// idempotency key (every response is gated on PoP + scope, not just brand-new grants). req.Validate
 	// verifies the Ed25519 agent_sig, so a caller that cannot sign the challenge is rejected here.
 	if e := req.Validate(); e != nil {
-		// Seal a B11 denial ONLY for a policy refusal of a well-formed request (failed PoP or over-cap TTL);
-		// a missing/ill-shaped field is malformed input, never logged.
-		if s.denyLog && errors.Is(e, broker.ErrPoPFailed) {
-			s.sealGrantDenial(gr, req, "pop_failed", e.Error())
-		} else if s.denyLog && errors.Is(e, broker.ErrTTLExceeded) {
-			s.sealGrantDenial(gr, req, "ttl_exceeded", e.Error())
+		if errors.Is(e, broker.ErrTTLExceeded) {
+			s.rejectAuthenticatedGrantPolicy(w, gr, req, idem, "ttl_exceeded", e)
+			return
 		}
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
 	if _, e := broker.ClassifyScope(req.Scope, req.ScopeClass); e != nil {
-		if s.denyLog && errors.Is(e, broker.ErrForbiddenScope) {
-			s.sealGrantDenial(gr, req, "forbidden_scope", e.Error())
+		if errors.Is(e, broker.ErrForbiddenScope) {
+			s.rejectAuthenticatedGrantPolicy(w, gr, req, idem, "forbidden_scope", e)
+			return
 		}
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
@@ -1840,6 +1841,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		// New grant: allocate (after validation, inside the lock), build, seal+store. Roll back the seq on
 		// ANY failure after allocation but before the record commits, so an uncommitted grant never burns a
 		// number (the rollback is safe under ingestMu — no other grant allocates in between).
+		if e = req.ValidateAt(s.now()); e != nil {
+			validationErr = e
+			return e
+		}
 		prepared, e = broker.Prepare(req, grantID, func() (int64, error) {
 			s.noteSeqAttempt(gr.ProjectID, grantID)
 			seq, _, aerr := st.AllocateBrokerSeq(gr.ProjectID, grantID)
@@ -1983,15 +1988,38 @@ func (s *Server) reconstructCapability(projectID, grantID string) (string, error
 	return "", fmt.Errorf("no stored credential descriptor for grant %s", grantID)
 }
 
-// sealGrantDenial seals a B11 denied-grant record for a POLICY refusal (forbidden scope / over-cap TTL /
-// failed PoP). It deliberately classifies to BrokerRole::None in the verifier — event_type
+// rejectAuthenticatedGrantPolicy checks idempotency before policy evidence.
+// A validly re-signed different request under an existing grant key is a 409,
+// never a new denial record. The denial writer repeats this lookup under its
+// project transaction to close a concurrent grant/denial race.
+func (s *Server) rejectAuthenticatedGrantPolicy(w http.ResponseWriter, gr grantRequest, req broker.Request, idem, reason string, policyErr error) {
+	if e := req.FreshAt(s.now()); e != nil {
+		writeErr(w, http.StatusBadRequest, e.Error())
+		return
+	}
+	if _, found, e := s.st.RecordByIdem(gr.ProjectID, idem); e != nil {
+		writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+e.Error())
+		return
+	} else if found {
+		writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
+		return
+	}
+	if s.denyLog && s.sealGrantDenial(gr, req, reason, policyErr.Error()) {
+		writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
+		return
+	}
+	writeErr(w, http.StatusBadRequest, policyErr.Error())
+}
+
+// sealGrantDenial seals a B11 denied-grant record for an authenticated POLICY refusal (forbidden
+// scope / over-cap TTL). It deliberately classifies to BrokerRole::None in the verifier — event_type
 // credential_grant_denied (so it is never counted as a grant), authority.enforcement_point
 // credential_broker_denied and extensions.broker.kind grant_denied (so it matches no grant-role tuple) —
 // and carries NO broker_seq / grant_evidence / capability: nothing was issued, so the gapless D6 grant
 // sequence is untouched. It records the REQUESTED scope metadata (the probe target). A deterministic
 // record_id collapses retries of the same probe. Best-effort: a seal failure is logged and never changes
 // the caller's 400. Caller must NOT already hold ingestMu (this takes it for the seal critical section).
-func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, detail string) {
+func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, detail string) (conflict bool) {
 	// #47: bound the best-effort denial log. A drop changes NOTHING the caller sees — every call site invokes
 	// this from inside the denial branch and writes the same 4xx immediately after it returns, regardless of
 	// whether a seal happened — it only declines to seal one more best-effort record once a sweep exceeds the
@@ -2002,7 +2030,7 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 			if logDrop {
 				log.Printf("WARNING: B11 denial seals are being dropped — per-project/global denial budget exhausted (varying-scope sweep DoS bound; this log is throttled to ~1/sec)")
 			}
-			return
+			return false
 		}
 	}
 	now := ts(s.now())
@@ -2088,6 +2116,12 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 		},
 	}
 	err := s.withProjectWrite(context.Background(), gr.ProjectID, func(st store.Store) error {
+		if _, found, e := st.RecordByIdem(gr.ProjectID, gr.IdempotencyKey); e != nil {
+			return e
+		} else if found {
+			conflict = true
+			return nil
+		}
 		stored, created, e := s.sealAndStore(st, gr.ProjectID, gr.SessionID, denialIdemPrefix+denialID, rec, nil)
 		if e != nil {
 			return e
@@ -2116,6 +2150,7 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	if err != nil {
 		log.Printf("WARNING: B11 grant-denial record %s failed to seal (denial NOT recorded): %v", denialID, err)
 	}
+	return conflict
 }
 
 // agentCnfKid returns the broker key-id of a base64url-no-pad ed25519 agent public key, or "" if malformed.
@@ -2345,22 +2380,20 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
 			return nil
 		}
-		shim := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, st)
+		trustedProject := r.URL.Query().Get("project")
+		if trustedProject == "" {
+			trustedProject = ur.ProjectID
+		} // no-auth local mode only
+		shim := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, st).WithProject(trustedProject)
 		// The callback receives the signature-verified JTI. A database read
 		// failure rejects the request before ledger consumption, never falling
 		// back to this replica's boot-time revoked cache.
-		var revocationErr error
-		shim.WithRevocationCheck(func(id string) bool {
-			revoked, e := st.IsRevoked(ur.ProjectID, id)
-			if e != nil {
-				revocationErr = e
-				return true
-			}
-			return revoked
+		shim.WithRevocationCheckErr(func(id string) (bool, error) {
+			return st.IsRevoked(trustedProject, id)
 		})
 		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, resourceshim.Op{Action: ur.Action, ParamsCommitment: paramsCommitment, UseSequenceNumber: ur.UseSequenceNumber}, ur.Nonce, s.now())
-		if revocationErr != nil {
-			return revocationErr
+		if errors.Is(e, resourceshim.ErrRevocationCheck) {
+			return e
 		}
 		if e != nil {
 			validateErr = e // a forged/expired/replayed/wrong-scope use — the caller's fault
@@ -3196,6 +3229,9 @@ func storedGrantMatchesRequest(recordJSON string, req broker.Request) (bool, err
 			Broker struct {
 				Kind          string `json:"kind"`
 				GrantEvidence struct {
+					PopVersion      int      `json:"pop_version"`
+					ProjectID       string   `json:"project_id"`
+					RequestHash     string   `json:"request_hash"`
 					AgentID         string   `json:"agent_id"`
 					Action          string   `json:"action"`
 					ResourceID      string   `json:"resource_id"`
@@ -3218,6 +3254,16 @@ func storedGrantMatchesRequest(recordJSON string, req broker.Request) (bool, err
 		return false, nil // not a grant record (e.g. a use/denial/generic row under this key): never a match
 	}
 	ge := p.Extensions.Broker.GrantEvidence
+	if req.PoPVersion == 2 {
+		if ge.PopVersion != 2 || ge.ProjectID != req.ProjectID {
+			return false, nil
+		}
+		h, err := req.SemanticHash()
+		return err == nil && ge.RequestHash == h, err
+	}
+	if ge.PopVersion != 0 {
+		return false, nil // a historical proof cannot retrieve a v2 capability
+	}
 	pub, e := base64.RawURLEncoding.DecodeString(req.AgentPubKey)
 	if e != nil || len(pub) != ed25519.PublicKeySize {
 		return false, nil

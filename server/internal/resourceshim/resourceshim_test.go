@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -127,6 +128,38 @@ func TestSignedCapabilityProjectCheckedBeforeLedgerOrRevocation(t *testing.T) {
 	}
 	if err := ledger.ConsumeNonce("n"); err != nil {
 		t.Fatalf("wrong-project token consumed nonce: %v", err)
+	}
+}
+
+func TestV2CapabilityMissingProjectRejectedBeforeLedger(t *testing.T) {
+	issuing, agent := keyFromByte(1), keyFromByte(2)
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	token := defaultCap(t, issuing, agent, time.Hour, now)
+	payloadB64, _, _ := strings.Cut(token, ".")
+	payload, err := base64.RawURLEncoding.DecodeString(payloadB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var descriptor map[string]any
+	if err := json.Unmarshal(payload, &descriptor); err != nil {
+		t.Fatal(err)
+	}
+	delete(descriptor, "project_id")
+	payload, err = json.Marshal(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := b64(payload)
+	token = encoded + "." + b64(ed25519.Sign(issuing, []byte(encoded)))
+	ledger := NewMemLedger()
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, ledger).WithProject("p1")
+	_, err = sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n"),
+		Op{Action: testAction, ParamsCommitment: testParams}, "n", now)
+	if err == nil || !strings.Contains(err.Error(), "project") {
+		t.Fatalf("missing v2 project accepted: %v", err)
+	}
+	if err := ledger.ConsumeNonce("n"); err != nil {
+		t.Fatalf("missing-project token consumed nonce: %v", err)
 	}
 }
 

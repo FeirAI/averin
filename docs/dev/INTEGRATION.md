@@ -112,6 +112,17 @@ The credential broker (`POST /v2/grants`) + resource gateway (`POST /v2/use`) ar
 standalone if you want Tier-A grant accountability and Tier-B use receipts for your own resources —
 they don't require any sibling plane.
 
+**Grant PoP v2 cutover.** This release makes the online cutoff explicit: new brokered grants require
+`pop_version: 2`, and the resource refuses historical capabilities without a signed project claim.
+For a coordinated upgrade, quiesce grant and use writers, let old queued/pending v1 work drain or
+expire, install readers that understand v2 descriptors and grant evidence, upgrade actual producers
+(including Vultrino's direct and durable Averin grant paths), then reopen traffic. Durable queue
+entries may be re-signed only from their original complete semantic request; do not infer a missing
+tenant, TTL, or authorization field from routing text or upgrade a v1 signature. An old worker gets
+a `400` on new grant issuance after cutoff; keep it out of service until upgraded. Previously sealed
+v1 records retain their original offline verification rules, while old live capabilities stop working
+online at the cutoff. Native `token_exchange` has its separate contract and is unchanged.
+
 ---
 
 ## Optional: composition with the sibling planes
