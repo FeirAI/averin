@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feirai/averin/server/internal/pgledger"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -89,6 +90,10 @@ func newTestStore(t *testing.T) (*Postgres, func()) {
 	if _, err := pool.Exec(ctx, string(migration4)); err != nil {
 		pool.Close()
 		t.Fatalf("apply migration 0004: %v", err)
+	}
+	if _, err := pool.Exec(ctx, pgledger.SchemaSQL); err != nil {
+		pool.Close()
+		t.Fatalf("apply ledger schema: %v", err)
 	}
 
 	p := &Postgres{pool: pool}

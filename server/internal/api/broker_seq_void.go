@@ -181,6 +181,12 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				}
+				if s.revocationKey != nil {
+					if _, re := st.RevokeGrant(vr.ProjectID, res.GrantID); re != nil {
+						fail(http.StatusServiceUnavailable, "revoke voided grant: %v", re)
+						return
+					}
+				}
 				sealed, created, code = existing.JSON, false, http.StatusOK
 				return
 			}
