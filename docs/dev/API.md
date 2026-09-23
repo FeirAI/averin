@@ -382,11 +382,11 @@ hold a process-global ingest mutex or stall another project's writers. The
 index is over `md5(record_id)`; an md5 collision in one project yields a `409`
 on the second distinct id.
 
-**Capability revocation.** When revocation is enabled, the void also revokes
-the reserved `grant_id` in the same transaction. Later `/v2/use` calls on any
-live replica reject it, and the next export's signed revocation list includes
-it. If the revocation step fails, tombstone and marker also roll back. Without
-revocation enabled, an already minted capability can remain usable until expiry.
+**Capability retirement and revocation.** The signed tombstone itself makes
+`/v2/use` reject the reserved `grant_id`, even when a revocation signing key is
+not configured. When revocation is enabled, the same transaction also adds the
+ID to the durable revoked set so the next signed export list carries it. A
+failure in either step rolls back tombstone, marker and revocation together.
 
 **Authorization.** The server has no separate operator or admin privilege. This route is gated only by
 the project-scoped API key, like every `/v2/` route, so **any writer for a project can void that
@@ -399,11 +399,12 @@ bound into the signed evidence).
 
 **Response `201`:** `{ "voided_broker_seq": <n>, "grant_id": "...", "created": true, "record": { /* tombstone */ } }`
 (plus `"revoked": true` when revocation is enabled).
-A repeat of a completed void returns the same tombstone with `200` and `"created": false`. Errors:
-`400`, `403`, `404`, `409` (recorded or the grant landed during the void, live pending grant, too young,
-or no UNIQUE `record_id` index), `429`/`503` (the void completed but revoking its `grant_id` failed;
-repeat the call), `500` (nothing voided, or the tombstone is sealed but the mark failed; repeat the call
-in both cases), `501` (broker not enabled).
+A repeat of a completed void returns the same tombstone with `200` and
+`"created": false`. Errors include `400`, `403`, `404`, `409` (recorded grant,
+live pending grant or too young), `503` for unavailable durable state or unsafe
+index shape, `500` for a failed transaction that rolls back all new void writes,
+and `501` when the broker is disabled. A lost COMMIT acknowledgement is
+retryable under the same operation identity.
 
 **Verifier compatibility.** Verifier builds from before `grant_void` existed do not recognise the
 tombstone's role. They report it as an unrecognized broker record and **fail the bundle**. Auditors must

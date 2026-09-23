@@ -2,15 +2,45 @@ package api_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/store"
 )
+
+func TestVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T) {
+	base := store.NewMem()
+	resourceCore, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithResource(resourceCore, "orders-db").WithBrokerSeqVoidMinAge(0).Routes()
+	ak := grantAgentKey()
+	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
+	req := broker.Request{AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "read:orders", AgentPubKey: pub, TTL: time.Minute}
+	req.AgentSig = base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
+	grantID := reservedGrantID("idem-prepared-void")
+	prepared, err := broker.Prepare(req, grantID, func() (int64, error) { return 1, nil }, time.Now(), brokerIssuingKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserveGrantSeq(t, base, "idem-prepared-void")
+	if code, response := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
+		t.Fatalf("void (%d): %s", code, response)
+	}
+	if code, response := do(t, h, "POST", "/v2/use", useBody(t, "idem-use-void", prepared.Capability, grantID, ak, "SELECT 1", "nonce-void")); code == http.StatusCreated {
+		t.Fatalf("prepared capability admitted after signed void: %s", response)
+	}
+}
 
 func voidBody(seq int64) string {
 	return fmt.Sprintf(`{"project_id":"p1","broker_seq":%d,"reason":"orphaned by an ambiguous commit"}`, seq)

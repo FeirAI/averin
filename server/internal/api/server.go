@@ -3972,7 +3972,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown record_kind %q (allowed: budget-exhausted, chargeback-posted)", recordKind))
 		return
 	}
-	bundle, snapshotDisclosures, err := s.buildBundleWithSnapshot(projectID, true)
+	bundle, snapshotDisclosures, err := s.buildBundleWithSnapshot(r.Context(), projectID, true)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -4008,7 +4008,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	verificationReport := s.core.VerifyBundleWith(bundle, s.selfVerifyOpts())
 	gaps := []string{completenessGapLine(verificationReport)}
 	if mode == "selective_disclosure" || mode == "full_evidence" {
-		disclosures, err := s.buildDisclosures(projectID, snapshotDisclosures)
+		disclosures, err := s.buildDisclosures(r.Context(), projectID, snapshotDisclosures)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -4101,10 +4101,10 @@ func filterRecordsByKind(recordsRaw json.RawMessage, kind string, matched map[st
 // buildDisclosures turns the project's stored disclosure secrets into the bundle's `disclosures`
 // array: {record_id, field, value_b64, nonce_hex}. The raw value is fetched from the content store
 // (which re-verifies its digest on read) and re-encoded base64url-no-pad for the verifier. Never nil.
-func (s *Server) buildDisclosures(projectID string, secrets []store.DisclosureSecret) ([]map[string]any, error) {
+func (s *Server) buildDisclosures(ctx context.Context, projectID string, secrets []store.DisclosureSecret) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(secrets))
 	for _, d := range secrets {
-		raw, err := s.content.Get(content.WithTenant(context.Background(), projectID), d.ValueDigest)
+		raw, err := s.content.Get(content.WithTenant(ctx, projectID), d.ValueDigest)
 		if errors.Is(err, content.ErrNotFound) {
 			// Retention intentionally removes the opening material. The signed
 			// record still carries the digest/reference added at ingest, so omit
@@ -4164,11 +4164,11 @@ func setBundleWriteDeadline(w http.ResponseWriter) {
 // buildBundle assembles the export/verify bundle: published key, all sealed records, and the full
 // checkpoint history.
 func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
-	bundle, _, err := s.buildBundleWithSnapshot(projectID, false)
+	bundle, _, err := s.buildBundleWithSnapshot(context.Background(), projectID, false)
 	return bundle, err
 }
 
-func (s *Server) buildBundleWithSnapshot(projectID string, includeDisclosures bool) (string, []store.DisclosureSecret, error) {
+func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, includeDisclosures bool) (string, []store.DisclosureSecret, error) {
 	// One repeatable-read snapshot prevents an export from combining a new
 	// checkpoint with an older record set, or a fresh revocation list with a
 	// different anchor/record cutoff. The complete uncheckpointed tail remains.
@@ -4177,7 +4177,7 @@ func (s *Server) buildBundleWithSnapshot(projectID string, includeDisclosures bo
 	var recs []store.Record
 	var revokedIDs []string
 	var secrets []store.DisclosureSecret
-	err := s.st.WithProjectRead(context.Background(), projectID, func(st store.Store) error {
+	err := s.st.WithProjectRead(ctx, projectID, func(st store.Store) error {
 		var err error
 		if checks, err = st.Checkpoints(projectID); err != nil {
 			return err
