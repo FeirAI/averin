@@ -439,9 +439,52 @@ fn revocation_merkle_hash_inputs_match_model() {
 fn opaque_challenge_fields_are_not_silently_normalized() {
     let composed = "é";
     let decomposed = "e\u{301}";
-    let pre_a = verify::use_pop_preimage(composed, "r", "read", "p", "c", "n");
+    let pairs = [
+        (
+            "ledger",
+            verify::ledger_commitment_preimage(composed, "n", 1),
+            verify::ledger_commitment_preimage(decomposed, "n", 1),
+        ),
+        (
+            "grant head",
+            verify::grant_head_step_preimage(&[0; 32], 1, composed),
+            verify::grant_head_step_preimage(&[0; 32], 1, decomposed),
+        ),
+        (
+            "revocation leaf",
+            verify::revocation_leaf_preimage(composed),
+            verify::revocation_leaf_preimage(decomposed),
+        ),
+        (
+            "use PoP",
+            verify::use_pop_preimage(composed, "r", "read", "p", "c", "n"),
+            verify::use_pop_preimage(decomposed, "r", "read", "p", "c", "n"),
+        ),
+        (
+            "cosig",
+            verify::cosig_approval_preimage(composed, "kid", "cb", 1, 2),
+            verify::cosig_approval_preimage(decomposed, "kid", "cb", 1, 2),
+        ),
+        (
+            "delegation",
+            verify::delegation_hop_preimage(composed, 0, "a", "b", "s", "read", "r", 2),
+            verify::delegation_hop_preimage(decomposed, 0, "a", "b", "s", "read", "r", 2),
+        ),
+        (
+            "introspection",
+            verify::introspection_transcript_preimage(composed, "lease", "s", "r", 1, 2),
+            verify::introspection_transcript_preimage(decomposed, "lease", "s", "r", 1, 2),
+        ),
+        (
+            "federation",
+            verify::federation_cert_preimage(composed, "subject", "kid", "s", "r", 2),
+            verify::federation_cert_preimage(decomposed, "subject", "kid", "s", "r", 2),
+        ),
+    ];
+    for (family, a, b) in pairs {
+        assert_ne!(a, b, "{family} silently normalized an opaque field");
+    }
     let pre_b = verify::use_pop_preimage(decomposed, "r", "read", "p", "c", "n");
-    assert_ne!(pre_a, pre_b);
     assert_eq!(
         verify::use_pop_challenge(decomposed, "r", "read", "p", "c", "n"),
         sha256(&pre_b)
