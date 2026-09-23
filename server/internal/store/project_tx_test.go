@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/feirai/averin/server/internal/resourceshim"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -45,6 +47,18 @@ func TestMemProjectWriteRollbackAndIsolation(t *testing.T) {
 	}
 	if seq, _ := m.NextDisplaySeq("p", "s"); seq != 0 {
 		t.Fatalf("aborted display seq persisted: %d", seq)
+	}
+}
+
+func TestProjectCommitClassification(t *testing.T) {
+	if err := classifyProjectCommit(pgx.ErrTxCommitRollback); !errors.Is(err, ErrTransactionAborted) || errors.Is(err, ErrCommitAmbiguous) {
+		t.Fatalf("known rollback classified as ambiguous: %v", err)
+	}
+	if err := classifyProjectCommit(&pgconn.PgError{Code: "40001", Message: "serialization failure"}); !errors.Is(err, ErrTransactionAborted) || errors.Is(err, ErrCommitAmbiguous) {
+		t.Fatalf("server-rejected commit classified as ambiguous: %v", err)
+	}
+	if err := classifyProjectCommit(context.DeadlineExceeded); !errors.Is(err, ErrCommitAmbiguous) || errors.Is(err, ErrTransactionAborted) {
+		t.Fatalf("unknown commit result classified as abort: %v", err)
 	}
 }
 
@@ -199,6 +213,60 @@ func TestPostgresProjectWriteTwoPools(t *testing.T) {
 	}
 	if heads, err := p.Heads("p", "s"); err != nil || len(heads) != 1 || heads[0] != "h2" {
 		t.Fatalf("heads=%v err=%v", heads, err)
+	}
+}
+
+func TestPostgresProjectWriteDeadlineBoundaries(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	ctx := context.Background()
+	// Pool acquisition must observe the caller's deadline.
+	cfg := p.pool.Config().Copy()
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	err = (&Postgres{pool: pool}).WithProjectWrite(deadline, "p", func(Store) error { t.Fatal("callback ran without connection"); return nil })
+	cancel()
+	conn.Release()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pool wait = %v", err)
+	}
+
+	// The same deadline also bounds a blocked guard and a statement after it.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	holder := make(chan error, 1)
+	go func() {
+		holder <- p.WithProjectWrite(ctx, "p", func(Store) error { close(entered); <-release; return nil })
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("holder did not enter")
+	}
+	defer func() { close(release); <-holder }()
+	deadline, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
+	err = p.WithProjectWrite(deadline, "p", func(Store) error { t.Fatal("callback escaped guard"); return nil })
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("guard wait = %v", err)
+	}
+	deadline, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
+	err = p.WithProjectRead(deadline, "q", func(st Store) error {
+		_, e := st.(*Postgres).tx.Exec(st.(*Postgres).callContext(), `SELECT pg_sleep(5)`)
+		return e
+	})
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("statement = %v", err)
 	}
 }
 

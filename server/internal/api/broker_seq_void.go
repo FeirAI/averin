@@ -10,35 +10,11 @@ import (
 	"github.com/feirai/averin/server/internal/store"
 )
 
-// DefaultBrokerSeqVoidMinAge is the default safety age (AVERIN_BROKER_SEQ_VOID_MIN_AGE) a reserved broker_seq must
-// reach before POST /v2/broker-seq/void may void it: far longer than any in-flight grant commit can take (the
-// Postgres statement timeout is 30s, a two-phase pending grant expires after pendingTTL = 15m).
-//
-// The age ALONE does not make a void-vs-commit race impossible, because the store's allocated_at is stamped only on
-// the FRESH insert and never refreshed when a retry of the same grant_id reuses the seq (fresh=false; on Postgres
-// broker_seq is insert-only). A retry at T0+59m59s whose COMMIT is still in flight would otherwise let a void at
-// T0+60m pass the age check while HasRecordID cannot yet see the uncommitted row. The guards that actually close it:
-//
-//  1. The age is measured from max(allocated_at, the LATEST attempt of that grant_id on this process, this process's
-//     START) — every grant path (handleGrant, two-phase finalize, native grant) stamps an attempt when it
-//     allocates/reuses the seq and again when it settles a failed attempt (s.noteSeqAttempt), so a recent retry
-//     blocks the void. The attempt map is in-memory, so the process start is a BOOT FLOOR: right after a restart
-//     (which forgot every earlier attempt) no void passes until the minimum age has elapsed since the start.
-//  2. Within one process the void and every allocate→seal→store run under ingestMu, so a commit that has not
-//     returned cannot interleave with the void's store reads.
-//  3. The DATABASE backstop: the tombstone's record_id IS the voided grant_id, so under the UNIQUE record_id index
-//     (records_project_record_id_uniq, migration 0002) at most one of {the grant, its tombstone} can ever land.
-//     A Postgres DB where 0002 took the WARNING fallback (a NON-unique index, historical duplicates) lacks this
-//     backstop, so the void REFUSES there (409) — see Store.RecordIDUniqueEnforced. The Mem store always enforces it.
-//
-// Guards 1 and 2 are PROCESS-LOCAL: a multi-instance deployment sharing one Postgres (a retry landing on instance
-// A while the operator voids on instance B) is closed only by guard 3.
-//
-// Clock skew: allocated_at is the STORE's clock (Postgres now() on the DB host; the Mem store's injectable clock)
-// while the age is taken against this process's clock. A DB clock that runs AHEAD only makes the age look smaller
-// (conservative); one that runs BEHIND makes it look larger by the skew, so keep the configured minimum age far
-// above any plausible DB↔app skew (the default 1h, and main.go's floor, dwarf NTP-disciplined skew). The latest-
-// attempt time (guard 1) is app-clock on both sides and so is skew-free.
+// DefaultBrokerSeqVoidMinAge is the safety age for remediating a durable
+// orphaned broker sequence. The latest local attempt and process start are
+// additional floors because a previous process may have forgotten an attempt.
+// A database project guard serializes grant finalize and void on every replica;
+// record_id uniqueness excludes a grant and its tombstone from coexisting.
 const DefaultBrokerSeqVoidMinAge = time.Hour
 
 // grantVoidDomain domain-separates a tombstone's void_evidence (its canonical bytes, and so its signed evidence_hash,
@@ -64,45 +40,12 @@ type brokerSeqVoidRequest struct {
 	Reason    string `json:"reason"`     // optional, bound into the signed void_evidence
 }
 
-// handleBrokerSeqVoid is the operator remediation for a WEDGED grant-transparency log (ADR 0004 D6). A broker_seq
-// reserved by a grant that never recorded (an ambiguous commit whose client never retried, or an orphan left by a
-// failed release) leaves the recorded set short of [1..MaxBrokerSeq], and createCheckpoint refuses to sign over that
-// gap forever. This seals a broker-signed grant_void TOMBSTONE that fills exactly that seq: it binds (project_id,
-// broker_seq, the reserved grant_id), is folded into broker_grant_head like a grant, and is never a grant (the
-// offline verifier accepts it as filling its seq only; a real grant claiming the same seq is a duplicate-seq
-// violation). The tombstone is sealed FIRST and the reservation marked voided in the store SECOND (VoidBrokerSeq):
-// kept in the allocation ledger so MAX+1 never re-issues the number, and the grant_id retired so a late retry of
-// that grant gets a 409 instead of the seq. Tombstone-first means the marker is written only for a void that WON:
-// if a still-in-flight commit of the grant wins the record_id race (the database backstop), the seal fails with
-// ErrRecordIDConflict, the call returns 409 "grant landed; nothing to void" and nothing is marked. If the marker
-// write fails after the tombstone is sealed (or the process dies between the two), the grant can already never
-// record (its record_id is taken; a retry in that window allocates the reserved seq, loses on record_id → 409, and
-// never releases the seq), and a repeat of this call finds the tombstone by its idempotency key and just writes
-// the marker.
-//
-// It voids ONLY a seq that is (1) currently allocated, (2) not recorded — no record holds the reserved grant_id and
-// no grant/tombstone record carries that broker_seq (the store read is the authority, so a commit that was ambiguous
-// but actually landed is refused however old it is), (3) not backing a live two-phase pending grant, and (4) at least
-// brokerSeqVoidMinAge old, measured from the later of its allocation and its grant's latest attempt — and only on a
-// store that enforces record_id uniqueness (Store.RecordIDUniqueEnforced). A repeat of a completed void returns the
-// existing tombstone (200, created:false). A reservation carrying a void marker but NO tombstone (left by a void
-// from before the tombstone-first ordering whose seal failed) is re-checked like a fresh one: if its grant landed
-// after all, the call returns 409 and names the marker inert.
-//
-// STALL RISK: the whole check→seal→mark runs under ingestMu (guard 2), and on Postgres the tombstone's INSERT waits on
-// the UNIQUE record_id index entry of any in-flight (uncommitted) row holding the same record_id — e.g. the grant's
-// commit on another instance — for up to the 30 s statement timeout. For that long every ingest/grant/use on this
-// process queues behind the void. It is a rare operator action, and the wait ends as soon as that transaction
-// commits or rolls back.
-//
-// When revocation is enabled (WithRevocation) the voided grant_id is also REVOKED (exactly as POST /v2/revoke would),
-// so a capability minted for it before the void — e.g. at a two-phase prepare — stops being honored at /v2/use at
-// once and is carried in the next signed revocation_list. If that revocation fails the call returns an error after
-// the void; repeating it (idempotent) retries the revocation. Without revocation the capability stays usable until
-// it expires (documented in docs/dev/API.md).
-//
-// AUTHZ: like every /v2 route this is gated only by the project-scoped API key — the server has no separate
-// operator/admin privilege — so any writer for the project can void that project's aged, unrecorded seqs.
+// handleBrokerSeqVoid fills a committed, unrecorded broker sequence with a
+// signed grant_void tombstone. It checks the reservation, durable pending state,
+// age and record_id uniqueness inside one project transaction. Tombstone,
+// void marker and optional revocation commit together; a failure rolls all of
+// them back. A retry returns the existing tombstone. A legacy marker without a
+// tombstone is rechecked against the record log before repair.
 func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 	if s.brokerKey == nil {
 		writeErr(w, http.StatusNotImplemented, "credential broker not enabled (set AVERIN_BROKER_ISSUING_SEED)")
@@ -167,10 +110,8 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 				inert = " (the void marker already on this reservation is INERT: an earlier void was interrupted before its tombstone was sealed, and the grant's own record holds the seq)"
 			}
 
-			// (a) The tombstone is already sealed: this is a repeat. The tombstone is sealed FIRST and the void marker
-			// written SECOND, so a void interrupted between the two (a failed marker write, a crash) is finished here by
-			// writing the marker — idempotent, and safe with no re-check: the sealed tombstone holds the grant_id as its
-			// record_id, so the grant can never record (the UNIQUE record_id index), however late its commit is.
+			// A prior tombstone may be a legacy partial void. Repair its marker
+			// and revocation in this transaction; new voids commit all three together.
 			if existing, ok, le := st.RecordByIdem(vr.ProjectID, idem); le != nil {
 				fail(http.StatusInternalServerError, "tombstone lookup: %v", le)
 				return
@@ -274,8 +215,7 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 				fail(http.StatusInternalServerError, "seal tombstone: %v — the reservation is NOT voided; repeat this call (if the tombstone's commit was ambiguous and landed, the repeat finds it and finishes the void)", se)
 				return
 			}
-			// ...and mark the reservation voided SECOND (retiring the grant_id at allocation). A failure here leaves a
-			// sealed tombstone without its marker, which step (a) of a repeat finishes.
+			// The marker and tombstone become visible together at COMMIT.
 			if !res.Voided {
 				if ve := st.VoidBrokerSeq(vr.ProjectID, res.GrantID, vr.BrokerSeq); ve != nil {
 					fail(http.StatusInternalServerError, "broker_seq %d void marker failed; the transaction rolled back: %v", vr.BrokerSeq, ve)
@@ -341,27 +281,6 @@ func (s *Server) lastSeqAttempt(projectID, grantID string) (time.Time, bool) {
 	defer s.seqAttemptsMu.Unlock()
 	t, ok := s.seqAttempts[projectID+"\x00"+grantID]
 	return t, ok
-}
-
-// allocateBrokerSeq is the ONLY way a grant path allocates (or reuses) a broker_seq: it stamps the attempt BEFORE
-// the store call (so even an allocation whose own outcome is ambiguous is covered) and delegates to the store.
-func (s *Server) allocateBrokerSeq(projectID, grantID string) (int64, bool, error) {
-	s.noteSeqAttempt(projectID, grantID)
-	return s.st.AllocateBrokerSeq(projectID, grantID)
-}
-
-// pendingGrantLive reports whether a two-phase pending grant (prepare done, finalize not committed) for grantID is
-// still within pendingTTL. Void is a rare operator action, so a scan of the pending map is fine.
-func (s *Server) pendingGrantLive(grantID string) bool {
-	now := s.now()
-	s.pendingMu.Lock()
-	defer s.pendingMu.Unlock()
-	for _, p := range s.pending {
-		if p.prepared.GrantID == grantID && now.Sub(p.created) <= pendingTTL {
-			return true
-		}
-	}
-	return false
 }
 
 // buildGrantVoidRecord assembles the unsealed grant_void tombstone. Its record_id IS the voided grant_id, so the

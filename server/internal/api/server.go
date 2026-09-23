@@ -142,11 +142,10 @@ type Server struct {
 	// the holder of one tenant's key from minting a fresh, valid block for another tenant's project.
 	policyEngineKeys map[authorityPin]ed25519.PublicKey
 	// Tier-B resource side (ADR 0003): the resource recording key signs use-receipt authority evidence
-	// (role-separated from the broker key, R2); resourceID is this resource's audience; ledger is the
-	// consume-before-act jti/nonce store. nil resourceCore = /v2/use disabled.
+	// (role-separated from the broker key, R2); resourceID is this resource's audience.
+	// The project Store transaction owns consume-before-act claims. nil disables /v2/use.
 	resourceCore Sealer
 	resourceID   string
-	ledger       resourceshim.Ledger
 	// M3 (ADR 0005 — Native/STS): the RAW resource recording key (the same key resourceCore wraps). The
 	// introspection-transcript producer needs it to sign the structured averin.resource.introspection.v1 challenge
 	// (over raw bytes), which the FFI core's tagged SignEvidence cannot do. nil = POST /v2/introspection disabled.
@@ -526,9 +525,8 @@ func (s *Server) WithProjectAuthorityKey(project, source string, key ed25519.Pub
 // authority evidence with resourceCore's key — which MUST be DISTINCT from the server signing key and
 // the broker key (R2 role separation; the verifier rejects a broker/resource key-set overlap). It
 // requires the broker to be enabled (the resource verifies capabilities under the broker issuing
-// key). The consume-before-act ledger defaults to an in-memory store (correct within one process but
-// VOLATILE across restarts); inject a durable one with WithLedger BEFORE WithResource. Nil resourceCore
-// (unset) disables /v2/use.
+// key). The configured project Store supplies consume-before-act claims in the
+// same transaction as each receipt. Nil resourceCore disables /v2/use.
 func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
 	// R2 (ADR 0003): the resource recording key MUST be disjoint from the server signing key and the
 	// broker issuing key, else a grant could forge its own use receipt. The offline verifier rejects an
@@ -545,19 +543,6 @@ func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
 	}
 	s.resourceCore = resourceCore
 	s.resourceID = resourceID
-	if s.ledger == nil {
-		s.ledger = resourceshim.NewMemLedger()
-	}
-	return s
-}
-
-// WithLedger injects the consume-before-act ledger backing /v2/use (R5 single-use + PoP-nonce replay
-// protection). Call it BEFORE WithResource to override the default. The default MemLedger is VOLATILE —
-// consumed jti/nonce are lost on restart, reopening a replay window for a single-use capability — so a
-// durable, atomically-consistent ledger is a production requirement. internal/pgledger is the durable,
-// Postgres-backed implementation; averin-server injects it here automatically when AVERIN_DATABASE_URL is set.
-func (s *Server) WithLedger(ledger resourceshim.Ledger) *Server {
-	s.ledger = ledger
 	return s
 }
 
@@ -1109,17 +1094,25 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			batchRecordIDs[ridKey] = struct{}{}
-			if _, replay, err := s.st.RecordByIdem(pid, idem); err != nil {
+			var replay, taken bool
+			err := s.st.WithProjectRead(r.Context(), pid, func(st store.Store) error {
+				_, found, err := st.RecordByIdem(pid, idem)
+				if err != nil {
+					return err
+				}
+				replay = found
+				if !replay {
+					taken, err = st.HasRecordID(pid, rid)
+				}
+				return err
+			})
+			if err != nil {
 				writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+err.Error())
 				return
-			} else if !replay {
-				if taken, err := s.st.HasRecordID(pid, rid); err != nil {
-					writeErr(w, http.StatusInternalServerError, "record_id lookup: "+err.Error())
-					return
-				} else if taken {
-					writeErr(w, http.StatusConflict, fmt.Sprintf("%v: %q", store.ErrRecordIDConflict, rid))
-					return
-				}
+			}
+			if !replay && taken {
+				writeErr(w, http.StatusConflict, fmt.Sprintf("%v: %q", store.ErrRecordIDConflict, rid))
+				return
 			}
 		}
 		// With AVERIN_REQUIRE_PINNED_AUTHORITY on, a failed authority elevation makes ingestOne REJECT the item —
@@ -1529,10 +1522,10 @@ func (s *Server) ingestOne(ctx context.Context, raw []byte, headerIdem string) (
 	return sealed, created, err
 }
 
-// sealAndStore stamps the server-controlled fields, links the record into the session DAG (heads +
-// display_seq), stamps the signing-key block, seals the record, and stores it (with any disclosure
-// secrets, atomically). The caller MUST hold s.ingestMu (the frontier-read → seal → put critical
-// section) and is responsible for any authority handling and commitments BEFORE calling — so both
+// sealAndStore stamps recorder fields, reads the transaction-bound frontier and
+// display sequence, seals the record, and inserts it with disclosures. The caller
+// MUST pass the project-bound Store from WithProjectWrite and prepare authority
+// handling and commitments before calling — so both
 // the generic ingest path (normalizeAuthority + commitLowEntropyFields) and the credential broker
 // (its own gateway_enforced authority + input_commit) share these DAG/seal/store mechanics without
 // the broker's verified authority being clobbered back to caller_declared.
@@ -1587,8 +1580,7 @@ func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string,
 	}
 
 	// causal DAG links = the session's current heads (server-derived, never client-trusted).
-	// NOTE: heads+seal+put are not yet one atomic transaction in the in-memory store; the Postgres
-	// store performs this in a single serializable transaction.
+	// Heads, seal inputs and insert share the project write transaction.
 	// FAIL-CLOSED (security-load-bearing): a swallowed Heads() error would leave heads=nil → parents=[] →
 	// the record sealed as a DETACHED, parentless DAG root — permanently forging a break in the causal
 	// chain the verifier relies on. A read failure MUST abort the seal, never manufacture a detached root.
@@ -1926,11 +1918,18 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrCommitAmbiguous) {
 		// COMMIT may have succeeded while its acknowledgement was lost. Only
 		// this exact idempotency identity may recover the committed grant.
-		if existing, found, lookupErr := s.st.RecordByIdem(gr.ProjectID, idem); lookupErr == nil && found {
+		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+		defer cancel()
+		_ = s.st.WithProjectRead(reconcileCtx, gr.ProjectID, func(st store.Store) error {
+			existing, found, lookupErr := st.RecordByIdem(gr.ProjectID, idem)
+			if lookupErr != nil || !found {
+				return lookupErr
+			}
 			if same, matchErr := storedGrantMatchesRequest(existing.JSON, req); matchErr == nil && same {
 				sealed, created, err = existing.JSON, false, nil
 			}
-		}
+			return nil
+		})
 	}
 	if conflictErr != nil {
 		writeErr(w, http.StatusConflict, conflictErr.Error())
@@ -1991,49 +1990,24 @@ func (s *Server) respondGrant(w http.ResponseWriter, projectID, grantID, sealed 
 	})
 }
 
-// settleFailedGrantSeq disposes of a broker_seq allocated for a grant whose record did NOT (visibly) commit and
-// returns the error to surface. The caller MUST hold ingestMu (the allocation's serialization) and must already
-// have ruled out a visibly-durable record under the grant's idempotency key.
-//
-//   - fresh == false (AllocateBrokerSeq returned an EXISTING reservation for this grant_id): the seq belongs to a
-//     PRIOR attempt of this grant whose outcome this request cannot know — its commit may have been ambiguous and
-//     may still land (an in-flight Postgres commit is not yet visible to RecordByIdem). Releasing it here would let
-//     the next grant reuse a number a durable grant holds → duplicate broker_seq. It is left RESERVED whatever the
-//     error; a later retry of this grant reclaims it.
-//   - store.ErrCommitAmbiguous (a fresh insert whose commit outcome is unknown): the record may still become
-//     durable, and releasing its seq could let a later grant REUSE a number a durable grant holds → duplicate
-//     broker_seq → poisoned head. The seq is left RESERVED; the deterministic grant_id makes a retry reclaim it.
-//   - ANY other error persisted no record (the store contract, see store.ErrCommitAmbiguous), so the seq is
-//     RELEASED. Keeping it would leave a permanent hole in the recorded [1..N] set that a later checkpoint would
-//     anchor forever (the offline verifier reports a non-gapless broker_seq prefix). The store releases only the
-//     project's current MAX: a seq that is no longer the max (an earlier release was lost and later grants took
-//     higher seqs) stays reserved so this grant's retry refills it rather than leaving an unrefillable mid-hole.
-//     A failed release is folded into the error; createCheckpoint independently refuses to sign over any gap.
-func (s *Server) settleFailedGrantSeq(projectID, grantID string, fresh bool, cause error) error {
-	s.noteSeqAttempt(projectID, grantID) // the attempt ends now: a commit it left in flight is at most this old
-	if !fresh {
-		return fmt.Errorf("%w — broker_seq left RESERVED (reused from a prior attempt of this grant whose commit may still land; never released by a retry)", cause)
-	}
-	if errors.Is(cause, store.ErrCommitAmbiguous) {
-		return fmt.Errorf("%w — broker_seq left RESERVED (commit-ambiguous; never released, to avoid reuse; a retry of this grant reclaims it)", cause)
-	}
-	if re := s.st.ReleaseBrokerSeq(projectID, grantID); re != nil {
-		return fmt.Errorf("%w; broker_seq rollback ALSO failed (seq orphaned until a retry of this grant reclaims it; checkpoints refuse to sign until then): %v", cause, re)
-	}
-	return cause
-}
-
 // reconstructCapability re-mints the original capability for an existing grant from its stored
 // credential descriptor (the bytes committed at issue), so an idempotent retry returns the SAME
 // token rather than a new one. ed25519 signing is deterministic, so the re-mint is byte-identical.
 func (s *Server) reconstructCapability(projectID, grantID string) (string, error) {
-	secrets, err := s.st.Disclosures(projectID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var secrets []store.DisclosureSecret
+	err := s.st.WithProjectRead(ctx, projectID, func(st store.Store) error {
+		var e error
+		secrets, e = st.Disclosures(projectID)
+		return e
+	})
 	if err != nil {
 		return "", err
 	}
 	for _, d := range secrets {
 		if d.RecordID == grantID && d.Field == "credential" {
-			raw, err := s.content.Get(content.WithTenant(context.Background(), projectID), d.ValueDigest)
+			raw, err := s.content.Get(content.WithTenant(ctx, projectID), d.ValueDigest)
 			if err != nil {
 				return "", err
 			}
@@ -3655,14 +3629,21 @@ func (s *Server) anchorCheckpoint(ctx context.Context, projectID string, seq int
 		return err
 	}
 	// base64url-no-pad to match the Rust verifier's token decoder.
-	return s.st.PutAnchor(projectID, seq, base64.RawURLEncoding.EncodeToString(der))
+	return s.st.WithProjectWrite(tctx, projectID, func(st store.Store) error {
+		return st.PutAnchor(projectID, seq, base64.RawURLEncoding.EncodeToString(der))
+	})
 }
 
 // ---- app / verify / export ----
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
-	sessions, err := s.st.Sessions(projectID)
+	var sessions []string
+	err := s.st.WithProjectRead(r.Context(), projectID, func(st store.Store) error {
+		var e error
+		sessions, e = st.Sessions(projectID)
+		return e
+	})
 	if err != nil {
 		// FAIL CLOSED (averin#3): surface a store read error as 500 rather than an empty 200 that would let a
 		// caller read "no sessions" during a transient outage.
@@ -3723,12 +3704,17 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 	// Page IN THE STORE (SQL LIMIT/OFFSET on Postgres) rather than loading the whole project history into RAM
 	// and slicing — a large tenant no longer materializes every record per list call. RecordsPage returns
 	// newest-first; RecordCount is a cheap indexed count for the truncation-honesty total.
-	total, err := s.st.RecordCount(projectID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	page, err := s.st.RecordsPage(projectID, limit, offset)
+	var total int
+	var page []store.Record
+	err := s.st.WithProjectRead(r.Context(), projectID, func(st store.Store) error {
+		var e error
+		total, e = st.RecordCount(projectID)
+		if e != nil {
+			return e
+		}
+		page, e = st.RecordsPage(projectID, limit, offset)
+		return e
+	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -3751,7 +3737,12 @@ func (s *Server) handleDAG(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project and session query params are required")
 		return
 	}
-	recs, err := s.st.SessionRecords(projectID, sessionID)
+	var recs []store.Record
+	err := s.st.WithProjectRead(r.Context(), projectID, func(st store.Store) error {
+		var e error
+		recs, e = st.SessionRecords(projectID, sessionID)
+		return e
+	})
 	if err != nil {
 		// FAIL CLOSED (averin#3): surface a store read error as 500 rather than an empty 200 that would let a
 		// caller read "no records" (an apparently-empty DAG) during a transient outage.
@@ -3909,7 +3900,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown record_kind %q (allowed: budget-exhausted, chargeback-posted)", recordKind))
 		return
 	}
-	bundle, err := s.buildBundle(projectID, true)
+	bundle, snapshotDisclosures, err := s.buildBundleWithSnapshot(projectID, true)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -3945,7 +3936,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	verificationReport := s.core.VerifyBundleWith(bundle, s.selfVerifyOpts())
 	gaps := []string{completenessGapLine(verificationReport)}
 	if mode == "selective_disclosure" || mode == "full_evidence" {
-		disclosures, err := s.buildDisclosures(projectID)
+		disclosures, err := s.buildDisclosures(projectID, snapshotDisclosures)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -4038,11 +4029,7 @@ func filterRecordsByKind(recordsRaw json.RawMessage, kind string, matched map[st
 // buildDisclosures turns the project's stored disclosure secrets into the bundle's `disclosures`
 // array: {record_id, field, value_b64, nonce_hex}. The raw value is fetched from the content store
 // (which re-verifies its digest on read) and re-encoded base64url-no-pad for the verifier. Never nil.
-func (s *Server) buildDisclosures(projectID string) ([]map[string]any, error) {
-	secrets, err := s.st.Disclosures(projectID)
-	if err != nil {
-		return nil, err
-	}
+func (s *Server) buildDisclosures(projectID string, secrets []store.DisclosureSecret) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(secrets))
 	for _, d := range secrets {
 		raw, err := s.content.Get(content.WithTenant(context.Background(), projectID), d.ValueDigest)
@@ -4105,6 +4092,11 @@ func setBundleWriteDeadline(w http.ResponseWriter) {
 // buildBundle assembles the export/verify bundle: published key, all sealed records, and the full
 // checkpoint history.
 func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
+	bundle, _, err := s.buildBundleWithSnapshot(projectID, false)
+	return bundle, err
+}
+
+func (s *Server) buildBundleWithSnapshot(projectID string, includeDisclosures bool) (string, []store.DisclosureSecret, error) {
 	// One repeatable-read snapshot prevents an export from combining a new
 	// checkpoint with an older record set, or a fresh revocation list with a
 	// different anchor/record cutoff. The complete uncheckpointed tail remains.
@@ -4112,6 +4104,7 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 	var anchors map[int64]string
 	var recs []store.Record
 	var revokedIDs []string
+	var secrets []store.DisclosureSecret
 	err := s.st.WithProjectRead(context.Background(), projectID, func(st store.Store) error {
 		var err error
 		if checks, err = st.Checkpoints(projectID); err != nil {
@@ -4125,11 +4118,17 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 		}
 		if s.revocationKey != nil {
 			revokedIDs, err = st.RevokedGrantIDs(projectID)
+			if err != nil {
+				return err
+			}
+		}
+		if includeDisclosures {
+			secrets, err = st.Disclosures(projectID)
 		}
 		return err
 	})
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	records := make([]json.RawMessage, len(recs))
 	for i, r := range recs {
@@ -4142,7 +4141,7 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 		if tok, ok := anchors[c.Seq]; ok {
 			withAnchor, err := attachAnchor(c.JSON, tok)
 			if err != nil {
-				return "", fmt.Errorf("attach anchor to checkpoint %d: %w", c.Seq, err)
+				return "", nil, fmt.Errorf("attach anchor to checkpoint %d: %w", c.Seq, err)
 			}
 			checkpoints[i] = json.RawMessage(withAnchor)
 		} else {
@@ -4177,17 +4176,17 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 	if s.revocationKey != nil {
 		rl, e := s.buildRevocationListForExportIDs(revokedIDs, checks)
 		if e != nil {
-			return "", e
+			return "", nil, e
 		}
 		if rl != nil {
 			bundle["revocation_list"] = rl
 			rlJSON, e := json.Marshal(rl)
 			if e != nil {
-				return "", fmt.Errorf("marshal revocation_list: %w", e)
+				return "", nil, fmt.Errorf("marshal revocation_list: %w", e)
 			}
 			d, e := s.core.RcpEvidenceHash(string(rlJSON))
 			if e != nil {
-				return "", fmt.Errorf("revocation_list digest: %w", e)
+				return "", nil, fmt.Errorf("revocation_list digest: %w", e)
 			}
 			revocationDigest = d
 		}
@@ -4198,14 +4197,14 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 	if s.attestKey != nil {
 		att, e := s.buildDeploymentAttestation(projectID, recs, checks, revocationDigest)
 		if e != nil {
-			return "", e
+			return "", nil, e
 		}
 		if att != nil {
 			bundle["deployment_attestation"] = att
 		}
 	}
 	out, err := json.Marshal(bundle)
-	return string(out), err
+	return string(out), secrets, err
 }
 
 // attachAnchor adds an `anchor` block to a sealed checkpoint JSON. The anchor is excluded from the
