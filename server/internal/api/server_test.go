@@ -138,6 +138,21 @@ func TestMalformedUTF8JSONIsRejectedBeforeDecode(t *testing.T) {
 	}
 }
 
+func TestUnpairedSurrogateInOpaqueIDIsRejectedBeforeDecode(t *testing.T) {
+	h := newSrv(t)
+	for _, body := range []string{
+		`{"idempotency_key":"k","project_id":"\uD800","session_id":"s"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"s","record_id":"\uDC00"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"s","content":{"\uD800":"bad"}}`,
+	} {
+		if code, resp := do(t, h, "POST", "/v2/records", body); code != http.StatusBadRequest {
+			t.Fatalf("unpaired surrogate accepted (%d): %s", code, resp)
+		}
+	}
+	postRecord(t, h, `{"idempotency_key":"pair","project_id":"p","session_id":"s","content":{"note":"\uD83D\uDE00"}}`)
+	postRecord(t, h, `{"idempotency_key":"literal","project_id":"p","session_id":"s","content":{"note":"\\uD800"}}`)
+}
+
 func TestIngestSealCheckpointVerifyExport(t *testing.T) {
 	h := newSrv(t)
 	r1, _ := postRecord(t, h, `{"idempotency_key":"k1","project_id":"p1","session_id":"s1","action":"db.read"}`)

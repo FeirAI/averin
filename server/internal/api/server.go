@@ -1020,9 +1020,56 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 // decode preserves integer literals (json.Number) so cost_micros_usd etc. never round-trip through
 // float64 (RCP forbids floats; the Rust core would reject a re-emitted exponent/precision-loss).
 func decode(b []byte, v any) error {
+	if err := rejectUnpairedSurrogates(b); err != nil {
+		return err
+	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	return dec.Decode(v)
+}
+
+// encoding/json replaces unpaired \uD800-\uDFFF escapes with U+FFFD. Check the raw JSON
+// string tokens first so an opaque identifier cannot silently change before the Rust RCP
+// canonicalizer sees it. JSON syntax and all other escapes remain the decoder's job.
+func rejectUnpairedSurrogates(b []byte) error {
+	inString := false
+	for i := 0; i < len(b); i++ {
+		switch b[i] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString || i+1 >= len(b) {
+				continue
+			}
+			if b[i+1] != 'u' {
+				i++ // escaped quote/backslash cannot open or close a string
+				continue
+			}
+			if i+5 >= len(b) {
+				continue // encoding/json reports the truncated escape
+			}
+			cp, err := strconv.ParseUint(string(b[i+2:i+6]), 16, 16)
+			if err != nil {
+				continue // encoding/json reports the malformed hex escape
+			}
+			if cp >= 0xDC00 && cp <= 0xDFFF {
+				return errors.New("unpaired low surrogate in JSON string")
+			}
+			if cp >= 0xD800 && cp <= 0xDBFF {
+				if i+11 >= len(b) || b[i+6] != '\\' || b[i+7] != 'u' {
+					return errors.New("unpaired high surrogate in JSON string")
+				}
+				low, err := strconv.ParseUint(string(b[i+8:i+12]), 16, 16)
+				if err != nil || low < 0xDC00 || low > 0xDFFF {
+					return errors.New("unpaired high surrogate in JSON string")
+				}
+				i += 11
+			} else {
+				i += 5
+			}
+		}
+	}
+	return nil
 }
 
 // ---- ingestion ----
