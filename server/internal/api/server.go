@@ -2376,7 +2376,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		return
 	}
 	if priorFound {
-		if gid, same := priorUseMatchesRequest(priorUse.JSON, useID, ur, brokerKind, paramsCommitment); same {
+		if gid, same := s.priorUseMatchesRequest(priorUse.JSON, useID, ur, brokerKind, paramsCommitment); same {
 			s.mUseOutcome.WithLabelValue("allow").Inc()
 			writeJSON(w, http.StatusCreated, map[string]any{
 				"use_id": useID, "grant_id": gid,
@@ -2435,7 +2435,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			// (capability/action/params/nonce/use_sig) must NOT collapse onto this receipt and return 201 while
 			// SKIPPING ValidateUse (which is what authorizes + consumes the credential), so also require the
 			// operation itself to match the signed receipt; anything else is a 409 BEFORE any side effect.
-			if gid, same := priorUseMatchesRequest(prior.JSON, useID, ur, brokerKind, paramsCommitment); same {
+			if gid, same := s.priorUseMatchesRequest(prior.JSON, useID, ur, brokerKind, paramsCommitment); same {
 				sealed, grantID, idempotent = prior.JSON, gid, true
 				return nil
 			}
@@ -2475,7 +2475,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			// is this exact operation; otherwise it is another record's receipt — returning it as ours would report
 			// an action that has no receipt of its own. Nothing of ours persisted and the caller has not acted, so
 			// release the consumed credential and 409.
-			if _, same := priorUseMatchesRequest(sealed, useID, ur, brokerKind, paramsCommitment); same {
+			if _, same := s.priorUseMatchesRequest(sealed, useID, ur, brokerKind, paramsCommitment); same {
 				idempotent = true
 				return nil
 			}
@@ -2526,9 +2526,9 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 
 // priorUseMatchesRequest is the single exact-retry rule for both the bounded
 // read-only fast path and the guarded write path.
-func priorUseMatchesRequest(recordJSON, useID string, ur useRequest, brokerKind, paramsCommitment string) (grantID string, same bool) {
+func (s *Server) priorUseMatchesRequest(recordJSON, useID string, ur useRequest, brokerKind, paramsCommitment string) (grantID string, same bool) {
 	rid, sessionID, kind, grantID := useReceiptIdentity(recordJSON)
-	return grantID, rid == useID && sessionID == ur.SessionID && kind == brokerKind && storedUseMatchesRequest(recordJSON, ur, paramsCommitment)
+	return grantID, rid == useID && sessionID == ur.SessionID && kind == brokerKind && s.storedUseMatchesRequest(recordJSON, ur, paramsCommitment)
 }
 
 // useReceiptIdentity extracts the identity tuple of a stored broker/resource record — its record_id,
@@ -2553,38 +2553,68 @@ func useReceiptIdentity(recJSON string) (recordID, sessionID, kind, grantID stri
 	return probe.RecordID, probe.SessionID, probe.Extensions.Broker.Kind, probe.Authority.GrantID
 }
 
-// storedUseMatchesRequest reports whether `ur` (with its computed paramsCommitment) describes the SAME use
-// operation as the stored receipt — comparing the action, the single-use nonce, the canonical PoP use_sig,
-// and the params commitment against the signed use_evidence + input_commit. The use_sig is the agent's
-// ed25519 PoP over the challenge binding grant_id/resource_id/action/params_commitment/credential_binding/
-// nonce, so matching it (plus the explicit fields) is a cryptographic match of the whole operation. Used to
-// keep an idem-key reuse that carries a DIFFERENT use from collapsing onto this receipt and skipping the
-// credential-consuming ValidateUse (adversarial review convergence). A malformed/non-canonical use_sig cannot match the
-// stored canonical one → not a match (fail closed to 409).
-func storedUseMatchesRequest(recordJSON string, ur useRequest, paramsCommitment string) bool {
+// storedUseMatchesRequest permits a committed exact retry without applying the
+// capability's CURRENT expiry, revocation, or replay state. It still verifies
+// the PRESENTED capability under this server's configured issuer key and
+// recomputes its descriptor-bound PoP challenge against the signed receipt.
+// This rejects changed tokens or use sequences even if the caller copies the
+// original use_sig; no raw capability has to be retained in the receipt.
+func (s *Server) storedUseMatchesRequest(recordJSON string, ur useRequest, paramsCommitment string) bool {
+	if s.brokerKey == nil {
+		return false
+	}
+	claims, err := broker.VerifyCapability(ur.Capability, s.brokerKey.Public().(ed25519.PublicKey))
+	if err != nil {
+		return false
+	}
 	var p struct {
+		ProjectID   string `json:"project_id"`
 		InputCommit struct {
 			Commitment string `json:"commitment"`
 		} `json:"input_commit"`
 		Extensions struct {
 			Broker struct {
 				UseEvidence struct {
-					Action string `json:"action"`
-					Nonce  string `json:"nonce"`
-					UseSig string `json:"use_sig"`
+					GrantID           string `json:"grant_id"`
+					JTI               string `json:"jti"`
+					ResourceID        string `json:"resource_id"`
+					Action            string `json:"action"`
+					Nonce             string `json:"nonce"`
+					UseSig            string `json:"use_sig"`
+					CnfPub            string `json:"cnf_pub"`
+					PopChallengeHash  string `json:"pop_challenge_hash"`
+					UseSequenceNumber int    `json:"use_sequence_number"`
 				} `json:"use_evidence"`
 			} `json:"broker"`
 		} `json:"extensions"`
 	}
-	if json.Unmarshal([]byte(recordJSON), &p) != nil {
+	if json.Unmarshal([]byte(recordJSON), &p) != nil || claims.Version != 2 ||
+		p.ProjectID != ur.ProjectID || claims.ProjectID != p.ProjectID {
 		return false
 	}
 	ue := p.Extensions.Broker.UseEvidence
-	canonSig := ur.UseSig // canonicalize the request sig the way the resource shim stores it
-	if raw, e := base64.RawURLEncoding.DecodeString(ur.UseSig); e == nil {
-		canonSig = base64.RawURLEncoding.EncodeToString(raw)
+	if ue.Action != ur.Action || ue.Nonce != ur.Nonce || ue.UseSequenceNumber != ur.UseSequenceNumber ||
+		p.InputCommit.Commitment != paramsCommitment ||
+		claims.Jti == "" || claims.Jti != ue.GrantID || claims.Jti != ue.JTI ||
+		claims.Aud != s.resourceID || claims.Aud != ue.ResourceID || claims.Act != ue.Action ||
+		claims.Cnf == "" || claims.Cnf != ue.CnfPub {
+		return false
 	}
-	return ue.Action == ur.Action && ue.Nonce == ur.Nonce && ue.UseSig == canonSig && p.InputCommit.Commitment == paramsCommitment
+	useSig, err := base64.RawURLEncoding.DecodeString(ur.UseSig)
+	if err != nil || len(useSig) != ed25519.SignatureSize ||
+		base64.RawURLEncoding.EncodeToString(useSig) != ue.UseSig {
+		return false
+	}
+	cnfPub, err := base64.RawURLEncoding.DecodeString(claims.Cnf)
+	if err != nil || len(cnfPub) != ed25519.PublicKeySize {
+		return false
+	}
+	binding, err := resourceshim.CredentialBinding(ur.Capability)
+	if err != nil {
+		return false
+	}
+	challenge := resourceshim.UsePoPChallenge(claims.Jti, ue.ResourceID, ue.Action, paramsCommitment, binding, ur.Nonce)
+	return ue.PopChallengeHash == "sha256:"+hex.EncodeToString(challenge) && ed25519.Verify(ed25519.PublicKey(cnfPub), challenge, useSig)
 }
 
 // storedOutcomeMatchesRequest reports whether the stored use_outcome receipt completes the SAME intent with

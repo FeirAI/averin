@@ -54,6 +54,28 @@ func mutateGrantBody(t *testing.T, body, field string, value any) string {
 	return string(b)
 }
 
+func resignCapabilityField(t *testing.T, token, field string, value any) string {
+	t.Helper()
+	encoded, _, ok := strings.Cut(token, ".")
+	if !ok {
+		t.Fatal("capability has no signature separator")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var descriptor map[string]any
+	if err := json.Unmarshal(payload, &descriptor); err != nil {
+		t.Fatal(err)
+	}
+	descriptor[field] = value
+	changed, err := json.Marshal(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return broker.MintCapability(changed, brokerIssuingKey())
+}
+
 func TestGrantPoPV2RouteRejectsEveryUnsignedSubstitution(t *testing.T) {
 	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
 	h := popTestServer(t, func() time.Time { return now })
@@ -397,7 +419,70 @@ func TestUsePreflightPreservesExpiredCommittedExactRetry(t *testing.T) {
 	if code, response := do(t, h, "POST", "/v2/use?project=p1", mutateGrantBody(t, use, "params", "SELECT 2")); code != http.StatusConflict {
 		t.Fatalf("changed request reused expired use idempotency key: %d %s", code, response)
 	}
+	encoded, _, _ := strings.Cut(grant.Capability, ".")
+	otherKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{78}, ed25519.SeedSize))
+	otherPub := base64.RawURLEncoding.EncodeToString(otherKey.Public().(ed25519.PublicKey))
+	changedTokens := []struct {
+		name, capability string
+	}{
+		{"malformed", "bad.token"},
+		{"signature", encoded + "." + base64.RawURLEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))},
+		{"jti", resignCapabilityField(t, grant.Capability, "jti", grant.GrantID+"-other")},
+		{"project", resignCapabilityField(t, grant.Capability, "project_id", "p2")},
+		{"cnf", resignCapabilityField(t, grant.Capability, "cnf", otherPub)},
+	}
+	for _, tc := range changedTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := mutateGrantBody(t, use, "capability", tc.capability) // retain the original use_sig
+			if code, response := do(t, h, "POST", "/v2/use?project=p1", changed); code != http.StatusConflict {
+				t.Fatalf("changed token reused committed receipt: %d %s", code, response)
+			}
+			if contentStore.puts != puts {
+				t.Fatalf("changed token wrote content: got %d puts, want %d", contentStore.puts, puts)
+			}
+		})
+	}
 	if contentStore.puts != puts {
 		t.Fatalf("committed retry or changed request wrote content: got %d puts, want %d", contentStore.puts, puts)
+	}
+}
+
+func TestUseCommittedRetryBindsBoundedSequenceWithoutContentWrite(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentStore := &countingContentStore{Store: content.NewMemStore()}
+	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(contentStore).Routes()
+	ak := grantAgentKey()
+	code, grantResponse := do(t, h, "POST", "/v2/grants", boundedGrantBody("idem-sequence-grant", 2, ak))
+	if code != http.StatusCreated {
+		t.Fatalf("bounded grant: %d %s", code, grantResponse)
+	}
+	var grant struct {
+		GrantID    string `json:"grant_id"`
+		Capability string `json:"capability"`
+	}
+	if err := json.Unmarshal([]byte(grantResponse), &grant); err != nil {
+		t.Fatal(err)
+	}
+	use := boundedUseBody(t, "idem-sequence-use", grant.Capability, grant.GrantID, ak, "SELECT 1", "nonce-sequence", 1)
+	if code, response := do(t, h, "POST", "/v2/use?project=p1", use); code != http.StatusCreated {
+		t.Fatalf("first bounded use: %d %s", code, response)
+	}
+	puts := contentStore.puts
+	changed := mutateGrantBody(t, use, "use_sequence_number", 2) // retain original capability and use_sig
+	if code, response := do(t, h, "POST", "/v2/use?project=p1", changed); code != http.StatusConflict {
+		t.Fatalf("changed use sequence reused committed receipt: %d %s", code, response)
+	}
+	if code, response := do(t, h, "POST", "/v2/use?project=p1", use); code != http.StatusCreated || !strings.Contains(response, `"idempotent":true`) {
+		t.Fatalf("original bounded use no longer replays: %d %s", code, response)
+	}
+	if contentStore.puts != puts {
+		t.Fatalf("changed or exact bounded retry wrote content: got %d puts, want %d", contentStore.puts, puts)
 	}
 }
