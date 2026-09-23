@@ -1,0 +1,13 @@
+Mutant: The decoder accepts nonzero unused bits in a three-symbol base64url tail.
+
+--- a/core/src/b64.rs
++++ b/core/src/b64.rs
+@@ -105,7 +105,7 @@
+                 | ((*chunk.get(2).unwrap_or(&0) as u32) << 6)
+                 | (*chunk.get(3).unwrap_or(&0) as u32);
+             if (chunk.len() == 2 && n & 0x0000_FFFF != 0)
+-                || (chunk.len() == 3 && n & 0x0000_00FF != 0)
++                || (chunk.len() == 3 && false)
+             {
+                 return Err(DecodeError::NonCanonical);
+             }

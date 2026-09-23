@@ -7,8 +7,8 @@
 #   inventory  python3 formal/check-refinement.py            (tag literals <-> Preimage.lean families)
 #   oracle     cargo test --test oracle                        (Rust bytes == executable Lean model)
 #   golden     cargo test --test golden                        (committed golden vectors)
-#   kani       the named bounded proof, only for m3 / m4       (see kani_harness below); for those two
-#              mutants the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
+#   kani       the named bounded proof for every property-bearing mutant (see kani_harness below);
+#              the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
 #
 # The suite passes only if every mutant is killed by at least one gate; it prints which gates killed each.
 # It first checks that every gate passes on the unmutated tree, so a gate that is simply broken cannot
@@ -16,7 +16,7 @@
 #
 #   bash formal/check-mutants.sh            # all gates for every mutant
 #   bash formal/check-mutants.sh --first    # stop at the first killing gate per mutant (faster)
-#   SKIP_KANI=1 bash formal/check-mutants.sh  # without cargo-kani (m3/m4 must then die to another gate)
+#   SKIP_KANI=1 bash formal/check-mutants.sh  # diagnostic only; Kani-only mutants may survive
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -32,8 +32,15 @@ export CARGO_TARGET_DIR="$work/target"
 
 kani_harness() {
   case "$1" in
+    m2-*) echo string_escape_roundtrip ;;
     m3-*) echo utf16_key_order_is_exact ;;
     m4-*) echo lp_into_frames_exactly ;;
+    m9-*) echo one_byte_tail_is_canonical ;;
+    m10-*) echo two_byte_tail_is_canonical ;;
+    m11-*) echo full_chunk_is_canonical ;;
+    m12-*) echo utf16_strict_matches_std ;;
+    m13-*) echo accepted_integer_spelling_is_canonical ;;
+    m14-*) echo parse_never_panics ;;
   esac
 }
 
@@ -80,7 +87,7 @@ for g in inventory oracle golden; do
   fi
 done
 if [ "$use_kani" = 1 ]; then
-  for h in utf16_key_order_is_exact lp_into_frames_exactly; do
+  for h in string_escape_roundtrip utf16_key_order_is_exact lp_into_frames_exactly one_byte_tail_is_canonical two_byte_tail_is_canonical full_chunk_is_canonical utf16_strict_matches_std accepted_integer_spelling_is_canonical parse_never_panics; do
     if ! run_gate "baseline-$h" kani "$h"; then
       echo "check-mutants: FAIL: Kani harness $h fails on the unmutated tree" >&2
       exit 1

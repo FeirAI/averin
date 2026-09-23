@@ -1,0 +1,12 @@
+Mutant: The full-chunk encoder writes a different fourth symbol.
+
+--- a/core/src/b64.rs
++++ b/core/src/b64.rs
+@@ -27,7 +27,7 @@
+         symbols[2] = ENC[((n >> 6) & 63) as usize];
+     }
+     if chunk.len() > 2 {
+-        symbols[3] = ENC[(n & 63) as usize];
++        symbols[3] = ENC[((n + 1) & 63) as usize];
+     }
+     (symbols, chunk.len() + 1)

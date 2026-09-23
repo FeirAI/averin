@@ -1,0 +1,12 @@
+Mutant: The parser indexes into a truncated Unicode escape instead of rejecting it.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -540,7 +540,7 @@
+     }
+
+     fn parse_hex4(&mut self) -> Result<u16, ParseError> {
+-        if self.i + 4 > self.s.len() {
++        if self.i + 4 < self.s.len() {
+             return Err(self.err("truncated \\u escape"));
+         }

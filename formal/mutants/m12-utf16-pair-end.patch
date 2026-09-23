@@ -1,0 +1,11 @@
+Mutant: The strict UTF-16 decoder rejects the final valid low surrogate.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -593,7 +593,7 @@
+                 // high surrogate; need a following low surrogate
+                 let lo = *units.get(i + 1).ok_or("unpaired high surrogate")?;
+-                if !(0xDC00..=0xDFFF).contains(&lo) {
++                if !(0xDC00..=0xDFFE).contains(&lo) {
+                     return Err("high surrogate not followed by low surrogate");
+                 }

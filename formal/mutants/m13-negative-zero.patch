@@ -1,0 +1,12 @@
+Mutant: The parser accepts the noncanonical integer spelling negative zero.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -384,7 +384,7 @@
+         }
+         let lexeme = std::str::from_utf8(&self.s[start..self.i]).unwrap();
+         // RCP §3: `-0` is not a canonical integer spelling (consistent with rejecting `00`/`01`).
+-        if lexeme == "-0" {
++        if lexeme == "-00" {
+             return Err(ParseError {
+                 message: ParseMessage::Static("negative zero is not a canonical integer"),
