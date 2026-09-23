@@ -287,6 +287,27 @@ func (p *Postgres) BrokerSeqAt(projectID string, seq int64) (BrokerSeqReservatio
 	return res, true, nil
 }
 
+// RecordIDUniqueEnforced reports whether migration 0002 built the UNIQUE record_id index
+// (records_project_record_id_uniq, valid and indisunique) on THIS schema's records table. On a DB that already held
+// a historical duplicate, 0002 falls back to the NON-unique records_project_record_id_idx (RAISE WARNING) and this
+// returns false: only the api's process-local probe then guards record_id uniqueness. 'records'::regclass resolves
+// through the connection's search_path, so it names the same table every other query here uses.
+func (p *Postgres) RecordIDUniqueEnforced() (bool, error) {
+	ctx := background()
+	var ok bool
+	if err := p.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+			WHERE i.indrelid = 'records'::regclass
+			  AND c.relname = 'records_project_record_id_uniq'
+			  AND i.indisunique AND i.indisvalid
+		)
+	`).Scan(&ok); err != nil {
+		return false, fmt.Errorf("store: record_id unique index probe: %w", err)
+	}
+	return ok, nil
+}
+
 // VoidBrokerSeq inserts the (insert-only) broker_seq_void marker for a reservation, under the same per-project
 // advisory lock as allocation/release. The broker_seq row itself is kept (see the Store doc).
 func (p *Postgres) VoidBrokerSeq(projectID, grantID string, seq int64) error {

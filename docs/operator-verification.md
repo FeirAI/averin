@@ -163,13 +163,35 @@ Remediation, per unrecorded seq `k` in `[1..M]`:
 
 1. If the grant's client is still around, have it retry under its original `idempotency_key`: the retry
    reclaims seq `k` and the gap closes.
-2. Otherwise, once the reservation is older than `AVERIN_BROKER_SEQ_VOID_MIN_AGE` (default `1h`), call
-   `POST /v2/broker-seq/void?project=<id>` with `{"project_id":"<id>","broker_seq":k,"reason":"..."}`. The
-   server confirms from the store that nothing records seq `k` (a seq whose ambiguous commit actually landed is
-   refused), retires the reserved `grant_id` (a later retry of it is a `409`; re-issue under a new key), and
-   seals a broker-signed `grant_void` tombstone binding the project, `k` and that `grant_id`.
+2. Otherwise, once the reservation **and its grant's latest attempt** are both older than
+   `AVERIN_BROKER_SEQ_VOID_MIN_AGE` (default `1h`), call `POST /v2/broker-seq/void?project=<id>` with
+   `{"project_id":"<id>","broker_seq":k,"reason":"..."}`. The server confirms from the store that nothing
+   records seq `k` (a seq whose ambiguous commit actually landed is refused), retires the reserved `grant_id`
+   (a later retry of it is a `409`; re-issue under a new key), and seals a broker-signed `grant_void`
+   tombstone binding the project, `k` and that `grant_id`. When revocation is enabled, it also **revokes**
+   that `grant_id`, so a capability minted for it stops working at `/v2/use`. Without revocation, such a
+   capability stays usable until it expires. In that case, enable `AVERIN_REVOCATION_SEED` and
+   `POST /v2/revoke` the `grant_id`, or wait out its TTL.
 3. `POST /v2/checkpoints` now signs. The offline verifier accepts the tombstone as filling seq `k`
    (`broker_trust: sequence_verified`), does not count it in `grant_total`, and never matches a use to it.
+
+What makes a void safe against a commit that is still in flight:
+
+- **Latest-attempt age.** The age is measured from the later of the seq's `allocated_at` and the last time
+  its grant attempted the seq on this server (every retry refreshes that time, although a retry never
+  refreshes `allocated_at`).
+- **Ingest lock.** Within one process the void and every grant commit are serialized.
+- **UNIQUE `record_id` index.** On Postgres, the void requires the UNIQUE index `records_project_record_id_uniq`
+  from migration `0002`. The tombstone's `record_id` is the voided `grant_id`, so at most one of the two can
+  land. If `0002` logged its WARNING and built a non-unique index (historical duplicate `record_id`s), every
+  void is refused with `409` until you resolve the duplicate and rebuild the index as UNIQUE. Check with
+  `SELECT indisunique FROM pg_index WHERE indexrelid = 'records_project_record_id_uniq'::regclass;`.
+
+The first two guards are process-local. On a multi-instance deployment only the UNIQUE index closes the race
+between a retry on one instance and a void on another. The age compares the database clock (`allocated_at`
+is Postgres `now()`) with the server clock. If the database clock runs behind, reservations look older by
+that difference, so keep the minimum age far above any plausible clock skew. The route has no separate
+operator privilege: any holder of the project's write key can call it.
 
 A tombstone is the broker's signed statement that seq `k` was never issued. An auditor who holds a credential
 carrying seq `k`, or finds a grant record claiming it, has evidence of equivocation: the verifier reports a

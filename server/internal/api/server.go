@@ -79,6 +79,15 @@ type Server struct {
 	// brokerSeqVoidMinAge is the safety age a reserved broker_seq must reach before POST /v2/broker-seq/void may
 	// fill it with a grant_void tombstone (AVERIN_BROKER_SEQ_VOID_MIN_AGE; DefaultBrokerSeqVoidMinAge).
 	brokerSeqVoidMinAge time.Duration
+	// seqAttempts is the void's second age input: the app-clock time of the LATEST attempt (allocate or settle) of
+	// each grant_id that allocated/reused a broker_seq on THIS process, keyed project\x00grant_id. The store's
+	// allocated_at is stamped only on the fresh insert (Postgres cannot refresh it — broker_seq is insert-only), so
+	// without this a retry at T0+59m whose commit is still in flight would not stop a void at T0+60m. Entries older
+	// than brokerSeqVoidMinAge can no longer block a void and are pruned (see noteSeqAttempt). Guarded by
+	// seqAttemptsMu. Process-local: a multi-instance deployment is closed only by the UNIQUE record_id index.
+	seqAttemptsMu      sync.Mutex
+	seqAttempts        map[string]time.Time
+	seqAttemptsPruneAt int
 	// M5 (ADR 0005): the revocation authority key (role-separated from broker/resource/signing/attestation/TSA).
 	// When set, POST /v2/revoke records a grant_id as revoked, and each /v2/export carries a signed, time-bounded
 	// revocation_list over the project's revoked set (the verifier blocks any use of a revoked grant). nil =
@@ -340,6 +349,13 @@ func (s *Server) WithReadiness(name string, p Pinger) *Server {
 // scrape (e.g. a pgx pool's live connection counts via PoolStat).
 func (s *Server) WithGauge(name, help string, fn func() float64) *Server {
 	s.metrics.GaugeFunc(name, help, fn)
+	return s
+}
+
+// WithClock replaces the server's clock (default time.Now) — for tests that must drive time-dependent paths such as
+// the broker_seq void's safety age. Pair it with the store's clock (store.Mem.WithClock) when both must agree.
+func (s *Server) WithClock(now func() time.Time) *Server {
+	s.now = now
 	return s
 }
 
@@ -1817,7 +1833,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		// number (the rollback is safe under ingestMu — no other grant allocates in between).
 		allocated, fresh := false, false
 		prepared, e = broker.Prepare(req, grantID, func() (int64, error) {
-			seq, isFresh, aerr := s.st.AllocateBrokerSeq(gr.ProjectID, grantID)
+			seq, isFresh, aerr := s.allocateBrokerSeq(gr.ProjectID, grantID)
 			fresh = isFresh
 			if aerr == nil && seq < 1 {
 				// a store-contract violation (non-positive seq with no error) is a 500 dependency bug,
@@ -1946,6 +1962,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 //     higher seqs) stays reserved so this grant's retry refills it rather than leaving an unrefillable mid-hole.
 //     A failed release is folded into the error; createCheckpoint independently refuses to sign over any gap.
 func (s *Server) settleFailedGrantSeq(projectID, grantID string, fresh bool, cause error) error {
+	s.noteSeqAttempt(projectID, grantID) // the attempt ends now: a commit it left in flight is at most this old
 	if !fresh {
 		return fmt.Errorf("%w — broker_seq left RESERVED (reused from a prior attempt of this grant whose commit may still land; never released by a retry)", cause)
 	}

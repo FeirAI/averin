@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"testing"
+	"time"
 )
 
 // exerciseDisclosures runs the disclosure-store contract against any Store implementation, so Mem
@@ -256,6 +257,28 @@ func exerciseBrokerSeqVoid(t *testing.T, s Store) {
 
 func TestMemBrokerSeqVoid(t *testing.T) {
 	exerciseBrokerSeqVoid(t, NewMem())
+}
+
+// TestMemBrokerSeqAllocatedAtUsesClock: the Mem store stamps allocated_at with its injectable clock (not time.Now),
+// set once on the fresh allocation and NOT refreshed by an idempotent retry (matching Postgres' insert-only row).
+func TestMemBrokerSeqAllocatedAtUsesClock(t *testing.T) {
+	t0 := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	now := t0
+	m := NewMem().WithClock(func() time.Time { return now })
+	if ok, err := m.RecordIDUniqueEnforced(); err != nil || !ok {
+		t.Fatalf("Mem always enforces record_id uniqueness: %v, %v", ok, err)
+	}
+	if _, fresh, err := m.AllocateBrokerSeq("p", "g1"); err != nil || !fresh {
+		t.Fatalf("alloc: fresh=%v err=%v", fresh, err)
+	}
+	now = t0.Add(time.Hour)
+	if _, fresh, err := m.AllocateBrokerSeq("p", "g1"); err != nil || fresh {
+		t.Fatalf("retry: fresh=%v err=%v", fresh, err)
+	}
+	res, found, err := m.BrokerSeqAt("p", 1)
+	if err != nil || !found || !res.AllocatedAt.Equal(t0) {
+		t.Fatalf("allocated_at = %v (found=%v err=%v); want the injected clock's T0, unrefreshed by the retry", res.AllocatedAt, found, err)
+	}
 }
 
 // exerciseIdemBinding pins the converged idempotency-key-binding contract shared by Mem and Postgres

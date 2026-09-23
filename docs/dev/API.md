@@ -327,16 +327,62 @@ Only a seq that meets **all** of these is voided:
    `broker_seq`. The store read decides this, so a seq whose ambiguous commit actually landed is refused
    whatever its age (`409`).
 3. It does not back a live two-phase pending grant (`409`, retry its finalize or wait 15 minutes).
-4. It is at least `AVERIN_BROKER_SEQ_VOID_MIN_AGE` old (default `1h`; `409` otherwise).
+4. Both the reservation **and the latest attempt of its grant** are at least
+   `AVERIN_BROKER_SEQ_VOID_MIN_AGE` old (default `1h`; `409` otherwise). The store's `allocated_at` is
+   stamped once, on the first allocation, and a retry that reuses the seq does not refresh it, so the
+   server also tracks, in memory, the last time each grant attempted its seq (allocate or failed commit)
+   and measures the age from the later of the two. A retry at `T0+59m` whose commit is still in flight
+   therefore blocks a void at `T0+60m`.
+5. The store enforces per-project `record_id` uniqueness. On Postgres this means migration `0002` built the
+   UNIQUE index `records_project_record_id_uniq`. If the database held historical duplicate `record_id`s,
+   `0002` builds a non-unique index and logs a WARNING. In that case every void is refused with `409`,
+   because the tombstone's `record_id` is the voided `grant_id` and only that UNIQUE index guarantees that
+   at most one of {the grant, its tombstone} lands. Resolve the duplicate and build the UNIQUE index first.
+   The in-memory store always enforces uniqueness.
+
+**Limits of these checks.**
+
+- Checks 2 to 4 run inside one server process, under its ingest lock and against its in-memory attempt
+  times. With several instances sharing one Postgres, a retry on instance A and a void on instance B do
+  not see each other. Only the UNIQUE `record_id` index (check 5) closes that race.
+- The age compares Postgres `now()` (the DB host's clock, used for `allocated_at`) with the server's own
+  clock. If the DB clock runs behind the app clock, reservations look older by the difference. Keep
+  `AVERIN_BROKER_SEQ_VOID_MIN_AGE` far above any plausible clock skew. The latest-attempt time uses the
+  server clock on both sides, so skew does not affect it.
+- The uniqueness index is over `md5(record_id)`. A tenant that writes two *different* `record_id`s with
+  equal md5 into one project gets a `409` (`record_id already used`) on the second. This only affects
+  that tenant's own project: taking another record's id would require an md5 second preimage.
+
+**Capability revocation.** A void retires the `grant_id` for issuance, but on its own it does not
+invalidate a capability already minted for that `grant_id`. When revocation is enabled
+(`AVERIN_REVOCATION_SEED`), the void also **revokes** the voided `grant_id`, exactly as
+[`POST /v2/revoke`](#post-v2revoke) would. `/v2/use` then rejects the capability immediately,
+and the next export's signed `revocation_list` carries the id. The response then includes
+`"revoked": true`. If that revocation fails (`429` revoked-set cap, `503` durable persist), the call
+returns that error after the tombstone is sealed. Repeating the call, which is idempotent, retries the
+revocation. **Without revocation enabled**, such a capability stays usable at `/v2/use` until it expires.
+In that case, enable revocation, or wait out the grant's TTL, before you rely on the void.
+
+**Authorization.** The server has no separate operator or admin privilege. This route is gated only by
+the project-scoped API key, like every `/v2/` route, so **any writer for a project can void that
+project's aged, unrecorded seqs**. Restrict who holds project write keys, or put this route behind an
+operator-only proxy rule, if that matters in your deployment.
 
 Request: `{ "project_id": "...", "broker_seq": <n>, "session_id": "...", "reason": "..." }`
 (`project_id` and `broker_seq` required; `session_id` defaults to `broker-seq-void`; `reason` is
 bound into the signed evidence).
 
-**Response `201`:** `{ "voided_broker_seq": <n>, "grant_id": "...", "created": true, "record": { /* tombstone */ } }`.
+**Response `201`:** `{ "voided_broker_seq": <n>, "grant_id": "...", "created": true, "record": { /* tombstone */ } }`
+(plus `"revoked": true` when revocation is enabled).
 A repeat of a completed void returns the same tombstone with `200` and `"created": false`. Errors:
-`400`, `403`, `404`, `409`, `500`, `501` (broker not enabled). Project-scoped auth applies like every
-`/v2/` route.
+`400`, `403`, `404`, `409` (recorded, live pending grant, too young, or no UNIQUE `record_id` index),
+`429`/`503` (the tombstone is sealed but revoking its `grant_id` failed; repeat the call), `500`,
+`501` (broker not enabled).
+
+**Verifier compatibility.** Verifier builds from before `grant_void` existed do not recognise the
+tombstone's role. They report it as an unrecognized broker record and **fail the bundle**. Auditors must
+use a verifier that includes ADR 0004 amendment A1 (`docs/decisions/0004-tier-b-residual-reduction.md`)
+to verify a bundle that contains a void.
 
 **Upgrade note.** Before this release, any failure after a seq was allocated could leave it reserved, so
 a project that ever hit a transient grant seal or insert error may refuse every checkpoint once this

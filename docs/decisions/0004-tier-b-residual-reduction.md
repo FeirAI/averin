@@ -333,6 +333,66 @@ detected; clean anchored sequence → `sequence_verified`; unanchored head → `
   multi-instance deployment must hold a distributed per-project lock across allocate→seal→insert (the
   Postgres advisory lock is the extension point). Stated, not hidden.
 
+### D6 amendment A1 — operator-voidable `broker_seq` (`grant_void` tombstones)
+
+**Status:** Implemented (server `POST /v2/broker-seq/void`, verifier `BrokerRole::Void`).
+**Date:** 2026-09-23.
+
+**Problem.** A `broker_seq` can be reserved for a grant that never records. This happens when the grant's
+commit was ambiguous and its client never retried, or when the release of a failed allocation was lost.
+The recorded log is then short of `[1..max]`. The producer refuses to anchor a gap, because an anchored gap
+would fail verification forever, so every later checkpoint is refused. Without a remediation, one abandoned
+grant stops a project's checkpoints permanently.
+
+**Mechanism.** The operator seals a broker-signed **tombstone** that fills exactly that seq:
+
+- The tombstone is a record classified by the new role tuple
+  `(extensions.broker.kind == "grant_void", authority.enforcement_point == "credential_broker")`.
+- Its `extensions.broker.void_evidence` carries `domain = "averin.broker.grant_void.v1"`, `project_id`,
+  `broker_seq`, the reserved `grant_id`, `voided_at`, `reason` and, under federation, `broker_id`.
+  The domain tag keeps the canonical bytes, and therefore the signed `evidence_hash`, disjoint from any
+  `grant_evidence`.
+- Its `record_id` is the voided `grant_id`. It is signed like a grant's authority block.
+- It is folded into `broker_grant_head` (and into the per-`broker_id` head under M4) exactly like a grant.
+
+**Verifier contract.**
+
+1. A tombstone fills its seq in the gapless-prefix check. It is **never** a grant: it is not counted in
+   `grant_total`, it is not joinable by a use, and it is never eligible for Tier-B.
+2. A tombstone must meet all of the following, or it is a hard issue and fills nothing:
+   - it carries the domain tag;
+   - its `broker_seq` is at least 1;
+   - its `void_evidence.grant_id` equals its `record_id`, and its `void_evidence.project_id` equals the
+     record's `project_id`;
+   - its `evidence_hash` re-derives from `void_evidence`;
+   - it verifies under a pinned broker key set, when one is pinned;
+   - it carries a `broker_id` while federation is active.
+3. A tombstone and a grant that both claim one seq are a duplicate-`broker_seq` violation. A bundle that
+   carries both a tombstone and a grant with the voided `grant_id` fails ("a voided reservation was issued").
+4. A tombstone is the broker's signed statement that the seq was never issued. A credential or grant record
+   that surfaces carrying that seq is evidence of equivocation.
+
+**Server guards.** The server voids a seq only when all of the following hold:
+
+- the seq is allocated;
+- nothing records it (the store read decides);
+- no live two-phase pending grant backs it;
+- both `allocated_at` and the grant's latest attempt are older than `AVERIN_BROKER_SEQ_VOID_MIN_AGE`;
+- the store enforces `record_id` uniqueness. On Postgres this means the UNIQUE index
+  `records_project_record_id_uniq`; a void is refused on the non-unique fallback from migration 0002.
+
+The UNIQUE index makes the tombstone and any late commit of the voided grant mutually exclusive. It is the
+only guard that holds across instances; the age and ingest-lock checks are process-local. When revocation is
+configured, the void also revokes the voided `grant_id`. Any holder of the project's write key may void,
+because the server has no separate operator privilege (see `docs/dev/API.md`).
+
+**Compatibility, a breaking change for old verifiers.** A verifier built before this amendment has no
+`grant_void` tuple. It classifies the tombstone as a record that claims a broker `kind` without a recognized
+role, and under R2 rule 4 ("not a recognized broker/resource role", fail-closed) it **fails the bundle**.
+The failure is conservative: an old verifier never accepts a tombstone as filling a seq. It does mean that a
+project which has voided a seq needs a verifier that includes this amendment, including the pinned WASM
+verifier build, before its bundles verify.
+
 ## D7 — Deployment attestation evaluation (claims, not enforced reality)
 
 **Residual (ADR 0003):** `attestation_status:"unevaluated"` — isolation/egress/non-transferability are

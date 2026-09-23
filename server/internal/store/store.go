@@ -67,7 +67,9 @@ var ErrRecordIDConflict = errors.New("store: record_id already used by a differe
 var ErrBrokerSeqVoided = errors.New("store: this grant's broker_seq was voided by the operator (grant_void tombstone); re-issue under a new idempotency key")
 
 // BrokerSeqReservation is one row of the broker_seq allocation ledger: the grant_id holding seq, when it was
-// allocated (the store's clock), and whether an operator has voided it.
+// allocated (the STORE's clock — Postgres now() on the DB server, the Mem store's injectable clock), and whether an
+// operator has voided it. AllocatedAt is set once, on the fresh insert, and never refreshed by an idempotent retry
+// (fresh=false; Postgres cannot — broker_seq is insert-only), so it is NOT the time of the grant's latest attempt.
 type BrokerSeqReservation struct {
 	GrantID     string
 	Seq         int64
@@ -183,6 +185,13 @@ type Store interface {
 	// the voided seq back). Idempotent for the same (grantID, seq); an error if seq is not reserved by grantID. The
 	// caller (the api, under ingestMu) seals the grant_void tombstone that fills the seq in the recorded log.
 	VoidBrokerSeq(projectID, grantID string, seq int64) error
+	// RecordIDUniqueEnforced reports whether the store itself (not just the api's under-lock probe) enforces
+	// per-project record_id uniqueness. The operator void relies on it: the tombstone's record_id IS the voided
+	// grant_id, so a UNIQUE record_id backstop makes a void and a still-in-flight commit of that grant mutually
+	// exclusive even when the api's process-local checks cannot see the in-flight commit. Mem always enforces it
+	// (under its mutex); Postgres does only when migration 0002 built the UNIQUE index records_project_record_id_uniq
+	// (on a DB that held historical duplicates it falls back to a NON-unique index, and this returns false).
+	RecordIDUniqueEnforced() (bool, error)
 
 	// Disclosures returns every disclosure secret for the project (for selective_disclosure export),
 	// in canonical (record_id, field) order. Disclosure secrets are written atomically with their
@@ -202,6 +211,7 @@ type Store interface {
 type Mem struct {
 	mu       sync.Mutex
 	projects map[string]*project
+	now      func() time.Time // the store's clock (broker_seq allocated_at); WithClock injects one for tests
 }
 
 type project struct {
@@ -219,7 +229,19 @@ type project struct {
 	voided     map[string]struct{}  // grant_id -> voided (row kept in brokerSeq; never released or re-allocated)
 }
 
-func NewMem() *Mem { return &Mem{projects: map[string]*project{}} }
+func NewMem() *Mem { return &Mem{projects: map[string]*project{}, now: time.Now} }
+
+// WithClock sets the clock the Mem store stamps broker_seq allocations with (allocated_at, the operator void's
+// safety age), so tests can drive it together with the api's injectable clock (api.Server.WithClock).
+func (m *Mem) WithClock(now func() time.Time) *Mem {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.now = now
+	return m
+}
+
+// RecordIDUniqueEnforced: Mem enforces per-project record_id uniqueness in PutRecord under its mutex, always.
+func (m *Mem) RecordIDUniqueEnforced() (bool, error) { return true, nil }
 
 func (m *Mem) proj(id string) *project {
 	p := m.projects[id]
@@ -476,7 +498,7 @@ func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, bool, error) 
 		}
 	}
 	p.brokerSeq[grantID] = max + 1
-	p.brokerAt[grantID] = time.Now()
+	p.brokerAt[grantID] = m.now()
 	return max + 1, true, nil
 }
 

@@ -56,7 +56,7 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 			sealed, created = existing.JSON, false
 			return nil
 		}
-		seq, fresh, aerr := s.st.AllocateBrokerSeq(gr.ProjectID, grantID)
+		seq, fresh, aerr := s.allocateBrokerSeq(gr.ProjectID, grantID)
 		if aerr != nil {
 			return fmt.Errorf("allocate broker_seq: %w", aerr)
 		}

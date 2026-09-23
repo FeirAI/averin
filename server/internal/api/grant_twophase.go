@@ -399,7 +399,7 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 	commitErr := func() error {
 		s.ingestMu.Lock()
 		defer s.ingestMu.Unlock()
-		seq, fresh, aerr := s.st.AllocateBrokerSeq(fr.ProjectID, grantID)
+		seq, fresh, aerr := s.allocateBrokerSeq(fr.ProjectID, grantID)
 		if aerr != nil {
 			return fmt.Errorf("allocate broker_seq: %w", aerr)
 		}
