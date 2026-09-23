@@ -188,34 +188,31 @@ is covered by the adversarial suite; it is not formally modelled yet.
 
 ## Storage model
 
-The `store.Store` interface (`server/internal/store/store.go`) has two implementations:
+The `store.Store` interface (`server/internal/store/store.go`) has in-memory and
+Postgres implementations. The in-memory store is volatile but uses the same
+project-session contract for tests and standalone development. Postgres is
+append-only for signed evidence: the runtime role has no UPDATE/DELETE on
+history tables. Versioned migrations run at startup; steady-state boot issues
+no DDL.
 
-- **In-memory** (`store.NewMem`) — default. Correct within one process but **NOT durable** (lost on
-  restart) and the `heads → seal → put` ingest path is not a single atomic transaction. Dev /
-  single-process only.
-- **Postgres** (`store.NewPostgres`, selected when `AVERIN_DATABASE_URL` is set) — **append-only at the
-  database** (the migration `REVOKE`s UPDATE/DELETE/TRUNCATE, verified under a least-privilege role),
-  with idempotency + content-hash collapse + a DAG-derived frontier computed in SQL. A single versioned
-  migration (`server/internal/pgschema`, advisory-lock-guarded, folding the store + ledger + durable
-  schemas under one `schema_migrations` version) auto-applies on first startup (`docker compose up` is
-  turnkey); a steady-state boot issues zero DDL, and a DB newer than the binary is a fail-closed refusal
-  to start. See CONFIGURATION.md → "Schema versioning & upgrades".
+Every authoritative project write enters `WithProjectWrite`. A persisted
+`project_write_guard` row is locked before reading the frontier, allocation,
+revocation, pending state or ledger claims. The callback uses one transaction
+and one connection through COMMIT, including insert and checkpoint frontier or
+history reads. Projects have distinct guards, so a wait on project A does not
+block project B. The same contract applies to all route writers, and a missing
+or malformed per-project `record_id` UNIQUE index refuses unsafe writes while
+leaving history readable. A lost COMMIT acknowledgment is typed as ambiguous;
+callers reconcile only the exact operation identity before reporting success.
+Known server-side rejection is a definite abort.
 
-  **Single-writer-per-project, in-process only (NOT a DB serializable transaction).** The `heads → seal
-  → put` ingest critical section is serialized by a **process-local mutex** (`ingestMu` in
-  `server/internal/api/server.go`), so concurrent ingests within ONE server process cannot read a stale
-  frontier and fork the DAG. `PutRecord` itself runs at Postgres's default (read-committed) isolation —
-  it is NOT a `SERIALIZABLE` transaction. The only DB-level advisory lock (`pg_advisory_xact_lock`,
-  `store/postgres.go` `AllocateBrokerSeq`) covers **broker_seq allocation**, not the record frontier.
-  **Consequence (deploy-critical):** running **two averin replicas against the same
-  `AVERIN_DATABASE_URL` can silently fork a project's DAG** — the in-process mutex does not span
-  processes. Run averin as a **single writer per project** (one replica, or shard projects across
-  replicas so no project is written by more than one). A real cross-replica frontier lock is a DEFERRED
-  item; see `docs/dev/LIMITATIONS.md`.
-
-  In Postgres mode, revocations and pending two-phase grants are persisted and rehydrated at boot.
-  Request handling still uses per-process caches, so this does not synchronize live replicas; see
-  [LIMITATIONS.md](LIMITATIONS.md).
+Exports read records, checkpoints, anchors, revocations and selected disclosure
+metadata from one repeatable-read snapshot. An RFC 3161 anchor is attached only
+after its checkpoint commits and can be backfilled idempotently. Live replicas
+read pending grants and revocations from the project Store, not from boot
+caches. The full multi-replica deployment claim still depends on the capability,
+ledger-scope and sequence-recovery changes tracked in the adjacent plans; keep
+the single-writer deployment policy until that matrix is integrated and tested.
 
 Append-only is the integrity invariant: records are written once, keyed by `(project, idempotency
 key)`; a retry collapses onto the existing row rather than duplicating. Disclosure secrets are
