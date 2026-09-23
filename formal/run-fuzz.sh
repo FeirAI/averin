@@ -25,4 +25,4 @@ shasum -a 256 "$tmp/corpus-1.tsv"
 
 # Build the same C ABI core for WASM without touching the verifier's tracked supply-chain pin.
 cargo build --locked --release -p averin-decision-core --target wasm32-unknown-unknown --no-default-features --lib
-bun formal/fuzz/check-wasm.js target/wasm32-unknown-unknown/release/averin_decision_core.wasm "$tmp/corpus-1.tsv"
+bun formal/fuzz/check-wasm.js "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/averin_decision_core.wasm" "$tmp/corpus-1.tsv"
