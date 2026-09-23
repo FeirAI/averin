@@ -3,14 +3,15 @@ import Averin.Preimage
 /-!
 # The rest of the preimage catalogue
 
-`Averin.Preimage` covers the LP-framed families. This module covers every *other* byte string
-averin hashes or signs, and proves each one distinguishable from the framed families and from
-each other:
+`Averin.Preimage` covers the LP-framed families. This module covers every *other* message an averin
+signing key signs, and every other preimage the verifier recomputes, and proves each one
+distinguishable from the framed families and from each other:
 
 | Family | Source | Shape |
 |---|---|---|
 | grant PoP challenge | `server/internal/broker/broker.go` `Request.Challenge` | canonical JSON object, first byte `{` (signed by the agent key) |
 | denial salt | `server/internal/api/server.go` (`averin.denial.salt.v1`) | fixed ASCII string (signed by the broker key) |
+| capability token | `server/internal/broker/broker.go::mint` | `base64url(descriptor)` text, first byte `e` (signed by the broker key) |
 | `cnf_kid` input | `core/src/verify.rs::cnf_kid` | raw 32-byte Ed25519 public key |
 | credential binding | `verify.rs` D6.4 (`sha256(descriptor)`) | canonical JSON descriptor, first byte `{` |
 | server record ids | `server.go::uuidV5Shaped` | `namespace ‖ 0x00 ‖ project ‖ 0x00 ‖ idem` |
@@ -18,6 +19,16 @@ each other:
 
 RFC 3161 tokens are verified, never produced, and are out of scope (`check-refinement.py` allowlists
 them).
+
+**Not catalogued (untagged plain SHA-256, no signature over them).** The server also hashes bytes
+with no domain tag: the RFC 3161 imprint `sha256(checkpoint_hash string)` (`server.go`
+`anchorCheckpoint`, a format fixed by the TSA protocol), content addresses (`content.go::Digest`),
+the witness fork-detection id (`witness.go::canonHash`), idempotency digests of request bodies
+(`server.go`, OTel ingest), the bearer-token comparison (`auth.go`), the denial-budget map key and
+the self-verify cache key. None of these is signed, and each is compared only against a digest of
+the same kind, so they rely on SHA-256 collision resistance alone and have no cross-family
+confusion to rule out. They are listed here so the scope is explicit; `check-refinement.py` sees
+only tagged preimages, by construction.
 
 The headline results:
 
@@ -29,6 +40,9 @@ The headline results:
 * `pop_ne_digest`, `pop_ne_framed`, `salt_ne_digest`, `salt_ne_framed`: the agent-signed JSON
   challenge and the broker-signed salt can never be confused with a framed signed message or a raw
   32-byte challenge digest (they are also disjuncts of `Seal.HonestSigner`).
+* `capability_head`, `capability_ne_framed`, `capability_ne_pop`, `capability_ne_salt`: the
+  broker-signed capability-token text (`base64url` of a JSON descriptor) starts with `e`, so it is
+  never a framed message, a PoP challenge or the salt, and `Seal.HonestSigner` admits it.
 * `nul_join_inj` / `server_id_inj`: server ids are injective in `(namespace, project, idem)`
   **provided none of them contains a NUL byte**; `server_id_nul_collision` exhibits the collision
   when a project may contain NUL. The server rejects NUL in `project_id`, `idempotency_key` and
@@ -192,6 +206,60 @@ theorem salt_ne_pop (m : Bytes) (h : ValidatedPop m) : denialSalt ≠ m := by
   intro he
   have h1 := h.1
   rw [← he] at h1
+  simp [denialSalt, ascii] at h1
+
+/-- RFC 4648 §5 base64url alphabet. -/
+def b64Alphabet : Bytes :=
+  ascii "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+def b64Sym (i : Nat) : Nat := b64Alphabet.getD i 0
+
+/-- Unpadded base64url (`base64.RawURLEncoding`), 3 bytes to 4 symbols. -/
+def b64url : Bytes → Bytes
+  | a :: b :: c :: rest =>
+      [b64Sym (a / 4), b64Sym (a % 4 * 16 + b / 16), b64Sym (b % 16 * 4 + c / 64), b64Sym (c % 64)] ++
+        b64url rest
+  | [a, b] => [b64Sym (a / 4), b64Sym (a % 4 * 16 + b / 16), b64Sym (b % 16 * 4)]
+  | [a] => [b64Sym (a / 4), b64Sym (a % 4 * 16)]
+  | [] => []
+
+/-- `broker.go::mint`: the broker key signs `base64url(descriptor)` (the token text before `.`),
+where the descriptor is canonical JSON. -/
+def capabilityMsg (descriptor : Bytes) : Bytes := b64url descriptor
+
+/-- A capability-token message over a JSON descriptor starts with `e` (`'{' = 0x7B`, whose top six
+bits are 30, and `b64Alphabet[30] = 'e'`). -/
+theorem capability_head (d : Bytes) (h : d.head? = some 123) :
+    (capabilityMsg d).head? = some 101 := by
+  match d, h with
+  | 123 :: _ :: _ :: _, _ => rfl
+  | [123, _], _ => rfl
+  | [123], _ => rfl
+
+theorem capability_ne_framed (d : Bytes) (h : d.head? = some 123) (F : Family)
+    (hshort : (ascii F.tag).length < 256) (vs : List Bytes) (t : Bytes) :
+    capabilityMsg d ≠ F.msg vs t := by
+  intro he
+  have h1 := capability_head d h
+  rw [he, framed_head_zero F hshort vs t] at h1
+  simp at h1
+
+/-- The capability text is admitted by `Seal.HonestSigner`'s unframed disjunct. -/
+theorem capability_head_ne_zero (d : Bytes) (h : d.head? = some 123) :
+    (capabilityMsg d).head? ≠ some 0 := by
+  rw [capability_head d h]; simp
+
+theorem capability_ne_pop (d m : Bytes) (h : d.head? = some 123) (hm : ValidatedPop m) :
+    capabilityMsg d ≠ m := by
+  intro he
+  have h1 := hm.1
+  rw [← he, capability_head d h] at h1
+  simp at h1
+
+theorem capability_ne_salt (d : Bytes) (h : d.head? = some 123) : capabilityMsg d ≠ denialSalt := by
+  intro he
+  have h1 := capability_head d h
+  rw [he] at h1
   simp [denialSalt, ascii] at h1
 
 /-! ## Output formats never collide -/

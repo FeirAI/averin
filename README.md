@@ -130,11 +130,14 @@ properties. These are checked by machine in [`formal/`](formal/README.md), not o
 - **Lean 4** (no `sorry`; every declaration audited to depend only on Lean's three standard axioms):
   - **the seal theorem.** If a record or checkpoint verifies under the pinned key, its body is
     *exactly* one the key holder sealed, unless SHA-256 has a collision. This holds even when the
-    same key also signs every other kind of message averin signs, so a signature cannot be
+    same key also signs every other framed family, raw 32-byte challenge digests, and any
+    unframed text (JSON challenges, capability tokens, the denial salt), so a signature cannot be
     replayed across contexts even if roles share a key;
   - canonical JSON (RCP v1) is injective;
-  - every byte string averin hashes or signs is in a proved-disjoint catalogue: framed families,
-    JSON challenges, raw keys, Merkle nodes and server id derivations;
+  - every message a signing key signs and every tagged or verifier-recomputed preimage is in a
+    proved-disjoint catalogue: framed families, JSON challenges, capability tokens, raw keys,
+    Merkle nodes and server id derivations (untagged, unsigned server-local digests such as
+    content addresses and idempotency keys are listed as out of scope);
   - hiding commitments are binding;
   - **no omission, no injection.** A verified bundle is exactly the signed ancestor-closure of the
     latest checkpoint;
