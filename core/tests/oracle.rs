@@ -335,6 +335,82 @@ fn every_preimage_family_matches_model() {
             "revocation leaf" => check(name, &verify::revocation_leaf_preimage(st(&f[0])), want),
             other => panic!("no Rust builder mapped for Lean family {other:?}: add one here"),
         }
+        // Check the production hash result separately from its production preimage bytes.
+        // A caller that stops using the checked byte helper must fail this assertion.
+        let digest: Option<Vec<u8>> = match name {
+            "use PoP" => Some(
+                verify::use_pop_challenge(
+                    st(&f[0]),
+                    st(&f[1]),
+                    st(&f[2]),
+                    st(&f[3]),
+                    st(&f[4]),
+                    st(&f[5]),
+                )
+                .to_vec(),
+            ),
+            "cosig approval" => Some(
+                verify::cosig_approval_challenge(
+                    st(&f[0]),
+                    st(&f[1]),
+                    st(&f[2]),
+                    int(&f[3]),
+                    int(&f[4]),
+                )
+                .to_vec(),
+            ),
+            "delegation hop" => Some(
+                verify::delegation_hop_challenge(
+                    st(&f[0]),
+                    int(&f[1]),
+                    st(&f[2]),
+                    st(&f[3]),
+                    st(&f[4]),
+                    st(&f[5]),
+                    st(&f[6]),
+                    int(&f[7]),
+                )
+                .to_vec(),
+            ),
+            "introspection transcript" => Some(
+                verify::introspection_transcript_challenge(
+                    st(&f[0]),
+                    st(&f[1]),
+                    st(&f[2]),
+                    st(&f[3]),
+                    int(&f[4]),
+                    int(&f[5]),
+                )
+                .to_vec(),
+            ),
+            "federation cert" => Some(
+                verify::federation_cert_challenge(
+                    st(&f[0]),
+                    st(&f[1]),
+                    st(&f[2]),
+                    st(&f[3]),
+                    st(&f[4]),
+                    int(&f[5]),
+                )
+                .to_vec(),
+            ),
+            "revocation leaf" => Some(verify::revocation_leaf(st(&f[0])).to_vec()),
+            "use ledger" => Some(unhex(
+                verify::ledger_commitment(st(&f[0]), st(&f[1]), int(&f[2]))
+                    .trim_start_matches("sha256:"),
+            )),
+            "grant head seed" => Some(unhex(
+                verify::grant_head_root(&[]).trim_start_matches("sha256:"),
+            )),
+            _ => None,
+        };
+        if let Some(digest) = digest {
+            assert_eq!(
+                digest,
+                sha256(&unhex(want)).to_vec(),
+                "{name}: production digest differs from Lean preimage hash"
+            );
+        }
         seen.push(name.to_string());
     }
     assert!(seen.len() >= 18, "family samples went missing: {seen:?}");
