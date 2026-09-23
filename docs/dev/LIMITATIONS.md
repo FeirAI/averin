@@ -78,10 +78,10 @@ closed; it does not promise write availability.
 
 The in-memory implementation mirrors transactional rollback and project
 isolation but is volatile across process restart. A multi-replica deployment
-claim still needs the capability project binding, ledger nonce scope and
-sequence-recovery matrix from plans 004, 005 and 008. Until those land together,
-keep the single-writer-per-project deployment policy even though frontier and
-checkpoint writes now serialize across replicas.
+claim still needs authenticated capability-project binding, scoped nonce
+claims and bounded sequence recovery tested together. Until then, keep the
+single-writer-per-project deployment policy even though frontier and checkpoint
+writes now serialize across replicas.
 
 ## Storage growth is unbounded and append-only (monitoring is a hard deploy requirement)
 

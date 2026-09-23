@@ -210,9 +210,9 @@ Exports read records, checkpoints, anchors, revocations and selected disclosure
 metadata from one repeatable-read snapshot. An RFC 3161 anchor is attached only
 after its checkpoint commits and can be backfilled idempotently. Live replicas
 read pending grants and revocations from the project Store, not from boot
-caches. The full multi-replica deployment claim still depends on the capability,
-ledger-scope and sequence-recovery changes tracked in the adjacent plans; keep
-the single-writer deployment policy until that matrix is integrated and tested.
+caches. Keep the single-writer deployment policy until authenticated
+capability-project binding, scoped nonce claims and bounded sequence recovery
+are integrated and tested together.
 
 Append-only is the integrity invariant: records are written once, keyed by `(project, idempotency
 key)`; a retry collapses onto the existing row rather than duplicating. Disclosure secrets are

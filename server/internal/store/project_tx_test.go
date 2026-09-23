@@ -57,6 +57,16 @@ func TestProjectCommitClassification(t *testing.T) {
 	if err := classifyProjectCommit(&pgconn.PgError{Code: "40001", Message: "serialization failure"}); !errors.Is(err, ErrTransactionAborted) || errors.Is(err, ErrCommitAmbiguous) {
 		t.Fatalf("server-rejected commit classified as ambiguous: %v", err)
 	}
+	for _, code := range []string{"40003", "08007", "57P01", "XX999"} {
+		if err := classifyProjectCommit(&pgconn.PgError{Code: code}); !errors.Is(err, ErrCommitAmbiguous) || errors.Is(err, ErrTransactionAborted) {
+			t.Fatalf("commit SQLSTATE %s classified as definite abort: %v", code, err)
+		}
+	}
+	for _, code := range []string{"40P01", "25P02", "23503"} {
+		if err := classifyProjectCommit(&pgconn.PgError{Code: code}); !errors.Is(err, ErrTransactionAborted) || errors.Is(err, ErrCommitAmbiguous) {
+			t.Fatalf("commit SQLSTATE %s classified as unknown: %v", code, err)
+		}
+	}
 	if err := classifyProjectCommit(context.DeadlineExceeded); !errors.Is(err, ErrCommitAmbiguous) || errors.Is(err, ErrTransactionAborted) {
 		t.Fatalf("unknown commit result classified as abort: %v", err)
 	}
@@ -283,6 +293,9 @@ func TestPostgresProjectWriteRejectsWrongIndex(t *testing.T) {
 	err := p.WithProjectWrite(ctx, "p", func(Store) error { t.Fatal("unsafe callback ran"); return nil })
 	if err == nil {
 		t.Fatal("wrong index accepted")
+	}
+	if _, _, err := p.PutRecord("p", "k", rec("h", "s")); err == nil {
+		t.Fatal("standalone write bypassed project transaction index check")
 	}
 	if _, err := p.AllRecords("p"); err != nil {
 		t.Fatalf("damaged history must remain readable: %v", err)
