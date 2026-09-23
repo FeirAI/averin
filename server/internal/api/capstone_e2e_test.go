@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feirai/averin/server/internal/api"
 	"github.com/feirai/averin/server/internal/core"
@@ -30,7 +32,11 @@ func TestCapstoneAttestedCompleteEndToEnd(t *testing.T) {
 	// The operator's affirmative side-effect closure: the deployment may touch orders-db under the read
 	// action and nothing else. The verifier checks the brokered surface stayed within this.
 	manifest := `{"side_effect_closure":[{"resource_id":"orders-db","action":"db.query:orders-ro","may_touch":[]}]}`
-	h := api.New(c, store.NewMem(), "k0").
+	// Fix time so a committed cross-target corpus has a stable validity window;
+	// randomized span IDs and hiding nonces still make each run's bytes distinct.
+	fixedNow := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+	h := api.New(c, store.NewMem().WithClock(fixedNow), "k0").
+		WithClock(fixedNow).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
 		WithAttestation(att).
@@ -65,8 +71,8 @@ func TestCapstoneAttestedCompleteEndToEnd(t *testing.T) {
 		t.Fatalf("taxonomy.Sign: %v", err)
 	}
 
-	opts := fmt.Sprintf(`{"broker_authority_keys":[%q],"resource_authority_keys":[%q],"tsa_keys":[%q],"attestation_keys":[%q],"taxonomy":%s,"taxonomy_keys":[%q],"taxonomy_digest":%q,"taxonomy_version":%d}`,
-		c.PubKey(), rc.PubKey(), tsaPubEncoded(tsa), attestPubEncoded(att), taxJSON, attestPubEncoded(taxKey), digest, ver)
+	opts := fmt.Sprintf(`{"signing_keys":[%q],"broker_authority_keys":[%q],"resource_authority_keys":[%q],"tsa_keys":[%q],"attestation_keys":[%q],"taxonomy":%s,"taxonomy_keys":[%q],"taxonomy_digest":%q,"taxonomy_version":%d,"claim_policy":{"requested":"complete_brokered"}}`,
+		c.PubKey(), c.PubKey(), rc.PubKey(), tsaPubEncoded(tsa), attestPubEncoded(att), taxJSON, attestPubEncoded(taxKey), digest, ver)
 	rep := c.VerifyBundleWith(anchored, opts)
 
 	for _, want := range []string{
@@ -78,10 +84,22 @@ func TestCapstoneAttestedCompleteEndToEnd(t *testing.T) {
 		`"taxonomy_status":"validated"`,
 		`"broker_trust":"sequence_verified"`,
 		`"uses_matched":1`,
-		`"uses_pop_reverified":1`, // the two-phase use's PoP was independently re-run offline (D2)
+		`"uses_pop_reverified":1`,         // the two-phase use's PoP was independently re-run offline (D2)
+		`"complete_brokered":"satisfied"`, // immutable claim requires pinned, body-bound producer evidence
 	} {
 		if !strings.Contains(rep, want) {
 			t.Fatalf("capstone bundle must verify with %s\nreport: %s", want, rep)
+		}
+	}
+	if path := os.Getenv("AVERIN_WRITE_V3_CAPSTONE_FIXTURE"); path != "" {
+		fixture, err := json.Marshal(map[string]json.RawMessage{
+			"bundle": json.RawMessage(anchored), "opts": json.RawMessage(opts),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, fixture, 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
@@ -135,8 +153,8 @@ func TestCapstoneWithRevocationConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("taxonomy.Sign: %v", err)
 	}
-	opts := fmt.Sprintf(`{"broker_authority_keys":[%q],"resource_authority_keys":[%q],"tsa_keys":[%q],"attestation_keys":[%q],"revocation_keys":[%q],"taxonomy":%s,"taxonomy_keys":[%q],"taxonomy_digest":%q,"taxonomy_version":%d}`,
-		c.PubKey(), rc.PubKey(), tsaPubEncoded(tsa), attestPubEncoded(att), attestPubEncoded(rev), taxJSON, attestPubEncoded(taxKey), digest, ver)
+	opts := fmt.Sprintf(`{"signing_keys":[%q],"broker_authority_keys":[%q],"resource_authority_keys":[%q],"tsa_keys":[%q],"attestation_keys":[%q],"revocation_keys":[%q],"taxonomy":%s,"taxonomy_keys":[%q],"taxonomy_digest":%q,"taxonomy_version":%d}`,
+		c.PubKey(), c.PubKey(), rc.PubKey(), tsaPubEncoded(tsa), attestPubEncoded(att), attestPubEncoded(rev), taxJSON, attestPubEncoded(taxKey), digest, ver)
 	rep := c.VerifyBundleWith(anchored, opts)
 	for _, want := range []string{
 		`"ok":true`,
@@ -209,8 +227,8 @@ func TestCapstoneOverBoundedReuseEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("taxonomy.Sign: %v", err)
 	}
-	opts := fmt.Sprintf(`{"broker_authority_keys":[%q],"resource_authority_keys":[%q],"tsa_keys":[%q],"attestation_keys":[%q],"taxonomy":%s,"taxonomy_keys":[%q],"taxonomy_digest":%q,"taxonomy_version":%d}`,
-		c.PubKey(), rc.PubKey(), tsaPubEncoded(tsa), attestPubEncoded(att), taxJSON, attestPubEncoded(taxKey), digest, ver)
+	opts := fmt.Sprintf(`{"signing_keys":[%q],"broker_authority_keys":[%q],"resource_authority_keys":[%q],"tsa_keys":[%q],"attestation_keys":[%q],"taxonomy":%s,"taxonomy_keys":[%q],"taxonomy_digest":%q,"taxonomy_version":%d}`,
+		c.PubKey(), c.PubKey(), rc.PubKey(), tsaPubEncoded(tsa), attestPubEncoded(att), taxJSON, attestPubEncoded(taxKey), digest, ver)
 	rep := c.VerifyBundleWith(anchored, opts)
 
 	for _, want := range []string{
