@@ -99,6 +99,9 @@
       ({report.checkpoints_anchors_attached ?? report.checkpoints_anchored} anchors attached,
       {report.checkpoints_anchored} verified-anchored) ·
       chain {report.chain_ok ? "ok" : "BROKEN"}
+      {#if report.record_trust?.some((r: any) => r.authority === "legacy_unbound")}
+        <div class="lvl">Historical authority signatures verify, but do not bind their record bodies.</div>
+      {/if}
       {#if report.first_broken_link}<div class="broken">{report.first_broken_link}</div>{/if}
       {#if !report.keys_externally_pinned}
         <div class="lvl">Keys are bundle-supplied (not externally pinned): this proves internal

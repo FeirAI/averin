@@ -94,6 +94,42 @@ func TestOpaqueIdentityRejectsNonNFCBeforeIngest(t *testing.T) {
 	}
 }
 
+func TestV3AuthorityRejectsNonNFCIdentityBeforeLookupOrSeal(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewMem()
+	h := api.New(c, st, "k0").Routes()
+	for _, identity := range []struct{ field, value string }{
+		{"project_id", "e\u0301"}, {"record_id", "e\u0301"},
+	} {
+		body := map[string]any{
+			"idempotency_key": "v3-bad-identity", "project_id": "p", "session_id": "s",
+			"record_id": "r", "span_id": "sp", "parent_span_id": nil,
+			"agent_ts": "2026-01-01T00:00:00.000Z",
+			"authority": map[string]any{
+				"source": "human_signed", "proof_version": "v3",
+				"subject_projection": "averin.authority.subject.v1",
+				"evidence_hash":      "sha256:" + strings.Repeat("1", 64),
+				"subject_digest":     "sha256:" + strings.Repeat("2", 64),
+				"evidence_sig":       "ed25519:invalid",
+			},
+		}
+		body[identity.field] = identity.value
+		raw, _ := json.Marshal(body)
+		if code, resp := do(t, h, "POST", "/v2/records", string(raw)); code != http.StatusBadRequest || !strings.Contains(resp, "NFC") {
+			t.Fatalf("v3 %s non-NFC accepted (%d): %s", identity.field, code, resp)
+		}
+	}
+	for _, project := range []string{"p", "e\u0301", "é"} {
+		recs, err := st.AllRecords(project)
+		if err != nil || len(recs) != 0 {
+			t.Fatalf("invalid v3 identity persisted a record in %q: %d, %v", project, len(recs), err)
+		}
+	}
+}
+
 func TestMalformedUTF8JSONIsRejectedBeforeDecode(t *testing.T) {
 	h := newSrv(t)
 	body := `{"idempotency_key":"k","project_id":"p","session_id":"s","content":{"note":"` + string([]byte{0xff}) + `"}}`

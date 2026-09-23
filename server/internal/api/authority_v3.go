@@ -87,6 +87,21 @@ func validateExternalV3Subject(rec map[string]any) error {
 	return nil
 }
 
+func (s *Server) validateExternalAuthoritySubject(rec map[string]any) error {
+	if err := validateExternalV3Subject(rec); err != nil {
+		return err
+	}
+	if !s.requireBodyBoundAuthority || authorityV3Claim(rec) {
+		return nil
+	}
+	a, _ := rec["authority"].(map[string]any)
+	switch a["source"] {
+	case "policy_engine_signed", "human_signed", "delegate_signed", "gateway_enforced":
+		return errors.New("body-bound authority ingest policy requires proof_version v3")
+	}
+	return nil
+}
+
 func (s *Server) signLocalAuthorityV3(rec map[string]any, signer Sealer) error {
 	finalizeSemanticRecord(rec, s.now())
 	a, ok := rec["authority"].(map[string]any)

@@ -230,6 +230,8 @@ type Server struct {
 	// averin-server binary get the SAME posture — a test suite running fail-open while production runs
 	// fail-closed would be testing a different server than the one that ships. See normalizeAuthority.
 	requirePinnedAuthority bool
+	// Explicit rollout gate: require v3 for newly ingested external elevation.
+	requireBodyBoundAuthority bool
 	// authorityDowngradeLogAt throttles the WARNING that names a failed authority elevation (a govder/averin
 	// key misalignment can otherwise spam it on every ingest). Guarded by ingestMu: normalizeAuthority — its
 	// only writer — is only ever called from ingestOne while ingestMu is held, so it needs no extra lock.
@@ -441,6 +443,13 @@ func (s *Server) WithDeniedGrantLog() *Server {
 // elevation to fail). See normalizeAuthority.
 func (s *Server) WithRequirePinnedAuthority(v bool) *Server {
 	s.requirePinnedAuthority = v
+	return s
+}
+
+// WithRequireBodyBoundAuthority rejects new external v2 authority claims at
+// ingest. Historical v2 records remain readable as legacy_unbound on export.
+func (s *Server) WithRequireBodyBoundAuthority(v bool) *Server {
+	s.requireBodyBoundAuthority = v
 	return s
 }
 
@@ -1100,7 +1109,7 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := validateExternalV3Subject(probe); err != nil {
+		if err := s.validateExternalAuthoritySubject(probe); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1555,7 +1564,7 @@ func (s *Server) ingestOne(ctx context.Context, raw []byte, headerIdem string) (
 	if err := s.validateGenericRecordItem(rec); err != nil {
 		return "", false, err
 	}
-	if err := validateExternalV3Subject(rec); err != nil {
+	if err := s.validateExternalAuthoritySubject(rec); err != nil {
 		return "", false, err
 	}
 	projectID := stringField(rec, "project_id")

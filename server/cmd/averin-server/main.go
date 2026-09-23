@@ -208,6 +208,16 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 	srv.WithRequirePinnedAuthority(requirePinned)
+	// Reader-first rollout: enable after every external authority producer has
+	// moved to v3. This never changes the classification of immutable v2 history.
+	switch raw := os.Getenv("AVERIN_REQUIRE_BODY_BOUND_AUTHORITY"); raw {
+	case "", "0", "false":
+		srv.WithRequireBodyBoundAuthority(false)
+	case "1", "true":
+		srv.WithRequireBodyBoundAuthority(true)
+	default:
+		log.Fatalf("AVERIN_REQUIRE_BODY_BOUND_AUTHORITY must be 1/true/0/false (got %q)", raw)
+	}
 	if requirePinned {
 		log.Printf("AVERIN_REQUIRE_PINNED_AUTHORITY on (default): a claimed authority elevation that fails key verification is REJECTED (fail-closed), not downgraded to caller_declared")
 	} else {
