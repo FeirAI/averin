@@ -2951,6 +2951,57 @@ fn v3_signed_grant_and_pop_use_satisfy_body_bound_authorization() {
         .iter()
         .all(|entry| entry.authority == AuthorityTrust::Verified));
     assert_eq!(r.claims().authorized, ClaimDecision::Satisfied);
+
+    // Exercise the public JSON options path over exactly these signed bytes,
+    // then optionally emit them for native, cgo and WASM differential tests.
+    let pubkey = |seed: u8| {
+        CanonValue::string(encode_pubkey(
+            &signing_key_from_seed(&[seed; 32]).verifying_key(),
+        ))
+    };
+    let opts_json = CanonValue::object(vec![
+        ("signing_keys".into(), CanonValue::Array(vec![pubkey(0)])),
+        (
+            "broker_authority_keys".into(),
+            CanonValue::Array(vec![pubkey(0)]),
+        ),
+        (
+            "resource_authority_keys".into(),
+            CanonValue::Array(vec![pubkey(3)]),
+        ),
+        ("tsa_keys".into(), CanonValue::Array(vec![pubkey(200)])),
+        ("taxonomy_keys".into(), CanonValue::Array(vec![pubkey(11)])),
+        ("taxonomy".into(), opts.taxonomy.clone().unwrap()),
+        (
+            "taxonomy_digest".into(),
+            CanonValue::string(opts.taxonomy_digest.as_ref().unwrap()),
+        ),
+        (
+            "taxonomy_version".into(),
+            CanonValue::Int(opts.taxonomy_version.unwrap()),
+        ),
+        (
+            "claim_policy".into(),
+            CanonValue::object(vec![("requested".into(), CanonValue::string("authorized"))])
+                .unwrap(),
+        ),
+    ])
+    .unwrap();
+    let public = verify_bundle_with_json(&bundle.serialize(), &opts_json.serialize());
+    let public = CanonValue::parse(&public).unwrap();
+    assert_eq!(
+        public
+            .get("claims")
+            .and_then(|claims| claims.get("authorized"))
+            .and_then(CanonValue::as_str),
+        Some("satisfied")
+    );
+    if let Ok(path) = std::env::var("AVERIN_WRITE_V3_CLAIM_FIXTURE") {
+        let fixture =
+            CanonValue::object(vec![("bundle".into(), bundle), ("opts".into(), opts_json)])
+                .unwrap();
+        std::fs::write(path, fixture.serialize()).unwrap();
+    }
 }
 
 #[test]
