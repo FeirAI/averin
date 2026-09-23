@@ -136,7 +136,7 @@ properties. These are checked by machine in [`formal/`](formal/README.md), not o
   - canonical JSON (RCP v1) is injective;
   - every message a signing key signs and every tagged or verifier-recomputed preimage is in a
     proved-disjoint catalogue: framed families, JSON challenges, capability tokens, raw keys,
-    Merkle nodes and server id derivations (untagged, unsigned server-local digests such as
+    Merkle nodes, the RFC 3161 imprint string and server id derivations (untagged, unsigned server-local digests such as
     content addresses and idempotency keys are listed as out of scope);
   - hiding commitments are binding;
   - **no omission, no injection.** A verified bundle is exactly the signed ancestor-closure of the
@@ -145,9 +145,10 @@ properties. These are checked by machine in [`formal/`](formal/README.md), not o
 - **TLA+** models the grant-transparency log and the consume-before-act ledger. Every
   counterexample for a pre-fix design is kept as an expected failure. The shipped design has no
   anchored gap and no duplicate sequence number, including when an operator `grant_void` races
-  an in-flight retry. It has no permanent checkpoint outage, given that remediation, as long as a
-  client that retries forever eventually commits (a client that gives up is covered by the void;
-  one that retries forever with every attempt failing starves it, and the model shows that too).
+  an in-flight retry. With that remediation it has no permanent checkpoint outage, as long as a
+  client that retries forever eventually commits (checked for 2 grants under strong fairness; a
+  client that gives up is covered by the void, and one that retries forever with every attempt
+  failing starves it, which the model also shows).
 - **Kani** checks the real Rust encoders (base64url, `sha256:<hex>`, LP framing, key order).
 - **An executable Lean oracle** runs the model over a corpus (every C0 control, DEL, U+2028,
   BMP-vs-astral key order, i64 extremes, one sample per preimage family), and CI fails when the

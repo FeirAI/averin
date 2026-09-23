@@ -14,15 +14,15 @@ distinguishable from the framed families and from each other:
 | capability token | `server/internal/broker/broker.go::mint` | `base64url(descriptor)` text, first byte `e` (signed by the broker key) |
 | `cnf_kid` input | `core/src/verify.rs::cnf_kid` | raw 32-byte Ed25519 public key |
 | credential binding | `verify.rs` D6.4 (`sha256(descriptor)`) | canonical JSON descriptor, first byte `{` |
+| RFC 3161 imprint input | `server.go::anchorCheckpoint`, `rfc3161.rs` | the `sha256:<hex>` checkpoint-hash string, first byte `s`, 71 bytes |
 | server record ids | `server.go::uuidV5Shaped` | `namespace ‖ 0x00 ‖ project ‖ 0x00 ‖ idem` |
 | Merkle leaf / node | `verify.rs::merkle_leaf_hash` / `merkle_node_hash` | `0x00 ‖ v(32)` / `0x01 ‖ l(32) ‖ r(32)` |
 
 RFC 3161 tokens are verified, never produced, and are out of scope (`check-refinement.py` allowlists
 them).
 
-**Not catalogued (untagged plain SHA-256, no signature over them).** The server also hashes bytes
-with no domain tag: the RFC 3161 imprint `sha256(checkpoint_hash string)` (`server.go`
-`anchorCheckpoint`, a format fixed by the TSA protocol), content addresses (`content.go::Digest`),
+**Not catalogued (untagged plain SHA-256, no signature over them, never recomputed by the
+verifier).** The server also hashes bytes with no domain tag: content addresses (`content.go::Digest`),
 the witness fork-detection id (`witness.go::canonHash`), idempotency digests of request bodies
 (`server.go`, OTel ingest), the bearer-token comparison (`auth.go`), the denial-budget map key and
 the self-verify cache key. None of these is signed, and each is compared only against a digest of
@@ -40,6 +40,10 @@ The headline results:
 * `pop_ne_digest`, `pop_ne_framed`, `salt_ne_digest`, `salt_ne_framed`: the agent-signed JSON
   challenge and the broker-signed salt can never be confused with a framed signed message or a raw
   32-byte challenge digest (they are also disjuncts of `Seal.HonestSigner`).
+* `imprint_ne_framed`, `imprint_ne_merkle`, `imprint_ne_raw_key`, `credential_binding_ne_*`: the
+  two untagged preimages the verifier recomputes (the RFC 3161 imprint string, first byte `s`, and
+  the JSON credential descriptor, first byte `{`) are disjoint from every framed, Merkle and
+  raw-key preimage and from each other.
 * `capability_head`, `capability_ne_framed`, `capability_ne_pop`, `capability_ne_salt`: the
   broker-signed capability-token text (`base64url` of a JSON descriptor) starts with `e`, so it is
   never a framed message, a PoP challenge or the salt, and `Seal.HonestSigner` admits it.
@@ -174,6 +178,58 @@ theorem raw_key_ne_merkle (k v l r : Bytes) (hk : k.length = 32) (hv : v.length 
   refine ⟨fun h => ?_, fun h => ?_⟩
   · have := congrArg List.length h; simp [merkleLeaf, hk, hv] at this
   · have := congrArg List.length h; simp [merkleNode, hk, hl, hr] at this
+
+/-! ## Verifier-recomputed unframed preimages -/
+
+/-- The RFC 3161 message imprint input: the checkpoint hash as its `sha256:<64 hex>` STRING
+(`server.go::anchorCheckpoint`, re-imprinted by `rfc3161.rs` / `anchor.rs`). First byte `s`. -/
+def imprintInput (hex : Bytes) : Bytes := ascii "sha256:" ++ hex
+
+theorem imprint_head (hex : Bytes) : (imprintInput hex).head? = some 115 := by
+  simp [imprintInput, ascii]
+
+theorem imprint_length (hex : Bytes) (h : hex.length = 64) : (imprintInput hex).length = 71 := by
+  simp [imprintInput, h]; decide
+
+theorem imprint_ne_framed (hex m : Bytes) (hm : FramedHashInput m) : imprintInput hex ≠ m := by
+  intro h
+  have := framed_head m hm
+  rw [← h, imprint_head] at this
+  simp at this
+
+theorem imprint_ne_merkle (hex v l r : Bytes) :
+    imprintInput hex ≠ merkleLeaf v ∧ imprintInput hex ≠ merkleNode l r := by
+  refine ⟨fun h => ?_, fun h => ?_⟩
+  · have := imprint_head hex; rw [h] at this; simp [merkleLeaf] at this
+  · have := imprint_head hex; rw [h] at this; simp [merkleNode] at this
+
+theorem imprint_ne_raw_key (hex k : Bytes) (hh : hex.length = 64) (hk : k.length = 32) :
+    imprintInput hex ≠ k := by
+  intro h
+  have := imprint_length hex hh
+  rw [h, hk] at this
+  simp at this
+
+/-- The credential-binding digest input (`verify.rs` D6.4): the canonical JSON descriptor, first
+byte `{`. Never a framed hash preimage, a Merkle preimage or an imprint input. -/
+theorem credential_binding_ne_framed (d m : Bytes) (hd : d.head? = some 123)
+    (hm : FramedHashInput m) : d ≠ m := by
+  intro h
+  have := framed_head m hm
+  rw [← h, hd] at this
+  simp at this
+
+theorem credential_binding_ne_merkle (d v l r : Bytes) (hd : d.head? = some 123) :
+    d ≠ merkleLeaf v ∧ d ≠ merkleNode l r := by
+  refine ⟨fun h => ?_, fun h => ?_⟩
+  · rw [h] at hd; simp [merkleLeaf] at hd
+  · rw [h] at hd; simp [merkleNode] at hd
+
+theorem credential_binding_ne_imprint (d hex : Bytes) (hd : d.head? = some 123) :
+    d ≠ imprintInput hex := by
+  intro h
+  rw [h, imprint_head] at hd
+  simp at hd
 
 /-! ## Signed non-framed messages -/
 

@@ -31,8 +31,11 @@ CATALOGUE = ROOT / "formal" / "lean" / "Averin" / "Catalogue.lean"
 # not grepped: comments are dropped and every string literal ("…", '…', `…` raw/template strings) is
 # searched, so a tag in a Go raw string, after a `//` inside a string ("http://x"), or in a TS/Python
 # SDK is seen. A tag assembled at runtime cannot be seen by any textual check, so the sweep also
-# rejects the pieces: a literal that is exactly tag-shaped but unversioned ("averin.x", unless
-# UNVERSIONED_ALLOWLIST names it) or exactly a version suffix (".v1").
+# rejects the pieces: ANY literal that starts with "averin." or "flightrecorder." must be exactly a
+# versioned tag (checked against the catalogue) or be named in UNVERSIONED_ALLOWLIST. That rejects
+# unversioned tags, format templates ("averin.%s.v1", format!("averin.{k}.v1")), and split pieces
+# ("averin." + x, concat!("averin.", …)); a literal that is exactly a version suffix (".v1") is
+# rejected too.
 SWEEP_ROOTS = [
     ("core/src", "*.rs"),
     ("server/internal", "*.go"),
@@ -46,7 +49,7 @@ SWEEP_ROOTS = [
 ]
 SKIP_PARTS = {"tests", "test", "testdata", "node_modules", "dist", "target"}
 TAG_IN_LITERAL = re.compile(r"\b((?:averin|flightrecorder)\.[a-z0-9_]+(?:\.[a-z0-9_]+)*\.v[0-9]+)\b")
-UNVERSIONED = re.compile(r"(?:averin|flightrecorder)\.[A-Za-z0-9_.]+")
+TAG_PREFIX = ("averin.", "flightrecorder.")
 VERSION_ONLY = re.compile(r"\.v[0-9]+")
 UNVERSIONED_ALLOWLIST = {
     "averin.session": "OTel span attribute name (server OTel ingest), never hashed as a domain",
@@ -173,10 +176,11 @@ for root, pattern in SWEEP_ROOTS:
             for m in TAG_IN_LITERAL.finditer(lit):
                 swept += 1
                 rust_tags.setdefault(m.group(1), f"{rel}:{n}")
-            if UNVERSIONED.fullmatch(lit) and not TAG_IN_LITERAL.fullmatch(lit) \
+            if lit.startswith(TAG_PREFIX) and not TAG_IN_LITERAL.fullmatch(lit) \
                     and lit not in UNVERSIONED_ALLOWLIST:
-                errors.append(f"{rel}:{n}: unversioned tag-shaped literal {lit!r} (version it, or add it "
-                              "to UNVERSIONED_ALLOWLIST with a reason)")
+                errors.append(f"{rel}:{n}: literal {lit!r} starts like a tag but is not a whole versioned "
+                              "tag (write tags whole, never templated or split; or add it to "
+                              "UNVERSIONED_ALLOWLIST with a reason)")
             if VERSION_ONLY.fullmatch(lit):
                 errors.append(f"{rel}:{n}: bare version literal {lit!r}: tags must be written whole, "
                               "never concatenated")

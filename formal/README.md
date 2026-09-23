@@ -8,7 +8,7 @@ that keeps the gates honest.
 
 | Layer | Tool | What it covers | Run |
 |---|---|---|---|
-| Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every hashed and signed preimage (full catalogue, including JSON challenges, raw keys, Merkle nodes and server id derivations), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
+| Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every message a key signs and every tagged or verifier-recomputed preimage (catalogue includes JSON challenges, capability tokens, raw keys, Merkle nodes, the RFC 3161 imprint string and server id derivations; untagged server-local digests are listed as out of scope), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
 | Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order and transitive (parser-level and base64 chunk harnesses in an extended set) | `bash formal/run-kani.sh` |
 | Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log under failures, ambiguous commits, lost rollbacks and the operator `grant_void` tombstone (no anchored gap, no duplicate seq, no permanent checkpoint outage); consume-before-act ledger with multiple gateways, releases and TTL sweeps | `bash formal/tla/run-tlc.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
@@ -41,7 +41,8 @@ Everything between "signature verifies" and "same body" is proved, not assumed:
    broker challenge families sign.
    `Catalogue.lean` covers every remaining message a key signs and every remaining tagged or
    verifier-recomputed preimage: the JSON grant PoP challenge, the capability-token text, the
-   denial salt, the raw key under `cnf_kid`, the credential-binding descriptor,
+   denial salt, the raw key under `cnf_kid`, the credential-binding descriptor, the RFC 3161
+   imprint string,
    the `uuidV5Shaped` server ids, and the RFC 6962 Merkle leaf and node. It proves each one
    disjoint from every framed family, by first byte or by length. That argument used to live
    only in prose.
@@ -49,10 +50,11 @@ Everything between "signature verifies" and "same body" is proved, not assumed:
    collision otherwise. The server therefore rejects NUL in `project_id`, `idempotency_key` and
    `record_id`.
    Out of scope, and listed as such in `Catalogue.lean`: untagged, unsigned server-local SHA-256
-   inputs (RFC 3161 imprint, content addresses, witness fork id, idempotency digests, token
-   comparison, cache keys). Each is compared only with a digest of its own kind.
-   `check-refinement.py` sweeps every `averin.*.vN` literal in `core/src` and `server/`, and fails
-   unless each is a Lean family or catalogue tag.
+   inputs that the verifier never recomputes (content addresses, witness fork id, idempotency
+   digests, token comparison, cache keys). Each is compared only with a digest of its own kind.
+   `check-refinement.py` sweeps every `averin.*` literal in `core/src`, `server/internal`,
+   `server/cmd`, `sdk/`, `verifier/` and `web/src`, and fails unless each is a Lean family or
+   catalogue tag (see "Refinement gate" below).
 2. **No delimiter injection** (`Encoding.encodeFields_inj`, `Family.msg_inj`). Every preimage
    is `LP(tag) ‖ fields ‖ tail?`, and equal bytes imply equal fields.
 3. **Canonical JSON is injective** (`Canon.ser_injective`). The model covers `write_string`'s
@@ -144,9 +146,11 @@ Three checks, each doing what it is good at:
    be used. The sweep lexes `core/src`, `server/internal`, `server/cmd`, `sdk/`, `verifier/` and
    `web/src` (tests excluded): comments are dropped and every string literal is searched, including
    Go raw strings, JS template strings and literals containing `//`. A tag built at runtime cannot
-   be seen textually, so the sweep also rejects its pieces: an unversioned tag-shaped literal
-   (`"averin.x"`, unless allowlisted with a reason, like the OTel attribute `averin.session`) and a
-   bare `".v1"`. This is the one check that is textual by design, and it only sees tagged
+   be seen textually, so the sweep rejects its pieces: every literal starting with `averin.` or
+   `flightrecorder.` must be a whole versioned tag, which rules out unversioned names, format
+   templates (`"averin.%s.v1"`, `format!("averin.{k}.v1")`) and split pieces (`"averin." + x`),
+   unless it is allowlisted with a reason (like the OTel attribute `averin.session`). A bare
+   `".v1"` literal is rejected too. This is the one check that is textual by design, and it only sees tagged
    preimages; the untagged digests are listed as out of scope in `Catalogue.lean`.
 3. **Golden vectors** (`cargo test --test golden`), the committed cross-implementation contract.
 
@@ -221,10 +225,14 @@ golden vectors, the adversarial suite, and the audit's 200k-document differentia
 - An operator may void a reserved, unrecorded seq with a signed `grant_void` tombstone. The voided
   seq stays in the allocation max, and the voided grant id is retired: a later allocation for it is
   refused (409), as in the Go server.
-- Two void guards are modelled as switches: `AgeFromLastAttempt` (the void's minimum age is
-  measured from the grant's last attempt, so none of its commits can still be open) and
-  `UniqueIndex` (the `records` UNIQUE record_id index, which migration 0002 falls back from when a
-  historical duplicate exists).
+- Two void guards are modelled as independent switches. `AgeFromLastAttempt` is a guard on the
+  void itself: its minimum age is measured from the grant's last attempt, so none of its commits
+  can still be open. `UniqueIndex` is not a void guard; it acts on the landing: once a tombstone
+  holds the grant's record_id, an in-flight insert of that grant can only abort. Migration 0002
+  falls back to a non-unique index when a historical duplicate exists.
+- The model has one global `ingestMu` and one attempt map, i.e. **one server process**. In Go the
+  latest-attempt map is per process, so on a multi-replica deployment only the UNIQUE index closes
+  the race; `void_index_only` is the result that carries over, `void_age_only` is not.
 
 There is no `CONSTRAINT`: TLC's liveness checking is unsound under one. Allocation beyond a bound
 is disabled inside `Begin`, and every passing config also asserts `BoundNotBinding`, so the bound
@@ -240,10 +248,11 @@ Each configuration fixes one implementation variant and asserts **one** outcome:
 | `GrantLog_failclosed.cfg` | fail-closed checkpoint, release not restricted to the max or to freshly allocated seqs | **violates** `HoleFree`: an orphan released while higher seqs exist becomes a permanent mid-sequence hole |
 | `GrantLog_reuse_release.cfg` | release a seq that a retry *reused* after an ambiguous commit | **violates** `NoDuplicateSeq`: the late commit and the next grant share a seq |
 | `GrantLog_void_race.cfg` | void age measured from the *allocation*, no UNIQUE index | **violates** `NoDuplicateSeq`: the first attempt fails, a retry reuses the seq and its commit is left open, the void passes the age check, the retry lands, and the seq is held by the grant and the tombstone |
-| `GrantLog_void_age_only.cfg` | void age from the last attempt, no UNIQUE index | `AnchoredGapless` and `NoDuplicateSeq` hold |
-| `GrantLog_void_index_only.cfg` | UNIQUE index, void age from the allocation | `AnchoredGapless` and `NoDuplicateSeq` hold |
+| `GrantLog_void_age_only.cfg` | void age from the last attempt, no UNIQUE index (one process) | `AnchoredGapless` and `NoDuplicateSeq` hold (2.45M states) |
+| `GrantLog_void_index_only.cfg` | UNIQUE index, void age from the allocation | `AnchoredGapless` and `NoDuplicateSeq` hold (2.98M states: a different graph, in which voids do race in-flight retries) |
+| `GrantLog_void_backstop.cfg` | as `void_index_only`, non-vacuity | **violates** `NoVoidDuringFlight`: a grant is voided while a retry of it is in flight, and only the index stops that retry landing |
 | `GrantLog_void_reachable.cfg` | shipped design, non-vacuity | **violates** `NoVoid`: the guarded void is reachable, so the passing configs exercise it |
-| `GrantLog_fixed.cfg` | shipped design: release only fresh, max seqs; fail-closed checkpoint; operator void with both guards | `AnchoredGapless` and `NoDuplicateSeq` hold, exhaustively for 3 grants (2.45M states) |
+| `GrantLog_fixed.cfg` | shipped design: release only fresh, max seqs; fail-closed checkpoint; operator void with both guards | `AnchoredGapless` and `NoDuplicateSeq` hold, exhaustively for 3 grants (2.45M states; with the age guard in force the void never races an in-flight insert, so this is the same graph as `void_age_only`) |
 | `GrantLog_wedge.cfg` | no void; clients may never retry | **violates** `CheckpointRecovers`: an orphaned seq wedges checkpointing forever |
 | `GrantLog_fair_retry.cfg` | no void; every client retries until it commits | `CheckpointRecovers` holds |
 | `GrantLog_void_starved.cfg` | operator void; a client may retry forever with every attempt failing | **violates** `CheckpointRecovers`: each retry restarts the void's last-attempt age, so the void is never enabled |

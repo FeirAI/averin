@@ -86,7 +86,8 @@ what truly happened in the world.
 
 - the seal: a body that verifies is exactly a sealed body, unless SHA-256 has a collision;
 - canonical-JSON injectivity;
-- domain separation of every hashed and signed preimage;
+- domain separation of every message a signing key signs and every tagged or verifier-recomputed
+  preimage (untagged server-local digests are listed as out of scope in `Catalogue.lean`);
 - commitment binding;
 - no omission and no injection: a verified bundle is exactly the signed closure of the latest
   frontier;
