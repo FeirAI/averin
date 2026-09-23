@@ -138,6 +138,45 @@ func TestGrantPoPV2ExpiredNewProofButCommittedExactRetry(t *testing.T) {
 	}
 }
 
+func TestGrantPoPV2ChangedSenderKeyRetryCannotMintSecondGrant(t *testing.T) {
+	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	h := popTestServer(t, func() time.Time { return now })
+	firstKey := grantAgentKey()
+	secondKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{77}, ed25519.SeedSize))
+	first := grantBodyAt("idem-lost-response", "read:orders", firstKey, firstKey, now)
+	code, original := do(t, h, "POST", "/v2/grants", first)
+	if code != http.StatusCreated {
+		t.Fatalf("first grant: %d %s", code, original)
+	}
+	if code, response := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-lost-response", "read:orders", secondKey, secondKey, now)); code != http.StatusConflict {
+		t.Fatalf("new sender key under existing idempotency key: %d %s", code, response)
+	}
+	code, retried := do(t, h, "POST", "/v2/grants", first)
+	if code != http.StatusCreated {
+		t.Fatalf("original proof no longer retrieves its grant: %d %s", code, retried)
+	}
+	var a, b map[string]any
+	if err := json.Unmarshal([]byte(original), &a); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(retried), &b); err != nil {
+		t.Fatal(err)
+	}
+	if a["capability"] != b["capability"] || a["expires_at"] != b["expires_at"] {
+		t.Fatalf("exact retry changed capability or expiry: %s / %s", original, retried)
+	}
+	_, exported := do(t, h, "GET", "/v2/export?project=p1", "")
+	var bundle struct {
+		Records []json.RawMessage `json:"records"`
+	}
+	if err := json.Unmarshal([]byte(exported), &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Records) != 1 {
+		t.Fatalf("changed key created a second grant record: %s", exported)
+	}
+}
+
 func TestGrantPoPV2RejectsConflictingIdempotencyRepresentations(t *testing.T) {
 	now := time.Now().UTC()
 	h := popTestServer(t, func() time.Time { return now })
