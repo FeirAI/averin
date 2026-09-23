@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -76,33 +75,6 @@ func copyEvidence(m map[string]any) map[string]any {
 		c[k] = v
 	}
 	return c
-}
-
-// prunePending drops pending grants older than pendingTTL (an abandoned prepare must not leak memory). It
-// takes pendingMu itself (callers must NOT already hold it) and only for the brief in-memory sweep — the
-// durable deletes below run AFTER releasing it, so a slow/degraded Postgres pruning one stale entry cannot
-// stall the pendingMu-guarded map for every other in-flight prepare/finalize (finding C). When a durable
-// store is configured each pruned row is also dropped there — best-effort (a failed delete just leaves a
-// stale row that WithDurable's boot-time TTL check prunes again later; it is never rehydrated as live
-// because it is already past pendingTTL by then too).
-func (s *Server) prunePending(now time.Time) {
-	s.pendingMu.Lock()
-	var expired []*pendingGrant
-	for k, p := range s.pending {
-		if now.Sub(p.created) > pendingTTL {
-			delete(s.pending, k)
-			expired = append(expired, p)
-		}
-	}
-	s.pendingMu.Unlock()
-	if s.durable == nil {
-		return
-	}
-	for _, p := range expired {
-		if err := s.durable.DeletePending(p.gr.ProjectID, p.idemKey); err != nil {
-			log.Printf("WARNING: durable two-phase grants: prune expired pending row (project=%q idem=%q): %v", p.gr.ProjectID, p.idemKey, err)
-		}
-	}
 }
 
 // handleGrantPrepare is PHASE 1 of the online two-phase grant flow (ADR 0005 M6 Cosig / M2 Delegation): it
@@ -332,16 +304,25 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 
 	// Read the durable pending challenge for expensive signature checks, then
 	// revalidate this exact row under the project transaction at commit.
-	row, found, err := s.st.PendingGrant(fr.ProjectID, idem)
+	var row store.PendingGrant
+	var found bool
+	var existing store.Record
+	var committed bool
+	err = s.st.WithProjectRead(r.Context(), fr.ProjectID, func(st store.Store) error {
+		var e error
+		row, found, e = st.PendingGrant(fr.ProjectID, idem)
+		if e != nil || found {
+			return e
+		}
+		existing, committed, e = st.RecordByIdem(fr.ProjectID, idem)
+		return e
+	})
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "pending lookup: "+err.Error())
 		return
 	}
 	if !found {
-		if existing, ok, e := s.st.RecordByIdem(fr.ProjectID, idem); e != nil {
-			writeErr(w, http.StatusServiceUnavailable, "idempotency lookup: "+e.Error())
-			return
-		} else if ok {
+		if committed {
 			if same, pe := storedGrantMatchesRequest(existing.JSON, req); pe != nil || !same {
 				writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
 				return

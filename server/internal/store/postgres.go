@@ -84,9 +84,11 @@ func (p *Postgres) projectTx(projectID string) (pgx.Tx, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '10000ms'`); err != nil {
-		_ = tx.Rollback(ctx)
-		return nil, false, err
+	for _, setting := range []string{`SET LOCAL lock_timeout = '10000ms'`, `SET LOCAL statement_timeout = '30000ms'`, `SET LOCAL idle_in_transaction_session_timeout = '45000ms'`} {
+		if _, err := tx.Exec(ctx, setting); err != nil {
+			_ = tx.Rollback(ctx)
+			return nil, false, err
+		}
 	}
 	if err := lockProject(ctx, tx, projectID); err != nil {
 		_ = tx.Rollback(ctx)
@@ -111,15 +113,25 @@ func (p *Postgres) finishProjectTx(ctx context.Context, tx pgx.Tx, own bool) err
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := tx.Commit(cctx); err != nil {
-		return fmt.Errorf("%w: %v", ErrCommitAmbiguous, err)
+		return classifyProjectCommit(err)
 	}
 	return nil
+}
+
+func classifyProjectCommit(err error) error {
+	var serverErr *pgconn.PgError
+	if errors.Is(err, pgx.ErrTxCommitRollback) || errors.As(err, &serverErr) {
+		return fmt.Errorf("%w: %v", ErrTransactionAborted, err)
+	}
+	return fmt.Errorf("%w: %v", ErrCommitAmbiguous, err)
 }
 
 func (p *Postgres) WithProjectWrite(ctx context.Context, projectID string, fn func(Store) error) error {
 	if p.tx != nil {
 		return errors.New("store: nested project transaction")
 	}
+	ctx, cancelSession := context.WithTimeout(ctx, 45*time.Second)
+	defer cancelSession()
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("store: begin project write: %w", err)
@@ -156,7 +168,7 @@ func (p *Postgres) WithProjectWrite(ctx context.Context, projectID string, fn fu
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := tx.Commit(cctx); err != nil {
-		return fmt.Errorf("%w: %v", ErrCommitAmbiguous, err)
+		return classifyProjectCommit(err)
 	}
 	return nil
 }
@@ -165,6 +177,8 @@ func (p *Postgres) WithProjectRead(ctx context.Context, projectID string, fn fun
 	if p.tx != nil {
 		return errors.New("store: nested project transaction")
 	}
+	ctx, cancelSession := context.WithTimeout(ctx, 45*time.Second)
+	defer cancelSession()
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return fmt.Errorf("store: begin project read: %w", err)
