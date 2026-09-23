@@ -30,8 +30,10 @@ def failed_checks(output: str) -> list[dict[str, str]]:
 def target_counterexample(
     output: str, exit_code: int, source: str, description: str
 ) -> tuple[bool, str]:
-    if exit_code == 0 or exit_code == 124:
-        return False, "proof passed or timed out"
+    # Kani 0.68.0 returns 1 for a completed failed verification (observed on m9).
+    # Any other exit is a tool, timeout, or signal failure, not a mutant kill.
+    if exit_code != 1:
+        return False, "Kani did not exit as a completed failed verification"
     if "VERIFICATION:- FAILED" not in output:
         return False, "Kani did not report a completed failed verification"
     failures = failed_checks(output)
@@ -72,14 +74,17 @@ def self_test() -> None:
 \t - Location: core/src/b64.rs:190:10 in function target
 """
     tail = "\nSUMMARY:\n ** 1 of 2 failed\nVERIFICATION:- FAILED\n"
-    assert target_counterexample(prefix + tail, 10, "core/src/b64.rs", "assertion failed")[0]
+    assert target_counterexample(prefix + tail, 1, "core/src/b64.rs", "assertion failed")[0]
     assert not target_counterexample(prefix + tail, 0, "core/src/b64.rs", "assertion failed")[0]
     assert not target_counterexample(prefix + tail, 124, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix, 10, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(unwind + tail, 10, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + unwind + tail, 10, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + tail, 10, "core/src/canon.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + tail, 10, "core/src/b64.rs", "index out of bounds")[0]
+    assert not target_counterexample(prefix + tail, 137, "core/src/b64.rs", "assertion failed")[0]
+    assert not target_counterexample(prefix + tail, 143, "core/src/b64.rs", "assertion failed")[0]
+    assert not target_counterexample(prefix + tail, 2, "core/src/b64.rs", "assertion failed")[0]
+    assert not target_counterexample(prefix, 1, "core/src/b64.rs", "assertion failed")[0]
+    assert not target_counterexample(unwind + tail, 1, "core/src/b64.rs", "assertion failed")[0]
+    assert not target_counterexample(prefix + unwind + tail, 1, "core/src/b64.rs", "assertion failed")[0]
+    assert not target_counterexample(prefix + tail, 1, "core/src/canon.rs", "assertion failed")[0]
+    assert not target_counterexample(prefix + tail, 1, "core/src/b64.rs", "index out of bounds")[0]
     assert completed_simple_gate("oracle", "test result: FAILED. 1 failed", 101, False)[0]
     assert not completed_simple_gate("oracle", "error: could not compile", 101, False)[0]
     assert not completed_simple_gate("golden", "test result: FAILED. 1 failed", 124, False)[0]
