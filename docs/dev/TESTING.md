@@ -100,6 +100,10 @@ caller strings unchanged, leaving opaque-identity validation to the server.
 
 At the API boundary, project/session/record/span/agent IDs, idempotency keys, grant/intent
 references, delegation lineage IDs and native credential references are opaque lookup keys.
+Each grant `delegation_chain` element is checked before PoP or pending-grant lookup. Server
+configuration checks broker and resource IDs and project-scoped authority pin IDs at setup;
+generated key IDs and record IDs use ASCII encodings. A caller-supplied generic record's
+`causal_prev_hashes` are replaced by server-computed content hashes before sealing.
 Broker `action`, `resource` and `scope` are exact authorization labels carried into signed
 challenges, so those ingress paths also reject non-NFC spelling before signing. Freeform content
 and rationale remain RCP text.

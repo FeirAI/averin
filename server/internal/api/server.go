@@ -420,6 +420,9 @@ func (s *Server) WithBrokerID(brokerID string) *Server {
 	if s.brokerKey == nil {
 		panic("WithBrokerID requires WithBroker (broker_id tags the grants this broker issues)")
 	}
+	if err := s.rejectOpaqueIdentity("broker_id", brokerID); err != nil {
+		panic("WithBrokerID: " + err.Error())
+	}
 	s.brokerID = brokerID
 	return s
 }
@@ -512,6 +515,9 @@ func (s *Server) WithProjectAuthorityKey(project, source string, key ed25519.Pub
 	default:
 		panic("WithPolicyEngineKey: source must be policy_engine_signed, human_signed, or delegate_signed")
 	}
+	if err := s.rejectOpaqueIdentity("authority project_id", project); err != nil {
+		panic("WithProjectAuthorityKey: " + err.Error())
+	}
 	if serverPub, err := decodePubKey(s.core.PubKey()); err == nil && key.Equal(serverPub) {
 		panic("WithPolicyEngineKey: the authority key must be role-separated from the server signing key")
 	}
@@ -544,6 +550,9 @@ func (s *Server) WithProjectAuthorityKey(project, source string, key ed25519.Pub
 // VOLATILE across restarts); inject a durable one with WithLedger BEFORE WithResource. Nil resourceCore
 // (unset) disables /v2/use.
 func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
+	if err := s.rejectOpaqueIdentity("resource_id", resourceID); err != nil {
+		panic("WithResource: " + err.Error())
+	}
 	// R2 (ADR 0003): the resource recording key MUST be disjoint from the server signing key and the
 	// broker issuing key, else a grant could forge its own use receipt. The offline verifier rejects an
 	// overlap as a fatal config error and averin-server checks it at startup — this fail-fasts an embedder
@@ -1768,11 +1777,19 @@ type grantRequest struct {
 // A grant's exact-match labels become both authorization inputs and signed evidence.
 // Validate them before PoP checks, deterministic IDs, or pending/finalized lookup.
 func (s *Server) rejectGrantIdentity(gr grantRequest, idem string) error {
-	return s.rejectOpaqueIdentity(
+	if err := s.rejectOpaqueIdentity(
 		"project_id", gr.ProjectID, "session_id", gr.SessionID, "idempotency_key", idem,
 		"agent_id", gr.AgentID, "action", gr.Action, "resource", gr.Resource,
 		"scope", gr.Scope, "authorizing_principal", gr.Principal, "lease_id", gr.LeaseID,
-	)
+	); err != nil {
+		return err
+	}
+	for i, id := range gr.DelegationChain {
+		if err := s.rejectOpaqueIdentity(fmt.Sprintf("delegation_chain[%d]", i), id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // uuidV5Shaped derives a DETERMINISTIC, UUIDv5-shaped id from (namespace, project, idempotency_key),
