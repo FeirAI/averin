@@ -255,6 +255,35 @@ func exerciseBrokerSeqVoid(t *testing.T, s Store) {
 	}
 }
 
+// exerciseReleaseKeepsRecordHeldSeq: the operator void seals its grant_void tombstone (record_id = the voided
+// grant_id) BEFORE it writes the void marker. If the marker write fails (or the process dies) between the two, a
+// fresh-looking attempt of that grant can fail on the record_id conflict and call ReleaseBrokerSeq; the reservation
+// is the MAX and not yet marked voided, but the tombstone fills its seq — releasing it would let MAX+1 re-issue the
+// voided number. ReleaseBrokerSeq must keep any reservation whose grant_id a record already holds.
+func exerciseReleaseKeepsRecordHeldSeq(t *testing.T, s Store) {
+	t.Helper()
+	if seq, _, err := s.AllocateBrokerSeq("p", "g1"); err != nil || seq != 1 {
+		t.Fatalf("alloc g1 = %d, %v", seq, err)
+	}
+	tomb := Record{JSON: `{"content_hash":"tomb1","record_id":"g1"}`, ContentHash: "tomb1", SessionID: "s"}
+	if _, _, err := s.PutRecord("p", "grant-void:1", tomb); err != nil {
+		t.Fatalf("put tombstone: %v", err)
+	}
+	if err := s.ReleaseBrokerSeq("p", "g1"); err != nil {
+		t.Fatalf("release of a record-held seq must be a no-op: %v", err)
+	}
+	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 1 {
+		t.Fatalf("MaxBrokerSeq = %d err=%v; want 1 (the tombstone-held reservation stays allocated)", max, err)
+	}
+	if seq, fresh, err := s.AllocateBrokerSeq("p", "g2"); err != nil || seq != 2 || !fresh {
+		t.Fatalf("alloc g2 = %d fresh=%v err=%v; want a fresh 2 (seq 1 is never re-issued)", seq, fresh, err)
+	}
+}
+
+func TestMemReleaseKeepsRecordHeldSeq(t *testing.T) {
+	exerciseReleaseKeepsRecordHeldSeq(t, NewMem())
+}
+
 func TestMemBrokerSeqVoid(t *testing.T) {
 	exerciseBrokerSeqVoid(t, NewMem())
 }

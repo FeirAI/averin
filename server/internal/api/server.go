@@ -88,6 +88,11 @@ type Server struct {
 	seqAttemptsMu      sync.Mutex
 	seqAttempts        map[string]time.Time
 	seqAttemptsPruneAt int
+	// processStart is the BOOT FLOOR of the void's age: seqAttempts is in-memory, so after a restart it has
+	// forgotten every attempt made by the previous process (a retry whose commit may still be in flight). The age
+	// is therefore measured from max(allocated_at, latest attempt, processStart). Stamped from the server's clock
+	// at construction (New) and re-stamped by WithClock, so a test clock drives it too.
+	processStart time.Time
 	// M5 (ADR 0005): the revocation authority key (role-separated from broker/resource/signing/attestation/TSA).
 	// When set, POST /v2/revoke records a grant_id as revoked, and each /v2/export carries a signed, time-bounded
 	// revocation_list over the project's revoked set (the verifier blocks any use of a revoked grant). nil =
@@ -276,6 +281,7 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		signingKeyID: signingKeyID,
 		keyValidFrom: "2026-01-01T00:00:00.000Z",
 		now:          time.Now,
+		processStart: time.Now(),                     // the void's boot floor (re-stamped by WithClock)
 		pending:      make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
 		// D6 operator remediation (POST /v2/broker-seq/void): a conservative default safety age.
 		brokerSeqVoidMinAge: DefaultBrokerSeqVoidMinAge,
@@ -356,6 +362,7 @@ func (s *Server) WithGauge(name, help string, fn func() float64) *Server {
 // the broker_seq void's safety age. Pair it with the store's clock (store.Mem.WithClock) when both must agree.
 func (s *Server) WithClock(now func() time.Time) *Server {
 	s.now = now
+	s.processStart = now() // construction-time boot floor, taken from the injected clock (see processStart)
 	return s
 }
 
@@ -1909,6 +1916,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		if msg := grantIDTakenMsg(err, grantID); msg != "" {
+			writeErr(w, http.StatusConflict, msg)
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "store grant: "+err.Error())
 		return
 	}

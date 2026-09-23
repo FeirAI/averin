@@ -254,12 +254,18 @@ func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
 		return fmt.Errorf("store: release broker seq lock: %w", err)
 	}
 	// A VOIDED reservation is never deleted: its tombstone fills the seq, and deleting the row would let the next
-	// MAX(seq)+1 re-issue the voided number (a duplicate broker_seq).
+	// MAX(seq)+1 re-issue the voided number (a duplicate broker_seq). Nor is one whose grant_id is already HELD by a
+	// record (the grant itself, or a grant_void tombstone sealed before its void marker was written — the void seals
+	// the tombstone FIRST): that record fills the seq, so the row must stay counted in MAX.
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM broker_seq
 		WHERE project_id = $1 AND grant_id = $2
 		  AND seq = (SELECT MAX(seq) FROM broker_seq WHERE project_id = $1)
 		  AND NOT EXISTS (SELECT 1 FROM broker_seq_void v WHERE v.project_id = $1 AND v.grant_id = $2)
+		  AND NOT EXISTS (
+			SELECT 1 FROM records r
+			WHERE r.project_id = $1 AND md5(r.json::jsonb ->> 'record_id') = md5($2) AND (r.json::jsonb ->> 'record_id') = $2
+		  )
 	`, projectID, grantID); err != nil {
 		return fmt.Errorf("store: release broker seq: %w", err)
 	}

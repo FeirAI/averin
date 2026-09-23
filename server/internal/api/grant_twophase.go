@@ -428,6 +428,10 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusConflict, commitErr.Error())
 			return
 		}
+		if msg := grantIDTakenMsg(commitErr, grantID); msg != "" {
+			writeErr(w, http.StatusConflict, msg)
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "finalize grant: "+commitErr.Error())
 		return
 	}

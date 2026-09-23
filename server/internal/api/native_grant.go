@@ -88,6 +88,10 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 			writeErr(w, http.StatusConflict, commitErr.Error())
 			return
 		}
+		if msg := grantIDTakenMsg(commitErr, grantID); msg != "" {
+			writeErr(w, http.StatusConflict, msg)
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "native grant: "+commitErr.Error())
 		return
 	}

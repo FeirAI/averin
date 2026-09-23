@@ -154,6 +154,10 @@ type Store interface {
 	// keeping the recorded log gapless. Safe to call when no allocation was made (no-op). MUST be called
 	// under the same per-project serialization as the allocation (the api's ingest lock).
 	//
+	// NEVER RELEASED: a voided reservation (VoidBrokerSeq), and one whose grant_id is already held by a record's
+	// record_id (the grant itself, or a grant_void tombstone sealed before its void marker) — that record fills the
+	// seq, so the row must stay counted in MaxBrokerSeq or MAX+1 would re-issue the number. Both are a no-op.
+	//
 	// ONLY THE CURRENT MAX IS RELEASED. If the grant's seq is no longer the project's max (an earlier release of
 	// it was lost — e.g. a failed Postgres DELETE — and higher seqs have since been allocated), deleting it would
 	// punch a hole in the MIDDLE of [1..N] that no allocation can ever refill (the next allocation for this
@@ -183,7 +187,9 @@ type Store interface {
 	// counts it and MAX+1 never re-issues the voided number; ReleaseBrokerSeq never deletes it; and
 	// AllocateBrokerSeq(grantID) fails with ErrBrokerSeqVoided from now on (the grant_id is retired, never handed
 	// the voided seq back). Idempotent for the same (grantID, seq); an error if seq is not reserved by grantID. The
-	// caller (the api, under ingestMu) seals the grant_void tombstone that fills the seq in the recorded log.
+	// caller (the api, under ingestMu) seals the grant_void tombstone that fills the seq in the recorded log FIRST
+	// and writes this marker SECOND: the tombstone's record_id IS grantID, so once it is sealed the grant can never
+	// record (record_id uniqueness), and a marker is only ever written for a void that actually won.
 	VoidBrokerSeq(projectID, grantID string, seq int64) error
 	// RecordIDUniqueEnforced reports whether the store itself (not just the api's under-lock probe) enforces
 	// per-project record_id uniqueness. The operator void relies on it: the tombstone's record_id IS the voided
@@ -513,6 +519,9 @@ func (m *Mem) ReleaseBrokerSeq(projectID, grantID string) error {
 	}
 	if _, v := p.voided[grantID]; v {
 		return nil // a voided seq is filled by its tombstone: never released (MAX+1 would re-issue it)
+	}
+	if _, held := p.byRecordID[grantID]; held {
+		return nil // a record (the grant, or a tombstone sealed before its void marker) fills the seq: keep it
 	}
 	for _, s := range bs {
 		if s > seq {

@@ -163,12 +163,15 @@ Remediation, per unrecorded seq `k` in `[1..M]`:
 
 1. If the grant's client is still around, have it retry under its original `idempotency_key`: the retry
    reclaims seq `k` and the gap closes.
-2. Otherwise, once the reservation **and its grant's latest attempt** are both older than
-   `AVERIN_BROKER_SEQ_VOID_MIN_AGE` (default `1h`), call `POST /v2/broker-seq/void?project=<id>` with
+2. Otherwise, once the reservation, its grant's latest attempt **and the server's start** are all older
+   than `AVERIN_BROKER_SEQ_VOID_MIN_AGE` (default `1h`), call `POST /v2/broker-seq/void?project=<id>` with
    `{"project_id":"<id>","broker_seq":k,"reason":"..."}`. The server confirms from the store that nothing
    records seq `k` (a seq whose ambiguous commit actually landed is refused), retires the reserved `grant_id`
    (a later retry of it is a `409`; re-issue under a new key), and seals a broker-signed `grant_void`
-   tombstone binding the project, `k` and that `grant_id`. When revocation is enabled, it also **revokes**
+   tombstone binding the project, `k` and that `grant_id`. The tombstone is sealed before the reservation is
+   marked voided. A `409` "grant landed; nothing to void" means the grant's own commit won: seq `k` is
+   recorded and nothing was voided. A `500` means either nothing was voided or the tombstone is sealed and
+   only the mark is missing. In both cases repeat the call; it finishes the void without re-sealing. When revocation is enabled, it also **revokes**
    that `grant_id`, so a capability minted for it stops working at `/v2/use`. Without revocation, such a
    capability stays usable until it expires. In that case, enable `AVERIN_REVOCATION_SEED` and
    `POST /v2/revoke` the `grant_id`, or wait out its TTL.
@@ -181,7 +184,11 @@ What makes a void safe against a commit that is still in flight:
   its grant attempted the seq on this server (every retry refreshes that time, although a retry never
   refreshes `allocated_at`). A client that keeps retrying a persistently failing grant therefore keeps the
   void refused; stop that client first (the TLA+ model's `GrantLog_void_starved.cfg` shows the outage).
-- **Ingest lock.** Within one process the void and every grant commit are serialized.
+  Attempt times are kept in memory, so after a restart the age also counts from the server's start: no void
+  passes until the minimum age has elapsed since the restart.
+- **Ingest lock.** Within one process the void and every grant commit are serialized. The void holds that lock
+  while its tombstone insert waits on any in-flight row with the same `record_id`, up to the 30 s Postgres
+  statement timeout, so ingest on that server can stall for that long.
 - **UNIQUE `record_id` index.** On Postgres, the void requires the UNIQUE index `records_project_record_id_uniq`
   from migration `0002`. The tombstone's `record_id` is the voided `grant_id`, so at most one of the two can
   land. If `0002` logged its WARNING and built a non-unique index (historical duplicate `record_id`s), every

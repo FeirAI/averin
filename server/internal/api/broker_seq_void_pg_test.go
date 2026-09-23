@@ -12,6 +12,7 @@ import (
 	"github.com/feirai/averin/server/internal/api"
 	"github.com/feirai/averin/server/internal/pgschema"
 	"github.com/feirai/averin/server/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -105,4 +106,107 @@ func TestBrokerSeqVoidPostgres(t *testing.T) {
 			t.Fatalf("a refused void must leave the reservation for the retry (%d): %s", code, resp)
 		}
 	})
+}
+
+// heldTxStore holds the next PutRecord's transaction OPEN on Postgres: the row (and its disclosures) is inserted but
+// not committed, and the call reports a commit-ambiguous error — a grant whose COMMIT is still in flight. commit()
+// lets it land. While it is open its record_id sits uncommitted in the UNIQUE index, so a tombstone INSERT for the
+// same record_id blocks on it.
+type heldTxStore struct {
+	store.Store
+	admin    *pgxpool.Pool
+	holdNext bool
+	tx       pgx.Tx
+}
+
+func (h *heldTxStore) PutRecord(p, k string, rec store.Record) (store.Record, bool, error) {
+	if !h.holdNext {
+		return h.Store.PutRecord(p, k, rec)
+	}
+	h.holdNext = false
+	ctx := context.Background()
+	tx, err := h.admin.Begin(ctx)
+	if err != nil {
+		return store.Record{}, false, err
+	}
+	parents := rec.Parents
+	if parents == nil {
+		parents = []string{}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO records (project_id, idempotency_key, content_hash, session_id, parents, json) VALUES ($1, $2, $3, $4, $5, $6)`,
+		p, k, rec.ContentHash, rec.SessionID, parents, rec.JSON); err != nil {
+		_ = tx.Rollback(ctx)
+		return store.Record{}, false, err
+	}
+	for _, d := range rec.Disclosures {
+		if _, err := tx.Exec(ctx, `INSERT INTO disclosures (project_id, record_id, field, value_digest, nonce_hex) VALUES ($1, $2, $3, $4, $5)`,
+			p, d.RecordID, d.Field, d.ValueDigest, d.NonceHex); err != nil {
+			_ = tx.Rollback(ctx)
+			return store.Record{}, false, err
+		}
+	}
+	h.tx = tx
+	return store.Record{}, false, fmt.Errorf("%w: injected (commit held in flight)", store.ErrCommitAmbiguous)
+}
+
+// TestBrokerSeqVoidGrantLandsFirstPostgres (review finding: the database backstop winning for the grant used to
+// leave an inert void marker and a 500 retry loop): the grant's transaction is held open, the void's tombstone INSERT
+// blocks on its uncommitted record_id index entry, then the grant COMMITS. The void must answer 409 "grant landed;
+// nothing to void" with NO marker written, and the grant's retry must idempotently return its record.
+func TestBrokerSeqVoidGrantLandsFirstPostgres(t *testing.T) {
+	pg, admin := newVoidTestPostgres(t)
+	hs := &heldTxStore{Store: pg, admin: admin}
+	h := api.New(mustCore(t), hs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
+	ak := grantAgentKey()
+	hs.holdNext = true
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-land", "read:orders", ak, ak)); code != http.StatusInternalServerError {
+		t.Fatalf("the grant's in-flight commit must 500 (got %d): %s", code, resp)
+	}
+	if hs.tx == nil {
+		t.Fatal("the grant's transaction was not held")
+	}
+	exerciseVoidGrantLandsFirst(t, pg, h, func() (int, string) {
+		type result struct {
+			code int
+			resp string
+		}
+		done := make(chan result, 1)
+		go func() {
+			c, r := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
+			done <- result{c, r}
+		}()
+		// wait until the void's tombstone INSERT is blocked on the grant's uncommitted index entry.
+		ctx := context.Background()
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			var waiting bool
+			if err := admin.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query ILIKE '%INSERT INTO records%')`).Scan(&waiting); err != nil {
+				t.Fatalf("pg_stat_activity: %v", err)
+			}
+			if waiting {
+				break
+			}
+			select {
+			case r := <-done:
+				t.Fatalf("the void returned before the grant committed (%d): %s", r.code, r.resp)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the void's tombstone insert never blocked on the in-flight grant")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if err := hs.tx.Commit(ctx); err != nil { // the grant's commit lands
+			t.Fatalf("commit held grant: %v", err)
+		}
+		r := <-done
+		return r.code, r.resp
+	})
+}
+
+// TestBrokerSeqVoidMarkerFailsPostgres: tombstone sealed, marker write failed → a repeat completes (see
+// exerciseVoidMarkerFails), on Postgres.
+func TestBrokerSeqVoidMarkerFailsPostgres(t *testing.T) {
+	pg, _ := newVoidTestPostgres(t)
+	exerciseVoidMarkerFails(t, pg)
 }

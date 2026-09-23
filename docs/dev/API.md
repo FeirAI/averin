@@ -332,13 +332,25 @@ Only a seq that meets **all** of these is voided:
    stamped once, on the first allocation, and a retry that reuses the seq does not refresh it, so the
    server also tracks, in memory, the last time each grant attempted its seq (allocate or failed commit)
    and measures the age from the later of the two. A retry at `T0+59m` whose commit is still in flight
-   therefore blocks a void at `T0+60m`.
+   therefore blocks a void at `T0+60m`. Those attempt times are lost on a restart, so the age is also
+   floored at the server's start: it runs from the latest of `allocated_at`, the last attempt and the
+   process start, and no void passes until `AVERIN_BROKER_SEQ_VOID_MIN_AGE` after a restart.
 5. The store enforces per-project `record_id` uniqueness. On Postgres this means migration `0002` built the
    UNIQUE index `records_project_record_id_uniq`. If the database held historical duplicate `record_id`s,
    `0002` builds a non-unique index and logs a WARNING. In that case every void is refused with `409`,
    because the tombstone's `record_id` is the voided `grant_id` and only that UNIQUE index guarantees that
    at most one of {the grant, its tombstone} lands. Resolve the duplicate and build the UNIQUE index first.
    The in-memory store always enforces uniqueness.
+
+**Order of operations.** The tombstone is sealed first, and the reservation is marked voided second.
+Because the tombstone's `record_id` is the reserved `grant_id`, a sealed tombstone already stops the
+grant from recording. If a commit of that grant was still in flight and lands first, the UNIQUE
+`record_id` index lets the grant win: the call returns `409` ("grant landed; nothing to void"), nothing
+is marked, and the grant's retry returns its record. If the tombstone is sealed but marking the
+reservation fails, the call returns `500`. Repeat it: the repeat finds the tombstone and only writes the
+mark. A retry of the grant in between gets a `409` and does not release or reuse the seq. A reservation
+marked voided by an older server with no tombstone behind it is re-checked like an unmarked one, and if
+its grant landed the `409` says the mark is inert.
 
 **Limits of these checks.**
 
@@ -349,6 +361,9 @@ Only a seq that meets **all** of these is voided:
   clock. If the DB clock runs behind the app clock, reservations look older by the difference. Keep
   `AVERIN_BROKER_SEQ_VOID_MIN_AGE` far above any plausible clock skew. The latest-attempt time uses the
   server clock on both sides, so skew does not affect it.
+- The whole void runs under the ingest lock. On Postgres the tombstone insert waits on any uncommitted row
+  holding the same `record_id` (a grant commit still in flight, for example on another instance), for up
+  to the 30 s statement timeout, and every ingest, grant and use on that server waits with it.
 - The uniqueness index is over `md5(record_id)`. A tenant that writes two *different* `record_id`s with
   equal md5 into one project gets a `409` (`record_id already used`) on the second. This only affects
   that tenant's own project: taking another record's id would require an md5 second preimage.
@@ -375,9 +390,10 @@ bound into the signed evidence).
 **Response `201`:** `{ "voided_broker_seq": <n>, "grant_id": "...", "created": true, "record": { /* tombstone */ } }`
 (plus `"revoked": true` when revocation is enabled).
 A repeat of a completed void returns the same tombstone with `200` and `"created": false`. Errors:
-`400`, `403`, `404`, `409` (recorded, live pending grant, too young, or no UNIQUE `record_id` index),
-`429`/`503` (the tombstone is sealed but revoking its `grant_id` failed; repeat the call), `500`,
-`501` (broker not enabled).
+`400`, `403`, `404`, `409` (recorded or the grant landed during the void, live pending grant, too young,
+or no UNIQUE `record_id` index), `429`/`503` (the void completed but revoking its `grant_id` failed;
+repeat the call), `500` (nothing voided, or the tombstone is sealed but the mark failed; repeat the call
+in both cases), `501` (broker not enabled).
 
 **Verifier compatibility.** Verifier builds from before `grant_void` existed do not recognise the
 tombstone's role. They report it as an unrecognized broker record and **fail the bundle**. Auditors must

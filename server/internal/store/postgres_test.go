@@ -316,6 +316,12 @@ func TestPostgresReleaseKeepsNonMaxSeq(t *testing.T) {
 	exerciseReleaseKeepsNonMaxSeq(t, p)
 }
 
+func TestPostgresReleaseKeepsRecordHeldSeq(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseReleaseKeepsRecordHeldSeq(t, p)
+}
+
 func TestPostgresBrokerSeqVoid(t *testing.T) {
 	p, done := newTestStore(t)
 	defer done()

@@ -377,12 +377,15 @@ grant stops a project's checkpoints permanently.
 - the seq is allocated;
 - nothing records it (the store read decides);
 - no live two-phase pending grant backs it;
-- both `allocated_at` and the grant's latest attempt are older than `AVERIN_BROKER_SEQ_VOID_MIN_AGE`;
+- `allocated_at`, the grant's latest attempt and the server's start are all older than
+  `AVERIN_BROKER_SEQ_VOID_MIN_AGE`;
 - the store enforces `record_id` uniqueness. On Postgres this means the UNIQUE index
   `records_project_record_id_uniq`; a void is refused on the non-unique fallback from migration 0002.
 
 The UNIQUE index makes the tombstone and any late commit of the voided grant mutually exclusive. It is the
-only guard that holds across instances; the age and ingest-lock checks are process-local. When revocation is
+only guard that holds across instances; the age and ingest-lock checks are process-local. The server seals
+the tombstone before it marks the reservation voided, so the mark is written only when the tombstone won; if
+the grant wins, the void returns `409` and marks nothing. When revocation is
 configured, the void also revokes the voided `grant_id`. Any holder of the project's write key may void,
 because the server has no separate operator privilege (see `docs/dev/API.md`).
 
