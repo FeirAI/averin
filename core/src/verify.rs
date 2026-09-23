@@ -25,6 +25,12 @@ use crate::sign::decode_pubkey;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod verdict;
+use verdict::{AnchoredCheckpoint, CapstoneFacts, PinnedRecordSeal, ValidatedFacts};
+pub use verdict::{
+    ClaimDecision, ClaimPolicy, ClaimResults, RequestedClaim, RevocationRequirement,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustLevel {
     /// L1: bytes sealed by a valid (and, if pinning is in effect, externally-trusted) key and
@@ -103,20 +109,33 @@ impl ActionCompleteness {
     /// native+PoP bundle reaches NEITHER label (it is `claimed_over_manifest`), keeping each label's MF1
     /// meaning crisp.
     pub fn of(r: &VerifyReport) -> Self {
+        Self::of_with_integrity(r, r.ok, r.broker_trust == "sequence_verified")
+    }
+
+    // The new claims use structural integrity plus typed committed contradictions. Legacy `ok`
+    // also includes diagnostics for malformed optional attachments; deleting such an attachment
+    // may change `ok` but cannot create proof of a stronger claim.
+    fn of_with_integrity(
+        r: &VerifyReport,
+        integrity: bool,
+        broker_sequence_verified: bool,
+    ) -> Self {
         // a JSON `"coverage_manifest": null` deserializes to `Some(Null)`, which is NOT a real manifest
         // (D7 already treats null as the empty digest) — the capstone must be asserted OVER a real scope
         // claim, so require a NON-NULL manifest.
         let has_manifest = r.coverage_manifest.as_ref().is_some_and(|m| !m.is_null());
         // `base` is the conjunction SHARED by both capstone labels — every reduction EXCEPT the surface-shape
         // conjuncts (`uses_matched`, native-vs-brokered) that distinguish the two labels.
-        let base = r.ok
+        let base = integrity
+            && r.keys_externally_pinned
+            && r.body_bound_role_evidence
             && has_manifest
             && !r.one_phase_use_present
             && r.intent_without_outcome == 0
             && r.taxonomy_status == "validated"
             && r.uses_action_unverified == 0
             && r.uses_pop_reverified == r.uses_matched
-            && r.broker_trust == "sequence_verified"
+            && broker_sequence_verified
             && r.attestation_status == "attested_claims"
             && r.unmatched_violation == 0
             && r.unmatched_pending == 0
@@ -168,8 +187,13 @@ impl ActionCompleteness {
 #[derive(Debug, Clone)]
 pub struct VerifyReport {
     pub ok: bool,
+    /// Versioned, typed claim decisions under the caller's fixed verification policy.
+    claims: ClaimResults,
     pub project_id: Option<String>,
     pub keys_externally_pinned: bool,
+    /// Every committed broker/resource/void contributor used by the strong claim has a
+    /// body-bound v3 authority signature. Historical v2 evidence remains a legacy join only.
+    pub body_bound_role_evidence: bool,
     pub records_total: usize,
     pub records_proven: usize,
     pub record_trust: Vec<RecordTrust>,
@@ -416,6 +440,10 @@ impl VerifyReport {
     pub fn action_completeness(&self) -> ActionCompleteness {
         ActionCompleteness::of(self)
     }
+
+    pub fn claims(&self) -> ClaimResults {
+        self.claims
+    }
 }
 
 /// An out-of-band pinned key. Beyond the public-key bytes it may carry the *authoritative* key
@@ -497,6 +525,8 @@ fn honored_clean_rotation(rks: &RoleKeyStatus, artifact_time: &str) -> bool {
 
 #[derive(Default)]
 pub struct VerifyOptions {
+    /// Requested claim and evidence requirements fixed by the caller, never read from the bundle.
+    pub claim_policy: ClaimPolicy,
     /// ADR 0006 §1 — out-of-band lifecycle for the authority-elevation ROLE keys, keyed by raw 32-byte public
     /// key. A key absent from this map is `active`. Consulted ONLY for the keys that elevate authority via
     /// `verify_authority` (broker/resource/federated/generic `authority_keys`); the freshness-dated roles
@@ -977,10 +1007,16 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         .collect();
     CanonValue::object(vec![
         ("ok".into(), CanonValue::Bool(r.ok)),
+        ("claims_version".into(), CanonValue::string("1")),
+        ("claims".into(), r.claims.to_canon()),
         ("project_id".into(), opt_str(&r.project_id)),
         (
             "keys_externally_pinned".into(),
             CanonValue::Bool(r.keys_externally_pinned),
+        ),
+        (
+            "body_bound_role_evidence".into(),
+            CanonValue::Bool(r.body_bound_role_evidence),
         ),
         ("records_total".into(), count(r.records_total)),
         ("records_proven".into(), count(r.records_proven)),
@@ -1374,6 +1410,10 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
             Err(e) => return error_report(&e),
         };
     let opts = VerifyOptions {
+        claim_policy: match ClaimPolicy::parse(&opts_val) {
+            Ok(p) => p,
+            Err(e) => return error_report(&e),
+        },
         trusted_authority_keys: authority,
         broker_authority_keys: broker_authority,
         resource_authority_keys: resource_authority,
@@ -1635,8 +1675,10 @@ fn error_report(msg: &str) -> String {
 fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
     VerifyReport {
         ok: false,
+        claims: ClaimResults::fatal(),
         project_id,
         keys_externally_pinned: false,
+        body_bound_role_evidence: false,
         records_total: 0,
         records_proven: 0,
         record_trust: Vec::new(),
@@ -4101,11 +4143,16 @@ fn build_key_store(
 /// bounds the existence time of all its causal ancestors, and `agent_ts` is untrusted regardless). A
 /// non-canonical `anchored_ts` breaks the lexical==chronological assumption (RFC3339 fixed-ms UTC sorts
 /// lexically iff canonical), so it is rejected rather than silently mis-ordered.
-fn check_anchor_backdating(anchored: &[(i64, String, Vec<String>)], issues: &mut Vec<String>) {
+fn check_anchor_backdating(
+    anchored: &[(i64, String, Vec<String>)],
+    issues: &mut Vec<String>,
+) -> bool {
     let mut sorted_anchored = anchored.to_vec();
     sorted_anchored.sort_by_key(|(seq, _, _)| *seq);
+    let mut valid = true;
     for (seq, ts, _) in &sorted_anchored {
         if !is_canonical_ts(ts) {
+            valid = false;
             issues.push(format!(
                 "checkpoint {seq}: anchor time {ts:?} is not a canonical RCP timestamp — the backdating ordering check requires canonical times (threat #3)"
             ));
@@ -4113,16 +4160,20 @@ fn check_anchor_backdating(anchored: &[(i64, String, Vec<String>)], issues: &mut
     }
     for w in sorted_anchored.windows(2) {
         if is_canonical_ts(&w[0].1) && is_canonical_ts(&w[1].1) && w[1].1 < w[0].1 {
+            valid = false;
             issues.push(format!(
                 "anchor time decreased across checkpoints {} -> {} (backdating, threat #3)",
                 w[0].0, w[1].0
             ));
         }
     }
+    valid
 }
 
 pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
     let mut issues: Vec<String> = Vec::new();
+    let mut semantic_record_conflict = false;
+    let mut checkpoint_project_conflict = false;
     let project_id = s(bundle, "project_id");
 
     // Seam 1 — role-key disjointness (R2/D4/D7/M5/M6). A FATAL config error aborts here before any record is
@@ -4339,6 +4390,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // classify to a recognized (kind, enforcement_point) role is a fail-closed verification
         // failure — surfaced as an issue, never a silent drop that could let a mislabeled use escape.
         if claims_role && broker_role == BrokerRole::None {
+            semantic_record_conflict = true;
             let msg = format!(
                 "record {i}: extensions.broker.kind set but (kind, enforcement_point) is not a recognized broker/resource role (R2 fail-closed)"
             );
@@ -4361,6 +4413,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 .is_some()
             && !govder_evidence_rederivable(rec)
         {
+            semantic_record_conflict = true;
             let msg = format!(
                 "record {i}: authority.evidence_hash is not re-derivable from the govder record's own fields (payload absent or divergent — R1, threat #4)"
             );
@@ -4390,12 +4443,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // record_ids must be unique (two distinct records may not share a record_id). This keeps
     // `record_id` a sound binding handle for authority evidence (a verified evidence triple bound to
     // a record_id cannot be copied onto a different record without colliding here).
+    let mut duplicate_record_id = false;
     {
         let mut by_id: BTreeMap<String, String> = BTreeMap::new();
         for rec in records.iter() {
             if let (Some(id), Some(ch)) = (s(rec, "record_id"), s(rec, "content_hash")) {
                 if let Some(prev) = by_id.insert(id.clone(), ch.clone()) {
                     if prev != ch {
+                        duplicate_record_id = true;
                         issues.push(format!("duplicate record_id '{id}' on distinct records"));
                     }
                 }
@@ -4552,6 +4607,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     for (i, cp) in checkpoints.iter().enumerate() {
         if let Some(pid) = &binding_project_id {
             if s(cp, "project_id").as_deref() != Some(pid.as_str()) {
+                checkpoint_project_conflict = true;
                 issues.push(format!("checkpoint {i} project_id does not match bundle"));
             }
         }
@@ -4685,7 +4741,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
 
     // Seam 3 — anchored times must be non-decreasing with seq (backdating, threat #3).
-    check_anchor_backdating(&anchored, &mut issues);
+    let anchor_order_valid = check_anchor_backdating(&anchored, &mut issues);
 
     let mut chain_ok = true;
     match &dag_opt {
@@ -4814,7 +4870,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
 
     // D6 operator remediation: every grant_void tombstone must be well-formed, bound and (under pinned broker keys)
     // broker-signed before it may fill its seq; a bad one is a hard issue (it never counts as a grant either way).
+    let void_issues_before = issues.len();
     check_grant_voids(&record_trust, records, opts, &mut issues);
+    let void_contradiction = issues.len() > void_issues_before;
 
     // Level 3 Tier-A: count credential-broker grants and how many are fully accountable. A grant only
     // counts as VERIFIED when ALL of: the record is integrity-proven (its own seal is valid —
@@ -4837,6 +4895,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // through as ok:true / grant_verified=2.
     let mut grant_content_seen: BTreeMap<String, String> = BTreeMap::new();
     let mut grant_equivocations: BTreeSet<String> = BTreeSet::new();
+    let grant_issues_before = issues.len();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if s(rec, "event_type").as_deref() == Some("credential_grant")
@@ -4912,6 +4971,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
     }
 
+    let grant_contradiction = issues.len() > grant_issues_before;
     // ---- Tier-B (ADR 0003 step 5): use↔grant join (R3) ----
     // CLOSED = a record's content_hash is transitively committed by a verified, ANCHORED checkpoint (the union of
     // the anchored committed sets). COMMITTED = transitively committed by ANY verified (signed, key-honored)
@@ -5014,6 +5074,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
     let mut native_grants_by_id: BTreeMap<String, NativeGrant> = BTreeMap::new();
     let mut native_credential_present = false;
+    // A rejected, already committed grant is a fixed semantic contradiction even when no
+    // receipt exercises that grant. Keep it separate from optional attachment diagnostics.
+    let mut committed_grant_rejected = false;
     for rt in &record_trust {
         let rec = &records[rt.index];
         let qualifies = rt.broker_role == BrokerRole::Broker.as_str()
@@ -5038,6 +5101,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             if cosignatures_of(rec).is_some_and(|a| !a.is_empty())
                 || delegation_assertions_present(rec)
             {
+                committed_grant_rejected = true;
                 issues.push(format!(
                     "grant {} ({}): native (token_exchange) grant also carries cosignatures/delegation_assertions — unsupported composition in M3 (fail-closed)",
                     rt.index, rt.record_id
@@ -5056,6 +5120,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     ti.escalating
                         .contains(&(n_resource.clone(), n_action.clone()))
                 }) {
+                    committed_grant_rejected = true;
                     issues.push(format!(
                         "grant {} ({}): native (token_exchange) grant for action '{n_action}' on '{n_resource}' which the taxonomy marks escalating — mis-scoped (D4)",
                         rt.index, rt.record_id
@@ -5071,7 +5136,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 ev_int(rec, "grant_evidence", "issued_at"),
                 ev_int(rec, "grant_evidence", "exp"),
             ) {
-                (Some(gid), Some(scope), Some(resource_id), Some(lease_id), Some(issued_at), Some(exp)) => {
+                (
+                    Some(gid),
+                    Some(scope),
+                    Some(resource_id),
+                    Some(lease_id),
+                    Some(issued_at),
+                    Some(exp),
+                ) => {
                     native_grants_by_id.entry(gid).or_insert(NativeGrant {
                         scope,
                         resource_id,
@@ -5081,10 +5153,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         closed: grant_closed,
                     });
                 }
-                _ => issues.push(format!(
-                    "grant {} ({}): native (token_exchange) grant_evidence is missing a required field (grant_id/scope/resource_id/lease_id/issued_at/exp) — fail-closed",
-                    rt.index, rt.record_id
-                )),
+                _ => {
+                    committed_grant_rejected = true;
+                    issues.push(format!(
+                        "grant {} ({}): native (token_exchange) grant_evidence is missing a required field (grant_id/scope/resource_id/lease_id/issued_at/exp) — fail-closed",
+                        rt.index, rt.record_id
+                    ));
+                }
             }
             continue;
         }
@@ -5098,13 +5173,23 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_int(rec, "grant_evidence", "issued_at"),
             ev_int(rec, "grant_evidence", "exp"),
         ) {
-            (Some(gid), Some(action), Some(resource_id), Some(scope_class), Some(cnf_kid), Some(credential_binding), Some(issued_at), Some(exp)) => {
+            (
+                Some(gid),
+                Some(action),
+                Some(resource_id),
+                Some(scope_class),
+                Some(cnf_kid),
+                Some(credential_binding),
+                Some(issued_at),
+                Some(exp),
+            ) => {
                 // M1 (bounded_reuse): the cap rides inside the signed grant_evidence (0/absent for other
                 // classes). A bounded_reuse grant MUST declare a positive use_limit; an "unbounded bounded"
                 // grant is fail-closed (NOT indexed), so a use against it reads as action-without-credential
                 // rather than silently honoring an uncapped reuse.
                 let use_limit = ev_int(rec, "grant_evidence", "use_limit").unwrap_or(0);
                 if scope_class == "bounded_reuse" && use_limit < 1 {
+                    committed_grant_rejected = true;
                     issues.push(format!(
                         "grant {} ({}): bounded_reuse grant_evidence.use_limit must be >= 1 — fail-closed",
                         rt.index, rt.record_id
@@ -5117,11 +5202,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 // is the LAST condition so the issue is pushed exactly once per grant_id (a second closed
                 // record reusing the same grant_id does not double-count).
                 if (scope_class == "single_operation" || scope_class == "bounded_reuse")
-                    && taxonomy_info
-                        .as_ref()
-                        .is_some_and(|ti| ti.escalating.contains(&(resource_id.clone(), action.clone())))
+                    && taxonomy_info.as_ref().is_some_and(|ti| {
+                        ti.escalating
+                            .contains(&(resource_id.clone(), action.clone()))
+                    })
                     && misscoped.insert(gid.clone())
                 {
+                    committed_grant_rejected = true;
                     issues.push(format!(
                         "grant {} ({}): claims {scope_class} for action '{action}' on '{resource_id}' which the taxonomy marks escalating — mis-scoped (D4)",
                         rt.index, rt.record_id
@@ -5142,6 +5229,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 // on a stripped field (stripping breaks evidence_rederivable). Threshold absent AND no
                 // cosignatures => an ordinary grant, unaffected (additive).
                 if cosig_threshold < 1 && cosignatures_of(rec).is_some_and(|a| !a.is_empty()) {
+                    committed_grant_rejected = true;
                     issues.push(format!(
                         "grant {} ({}): carries cosignatures but no positive cosig_threshold — malformed cosig declaration (M6 fail-closed)",
                         rt.index, rt.record_id
@@ -5179,6 +5267,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         }
                     }
                     if !satisfied {
+                        committed_grant_rejected = true;
                         continue; // fail-closed: do not index a grant that did not meet its approval threshold
                     }
                 }
@@ -5189,10 +5278,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 // are deduped per grant_id (delegation_seen); the `continue` gate always applies.
                 let grant_scope = ev_str(rec, "grant_evidence", "scope").unwrap_or_default();
                 let (effective_cnf_kid, effective_exp) = match verify_delegation_chain(
-                    rec, &gid, &cnf_kid, &grant_scope, &action, &resource_id, exp,
+                    rec,
+                    &gid,
+                    &cnf_kid,
+                    &grant_scope,
+                    &action,
+                    &resource_id,
+                    exp,
                 ) {
                     ChainResult::Absent => (cnf_kid.clone(), exp),
-                    ChainResult::Verified { eff_cnf_kid, eff_exp } => {
+                    ChainResult::Verified {
+                        eff_cnf_kid,
+                        eff_exp,
+                    } => {
                         if delegation_seen.insert(gid.clone()) {
                             delegation_chains_total += 1;
                             delegation_chains_verified += 1;
@@ -5200,6 +5298,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         (eff_cnf_kid, eff_exp)
                     }
                     ChainResult::Monotonicity => {
+                        committed_grant_rejected = true;
                         if delegation_seen.insert(gid.clone()) {
                             delegation_chains_total += 1;
                             delegation_monotonicity_violations += 1;
@@ -5211,6 +5310,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         continue; // fail-closed: not Tier-B-eligible
                     }
                     ChainResult::Invalid => {
+                        committed_grant_rejected = true;
                         if delegation_seen.insert(gid.clone()) {
                             delegation_chains_total += 1;
                             issues.push(format!(
@@ -5238,10 +5338,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             // A verified, closed broker grant whose grant_evidence is missing a required match field is
             // a fail-closed failure surfaced as an issue — NOT a silent skip (which would let a use
             // against it read as "action without a credential" and mask the real cause).
-            _ => issues.push(format!(
-                "grant {} ({}): closed broker grant has incomplete grant_evidence (missing a required match field) — fail-closed",
-                rt.index, rt.record_id
-            )),
+            _ => {
+                committed_grant_rejected = true;
+                issues.push(format!(
+                    "grant {} ({}): closed broker grant has incomplete grant_evidence (missing a required match field) — fail-closed",
+                    rt.index, rt.record_id
+                ));
+            }
         }
     }
 
@@ -5422,6 +5525,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     );
     let revocation_proofs = bundle.get("revocation_proofs");
     let mut revoked_uses_blocked = 0usize;
+    let mut revoked_membership_found = false;
     let mut revocation_nonmembership_verified = 0usize;
     let mut seen_uses: BTreeSet<&str> = BTreeSet::new();
     // D3 (ADR 0004): a (resource_id, PoP nonce) pair seen on two CLOSED receipts is a replay/duplicate
@@ -5648,6 +5752,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // `absent` (no list / unpinned issuer) leaves `revoked` empty, so this is a no-op there.
         if revocation.revoked.contains(&gid) {
             revoked_uses_blocked += 1;
+            revoked_membership_found = true;
             violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_list ({}) marks REVOKED — blocked (M5)", revocation.status));
             continue;
         }
@@ -5675,6 +5780,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 }
                 ProofVerdict::Revoked => {
                     revoked_uses_blocked += 1;
+                    revoked_membership_found = true;
                     violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_merkle_root ({}) proves REVOKED — blocked (M5)", merkle_rev.status));
                     continue;
                 }
@@ -5939,6 +6045,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     for gid in native_grants_by_id.keys() {
         if revocation.revoked.contains(gid.as_str()) {
             revoked_uses_blocked += 1;
+            revoked_membership_found = true;
             revoked_native.insert(gid.clone());
             issues.push(format!("native credential for grant '{gid}': a signed revocation_list ({}) marks it REVOKED — its introspected surface is blocked (M5)", revocation.status));
         } else if merkle_rev.root.is_some() {
@@ -5956,6 +6063,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 ProofVerdict::NotRevoked => revocation_nonmembership_verified += 1,
                 ProofVerdict::Revoked => {
                     revoked_uses_blocked += 1;
+                    revoked_membership_found = true;
                     revoked_native.insert(gid.clone());
                     issues.push(format!("native credential for grant '{gid}': a signed revocation_merkle_root ({}) proves it REVOKED — blocked (M5)", merkle_rev.status));
                 }
@@ -5978,7 +6086,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let revocation_status = if revoked_uses_blocked > 0 {
         "revoked_present".to_string()
     } else {
-        revocation.status
+        revocation.status.clone()
     };
     // The Merkle-mode status is reported as evaluated (absent|fresh|stale); blocked/unproven uses already raise a
     // hard violation (→ !ok) and are counted in revoked_uses_blocked, so no separate "revoked_present" recolor.
@@ -6186,6 +6294,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut brokers_seq_verified = 0usize;
     let mut cross_broker_suppression = 0usize;
     let mut per_broker_trust: Vec<(String, String)> = Vec::new();
+    let broker_issues_before = issues.len();
     let broker_trust = match dag_opt.as_ref() {
         Some(d) => {
             let full_committed = committed_set(records, &d.by_hash, &d.heads);
@@ -6235,6 +6344,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
         None => "assumed".to_string(),
     };
+    let broker_log_contradiction = issues.len() > broker_issues_before;
 
     // D7: the resource_id set the deployment-attestation subject must bind — every resource named by a
     // grant_evidence or use_evidence in the bundle (so a substituted attestation for a different surface
@@ -6324,6 +6434,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         && checkpoints_verified == checkpoints.len()
         && !checkpoints.is_empty()
         && chain_ok;
+    let broker_sequence_verified = broker_trust == "sequence_verified";
 
     // The trust label must never outrank the verdict: if the bundle is not `ok` (e.g. a broken checkpoint
     // chain, an unverified checkpoint, or any other failure), `broker_trust` cannot claim a reduction.
@@ -6333,10 +6444,26 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         "assumed".to_string()
     };
 
-    VerifyReport {
+    let relevant_roles: Vec<&RecordTrust> = record_trust
+        .iter()
+        .filter(|rt| {
+            committed.contains(&rt.content_hash)
+                && matches!(
+                    rt.broker_role.as_str(),
+                    "broker" | "resource" | "grant_void"
+                )
+        })
+        .collect();
+    let body_bound_role_evidence = !relevant_roles.is_empty()
+        && relevant_roles
+            .iter()
+            .all(|rt| rt.authority == AuthorityTrust::Verified);
+    let mut report = VerifyReport {
         ok,
+        claims: ClaimResults::fatal(),
         project_id,
         keys_externally_pinned,
+        body_bound_role_evidence,
         records_total: records.len(),
         records_proven,
         record_trust,
@@ -6405,5 +6532,140 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         side_effect_closure_status,
         issues,
         first_broken_link,
-    }
+    };
+    // Claims are decided from checked pass outputs once, before the mutable diagnostic report is
+    // handed to callers. A later edit to a public counter or string cannot mint a trusted fact.
+    let structural_integrity = report.records_total > 0
+        && report.records_proven == report.records_total
+        && report.dag_ok
+        && report.chain_ok
+        && !duplicate_record_id
+        && !checkpoint_project_conflict
+        && report.checkpoints_total > 0
+        && report.checkpoints_verified == report.checkpoints_total;
+    let pinned_role_authority = (!opts.broker_authority_keys.is_empty()
+        || !opts.federated_broker_keys.is_empty())
+        && !opts.resource_authority_keys.is_empty()
+        && report.grant_total > 0
+        && report.grant_verified == report.grant_total
+        && body_bound_role_evidence;
+    let brokered_use_valid = report.uses_total > 0
+        && report.uses_matched == report.uses_total
+        && report.uses_pop_reverified == report.uses_matched
+        && report.unmatched_violation == 0
+        && report.unmatched_pending == 0
+        && report.taxonomy_status == "validated"
+        && report.uses_action_unverified == 0;
+    let introspected_use_valid = report.native_credential_present
+        && report.introspection_status == "attested"
+        && report.introspection_transcripts_total > 0
+        && report.introspection_transcripts_verified == report.introspection_transcripts_total;
+    let pinned_signer_keys: Vec<[u8; 32]> = opts
+        .trusted_keys
+        .as_ref()
+        .map(|set| set.iter().map(|k| k.vk.to_bytes()).collect())
+        .unwrap_or_default();
+    let pinned_record_seals: Vec<PinnedRecordSeal> = report
+        .record_trust
+        .iter()
+        .filter_map(|rt| {
+            if rt.trust != TrustLevel::IntegrityProven {
+                return None;
+            }
+            let rec_key = records[rt.index].get("key")?;
+            let id = s(rec_key, "signing_key_id")?;
+            let epoch = rec_key.get("key_epoch")?.as_int()?;
+            let key_bytes = keys.get(&(id, epoch))?.vk.to_bytes();
+            if !pinned_signer_keys.contains(&key_bytes) {
+                return None;
+            }
+            Some(PinnedRecordSeal {
+                record_hash: rt.content_hash.clone(),
+                key_bytes,
+            })
+        })
+        .collect();
+    let anchors: Vec<AnchoredCheckpoint> = anchored_cp_ids
+        .iter()
+        .map(
+            |(sequence, checkpoint_hash, timestamp, _)| AnchoredCheckpoint {
+                sequence: *sequence,
+                checkpoint_hash: checkpoint_hash.clone(),
+                timestamp: timestamp.clone(),
+            },
+        )
+        .collect();
+    let facts = ValidatedFacts {
+        structural_integrity,
+        record_count: report.records_total,
+        pinned_record_seals,
+        pinned_signer_keys,
+        pinned_role_authority,
+        latest_checkpoint_sequence: latest_cp_seq,
+        anchors,
+        attestation_valid: report.attestation_status == "attested_claims",
+        brokered_use_valid,
+        introspected_use_valid,
+        capstone: CapstoneFacts {
+            manifest: report
+                .coverage_manifest
+                .as_ref()
+                .is_some_and(|m| !m.is_null()),
+            two_phase: !report.one_phase_use_present,
+            no_incomplete_intent: report.intent_without_outcome == 0,
+            taxonomy: report.taxonomy_status == "validated",
+            every_action_verified: report.uses_action_unverified == 0,
+            every_pop_reverified: report.uses_pop_reverified == report.uses_matched,
+            grant_log: broker_sequence_verified,
+            attestation: report.attestation_status == "attested_claims",
+            no_violation: report.unmatched_violation == 0,
+            no_pending: report.unmatched_pending == 0,
+            bounded_reuse: report.bounded_reuse_overspent == 0
+                && report.bounded_reuse_seq_replays == 0,
+            cosignatures: report.cosig_threshold_failures == 0
+                && (report.cosigned_grants_total == 0
+                    || report.cosigned_grants_satisfied == report.cosigned_grants_total),
+            delegation: (report.delegation_chains_total == 0
+                || report.delegation_chains_verified == report.delegation_chains_total)
+                && report.delegation_monotonicity_violations == 0,
+            revocation: !matches!(
+                report.revocation_status.as_str(),
+                "stale" | "revoked_present" | "missing"
+            ) && report.revoked_uses_blocked == 0
+                && report.revocation_merkle_status != "stale",
+            federation: report.cross_broker_suppression == 0
+                && report.brokers_seq_verified == report.brokers_total,
+            coverage: report.side_effect_closure_status == "closed",
+            brokered_surface: report.uses_matched > 0 && !report.native_credential_present,
+            introspected_surface: report.uses_matched == 0
+                && report.native_credential_present
+                && report.introspection_status == "attested",
+        },
+        committed_contradiction: report.unmatched_violation > 0
+            || duplicate_record_id
+            || semantic_record_conflict
+            || checkpoint_project_conflict
+            || committed_grant_rejected
+            || void_contradiction
+            || grant_contradiction
+            || broker_log_contradiction
+            || !grant_equivocations.is_empty()
+            || report.bounded_reuse_overspent > 0
+            || report.bounded_reuse_seq_replays > 0
+            || report.cosig_threshold_failures > 0
+            || report.delegation_monotonicity_violations > 0
+            || report.cross_broker_suppression > 0,
+        adverse_disclosure: report.cred_label_checks > report.cred_label_matched,
+        adverse_anchor: !anchor_order_valid,
+        revoked_membership: revoked_membership_found,
+        revocation_issuer_pinned: !opts.revocation_keys.is_empty(),
+        disclosed_revocation_fresh: revocation.status == "fresh",
+        merkle_revocation_fresh: merkle_rev.status == "fresh",
+        disclosure_complete: report.cred_label_checks > 0
+            && report.cred_label_checks == report.cred_label_matched
+            && report.disclosures_total == report.disclosures_verified,
+        policy: opts.claim_policy,
+    };
+    report.claims = facts.decide();
+    report
 }
