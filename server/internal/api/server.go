@@ -1896,6 +1896,15 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	if errors.Is(err, store.ErrCommitAmbiguous) {
+		// COMMIT may have succeeded while its acknowledgement was lost. Only
+		// this exact idempotency identity may recover the committed grant.
+		if existing, found, lookupErr := s.st.RecordByIdem(gr.ProjectID, idem); lookupErr == nil && found {
+			if same, matchErr := storedGrantMatchesRequest(existing.JSON, req); matchErr == nil && same {
+				sealed, created, err = existing.JSON, false, nil
+			}
+		}
+	}
 	if conflictErr != nil {
 		writeErr(w, http.StatusConflict, conflictErr.Error())
 		return
