@@ -82,6 +82,59 @@ func TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite(t *testing.T) {
 	}
 }
 
+func TestV3NonNFCIdentityRejectedBeforeAuthorityLookup(t *testing.T) {
+	fixtureBytes, err := os.ReadFile("../../../spec/golden-vectors/authority-sdk-v3.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Prepared map[string]any `json:"prepared_record"`
+	}
+	if err := json.Unmarshal(fixtureBytes, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	approver, err := core.New(hex.EncodeToString(peSeed(0x67)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(fixture.Prepared)
+	proof, err := approver.SignAuthorityRecordV3(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := fixture.Prepared["authority"].(map[string]any)
+	authority["subject_digest"], authority["evidence_sig"] = proof.SubjectDigest, proof.EvidenceSig
+	recorder, err := core.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewMem()
+	// No external key is configured: an authority lookup would fail if it ran.
+	h := api.New(recorder, st, "k0").Routes()
+	for _, field := range []string{"project_id", "record_id"} {
+		t.Run(field, func(t *testing.T) {
+			original, _ := json.Marshal(fixture.Prepared)
+			var rec map[string]any
+			if err := json.Unmarshal(original, &rec); err != nil {
+				t.Fatal(err)
+			}
+			rec[field] = "e\u0301"
+			rec["idempotency_key"] = "non-nfc-" + field
+			raw, _ := json.Marshal(rec)
+			code, body := do(t, h, "POST", "/v2/records", string(raw))
+			if code != http.StatusBadRequest || !strings.Contains(body, "NFC") {
+				t.Fatalf("non-NFC %s should fail identity validation first (%d): %s", field, code, body)
+			}
+			for _, project := range []string{"p1", "e\u0301", "é"} {
+				persisted, err := st.AllRecords(project)
+				if err != nil || len(persisted) != 0 {
+					t.Fatalf("non-NFC %s left %d records for %q: %v", field, len(persisted), project, err)
+				}
+			}
+		})
+	}
+}
+
 func TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal(t *testing.T) {
 	recorder, err := core.New(seed)
 	if err != nil {
