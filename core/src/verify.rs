@@ -5099,6 +5099,21 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_int(rec, "grant_evidence", "exp"),
         ) {
             (Some(gid), Some(action), Some(resource_id), Some(scope_class), Some(cnf_kid), Some(credential_binding), Some(issued_at), Some(exp)) => {
+                // v2 brokered grants carry the authorized project inside the
+                // broker-signed evidence as well as the sealed record. This gate
+                // applies even when the credential descriptor is not disclosed.
+                let pop_version = ev_int(rec, "grant_evidence", "pop_version");
+                if (pop_version.is_some() && pop_version != Some(2))
+                    || (pop_version == Some(2)
+                        && (ev_str(rec, "grant_evidence", "project_id") != s(rec, "project_id")
+                            || ev_str(rec, "grant_evidence", "request_hash").is_none_or(|h| {
+                                !h.starts_with("sha256:") || h.len() != 71
+                                    || !h[7..].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                            })))
+                {
+                    issues.push(format!("grant {} ({}): v2 signed project/request identity does not match sealed grant", rt.index, rt.record_id));
+                    continue;
+                }
                 // M1 (bounded_reuse): the cap rides inside the signed grant_evidence (0/absent for other
                 // classes). A bounded_reuse grant MUST declare a positive use_limit; an "unbounded bounded"
                 // grant is fail-closed (NOT indexed), so a use against it reads as action-without-credential
@@ -5324,6 +5339,22 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
         if jti != gid.as_str() {
             mism.push(format!("jti '{jti}' != grant_id '{gid}'"));
+        }
+        if ev_int(rec, "grant_evidence", "pop_version") == Some(2)
+            || descriptor.get("version").and_then(|v| v.as_int()) == Some(2)
+        {
+            if descriptor.get("version").and_then(|v| v.as_int()) != Some(2) {
+                mism.push("v2 descriptor.version is missing or wrong".to_string());
+            }
+            if ev_int(rec, "grant_evidence", "pop_version") != Some(2) {
+                mism.push("v2 grant_evidence.pop_version is missing or wrong".to_string());
+            }
+            if ds("project_id") != s(rec, "project_id").unwrap_or_default() {
+                mism.push("v2 descriptor.project_id != sealed record.project_id".to_string());
+            }
+            if ds("project_id") != label("project_id") {
+                mism.push("v2 descriptor.project_id != signed grant_evidence.project_id".to_string());
+            }
         }
         if descriptor.get("exp").and_then(|v| v.as_int()) != ev_int(rec, "grant_evidence", "exp") {
             mism.push("exp != grant_evidence.exp".to_string());

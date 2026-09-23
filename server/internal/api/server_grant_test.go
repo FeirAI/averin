@@ -36,14 +36,20 @@ func newBrokerServer(t *testing.T) http.Handler {
 // grantBody builds a JSON grant request whose agent_sig proves possession of the agent key (PoP),
 // carrying idempotency key `idem`.
 func grantBody(idem, scope string, ak ed25519.PrivateKey, sigKey ed25519.PrivateKey) string {
+	return grantBodyAt(idem, scope, ak, sigKey, time.Now())
+}
+
+func grantBodyAt(idem, scope string, ak ed25519.PrivateKey, sigKey ed25519.PrivateKey, now time.Time) string {
 	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
-	// the challenge is over agent_id/action/resource/scope/agent_pubkey
 	req := broker.Request{
+		PoPVersion: 2, ProjectID: "p1", IdempotencyKey: idem, SessionID: "s1",
+		IssuedAt: now.Unix(), RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
 		AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db",
-		Scope: scope, AgentPubKey: pub,
+		Scope: scope, AgentPubKey: pub, TTL: time.Minute,
 	}
 	sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(sigKey, req.Challenge()))
 	b, _ := json.Marshal(map[string]any{
+		"pop_version": 2, "issued_at": req.IssuedAt, "request_expires_at": req.RequestExpiresAt,
 		"idempotency_key": idem,
 		"project_id":      "p1", "session_id": "s1",
 		"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",

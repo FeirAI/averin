@@ -208,6 +208,8 @@ Request (`grantRequest`):
 | Field | Type | Notes |
 |-------|------|-------|
 | `idempotency_key` | string | Required (or `Idempotency-Key` header). Deterministically fixes `grant_id`. |
+| `pop_version` | int | `2` for new brokered issuance; native `token_exchange` has its separate proof contract. |
+| `issued_at`, `request_expires_at` | int64 Unix seconds | Agent-signed freshness window. Maximum 15 minutes; 30 seconds of clock skew accepted. |
 | `project_id`, `session_id` | string | Required. |
 | `agent_id`, `action`, `resource`, `scope` | string | The operation being authorized. |
 | `scope_class` | string | Scope classification input (see broker `ScopeClass`). |
@@ -226,7 +228,7 @@ Request (`grantRequest`):
   "grant_id": "<uuid>",
   "capability": "<minted sender-constrained token>",
   "expires_at": "2026-...Z",
-  "scope_class": "single_use"
+  "scope_class": "single_operation"
 }
 ```
 
@@ -234,19 +236,20 @@ Errors: `400` (validation, failed PoP, forbidden scope, malformed), `409` (idemp
 for a *different* grant request, or the grant's reserved `broker_seq` was voided by the operator —
 re-issue under a new `idempotency_key`), `500` (store/seal failure), `501` (broker not enabled). When an
 M-of-N cosig policy is pinned, single-phase issuance is refused (`400`) — use prepare/finalize.
+An invalid signature, stale proof, or conflicting project/idempotency representation is rejected
+without allocating a grant sequence or sealing authorization or denial evidence. An authenticated
+fresh request that fails broker policy may produce a signed denied-grant record when denial logging
+is enabled.
 
-**What `agent_sig` binds.** `agent_sig` is an Ed25519 signature, under the key in `agent_pubkey`, over
-the JSON object `{"tag":"averin.broker.pop.v1","agent_id","action","resource","scope","agent_pubkey"}`
-(keys sorted). It proves the caller holds the cnf key and binds the operation to it. It does **not**
-bind a nonce, an expiry, the `project_id`, the `session_id`, the `idempotency_key`, `scope_class`,
-`use_limit`, `ttl_seconds`, the principal or the delegation chain. So a captured request body is
-replayable: under a new `idempotency_key` (or in another project the replayer can write to) it yields
-another grant for the same operation, bound to the same agent key, which only the holder of that key can
-use (resources re-check PoP at use time). Against the two-phase flow, a captured body lets a third party
-drive `prepare`/`finalize` for that agent's pending grant under its `idempotency_key`; it cannot change
-what the grant authorizes or which key it is bound to. Treat grant request bodies as sensitive in transit
-and logs. Binding the project and idempotency key into the challenge (with a new tag) is a planned
-wire-format change.
+**What `agent_sig` binds.** For `pop_version: 2`, the agent signs a SHA-256 digest of the
+length-prefixed effective request, including authenticated `project_id`, resolved `idempotency_key`,
+`session_id`, operation and sender key, effective scope class/use limit, TTL, authorizing principal,
+delegation chain, justification, and the signed issue/expiry envelope. The exact field order and
+encoding are specified in [grant-pop-v2.md](../../spec/grant-pop-v2.md). A captured proof cannot be
+moved to another project or idempotency key, and it cannot mint after the signed freshness window.
+An exact committed retry can return the original capability after that window; it does not re-mint or
+extend the capability. Historical v1 signatures remain inspectable under their original format but
+are not accepted for new brokered issuance after the online cutover.
 
 ### POST `/v2/grants/prepare` and `/v2/grants/finalize` (two-phase)
 

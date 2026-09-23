@@ -50,12 +50,12 @@ func TestBrokerSeqVoidAgeCountsLatestAttempt(t *testing.T) {
 		h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).Routes() // default 1h
 
 		ls.ambiguousPut = true // T0: ambiguous commit that never lands
-		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusInternalServerError {
+		if code, resp := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-race", "read:orders", ak, ak, clk.Now())); code != http.StatusInternalServerError {
 			t.Fatalf("T0 ambiguous commit must 500 (got %d): %s", code, resp)
 		}
 		clk.Advance(59 * time.Minute)
 		ls.holdNext = true // T0+59m: the retry reuses seq 1; its commit is in flight (invisible to the store reads)
-		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusInternalServerError {
+		if code, resp := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-race", "read:orders", ak, ak, clk.Now())); code != http.StatusInternalServerError {
 			t.Fatalf("T0+59m retry with an in-flight commit must 500 (got %d): %s", code, resp)
 		}
 		clk.Advance(2 * time.Minute) // T0+61m: allocated_at is 61m old
@@ -79,7 +79,7 @@ func TestBrokerSeqVoidAgeCountsLatestAttempt(t *testing.T) {
 		h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).Routes()
 
 		fs.ambiguousPut = true
-		do(t, h, "POST", "/v2/grants", grantBody("idem-ctl", "read:orders", ak, ak))
+		do(t, h, "POST", "/v2/grants", grantBodyAt("idem-ctl", "read:orders", ak, ak, clk.Now()))
 		clk.Advance(30 * time.Minute)
 		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "AVERIN_BROKER_SEQ_VOID_MIN_AGE") {
 			t.Fatalf("a 30m-old reservation must be refused (got %d): %s", code, resp)

@@ -42,6 +42,10 @@ var ErrConsumed = errors.New("resourceshim: credential jti or nonce already cons
 // it BEFORE consuming anything, so a revoked credential is never exercised and never burns a nonce.
 var ErrRevoked = errors.New("resourceshim: the capability's grant is revoked")
 
+// ErrRevocationCheck marks an unavailable authoritative revocation lookup.
+// Callers must surface it as a server failure rather than a rejected credential.
+var ErrRevocationCheck = errors.New("resourceshim: revocation check failed")
+
 // Ledger is the durable consume-before-act store. Consumption is marked BEFORE the resource performs
 // the side effect, so a crash after consumption cannot leave a live credential.
 type Ledger interface {
@@ -164,10 +168,13 @@ func consumeKey(jti string, useSeq int) string {
 // Shim is the resource-side gateway, configured once with the broker's capability-issuing public key,
 // this resource's id, and the durable ledger.
 type Shim struct {
-	issuingPub ed25519.PublicKey
-	resourceID string
-	ledger     Ledger
-	isRevoked  func(grantID string) bool // nil = no use-time revocation check
+	issuingPub          ed25519.PublicKey
+	resourceID          string
+	projectID           string // authenticated route context; never inferred from the request body
+	ledger              Ledger
+	isRevoked           func(grantID string) bool // nil = no use-time revocation check
+	isRevokedErr        func(grantID string) (bool, error)
+	legacyProjectLookup func(projectID, grantID, credentialBinding string) bool
 }
 
 // New constructs a Shim. resourceID is this resource's audience id (capabilities whose aud differs are
@@ -176,12 +183,33 @@ func New(issuingPub ed25519.PublicKey, resourceID string, ledger Ledger) *Shim {
 	return &Shim{issuingPub: issuingPub, resourceID: resourceID, ledger: ledger}
 }
 
+// WithProject binds this shim to the project authenticated for the route.
+func (s *Shim) WithProject(projectID string) *Shim {
+	s.projectID = projectID
+	return s
+}
+
+// WithLegacyProjectLookup permits a historical capability without a signed
+// project only when an authoritative sealed grant in the authenticated project
+// commits to its exact descriptor. Without this lookup legacy online use fails.
+func (s *Shim) WithLegacyProjectLookup(lookup func(projectID, grantID, credentialBinding string) bool) *Shim {
+	s.legacyProjectLookup = lookup
+	return s
+}
+
 // WithRevocationCheck makes ValidateUse consult the revoked set at use time: a capability whose grant_id (== the
 // verified jti) isRevoked reports as revoked is rejected with ErrRevoked BEFORE anything is consumed. Without it
 // a revoked grant stays usable at the resource until its expiry (the offline verifier only flags the use after
 // the fact).
 func (s *Shim) WithRevocationCheck(isRevoked func(grantID string) bool) *Shim {
 	s.isRevoked = isRevoked
+	return s
+}
+
+// WithRevocationCheckErr uses an authoritative lookup that can fail. A failed
+// read fails closed before any ledger access and retains its server-error type.
+func (s *Shim) WithRevocationCheckErr(isRevoked func(grantID string) (bool, error)) *Shim {
+	s.isRevokedErr = isRevoked
 	return s
 }
 
@@ -207,6 +235,28 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 	claims, err := broker.VerifyCapability(token, s.issuingPub)
 	if err != nil {
 		return UseEvidence{}, err
+	}
+	// Tenant binding is an authorization gate, ahead of revocation and every
+	// nonce/JTI read or write. Legacy capabilities have no project claim and
+	// require an exact sealed-grant lookup; request text cannot assign ownership.
+	if s.projectID == "" {
+		return UseEvidence{}, errors.New("resourceshim: authenticated project is required")
+	}
+	switch claims.Version {
+	case 2:
+		if claims.ProjectID == "" || claims.ProjectID != s.projectID {
+			return UseEvidence{}, errors.New("resourceshim: capability project does not match authenticated project")
+		}
+	case 0:
+		binding, e := credentialBinding(token)
+		if e != nil {
+			return UseEvidence{}, e
+		}
+		if s.legacyProjectLookup == nil || !s.legacyProjectLookup(s.projectID, claims.Jti, binding) {
+			return UseEvidence{}, errors.New("resourceshim: legacy capability project cannot be authenticated")
+		}
+	default:
+		return UseEvidence{}, errors.New("resourceshim: unsupported capability version")
 	}
 	// 2. Validity window (threat B8: short-lived credentials).
 	unix := now.UTC().Unix()
@@ -256,7 +306,15 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 	}
 	// 4.6 M5 revocation: a revoked grant must not be exercised. Checked on the SIGNATURE-VERIFIED jti (== the
 	// grant_id) and BEFORE consuming, so a revoked credential burns neither its nonce nor its jti.
-	if s.isRevoked != nil && s.isRevoked(claims.Jti) {
+	if s.isRevokedErr != nil {
+		revoked, err := s.isRevokedErr(claims.Jti)
+		if err != nil {
+			return UseEvidence{}, fmt.Errorf("%w: %v", ErrRevocationCheck, err)
+		}
+		if revoked {
+			return UseEvidence{}, fmt.Errorf("%w: grant %s", ErrRevoked, claims.Jti)
+		}
+	} else if s.isRevoked != nil && s.isRevoked(claims.Jti) {
 		return UseEvidence{}, fmt.Errorf("%w: grant %s", ErrRevoked, claims.Jti)
 	}
 	// 5. Consume-before-act (R5): mark the nonce (replay) and the credential's double-spend key consumed

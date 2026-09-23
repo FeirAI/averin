@@ -199,7 +199,7 @@ func TestBrokerSeqVoidBootFloor(t *testing.T) {
 	fs := &flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}
 	h1 := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).Routes()
 	fs.ambiguousPut = true
-	do(t, h1, "POST", "/v2/grants", grantBody("idem-boot", "read:orders", ak, ak)) // T0: reserved, never lands
+	do(t, h1, "POST", "/v2/grants", grantBodyAt("idem-boot", "read:orders", ak, ak, clk.Now())) // T0: reserved, never lands
 	clk.Advance(3 * time.Hour)
 
 	// "restart": a new Server over the same store, constructed now (T0+3h).

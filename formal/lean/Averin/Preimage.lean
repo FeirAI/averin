@@ -70,6 +70,13 @@ def signedFamilies : List Family :=
 
 /-! ## Challenge families (SHA-256 of the preimage; the raw 32-byte digest is what is signed) -/
 
+/-- `broker.Request.Challenge` v2. The opaque tail is the variable-length
+delegation LP4 sequence followed by two fixed BE8 freshness times. The shared
+golden vector checks the complete encoding in both producers. -/
+def grantPopV2 : Family :=
+  ⟨"grant PoP v2", "averin.broker.pop.v2",
+   List.replicate 12 .framed ++ [.fixed 8, .fixed 8, .fixed 8], true⟩
+
 /-- `verify.rs::use_pop_challenge`. -/
 def usePop : Family :=
   ⟨"use PoP", "averin.broker.use.pop.v1", [.framed, .framed, .framed, .framed, .framed, .framed], false⟩
@@ -113,7 +120,7 @@ def revocationLeaf : Family := ⟨"revocation leaf", "averin.broker.revocation.l
 /-- Every LP-framed SHA-256 input family whose leading tag is unique. (`grantHeadSeed` shares its
 tag with `grantHeadStep` and is separated by length in `grant_head_seed_ne_step`.) -/
 def hashFamilies : List Family :=
-  [usePop, cosig, delegationHop, introspection, federation, recordHash, checkpointHash, commitment,
+  [grantPopV2, usePop, cosig, delegationHop, introspection, federation, recordHash, checkpointHash, commitment,
    ledger, grantHeadStep, revocationLeaf]
 
 /-! ## Within-family injectivity -/
@@ -148,7 +155,7 @@ theorem hash_tags_distinct : (hashFamilies.map (fun F => ascii F.tag)).Pairwise 
   decide
 
 theorem challenge_tags_disjoint_from_signed :
-    ∀ F ∈ [usePop, cosig, delegationHop, introspection, federation],
+    ∀ F ∈ [grantPopV2, usePop, cosig, delegationHop, introspection, federation],
     ∀ G ∈ signedFamilies, ascii F.tag ≠ ascii G.tag := by
   decide
 

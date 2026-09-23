@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/feirai/averin/server/internal/goldenvec"
 )
 
 // deterministic keys for reproducible tests.
@@ -34,6 +37,98 @@ func validRequest() Request {
 		Principal: "policy/orders",
 		TTL:       60 * time.Second,
 	}, agentKey())
+}
+
+func validRequestV2() Request {
+	r := validRequest()
+	r.PoPVersion = 2
+	r.ProjectID = "p1"
+	r.IdempotencyKey = "idem-1"
+	r.SessionID = "s1"
+	r.IssuedAt = 1718445000
+	r.RequestExpiresAt = 1718445900
+	r.AgentSig = b64(ed25519.Sign(agentKey(), r.Challenge()))
+	return r
+}
+
+func TestGrantPoPV2BindsEffectiveSubjectAndFreshness(t *testing.T) {
+	r := validRequestV2()
+	if err := r.ValidateAt(time.Unix(r.IssuedAt+30, 0)); err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]func(*Request){
+		"project":       func(r *Request) { r.ProjectID = "p2" },
+		"idempotency":   func(r *Request) { r.IdempotencyKey = "idem-2" },
+		"session":       func(r *Request) { r.SessionID = "s2" },
+		"agent":         func(r *Request) { r.AgentID = "other" },
+		"action":        func(r *Request) { r.Action = "other" },
+		"resource":      func(r *Request) { r.Resource = "other" },
+		"scope":         func(r *Request) { r.Scope = "read:other" },
+		"class":         func(r *Request) { r.ScopeClass = ScopeSession },
+		"key":           func(r *Request) { r.AgentPubKey = b64(issuingKey().Public().(ed25519.PublicKey)) },
+		"principal":     func(r *Request) { r.Principal = "other" },
+		"delegation":    func(r *Request) { r.DelegationChain = []string{"other"} },
+		"justification": func(r *Request) { r.Justification = "other" },
+		"ttl":           func(r *Request) { r.TTL = 120 * time.Second },
+		"issued":        func(r *Request) { r.IssuedAt++ },
+		"expiry":        func(r *Request) { r.RequestExpiresAt++ },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changed := r
+			mutate(&changed)
+			if err := changed.Validate(); err == nil {
+				t.Fatal("substituted signed field accepted")
+			}
+		})
+	}
+	if err := r.ValidateAt(time.Unix(r.RequestExpiresAt+31, 0)); err == nil {
+		t.Fatal("expired proof accepted for fresh issuance")
+	}
+	resigned := r
+	resigned.IssuedAt += 60
+	resigned.RequestExpiresAt += 60
+	resigned.AgentSig = b64(ed25519.Sign(agentKey(), resigned.Challenge()))
+	a, b := r.SemanticHash()
+	c, d := resigned.SemanticHash()
+	if b != nil || d != nil || a != c {
+		t.Fatalf("freshness envelope altered retry identity: %s %s, %v %v", a, c, b, d)
+	}
+	explicitDefault := r
+	explicitDefault.ScopeClass = ScopeSingleOperation
+	defaultHash, err := explicitDefault.SemanticHash()
+	if err != nil || defaultHash != a {
+		t.Fatalf("explicit default changed semantic subject: %s, %v", defaultHash, err)
+	}
+	bounded := r
+	bounded.ScopeClass, bounded.UseLimit = ScopeBoundedReuse, 2
+	bounded.AgentSig = b64(ed25519.Sign(agentKey(), bounded.Challenge()))
+	if err := bounded.ValidateAt(time.Unix(r.IssuedAt+30, 0)); err != nil {
+		t.Fatal(err)
+	}
+	bounded.UseLimit = 3
+	if err := bounded.Validate(); err == nil {
+		t.Fatal("a substituted bounded use limit passed PoP")
+	}
+}
+
+func TestGrantPoPV2SharedVector(t *testing.T) {
+	v, err := goldenvec.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.GrantPoPV2) == 0 {
+		t.Fatal("missing v2 grant vectors")
+	}
+	for _, c := range v.GrantPoPV2 {
+		r := Request{PoPVersion: 2, ProjectID: c.ProjectID, IdempotencyKey: c.IdempotencyKey, SessionID: c.SessionID,
+			AgentID: c.AgentID, Action: c.Action, Resource: c.Resource, Scope: c.Scope, ScopeClass: ScopeClass(c.ScopeClass),
+			AgentPubKey: c.AgentPubKey, Principal: c.Principal, Justification: c.Justification, UseLimit: c.UseLimit,
+			TTL: time.Duration(c.TTLSeconds) * time.Second, DelegationChain: c.DelegationChain, IssuedAt: c.IssuedAt, RequestExpiresAt: c.RequestExpiresAt}
+		if got := hex.EncodeToString(r.Challenge()); got != c.ExpectHex {
+			t.Fatalf("%s: %s != %s", c.Name, got, c.ExpectHex)
+		}
+	}
 }
 
 func TestClassifyScope(t *testing.T) {

@@ -35,13 +35,19 @@ func mintCap(t *testing.T, issuing, agent ed25519.PrivateKey, grantID, action, r
 	t.Helper()
 	agentPub := agent.Public().(ed25519.PublicKey)
 	req := broker.Request{
-		AgentID:     "agent-1",
-		Action:      action,
-		Resource:    resource,
-		Scope:       "read:orders",
-		AgentPubKey: b64(agentPub),
-		Principal:   "svc",
-		TTL:         ttl,
+		PoPVersion:       2,
+		ProjectID:        "p1",
+		IdempotencyKey:   grantID,
+		SessionID:        "s1",
+		IssuedAt:         now.Unix(),
+		RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
+		AgentID:          "agent-1",
+		Action:           action,
+		Resource:         resource,
+		Scope:            "read:orders",
+		AgentPubKey:      b64(agentPub),
+		Principal:        "svc",
+		TTL:              ttl,
 	}
 	req.AgentSig = b64(ed25519.Sign(agent, req.Challenge()))
 	p, err := broker.Prepare(req, grantID, func() (int64, error) { return 1, nil }, now, issuing)
@@ -76,7 +82,7 @@ func TestValidUseProducesCanonicalEvidence(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	useSig := signDefault(t, agent, token, testParams, "nonce-1")
 
 	ev, err := sh.ValidateUse(token, useSig, Op{Action: testAction, ParamsCommitment: testParams}, "nonce-1", now)
@@ -103,11 +109,70 @@ func TestValidUseProducesCanonicalEvidence(t *testing.T) {
 	}
 }
 
+func TestSignedCapabilityProjectCheckedBeforeLedgerOrRevocation(t *testing.T) {
+	issuing, agent := keyFromByte(1), keyFromByte(2)
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	token := defaultCap(t, issuing, agent, time.Hour, now)
+	ledger := NewMemLedger()
+	revocationCalled := false
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, ledger).WithProject("p2").
+		WithRevocationCheck(func(string) bool { revocationCalled = true; return false })
+	_, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n"),
+		Op{Action: testAction, ParamsCommitment: testParams}, "n", now)
+	if err == nil || !strings.Contains(err.Error(), "project") {
+		t.Fatalf("wrong-project token accepted: %v", err)
+	}
+	if revocationCalled {
+		t.Fatal("revocation read preceded project validation")
+	}
+	if err := ledger.ConsumeNonce("n"); err != nil {
+		t.Fatalf("wrong-project token consumed nonce: %v", err)
+	}
+}
+
+func TestRevocationReadFailurePrecedesLedger(t *testing.T) {
+	issuing, agent := keyFromByte(1), keyFromByte(2)
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	token := defaultCap(t, issuing, agent, time.Hour, now)
+	ledger := NewMemLedger()
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, ledger).WithProject("p1").
+		WithRevocationCheckErr(func(string) (bool, error) { return false, errors.New("database unavailable") })
+	_, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n"),
+		Op{Action: testAction, ParamsCommitment: testParams}, "n", now)
+	if !errors.Is(err, ErrRevocationCheck) {
+		t.Fatalf("revocation read error = %v", err)
+	}
+	if err := ledger.ConsumeNonce("n"); err != nil {
+		t.Fatalf("revocation failure consumed nonce: %v", err)
+	}
+}
+
+func TestLegacyCapabilityNeedsAuthoritativeProjectLookup(t *testing.T) {
+	issuing, agent := keyFromByte(1), keyFromByte(2)
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	req := broker.Request{AgentID: "agent-1", Action: testAction, Resource: testResource, Scope: "read:orders",
+		AgentPubKey: b64(agent.Public().(ed25519.PublicKey)), TTL: time.Hour}
+	req.AgentSig = b64(ed25519.Sign(agent, req.Challenge()))
+	p, err := broker.Prepare(req, testGrantID, func() (int64, error) { return 1, nil }, now, issuing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := p.Capability
+	for _, project := range []string{"p1", "p2"} {
+		sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject(project)
+		_, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n"),
+			Op{Action: testAction, ParamsCommitment: testParams}, "n", now)
+		if err == nil || !strings.Contains(err.Error(), "legacy capability project") {
+			t.Fatalf("legacy capability used under %s without sealed lookup: %v", project, err)
+		}
+	}
+}
+
 func TestExpiredCredentialRejected(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Minute, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	useSig := signDefault(t, agent, token, testParams, "n")
 	// validate two minutes later — past exp
 	_, err := sh.ValidateUse(token, useSig, Op{Action: testAction, ParamsCommitment: testParams}, "n", now.Add(2*time.Minute))
@@ -120,7 +185,7 @@ func TestActionSubstitutionRejected(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	// agent honestly signs for the granted action, but the resource is asked to perform a DIFFERENT op
 	useSig := signDefault(t, agent, token, testParams, "n")
 	_, err := sh.ValidateUse(token, useSig, Op{Action: "db.delete:everything", ParamsCommitment: testParams}, "n", now)
@@ -134,7 +199,7 @@ func TestWrongResourceRejected(t *testing.T) {
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
 	// a DIFFERENT resource presents the capability (aud mismatch)
-	sh := New(issuing.Public().(ed25519.PublicKey), "payments-db", NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), "payments-db", NewMemLedger()).WithProject("p1")
 	useSig := signUse(t, agent, token, testGrantID, "payments-db", testAction, testParams, "n")
 	_, err := sh.ValidateUse(token, useSig, Op{Action: testAction, ParamsCommitment: testParams}, "n", now)
 	if err == nil || !strings.Contains(err.Error(), "audience") {
@@ -146,7 +211,7 @@ func TestTokenTheftFailsPoP(t *testing.T) {
 	issuing, agent, thief := keyFromByte(1), keyFromByte(2), keyFromByte(9)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	// a thief holding the token but NOT the cnf key signs the PoP with their own key
 	stolenSig := signDefault(t, thief, token, testParams, "n")
 	_, err := sh.ValidateUse(token, stolenSig, Op{Action: testAction, ParamsCommitment: testParams}, "n", now)
@@ -159,7 +224,7 @@ func TestParamsBindingRejectsMismatch(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	// agent signs over one params commitment, but the resource is invoked with DIFFERENT params
 	useSig := signDefault(t, agent, token, testParams, "n")
 	otherParams := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -173,7 +238,7 @@ func TestReplayedUseSigRejected(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	useSig := signDefault(t, agent, token, testParams, "nonce-replay")
 	op := Op{Action: testAction, ParamsCommitment: testParams}
 	if _, err := sh.ValidateUse(token, useSig, op, "nonce-replay", now); err != nil {
@@ -190,7 +255,7 @@ func TestSingleUseDoubleSpendRejected(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	op := Op{Action: testAction, ParamsCommitment: testParams}
 	// first use: fresh nonce
 	if _, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n1"), op, "n1", now); err != nil {
@@ -213,7 +278,7 @@ func TestRevokedGrantRejectedBeforeConsume(t *testing.T) {
 	token := defaultCap(t, issuing, agent, time.Hour, now)
 	ledger := NewMemLedger()
 	revoked := map[string]bool{testGrantID: true}
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, ledger).
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, ledger).WithProject("p1").
 		WithRevocationCheck(func(g string) bool { return revoked[g] })
 	op := Op{Action: testAction, ParamsCommitment: testParams}
 	_, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n1"), op, "n1", now)
@@ -241,7 +306,7 @@ func TestDoubleSpendReleasesNonce(t *testing.T) {
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
 	ledger := NewMemLedger()
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, ledger)
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, ledger).WithProject("p1")
 	op := Op{Action: testAction, ParamsCommitment: testParams}
 	if _, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n1"), op, "n1", now); err != nil {
 		t.Fatalf("first use should succeed: %v", err)
@@ -260,7 +325,7 @@ func TestTamperedTokenRejected(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	// flip a character in the payload — the issuing-key signature no longer verifies
 	tampered := "A" + token[1:]
 	useSig := signDefault(t, agent, token, testParams, "n")
@@ -274,7 +339,7 @@ func TestEmptyNonceRejected(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	useSig := signDefault(t, agent, token, testParams, "")
 	_, err := sh.ValidateUse(token, useSig, Op{Action: testAction, ParamsCommitment: testParams}, "", now)
 	if err == nil || !strings.Contains(err.Error(), "nonce is required") {
@@ -286,7 +351,7 @@ func TestNotYetValidRejected(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	useSig := signDefault(t, agent, token, testParams, "n")
 	// validate BEFORE nbf (one minute before issuance)
 	_, err := sh.ValidateUse(token, useSig, Op{Action: testAction, ParamsCommitment: testParams}, "n", now.Add(-time.Minute))
@@ -299,7 +364,7 @@ func TestMalformedUseSigRejected(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	op := Op{Action: testAction, ParamsCommitment: testParams}
 	// not valid base64url, and a valid-base64-but-wrong-length signature, both fail closed
 	for _, bad := range []string{"!!!not base64!!!", b64([]byte("too short"))} {
@@ -312,7 +377,7 @@ func TestMalformedUseSigRejected(t *testing.T) {
 func TestMalformedTokenRejected(t *testing.T) {
 	issuing := keyFromByte(1)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	// a token with no "." separator is structurally invalid
 	if _, err := sh.ValidateUse("nodothere", b64(make([]byte, ed25519.SignatureSize)), Op{Action: testAction, ParamsCommitment: testParams}, "n", now); err == nil {
 		t.Fatalf("a malformed capability token (no separator) must be rejected")
@@ -326,7 +391,7 @@ func TestFailedValidationDoesNotConsumeCredential(t *testing.T) {
 	issuing, agent, thief := keyFromByte(1), keyFromByte(2), keyFromByte(9)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
 	token := defaultCap(t, issuing, agent, time.Hour, now)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	op := Op{Action: testAction, ParamsCommitment: testParams}
 	// a failed PoP (thief's key) with nonce "n"
 	if _, err := sh.ValidateUse(token, signDefault(t, thief, token, testParams, "n"), op, "n", now); err == nil {
@@ -344,7 +409,7 @@ func TestNonceUniqueAcrossDifferentCredentials(t *testing.T) {
 	// rejected, independent of the per-jti single-use check.
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
-	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger())
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	tokenA := mintCap(t, issuing, agent, "grant-a", testAction, testResource, time.Hour, now)
 	tokenB := mintCap(t, issuing, agent, "grant-b", testAction, testResource, time.Hour, now)
 	op := Op{Action: testAction, ParamsCommitment: testParams}
