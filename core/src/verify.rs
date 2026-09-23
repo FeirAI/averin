@@ -1871,12 +1871,17 @@ fn be8(pre: &mut Vec<u8>, n: u64) {
 /// `TestLedgerCommitmentGoldenVector` and Rust `ledger_commitment_golden_vector`, so a drift in either
 /// implementation breaks both suites against the one file (not two independently-hardcoded copies).
 pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
+    crate::hashx::sha256_prefixed(&ledger_commitment_preimage(jti, nonce, used_at))
+}
+
+/// Exact bytes hashed by the production ledger commitment builder.
+pub fn ledger_commitment_preimage(jti: &str, nonce: &str, used_at: i64) -> Vec<u8> {
     let mut pre = Vec::new();
     for part in ["averin.broker.use.ledger.v1", jti, nonce] {
         lp4(&mut pre, part.as_bytes());
     }
     be8(&mut pre, used_at as u64);
-    crate::hashx::sha256_prefixed(&pre)
+    pre
 }
 
 /// Cumulative grant-transparency root (ADR 0004 D6 / MF2): a hash-CHAIN over a broker's grant log,
@@ -1889,20 +1894,27 @@ pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
 /// sorted by `broker_seq` (the verifier sorts the closed grant set; the producer folds in issue order).
 /// Returns `sha256:<hex>` of the final accumulator. The empty log has a well-defined non-zero root.
 pub fn grant_head_root(grants: &[(i64, String)]) -> String {
-    const TAG: &str = "averin.broker.grant_head.v1";
-    // acc_0 = sha256(LP4(tag)) — a fixed non-zero seed so an empty log is distinguishable from a forged one.
-    let mut seed = Vec::new();
-    lp4(&mut seed, TAG.as_bytes());
-    let mut acc = crate::hashx::sha256(&seed);
+    let mut acc = crate::hashx::sha256(&grant_head_seed_preimage());
     for (seq, content_hash) in grants {
-        let mut pre = Vec::new();
-        lp4(&mut pre, TAG.as_bytes());
-        pre.extend_from_slice(&acc); // raw 32-byte accumulator, NOT length-prefixed
-        be8(&mut pre, *seq as u64);
-        lp4(&mut pre, content_hash.as_bytes());
-        acc = crate::hashx::sha256(&pre);
+        acc = crate::hashx::sha256(&grant_head_step_preimage(&acc, *seq, content_hash));
     }
     format!("sha256:{}", crate::hashx::hex_lower(&acc))
+}
+
+/// Exact seed bytes hashed by the production grant-head chain.
+pub fn grant_head_seed_preimage() -> Vec<u8> {
+    let mut seed = Vec::new();
+    lp4(&mut seed, b"averin.broker.grant_head.v1");
+    seed
+}
+
+/// Exact per-step bytes hashed by the production grant-head chain.
+pub fn grant_head_step_preimage(acc: &[u8; 32], seq: i64, content_hash: &str) -> Vec<u8> {
+    let mut pre = grant_head_seed_preimage();
+    pre.extend_from_slice(acc); // raw 32-byte accumulator, NOT length-prefixed
+    be8(&mut pre, seq as u64);
+    lp4(&mut pre, content_hash.as_bytes());
+    pre
 }
 
 /// M5 Merkle-non-disclosure revocation (ADR 0005): the domain-separated leaf VALUE for a (possibly) revoked
@@ -1912,10 +1924,15 @@ pub fn grant_head_root(grants: &[(i64, String)]) -> String {
 /// non-membership proof reveals only the two adjacent leaf VALUES (hashes), never the full revoked list — the
 /// non-disclosure win. Kept in sync with the Go producer via the shared golden vector.
 pub fn revocation_leaf(grant_id: &str) -> [u8; 32] {
+    crate::hashx::sha256(&revocation_leaf_preimage(grant_id))
+}
+
+/// Exact bytes hashed by the production revocation-leaf builder.
+pub fn revocation_leaf_preimage(grant_id: &str) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.broker.revocation.leaf.v1");
     lp4(&mut pre, grant_id.as_bytes());
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// M5 Merkle-non-disclosure (ADR 0005): the canonical Merkle ROOT (`sha256:<hex>`) the revocation authority
@@ -1953,19 +1970,29 @@ pub fn revocation_merkle_root(revoked: &[&str]) -> String {
 /// leaves from internal nodes so a leaf hash can never be reinterpreted as an interior node (a second-preimage
 /// guard standard to transparency logs).
 fn merkle_leaf_hash(v: &[u8; 32]) -> [u8; 32] {
+    crate::hashx::sha256(&merkle_leaf_preimage(v))
+}
+
+/// Exact bytes hashed for an RFC6962 revocation-tree leaf.
+pub fn merkle_leaf_preimage(v: &[u8; 32]) -> Vec<u8> {
     let mut pre = Vec::with_capacity(33);
     pre.push(0x00);
     pre.extend_from_slice(v);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// RFC6962-style internal Merkle NODE: `sha256( 0x01 ‖ left ‖ right )`.
 fn merkle_node_hash(l: &[u8; 32], r: &[u8; 32]) -> [u8; 32] {
+    crate::hashx::sha256(&merkle_node_preimage(l, r))
+}
+
+/// Exact bytes hashed for an RFC6962 revocation-tree node.
+pub fn merkle_node_preimage(l: &[u8; 32], r: &[u8; 32]) -> Vec<u8> {
     let mut pre = Vec::with_capacity(65);
     pre.push(0x01);
     pre.extend_from_slice(l);
     pre.extend_from_slice(r);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Recompute the Merkle root from an inclusion proof (RFC6962 audit path; an odd level PROMOTES its last node,
@@ -2017,6 +2044,25 @@ pub fn use_pop_challenge(
     credential_binding: &str,
     nonce: &str,
 ) -> [u8; 32] {
+    crate::hashx::sha256(&use_pop_preimage(
+        grant_id,
+        resource_id,
+        action,
+        params_commitment,
+        credential_binding,
+        nonce,
+    ))
+}
+
+/// Exact bytes hashed by the production use-time PoP challenge builder.
+pub fn use_pop_preimage(
+    grant_id: &str,
+    resource_id: &str,
+    action: &str,
+    params_commitment: &str,
+    credential_binding: &str,
+    nonce: &str,
+) -> Vec<u8> {
     let mut pre = Vec::new();
     for part in [
         "averin.broker.use.pop.v1",
@@ -2029,7 +2075,7 @@ pub fn use_pop_challenge(
     ] {
         lp4(&mut pre, part.as_bytes());
     }
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Re-derive the cosignature-approval challenge an approver signs (ADR 0005 M6), byte-identically to the
@@ -2046,6 +2092,23 @@ pub fn cosig_approval_challenge(
     threshold_m: i64,
     exp: i64,
 ) -> [u8; 32] {
+    crate::hashx::sha256(&cosig_approval_preimage(
+        grant_id,
+        approver_kid,
+        credential_binding,
+        threshold_m,
+        exp,
+    ))
+}
+
+/// Exact bytes hashed by the production cosignature challenge builder.
+pub fn cosig_approval_preimage(
+    grant_id: &str,
+    approver_kid: &str,
+    credential_binding: &str,
+    threshold_m: i64,
+    exp: i64,
+) -> Vec<u8> {
     let mut pre = Vec::new();
     for part in [
         "averin.broker.cosig.approval.v1",
@@ -2057,7 +2120,7 @@ pub fn cosig_approval_challenge(
     }
     be8(&mut pre, threshold_m as u64);
     be8(&mut pre, exp as u64);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// The `grant_evidence.cosignatures[]` array of a broker record, if present (ADR 0005 M6). Borrowed from the
@@ -2164,6 +2227,30 @@ pub fn delegation_hop_challenge(
     resource_id: &str,
     exp: i64,
 ) -> [u8; 32] {
+    crate::hashx::sha256(&delegation_hop_preimage(
+        grant_id,
+        hop_index,
+        delegator_kid,
+        delegate_kid,
+        scope,
+        action,
+        resource_id,
+        exp,
+    ))
+}
+
+/// Exact bytes hashed by the production delegation-hop challenge builder.
+#[allow(clippy::too_many_arguments)]
+pub fn delegation_hop_preimage(
+    grant_id: &str,
+    hop_index: i64,
+    delegator_kid: &str,
+    delegate_kid: &str,
+    scope: &str,
+    action: &str,
+    resource_id: &str,
+    exp: i64,
+) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.broker.delegation.hop.v1");
     lp4(&mut pre, grant_id.as_bytes());
@@ -2174,7 +2261,7 @@ pub fn delegation_hop_challenge(
     lp4(&mut pre, action.as_bytes());
     lp4(&mut pre, resource_id.as_bytes());
     be8(&mut pre, exp as u64);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Re-derive the resource's introspection-transcript challenge (ADR 0005 M3), byte-identically to the Go
@@ -2195,6 +2282,26 @@ pub fn introspection_transcript_challenge(
     introspected_at: i64,
     effective_exp: i64,
 ) -> [u8; 32] {
+    crate::hashx::sha256(&introspection_transcript_preimage(
+        grant_id,
+        credential_ref,
+        effective_scope,
+        resource_id,
+        introspected_at,
+        effective_exp,
+    ))
+}
+
+/// Exact bytes hashed by the production introspection transcript builder.
+#[allow(clippy::too_many_arguments)]
+pub fn introspection_transcript_preimage(
+    grant_id: &str,
+    credential_ref: &str,
+    effective_scope: &str,
+    resource_id: &str,
+    introspected_at: i64,
+    effective_exp: i64,
+) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.resource.introspection.v1");
     lp4(&mut pre, grant_id.as_bytes());
@@ -2203,7 +2310,7 @@ pub fn introspection_transcript_challenge(
     lp4(&mut pre, resource_id.as_bytes());
     be8(&mut pre, introspected_at as u64);
     be8(&mut pre, effective_exp as u64);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Re-derive the cross-broker certificate challenge (ADR 0005 M4, OPTIONAL transitive-trust tier),
@@ -2222,6 +2329,26 @@ pub fn federation_cert_challenge(
     resource_id: &str,
     not_after: i64,
 ) -> [u8; 32] {
+    crate::hashx::sha256(&federation_cert_preimage(
+        issuer_broker_id,
+        subject_broker_id,
+        subject_kid,
+        scope,
+        resource_id,
+        not_after,
+    ))
+}
+
+/// Exact bytes hashed by the production federation certificate builder.
+#[allow(clippy::too_many_arguments)]
+pub fn federation_cert_preimage(
+    issuer_broker_id: &str,
+    subject_broker_id: &str,
+    subject_kid: &str,
+    scope: &str,
+    resource_id: &str,
+    not_after: i64,
+) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.broker.federation.cert.v1");
     lp4(&mut pre, issuer_broker_id.as_bytes());
@@ -2230,7 +2357,7 @@ pub fn federation_cert_challenge(
     lp4(&mut pre, scope.as_bytes());
     lp4(&mut pre, resource_id.as_bytes());
     be8(&mut pre, not_after as u64);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Outcome of re-walking a grant's `delegation_assertions[]` chain (ADR 0005 M2).

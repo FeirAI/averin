@@ -47,6 +47,68 @@
     {"family": "grant head step", "fields": [{"hex": "b807ef08eb667015cab8143ac303bcb60e23f6dc72c873d7f5119b12967e804f"}, {"u64": 7}, {"s": "sha256:0909090909090909090909090909090909090909090909090909090909090909"}]},
     {"family": "revocation leaf", "fields": [{"s": "grant-revoked-1"}]}
   ],
+  "preimage_variants": [
+    {"family":"grant head step","fields":[{"hex":"8431a2cbb1eaf40085dc810a7144e500f81873ef4c808c58421b3bc6b44eac8b"},{"u64":8},{"s":"sha256:abababababababababababababababababababababababababababababababab"}]},
+    {"family":"use PoP","fields":[{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"res-2"},{"s":"read"},{"s":"sha256:params"},{"s":"cb-5"},{"s":"nonce-6"}]},
+    {"family":"use PoP","fields":[{"s":"grant-1"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"read"},{"s":"sha256:params"},{"s":"cb-5"},{"s":"nonce-6"}]},
+    {"family":"use PoP","fields":[{"s":"grant-1"},{"s":"res-2"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"sha256:params"},{"s":"cb-5"},{"s":"nonce-6"}]},
+    {"family":"use PoP","fields":[{"s":"grant-1"},{"s":"res-2"},{"s":"read"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"cb-5"},{"s":"nonce-6"}]},
+    {"family":"use PoP","fields":[{"s":"grant-1"},{"s":"res-2"},{"s":"read"},{"s":"sha256:params"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"nonce-6"}]},
+    {"family":"use PoP","fields":[{"s":"grant-1"},{"s":"res-2"},{"s":"read"},{"s":"sha256:params"},{"s":"cb-5"},{"s":"\u00e9\u0000\ud83d\ude00"}]},
+    {"family":"use PoP","fields":[{"s":""},{"s":""},{"s":""},{"s":""},{"s":""},{"s":""}]},
+    {"family":"cosig approval","fields":[{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"approver-kid"},{"s":"cb-3"},{"u64":2},{"u64":1767225600}]},
+    {"family":"cosig approval","fields":[{"s":"grant-1"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"cb-3"},{"u64":2},{"u64":1767225600}]},
+    {"family":"cosig approval","fields":[{"s":"grant-1"},{"s":"approver-kid"},{"s":"\u00e9\u0000\ud83d\ude00"},{"u64":2},{"u64":1767225600}]},
+    {"family":"cosig approval","fields":[{"s":"grant-1"},{"s":"approver-kid"},{"s":"cb-3"},{"u64":9223372036854775807},{"u64":1767225600}]},
+    {"family":"cosig approval","fields":[{"s":"grant-1"},{"s":"approver-kid"},{"s":"cb-3"},{"u64":2},{"u64":9223372036854775807}]},
+    {"family":"cosig approval","fields":[{"s":""},{"s":""},{"s":""},{"u64":0},{"u64":0}]},
+    {"family":"delegation hop","fields":[{"s":"\u00e9\u0000\ud83d\ude00"},{"u64":3},{"s":"delegator"},{"s":"delegate"},{"s":"scope:x"},{"s":"write"},{"s":"res-7"},{"u64":72623859790382856}]},
+    {"family":"delegation hop","fields":[{"s":"grant-1"},{"u64":9223372036854775807},{"s":"delegator"},{"s":"delegate"},{"s":"scope:x"},{"s":"write"},{"s":"res-7"},{"u64":72623859790382856}]},
+    {"family":"delegation hop","fields":[{"s":"grant-1"},{"u64":3},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"delegate"},{"s":"scope:x"},{"s":"write"},{"s":"res-7"},{"u64":72623859790382856}]},
+    {"family":"delegation hop","fields":[{"s":"grant-1"},{"u64":3},{"s":"delegator"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"scope:x"},{"s":"write"},{"s":"res-7"},{"u64":72623859790382856}]},
+    {"family":"delegation hop","fields":[{"s":"grant-1"},{"u64":3},{"s":"delegator"},{"s":"delegate"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"write"},{"s":"res-7"},{"u64":72623859790382856}]},
+    {"family":"delegation hop","fields":[{"s":"grant-1"},{"u64":3},{"s":"delegator"},{"s":"delegate"},{"s":"scope:x"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"res-7"},{"u64":72623859790382856}]},
+    {"family":"delegation hop","fields":[{"s":"grant-1"},{"u64":3},{"s":"delegator"},{"s":"delegate"},{"s":"scope:x"},{"s":"write"},{"s":"\u00e9\u0000\ud83d\ude00"},{"u64":72623859790382856}]},
+    {"family":"delegation hop","fields":[{"s":"grant-1"},{"u64":3},{"s":"delegator"},{"s":"delegate"},{"s":"scope:x"},{"s":"write"},{"s":"res-7"},{"u64":9223372036854775807}]},
+    {"family":"delegation hop","fields":[{"s":""},{"u64":0},{"s":""},{"s":""},{"s":""},{"s":""},{"s":""},{"u64":0}]},
+    {"family":"introspection transcript","fields":[{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"lease-2"},{"s":"scope y"},{"s":"res-4"},{"u64":1767225601},{"u64":1767229200}]},
+    {"family":"introspection transcript","fields":[{"s":"grant-1"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"scope y"},{"s":"res-4"},{"u64":1767225601},{"u64":1767229200}]},
+    {"family":"introspection transcript","fields":[{"s":"grant-1"},{"s":"lease-2"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"res-4"},{"u64":1767225601},{"u64":1767229200}]},
+    {"family":"introspection transcript","fields":[{"s":"grant-1"},{"s":"lease-2"},{"s":"scope y"},{"s":"\u00e9\u0000\ud83d\ude00"},{"u64":1767225601},{"u64":1767229200}]},
+    {"family":"introspection transcript","fields":[{"s":"grant-1"},{"s":"lease-2"},{"s":"scope y"},{"s":"res-4"},{"u64":9223372036854775807},{"u64":1767229200}]},
+    {"family":"introspection transcript","fields":[{"s":"grant-1"},{"s":"lease-2"},{"s":"scope y"},{"s":"res-4"},{"u64":1767225601},{"u64":9223372036854775807}]},
+    {"family":"introspection transcript","fields":[{"s":""},{"s":""},{"s":""},{"s":""},{"u64":0},{"u64":0}]},
+    {"family":"federation cert","fields":[{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"broker-B"},{"s":"kid-B"},{"s":"scope-z"},{"s":"res-5"},{"u64":1798761600}]},
+    {"family":"federation cert","fields":[{"s":"broker-A"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"kid-B"},{"s":"scope-z"},{"s":"res-5"},{"u64":1798761600}]},
+    {"family":"federation cert","fields":[{"s":"broker-A"},{"s":"broker-B"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"scope-z"},{"s":"res-5"},{"u64":1798761600}]},
+    {"family":"federation cert","fields":[{"s":"broker-A"},{"s":"broker-B"},{"s":"kid-B"},{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"res-5"},{"u64":1798761600}]},
+    {"family":"federation cert","fields":[{"s":"broker-A"},{"s":"broker-B"},{"s":"kid-B"},{"s":"scope-z"},{"s":"\u00e9\u0000\ud83d\ude00"},{"u64":1798761600}]},
+    {"family":"federation cert","fields":[{"s":"broker-A"},{"s":"broker-B"},{"s":"kid-B"},{"s":"scope-z"},{"s":"res-5"},{"u64":9223372036854775807}]},
+    {"family":"federation cert","fields":[{"s":""},{"s":""},{"s":""},{"s":""},{"s":""},{"u64":0}]},
+    {"family":"use ledger","fields":[{"s":"\u00e9\u0000\ud83d\ude00"},{"s":"nonce-2"},{"u64":1767225602}]},
+    {"family":"use ledger","fields":[{"s":"jti-1"},{"s":"\u00e9\u0000\ud83d\ude00"},{"u64":1767225602}]},
+    {"family":"use ledger","fields":[{"s":"jti-1"},{"s":"nonce-2"},{"u64":9223372036854775807}]},
+    {"family":"use ledger","fields":[{"s":""},{"s":""},{"u64":0}]},
+    {"family":"grant head step","fields":[{"hex":"b807ef08eb667015cab8143ac303bcb60e23f6dc72c873d7f5119b12967e804f"},{"u64":9223372036854775807},{"s":"sha256:0909090909090909090909090909090909090909090909090909090909090909"}]},
+    {"family":"grant head step","fields":[{"hex":"b807ef08eb667015cab8143ac303bcb60e23f6dc72c873d7f5119b12967e804f"},{"u64":7},{"s":"\u00e9\u0000\ud83d\ude00"}]},
+    {"family":"revocation leaf","fields":[{"s":"\u00e9\u0000\ud83d\ude00"}]},
+    {"family":"revocation leaf","fields":[{"s":""}]}
+  ],
+  "merkle": [
+  {
+    "kind": "leaf",
+    "left": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  {
+    "kind": "leaf",
+    "left": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  {
+    "kind": "node",
+    "left": "0101010101010101010101010101010101010101010101010101010101010101",
+    "right": "0202020202020202020202020202020202020202020202020202020202020202"
+  }
+],
   "records": [
     {"name": "every top-level key", "body": {"obj": [
       ["schema_version", "2"], ["canon_version", "rcp-1"], ["domain", "flightrecorder.record.v2"],

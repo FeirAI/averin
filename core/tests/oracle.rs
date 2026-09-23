@@ -4,10 +4,7 @@
 //! (`Canon.ser`, `escChar`, `serInt`, `lp`, `be32`/`be64`, `Family.msg` for every preimage family,
 //! the `Seal` record/checkpoint hash preimages) over `formal/oracle/inputs.json`; CI regenerates it
 //! and fails on any diff. This test asserts that the real Rust functions produce the *same bytes*.
-//! Preimages are compared before SHA-256 wherever the Rust exposes them, so a reordered, dropped or
-//! re-framed field shows up as a byte diff rather than an opaque digest mismatch. The broker/resource
-//! challenge builders in `verify.rs` only return digests; for those the test hashes the model's
-//! preimage and prints it on mismatch.
+//! Preimages are compared before SHA-256, including the production broker/resource builders.
 //!
 //! Corpus values: JSON with objects written `{"obj": [[key, value], ...]}` (explicit, unsorted member
 //! order). They are decoded with `CanonValue::parse` (as the golden-vector tests do) and rebuilt with
@@ -90,15 +87,6 @@ fn check(what: &str, got: &[u8], want_hex: &str) {
         hex_lower(got),
         want_hex,
         "{what}: Rust bytes differ from the Lean model"
-    );
-}
-
-/// For builders that only return a digest: compare against SHA-256 of the model's preimage.
-fn check_digest(what: &str, got: &[u8], want_preimage_hex: &str) {
-    assert_eq!(
-        hex_lower(got),
-        hex_lower(&sha256(&unhex(want_preimage_hex))),
-        "{what}: Rust digest != SHA-256 of the Lean model's preimage {want_preimage_hex}"
     );
 }
 
@@ -196,7 +184,17 @@ fn raw(f: &F) -> &[u8] {
 #[test]
 fn every_preimage_family_matches_model() {
     let mut seen = Vec::new();
-    for (i, e) in section("families") {
+    let first_step = section("families")
+        .into_iter()
+        .find(|(i, _)| s(i, "family") == "grant head step")
+        .unwrap()
+        .0;
+    let first_fields: Vec<F> = arr(&first_step, "fields").iter().map(field).collect();
+    let first_grant = (int(&first_fields[1]), st(&first_fields[2]).to_string());
+    for (i, e) in section("families")
+        .into_iter()
+        .chain(section("preimage_variants"))
+    {
         let name = s(&i, "family");
         assert_eq!(name, s(&e, "family"));
         let want = s(&e, "hex");
@@ -230,9 +228,9 @@ fn every_preimage_family_matches_model() {
                 want,
             ),
             "test anchor" => check(name, &anchor::anchor_preimage(st(&f[0]), st(&f[1])), want),
-            "use PoP" => check_digest(
+            "use PoP" => check(
                 name,
-                &verify::use_pop_challenge(
+                &verify::use_pop_preimage(
                     st(&f[0]),
                     st(&f[1]),
                     st(&f[2]),
@@ -242,9 +240,9 @@ fn every_preimage_family_matches_model() {
                 ),
                 want,
             ),
-            "cosig approval" => check_digest(
+            "cosig approval" => check(
                 name,
-                &verify::cosig_approval_challenge(
+                &verify::cosig_approval_preimage(
                     st(&f[0]),
                     st(&f[1]),
                     st(&f[2]),
@@ -253,9 +251,9 @@ fn every_preimage_family_matches_model() {
                 ),
                 want,
             ),
-            "delegation hop" => check_digest(
+            "delegation hop" => check(
                 name,
-                &verify::delegation_hop_challenge(
+                &verify::delegation_hop_preimage(
                     st(&f[0]),
                     int(&f[1]),
                     st(&f[2]),
@@ -267,9 +265,9 @@ fn every_preimage_family_matches_model() {
                 ),
                 want,
             ),
-            "introspection transcript" => check_digest(
+            "introspection transcript" => check(
                 name,
-                &verify::introspection_transcript_challenge(
+                &verify::introspection_transcript_preimage(
                     st(&f[0]),
                     st(&f[1]),
                     st(&f[2]),
@@ -279,9 +277,9 @@ fn every_preimage_family_matches_model() {
                 ),
                 want,
             ),
-            "federation cert" => check_digest(
+            "federation cert" => check(
                 name,
-                &verify::federation_cert_challenge(
+                &verify::federation_cert_preimage(
                     st(&f[0]),
                     st(&f[1]),
                     st(&f[2]),
@@ -300,35 +298,82 @@ fn every_preimage_family_matches_model() {
                     sha256_prefixed(&unhex(want))
                 );
             }
-            "use ledger" => assert_eq!(
-                verify::ledger_commitment(st(&f[0]), st(&f[1]), int(&f[2])),
-                sha256_prefixed(&unhex(want)),
-                "{name}: Rust digest != SHA-256 of the Lean model's preimage {want}"
+            "use ledger" => check(
+                name,
+                &verify::ledger_commitment_preimage(st(&f[0]), st(&f[1]), int(&f[2])),
+                want,
             ),
-            "grant head seed" => assert_eq!(
-                verify::grant_head_root(&[]),
-                sha256_prefixed(&unhex(want)),
-                "{name}: empty-log root != SHA-256 of the Lean model's seed preimage {want}"
-            ),
+            "grant head seed" => check(name, &verify::grant_head_seed_preimage(), want),
             "grant head step" => {
-                // The sample's accumulator must be the real seed so a one-step fold is comparable.
-                assert_eq!(
-                    hex_lower(raw(&f[0])),
-                    verify::grant_head_root(&[]).trim_start_matches("sha256:"),
-                    "grant head step sample: acc must be the seed accumulator"
+                let acc: [u8; 32] = raw(&f[0]).try_into().unwrap();
+                check(
+                    name,
+                    &verify::grant_head_step_preimage(&acc, int(&f[1]), st(&f[2])),
+                    want,
                 );
+                let prefix = if hex_lower(&acc)
+                    == verify::grant_head_root(&[]).trim_start_matches("sha256:")
+                {
+                    Vec::new()
+                } else {
+                    assert_eq!(
+                        hex_lower(&acc),
+                        verify::grant_head_root(&[first_grant.clone()])
+                            .trim_start_matches("sha256:"),
+                        "step accumulator must come from the actual prior production fold"
+                    );
+                    vec![first_grant.clone()]
+                };
+                let mut grants = prefix;
+                grants.push((int(&f[1]), st(&f[2]).to_string()));
                 assert_eq!(
-                    verify::grant_head_root(&[(int(&f[1]), st(&f[2]).to_string())]),
+                    verify::grant_head_root(&grants),
                     sha256_prefixed(&unhex(want)),
-                    "{name}: one-step root != SHA-256 of the Lean model's step preimage {want}"
+                    "{name}: root != SHA-256 of the Lean model's step preimage {want}"
                 );
             }
-            "revocation leaf" => check_digest(name, &verify::revocation_leaf(st(&f[0])), want),
+            "revocation leaf" => check(name, &verify::revocation_leaf_preimage(st(&f[0])), want),
             other => panic!("no Rust builder mapped for Lean family {other:?}: add one here"),
         }
         seen.push(name.to_string());
     }
     assert!(seen.len() >= 18, "family samples went missing: {seen:?}");
+}
+
+#[test]
+fn revocation_merkle_hash_inputs_match_model() {
+    for (i, e) in section("merkle") {
+        let kind = s(&i, "kind");
+        assert_eq!(kind, s(&e, "kind"));
+        let left: [u8; 32] = unhex(s(&i, "left")).try_into().unwrap();
+        let pre = match kind {
+            "leaf" => verify::merkle_leaf_preimage(&left),
+            "node" => {
+                let right: [u8; 32] = unhex(s(&i, "right")).try_into().unwrap();
+                verify::merkle_node_preimage(&left, &right)
+            }
+            _ => panic!("unknown Merkle kind {kind}"),
+        };
+        check(kind, &pre, s(&e, "hex"));
+        assert_eq!(sha256(&pre), sha256(&unhex(s(&e, "hex"))));
+    }
+}
+
+#[test]
+fn opaque_challenge_fields_are_not_silently_normalized() {
+    let composed = "é";
+    let decomposed = "e\u{301}";
+    let pre_a = verify::use_pop_preimage(composed, "r", "read", "p", "c", "n");
+    let pre_b = verify::use_pop_preimage(decomposed, "r", "read", "p", "c", "n");
+    assert_ne!(pre_a, pre_b);
+    assert_eq!(
+        verify::use_pop_challenge(decomposed, "r", "read", "p", "c", "n"),
+        sha256(&pre_b)
+    );
+    assert_eq!(
+        verify::ledger_commitment(decomposed, "n", 1),
+        sha256_prefixed(&verify::ledger_commitment_preimage(decomposed, "n", 1))
+    );
 }
 
 fn with_members(v: CanonValue, extra: &[(&str, CanonValue)]) -> CanonValue {
