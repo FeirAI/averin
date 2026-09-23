@@ -247,9 +247,9 @@ length-prefixed effective request, including authenticated `project_id`, resolve
 delegation chain, justification, and the signed issue/expiry envelope. The exact field order and
 encoding are specified in [grant-pop-v2.md](../../spec/grant-pop-v2.md). A captured proof cannot be
 moved to another project or idempotency key, and it cannot mint after the signed freshness window.
-An exact committed retry can return the original capability after that window; it does not re-mint or
+An exact v2 committed retry can return the original capability after that window; it does not re-mint or
 extend the capability. Historical v1 signatures remain inspectable under their original format but
-are not accepted for new brokered issuance after the online cutover.
+are not accepted by online brokered grant routes after the cutoff, including committed retries.
 
 ### POST `/v2/grants/prepare` and `/v2/grants/finalize` (two-phase)
 

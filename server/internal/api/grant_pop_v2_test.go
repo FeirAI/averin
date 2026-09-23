@@ -55,7 +55,7 @@ func TestGrantPoPV2RouteRejectsEveryUnsignedSubstitution(t *testing.T) {
 		"agent_sig":    "AAAA", "lease_id": "other-lease", "mode": "unexpected",
 		"authorizing_principal": "other", "delegation_chain": []string{"other"},
 		"justification": "other", "ttl_seconds": 120, "issued_at": now.Unix() + 1,
-		"request_expires_at": now.Add(broker.MaxRequestAge).Unix() + 1, "pop_version": 1,
+		"request_expires_at": now.Add(broker.MaxRequestAge).Unix() - 1, "pop_version": 1,
 	}
 	for field, value := range changes {
 		t.Run(field, func(t *testing.T) {
@@ -69,6 +69,43 @@ func TestGrantPoPV2RouteRejectsEveryUnsignedSubstitution(t *testing.T) {
 		if strings.Contains(exported, `"credential_grant"`) || strings.Contains(exported, `"credential_grant_denied"`) {
 			t.Fatalf("rejected proof persisted a record under %s: %s", project, exported)
 		}
+	}
+}
+
+func TestGrantPoPV2SignsEffectiveClassAndUseLimit(t *testing.T) {
+	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	h := popTestServer(t, func() time.Time { return now })
+	ak := grantAgentKey()
+	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
+	req := broker.Request{
+		PoPVersion: 2, ProjectID: "p1", IdempotencyKey: "idem-bounded", SessionID: "s1",
+		IssuedAt: now.Unix(), RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
+		AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db",
+		Scope: "read:orders", ScopeClass: broker.ScopeBoundedReuse, UseLimit: 2,
+		AgentPubKey: pub, TTL: time.Minute,
+	}
+	body, err := json.Marshal(map[string]any{
+		"pop_version": 2, "project_id": "p1", "idempotency_key": "idem-bounded", "session_id": "s1",
+		"issued_at": req.IssuedAt, "request_expires_at": req.RequestExpiresAt,
+		"agent_id": req.AgentID, "action": req.Action, "resource": req.Resource, "scope": req.Scope,
+		"scope_class": string(req.ScopeClass), "use_limit": req.UseLimit,
+		"agent_pubkey": pub, "agent_sig": base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge())),
+		"ttl_seconds": 60,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, response := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusCreated {
+		t.Fatalf("valid bounded request: %d %s", code, response)
+	}
+	if code, response := do(t, h, "POST", "/v2/grants", mutateGrantBody(t, string(body), "use_limit", 3)); code != http.StatusBadRequest {
+		t.Fatalf("mutated use limit bypassed signature: %d %s", code, response)
+	}
+	defaultBody := grantBodyAt("idem-defaults", "read:orders", ak, ak, now)
+	defaultBody = mutateGrantBody(t, defaultBody, "scope_class", "single_operation")
+	defaultBody = mutateGrantBody(t, defaultBody, "use_limit", 0)
+	if code, response := do(t, h, "POST", "/v2/grants", defaultBody); code != http.StatusCreated {
+		t.Fatalf("explicit effective defaults changed signature subject: %d %s", code, response)
 	}
 }
 

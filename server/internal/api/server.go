@@ -1783,6 +1783,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	gr.IdempotencyKey = idem
 	req := grantRequestToBroker(gr)
 	req.BrokerID = s.brokerID
+	if req.PoPVersion != 2 {
+		writeErr(w, http.StatusBadRequest, "online brokered grants require grant PoP v2")
+		return
+	}
 	// Validate the request — proof-of-possession (agent_sig) + forbidden-scope — BEFORE anything else, so
 	// a malformed / unsigned / forbidden request can NEVER retrieve a stored capability by reusing a known
 	// idempotency key (every response is gated on PoP + scope, not just brand-new grants). req.Validate
@@ -2080,16 +2084,9 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 		"action": req.Action, "resource_id": req.Resource, "scope": req.Scope,
 		"scope_class": string(req.ScopeClass), "agent_id": req.AgentID,
 	}
-	// cnf_kid is recorded as PROVEN possession for forbidden_scope AND ttl_exceeded — both reach a denial only
-	// AFTER req.Validate()'s PoP check passes (the TTL cap is now a post-PoP policy check; adversarial review). Only a
-	// pop_failed denial reaches here with an UNPROVEN key, so it records the CLAIMED pubkey — never a verified
-	// cnf (else an attacker could bind a victim's pubkey into the evidence as a "proven" key).
-	if reason == "forbidden_scope" || reason == "ttl_exceeded" {
-		if kid := agentCnfKid(req.AgentPubKey); kid != "" {
-			requested["cnf_kid"] = kid
-		}
-	} else {
-		requested["claimed_agent_pubkey"] = req.AgentPubKey
+	// Both policy denials reach this point only after the agent signature verifies.
+	if kid := agentCnfKid(req.AgentPubKey); kid != "" {
+		requested["cnf_kid"] = kid
 	}
 	// Derive the id from the FULL denied request identity, NOT a hand-picked field subset: a probe that
 	// reuses one idem key while varying ANY distinguishing field (session_id, ttl_seconds, principal,

@@ -180,6 +180,10 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 
 	req := grantRequestToBroker(gr)
 	req.BrokerID = s.brokerID // M4: tag the grant with this broker's federation id ("" = single-broker)
+	if req.PoPVersion != 2 {
+		writeErr(w, http.StatusBadRequest, "online brokered grants require grant PoP v2")
+		return
+	}
 	// Validate proof-of-possession + scope BEFORE anything else (same gate as the single-phase /v2/grants) — so
 	// an unsigned/forbidden request can never read back a committed grant or a pending challenge by reusing a
 	// known idempotency key.
@@ -381,6 +385,10 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 	// (both guessable/observable) must never retrieve or commit someone else's grant.
 	req := grantRequestToBroker(fr.grantRequest)
 	req.BrokerID = s.brokerID
+	if req.PoPVersion != 2 {
+		writeErr(w, http.StatusBadRequest, "online brokered grants require grant PoP v2")
+		return
+	}
 	if e := req.Validate(); e != nil {
 		writeErr(w, http.StatusBadRequest, "finalize must carry the prepared grant request with a valid agent_sig: "+e.Error())
 		return

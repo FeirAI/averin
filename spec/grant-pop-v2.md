@@ -1,6 +1,7 @@
 # Brokered grant proof of possession v2
 
-New online brokered issuance requires `pop_version: 2`. Native `token_exchange`
+All online brokered grant routes require `pop_version: 2`, including committed
+retries. Historical v1 signatures retain their original offline rules. Native `token_exchange`
 grants use their separate authentication contract. The agent signs an Ed25519
 signature over `SHA256(subject || BE8(issued_at) || BE8(request_expires_at))`.
 `subject` is the following byte sequence in **exactly this order**:
