@@ -32,7 +32,10 @@ impl std::fmt::Display for SigError {
 }
 impl std::error::Error for SigError {}
 
-fn preimage(tag: &str, content_hash: &str) -> Vec<u8> {
+/// The exact bytes an Ed25519 signature under `tag` covers. Hidden `pub` for the Lean-oracle
+/// differential test (`core/tests/oracle.rs`).
+#[doc(hidden)]
+pub fn preimage(tag: &str, content_hash: &str) -> Vec<u8> {
     // LP(tag) ‖ utf8(content_hash)   (RCP §9.2)
     let mut pre = Vec::with_capacity(4 + tag.len() + content_hash.len());
     lp_str_into(&mut pre, tag);

@@ -79,3 +79,48 @@ fn hex_val(c: u8) -> Option<u8> {
         _ => None, // RCP requires lowercase hex
     }
 }
+
+/// Bounded proofs over this exact code (run by `formal/run-kani.sh`). The Lean seal theorem assumes
+/// `"sha256:" ‖ lowerhex(·)` is injective and that `LP` emits `uint32_be(len) ‖ b`; these discharge both
+/// against the implementation.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Every byte round-trips through its two lowercase hex digits. `hex_lower` writes exactly two digits
+    /// per byte and `parse_sha256`/`hex32` read exactly two per byte at fixed offsets, so with
+    /// `hex_digit_is_canonical` this makes `"sha256:" ‖ hex_lower(d)` injective in `d` for every length.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn hex_byte_roundtrip() {
+        let b: u8 = kani::any();
+        let s = hex_lower(&[b]);
+        let d = s.as_bytes();
+        assert_eq!(d.len(), 2);
+        assert_eq!((hex_val(d[0]).unwrap() << 4) | hex_val(d[1]).unwrap(), b);
+    }
+
+    /// `hex_val` accepts exactly the 16 lowercase digits, each as the unique spelling of its value, so
+    /// no uppercase or other alternative spelling of a digest is ever accepted.
+    #[kani::proof]
+    fn hex_digit_is_canonical() {
+        let c: u8 = kani::any();
+        if let Some(v) = hex_val(c) {
+            assert!(v < 16);
+            assert_eq!(b"0123456789abcdef"[v as usize], c);
+        }
+    }
+
+    /// `lp_into` appends exactly `uint32_be(len) ‖ b` (checked for every `b` of length ≤ 4).
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn lp_into_frames_exactly() {
+        let bytes: [u8; 4] = kani::any();
+        let len: usize = kani::any_where(|l: &usize| *l <= 4);
+        let mut out = Vec::new();
+        assert!(lp_into(&mut out, &bytes[..len]));
+        assert_eq!(out.len(), 4 + len);
+        assert_eq!(&out[..4], &(len as u32).to_be_bytes());
+        assert_eq!(&out[4..], &bytes[..len]);
+    }
+}

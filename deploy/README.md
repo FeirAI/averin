@@ -86,6 +86,7 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 | `AVERIN_RESOURCE_ID` | server | (none) | the resource's audience id; required when `AVERIN_RESOURCE_SEED` is set. |
 | `AVERIN_COSIG_APPROVER_KEYS` | server | (none) | comma-separated ed25519 pubkeys (base64url, optional `ed25519pub:` prefix). Enables the **online M-of-N cosig flow** (`POST /v2/grants/prepare` + `/v2/grants/finalize`, ADR-0005 M6). Requires the broker. The verifier re-pins these as `cosig_approver_keys` (role-disjoint). |
 | `AVERIN_COSIG_THRESHOLD` | server | = #approvers | M, the cosig threshold (1 ≤ M ≤ #approvers). |
+| `AVERIN_BROKER_SEQ_VOID_MIN_AGE` | server | `1h` | Safety age before `POST /v2/broker-seq/void` may fill a reserved, never-recorded `broker_seq` with a signed `grant_void` tombstone (floor `20m`). **Upgrade:** a project whose checkpoints are refused over a broker_seq gap after deploying this build is unwedged this way — see [operator verification](../docs/operator-verification.md#unwedging-a-refused-checkpoint-grant_void-tombstones-d6). |
 | `AVERIN_BROKER_ID` | server | (none) | M4 federation identity. Grants are tagged with this `broker_id` and checkpoints carry a per-broker_id `broker_grant_heads` map — verify with `federated_broker_keys[<id>]`. Requires the broker. Unset = single-broker. |
 | `AVERIN_REVOCATION_SEED` | server | (none) | 64 hex chars. Enables M5 revocation (`POST /v2/revoke`); exports carry a signed `revocation_list`. MUST be role-separated from the signing/broker/resource/attestation/cosig keys. Unset = off. |
 | `AVERIN_DATABASE_URL` | server | (none) | Postgres DSN for the database-backed store and ledger. One synthetic configuration was tested at `8ac16313`; production durability/isolation are not established. Unset = in-memory (dev, NOT durable). |
@@ -103,7 +104,7 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 A cosigned/delegated grant is inherently two-phase (the approver/delegator signs a challenge that binds
 the broker-minted credential): `POST /v2/grants/prepare` mints + reveals `{grant_id, credential_binding,
 exp, cnf_kid, cosig_threshold}`; the approvers/delegators sign it; `POST /v2/grants/finalize` submits the
-`cosignatures` (M6) / `delegation_hops` (M2) and commits.
+same PoP-signed grant request plus the `cosignatures` (M6) / `delegation_hops` (M2) and commits.
 
 A **native (M3)** grant is single-phase: `POST /v2/grants` with `mode:"token_exchange"` + `lease_id`
 issues a grant for an externally-minted IdP/STS credential (no PoP, no minted capability); the resource

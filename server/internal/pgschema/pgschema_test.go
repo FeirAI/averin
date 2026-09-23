@@ -2,6 +2,8 @@ package pgschema
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"testing"
@@ -185,5 +187,134 @@ func TestMigrateNewerVersionFailsClosed(t *testing.T) {
 	// Fail-closed means refuse-and-leave: the future stamp must not have been rewritten or removed.
 	if got := maxVersion(t, admin); got != future {
 		t.Fatalf("version after fail-closed refusal = %d, want %d (must not mutate the ledger)", got, future)
+	}
+}
+
+// TestMigrateV2RecordIDUniqueness: the v1→v2 step builds the per-project record_id UNIQUE backstop on a clean
+// DB (a second record under the same (project_id, record_id) is then rejected by the database itself), and on
+// a DB that ALREADY holds a historical duplicate it must still migrate (never refuse to boot over immutable
+// evidence) — building the non-unique index instead.
+func TestMigrateV2RecordIDUniqueness(t *testing.T) {
+	ctx := context.Background()
+	stampV1 := func(t *testing.T, admin *pgxpool.Pool) {
+		t.Helper()
+		if _, err := admin.Exec(ctx, baselineV1); err != nil {
+			t.Fatalf("apply v1 baseline: %v", err)
+		}
+		if _, err := admin.Exec(ctx, `CREATE TABLE schema_migrations (version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+			INSERT INTO schema_migrations (version) VALUES (1)`); err != nil {
+			t.Fatalf("stamp v1: %v", err)
+		}
+	}
+	insert := func(admin *pgxpool.Pool, hash, recordID string) error {
+		_, err := admin.Exec(ctx, `INSERT INTO records (project_id, idempotency_key, content_hash, session_id, parents, json)
+			VALUES ('p', $1, $1, 's', '{}', $2)`, hash, fmt.Sprintf(`{"record_id":%q}`, recordID))
+		return err
+	}
+
+	t.Run("clean", func(t *testing.T) {
+		scoped, admin, cleanup := newTestSchema(t)
+		defer cleanup()
+		stampV1(t, admin)
+		if err := insert(admin, "sha256:a", "r1"); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := Migrate(ctx, scoped); err != nil {
+			t.Fatalf("migrate v1->current: %v", err)
+		}
+		if got := maxVersion(t, admin); got != CurrentSchemaVersion {
+			t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
+		}
+		if !regExists(t, admin, "records_project_record_id_uniq") {
+			t.Fatal("clean DB must get the UNIQUE record_id index")
+		}
+		if err := insert(admin, "sha256:b", "r1"); err == nil {
+			t.Fatal("the database must reject a second record under the same (project_id, record_id)")
+		}
+	})
+	t.Run("long historical record_id", func(t *testing.T) {
+		// Review finding 4: a pre-cap record with a 3200-byte INCOMPRESSIBLE record_id exceeds the btree row limit
+		// (~2704 bytes), so an index over the raw id aborted this step and every replica refused to boot. The index
+		// is over md5(record_id): the migration must succeed and the UNIQUE backstop must still hold for it.
+		scoped, admin, cleanup := newTestSchema(t)
+		defer cleanup()
+		stampV1(t, admin)
+		raw := make([]byte, 1600)
+		if _, err := rand.Read(raw); err != nil {
+			t.Fatal(err)
+		}
+		long := hex.EncodeToString(raw) // 3200 random hex chars: pglz cannot compress it under the limit
+		if err := insert(admin, "sha256:a", long); err != nil {
+			t.Fatalf("seed long record_id: %v", err)
+		}
+		if err := Migrate(ctx, scoped); err != nil {
+			t.Fatalf("a long historical record_id must NOT make the migration refuse to boot: %v", err)
+		}
+		if got := maxVersion(t, admin); got != CurrentSchemaVersion {
+			t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
+		}
+		if !regExists(t, admin, "records_project_record_id_uniq") {
+			t.Fatal("a clean DB with a long record_id must still get the UNIQUE record_id index")
+		}
+		if err := insert(admin, "sha256:b", long); err == nil {
+			t.Fatal("the database must reject a second record under the same long record_id")
+		}
+		if err := insert(admin, "sha256:c", long+"x"); err != nil {
+			t.Fatalf("a DIFFERENT long record_id must insert: %v", err)
+		}
+	})
+	t.Run("historical duplicate", func(t *testing.T) {
+		scoped, admin, cleanup := newTestSchema(t)
+		defer cleanup()
+		stampV1(t, admin)
+		if err := insert(admin, "sha256:a", "r1"); err != nil {
+			t.Fatalf("seed a: %v", err)
+		}
+		if err := insert(admin, "sha256:b", "r1"); err != nil {
+			t.Fatalf("seed historical duplicate: %v", err)
+		}
+		if err := Migrate(ctx, scoped); err != nil {
+			t.Fatalf("a historical duplicate must NOT make the migration refuse to boot: %v", err)
+		}
+		if got := maxVersion(t, admin); got != CurrentSchemaVersion {
+			t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
+		}
+		if regExists(t, admin, "records_project_record_id_uniq") || !regExists(t, admin, "records_project_record_id_idx") {
+			t.Fatal("a DB with a historical duplicate must get the NON-unique record_id index")
+		}
+	})
+}
+
+// TestMigrateV3BrokerSeqVoid: the v2→v3 step adds broker_seq.allocated_at (existing reservations take the migration
+// time, so a pre-upgrade orphan becomes voidable one safety age later) and the insert-only broker_seq_void marker,
+// without touching existing broker_seq rows.
+func TestMigrateV3BrokerSeqVoid(t *testing.T) {
+	ctx := context.Background()
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	if _, err := admin.Exec(ctx, baselineV1+"\n"+steps[1]); err != nil {
+		t.Fatalf("apply v1+v2: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `CREATE TABLE schema_migrations (version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+		INSERT INTO schema_migrations (version) VALUES (1), (2);
+		INSERT INTO broker_seq (project_id, grant_id, seq) VALUES ('p', 'g-orphan', 1)`); err != nil {
+		t.Fatalf("stamp v2 + seed an orphan reservation: %v", err)
+	}
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatalf("migrate v2->v3: %v", err)
+	}
+	if got := maxVersion(t, admin); got != 3 {
+		t.Fatalf("version = %d, want 3", got)
+	}
+	var seq int64
+	var allocatedAt time.Time
+	if err := admin.QueryRow(ctx, `SELECT seq, allocated_at FROM broker_seq WHERE project_id='p' AND grant_id='g-orphan'`).Scan(&seq, &allocatedAt); err != nil {
+		t.Fatalf("the pre-existing reservation must survive with an allocated_at: %v", err)
+	}
+	if seq != 1 || allocatedAt.IsZero() {
+		t.Fatalf("reservation = seq %d allocated_at %v", seq, allocatedAt)
+	}
+	if !regExists(t, admin, "broker_seq_void") {
+		t.Fatal("v3 must create broker_seq_void")
 	}
 }

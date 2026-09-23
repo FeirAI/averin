@@ -56,7 +56,7 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 			sealed, created = existing.JSON, false
 			return nil
 		}
-		seq, aerr := s.st.AllocateBrokerSeq(gr.ProjectID, grantID)
+		seq, fresh, aerr := s.allocateBrokerSeq(gr.ProjectID, grantID)
 		if aerr != nil {
 			return fmt.Errorf("allocate broker_seq: %w", aerr)
 		}
@@ -69,7 +69,7 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 		}
 		rec, e := s.buildNativeGrantRecord(gr, grantID, evidence)
 		if e != nil {
-			return e
+			return s.settleFailedGrantSeq(gr.ProjectID, grantID, fresh, e) // nothing persisted → release the seq
 		}
 		var se error
 		sealed, created, se = s.sealAndStore(gr.ProjectID, gr.SessionID, idem, rec, nil)
@@ -78,11 +78,20 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 				sealed, created = r2.JSON, false
 				return nil
 			}
-			return fmt.Errorf("%w — broker_seq left RESERVED (commit-ambiguous; a retry reclaims it)", se)
+			// Released unless commit-ambiguous (then RESERVED; a retry reclaims it).
+			return s.settleFailedGrantSeq(gr.ProjectID, grantID, fresh, se)
 		}
 		return nil
 	}()
 	if commitErr != nil {
+		if isVoidedGrant(commitErr) {
+			writeErr(w, http.StatusConflict, commitErr.Error())
+			return
+		}
+		if msg := grantIDTakenMsg(commitErr, grantID); msg != "" {
+			writeErr(w, http.StatusConflict, msg)
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "native grant: "+commitErr.Error())
 		return
 	}
@@ -179,6 +188,10 @@ func (s *Server) handleIntrospection(w http.ResponseWriter, r *http.Request) {
 	}
 	if ir.ProjectID == "" || ir.SessionID == "" || ir.IdempotencyKey == "" || ir.GrantID == "" || ir.CredentialRef == "" || ir.EffectiveScope == "" {
 		writeErr(w, http.StatusBadRequest, "project_id, session_id, idempotency_key, grant_id, credential_ref, effective_scope are required")
+		return
+	}
+	if err := rejectNUL("project_id", ir.ProjectID, "idempotency_key", ir.IdempotencyKey); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if ir.EffectiveExp <= 0 {

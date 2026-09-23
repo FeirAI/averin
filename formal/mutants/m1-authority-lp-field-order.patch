@@ -1,0 +1,14 @@
+Mutant: Swap LP(project_id) and LP(record_id) in the authority-evidence signing preimage.
+
+--- a/core/src/authority.rs
++++ b/core/src/authority.rs
+@@ -64,8 +64,8 @@
+     );
+     lp_str_into(&mut p, AUTHORITY_SIG_TAG);
+     lp_str_into(&mut p, source);
++    lp_str_into(&mut p, record_id);
+     lp_str_into(&mut p, project_id);
+-    lp_str_into(&mut p, record_id);
+     p.extend_from_slice(evidence_hash.as_bytes());
+     p
+ }

@@ -7,8 +7,10 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Record is a sealed Decision Record plus the few fields the store indexes on.
@@ -50,15 +52,55 @@ var ErrNotFound = errors.New("not found")
 // NOT roll back on this one (releasing a durable-but-invisible receipt's credential would allow a double-spend).
 var ErrCommitAmbiguous = errors.New("store: commit outcome unknown (a record insert may or may not have persisted)")
 
+// ErrRecordIDConflict is returned by PutRecord when a DIFFERENT record (different content_hash, different or no
+// idempotency key) already holds the new record's record_id in the project. record_id is unique per project: the
+// offline verifier rejects a bundle carrying a duplicate record_id, and disclosure secrets are keyed
+// (record_id, field), so a second record under an existing id would poison verification forever and lose its
+// opening secret. Nothing is persisted on this error (it is NOT commit-ambiguous). An exact idempotent replay
+// (same idempotency key, or byte-identical content) still collapses onto the stored row as before.
+var ErrRecordIDConflict = errors.New("store: record_id already used by a different record in this project")
+
+// ErrBrokerSeqVoided is returned by AllocateBrokerSeq for a grant_id whose reserved broker_seq an operator VOIDED
+// (VoidBrokerSeq). The voided seq is filled by a signed grant_void tombstone, so that grant_id can never be issued
+// again — neither at its old seq (a duplicate) nor at a new one (the tombstone binds the grant_id). A retry must use
+// a new idempotency key (a new grant_id).
+var ErrBrokerSeqVoided = errors.New("store: this grant's broker_seq was voided by the operator (grant_void tombstone); re-issue under a new idempotency key")
+
+// BrokerSeqReservation is one row of the broker_seq allocation ledger: the grant_id holding seq, when it was
+// allocated (the STORE's clock — Postgres now() on the DB server, the Mem store's injectable clock), and whether an
+// operator has voided it. AllocatedAt is set once, on the fresh insert, and never refreshed by an idempotent retry
+// (fresh=false; Postgres cannot — broker_seq is insert-only), so it is NOT the time of the grant's latest attempt.
+type BrokerSeqReservation struct {
+	GrantID     string
+	Seq         int64
+	AllocatedAt time.Time
+	Voided      bool
+}
+
+// recordIDOf extracts the record_id carried in a sealed record's JSON ("" if absent/unparseable — such a record
+// does not participate in the uniqueness check, matching the Postgres expression index, where NULL never conflicts).
+func recordIDOf(recordJSON string) string {
+	var p struct {
+		RecordID string `json:"record_id"`
+	}
+	_ = json.Unmarshal([]byte(recordJSON), &p)
+	return p.RecordID
+}
+
 // Store is append-only: records and checkpoints are never mutated or removed.
 type Store interface {
 	// PutRecord stores a record under an idempotency key. If the key was already used, it returns
-	// the previously stored record and created=false (threat #8: retry duplication collapses).
+	// the previously stored record and created=false (threat #8: retry duplication collapses). A NEW record
+	// whose record_id is already held by a different record in the project fails with ErrRecordIDConflict.
 	PutRecord(projectID, idemKey string, rec Record) (stored Record, created bool, err error)
 	// RecordByIdem returns the record previously stored under an idempotency key, if any. The broker
 	// uses it to detect an idempotent (or pre-D6 legacy) grant retry BEFORE allocating a broker_seq, so
 	// a replay can never burn a seq it then fails to record and manufacture a false transparency gap (D6).
 	RecordByIdem(projectID, idemKey string) (rec Record, found bool, err error)
+	// HasRecordID reports whether a record carrying recordID is already stored in the project. The api's batch
+	// pre-pass uses it to reject a record_id collision BEFORE any batch item is sealed (all-or-nothing); the
+	// authoritative check is PutRecord's ErrRecordIDConflict.
+	HasRecordID(projectID, recordID string) (bool, error)
 	// Heads returns the current head content_hashes for a session (records not referenced as a
 	// causal parent within that session), byte-sorted.
 	Heads(projectID, sessionID string) ([]string, error)
@@ -72,8 +114,9 @@ type Store interface {
 	// the whole project history into memory (Postgres pages in SQL). It backs the paged app list endpoint so
 	// a large tenant is not fully materialized per list call. limit<=0 returns an empty page; offset<0 == 0.
 	RecordsPage(projectID string, limit, offset int) ([]Record, error)
-	// GrantRecords returns the project's credential-broker GRANT records (a superset of the transparency-log
-	// membership set — it filters on the necessary marker extensions.broker.kind=="grant"; api.grantLog
+	// GrantRecords returns the project's credential-broker GRANT and grant_void tombstone records (a superset of the
+	// transparency-log membership set — it filters on the necessary marker extensions.broker.kind in {"grant",
+	// "grant_void"}; api.grantLog
 	// re-applies the exact D6 rule). It exists so checkpoint creation folds the grant head from the grant
 	// records alone instead of a full-history scan; it MUST never omit a real grant (that would be
 	// suppression), so implementations filter LOOSELY (superset) and let grantLog tighten. Never nil.
@@ -101,22 +144,60 @@ type Store interface {
 	// sharing one store must additionally hold a DISTRIBUTED per-project lock across allocate→seal→insert
 	// (extend the Postgres advisory lock here to span the record insert), or two instances could record
 	// seq N+1 before seq N and a checkpoint could anchor a transient false gap.
-	AllocateBrokerSeq(projectID, grantID string) (int64, error)
+	//
+	// fresh reports whether THIS call created the allocation (true) or returned an existing reservation for the
+	// grant_id (false). Only a fresh allocation may be released by the caller that made it: an existing one may
+	// belong to a prior attempt whose commit was ambiguous and may still land (see api.settleFailedGrantSeq).
+	AllocateBrokerSeq(projectID, grantID string) (seq int64, fresh bool, err error)
 	// ReleaseBrokerSeq rolls back an allocation whose grant was NOT recorded (a failure after allocation
 	// but before the record committed), so the durable max sequence only advances for grants that exist —
 	// keeping the recorded log gapless. Safe to call when no allocation was made (no-op). MUST be called
-	// under the same per-project serialization as the allocation (the api's ingest lock), so the released
-	// seq is the current max and is cleanly reusable by the next allocation.
+	// under the same per-project serialization as the allocation (the api's ingest lock).
+	//
+	// NEVER RELEASED: a voided reservation (VoidBrokerSeq), and one whose grant_id is already held by a record's
+	// record_id (the grant itself, or a grant_void tombstone sealed before its void marker) — that record fills the
+	// seq, so the row must stay counted in MaxBrokerSeq or MAX+1 would re-issue the number. Both are a no-op.
+	//
+	// ONLY THE CURRENT MAX IS RELEASED. If the grant's seq is no longer the project's max (an earlier release of
+	// it was lost — e.g. a failed Postgres DELETE — and higher seqs have since been allocated), deleting it would
+	// punch a hole in the MIDDLE of [1..N] that no allocation can ever refill (the next allocation for this
+	// grant_id would get MAX+1), so no gapless checkpoint could be signed again. Such a non-max allocation is
+	// instead KEPT (a no-op, nil error): the grant's idempotent retry reclaims that exact seq and fills the hole.
+	// (Found by TLA+ model checking, formal/tla/GrantLog.tla.)
 	//
 	// ROLLBACK is BEST-EFFORT, not atomic with the allocation: the Mem store never errors here (so the Mem
 	// path is fully gapless), but a Postgres DELETE can fail. The api SURFACES that failure (it does not
 	// swallow it). A surfaced orphan SELF-HEALS — the deterministic grant_id makes AllocateBrokerSeq
 	// idempotent, so a retry of the same grant reuses the orphaned seq and records it. A PERMANENT gap
 	// therefore needs the narrow triple of {failure after allocation, failed rollback, client never
-	// retries}, which surfaces as a transparency anomaly the operator investigates. The full production
+	// retries}, which surfaces as a transparency anomaly the operator investigates — and the api's checkpoint
+	// creation refuses to sign while any allocated seq (MaxBrokerSeq) lacks a recorded grant, so such a gap is
+	// never ANCHORED (checkpoints are append-only; an anchored gap would fail verification forever). The full production
 	// hardening is to make allocation and record insertion ONE transaction (held across the cgo signing),
 	// which also subsumes the multi-instance ordering lock — out of scope for the single-instance demo.
 	ReleaseBrokerSeq(projectID, grantID string) error
+	// MaxBrokerSeq returns the highest broker_seq currently ALLOCATED for the project (0 if none). Checkpoint
+	// creation compares it against the recorded grant set under the ingest lock and refuses to sign when an
+	// allocated seq has no recorded grant (a reserved/orphaned seq), so a gap can never be anchored.
+	MaxBrokerSeq(projectID string) (int64, error)
+	// BrokerSeqAt returns the allocation-ledger row holding seq in the project (found=false if none). The operator
+	// void endpoint uses it to name the reserved grant_id and check the reservation's age.
+	BrokerSeqAt(projectID string, seq int64) (res BrokerSeqReservation, found bool, err error)
+	// VoidBrokerSeq marks the reservation (grantID, seq) VOIDED. The allocation row is KEPT, so MaxBrokerSeq still
+	// counts it and MAX+1 never re-issues the voided number; ReleaseBrokerSeq never deletes it; and
+	// AllocateBrokerSeq(grantID) fails with ErrBrokerSeqVoided from now on (the grant_id is retired, never handed
+	// the voided seq back). Idempotent for the same (grantID, seq); an error if seq is not reserved by grantID. The
+	// caller (the api, under ingestMu) seals the grant_void tombstone that fills the seq in the recorded log FIRST
+	// and writes this marker SECOND: the tombstone's record_id IS grantID, so once it is sealed the grant can never
+	// record (record_id uniqueness), and a marker is only ever written for a void that actually won.
+	VoidBrokerSeq(projectID, grantID string, seq int64) error
+	// RecordIDUniqueEnforced reports whether the store itself (not just the api's under-lock probe) enforces
+	// per-project record_id uniqueness. The operator void relies on it: the tombstone's record_id IS the voided
+	// grant_id, so a UNIQUE record_id backstop makes a void and a still-in-flight commit of that grant mutually
+	// exclusive even when the api's process-local checks cannot see the in-flight commit. Mem always enforces it
+	// (under its mutex); Postgres does only when migration 0002 built the UNIQUE index records_project_record_id_uniq
+	// (on a DB that held historical duplicates it falls back to a NON-unique index, and this returns false).
+	RecordIDUniqueEnforced() (bool, error)
 
 	// Disclosures returns every disclosure secret for the project (for selective_disclosure export),
 	// in canonical (record_id, field) order. Disclosure secrets are written atomically with their
@@ -136,32 +217,51 @@ type Store interface {
 type Mem struct {
 	mu       sync.Mutex
 	projects map[string]*project
+	now      func() time.Time // the store's clock (broker_seq allocated_at); WithClock injects one for tests
 }
 
 type project struct {
 	records    []Record
 	idem       map[string]int // idempotency key -> record index
 	byHash     map[string]struct{}
+	byRecordID map[string]struct{} // record_id -> present (per-project uniqueness)
 	checks     []Checkpoint
 	seqBySess  map[string]int64
 	disclosure []DisclosureSecret
-	discSeen   map[string]struct{} // record_id\x00field -> present (dedupe)
-	anchors    map[int64]string    // checkpoint seq -> token_b64
-	brokerSeq  map[string]int64    // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
+	discSeen   map[string]struct{}  // record_id\x00field -> present (dedupe)
+	anchors    map[int64]string     // checkpoint seq -> token_b64
+	brokerSeq  map[string]int64     // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
+	brokerAt   map[string]time.Time // grant_id -> allocation time (the operator void's safety age)
+	voided     map[string]struct{}  // grant_id -> voided (row kept in brokerSeq; never released or re-allocated)
 }
 
-func NewMem() *Mem { return &Mem{projects: map[string]*project{}} }
+func NewMem() *Mem { return &Mem{projects: map[string]*project{}, now: time.Now} }
+
+// WithClock sets the clock the Mem store stamps broker_seq allocations with (allocated_at, the operator void's
+// safety age), so tests can drive it together with the api's injectable clock (api.Server.WithClock).
+func (m *Mem) WithClock(now func() time.Time) *Mem {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.now = now
+	return m
+}
+
+// RecordIDUniqueEnforced: Mem enforces per-project record_id uniqueness in PutRecord under its mutex, always.
+func (m *Mem) RecordIDUniqueEnforced() (bool, error) { return true, nil }
 
 func (m *Mem) proj(id string) *project {
 	p := m.projects[id]
 	if p == nil {
 		p = &project{
-			idem:      map[string]int{},
-			byHash:    map[string]struct{}{},
-			seqBySess: map[string]int64{},
-			discSeen:  map[string]struct{}{},
-			anchors:   map[int64]string{},
-			brokerSeq: map[string]int64{},
+			idem:       map[string]int{},
+			byHash:     map[string]struct{}{},
+			byRecordID: map[string]struct{}{},
+			seqBySess:  map[string]int64{},
+			discSeen:   map[string]struct{}{},
+			anchors:    map[int64]string{},
+			brokerSeq:  map[string]int64{},
+			brokerAt:   map[string]time.Time{},
+			voided:     map[string]struct{}{},
 		}
 		m.projects[id] = p
 	}
@@ -191,9 +291,20 @@ func (m *Mem) PutRecord(projectID, idemKey string, rec Record) (Record, bool, er
 			}
 		}
 	}
+	// record_id is unique per project (checked AFTER the idem/content collapses above, so an exact replay still
+	// returns the stored row). A different record under an already-held record_id persists nothing.
+	rid := recordIDOf(rec.JSON)
+	if rid != "" {
+		if _, taken := p.byRecordID[rid]; taken {
+			return Record{}, false, fmt.Errorf("%w: %q", ErrRecordIDConflict, rid)
+		}
+	}
 	p.records = append(p.records, rec)
 	idx := len(p.records) - 1
 	p.byHash[rec.ContentHash] = struct{}{}
+	if rid != "" {
+		p.byRecordID[rid] = struct{}{}
+	}
 	if idemKey != "" {
 		p.idem[idemKey] = idx
 	}
@@ -218,6 +329,13 @@ func (m *Mem) RecordByIdem(projectID, idemKey string) (Record, bool, error) {
 		return p.records[i], true, nil
 	}
 	return Record{}, false, nil
+}
+
+func (m *Mem) HasRecordID(projectID, recordID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.proj(projectID).byRecordID[recordID]
+	return ok, nil
 }
 
 func headsOf(recs []Record) []string {
@@ -317,8 +435,8 @@ func (m *Mem) RecordsPage(projectID string, limit, offset int) ([]Record, error)
 	return out, nil
 }
 
-// GrantRecords returns the project's grant-tuple records (a superset for api.grantLog). Mem filters on the
-// necessary marker extensions.broker.kind=="grant" so it matches the Postgres implementation's superset; a
+// GrantRecords returns the project's grant-tuple and grant_void records (a superset for api.grantLog). Mem filters on
+// the necessary marker extensions.broker.kind in {"grant", "grant_void"} so it matches the Postgres implementation's superset; a
 // non-grant is dropped and grantLog re-verifies enforcement_point+broker_seq. Parse failures are conservatively
 // INCLUDED (never silently dropped) so a malformed grant can never be suppressed from the transparency log.
 func (m *Mem) GrantRecords(projectID string) ([]Record, error) {
@@ -333,7 +451,7 @@ func (m *Mem) GrantRecords(projectID string) ([]Record, error) {
 				} `json:"broker"`
 			} `json:"extensions"`
 		}
-		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil || parsed.Extensions.Broker.Kind == "grant" {
+		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil || parsed.Extensions.Broker.Kind == "grant" || parsed.Extensions.Broker.Kind == "grant_void" {
 			out = append(out, r)
 		}
 	}
@@ -366,12 +484,15 @@ func (m *Mem) NextCheckpointSeq(projectID string) (int64, error) {
 	return int64(len(m.proj(projectID).checks)), nil
 }
 
-func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, error) {
+func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.proj(projectID)
+	if _, v := p.voided[grantID]; v {
+		return 0, false, ErrBrokerSeqVoided // never hand a voided seq back (it is filled by a tombstone)
+	}
 	if seq, ok := p.brokerSeq[grantID]; ok {
-		return seq, nil // idempotent: a retry of the same grant_id gets its original seq (no gap)
+		return seq, false, nil // idempotent: a retry of the same grant_id gets its original seq (no gap)
 	}
 	// Derive next from the CURRENT max in the map (not a monotonic counter) so a ReleaseBrokerSeq of the
 	// highest seq is reusable — keeping the recorded sequence gapless even when a grant fails after
@@ -383,14 +504,69 @@ func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, error) {
 		}
 	}
 	p.brokerSeq[grantID] = max + 1
-	return max + 1, nil
+	p.brokerAt[grantID] = m.now()
+	return max + 1, true, nil
 }
 
 func (m *Mem) ReleaseBrokerSeq(projectID, grantID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.proj(projectID).brokerSeq, grantID)
+	p := m.proj(projectID)
+	bs := p.brokerSeq
+	seq, ok := bs[grantID]
+	if !ok {
+		return nil
+	}
+	if _, v := p.voided[grantID]; v {
+		return nil // a voided seq is filled by its tombstone: never released (MAX+1 would re-issue it)
+	}
+	if _, held := p.byRecordID[grantID]; held {
+		return nil // a record (the grant, or a tombstone sealed before its void marker) fills the seq: keep it
+	}
+	for _, s := range bs {
+		if s > seq {
+			return nil // not the current max: keep the reservation (see ReleaseBrokerSeq) so a retry refills it
+		}
+	}
+	delete(bs, grantID)
+	delete(p.brokerAt, grantID)
 	return nil
+}
+
+func (m *Mem) BrokerSeqAt(projectID string, seq int64) (BrokerSeqReservation, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.proj(projectID)
+	for gid, s := range p.brokerSeq {
+		if s == seq {
+			_, v := p.voided[gid]
+			return BrokerSeqReservation{GrantID: gid, Seq: s, AllocatedAt: p.brokerAt[gid], Voided: v}, true, nil
+		}
+	}
+	return BrokerSeqReservation{}, false, nil
+}
+
+func (m *Mem) VoidBrokerSeq(projectID, grantID string, seq int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.proj(projectID)
+	if s, ok := p.brokerSeq[grantID]; !ok || s != seq {
+		return fmt.Errorf("store: broker_seq %d is not reserved by grant %s", seq, grantID)
+	}
+	p.voided[grantID] = struct{}{}
+	return nil
+}
+
+func (m *Mem) MaxBrokerSeq(projectID string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var max int64
+	for _, s := range m.proj(projectID).brokerSeq {
+		if s > max {
+			max = s
+		}
+	}
+	return max, nil
 }
 
 func (m *Mem) LatestCheckpointHash(projectID string) (string, bool, error) {

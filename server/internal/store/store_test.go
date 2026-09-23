@@ -1,6 +1,12 @@
 package store
 
-import "testing"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"testing"
+	"time"
+)
 
 // exerciseDisclosures runs the disclosure-store contract against any Store implementation, so Mem
 // (TestMemDisclosures) and Postgres (TestPostgresDisclosures) are proven to behave identically.
@@ -113,44 +119,195 @@ func TestMemAnchors(t *testing.T) {
 func exerciseBrokerSeq(t *testing.T, s Store) {
 	t.Helper()
 	for i, gid := range []string{"g1", "g2", "g3"} {
-		seq, err := s.AllocateBrokerSeq("p", gid)
+		seq, fresh, err := s.AllocateBrokerSeq("p", gid)
 		if err != nil {
 			t.Fatalf("alloc %s: %v", gid, err)
+		}
+		if !fresh {
+			t.Fatalf("alloc %s: a first allocation must report fresh=true", gid)
 		}
 		if want := int64(i + 1); seq != want {
 			t.Fatalf("alloc %s = %d; want %d (gapless [1..N])", gid, seq, want)
 		}
 	}
 	// idempotent on grant_id: re-allocating an existing grant returns its original seq, no advance.
-	if seq, err := s.AllocateBrokerSeq("p", "g2"); err != nil || seq != 2 {
-		t.Fatalf("re-alloc g2 = %d err=%v; want idempotent 2", seq, err)
+	// fresh=false: a caller must never release a reservation it did not create (api.settleFailedGrantSeq).
+	if seq, fresh, err := s.AllocateBrokerSeq("p", "g2"); err != nil || seq != 2 || fresh {
+		t.Fatalf("re-alloc g2 = %d fresh=%v err=%v; want idempotent 2, fresh=false", seq, fresh, err)
 	}
 	// the next NEW grant continues gapless (the idempotent retry above did not consume a number).
-	if seq, err := s.AllocateBrokerSeq("p", "g4"); err != nil || seq != 4 {
+	if seq, _, err := s.AllocateBrokerSeq("p", "g4"); err != nil || seq != 4 {
 		t.Fatalf("alloc g4 = %d err=%v; want 4 (gapless after idempotent retry)", seq, err)
 	}
 	// per-project isolation: a different project starts its own sequence at 1.
-	if seq, err := s.AllocateBrokerSeq("other", "g1"); err != nil || seq != 1 {
+	if seq, _, err := s.AllocateBrokerSeq("other", "g1"); err != nil || seq != 1 {
 		t.Fatalf("alloc other/g1 = %d err=%v; want 1 (per-project)", seq, err)
 	}
 	// ReleaseBrokerSeq frees a not-yet-recorded allocation; the freed (highest) seq is REUSED gaplessly.
-	if seq, err := s.AllocateBrokerSeq("p", "g5"); err != nil || seq != 5 {
+	if seq, _, err := s.AllocateBrokerSeq("p", "g5"); err != nil || seq != 5 {
 		t.Fatalf("alloc g5 = %d err=%v; want 5", seq, err)
 	}
 	if err := s.ReleaseBrokerSeq("p", "g5"); err != nil {
 		t.Fatalf("release g5: %v", err)
 	}
-	if seq, err := s.AllocateBrokerSeq("p", "g6"); err != nil || seq != 5 {
+	if seq, _, err := s.AllocateBrokerSeq("p", "g6"); err != nil || seq != 5 {
 		t.Fatalf("after releasing g5, alloc g6 = %d err=%v; want reused 5 (gapless rollback)", seq, err)
 	}
 	// releasing an unallocated grant is a safe no-op.
 	if err := s.ReleaseBrokerSeq("p", "never-allocated"); err != nil {
 		t.Fatalf("release of unallocated grant must be a no-op: %v", err)
 	}
+	// MaxBrokerSeq reports the highest ALLOCATED seq per project (0 when none) — what checkpoint creation
+	// compares against the recorded grant count to refuse anchoring a gap.
+	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 5 {
+		t.Fatalf("MaxBrokerSeq(p) = %d err=%v; want 5", max, err)
+	}
+	if max, err := s.MaxBrokerSeq("other"); err != nil || max != 1 {
+		t.Fatalf("MaxBrokerSeq(other) = %d err=%v; want 1", max, err)
+	}
+	if max, err := s.MaxBrokerSeq("empty"); err != nil || max != 0 {
+		t.Fatalf("MaxBrokerSeq(empty) = %d err=%v; want 0", max, err)
+	}
 }
 
 func TestMemBrokerSeq(t *testing.T) {
 	exerciseBrokerSeq(t, NewMem())
+}
+
+// exerciseReleaseKeepsNonMaxSeq pins the TLA+-found rule (formal/tla/GrantLog.tla): ReleaseBrokerSeq deletes an
+// allocation ONLY while it is the project's current max. g1=1 stays reserved (its earlier release was lost)
+// while g2 takes seq 2 and commits; a later release of g1 must KEEP the reservation — deleting it would leave a
+// permanent hole at 1 (the next allocation for g1 would be MAX+1=3) — so g1's retry reclaims seq 1.
+func exerciseReleaseKeepsNonMaxSeq(t *testing.T, s Store) {
+	t.Helper()
+	if seq, _, err := s.AllocateBrokerSeq("p", "g1"); err != nil || seq != 1 {
+		t.Fatalf("alloc g1 = %d err=%v; want 1", seq, err)
+	}
+	if seq, _, err := s.AllocateBrokerSeq("p", "g2"); err != nil || seq != 2 {
+		t.Fatalf("alloc g2 = %d err=%v; want 2", seq, err)
+	}
+	if err := s.ReleaseBrokerSeq("p", "g1"); err != nil {
+		t.Fatalf("release g1: %v", err)
+	}
+	if seq, _, err := s.AllocateBrokerSeq("p", "g1"); err != nil || seq != 1 {
+		t.Fatalf("after releasing the NON-max g1, its retry got seq %d err=%v; want the kept reservation 1", seq, err)
+	}
+	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 2 {
+		t.Fatalf("MaxBrokerSeq = %d err=%v; want 2", max, err)
+	}
+	// the max (g2) is still releasable.
+	if err := s.ReleaseBrokerSeq("p", "g2"); err != nil {
+		t.Fatalf("release g2: %v", err)
+	}
+	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 1 {
+		t.Fatalf("after releasing the max g2, MaxBrokerSeq = %d err=%v; want 1", max, err)
+	}
+}
+
+func TestMemReleaseKeepsNonMaxSeq(t *testing.T) {
+	exerciseReleaseKeepsNonMaxSeq(t, NewMem())
+}
+
+// exerciseBrokerSeqVoid pins the operator-void contract shared by Mem and Postgres (formal/tla/GrantLog.tla): a
+// voided reservation is KEPT in the allocation ledger (MaxBrokerSeq still counts it, so MAX+1 never re-issues the
+// voided number), ReleaseBrokerSeq never deletes it, and its grant_id is retired — AllocateBrokerSeq refuses it with
+// ErrBrokerSeqVoided rather than handing the voided seq back or allocating a fresh one.
+func exerciseBrokerSeqVoid(t *testing.T, s Store) {
+	t.Helper()
+	for _, gid := range []string{"g1", "g2"} {
+		if _, _, err := s.AllocateBrokerSeq("p", gid); err != nil {
+			t.Fatalf("alloc %s: %v", gid, err)
+		}
+	}
+	res, found, err := s.BrokerSeqAt("p", 1)
+	if err != nil || !found || res.GrantID != "g1" || res.Seq != 1 || res.Voided || res.AllocatedAt.IsZero() {
+		t.Fatalf("BrokerSeqAt(1) = %+v found=%v err=%v; want g1, unvoided, with an allocation time", res, found, err)
+	}
+	if _, found, err := s.BrokerSeqAt("p", 99); err != nil || found {
+		t.Fatalf("BrokerSeqAt(99) found=%v err=%v; want not found", found, err)
+	}
+	if err := s.VoidBrokerSeq("p", "g2", 1); err == nil {
+		t.Fatal("voiding seq 1 under a grant that does not hold it must fail")
+	}
+	for i := 0; i < 2; i++ { // idempotent
+		if err := s.VoidBrokerSeq("p", "g1", 1); err != nil {
+			t.Fatalf("void g1@1 (#%d): %v", i+1, err)
+		}
+	}
+	if res, _, _ := s.BrokerSeqAt("p", 1); !res.Voided {
+		t.Fatalf("BrokerSeqAt(1) after void = %+v; want voided", res)
+	}
+	if _, _, err := s.AllocateBrokerSeq("p", "g1"); !errors.Is(err, ErrBrokerSeqVoided) {
+		t.Fatalf("re-allocating a voided grant_id must fail with ErrBrokerSeqVoided, got %v", err)
+	}
+	// voiding the MAX then releasing it must keep the row: the next grant gets 3, never the voided 2.
+	if err := s.VoidBrokerSeq("p", "g2", 2); err != nil {
+		t.Fatalf("void g2@2: %v", err)
+	}
+	if err := s.ReleaseBrokerSeq("p", "g2"); err != nil {
+		t.Fatalf("release of a voided seq must be a no-op: %v", err)
+	}
+	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 2 {
+		t.Fatalf("MaxBrokerSeq after voiding = %d err=%v; want 2 (voided rows stay allocated)", max, err)
+	}
+	if seq, fresh, err := s.AllocateBrokerSeq("p", "g3"); err != nil || seq != 3 || !fresh {
+		t.Fatalf("alloc g3 = %d fresh=%v err=%v; want a fresh 3 (a voided seq is never re-issued)", seq, fresh, err)
+	}
+}
+
+// exerciseReleaseKeepsRecordHeldSeq: the operator void seals its grant_void tombstone (record_id = the voided
+// grant_id) BEFORE it writes the void marker. If the marker write fails (or the process dies) between the two, a
+// fresh-looking attempt of that grant can fail on the record_id conflict and call ReleaseBrokerSeq; the reservation
+// is the MAX and not yet marked voided, but the tombstone fills its seq — releasing it would let MAX+1 re-issue the
+// voided number. ReleaseBrokerSeq must keep any reservation whose grant_id a record already holds.
+func exerciseReleaseKeepsRecordHeldSeq(t *testing.T, s Store) {
+	t.Helper()
+	if seq, _, err := s.AllocateBrokerSeq("p", "g1"); err != nil || seq != 1 {
+		t.Fatalf("alloc g1 = %d, %v", seq, err)
+	}
+	tomb := Record{JSON: `{"content_hash":"tomb1","record_id":"g1"}`, ContentHash: "tomb1", SessionID: "s"}
+	if _, _, err := s.PutRecord("p", "grant-void:1", tomb); err != nil {
+		t.Fatalf("put tombstone: %v", err)
+	}
+	if err := s.ReleaseBrokerSeq("p", "g1"); err != nil {
+		t.Fatalf("release of a record-held seq must be a no-op: %v", err)
+	}
+	if max, err := s.MaxBrokerSeq("p"); err != nil || max != 1 {
+		t.Fatalf("MaxBrokerSeq = %d err=%v; want 1 (the tombstone-held reservation stays allocated)", max, err)
+	}
+	if seq, fresh, err := s.AllocateBrokerSeq("p", "g2"); err != nil || seq != 2 || !fresh {
+		t.Fatalf("alloc g2 = %d fresh=%v err=%v; want a fresh 2 (seq 1 is never re-issued)", seq, fresh, err)
+	}
+}
+
+func TestMemReleaseKeepsRecordHeldSeq(t *testing.T) {
+	exerciseReleaseKeepsRecordHeldSeq(t, NewMem())
+}
+
+func TestMemBrokerSeqVoid(t *testing.T) {
+	exerciseBrokerSeqVoid(t, NewMem())
+}
+
+// TestMemBrokerSeqAllocatedAtUsesClock: the Mem store stamps allocated_at with its injectable clock (not time.Now),
+// set once on the fresh allocation and NOT refreshed by an idempotent retry (matching Postgres' insert-only row).
+func TestMemBrokerSeqAllocatedAtUsesClock(t *testing.T) {
+	t0 := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	now := t0
+	m := NewMem().WithClock(func() time.Time { return now })
+	if ok, err := m.RecordIDUniqueEnforced(); err != nil || !ok {
+		t.Fatalf("Mem always enforces record_id uniqueness: %v, %v", ok, err)
+	}
+	if _, fresh, err := m.AllocateBrokerSeq("p", "g1"); err != nil || !fresh {
+		t.Fatalf("alloc: fresh=%v err=%v", fresh, err)
+	}
+	now = t0.Add(time.Hour)
+	if _, fresh, err := m.AllocateBrokerSeq("p", "g1"); err != nil || fresh {
+		t.Fatalf("retry: fresh=%v err=%v", fresh, err)
+	}
+	res, found, err := m.BrokerSeqAt("p", 1)
+	if err != nil || !found || !res.AllocatedAt.Equal(t0) {
+		t.Fatalf("allocated_at = %v (found=%v err=%v); want the injected clock's T0, unrefreshed by the retry", res.AllocatedAt, found, err)
+	}
 }
 
 // exerciseIdemBinding pins the converged idempotency-key-binding contract shared by Mem and Postgres
@@ -189,4 +346,70 @@ func exerciseIdemBinding(t *testing.T, s Store) {
 
 func TestMemIdemBinding(t *testing.T) {
 	exerciseIdemBinding(t, NewMem())
+}
+
+// exerciseRecordIDUnique pins the per-project record_id uniqueness contract shared by Mem and Postgres: a
+// DIFFERENT record under an already-held record_id is rejected with ErrRecordIDConflict and persists nothing
+// (no row, no idem binding, no disclosure secret), while an exact replay — same idempotency key, or
+// byte-identical content under a new key — still collapses onto the stored row, and another project is
+// unaffected.
+func exerciseRecordIDUnique(t *testing.T, s Store) {
+	t.Helper()
+	a := Record{JSON: `{"record_id":"r1","v":1}`, ContentHash: "sha256:ra", SessionID: "s",
+		Disclosures: []DisclosureSecret{{RecordID: "r1", Field: "input", ValueDigest: "sha256:va", NonceHex: "aa"}}}
+	b := Record{JSON: `{"record_id":"r1","v":2}`, ContentHash: "sha256:rb", SessionID: "s",
+		Disclosures: []DisclosureSecret{{RecordID: "r1", Field: "input", ValueDigest: "sha256:vb", NonceHex: "bb"}}}
+	if _, created, err := s.PutRecord("p", "k1", a); err != nil || !created {
+		t.Fatalf("put a: created=%v err=%v", created, err)
+	}
+	if got, created, err := s.PutRecord("p", "k1", a); err != nil || created || got.ContentHash != a.ContentHash {
+		t.Fatalf("exact replay (same idem) must collapse: created=%v err=%v got=%s", created, err, got.ContentHash)
+	}
+	if got, created, err := s.PutRecord("p", "k3", a); err != nil || created || got.ContentHash != a.ContentHash {
+		t.Fatalf("byte-identical content under a new key must collapse: created=%v err=%v", created, err)
+	}
+	if _, _, err := s.PutRecord("p", "k2", b); !errors.Is(err, ErrRecordIDConflict) {
+		t.Fatalf("a different record under record_id r1 must fail with ErrRecordIDConflict, got %v", err)
+	}
+	if n, _ := s.RecordCount("p"); n != 1 {
+		t.Fatalf("record count after the rejected duplicate = %d, want 1", n)
+	}
+	if _, found, _ := s.RecordByIdem("p", "k2"); found {
+		t.Fatalf("the rejected record's idempotency key must not be bound")
+	}
+	if has, err := s.HasRecordID("p", "r1"); err != nil || !has {
+		t.Fatalf("HasRecordID(p, r1) = %v err=%v; want true", has, err)
+	}
+	if has, err := s.HasRecordID("p", "nope"); err != nil || has {
+		t.Fatalf("HasRecordID(p, nope) = %v err=%v; want false", has, err)
+	}
+	if d, _ := s.Disclosures("p"); len(d) != 1 || d[0].ValueDigest != "sha256:va" {
+		t.Fatalf("disclosures = %+v; want only the FIRST record's secret", d)
+	}
+	if _, created, err := s.PutRecord("other", "k2", b); err != nil || !created {
+		t.Fatalf("the same record_id in ANOTHER project must be accepted: created=%v err=%v", created, err)
+	}
+
+	// A record_id past the btree row limit (a pre-cap historical id; the api now caps new ids at 256 bytes) must
+	// still store and stay unique: the Postgres backstop indexes md5(record_id), never the raw value.
+	raw := make([]byte, 1600)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	long := hex.EncodeToString(raw)
+	la := Record{JSON: `{"record_id":"` + long + `","v":1}`, ContentHash: "sha256:la", SessionID: "s"}
+	lb := Record{JSON: `{"record_id":"` + long + `","v":2}`, ContentHash: "sha256:lb", SessionID: "s"}
+	if _, created, err := s.PutRecord("p", "kl1", la); err != nil || !created {
+		t.Fatalf("a 3200-byte record_id must store: created=%v err=%v", created, err)
+	}
+	if _, _, err := s.PutRecord("p", "kl2", lb); !errors.Is(err, ErrRecordIDConflict) {
+		t.Fatalf("a different record under the long record_id must fail with ErrRecordIDConflict, got %v", err)
+	}
+	if has, err := s.HasRecordID("p", long); err != nil || !has {
+		t.Fatalf("HasRecordID(p, long) = %v err=%v; want true", has, err)
+	}
+}
+
+func TestMemRecordIDUnique(t *testing.T) {
+	exerciseRecordIDUnique(t, NewMem())
 }

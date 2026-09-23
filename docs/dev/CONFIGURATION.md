@@ -78,6 +78,11 @@ The runner reads the stored version (an existing **unstamped** DB reads as `0`) 
 **To add a migration:** bump `CurrentSchemaVersion` and append one ordered DDL step in
 `server/internal/pgschema` — it is a version stamp, not a framework.
 
+Versions: **1** is the baseline above; **2** (`migrations/0002_record_id_unique.sql`) adds a per-project
+`record_id` uniqueness index (an expression index over the sealed JSON — no new column, no row rewrite).
+If the DB already holds a historical duplicate `record_id`, v2 still applies but builds a non-unique index
+and logs a `WARNING`; new duplicates are still rejected by the application.
+
 ### Authentication (project-scoped API keys)
 
 | Variable | Default | Required | Behavior |
@@ -141,6 +146,7 @@ the pinned-key id — so a govder/averin key misalignment is visible in both met
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
 | `AVERIN_BROKER_ISSUING_SEED` (or `_FILE`) | unset ⇒ broker disabled | No | 64-hex (32-byte) Ed25519 seed; the key that signs the minted capabilities. Bad value ⇒ fatal. Unset ⇒ `POST /v2/grants` returns `501 Not Implemented`. The recording key for the grant's `gateway_enforced` evidence is the server's own signing key (Tier-A `broker_trust: assumed`). |
+| `AVERIN_BROKER_SEQ_VOID_MIN_AGE` | `1h` | No | Safety age a reserved-but-unrecorded `broker_seq` must reach before `POST /v2/broker-seq/void` may fill it with a signed `grant_void` tombstone (the operator remediation for a checkpoint refused over a broker_seq gap). A Go duration; below the floor of `20m` (it must exceed any in-flight commit and the 15-minute two-phase pending window) or unparseable ⇒ fatal. The age runs from the latest of the reservation (`allocated_at`, the Postgres clock), the grant's latest attempt on this server and the server's start (attempt times are in memory), so keep it far above any DB-to-app clock skew. Requires the broker. |
 | `AVERIN_BROKER_ID` | unset | No | This broker's federation identity (ADR 0005 M4). When set, grants carry `grant_evidence.broker_id` and checkpoints carry a per-broker `broker_grant_heads` map (verify under `federated_broker_keys[<id>]`). Requires the broker. |
 
 ### Online M-of-N cosign policy (`POST /v2/grants/prepare` + `/finalize`)

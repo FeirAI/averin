@@ -41,3 +41,8 @@ test("the committed sidecar digest matches the built wasm (pin is not stale)", a
   const pinned = sidecar.replace(/^sha256:/, "").split(/\s+/)[0];
   expect(pinned).toBe(await sha256Hex(bytes()));
 });
+
+test("a present but empty/malformed pin fails closed instead of disabling the check", async () => {
+  await expect(initAverin(bytes(), { expectedSha256: "sha256:" })).rejects.toThrow(/invalid wasm pin/);
+  await expect(initAverin(bytes(), { expectedSha256: "" })).rejects.toThrow(/invalid wasm pin/);
+});

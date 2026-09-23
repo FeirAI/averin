@@ -10,6 +10,14 @@ import (
 	"github.com/feirai/averin/server/internal/pgdurable"
 )
 
+// durableWriter is the subset of *pgdurable.Store the request paths call (the boot-time rehydrate in WithDurable
+// uses the concrete store). An interface so a test can inject a slow/blocking durable store.
+type durableWriter interface {
+	Revoke(projectID, grantID string) error
+	PutPending(projectID, idemKey, grantID string, payload []byte, created time.Time) ([]byte, time.Time, error)
+	DeletePending(projectID, idemKey string) error
+}
+
 // WithDurable backs the M5 revoked-grant set and the M6/M2 pending two-phase grant state with Postgres
 // (server/cmd/averin-server/main.go wires this in only when AVERIN_DATABASE_URL is set). It rehydrates
 // both in-memory caches from pd IMMEDIATELY, so it must be called AFTER WithRevocation (which resets

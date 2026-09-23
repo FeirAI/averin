@@ -39,12 +39,13 @@ func TestRevocationServerBlocksRevokedUseEndToEnd(t *testing.T) {
 	revPub := "ed25519pub:" + base64.RawURLEncoding.EncodeToString(rev.Public().(ed25519.PublicKey))
 	pinned := `{"broker_authority_keys":["` + c.PubKey() + `"],"resource_authority_keys":["` + rc.PubKey() + `"],"tsa_keys":["` + tsaPubEncoded(tsa) + `"],"revocation_keys":["` + revPub + `"]}`
 
-	// BEFORE the revoke: export carries NO revocation_list -> the use verifies clean.
+	// BEFORE the revoke: export carries a signed EMPTY revocation_list (an affirmative "nothing revoked", so the
+	// pinned verifier reads `fresh`, not `missing`) -> the use verifies clean.
 	_, exp0 := do(t, h, "GET", "/v2/export?project=p1", "")
-	if strings.Contains(exp0, `"revocation_list"`) {
-		t.Fatalf("a pre-revoke export must carry no revocation_list:\n%s", exp0)
+	if !strings.Contains(exp0, `"revoked_grant_ids":[]`) {
+		t.Fatalf("a pre-revoke export must carry a signed empty revocation_list:\n%s", exp0)
 	}
-	if rep := c.VerifyBundleWith(attachTestAnchor(t, exp0, tsa), pinned); !strings.Contains(rep, `"ok":true`) || !strings.Contains(rep, `"uses_matched":1`) {
+	if rep := c.VerifyBundleWith(attachTestAnchor(t, exp0, tsa), pinned); !strings.Contains(rep, `"ok":true`) || !strings.Contains(rep, `"uses_matched":1`) || !strings.Contains(rep, `"revocation_status":"fresh"`) {
 		t.Fatalf("pre-revoke bundle must verify clean: %s", rep)
 	}
 

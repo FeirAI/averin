@@ -1,0 +1,13 @@
+Mutant: verify.rs verifies taxonomy statements under a tag no Lean family models.
+
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -2624,7 +2624,7 @@
+     }
+     let signer = keys
+         .iter()
+-        .find(|vk| crate::sign::verify("averin.taxonomy.v1", &digest, sig, vk).is_ok())?;
++        .find(|vk| crate::sign::verify("averin.taxonomy.v2", &digest, sig, vk).is_ok())?;
+     // ADR 0006 §1 — taxonomy-key rotation (defense-in-depth). The auditor's `pinned_digest` already binds the
+     // EXACT vetted artifact, so a compromised key cannot SUBSTITUTE a different taxonomy (the dominant check).
+     // Still, an issuer the auditor flagged `compromised`/`revoked` is no longer a trusted source, so its

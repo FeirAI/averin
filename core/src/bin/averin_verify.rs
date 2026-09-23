@@ -23,6 +23,10 @@ fn main() -> ExitCode {
             eprintln!("  averin-verify record <record.json> [ed25519pub:<key>]");
             eprintln!();
             eprintln!("opts.json keys (each a role-disjoint set; omit a set to leave that mode unevaluated):");
+            eprintln!("  signing_keys — the RECORD-SIGNING keys; pin them for AUTHENTIC verification (omitted =>");
+            eprintln!("    internal consistency only; an empty [] is an error). Each is an ed25519pub: string or a");
+            eprintln!("    {{key, status: active|retired|revoked|compromised, status_changed_at}} object (the");
+            eprintln!("    authoritative RCP §10.2 compromise time). Disjoint from every role below but the broker.");
             eprintln!("  broker_authority_keys, resource_authority_keys, tsa_keys, taxonomy/taxonomy_keys/");
             eprintln!("  taxonomy_digest/taxonomy_version, attestation_keys, cosig_approver_keys, revocation_keys,");
             eprintln!("  federated_broker_keys (a {{broker_id: [keys]}} map), authority_keys — all base64url");
@@ -107,11 +111,14 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         if gb("dag_ok") { "valid" } else { "INVALID" },
         gi("dag_heads")
     );
+    // `checkpoints_anchored` counts anchors that VERIFIED under a pinned TSA; `checkpoints_anchors_attached` is
+    // mere presence (an unverified token anyone can attach) — never print presence as "anchored".
     println!(
-        "  checkpoints:  {}/{} verified, {} anchored, chain {}",
+        "  checkpoints:  {}/{} verified, {} anchored (verified; {} attached), chain {}",
         gi("checkpoints_verified"),
         gi("checkpoints_total"),
         gi("checkpoints_anchored"),
+        gi("checkpoints_anchors_attached"),
         if gb("chain_ok") { "ok" } else { "BROKEN" }
     );
     // Tier-B / ADR-0005 mode gates (only meaningful when the relevant key set was pinned via opts.json).

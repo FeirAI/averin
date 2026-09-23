@@ -1,0 +1,76 @@
+{
+  "_comment": "Corpus for the executable Lean oracle (formal/lean/Oracle/Main.lean). Objects are written {\"obj\": [[key, value], ...]} so member order is explicit and deliberately unsorted; the oracle sorts by UTF-16 code unit exactly as RCP section 2 requires. Regenerate expected.json with: cd formal/lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json",
+  "canon": [
+    {"name": "null", "value": null},
+    {"name": "true", "value": true},
+    {"name": "false", "value": false},
+    {"name": "zero", "value": 0},
+    {"name": "i64 max", "value": 9223372036854775807},
+    {"name": "i64 min", "value": -9223372036854775808},
+    {"name": "ints", "value": [-1, 1, 9, 10, -10, 100, 1000000007, -9223372036854775807]},
+    {"name": "empty string", "value": ""},
+    {"name": "empty array", "value": []},
+    {"name": "empty object", "value": {"obj": []}},
+    {"name": "nested empties", "value": [[], {"obj": []}, [[]], [{"obj": []}], {"obj": [["x", {"obj": []}], ["y", []], ["z", [[], {"obj": []}]]]}, ""]},
+    {"name": "every C0 control", "value": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u0008\u0009\u000a\u000b\u000c\u000d\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f"},
+    {"name": "DEL", "value": "a\u007fb"},
+    {"name": "U+2028 U+2029", "value": "line\u2028sep\u2029para"},
+    {"name": "quote backslash slash", "value": "\"\\/'"},
+    {"name": "non-ASCII", "value": "caf\u00e9 \u65e5\u672c \u00ff \ud7ff \ue000 \uffff 𐀀 😀"},
+    {"name": "BMP vs astral keys", "value": {"obj": [["\uffff", 1], ["𐀀", 2], ["\ue000", 3], ["😀", 4], ["\ud7ff", 5], ["a", 6], ["", 7], ["\u00e9", 8]]}},
+    {"name": "prefix keys", "value": {"obj": [["ab", 1], ["a", 2], ["b", 3], ["aa", 4], ["A", 5], ["a\u0000", 6]]}},
+    {"name": "escaped keys", "value": {"obj": [["\u0001", "c0"], ["\"", "quote"], ["\\", "backslash"], ["\u007f", "del"], ["\u2028", "ls"]]}},
+    {"name": "nested objects", "value": {"obj": [["z", {"obj": [["b", [1, {"obj": [["d", null], ["c", false]]}]], ["a", true]]}], ["m", [{"obj": [["y", -1], ["x", "\u001f"]]}]]]}}
+  ],
+  "esc": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 39, 47, 48, 65, 92, 97, 126, 127, 128, 159, 160, 233, 8232, 8233, 55295, 57344, 65279, 65535, 65536, 128512, 1114111],
+  "ints": [0, 1, -1, 9, 10, -10, 99, 100, 1234567890, -1234567890, 9223372036854775807, -9223372036854775807, -9223372036854775808],
+  "lp": ["", "00", "61", "616263", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "ff"],
+  "be32": [0, 1, 255, 256, 65535, 65536, 16909060, 4294967295],
+  "be64": ["0", "1", "255", "256", "72623859790382856", "9223372036854775807", "9223372036854775808", "18446744073709551615"],
+  "families": [
+    {"family": "record sig", "fields": [], "tail": {"s": "sha256:0101010101010101010101010101010101010101010101010101010101010101"}},
+    {"family": "checkpoint sig", "fields": [], "tail": {"s": "sha256:0202020202020202020202020202020202020202020202020202020202020202"}},
+    {"family": "taxonomy statement", "fields": [], "tail": {"s": "sha256:0303030303030303030303030303030303030303030303030303030303030303"}},
+    {"family": "revocation statement", "fields": [], "tail": {"s": "sha256:0404040404040404040404040404040404040404040404040404040404040404"}},
+    {"family": "revocation merkle root", "fields": [], "tail": {"s": "sha256:0505050505050505050505050505050505050505050505050505050505050505"}},
+    {"family": "attestation", "fields": [], "tail": {"s": "sha256:0606060606060606060606060606060606060606060606060606060606060606"}},
+    {"family": "authority evidence", "fields": [{"s": "policy-engine"}, {"s": "proj-A"}, {"s": "rec-01"}], "tail": {"s": "sha256:0707070707070707070707070707070707070707070707070707070707070707"}},
+    {"family": "test anchor", "fields": [{"s": "sha256:0808080808080808080808080808080808080808080808080808080808080808"}, {"s": "2026-06-15T10:00:00.000Z"}]},
+    {"family": "use PoP", "fields": [{"s": "grant-1"}, {"s": "res-2"}, {"s": "read"}, {"s": "sha256:params"}, {"s": "cb-5"}, {"s": "nonce-6"}]},
+    {"family": "cosig approval", "fields": [{"s": "grant-1"}, {"s": "approver-kid"}, {"s": "cb-3"}, {"u64": 2}, {"u64": 1767225600}]},
+    {"family": "delegation hop", "fields": [{"s": "grant-1"}, {"u64": 3}, {"s": "delegator"}, {"s": "delegate"}, {"s": "scope:x"}, {"s": "write"}, {"s": "res-7"}, {"u64": 72623859790382856}]},
+    {"family": "introspection transcript", "fields": [{"s": "grant-1"}, {"s": "lease-2"}, {"s": "scope y"}, {"s": "res-4"}, {"u64": 1767225601}, {"u64": 1767229200}]},
+    {"family": "federation cert", "fields": [{"s": "broker-A"}, {"s": "broker-B"}, {"s": "kid-B"}, {"s": "scope-z"}, {"s": "res-5"}, {"u64": 1798761600}]},
+    {"family": "hiding commitment", "fields": [{"s": "rationale"}, {"hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}, {"hex": "76616c7565ff00"}]},
+    {"family": "use ledger", "fields": [{"s": "jti-1"}, {"s": "nonce-2"}, {"u64": 1767225602}]},
+    {"family": "grant head seed", "fields": []},
+    {"family": "grant head step", "fields": [{"hex": "b807ef08eb667015cab8143ac303bcb60e23f6dc72c873d7f5119b12967e804f"}, {"u64": 7}, {"s": "sha256:0909090909090909090909090909090909090909090909090909090909090909"}]},
+    {"family": "revocation leaf", "fields": [{"s": "grant-revoked-1"}]}
+  ],
+  "records": [
+    {"name": "every top-level key", "body": {"obj": [
+      ["schema_version", "2"], ["canon_version", "rcp-1"], ["domain", "flightrecorder.record.v2"],
+      ["record_id", "rec-01"], ["project_id", "proj-A"], ["agent_id", "agent-1"], ["agent_version", "1.0.0"],
+      ["session_id", "sess-1"], ["span_id", "span-1"], ["parent_span_id", null],
+      ["causal_prev_hashes", ["sha256:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"]],
+      ["display_seq", 0], ["agent_ts", "2026-06-15T10:00:00.000Z"], ["received_ts", "2026-06-15T10:00:00.001Z"],
+      ["anchored_ts", null], ["event_type", "tool_call"], ["record_kind", "budget-exhausted"], ["action", "search"],
+      ["observed_via", "sdk"], ["input_commit", "sha256:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"],
+      ["output_commit", null], ["rationale_commit", null], ["credential_commit", null], ["status", "ok"],
+      ["tokens", {"obj": [["out", 20], ["in", 10]]}], ["cost_micros_usd", 1234],
+      ["authority", {"obj": [["source", "caller_declared"]]}], ["content", {"obj": [["note", "caf\u00e9\u2028\u007f😀"]]}],
+      ["key", {"obj": [["signing_key_id", "k0"], ["key_epoch", 0], ["key_status", "active"]]}],
+      ["framework", "none"], ["extensions", {"obj": [["\uffff", 1], ["𐀀", 2]]}]
+    ]}},
+    {"name": "minimal", "body": {"obj": [["domain", "flightrecorder.record.v2"], ["canon_version", "rcp-1"], ["n", -9223372036854775808]]}}
+  ],
+  "checkpoints": [
+    {"name": "genesis checkpoint", "body": {"obj": [
+      ["canon_version", "rcp-1"], ["domain", "flightrecorder.checkpoint.v2"], ["checkpoint_id", "cp-0"],
+      ["project_id", "proj-A"], ["checkpoint_seq", 0], ["prev_checkpoint_hash", null],
+      ["frontier", ["sha256:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"]],
+      ["record_count", 1], ["created_ts", "2026-06-15T10:00:01.000Z"],
+      ["key", {"obj": [["signing_key_id", "k0"], ["key_epoch", 0], ["key_status", "active"]]}]
+    ]}}
+  ]
+}

@@ -59,6 +59,7 @@ Three honest trust levels (used verbatim in product copy):
 | `spec/` | **schema v2, RCP v1, golden vectors, adversarial fixtures** |
 | `deploy/` | Docker Compose source recipes; not validated for the source-only alpha |
 | `docs/` | coverage limits, deployment readiness, vultrino integration, ADRs (0001–0006) |
+| `formal/` | **Formal verification**: Lean 4 proofs of the seal, TLA+ models of the server protocols, Kani bounded proofs of the core, and a Rust↔Lean refinement gate ([`formal/README.md`](formal/README.md)) |
 
 ## Status
 
@@ -119,6 +120,52 @@ are not covered by this offline-verification statement.
 ```
 cargo build --workspace          # Rust core + CLI
 cargo test  --workspace          # golden vectors + adversarial fixtures (the acceptance gates)
+```
+
+## Formal verification
+
+The Level-1 claim, *"sealed by this key, unchanged since, in a verifiable history"*, rests on a few
+properties. These are checked by machine in [`formal/`](formal/README.md), not only by tests:
+
+- **Lean 4** (no `sorry`; every declaration audited to depend only on Lean's three standard axioms):
+  - **the seal theorem.** If a record or checkpoint verifies under the pinned key, its body is
+    *exactly* one the key holder sealed, unless SHA-256 has a collision. This holds even when the
+    same key also signs every other framed family, raw 32-byte challenge digests, and any
+    unframed text (JSON challenges, capability tokens, the denial salt), so a signature cannot be
+    replayed across contexts even if roles share a key;
+  - canonical JSON (RCP v1) is injective;
+  - every message a signing key signs and every tagged or verifier-recomputed preimage is in a
+    proved-disjoint catalogue: framed families, JSON challenges, capability tokens, raw keys,
+    Merkle nodes, the RFC 3161 imprint string and server id derivations (untagged, unsigned server-local digests such as
+    content addresses and idempotency keys are listed as out of scope);
+  - hiding commitments are binding;
+  - **no omission, no injection.** A verified bundle is exactly the signed ancestor-closure of the
+    latest checkpoint;
+  - the checkpoint history is unique.
+- **TLA+** models the grant-transparency log and the consume-before-act ledger. Every
+  counterexample for a pre-fix design is kept as an expected failure. The shipped design has no
+  anchored gap and no duplicate sequence number, including when an operator `grant_void` races
+  an in-flight retry. With that remediation it has no permanent checkpoint outage, as long as a
+  client that retries forever eventually commits (checked for 2 grants under strong fairness; a
+  client that gives up is covered by the void, and one that retries forever with every attempt
+  failing starves it, which the model also shows).
+- **Kani** checks the real Rust encoders (base64url, `sha256:<hex>`, LP framing, key order).
+- **An executable Lean oracle** runs the model over a corpus (every C0 control, DEL, U+2028,
+  BMP-vs-astral key order, i64 extremes, one sample per preimage family), and CI fails when the
+  Rust's bytes differ from the model's. A tag inventory ties every Rust domain tag to a Lean family,
+  and a mutation suite (`formal/check-mutants.sh`) checks that these gates catch eight known drifts.
+  This is differential testing over a corpus, not a mechanised refinement proof.
+
+What is *not* proved yet (verifier verdict logic, authority-evidence body binding, and a
+mechanised Rust↔Lean refinement) is listed in [`formal/README.md`](formal/README.md).
+
+```
+cd formal/lean && lake build --wfail && ./check-axioms.sh   # Lean proofs
+bash formal/tla/run-tlc.sh                                  # TLA+ models (expected outcomes)
+bash formal/run-kani.sh                                     # Kani bounded proofs
+python3 formal/check-refinement.py                          # tag inventory
+cargo test -p averin-decision-core --test oracle            # Rust bytes == Lean oracle output
+bash formal/check-mutants.sh                                # the gates catch known drifts
 ```
 
 ## Security model

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,7 +30,6 @@ import (
 	"github.com/feirai/averin/server/internal/meter"
 	"github.com/feirai/averin/server/internal/metrics"
 	"github.com/feirai/averin/server/internal/otel"
-	"github.com/feirai/averin/server/internal/pgdurable"
 	"github.com/feirai/averin/server/internal/resourceshim"
 	"github.com/feirai/averin/server/internal/store"
 	"github.com/feirai/averin/server/internal/witness"
@@ -76,6 +76,23 @@ type Server struct {
 	// can be combined with OTHER brokers' bundles without one broker's grants masking another's. "" = single-broker
 	// (legacy byte-identical path — no broker_id, no map).
 	brokerID string
+	// brokerSeqVoidMinAge is the safety age a reserved broker_seq must reach before POST /v2/broker-seq/void may
+	// fill it with a grant_void tombstone (AVERIN_BROKER_SEQ_VOID_MIN_AGE; DefaultBrokerSeqVoidMinAge).
+	brokerSeqVoidMinAge time.Duration
+	// seqAttempts is the void's second age input: the app-clock time of the LATEST attempt (allocate or settle) of
+	// each grant_id that allocated/reused a broker_seq on THIS process, keyed project\x00grant_id. The store's
+	// allocated_at is stamped only on the fresh insert (Postgres cannot refresh it — broker_seq is insert-only), so
+	// without this a retry at T0+59m whose commit is still in flight would not stop a void at T0+60m. Entries older
+	// than brokerSeqVoidMinAge can no longer block a void and are pruned (see noteSeqAttempt). Guarded by
+	// seqAttemptsMu. Process-local: a multi-instance deployment is closed only by the UNIQUE record_id index.
+	seqAttemptsMu      sync.Mutex
+	seqAttempts        map[string]time.Time
+	seqAttemptsPruneAt int
+	// processStart is the BOOT FLOOR of the void's age: seqAttempts is in-memory, so after a restart it has
+	// forgotten every attempt made by the previous process (a retry whose commit may still be in flight). The age
+	// is therefore measured from max(allocated_at, latest attempt, processStart). Stamped from the server's clock
+	// at construction (New) and re-stamped by WithClock, so a test clock drives it too.
+	processStart time.Time
 	// M5 (ADR 0005): the revocation authority key (role-separated from broker/resource/signing/attestation/TSA).
 	// When set, POST /v2/revoke records a grant_id as revoked, and each /v2/export carries a signed, time-bounded
 	// revocation_list over the project's revoked set (the verifier blocks any use of a revoked grant). nil =
@@ -83,13 +100,14 @@ type Server struct {
 	// every revoke is persisted to Postgres FIRST (fail-closed) and the cache is rehydrated from it at boot —
 	// see WithDurable. With no durable store configured it stays in-memory only, as before.
 	revocationKey ed25519.PrivateKey
-	revoked       map[string]map[string]struct{} // projectID -> set of revoked grant_ids
-	// revokedMu guards STRUCTURAL access to `revoked` ONLY (get-or-create the top-level per-project entry) —
-	// it is never held across the durable Revoke() Postgres round-trip. The cap-check-then-persist-then-write
-	// for a SINGLE project must still stay atomic (finding C), so handleRevoke and buildRevocationListForExport
-	// instead serialize per-project via revokeLocks, which IS held across that round-trip; different projects'
-	// revokes/exports run fully concurrently under it (a slow/degraded Postgres no longer stalls every project's
-	// /v2/revoke process-wide).
+	revoked       map[string]map[string]struct{} // projectID -> IMMUTABLE set of revoked grant_ids (copy-on-write)
+	// revokedMu guards the top-level `revoked` map ONLY — it is never held across the durable Revoke() Postgres
+	// round-trip. Each per-project set is IMMUTABLE once published: handleRevoke builds a new set (old ∪ {id})
+	// and swaps it in under revokedMu, so readers (isRevoked on the /v2/use path, the export) take ONLY
+	// revokedMu for a pointer read and then range the snapshot lock-free. The cap-check-then-persist-then-publish
+	// for a SINGLE project must still stay atomic (finding C), so handleRevoke serializes per-project via
+	// revokeLocks, which IS held across the durable round-trip — but no reader ever takes revokeLocks, so a slow
+	// revoke can never stall /v2/use (which runs under the process-wide ingestMu).
 	revokedMu          sync.Mutex
 	revokeLocks        keyedMutex
 	revokeCapWarnAt    time.Time // throttles the at-capacity WARNING (guarded by revokeLocks, keyed by project_id)
@@ -189,7 +207,7 @@ type Server struct {
 	cosigApprovers  []ed25519.PublicKey
 	// durable optionally backs `revoked` and `pending` with Postgres (AVERIN_DATABASE_URL) — see WithDurable.
 	// nil = both stay in-memory only (dev/single-process), matching the pre-durability behavior exactly.
-	durable *pgdurable.Store
+	durable durableWriter
 	// ingestMu serializes the heads->seal->put critical section so concurrent ingests cannot read
 	// a stale frontier and fork the DAG (the Postgres store will do this in a serializable tx).
 	ingestMu sync.Mutex
@@ -263,8 +281,11 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		signingKeyID: signingKeyID,
 		keyValidFrom: "2026-01-01T00:00:00.000Z",
 		now:          time.Now,
+		processStart: time.Now(),                     // the void's boot floor (re-stamped by WithClock)
 		pending:      make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
-		bundleSem:    make(chan struct{}, maxConcurrentBundleReads),
+		// D6 operator remediation (POST /v2/broker-seq/void): a conservative default safety age.
+		brokerSeqVoidMinAge: DefaultBrokerSeqVoidMinAge,
+		bundleSem:           make(chan struct{}, maxConcurrentBundleReads),
 		// F3: fail-CLOSED authority posture by default. A record CLAIMING an elevated source that averin
 		// cannot verify under a pinned key is REJECTED, never silently sealed at the forgeable
 		// caller_declared. WithRequirePinnedAuthority(false) is the explicit opt-out.
@@ -334,6 +355,14 @@ func (s *Server) WithReadiness(name string, p Pinger) *Server {
 // scrape (e.g. a pgx pool's live connection counts via PoolStat).
 func (s *Server) WithGauge(name, help string, fn func() float64) *Server {
 	s.metrics.GaugeFunc(name, help, fn)
+	return s
+}
+
+// WithClock replaces the server's clock (default time.Now) — for tests that must drive time-dependent paths such as
+// the broker_seq void's safety age. Pair it with the store's clock (store.Mem.WithClock) when both must agree.
+func (s *Server) WithClock(now func() time.Time) *Server {
+	s.now = now
+	s.processStart = now() // construction-time boot floor, taken from the injected clock (see processStart)
 	return s
 }
 
@@ -896,6 +925,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v2/grants/finalize", s.handleGrantFinalize) // M6/M2 online two-phase: phase 2 (attach+commit)
 	mux.HandleFunc("POST /v2/introspection", s.handleIntrospection)   // M3 native/STS: record a resource introspection transcript
 	mux.HandleFunc("POST /v2/revoke", s.handleRevoke)                 // M5: mark a grant_id revoked (export carries a signed revocation_list)
+	mux.HandleFunc("POST /v2/broker-seq/void", s.handleBrokerSeqVoid) // D6 remediation: fill a reserved, never-recorded broker_seq with a signed tombstone
 	mux.HandleFunc("POST /v2/use", s.handleUse)
 	mux.HandleFunc("POST /v2/use-intent", s.handleUseIntent)
 	mux.HandleFunc("POST /v2/use-outcome", s.handleUseOutcome)
@@ -915,7 +945,7 @@ func (s *Server) Routes() http.Handler {
 		handler = s.rateLimitIngest(mux)
 	}
 	if s.auth == nil || auth.IsOpen(s.auth) {
-		return handler // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
+		return rejectNULParams(handler) // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
 	}
 	// gate every /v2/* route behind project-scoped auth; /healthz, /readyz, /metrics stay open (health/
 	// observability endpoints are unauthenticated by design, matching /healthz's existing posture).
@@ -925,7 +955,7 @@ func (s *Server) Routes() http.Handler {
 	guarded.HandleFunc("GET /readyz", s.readyz)
 	guarded.HandleFunc("GET /metrics", s.metrics.Handler())
 	guarded.Handle("/v2/", gate(handler))
-	return guarded
+	return rejectNULParams(guarded)
 }
 
 // rateLimitIngest wraps h with the opt-in per-project + global ingest token bucket (averin#20). It governs ONLY
@@ -1021,6 +1051,7 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 	// up front (deterministic 400, nothing sealed) rather than silently dropping records: a batch of distinct
 	// records needs a distinct idempotency_key per item.
 	batchIdem := make(map[string]struct{}, len(items))
+	batchRecordIDs := make(map[string]struct{}, len(items))
 	for _, raw := range items {
 		var probe map[string]any
 		if decode(raw, &probe) != nil {
@@ -1040,7 +1071,11 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if reservedIdem(idem) {
-			writeErr(w, http.StatusBadRequest, fmt.Sprintf("idempotency_key prefix %q is reserved for the broker denied-grant log", denialIdemPrefix))
+			writeErr(w, http.StatusBadRequest, reservedIdemMsg)
+			return
+		}
+		if err := rejectNUL("idempotency_key", idem); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		// F5: the store dedups per (project_id, idempotency_key), so two items in one batch under the same
@@ -1059,6 +1094,47 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 		if err := s.validateGenericRecordItem(probe); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		// record_id is unique per project (store.ErrRecordIDConflict → 409). Reject a collision — within this
+		// batch, or with an already-stored record — HERE, before any item is sealed, so a later item's conflict
+		// cannot leave the earlier items committed. An idempotent replay (its idempotency_key already bound)
+		// collapses onto its stored row and is exempt. PutRecord remains the authoritative check.
+		if rid := stringField(probe, "record_id"); rid != "" {
+			pid := stringField(probe, "project_id")
+			ridKey := pid + "\x00" + rid
+			if _, dup := batchRecordIDs[ridKey]; dup {
+				writeErr(w, http.StatusConflict, fmt.Sprintf("two records in this batch share record_id %q under the same project_id (record_id is unique per project)", rid))
+				return
+			}
+			batchRecordIDs[ridKey] = struct{}{}
+			if _, replay, err := s.st.RecordByIdem(pid, idem); err != nil {
+				writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+err.Error())
+				return
+			} else if !replay {
+				if taken, err := s.st.HasRecordID(pid, rid); err != nil {
+					writeErr(w, http.StatusInternalServerError, "record_id lookup: "+err.Error())
+					return
+				} else if taken {
+					writeErr(w, http.StatusConflict, fmt.Sprintf("%v: %q", store.ErrRecordIDConflict, rid))
+					return
+				}
+			}
+		}
+		// With AVERIN_REQUIRE_PINNED_AUTHORITY on, a failed authority elevation makes ingestOne REJECT the item —
+		// a deterministic outcome for a given body + pinned keys, so a later item failing it would otherwise leave
+		// the earlier items committed (and the retry fail identically). Dry-run the SAME decision here
+		// (checkAuthority is pure) and reject the whole batch before anything is sealed, with the same retryable
+		// 500 + metric/WARNING ingestOne would produce. A record with no record_id cannot verify either way
+		// (ingestOne would assign a fresh random one), so the dry-run's verdict matches.
+		if _, isMap := probe["authority"].(map[string]any); isMap && s.requirePinnedAuthority {
+			if v := s.checkAuthority(probe); v.failedElevation {
+				s.ingestMu.Lock() // onFailedElevation's log throttle is guarded by ingestMu
+				s.mAuthorityDowngrades.Inc()
+				err := s.onFailedElevation(v.claimed, v.keyID)
+				s.ingestMu.Unlock()
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 		}
 		// F14: the seal RCP-canonicalizes the record and HARD-rejects floats, out-of-range integers, and
 		// interior NULs (canon.rs) — deterministic 400s the shallow checks above miss. Without this dry-run a
@@ -1089,6 +1165,11 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			// A different record already holds this record_id (a race past the pre-pass): nothing persisted.
+			if errors.Is(err, store.ErrRecordIDConflict) {
+				writeErr(w, http.StatusConflict, err.Error())
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1105,7 +1186,41 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 // here, via sealAndStore, which bypasses these handler guards.
 const denialIdemPrefix = "denial:"
 
-func reservedIdem(idem string) bool { return strings.HasPrefix(idem, denialIdemPrefix) }
+// reservedIdemMsg is the 400 every caller-facing entry point returns for a reserved idempotency_key prefix.
+const reservedIdemMsg = `idempotency_key prefixes "denial:" and "grant-void:" are reserved for the broker (denied-grant log, grant_void tombstones)`
+
+// reservedIdem also covers grantVoidIdemPrefix: a record pre-seeded under grant-void:<seq> would make the operator's
+// tombstone for that seq collapse onto it (and never fill the seq).
+func reservedIdem(idem string) bool {
+	return strings.HasPrefix(idem, denialIdemPrefix) || strings.HasPrefix(idem, grantVoidIdemPrefix)
+}
+
+// rejectNUL returns an error naming the first (name, value) pair whose value contains U+0000. project_id,
+// idempotency_key and record_id feed NUL-DELIMITED derivations — the deterministic grant/use/outcome/introspection
+// ids (uuidV5Shaped hashes namespace‖0‖project‖0‖idem), the two-phase pendingKey, the batch dedup keys and the
+// verify cache key — so (project "a", idem "b\x00c") and (project "a\x00b", idem "c") would derive the SAME id
+// and pending key across projects. The RCP parser accepts an escaped \u0000, so reject it at every entry point.
+func rejectNUL(pairs ...string) error {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if strings.IndexByte(pairs[i+1], 0) >= 0 {
+			return fmt.Errorf("%s must not contain a NUL (U+0000) character", pairs[i])
+		}
+	}
+	return nil
+}
+
+// rejectNULParams is the outermost handler: it refuses a NUL in the ?project= query parameter or the
+// Idempotency-Key header on EVERY route (the same 400 whether or not auth is enabled), before auth scoping,
+// rate limiting or any handler derives a key from them. Body fields are checked by each handler (rejectNUL).
+func rejectNULParams(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := rejectNUL("project", r.URL.Query().Get("project"), "Idempotency-Key", r.Header.Get("Idempotency-Key")); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
 
 // canonProbe projects a decoded record down to exactly the fields whose CALLER-supplied value reaches the
 // seal verbatim, so the batch pre-pass (F14) can dry-run the RCP canonicalizer and reject a deterministic
@@ -1155,6 +1270,30 @@ func canonProbe(probe map[string]any) map[string]any {
 	return out
 }
 
+// uuidV5Pattern matches exactly the lowercase UUIDv5 shape uuidV5Shaped emits — the form of every
+// deterministic grant_id (deterministicGrantID) and introspection record_id.
+var uuidV5Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// reservedRecordID reports whether a CALLER-supplied record_id falls in a namespace the broker/resource
+// endpoints derive their own ids from. record_id is unique per project (store.ErrRecordIDConflict), so a
+// generic record pre-seeded under one of these ids would squat it: the later grant/use/outcome/denial/
+// introspection whose deterministic id it is (grant ids are PUBLIC functions of project + idempotency key)
+// would then be refused. Reserved: the use-/outcome-/denial- prefixes, the introspection-/revocation- prefixes
+// ADR 0005 §7 reserves, and the lowercase UUIDv5 shape of deterministic grant/introspection ids. Server-assigned
+// ids (newUUID) are v4, so a record with no caller record_id is never affected.
+func reservedRecordID(rid string) bool {
+	for _, p := range []string{"use-", "outcome-", "denial-", "introspection-", "revocation-"} {
+		if strings.HasPrefix(rid, p) {
+			return true
+		}
+	}
+	return uuidV5Pattern.MatchString(rid)
+}
+
+// maxRecordIDBytes caps a caller-supplied record_id (see validateGenericRecordItem; documented in docs/dev/API.md).
+// Every server-derived id (UUIDs, use-/outcome-/denial- ids) is far below it.
+const maxRecordIDBytes = 256
+
 // validateGenericRecordItem runs the deterministic, body-only validations the generic /v2/records path
 // rejects with a 400. It is shared by ingestOne and the batch up-front pre-pass (F14: a malformed item
 // must reject the WHOLE batch before any earlier item is sealed) so the two cannot diverge. It does NOT
@@ -1163,6 +1302,9 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	if stringField(rec, "project_id") == "" || stringField(rec, "session_id") == "" {
 		return fmt.Errorf("project_id and session_id are required")
 	}
+	if err := rejectNUL("project_id", stringField(rec, "project_id"), "record_id", stringField(rec, "record_id")); err != nil {
+		return err
+	}
 	if err := s.validateDelegationEvidence(rec); err != nil {
 		return err
 	}
@@ -1170,8 +1312,14 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	// (deterministic ids from the idempotency key): a generic caller must not pre-seed one, else a later
 	// /v2/use[-intent|-outcome] retry with the matching idempotency key could short-circuit to the
 	// pre-seeded record and SKIP PoP validation / consume-before-act (a forged-capability use as success).
-	if rid := stringField(rec, "record_id"); strings.HasPrefix(rid, "use-") || strings.HasPrefix(rid, "outcome-") || strings.HasPrefix(rid, "denial-") {
-		return fmt.Errorf("record_id prefix of %q is reserved for the broker/resource endpoints", rid)
+	// record_id is capped (bytes): it is indexed (the store's per-project uniqueness backstop) and echoed in every
+	// export, so an unbounded caller-chosen id is both an index-row-limit hazard and an amplification vector. The
+	// check is here — before any store — so Mem and Postgres reject an overlong id identically (400).
+	if rid := stringField(rec, "record_id"); len(rid) > maxRecordIDBytes {
+		return fmt.Errorf("record_id is %d bytes; the maximum is %d", len(rid), maxRecordIDBytes)
+	}
+	if rid := stringField(rec, "record_id"); reservedRecordID(rid) {
+		return fmt.Errorf("record_id %q is in a namespace reserved for the broker/resource endpoints (use-/outcome-/denial-/introspection-/revocation- prefixes and the deterministic UUIDv5 grant/introspection ids)", rid)
 	}
 	// credential_grant_denied is the B11 denied-grant marker the verifier counts (denied_grants) by
 	// event_type alone. A denial is sealed by the server signing key like every record, so the verifier
@@ -1336,7 +1484,10 @@ func (s *Server) ingestOne(raw []byte, headerIdem string) (string, bool, error) 
 		return "", false, fmt.Errorf("idempotency_key is required (field or Idempotency-Key header)")
 	}
 	if reservedIdem(idem) { // see denialIdemPrefix: no caller may squat the denied-grant log namespace
-		return "", false, fmt.Errorf("idempotency_key prefix %q is reserved for the broker denied-grant log", denialIdemPrefix)
+		return "", false, errors.New(reservedIdemMsg)
+	}
+	if err := rejectNUL("idempotency_key", idem); err != nil {
+		return "", false, err
 	}
 	delete(rec, "idempotency_key") // not part of the signed record
 
@@ -1571,7 +1722,11 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if reservedIdem(idem) { // a grant under denial:<denialID> would later collapse a denial and suppress it
-		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
+		return
+	}
+	if err := rejectNUL("project_id", gr.ProjectID, "idempotency_key", idem); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	grantID := deterministicGrantID(gr.ProjectID, idem) // also the credential jti + record_id
@@ -1683,9 +1838,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		// New grant: allocate (after validation, inside the lock), build, seal+store. Roll back the seq on
 		// ANY failure after allocation but before the record commits, so an uncommitted grant never burns a
 		// number (the rollback is safe under ingestMu — no other grant allocates in between).
-		allocated := false
+		allocated, fresh := false, false
 		prepared, e = broker.Prepare(req, grantID, func() (int64, error) {
-			seq, aerr := s.st.AllocateBrokerSeq(gr.ProjectID, grantID)
+			seq, isFresh, aerr := s.allocateBrokerSeq(gr.ProjectID, grantID)
+			fresh = isFresh
 			if aerr == nil && seq < 1 {
 				// a store-contract violation (non-positive seq with no error) is a 500 dependency bug,
 				// NOT caller-bad-input — synthesize an error so it routes to allocErr (500), not 400.
@@ -1698,21 +1854,17 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 			}
 			return seq, aerr
 		}, s.now(), s.brokerKey)
-		// rollback frees a not-yet-recorded allocation and FOLDS a rollback-DELETE failure into the error so
-		// it is surfaced (not silently swallowed). A surfaced orphan self-heals: the deterministic grantID
-		// makes AllocateBrokerSeq idempotent, so a retry of THIS grant reuses the orphaned seq and records it
-		// (no gap). A permanent gap needs the narrow triple of: a failure after allocation, a failed
-		// rollback, AND the client never retrying — a documented Postgres residual (Mem rollback cannot
-		// fail). Full atomicity (one transaction across signing) is the production hardening; see the store
-		// ReleaseBrokerSeq doc.
+		// rollback disposes of a not-yet-recorded allocation via settleFailedGrantSeq: released for every
+		// failure that persisted no record, kept RESERVED only for a commit-ambiguous store error. A failed
+		// release is folded into the error (surfaced, not swallowed) and self-heals on a retry of THIS grant
+		// (the deterministic grantID makes AllocateBrokerSeq idempotent); until then createCheckpoint refuses
+		// to anchor the resulting gap. Full atomicity (one transaction across signing) is the production
+		// hardening; see the store ReleaseBrokerSeq doc.
 		rollback := func(cause error) error {
 			if !allocated {
 				return cause
 			}
-			if re := s.st.ReleaseBrokerSeq(gr.ProjectID, grantID); re != nil {
-				return fmt.Errorf("%w; broker_seq rollback ALSO failed (seq orphaned until a retry of this grant reclaims it): %v", cause, re)
-			}
-			return cause
+			return s.settleFailedGrantSeq(gr.ProjectID, grantID, fresh, cause)
 		}
 		if e != nil {
 			if allocErr == nil {
@@ -1728,19 +1880,17 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		}
 		sealed, created, e = s.sealAndStore(gr.ProjectID, gr.SessionID, idem, rec, disclosures)
 		if e != nil {
-			// A store error AT THE COMMIT POINT is AMBIGUOUS: an immediate absence is NOT proof the commit
-			// did not (or will not) become durable (an in-flight/visibility-delayed Postgres commit can
-			// later land). Releasing the seq on a not-yet-visible commit could let a later grant REUSE a
-			// number a durable grant already recorded → duplicate broker_seq → poisoned head. So we NEVER
-			// release here: keeping the broker_seq row ORPHANED reserves the number (it is never reused), and
-			// the deterministic grantID makes a retry idempotent — it reclaims the same seq and reconstructs
-			// the record (if it committed) or records it (if it did not). If the record is ALREADY visibly
-			// durable, surface success; otherwise return the error and let the client retry (seq stays reserved).
+			// If the record is ALREADY visibly durable (a commit whose ack was lost), surface success and keep
+			// the seq it holds. Otherwise only a store error AT THE COMMIT POINT (store.ErrCommitAmbiguous) is
+			// ambiguous — an in-flight Postgres commit can still land, so its seq stays RESERVED (never reused)
+			// and a retry of the deterministic grantID reclaims it. Every OTHER failure (display-seq/heads read,
+			// marshal, seal, begin/insert/disclosure) persisted nothing, so its seq is RELEASED — keeping it
+			// would leave a permanent hole in the recorded [1..N] set for a later checkpoint to anchor.
 			if r2, found2, re := s.st.RecordByIdem(gr.ProjectID, idem); re == nil && found2 {
 				sealed, created = r2.JSON, false
 				return nil // committed + visible
 			}
-			return fmt.Errorf("%w — broker_seq left RESERVED (commit-ambiguous; never released, to avoid reuse; a retry of this grant reclaims it)", e)
+			return rollback(e)
 		}
 		if !created {
 			// defensive: a brand-new grant collapsed (impossible — content is unique). The record exists, so
@@ -1754,6 +1904,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if allocErr != nil {
+		if isVoidedGrant(allocErr) {
+			writeErr(w, http.StatusConflict, allocErr.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "allocate broker_seq: "+allocErr.Error())
 		return
 	}
@@ -1762,6 +1916,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		if msg := grantIDTakenMsg(err, grantID); msg != "" {
+			writeErr(w, http.StatusConflict, msg)
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "store grant: "+err.Error())
 		return
 	}
@@ -1794,6 +1952,38 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		"created":     created,
 		"record":      json.RawMessage(sealed),
 	})
+}
+
+// settleFailedGrantSeq disposes of a broker_seq allocated for a grant whose record did NOT (visibly) commit and
+// returns the error to surface. The caller MUST hold ingestMu (the allocation's serialization) and must already
+// have ruled out a visibly-durable record under the grant's idempotency key.
+//
+//   - fresh == false (AllocateBrokerSeq returned an EXISTING reservation for this grant_id): the seq belongs to a
+//     PRIOR attempt of this grant whose outcome this request cannot know — its commit may have been ambiguous and
+//     may still land (an in-flight Postgres commit is not yet visible to RecordByIdem). Releasing it here would let
+//     the next grant reuse a number a durable grant holds → duplicate broker_seq. It is left RESERVED whatever the
+//     error; a later retry of this grant reclaims it.
+//   - store.ErrCommitAmbiguous (a fresh insert whose commit outcome is unknown): the record may still become
+//     durable, and releasing its seq could let a later grant REUSE a number a durable grant holds → duplicate
+//     broker_seq → poisoned head. The seq is left RESERVED; the deterministic grant_id makes a retry reclaim it.
+//   - ANY other error persisted no record (the store contract, see store.ErrCommitAmbiguous), so the seq is
+//     RELEASED. Keeping it would leave a permanent hole in the recorded [1..N] set that a later checkpoint would
+//     anchor forever (the offline verifier reports a non-gapless broker_seq prefix). The store releases only the
+//     project's current MAX: a seq that is no longer the max (an earlier release was lost and later grants took
+//     higher seqs) stays reserved so this grant's retry refills it rather than leaving an unrefillable mid-hole.
+//     A failed release is folded into the error; createCheckpoint independently refuses to sign over any gap.
+func (s *Server) settleFailedGrantSeq(projectID, grantID string, fresh bool, cause error) error {
+	s.noteSeqAttempt(projectID, grantID) // the attempt ends now: a commit it left in flight is at most this old
+	if !fresh {
+		return fmt.Errorf("%w — broker_seq left RESERVED (reused from a prior attempt of this grant whose commit may still land; never released by a retry)", cause)
+	}
+	if errors.Is(cause, store.ErrCommitAmbiguous) {
+		return fmt.Errorf("%w — broker_seq left RESERVED (commit-ambiguous; never released, to avoid reuse; a retry of this grant reclaims it)", cause)
+	}
+	if re := s.st.ReleaseBrokerSeq(projectID, grantID); re != nil {
+		return fmt.Errorf("%w; broker_seq rollback ALSO failed (seq orphaned until a retry of this grant reclaims it; checkpoints refuse to sign until then): %v", cause, re)
+	}
+	return cause
 }
 
 // reconstructCapability re-mints the original capability for an existing grant from its stored
@@ -2123,7 +2313,11 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		return
 	}
 	if reservedIdem(idem) { // a use under denial:<denialID> would later collapse a denial and suppress it
-		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
+		return
+	}
+	if err := rejectNUL("project_id", ur.ProjectID, "idempotency_key", idem); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	useID := deterministicUseID(ur.ProjectID, idem)
@@ -2140,6 +2334,11 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		return
 	}
 	shim := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, s.ledger)
+	if s.revocationKey != nil {
+		// M5: enforce revocation AT USE TIME (rejected before consuming), not only in the next export's signed
+		// revocation_list — otherwise a revoked grant keeps working at the resource until it expires.
+		shim.WithRevocationCheck(func(grantID string) bool { return s.isRevoked(ur.ProjectID, grantID) })
+	}
 
 	// The idempotency resolution, the capability validation+consume, and the seal run as ONE critical
 	// section. Idempotency is keyed on `idem` — the SAME key sealAndStore→PutRecord dedupes on — resolved
@@ -2194,8 +2393,31 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			shim.RollbackUse(ev)
 			return e
 		}
-		sealed, _, e = s.sealAndStore(ur.ProjectID, ur.SessionID, idem, rec, disclosures)
+		var created bool
+		sealed, created, e = s.sealAndStore(ur.ProjectID, ur.SessionID, idem, rec, disclosures)
+		if e == nil && !created {
+			// PutRecord COLLAPSED onto an already-stored row (a same-key insert that raced past the RecordByIdem
+			// check above, e.g. another instance): THIS receipt was not persisted. Answer with that row only if it
+			// is this exact operation; otherwise it is another record's receipt — returning it as ours would report
+			// an action that has no receipt of its own. Nothing of ours persisted and the caller has not acted, so
+			// release the consumed credential and 409.
+			if rid, sess, kind, _ := useReceiptIdentity(sealed); rid == useID && sess == ur.SessionID && kind == brokerKind && storedUseMatchesRequest(sealed, ur, paramsCommitment) {
+				idempotent = true
+				return nil
+			}
+			shim.RollbackUse(ev)
+			sealed, grantID = "", ""
+			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
+			return nil
+		}
 		if e != nil {
+			if errors.Is(e, store.ErrRecordIDConflict) {
+				// A different record already holds this deterministic use id (persisted nothing): a conflict, not
+				// an infra failure — release the credential (the caller has not acted) and 409.
+				shim.RollbackUse(ev)
+				conflictErr = e
+				return nil
+			}
 			if !errors.Is(e, store.ErrCommitAmbiguous) {
 				// Definitively PRE-persistence (marshal/seal, or a store begin/select/insert/disclosure failure
 				// — NOT a post-insert commit): nothing persisted and the caller never acted, so RELEASE the
@@ -2319,40 +2541,50 @@ func storedOutcomeMatchesRequest(recordJSON, intentRef, status string) bool {
 	return uo.IntentRef == intentRef && uo.Status == status
 }
 
-// existingReceipt returns the sealed record (and its authority.grant_id) for a broker/resource record
-// whose record_id matches `useID` in the session — used by /v2/use-outcome to RESOLVE the use_intent it
-// completes (a lookup by referenced record_id, NOT an idempotency-key retry: retries are keyed on `idem`
-// via RecordByIdem). A generic record can never set extensions.broker (reserved), so a pre-seeded generic
-// row with a matching record_id is NOT resolvable as an intent. Caller holds ingestMu.
-func (s *Server) existingReceipt(projectID, sessionID, useID string) (string, string, bool, error) {
+// intentAndOutcome resolves, in ONE pass over the session's records, (a) the broker/resource record whose record_id
+// is intentRef (the use_intent an outcome completes) and (b) the record_id of a use_outcome that already completes
+// intentRef, read from the SIGNED use_outcome payload the verifier pairs on (not the unsigned extensions.broker
+// sibling). /v2/use-outcome runs under the process-wide ingestMu, so it scans the session once, not once per question.
+// A read error propagates (fail closed → retryable 500). Caller holds ingestMu.
+//
+// A matching record must be a real broker/resource record (it carries extensions.broker.kind). A generic record can
+// never set extensions.broker (reserved), so a pre-seeded generic record with a matching record_id is NOT treated as
+// the intent — the gateway validation (PoP, consume-before-act) is never skipped on a spoofed record. (Reserved
+// record_id prefixes also block the pre-seed.)
+func (s *Server) intentAndOutcome(projectID, sessionID, intentRef string) (intentJSON string, intentFound bool, outcomeID string, outcomeFound bool, err error) {
 	recs, err := s.st.SessionRecords(projectID, sessionID)
 	if err != nil {
 		// FAIL CLOSED (averin#14): a SessionRecords read error is NOT "intent not found" — propagate it so the
 		// caller answers a retryable 500, not a 400 that makes the client abandon the outcome (breaking the
 		// intent→outcome pairing and leaving a permanent intent_without_outcome).
-		return "", "", false, err
+		return "", false, "", false, err
 	}
 	for _, rec := range recs {
 		var probe struct {
-			RecordID  string `json:"record_id"`
-			Authority struct {
-				GrantID string `json:"grant_id"`
-			} `json:"authority"`
+			RecordID   string `json:"record_id"`
 			Extensions struct {
 				Broker struct {
-					Kind string `json:"kind"`
+					Kind       string `json:"kind"`
+					UseOutcome struct {
+						IntentRef string `json:"intent_ref"`
+					} `json:"use_outcome"`
 				} `json:"broker"`
 			} `json:"extensions"`
 		}
-		// A valid retry must be a real broker/resource record (it carries extensions.broker.kind). A generic
-		// record can never set extensions.broker (reserved), so a pre-seeded generic record with a matching
-		// record_id is NOT treated as a use/outcome retry — the gateway validation (PoP, consume-before-act)
-		// is never skipped on a spoofed record. (Reserved record_id prefixes also block the pre-seed.)
-		if json.Unmarshal([]byte(rec.JSON), &probe) == nil && probe.RecordID == useID && probe.Extensions.Broker.Kind != "" {
-			return rec.JSON, probe.Authority.GrantID, true, nil
+		if json.Unmarshal([]byte(rec.JSON), &probe) != nil || probe.Extensions.Broker.Kind == "" {
+			continue
+		}
+		if !intentFound && probe.RecordID == intentRef {
+			intentJSON, intentFound = rec.JSON, true
+		}
+		if !outcomeFound && probe.Extensions.Broker.Kind == "use_outcome" && probe.Extensions.Broker.UseOutcome.IntentRef == intentRef {
+			outcomeID, outcomeFound = probe.RecordID, true
+		}
+		if intentFound && outcomeFound {
+			break
 		}
 	}
-	return "", "", false, nil
+	return intentJSON, intentFound, outcomeID, outcomeFound, nil
 }
 
 // buildUseRecord assembles the unsealed use-receipt Decision Record: a tool_gateway-role authority
@@ -2481,7 +2713,11 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if reservedIdem(idem) { // an outcome under denial:<denialID> would later collapse a denial and suppress it
-		writeErr(w, http.StatusBadRequest, "idempotency_key prefix \"denial:\" is reserved for the broker denied-grant log")
+		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
+		return
+	}
+	if err := rejectNUL("project_id", or.ProjectID, "idempotency_key", idem); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	status := or.Status
@@ -2518,7 +2754,7 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		}
 		// resolve the intent this outcome completes: it must be a use_intent recorded in this session, and
 		// we read its content_hash to bind the before-act ordering into the resource-signed payload.
-		intentJSON, _, ok, re := s.existingReceipt(or.ProjectID, or.SessionID, or.IntentRecordID)
+		intentJSON, ok, priorOutcome, outcomeDone, re := s.intentAndOutcome(or.ProjectID, or.SessionID, or.IntentRecordID)
 		if re != nil {
 			return re // FAIL CLOSED (averin#14): a SessionRecords read error → retryable 500, not a 400 "not found"
 		}
@@ -2547,12 +2783,39 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 			clientErr = fmt.Errorf("record %q is not a use_intent (kind=%q)", or.IntentRecordID, probe.Extensions.Broker.Kind)
 			return nil
 		}
+		// An intent has EXACTLY ONE outcome: a second use_outcome for the same intent (e.g. "ok" then "failed"
+		// under a different idempotency key) would make the anchored bundle fail verification. The honest retry
+		// of the SAME outcome was already answered above via its idempotency key, so any other outcome already
+		// completing this intent is a conflict → 409, checked under ingestMu so two racing outcomes cannot both land.
+		if outcomeDone {
+			conflictErr = fmt.Errorf("intent %q already has a recorded use_outcome (%s); an intent is completed exactly once", or.IntentRecordID, priorOutcome)
+			return nil
+		}
 		rec, be := s.buildUseOutcomeRecord(outcomeID, or.ProjectID, or.SessionID, probe.Extensions.Broker.UseEvidence.GrantID, or.IntentRecordID, probe.ContentHash, status)
 		if be != nil {
 			return be // 500: never seal an outcome whose evidence could not be hashed/signed
 		}
-		sealed, _, err = s.sealAndStore(or.ProjectID, or.SessionID, idem, rec, nil)
-		return err
+		stored, created, se := s.sealAndStore(or.ProjectID, or.SessionID, idem, rec, nil)
+		if errors.Is(se, store.ErrRecordIDConflict) {
+			conflictErr = se // a different record already holds this deterministic outcome id; nothing persisted
+			return nil
+		}
+		if se != nil {
+			return se
+		}
+		if !created {
+			// PutRecord COLLAPSED onto an already-stored row (a same-key insert that raced past the RecordByIdem
+			// check above): this outcome was not persisted. Only the SAME outcome may be echoed back; anything
+			// else is another record's receipt → 409 (mirrors the up-front idempotency check).
+			if rid, sess, kind, _ := useReceiptIdentity(stored); rid == outcomeID && sess == or.SessionID && kind == "use_outcome" && storedOutcomeMatchesRequest(stored, or.IntentRecordID, status) {
+				sealed, idempotent = stored, true
+				return nil
+			}
+			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
+			return nil
+		}
+		sealed = stored
+		return nil
 	}()
 	if conflictErr != nil {
 		writeErr(w, http.StatusConflict, "use-outcome rejected: "+conflictErr.Error())
@@ -2735,9 +2998,39 @@ func (s *Server) normalizeAuthority(rec map[string]any) error {
 	if !ok {
 		return nil
 	}
+	v := s.checkAuthority(rec)
+	if v.elevate {
+		a["source"] = v.claimed // verified; evidence_hash/evidence_sig retained for the offline verifier
+		rec["authority"] = a
+		return nil
+	}
+	if v.failedElevation {
+		s.mAuthorityDowngrades.Inc()
+		if err := s.onFailedElevation(v.claimed, v.keyID); err != nil {
+			return err
+		}
+	}
+	a["source"] = "caller_declared"
+	rec["authority"] = a
+	return nil
+}
+
+// authorityVerdict is checkAuthority's side-effect-free decision for one record's authority block.
+type authorityVerdict struct {
+	claimed         string // the caller-claimed authority.source
+	keyID           string // the pinned key's log-safe id, or "unpinned"
+	elevate         bool   // the claim verified under the key pinned for (project, source): seal it as claimed
+	failedElevation bool   // an elevation was attempted and FAILED (normalizeAuthority downgrades or rejects it)
+}
+
+// checkAuthority is the PURE core of normalizeAuthority — no metric, no log, no mutation — so the batch pre-pass
+// can dry-run it (a deterministic authority rejection must reject the WHOLE batch before any item is sealed).
+// rec must carry a map authority.
+func (s *Server) checkAuthority(rec map[string]any) authorityVerdict {
+	a, _ := rec["authority"].(map[string]any)
 	claimed, _ := a["source"].(string)
 	// A record with no elevated claim at all (empty, or already caller_declared) has nothing to
-	// downgrade FROM — only an ATTEMPTED elevation that fails counts toward mAuthorityDowngrades below
+	// downgrade FROM — only an ATTEMPTED elevation that fails counts toward mAuthorityDowngrades
 	// (the silent key-misalignment signal), so ordinary caller_declared traffic does not swamp it, and the
 	// fail-closed toggle never rejects plain caller_declared Phase-1 traffic.
 	attemptedElevation := claimed != "" && claimed != "caller_declared"
@@ -2749,15 +3042,7 @@ func (s *Server) normalizeAuthority(rec map[string]any) error {
 	recProjectID, _ := rec["project_id"].(string)
 	key, pinned := s.authorityKeyFor(recProjectID, claimed)
 	if !pinned {
-		if attemptedElevation {
-			s.mAuthorityDowngrades.Inc()
-			if err := s.onFailedElevation(claimed, "unpinned"); err != nil {
-				return err
-			}
-		}
-		a["source"] = "caller_declared"
-		rec["authority"] = a
-		return nil
+		return authorityVerdict{claimed: claimed, keyID: "unpinned", failedElevation: attemptedElevation}
 	}
 	// T7 model (b): elevate to the claimed source ONLY if the caller-supplied evidence_sig verifies under that
 	// source's pinned key over the canonical authority preimage; else fall back to caller_declared.
@@ -2765,18 +3050,11 @@ func (s *Server) normalizeAuthority(rec map[string]any) error {
 	eh, _ := a["evidence_hash"].(string)
 	es, _ := a["evidence_sig"].(string)
 	if verifyAuthorityEvidence(claimed, recProjectID, recordID, eh, es, key) {
-		a["source"] = claimed // verified; evidence_hash/evidence_sig retained for the offline verifier
-	} else {
-		// A source IS pinned but the evidence failed to verify under it — a genuine key-misalignment
-		// (wrong signature, wrong preimage, or a forged claim), not just an unconfigured source.
-		s.mAuthorityDowngrades.Inc()
-		if err := s.onFailedElevation(claimed, authorityKeyID(key)); err != nil {
-			return err
-		}
-		a["source"] = "caller_declared"
+		return authorityVerdict{claimed: claimed, elevate: true}
 	}
-	rec["authority"] = a
-	return nil
+	// A source IS pinned but the evidence failed to verify under it — a genuine key-misalignment
+	// (wrong signature, wrong preimage, or a forged claim), not just an unconfigured source.
+	return authorityVerdict{claimed: claimed, keyID: authorityKeyID(key), failedElevation: true}
 }
 
 // onFailedElevation is the companion to the mAuthorityDowngrades counter: it emits a rate-limited WARNING that
@@ -2949,6 +3227,7 @@ func storedGrantMatchesRequest(recordJSON string, req broker.Request) (bool, err
 	var p struct {
 		Extensions struct {
 			Broker struct {
+				Kind          string `json:"kind"`
 				GrantEvidence struct {
 					AgentID         string   `json:"agent_id"`
 					Action          string   `json:"action"`
@@ -2967,6 +3246,9 @@ func storedGrantMatchesRequest(recordJSON string, req broker.Request) (bool, err
 	}
 	if e := json.Unmarshal([]byte(recordJSON), &p); e != nil {
 		return false, fmt.Errorf("read stored grant match fields: %w", e)
+	}
+	if p.Extensions.Broker.Kind != "grant" {
+		return false, nil // not a grant record (e.g. a use/denial/generic row under this key): never a match
 	}
 	ge := p.Extensions.Broker.GrantEvidence
 	pub, e := base64.RawURLEncoding.DecodeString(req.AgentPubKey)
@@ -3039,11 +3321,22 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 					GrantEvidence struct {
 						BrokerSeq int64 `json:"broker_seq"`
 					} `json:"grant_evidence"`
+					VoidEvidence struct {
+						BrokerSeq int64 `json:"broker_seq"`
+					} `json:"void_evidence"`
 				} `json:"broker"`
 			} `json:"extensions"`
 		}
 		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil {
 			return nil, fmt.Errorf("grant log: parse record %s: %w", r.ContentHash, err)
+		}
+		// A grant_void tombstone (POST /v2/broker-seq/void) fills its seq in the log EXACTLY as a grant would — the
+		// verifier's committed_broker_log folds it identically — so an operator-voided reservation closes the gap.
+		if parsed.Extensions.Broker.Kind == "grant_void" && parsed.Authority.EnforcementPoint == "credential_broker" {
+			if seq := parsed.Extensions.Broker.VoidEvidence.BrokerSeq; seq >= 1 {
+				log = append(log, broker.GrantSeqHash{Seq: seq, ContentHash: r.ContentHash})
+			}
+			continue
 		}
 		// Identify a grant EXACTLY as the offline verifier's classify_role does — the tuple
 		// (extensions.broker.kind=="grant", authority.enforcement_point=="credential_broker"). MEMBERSHIP
@@ -3072,6 +3365,25 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 	}
 	sort.Slice(log, func(i, j int) bool { return log[i].Seq < log[j].Seq })
 	return log, nil
+}
+
+// checkGaplessGrantLog reports an error unless the seq-sorted grant log is exactly [1..N] AND the store's
+// allocated max broker_seq equals N — i.e. every allocated seq is held by exactly one recorded grant.
+func checkGaplessGrantLog(gl []broker.GrantSeqHash, maxAllocated int64) error {
+	for i := 1; i < len(gl); i++ {
+		if gl[i].Seq == gl[i-1].Seq {
+			return fmt.Errorf("broker_seq %d is held by two recorded entries (%s, %s) — duplicate seq", gl[i].Seq, gl[i-1].ContentHash, gl[i].ContentHash)
+		}
+	}
+	for i, g := range gl {
+		if g.Seq != int64(i+1) {
+			return fmt.Errorf("recorded grant broker_seq set is not a gapless [1..N] prefix (position %d holds seq %d)", i+1, g.Seq)
+		}
+	}
+	if n := int64(len(gl)); maxAllocated != n {
+		return fmt.Errorf("allocated broker_seq max %d != %d recorded grants (a reserved or orphaned seq has no recorded grant; retry that grant before checkpointing, or void the seq with POST /v2/broker-seq/void once it is older than AVERIN_BROKER_SEQ_VOID_MIN_AGE)", maxAllocated, n)
+	}
+	return nil
 }
 
 // priorGrantHeadRoot returns the cumulative_root of the LATEST stored checkpoint's broker_grant_head, to
@@ -3155,6 +3467,10 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	heads, headsErr := s.st.ProjectHeads(projectID)
 	count, countErr := s.st.RecordCount(projectID)
 	grantRecs, recErr := s.st.GrantRecords(projectID)
+	// The allocated max broker_seq is read in the SAME snapshot: every allocate→seal→insert runs under ingestMu,
+	// so outside it an allocated seq with no recorded grant is never "in flight" — it is a reserved
+	// (commit-ambiguous) or orphaned (failed release) seq, i.e. a real gap the fail-closed check below refuses.
+	maxAlloc, maxAllocErr := s.st.MaxBrokerSeq(projectID)
 	s.ingestMu.Unlock()
 	// Surface any snapshot-read error: signing a checkpoint with an empty frontier (heads=nil) while the
 	// grant head folds a non-empty grant set would anchor a frontier that disagrees with the grant set it
@@ -3164,7 +3480,7 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	// Surface ANY snapshot/chain read error: signing a checkpoint with a defaulted frontier/seq/prev (e.g.
 	// seq silently 0, or prev_checkpoint_hash omitted while broker_grant_head.prior_head_hash still points
 	// at the prior head) would anchor a broken/forked checkpoint, so a read failure must abort, not degrade.
-	for _, e := range []error{headsErr, countErr, recErr, seqErr, prevErr} {
+	for _, e := range []error{headsErr, countErr, recErr, maxAllocErr, seqErr, prevErr} {
 		if e != nil {
 			return "", nil, fmt.Errorf("checkpoint: read project snapshot: %w", e)
 		}
@@ -3183,6 +3499,13 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	gl, err := grantLog(grantRecs)
 	if err != nil {
 		return "", nil, err
+	}
+	// FAIL CLOSED on a broker_seq gap (ADR 0004 D6): checkpoints are append-only, so a head signed over a
+	// recorded set that is not exactly [1..N] — or while an allocated seq above N has no recorded grant — would
+	// anchor a PERMANENT "not a gapless [1..N] prefix" verifier failure. Refuse to sign instead; the gap closes
+	// when the reserved grant is retried (its deterministic grant_id reclaims the seq) or the orphan is released.
+	if err := checkGaplessGrantLog(gl, maxAlloc); err != nil {
+		return "", nil, fmt.Errorf("checkpoint refused: %w", err)
 	}
 	prior, err := s.priorGrantHeadRoot(projectID)
 	if err != nil {
@@ -3744,15 +4067,21 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 	// FAIL CLOSED (averin#3): a transient read failure must NOT collapse into an empty bundle — the callers
 	// (handleExport/handleVerify) 500 on this error and meter AFTER, so returning the error keeps billing/self-
 	// verify from ever running over a silently-truncated (zero-record) history. Mirrors the Anchors handling below.
-	recs, err := s.st.AllRecords(projectID)
-	if err != nil {
-		return "", err
-	}
+	//
+	// READ ORDER (torn-snapshot safety): checkpoints, then anchors, then records — with no lock held, a record +
+	// checkpoint can be created between the reads. The store is append-only and every checkpoint's frontier only
+	// references records stored BEFORE it was sealed, so reading records LAST guarantees they are a superset of
+	// every exported checkpoint's frontier (a newer record is just an un-checkpointed tail). The reverse order
+	// could export a checkpoint whose frontier references records missing from the bundle — a false failure.
 	checks, err := s.st.Checkpoints(projectID)
 	if err != nil {
 		return "", err
 	}
 	anchors, err := s.st.Anchors(projectID)
+	if err != nil {
+		return "", err
+	}
+	recs, err := s.st.AllRecords(projectID)
 	if err != nil {
 		return "", err
 	}
@@ -3792,8 +4121,9 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 	if s.coverageManifest != "" {
 		bundle["coverage_manifest"] = json.RawMessage(s.coverageManifest)
 	}
-	// M5 (ADR 0005): emit a signed, time-bounded revocation_list over the project's revoked grant_ids, when a
-	// revocation authority key is configured and there is at least one revoked grant. Its freshness window is
+	// M5 (ADR 0005): emit a signed, time-bounded revocation_list over the project's revoked grant_ids whenever a
+	// revocation authority key is configured — EMPTY when nothing is revoked, because a verifier pinning that key
+	// reads a bundle with no list as `missing` (blocks the capstone). Its freshness window is
 	// derived from the latest checkpoint's created_ts (same anchor the attestation uses), so the verifier reads
 	// it `fresh` for this bundle and `stale` for a much-later one. Built BEFORE the attestation so the
 	// attestation can bind its digest (#3 strip-downgrade defense).

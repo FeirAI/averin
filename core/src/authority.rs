@@ -55,7 +55,10 @@ impl AuthorityTrust {
 /// evidence triple onto an unrelated record OR a record in a DIFFERENT project (cross-tenant replay, adversarial review).
 /// `record_id` alone is caller-chosen and the verifier's duplicate-record_id rejection is only WITHIN a
 /// bundle, so `project_id` is the load-bearing tenant-isolation binding.
-fn preimage(source: &str, project_id: &str, record_id: &str, evidence_hash: &str) -> Vec<u8> {
+///
+/// Hidden `pub` for the Lean-oracle differential test (`core/tests/oracle.rs`).
+#[doc(hidden)]
+pub fn preimage(source: &str, project_id: &str, record_id: &str, evidence_hash: &str) -> Vec<u8> {
     let mut p = Vec::with_capacity(
         56 + source.len() + project_id.len() + record_id.len() + evidence_hash.len(),
     );

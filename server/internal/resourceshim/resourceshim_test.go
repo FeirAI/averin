@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +201,35 @@ func TestSingleUseDoubleSpendRejected(t *testing.T) {
 	_, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n2"), op, "n2", now)
 	if err == nil || !strings.Contains(err.Error(), "double-spend") {
 		t.Fatalf("single-use double-spend should be rejected by the jti ledger, got: %v", err)
+	}
+}
+
+// TestRevokedGrantRejectedBeforeConsume (M5): with a revocation check wired, a use of a revoked grant is
+// rejected with ErrRevoked BEFORE anything is consumed — neither the nonce nor the single-use jti is burned — and
+// a grant NOT in the revoked set is unaffected.
+func TestRevokedGrantRejectedBeforeConsume(t *testing.T) {
+	issuing, agent := keyFromByte(1), keyFromByte(2)
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	token := defaultCap(t, issuing, agent, time.Hour, now)
+	ledger := NewMemLedger()
+	revoked := map[string]bool{testGrantID: true}
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, ledger).
+		WithRevocationCheck(func(g string) bool { return revoked[g] })
+	op := Op{Action: testAction, ParamsCommitment: testParams}
+	_, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n1"), op, "n1", now)
+	if !errors.Is(err, ErrRevoked) {
+		t.Fatalf("a revoked grant's use must be rejected with ErrRevoked, got: %v", err)
+	}
+	if err := ledger.ConsumeNonce("n1"); err != nil {
+		t.Fatalf("a revoked use must not consume the nonce: %v", err)
+	}
+	if err := ledger.ConsumeJTI(testGrantID); err != nil {
+		t.Fatalf("a revoked use must not consume the jti: %v", err)
+	}
+	// CONTROL: another grant (not revoked) still validates.
+	other := mintCap(t, issuing, agent, "grant-ok", testAction, testResource, time.Hour, now)
+	if _, err := sh.ValidateUse(other, signUse(t, agent, other, "grant-ok", testResource, testAction, testParams, "n2"), op, "n2", now); err != nil {
+		t.Fatalf("a non-revoked grant must still validate: %v", err)
 	}
 }
 

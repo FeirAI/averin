@@ -1,0 +1,13 @@
+Mutant: compute_content_hash strips an extra signed field (status) from the preimage.
+
+--- a/core/src/record.rs
++++ b/core/src/record.rs
+@@ -195,7 +195,7 @@
+ /// Hidden `pub` for the Lean-oracle differential test (`core/tests/oracle.rs`).
+ #[doc(hidden)]
+ pub fn content_hash_preimage(record: &CanonValue) -> Result<Vec<u8>, RecordError> {
+-    hash_body_preimage(record, &["content_hash", "sig"])
++    hash_body_preimage(record, &["content_hash", "sig", "status"])
+ }
+ 
+ /// Verify a record's stored `content_hash` and that its declared domain/canon_version match

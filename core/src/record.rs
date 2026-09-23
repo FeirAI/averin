@@ -157,6 +157,14 @@ fn str_field<'a>(obj: &'a CanonValue, key: &'static str) -> Result<&'a str, Reco
 /// Shared by records (`strip = [content_hash, sig]`) and checkpoints
 /// (`strip = [anchor, checkpoint_hash, sig]`).
 pub fn hash_body(value: &CanonValue, strip: &[&str]) -> Result<String, RecordError> {
+    Ok(sha256_prefixed(&hash_body_preimage(value, strip)?))
+}
+
+/// The exact bytes [`hash_body`] feeds SHA-256:
+/// `LP(domain) ‖ LP(canon_version) ‖ RCP-serialize(body \ strip)`. Hidden `pub` so
+/// `core/tests/oracle.rs` can compare it byte-for-byte against the Lean model's preimage.
+#[doc(hidden)]
+pub fn hash_body_preimage(value: &CanonValue, strip: &[&str]) -> Result<Vec<u8>, RecordError> {
     if value.as_object().is_none() {
         return Err(RecordError::NotObject);
     }
@@ -171,7 +179,7 @@ pub fn hash_body(value: &CanonValue, strip: &[&str]) -> Result<String, RecordErr
         return Err(RecordError::TooLong);
     }
     preimage.extend_from_slice(canon.as_bytes());
-    Ok(sha256_prefixed(&preimage))
+    Ok(preimage)
 }
 
 /// Compute the canonical record `content_hash` (RCP §9.1).
@@ -180,7 +188,14 @@ pub fn hash_body(value: &CanonValue, strip: &[&str]) -> Result<String, RecordErr
 /// verifying a record should additionally confirm they equal the expected constants (see
 /// [`verify_content_hash`]).
 pub fn compute_content_hash(record: &CanonValue) -> Result<String, RecordError> {
-    hash_body(record, &["content_hash", "sig"])
+    Ok(sha256_prefixed(&content_hash_preimage(record)?))
+}
+
+/// The exact bytes [`compute_content_hash`] feeds SHA-256 (body with `content_hash`/`sig` stripped).
+/// Hidden `pub` for the Lean-oracle differential test (`core/tests/oracle.rs`).
+#[doc(hidden)]
+pub fn content_hash_preimage(record: &CanonValue) -> Result<Vec<u8>, RecordError> {
+    hash_body_preimage(record, &["content_hash", "sig"])
 }
 
 /// Verify a record's stored `content_hash` and that its declared domain/canon_version match

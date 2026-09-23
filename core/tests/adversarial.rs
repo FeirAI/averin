@@ -4570,11 +4570,11 @@ fn role_key_rotation_json_parser_is_fail_closed() {
         "a valid rotation object must PARSE and verify"
     );
 
-    // signing_keys stays STRING-ONLY (its rotation is the richer Rust TrustedKey API, not the opts object), so
-    // the object form is still rejected there — whereas the deferred freshness-dated roles (tsa/attestation/
-    // cosig/revocation/taxonomy) now ACCEPT it (ADR 0006 §1 deferred roles).
-    let signing = format!(r#"{{"signing_keys":[{{"key":"{key}","status":"compromised"}}]}}"#);
-    assert!(verify_bundle_with_json(bundle_json, &signing).contains("must be a string"));
+    // signing_keys takes its OWN object form — the RCP §10.2 key_status vocabulary (see
+    // signing_keys_json_object_form_carries_compromise), so a role-key `rotated` status is rejected there.
+    let signing = format!(r#"{{"signing_keys":[{{"key":"{key}","status":"rotated"}}]}}"#);
+    assert!(verify_bundle_with_json(bundle_json, &signing)
+        .contains("is not one of active|retired|revoked|compromised"));
 
     // A misspelled/UNKNOWN field is rejected (fail-closed): silently dropping it would lose the auditor's
     // compromise pin (read as active) — exactly the silent fail-open the 5-lens review caught.
@@ -7092,6 +7092,113 @@ fn tier_b_two_phase_failed_pop_intent_does_not_consume_outcome() {
         "the failed-PoP intent's outcome must be flagged orphan, not masked: {:?}",
         r.issues
     );
+}
+
+#[test]
+fn tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation() {
+    // PR review (round 4, P1): a grant + an intent with an INVALID PoP committed by anchored cp0, and the
+    // intent's outcome committed by anchored cp1. With both anchors the bundle fails on the PoP. Deleting ONLY
+    // cp1's unsigned `anchor` made the outcome committed-but-not-closed; the partial-closure branch then
+    // consumed it and skipped pop_reverify, reading ok:true. Negative checks must run before closure.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let grant = seal_grant(
+        &rec,
+        &rec,
+        GID,
+        &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP),
+    );
+    let gh = content_hash_of(&grant);
+    let ue = change_field(
+        &change_field(
+            &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED),
+            "cnf_pub",
+            CanonValue::string(b64enc(cnf.verifying_key().as_bytes())),
+        ),
+        "use_sig",
+        CanonValue::string(b64enc(&[7u8; 64])),
+    );
+    let intent = seal_intent(
+        &rec,
+        &res,
+        "intent-1",
+        std::slice::from_ref(&gh),
+        ACTION,
+        &ue,
+    );
+    let ih = content_hash_of(&intent);
+    let outcome = seal_outcome(
+        &rec,
+        &res,
+        "outcome-1",
+        std::slice::from_ref(&ih),
+        "intent-1",
+        "intent-1",
+        GID,
+    );
+    let oh = content_hash_of(&outcome);
+    let cp0 = checkpoint_seqd(
+        &rec,
+        "cp0",
+        0,
+        None,
+        std::slice::from_ref(&ih),
+        2,
+        None,
+        Some(&tsa),
+    );
+    let cp0h = checkpoint_hash(&cp0);
+    let cp1 = checkpoint_seqd(
+        &rec,
+        "cp1",
+        1,
+        Some(&cp0h),
+        std::slice::from_ref(&oh),
+        3,
+        None,
+        Some(&tsa),
+    );
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let both = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant.clone(), intent.clone(), outcome.clone()],
+        vec![cp0.clone(), cp1.clone()],
+    );
+    let r = verify_bundle_with(&both, &opts);
+    assert!(!r.ok, "baseline must fail on the PoP: {:?}", r.issues);
+    // strip ONLY cp1's anchor (cp0 keeps its anchor, so the intent stays closed)
+    let mut cp1_bare = cp1.as_object().unwrap().clone();
+    cp1_bare.retain(|(k, _)| k != "anchor");
+    let partial = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant, intent, outcome],
+        vec![cp0, CanonValue::Object(cp1_bare)],
+    );
+    let r = verify_bundle_with(&partial, &opts);
+    assert!(
+        !r.ok,
+        "stripping one anchor must not turn a violation into a pass: {:?}",
+        r.issues
+    );
+    assert!(
+        r.issues.iter().any(|i| i.contains("PoP re-verification"))
+            && r.issues
+                .iter()
+                .any(|i| i.contains("completion without a recorded intent")),
+        "the failed intent must be a violation and its outcome still an orphan: {:?}",
+        r.issues
+    );
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 0));
+    // and every anchor stripped: still a failure
+    assert!(!verify_bundle_with(&strip_anchors(&both), &opts).ok);
 }
 
 #[test]
@@ -11961,5 +12068,1128 @@ fn tier_b_federation_capstone_blocked_by_suppression() {
     assert!(
         out.contains(r#""action_completeness":"claimed_over_manifest""#),
         "{out}"
+    );
+}
+
+// ---- F: canonical-JSON duplicate-key detection must be sub-quadratic ----
+
+#[test]
+fn canon_wide_object_parses_in_subquadratic_time() {
+    // RCP §5 duplicate-key detection used to scan every prior member per key (O(n^2)): a single 80k-key object
+    // took ~10s, a verifier DoS from one attacker-supplied bundle field. 100k keys must now parse promptly (the
+    // dev profile is opt-level 3), and a post-NFC duplicate at the tail must still be rejected with the SAME
+    // message and byte position as before.
+    const N: usize = 100_000;
+    let mut s = String::with_capacity(N * 16);
+    s.push('{');
+    for i in 0..N {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("\"k{i}\":{i}"));
+    }
+    s.push('}');
+    let t = std::time::Instant::now();
+    let v = CanonValue::parse(&s).expect("a wide unique-key object parses");
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "100k-key parse took {:?} (quadratic duplicate detection?)",
+        t.elapsed()
+    );
+    assert_eq!(v.as_object().unwrap().len(), N);
+
+    // the checked constructor must scale the same way.
+    let pairs: Vec<(String, CanonValue)> = (0..N)
+        .map(|i| (format!("k{i}"), CanonValue::Int(i as i64)))
+        .collect();
+    let t = std::time::Instant::now();
+    assert!(CanonValue::object(pairs).is_ok());
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "100k-key CanonValue::object took {:?}",
+        t.elapsed()
+    );
+
+    // behavior unchanged: a duplicate (here after NFC: "e\u{301}" == "é") is still rejected at the key's position.
+    let mut dup = s[..s.len() - 1].to_string();
+    dup.push_str(",\"\u{e9}\":1,");
+    let pos = dup.len();
+    dup.push_str("\"e\u{301}\":2}");
+    let err = CanonValue::parse(&dup).unwrap_err();
+    assert_eq!(err.pos, pos);
+    assert_eq!(
+        err.msg,
+        format!(
+            "duplicate object key after NFC normalization: {:?}",
+            "\u{e9}"
+        )
+    );
+}
+
+#[test]
+fn tier_b_merkle_revocation_multibyte_or_signed_hex_does_not_panic() {
+    // SAFETY (DoS): the proof's `lo`/`hi`/path nodes ride the UNSIGNED revocation_proofs map. A 64-BYTE string whose
+    // first char is multibyte ("€" = 3 bytes + 61 ASCII) passed the byte-length check and then sliced mid-char —
+    // a panic (and UB across cgo). A "+a" pair was accepted by from_str_radix. Both are just an invalid proof
+    // (Unproven → fail-closed), never a panic and never a parsed node.
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let good = nonmembership_proof(&leaves, GID);
+    let multibyte = format!("€{}", "a".repeat(61));
+    assert_eq!(multibyte.len(), 64);
+    let lo = good.get("lo").unwrap().as_str().unwrap().to_string();
+    // non-canonical encodings of the SAME bytes, which the old from_str_radix decode accepted: uppercase hex, and
+    // (when the first byte's high nibble is 0) a "+X" sign-prefixed pair.
+    let mut bads = vec![multibyte, lo.to_uppercase()];
+    if let Some(rest) = lo.strip_prefix('0') {
+        bads.push(format!("+{rest}"));
+    }
+    for bad_lo in bads {
+        let proof = change_field(&good, "lo", CanonValue::string(bad_lo.clone()));
+        let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+        let r = merkle_rev_bundle_verify(
+            &rec,
+            &res,
+            &tsa,
+            &rev,
+            root_obj,
+            vec![(GID.to_string(), proof)],
+        );
+        assert!(!r.ok, "malformed hex {bad_lo:?} must fail closed");
+        assert_eq!(r.revoked_uses_blocked, 1, "{bad_lo:?}");
+        assert_eq!(r.uses_matched, 0);
+    }
+}
+
+#[test]
+fn garbage_anchor_tokens_are_not_counted_as_anchored() {
+    // H: `checkpoints_anchored` counted anchor PRESENCE before verifying it, so two garbage `anchor` blobs read as
+    // "2 anchored" (the CLI printed it as such). Only a VERIFIED anchor counts; presence is reported separately.
+    let b = fixture();
+    let garbage = CanonValue::parse(r#"{"scheme":"test-anchor","token":"not-a-token"}"#).unwrap();
+    let checkpoints: Vec<CanonValue> = arr(&b, "checkpoints")
+        .iter()
+        .map(|cp| attach_anchor(cp, garbage.clone()))
+        .collect();
+    let bundle = rebuild(arr(&b, "keys"), arr(&b, "records"), checkpoints);
+    for tsa_pinned in [false, true] {
+        let tsa = test_tsa_key(&[200u8; 32]);
+        let r = verify_bundle_with(
+            &bundle,
+            &VerifyOptions {
+                trusted_tsa_keys: if tsa_pinned {
+                    vec![tsa.verifying_key()]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.checkpoints_anchored, 0, "tsa_pinned={tsa_pinned}");
+        assert_eq!(r.checkpoints_anchors_attached, 2, "tsa_pinned={tsa_pinned}");
+        let json = report_to_json(&r);
+        assert!(json.contains(r#""checkpoints_anchored":0"#), "{json}");
+        assert!(
+            json.contains(r#""checkpoints_anchors_attached":2"#),
+            "{json}"
+        );
+    }
+
+    // control: a REAL anchor on the latest checkpoint counts as anchored once pinned.
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let mut checkpoints = arr(&b, "checkpoints");
+    let a = make_test_anchor(
+        &checkpoint_hash(&checkpoints[1]),
+        "2026-06-15T10:05:00.000Z",
+        &tsa,
+        "t",
+    );
+    checkpoints[1] = attach_anchor(&checkpoints[1], a);
+    let r = verify_bundle_with(
+        &rebuild(arr(&b, "keys"), arr(&b, "records"), checkpoints),
+        &VerifyOptions {
+            trusted_tsa_keys: vec![tsa.verifying_key()],
+            ..Default::default()
+        },
+    );
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.checkpoints_anchored, 1);
+    assert_eq!(r.checkpoints_anchors_attached, 1);
+}
+
+#[test]
+fn bundle_without_project_id_still_binds_one_project() {
+    // I: with no top-level `project_id`, every project-binding check was skipped, so records (and checkpoints)
+    // from DIFFERENT projects could be spliced into one bundle and verify clean. The verifier now derives the
+    // binding project from the bundle's own records/checkpoints and requires them all to share it.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let g1 = seal_grant(&rec, &rec, "g-1", &ge);
+    let g2 = {
+        let other = seal_grant(&rec, &rec, "g-2", &ge);
+        let moved = change_field(&other, "project_id", CanonValue::string("proj-OTHER"));
+        seal(&moved, &rec).unwrap()
+    };
+    let cp = checkpoint_over(&rec, &[content_hash_of(&g1), content_hash_of(&g2)], 2, None);
+    let without_pid = |b: CanonValue| {
+        let mut m = b.as_object().unwrap().clone();
+        m.retain(|(k, _)| k != "project_id");
+        CanonValue::Object(m)
+    };
+    let spliced = without_pid(tier_b_bundle(
+        &rec.verifying_key(),
+        vec![g1.clone(), g2],
+        vec![cp],
+    ));
+    let r = verify_bundle(&spliced);
+    assert!(
+        !r.ok,
+        "a cross-project splice must not verify just because the bundle omits project_id"
+    );
+    assert!(
+        r.record_trust.iter().any(|t| t
+            .notes
+            .iter()
+            .any(|n| n.contains("project_id does not match"))),
+        "{:?}",
+        r.issues
+    );
+
+    // control: a single-project bundle that merely omits the top-level project_id still verifies.
+    let cp = checkpoint_over(&rec, &[content_hash_of(&g1)], 1, None);
+    let clean = without_pid(tier_b_bundle(&rec.verifying_key(), vec![g1], vec![cp]));
+    let r = verify_bundle(&clean);
+    assert!(r.ok, "{:?}", r.issues);
+}
+
+#[test]
+fn signing_key_overlapping_tsa_key_is_fatal() {
+    // C: the record-signing keys were missing from the role-disjointness matrix. With the SAME key pinned as a
+    // (compromised) signing key and as a TSA key, a thief holding it self-anchors every checkpoint "before" the
+    // compromise and the whole bundle PASSES. Signing keys must be disjoint from every non-broker role.
+    let k0 = signing_key_from_seed(&[0u8; 32]);
+    let b = fixture();
+    let mut checkpoints = arr(&b, "checkpoints");
+    let a = make_test_anchor(
+        &checkpoint_hash(&checkpoints[1]),
+        "2026-06-15T10:02:00.000Z", // backdated by the thief, who holds k0
+        &k0,
+        "self",
+    );
+    checkpoints[1] = attach_anchor(&checkpoints[1], a);
+    let bundle = rebuild(arr(&b, "keys"), arr(&b, "records"), checkpoints);
+    let r = verify_bundle_with(
+        &bundle,
+        &VerifyOptions {
+            trusted_keys: Some(vec![pinned_compromised("2026-06-15T10:10:00.000Z")]),
+            trusted_tsa_keys: vec![k0.verifying_key()],
+            ..Default::default()
+        },
+    );
+    assert!(
+        !r.ok,
+        "a signing key doubling as the TSA must not self-anchor"
+    );
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("signing_keys") && i.contains("disjoint")),
+        "{:?}",
+        r.issues
+    );
+
+    // every other non-broker role is likewise disjoint from the signing keys...
+    let vk = k0.verifying_key();
+    let pin = || Some(vec![TrustedKey::from(vk)]);
+    for (name, opts) in [
+        (
+            "resource_authority_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                resource_authority_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "taxonomy_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                taxonomy_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "attestation_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                attestation_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "cosig_approver_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                cosig_approver_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "revocation_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                revocation_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+    ] {
+        let r = verify_bundle_with(&fixture(), &opts);
+        assert!(!r.ok, "{name}");
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.contains("signing_keys") && i.contains(name)),
+            "{name}: {:?}",
+            r.issues
+        );
+    }
+
+    // ...but the broker recording key IS the record-signing key by design (ADR 0002), as is the generic
+    // authority set in self-host: that overlap stays allowed.
+    let r = verify_bundle_with(
+        &fixture(),
+        &VerifyOptions {
+            trusted_keys: pin(),
+            broker_authority_keys: vec![vk],
+            trusted_authority_keys: vec![vk],
+            ..Default::default()
+        },
+    );
+    assert!(r.ok, "{:?}", r.issues);
+}
+
+#[test]
+fn signing_keys_json_object_form_carries_compromise() {
+    // E: the JSON/CLI/FFI path built `TrustedKey::from(vk)` with NO status, and rejected the object form, so an
+    // auditor could not express "this signing key was compromised at T" outside the Rust API. The object form now
+    // carries the authoritative RCP §10.2 status + compromise time exactly like `TrustedKey`.
+    let (b, tsa_vk) = compromised_bundle("2026-06-15T10:02:00.000Z");
+    let bundle_json = b.serialize();
+    let key = encode_pubkey(&signing_key_from_seed(&[0u8; 32]).verifying_key());
+    let tsa = encode_pubkey(&tsa_vk);
+    let opts = |changed_at: &str| {
+        format!(
+            r#"{{"signing_keys":[{{"key":"{key}","status":"compromised","status_changed_at":"{changed_at}"}}],"tsa_keys":["{tsa}"]}}"#
+        )
+    };
+    // compromise AFTER the 10:02 anchor: every record predates it -> trusted (mirrors the Rust API test).
+    let after = verify_bundle_with_json(&bundle_json, &opts("2026-06-15T10:10:00.000Z"));
+    assert!(after.contains(r#""ok":true"#), "{after}");
+    assert!(
+        after.contains(r#""keys_externally_pinned":true"#),
+        "{after}"
+    );
+    // compromise BEFORE the anchor: nothing is anchored before it -> untrusted (threat #9).
+    let before = verify_bundle_with_json(&bundle_json, &opts("2026-06-15T10:01:00.000Z"));
+    assert!(before.contains(r#""ok":false"#), "{before}");
+    assert!(before.contains("threat #9"), "{before}");
+
+    // an EXPLICITLY empty signing_keys used to fall back SILENTLY to unpinned verification — now a config error.
+    let empty = verify_bundle_with_json(&bundle_json, r#"{"signing_keys":[]}"#);
+    assert!(
+        empty.contains(r#""ok":false"#) && empty.contains("signing_keys is present but empty"),
+        "{empty}"
+    );
+    // plain strings still work, and malformed objects fail closed.
+    let plain = verify_bundle_with_json(&bundle_json, &format!(r#"{{"signing_keys":["{key}"]}}"#));
+    assert!(
+        plain.contains(r#""keys_externally_pinned":true"#),
+        "{plain}"
+    );
+    let typo = verify_bundle_with_json(
+        &bundle_json,
+        &format!(r#"{{"signing_keys":[{{"key":"{key}","statuss":"compromised"}}]}}"#),
+    );
+    assert!(typo.contains("unknown field"), "{typo}");
+}
+
+// ---- B: RCP §10.2 applies to CHECKPOINT keys, not only record keys ----
+
+// A two-checkpoint chain over two records (g1 <- g2), both checkpoints signed by `cp_sk` under key id "kc"; cp1
+// optionally carries a test anchor at `anchor_ts`. Records are signed by `rec` ("k0").
+fn kc_chain_bundle(
+    rec: &SigningKey,
+    cp_sk: &SigningKey,
+    anchor: Option<(&SigningKey, &str)>,
+) -> CanonValue {
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let g1 = seal_grant(rec, rec, "g-1", &ge);
+    let g2 = seal_grant_prev(rec, rec, "g-2", &ge, &[content_hash_of(&g1)]);
+    let key_block =
+        CanonValue::parse(r#"{"signing_key_id":"kc","key_epoch":0,"key_status":"active"}"#)
+            .unwrap();
+    let cp0 = seal_checkpoint(
+        &checkpoint_body(
+            "cp0",
+            "proj-001",
+            0,
+            None,
+            &[content_hash_of(&g1)],
+            1,
+            "2026-06-15T10:05:00.000Z",
+            key_block.clone(),
+        )
+        .unwrap(),
+        cp_sk,
+    )
+    .unwrap();
+    let cp0_hash = checkpoint_hash(&cp0);
+    let mut cp1 = seal_checkpoint(
+        &checkpoint_body(
+            "cp1",
+            "proj-001",
+            1,
+            Some(&cp0_hash),
+            &[content_hash_of(&g2)],
+            2,
+            "2026-06-15T10:10:00.000Z",
+            key_block,
+        )
+        .unwrap(),
+        cp_sk,
+    )
+    .unwrap();
+    if let Some((tsa, ts)) = anchor {
+        let a = make_test_anchor(&checkpoint_hash(&cp1), ts, tsa, "tsa-1");
+        cp1 = attach_anchor(&cp1, a);
+    }
+    let key_entry = |id: &str, vk: &VerifyingKey| {
+        CanonValue::object(vec![
+            ("signing_key_id".into(), CanonValue::string(id)),
+            ("key_epoch".into(), CanonValue::Int(0)),
+            ("public_key".into(), CanonValue::string(encode_pubkey(vk))),
+            ("key_status".into(), CanonValue::string("active")), // the bundle's (attacker's) claim
+        ])
+        .unwrap()
+    };
+    rebuild(
+        vec![
+            key_entry("k0", &rec.verifying_key()),
+            key_entry("kc", &cp_sk.verifying_key()),
+        ],
+        vec![g1, g2],
+        vec![cp0, cp1],
+    )
+}
+
+#[test]
+fn checkpoint_signed_by_compromised_pinned_key_is_untrusted() {
+    // B: the auditor pins K0 (active — it signs the records) and Kc (a checkpoint key, compromised in 2020). An
+    // attacker holding ONLY Kc drops a session and re-signs a fresh, internally consistent checkpoint chain. The
+    // checkpoint key was filtered only by `is_trusted`, so the forged chain verified (omission, threat #1/#9).
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let kc = signing_key_from_seed(&[42u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let opts = |changed_at: &str| VerifyOptions {
+        trusted_keys: Some(vec![
+            rec.verifying_key().into(),
+            TrustedKey {
+                vk: kc.verifying_key(),
+                status: Some("compromised".into()),
+                status_changed_at: Some(changed_at.into()),
+            },
+        ]),
+        trusted_tsa_keys: vec![tsa.verifying_key()],
+        ..Default::default()
+    };
+
+    let forged = kc_chain_bundle(&rec, &kc, None);
+    let r = verify_bundle_with(&forged, &opts("2020-01-01T00:00:00.000Z"));
+    assert!(!r.ok, "a chain signed by a compromised key must not verify");
+    assert_eq!(r.checkpoints_verified, 0);
+    assert!(
+        r.issues.iter().any(|i| i.contains("RCP §10.2")),
+        "{:?}",
+        r.issues
+    );
+    // anchored, but AFTER the compromise: still untrusted.
+    let late = kc_chain_bundle(&rec, &kc, Some((&tsa, "2026-06-15T10:10:01.000Z")));
+    assert!(!verify_bundle_with(&late, &opts("2020-01-01T00:00:00.000Z")).ok);
+
+    // control: an anchor at/before the status change commits cp1 AND (via prev_checkpoint_hash) cp0 -> trusted.
+    let r = verify_bundle_with(&late, &opts("2026-06-15T10:20:00.000Z"));
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.checkpoints_verified, 2);
+    // control: no status pinned for Kc -> active -> the unanchored chain verifies as before.
+    let r = verify_bundle_with(
+        &forged,
+        &VerifyOptions {
+            trusted_keys: Some(vec![rec.verifying_key().into(), kc.verifying_key().into()]),
+            ..Default::default()
+        },
+    );
+    assert!(r.ok, "{:?}", r.issues);
+}
+
+// ---- D: stripping the revocation artifacts must not read as the benign `absent` when revocation keys are pinned ----
+
+#[test]
+fn tier_b_revocation_artifacts_stripped_under_pinned_keys_is_missing() {
+    // D: with `revocation_keys` pinned, a bundle whose `revocation_list` / `revocation_merkle_root` was DELETED read
+    // `absent` — the "not evaluated" baseline — and the capstone stayed reachable, so stripping the (bundle-level)
+    // revocation evidence un-blocked every revoked use for free. It is now `missing`, which blocks the capstone.
+    let (rec, res, tsa, rev) = rev_keys();
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let stripped = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let mut opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    opts.revocation_keys = vec![rev.verifying_key()];
+    let r = verify_bundle_with(&stripped, &opts);
+    assert_eq!(r.revocation_status, "missing");
+    assert!(report_to_json(&r).contains(r#""revocation_status":"missing""#));
+
+    // unpinned revocation authority: still the legitimate `absent` baseline.
+    opts.revocation_keys = vec![];
+    assert_eq!(
+        verify_bundle_with(&stripped, &opts).revocation_status,
+        "absent"
+    );
+
+    // a Merkle-mode bundle carries only the root: the disclosed list is legitimately absent there.
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let proofs = vec![(GID.to_string(), nonmembership_proof(&leaves, GID))];
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, proofs);
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.revocation_status, "absent");
+    assert_eq!(r.revocation_merkle_status, "fresh");
+
+    // capstone: `missing` blocks it (a fully-clean capstone report otherwise).
+    let mut c = capstone_report();
+    assert_eq!(
+        c.action_completeness(),
+        ActionCompleteness::AttestedCompleteOverBrokeredSurface
+    );
+    c.revocation_status = "missing".to_string();
+    assert_eq!(
+        c.action_completeness(),
+        ActionCompleteness::ClaimedOverManifest
+    );
+}
+
+#[test]
+fn tier_b_attestation_binds_revocation_evidence_when_revocation_keys_pinned() {
+    // D (attestation half): under pinned revocation keys the signed subject MUST carry `revocation_digest` (else
+    // it never committed to the revocation evidence and cannot vouch nothing was stripped), and an optional
+    // `revocation_merkle_digest` binds the Merkle-mode root the same way.
+    let (rec, res, tsa, attest, rev) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+        signing_key_from_seed(&[11u8; 32]),
+        signing_key_from_seed(&[77u8; 32]),
+    );
+    let (base, cph, head_root) = d6_anchored(&rec, &tsa);
+    let revlist = revocation_list(&rev, ATT_ISSUED, ATT_NOT_AFTER, &["some-other-grant"]);
+    let with_list = change_field(&base, "revocation_list", revlist.clone());
+    let att_over = |subj: CanonValue| {
+        attestation(
+            &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
+            ATT_ISSUED,
+            ATT_NOT_AFTER,
+            subj,
+            &attest,
+        )
+    };
+    let mut opts = attest_opts(&rec, &res, &tsa, &attest);
+    opts.revocation_keys = vec![rev.verifying_key()];
+
+    // an attestation that never bound revocation_digest no longer attests a revocation-pinned bundle.
+    let unbound = att_over(honest_subject(&rec, &res, &cph, &head_root));
+    let r = verify_bundle_with(
+        &change_field(&with_list, "deployment_attestation", unbound),
+        &opts,
+    );
+    assert_ne!(r.attestation_status, "attested_claims");
+    assert!(
+        r.issues.iter().any(|i| i.contains("revocation_digest")),
+        "{:?}",
+        r.issues
+    );
+
+    // bound revocation_digest + a bound revocation_merkle_digest: stripping the root breaks the subject match.
+    let leaves = rev_leaves(&["other-1"]);
+    let root_obj = merkle_root_obj(&rev, ATT_ISSUED, ATT_NOT_AFTER, &leaves);
+    let subj = change_field(
+        &change_field(
+            &honest_subject(&rec, &res, &cph, &head_root),
+            "revocation_digest",
+            CanonValue::string(sha256_prefixed(revlist.serialize().as_bytes())),
+        ),
+        "revocation_merkle_digest",
+        CanonValue::string(sha256_prefixed(root_obj.serialize().as_bytes())),
+    );
+    let att = att_over(subj);
+    let full = change_field(
+        &change_field(&with_list, "revocation_merkle_root", root_obj),
+        "deployment_attestation",
+        att.clone(),
+    );
+    assert_eq!(
+        verify_bundle_with(&full, &opts).attestation_status,
+        "attested_claims"
+    );
+    let r = verify_bundle_with(
+        &change_field(&with_list, "deployment_attestation", att),
+        &opts,
+    );
+    assert_ne!(r.attestation_status, "attested_claims");
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("revocation_merkle_digest")),
+        "{:?}",
+        r.issues
+    );
+}
+
+// ---- A: deleting the (unsigned) `anchor` must never improve the Tier-B verdict (monotonicity) ----
+
+// Drop every checkpoint's `anchor` — it is outside the checkpoint hash (checkpoint.rs STRIP), so the stripped
+// checkpoints still verify: exactly what an attacker holding no key at all can do to a bundle.
+fn strip_anchors(bundle: &CanonValue) -> CanonValue {
+    let cps: Vec<CanonValue> = arr(bundle, "checkpoints")
+        .iter()
+        .map(|cp| {
+            let mut m = cp.as_object().unwrap().clone();
+            m.retain(|(k, _)| k != "anchor");
+            CanonValue::Object(m)
+        })
+        .collect();
+    change_field(bundle, "checkpoints", CanonValue::Array(cps))
+}
+
+#[test]
+fn tier_b_stripping_anchors_does_not_hide_violations() {
+    // A: the Tier-B join ran over the ANCHORED-closed set only, so deleting `anchor` turned every closed use into
+    // `unmatched_pending` (never a violation): an action without a credential, a double-spend, a revoked use and a
+    // cosig failure all flipped to ok:true with no key. Negative findings now run over every record committed by a
+    // SIGNED checkpoint; only positive claims still need anchoring.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let rev = signing_key_from_seed(&[77u8; 32]);
+    // revocation keys are pinned only for the revoked-use case (a pinned issuer with no list would itself block).
+    let opts = |revocation: bool| {
+        let mut o = pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        );
+        if revocation {
+            o.revocation_keys = vec![rev.verifying_key()];
+        }
+        o
+    };
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let use_of = |id: &str, prev: &[String], used_at: i64| {
+        seal_use(
+            &rec,
+            &res,
+            id,
+            prev,
+            ACTION,
+            &use_evidence(GID, ACTION, RESOURCE, GID, CNF, used_at),
+        )
+    };
+    // 1. action without a credential (the auditor's repro).
+    let lone = use_of("use-1", &[], USED);
+    let b1 = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![lone.clone()],
+        vec![checkpoint_over(
+            &rec,
+            &[content_hash_of(&lone)],
+            1,
+            Some(&tsa),
+        )],
+    );
+    // 2. single-use double-spend.
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let gch = content_hash_of(&grant);
+    let (u1, u2) = (
+        use_of("use-1", std::slice::from_ref(&gch), USED),
+        use_of("use-2", std::slice::from_ref(&gch), USED + 1),
+    );
+    let b2 = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant.clone(), u1.clone(), u2.clone()],
+        vec![checkpoint_over(
+            &rec,
+            &[content_hash_of(&u1), content_hash_of(&u2)],
+            3,
+            Some(&tsa),
+        )],
+    );
+    // 3. a use of a grant the signed revocation_list revokes (already caught pre-fix via the undatable list,
+    //    kept here so the revoked-use block itself is shown to survive the strip).
+    let b3 = change_field(
+        &tier_b_bundle(
+            &rec.verifying_key(),
+            vec![grant.clone(), u1.clone()],
+            vec![checkpoint_over(
+                &rec,
+                &[content_hash_of(&u1)],
+                2,
+                Some(&tsa),
+            )],
+        ),
+        "revocation_list",
+        revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[GID]),
+    );
+    // 4. a grant declaring cosig_threshold 1 with no approvals (M6), and a use of it.
+    let cosig_grant = seal_grant(
+        &rec,
+        &rec,
+        GID,
+        &change_field(&ge, "cosig_threshold", CanonValue::Int(1)),
+    );
+    let cu = use_of("use-1", &[content_hash_of(&cosig_grant)], USED);
+    let b4 = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![cosig_grant, cu.clone()],
+        vec![checkpoint_over(
+            &rec,
+            &[content_hash_of(&cu)],
+            2,
+            Some(&tsa),
+        )],
+    );
+
+    for (name, b, revocation, needle) in [
+        ("no credential", b1, false, "action without a credential"),
+        ("double-spend", b2, false, "double-spend"),
+        ("revoked use", b3, true, "marks REVOKED"),
+        ("cosig failure", b4, false, "cosig threshold not met"),
+    ] {
+        let anchored = verify_bundle_with(&b, &opts(revocation));
+        assert!(!anchored.ok, "{name}: anchored baseline must fail");
+        let stripped = verify_bundle_with(&strip_anchors(&b), &opts(revocation));
+        assert!(
+            !stripped.ok,
+            "{name}: deleting the anchors must not turn a violation into a PASS; issues: {:?}",
+            stripped.issues
+        );
+        assert!(
+            stripped.issues.iter().any(|i| i.contains(needle)),
+            "{name}: {:?}",
+            stripped.issues
+        );
+        assert_eq!(stripped.uses_matched, 0, "{name}");
+    }
+}
+
+#[test]
+fn tier_b_stripping_anchors_only_demotes_positive_claims() {
+    // A (the other half): a CLEAN anchored bundle stays ok when its anchors are stripped, but its positive claim
+    // falls back to pending — the verdict can only get weaker, never stronger.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let a = verify_bundle_with(&bundle, &opts);
+    assert!(a.ok, "{:?}", a.issues);
+    assert_eq!(
+        (a.uses_matched, a.unmatched_pending, a.grants_unused),
+        (1, 0, 0)
+    );
+    let s = verify_bundle_with(&strip_anchors(&bundle), &opts);
+    assert!(s.ok, "{:?}", s.issues);
+    assert_eq!(s.uses_matched, 0);
+    assert_eq!(s.unmatched_pending, 1);
+    assert_eq!(s.unmatched_violation, 0);
+    assert_eq!(
+        s.grants_unused, 0,
+        "an unanchored grant is not a clean unused grant"
+    );
+    // With NO Tier-B authority pinned (the default, pin-nothing integrity flow) no receipt can validate, so the
+    // committed extension does not apply: the bundle stays ok with its use pending, as before.
+    let d = verify_bundle(&bundle);
+    assert!(d.ok, "{:?}", d.issues);
+    assert_eq!((d.uses_matched, d.unmatched_pending), (0, 1));
+}
+
+// ---- D6 amendment A1: operator-voided broker_seq (`grant_void` tombstones) ----
+
+// a well-formed void_evidence for a voided reservation (gid at broker_seq), optionally tagged with a broker_id (M4).
+fn void_evidence(gid: &str, broker_seq: i64, broker_id: Option<&str>) -> CanonValue {
+    let ve = CanonValue::object(vec![
+        (
+            "domain".into(),
+            CanonValue::string("averin.broker.grant_void.v1"),
+        ),
+        ("project_id".into(), CanonValue::string("proj-001")),
+        ("broker_seq".into(), CanonValue::Int(broker_seq)),
+        ("grant_id".into(), CanonValue::string(gid)),
+        (
+            "voided_at".into(),
+            CanonValue::string("2026-06-15T10:05:00.000Z"),
+        ),
+        ("reason".into(), CanonValue::string("orphaned reservation")),
+    ])
+    .unwrap();
+    match broker_id {
+        Some(b) => change_field(&ve, "broker_id", CanonValue::string(b)),
+        None => ve,
+    }
+}
+
+// seal a grant_void tombstone exactly as the server's buildGrantVoidRecord shapes it: role tuple
+// (grant_void, credential_broker), record_id == the voided grant_id, event_type credential_grant_void, and the
+// authority's evidence_sig over sha256(RCP(void_evidence)) by `broker_sk` — or NO evidence_sig when `broker_sk` is None.
+fn seal_void(
+    rec_sk: &SigningKey,
+    broker_sk: Option<&SigningKey>,
+    record_id: &str,
+    ve: &CanonValue,
+) -> CanonValue {
+    let eh = sha256_prefixed(ve.serialize().as_bytes());
+    let sig_field = match broker_sk {
+        Some(sk) => format!(
+            r#","evidence_sig":"{}""#,
+            sign_evidence("gateway_enforced", "proj-001", record_id, &eh, sk)
+        ),
+        None => String::new(),
+    };
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"averin-broker","agent_version":"averin-broker",
+        "session_id":"broker-seq-void","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
+        "agent_ts":"2026-06-15T10:05:00.000Z","received_ts":"2026-06-15T10:05:00.000Z",
+        "event_type":"credential_grant_void","action":"broker_seq.void","observed_via":"broker","status":"void",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"credential_broker","grant_id":"{record_id}","evidence_hash":"{eh}"{sig_field}}},
+        "extensions":{{"broker":{{"kind":"grant_void","void_evidence":{ve}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ve = ve.serialize(),
+    );
+    seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
+// the D6 single-broker bundle over `records`, whose ONE anchored checkpoint commits all of them and carries a head
+// folding `log` (seq, content_hash) with the given max_seq.
+fn void_bundle(
+    rec: &SigningKey,
+    tsa: &SigningKey,
+    records: Vec<CanonValue>,
+    log: &[(i64, &str)],
+    max_seq: i64,
+) -> CanonValue {
+    let frontier: Vec<String> = records.iter().map(content_hash_of).collect();
+    let head = grant_head_cv(max_seq, &ghr(&[]), &ghr(log));
+    let cp = checkpoint_with_head(rec, &frontier, records.len() as i64, head, Some(tsa));
+    tier_b_bundle(&rec.verifying_key(), records, vec![cp])
+}
+
+fn void_keys() -> (SigningKey, SigningKey, SigningKey) {
+    (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    )
+}
+
+fn has_issue(r: &VerifyReport, needle: &str) -> bool {
+    r.issues.iter().any(|i| i.contains(needle))
+}
+
+#[test]
+fn grant_void_tombstone_filling_a_gap_verifies() {
+    // POSITIVE: seq 1 was reserved by grant-1 and never recorded; grant-2 recorded seq 2. A broker-signed tombstone
+    // for grant-1 at seq 1 fills the gap: the log is a gapless [1..2], broker_trust reaches sequence_verified, and
+    // the tombstone is NEVER counted as a grant.
+    let (rec, res, tsa) = void_keys();
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let g = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g.clone()], &[(1, &th), (2, &gh)], 2),
+        &opts,
+    );
+    assert!(
+        r.ok,
+        "a valid tombstone filling a gap must verify; issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.broker_trust, "sequence_verified");
+    assert_eq!(r.grant_total, 1, "a tombstone is never a grant");
+    assert_eq!(r.grant_verified, 1);
+
+    // CONTROL: the same bundle without the tombstone is the wedge (a gap at seq 1).
+    let r = verify_bundle_with(&void_bundle(&rec, &tsa, vec![g], &[(2, &gh)], 2), &opts);
+    assert!(!r.ok && has_issue(&r, "gapless"), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn grant_void_relabelled_grant_evidence_fails_domain_check() {
+    // (1) a real grant's signed payload relabelled as a tombstone: grant_evidence (augmented to bind the project, so
+    // ONLY the domain tag is missing) moved under void_evidence and signed by the pinned broker key. The domain tag
+    // is what keeps a grant_evidence payload from ever doubling as a void statement, so it must not fill seq 1.
+    let (rec, res, tsa) = void_keys();
+    let ge = change_field(
+        &grant_evidence_d6(GID, 1),
+        "project_id",
+        CanonValue::string("proj-001"),
+    );
+    let t = seal_void(&rec, Some(&rec), GID, &ge);
+    let g = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (2, &gh)], 2),
+        &pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        ),
+    );
+    assert!(
+        !r.ok,
+        "a grant_evidence payload relabelled as void_evidence must fail"
+    );
+    assert!(
+        has_issue(&r, "grant_void tombstone")
+            && has_issue(
+                &r,
+                "void_evidence.domain is not averin.broker.grant_void.v1"
+            ),
+        "issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.grant_total, 1, "the relabelled payload is not a grant");
+}
+
+#[test]
+fn grant_void_unsigned_or_foreign_signed_under_pinned_broker_keys_fails() {
+    // (2) under pinned broker_authority_keys a tombstone must verify under them to fill its seq: one with NO
+    // evidence_sig, or one signed by a key that is not a pinned broker key, is a hard failure (not a silent filler).
+    let (rec, res, tsa) = void_keys();
+    let rogue = signing_key_from_seed(&[77u8; 32]);
+    for (label, signer) in [("unsigned", None), ("rogue-signed", Some(&rogue))] {
+        let t = seal_void(&rec, signer, GID, &void_evidence(GID, 1, None));
+        let g = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+        let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+        let r = verify_bundle_with(
+            &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (2, &gh)], 2),
+            &pinned_roles(
+                rec.verifying_key(),
+                res.verifying_key(),
+                tsa.verifying_key(),
+            ),
+        );
+        assert!(
+            !r.ok,
+            "{label} tombstone under pinned broker keys must fail"
+        );
+        assert!(
+            has_issue(&r, "does not verify under a pinned broker key"),
+            "{label}: issues: {:?}",
+            r.issues
+        );
+    }
+}
+
+#[test]
+fn grant_void_without_broker_id_under_federation_fails() {
+    // (3) under an active federation a tombstone fills a seq only in ITS broker's partition (void_evidence.broker_id).
+    // One carrying no broker_id fills nothing and is flagged; the SAME tombstone tagged with the broker verifies.
+    let (rec, res, tsa) = void_keys();
+    let mk = |bid: Option<&str>| {
+        let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, bid));
+        let g = seal_grant(
+            &rec,
+            &rec,
+            "grant-2",
+            &grant_evidence_fed("grant-2", BID_A, 2),
+        );
+        let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+        let heads = fed_heads(&[(
+            BID_A,
+            grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &th), (2, &gh)])),
+        )]);
+        let cp = checkpoint_with_fed_heads(
+            &rec,
+            "cp0",
+            0,
+            None,
+            &[th.clone(), gh.clone()],
+            2,
+            heads,
+            Some(&tsa),
+        );
+        let mut fed = std::collections::BTreeMap::new();
+        fed.insert(BID_A.to_string(), vec![rec.verifying_key()]);
+        let opts = VerifyOptions {
+            federated_broker_keys: fed,
+            resource_authority_keys: vec![res.verifying_key()],
+            trusted_tsa_keys: vec![tsa.verifying_key()],
+            ..Default::default()
+        };
+        verify_bundle_with(
+            &tier_b_bundle(&rec.verifying_key(), vec![t, g], vec![cp]),
+            &opts,
+        )
+    };
+    let r = mk(None);
+    assert!(
+        !r.ok,
+        "a tombstone without broker_id under federation must fail"
+    );
+    assert!(
+        has_issue(&r, "carries no broker_id while federation is active"),
+        "issues: {:?}",
+        r.issues
+    );
+    let r = mk(Some(BID_A));
+    assert!(
+        r.ok,
+        "the same tombstone tagged with its broker_id fills that partition's seq; issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.federation_status, "sequence_verified");
+}
+
+#[test]
+fn grant_void_use_of_voided_grant_id_never_joins() {
+    // (4) a tombstone is never a grant: a resource-signed use referencing the voided grant_id finds no grant to join
+    // and is an anchored unmatched use — a violation, never a match against the tombstone.
+    let (rec, res, tsa) = void_keys();
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let th = content_hash_of(&t);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let u = seal_use(&rec, &res, "use-1", std::slice::from_ref(&th), ACTION, &ue);
+    let uh = content_hash_of(&u);
+    let head = grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &th)]));
+    let cp = checkpoint_with_head(&rec, std::slice::from_ref(&uh), 2, head, Some(&tsa));
+    let r = verify_bundle_with(
+        &tier_b_bundle(&rec.verifying_key(), vec![t, u], vec![cp]),
+        &pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        ),
+    );
+    assert!(!r.ok, "a use of a voided grant_id must fail the bundle");
+    assert_eq!(r.uses_matched, 0, "a use must never join a tombstone");
+    assert_eq!(r.unmatched_violation, 1, "issues: {:?}", r.issues);
+    assert_eq!(r.grant_total, 0);
+}
+
+#[test]
+fn grant_void_above_max_seq_is_flagged() {
+    // (5) a tombstone at a seq ABOVE the recorded max: grant-1 at seq 1, a tombstone at seq 3 (nothing at 2).
+    // (a) a head that honestly folds both (max_seq 3) is not a gapless prefix; (b) a head that stops at max_seq 1
+    // omits a committed log entry (tail omission / root mismatch). Both fail.
+    let (rec, res, tsa) = void_keys();
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let g = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let t = seal_void(
+        &rec,
+        Some(&rec),
+        "grant-3",
+        &void_evidence("grant-3", 3, None),
+    );
+    let (gh, th) = (content_hash_of(&g), content_hash_of(&t));
+    let r = verify_bundle_with(
+        &void_bundle(
+            &rec,
+            &tsa,
+            vec![g.clone(), t.clone()],
+            &[(1, &gh), (3, &th)],
+            3,
+        ),
+        &opts,
+    );
+    assert!(
+        !r.ok && has_issue(&r, "gapless"),
+        "(a) a tombstone past a hole must fail the gapless check; issues: {:?}",
+        r.issues
+    );
+    let r = verify_bundle_with(&void_bundle(&rec, &tsa, vec![g, t], &[(1, &gh)], 1), &opts);
+    assert!(
+        !r.ok,
+        "(b) a committed tombstone above the head's max_seq must fail; issues: {:?}",
+        r.issues
+    );
+    assert_ne!(r.broker_trust, "sequence_verified");
+}
+
+#[test]
+fn grant_void_with_grant_of_the_voided_grant_id_fails() {
+    // (6) a bundle carrying BOTH a tombstone for grant-1 AND a grant whose grant_evidence.grant_id is grant-1 (under a
+    // different record_id, dodging the duplicate-record_id check, and at a different seq, dodging the duplicate-seq
+    // check): the voided reservation was nonetheless issued — the tombstone must not fill its seq.
+    let (rec, res, tsa) = void_keys();
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let g = seal_grant(&rec, &rec, "rec-issued", &grant_evidence_d6(GID, 2));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (2, &gh)], 2),
+        &opts,
+    );
+    assert!(
+        !r.ok,
+        "a tombstone alongside a grant of the voided grant_id must fail"
+    );
+    assert!(
+        has_issue(
+            &r,
+            "a grant with the voided grant_id is also present (a voided reservation was issued)"
+        ),
+        "issues: {:?}",
+        r.issues
+    );
+
+    // and a different grant claiming the tombstone's OWN seq is a duplicate-seq violation.
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let g = seal_grant(&rec, &rec, "grant-dup", &grant_evidence_d6("grant-dup", 1));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (1, &gh)], 1),
+        &opts,
+    );
+    assert!(
+        !r.ok && has_issue(&r, "claimed by more than one committed record"),
+        "issues: {:?}",
+        r.issues
     );
 }

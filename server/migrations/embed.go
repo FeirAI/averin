@@ -9,3 +9,15 @@ import _ "embed"
 //
 //go:embed 0001_init.sql
 var Schema string
+
+// RecordIDUnique is the full contents of 0002_record_id_unique.sql: the per-project record_id uniqueness
+// backstop (schema version 2). Idempotent (IF NOT EXISTS).
+//
+//go:embed 0002_record_id_unique.sql
+var RecordIDUnique string
+
+// BrokerSeqVoid is the full contents of 0003_broker_seq_void.sql: broker_seq.allocated_at + the insert-only
+// broker_seq_void marker table behind the operator's grant_void remediation (schema version 3). Idempotent.
+//
+//go:embed 0003_broker_seq_void.sql
+var BrokerSeqVoid string
