@@ -94,6 +94,21 @@ fn authority_subject_v3_matches_govder_vector() {
     );
 }
 
+#[test]
+fn sdk_prepared_v3_record_matches_govder_subject_bytes() {
+    let vector = read_manifest("authority-sdk-v3.json");
+    let record = vector.get("prepared_record").unwrap();
+    assert_eq!(
+        subject_digest(record).unwrap(),
+        vector.get("subject_digest").unwrap().as_str().unwrap()
+    );
+    let draft = vector.get("draft_record").unwrap();
+    assert!(
+        subject_digest(draft).is_err(),
+        "draft is not signable before preparation"
+    );
+}
+
 // ---- RCP rejection rules (negative vectors) ----
 
 fn rejects(input: &str, why: &str) {

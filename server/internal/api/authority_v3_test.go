@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -12,6 +14,73 @@ import (
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/store"
 )
+
+func TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite(t *testing.T) {
+	fixtureBytes, err := os.ReadFile("../../../spec/golden-vectors/authority-sdk-v3.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Prepared map[string]any `json:"prepared_record"`
+		Digest   string         `json:"subject_digest"`
+	}
+	if err := json.Unmarshal(fixtureBytes, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	recorder, err := core.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalSeed := peSeed(0x67)
+	approver, err := core.New(hex.EncodeToString(externalSeed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := ed25519.NewKeyFromSeed(externalSeed).Public().(ed25519.PublicKey)
+	st := store.NewMem()
+	h := api.New(recorder, st, "k0").WithPolicyEngineKey("human_signed", pub).Routes()
+	raw, err := json.Marshal(fixture.Prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := approver.SignAuthorityRecordV3(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof.SubjectDigest != fixture.Digest {
+		t.Fatalf("SDK fixture digest = %s, want %s", proof.SubjectDigest, fixture.Digest)
+	}
+	authority := fixture.Prepared["authority"].(map[string]any)
+	authority["subject_digest"] = proof.SubjectDigest
+	authority["evidence_sig"] = proof.EvidenceSig
+	expected := map[string]any{}
+	raw, _ = json.Marshal(fixture.Prepared)
+	if err := json.Unmarshal(raw, &expected); err != nil {
+		t.Fatal(err)
+	}
+	fixture.Prepared["idempotency_key"] = "sdk-v3-fixture"
+	raw, _ = json.Marshal(fixture.Prepared)
+	if code, body := do(t, h, "POST", "/v2/records", string(raw)); code != http.StatusCreated {
+		t.Fatalf("prepared SDK v3 record did not seal (%d): %s", code, body)
+	}
+	stored, err := st.AllRecords("p1")
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("prepared SDK record storage: %d, %v", len(stored), err)
+	}
+	if got, err := recorder.VerifyAuthorityRecord(stored[0].JSON, approver.PubKey()); err != nil || got != "verified" {
+		t.Fatalf("prepared SDK authority = %q, %v", got, err)
+	}
+	var sealed map[string]any
+	if err := json.Unmarshal([]byte(stored[0].JSON), &sealed); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"received_ts", "display_seq", "causal_prev_hashes", "key", "content_hash", "sig"} {
+		delete(sealed, field)
+	}
+	if !reflect.DeepEqual(sealed, expected) {
+		t.Fatalf("server rewrote externally approved semantic record\nsealed: %#v\napproved: %#v", sealed, expected)
+	}
+}
 
 func TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal(t *testing.T) {
 	recorder, err := core.New(seed)
