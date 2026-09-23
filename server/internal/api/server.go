@@ -2546,7 +2546,10 @@ func (s *Server) storedUseMatchesRequest(recordJSON string, ur useRequest, param
 		return false
 	}
 	var p struct {
-		ProjectID   string `json:"project_id"`
+		ProjectID string `json:"project_id"`
+		Authority struct {
+			GrantID string `json:"grant_id"`
+		} `json:"authority"`
 		InputCommit struct {
 			Commitment string `json:"commitment"`
 		} `json:"input_commit"`
@@ -2583,7 +2586,7 @@ func (s *Server) storedUseMatchesRequest(recordJSON string, ur useRequest, param
 	}
 	if ue.Action != ur.Action || ue.Nonce != ur.Nonce || ue.UseSequenceNumber != effectiveUseSequence ||
 		p.InputCommit.Commitment != paramsCommitment ||
-		claims.Jti == "" || claims.Jti != ue.GrantID || claims.Jti != ue.JTI ||
+		claims.Jti == "" || claims.Jti != p.Authority.GrantID || claims.Jti != ue.GrantID || claims.Jti != ue.JTI ||
 		claims.Aud != s.resourceID || claims.Aud != ue.ResourceID || claims.Act != ue.Action ||
 		claims.Cnf == "" || claims.Cnf != ue.CnfPub {
 		return false
