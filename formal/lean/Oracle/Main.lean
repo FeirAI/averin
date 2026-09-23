@@ -98,23 +98,29 @@ def jsonInt (j : Json) : M Int := do
   | .num n => if n.exponent = 0 then pure n.mantissa else throw s!"non-integer {j.compress}"
   | _ => throw s!"expected an integer, got {j.compress}"
 
-partial def toCV (j : Json) : M CV := do
-  match j with
-  | .null => pure .null
-  | .bool b => pure (.bool b)
-  | .num _ => pure (.int (← jsonInt j))
-  | .str s => pure (.str s.toList)
-  | .arr xs => pure (.arr (toCVs (← xs.toList.mapM toCV)))
-  | .obj _ =>
-    let pairs ← (← (← j.getObjVal? "obj").getArr?).toList.mapM fun p => do
-      match p with
-      | .arr #[k, v] => pure ((← k.getStr?).toList, ← toCV v)
-      | _ => throw s!"object member must be [key, value], got {p.compress}"
-    let sorted := sortMembers pairs
-    -- RCP §5: keys are unique. A duplicate would make the model's text ambiguous to compare.
-    let keys := sorted.map (·.1)
-    if keys.eraseDups.length != keys.length then throw s!"duplicate key in {j.compress}"
-    pure (.obj (toMembers sorted))
+/-- Total (fuel-bounded, so no `partial def` escapes the axiom gate); `toCV` passes the compressed
+text length, which bounds the nesting depth. -/
+def toCVF : Nat → Json → M CV
+  | 0, j => throw s!"nesting too deep at {j.compress}"
+  | fuel + 1, j => do
+    match j with
+    | .null => pure .null
+    | .bool b => pure (.bool b)
+    | .num _ => pure (.int (← jsonInt j))
+    | .str s => pure (.str s.toList)
+    | .arr xs => pure (.arr (toCVs (← xs.toList.mapM (toCVF fuel))))
+    | .obj _ =>
+      let pairs ← (← (← j.getObjVal? "obj").getArr?).toList.mapM fun p => do
+        match p with
+        | .arr #[k, v] => pure ((← k.getStr?).toList, ← toCVF fuel v)
+        | _ => throw s!"object member must be [key, value], got {p.compress}"
+      let sorted := sortMembers pairs
+      -- RCP §5: keys are unique. A duplicate would make the model's text ambiguous to compare.
+      let keys := sorted.map (·.1)
+      if keys.eraseDups.length != keys.length then throw s!"duplicate key in {j.compress}"
+      pure (.obj (toMembers sorted))
+
+def toCV (j : Json) : M CV := toCVF (j.compress.length + 1) j
 
 /-! ## Hex output -/
 
