@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/store"
 )
 
@@ -461,6 +462,11 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	credentialAddr, err := s.content.Put(content.WithTenant(r.Context(), fr.ProjectID), prepared.DescriptorBytes)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store credential descriptor: "+err.Error())
+		return
+	}
 
 	// The project lock spans final pending/idempotency checks, allocation,
 	// frontier selection, seal, insert, and pending deletion on one connection.
@@ -512,7 +518,7 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("store returned non-positive broker_seq %d", seq)
 		}
 		prepared.Evidence["broker_seq"] = seq
-		rec, disclosures, e := s.buildGrantRecord(grantID, p.gr, p.req, prepared)
+		rec, disclosures, e := s.buildGrantRecord(grantID, p.gr, p.req, prepared, credentialAddr.Digest)
 		if e != nil {
 			return e
 		}

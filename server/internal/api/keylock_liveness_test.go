@@ -2,149 +2,138 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/feirai/averin/server/internal/store"
 )
 
-// These tests exercise the finding-C fix directly: handleGrantPrepare/handleRevoke used to hold a SINGLE
-// process-wide mutex across the durable Postgres round-trip (up to opTimeout=10s), so a slow/degraded DB
-// serialized ALL prepares/revokes, not just ones racing for the same idem-key/project (a self-inflicted
-// DoS). They now serialize per-idem-key (pendingKeyLocks) / per-project (revokeLocks) instead. No real
-// Postgres is needed here: both handlers take their keyed lock UNCONDITIONALLY (even with s.durable == nil,
-// which skips the DB round-trip entirely), so grabbing the SAME keyedMutex directly from the test — as if
-// another goroutine's in-flight request were mid-round-trip — is a faithful, hermetic way to simulate
-// contention without a fake/slow durable double.
-
-// TestHandleGrantPrepareDifferentIdemKeysDoNotBlock: a prepare for idem key "B" must complete promptly even
-// while idem key "A"'s lock is held (simulating a same-key prepare stuck in a slow PutPending) — different
-// keys must run fully concurrently.
-func TestHandleGrantPrepareDifferentIdemKeysDoNotBlock(t *testing.T) {
-	brokerKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
-	agentKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, ed25519.SeedSize))
-	s := New(testCore(t), store.NewMem(), "k0").WithBroker(brokerKey)
-
-	unlockA := s.pendingKeyLocks.Lock(pendingKey("p1", "idem-A"))
-	defer unlockA()
-
-	done := make(chan int, 1)
+func holdProject(t *testing.T, st store.Store, projectID string) func() {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	go func() {
-		req := httptest.NewRequest("POST", "/v2/grants/prepare", bytes.NewReader([]byte(grantChallengeBody("idem-B", "read:orders", agentKey))))
-		w := httptest.NewRecorder()
-		s.handleGrantPrepare(w, req)
-		done <- w.Code
+		done <- st.WithProjectWrite(ctx, projectID, func(store.Store) error {
+			close(entered)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
 	}()
 	select {
-	case code := <-done:
-		if code != http.StatusOK {
-			t.Fatalf("prepare for a DIFFERENT idem key failed: %d", code)
+	case <-entered:
+	case err := <-done:
+		t.Fatalf("holder failed: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	return func() {
+		close(release)
+		if err := <-done; err != nil {
+			t.Error(err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("prepare for a DIFFERENT idem key blocked on another key's lock — per-key serialization is too coarse")
+		cancel()
 	}
 }
 
-// TestHandleGrantPrepareSameIdemKeyBlocks: a prepare for idem key "same" must stay blocked while ANOTHER
-// holder of that SAME key's lock has not released it, and complete promptly once it does — the
-// mint/persist/cache critical section must stay atomic per key (correctness preserved, not weakened).
-func TestHandleGrantPrepareSameIdemKeyBlocks(t *testing.T) {
+func TestGrantPrepareProjectSerialization(t *testing.T) {
 	brokerKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
 	agentKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, ed25519.SeedSize))
-	s := New(testCore(t), store.NewMem(), "k0").WithBroker(brokerKey)
-
-	unlockSame := s.pendingKeyLocks.Lock(pendingKey("p1", "idem-same"))
-
-	done := make(chan int, 1)
-	go func() {
-		req := httptest.NewRequest("POST", "/v2/grants/prepare", bytes.NewReader([]byte(grantChallengeBody("idem-same", "read:orders", agentKey))))
-		w := httptest.NewRecorder()
-		s.handleGrantPrepare(w, req)
-		done <- w.Code
+	st := store.NewMem()
+	s := New(testCore(t), st, "k0").WithBroker(brokerKey)
+	release := holdProject(t, st, "p1")
+	defer func() {
+		if release != nil {
+			release()
+		}
 	}()
-	select {
-	case <-done:
-		t.Fatal("prepare for the SAME idem key completed while another holder still held that key's lock")
-	case <-time.After(200 * time.Millisecond):
-		// expected: still blocked
+	request := func(project, idem string) int {
+		body := strings.Replace(grantChallengeBody(idem, "read:orders", agentKey), `"project_id":"p1"`, `"project_id":"`+project+`"`, 1)
+		w := httptest.NewRecorder()
+		s.handleGrantPrepare(w, httptest.NewRequest("POST", "/v2/grants/prepare", bytes.NewReader([]byte(body))))
+		return w.Code
 	}
-	unlockSame()
+	blocked := make(chan int, 1)
+	go func() { blocked <- request("p1", "same") }()
 	select {
-	case code := <-done:
+	case code := <-blocked:
+		t.Fatalf("same project escaped guard: %d", code)
+	case <-time.After(100 * time.Millisecond):
+	}
+	other := make(chan int, 1)
+	go func() { other <- request("p2", "independent") }()
+	select {
+	case code := <-other:
 		if code != http.StatusOK {
-			t.Fatalf("prepare after the same-key lock was released failed: %d", code)
+			t.Fatalf("other project prepare = %d", code)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("prepare never completed after the same-key lock was released")
+		t.Fatal("other project stalled")
+	}
+	release()
+	release = nil
+	select {
+	case code := <-blocked:
+		if code != http.StatusOK {
+			t.Fatalf("same project prepare = %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("same project never resumed")
 	}
 }
 
-// TestHandleRevokeDifferentProjectsDoNotBlock: mirrors the prepare test above for handleRevoke — a revoke
-// for project "p2" must complete promptly even while project "p1"'s lock is held.
-func TestHandleRevokeDifferentProjectsDoNotBlock(t *testing.T) {
+func TestRevokeProjectSerialization(t *testing.T) {
 	_, revKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(testCore(t), store.NewMem(), "k0").WithRevocation(revKey)
-
-	unlockP1 := s.revokeLocks.Lock("p1")
-	defer unlockP1()
-
-	done := make(chan int, 1)
-	go func() {
-		body := `{"project_id":"p2","grant_id":"g-1"}`
-		req := httptest.NewRequest("POST", "/v2/revoke?project=p2", bytes.NewReader([]byte(body)))
-		w := httptest.NewRecorder()
-		s.handleRevoke(w, req)
-		done <- w.Code
+	st := store.NewMem()
+	s := New(testCore(t), st, "k0").WithRevocation(revKey)
+	release := holdProject(t, st, "p1")
+	defer func() {
+		if release != nil {
+			release()
+		}
 	}()
+	request := func(project string) int {
+		body := `{"project_id":"` + project + `","grant_id":"g-1"}`
+		w := httptest.NewRecorder()
+		s.handleRevoke(w, httptest.NewRequest("POST", "/v2/revoke?project="+project, bytes.NewReader([]byte(body))))
+		return w.Code
+	}
+	blocked := make(chan int, 1)
+	go func() { blocked <- request("p1") }()
 	select {
-	case code := <-done:
+	case code := <-blocked:
+		t.Fatalf("same project escaped guard: %d", code)
+	case <-time.After(100 * time.Millisecond):
+	}
+	other := make(chan int, 1)
+	go func() { other <- request("p2") }()
+	select {
+	case code := <-other:
 		if code != http.StatusCreated {
-			t.Fatalf("revoke for a DIFFERENT project failed: %d", code)
+			t.Fatalf("other project revoke = %d", code)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("revoke for a DIFFERENT project blocked on another project's lock — per-project serialization is too coarse")
+		t.Fatal("other project stalled")
 	}
-}
-
-// TestHandleRevokeSameProjectBlocks: a revoke for project "p1" must stay blocked while another holder of
-// that SAME project's lock has not released it — the cap-check-then-persist-then-write critical section
-// must stay atomic per project (correctness preserved, not weakened — see handleRevoke's doc comment).
-func TestHandleRevokeSameProjectBlocks(t *testing.T) {
-	_, revKey, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := New(testCore(t), store.NewMem(), "k0").WithRevocation(revKey)
-
-	unlockP1 := s.revokeLocks.Lock("p1")
-
-	done := make(chan int, 1)
-	go func() {
-		body := `{"project_id":"p1","grant_id":"g-1"}`
-		req := httptest.NewRequest("POST", "/v2/revoke?project=p1", bytes.NewReader([]byte(body)))
-		w := httptest.NewRecorder()
-		s.handleRevoke(w, req)
-		done <- w.Code
-	}()
+	release()
+	release = nil
 	select {
-	case <-done:
-		t.Fatal("revoke for the SAME project completed while another holder still held that project's lock")
-	case <-time.After(200 * time.Millisecond):
-		// expected: still blocked
-	}
-	unlockP1()
-	select {
-	case code := <-done:
+	case code := <-blocked:
 		if code != http.StatusCreated {
-			t.Fatalf("revoke after the same-project lock was released failed: %d", code)
+			t.Fatalf("same project revoke = %d", code)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("revoke never completed after the same-project lock was released")
+		t.Fatal("same project never resumed")
 	}
 }
