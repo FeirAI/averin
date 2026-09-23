@@ -177,7 +177,7 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 			} else if ok {
 				if !res.Voided {
 					if ve := st.VoidBrokerSeq(vr.ProjectID, res.GrantID, vr.BrokerSeq); ve != nil {
-						fail(http.StatusInternalServerError, "broker_seq %d's grant_void tombstone is sealed but marking the reservation voided FAILED — repeat this call to finish (the tombstone already holds grant_id %s, so that grant can no longer record): %v", vr.BrokerSeq, res.GrantID, ve)
+						fail(http.StatusInternalServerError, "broker_seq %d void marker failed; the transaction rolled back: %v", vr.BrokerSeq, ve)
 						return
 					}
 				}
@@ -278,7 +278,7 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 			// sealed tombstone without its marker, which step (a) of a repeat finishes.
 			if !res.Voided {
 				if ve := st.VoidBrokerSeq(vr.ProjectID, res.GrantID, vr.BrokerSeq); ve != nil {
-					fail(http.StatusInternalServerError, "broker_seq %d's grant_void tombstone is sealed but marking the reservation voided FAILED — repeat this call to finish (the tombstone already holds grant_id %s, so that grant can no longer record): %v", vr.BrokerSeq, res.GrantID, ve)
+					fail(http.StatusInternalServerError, "broker_seq %d void marker failed; the transaction rolled back: %v", vr.BrokerSeq, ve)
 					return
 				}
 			}

@@ -2,10 +2,11 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -491,21 +492,20 @@ func TestGrantIdempotencyConflictRejected(t *testing.T) {
 	}
 }
 
-// ambiguousCommitStore simulates a store whose PutRecord COMMITS the record but returns an error (e.g. a
-// Postgres tx.Commit ack lost after the server-side commit), to prove the broker_seq is NOT released for a
-// grant that is actually durable (which would let a later grant reuse the number — ADR 0004 D6).
+// ambiguousCommitStore simulates a lost COMMIT acknowledgment after the
+// complete project transaction has committed, including its seq reservation.
 type ambiguousCommitStore struct {
 	store.Store
 	failNextCreate bool
 }
 
-func (a *ambiguousCommitStore) PutRecord(p, k string, rec store.Record) (store.Record, bool, error) {
-	stored, created, err := a.Store.PutRecord(p, k, rec)
-	if a.failNextCreate && created {
+func (a *ambiguousCommitStore) WithProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
+	err := a.Store.WithProjectWrite(ctx, projectID, fn)
+	if err == nil && a.failNextCreate {
 		a.failNextCreate = false
-		return stored, created, errors.New("simulated ambiguous commit (the record IS durable)")
+		return fmt.Errorf("%w: injected after durable commit", store.ErrCommitAmbiguous)
 	}
-	return stored, created, err
+	return err
 }
 
 func TestGrantAmbiguousCommitDoesNotReleaseSeq(t *testing.T) {
