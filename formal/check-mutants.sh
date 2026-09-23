@@ -44,6 +44,15 @@ kani_harness() {
   esac
 }
 
+kani_expectation() {
+  case "$1" in
+    m4-*) echo 'core/src/hashx.rs|assertion failed' ;;
+    m9-*|m10-*|m11-*) echo 'core/src/b64.rs|assertion failed' ;;
+    m14-*) echo 'core/src/canon.rs|index out of bounds' ;;
+    *) echo 'core/src/canon.rs|assertion failed' ;;
+  esac
+}
+
 fresh_tree() {
   rm -rf "$tree"
   mkdir -p "$tree/formal"
@@ -65,30 +74,40 @@ run_gate() {
       inventory) python3 formal/check-refinement.py ;;
       oracle) cargo test -q -p averin-decision-core --test oracle ;;
       golden) cargo test -q -p averin-decision-core --test golden ;;
-      kani) cargo kani -p averin-decision-core --lib --no-default-features --harness "$3" ;;
+      kani) "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" cargo kani -p averin-decision-core --lib --no-default-features --harness "$3" ;;
     esac
   ) >"$log" 2>&1
 }
 
 use_kani=1
+python3 formal/check-kani-mutant.py --self-test || exit 2
 if [ "${SKIP_KANI:-0}" = 1 ]; then
   use_kani=0
 elif ! command -v cargo-kani >/dev/null 2>&1; then
   echo "check-mutants: cargo-kani not found (install it, or set SKIP_KANI=1)" >&2
   exit 2
 fi
+if [ "$use_kani" = 1 ]; then
+  kani_timeout="$(command -v timeout || command -v gtimeout || true)"
+  if [ -z "$kani_timeout" ]; then
+    echo "check-mutants: timeout/gtimeout is required for bounded Kani runs" >&2
+    exit 2
+  fi
+fi
 
 echo "== baseline (unmutated): every gate must pass"
 fresh_tree
 for g in inventory oracle golden; do
-  if ! run_gate baseline "$g"; then
+  gate_exit=0
+  run_gate baseline "$g" || gate_exit=$?
+  if ! python3 formal/check-kani-mutant.py --gate "$g" --expect-success "$logs/baseline-$g.log" "$gate_exit"; then
     echo "check-mutants: FAIL: gate '$g' fails on the unmutated tree (see $logs/baseline-$g.log)" >&2
     exit 1
   fi
 done
 if [ "$use_kani" = 1 ]; then
   for h in string_escape_roundtrip utf16_key_order_is_exact lp_into_frames_exactly one_byte_tail_is_canonical two_byte_tail_is_canonical full_chunk_is_canonical utf16_strict_matches_std accepted_integer_spelling_is_canonical parse_never_panics; do
-    if ! run_gate "baseline-$h" kani "$h"; then
+    if ! run_gate "baseline-$h" kani "$h" || ! grep -q 'VERIFICATION:- SUCCESSFUL' "$logs/baseline-$h-kani.log"; then
       echo "check-mutants: FAIL: Kani harness $h fails on the unmutated tree" >&2
       exit 1
     fi
@@ -111,7 +130,10 @@ for patch in formal/mutants/*.patch; do
   # A mutant with a named harness must be killed by that harness itself (a real counterexample, not an
   # unwinding bound), whatever the other gates do: that is what keeps the Kani claim load-bearing.
   if [ -n "$h" ] && [ "$use_kani" = 1 ]; then
-    if ! run_gate "$name" kani "$h" && grep -q "VERIFICATION:- FAILED" "$logs/$name-kani.log"; then
+    proof_exit=0
+    run_gate "$name" kani "$h" || proof_exit=$?
+    IFS='|' read -r source description <<<"$(kani_expectation "$name")"
+    if python3 formal/check-kani-mutant.py "$logs/$name-kani.log" "$proof_exit" "$source" "$description"; then
       killed+=("kani:$h")
     else
       echo "check-mutants: FAIL: Kani harness $h did not refute $name (see $logs/$name-kani.log)" >&2
@@ -119,9 +141,14 @@ for patch in formal/mutants/*.patch; do
     fi
   fi
   for g in "${gates[@]}"; do
-    if ! run_gate "$name" "$g"; then
+    gate_exit=0
+    run_gate "$name" "$g" || gate_exit=$?
+    if python3 formal/check-kani-mutant.py --gate "$g" "$logs/$name-$g.log" "$gate_exit"; then
       killed+=("$g")
       [ "$first" = 1 ] && break
+    elif [ "$gate_exit" -ne 0 ]; then
+      echo "check-mutants: FAIL: gate '$g' did not finish with a recognized mutant counterexample (see $logs/$name-$g.log)" >&2
+      exit 1
     fi
   done
   if [ "${#killed[@]}" -eq 0 ]; then
