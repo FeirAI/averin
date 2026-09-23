@@ -179,7 +179,8 @@ What makes a void safe against a commit that is still in flight:
 
 - **Latest-attempt age.** The age is measured from the later of the seq's `allocated_at` and the last time
   its grant attempted the seq on this server (every retry refreshes that time, although a retry never
-  refreshes `allocated_at`).
+  refreshes `allocated_at`). A client that keeps retrying a persistently failing grant therefore keeps the
+  void refused; stop that client first (the TLA+ model's `GrantLog_void_starved.cfg` shows the outage).
 - **Ingest lock.** Within one process the void and every grant commit are serialized.
 - **UNIQUE `record_id` index.** On Postgres, the void requires the UNIQUE index `records_project_record_id_uniq`
   from migration `0002`. The tombstone's `record_id` is the voided `grant_id`, so at most one of the two can

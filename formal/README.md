@@ -23,8 +23,11 @@ that keeps the gates honest.
 > unless SHA-256 has a collision.
 
 The signer model (`Seal.HonestSigner`) lets the same key also sign checkpoints, every other
-signed family with *arbitrary* field values, raw 32-byte challenge digests, the JSON grant PoP
-challenge and the denial salt. So the "shared key" sentence is the theorem, not a gloss on it.
+signed family with *arbitrary* field values, raw 32-byte challenge digests, and **any** message whose
+first byte is not `0x00` (every seal message starts with `0x00`). That last disjunct covers the JSON
+grant PoP challenge, the base64url capability-token text the broker key signs
+(`broker.go::mint`, first byte `e`), the denial salt, and any unframed text added later. So the
+"shared key" sentence is the theorem, not a gloss on it.
 Giving two signed families the same tag breaks the build.
 
 Everything between "signature verifies" and "same body" is proved, not assumed:
@@ -36,14 +39,18 @@ Everything between "signature verifies" and "same body" is proved, not assumed:
    role-key disjointness is defence in depth. `signed_message_long` adds that, given the
    verifier's own digest validation, none of them can equal the raw 32-byte digests that the
    broker challenge families sign.
-   `Catalogue.lean` covers every remaining byte string averin hashes or signs: the JSON grant PoP
-   challenge, the denial salt, the raw key under `cnf_kid`, the credential-binding descriptor,
+   `Catalogue.lean` covers every remaining message a key signs and every remaining tagged or
+   verifier-recomputed preimage: the JSON grant PoP challenge, the capability-token text, the
+   denial salt, the raw key under `cnf_kid`, the credential-binding descriptor,
    the `uuidV5Shaped` server ids, and the RFC 6962 Merkle leaf and node. It proves each one
    disjoint from every framed family, by first byte or by length. That argument used to live
    only in prose.
    It also proves the server ids injective *only* for NUL-free project ids and exhibits the
    collision otherwise. The server therefore rejects NUL in `project_id`, `idempotency_key` and
    `record_id`.
+   Out of scope, and listed as such in `Catalogue.lean`: untagged, unsigned server-local SHA-256
+   inputs (RFC 3161 imprint, content addresses, witness fork id, idempotency digests, token
+   comparison, cache keys). Each is compared only with a digest of its own kind.
    `check-refinement.py` sweeps every `averin.*.vN` literal in `core/src` and `server/`, and fails
    unless each is a Lean family or catalogue tag.
 2. **No delimiter injection** (`Encoding.encodeFields_inj`, `Family.msg_inj`). Every preimage
@@ -60,10 +67,13 @@ Everything between "signature verifies" and "same body" is proved, not assumed:
 Cryptography is never axiomatised as injective. SHA-256 compresses, so that axiom would be false
 and every theorem vacuous. Hash results carry an explicit collision disjunct. Ed25519
 unforgeability is a hypothesis about which messages were signed. `check-axioms.sh` audits **every**
-declaration in the `Averin` namespace (the script prints the count), not a hand-picked list. The build fails if
-any of them depends on anything beyond `propext`, `Classical.choice` and `Quot.sound`, which
-also catches `sorry` and `native_decide`, both of which are axioms. It also rejects `axiom`,
-`admit`, `implemented_by` and `extern` tokens.
+declaration in the `Averin` namespace (the script prints the count), not a hand-picked list. That
+includes the oracle glue in `Averin.Oracle` (`utf8c_eq`, `recordPre_spec`, `checkpointPre_spec`),
+which ties the executable oracle to the definitions in `Seal`. The build fails if any of them
+depends on anything beyond `propext`, `Classical.choice` and `Quot.sound`, which also catches
+`sorry` and `native_decide`, both of which are axioms. It also rejects `axiom`, `admit`,
+`partial def`, `implemented_by` and `extern` tokens in `Averin/` and `Oracle/` (the oracle's JSON
+decoder is fuel-bounded rather than `partial` for this reason).
 
 Other results:
 
@@ -129,16 +139,21 @@ Three checks, each doing what it is good at:
      builder for.
    * The test also checks that the verifier rejects any record or checkpoint outside the model's
      pinned `domain` and `canon_version = "rcp-1"`.
-2. **Tag inventory** (`check-refinement.py`). Every domain-separation tag literal in the Rust
-   (named constants and the inline tags in `verify.rs`) must be a `Family` tag in `Preimage.lean`,
-   and every family's tag must still be used by the Rust. This is the one check that is textual by
-   design.
+2. **Tag inventory** (`check-refinement.py`). Every domain-separation tag literal in the code must
+   be a `Family` tag in `Preimage.lean` or a `Catalogue.lean` tag, and every family's tag must still
+   be used. The sweep lexes `core/src`, `server/internal`, `server/cmd`, `sdk/`, `verifier/` and
+   `web/src` (tests excluded): comments are dropped and every string literal is searched, including
+   Go raw strings, JS template strings and literals containing `//`. A tag built at runtime cannot
+   be seen textually, so the sweep also rejects its pieces: an unversioned tag-shaped literal
+   (`"averin.x"`, unless allowlisted with a reason, like the OTel attribute `averin.session`) and a
+   bare `".v1"`. This is the one check that is textual by design, and it only sees tagged
+   preimages; the untagged digests are listed as out of scope in `Catalogue.lean`.
 3. **Golden vectors** (`cargo test --test golden`), the committed cross-implementation contract.
 
 ## Mutation suite (CI job `formal-mutants`)
 
-`check-mutants.sh` applies each `mutants/*.patch` to a scratch copy of `core/`, `spec/` and
-`formal/`, runs the gates, and passes only if every mutant is killed. It first checks that every
+`check-mutants.sh` applies each `mutants/*.patch` to a scratch copy of the tree (`core/`, `spec/`,
+`formal/` and the directories the tag inventory sweeps), runs the gates, and passes only if every mutant is killed. It first checks that every
 gate passes on the unmutated tree, so a broken gate cannot count as a kill. For m3 and m4 the named
 Kani harness must itself report `VERIFICATION:- FAILED`.
 
@@ -197,12 +212,24 @@ golden vectors, the adversarial suite, and the audit's 200k-document differentia
 `tla/GrantLog.tla` models the broker_seq grant-transparency log:
 
 - Allocate, seal and insert run under `ingestMu`.
-- A commit can be *ambiguous*: it lands, but the server sees an error.
+- A commit can be *ambiguous*: the server sees an error and frees `ingestMu` while the
+  transaction is still open at the database. It later lands or aborts in a separate step, so an
+  operator void can interleave with it.
 - Releases can be lost.
 - Clients may retry or give up.
 - `createCheckpoint` signs the recorded set.
 - An operator may void a reserved, unrecorded seq with a signed `grant_void` tombstone. The voided
-  seq stays in the allocation max, and the voided grant id can never record it.
+  seq stays in the allocation max, and the voided grant id is retired: a later allocation for it is
+  refused (409), as in the Go server.
+- Two void guards are modelled as switches: `AgeFromLastAttempt` (the void's minimum age is
+  measured from the grant's last attempt, so none of its commits can still be open) and
+  `UniqueIndex` (the `records` UNIQUE record_id index, which migration 0002 falls back from when a
+  historical duplicate exists).
+
+There is no `CONSTRAINT`: TLC's liveness checking is unsound under one. Allocation beyond a bound
+is disabled inside `Begin`, and every passing config also asserts `BoundNotBinding`, so the bound
+never cuts a behaviour. `run-tlc.sh` fails if a config declares a constraint or TLC warns about
+one.
 
 Each configuration fixes one implementation variant and asserts **one** outcome:
 
@@ -212,10 +239,15 @@ Each configuration fixes one implementation variant and asserts **one** outcome:
 | `GrantLog_release_lost.cfg` | release on error, but the Postgres DELETE can fail, no fail-closed checkpoint | **violates** `AnchoredGapless` |
 | `GrantLog_failclosed.cfg` | fail-closed checkpoint, release not restricted to the max or to freshly allocated seqs | **violates** `HoleFree`: an orphan released while higher seqs exist becomes a permanent mid-sequence hole |
 | `GrantLog_reuse_release.cfg` | release a seq that a retry *reused* after an ambiguous commit | **violates** `NoDuplicateSeq`: the late commit and the next grant share a seq |
-| `GrantLog_fixed.cfg` | shipped design: release only fresh, max seqs; fail-closed checkpoint; operator void | `AnchoredGapless` and `NoDuplicateSeq` hold, exhaustively for 3 grants (10.6M states) |
+| `GrantLog_void_race.cfg` | void age measured from the *allocation*, no UNIQUE index | **violates** `NoDuplicateSeq`: the first attempt fails, a retry reuses the seq and its commit is left open, the void passes the age check, the retry lands, and the seq is held by the grant and the tombstone |
+| `GrantLog_void_age_only.cfg` | void age from the last attempt, no UNIQUE index | `AnchoredGapless` and `NoDuplicateSeq` hold |
+| `GrantLog_void_index_only.cfg` | UNIQUE index, void age from the allocation | `AnchoredGapless` and `NoDuplicateSeq` hold |
+| `GrantLog_void_reachable.cfg` | shipped design, non-vacuity | **violates** `NoVoid`: the guarded void is reachable, so the passing configs exercise it |
+| `GrantLog_fixed.cfg` | shipped design: release only fresh, max seqs; fail-closed checkpoint; operator void with both guards | `AnchoredGapless` and `NoDuplicateSeq` hold, exhaustively for 3 grants (2.45M states) |
 | `GrantLog_wedge.cfg` | no void; clients may never retry | **violates** `CheckpointRecovers`: an orphaned seq wedges checkpointing forever |
 | `GrantLog_fair_retry.cfg` | no void; every client retries until it commits | `CheckpointRecovers` holds |
-| `GrantLog_fixed_live.cfg` | operator void; clients may never retry | `CheckpointRecovers` holds, with strong fairness on the operator, for 2 grants (the 3-grant space is too slow for liveness checking in CI) |
+| `GrantLog_void_starved.cfg` | operator void; a client may retry forever with every attempt failing | **violates** `CheckpointRecovers`: each retry restarts the void's last-attempt age, so the void is never enabled |
+| `GrantLog_fixed_live.cfg` | operator void; clients may give up at any point, and a grant retried forever eventually commits | `CheckpointRecovers` holds, with strong fairness on the operator and weak fairness on open transactions resolving, for 2 grants (liveness over 3 grants is too slow for CI) |
 
 `tla/ConsumeLedger.tla` models consume-before-act. Several gateways race on one ledger through
 `INSERT … ON CONFLICT DO NOTHING`, release on provable non-action, and run the TTL sweep.

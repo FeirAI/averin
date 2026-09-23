@@ -19,6 +19,12 @@ check() { # spec config expected: pass | <invariant or temporal property that mu
   local out
   out="$(java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -cleanup \
     -config "$2" "$1" 2>&1 || true)"
+  # A state/action CONSTRAINT makes TLC's liveness checking unsound; the models bound themselves in
+  # their actions instead, and any such warning (or a CONSTRAINT line) fails the run.
+  if echo "$out" | grep -qi "constraints during liveness checking is dangerous" \
+     || grep -qE '^\s*(CONSTRAINTS?|ACTION_CONSTRAINTS?)\b' "$2"; then
+    echo "$out" | tail -30; echo "FAIL: $2 uses a state/action constraint" >&2; exit 1
+  fi
   if [ "$3" = pass ]; then
     echo "$out" | grep -q "No error has been found" || { echo "$out" | tail -30; echo "FAIL: $2 expected to pass" >&2; exit 1; }
   else
@@ -30,7 +36,7 @@ check() { # spec config expected: pass | <invariant or temporal property that mu
     else echo "$out" | tail -30; echo "FAIL: $2 expected a $3 violation" >&2; exit 1
     fi
   fi
-  echo "ok  $2 (${3})"
+  echo "ok  $2 (${3}; $(echo "$out" | grep -oE '[0-9]+ distinct states found' | tail -1))"
 }
 
 # Grant-transparency log (GrantLog.tla).
@@ -38,9 +44,14 @@ check GrantLog.tla GrantLog_current.cfg AnchoredGapless        # pre-fix: a gap 
 check GrantLog.tla GrantLog_release_lost.cfg AnchoredGapless   # a lost release, no fail-closed checkpoint
 check GrantLog.tla GrantLog_failclosed.cfg HoleFree            # release of a non-max orphan leaves a hole
 check GrantLog.tla GrantLog_reuse_release.cfg NoDuplicateSeq   # release of a seq reused after an ambiguous commit
+check GrantLog.tla GrantLog_void_race.cfg NoDuplicateSeq      # void age from allocation, no UNIQUE index: void races a retry
+check GrantLog.tla GrantLog_void_age_only.cfg pass             # ...either guard alone closes it: age from the last attempt
+check GrantLog.tla GrantLog_void_index_only.cfg pass           # ...or the UNIQUE record_id index
+check GrantLog.tla GrantLog_void_reachable.cfg NoVoid           # non-vacuity: the guarded void does happen
 check GrantLog.tla GrantLog_fixed.cfg pass                     # shipped design: no anchored gap, no duplicate seq
 check GrantLog.tla GrantLog_wedge.cfg CheckpointRecovers       # without void, a client that never retries wedges checkpoints
 check GrantLog.tla GrantLog_fair_retry.cfg pass                # ...recovers only if every client retries until it commits
+check GrantLog.tla GrantLog_void_starved.cfg CheckpointRecovers # a client retrying forever, every attempt failing, starves the void
 check GrantLog.tla GrantLog_fixed_live.cfg pass                # with operator void: no permanent checkpoint outage
 
 # Consume-before-act ledger (ConsumeLedger.tla).

@@ -144,8 +144,10 @@ properties. These are checked by machine in [`formal/`](formal/README.md), not o
   - the checkpoint history is unique.
 - **TLA+** models the grant-transparency log and the consume-before-act ledger. Every
   counterexample for a pre-fix design is kept as an expected failure. The shipped design has no
-  anchored gap, no duplicate sequence number, and no permanent checkpoint outage, given the
-  operator `grant_void` remediation.
+  anchored gap and no duplicate sequence number, including when an operator `grant_void` races
+  an in-flight retry. It has no permanent checkpoint outage, given that remediation, as long as a
+  client that retries forever eventually commits (a client that gives up is covered by the void;
+  one that retries forever with every attempt failing starves it, and the model shows that too).
 - **Kani** checks the real Rust encoders (base64url, `sha256:<hex>`, LP framing, key order).
 - **An executable Lean oracle** runs the model over a corpus (every C0 control, DEL, U+2028,
   BMP-vs-astral key order, i64 extremes, one sample per preimage family), and CI fails when the
