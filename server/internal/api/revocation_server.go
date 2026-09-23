@@ -153,7 +153,7 @@ func (s *Server) revokeGrantIDTotalCtx(ctx context.Context, projectID, grantID s
 				return nil
 			}
 		}
-		if len(ids) >= maxRevokedPerProject {
+		if len(ids) >= s.revocationCap {
 			code = http.StatusTooManyRequests
 			return errRevocationCap
 		}

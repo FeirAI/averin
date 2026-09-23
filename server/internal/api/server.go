@@ -117,6 +117,7 @@ type Server struct {
 	revokeLocks        keyedMutex
 	revokeCapWarnAt    time.Time // throttles the at-capacity WARNING (guarded by revokeLocks, keyed by project_id)
 	revocationValidity time.Duration
+	revocationCap      int
 	denyLog            bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
 	// inflate stored records without bound (the prerequisite for default-on). nil = unbounded (prior behavior).
@@ -281,15 +282,16 @@ type readinessTarget struct {
 func New(core Sealer, st store.Store, signingKeyID string) *Server {
 	reg := metrics.NewRegistry()
 	return &Server{
-		core:         core,
-		st:           st,
-		content:      content.NewMemStore(), // in-memory by default; WithContent for a durable store
-		meter:        meter.NewMem(),
-		signingKeyID: signingKeyID,
-		keyValidFrom: "2026-01-01T00:00:00.000Z",
-		now:          time.Now,
-		processStart: time.Now(),                     // the void's boot floor (re-stamped by WithClock)
-		pending:      make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
+		core:          core,
+		st:            st,
+		content:       content.NewMemStore(), // in-memory by default; WithContent for a durable store
+		meter:         meter.NewMem(),
+		signingKeyID:  signingKeyID,
+		keyValidFrom:  "2026-01-01T00:00:00.000Z",
+		now:           time.Now,
+		processStart:  time.Now(), // the void's boot floor (re-stamped by WithClock)
+		revocationCap: maxRevokedPerProject,
+		pending:       make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
 		// D6 operator remediation (POST /v2/broker-seq/void): a conservative default safety age.
 		brokerSeqVoidMinAge: DefaultBrokerSeqVoidMinAge,
 		bundleSem:           make(chan struct{}, maxConcurrentBundleReads),
@@ -1857,7 +1859,22 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
-	// Mint + record-before-issue, all UNDER the ingest lock (ADR 0004 D6): broker.Prepare validates the
+	// Stage the immutable credential descriptor before taking the project guard.
+	// Its bytes do not depend on broker_seq; the authoritative prepare below
+	// replaces only the sequence inside signed grant evidence.
+	issuedAt := s.now()
+	staged, err := broker.Prepare(req, grantID, func() (int64, error) { return 1, nil }, issuedAt, s.brokerKey)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	credentialAddr, err := s.content.Put(content.WithTenant(r.Context(), gr.ProjectID), staged.DescriptorBytes)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store credential descriptor: "+err.Error())
+		return
+	}
+
+	// Mint + record-before-issue, all UNDER the project transaction (ADR 0004 D6): broker.Prepare validates the
 	// request (proof-of-possession + forbidden scopes) and mints the capability + canonical evidence; its
 	// allocSeq callback assigns the gapless broker_seq ONLY after validation passes (a rejected grant
 	// never burns a seq) AND inside the same critical section as the record insert — so the broker_seq
@@ -1909,7 +1926,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 				allocErr = aerr // a dependency failure, not a 400 — surfaced as 500 below
 			}
 			return seq, aerr
-		}, s.now(), s.brokerKey)
+		}, issuedAt, s.brokerKey)
 		if e != nil {
 			if allocErr == nil {
 				validationErr = e
@@ -1918,7 +1935,10 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 			}
 			return e // rollback the whole transaction, including any allocated sequence
 		}
-		rec, disclosures, e := s.buildGrantRecord(grantID, gr, req, prepared)
+		if !bytes.Equal(prepared.DescriptorBytes, staged.DescriptorBytes) {
+			return errors.New("credential descriptor changed between staging and transaction")
+		}
+		rec, disclosures, e := s.buildGrantRecord(grantID, gr, req, prepared, credentialAddr.Digest)
 		if e != nil {
 			return e
 		}
@@ -2187,7 +2207,7 @@ func agentCnfKid(agentPubKeyB64 string) string {
 // buildGrantRecord assembles the unsealed grant Decision Record: gateway_enforced authority with a
 // broker-signed evidence_sig, a hiding commitment over the credential descriptor (revealable via
 // selective disclosure), and the broker lifecycle fields under extensions.broker.
-func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Request, p broker.Prepared) (map[string]any, []store.DisclosureSecret, error) {
+func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Request, p broker.Prepared, descriptorDigest string) (map[string]any, []store.DisclosureSecret, error) {
 	// Derive evidence_hash = sha256(RCP-canonicalize(grant_evidence)) via the Rust core (ADR 0003 R1).
 	// json.Marshal here only produces the bytes we hand to the core; the canonical hash is computed by
 	// RCP inside RcpEvidenceHash (NOT from these Go-marshaled bytes), so the offline verifier re-derives
@@ -2206,10 +2226,6 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 	// a grant no longer overloads `input`): store the bytes content-addressed, mint a nonce, and commit.
 	// Selective disclosure can later reveal the descriptor to prove the grant↔credential binding
 	// without publishing it in the signed body.
-	addr, err := s.content.Put(content.WithTenant(context.Background(), gr.ProjectID), p.DescriptorBytes)
-	if err != nil {
-		return nil, nil, fmt.Errorf("store credential descriptor: %w", err)
-	}
 	nonce, err := s.core.RandomNonce()
 	if err != nil {
 		return nil, nil, fmt.Errorf("nonce: %w", err)
@@ -2264,7 +2280,7 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 		},
 	}
 	disclosures := []store.DisclosureSecret{
-		{RecordID: grantID, Field: "credential", ValueDigest: addr.Digest, NonceHex: nonce},
+		{RecordID: grantID, Field: "credential", ValueDigest: descriptorDigest, NonceHex: nonce},
 	}
 	if err := s.signLocalAuthorityV3(rec, s.core); err != nil {
 		return nil, nil, err
@@ -2362,6 +2378,11 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		writeErr(w, http.StatusBadRequest, "invalid params/params_nonce (need a 64-hex nonce): "+err.Error())
 		return
 	}
+	paramsAddr, err := s.content.Put(content.WithTenant(r.Context(), ur.ProjectID), rawParams)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store use params: "+err.Error())
+		return
+	}
 
 	// The idempotency resolution, the capability validation+consume, and the seal run as ONE critical
 	// section. Idempotency is keyed on `idem` — the SAME key sealAndStore→PutRecord dedupes on — resolved
@@ -2421,7 +2442,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			return nil
 		}
 		grantID = ev.GrantID
-		rec, disclosures, e := s.buildUseRecord(useID, ur, ev, rawParams, paramsCommitment, brokerKind)
+		rec, disclosures, e := s.buildUseRecord(useID, ur, ev, paramsAddr.Digest, paramsCommitment, brokerKind)
 		if e != nil {
 			// Receipt construction failed BEFORE any record was written and the caller never acted (it gets a
 			// 500). ValidateUse already consumed the single-use nonce/jti, so RELEASE them — otherwise a
@@ -2613,7 +2634,7 @@ func (s *Server) intentAndOutcome(st store.Store, projectID, sessionID, intentRe
 // buildUseRecord assembles the unsealed use-receipt Decision Record: a tool_gateway-role authority
 // with a RESOURCE-signed evidence_sig over the re-derivable use_evidence (R1/R2), a hiding commitment
 // over the operation params, and the use lifecycle under extensions.broker (kind=use → resource role).
-func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.UseEvidence, rawParams []byte, commitment, brokerKind string) (map[string]any, []store.DisclosureSecret, error) {
+func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.UseEvidence, paramsDigest, commitment, brokerKind string) (map[string]any, []store.DisclosureSecret, error) {
 	// D5 (ADR 0004): brokerKind is "use" (one-phase ADR-0003) or "use_intent" (two-phase, recorded BEFORE
 	// the side effect). use_evidence.kind MUST equal the extensions.broker.kind discriminator (the verifier
 	// rejects divergence), so stamp it onto the evidence before hashing.
@@ -2631,10 +2652,6 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 	// Store the raw params content-addressed for selective disclosure. D2: input_commit IS the agent's
 	// PoP-bound hiding commitment (over (params, params_nonce)) — the SAME value the offline verifier
 	// reconstructs the PoP challenge from. The disclosure opens it with the agent's params_nonce.
-	addr, err := s.content.Put(content.WithTenant(context.Background(), ur.ProjectID), rawParams)
-	if err != nil {
-		return nil, nil, fmt.Errorf("store use params: %w", err)
-	}
 	nonce := ur.ParamsNonce
 
 	// use_evidence is carried verbatim (the verifier re-derives evidence_hash from it). Round-trip the
@@ -2678,7 +2695,7 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 		},
 	}
 	disclosures := []store.DisclosureSecret{
-		{RecordID: useID, Field: "input", ValueDigest: addr.Digest, NonceHex: nonce},
+		{RecordID: useID, Field: "input", ValueDigest: paramsDigest, NonceHex: nonce},
 	}
 	if err := s.signLocalAuthorityV3(rec, s.resourceCore); err != nil {
 		return nil, nil, err
@@ -3190,7 +3207,7 @@ func (s *Server) handleOTel(w http.ResponseWriter, r *http.Request) {
 		// sharing a span_id across traces — never collide. A per-span failure does not abort the
 		// rest (idempotency makes a whole-export retry safe), so partial success is reported honestly.
 		sum := sha256.Sum256(raw)
-		if _, _, err := s.ingestOne(context.Background(), raw, "otel-"+hex.EncodeToString(sum[:])); err != nil {
+		if _, _, err := s.ingestOne(r.Context(), raw, "otel-"+hex.EncodeToString(sum[:])); err != nil {
 			failed++
 			errs = append(errs, err.Error())
 			continue

@@ -245,6 +245,10 @@ type Store interface {
 // Mem is an in-memory Store for tests and single-node dev.
 type Mem struct {
 	mu           sync.Mutex
+	ledgerMu     sync.Mutex
+	ledgerClaims map[string]*Mem // nil owner means committed; bound owner means reserved
+	root         *Mem
+	claimed      []string
 	projectLocks sync.Map // project ID -> chan struct{}; one token per project
 	projects     map[string]*project
 	now          func() time.Time // the store's clock (broker_seq allocated_at); WithClock injects one for tests
@@ -312,7 +316,6 @@ func memSnapshot(p *project) *project {
 		discSeen: maps.Clone(p.discSeen), anchors: maps.Clone(p.anchors),
 		brokerSeq: maps.Clone(p.brokerSeq), brokerAt: maps.Clone(p.brokerAt), voided: maps.Clone(p.voided),
 		pending: pending, revoked: maps.Clone(p.revoked),
-		nonces: maps.Clone(p.nonces), consumedJTI: maps.Clone(p.consumedJTI),
 	}
 }
 
@@ -331,11 +334,27 @@ func (m *Mem) WithProjectWrite(ctx context.Context, projectID string, fn func(St
 	m.mu.Lock()
 	active := &atomic.Bool{}
 	active.Store(true)
-	tmp := &Mem{projects: map[string]*project{projectID: memSnapshot(m.proj(projectID))}, now: m.now, boundProject: projectID, inTx: true, active: active}
+	tmp := &Mem{projects: map[string]*project{projectID: memSnapshot(m.proj(projectID))}, now: m.now, boundProject: projectID, inTx: true, active: active, root: m}
 	m.mu.Unlock()
 	defer active.Store(false)
-	if err := fn(tmp); err != nil {
-		return err
+	committed := false
+	defer func() {
+		m.ledgerMu.Lock()
+		for _, key := range tmp.claimed {
+			if owner, ok := m.ledgerClaims[key]; ok && owner == tmp {
+				if committed {
+					m.ledgerClaims[key] = nil
+				} else {
+					delete(m.ledgerClaims, key)
+				}
+			}
+		}
+		m.ledgerMu.Unlock()
+	}()
+	callbackErr := fn(tmp)
+	active.Store(false)
+	if callbackErr != nil {
+		return callbackErr
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -343,6 +362,7 @@ func (m *Mem) WithProjectWrite(ctx context.Context, projectID string, fn func(St
 	m.mu.Lock()
 	m.projects[projectID] = tmp.projects[projectID]
 	m.mu.Unlock()
+	committed = true
 	return nil
 }
 
@@ -363,22 +383,20 @@ func (m *Mem) WithProjectRead(ctx context.Context, projectID string, fn func(Sto
 }
 
 type project struct {
-	records     []Record
-	idem        map[string]int // idempotency key -> record index
-	byHash      map[string]struct{}
-	byRecordID  map[string]struct{} // record_id -> present (per-project uniqueness)
-	checks      []Checkpoint
-	seqBySess   map[string]int64
-	disclosure  []DisclosureSecret
-	discSeen    map[string]struct{}  // record_id\x00field -> present (dedupe)
-	anchors     map[int64]string     // checkpoint seq -> token_b64
-	brokerSeq   map[string]int64     // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
-	brokerAt    map[string]time.Time // grant_id -> allocation time (the operator void's safety age)
-	voided      map[string]struct{}  // grant_id -> voided (row kept in brokerSeq; never released or re-allocated)
-	pending     map[string]PendingGrant
-	revoked     map[string]struct{}
-	nonces      map[string]struct{}
-	consumedJTI map[string]struct{}
+	records    []Record
+	idem       map[string]int // idempotency key -> record index
+	byHash     map[string]struct{}
+	byRecordID map[string]struct{} // record_id -> present (per-project uniqueness)
+	checks     []Checkpoint
+	seqBySess  map[string]int64
+	disclosure []DisclosureSecret
+	discSeen   map[string]struct{}  // record_id\x00field -> present (dedupe)
+	anchors    map[int64]string     // checkpoint seq -> token_b64
+	brokerSeq  map[string]int64     // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
+	brokerAt   map[string]time.Time // grant_id -> allocation time (the operator void's safety age)
+	voided     map[string]struct{}  // grant_id -> voided (row kept in brokerSeq; never released or re-allocated)
+	pending    map[string]PendingGrant
+	revoked    map[string]struct{}
 }
 
 func NewMem() *Mem { return &Mem{projects: map[string]*project{}, now: time.Now} }
@@ -393,25 +411,28 @@ func (m *Mem) WithClock(now func() time.Time) *Mem {
 }
 
 // RecordIDUniqueEnforced: Mem enforces per-project record_id uniqueness in PutRecord under its mutex, always.
-func (m *Mem) RecordIDUniqueEnforced() (bool, error) { return true, nil }
+func (m *Mem) RecordIDUniqueEnforced() (bool, error) {
+	if m.active != nil && !m.active.Load() {
+		return false, errors.New("store: project transaction already closed")
+	}
+	return true, nil
+}
 
 func (m *Mem) proj(id string) *project {
 	p := m.projects[id]
 	if p == nil {
 		p = &project{
-			idem:        map[string]int{},
-			byHash:      map[string]struct{}{},
-			byRecordID:  map[string]struct{}{},
-			seqBySess:   map[string]int64{},
-			discSeen:    map[string]struct{}{},
-			anchors:     map[int64]string{},
-			brokerSeq:   map[string]int64{},
-			brokerAt:    map[string]time.Time{},
-			voided:      map[string]struct{}{},
-			pending:     map[string]PendingGrant{},
-			revoked:     map[string]struct{}{},
-			nonces:      map[string]struct{}{},
-			consumedJTI: map[string]struct{}{},
+			idem:       map[string]int{},
+			byHash:     map[string]struct{}{},
+			byRecordID: map[string]struct{}{},
+			seqBySess:  map[string]int64{},
+			discSeen:   map[string]struct{}{},
+			anchors:    map[int64]string{},
+			brokerSeq:  map[string]int64{},
+			brokerAt:   map[string]time.Time{},
+			voided:     map[string]struct{}{},
+			pending:    map[string]PendingGrant{},
+			revoked:    map[string]struct{}{},
 		}
 		m.projects[id] = p
 	}

@@ -78,14 +78,28 @@ func (p *Postgres) projectTx(projectID string) (pgx.Tx, bool, error) {
 	if p.tx != nil {
 		return p.tx, false, nil
 	}
-	ctx := p.callContext()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
+		return nil, false, err
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '10000ms'`); err != nil {
+		_ = tx.Rollback(ctx)
 		return nil, false, err
 	}
 	if err := lockProject(ctx, tx, projectID); err != nil {
 		_ = tx.Rollback(ctx)
 		return nil, false, err
+	}
+	bound := &Postgres{tx: tx, projectID: projectID, ctx: ctx}
+	unique, err := bound.RecordIDUniqueEnforced()
+	if err != nil || !unique {
+		_ = tx.Rollback(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		return nil, false, errors.New("store: write refused: required per-project record_id UNIQUE index is absent, invalid, or has the wrong definition")
 	}
 	return tx, true, nil
 }
@@ -94,7 +108,12 @@ func (p *Postgres) finishProjectTx(ctx context.Context, tx pgx.Tx, own bool) err
 	if !own {
 		return nil
 	}
-	return tx.Commit(ctx)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := tx.Commit(cctx); err != nil {
+		return fmt.Errorf("%w: %v", ErrCommitAmbiguous, err)
+	}
+	return nil
 }
 
 func (p *Postgres) WithProjectWrite(ctx context.Context, projectID string, fn func(Store) error) error {
@@ -127,8 +146,10 @@ func (p *Postgres) WithProjectWrite(ctx context.Context, projectID string, fn fu
 	if !unique {
 		return errors.New("store: write refused: required per-project record_id UNIQUE index is absent, invalid, or has the wrong definition")
 	}
-	if err := fn(bound); err != nil {
-		return err
+	callbackErr := fn(bound)
+	active.Store(false)
+	if callbackErr != nil {
+		return callbackErr
 	}
 	// Once COMMIT is sent, cancellation or connection loss leaves the result
 	// unknown. Reconcile by the same operation identity; never assume rollback.
@@ -276,30 +297,19 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 		parents = []string{}
 	}
 
-	// One transaction so the post-conflict lookup sees a consistent view with the insert attempt.
-	tx := p.tx
-	if tx == nil {
-		var err error
-		tx, err = p.pool.Begin(ctx)
-		if err != nil {
-			return Record{}, false, fmt.Errorf("store: begin: %w", err)
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-		if err := lockProject(ctx, tx, projectID); err != nil {
-			return Record{}, false, err
-		}
+	// The same guard and index-shape check apply to standalone writes.
+	tx, own, err := p.projectTx(projectID)
+	if err != nil {
+		return Record{}, false, err
 	}
+	if own {
+		defer tx.Rollback(ctx)
+	} //nolint:errcheck
 	finish := func(fresh bool) error {
-		if p.tx != nil {
+		if !own {
 			return nil
 		}
-		if err := tx.Commit(ctx); err != nil {
-			if fresh {
-				return fmt.Errorf("%w: %v", ErrCommitAmbiguous, err)
-			}
-			return fmt.Errorf("store: commit: %w", err)
-		}
-		return nil
+		return p.finishProjectTx(ctx, tx, own)
 	}
 
 	// Fast path: a prior insert already used this idempotency key -> return that row verbatim.
@@ -335,7 +345,7 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 	// pgx.ErrNoRows rather than an error; a RETURNING row means this statement actually inserted —
 	// our authoritative "created" signal under concurrency.
 	var inserted bool
-	err := tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO records (project_id, idempotency_key, content_hash, session_id, parents, json)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT DO NOTHING

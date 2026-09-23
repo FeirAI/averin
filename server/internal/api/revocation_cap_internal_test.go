@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"testing"
 
 	"github.com/feirai/averin/server/internal/core"
@@ -29,12 +28,12 @@ func TestRevokeSetSizeCap(t *testing.T) {
 	}
 	s := New(c, store.NewMem(), "k0").WithRevocation(rev)
 
-	// Fill p1's set exactly to the cap, directly (the white-box reason this is an internal test).
-	set := make(map[string]struct{}, maxRevokedPerProject)
-	for i := 0; i < maxRevokedPerProject; i++ {
-		set["g"+strconv.Itoa(i)] = struct{}{}
+	s.revocationCap = 3
+	for _, id := range []string{"g0", "g1", "g2"} {
+		if _, code, msg := s.revokeGrantIDTotal("p1", id); code != 0 || msg != "" {
+			t.Fatalf("seed revoke %s: %d %s", id, code, msg)
+		}
 	}
-	s.revoked["p1"] = set
 
 	post := func(grantID string) int {
 		body, _ := json.Marshal(map[string]any{"project_id": "p1", "grant_id": grantID})
@@ -53,7 +52,8 @@ func TestRevokeSetSizeCap(t *testing.T) {
 		t.Fatalf("re-revoking an existing id at capacity must be 201 (idempotent), got %d", code)
 	}
 	// The set never grew past the cap.
-	if len(s.revoked["p1"]) != maxRevokedPerProject {
-		t.Fatalf("set grew past the cap: %d", len(s.revoked["p1"]))
+	ids, err := s.st.RevokedGrantIDs("p1")
+	if err != nil || len(ids) != s.revocationCap {
+		t.Fatalf("durable set grew past the cap: %v, %v", ids, err)
 	}
 }
