@@ -2414,7 +2414,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 	// kind that the scan misses; ValidateUse would then burn the nonce/jti and PutRecord would silently
 	// COLLAPSE the seal onto that prior row (created=false) → an action with no persisted receipt (and a
 	// foreign record echoed back). So: a retry under this key that ALSO matches the stored receipt's OPERATION
-	// (action/nonce/params-commitment/use_sig — storedUseMatchesRequest) is an honest retry (return it,
+	// (presented capability, use sequence, action, nonce, params commitment, and use_sig) is an honest retry (return it,
 	// skipping the credential-consuming ValidateUse — concurrent retries also see it under the lock); ANY other
 	// record under this key — including a DIFFERENT use reusing the key — is a conflict → 409 BEFORE consuming.
 	// validateErr (caller's 400) and conflictErr (caller's 409) are distinguished from a store error (500).
