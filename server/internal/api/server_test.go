@@ -64,6 +64,44 @@ func postRecord(t *testing.T, h http.Handler, body string) (map[string]any, bool
 	return out.Results[0].Record, out.Results[0].Created
 }
 
+func TestOpaqueIdentityRejectsNonNFCBeforeIngest(t *testing.T) {
+	h := newSrv(t)
+	for _, body := range []string{
+		`{"idempotency_key":"k","project_id":"e\u0301","session_id":"s"}`,
+		`{"idempotency_key":"e\u0301","project_id":"p","session_id":"s"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"s","record_id":"e\u0301"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"e\u0301"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"s","span_id":"e\u0301"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"s","parent_span_id":"e\u0301"}`,
+	} {
+		if code, resp := do(t, h, "POST", "/v2/records", body); code != http.StatusBadRequest || !strings.Contains(resp, "NFC") {
+			t.Fatalf("non-NFC identity accepted (%d): %s", code, resp)
+		}
+	}
+	if code, resp := do(t, h, "GET", "/v2/verify?project=e%CC%81", ""); code != http.StatusBadRequest || !strings.Contains(resp, "NFC") {
+		t.Fatalf("non-NFC project query accepted (%d): %s", code, resp)
+	}
+	req := httptest.NewRequest("POST", "/v2/records", strings.NewReader(`{"project_id":"p","session_id":"s"}`))
+	req.Header.Set("Idempotency-Key", "e\u0301")
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "NFC") {
+		t.Fatalf("non-NFC idempotency header accepted (%d): %s", res.Code, res.Body.String())
+	}
+	rec, _ := postRecord(t, h, `{"idempotency_key":"é","project_id":"p","session_id":"s","record_id":"ré","content":{"note":"e\u0301"}}`)
+	if got := rec["content"].(map[string]any)["note"]; got != "é" {
+		t.Fatalf("structured text was not NFC-normalized at seal: %v", got)
+	}
+}
+
+func TestMalformedUTF8JSONIsRejectedBeforeDecode(t *testing.T) {
+	h := newSrv(t)
+	body := `{"idempotency_key":"k","project_id":"p","session_id":"s","content":{"note":"` + string([]byte{0xff}) + `"}}`
+	if code, resp := do(t, h, "POST", "/v2/records", body); code != http.StatusBadRequest || !strings.Contains(resp, "UTF-8") {
+		t.Fatalf("invalid UTF-8 was accepted (%d): %s", code, resp)
+	}
+}
+
 func TestIngestSealCheckpointVerifyExport(t *testing.T) {
 	h := newSrv(t)
 	r1, _ := postRecord(t, h, `{"idempotency_key":"k1","project_id":"p1","session_id":"s1","action":"db.read"}`)
