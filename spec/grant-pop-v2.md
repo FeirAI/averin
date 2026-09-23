@@ -42,9 +42,9 @@ existing grant or pending operation.
 
 New capability descriptors include signed integer `version: 2` and string
 `project_id`. The resource compares `project_id` with the authenticated route
-project before revocation and consumption. Historical descriptors without this
-claim require authoritative sealed-grant/descriptor lookup or are denied online
-after cutoff. Historical records and signatures remain verifiable under v1.
+project before revocation and consumption. This rollout denies historical
+descriptors without the signed claim online at cutoff. Historical records and
+signatures remain verifiable under v1.
 
 The shared preimage example lives in
 [`golden-vectors/broker-preimages.json`](golden-vectors/broker-preimages.json).

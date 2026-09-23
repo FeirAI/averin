@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -13,9 +14,20 @@ import (
 
 	"github.com/feirai/averin/server/internal/api"
 	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/store"
 )
+
+type countingContentStore struct {
+	content.Store
+	puts int
+}
+
+func (s *countingContentStore) Put(ctx context.Context, data []byte) (content.Address, error) {
+	s.puts++
+	return s.Store.Put(ctx, data)
+}
 
 func popTestServer(t *testing.T, clock func() time.Time) http.Handler {
 	t.Helper()
@@ -295,5 +307,97 @@ func TestOldV1WorkerProofCannotMintAfterOnlineCutoff(t *testing.T) {
 	_, exported := do(t, h, "GET", "/v2/export?project=p1", "")
 	if strings.Contains(exported, `"credential_grant"`) {
 		t.Fatalf("old worker proof persisted grant: %s", exported)
+	}
+}
+
+func TestUsePreflightRejectsUnverifiedRequestsBeforeContentWrite(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentStore := &countingContentStore{Store: content.NewMemStore()}
+	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(contentStore).Routes()
+	ak := grantAgentKey()
+	grantID, capability := mkGrant(t, h, ak, "idem-preflight-grant")
+	baseline := contentStore.puts
+	valid := useBody(t, "idem-preflight-use", capability, grantID, ak, "SELECT 1", "nonce-preflight")
+	badSig := base64.RawURLEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+	cases := []struct {
+		name, path, body string
+	}{
+		{"malformed-capability", "/v2/use?project=p1", mutateGrantBody(t, valid, "capability", "bad.token")},
+		{"wrong-signed-project", "/v2/use?project=p2", mutateGrantBody(t, valid, "project_id", "p2")},
+		{"bad-use-pop", "/v2/use?project=p1", mutateGrantBody(t, valid, "use_sig", badSig)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if code, response := do(t, h, "POST", tc.path, tc.body); code != http.StatusBadRequest {
+				t.Fatalf("unverified use accepted: %d %s", code, response)
+			}
+			if contentStore.puts != baseline {
+				t.Fatalf("unverified use wrote content: got %d puts, want %d", contentStore.puts, baseline)
+			}
+		})
+	}
+	_, exported := do(t, h, "GET", "/v2/export?project=p1", "")
+	var bundle struct {
+		Records []json.RawMessage `json:"records"`
+	}
+	if err := json.Unmarshal([]byte(exported), &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Records) != 1 {
+		t.Fatalf("unverified use persisted a receipt: %s", exported)
+	}
+	if code, response := do(t, h, "POST", "/v2/use?project=p1", valid); code != http.StatusCreated {
+		t.Fatalf("rejected proofs consumed valid nonce or capability: %d %s", code, response)
+	}
+	if contentStore.puts != baseline+1 {
+		t.Fatalf("valid use wrote %d content blobs, want one", contentStore.puts-baseline)
+	}
+}
+
+func TestUsePreflightPreservesExpiredCommittedExactRetry(t *testing.T) {
+	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentStore := &countingContentStore{Store: content.NewMemStore()}
+	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(contentStore).WithClock(func() time.Time { return now }).Routes()
+	ak := grantAgentKey()
+	code, grantResponse := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-use-expiry-grant", "read:orders", ak, ak, now))
+	if code != http.StatusCreated {
+		t.Fatalf("grant: %d %s", code, grantResponse)
+	}
+	var grant struct {
+		GrantID    string `json:"grant_id"`
+		Capability string `json:"capability"`
+	}
+	if err := json.Unmarshal([]byte(grantResponse), &grant); err != nil {
+		t.Fatal(err)
+	}
+	use := useBody(t, "idem-use-expiry-use", grant.Capability, grant.GrantID, ak, "SELECT 1", "nonce-use-expiry")
+	if code, response := do(t, h, "POST", "/v2/use?project=p1", use); code != http.StatusCreated {
+		t.Fatalf("first use: %d %s", code, response)
+	}
+	puts := contentStore.puts
+	now = now.Add(2 * time.Minute) // capability TTL is one minute
+	if code, response := do(t, h, "POST", "/v2/use?project=p1", use); code != http.StatusCreated || !strings.Contains(response, `"idempotent":true`) {
+		t.Fatalf("expired exact committed use retry: %d %s", code, response)
+	}
+	if code, response := do(t, h, "POST", "/v2/use?project=p1", mutateGrantBody(t, use, "params", "SELECT 2")); code != http.StatusConflict {
+		t.Fatalf("changed request reused expired use idempotency key: %d %s", code, response)
+	}
+	if contentStore.puts != puts {
+		t.Fatalf("committed retry or changed request wrote content: got %d puts, want %d", contentStore.puts, puts)
 	}
 }

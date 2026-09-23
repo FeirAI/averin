@@ -2361,6 +2361,46 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		writeErr(w, http.StatusBadRequest, "invalid params/params_nonce (need a 64-hex nonce): "+err.Error())
 		return
 	}
+	// A committed exact retry can return its original receipt even after the
+	// capability expires. Resolve it from a bounded project snapshot before the
+	// pure preflight and before staging content; the write session below repeats
+	// the lookup for a concurrent first commit.
+	var priorUse store.Record
+	var priorFound bool
+	if err := s.st.WithProjectRead(r.Context(), ur.ProjectID, func(st store.Store) error {
+		var e error
+		priorUse, priorFound, e = st.RecordByIdem(ur.ProjectID, idem)
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusInternalServerError, "use idempotency lookup: "+err.Error())
+		return
+	}
+	if priorFound {
+		if gid, same := priorUseMatchesRequest(priorUse.JSON, useID, ur, brokerKind, paramsCommitment); same {
+			s.mUseOutcome.WithLabelValue("allow").Inc()
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"use_id": useID, "grant_id": gid,
+				"record": json.RawMessage(priorUse.JSON), "idempotent": true,
+			})
+			return
+		}
+		writeErr(w, http.StatusConflict, "use rejected: idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
+		return
+	}
+	trustedProject := r.URL.Query().Get("project")
+	if trustedProject == "" {
+		trustedProject = ur.ProjectID // no-auth local mode only
+	}
+	op := resourceshim.Op{Action: ur.Action, ParamsCommitment: paramsCommitment, UseSequenceNumber: ur.UseSequenceNumber}
+	// Reject malformed, wrong-project, or bad-PoP uses before staging even an
+	// erasable content blob. ValidateUse repeats this pure check inside the
+	// project transaction before revocation, ledger claims, and receipt sealing.
+	preflight := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, nil).WithProject(trustedProject)
+	if err := preflight.PreflightUse(ur.Capability, ur.UseSig, op, ur.Nonce, s.now()); err != nil {
+		s.mUseOutcome.WithLabelValue("deny").Inc()
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	paramsAddr, err := s.content.Put(content.WithTenant(r.Context(), ur.ProjectID), rawParams)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store use params: "+err.Error())
@@ -2390,23 +2430,18 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			return le
 		}
 		if found {
-			rid, sess, kind, gid := useReceiptIdentity(prior.JSON)
 			// EXACT-request match (adversarial review): (record_id, session, kind) is NOT sufficient — useID is derived from
 			// (project, idem) so it always matches on key reuse. A reused idem key carrying a DIFFERENT use
 			// (capability/action/params/nonce/use_sig) must NOT collapse onto this receipt and return 201 while
 			// SKIPPING ValidateUse (which is what authorizes + consumes the credential), so also require the
 			// operation itself to match the signed receipt; anything else is a 409 BEFORE any side effect.
-			if rid == useID && sess == ur.SessionID && kind == brokerKind && storedUseMatchesRequest(prior.JSON, ur, paramsCommitment) {
+			if gid, same := priorUseMatchesRequest(prior.JSON, useID, ur, brokerKind, paramsCommitment); same {
 				sealed, grantID, idempotent = prior.JSON, gid, true
 				return nil
 			}
 			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
 			return nil
 		}
-		trustedProject := r.URL.Query().Get("project")
-		if trustedProject == "" {
-			trustedProject = ur.ProjectID
-		} // no-auth local mode only
 		shim := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, st).WithProject(trustedProject)
 		// The callback receives the signature-verified JTI. A database read
 		// failure rejects the request before ledger consumption, never falling
@@ -2414,7 +2449,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		shim.WithRevocationCheckErr(func(id string) (bool, error) {
 			return st.IsRevoked(trustedProject, id)
 		})
-		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, resourceshim.Op{Action: ur.Action, ParamsCommitment: paramsCommitment, UseSequenceNumber: ur.UseSequenceNumber}, ur.Nonce, s.now())
+		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, op, ur.Nonce, s.now())
 		if errors.Is(e, resourceshim.ErrRevocationCheck) {
 			return e
 		}
@@ -2440,7 +2475,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			// is this exact operation; otherwise it is another record's receipt — returning it as ours would report
 			// an action that has no receipt of its own. Nothing of ours persisted and the caller has not acted, so
 			// release the consumed credential and 409.
-			if rid, sess, kind, _ := useReceiptIdentity(sealed); rid == useID && sess == ur.SessionID && kind == brokerKind && storedUseMatchesRequest(sealed, ur, paramsCommitment) {
+			if _, same := priorUseMatchesRequest(sealed, useID, ur, brokerKind, paramsCommitment); same {
 				idempotent = true
 				return nil
 			}
@@ -2487,6 +2522,13 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		"record":     json.RawMessage(sealed),
 		"idempotent": idempotent,
 	})
+}
+
+// priorUseMatchesRequest is the single exact-retry rule for both the bounded
+// read-only fast path and the guarded write path.
+func priorUseMatchesRequest(recordJSON, useID string, ur useRequest, brokerKind, paramsCommitment string) (grantID string, same bool) {
+	rid, sessionID, kind, grantID := useReceiptIdentity(recordJSON)
+	return grantID, rid == useID && sessionID == ur.SessionID && kind == brokerKind && storedUseMatchesRequest(recordJSON, ur, paramsCommitment)
 }
 
 // useReceiptIdentity extracts the identity tuple of a stored broker/resource record — its record_id,
