@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,7 @@ type Postgres struct {
 	tx        pgx.Tx // non-nil only on the callback-bound view
 	projectID string
 	ctx       context.Context
+	active    *atomic.Bool
 }
 
 func (p *Postgres) callContext() context.Context {
@@ -34,6 +36,9 @@ func (p *Postgres) callContext() context.Context {
 }
 
 func (p *Postgres) checkProject(projectID string) error {
+	if p.active != nil && !p.active.Load() {
+		return errors.New("store: project transaction already closed")
+	}
 	if p.tx != nil && projectID != p.projectID {
 		return fmt.Errorf("store: transaction for project %q cannot access %q", p.projectID, projectID)
 	}
@@ -111,7 +116,10 @@ func (p *Postgres) WithProjectWrite(ctx context.Context, projectID string, fn fu
 	if err := lockProject(ctx, tx, projectID); err != nil {
 		return err
 	}
-	bound := &Postgres{pool: p.pool, tx: tx, projectID: projectID, ctx: ctx}
+	active := &atomic.Bool{}
+	active.Store(true)
+	bound := &Postgres{pool: p.pool, tx: tx, projectID: projectID, ctx: ctx, active: active}
+	defer active.Store(false)
 	unique, err := bound.RecordIDUniqueEnforced()
 	if err != nil {
 		return err
@@ -145,7 +153,10 @@ func (p *Postgres) WithProjectRead(ctx context.Context, projectID string, fn fun
 		defer cancel()
 		_ = tx.Rollback(rctx)
 	}()
-	bound := &Postgres{pool: p.pool, tx: tx, projectID: projectID, ctx: ctx}
+	active := &atomic.Bool{}
+	active.Store(true)
+	bound := &Postgres{pool: p.pool, tx: tx, projectID: projectID, ctx: ctx, active: active}
+	defer active.Store(false)
 	if err := fn(bound); err != nil {
 		return err
 	}
@@ -428,6 +439,9 @@ func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
 
 // BrokerSeqAt returns the allocation row holding seq (a UNIQUE (project_id, seq) lookup) and whether it is voided.
 func (p *Postgres) BrokerSeqAt(projectID string, seq int64) (BrokerSeqReservation, bool, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return BrokerSeqReservation{}, false, err
+	}
 	ctx := p.callContext()
 	var res BrokerSeqReservation
 	err := p.queries().QueryRow(ctx, `
@@ -449,6 +463,9 @@ func (p *Postgres) BrokerSeqAt(projectID string, seq int64) (BrokerSeqReservatio
 // wrong-expression index is not. Historical duplicate projects remain readable
 // but cannot enter the transaction write path until the backstop is repaired.
 func (p *Postgres) RecordIDUniqueEnforced() (bool, error) {
+	if p.active != nil && !p.active.Load() {
+		return false, errors.New("store: project transaction already closed")
+	}
 	ctx := p.callContext()
 	var ok bool
 	if err := p.queries().QueryRow(ctx, `
@@ -503,6 +520,9 @@ func (p *Postgres) VoidBrokerSeq(projectID, grantID string, seq int64) error {
 
 // HasRecordID reports whether a record carrying recordID exists in the project (a migration-0002 index lookup).
 func (p *Postgres) HasRecordID(projectID, recordID string) (bool, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return false, err
+	}
 	ctx := p.callContext()
 	var held bool
 	if err := p.queries().QueryRow(ctx, `
@@ -518,6 +538,9 @@ func (p *Postgres) HasRecordID(projectID, recordID string) (bool, error) {
 
 // MaxBrokerSeq returns the highest allocated broker_seq for the project (0 if none).
 func (p *Postgres) MaxBrokerSeq(projectID string) (int64, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return 0, err
+	}
 	ctx := p.callContext()
 	var max int64
 	if err := p.queries().QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM broker_seq WHERE project_id = $1`, projectID).Scan(&max); err != nil {
@@ -527,6 +550,9 @@ func (p *Postgres) MaxBrokerSeq(projectID string) (int64, error) {
 }
 
 func (p *Postgres) RecordByIdem(projectID, idemKey string) (Record, bool, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return Record{}, false, err
+	}
 	ctx := p.callContext()
 	row := p.queries().QueryRow(ctx, `
 		SELECT json, content_hash, session_id, parents
@@ -596,6 +622,9 @@ func selectByContentHash(ctx context.Context, tx pgx.Tx, projectID, hash string)
 // as a causal parent by any record in the SAME session. De-duplicated and byte-sorted ascending,
 // never nil. Heads are derived here (not trusted from the client) — this is the frontier authority.
 func (p *Postgres) Heads(projectID, sessionID string) ([]string, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	ctx := p.callContext()
 	rows, err := p.queries().Query(ctx, `
 		SELECT DISTINCT r.content_hash
@@ -618,6 +647,9 @@ func (p *Postgres) Heads(projectID, sessionID string) ([]string, error) {
 // records whose content_hash is not referenced as a causal parent by any record in the project.
 // De-duplicated and byte-sorted ascending, never nil.
 func (p *Postgres) ProjectHeads(projectID string) ([]string, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	ctx := p.callContext()
 	rows, err := p.queries().Query(ctx, `
 		SELECT DISTINCT r.content_hash
@@ -699,6 +731,9 @@ func (p *Postgres) NextDisplaySeq(projectID, sessionID string) (int64, error) {
 // Sessions returns the distinct session ids that have at least one record, in first-seen
 // (insertion) order to match Mem. Never nil.
 func (p *Postgres) Sessions(projectID string) ([]string, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	ctx := p.callContext()
 	// DISTINCT ON keeps each session once; ordering by the earliest row reproduces Mem's first-seen
 	// iteration order. ctid breaks ties deterministically for rows inserted in the same instant.
@@ -731,6 +766,9 @@ func (p *Postgres) Sessions(projectID string) ([]string, error) {
 
 // SessionRecords returns all records in a session, in insertion order. Never nil.
 func (p *Postgres) SessionRecords(projectID, sessionID string) ([]Record, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	ctx := p.callContext()
 	rows, err := p.queries().Query(ctx, `
 		SELECT json, content_hash, session_id, parents
@@ -746,6 +784,9 @@ func (p *Postgres) SessionRecords(projectID, sessionID string) ([]Record, error)
 
 // AllRecords returns every record in the project, in insertion order. Never nil.
 func (p *Postgres) AllRecords(projectID string) ([]Record, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	ctx := p.callContext()
 	rows, err := p.queries().Query(ctx, `
 		SELECT json, content_hash, session_id, parents
@@ -763,6 +804,9 @@ func (p *Postgres) AllRecords(projectID string) ([]Record, error) {
 // so a large tenant's list call never materializes the whole history in RAM. Ordering mirrors AllRecords'
 // (inserted_at, ctid) but DESC, so the newest record is first. Never nil.
 func (p *Postgres) RecordsPage(projectID string, limit, offset int) ([]Record, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		return []Record{}, nil
 	}
@@ -794,6 +838,9 @@ func (p *Postgres) RecordsPage(projectID string, limit, offset int) ([]Record, e
 // O(grants) indexed grant head is a deferred rearchitecture (needs a schema migration). The `#>>` path yields
 // NULL (≠ 'grant') for any record lacking the marker, so only grant-kind rows match.
 func (p *Postgres) GrantRecords(projectID string) ([]Record, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	ctx := p.callContext()
 	rows, err := p.queries().Query(ctx, `
 		SELECT json, content_hash, session_id, parents
@@ -828,6 +875,9 @@ func collectRecords(rows pgx.Rows) ([]Record, error) {
 // which counts unique content, not insert attempts). Because (project_id, content_hash) is unique,
 // this equals the row count, but DISTINCT keeps the semantics explicit.
 func (p *Postgres) RecordCount(projectID string) (int, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return 0, err
+	}
 	ctx := p.callContext()
 	var n int
 	err := p.queries().QueryRow(ctx, `
@@ -872,6 +922,9 @@ func (p *Postgres) PutCheckpoint(projectID string, cp Checkpoint) error {
 
 // Checkpoints returns all checkpoints for the project ordered by seq ascending. Never nil.
 func (p *Postgres) Checkpoints(projectID string) ([]Checkpoint, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	ctx := p.callContext()
 	rows, err := p.queries().Query(ctx, `
 		SELECT json, checkpoint_hash, seq
@@ -900,6 +953,9 @@ func (p *Postgres) Checkpoints(projectID string) ([]Checkpoint, error) {
 // NextCheckpointSeq returns the next checkpoint sequence number: the count of existing checkpoints
 // for the project (0-based, matching Mem). This is the value the caller passes as Checkpoint.Seq.
 func (p *Postgres) NextCheckpointSeq(projectID string) (int64, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return 0, err
+	}
 	ctx := p.callContext()
 	var n int64
 	err := p.queries().QueryRow(ctx, `
@@ -1012,6 +1068,9 @@ func (p *Postgres) PutAnchor(projectID string, seq int64, tokenB64 string) error
 
 // Anchors returns seq -> token_b64 for the project. Never nil.
 func (p *Postgres) Anchors(projectID string) (map[int64]string, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	ctx := p.callContext()
 	rows, err := p.queries().Query(ctx, `SELECT seq, token_b64 FROM anchors WHERE project_id = $1`, projectID)
 	if err != nil {
@@ -1035,6 +1094,9 @@ func (p *Postgres) Anchors(projectID string) (map[int64]string, error) {
 
 // Disclosures returns every disclosure secret for the project, ordered by insertion. Never nil.
 func (p *Postgres) Disclosures(projectID string) ([]DisclosureSecret, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
 	ctx := p.callContext()
 	// Order canonically by the (record_id, field) key — unique within a project, so the result is
 	// fully deterministic and identical to Mem regardless of insertion timing (a same-timestamp tie
@@ -1067,6 +1129,9 @@ func (p *Postgres) Disclosures(projectID string) ([]DisclosureSecret, error) {
 // are no checkpoints yet. (Mem returns its last-appended checkpoint; with monotonic seq that is the
 // max-seq row.)
 func (p *Postgres) LatestCheckpointHash(projectID string) (string, bool, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return "", false, err
+	}
 	ctx := p.callContext()
 	var hash string
 	err := p.queries().QueryRow(ctx, `

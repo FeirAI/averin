@@ -12,6 +12,7 @@ import (
 	"maps"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -112,6 +113,11 @@ type Store interface {
 	IsRevoked(projectID, grantID string) (bool, error)
 	RevokeGrant(projectID, grantID string) (bool, error)
 	RevokedGrantIDs(projectID string) ([]string, error)
+	// Ledger claims made on the bound Store commit with the use receipt.
+	ConsumeNonce(nonce string) error
+	ConsumeJTI(jti string) error
+	ReleaseNonce(nonce string)
+	ReleaseJTI(jti string)
 	// PutRecord stores a record under an idempotency key. If the key was already used, it returns
 	// the previously stored record and created=false (threat #8: retry duplication collapses). A NEW record
 	// whose record_id is already held by a different record in the project fails with ErrRecordIDConflict.
@@ -239,15 +245,32 @@ type Store interface {
 // Mem is an in-memory Store for tests and single-node dev.
 type Mem struct {
 	mu           sync.Mutex
-	projectLocks sync.Map // project ID -> *sync.Mutex; never held for another project
+	projectLocks sync.Map // project ID -> chan struct{}; one token per project
 	projects     map[string]*project
 	now          func() time.Time // the store's clock (broker_seq allocated_at); WithClock injects one for tests
 	boundProject string
 	readOnly     bool
 	inTx         bool
+	active       *atomic.Bool
+}
+
+func (m *Mem) projectLock(ctx context.Context, projectID string) (func(), error) {
+	fresh := make(chan struct{}, 1)
+	fresh <- struct{}{}
+	v, _ := m.projectLocks.LoadOrStore(projectID, fresh)
+	ch := v.(chan struct{})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-ch:
+		return func() { ch <- struct{}{} }, nil
+	}
 }
 
 func (m *Mem) checkProject(projectID string) error {
+	if m.active != nil && !m.active.Load() {
+		return errors.New("store: project transaction already closed")
+	}
 	if m.inTx && m.boundProject != projectID {
 		return fmt.Errorf("store: transaction for project %q cannot access %q", m.boundProject, projectID)
 	}
@@ -264,10 +287,7 @@ func (m *Mem) mutation(projectID string) (func(), error) {
 	if m.inTx {
 		return func() {}, nil
 	}
-	v, _ := m.projectLocks.LoadOrStore(projectID, &sync.Mutex{})
-	l := v.(*sync.Mutex)
-	l.Lock()
-	return l.Unlock, nil
+	return m.projectLock(context.Background(), projectID)
 }
 
 // memSnapshot makes the transaction's mutations private until a successful
@@ -292,6 +312,7 @@ func memSnapshot(p *project) *project {
 		discSeen: maps.Clone(p.discSeen), anchors: maps.Clone(p.anchors),
 		brokerSeq: maps.Clone(p.brokerSeq), brokerAt: maps.Clone(p.brokerAt), voided: maps.Clone(p.voided),
 		pending: pending, revoked: maps.Clone(p.revoked),
+		nonces: maps.Clone(p.nonces), consumedJTI: maps.Clone(p.consumedJTI),
 	}
 }
 
@@ -299,16 +320,20 @@ func (m *Mem) WithProjectWrite(ctx context.Context, projectID string, fn func(St
 	if m.inTx {
 		return errors.New("store: nested project transaction")
 	}
-	v, _ := m.projectLocks.LoadOrStore(projectID, &sync.Mutex{})
-	l := v.(*sync.Mutex)
-	l.Lock()
-	defer l.Unlock()
+	unlock, err := m.projectLock(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	m.mu.Lock()
-	tmp := &Mem{projects: map[string]*project{projectID: memSnapshot(m.proj(projectID))}, now: m.now, boundProject: projectID, inTx: true}
+	active := &atomic.Bool{}
+	active.Store(true)
+	tmp := &Mem{projects: map[string]*project{projectID: memSnapshot(m.proj(projectID))}, now: m.now, boundProject: projectID, inTx: true, active: active}
 	m.mu.Unlock()
+	defer active.Store(false)
 	if err := fn(tmp); err != nil {
 		return err
 	}
@@ -329,26 +354,31 @@ func (m *Mem) WithProjectRead(ctx context.Context, projectID string, fn func(Sto
 		return err
 	}
 	m.mu.Lock()
-	tmp := &Mem{projects: map[string]*project{projectID: memSnapshot(m.proj(projectID))}, now: m.now, boundProject: projectID, readOnly: true, inTx: true}
+	active := &atomic.Bool{}
+	active.Store(true)
+	tmp := &Mem{projects: map[string]*project{projectID: memSnapshot(m.proj(projectID))}, now: m.now, boundProject: projectID, readOnly: true, inTx: true, active: active}
 	m.mu.Unlock()
+	defer active.Store(false)
 	return fn(tmp)
 }
 
 type project struct {
-	records    []Record
-	idem       map[string]int // idempotency key -> record index
-	byHash     map[string]struct{}
-	byRecordID map[string]struct{} // record_id -> present (per-project uniqueness)
-	checks     []Checkpoint
-	seqBySess  map[string]int64
-	disclosure []DisclosureSecret
-	discSeen   map[string]struct{}  // record_id\x00field -> present (dedupe)
-	anchors    map[int64]string     // checkpoint seq -> token_b64
-	brokerSeq  map[string]int64     // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
-	brokerAt   map[string]time.Time // grant_id -> allocation time (the operator void's safety age)
-	voided     map[string]struct{}  // grant_id -> voided (row kept in brokerSeq; never released or re-allocated)
-	pending    map[string]PendingGrant
-	revoked    map[string]struct{}
+	records     []Record
+	idem        map[string]int // idempotency key -> record index
+	byHash      map[string]struct{}
+	byRecordID  map[string]struct{} // record_id -> present (per-project uniqueness)
+	checks      []Checkpoint
+	seqBySess   map[string]int64
+	disclosure  []DisclosureSecret
+	discSeen    map[string]struct{}  // record_id\x00field -> present (dedupe)
+	anchors     map[int64]string     // checkpoint seq -> token_b64
+	brokerSeq   map[string]int64     // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
+	brokerAt    map[string]time.Time // grant_id -> allocation time (the operator void's safety age)
+	voided      map[string]struct{}  // grant_id -> voided (row kept in brokerSeq; never released or re-allocated)
+	pending     map[string]PendingGrant
+	revoked     map[string]struct{}
+	nonces      map[string]struct{}
+	consumedJTI map[string]struct{}
 }
 
 func NewMem() *Mem { return &Mem{projects: map[string]*project{}, now: time.Now} }
@@ -369,17 +399,19 @@ func (m *Mem) proj(id string) *project {
 	p := m.projects[id]
 	if p == nil {
 		p = &project{
-			idem:       map[string]int{},
-			byHash:     map[string]struct{}{},
-			byRecordID: map[string]struct{}{},
-			seqBySess:  map[string]int64{},
-			discSeen:   map[string]struct{}{},
-			anchors:    map[int64]string{},
-			brokerSeq:  map[string]int64{},
-			brokerAt:   map[string]time.Time{},
-			voided:     map[string]struct{}{},
-			pending:    map[string]PendingGrant{},
-			revoked:    map[string]struct{}{},
+			idem:        map[string]int{},
+			byHash:      map[string]struct{}{},
+			byRecordID:  map[string]struct{}{},
+			seqBySess:   map[string]int64{},
+			discSeen:    map[string]struct{}{},
+			anchors:     map[int64]string{},
+			brokerSeq:   map[string]int64{},
+			brokerAt:    map[string]time.Time{},
+			voided:      map[string]struct{}{},
+			pending:     map[string]PendingGrant{},
+			revoked:     map[string]struct{}{},
+			nonces:      map[string]struct{}{},
+			consumedJTI: map[string]struct{}{},
 		}
 		m.projects[id] = p
 	}
