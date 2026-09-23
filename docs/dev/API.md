@@ -259,6 +259,10 @@ grant under the same `idempotency_key` is returned only when the request matches
 `/v2/grants` retry), else `409`; a body without a valid `agent_sig` is a `400`. `finalize` with no
 prior `prepare` is a `409`.
 
+With `AVERIN_DATABASE_URL`, pending challenges persist and rehydrate after restart. They are still
+served from a local cache: a different live replica may answer `409` until it is restarted or the
+request is routed to the original issuer. Route both phases to the same writer.
+
 ---
 
 ## POST `/v2/use` (resource gateway, Tier-B)
@@ -293,6 +297,9 @@ reads a bundle with no list as `revocation_status: missing` (which blocks the ca
 revoked" is an affirmative, signed statement rather than an absent field. (Known limit: the verifier evaluates a use against the list *as of the export*, so a
 use recorded **before** the revoke is also reported blocked; distinguishing pre-revocation uses needs a
 verifier-side change.)
+
+In Postgres mode, the revoke is durable before `201` and is reloaded at boot. Other live replicas do
+not refresh their local revoked set from that write; route uses and revokes for a project together.
 
 Request: `{ "project_id": "...", "grant_id": "..." }` (both required).
 

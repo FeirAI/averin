@@ -30,24 +30,29 @@ make test-core            # = cargo test --workspace
 cargo test --features test-tsa   # also exercises real RFC 3161 / mini-TSA token verify
 
 # Go server: rebuilds the staticlib FIRST, then go vet + go test.
-make test-server          # = cargo build -p averin-decision-core && (cd server && go vet ./... && go test ./...)
+make test-server          # builds native Rust with rfc3161, then Go vet + test
 
 # Offline verifier (browser trust-root tests).
 make test-verifier        # = (cd verifier && bun test)
 ```
 
-### Postgres store + ledger tests
+### Real-Postgres API, store, ledger and durable-state tests
 
-The store-parity / append-only / consume-before-act-ledger tests need a real Postgres and are
-**skipped** unless you point them at one:
+Several API race, durability, store-parity, append-only and consume-before-act-ledger tests
+**skip** without a real Postgres DSN. Use a disposable Postgres 16 database, then run from the
+repository root:
 
 ```bash
-AVERIN_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
-  go test -count=1 ./internal/store/... ./internal/pgledger/...
+AVERIN_TEST_DATABASE_URL='postgres://test-user:test-password@localhost:55432/test-db?sslmode=disable' \
+  make test-server-postgres
 ```
 
-CI runs these against Postgres 16 under a non-owner least-privilege role (to prove the append-only
-`REVOKE` actually bites).
+The target rebuilds and freshness-checks the native RFC 3161 cgo library, runs the Go suite, and
+checks the JSON event stream for explicit pass events from the three named broker-sequence void
+Postgres tests. Missing tests and skipped children fail the gate. CI runs this against Postgres 16;
+the append-only test also uses a freshly created non-owner least-privilege role to prove that
+`REVOKE` actually bites. The DSN needs sufficient privilege to create that test role and private
+schemas. Run `make check-claims` for textual validation of the claim inventory and CI job IDs.
 
 ### SDKs
 

@@ -2,7 +2,7 @@
 # staticlib (server/internal/core: #cgo LDFLAGS .../target/debug/libaverin_decision_core.a). Edit core/ but
 # forget to rebuild it and the Go tests pass against a STALE trust root. `make test-server` always rebuilds
 # the staticlib first; `make check-staticlib` fails if it is older than core source.
-.PHONY: all core wasm check-staticlib test-core test-server test-verifier test deny vuln supply-chain
+.PHONY: all core wasm check-staticlib test-core test-server test-server-postgres test-verifier test deny vuln supply-chain check-claims
 
 all: test
 
@@ -25,6 +25,17 @@ test-core:
 # Rebuild the staticlib FIRST so the linked core is never stale, then run the Go suite.
 test-server: core
 	cd server && go vet ./... && go test -a ./...
+
+# Real-Postgres API/store gate; requires a disposable Postgres 16 DSN. The JSON gate
+# rejects absent/skipped named race tests, including skipped children of a passing parent.
+test-server-postgres: core check-staticlib
+	@test -n "$(AVERIN_TEST_DATABASE_URL)" || (echo 'AVERIN_TEST_DATABASE_URL is required' >&2; exit 1)
+	python3 -m unittest discover -s scripts -p test_check_go_test_events.py
+	cd server && bash -o pipefail -c 'go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... | python3 ../scripts/check-go-test-events.py'
+
+check-claims:
+	python3 -m unittest discover -s scripts -p test_check_claims.py
+	python3 scripts/check-claims.py
 
 test-verifier: wasm
 	cd verifier && bun test

@@ -31,6 +31,10 @@ Accountability, not just observability. Apache-2.0, self-hostable.
 > [Integration](docs/dev/INTEGRATION.md) · [Testing](docs/dev/TESTING.md). averin is usable
 > **standalone** — a single Go binary plus an offline verifier; the four-plane composition is optional.
 
+The [claim inventory](formal/claims.json) maps trust claims to source symbols, assumptions, targets
+and recurring gates. Its checker validates references; model proofs, sampled conformance and
+production behavior retain the separate bounds described in [formal verification](formal/README.md).
+
 ## The claim we actually make (and its limits)
 
 A signed, hash-chained record proves **provenance and integrity**, not **reality**. We prove:

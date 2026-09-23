@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "note": "An inventory of bounded claims and required recurring gates. Reference validation is textual, not semantic proof.",
+  "claims": [
+    {
+      "id": "seal-and-closure-model",
+      "claim": "The Lean model gives seal binding and closed DAG/checkpoint history under its cryptographic and honest-signer assumptions.",
+      "class": "unbounded-model-proof",
+      "targets": ["Lean model"],
+      "assumptions": ["SHA-256 collision resistance", "Ed25519 signatures", "honest signer", "model inputs are post-NFC"],
+      "sources": [{"file": "formal/lean/Averin/Seal.lean", "symbol": "recordHashOf_binding"}, {"file": "formal/lean/Averin/Dag.lean", "symbol": "bundle_eq_closure"}, {"file": "formal/lean/Averin/Chain.lean", "symbol": "unique_history"}],
+      "proofs": [{"file": "formal/lean/check-axioms.sh", "symbol": "check"}],
+      "gates": ["formal-lean"]
+    },
+    {
+      "id": "rust-model-refinement",
+      "claim": "Rust matches the executable Lean preimage oracle on a fixed corpus and tag inventory; this is sampled conformance, not a mechanized refinement proof.",
+      "class": "sampled-conformance",
+      "targets": ["native Rust"],
+      "assumptions": ["corpus covers the relevant drift", "Lean model expresses the intended format"],
+      "sources": [{"file": "core/src/canon.rs", "symbol": "pub fn serialize"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "Family.msg"}],
+      "proofs": [{"file": "core/tests/oracle.rs", "symbol": "every_preimage_family_matches_model"}, {"file": "formal/check-refinement.py", "symbol": "main"}],
+      "gates": ["formal-refinement", "formal-mutants"]
+    },
+    {
+      "id": "bounded-real-encoders",
+      "claim": "Kani proves selected parser and encoder properties of the real Rust implementation only within harness bounds.",
+      "class": "bounded-implementation-proof",
+      "targets": ["native Rust harnesses"],
+      "assumptions": ["harness bounds and feature selections in run-kani.sh"],
+      "sources": [{"file": "core/src/canon.rs", "symbol": "pub fn serialize"}],
+      "proofs": [{"file": "formal/run-kani.sh", "symbol": "cargo kani"}],
+      "gates": ["formal-kani", "formal-mutants"]
+    },
+    {
+      "id": "grant-log-model",
+      "claim": "TLC checks bounded grant-log safety and conditional liveness; recovery needs the stated retry and fairness assumptions.",
+      "class": "bounded-model-check",
+      "targets": ["TLA+ model"],
+      "assumptions": ["finite configured grant count", "strong fairness of operator void", "weak fairness of open transaction resolution"],
+      "sources": [{"file": "formal/tla/GrantLog.tla", "symbol": "CheckpointRecovers"}],
+      "proofs": [{"file": "formal/tla/run-tlc.sh", "symbol": "GrantLog_fixed_live.cfg"}],
+      "gates": ["formal-tla"]
+    },
+    {
+      "id": "postgres-void-ordering",
+      "claim": "The three named API tests exercise void ordering and recovery against real Postgres 16; skips must fail the CI gate.",
+      "class": "real-database-test",
+      "targets": ["Go server", "Postgres 16"],
+      "assumptions": ["private test schema", "unique record_id index present where void succeeds", "database is reachable"],
+      "sources": [{"file": "server/internal/store/postgres.go", "symbol": "VoidBrokerSeq"}],
+      "proofs": [{"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidPostgres"}, {"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidGrantLandsFirstPostgres"}, {"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidMarkerFailsPostgres"}, {"file": "scripts/check-go-test-events.py", "symbol": "REQUIRED"}],
+      "gates": ["store-postgres"]
+    },
+    {
+      "id": "revocation-live-and-durable",
+      "claim": "A successful revoke blocks later uses on that server; Postgres mode persists and rehydrates revocations across restart. Live cross-replica coherence is not established.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": ["Go server", "Postgres mode"],
+      "assumptions": ["revocation enabled", "single writer per project", "Postgres durable store configured"],
+      "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "isRevoked"}, {"file": "server/internal/api/durable.go", "symbol": "WithDurable"}],
+      "proofs": [{"file": "server/internal/api/durable_internal_test.go", "symbol": "TestDurableRevocationSurvivesRestart"}],
+      "gates": ["store-postgres"]
+    },
+    {
+      "id": "pending-grant-durability",
+      "claim": "Postgres mode persists and rehydrates pending two-phase grants at boot; live replicas are not a coherent shared pending cache.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": ["Go server", "Postgres mode"],
+      "assumptions": ["Postgres durable store configured", "single writer or sticky routing for live two-phase requests"],
+      "sources": [{"file": "server/internal/api/durable.go", "symbol": "WithDurable"}],
+      "proofs": [{"file": "server/internal/api/durable_internal_test.go", "symbol": "TestDurablePendingTwoPhaseGrantSurvivesRestart"}],
+      "gates": ["store-postgres"]
+    },
+    {
+      "id": "native-rfc3161",
+      "claim": "The native feature verifies RFC 3161 tokens against pinned TSA SPKI; the lean WASM build reports RFC 3161 as Unsupported.",
+      "class": "target-specific-test",
+      "targets": ["native Rust with rfc3161", "Go cgo with rfc3161", "WASM without rfc3161"],
+      "assumptions": ["TSA SPKI pinned out of band", "no production TSA round trip has been validated"],
+      "sources": [{"file": "core/src/rfc3161.rs", "symbol": "verify_token"}, {"file": "core/src/anchor.rs", "symbol": "AnchorError::Unsupported"}],
+      "proofs": [{"file": "core/src/anchor.rs", "symbol": "rfc3161_no_trusted_tsa_is_an_error_not_a_pass"}, {"file": "scripts/check-staticlib-fresh.sh", "symbol": "staticlib"}],
+      "gates": ["core", "store-postgres", "wasm"]
+    },
+    {
+      "id": "external-authenticity-pins",
+      "claim": "Authentic role and TSA verdicts require independently obtained public keys; self-reported bundle keys do not establish operator authenticity.",
+      "class": "deployment-assumption",
+      "targets": ["CLI", "WASM", "Go cgo"],
+      "assumptions": ["operator pins role keys and TSA SPKI out of band"],
+      "sources": [{"file": "core/src/verify.rs", "symbol": "verify_bundle_with"}],
+      "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "out_of_band_key_pinning_governs_authenticity"}],
+      "gates": ["core"]
+    },
+    {
+      "id": "resource-truth-and-single-writer",
+      "claim": "The strongest completeness label is conditional on truthful resource labeling, and the server requires one writer per project for DAG frontier consistency.",
+      "class": "deployment-assumption",
+      "targets": ["Go server", "offline verifier"],
+      "assumptions": ["resource honestly labels covered actions", "one writer per project; no distributed frontier lock"],
+      "sources": [{"file": "core/src/verify.rs", "symbol": "assumed_truthful"}, {"file": "server/internal/api/server.go", "symbol": "ingestMu"}],
+      "proofs": [{"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
+      "gates": ["core", "server"]
+    }
+  ]
+}

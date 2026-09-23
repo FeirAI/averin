@@ -216,6 +216,8 @@ time from a role-separated key:
   `/v2/export` carries a signed, time-bounded `revocation_list` (its freshness window anchored to the latest
   checkpoint) — an empty one while nothing is revoked, so a verifier pinning `revocation_keys` reads `fresh`
   rather than `missing`. Verify with `revocation_keys` pinned → a revoked grant's use (brokered OR native) is blocked.
+  A successful revoke also blocks later uses on the serving process. Postgres mode restores the revoked set
+  after restart, but does not synchronize other live replicas; route each project's uses and revokes together.
 - **Federation (M4) — server-native.** Set `AVERIN_BROKER_ID`; the server tags its grants with `broker_id` and
   emits a per-broker_id `broker_grant_heads` map in each checkpoint. Verify with `federated_broker_keys[<id>]`
   pinned → `federation_status: sequence_verified`. (One server = one broker_id; combine bundles from multiple

@@ -138,21 +138,25 @@ would reopen the single-use replay the ledger exists to close. A configured valu
 floor is fatal at startup. A sweep failure is logged, never fatal: it only defers reclaiming space, it
 can never reopen a replay window.
 
-## Revocation is audit-time, not a live kill-switch (averin#1)
+## Revocation blocks later local uses, with a replica-coherence limit
 
-averin does NOT enforce a revocation at the live `/v2/use` gateway — a revoked capability is caught
-when the evidence is later verified (the offline verifier evaluates the revocation list when the
-auditor pins `revocation_keys`), not blocked in-path at use time. averin PROVES; it does not ENFORCE.
-The live kill-switch is govder/vultrino token revoke (the credential-broker plane), which stops the
-credential at `/execute`. Product copy must not claim averin gives "live"/"immediate" per-action
-revocation — the accurate bound is: govder/vultrino revoke the credential live; averin's revocation
-list makes a use-after-revoke provable after the fact.
+When revocation is enabled, a successful `POST /v2/revoke` publishes the revoked grant ID before it
+returns `201`. This server then rejects later `/v2/use` and `/v2/use-intent` calls for that grant before
+consumption. The next export contains a signed revocation list for offline verification. With the
+Postgres durable store, the revoke is persisted before publication and reloaded at startup; a failed
+durable write does not acknowledge the revoke. Without Postgres the revoked set is volatile.
 
-## Two-phase grant prepare/finalize is single-replica (or sticky) under HA (averin#13)
+Each running replica reads its own in-memory snapshot. A revoke acknowledged by one replica is **not**
+automatically visible to another live replica, even when both use Postgres; restart rehydration is
+not live synchronization. Keep each project's use traffic on the writer that handles revocation, or
+enforce credential revocation at the upstream gateway. The offline verifier evaluates the exported
+list as of export, so a use recorded before the revoke is also reported blocked under a fresh list.
 
-The two-phase grant flow keeps the `prepare` challenge in an in-memory pending cache. A `finalize`
-that lands on a *different* replica than served the `prepare` 409s (the pending entry is not there).
-Run the two-phase-grant issuer as a single replica, or pin prepare+finalize to the same replica with a
-sticky-session/consistent-hash route, until the pending cache is made shared/durable (deferred). The
-single-phase and native (token_exchange) grant paths are unaffected — this bound is specific to the
-online cosigned two-phase flow.
+## Two-phase pending grants survive restart in Postgres mode, not live replica handoff
+
+The `prepare` challenge is held in an in-memory pending cache. With the Postgres durable store it is
+also persisted and rehydrated at startup, so a restart need not lose a pending grant. A live
+`finalize` request routed to a different replica does not load the other replica's pending cache and
+can return `409`. Run one issuer per project or route prepare and finalize to the same replica. In a
+non-Postgres deployment pending grants remain volatile. This bound is specific to the online
+two-phase flow.

@@ -155,6 +155,9 @@ verdict logic and authority-evidence binding.
 - **In-memory deployments lose evidence on restart** and are not serializable; use Postgres for any
   durability/integrity guarantee. The in-memory consume-before-act ledger reopens a single-use replay
   window on restart (warned about) — use the Postgres-backed ledger in production.
+- **Revocation and two-phase pending grants use local request caches.** In Postgres mode they persist
+  and rehydrate at boot, but a live replica does not automatically see another replica's revoke or
+  pending prepare. Route each project's requests to one writer; see [LIMITATIONS.md](LIMITATIONS.md).
 
 ## Data retention & erasure (append-only — no in-store deletion)
 

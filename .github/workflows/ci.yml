@@ -73,7 +73,7 @@ jobs:
         with:
           go-version: '1.25.13'
       - name: build rust staticlib (cgo links it)
-        run: cargo build -p averin-decision-core
+        run: cargo build -p averin-decision-core --features rfc3161
       - name: stale-staticlib guard (the cgo lib must match current core source, never a stale trust root)
         run: ./scripts/check-staticlib-fresh.sh
       - name: go vet + test
@@ -90,7 +90,7 @@ jobs:
           govulncheck ./...
 
   store-postgres:
-    name: store parity + append-only + pgdurable (Mem semantics ↔ real Postgres, non-owner role)
+    name: Postgres API races + store parity + durable state (real Postgres, non-owner role)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -107,10 +107,15 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25.13'
-      # The store package is pure Go (no cgo/core dependency), so no rust staticlib build is needed.
+      - name: build native RFC 3161 rust staticlib for cgo API tests
+        run: cargo build -p averin-decision-core --features rfc3161
+      - name: reject stale cgo staticlib
+        run: ./scripts/check-staticlib-fresh.sh
       # Setting AVERIN_TEST_DATABASE_URL un-skips the Postgres tests: the SAME exercise*(t, Store) contract
       # helpers that TestMem* run now also run against real Postgres (parity), and
       # TestPostgresAppendOnlyRejectsMutation proves UPDATE/DELETE/TRUNCATE are rejected (SQLSTATE 42501)
@@ -119,13 +124,24 @@ jobs:
       # pgdurable is INCLUDED here too: it is the durable-revocation + two-phase-grant store whose own doc
       # calls a lost revoke "a fail-open — the verifier would then accept a grant an operator believed was
       # blocked", and TestPutPendingConflictReturnsWinningRow arbitrates multi-replica pending-grant races.
-      # Its Postgres tests self-skip without a DSN, so the SAME CI-style DSN (no '?') that broke its harness's
-      # search_path concatenation now exercises the robust separator fix — see pgdurable_test.go.
-      - name: store + pgdurable tests against real Postgres (parity + non-owner append-only + durable revocation)
+      # Its Postgres tests self-skip without a DSN. API durable and pgschema test helpers append
+      # `&search_path`, so the CI DSN includes an initial `?sslmode=disable` query parameter.
+      - name: self-test required Go event gate
+        run: python3 -m unittest discover -s scripts -p test_check_go_test_events.py
+      - name: API races + store + pgdurable against real Postgres
         working-directory: server
         env:
-          AVERIN_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: go test -count=1 ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/...
+          AVERIN_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+        run: |
+          set -o pipefail
+          : "${AVERIN_TEST_DATABASE_URL:?Postgres DSN is required for the API race gate}"
+          go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... | tee "${RUNNER_TEMP}/averin-go-events.json" | python3 ../scripts/check-go-test-events.py
+      - name: save Go test events on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-go-test-events
+          path: ${{ runner.temp }}/averin-go-events.json
 
   web:
     name: web app (svelte build + trace unit tests)
@@ -221,6 +237,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: validate claim references and required CI gates
+        run: |
+          python3 -m unittest discover -s scripts -p test_check_claims.py
+          python3 scripts/check-claims.py
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: leanprover/lean-action@v1

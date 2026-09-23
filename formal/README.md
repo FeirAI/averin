@@ -6,6 +6,14 @@ evidence for the assumptions that claim rests on. There are three layers, each u
 strongest, plus a refinement gate that keeps them in sync with the code and a mutation suite
 that keeps the gates honest.
 
+[`claims.json`](claims.json) is the reviewable claim inventory: each entry names its implementation
+or model symbols, assumptions, proof or test, supported target and recurring CI job.
+`make check-claims` verifies that the referenced files, symbols and job IDs exist. This textual check
+does not prove that a test covers the stated behavior or that a model refines the production code;
+those claims still require review. In particular, the Lean theorems are unbounded **for the model**,
+Kani proves bounded properties of selected real-code harnesses, and the Rust/Lean oracle samples a
+fixed corpus. The TLA+ recovery liveness result depends on its retry and fairness assumptions.
+
 | Layer | Tool | What it covers | Run |
 |---|---|---|---|
 | Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every message a key signs and every tagged or verifier-recomputed preimage (catalogue includes JSON challenges, capability tokens, raw keys, Merkle nodes, the RFC 3161 imprint string and server id derivations; untagged server-local digests are listed as out of scope), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |

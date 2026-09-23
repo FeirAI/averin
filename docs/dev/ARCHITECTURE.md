@@ -213,6 +213,10 @@ The `store.Store` interface (`server/internal/store/store.go`) has two implement
   replicas so no project is written by more than one). A real cross-replica frontier lock is a DEFERRED
   item; see `docs/dev/LIMITATIONS.md`.
 
+  In Postgres mode, revocations and pending two-phase grants are persisted and rehydrated at boot.
+  Request handling still uses per-process caches, so this does not synchronize live replicas; see
+  [LIMITATIONS.md](LIMITATIONS.md).
+
 Append-only is the integrity invariant: records are written once, keyed by `(project, idempotency
 key)`; a retry collapses onto the existing row rather than duplicating. Disclosure secrets are
 written **atomically** with the record they open. The Rust core never touches storage — it only
