@@ -260,7 +260,7 @@ jobs:
       - run: bash formal/check-mutants.sh
 
   formal-kani:
-    name: formal — Kani bounded proofs over the real encoders/parser
+    name: formal — Kani bounded proofs over the real encoders
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
