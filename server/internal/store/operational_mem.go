@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"sort"
 	"time"
 )
@@ -69,7 +70,27 @@ func (m *Mem) IsRevoked(projectID, grantID string) (bool, error) {
 	p := m.proj(projectID)
 	_, rev := p.revoked[grantID]
 	_, void := p.voided[grantID]
-	return rev || void, nil
+	if rev || void {
+		return true, nil
+	}
+	// A tombstone can commit while the marker write fails. The signed record
+	// already retires the grant ID, including when revocation is disabled.
+	for _, rec := range p.records {
+		if recordIDOf(rec.JSON) != grantID {
+			continue
+		}
+		var shape struct {
+			Extensions struct {
+				Broker struct {
+					Kind string `json:"kind"`
+				} `json:"broker"`
+			} `json:"extensions"`
+		}
+		if json.Unmarshal([]byte(rec.JSON), &shape) == nil && shape.Extensions.Broker.Kind == "grant_void" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *Mem) RevokeGrant(projectID, grantID string) (bool, error) {
