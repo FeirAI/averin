@@ -419,7 +419,9 @@ func TestUsePreflightPreservesExpiredCommittedExactRetry(t *testing.T) {
 	if err := json.Unmarshal([]byte(grantResponse), &grant); err != nil {
 		t.Fatal(err)
 	}
-	use := useBody(t, "idem-use-expiry-use", grant.Capability, grant.GrantID, ak, "SELECT 1", "nonce-use-expiry")
+	// Non-bounded capabilities accept but ignore this optional wire value; the
+	// receipt records the effective zero sequence. Replay must use that rule.
+	use := mutateGrantBody(t, useBody(t, "idem-use-expiry-use", grant.Capability, grant.GrantID, ak, "SELECT 1", "nonce-use-expiry"), "use_sequence_number", 17)
 	if code, response := do(t, h, "POST", "/v2/use?project=p1", use); code != http.StatusCreated {
 		t.Fatalf("first use: %d %s", code, response)
 	}
@@ -427,6 +429,9 @@ func TestUsePreflightPreservesExpiredCommittedExactRetry(t *testing.T) {
 	now = now.Add(2 * time.Minute) // capability TTL is one minute
 	if code, response := do(t, h, "POST", "/v2/use?project=p1", use); code != http.StatusCreated || !strings.Contains(response, `"idempotent":true`) {
 		t.Fatalf("expired exact committed use retry: %d %s", code, response)
+	}
+	if code, response := do(t, h, "POST", "/v2/use?project=p1", mutateGrantBody(t, use, "use_sequence_number", 18)); code != http.StatusCreated || !strings.Contains(response, `"idempotent":true`) {
+		t.Fatalf("effective non-bounded sequence changed on retry: %d %s", code, response)
 	}
 	if code, response := do(t, h, "POST", "/v2/use?project=p1", mutateGrantBody(t, use, "params", "SELECT 2")); code != http.StatusConflict {
 		t.Fatalf("changed request reused expired use idempotency key: %d %s", code, response)

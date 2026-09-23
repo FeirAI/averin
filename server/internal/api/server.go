@@ -2571,7 +2571,17 @@ func (s *Server) storedUseMatchesRequest(recordJSON string, ur useRequest, param
 		return false
 	}
 	ue := p.Extensions.Broker.UseEvidence
-	if ue.Action != ur.Action || ue.Nonce != ur.Nonce || ue.UseSequenceNumber != ur.UseSequenceNumber ||
+	// The shim ignores a sequence on non-bounded capabilities and records zero.
+	// Compare that same effective value so an otherwise exact committed retry
+	// remains recoverable even if the original caller supplied a nonzero number.
+	effectiveUseSequence := 0
+	if claims.UseLimit > 0 {
+		if ur.UseSequenceNumber < 1 || ur.UseSequenceNumber > claims.UseLimit {
+			return false
+		}
+		effectiveUseSequence = ur.UseSequenceNumber
+	}
+	if ue.Action != ur.Action || ue.Nonce != ur.Nonce || ue.UseSequenceNumber != effectiveUseSequence ||
 		p.InputCommit.Commitment != paramsCommitment ||
 		claims.Jti == "" || claims.Jti != ue.GrantID || claims.Jti != ue.JTI ||
 		claims.Aud != s.resourceID || claims.Aud != ue.ResourceID || claims.Act != ue.Action ||

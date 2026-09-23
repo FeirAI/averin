@@ -276,7 +276,9 @@ receipt the offline verifier joins back to its grant.
 
 Request (`useRequest`): `idempotency_key`, `project_id`, `session_id`, `capability`, `use_sig`
 (base64url Ed25519 PoP), `action`, `params`, `nonce`, `params_nonce`, and `use_sequence_number`
-(bounded_reuse only).
+(bounded_reuse only). For other capability classes, the server currently ignores a supplied
+`use_sequence_number` and records the effective value `0`; committed retry matching uses that
+effective value as well.
 
 A bounded project read returns an exact committed retry, including after capability
 expiry, without another content write or ledger claim; a changed request under
