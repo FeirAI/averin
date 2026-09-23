@@ -21,6 +21,36 @@ fixed corpus. The TLA+ recovery liveness result depends on its retry and fairnes
 | Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log under failures, ambiguous commits, lost rollbacks and the operator `grant_void` tombstone (no anchored gap, no duplicate seq, no permanent checkpoint outage); consume-before-act ledger with multiple gateways, releases and TTL sweeps | `bash formal/tla/run-tlc.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
 | Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | eight known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
+| Deterministic differential fuzz | `run-fuzz.sh`, `fuzz/regressions.tsv`, `core/tests/rcp_fuzz.rs` | sampled RCP lexical acceptance/rejection and canonical bytes, native C ABI parity, browser WASM parity, base64url round trips | `bash formal/run-fuzz.sh pr` |
+
+## Reproducible RCP fuzz complement
+
+`bash formal/run-fuzz.sh pr` runs 500 generated cases plus 21 fixed cases; the weekly
+`scheduled` mode runs 5,000 generated cases. Both use seed `20260923` and Rust 1.92.0
+(`rust-toolchain.toml`), `Cargo.lock`, and Bun 1.3.14. The runner emits and compares two
+complete corpora for the same seed, prints their SHA-256, then replays every case through
+a freshly built WASM core via the browser verifier wrapper. CI uses `ubuntu-latest`, a
+40-minute job timeout, and runs PR mode on pushes and pull requests and scheduled mode
+each Sunday. A regression saved in `fuzz/regressions.tsv` is checked on every run,
+including its exact canonical bytes for accepted cases. Add a newly minimized input
+there as UTF-8 hex with `A` or `R`
+and its expected canonical UTF-8 hex (`21` for the reject marker `!`).
+Set `FUZZ_SEED` to replay or explore another decimal `u64` seed locally; CI fixes the default.
+
+The generator's valid branch uses RCP's JSON grammar, i64 endpoint literals, escaped
+controls and surrogate pairs, decomposed Unicode, unsorted object keys, and arrays/objects
+up to four generated levels. The invalid branch samples forbidden integer spellings,
+fractions/exponents, out-of-range integers, lone surrogates, bad escapes, raw controls,
+post-NFC duplicate keys, trailing data, and truncated structures. Fixed cases cover the
+256/257 nesting boundary, a 16,384-byte string, and an 8,192-byte key, beyond the short
+Kani symbolic inputs. Each accepted value must round-trip through parse/serialize and
+match its saved expected bytes where specified; each forbidden class must reject without
+panic. Every case without an interior NUL must agree with the native C-string ABI. The
+browser wrapper rejects raw NUL before calling its C-string WASM export, and all other
+cases must agree with the WASM canonicalizer. Random byte strings of length 0–64 also
+round-trip through base64url and reject padding. These are finite sampled checks, not a
+proof over arbitrary inputs or a permissive JSON parser equivalence claim; schema rules
+for specific record types are outside this campaign.
 
 ## The seal, precisely
 
