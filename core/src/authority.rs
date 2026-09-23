@@ -60,7 +60,7 @@ pub enum AuthorityTrust {
     None,
     /// `caller_declared` (or an unknown source) — forgeable, taken at face value.
     Declared,
-    /// An `evidence_sig` verified under a pinned authority key.
+    /// A v3 `evidence_sig` verified under a pinned key and bound to the semantic body.
     Verified,
     /// A valid historical v2 signature binds evidence identity but not record content.
     LegacyUnbound,
@@ -300,10 +300,10 @@ pub fn verify_authority(record: &CanonValue, trusted: &[VerifyingKey]) -> Author
     verify_authority_with_key(record, trusted).0
 }
 
-/// Like [`verify_authority`], but also returns WHICH trusted key verified the evidence signature (when the
-/// result is `Verified`). The verifier uses the key to look up its ROLE-key rotation lifecycle (ADR 0006 §1):
-/// elevation under a compromised/rotated authority key is withdrawn for evidence not anchored before the
-/// status change. `None` for every non-`Verified` outcome.
+/// Like [`verify_authority`], but also returns WHICH trusted key verified the evidence signature
+/// for either body-bound `Verified` or historical `LegacyUnbound`. The verifier uses the key to look
+/// up its ROLE-key rotation lifecycle (ADR 0006 §1): elevation under a compromised/rotated key is
+/// withdrawn for evidence not anchored before the status change. Other outcomes return `None`.
 pub fn verify_authority_with_key(
     record: &CanonValue,
     trusted: &[VerifyingKey],
@@ -564,7 +564,7 @@ mod tests {
                 "proof_version":"v3","subject_projection":"{SUBJECT_PROJECTION}",
                 "evidence_hash":"{EH}"}},
             "received_ts":"2026-01-01T00:00:01.000Z","display_seq":1,
-            "causal_prev_hashes":[],"key":{{"signing_key_id":"k1"}}
+            "causal_prev_hashes":[],"key":{{"signing_key_id":"k1","key_epoch":0,"key_status":"active"}}
         }}"#
         ));
         let (digest, sig) = sign_evidence_v3(&unsigned, &key).unwrap();
@@ -575,6 +575,22 @@ mod tests {
         assert_eq!(
             verify_authority(&sealed, &[key.verifying_key()]),
             AuthorityTrust::Verified
+        );
+        let recorder = signing_key_from_seed(&[43u8; 32]);
+        let recorder_sealed = crate::record::seal(&sealed, &recorder).unwrap();
+        assert!(crate::record::verify_sealed(&recorder_sealed, &recorder.verifying_key()).is_ok());
+        let changed_receipt = rec_with_authority(&recorder_sealed.serialize().replace(
+            "\"received_ts\":\"2026-01-01T00:00:01.000Z\"",
+            "\"received_ts\":\"2026-01-01T00:00:02.000Z\"",
+        ));
+        assert_eq!(
+            verify_authority(&changed_receipt, &[key.verifying_key()]),
+            AuthorityTrust::Verified,
+            "recorder envelope is outside authority approval"
+        );
+        assert!(
+            crate::record::verify_sealed(&changed_receipt, &recorder.verifying_key()).is_err(),
+            "an unsigned recorder-envelope change must fail record integrity"
         );
         for (from, to) in [
             ("\"action\":\"approve\"", "\"action\":\"deny\""),

@@ -4,8 +4,9 @@
 //! #9 key compromise, plus integrity tamper.
 
 use averin_decision_core::anchor::{make_test_anchor, test_tsa_key};
-use averin_decision_core::authority::sign_evidence;
-use averin_decision_core::authority::AuthorityTrust;
+use averin_decision_core::authority::{
+    sign_evidence, sign_evidence_v3, AuthorityTrust, SUBJECT_PROJECTION,
+};
 use averin_decision_core::canon::CanonValue;
 use averin_decision_core::checkpoint::{attach_anchor, checkpoint_body, seal_checkpoint};
 use averin_decision_core::hashx::sha256_prefixed;
@@ -442,21 +443,20 @@ fn govder_record_evidence_binding_r1() {
     assert_eq!(r_good.record_trust.len(), 1);
     assert_eq!(
         r_good.record_trust[0].authority,
-        AuthorityTrust::Verified,
-        "the real signature must classify Verified"
+        AuthorityTrust::LegacyUnbound,
+        "the historical v2 signature remains valid but cannot bind the record body"
     );
 
     // R1: extensions.govder.outcome changed AFTER signing (the signature was computed over
     // "ok"). The signature still verifies (govder's real key, unchanged bytes) — authority stays
-    // Verified — but the re-derivation must catch that the VISIBLE decision no longer matches
+    // LegacyUnbound — but the re-derivation must catch that the VISIBLE decision no longer matches
     // what was signed.
     let tampered = seal(&CanonValue::parse(&mk_body("error")).unwrap(), &seal_key).unwrap();
     let r_bad = verify_bundle_with(&bundle_of(tampered), &pinned());
     assert_eq!(
         r_bad.record_trust[0].authority,
-        AuthorityTrust::Verified,
-        "the signature is untouched and must still classify Verified — this is the whole finding: \
-         a valid signature over the WRONG evidence still reads 'verified'"
+        AuthorityTrust::LegacyUnbound,
+        "the historical signature is untouched and valid; re-derivation must catch the wrong evidence"
     );
     assert!(
         r_bad
@@ -533,8 +533,8 @@ fn govder_record_with_no_agent_id_evidence_binding() {
     assert_eq!(r.record_trust.len(), 1);
     assert_eq!(
         r.record_trust[0].authority,
-        AuthorityTrust::Verified,
-        "a real govder signature over a no-agent_id record must still classify Verified"
+        AuthorityTrust::LegacyUnbound,
+        "a historical v2 govder signature remains valid without claiming body binding"
     );
     assert!(
         !r.issues
@@ -2865,17 +2865,42 @@ fn tier_b_pop_reverified_under_carried_cnf() {
     assert!(averin_decision_core::verify::report_to_json(&r).contains(r#""uses_pop_reverified":1"#));
 }
 
+// Upgrade an actual structured role record to v3, then have the recorder reseal it.
+// The proof sees the finalized semantic body and has no caller-supplied digest seam.
+fn body_bind_role_record(
+    record: &CanonValue,
+    authority: &SigningKey,
+    recorder: &SigningKey,
+) -> CanonValue {
+    let auth = record.get("authority").unwrap();
+    let auth = change_field(auth, "proof_version", CanonValue::string("v3"));
+    let auth = change_field(
+        &auth,
+        "subject_projection",
+        CanonValue::string(SUBJECT_PROJECTION),
+    );
+    let body = change_field(record, "authority", auth);
+    let (digest, signature) = sign_evidence_v3(&body, authority).unwrap();
+    let auth = body.get("authority").unwrap();
+    let auth = change_field(auth, "subject_digest", CanonValue::string(digest));
+    let auth = change_field(&auth, "evidence_sig", CanonValue::string(signature));
+    seal(&change_field(&body, "authority", auth), recorder).unwrap()
+}
+
 // A real signed grant and resource use with offline PoP, taxonomy, record-key and role pins.
 // Claim properties below vary only unsigned attachments and the fixed caller policy.
-fn claim_ready_bundle() -> (CanonValue, VerifyOptions) {
+fn claim_ready_bundle_with_version(body_bound: bool) -> (CanonValue, VerifyOptions) {
     let rec = signing_key_from_seed(&[0u8; 32]);
     let res = signing_key_from_seed(&[3u8; 32]);
     let cnf = signing_key_from_seed(&[5u8; 32]);
     let tsa = test_tsa_key(&[200u8; 32]);
     let tax = signing_key_from_seed(&[11u8; 32]);
     let pc = sha256_prefixed(b"params-commit");
-    let grant = d2_grant(&rec, &cnf.verifying_key());
-    let use_rec = seal_d2_use(
+    let mut grant = d2_grant(&rec, &cnf.verifying_key());
+    if body_bound {
+        grant = body_bind_role_record(&grant, &rec, &rec);
+    }
+    let mut use_rec = seal_d2_use(
         &rec,
         &res,
         "use-1",
@@ -2887,6 +2912,9 @@ fn claim_ready_bundle() -> (CanonValue, VerifyOptions) {
         &cnf.verifying_key(),
         &cnf,
     );
+    if body_bound {
+        use_rec = body_bind_role_record(&use_rec, &res, &rec);
+    }
     let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
     let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
     let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
@@ -2903,6 +2931,46 @@ fn claim_ready_bundle() -> (CanonValue, VerifyOptions) {
         ..Default::default()
     };
     (bundle, opts)
+}
+
+fn claim_ready_bundle() -> (CanonValue, VerifyOptions) {
+    claim_ready_bundle_with_version(true)
+}
+
+#[test]
+fn v3_signed_grant_and_pop_use_satisfy_body_bound_authorization() {
+    let (bundle, opts) = claim_ready_bundle();
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(r.ok, "v3 grant/use bundle failed: {:?}", r.issues);
+    assert_eq!(r.grant_verified, 1);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.uses_pop_reverified, 1);
+    assert!(r.body_bound_role_evidence);
+    assert!(r
+        .record_trust
+        .iter()
+        .all(|entry| entry.authority == AuthorityTrust::Verified));
+    assert_eq!(r.claims().authorized, ClaimDecision::Satisfied);
+}
+
+#[test]
+fn v2_role_evidence_retains_tier_b_joins_but_cannot_satisfy_body_bound_claim() {
+    let (bundle, opts) = claim_ready_bundle_with_version(false);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(
+        r.ok,
+        "historical v2 bundle should remain valid: {:?}",
+        r.issues
+    );
+    assert_eq!(r.grant_verified, 1);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.uses_pop_reverified, 1);
+    assert!(r
+        .record_trust
+        .iter()
+        .all(|entry| entry.authority == AuthorityTrust::LegacyUnbound));
+    assert!(!r.body_bound_role_evidence);
+    assert_eq!(r.claims().authorized, ClaimDecision::Insufficient);
 }
 
 #[test]
@@ -5976,7 +6044,7 @@ fn validated_adverse_opening_is_enforced_and_bounds_support_erasure() {
     let binding = sha256_prefixed(descriptor.serialize().as_bytes());
     let ge = cred_ge(&vk_cnf_kid(&cnf.verifying_key()), &binding);
     let disclosed_grant = cred_bundle(&rec, &tsa, &descriptor, &ge);
-    let grant = arr(&disclosed_grant, "records").remove(0);
+    let grant = body_bind_role_record(&arr(&disclosed_grant, "records").remove(0), &rec, &rec);
     let pc = sha256_prefixed(b"params-commit");
     let use_rec = seal_d2_use_with_binding(
         &rec,
@@ -5991,6 +6059,7 @@ fn validated_adverse_opening_is_enforced_and_bounds_support_erasure() {
         &cnf,
         &binding,
     );
+    let use_rec = body_bind_role_record(&use_rec, &res, &rec);
     let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
     let base = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
     let opened = change_field(

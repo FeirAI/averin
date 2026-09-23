@@ -33,7 +33,13 @@ func TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal(t *testing.T) {
 		"agent_ts": "2026-01-01T00:00:00.000Z", "event_type": "decision",
 		"action": "approve", "status": "ok", "observed_via": "sdk",
 		"input_commit": map[string]any{"alg": "sha256", "commitment": "sha256:" + strings.Repeat("2", 64), "low_entropy": true},
-		"extensions":   map[string]any{"new_vendor": map[string]any{"meaning": "approved"}},
+		"extensions": map[string]any{
+			"new_vendor": map[string]any{"meaning": "approved"},
+			"feir_evidence": map[string]any{
+				"capture_authority": "sdk",
+				"lineage":           map[string]any{"session_id": "s1", "span_id": "sp1", "parent_span_id": nil},
+			},
+		},
 		"authority": map[string]any{
 			"source": "human_signed", "enforcement_point": "sdk",
 			"evidence_hash": "sha256:" + strings.Repeat("1", 64),
@@ -64,26 +70,62 @@ func TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal(t *testing.T) {
 		t.Fatal(err)
 	}
 	mutations := map[string]func(map[string]any){
-		"project_id":        func(r map[string]any) { r["project_id"] = "p2" },
-		"record_id":         func(r map[string]any) { r["record_id"] = "r2" },
-		"session_id":        func(r map[string]any) { r["session_id"] = "s2" },
-		"agent_id":          func(r map[string]any) { r["agent_id"] = "a2" },
-		"agent_version":     func(r map[string]any) { r["agent_version"] = "2" },
-		"span_id":           func(r map[string]any) { r["span_id"] = "sp2" },
-		"parent_span_id":    func(r map[string]any) { r["parent_span_id"] = "parent" },
-		"agent_ts":          func(r map[string]any) { r["agent_ts"] = "2026-01-01T00:00:01.000Z" },
-		"event_type":        func(r map[string]any) { r["event_type"] = "tool_call" },
-		"action":            func(r map[string]any) { r["action"] = "deny" },
-		"status":            func(r map[string]any) { r["status"] = "blocked" },
-		"observed_via":      func(r map[string]any) { r["observed_via"] = "broker" },
+		"project_id":      func(r map[string]any) { r["project_id"] = "p2" },
+		"record_id":       func(r map[string]any) { r["record_id"] = "r2" },
+		"session_id":      func(r map[string]any) { r["session_id"] = "s2" },
+		"agent_id":        func(r map[string]any) { r["agent_id"] = "a2" },
+		"agent_version":   func(r map[string]any) { r["agent_version"] = "2" },
+		"span_id":         func(r map[string]any) { r["span_id"] = "sp2" },
+		"parent_span_id":  func(r map[string]any) { r["parent_span_id"] = "parent" },
+		"agent_ts":        func(r map[string]any) { r["agent_ts"] = "2026-01-01T00:00:01.000Z" },
+		"event_type":      func(r map[string]any) { r["event_type"] = "tool_call" },
+		"record_kind":     func(r map[string]any) { r["record_kind"] = "budget-exhausted" },
+		"action":          func(r map[string]any) { r["action"] = "deny" },
+		"status":          func(r map[string]any) { r["status"] = "blocked" },
+		"observed_via":    func(r map[string]any) { r["observed_via"] = "broker" },
+		"anchored_ts":     func(r map[string]any) { r["anchored_ts"] = "2026-01-01T00:00:02.000Z" },
+		"framework":       func(r map[string]any) { r["framework"] = "test-runtime" },
+		"tokens":          func(r map[string]any) { r["tokens"] = map[string]any{"in": 1, "out": 2} },
+		"cost_micros_usd": func(r map[string]any) { r["cost_micros_usd"] = 12 },
+		"content": func(r map[string]any) {
+			r["content"] = map[string]any{"uri": "object://1", "digest": "sha256:" + strings.Repeat("4", 64), "length": 1, "object_version": "v1"}
+		},
 		"enforcement_point": func(r map[string]any) { r["authority"].(map[string]any)["enforcement_point"] = "tool_gateway" },
+		"authority_source":  func(r map[string]any) { r["authority"].(map[string]any)["source"] = "policy_engine_signed" },
+		"evidence_hash": func(r map[string]any) {
+			r["authority"].(map[string]any)["evidence_hash"] = "sha256:" + strings.Repeat("7", 64)
+		},
+		"proof_version":      func(r map[string]any) { r["authority"].(map[string]any)["proof_version"] = "v4" },
+		"drop_proof_version": func(r map[string]any) { delete(r["authority"].(map[string]any), "proof_version") },
+		"subject_projection": func(r map[string]any) { r["authority"].(map[string]any)["subject_projection"] = "other" },
+		"decision_basis":     func(r map[string]any) { r["authority"].(map[string]any)["decision_basis"] = "human_approved" },
+		"policy_hash": func(r map[string]any) {
+			r["authority"].(map[string]any)["policy_hash"] = "sha256:" + strings.Repeat("5", 64)
+		},
+		"policy_snapshot_ref": func(r map[string]any) {
+			r["authority"].(map[string]any)["policy_snapshot_ref"] = map[string]any{"uri": "object://policy", "digest": "sha256:" + strings.Repeat("6", 64), "object_version": "v1"}
+		},
+		"grant_id":              func(r map[string]any) { r["authority"].(map[string]any)["grant_id"] = "grant-1" },
+		"grant_type":            func(r map[string]any) { r["authority"].(map[string]any)["grant_type"] = "id-jag" },
+		"authorizing_principal": func(r map[string]any) { r["authority"].(map[string]any)["authorizing_principal"] = "principal-1" },
+		"delegation_chain":      func(r map[string]any) { r["authority"].(map[string]any)["delegation_chain"] = []string{"delegate-1"} },
+		"evaluated_at":          func(r map[string]any) { r["authority"].(map[string]any)["evaluated_at"] = "2026-01-01T00:00:01.000Z" },
+		"expires_at":            func(r map[string]any) { r["authority"].(map[string]any)["expires_at"] = "2026-01-02T00:00:00.000Z" },
+		"nonce":                 func(r map[string]any) { r["authority"].(map[string]any)["nonce"] = "nonce-1" },
 		"commitment": func(r map[string]any) {
 			r["input_commit"].(map[string]any)["commitment"] = "sha256:" + strings.Repeat("3", 64)
 		},
+		"commit_low_entropy": func(r map[string]any) { r["input_commit"].(map[string]any)["low_entropy"] = false },
+		"output_commit":      func(r map[string]any) { r["output_commit"] = r["input_commit"] },
+		"rationale_commit":   func(r map[string]any) { r["rationale_commit"] = r["input_commit"] },
+		"credential_commit":  func(r map[string]any) { r["credential_commit"] = r["input_commit"] },
 		"known_extension": func(r map[string]any) {
 			r["extensions"].(map[string]any)["new_vendor"].(map[string]any)["meaning"] = "denied"
 		},
 		"unknown_extension": func(r map[string]any) { r["extensions"].(map[string]any)["future_vendor"] = true },
+		"feir_lineage": func(r map[string]any) {
+			r["extensions"].(map[string]any)["feir_evidence"].(map[string]any)["lineage"].(map[string]any)["span_id"] = "other-span"
+		},
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
@@ -102,6 +144,64 @@ func TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal(t *testing.T) {
 			}
 			if got, err := recorder.VerifyAuthorityRecord(resealed, approver.PubKey()); err != nil || got != "failed" {
 				t.Fatalf("re-sealed %s retained v3 authority: %q, %v", name, got, err)
+			}
+		})
+	}
+	// A later invalid v3 proof must reject the whole batch before the first
+	// independently valid item is sealed.
+	batchRecord := func(recordID, idem string) map[string]any {
+		raw, _ := json.Marshal(rec)
+		var item map[string]any
+		if err := json.Unmarshal(raw, &item); err != nil {
+			t.Fatal(err)
+		}
+		item["record_id"] = recordID
+		delete(item, "idempotency_key")
+		block := item["authority"].(map[string]any)
+		delete(block, "subject_digest")
+		delete(block, "evidence_sig")
+		raw, _ = json.Marshal(item)
+		proof, err := approver.SignAuthorityRecordV3(string(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		block["subject_digest"], block["evidence_sig"] = proof.SubjectDigest, proof.EvidenceSig
+		item["idempotency_key"] = idem
+		return item
+	}
+	good := batchRecord("batch-good", "idem-good")
+	bad := batchRecord("batch-bad", "idem-bad")
+	bad["action"] = "not approved"
+	batchStore := store.NewMem()
+	batchHandler := api.New(recorder, batchStore, "k0").WithPolicyEngineKey("human_signed", pub).Routes()
+	batch, _ := json.Marshal([]any{good, bad})
+	if code, body := do(t, batchHandler, "POST", "/v2/records", string(batch)); code < 400 {
+		t.Fatalf("invalid later v3 proof did not reject batch (%d): %s", code, body)
+	}
+	if persisted, err := batchStore.AllRecords("p1"); err != nil || len(persisted) != 0 {
+		t.Fatalf("partial v3 batch persisted %d records: %v", len(persisted), err)
+	}
+	for _, field := range []string{"input", "output", "rationale"} {
+		t.Run("raw_"+field, func(t *testing.T) {
+			item := batchRecord("raw-"+field, "idem-"+field)
+			item[field] = "private value"
+			delete(item, "idempotency_key")
+			block := item["authority"].(map[string]any)
+			delete(block, "subject_digest")
+			delete(block, "evidence_sig")
+			raw, _ := json.Marshal(item)
+			proof, err := approver.SignAuthorityRecordV3(string(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			block["subject_digest"], block["evidence_sig"] = proof.SubjectDigest, proof.EvidenceSig
+			item["idempotency_key"] = "idem-" + field
+			raw, _ = json.Marshal(item)
+			if code, body := do(t, batchHandler, "POST", "/v2/records", string(raw)); code != http.StatusBadRequest {
+				t.Fatalf("v3 raw %s should fail before commitment (%d): %s", field, code, body)
+			}
+			if persisted, err := batchStore.AllRecords("p1"); err != nil || len(persisted) != 0 {
+				t.Fatalf("raw %s created %d records: %v", field, len(persisted), err)
 			}
 		})
 	}

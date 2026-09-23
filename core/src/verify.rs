@@ -2822,7 +2822,12 @@ fn check_grant_voids(
                 "authority.evidence_hash is not re-derivable from extensions.broker.void_evidence",
             );
         }
-        if broker_keys_pinned && !matches!(rt.authority, AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound) {
+        if broker_keys_pinned
+            && !matches!(
+                rt.authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            )
+        {
             bad.push("its authority does not verify under a pinned broker key");
         }
         if gid.as_ref().is_some_and(|g| granted.contains(g)) {
@@ -4379,7 +4384,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             .collect();
         // A grant verified ONLY because a cross_broker_cert vouched for its (unpinned) subject key is `transitive`.
         let transitive_authority = cross_cert_pair.is_some()
-            && matches!(authority, AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound);
+            && matches!(
+                authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            );
         if authority == AuthorityTrust::Failed {
             notes.push(format!(
                 "authority claims a verified source but its evidence_sig did not verify under a trusted {} authority key",
@@ -4409,11 +4417,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // which has no govder equivalent) so an already-Failed/Declared/Unverifiable record does
         // not double-report; gated on extensions.govder present so no non-govder record is
         // affected.
-        if matches!(authority, AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound)
-            && rec
-                .get("extensions")
-                .and_then(|e| e.get("govder"))
-                .is_some()
+        if matches!(
+            authority,
+            AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+        ) && rec
+            .get("extensions")
+            .and_then(|e| e.get("govder"))
+            .is_some()
             && !govder_evidence_rederivable(rec)
         {
             semantic_record_conflict = true;
@@ -4821,7 +4831,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // UNCONDITIONALLY (fail-closed: an undatable compromise cannot be proven to predate any record). The
         // record's own integrity/signature trust (above) is independent — a real record signed by a good
         // signing key stays integrity-proven; only its authority ELEVATION is withdrawn.
-        if matches!(p.authority, AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound) {
+        if matches!(
+            p.authority,
+            AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+        ) {
             // Withdraw if ANY involved pinned key (direct authority/subject OR transitive cert issuer) is
             // non-active and this record does NOT predate that key's status change. The list holds only
             // non-active statuses, so each entry is a real gate.
@@ -4934,7 +4947,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 continue;
             }
             if rt.trust == TrustLevel::IntegrityProven
-                && matches!(rt.authority, AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound) {
+                && matches!(
+                    rt.authority,
+                    AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+                )
+            {
                 if evidence_rederivable(rec, "grant_evidence") {
                     grant_verified += 1;
                     // F8: a second DISTINCT content_hash under one grant_id is equivocation (flag once per
@@ -5085,7 +5102,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         let rec = &records[rt.index];
         let qualifies = rt.broker_role == BrokerRole::Broker.as_str()
             && rt.trust == TrustLevel::IntegrityProven
-            && matches!(rt.authority, AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound)
+            && matches!(
+                rt.authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            )
             && evidence_rederivable(rec, "grant_evidence")
             && committed.contains(&rt.content_hash);
         if !qualifies {
@@ -5573,7 +5593,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             continue; // in-flight outcome: not yet committed by a verified checkpoint, completes nothing
         }
         if rt.trust != TrustLevel::IntegrityProven
-            || !matches!(rt.authority, AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound)
+            || !matches!(
+                rt.authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            )
             || !evidence_rederivable(rec, "use_outcome")
         {
             unmatched_violation += 1;
@@ -5642,7 +5665,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             issues.push(format!("use {} ({}): {msg}", rt.index, rt.record_id));
         };
         if rt.trust != TrustLevel::IntegrityProven
-            || !matches!(rt.authority, AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound)
+            || !matches!(
+                rt.authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            )
             || !evidence_rederivable(rec, "use_evidence")
         {
             unmatched_violation += 1;
@@ -6142,7 +6168,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ));
         };
         if rt.trust != TrustLevel::IntegrityProven
-            || !matches!(rt.authority, AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound)
+            || !matches!(
+                rt.authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            )
             || !evidence_rederivable(rec, "introspection_evidence")
         {
             unmatched_violation += 1;
