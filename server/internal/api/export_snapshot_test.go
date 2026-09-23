@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -16,13 +17,24 @@ type interleavingStore struct {
 	store.Store
 	armed bool
 	hook  func()
+	parent *interleavingStore
 }
 
 func (s *interleavingStore) fire() {
+	if s.parent != nil {
+		s.parent.fire()
+		return
+	}
 	if s.armed {
 		s.armed = false
 		s.hook()
 	}
+}
+
+func (s *interleavingStore) WithProjectRead(ctx context.Context, projectID string, fn func(store.Store) error) error {
+	return s.Store.WithProjectRead(ctx, projectID, func(st store.Store) error {
+		return fn(&interleavingStore{Store: st, parent: s})
+	})
 }
 
 func (s *interleavingStore) AllRecords(p string) ([]store.Record, error) {
