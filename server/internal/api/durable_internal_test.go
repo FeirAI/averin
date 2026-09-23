@@ -181,15 +181,19 @@ func TestDurableRevocationFailsClosedWhenPostgresUnavailable(t *testing.T) {
 // proof-of-possession signature, mirroring server_grant_test.go's grantBody (unavailable here — that helper
 // lives in the external api_test package).
 func grantChallengeBody(idem, scope string, ak ed25519.PrivateKey) string {
+	return grantChallengeBodyForProject("p1", idem, scope, ak)
+}
+
+func grantChallengeBodyForProject(projectID, idem, scope string, ak ed25519.PrivateKey) string {
 	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
 	now := time.Now().UTC()
-	req := broker.Request{PoPVersion: 2, ProjectID: "p1", IdempotencyKey: idem, SessionID: "s1",
+	req := broker.Request{PoPVersion: 2, ProjectID: projectID, IdempotencyKey: idem, SessionID: "s1",
 		IssuedAt: now.Unix(), RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
 		AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: scope,
 		AgentPubKey: pub, TTL: time.Hour}
 	sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
 	body, _ := json.Marshal(map[string]any{
-		"idempotency_key": idem, "project_id": "p1", "session_id": "s1", "pop_version": 2,
+		"idempotency_key": idem, "project_id": projectID, "session_id": "s1", "pop_version": 2,
 		"issued_at": req.IssuedAt, "request_expires_at": req.RequestExpiresAt,
 		"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",
 		"scope": scope, "agent_pubkey": pub, "agent_sig": sig, "ttl_seconds": 3600,

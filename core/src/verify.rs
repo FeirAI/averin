@@ -5353,7 +5353,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 mism.push("v2 descriptor.project_id != sealed record.project_id".to_string());
             }
             if ds("project_id") != label("project_id") {
-                mism.push("v2 descriptor.project_id != signed grant_evidence.project_id".to_string());
+                mism.push(
+                    "v2 descriptor.project_id != signed grant_evidence.project_id".to_string(),
+                );
             }
         }
         if descriptor.get("exp").and_then(|v| v.as_int()) != ev_int(rec, "grant_evidence", "exp") {

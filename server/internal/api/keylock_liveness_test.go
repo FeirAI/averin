@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -56,7 +55,7 @@ func TestGrantPrepareProjectSerialization(t *testing.T) {
 		}
 	}()
 	request := func(project, idem string) int {
-		body := strings.Replace(grantChallengeBody(idem, "read:orders", agentKey), `"project_id":"p1"`, `"project_id":"`+project+`"`, 1)
+		body := grantChallengeBodyForProject(project, idem, "read:orders", agentKey)
 		w := httptest.NewRecorder()
 		s.handleGrantPrepare(w, httptest.NewRequest("POST", "/v2/grants/prepare", bytes.NewReader([]byte(body))))
 		return w.Code

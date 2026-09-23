@@ -233,11 +233,20 @@ fn every_preimage_family_matches_model() {
             "grant PoP v2" => {
                 let mut pre = Vec::new();
                 assert!(lp_into(&mut pre, b"averin.broker.pop.v2"));
-                for part in &f[..12] { assert!(lp_into(&mut pre, raw(part))); }
-                for part in &f[12..15] { pre.extend_from_slice(raw(part)); }
-                pre.extend_from_slice(raw(tail_field.as_ref().expect("v2 variable chain/times tail")));
+                for part in &f[..12] {
+                    assert!(lp_into(&mut pre, raw(part)));
+                }
+                for part in &f[12..15] {
+                    pre.extend_from_slice(raw(part));
+                }
+                pre.extend_from_slice(raw(tail_field
+                    .as_ref()
+                    .expect("v2 variable chain/times tail")));
                 check(name, &pre, want);
-                assert_eq!(hex_lower(&sha256(&pre)), "20809965afd8dd263d5f02afb1461cdce5a8cb7adf1187ba0feb43a46b48fe94");
+                assert_eq!(
+                    hex_lower(&sha256(&pre)),
+                    "20809965afd8dd263d5f02afb1461cdce5a8cb7adf1187ba0feb43a46b48fe94"
+                );
             }
             "use PoP" => check_digest(
                 name,
