@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -135,4 +136,54 @@ func TestPostNFCDuplicateKeysFailBeforeSeal(t *testing.T) {
 		t.Fatalf("post-NFC duplicate key sealed (%d): %s", code, resp)
 	}
 	assertRecordCount(t, st, "p1", 0)
+}
+
+func TestGrantDelegationChainRejectsNonNFCBeforeSeal(t *testing.T) {
+	c, _ := core.New(seed)
+	st := store.NewMem()
+	h := api.New(c, st, "k0").WithBroker(brokerIssuingKey()).Routes()
+	ak := grantAgentKey()
+	var gr map[string]any
+	if err := json.Unmarshal([]byte(grantBody("delegation-1", "read:orders", ak, ak)), &gr); err != nil {
+		t.Fatal(err)
+	}
+	gr["delegation_chain"] = []string{"e\u0301"}
+	body, _ := json.Marshal(gr)
+	if code, resp := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusBadRequest || !strings.Contains(resp, "NFC") {
+		t.Fatalf("non-NFC delegation identity was sealed (%d): %s", code, resp)
+	}
+	assertRecordCount(t, st, "p1", 0)
+	gr["delegation_chain"] = []string{"é"}
+	body, _ = json.Marshal(gr)
+	if code, resp := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusCreated {
+		t.Fatalf("canonical delegation identity rejected (%d): %s", code, resp)
+	}
+	assertRecordCount(t, st, "p1", 1)
+}
+
+func TestConfiguredOpaqueIDsRejectNonNFC(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*api.Server)
+	}{
+		{"broker_id", func(s *api.Server) { s.WithBroker(brokerIssuingKey()).WithBrokerID("e\u0301") }},
+		{"resource_id", func(s *api.Server) {
+			rc, _ := core.New(resourceSeed)
+			s.WithBroker(brokerIssuingKey()).WithResource(rc, "e\u0301")
+		}},
+		{"authority_project_id", func(s *api.Server) {
+			s.WithProjectAuthorityKey("e\u0301", "human_signed", seedKey(40).Public().(ed25519.PublicKey))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := core.New(seed)
+			s := api.New(c, store.NewMem(), "k0")
+			defer func() {
+				if got := recover(); got == nil || !strings.Contains(fmt.Sprint(got), "NFC") {
+					t.Fatalf("non-NFC configured ID must fail at setup with NFC error, got %v", got)
+				}
+			}()
+			tc.set(s)
+		})
+	}
 }
