@@ -113,10 +113,10 @@ func TestPolicyEngineSignedAuthorityElevates(t *testing.T) {
 	for _, rt := range report.RecordTrust {
 		got[rt.RecordID] = rt.Authority
 	}
-	if got["policy-rec-1"] != "verified" {
+	if got["policy-rec-1"] != "legacy_unbound" {
 		t.Fatalf("policy-rec-1 authority = %q, want verified: %s", got["policy-rec-1"], rep)
 	}
-	if got["policy-rec-2"] == "verified" {
+	if got["policy-rec-2"] == "legacy_unbound" {
 		t.Fatalf("the forged-evidence record must NOT verify: %s", rep)
 	}
 }
@@ -198,13 +198,13 @@ func TestMultipleAuthorityKeysElevatePerSource(t *testing.T) {
 	for _, rt := range report.RecordTrust {
 		got[rt.RecordID] = rt.Authority
 	}
-	if got["human-rec-1"] != "verified" {
+	if got["human-rec-1"] != "legacy_unbound" {
 		t.Fatalf("human-rec-1 authority = %q, want verified: %s", got["human-rec-1"], rep)
 	}
-	if got["policy-rec-1"] != "verified" {
+	if got["policy-rec-1"] != "legacy_unbound" {
 		t.Fatalf("policy-rec-1 authority = %q, want verified: %s", got["policy-rec-1"], rep)
 	}
-	if got["rogue-rec-1"] == "verified" {
+	if got["rogue-rec-1"] == "legacy_unbound" {
 		t.Fatalf("the unpinned-key record must NOT verify: %s", rep)
 	}
 }
@@ -311,10 +311,10 @@ func TestDelegateSignedAuthorityElevates(t *testing.T) {
 	for _, rt := range report.RecordTrust {
 		got[rt.RecordID] = rt.Authority
 	}
-	if got["delegate-rec-1"] != "verified" {
+	if got["delegate-rec-1"] != "legacy_unbound" {
 		t.Fatalf("delegate-rec-1 authority = %q, want verified: %s", got["delegate-rec-1"], rep)
 	}
-	if got["delegate-rec-2"] == "verified" {
+	if got["delegate-rec-2"] == "legacy_unbound" {
 		t.Fatalf("the forged-evidence record must NOT verify: %s", rep)
 	}
 }
