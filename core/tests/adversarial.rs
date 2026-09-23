@@ -7095,6 +7095,113 @@ fn tier_b_two_phase_failed_pop_intent_does_not_consume_outcome() {
 }
 
 #[test]
+fn tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation() {
+    // PR review (round 4, P1): a grant + an intent with an INVALID PoP committed by anchored cp0, and the
+    // intent's outcome committed by anchored cp1. With both anchors the bundle fails on the PoP. Deleting ONLY
+    // cp1's unsigned `anchor` made the outcome committed-but-not-closed; the partial-closure branch then
+    // consumed it and skipped pop_reverify, reading ok:true. Negative checks must run before closure.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let grant = seal_grant(
+        &rec,
+        &rec,
+        GID,
+        &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP),
+    );
+    let gh = content_hash_of(&grant);
+    let ue = change_field(
+        &change_field(
+            &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED),
+            "cnf_pub",
+            CanonValue::string(b64enc(cnf.verifying_key().as_bytes())),
+        ),
+        "use_sig",
+        CanonValue::string(b64enc(&[7u8; 64])),
+    );
+    let intent = seal_intent(
+        &rec,
+        &res,
+        "intent-1",
+        std::slice::from_ref(&gh),
+        ACTION,
+        &ue,
+    );
+    let ih = content_hash_of(&intent);
+    let outcome = seal_outcome(
+        &rec,
+        &res,
+        "outcome-1",
+        std::slice::from_ref(&ih),
+        "intent-1",
+        "intent-1",
+        GID,
+    );
+    let oh = content_hash_of(&outcome);
+    let cp0 = checkpoint_seqd(
+        &rec,
+        "cp0",
+        0,
+        None,
+        std::slice::from_ref(&ih),
+        2,
+        None,
+        Some(&tsa),
+    );
+    let cp0h = checkpoint_hash(&cp0);
+    let cp1 = checkpoint_seqd(
+        &rec,
+        "cp1",
+        1,
+        Some(&cp0h),
+        std::slice::from_ref(&oh),
+        3,
+        None,
+        Some(&tsa),
+    );
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let both = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant.clone(), intent.clone(), outcome.clone()],
+        vec![cp0.clone(), cp1.clone()],
+    );
+    let r = verify_bundle_with(&both, &opts);
+    assert!(!r.ok, "baseline must fail on the PoP: {:?}", r.issues);
+    // strip ONLY cp1's anchor (cp0 keeps its anchor, so the intent stays closed)
+    let mut cp1_bare = cp1.as_object().unwrap().clone();
+    cp1_bare.retain(|(k, _)| k != "anchor");
+    let partial = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant, intent, outcome],
+        vec![cp0, CanonValue::Object(cp1_bare)],
+    );
+    let r = verify_bundle_with(&partial, &opts);
+    assert!(
+        !r.ok,
+        "stripping one anchor must not turn a violation into a pass: {:?}",
+        r.issues
+    );
+    assert!(
+        r.issues.iter().any(|i| i.contains("PoP re-verification"))
+            && r.issues
+                .iter()
+                .any(|i| i.contains("completion without a recorded intent")),
+        "the failed intent must be a violation and its outcome still an orphan: {:?}",
+        r.issues
+    );
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 0));
+    // and every anchor stripped: still a failure
+    assert!(!verify_bundle_with(&strip_anchors(&both), &opts).ok);
+}
+
+#[test]
 fn tier_b_two_phase_backfilled_causal_edge_does_not_complete() {
     // adversarial review round-5: the before-act ordering must be bound to the RESOURCE signature, not the relay-controlled
     // top-level causal_prev_hashes. Here the resource-signed payload's intent_hash names a DIFFERENT intent,

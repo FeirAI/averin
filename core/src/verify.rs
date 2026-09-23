@@ -5792,6 +5792,24 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                             })
                 })
             });
+        }
+        // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
+        // reconstructing the challenge from the proven fields + this grant's credential_binding + the
+        // record's input_commit. A claimed re-verification that FAILS is a violation; a receipt that
+        // carries neither stays `shim_asserted` (legacy ADR-0003 path). This NEGATIVE check runs on every
+        // committed use/intent BEFORE any completion (closure) branch below: a two-phase intent whose
+        // outcome is missing or only committed must still fail on a bad PoP, or deleting one checkpoint's
+        // unsigned `anchor` would turn a violation into a pass (monotonicity). A failed intent never
+        // consumes its outcome, so the outcome is still reported as an orphan.
+        let pop_reverified = match pop_reverify(rec, &g.credential_binding) {
+            Ok(r) => r,
+            Err(msg) => {
+                unmatched_violation += 1;
+                violation(&mut issues, format!("offline PoP re-verification: {msg}"));
+                continue;
+            }
+        };
+        if bkind == "use_intent" {
             match pending_consume {
                 // no outcome at all: a CLOSED intent is the D5 anomaly; a committed-only one is still in flight.
                 None => {
@@ -5804,7 +5822,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 }
                 // a CLOSED intent whose outcome is only committed (not anchored): completion is not yet
                 // established over the closed set — the D5 anomaly, as before (when the outcome was invisible).
-                // The outcome is consumed so it is not ALSO reported as an orphan.
+                // The (validated) intent consumes the outcome so it is not ALSO reported as an orphan.
                 Some(i) if use_closed && !outcomes[i].5 => {
                     consumed_outcomes.insert(outcomes[i].2.clone());
                     intent_without_outcome += 1;
@@ -5813,18 +5831,6 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 Some(_) => {}
             }
         }
-        // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
-        // reconstructing the challenge from the proven fields + this grant's credential_binding + the
-        // record's input_commit. A claimed re-verification that FAILS is a violation; a receipt that
-        // carries neither stays `shim_asserted` (legacy ADR-0003 path).
-        let pop_reverified = match pop_reverify(rec, &g.credential_binding) {
-            Ok(r) => r,
-            Err(msg) => {
-                unmatched_violation += 1;
-                violation(&mut issues, format!("offline PoP re-verification: {msg}"));
-                continue;
-            }
-        };
         if let Some(i) = pending_consume {
             consumed_outcomes.insert(outcomes[i].2.clone()); // accepted intent → consume its outcome now
         }
