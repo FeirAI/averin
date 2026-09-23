@@ -298,8 +298,9 @@ revoked" is an affirmative, signed statement rather than an absent field. (Known
 use recorded **before** the revoke is also reported blocked; distinguishing pre-revocation uses needs a
 verifier-side change.)
 
-In Postgres mode, the revoke is durable before `201` and is reloaded at boot. Other live replicas do
-not refresh their local revoked set from that write; route uses and revokes for a project together.
+In Postgres mode, the revoke is durable before `201`. Later use transactions on
+any live replica check the same durable project state. An already admitted use
+may complete; a failed revocation lookup rejects rather than trusting a cache.
 
 Request: `{ "project_id": "...", "grant_id": "..." }` (both required).
 
@@ -344,46 +345,32 @@ Only a seq that meets **all** of these is voided:
    process start, and no void passes until `AVERIN_BROKER_SEQ_VOID_MIN_AGE` after a restart.
 5. The store enforces per-project `record_id` uniqueness. On Postgres this means migration `0002` built the
    UNIQUE index `records_project_record_id_uniq`. If the database held historical duplicate `record_id`s,
-   `0002` builds a non-unique index and logs a WARNING. In that case every void is refused with `409`,
+   `0002` builds a non-unique index and logs a WARNING. In that case every project write is refused with a retryable server error,
    because the tombstone's `record_id` is the voided `grant_id` and only that UNIQUE index guarantees that
    at most one of {the grant, its tombstone} lands. Resolve the duplicate and build the UNIQUE index first.
    The in-memory store always enforces uniqueness.
 
-**Order of operations.** The tombstone is sealed first, and the reservation is marked voided second.
-Because the tombstone's `record_id` is the reserved `grant_id`, a sealed tombstone already stops the
-grant from recording. If a commit of that grant was still in flight and lands first, the UNIQUE
-`record_id` index lets the grant win: the call returns `409` ("grant landed; nothing to void"), nothing
-is marked, and the grant's retry returns its record. If the tombstone is sealed but marking the
-reservation fails, the call returns `500`. Repeat it: the repeat finds the tombstone and only writes the
-mark. A retry of the grant in between gets a `409` and does not release or reuse the seq. A reservation
-marked voided by an older server with no tombstone behind it is re-checked like an unmarked one, and if
-its grant landed the `409` says the mark is inert.
+**Atomic transaction.** The exact project guard serializes grant and void on
+every replica. The tombstone, reservation marker and optional revocation commit
+together. If any write fails, none of them persists. A lost COMMIT response has
+an unknown outcome; repeat the same void operation to reconcile the durable
+tombstone and marker. A grant that committed first causes `409` ("grant landed;
+nothing to void"). A legacy marker without a tombstone is checked against the
+record log before repair. The Postgres store validates the actual UNIQUE index
+shape, predicate, readiness and validity before any project write; a damaged
+index refuses unsafe writes while history remains readable.
 
-**Limits of these checks.**
+The safety age still uses the reservation time, latest local attempt and process
+start. PostgreSQL supplies the project serialization, so a slow void does not
+hold a process-global ingest mutex or stall another project's writers. The
+index is over `md5(record_id)`; an md5 collision in one project yields a `409`
+on the second distinct id.
 
-- Checks 2 to 4 run inside one server process, under its ingest lock and against its in-memory attempt
-  times. With several instances sharing one Postgres, a retry on instance A and a void on instance B do
-  not see each other. Only the UNIQUE `record_id` index (check 5) closes that race.
-- The age compares Postgres `now()` (the DB host's clock, used for `allocated_at`) with the server's own
-  clock. If the DB clock runs behind the app clock, reservations look older by the difference. Keep
-  `AVERIN_BROKER_SEQ_VOID_MIN_AGE` far above any plausible clock skew. The latest-attempt time uses the
-  server clock on both sides, so skew does not affect it.
-- The whole void runs under the ingest lock. On Postgres the tombstone insert waits on any uncommitted row
-  holding the same `record_id` (a grant commit still in flight, for example on another instance), for up
-  to the 30 s statement timeout, and every ingest, grant and use on that server waits with it.
-- The uniqueness index is over `md5(record_id)`. A tenant that writes two *different* `record_id`s with
-  equal md5 into one project gets a `409` (`record_id already used`) on the second. This only affects
-  that tenant's own project: taking another record's id would require an md5 second preimage.
-
-**Capability revocation.** A void retires the `grant_id` for issuance, but on its own it does not
-invalidate a capability already minted for that `grant_id`. When revocation is enabled
-(`AVERIN_REVOCATION_SEED`), the void also **revokes** the voided `grant_id`, exactly as
-[`POST /v2/revoke`](#post-v2revoke) would. `/v2/use` then rejects the capability immediately,
-and the next export's signed `revocation_list` carries the id. The response then includes
-`"revoked": true`. If that revocation fails (`429` revoked-set cap, `503` durable persist), the call
-returns that error after the tombstone is sealed. Repeating the call, which is idempotent, retries the
-revocation. **Without revocation enabled**, such a capability stays usable at `/v2/use` until it expires.
-In that case, enable revocation, or wait out the grant's TTL, before you rely on the void.
+**Capability revocation.** When revocation is enabled, the void also revokes
+the reserved `grant_id` in the same transaction. Later `/v2/use` calls on any
+live replica reject it, and the next export's signed revocation list includes
+it. If the revocation step fails, tombstone and marker also roll back. Without
+revocation enabled, an already minted capability can remain usable until expiry.
 
 **Authorization.** The server has no separate operator or admin privilege. This route is gated only by
 the project-scoped API key, like every `/v2/` route, so **any writer for a project can void that

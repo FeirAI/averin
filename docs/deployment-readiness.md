@@ -10,10 +10,10 @@ boundary between "averin ships this" and "your deployment provides this."
 |------|---------------|------------------|--------|
 | 1. Per-project authn/authz (Phase 2) | API-key auth (`auth.KeyStore` + `Middleware`, wired) | IdP (SSO/SAML/OIDC), secrets store, RBAC/scoped-token layer | **Phase-1 done; Phase-2 layered design** |
 | 2. HSM/TPM sender-key (B12) | raw ed25519 keys + PoP binding (theft-fails-PoP test) | HSM/TPM/KMS + agent secure element | **Needs a `Signer` interface + hardware** |
-| 3. Multi-instance `broker_seq` lock (D6) | per-project `pg_advisory_xact_lock` for seq | shared Postgres + ingest-path distributed lock | **Seq-lock done; ingest-lock design** |
+| 3. Multi-instance project writes (D6) | persisted project guard and bound transactions | plans 004/005/008 integration and failure matrix | **Transaction seam done; full HA gate pending** |
 | 4. TEE/remote-attestation enforcement (D7) | signed `deployment_attestation` claim | TEE hardware + attestation service + quote-verify lib | **Assertion today; hardware-root design** |
 | 5. git remote + push | clean tree, `.gitignore` hardened | remote URL + push credentials | **Repo push-ready; operator action** |
-| 6. Durable consume-before-act ledger (R5) | Postgres-backed `internal/pgledger` (auto-injected when `AVERIN_DATABASE_URL` is set) | shared Postgres | **Done** — survives restart + serializes across instances (`a9c4b9c`) |
+| 6. Durable consume-before-act ledger (R5) | project Store claims and receipt share one transaction; `pgledger` sweeps | shared Postgres and plan 005 nonce scope | **Atomic seam done; scope gate pending** |
 
 ---
 
@@ -87,40 +87,21 @@ signer.
 
 ---
 
-## 3. Multi-instance distributed per-project lock for gapless `broker_seq` (ADR 0004 D6)
+## 3. Multi-instance project serialization and remaining readiness gates
 
-**Current state.** Gaplessness of `broker_seq` is **already cross-instance-safe for the allocation step**:
-`Postgres.AllocateBrokerSeq` (`postgres.go:482`) takes a per-project `pg_advisory_xact_lock(hashtext(project))`
-inside its transaction, so two instances cannot mint the same seq; a grant that fails after allocation deletes
-its `broker_seq` row, so the durable max only advances for recorded grants (no manufactured gap). What is
-**single-instance only** is the *broader* ingest critical section — the `heads → seal → put` frontier read in
-`server.go` is serialized by the **in-process** `ingestMu`/`checkpointMu` mutexes, which do not coordinate
-across processes.
+**Current state.** The database now serializes each project's authoritative
+frontier, allocation, pending, revocation, ledger and checkpoint writes with an
+exact `project_write_guard` row. Each callback uses one transaction and
+connection; a separate project can proceed while a guard is held. The
+`record_id` UNIQUE index is checked before unsafe writes. Export uses one
+repeatable-read snapshot. Independent-pool tests cover these seams.
 
-**Production design.** For multiple server instances behind a shared Postgres:
-- The `broker_seq` allocation lock already serializes cross-instance — no change.
-- The **ingest path** (read frontier → seal → put record, and checkpoint creation) must also serialize per
-  project across instances, or two instances could read the same DAG frontier and fork it. Two equivalent
-  options: (a) hold a **per-project `pg_advisory_xact_lock`** around the whole read-seal-put within one txn
-  (extends the `AllocateBrokerSeq` pattern), or (b) run the put under a **serializable** Postgres txn that
-  fails-and-retries on a frontier conflict. The in-memory `Mem` store is single-instance only and cannot back
-  a multi-instance deployment.
-
-**In-repo preparation.**
-- Document the **single-writer-per-project** invariant and that `ingestMu` is an in-process optimization, not
-  a multi-instance guarantee.
-- Add a `DistributedLock`/per-project lock seam at the ingest entry (the wiring point), defaulting to the
-  in-process mutex and pluggable to the Postgres advisory lock.
-- A concurrency test (`TestConcurrentCheckpointsDoNotFork` already covers the single-instance case) extended
-  to the Postgres-backed cross-connection case (the parity CI lane added in T10 can host it).
-
-**External infra.** A shared Postgres (the lock authority) and a multi-instance deployment topology.
-
-**Readiness checklist.** Two instances ingesting the same project concurrently produce one gapless DAG +
-gapless `broker_seq` (no fork, no duplicate seq); `Mem` is rejected for multi-instance; the advisory lock is
-the single serialization point.
-
-**Operator action.** Deploy with Postgres (not `Mem`); run behind the per-project lock.
+**Deployment policy.** Continue using one writer per project until the
+capability-project binding, nonce scope and bounded sequence-recovery changes
+from plans 004, 005 and 008 are integrated and their two-process failure matrix
+passes. This project transaction seam alone does not justify an end-to-end
+multi-replica safety claim. On DB outage, writes fail closed rather than
+remaining available.
 
 ---
 
@@ -191,7 +172,7 @@ natural next commits when this umbrella is picked up:
 1. **`core.Signer` interface** abstracting raw-seed signing (item 2) — unblocks an HSM/KMS drop-in.
 2. **`Authorizer` interface + `RequireRole`** extending the auth middleware (item 1) — unblocks RBAC/OIDC.
 3. **`Attester` interface + reserved `quote` field + feature-gated quote-verify hook** (item 4).
-4. **Per-project ingest lock seam** defaulting to `ingestMu`, pluggable to the Postgres advisory lock (item 3).
+4. **Project transaction contract** — implemented with the persisted guard row; retain the deployment policy above until the remaining protocol gates pass.
 5. **`.gitignore` for `.claude/`** (item 5) — done in this change.
 
 Items 2–4's interfaces are pure refactors (extract a seam; the existing behavior becomes the default impl), so

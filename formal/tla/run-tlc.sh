@@ -59,4 +59,12 @@ check GrantLog.tla GrantLog_fixed_live.cfg pass                # with operator v
 check ConsumeLedger.tla ConsumeLedger_safe.cfg pass                               # Retention >= MaxTTL: at most once per key
 check ConsumeLedger.tla ConsumeLedger_short_retention_replay.cfg AtMostOncePerKey # Retention < MaxTTL: replay
 check ConsumeLedger.tla ConsumeLedger_short_retention.cfg InFlightRecorded       # ...and a live in-flight key is pruned
+
+# Exact project guard and authoritative operational state across two replicas.
+check ProjectTx.tla ProjectTx_unserialized.cfg NoFrontierFork        # process-local locks fork a project frontier
+check ProjectTx.tla ProjectTx_checkpoint_fork.cfg NoCheckpointFork   # concurrent snapshots reuse checkpoint_seq
+check ProjectTx.tla ProjectTx_stale_cache.cfg NoRevokedUse          # a stale replica admits a revoked capability
+check ProjectTx.tla ProjectTx_pending_cache.cfg NoGhostFinalize    # a cached expired challenge can finalize
+check ProjectTx.tla ProjectTx_safe.cfg pass                         # DB guard, ambiguity, crash and post-commit anchor
+check ProjectTx.tla ProjectTx_operational_safe.cfg pass             # durable pending/revocation reads
 rm -rf states
