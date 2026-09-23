@@ -191,17 +191,26 @@ func (r Request) v2Subject() ([]byte, error) {
 	for _, s := range []string{popTagV2, r.ProjectID, r.IdempotencyKey, r.SessionID,
 		r.AgentID, r.Action, r.Resource, r.Scope, string(class), r.AgentPubKey,
 		r.Principal, r.Justification, "capability"} {
+		if !fitsLP4Length(uint64(len(s))) {
+			return nil, errors.New("v2 grant field exceeds the 32-bit length framing limit")
+		}
 		b = appendLP4(b, s)
 	}
 	b = appendBE8(b, limit)
 	b = appendBE8(b, int64(r.TTL/time.Second))
 	b = appendBE8(b, int64(len(r.DelegationChain)))
 	for _, s := range r.DelegationChain {
+		if !fitsLP4Length(uint64(len(s))) {
+			return nil, errors.New("v2 grant delegation field exceeds the 32-bit length framing limit")
+		}
 		b = appendLP4(b, s)
 	}
 	return b, nil
 }
 
+func fitsLP4Length(n uint64) bool { return n <= uint64(^uint32(0)) }
+
+// appendLP4 is called only after v2Subject checks the unsigned 32-bit length.
 func appendLP4(b []byte, s string) []byte {
 	var n [4]byte
 	binary.BigEndian.PutUint32(n[:], uint32(len(s)))
@@ -272,6 +281,9 @@ func (r Request) Validate() error {
 		return errors.New("ttl must be positive")
 	}
 	if r.PoPVersion == 2 {
+		if _, err := r.v2Subject(); err != nil {
+			return err
+		}
 		if r.ProjectID == "" || r.IdempotencyKey == "" || r.SessionID == "" {
 			return errors.New("v2 grant PoP requires project_id, idempotency_key and session_id")
 		}

@@ -16,6 +16,12 @@ import (
 func issuingKey() ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, ed25519.SeedSize))
 }
+
+func TestGrantPoPV2RejectsTruncatingLengthFrame(t *testing.T) {
+	if !fitsLP4Length(uint64(^uint32(0))) || fitsLP4Length(uint64(^uint32(0))+1) {
+		t.Fatal("LP4 length must reject values above uint32 without truncation")
+	}
+}
 func agentKey() ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, ed25519.SeedSize))
 }

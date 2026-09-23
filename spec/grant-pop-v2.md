@@ -20,6 +20,8 @@ LP4(delegation_chain[0]) ... LP4(delegation_chain[n-1])
 bytes. `BE8(x)` is an eight-byte signed integer in two's-complement big-endian
 form. All strings, including opaque IDs and justification, are byte-exact; no
 case folding, trimming, Unicode normalization or JSON reserialization applies.
+Every LP4 field must fit in 32 bits; producers and the server reject an
+oversized field before signing or verification, with no truncated length frame.
 The public key must be canonical unpadded base64url. Absent scope class resolves
 to `single_operation`; non-bounded use limit is zero; absent delegation chain is
 empty. The server resolves body/header idempotency and body/authenticated-route
