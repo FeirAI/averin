@@ -3,15 +3,30 @@
 # written. Complements the unbounded Lean model in formal/lean (see formal/README.md).
 #
 #   bash formal/run-kani.sh              # default set: verified on a 4-core / 16 GB runner (each < 2 min)
-#   bash formal/run-kani.sh --extended   # also the parser-level harnesses (need more memory: CBMC
-#                                        # symbolically executes the full RCP parser / heap strings)
+#   bash formal/run-kani.sh --extended   # also all eight extended harnesses
+#   bash formal/run-kani.sh --harness NAME  # one named harness for profiling and CI sharding
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 run_harness() {
-  cargo kani -p averin-decision-core --no-default-features -Z stubbing --harness "$1"
+  cargo kani -p averin-decision-core --lib --no-default-features --harness "$1"
 }
+
+if [ "${1:-}" = "--harness" ]; then
+  [ "$#" -eq 2 ] || { echo "usage: $0 --harness NAME" >&2; exit 2; }
+  case "$2" in
+    alphabet_is_a_bijection|hex_byte_roundtrip|hex_digit_is_canonical|lp_into_frames_exactly|utf16_key_order_is_exact|utf16_key_order_is_transitive|one_byte_tail_is_canonical|two_byte_tail_is_canonical|full_chunk_is_canonical|utf16_strict_matches_std|integer_roundtrip|accepted_integer_spelling_is_canonical|string_escape_roundtrip|parse_never_panics)
+      run_harness "$2" ;;
+    *) echo "unknown Kani harness: $2" >&2; exit 2 ;;
+  esac
+  exit
+fi
+
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--extended" ]; }; then
+  echo "usage: $0 [--extended | --harness NAME]" >&2
+  exit 2
+fi
 
 # b64.rs — base64url: the alphabet is a bijection.
 run_harness alphabet_is_a_bijection
@@ -27,9 +42,7 @@ run_harness utf16_key_order_is_transitive
 if [ "${1:-}" = "--extended" ]; then
   run_harness one_byte_tail_is_canonical
   run_harness two_byte_tail_is_canonical
-  # Full 4-symbol chunk. Heap-light (no from_utf8, no formatted asserts), but decode's error path still
-  # formats a char with {:?}, which drags Unicode tables into CBMC: out of memory under an 8 GB cap after
-  # ~12 min on a 16 GB box, so it is extended-only until a larger runner verifies it.
+  # Full 4-symbol chunk, checked through the fixed-width functions used by the public codec.
   run_harness full_chunk_is_canonical
   run_harness utf16_strict_matches_std
   run_harness integer_roundtrip

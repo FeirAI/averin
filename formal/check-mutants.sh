@@ -58,7 +58,7 @@ run_gate() {
       inventory) python3 formal/check-refinement.py ;;
       oracle) cargo test -q -p averin-decision-core --test oracle ;;
       golden) cargo test -q -p averin-decision-core --test golden ;;
-      kani) cargo kani -p averin-decision-core --no-default-features -Z stubbing --harness "$3" ;;
+      kani) cargo kani -p averin-decision-core --lib --no-default-features --harness "$3" ;;
     esac
   ) >"$log" 2>&1
 }

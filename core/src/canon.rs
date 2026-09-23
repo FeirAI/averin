@@ -39,10 +39,44 @@ impl fmt::Display for CanonError {
 }
 impl std::error::Error for CanonError {}
 
+// Keep parser decisions independent of diagnostic formatting. The public API still constructs
+// precisely the same `CanonError` text at its boundary.
+#[derive(Debug)]
+struct ParseError {
+    message: ParseMessage,
+    pos: usize,
+}
+
+#[derive(Debug)]
+enum ParseMessage {
+    Static(&'static str),
+    Expected(u8),
+    InvalidLiteral(&'static str),
+    DuplicateKey(String),
+}
+
+impl ParseError {
+    fn into_public(self) -> CanonError {
+        let msg = match self.message {
+            ParseMessage::Static(msg) => msg.to_string(),
+            ParseMessage::Expected(b) => format!("expected '{}'", b as char),
+            ParseMessage::InvalidLiteral(kw) => format!("invalid literal, expected '{kw}'"),
+            ParseMessage::DuplicateKey(key) => {
+                format!("duplicate object key after NFC normalization: {key:?}")
+            }
+        };
+        CanonError { msg, pos: self.pos }
+    }
+}
+
 impl CanonValue {
     /// Parse a JSON document under RCP v1 rules. Rejects floats, out-of-range integers,
     /// duplicate keys (post-NFC), lone surrogates, and trailing garbage.
     pub fn parse(input: &str) -> Result<CanonValue, CanonError> {
+        Self::parse_typed(input).map_err(ParseError::into_public)
+    }
+
+    fn parse_typed(input: &str) -> Result<CanonValue, ParseError> {
         let mut p = Parser {
             s: input.as_bytes(),
             i: 0,
@@ -193,7 +227,13 @@ fn utf16_cmp(a: &str, b: &str) -> Ordering {
 
 /// NFC-normalize a string (RCP §4). Idempotent on already-normalized input.
 fn nfc(s: &str) -> String {
-    s.nfc().collect()
+    if s.is_ascii() {
+        // Every ASCII scalar is already NFC. This common production path also keeps symbolic
+        // ASCII parser proofs out of the Unicode normalization tables.
+        s.to_string()
+    } else {
+        s.nfc().collect()
+    }
 }
 
 /// Write a JSON string with RCP-minimal escaping (RCP §4).
@@ -240,9 +280,9 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn err(&self, msg: &str) -> CanonError {
-        CanonError {
-            msg: msg.to_string(),
+    fn err(&self, msg: &'static str) -> ParseError {
+        ParseError {
+            message: ParseMessage::Static(msg),
             pos: self.i,
         }
     }
@@ -262,7 +302,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_value(&mut self) -> Result<CanonValue, CanonError> {
+    fn parse_value(&mut self) -> Result<CanonValue, ParseError> {
         match self.peek() {
             Some(b'{') => self.parse_object(),
             Some(b'[') => self.parse_array(),
@@ -275,25 +315,31 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect(&mut self, b: u8) -> Result<(), CanonError> {
+    fn expect(&mut self, b: u8) -> Result<(), ParseError> {
         if self.peek() == Some(b) {
             self.i += 1;
             Ok(())
         } else {
-            Err(self.err(&format!("expected '{}'", b as char)))
+            Err(ParseError {
+                message: ParseMessage::Expected(b),
+                pos: self.i,
+            })
         }
     }
 
-    fn parse_keyword(&mut self, kw: &str) -> Result<(), CanonError> {
+    fn parse_keyword(&mut self, kw: &'static str) -> Result<(), ParseError> {
         if self.s[self.i..].starts_with(kw.as_bytes()) {
             self.i += kw.len();
             Ok(())
         } else {
-            Err(self.err(&format!("invalid literal, expected '{kw}'")))
+            Err(ParseError {
+                message: ParseMessage::InvalidLiteral(kw),
+                pos: self.i,
+            })
         }
     }
 
-    fn parse_bool(&mut self) -> Result<CanonValue, CanonError> {
+    fn parse_bool(&mut self) -> Result<CanonValue, ParseError> {
         if self.peek() == Some(b't') {
             self.parse_keyword("true")?;
             Ok(CanonValue::Bool(true))
@@ -303,12 +349,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_null(&mut self) -> Result<CanonValue, CanonError> {
+    fn parse_null(&mut self) -> Result<CanonValue, ParseError> {
         self.parse_keyword("null")?;
         Ok(CanonValue::Null)
     }
 
-    fn parse_number(&mut self) -> Result<CanonValue, CanonError> {
+    fn parse_number(&mut self) -> Result<CanonValue, ParseError> {
         let start = self.i;
         if self.peek() == Some(b'-') {
             self.i += 1;
@@ -336,21 +382,21 @@ impl<'a> Parser<'a> {
         let lexeme = std::str::from_utf8(&self.s[start..self.i]).unwrap();
         // RCP §3: `-0` is not a canonical integer spelling (consistent with rejecting `00`/`01`).
         if lexeme == "-0" {
-            return Err(CanonError {
-                msg: "negative zero is not a canonical integer".to_string(),
+            return Err(ParseError {
+                message: ParseMessage::Static("negative zero is not a canonical integer"),
                 pos: start,
             });
         }
         match lexeme.parse::<i64>() {
             Ok(n) => Ok(CanonValue::Int(n)),
-            Err(_) => Err(CanonError {
-                msg: "integer out of signed 64-bit range".to_string(),
+            Err(_) => Err(ParseError {
+                message: ParseMessage::Static("integer out of signed 64-bit range"),
                 pos: start,
             }),
         }
     }
 
-    fn enter(&mut self) -> Result<(), CanonError> {
+    fn enter(&mut self) -> Result<(), ParseError> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             return Err(self.err("nesting depth limit exceeded"));
@@ -358,7 +404,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_array(&mut self) -> Result<CanonValue, CanonError> {
+    fn parse_array(&mut self) -> Result<CanonValue, ParseError> {
         self.expect(b'[')?;
         self.enter()?;
         let mut items = Vec::new();
@@ -387,7 +433,7 @@ impl<'a> Parser<'a> {
         Ok(CanonValue::Array(items))
     }
 
-    fn parse_object(&mut self) -> Result<CanonValue, CanonError> {
+    fn parse_object(&mut self) -> Result<CanonValue, ParseError> {
         self.expect(b'{')?;
         self.enter()?;
         let mut members: Vec<(String, CanonValue)> = Vec::new();
@@ -409,8 +455,8 @@ impl<'a> Parser<'a> {
             let key = self.parse_string()?; // already NFC-normalized
                                             // RCP §5: reject duplicate keys, checked AFTER NFC normalization.
             if !seen.insert(key.clone()) {
-                return Err(CanonError {
-                    msg: format!("duplicate object key after NFC normalization: {key:?}"),
+                return Err(ParseError {
+                    message: ParseMessage::DuplicateKey(key),
                     pos: key_pos,
                 });
             }
@@ -437,7 +483,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a JSON string, decode escapes (rejecting lone surrogates and raw control chars),
     /// and NFC-normalize (RCP §4).
-    fn parse_string(&mut self) -> Result<String, CanonError> {
+    fn parse_string(&mut self) -> Result<String, ParseError> {
         self.expect(b'"')?;
         let mut units: Vec<u16> = Vec::new(); // collect UTF-16 to handle surrogate pairs cleanly
         loop {
@@ -482,16 +528,15 @@ impl<'a> Parser<'a> {
             }
         }
         // Decode the UTF-16 units; a lone surrogate is invalid (RCP §4 — no U+FFFD substitution).
-        let s = decode_utf16_strict(&units).map_err(|m| CanonError {
-            msg: m,
+        let s = decode_utf16_strict(&units).map_err(|m| ParseError {
+            message: ParseMessage::Static(m),
             pos: self.i,
         })?;
-        // NFC normalize (RCP §4). Through `nfc` (not `s.nfc()` inline) so the Kani harnesses can stub
-        // the Unicode tables and check the escape decoder itself.
+        // NFC normalize (RCP §4), including non-ASCII scalars and combining sequences.
         Ok(nfc(&s))
     }
 
-    fn parse_hex4(&mut self) -> Result<u16, CanonError> {
+    fn parse_hex4(&mut self) -> Result<u16, ParseError> {
         if self.i + 4 > self.s.len() {
             return Err(self.err("truncated \\u escape"));
         }
@@ -511,7 +556,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Read one UTF-8 scalar value at the cursor, advancing past it. Returns (char, byte_len).
-    fn next_utf8_char(&mut self) -> Result<(char, usize), CanonError> {
+    fn next_utf8_char(&mut self) -> Result<(char, usize), ParseError> {
         let rest = &self.s[self.i..];
         // Determine length from lead byte, then validate via std.
         let lead = rest[0];
@@ -538,7 +583,7 @@ impl<'a> Parser<'a> {
 }
 
 /// Strictly decode a UTF-16 unit sequence; reject unpaired surrogates.
-fn decode_utf16_strict(units: &[u16]) -> Result<String, String> {
+fn decode_utf16_strict(units: &[u16]) -> Result<String, &'static str> {
     let mut out = String::with_capacity(units.len());
     let mut i = 0;
     while i < units.len() {
@@ -546,26 +591,54 @@ fn decode_utf16_strict(units: &[u16]) -> Result<String, String> {
         match u {
             0xD800..=0xDBFF => {
                 // high surrogate; need a following low surrogate
-                let lo = *units
-                    .get(i + 1)
-                    .ok_or_else(|| "unpaired high surrogate".to_string())?;
+                let lo = *units.get(i + 1).ok_or("unpaired high surrogate")?;
                 if !(0xDC00..=0xDFFF).contains(&lo) {
-                    return Err("high surrogate not followed by low surrogate".to_string());
+                    return Err("high surrogate not followed by low surrogate");
                 }
                 let c = 0x10000 + (((u as u32 - 0xD800) << 10) | (lo as u32 - 0xDC00));
-                out.push(char::from_u32(c).ok_or_else(|| "invalid scalar value".to_string())?);
+                out.push(char::from_u32(c).ok_or("invalid scalar value")?);
                 i += 2;
             }
-            0xDC00..=0xDFFF => return Err("unpaired low surrogate".to_string()),
+            0xDC00..=0xDFFF => return Err("unpaired low surrogate"),
             _ => {
-                out.push(
-                    char::from_u32(u as u32).ok_or_else(|| "invalid scalar value".to_string())?,
-                );
+                out.push(char::from_u32(u as u32).ok_or("invalid scalar value")?);
                 i += 1;
             }
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod error_compat_tests {
+    use super::*;
+
+    #[test]
+    fn public_parser_errors_keep_their_text_and_position() {
+        let cases = [
+            ("tru", "invalid literal, expected 'true'", 0),
+            ("[1", "expected ',' or ']' in array", 2),
+            ("{\"x\" 1}", "expected ':'", 5),
+            (
+                "{\"é\":0,\"e\\u0301\":1}",
+                "duplicate object key after NFC normalization: \"é\"",
+                8,
+            ),
+            ("\"\\uD800\"", "unpaired high surrogate", 8),
+        ];
+        for (input, msg, pos) in cases {
+            let err = CanonValue::parse(input).unwrap_err();
+            assert_eq!((err.msg.as_str(), err.pos), (msg, pos), "{input}");
+        }
+    }
+
+    #[test]
+    fn real_nfc_normalizes_combining_sequence() {
+        assert_eq!(
+            CanonValue::parse("\"e\\u0301\"").unwrap(),
+            CanonValue::Str("é".into())
+        );
+    }
 }
 
 /// Bounded proofs over this exact code (run by `formal/run-kani.sh`), complementing the unbounded Lean
@@ -575,10 +648,6 @@ fn decode_utf16_strict(units: &[u16]) -> Result<String, String> {
 mod kani_proofs {
     use super::*;
 
-    fn nfc_identity(s: &str) -> String {
-        s.to_string()
-    }
-
     /// `parse(n.to_string()) == Int(n)` and serialization writes that same spelling back, for every
     /// |n| < 10^5 (the i64 extremes are pinned by the golden vectors).
     #[kani::proof]
@@ -586,7 +655,7 @@ mod kani_proofs {
     fn integer_roundtrip() {
         let n: i64 = kani::any_where(|n: &i64| *n > -100_000 && *n < 100_000);
         let text = n.to_string();
-        let v = CanonValue::parse(&text).unwrap();
+        let v = CanonValue::parse_typed(&text).unwrap();
         assert_eq!(v, CanonValue::Int(n));
         assert_eq!(v.serialize(), text);
     }
@@ -602,7 +671,7 @@ mod kani_proofs {
             kani::assume(b.is_ascii_digit() || matches!(*b, b'-' | b'+' | b'.' | b'e' | b'E'));
         }
         let text = core::str::from_utf8(&raw[..len]).unwrap();
-        if let Ok(CanonValue::Int(_)) = CanonValue::parse(text) {
+        if let Ok(CanonValue::Int(_)) = CanonValue::parse_typed(text) {
             let digits = text.strip_prefix('-').unwrap_or(text).as_bytes();
             assert!(!digits.is_empty() && digits.iter().all(|b| b.is_ascii_digit()));
             assert!(digits[0] != b'0' || digits.len() == 1, "no leading zero");
@@ -611,10 +680,8 @@ mod kani_proofs {
     }
 
     /// `write_string` is inverted by the parser for every string of ≤ 2 characters drawn from quotes,
-    /// backslashes, every C0 control, DEL, and non-ASCII scalars (NFC stubbed to the identity; the
-    /// escaper and the escape decoder are what is checked).
+    /// backslashes, every C0 control, DEL, and non-ASCII scalars through the real NFC path.
     #[kani::proof]
-    #[kani::stub(nfc, nfc_identity)]
     #[kani::unwind(16)]
     fn string_escape_roundtrip() {
         let len: usize = kani::any_where(|l: &usize| *l <= 2);
@@ -630,7 +697,7 @@ mod kani_proofs {
             text.bytes().all(|b| b >= 0x20),
             "no raw control byte may be emitted"
         );
-        assert_eq!(CanonValue::parse(&text).unwrap(), CanonValue::Str(s));
+        assert_eq!(CanonValue::parse_typed(&text).unwrap(), CanonValue::Str(s));
     }
 
     fn utf16_agrees<const N: usize>() {
@@ -725,15 +792,14 @@ mod kani_proofs {
         assert_eq!(ab == Ordering::Equal, a == b);
     }
 
-    /// The parser never panics on any input of ≤ 5 bytes (NFC stubbed): every rejection is a `CanonError`.
+    /// The parser never panics on any valid UTF-8 input of ≤ 5 bytes, including real NFC.
     #[kani::proof]
-    #[kani::stub(nfc, nfc_identity)]
     #[kani::unwind(8)]
     fn parse_never_panics() {
         let raw: [u8; 5] = kani::any();
         let len: usize = kani::any_where(|l: &usize| *l <= 5);
         if let Ok(text) = core::str::from_utf8(&raw[..len]) {
-            let _ = CanonValue::parse(text);
+            let _ = CanonValue::parse_typed(text);
         }
     }
 }
