@@ -1803,6 +1803,24 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
+	// A committed exact retry remains readable after its signed request window.
+	// Check before staging the descriptor: staging a fresh candidate would both
+	// reject the expired proof and leave an unnecessary content-store write.
+	if existing, found, e := s.st.RecordByIdem(gr.ProjectID, idem); e != nil {
+		writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+e.Error())
+		return
+	} else if found {
+		if same, e := storedGrantMatchesRequest(existing.JSON, req); e != nil || !same {
+			writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
+			return
+		}
+		s.respondGrant(w, gr.ProjectID, grantID, existing.JSON, false, "")
+		return
+	}
+	if e := req.ValidateAt(s.now()); e != nil {
+		writeErr(w, http.StatusBadRequest, e.Error())
+		return
+	}
 	// Stage the immutable credential descriptor before taking the project guard.
 	// Its bytes do not depend on broker_seq; the authoritative prepare below
 	// replaces only the sequence inside signed grant evidence.
@@ -1926,11 +1944,15 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	capability := prepared.Capability
+	s.respondGrant(w, gr.ProjectID, grantID, sealed, created, prepared.Capability)
+}
+
+func (s *Server) respondGrant(w http.ResponseWriter, projectID, grantID, sealed string, created bool, capability string) {
+	var err error
 	if !created {
 		// Idempotent retry: the grant already exists. Return the ORIGINAL capability, reconstructed
 		// deterministically from the stored descriptor, NOT this call's freshly-timed one.
-		capability, err = s.reconstructCapability(gr.ProjectID, grantID)
+		capability, err = s.reconstructCapability(projectID, grantID)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "reconstruct capability: "+err.Error())
 			return

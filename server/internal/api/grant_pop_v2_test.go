@@ -51,6 +51,8 @@ func TestGrantPoPV2RouteRejectsEveryUnsignedSubstitution(t *testing.T) {
 		"project_id": "p2", "idempotency_key": "idem-other", "session_id": "s2",
 		"agent_id": "other", "action": "db.query:other", "resource": "other-db",
 		"scope": "read:other", "scope_class": "session_grant", "use_limit": 1,
+		"agent_pubkey": base64.RawURLEncoding.EncodeToString(brokerIssuingKey().Public().(ed25519.PublicKey)),
+		"agent_sig":    "AAAA", "lease_id": "other-lease", "mode": "unexpected",
 		"authorizing_principal": "other", "delegation_chain": []string{"other"},
 		"justification": "other", "ttl_seconds": 120, "issued_at": now.Unix() + 1,
 		"request_expires_at": now.Add(broker.MaxRequestAge).Unix() + 1, "pop_version": 1,
