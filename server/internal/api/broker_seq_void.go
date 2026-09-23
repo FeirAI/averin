@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/store"
 )
 
@@ -58,10 +60,12 @@ func (s *Server) WithBrokerSeqVoidMinAge(d time.Duration) *Server {
 
 // brokerSeqVoidRequest is the POST /v2/broker-seq/void wire shape.
 type brokerSeqVoidRequest struct {
-	ProjectID string `json:"project_id"`
-	BrokerSeq int64  `json:"broker_seq"`
-	SessionID string `json:"session_id"` // optional: the session the tombstone is sealed into (default broker-seq-void)
-	Reason    string `json:"reason"`     // optional, bound into the signed void_evidence
+	ProjectID   string `json:"project_id"`
+	BrokerSeq   int64  `json:"broker_seq"`
+	SessionID   string `json:"session_id"`   // optional: the session the tombstone is sealed into (default broker-seq-void)
+	OperationID string `json:"operation_id"` // caller-chosen stable ID for this recovery action
+	Reason      string `json:"reason"`       // required, bound into the signed void_evidence
+	ActorID     string `json:"actor_id"`     // rejected if supplied; set only from authenticated context
 }
 
 // handleBrokerSeqVoid is the operator remediation for a WEDGED grant-transparency log (ADR 0004 D6). A broker_seq
@@ -101,9 +105,13 @@ type brokerSeqVoidRequest struct {
 // the void; repeating it (idempotent) retries the revocation. Without revocation the capability stays usable until
 // it expires (documented in docs/dev/API.md).
 //
-// AUTHZ: like every /v2 route this is gated only by the project-scoped API key — the server has no separate
-// operator/admin privilege — so any writer for the project can void that project's aged, unrecorded seqs.
+// AUTHZ: the exact route is gated by separate project-scoped recovery credentials.
 func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
+	actor, authorized := auth.RecoveryActor(r.Context())
+	if !authorized {
+		writeErr(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	if s.brokerKey == nil {
 		writeErr(w, http.StatusNotImplemented, "credential broker not enabled (set AVERIN_BROKER_ISSUING_SEED)")
 		return
@@ -118,6 +126,10 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid void request: "+err.Error())
 		return
 	}
+	if vr.ActorID != "" {
+		writeErr(w, http.StatusBadRequest, "actor_id is supplied by authentication")
+		return
+	}
 	if qp := r.URL.Query().Get("project"); qp != "" && vr.ProjectID != qp {
 		writeErr(w, http.StatusForbidden, "project_id does not match the authorized ?project=")
 		return
@@ -126,10 +138,16 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project_id and broker_seq (>= 1) are required")
 		return
 	}
+	if strings.TrimSpace(vr.Reason) != vr.Reason || len(vr.Reason) < 1 || len(vr.Reason) > 512 ||
+		strings.TrimSpace(vr.OperationID) != vr.OperationID || len(vr.OperationID) < 1 || len(vr.OperationID) > 128 {
+		writeErr(w, http.StatusBadRequest, "operation_id and reason are required and must be bounded nonblank strings")
+		return
+	}
+	vr.ActorID = actor
 	if vr.SessionID == "" {
 		vr.SessionID = "broker-seq-void"
 	}
-	if err := rejectNUL("project_id", vr.ProjectID, "session_id", vr.SessionID); err != nil {
+	if err := rejectNUL("project_id", vr.ProjectID, "session_id", vr.SessionID, "operation_id", vr.OperationID, "reason", vr.Reason); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -172,6 +190,10 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusInternalServerError, "tombstone lookup: %v", le)
 			return
 		} else if ok {
+			if !sameRecoveryAction(existing.JSON, vr, res.GrantID) {
+				fail(http.StatusConflict, "broker_seq already has a recovery tombstone with different action parameters")
+				return
+			}
 			if !res.Voided {
 				if ve := s.st.VoidBrokerSeq(vr.ProjectID, res.GrantID, vr.BrokerSeq); ve != nil {
 					fail(http.StatusInternalServerError, "broker_seq %d's grant_void tombstone is sealed but marking the reservation voided FAILED — repeat this call to finish (the tombstone already holds grant_id %s, so that grant can no longer record): %v", vr.BrokerSeq, res.GrantID, ve)
@@ -295,6 +317,37 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, out)
 }
 
+// sameRecoveryAction prevents a retry from rewriting or claiming somebody
+// else's tombstone. Legacy tombstones remain readable and verifiable, but lack
+// the identity needed to accept a new authenticated retry.
+func sameRecoveryAction(raw string, vr brokerSeqVoidRequest, grantID string) bool {
+	var record struct {
+		RecordID   string `json:"record_id"`
+		ProjectID  string `json:"project_id"`
+		SessionID  string `json:"session_id"`
+		Extensions struct {
+			Broker struct {
+				Kind         string `json:"kind"`
+				VoidEvidence struct {
+					ProjectID   string `json:"project_id"`
+					BrokerSeq   int64  `json:"broker_seq"`
+					GrantID     string `json:"grant_id"`
+					ActorID     string `json:"actor_id"`
+					OperationID string `json:"operation_id"`
+					Reason      string `json:"reason"`
+				} `json:"void_evidence"`
+			} `json:"broker"`
+		} `json:"extensions"`
+	}
+	if json.Unmarshal([]byte(raw), &record) != nil {
+		return false
+	}
+	ev := record.Extensions.Broker.VoidEvidence
+	return record.Extensions.Broker.Kind == "grant_void" && record.RecordID == grantID && record.ProjectID == vr.ProjectID && record.SessionID == vr.SessionID &&
+		ev.ProjectID == vr.ProjectID && ev.BrokerSeq == vr.BrokerSeq && ev.GrantID == grantID &&
+		ev.ActorID == vr.ActorID && ev.OperationID == vr.OperationID && ev.Reason == vr.Reason
+}
+
 // noteSeqAttempt stamps now as the latest attempt of (projectID, grantID) — see Server.seqAttempts. Entries older
 // than brokerSeqVoidMinAge can no longer block a void, so the map is pruned of them whenever it doubles in size.
 func (s *Server) noteSeqAttempt(projectID, grantID string) {
@@ -353,12 +406,14 @@ func (s *Server) pendingGrantLive(grantID string) bool {
 func (s *Server) buildGrantVoidRecord(vr brokerSeqVoidRequest, grantID string) (map[string]any, error) {
 	now := ts(s.now())
 	evidence := map[string]any{
-		"domain":     grantVoidDomain,
-		"project_id": vr.ProjectID,
-		"broker_seq": vr.BrokerSeq,
-		"grant_id":   grantID,
-		"voided_at":  now,
-		"reason":     vr.Reason,
+		"domain":       grantVoidDomain,
+		"project_id":   vr.ProjectID,
+		"broker_seq":   vr.BrokerSeq,
+		"grant_id":     grantID,
+		"voided_at":    now,
+		"actor_id":     vr.ActorID,
+		"operation_id": vr.OperationID,
+		"reason":       vr.Reason,
 	}
 	if s.brokerID != "" {
 		evidence["broker_id"] = s.brokerID // M4: the tombstone fills the seq in THIS broker's partition

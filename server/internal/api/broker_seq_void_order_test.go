@@ -74,7 +74,7 @@ func exerciseVoidGrantLandsFirst(t *testing.T, base store.Store, h http.Handler,
 	if code != http.StatusCreated || !strings.Contains(resp, `"created":false`) || grantSeqOf(t, resp) != 1 {
 		t.Fatalf("the grant's retry must idempotently return its landed record at seq 1 (%d): %s", code, resp)
 	}
-	if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "is recorded") {
+	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "is recorded") {
 		t.Fatalf("a repeat void of the landed seq must 409 as recorded (got %d): %s", code, resp)
 	}
 	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
@@ -85,14 +85,14 @@ func exerciseVoidGrantLandsFirst(t *testing.T, base store.Store, h http.Handler,
 func TestBrokerSeqVoidGrantLandsFirstMem(t *testing.T) {
 	ls := &lateCommitStore{flakyGrantStore: flakyGrantStore{Store: store.NewMem()}}
 	ws := &landOnTombstoneStore{lateCommitStore: ls, t: t}
-	h := api.New(mustCore(t), ws, "k0").WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).Routes()
+	h := api.New(mustCore(t), ws, "k0").WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 	ls.holdNext = true
 	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-land", "read:orders", ak, ak)); code != http.StatusInternalServerError {
 		t.Fatalf("the grant's in-flight commit must 500 (got %d): %s", code, resp)
 	}
 	exerciseVoidGrantLandsFirst(t, ls.Store, h, func() (int, string) {
-		return do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
+		return doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 	})
 	// revocation-on-void runs only for a void that WON: the landed grant must not have been revoked (the revoked set
 	// is still empty, so revoking an unrelated id makes it exactly 1).
@@ -109,7 +109,7 @@ func exerciseVoidMarkerFails(t *testing.T, base store.Store) {
 	t.Helper()
 	fs := &flakyGrantStore{Store: base}
 	fm := &failMarkStore{Store: fs}
-	h := api.New(mustCore(t), fm, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
+	h := api.New(mustCore(t), fm, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 
 	fs.ambiguousPut = true // seq 1 (the max) is reserved by a commit that never lands
@@ -117,7 +117,7 @@ func exerciseVoidMarkerFails(t *testing.T, base store.Store) {
 		t.Fatalf("ambiguous commit must 500 (got %d): %s", code, resp)
 	}
 	fm.failMark = true
-	code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
+	code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 	if code != http.StatusInternalServerError || !strings.Contains(resp, "tombstone is sealed but marking the reservation voided FAILED") || !strings.Contains(resp, "repeat this call to finish") {
 		t.Fatalf("a failed marker write after the seal must 500 and ask for a repeat (got %d): %s", code, resp)
 	}
@@ -138,7 +138,7 @@ func exerciseVoidMarkerFails(t *testing.T, base store.Store) {
 		t.Fatalf("a new grant must take seq 2, never the tombstoned 1 (%d): %s", code, resp)
 	}
 	// the repeat finishes: returns the existing tombstone and writes the marker.
-	code, resp = do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
+	code, resp = doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 	if code != http.StatusOK || !strings.Contains(resp, `"created":false`) || !strings.Contains(resp, `"grant_void"`) {
 		t.Fatalf("the repeat must return the sealed tombstone (got %d): %s", code, resp)
 	}
@@ -168,7 +168,7 @@ func TestBrokerSeqVoidMarkerFailsMem(t *testing.T) {
 // store, answers 409 "grant landed; nothing to void" and names the marker inert.
 func TestBrokerSeqVoidInertLegacyMarker(t *testing.T) {
 	ls := &lateCommitStore{flakyGrantStore: flakyGrantStore{Store: store.NewMem()}}
-	h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
+	h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 	ls.holdNext = true
 	do(t, h, "POST", "/v2/grants", grantBody("idem-inert", "read:orders", ak, ak))
@@ -177,7 +177,7 @@ func TestBrokerSeqVoidInertLegacyMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	ls.land(t)
-	code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
+	code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 	if code != http.StatusConflict || !strings.Contains(resp, "grant landed; nothing to void") || !strings.Contains(resp, "INERT") {
 		t.Fatalf("a legacy marker over a landed grant must 409 and be named inert (got %d): %s", code, resp)
 	}
@@ -197,15 +197,15 @@ func TestBrokerSeqVoidBootFloor(t *testing.T) {
 	ak := grantAgentKey()
 	clk := newFakeClock()
 	fs := &flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}
-	h1 := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).Routes()
+	h1 := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
 	fs.ambiguousPut = true
 	do(t, h1, "POST", "/v2/grants", grantBody("idem-boot", "read:orders", ak, ak)) // T0: reserved, never lands
 	clk.Advance(3 * time.Hour)
 
 	// "restart": a new Server over the same store, constructed now (T0+3h).
-	h2 := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).Routes()
+	h2 := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
 	clk.Advance(10 * time.Minute)
-	code, resp := do(t, h2, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
+	code, resp := doRecovery(t, h2, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 	if code != http.StatusConflict || !strings.Contains(resp, "before this process started") || !strings.Contains(resp, "AVERIN_BROKER_SEQ_VOID_MIN_AGE") {
 		t.Fatalf("a void within the min age of the process start must 409 (got %d): %s", code, resp)
 	}
@@ -213,7 +213,7 @@ func TestBrokerSeqVoidBootFloor(t *testing.T) {
 		t.Fatalf("a refused void must not mark: %+v", res)
 	}
 	clk.Advance(51 * time.Minute) // T0+4h01m: 61m after the start
-	if code, resp := do(t, h2, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
+	if code, resp := doRecovery(t, h2, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
 		t.Fatalf("once the min age has passed since the start the void must succeed (got %d): %s", code, resp)
 	}
 }

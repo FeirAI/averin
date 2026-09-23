@@ -161,11 +161,28 @@ build is deployed (no new anchoring; after the revocation validity window its ex
 
 Remediation, per unrecorded seq `k` in `[1..M]`:
 
+Configure `AVERIN_RECOVERY_KEYS` with a separate credential for the exact project and a stable
+non-secret `actor_id` (see [configuration](dev/CONFIGURATION.md)). Keep the token in your secret
+manager, send it as `Authorization: Bearer <token>`, and rotate it by briefly configuring old and
+new tokens for the same actor. Ordinary API writer keys cannot call this route. An unset recovery
+configuration denies recovery, including when ordinary API auth is in dev-open mode.
+
+For an emergency action, use a fresh incident ID and a specific reason:
+
+```sh
+curl -X POST 'https://<averin-host>/v2/broker-seq/void?project=<project>' \
+  -H "Authorization: Bearer ${AVERIN_RECOVERY_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  --data '{"project_id":"<project>","broker_seq":1,"operation_id":"<incident-id>","reason":"<specific cause>"}'
+```
+
 1. If the grant's client is still around, have it retry under its original `idempotency_key`: the retry
    reclaims seq `k` and the gap closes.
 2. Otherwise, once the reservation, its grant's latest attempt **and the server's start** are all older
    than `AVERIN_BROKER_SEQ_VOID_MIN_AGE` (default `1h`), call `POST /v2/broker-seq/void?project=<id>` with
-   `{"project_id":"<id>","broker_seq":k,"reason":"..."}`. The server confirms from the store that nothing
+   `{"project_id":"<id>","broker_seq":k,"operation_id":"<ticket-or-incident-id>","reason":"<specific cause>"}`.
+   The authenticated actor, operation ID and reason are bound into the signed tombstone. Reuse
+   those exact values and the same session for retries; changed values return `409`. The server confirms from the store that nothing
    records seq `k` (a seq whose ambiguous commit actually landed is refused), retires the reserved `grant_id`
    (a later retry of it is a `409`; re-issue under a new key), and seals a broker-signed `grant_void`
    tombstone binding the project, `k` and that `grant_id`. The tombstone is sealed before the reservation is

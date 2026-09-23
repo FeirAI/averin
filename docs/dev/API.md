@@ -8,9 +8,9 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 
 ## Authentication
 
-- When `AVERIN_API_KEYS` is **unset**, the API is **unauthenticated** (`/v2/*` is open). Dev /
-  single-tenant only.
-- When `AVERIN_API_KEYS` is set, every `/v2/*` route is gated by project-scoped API-key middleware;
+- When `AVERIN_API_KEYS` is **unset**, ordinary `/v2/*` routes are unauthenticated. Dev /
+  single-tenant only. The recovery route always requires `AVERIN_RECOVERY_KEYS`.
+- When `AVERIN_API_KEYS` is set, ordinary `/v2/*` routes are gated by project-scoped API-key middleware;
   `/healthz` stays open. Credentials are read from `Authorization: Bearer <token>` (scheme is
   case-insensitive) **or** `X-Api-Key: <token>`; the project comes from the `?project=` query
   parameter. A token not valid for that project gets a generic `401` (`{"error":"unauthorized"}`,
@@ -320,6 +320,8 @@ fills exactly that seq:
 - It binds `project_id`, `broker_seq` and the reserved `grant_id` in `extensions.broker.void_evidence`
   (domain `averin.broker.grant_void.v1`), is signed like a grant's authority (`gateway_enforced`,
   `evidence_sig` over `sha256(RCP(void_evidence))`), and its `record_id` is the reserved `grant_id`.
+- The signed evidence also binds the authenticated `actor_id`, caller-supplied `operation_id`, and
+  required `reason`.
 - It is folded into `broker_grant_head` exactly like a grant, so the next checkpoint signs. The offline
   verifier accepts it as filling its seq, **never** counts it as a grant or matches a use to it, and
   reports a real grant claiming the same seq as a duplicate-seq violation.
@@ -385,18 +387,22 @@ returns that error after the tombstone is sealed. Repeating the call, which is i
 revocation. **Without revocation enabled**, such a capability stays usable at `/v2/use` until it expires.
 In that case, enable revocation, or wait out the grant's TTL, before you rely on the void.
 
-**Authorization.** The server has no separate operator or admin privilege. This route is gated only by
-the project-scoped API key, like every `/v2/` route, so **any writer for a project can void that
-project's aged, unrecorded seqs**. Restrict who holds project write keys, or put this route behind an
-operator-only proxy rule, if that matters in your deployment.
+**Authorization.** This route requires a separate `broker_seq:recover` credential for the exact
+`?project=`. An ordinary `AVERIN_API_KEYS` writer receives `403`; unset recovery configuration also
+denies. The route does not accept an actor identity from the request body. Rotate a recovery token by
+configuring a new token for the same actor, restarting, then removing the old token and restarting.
+The token is accepted only here; it does not grant ordinary writer access.
 
-Request: `{ "project_id": "...", "broker_seq": <n>, "session_id": "...", "reason": "..." }`
-(`project_id` and `broker_seq` required; `session_id` defaults to `broker-seq-void`; `reason` is
-bound into the signed evidence).
+Request: `{ "project_id": "...", "broker_seq": <n>, "session_id": "...", "operation_id": "...", "reason": "..." }`
+(`project_id`, `broker_seq`, `operation_id` and `reason` required; `session_id` defaults to
+`broker-seq-void`; `operation_id` is at most 128 bytes and `reason` at most 512 bytes).
+Use the same `operation_id`, `reason`, session and credential for a retry. A conflicting retry is
+`409` and leaves the original tombstone untouched. Historical tombstones remain readable; because
+they lack an authenticated actor and operation ID, a new recovery action cannot claim them.
 
 **Response `201`:** `{ "voided_broker_seq": <n>, "grant_id": "...", "created": true, "record": { /* tombstone */ } }`
 (plus `"revoked": true` when revocation is enabled).
-A repeat of a completed void returns the same tombstone with `200` and `"created": false`. Errors:
+A repeat of the same completed action returns the tombstone with `200` and `"created": false`. Errors:
 `400`, `403`, `404`, `409` (recorded or the grant landed during the void, live pending grant, too young,
 or no UNIQUE `record_id` index), `429`/`503` (the void completed but revoking its `grant_id` failed;
 repeat the call), `500` (nothing voided, or the tombstone is sealed but the mark failed; repeat the call

@@ -68,11 +68,11 @@ func TestBrokerSeqVoidPostgres(t *testing.T) {
 	t.Run("unique index present: void unwedges", func(t *testing.T) {
 		pg, _ := newVoidTestPostgres(t)
 		fs := &flakyGrantStore{Store: pg}
-		h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
+		h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 		fs.ambiguousPut = true
 		do(t, h, "POST", "/v2/grants", grantBody("idem-pg1", "read:orders", ak, ak))
 		mkGrant(t, h, ak, "idem-pg2")
-		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
+		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
 			t.Fatalf("void on Postgres with the UNIQUE index (%d): %s", code, resp)
 		}
 		if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
@@ -94,10 +94,10 @@ func TestBrokerSeqVoidPostgres(t *testing.T) {
 			t.Fatalf("create fallback index: %v", err)
 		}
 		fs := &flakyGrantStore{Store: pg}
-		h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
+		h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 		fs.ambiguousPut = true
 		do(t, h, "POST", "/v2/grants", grantBody("idem-pgf", "read:orders", ak, ak))
-		code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
+		code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 		if code != http.StatusConflict || !strings.Contains(resp, "does not enforce record_id uniqueness") {
 			t.Fatalf("a void without the UNIQUE record_id index must be refused (got %d): %s", code, resp)
 		}
@@ -156,7 +156,7 @@ func (h *heldTxStore) PutRecord(p, k string, rec store.Record) (store.Record, bo
 func TestBrokerSeqVoidGrantLandsFirstPostgres(t *testing.T) {
 	pg, admin := newVoidTestPostgres(t)
 	hs := &heldTxStore{Store: pg, admin: admin}
-	h := api.New(mustCore(t), hs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
+	h := api.New(mustCore(t), hs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 	hs.holdNext = true
 	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-land", "read:orders", ak, ak)); code != http.StatusInternalServerError {
@@ -172,7 +172,7 @@ func TestBrokerSeqVoidGrantLandsFirstPostgres(t *testing.T) {
 		}
 		done := make(chan result, 1)
 		go func() {
-			c, r := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
+			c, r := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 			done <- result{c, r}
 		}()
 		// wait until the void's tombstone INSERT is blocked on the grant's uncommitted index entry.

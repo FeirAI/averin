@@ -97,6 +97,25 @@ func (ks *MapStore) ValidFor(project, token string) bool {
 	return match == 1
 }
 
+// ContainsToken is used at startup to keep recovery credentials disjoint from
+// ordinary writer credentials across every configured project.
+func (ks *MapStore) ContainsToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	got := sha256.Sum256([]byte(token))
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	var match int
+	for _, tokens := range ks.keys {
+		for _, want := range tokens {
+			digest := sha256.Sum256([]byte(want))
+			match |= subtle.ConstantTimeCompare(got[:], digest[:])
+		}
+	}
+	return match == 1
+}
+
 // openStore is the explicit, dev-only "allow everything" KeyStore. See NewOpenStore.
 type openStore struct{}
 

@@ -129,16 +129,26 @@ func main() {
 	srv.WithMeter(meterReporter)
 
 	// project-scoped API keys: AVERIN_API_KEYS="proj-a:tok1,tok2;proj-b:tok3". Unset = no auth (dev).
+	var writerKeys auth.KeyStore
 	if raw := os.Getenv("AVERIN_API_KEYS"); raw != "" {
 		ks, n := auth.ParseKeys(raw)
 		if n == 0 {
 			log.Fatal("AVERIN_API_KEYS is set but parsed to zero keys — refusing to start in silent deny-all (use 'proj:tok' form)")
 		}
 		srv.WithAuth(ks)
+		writerKeys = ks
 		log.Printf("per-project API-key auth enabled (%d projects)", n)
 	} else {
 		log.Printf("WARNING: no AVERIN_API_KEYS set — the app API is UNAUTHENTICATED (dev/single-tenant only)")
 	}
+	// AVERIN_RECOVERY_KEYS is a separate broker_seq:recover authority. An absent
+	// configuration denies all recovery actions even when ordinary auth is open.
+	recoveryKeys, recoveryCount, err := auth.ParseRecoveryKeys(os.Getenv("AVERIN_RECOVERY_KEYS"), writerKeys)
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.WithRecoveryAuth(recoveryKeys)
+	log.Printf("project-scoped recovery auth configured (%d credentials)", recoveryCount)
 	// T7: pin EXTERNAL authority verifying keys so a generic record carrying a policy_engine_signed
 	// OR human_signed authority block, with an evidence_sig that verifies under the key pinned FOR
 	// THAT source, is elevated to that source at ingest (else forced to the forgeable

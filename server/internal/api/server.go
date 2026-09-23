@@ -67,6 +67,7 @@ type Server struct {
 	content   content.Store // raw low-entropy values (committed at ingest, revealed on disclosure)
 	meter     meter.Meter
 	auth      auth.KeyStore      // nil = no per-project auth (dev/single-tenant)
+	recovery  auth.RecoveryStore // nil = deny all broker_seq:recover actions
 	witness   witness.Witness    // nil = no external witness configured
 	tsa       witness.TSA        // nil = no external timestamp anchoring configured
 	brokerKey ed25519.PrivateKey // nil = credential broker (/v2/grants) disabled
@@ -369,6 +370,13 @@ func (s *Server) WithClock(now func() time.Time) *Server {
 // WithAuth gates the /v2/* routes behind project-scoped API-key auth.
 func (s *Server) WithAuth(ks auth.KeyStore) *Server {
 	s.auth = ks
+	return s
+}
+
+// WithRecoveryAuth installs the separate project-scoped broker_seq:recover
+// credential store. Ordinary writer credentials never authorize recovery.
+func (s *Server) WithRecoveryAuth(rs auth.RecoveryStore) *Server {
+	s.recovery = rs
 	return s
 }
 
@@ -944,17 +952,19 @@ func (s *Server) Routes() http.Handler {
 	if s.ingestBudget != nil {
 		handler = s.rateLimitIngest(mux)
 	}
-	if s.auth == nil || auth.IsOpen(s.auth) {
-		return rejectNULParams(handler) // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
-	}
-	// gate every /v2/* route behind project-scoped auth; /healthz, /readyz, /metrics stay open (health/
-	// observability endpoints are unauthenticated by design, matching /healthz's existing posture).
-	gate := auth.Middleware(s.auth, "project")
 	guarded := http.NewServeMux()
 	guarded.HandleFunc("GET /healthz", healthz)
 	guarded.HandleFunc("GET /readyz", s.readyz)
 	guarded.HandleFunc("GET /metrics", s.metrics.Handler())
-	guarded.Handle("/v2/", gate(handler))
+	// Recovery is an exact-route exception to ordinary /v2 writer auth. This
+	// remains fail-closed even in dev-open mode and does not grant the operator
+	// credential access to other writer routes.
+	guarded.Handle("POST /v2/broker-seq/void", auth.RecoveryMiddleware(s.recovery)(handler))
+	if s.auth == nil || auth.IsOpen(s.auth) {
+		guarded.Handle("/v2/", handler)
+	} else {
+		guarded.Handle("/v2/", auth.Middleware(s.auth, "project")(handler))
+	}
 	return rejectNULParams(guarded)
 }
 

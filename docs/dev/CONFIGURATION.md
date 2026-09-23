@@ -87,7 +87,8 @@ and logs a `WARNING`; new duplicates are still rejected by the application.
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_API_KEYS` | unset ⇒ **no auth** | No | Project-scoped API keys in the form `proj-a:tok1,tok2;proj-b:tok3`. When set, every `/v2/*` route is gated; `/healthz` stays open. If set but parses to **zero** keys ⇒ **fatal** (refuses to start in a silent deny-all). Unset ⇒ the app API is **UNAUTHENTICATED** (dev/single-tenant; logs a WARNING). See [SECURITY.md](SECURITY.md) for the auth model and its Phase-1 limits. |
+| `AVERIN_API_KEYS` | unset ⇒ **no ordinary API auth** | No | Project-scoped API keys in the form `proj-a:tok1,tok2;proj-b:tok3`. When set, ordinary `/v2/*` routes are gated; `/healthz` stays open. If set but parses to **zero** keys ⇒ **fatal**. Unset ⇒ ordinary API routes are **UNAUTHENTICATED** (dev/single-tenant; logs a WARNING). The recovery route always has separate auth. See [SECURITY.md](SECURITY.md). |
+| `AVERIN_RECOVERY_KEYS` | unset ⇒ recovery denied | No | JSON array of `{ "project_id": "p1", "actor_id": "operator-1", "token": "<secret>" }` objects. Grants only `broker_seq:recover` for the named project, not ordinary write access. Actor ID is a stable non-secret identity signed into recovery evidence. Absent or `[]` denies even in dev-open mode. Invalid entries, duplicate tokens, or a token shared with an ordinary API key fail startup; token values are never logged. For rotation, temporarily configure two distinct tokens with the same actor ID, then remove the old token. |
 
 ### Authority elevation (external authority keys, T7)
 
