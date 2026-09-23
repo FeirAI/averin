@@ -139,8 +139,22 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(vr.Reason) != vr.Reason || len(vr.Reason) < 1 || len(vr.Reason) > 512 ||
-		strings.TrimSpace(vr.OperationID) != vr.OperationID || len(vr.OperationID) < 1 || len(vr.OperationID) > 128 {
-		writeErr(w, http.StatusBadRequest, "operation_id and reason are required and must be bounded nonblank strings")
+		!auth.ValidRecoveryID(vr.OperationID) {
+		writeErr(w, http.StatusBadRequest, "operation_id must be 1..128 printable non-whitespace ASCII bytes and reason must be a bounded nonblank string")
+		return
+	}
+	// The Rust RCP seal normalizes strings to NFC. Normalize only the human
+	// reason before both signing and replay comparison, or an identical request
+	// with decomposed Unicode would falsely conflict with its stored tombstone.
+	reasonJSON, err := json.Marshal(vr.Reason)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid recovery reason")
+		return
+	}
+	canonicalReason := s.core.RcpCanonicalize(string(reasonJSON))
+	if json.Unmarshal([]byte(canonicalReason), &vr.Reason) != nil ||
+		strings.TrimSpace(vr.Reason) != vr.Reason || len(vr.Reason) < 1 || len(vr.Reason) > 512 {
+		writeErr(w, http.StatusBadRequest, "invalid recovery reason")
 		return
 	}
 	vr.ActorID = actor

@@ -396,6 +396,9 @@ The token is accepted only here; it does not grant ordinary writer access.
 Request: `{ "project_id": "...", "broker_seq": <n>, "session_id": "...", "operation_id": "...", "reason": "..." }`
 (`project_id`, `broker_seq`, `operation_id` and `reason` required; `session_id` defaults to
 `broker-seq-void`; `operation_id` is at most 128 bytes and `reason` at most 512 bytes).
+`operation_id` must be 1–128 printable non-whitespace ASCII bytes. The authenticated `actor_id`
+has the same format. These identifiers remain byte-exact; the human-readable `reason` is
+NFC-normalized through the Rust RCP canonicalizer before signing and retry comparison.
 Use the same `operation_id`, `reason`, session and credential for a retry. A conflicting retry is
 `409` and leaves the original tombstone untouched. Historical tombstones remain readable; because
 they lack an authenticated actor and operation ID, a new recovery action cannot claim them.

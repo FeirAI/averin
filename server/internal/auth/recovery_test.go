@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+type invalidActorStore struct{}
+
+func (invalidActorStore) ActorFor(_, _ string) (string, bool) { return "opérator", true }
+
 func TestRecoveryAuthorization(t *testing.T) {
 	rs, n, err := ParseRecoveryKeys(`[{"project_id":"p1","actor_id":"operator-1","token":"recovery-secret"},{"project_id":"p2","actor_id":"operator-2","token":"other-secret"}]`)
 	if err != nil || n != 2 {
@@ -64,6 +68,9 @@ func TestRecoveryConfigFailsClosed(t *testing.T) {
 		`[{"project_id":"p1","actor_id":"","token":"x"}]`,
 		`[{"project_id":"p1","actor_id":"a","token":""}]`,
 		`[{"project_id":"p1","actor_id":"a","token":"x","role":"admin"}]`,
+		`[{"project_id":"p1","actor_id":"opérator","token":"x"}]`,
+		`[{"project_id":"p1","actor_id":"operator one","token":"x"}]`,
+		`[{"project_id":"p1","actor_id":"operator\n","token":"x"}]`,
 		`{"project_id":"p1","actor_id":"a","token":"x"}`,
 		`[] garbage`,
 	} {
@@ -78,8 +85,24 @@ func TestRecoveryConfigFailsClosed(t *testing.T) {
 	if _, ok := rs.ActorFor("p1", "anything"); ok {
 		t.Fatal("absent recovery configuration granted access")
 	}
+	for _, id := range []string{"", "opérator", "operator one", "operator\n", strings.Repeat("a", 129)} {
+		if ValidRecoveryID(id) {
+			t.Fatalf("accepted invalid recovery ID %q", id)
+		}
+	}
 	writers := NewMapStore(map[string][]string{"different-project": {"shared-token"}})
 	if _, _, err := ParseRecoveryKeys(`[{"project_id":"p1","actor_id":"operator","token":"shared-token"}]`, writers); err == nil {
 		t.Fatal("a recovery token shared with an ordinary writer on another project was accepted")
+	}
+}
+
+func TestRecoveryMiddlewareRejectsInvalidActorFromStore(t *testing.T) {
+	h := RecoveryMiddleware(invalidActorStore{})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("invalid actor reached recovery handler")
+	}))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/void?project=p1", nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("invalid actor got %d, want 403", w.Code)
 	}
 }

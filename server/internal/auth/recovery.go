@@ -33,6 +33,22 @@ type recoveryEntry struct {
 
 type recoveryMapStore struct{ entries []recoveryEntry }
 
+// ValidRecoveryID restricts actor and operation identifiers to visible ASCII
+// without spaces. Opaque identifiers must remain byte-exact across auth,
+// evidence signing, and idempotent replay; only human-readable reason is NFC
+// normalized by the Rust canonicalizer.
+func ValidRecoveryID(id string) bool {
+	if len(id) < 1 || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < '!' || id[i] > '~' {
+			return false
+		}
+	}
+	return true
+}
+
 // ParseRecoveryKeys accepts a JSON array of project/actor/token objects. Duplicate
 // project+token entries and tokens shared by two actors or projects are rejected so
 // a credential has one unambiguous identity. An empty array is a valid deny-all
@@ -54,10 +70,10 @@ func ParseRecoveryKeys(raw string, writers ...KeyStore) (RecoveryStore, int, err
 	store := recoveryMapStore{}
 	seen := make(map[[32]byte]struct{}, len(credentials))
 	for _, c := range credentials {
-		if c.ProjectID == "" || c.ActorID == "" || c.Token == "" ||
-			c.ProjectID != strings.TrimSpace(c.ProjectID) || c.ActorID != strings.TrimSpace(c.ActorID) ||
-			c.Token != strings.TrimSpace(c.Token) || len(c.ProjectID) > 128 || len(c.ActorID) > 128 ||
-			strings.ContainsRune(c.ProjectID, 0) || strings.ContainsRune(c.ActorID, 0) || strings.ContainsRune(c.Token, 0) {
+		if c.ProjectID == "" || !ValidRecoveryID(c.ActorID) || c.Token == "" ||
+			c.ProjectID != strings.TrimSpace(c.ProjectID) ||
+			c.Token != strings.TrimSpace(c.Token) || len(c.ProjectID) > 128 ||
+			strings.ContainsRune(c.ProjectID, 0) || strings.ContainsRune(c.Token, 0) {
 			return nil, 0, errors.New("AVERIN_RECOVERY_KEYS contains an invalid project_id, actor_id or token")
 		}
 		digest := sha256.Sum256([]byte(c.Token))
@@ -118,7 +134,7 @@ func RecoveryMiddleware(rs RecoveryStore) func(http.Handler) http.Handler {
 			if rs != nil && len(r.URL.Query()["project"]) == 1 {
 				actor, ok = rs.ActorFor(project, tokenFromRequest(r))
 			}
-			if !ok {
+			if !ok || !ValidRecoveryID(actor) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				_, _ = w.Write([]byte(`{"error":"forbidden"}`))

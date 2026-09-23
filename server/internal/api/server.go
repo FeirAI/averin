@@ -37,6 +37,7 @@ import (
 
 // Sealer is the subset of the Rust core the API needs.
 type Sealer interface {
+	RcpCanonicalize(jsonDoc string) string
 	SealRecord(bodyJSON string) (string, error)
 	SealCheckpoint(bodyJSON string) (string, error)
 	VerifyBundle(bundleJSON string) string

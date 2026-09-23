@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,6 +21,26 @@ func recoveryRequest(h http.Handler, token, body string) (int, string) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w.Code, w.Body.String()
+}
+
+func TestBrokerSeqRecoveryDecomposedReasonReplay(t *testing.T) {
+	st := store.NewMem()
+	if _, _, err := st.AllocateBrokerSeq("p1", "reserved-grant"); err != nil {
+		t.Fatal(err)
+	}
+	h := api.New(mustCore(t), st, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).
+		WithRecoveryAuth(testRecoveryStore()).Routes()
+	body := fmt.Sprintf(`{"project_id":"p1","broker_seq":1,"operation_id":"incident-1","reason":%q}`, "Cafe\u0301 recovery")
+	code, response := recoveryRequest(h, "test-recovery-token", body)
+	if code != http.StatusCreated {
+		t.Fatalf("initial recovery: %d %s", code, response)
+	}
+	if !strings.Contains(response, "Café recovery") {
+		t.Fatalf("stored reason was not NFC-normalized: %s", response)
+	}
+	if code, response := recoveryRequest(h, "test-recovery-token", body); code != http.StatusOK || !strings.Contains(response, `"created":false`) {
+		t.Fatalf("identical decomposed-Unicode retry: %d %s", code, response)
+	}
 }
 
 func writerRequest(h http.Handler, method, path, body string) (int, string) {
@@ -71,12 +92,21 @@ func TestBrokerSeqRecoveryAuthorizationAndEvidence(t *testing.T) {
 		`{"project_id":"p2","broker_seq":1,"operation_id":"op","reason":"valid reason"}`,
 		`{"project_id":"p1","broker_seq":1,"operation_id":"","reason":"valid reason"}`,
 		`{"project_id":"p1","broker_seq":1,"operation_id":"op","reason":" "}`,
+		`{"project_id":"p1","broker_seq":1,"operation_id":"op id","reason":"valid reason"}`,
+		`{"project_id":"p1","broker_seq":1,"operation_id":"opé","reason":"valid reason"}`,
+		`{"project_id":"p1","broker_seq":1,"operation_id":"op\n","reason":"valid reason"}`,
 		`{"project_id":"p1","broker_seq":1,"operation_id":"op","reason":"valid reason","actor_id":"spoofed"}`,
 	} {
 		code, _ := recoveryRequest(h, "test-recovery-token", bad)
 		if code != http.StatusBadRequest && code != http.StatusForbidden {
 			t.Fatalf("bad request got %d: %s", code, bad)
 		}
+	}
+	if _, ok, err := st.RecordByIdem("p1", "grant-void:1"); err != nil || ok {
+		t.Fatalf("invalid recovery inputs sealed evidence: found=%v err=%v", ok, err)
+	}
+	if res, ok, err := st.BrokerSeqAt("p1", 1); err != nil || !ok || res.Voided {
+		t.Fatalf("invalid recovery inputs changed reservation: %+v %v %v", res, ok, err)
 	}
 	code, response := recoveryRequest(h, "test-recovery-token", body)
 	if code != http.StatusCreated {
