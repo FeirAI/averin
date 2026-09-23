@@ -38,9 +38,10 @@ func (p *Postgres) PutPendingGrant(projectID, idemKey string, row PendingGrant) 
 		return PendingGrant{}, false, err
 	}
 	ctx := p.callContext()
-	var created bool
-	err := p.tx.QueryRow(ctx, `INSERT INTO pending_grants(project_id,idem_key,grant_id,payload,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(project_id,idem_key) DO NOTHING RETURNING true`, projectID, idemKey, row.GrantID, row.Payload, row.Created).Scan(&created)
+	var createdAt time.Time
+	err := p.tx.QueryRow(ctx, `INSERT INTO pending_grants(project_id,idem_key,grant_id,payload,created_at) VALUES($1,$2,$3,$4,now()) ON CONFLICT(project_id,idem_key) DO NOTHING RETURNING created_at`, projectID, idemKey, row.GrantID, row.Payload).Scan(&createdAt)
 	if err == nil {
+		row.Created = createdAt
 		return row, true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {

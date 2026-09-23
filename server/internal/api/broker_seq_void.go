@@ -141,138 +141,158 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 		created bool
 		grantID string
 	)
-	func() {
-		s.ingestMu.Lock()
-		defer s.ingestMu.Unlock()
-		fail := func(c int, format string, a ...any) { code, errMsg = c, fmt.Sprintf(format, a...) }
+	var txFailure error
+	txErr := s.withProjectWrite(r.Context(), vr.ProjectID, func(st store.Store) error {
+		func() {
+			fail := func(c int, format string, a ...any) {
+				code, errMsg = c, fmt.Sprintf(format, a...)
+				txFailure = errors.New(errMsg)
+			}
 
-		res, found, e := s.st.BrokerSeqAt(vr.ProjectID, vr.BrokerSeq)
-		if e != nil {
-			fail(http.StatusInternalServerError, "broker_seq lookup: %v", e)
-			return
-		}
-		if !found {
-			fail(http.StatusNotFound, "no broker_seq %d is allocated in project %q", vr.BrokerSeq, vr.ProjectID)
-			return
-		}
-		grantID = res.GrantID
-		idem := fmt.Sprintf("%s%d", grantVoidIdemPrefix, vr.BrokerSeq)
-		// inert names an old void marker that no tombstone backs (left by a void from before the tombstone-first
-		// ordering whose seal then failed): it retires the grant_id at allocation but fills nothing.
-		inert := ""
-		if res.Voided {
-			inert = " (the void marker already on this reservation is INERT: an earlier void was interrupted before its tombstone was sealed, and the grant's own record holds the seq)"
-		}
+			res, found, e := st.BrokerSeqAt(vr.ProjectID, vr.BrokerSeq)
+			if e != nil {
+				fail(http.StatusInternalServerError, "broker_seq lookup: %v", e)
+				return
+			}
+			if !found {
+				fail(http.StatusNotFound, "no broker_seq %d is allocated in project %q", vr.BrokerSeq, vr.ProjectID)
+				return
+			}
+			grantID = res.GrantID
+			idem := fmt.Sprintf("%s%d", grantVoidIdemPrefix, vr.BrokerSeq)
+			// inert names an old void marker that no tombstone backs (left by a void from before the tombstone-first
+			// ordering whose seal then failed): it retires the grant_id at allocation but fills nothing.
+			inert := ""
+			if res.Voided {
+				inert = " (the void marker already on this reservation is INERT: an earlier void was interrupted before its tombstone was sealed, and the grant's own record holds the seq)"
+			}
 
-		// (a) The tombstone is already sealed: this is a repeat. The tombstone is sealed FIRST and the void marker
-		// written SECOND, so a void interrupted between the two (a failed marker write, a crash) is finished here by
-		// writing the marker — idempotent, and safe with no re-check: the sealed tombstone holds the grant_id as its
-		// record_id, so the grant can never record (the UNIQUE record_id index), however late its commit is.
-		if existing, ok, le := s.st.RecordByIdem(vr.ProjectID, idem); le != nil {
-			fail(http.StatusInternalServerError, "tombstone lookup: %v", le)
-			return
-		} else if ok {
+			// (a) The tombstone is already sealed: this is a repeat. The tombstone is sealed FIRST and the void marker
+			// written SECOND, so a void interrupted between the two (a failed marker write, a crash) is finished here by
+			// writing the marker — idempotent, and safe with no re-check: the sealed tombstone holds the grant_id as its
+			// record_id, so the grant can never record (the UNIQUE record_id index), however late its commit is.
+			if existing, ok, le := st.RecordByIdem(vr.ProjectID, idem); le != nil {
+				fail(http.StatusInternalServerError, "tombstone lookup: %v", le)
+				return
+			} else if ok {
+				if !res.Voided {
+					if ve := st.VoidBrokerSeq(vr.ProjectID, res.GrantID, vr.BrokerSeq); ve != nil {
+						fail(http.StatusInternalServerError, "broker_seq %d's grant_void tombstone is sealed but marking the reservation voided FAILED — repeat this call to finish (the tombstone already holds grant_id %s, so that grant can no longer record): %v", vr.BrokerSeq, res.GrantID, ve)
+						return
+					}
+				}
+				sealed, created, code = existing.JSON, false, http.StatusOK
+				return
+			}
+
+			// (b) No tombstone yet: every safety check, including for a reservation already carrying a (necessarily
+			// inert) marker — its grant may have landed after all.
+			// (0) the database backstop must be present (guard 3, see DefaultBrokerSeqVoidMinAge): without a UNIQUE
+			// record_id index a still-in-flight commit of this grant (possibly on another instance) and its tombstone
+			// could BOTH land, holding the seq twice — and every later checkpoint would refuse forever.
+			if uniq, ue := st.RecordIDUniqueEnforced(); ue != nil {
+				fail(http.StatusInternalServerError, "record_id uniqueness probe: %v", ue)
+				return
+			} else if !uniq {
+				fail(http.StatusConflict, "broker_seq void refused: the store does not enforce record_id uniqueness (the UNIQUE index records_project_record_id_uniq is absent or non-unique — migration 0002 fell back to a plain index over historical duplicate record_ids). Without it a void could race a still-in-flight commit of grant %s and hold broker_seq %d twice. Resolve the historical duplicate and build the UNIQUE index first (docs/operator-verification.md)", res.GrantID, vr.BrokerSeq)
+				return
+			}
+			// (2) the store must confirm NO record holds this seq — neither under the reserved grant_id (the
+			// deterministic record_id of the grant it was reserved for) nor any grant/tombstone carrying the seq.
+			if has, he := st.HasRecordID(vr.ProjectID, res.GrantID); he != nil {
+				fail(http.StatusInternalServerError, "record lookup: %v", he)
+				return
+			} else if has {
+				fail(http.StatusConflict, "broker_seq %d is recorded (a record holds its grant_id %s): grant landed; nothing to void%s", vr.BrokerSeq, res.GrantID, inert)
+				return
+			}
+			grantRecs, ge := st.GrantRecords(vr.ProjectID)
+			if ge != nil {
+				fail(http.StatusInternalServerError, "grant records: %v", ge)
+				return
+			}
+			gl, ge := grantLog(grantRecs)
+			if ge != nil {
+				fail(http.StatusInternalServerError, "%v", ge)
+				return
+			}
+			for _, g := range gl {
+				if g.Seq == vr.BrokerSeq {
+					fail(http.StatusConflict, "broker_seq %d is recorded (record %s carries it): nothing to void%s", vr.BrokerSeq, g.ContentHash, inert)
+					return
+				}
+			}
 			if !res.Voided {
-				if ve := s.st.VoidBrokerSeq(vr.ProjectID, res.GrantID, vr.BrokerSeq); ve != nil {
+				// (3) a live two-phase pending grant for this grant_id may still finalize (a finalize retry reclaims it).
+				// (An inert marker already retires the grant_id at allocation, so no finalize can start any more.)
+				live, pe := st.PendingGrantLive(vr.ProjectID, res.GrantID, s.now(), pendingTTL)
+				if pe != nil {
+					fail(http.StatusServiceUnavailable, "pending grant lookup: %v", pe)
+					return
+				}
+				if live {
+					fail(http.StatusConflict, "broker_seq %d backs a live two-phase pending grant (%s) — retry its finalize, or wait for it to expire", vr.BrokerSeq, res.GrantID)
+					return
+				}
+				// (4) the safety age: the reservation, its latest attempt AND this process's start must all be old enough
+				// that no commit for it can still be in flight (allocated_at alone is never refreshed by a retry, and
+				// the attempt map is in-memory — empty after a restart — see DefaultBrokerSeqVoidMinAge).
+				last, what := res.AllocatedAt, "reserved"
+				if t, ok := s.lastSeqAttempt(vr.ProjectID, res.GrantID); ok && t.After(last) {
+					last, what = t, "last attempted by its grant"
+				}
+				if s.processStart.After(last) {
+					last, what = s.processStart, "reserved before this process started (its attempt history is in-memory, so the age counts from the start)"
+				}
+				if age := s.now().Sub(last); age < s.brokerSeqVoidMinAge {
+					fail(http.StatusConflict, "broker_seq %d was %s %s ago; it can be voided once that is %s old (AVERIN_BROKER_SEQ_VOID_MIN_AGE) — retry the grant first if its client is still around", vr.BrokerSeq, what, age.Truncate(time.Second), s.brokerSeqVoidMinAge)
+					return
+				}
+			}
+
+			// Seal the tombstone FIRST. Its record_id IS the reserved grant_id, so under the UNIQUE record_id index it
+			// and the grant are mutually exclusive: if a still-in-flight commit of the grant wins (on Postgres the
+			// tombstone's insert waits on the grant's uncommitted index entry, then conflicts), the seal fails with
+			// ErrRecordIDConflict and NOTHING is voided — no marker is written, and the grant's retry returns it.
+			rec, be := s.buildGrantVoidRecord(vr, res.GrantID)
+			if be != nil {
+				fail(http.StatusInternalServerError, "build tombstone: %v", be)
+				return
+			}
+			sealedRecord, c, se := s.sealAndStore(st, vr.ProjectID, vr.SessionID, idem, rec, nil)
+			if se != nil {
+				if errors.Is(se, store.ErrRecordIDConflict) {
+					fail(http.StatusConflict, "broker_seq %d is recorded: grant %s landed while its tombstone was being sealed (the database's record_id uniqueness let the grant win) — grant landed; nothing to void%s", vr.BrokerSeq, res.GrantID, inert)
+					return
+				}
+				fail(http.StatusInternalServerError, "seal tombstone: %v — the reservation is NOT voided; repeat this call (if the tombstone's commit was ambiguous and landed, the repeat finds it and finishes the void)", se)
+				return
+			}
+			// ...and mark the reservation voided SECOND (retiring the grant_id at allocation). A failure here leaves a
+			// sealed tombstone without its marker, which step (a) of a repeat finishes.
+			if !res.Voided {
+				if ve := st.VoidBrokerSeq(vr.ProjectID, res.GrantID, vr.BrokerSeq); ve != nil {
 					fail(http.StatusInternalServerError, "broker_seq %d's grant_void tombstone is sealed but marking the reservation voided FAILED — repeat this call to finish (the tombstone already holds grant_id %s, so that grant can no longer record): %v", vr.BrokerSeq, res.GrantID, ve)
 					return
 				}
 			}
-			sealed, created, code = existing.JSON, false, http.StatusOK
-			return
-		}
-
-		// (b) No tombstone yet: every safety check, including for a reservation already carrying a (necessarily
-		// inert) marker — its grant may have landed after all.
-		// (0) the database backstop must be present (guard 3, see DefaultBrokerSeqVoidMinAge): without a UNIQUE
-		// record_id index a still-in-flight commit of this grant (possibly on another instance) and its tombstone
-		// could BOTH land, holding the seq twice — and every later checkpoint would refuse forever.
-		if uniq, ue := s.st.RecordIDUniqueEnforced(); ue != nil {
-			fail(http.StatusInternalServerError, "record_id uniqueness probe: %v", ue)
-			return
-		} else if !uniq {
-			fail(http.StatusConflict, "broker_seq void refused: the store does not enforce record_id uniqueness (the UNIQUE index records_project_record_id_uniq is absent or non-unique — migration 0002 fell back to a plain index over historical duplicate record_ids). Without it a void could race a still-in-flight commit of grant %s and hold broker_seq %d twice. Resolve the historical duplicate and build the UNIQUE index first (docs/operator-verification.md)", res.GrantID, vr.BrokerSeq)
-			return
-		}
-		// (2) the store must confirm NO record holds this seq — neither under the reserved grant_id (the
-		// deterministic record_id of the grant it was reserved for) nor any grant/tombstone carrying the seq.
-		if has, he := s.st.HasRecordID(vr.ProjectID, res.GrantID); he != nil {
-			fail(http.StatusInternalServerError, "record lookup: %v", he)
-			return
-		} else if has {
-			fail(http.StatusConflict, "broker_seq %d is recorded (a record holds its grant_id %s): grant landed; nothing to void%s", vr.BrokerSeq, res.GrantID, inert)
-			return
-		}
-		grantRecs, ge := s.st.GrantRecords(vr.ProjectID)
-		if ge != nil {
-			fail(http.StatusInternalServerError, "grant records: %v", ge)
-			return
-		}
-		gl, ge := grantLog(grantRecs)
-		if ge != nil {
-			fail(http.StatusInternalServerError, "%v", ge)
-			return
-		}
-		for _, g := range gl {
-			if g.Seq == vr.BrokerSeq {
-				fail(http.StatusConflict, "broker_seq %d is recorded (record %s carries it): nothing to void%s", vr.BrokerSeq, g.ContentHash, inert)
-				return
+			if s.revocationKey != nil {
+				if _, re := st.RevokeGrant(vr.ProjectID, res.GrantID); re != nil {
+					fail(http.StatusServiceUnavailable, "revoke voided grant: %v", re)
+					return
+				}
 			}
-		}
-		if !res.Voided {
-			// (3) a live two-phase pending grant for this grant_id may still finalize (a finalize retry reclaims it).
-			// (An inert marker already retires the grant_id at allocation, so no finalize can start any more.)
-			if s.pendingGrantLive(res.GrantID) {
-				fail(http.StatusConflict, "broker_seq %d backs a live two-phase pending grant (%s) — retry its finalize, or wait for it to expire", vr.BrokerSeq, res.GrantID)
-				return
+			sealed, created, code = sealedRecord, c, http.StatusCreated
+			if !c {
+				code = http.StatusOK
 			}
-			// (4) the safety age: the reservation, its latest attempt AND this process's start must all be old enough
-			// that no commit for it can still be in flight (allocated_at alone is never refreshed by a retry, and
-			// the attempt map is in-memory — empty after a restart — see DefaultBrokerSeqVoidMinAge).
-			last, what := res.AllocatedAt, "reserved"
-			if t, ok := s.lastSeqAttempt(vr.ProjectID, res.GrantID); ok && t.After(last) {
-				last, what = t, "last attempted by its grant"
-			}
-			if s.processStart.After(last) {
-				last, what = s.processStart, "reserved before this process started (its attempt history is in-memory, so the age counts from the start)"
-			}
-			if age := s.now().Sub(last); age < s.brokerSeqVoidMinAge {
-				fail(http.StatusConflict, "broker_seq %d was %s %s ago; it can be voided once that is %s old (AVERIN_BROKER_SEQ_VOID_MIN_AGE) — retry the grant first if its client is still around", vr.BrokerSeq, what, age.Truncate(time.Second), s.brokerSeqVoidMinAge)
-				return
-			}
-		}
-
-		// Seal the tombstone FIRST. Its record_id IS the reserved grant_id, so under the UNIQUE record_id index it
-		// and the grant are mutually exclusive: if a still-in-flight commit of the grant wins (on Postgres the
-		// tombstone's insert waits on the grant's uncommitted index entry, then conflicts), the seal fails with
-		// ErrRecordIDConflict and NOTHING is voided — no marker is written, and the grant's retry returns it.
-		rec, be := s.buildGrantVoidRecord(vr, res.GrantID)
-		if be != nil {
-			fail(http.StatusInternalServerError, "build tombstone: %v", be)
-			return
-		}
-		st, c, se := s.sealAndStore(vr.ProjectID, vr.SessionID, idem, rec, nil)
-		if se != nil {
-			if errors.Is(se, store.ErrRecordIDConflict) {
-				fail(http.StatusConflict, "broker_seq %d is recorded: grant %s landed while its tombstone was being sealed (the database's record_id uniqueness let the grant win) — grant landed; nothing to void%s", vr.BrokerSeq, res.GrantID, inert)
-				return
-			}
-			fail(http.StatusInternalServerError, "seal tombstone: %v — the reservation is NOT voided; repeat this call (if the tombstone's commit was ambiguous and landed, the repeat finds it and finishes the void)", se)
-			return
-		}
-		// ...and mark the reservation voided SECOND (retiring the grant_id at allocation). A failure here leaves a
-		// sealed tombstone without its marker, which step (a) of a repeat finishes.
-		if !res.Voided {
-			if ve := s.st.VoidBrokerSeq(vr.ProjectID, res.GrantID, vr.BrokerSeq); ve != nil {
-				fail(http.StatusInternalServerError, "broker_seq %d's grant_void tombstone is sealed but marking the reservation voided FAILED — repeat this call to finish (the tombstone already holds grant_id %s, so that grant can no longer record): %v", vr.BrokerSeq, res.GrantID, ve)
-				return
-			}
-		}
-		sealed, created, code = st, c, http.StatusCreated
-		if !c {
-			code = http.StatusOK
-		}
-	}()
+		}()
+		return txFailure
+	})
+	if txErr != nil && errMsg == "" {
+		writeErr(w, http.StatusServiceUnavailable, "void transaction: "+txErr.Error())
+		return
+	}
 	if errMsg != "" {
 		writeErr(w, code, errMsg)
 		return
@@ -283,13 +303,7 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 		"created":           created,
 		"record":            json.RawMessage(sealed),
 	}
-	// Retire any capability already minted for the voided grant_id (outside ingestMu: the durable revoke is a
-	// Postgres round-trip, and a revoke never needs the ingest lock).
 	if s.revocationKey != nil {
-		if rc, rmsg := s.revokeGrantID(vr.ProjectID, grantID); rmsg != "" {
-			writeErr(w, rc, fmt.Sprintf("broker_seq %d is voided (tombstone sealed) but revoking its grant_id %s FAILED — repeat this call to retry the revocation: %s", vr.BrokerSeq, grantID, rmsg))
-			return
-		}
 		out["revoked"] = true
 	}
 	writeJSON(w, code, out)
