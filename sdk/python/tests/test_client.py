@@ -51,6 +51,19 @@ def test_client_submits_with_idempotency_and_returns_record():
     assert out["content_hash"] == "sha256:abc"
 
 
+def test_transport_preserves_opaque_identity_for_server_validation():
+    captured = {}
+
+    def transport(_url, _headers, body):
+        captured["project_id"] = json.loads(body)["project_id"]
+        return json.dumps({"error": "project_id must be NFC-normalized"})
+
+    c = averin.Client("http://x", "e\u0301", transport=transport)
+    # Python SDK does not inspect server error bodies, but it must send the exact identity.
+    c.record("s", "read", idempotency_key="k")
+    assert captured["project_id"] == "e\u0301"
+
+
 def test_auto_idempotency_key_is_unique():
     keys = set()
 

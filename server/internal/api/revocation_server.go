@@ -105,7 +105,7 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project_id and grant_id are required")
 		return
 	}
-	if err := rejectNUL("project_id", rr.ProjectID, "grant_id", rr.GrantID); err != nil {
+	if err := s.rejectOpaqueIdentity("project_id", rr.ProjectID, "grant_id", rr.GrantID); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

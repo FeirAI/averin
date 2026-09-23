@@ -182,7 +182,7 @@ func (s *Server) handleIntrospection(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project_id, session_id, idempotency_key, grant_id, credential_ref, effective_scope are required")
 		return
 	}
-	if err := rejectNUL("project_id", ir.ProjectID, "idempotency_key", ir.IdempotencyKey); err != nil {
+	if err := s.rejectOpaqueIdentity("project_id", ir.ProjectID, "session_id", ir.SessionID, "idempotency_key", ir.IdempotencyKey, "grant_id", ir.GrantID, "credential_ref", ir.CredentialRef, "effective_scope", ir.EffectiveScope); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

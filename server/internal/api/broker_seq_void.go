@@ -129,7 +129,7 @@ func (s *Server) handleBrokerSeqVoid(w http.ResponseWriter, r *http.Request) {
 	if vr.SessionID == "" {
 		vr.SessionID = "broker-seq-void"
 	}
-	if err := rejectNUL("project_id", vr.ProjectID, "session_id", vr.SessionID); err != nil {
+	if err := s.rejectOpaqueIdentity("project_id", vr.ProjectID, "session_id", vr.SessionID); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

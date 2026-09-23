@@ -48,6 +48,17 @@ test("client submits with idempotency key and returns the record", async () => {
   expect(out.content_hash).toBe("sha256:abc");
 });
 
+test("transport preserves opaque identity bytes for server validation", async () => {
+  let sent = "";
+  const transport = async (_url: string, _headers: Record<string, string>, body: string) => {
+    sent = body;
+    return JSON.stringify({ error: "project_id must be NFC-normalized" });
+  };
+  const c = new Client("http://x", "e\u0301", { transport });
+  await expect(c.record("s", "read", { idempotencyKey: "k" })).rejects.toThrow(/NFC/);
+  expect(JSON.parse(sent).project_id).toBe("e\u0301");
+});
+
 test("a server rejection is THROWN, never returned as a sealed record", async () => {
   // A custom transport that does not check status returns the {"error":...} body. The SDK must NOT hand that
   // back as if a record were sealed (the agent would believe unrecorded evidence exists).
