@@ -14,6 +14,7 @@ import (
 	"github.com/feirai/averin/server/internal/api"
 	"github.com/feirai/averin/server/internal/broker"
 	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/resourceshim"
 	"github.com/feirai/averin/server/internal/store"
 )
 
@@ -34,11 +35,31 @@ func TestVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	reserveGrantSeq(t, base, "idem-prepared-void")
+	use := useBody(t, "idem-use-void", prepared.Capability, grantID, ak, "SELECT 1", "nonce-void")
+	var presented struct {
+		UseSig string `json:"use_sig"`
+	}
+	if err := json.Unmarshal([]byte(use), &presented); err != nil {
+		t.Fatal(err)
+	}
+	commitment, err := mustCore(t).Commit("input", []byte("SELECT 1"), strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This independently verifies the issuer signature, audience, action, PoP,
+	// and freshness before void. The test must not pass merely because the
+	// prepared descriptor was malformed or expired.
+	shim := resourceshim.New(brokerIssuingKey().Public().(ed25519.PublicKey), "orders-db", resourceshim.NewMemLedger())
+	ev, err := shim.ValidateUse(prepared.Capability, presented.UseSig, resourceshim.Op{Action: "db.query:orders-ro", ParamsCommitment: commitment}, "nonce-void", time.Now())
+	if err != nil {
+		t.Fatalf("prepared capability was not otherwise valid: %v", err)
+	}
+	shim.RollbackUse(ev)
 	if code, response := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
 		t.Fatalf("void (%d): %s", code, response)
 	}
-	if code, response := do(t, h, "POST", "/v2/use", useBody(t, "idem-use-void", prepared.Capability, grantID, ak, "SELECT 1", "nonce-void")); code == http.StatusCreated {
-		t.Fatalf("prepared capability admitted after signed void: %s", response)
+	if code, response := do(t, h, "POST", "/v2/use", use); code != http.StatusBadRequest || !strings.Contains(response, "revoked") {
+		t.Fatalf("prepared capability was not denied specifically by signed void (%d): %s", code, response)
 	}
 }
 

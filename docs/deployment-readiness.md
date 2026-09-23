@@ -13,7 +13,7 @@ boundary between "averin ships this" and "your deployment provides this."
 | 3. Multi-instance project writes (D6) | persisted project guard and bound transactions | capability-project binding, scoped nonce claims, bounded recovery and a failure matrix | **Transaction seam done; full HA gate pending** |
 | 4. TEE/remote-attestation enforcement (D7) | signed `deployment_attestation` claim | TEE hardware + attestation service + quote-verify lib | **Assertion today; hardware-root design** |
 | 5. git remote + push | clean tree, `.gitignore` hardened | remote URL + push credentials | **Repo push-ready; operator action** |
-| 6. Durable consume-before-act ledger (R5) | project Store claims and receipt share one transaction; `pgledger` sweeps | shared Postgres and plan 005 nonce scope | **Atomic seam done; scope gate pending** |
+| 6. Durable consume-before-act ledger (R5) | project Store claims and receipt share one transaction; `pgledger` sweeps | shared Postgres and resource-scoped nonce claims | **Atomic seam done; scope gate pending** |
 
 ---
 

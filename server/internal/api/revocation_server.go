@@ -18,8 +18,8 @@ import (
 // verifier then blocks any use — brokered OR native — of a revoked grant). `revKey` is the revocation authority
 // key; it MUST be role-separated from the broker (issuing + recording), resource, and attestation keys — the
 // verifier rejects an overlap as a FATAL config error, so we fail-fast here (a key collision is a programming
-// error → panic). The revoked set is the in-memory READ cache; it starts empty here and, when a durable store
-// is configured (AVERIN_DATABASE_URL), is rehydrated from Postgres by a subsequent WithDurable call — see there.
+// error → panic). The in-memory revoked set is a diagnostic cache. Request admission and export read
+// the project Store's committed state, including revocations made on other replicas.
 func (s *Server) WithRevocation(revKey ed25519.PrivateKey) *Server {
 	// Ordering guard (prevents a future fail-open): WithDurable rehydrates the revoked set from Postgres only
 	// `if s.revocationKey != nil` (see durable.go), so it must run AFTER this method. If a durable store is
@@ -185,10 +185,8 @@ func (s *Server) revokeGrantIDTotalCtx(ctx context.Context, projectID, grantID s
 
 var errRevocationCap = errors.New("revocation capacity reached")
 
-// isRevoked reports whether grantID is in the project's revoked set. It reads the published IMMUTABLE snapshot
-// under revokedMu only — never revokeLocks, which handleRevoke holds across the durable Postgres write. It is
-// called from the use path under the process-wide ingestMu, so waiting on a slow revoke here would stall every
-// record/grant/use/checkpoint on the process. A revoke that has returned 201 has already published its set.
+// isRevoked reads the legacy diagnostic cache. Authorization uses Store.IsRevoked
+// inside a project transaction so another replica's committed revoke is visible.
 func (s *Server) isRevoked(projectID, grantID string) bool {
 	s.revokedMu.Lock()
 	set := s.revoked[projectID]

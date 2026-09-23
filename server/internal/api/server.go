@@ -96,18 +96,12 @@ type Server struct {
 	// M5 (ADR 0005): the revocation authority key (role-separated from broker/resource/signing/attestation/TSA).
 	// When set, POST /v2/revoke records a grant_id as revoked, and each /v2/export carries a signed, time-bounded
 	// revocation_list over the project's revoked set (the verifier blocks any use of a revoked grant). nil =
-	// revocation disabled. `revoked` is the in-memory READ cache; when `durable` is set (AVERIN_DATABASE_URL),
-	// every revoke is persisted to Postgres FIRST (fail-closed) and the cache is rehydrated from it at boot —
-	// see WithDurable. With no durable store configured it stays in-memory only, as before.
+	// revocation disabled. Request admission and export consult the project Store's committed rows;
+	// `revoked` is retained only as a legacy diagnostic cache.
 	revocationKey ed25519.PrivateKey
 	revoked       map[string]map[string]struct{} // projectID -> IMMUTABLE set of revoked grant_ids (copy-on-write)
-	// revokedMu guards the top-level `revoked` map ONLY — it is never held across the durable Revoke() Postgres
-	// round-trip. Each per-project set is IMMUTABLE once published: handleRevoke builds a new set (old ∪ {id})
-	// and swaps it in under revokedMu, so readers (isRevoked on the /v2/use path, the export) take ONLY
-	// revokedMu for a pointer read and then range the snapshot lock-free. The cap-check-then-persist-then-publish
-	// for a SINGLE project must still stay atomic (finding C), so handleRevoke serializes per-project via
-	// revokeLocks, which IS held across the durable round-trip — but no reader ever takes revokeLocks, so a slow
-	// revoke can never stall /v2/use (which runs under the process-wide ingestMu).
+	// revokedMu guards only the diagnostic cache. It is never held while waiting for the project guard;
+	// revocation cap checking and insertion are atomic inside the Store transaction.
 	revokedMu          sync.Mutex
 	revokeLocks        keyedMutex
 	revokeCapWarnAt    time.Time // throttles the at-capacity WARNING (guarded by revokeLocks, keyed by project_id)
@@ -183,37 +177,23 @@ type Server struct {
 	// cosigned/delegated grant is inherently two-phase: the cosig/delegation challenge binds the broker-MINTED
 	// credential_binding/exp, so an approver/delegator can only sign AFTER the broker prepares + reveals it.
 	// `pending` holds the minted-but-uncommitted broker.Prepared between the two phases, keyed by project:idem,
-	// WITHOUT a broker_seq (the seq is allocated at FINALIZE, under ingestMu, so the seq order == the record
-	// commit order and the D6 grant log stays a gapless prefix). `pending` is the in-memory READ cache; when
-	// `durable` is set (AVERIN_DATABASE_URL), every fresh mint is persisted to Postgres FIRST (fail-closed)
-	// before it is cached, and the cache is rehydrated from it at boot — see WithDurable. With no durable
-	// store configured it stays in-memory only, as before: a restart mid-approval loses the pending mint. With
-	// a durable store, a same-idem-key mint race across REPLICAS sharing one AVERIN_DATABASE_URL is now also
-	// coordinated: pgdurable.PutPending detects the conflict and the loser serves the winner's durable
-	// challenge instead of its own (see handleGrantPrepare) — but WITHIN a single process, same-key prepares
-	// still fully serialize via pendingKeyLocks below, and different instances still mint independently rather
-	// than negotiating who mints at all (only the after-the-fact conflict is resolved, not prevented).
+	// WITHOUT a broker_seq (the seq is allocated at FINALIZE, inside the project transaction, so the seq
+	// order matches the grant commit order). `pending` is a legacy diagnostic cache; request paths use the
+	// project Store's durable pending row for admission and retry decisions across replicas.
 	// cosigApprovers/cosigThreshold are the SERVER-pinned M-of-N policy a finalize's cosignatures are
 	// validated against (never client-supplied).
 	pending map[string]*pendingGrant
-	// pendingMu guards STRUCTURAL access to `pending` ONLY (lookup/insert/delete) — it is never held across
-	// the durable PutPending Postgres round-trip. The idempotent-mint-check-then-persist-then-cache for a
-	// SINGLE idem key must still stay atomic (finding C), so handleGrantPrepare instead serializes per-idem-key
-	// via pendingKeyLocks, which IS held across that round-trip; different idem keys' prepares run fully
-	// concurrently under it (a slow/degraded Postgres no longer stalls every prepare process-wide).
+	// pendingMu guards only diagnostic cache publication, after a durable project transaction commits.
 	pendingMu       sync.Mutex
 	pendingKeyLocks keyedMutex
 	cosigThreshold  int
 	cosigApprovers  []ed25519.PublicKey
-	// durable optionally backs `revoked` and `pending` with Postgres (AVERIN_DATABASE_URL) — see WithDurable.
-	// nil = both stay in-memory only (dev/single-process), matching the pre-durability behavior exactly.
+	// durable retains the auxiliary connection for startup diagnostics/readiness; the project Store owns
+	// authoritative pending and revocation decisions on every request.
 	durable durableWriter
-	// ingestMu serializes the heads->seal->put critical section so concurrent ingests cannot read
-	// a stale frontier and fork the DAG (the Postgres store will do this in a serializable tx).
+	// ingestMu guards only the authority downgrade warning throttle. The project Store transaction
+	// serializes heads, seal inputs, insert, and checkpoint state across processes.
 	ingestMu sync.Mutex
-	// checkpointMu serializes checkpoint creation so concurrent calls cannot read the same
-	// NextCheckpointSeq and fork the checkpoint chain.
-	checkpointMu sync.Mutex
 
 	// requirePinnedAuthority (AVERIN_REQUIRE_PINNED_AUTHORITY, default ON since F3) makes an
 	// authority-BEARING record whose CLAIMED elevation (policy_engine_signed / human_signed /
@@ -226,8 +206,7 @@ type Server struct {
 	// fail-closed would be testing a different server than the one that ships. See normalizeAuthority.
 	requirePinnedAuthority bool
 	// authorityDowngradeLogAt throttles the WARNING that names a failed authority elevation (a govder/averin
-	// key misalignment can otherwise spam it on every ingest). Guarded by ingestMu: normalizeAuthority — its
-	// only writer — is only ever called from ingestOne while ingestMu is held, so it needs no extra lock.
+	// key misalignment can otherwise spam it on every ingest). Guarded by ingestMu around updates.
 	authorityDowngradeLogAt time.Time
 	// bundleSem caps concurrent whole-project bundle builds (GET /v2/export + /v2/verify). Each buildBundle
 	// materializes the project's full record+checkpoint history in RAM (see docs/dev/LIMITATIONS.md), so a
@@ -1847,8 +1826,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		// New grant: allocate (after validation, inside the lock), build, seal+store. Roll back the seq on
-		// ANY failure after allocation but before the record commits, so an uncommitted grant never burns a
-		// number (the rollback is safe under ingestMu — no other grant allocates in between).
+		// ANY callback failure after allocation rolls back the grant and reservation together.
 		prepared, e = broker.Prepare(req, grantID, func() (int64, error) {
 			s.noteSeqAttempt(gr.ProjectID, grantID)
 			seq, _, aerr := st.AllocateBrokerSeq(gr.ProjectID, grantID)
@@ -1993,12 +1971,12 @@ func (s *Server) reconstructCapability(projectID, grantID string) (string, error
 // and carries NO broker_seq / grant_evidence / capability: nothing was issued, so the gapless D6 grant
 // sequence is untouched. It records the REQUESTED scope metadata (the probe target). A deterministic
 // record_id collapses retries of the same probe. Best-effort: a seal failure is logged and never changes
-// the caller's 400. Caller must NOT already hold ingestMu (this takes it for the seal critical section).
+// the caller's 400.
 func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, detail string) {
 	// #47: bound the best-effort denial log. A drop changes NOTHING the caller sees — every call site invokes
 	// this from inside the denial branch and writes the same 4xx immediately after it returns, regardless of
 	// whether a seal happened — it only declines to seal one more best-effort record once a sweep exceeds the
-	// budget. The check runs BEFORE taking ingestMu, so a rate-limited probe never enters the seal critical section.
+	// budget. The check runs before the project write transaction.
 	if s.denialBudget != nil {
 		if ok, logDrop := s.denialBudget.allow(gr.ProjectID); !ok {
 			s.mDenialBudgetDrops.Inc()
@@ -2517,8 +2495,8 @@ func storedOutcomeMatchesRequest(recordJSON, intentRef, status string) bool {
 // intentAndOutcome resolves, in ONE pass over the session's records, (a) the broker/resource record whose record_id
 // is intentRef (the use_intent an outcome completes) and (b) the record_id of a use_outcome that already completes
 // intentRef, read from the SIGNED use_outcome payload the verifier pairs on (not the unsigned extensions.broker
-// sibling). /v2/use-outcome runs under the process-wide ingestMu, so it scans the session once, not once per question.
-// A read error propagates (fail closed → retryable 500). Caller holds ingestMu.
+// sibling). /v2/use-outcome scans once inside the project transaction, so two replicas cannot both
+// complete the same intent. A read error propagates (fail closed → retryable 500).
 //
 // A matching record must be a real broker/resource record (it carries extensions.broker.kind). A generic record can
 // never set extensions.broker (reserved), so a pre-seeded generic record with a matching record_id is NOT treated as
@@ -2753,7 +2731,7 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		// An intent has EXACTLY ONE outcome: a second use_outcome for the same intent (e.g. "ok" then "failed"
 		// under a different idempotency key) would make the anchored bundle fail verification. The honest retry
 		// of the SAME outcome was already answered above via its idempotency key, so any other outcome already
-		// completing this intent is a conflict → 409, checked under ingestMu so two racing outcomes cannot both land.
+		// completing this intent is a conflict → 409, checked under the project guard so two racing outcomes cannot both land.
 		if outcomeDone {
 			conflictErr = fmt.Errorf("intent %q already has a recorded use_outcome (%s); an intent is completed exactly once", or.IntentRecordID, priorOutcome)
 			return nil
@@ -3317,7 +3295,7 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 			continue
 		}
 		// STRICT D6: the head folds only grants that CARRY a broker_seq>=1, and the producer ALWAYS assigns
-		// one (allocated under ingestMu in /v2/grants). The seq<1 skip below therefore only ever fires on a
+		// one (allocated inside the project transaction in /v2/grants). The seq<1 skip below therefore only ever fires on a
 		// LEGACY grant recorded before D6 — which strict D6 does NOT treat as benign: the verifier requires
 		// every tuple-classified grant the DAG commits to carry a broker_seq, and down-ranks broker_trust to
 		// `assumed` on any committed seq-less broker grant (a seq-less grant is indistinguishable from one
@@ -3409,8 +3387,8 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Che
 	heads, headsErr := st.ProjectHeads(projectID)
 	count, countErr := st.RecordCount(projectID)
 	grantRecs, recErr := st.GrantRecords(projectID)
-	// The allocated max broker_seq is read in the SAME snapshot: every allocate→seal→insert runs under ingestMu,
-	// so outside it an allocated seq with no recorded grant is never "in flight" — it is a reserved
+	// The allocated max broker_seq is read in the SAME project transaction as the frontier and grant log.
+	// An allocated seq with no recorded grant is never "in flight" in this snapshot — it is a reserved
 	// (commit-ambiguous) or orphaned (failed release) seq, i.e. a real gap the fail-closed check below refuses.
 	maxAlloc, maxAllocErr := st.MaxBrokerSeq(projectID)
 	// Surface any snapshot-read error: signing a checkpoint with an empty frontier (heads=nil) while the
