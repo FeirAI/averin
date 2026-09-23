@@ -12728,3 +12728,361 @@ fn tier_b_stripping_anchors_only_demotes_positive_claims() {
     assert!(d.ok, "{:?}", d.issues);
     assert_eq!((d.uses_matched, d.unmatched_pending), (0, 1));
 }
+
+// ---- D6 amendment A1: operator-voided broker_seq (`grant_void` tombstones) ----
+
+// a well-formed void_evidence for a voided reservation (gid at broker_seq), optionally tagged with a broker_id (M4).
+fn void_evidence(gid: &str, broker_seq: i64, broker_id: Option<&str>) -> CanonValue {
+    let ve = CanonValue::object(vec![
+        (
+            "domain".into(),
+            CanonValue::string("averin.broker.grant_void.v1"),
+        ),
+        ("project_id".into(), CanonValue::string("proj-001")),
+        ("broker_seq".into(), CanonValue::Int(broker_seq)),
+        ("grant_id".into(), CanonValue::string(gid)),
+        (
+            "voided_at".into(),
+            CanonValue::string("2026-06-15T10:05:00.000Z"),
+        ),
+        ("reason".into(), CanonValue::string("orphaned reservation")),
+    ])
+    .unwrap();
+    match broker_id {
+        Some(b) => change_field(&ve, "broker_id", CanonValue::string(b)),
+        None => ve,
+    }
+}
+
+// seal a grant_void tombstone exactly as the server's buildGrantVoidRecord shapes it: role tuple
+// (grant_void, credential_broker), record_id == the voided grant_id, event_type credential_grant_void, and the
+// authority's evidence_sig over sha256(RCP(void_evidence)) by `broker_sk` — or NO evidence_sig when `broker_sk` is None.
+fn seal_void(
+    rec_sk: &SigningKey,
+    broker_sk: Option<&SigningKey>,
+    record_id: &str,
+    ve: &CanonValue,
+) -> CanonValue {
+    let eh = sha256_prefixed(ve.serialize().as_bytes());
+    let sig_field = match broker_sk {
+        Some(sk) => format!(
+            r#","evidence_sig":"{}""#,
+            sign_evidence("gateway_enforced", "proj-001", record_id, &eh, sk)
+        ),
+        None => String::new(),
+    };
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"averin-broker","agent_version":"averin-broker",
+        "session_id":"broker-seq-void","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
+        "agent_ts":"2026-06-15T10:05:00.000Z","received_ts":"2026-06-15T10:05:00.000Z",
+        "event_type":"credential_grant_void","action":"broker_seq.void","observed_via":"broker","status":"void",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"credential_broker","grant_id":"{record_id}","evidence_hash":"{eh}"{sig_field}}},
+        "extensions":{{"broker":{{"kind":"grant_void","void_evidence":{ve}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ve = ve.serialize(),
+    );
+    seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
+// the D6 single-broker bundle over `records`, whose ONE anchored checkpoint commits all of them and carries a head
+// folding `log` (seq, content_hash) with the given max_seq.
+fn void_bundle(
+    rec: &SigningKey,
+    tsa: &SigningKey,
+    records: Vec<CanonValue>,
+    log: &[(i64, &str)],
+    max_seq: i64,
+) -> CanonValue {
+    let frontier: Vec<String> = records.iter().map(content_hash_of).collect();
+    let head = grant_head_cv(max_seq, &ghr(&[]), &ghr(log));
+    let cp = checkpoint_with_head(rec, &frontier, records.len() as i64, head, Some(tsa));
+    tier_b_bundle(&rec.verifying_key(), records, vec![cp])
+}
+
+fn void_keys() -> (SigningKey, SigningKey, SigningKey) {
+    (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    )
+}
+
+fn has_issue(r: &VerifyReport, needle: &str) -> bool {
+    r.issues.iter().any(|i| i.contains(needle))
+}
+
+#[test]
+fn grant_void_tombstone_filling_a_gap_verifies() {
+    // POSITIVE: seq 1 was reserved by grant-1 and never recorded; grant-2 recorded seq 2. A broker-signed tombstone
+    // for grant-1 at seq 1 fills the gap: the log is a gapless [1..2], broker_trust reaches sequence_verified, and
+    // the tombstone is NEVER counted as a grant.
+    let (rec, res, tsa) = void_keys();
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let g = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g.clone()], &[(1, &th), (2, &gh)], 2),
+        &opts,
+    );
+    assert!(
+        r.ok,
+        "a valid tombstone filling a gap must verify; issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.broker_trust, "sequence_verified");
+    assert_eq!(r.grant_total, 1, "a tombstone is never a grant");
+    assert_eq!(r.grant_verified, 1);
+
+    // CONTROL: the same bundle without the tombstone is the wedge (a gap at seq 1).
+    let r = verify_bundle_with(&void_bundle(&rec, &tsa, vec![g], &[(2, &gh)], 2), &opts);
+    assert!(!r.ok && has_issue(&r, "gapless"), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn grant_void_relabelled_grant_evidence_fails_domain_check() {
+    // (1) a real grant's signed payload relabelled as a tombstone: grant_evidence (augmented to bind the project, so
+    // ONLY the domain tag is missing) moved under void_evidence and signed by the pinned broker key. The domain tag
+    // is what keeps a grant_evidence payload from ever doubling as a void statement, so it must not fill seq 1.
+    let (rec, res, tsa) = void_keys();
+    let ge = change_field(
+        &grant_evidence_d6(GID, 1),
+        "project_id",
+        CanonValue::string("proj-001"),
+    );
+    let t = seal_void(&rec, Some(&rec), GID, &ge);
+    let g = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (2, &gh)], 2),
+        &pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        ),
+    );
+    assert!(
+        !r.ok,
+        "a grant_evidence payload relabelled as void_evidence must fail"
+    );
+    assert!(
+        has_issue(&r, "grant_void tombstone")
+            && has_issue(
+                &r,
+                "void_evidence.domain is not averin.broker.grant_void.v1"
+            ),
+        "issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.grant_total, 1, "the relabelled payload is not a grant");
+}
+
+#[test]
+fn grant_void_unsigned_or_foreign_signed_under_pinned_broker_keys_fails() {
+    // (2) under pinned broker_authority_keys a tombstone must verify under them to fill its seq: one with NO
+    // evidence_sig, or one signed by a key that is not a pinned broker key, is a hard failure (not a silent filler).
+    let (rec, res, tsa) = void_keys();
+    let rogue = signing_key_from_seed(&[77u8; 32]);
+    for (label, signer) in [("unsigned", None), ("rogue-signed", Some(&rogue))] {
+        let t = seal_void(&rec, signer, GID, &void_evidence(GID, 1, None));
+        let g = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+        let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+        let r = verify_bundle_with(
+            &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (2, &gh)], 2),
+            &pinned_roles(
+                rec.verifying_key(),
+                res.verifying_key(),
+                tsa.verifying_key(),
+            ),
+        );
+        assert!(
+            !r.ok,
+            "{label} tombstone under pinned broker keys must fail"
+        );
+        assert!(
+            has_issue(&r, "does not verify under a pinned broker key"),
+            "{label}: issues: {:?}",
+            r.issues
+        );
+    }
+}
+
+#[test]
+fn grant_void_without_broker_id_under_federation_fails() {
+    // (3) under an active federation a tombstone fills a seq only in ITS broker's partition (void_evidence.broker_id).
+    // One carrying no broker_id fills nothing and is flagged; the SAME tombstone tagged with the broker verifies.
+    let (rec, res, tsa) = void_keys();
+    let mk = |bid: Option<&str>| {
+        let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, bid));
+        let g = seal_grant(
+            &rec,
+            &rec,
+            "grant-2",
+            &grant_evidence_fed("grant-2", BID_A, 2),
+        );
+        let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+        let heads = fed_heads(&[(
+            BID_A,
+            grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &th), (2, &gh)])),
+        )]);
+        let cp = checkpoint_with_fed_heads(
+            &rec,
+            "cp0",
+            0,
+            None,
+            &[th.clone(), gh.clone()],
+            2,
+            heads,
+            Some(&tsa),
+        );
+        let mut fed = std::collections::BTreeMap::new();
+        fed.insert(BID_A.to_string(), vec![rec.verifying_key()]);
+        let opts = VerifyOptions {
+            federated_broker_keys: fed,
+            resource_authority_keys: vec![res.verifying_key()],
+            trusted_tsa_keys: vec![tsa.verifying_key()],
+            ..Default::default()
+        };
+        verify_bundle_with(
+            &tier_b_bundle(&rec.verifying_key(), vec![t, g], vec![cp]),
+            &opts,
+        )
+    };
+    let r = mk(None);
+    assert!(
+        !r.ok,
+        "a tombstone without broker_id under federation must fail"
+    );
+    assert!(
+        has_issue(&r, "carries no broker_id while federation is active"),
+        "issues: {:?}",
+        r.issues
+    );
+    let r = mk(Some(BID_A));
+    assert!(
+        r.ok,
+        "the same tombstone tagged with its broker_id fills that partition's seq; issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.federation_status, "sequence_verified");
+}
+
+#[test]
+fn grant_void_use_of_voided_grant_id_never_joins() {
+    // (4) a tombstone is never a grant: a resource-signed use referencing the voided grant_id finds no grant to join
+    // and is an anchored unmatched use — a violation, never a match against the tombstone.
+    let (rec, res, tsa) = void_keys();
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let th = content_hash_of(&t);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let u = seal_use(&rec, &res, "use-1", std::slice::from_ref(&th), ACTION, &ue);
+    let uh = content_hash_of(&u);
+    let head = grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &th)]));
+    let cp = checkpoint_with_head(&rec, std::slice::from_ref(&uh), 2, head, Some(&tsa));
+    let r = verify_bundle_with(
+        &tier_b_bundle(&rec.verifying_key(), vec![t, u], vec![cp]),
+        &pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        ),
+    );
+    assert!(!r.ok, "a use of a voided grant_id must fail the bundle");
+    assert_eq!(r.uses_matched, 0, "a use must never join a tombstone");
+    assert_eq!(r.unmatched_violation, 1, "issues: {:?}", r.issues);
+    assert_eq!(r.grant_total, 0);
+}
+
+#[test]
+fn grant_void_above_max_seq_is_flagged() {
+    // (5) a tombstone at a seq ABOVE the recorded max: grant-1 at seq 1, a tombstone at seq 3 (nothing at 2).
+    // (a) a head that honestly folds both (max_seq 3) is not a gapless prefix; (b) a head that stops at max_seq 1
+    // omits a committed log entry (tail omission / root mismatch). Both fail.
+    let (rec, res, tsa) = void_keys();
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let g = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let t = seal_void(
+        &rec,
+        Some(&rec),
+        "grant-3",
+        &void_evidence("grant-3", 3, None),
+    );
+    let (gh, th) = (content_hash_of(&g), content_hash_of(&t));
+    let r = verify_bundle_with(
+        &void_bundle(
+            &rec,
+            &tsa,
+            vec![g.clone(), t.clone()],
+            &[(1, &gh), (3, &th)],
+            3,
+        ),
+        &opts,
+    );
+    assert!(
+        !r.ok && has_issue(&r, "gapless"),
+        "(a) a tombstone past a hole must fail the gapless check; issues: {:?}",
+        r.issues
+    );
+    let r = verify_bundle_with(&void_bundle(&rec, &tsa, vec![g, t], &[(1, &gh)], 1), &opts);
+    assert!(
+        !r.ok,
+        "(b) a committed tombstone above the head's max_seq must fail; issues: {:?}",
+        r.issues
+    );
+    assert_ne!(r.broker_trust, "sequence_verified");
+}
+
+#[test]
+fn grant_void_with_grant_of_the_voided_grant_id_fails() {
+    // (6) a bundle carrying BOTH a tombstone for grant-1 AND a grant whose grant_evidence.grant_id is grant-1 (under a
+    // different record_id, dodging the duplicate-record_id check, and at a different seq, dodging the duplicate-seq
+    // check): the voided reservation was nonetheless issued — the tombstone must not fill its seq.
+    let (rec, res, tsa) = void_keys();
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let g = seal_grant(&rec, &rec, "rec-issued", &grant_evidence_d6(GID, 2));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (2, &gh)], 2),
+        &opts,
+    );
+    assert!(
+        !r.ok,
+        "a tombstone alongside a grant of the voided grant_id must fail"
+    );
+    assert!(
+        has_issue(
+            &r,
+            "a grant with the voided grant_id is also present (a voided reservation was issued)"
+        ),
+        "issues: {:?}",
+        r.issues
+    );
+
+    // and a different grant claiming the tombstone's OWN seq is a duplicate-seq violation.
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let g = seal_grant(&rec, &rec, "grant-dup", &grant_evidence_d6("grant-dup", 1));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (1, &gh)], 1),
+        &opts,
+    );
+    assert!(
+        !r.ok && has_issue(&r, "claimed by more than one committed record"),
+        "issues: {:?}",
+        r.issues
+    );
+}
