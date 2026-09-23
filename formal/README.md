@@ -179,6 +179,7 @@ Kani harness must itself report `VERIFICATION:- FAILED`.
 | m6 | `compute_content_hash` strips an extra field | oracle, golden |
 | m7 | `verify_content_hash` stops pinning `canon_version` | oracle (pinned-constants check) |
 | m8 | `verify.rs` taxonomy tag renamed | tag inventory |
+| m15 | v3 authority signature preimage drops the semantic subject digest | oracle, golden |
 
 A new drift class gets a new patch here before the gate that catches it is called done.
 

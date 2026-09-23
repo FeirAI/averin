@@ -153,8 +153,8 @@ theorem authority_v3_digest_bound (projection source project record evidence d�
       authoritySigV3.msg [projection, source, project, record, evidence, d₂] [] := by
   intro h
   have heq := (Family.msg_inj authoritySigV3 (by decide) h₁ h₂ h).1
-  simp only [List.cons.injEq, and_true] at heq
-  exact hd heq
+  have digest_eq : d₁ = d₂ := by simpa using heq
+  exact hd digest_eq
 
 /-- **Cross-family disjointness.** Distinct leading tags ⇒ distinct messages, for any fields. -/
 theorem Family.msg_disjoint (F G : Family) (vs ws : List Bytes) (t u : Bytes)
