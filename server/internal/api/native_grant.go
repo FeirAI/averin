@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // WithIntrospection enables POST /v2/introspection (ADR 0005 M3 — Native/STS): the resource records a signed
@@ -31,8 +33,9 @@ func (s *Server) WithIntrospection(rawResourceKey ed25519.PrivateKey) *Server {
 // handleNativeGrant issues a native (token_exchange) grant: it records a signed gateway_enforced grant with
 // grant_evidence.mode=="token_exchange" + lease_id (NO credential_binding, NO cnf PoP, NO minted capability) —
 // the external IdP/STS holds the credential, the grant authorizes the exchange, and a later resource-signed
-// introspection transcript binds the effective scope. Record-before-issue; the gapless broker_seq under ingestMu.
-func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem, grantID string) {
+// introspection transcript binds the effective scope. Record-before-issue; the gapless broker_seq is
+// allocated with the grant record inside the project transaction.
+func (s *Server) handleNativeGrant(ctx context.Context, w http.ResponseWriter, gr grantRequest, idem, grantID string) {
 	if gr.LeaseID == "" || gr.Action == "" || gr.Resource == "" || gr.Scope == "" {
 		writeErr(w, http.StatusBadRequest, "a native (token_exchange) grant requires lease_id, action, resource, and scope")
 		return
@@ -47,16 +50,15 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 
 	var sealed string
 	var created bool
-	commitErr := func() error {
-		s.ingestMu.Lock()
-		defer s.ingestMu.Unlock()
-		if existing, found, le := s.st.RecordByIdem(gr.ProjectID, idem); le != nil {
+	commitErr := s.withProjectWrite(ctx, gr.ProjectID, func(st store.Store) error {
+		if existing, found, le := st.RecordByIdem(gr.ProjectID, idem); le != nil {
 			return le
 		} else if found {
 			sealed, created = existing.JSON, false
 			return nil
 		}
-		seq, fresh, aerr := s.allocateBrokerSeq(gr.ProjectID, grantID)
+		s.noteSeqAttempt(gr.ProjectID, grantID)
+		seq, _, aerr := st.AllocateBrokerSeq(gr.ProjectID, grantID)
 		if aerr != nil {
 			return fmt.Errorf("allocate broker_seq: %w", aerr)
 		}
@@ -69,20 +71,12 @@ func (s *Server) handleNativeGrant(w http.ResponseWriter, gr grantRequest, idem,
 		}
 		rec, e := s.buildNativeGrantRecord(gr, grantID, evidence)
 		if e != nil {
-			return s.settleFailedGrantSeq(gr.ProjectID, grantID, fresh, e) // nothing persisted → release the seq
+			return e
 		}
 		var se error
-		sealed, created, se = s.sealAndStore(gr.ProjectID, gr.SessionID, idem, rec, nil)
-		if se != nil {
-			if r2, found2, re := s.st.RecordByIdem(gr.ProjectID, idem); re == nil && found2 {
-				sealed, created = r2.JSON, false
-				return nil
-			}
-			// Released unless commit-ambiguous (then RESERVED; a retry reclaims it).
-			return s.settleFailedGrantSeq(gr.ProjectID, grantID, fresh, se)
-		}
-		return nil
-	}()
+		sealed, created, se = s.sealAndStore(st, gr.ProjectID, gr.SessionID, idem, rec, nil)
+		return se
+	})
 	if commitErr != nil {
 		if isVoidedGrant(commitErr) {
 			writeErr(w, http.StatusConflict, commitErr.Error())
@@ -218,10 +212,8 @@ func (s *Server) handleIntrospection(w http.ResponseWriter, r *http.Request) {
 
 	var sealed string
 	var created bool
-	commitErr := func() error {
-		s.ingestMu.Lock()
-		defer s.ingestMu.Unlock()
-		if existing, found, le := s.st.RecordByIdem(ir.ProjectID, ir.IdempotencyKey); le != nil {
+	commitErr := s.withProjectWrite(r.Context(), ir.ProjectID, func(st store.Store) error {
+		if existing, found, le := st.RecordByIdem(ir.ProjectID, ir.IdempotencyKey); le != nil {
 			return le
 		} else if found {
 			sealed, created = existing.JSON, false
@@ -232,16 +224,9 @@ func (s *Server) handleIntrospection(w http.ResponseWriter, r *http.Request) {
 			return e
 		}
 		var se error
-		sealed, created, se = s.sealAndStore(ir.ProjectID, ir.SessionID, ir.IdempotencyKey, rec, nil)
-		if se != nil {
-			if r2, found2, re := s.st.RecordByIdem(ir.ProjectID, ir.IdempotencyKey); re == nil && found2 {
-				sealed, created = r2.JSON, false
-				return nil
-			}
-			return se
-		}
-		return nil
-	}()
+		sealed, created, se = s.sealAndStore(st, ir.ProjectID, ir.SessionID, ir.IdempotencyKey, rec, nil)
+		return se
+	})
 	if commitErr != nil {
 		writeErr(w, http.StatusInternalServerError, "introspection: "+commitErr.Error())
 		return

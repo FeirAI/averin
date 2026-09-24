@@ -18,19 +18,12 @@ type durableWriter interface {
 	DeletePending(projectID, idemKey string) error
 }
 
-// WithDurable backs the M5 revoked-grant set and the M6/M2 pending two-phase grant state with Postgres
-// (server/cmd/averin-server/main.go wires this in only when AVERIN_DATABASE_URL is set). It rehydrates
-// both in-memory caches from pd IMMEDIATELY, so it must be called AFTER WithRevocation (which resets
-// `revoked` to a fresh, empty map) — calling it before WithRevocation would have the rehydrated set
-// silently discarded. Revocation is itself optional (nil s.revocationKey is a legitimate, documented,
-// tested standalone configuration — durable two-phase grants with revocation never enabled at all — so
-// this method cannot fail-fast on that by itself); the ordering IS enforced, defensively, on the other
-// side: WithRevocation panics if s.durable is already non-nil, so a future refactor that reorders the two
-// calls (with revocation actually intended) fails loudly at boot instead of silently discarding a
-// rehydrated revoked set — see the guard at the top of WithRevocation in revocation_server.go. `pending`
-// is always initialized by New(), so ordering relative to WithBroker / WithCosigPolicy does not matter for
-// it. A rehydrate failure here is FATAL (log.Fatalf): starting with a silently-empty revoked set or
-// pending map would be a fail-open, not a degraded-but-safe start.
+// WithDurable validates the auxiliary Postgres durable-state connection and
+// rehydrates legacy in-process diagnostic caches at boot. Authoritative pending
+// and revocation checks on request paths now use the project Store transaction;
+// these caches never grant permission. Main wires this to the same database as
+// the Store and retains its readiness probe. Call after WithRevocation so the
+// optional cache is not reset after loading.
 func (s *Server) WithDurable(pd *pgdurable.Store) *Server {
 	s.durable = pd
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

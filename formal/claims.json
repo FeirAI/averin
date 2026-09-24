@@ -54,23 +54,23 @@
     },
     {
       "id": "revocation-live-and-durable",
-      "claim": "A successful revoke blocks later uses on that server; Postgres mode persists and rehydrates revocations across restart. Live cross-replica coherence is not established.",
+      "claim": "With a shared Postgres project Store, an acknowledged revoke is committed before a later use checks revocation on any replica; restart does not restore an older admission view. This is tested behavior, while the bounded TLA+ model checks its operational abstraction.",
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "Postgres mode"],
-      "assumptions": ["revocation enabled", "single writer per project", "Postgres durable store configured"],
-      "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "isRevoked"}, {"file": "server/internal/api/durable.go", "symbol": "WithDurable"}],
-      "proofs": [{"file": "server/internal/api/durable_internal_test.go", "symbol": "TestDurableRevocationSurvivesRestart"}],
-      "gates": ["store-postgres"]
+      "assumptions": ["revocation enabled", "shared Postgres project Store", "all use and revoke paths obey WithProjectWrite"],
+      "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "revokeGrantIDTotalCtx"}, {"file": "server/internal/store/operational_postgres.go", "symbol": "IsRevoked"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
+      "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoRevokedUse"}],
+      "gates": ["store-postgres", "formal-tla"]
     },
     {
       "id": "pending-grant-durability",
-      "claim": "Postgres mode persists and rehydrates pending two-phase grants at boot; live replicas are not a coherent shared pending cache.",
+      "claim": "With a shared Postgres project Store, a committed prepare is visible to finalize on another replica and after issuer restart; retries read the durable pending row. This is tested behavior, while the bounded TLA+ model checks its operational abstraction.",
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "Postgres mode"],
-      "assumptions": ["Postgres durable store configured", "single writer or sticky routing for live two-phase requests"],
-      "sources": [{"file": "server/internal/api/durable.go", "symbol": "WithDurable"}],
-      "proofs": [{"file": "server/internal/api/durable_internal_test.go", "symbol": "TestDurablePendingTwoPhaseGrantSurvivesRestart"}],
-      "gates": ["store-postgres"]
+      "assumptions": ["shared Postgres project Store", "prepare and finalize use WithProjectWrite", "pending expiry is checked from the authoritative row"],
+      "sources": [{"file": "server/internal/api/grant_twophase.go", "symbol": "PutPendingGrant"}, {"file": "server/internal/store/operational_postgres.go", "symbol": "PendingGrantLive"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
+      "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoGhostFinalize"}],
+      "gates": ["store-postgres", "formal-tla"]
     },
     {
       "id": "native-rfc3161",
@@ -93,14 +93,14 @@
       "gates": ["core"]
     },
     {
-      "id": "resource-truth-and-single-writer",
-      "claim": "The strongest completeness label is conditional on truthful resource labeling, and the server requires one writer per project for DAG frontier consistency.",
-      "class": "deployment-assumption",
+      "id": "resource-truth-and-project-serialization",
+      "claim": "The strongest completeness label remains conditional on truthful resource labeling. Project frontier and checkpoint writes now serialize through a persisted Postgres guard, tested with two pools and separate processes; full multi-instance deployment remains gated by authenticated capability-project binding, scoped nonce claims, and bounded recovery. The finite TLA+ model is not a production proof.",
+      "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "offline verifier"],
-      "assumptions": ["resource honestly labels covered actions", "one writer per project; no distributed frontier lock"],
-      "sources": [{"file": "core/src/verify.rs", "symbol": "assumed_truthful"}, {"file": "server/internal/api/server.go", "symbol": "ingestMu"}],
-      "proofs": [{"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
-      "gates": ["core", "server"]
+      "assumptions": ["resource honestly labels covered actions", "all project writers use WithProjectWrite", "required unique record_id index remains valid", "shared Postgres database"],
+      "sources": [{"file": "core/src/verify.rs", "symbol": "assumed_truthful"}, {"file": "server/internal/store/postgres.go", "symbol": "lockProject"}, {"file": "server/internal/api/server.go", "symbol": "createCheckpointTx"}],
+      "proofs": [{"file": "server/internal/store/project_tx_test.go", "symbol": "TestPostgresProjectWriteTwoPools"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionProcessCuts"}, {"file": "formal/tla/ProjectTx_safe.cfg", "symbol": "NoFrontierFork"}, {"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
+      "gates": ["core", "server", "store-postgres", "formal-tla"]
     }
   ]
 }

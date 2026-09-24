@@ -1,14 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/content"
+	"github.com/feirai/averin/server/internal/store"
 )
 
 // pendingGrant is a minted-but-uncommitted grant held between /v2/grants/prepare and /v2/grants/finalize.
@@ -75,33 +77,6 @@ func copyEvidence(m map[string]any) map[string]any {
 	return c
 }
 
-// prunePending drops pending grants older than pendingTTL (an abandoned prepare must not leak memory). It
-// takes pendingMu itself (callers must NOT already hold it) and only for the brief in-memory sweep — the
-// durable deletes below run AFTER releasing it, so a slow/degraded Postgres pruning one stale entry cannot
-// stall the pendingMu-guarded map for every other in-flight prepare/finalize (finding C). When a durable
-// store is configured each pruned row is also dropped there — best-effort (a failed delete just leaves a
-// stale row that WithDurable's boot-time TTL check prunes again later; it is never rehydrated as live
-// because it is already past pendingTTL by then too).
-func (s *Server) prunePending(now time.Time) {
-	s.pendingMu.Lock()
-	var expired []*pendingGrant
-	for k, p := range s.pending {
-		if now.Sub(p.created) > pendingTTL {
-			delete(s.pending, k)
-			expired = append(expired, p)
-		}
-	}
-	s.pendingMu.Unlock()
-	if s.durable == nil {
-		return
-	}
-	for _, p := range expired {
-		if err := s.durable.DeletePending(p.gr.ProjectID, p.idemKey); err != nil {
-			log.Printf("WARNING: durable two-phase grants: prune expired pending row (project=%q idem=%q): %v", p.gr.ProjectID, p.idemKey, err)
-		}
-	}
-}
-
 // handleGrantPrepare is PHASE 1 of the online two-phase grant flow (ADR 0005 M6 Cosig / M2 Delegation): it
 // validates the request and MINTS the credential (broker.Prepare) WITHOUT allocating a broker_seq or committing,
 // holds it in `pending`, and reveals the challenge inputs the approvers/delegators must sign — grant_id,
@@ -159,90 +134,91 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Already finalized? (a prepare after a completed finalize) — return the committed grant, idempotently, but
-	// ONLY to the same PoP-validated grant request (mirroring the single-phase storedGrantMatchesRequest gate);
-	// any other record under this key — a different grant, or not a grant at all — is a 409.
-	if existing, found, le := s.st.RecordByIdem(gr.ProjectID, idem); le != nil {
-		writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+le.Error())
-		return
-	} else if found {
-		if same, pe := storedGrantMatchesRequest(existing.JSON, req); pe != nil || !same {
-			writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
-			return
+	// The durable project transaction arbitrates both committed and pending
+	// idempotency across replicas. Local pending entries are only a cache.
+	var p *pendingGrant
+	var finalized string
+	var conflict string
+	err = s.withProjectWrite(r.Context(), gr.ProjectID, func(st store.Store) error {
+		if existing, found, e := st.RecordByIdem(gr.ProjectID, idem); e != nil {
+			return e
+		} else if found {
+			if same, pe := storedGrantMatchesRequest(existing.JSON, req); pe != nil || !same {
+				conflict = "idempotency_key already used for a different record or grant request"
+				return nil
+			}
+			finalized = existing.JSON
+			return nil
 		}
-		s.respondPreparedFromSealed(w, grantID, existing.JSON, true)
-		return
-	}
-
-	pk := pendingKey(gr.ProjectID, idem)
-
-	// Best-effort sweep of expired entries. Self-locking (takes pendingMu itself, briefly, and does any
-	// durable deletes AFTER releasing it) — safe to call before we take the per-key lock below.
-	s.prunePending(s.now())
-
-	// Serialize per-idem-key across the check-then-mint-then-persist-then-cache critical section below
-	// (finding C): a slow/degraded Postgres round-trip inside PutPending then only blocks another caller
-	// racing for THIS SAME idem key, not every /v2/grants/prepare on the process. Different idem keys run
-	// fully concurrently under this lock.
-	unlockKey := s.pendingKeyLocks.Lock(pk)
-	defer unlockKey()
-
-	// Idempotent prepare: an already-pending mint returns the SAME challenge (stable credential_binding/exp).
-	// pendingMu here guards only the STRUCTURAL map read (a concurrent prepare/finalize for a DIFFERENT idem
-	// key may be reading/writing `pending` at the same time) — it is held only for this lookup, not across
-	// the mint/persist work below.
-	s.pendingMu.Lock()
-	p, ok := s.pending[pk]
-	s.pendingMu.Unlock()
-	if !ok {
-		// Mint WITHOUT a real broker_seq (the dummy 1 just satisfies Prepare's seq>=1 validation; it is
-		// OVERWRITTEN with the gapless seq at finalize, so the seq order == the record commit order, D6).
+		row, found, e := st.PendingGrant(gr.ProjectID, idem)
+		if e != nil {
+			return e
+		}
+		if found {
+			live, e := st.PendingGrantLive(gr.ProjectID, row.GrantID, s.now(), pendingTTL)
+			if e != nil {
+				return e
+			}
+			if live {
+				var dto pendingGrantDTO
+				if e := json.Unmarshal(row.Payload, &dto); e != nil {
+					return e
+				}
+				dto.Created = row.Created
+				p = dto.toPendingGrant(idem)
+				if same, pe := pendingGrantMatchesRequest(p, req); pe != nil || !same {
+					conflict = "idempotency_key already has a pending grant for a different grant request"
+				}
+				return nil
+			}
+			if e := st.DeletePendingGrant(gr.ProjectID, idem); e != nil {
+				return e
+			}
+		}
 		prepared, e := broker.Prepare(req, grantID, func() (int64, error) { return 1, nil }, s.now(), s.brokerKey)
 		if e != nil {
-			writeErr(w, http.StatusBadRequest, e.Error())
-			return
+			return e
 		}
 		p = &pendingGrant{prepared: prepared, req: req, gr: gr, created: s.now(), idemKey: idem}
-		// Persist-then-cache, fail-closed (M6/M2 durability): when a durable store is configured, the mint
-		// must be DURABLE before it is handed to the caller as a live challenge — otherwise a restart between
-		// this response and finalize would lose it while the caller believes prepare succeeded. A Postgres
-		// write failure is surfaced as an error and the pending entry is NOT cached (so a retry re-attempts
-		// cleanly rather than serving a challenge this instance cannot survive a restart to finalize).
-		if s.durable != nil {
-			payload, merr := json.Marshal(dtoFromPending(p))
-			if merr != nil {
-				writeErr(w, http.StatusInternalServerError, "encode pending grant: "+merr.Error())
-				return
-			}
-			durablePayload, _, perr := s.durable.PutPending(gr.ProjectID, idem, grantID, payload, p.created)
-			if perr != nil {
-				writeErr(w, http.StatusServiceUnavailable, "pending grant could not be durably persisted — NOT issued (fail-closed): "+perr.Error())
-				return
-			}
-			// Serve/cache whatever is NOW durable for this idem key. On the normal (single-writer) path this
-			// is exactly the payload just marshaled above. Under a race with ANOTHER replica sharing this
-			// AVERIN_DATABASE_URL, PutPending instead returns that OTHER writer's row (pending_grants' payload
-			// bakes in call-time now, so two mints of the same idem key produce different challenges) —
-			// decoding whatever came back (rather than keeping the local `p`) guarantees the challenge handed
-			// to this caller is the one that will still be there to finalize against after a restart.
-			var dto pendingGrantDTO
-			if uerr := json.Unmarshal(durablePayload, &dto); uerr != nil {
-				writeErr(w, http.StatusInternalServerError, "decode durable pending grant: "+uerr.Error())
-				return
-			}
-			p = dto.toPendingGrant(idem)
+		payload, e := json.Marshal(dtoFromPending(p))
+		if e != nil {
+			return e
 		}
-		s.pendingMu.Lock()
-		s.pending[pk] = p
-		s.pendingMu.Unlock()
-	}
-	if ok {
-		// A pending mint under this key is only re-served to the SAME grant request that minted it.
+		winning, _, e := st.PutPendingGrant(gr.ProjectID, idem, store.PendingGrant{GrantID: grantID, Payload: payload, Created: p.created})
+		if e != nil {
+			return e
+		}
+		var dto pendingGrantDTO
+		if e := json.Unmarshal(winning.Payload, &dto); e != nil {
+			return e
+		}
+		dto.Created = winning.Created
+		p = dto.toPendingGrant(idem)
 		if same, pe := pendingGrantMatchesRequest(p, req); pe != nil || !same {
-			writeErr(w, http.StatusConflict, "idempotency_key already has a pending grant for a different grant request")
-			return
+			conflict = "idempotency_key already has a pending grant for a different grant request"
 		}
+		return nil
+	})
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "prepare grant: "+err.Error())
+		return
 	}
+	if conflict != "" {
+		writeErr(w, http.StatusConflict, conflict)
+		return
+	}
+	if finalized != "" {
+		s.respondPreparedFromSealed(w, grantID, finalized, true)
+		return
+	}
+	if p == nil {
+		writeErr(w, http.StatusInternalServerError, "prepare grant: no pending result")
+		return
+	}
+	pk := pendingKey(gr.ProjectID, idem)
+	s.pendingMu.Lock()
+	s.pending[pk] = p
+	s.pendingMu.Unlock()
 	resp := map[string]any{
 		"grant_id":           p.prepared.GrantID,
 		"credential_binding": p.prepared.CredentialBinding,
@@ -326,33 +302,48 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Idempotent re-finalize: the grant already committed — return it (do NOT re-allocate a seq), but only when
-	// the stored record IS a grant for this exact request (storedGrantMatchesRequest); anything else is a 409.
-	if existing, found, le := s.st.RecordByIdem(fr.ProjectID, idem); le != nil {
-		writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+le.Error())
+	// Read the durable pending challenge for expensive signature checks, then
+	// revalidate this exact row under the project transaction at commit.
+	var row store.PendingGrant
+	var found bool
+	var existing store.Record
+	var committed bool
+	err = s.st.WithProjectRead(r.Context(), fr.ProjectID, func(st store.Store) error {
+		var e error
+		row, found, e = st.PendingGrant(fr.ProjectID, idem)
+		if e != nil || found {
+			return e
+		}
+		existing, committed, e = st.RecordByIdem(fr.ProjectID, idem)
+		return e
+	})
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "pending lookup: "+err.Error())
 		return
-	} else if found {
-		if same, pe := storedGrantMatchesRequest(existing.JSON, req); pe != nil || !same {
-			writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
+	}
+	if !found {
+		if committed {
+			if same, pe := storedGrantMatchesRequest(existing.JSON, req); pe != nil || !same {
+				writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
+				return
+			}
+			s.respondFinalized(w, fr.ProjectID, grantID, existing.JSON, false)
 			return
 		}
-		s.respondFinalized(w, fr.ProjectID, grantID, existing.JSON, false)
+		writeErr(w, http.StatusConflict, "no pending grant for this idempotency_key — call /v2/grants/prepare first")
 		return
 	}
-
-	s.pendingMu.Lock()
-	pk := pendingKey(fr.ProjectID, idem)
-	p, ok := s.pending[pk]
-	s.pendingMu.Unlock()
-	if !ok {
-		writeErr(w, http.StatusConflict, "no pending grant for this idempotency_key — call /v2/grants/prepare first (or it expired / the server restarted)")
+	var dto pendingGrantDTO
+	if e := json.Unmarshal(row.Payload, &dto); e != nil {
+		writeErr(w, http.StatusServiceUnavailable, "invalid durable pending grant: "+e.Error())
 		return
 	}
+	dto.Created = row.Created
+	p := dto.toPendingGrant(idem)
 	if same, pe := pendingGrantMatchesRequest(p, req); pe != nil || !same {
 		writeErr(w, http.StatusConflict, "the pending grant under this idempotency_key was prepared for a different grant request")
 		return
 	}
-
 	// M6 producer policy: if the server pins a cosig requirement, a finalize MUST carry cosignatures — an
 	// empty-cosignatures finalize must not silently mint an un-cosigned grant (defense-in-depth; the offline
 	// verifier only gates grants that DECLARE cosig_threshold, so this is the broker honoring its own policy).
@@ -388,41 +379,67 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	credentialAddr, err := s.content.Put(content.WithTenant(r.Context(), fr.ProjectID), prepared.DescriptorBytes)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store credential descriptor: "+err.Error())
+		return
+	}
 
-	// Commit under the ingest lock: allocate the gapless broker_seq HERE (so seq order == commit order, D6),
-	// overwrite the placeholder seq in the signed grant_evidence, build + seal + store. Mirrors handleGrant's
-	// failure handling (settleFailedGrantSeq): a failure that persisted nothing releases the seq; only a
-	// commit-ambiguous store error leaves it RESERVED, so a retry reclaims it.
-	sessionID := p.gr.SessionID
+	// The project lock spans final pending/idempotency checks, allocation,
+	// frontier selection, seal, insert, and pending deletion on one connection.
 	var sealed string
 	var created bool
-	commitErr := func() error {
-		s.ingestMu.Lock()
-		defer s.ingestMu.Unlock()
-		seq, fresh, aerr := s.allocateBrokerSeq(fr.ProjectID, grantID)
-		if aerr != nil {
-			return fmt.Errorf("allocate broker_seq: %w", aerr)
+	var conflict string
+	commitErr := s.withProjectWrite(r.Context(), fr.ProjectID, func(st store.Store) error {
+		if existing, ok, e := st.RecordByIdem(fr.ProjectID, idem); e != nil {
+			return e
+		} else if ok {
+			if same, pe := storedGrantMatchesRequest(existing.JSON, req); pe != nil || !same {
+				conflict = "idempotency_key already used for a different record or grant request"
+				return nil
+			}
+			sealed, created = existing.JSON, false
+			return nil
+		}
+		current, ok, e := st.PendingGrant(fr.ProjectID, idem)
+		if e != nil {
+			return e
+		}
+		if !ok || !bytes.Equal(current.Payload, row.Payload) {
+			conflict = "pending challenge changed; prepare again"
+			return nil
+		}
+		live, e := st.PendingGrantLive(fr.ProjectID, grantID, s.now(), pendingTTL)
+		if e != nil {
+			return e
+		}
+		if !live {
+			conflict = "pending challenge expired; prepare again"
+			return nil
+		}
+		s.noteSeqAttempt(fr.ProjectID, grantID)
+		seq, _, e := st.AllocateBrokerSeq(fr.ProjectID, grantID)
+		if e != nil {
+			return e
 		}
 		if seq < 1 {
 			return fmt.Errorf("store returned non-positive broker_seq %d", seq)
 		}
-		prepared.Evidence["broker_seq"] = seq // OVERWRITE the prepare-time placeholder with the real gapless seq
-		rec, disclosures, e := s.buildGrantRecord(grantID, p.gr, p.req, prepared)
+		prepared.Evidence["broker_seq"] = seq
+		rec, disclosures, e := s.buildGrantRecord(grantID, p.gr, p.req, prepared, credentialAddr.Digest)
 		if e != nil {
-			return s.settleFailedGrantSeq(fr.ProjectID, grantID, fresh, e) // nothing persisted → release the seq
+			return e
 		}
-		var se error
-		sealed, created, se = s.sealAndStore(fr.ProjectID, sessionID, idem, rec, disclosures)
-		if se != nil {
-			if r2, found2, re := s.st.RecordByIdem(fr.ProjectID, idem); re == nil && found2 {
-				sealed, created = r2.JSON, false
-				return nil
-			}
-			// Released unless commit-ambiguous (then RESERVED; a retry of this finalize reclaims it).
-			return s.settleFailedGrantSeq(fr.ProjectID, grantID, fresh, se)
+		sealed, created, e = s.sealAndStore(st, fr.ProjectID, p.gr.SessionID, idem, rec, disclosures)
+		if e != nil {
+			return e
 		}
-		return nil
-	}()
+		return st.DeletePendingGrant(fr.ProjectID, idem)
+	})
+	if conflict != "" {
+		writeErr(w, http.StatusConflict, conflict)
+		return
+	}
 	if commitErr != nil {
 		if isVoidedGrant(commitErr) {
 			writeErr(w, http.StatusConflict, commitErr.Error())
@@ -432,23 +449,14 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusConflict, msg)
 			return
 		}
-		writeErr(w, http.StatusInternalServerError, "finalize grant: "+commitErr.Error())
+		writeErr(w, http.StatusServiceUnavailable, "finalize grant: "+commitErr.Error())
 		return
 	}
-
-	// Committed — drop the pending entry (a re-finalize now hits the idempotent RecordByIdem path above).
+	// Invalidate the local cache after the transaction commits. It has no
+	// authority over finalize, so a stale entry cannot authorize another grant.
 	s.pendingMu.Lock()
-	delete(s.pending, pk)
+	delete(s.pending, pendingKey(fr.ProjectID, idem))
 	s.pendingMu.Unlock()
-	// Best-effort durable cleanup: the grant is now durably committed in the MAIN store (the source of
-	// truth), so a pending_grants row surviving this delete is harmless — RecordByIdem is checked before the
-	// pending map on both prepare and finalize, so a stale rehydrated entry for an already-committed grant is
-	// simply never reached.
-	if s.durable != nil {
-		if err := s.durable.DeletePending(fr.ProjectID, idem); err != nil {
-			log.Printf("WARNING: durable two-phase grants: cleanup of finalized pending row (project=%q idem=%q) failed (harmless — the grant is already committed): %v", fr.ProjectID, idem, err)
-		}
-	}
 
 	s.respondFinalized(w, fr.ProjectID, grantID, sealed, created)
 }

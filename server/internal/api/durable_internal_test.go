@@ -84,6 +84,18 @@ func reconnectDurable(t *testing.T, dsn string) *pgdurable.Store {
 	return pd
 }
 
+func connectProjectStore(t *testing.T, dsn string) *store.Postgres {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	st, err := store.NewPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	return st
+}
+
 func testCore(t *testing.T) *core.Core {
 	t.Helper()
 	c, err := core.New("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
@@ -98,7 +110,7 @@ func testCore(t *testing.T) *core.Core {
 // restart) once WithDurable rehydrates from Postgres — closing the gap where a revoke issued just before a
 // restart was silently forgotten.
 func TestDurableRevocationSurvivesRestart(t *testing.T) {
-	pd, dsn, cleanup := newTestDurable(t)
+	_, dsn, cleanup := newTestDurable(t)
 	defer cleanup()
 
 	_, rev, err := ed25519.GenerateKey(nil)
@@ -106,8 +118,9 @@ func TestDurableRevocationSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// "Boot 1": revoke a grant.
-	s1 := New(testCore(t), store.NewMem(), "k0").WithRevocation(rev).WithDurable(pd)
+	// "Boot 1": revoke through the same project Store that will be reopened.
+	st1 := connectProjectStore(t, dsn)
+	s1 := New(testCore(t), st1, "k0").WithRevocation(rev)
 	body, _ := json.Marshal(map[string]any{"project_id": "p1", "grant_id": "g-revoked-1", "reason": "compromised"})
 	req := httptest.NewRequest("POST", "/v2/revoke?project=p1", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -115,15 +128,16 @@ func TestDurableRevocationSurvivesRestart(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("revoke (%d): %s", w.Code, w.Body.String())
 	}
-	if _, ok := s1.revoked["p1"]["g-revoked-1"]; !ok {
-		t.Fatalf("revoke did not update the in-memory set")
+	if yes, err := st1.IsRevoked("p1", "g-revoked-1"); err != nil || !yes {
+		t.Fatalf("revoke not visible in Store: %v, %v", yes, err)
 	}
 
 	// "Restart": a fresh Server, a fresh pgdurable.Store reconnecting to the SAME durable state.
-	pd2 := reconnectDurable(t, dsn)
-	s2 := New(testCore(t), store.NewMem(), "k0").WithRevocation(rev).WithDurable(pd2)
-	if _, ok := s2.revoked["p1"]["g-revoked-1"]; !ok {
-		t.Fatalf("revocation did not survive the simulated restart — rehydrated set: %v", s2.revoked)
+	st1.Close()
+	st2 := connectProjectStore(t, dsn)
+	s2 := New(testCore(t), st2, "k0").WithRevocation(rev)
+	if yes, err := st2.IsRevoked("p1", "g-revoked-1"); err != nil || !yes {
+		t.Fatalf("revocation did not survive restart: %v, %v", yes, err)
 	}
 
 	// A revoke made BEFORE WithDurable rehydrates on this instance is unaffected by a later re-revoke.
@@ -140,14 +154,15 @@ func TestDurableRevocationSurvivesRestart(t *testing.T) {
 // rejected (503) and the in-memory set must NOT be mutated — a revoke that only "took" in memory would
 // silently vanish on the very next restart while an operator believes it is enforced.
 func TestDurableRevocationFailsClosedWhenPostgresUnavailable(t *testing.T) {
-	pd, _, cleanup := newTestDurable(t)
+	_, dsn, cleanup := newTestDurable(t)
+	defer cleanup()
 	_, rev, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(testCore(t), store.NewMem(), "k0").WithRevocation(rev).WithDurable(pd)
-	// Kill the durable store's connectivity by closing it early (simulates Postgres going away).
-	cleanup()
+	st := connectProjectStore(t, dsn)
+	s := New(testCore(t), st, "k0").WithRevocation(rev)
+	st.Close() // the authoritative Store is unavailable
 
 	body, _ := json.Marshal(map[string]any{"project_id": "p1", "grant_id": "g-should-not-take", "reason": "test"})
 	req := httptest.NewRequest("POST", "/v2/revoke?project=p1", bytes.NewReader(body))
@@ -156,8 +171,9 @@ func TestDurableRevocationFailsClosedWhenPostgresUnavailable(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("a revoke whose durable write fails must be rejected 503 (fail-closed), got %d: %s", w.Code, w.Body.String())
 	}
-	if _, ok := s.revoked["p1"]["g-should-not-take"]; ok {
-		t.Fatalf("a failed durable write must NOT be applied to the in-memory set (fail-open)")
+	st2 := connectProjectStore(t, dsn)
+	if yes, err := st2.IsRevoked("p1", "g-should-not-take"); err != nil || yes {
+		t.Fatalf("failed revoke leaked into durable state: %v, %v", yes, err)
 	}
 }
 
@@ -193,16 +209,13 @@ func TestDurablePendingTwoPhaseGrantSurvivesRestart(t *testing.T) {
 	a2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{41}, ed25519.SeedSize))
 	approvers := []ed25519.PublicKey{a1.Public().(ed25519.PublicKey), a2.Public().(ed25519.PublicKey)}
 
-	newServer := func(pd *pgdurable.Store) *Server {
-		s := New(testCore(t), store.NewMem(), "k0").WithBroker(brokerKey).WithCosigPolicy(2, approvers)
-		if pd != nil {
-			s = s.WithDurable(pd)
-		}
-		return s
+	newServer := func(st store.Store) *Server {
+		return New(testCore(t), st, "k0").WithBroker(brokerKey).WithCosigPolicy(2, approvers)
 	}
+	st1 := connectProjectStore(t, dsn)
 
 	// "Boot 1": prepare (mints + persists the pending grant, no cosig attached yet).
-	s1 := newServer(pd)
+	s1 := newServer(st1)
 	preq := httptest.NewRequest("POST", "/v2/grants/prepare", bytes.NewReader([]byte(grantChallengeBody("idem-restart-1", "read:orders", agentKey))))
 	pw := httptest.NewRecorder()
 	s1.handleGrantPrepare(pw, preq)
@@ -221,8 +234,8 @@ func TestDurablePendingTwoPhaseGrantSurvivesRestart(t *testing.T) {
 	if pr.GrantID == "" || pr.CredentialBinding == "" || pr.CosigThreshold != 2 {
 		t.Fatalf("prepare response incomplete: %s", pw.Body.String())
 	}
-	if _, ok := s1.pending[pendingKey("p1", "idem-restart-1")]; !ok {
-		t.Fatalf("prepare did not cache the pending grant in-memory")
+	if _, ok, err := st1.PendingGrant("p1", "idem-restart-1"); err != nil || !ok {
+		t.Fatalf("prepare did not persist pending grant: %v, %v", ok, err)
 	}
 
 	// The approvers sign the REVEALED challenge (off-server, as in production).
@@ -242,10 +255,11 @@ func TestDurablePendingTwoPhaseGrantSurvivesRestart(t *testing.T) {
 	// "Restart": a fresh Server (fresh in-memory pending map AND a fresh main store — this test targets only
 	// pgdurable, not the main store's independent Postgres durability), a fresh pgdurable.Store reconnecting
 	// to the SAME durable state.
-	pd2 := reconnectDurable(t, dsn)
-	s2 := newServer(pd2)
-	if _, ok := s2.pending[pendingKey("p1", "idem-restart-1")]; !ok {
-		t.Fatalf("pending grant did not survive the simulated restart — rehydrated pending: %v", s2.pending)
+	st1.Close()
+	st2 := connectProjectStore(t, dsn)
+	s2 := newServer(st2)
+	if _, ok, err := st2.PendingGrant("p1", "idem-restart-1"); err != nil || !ok {
+		t.Fatalf("pending grant did not survive restart: %v, %v", ok, err)
 	}
 
 	// PHASE 2, on the POST-RESTART server: finalize -> bind cosignatures + commit. This is the load-bearing
@@ -261,7 +275,7 @@ func TestDurablePendingTwoPhaseGrantSurvivesRestart(t *testing.T) {
 	}
 
 	// The durable pending row is cleaned up once finalized.
-	rows, err := pd2.LoadPending(context.Background())
+	rows, err := pd.LoadPending(context.Background())
 	if err != nil {
 		t.Fatalf("LoadPending: %v", err)
 	}
@@ -276,11 +290,13 @@ func TestDurablePendingTwoPhaseGrantSurvivesRestart(t *testing.T) {
 // prepare whose durable write fails must not hand out a live challenge the process cannot survive a restart
 // to finalize.
 func TestDurablePendingGrantFailsClosedWhenPostgresUnavailable(t *testing.T) {
-	pd, _, cleanup := newTestDurable(t)
+	_, dsn, cleanup := newTestDurable(t)
+	defer cleanup()
 	brokerKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{5}, ed25519.SeedSize))
 	agentKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{6}, ed25519.SeedSize))
-	s := New(testCore(t), store.NewMem(), "k0").WithBroker(brokerKey).WithDurable(pd)
-	cleanup() // kill Postgres connectivity
+	st := connectProjectStore(t, dsn)
+	s := New(testCore(t), st, "k0").WithBroker(brokerKey)
+	st.Close() // authoritative Store unavailable
 
 	preq := httptest.NewRequest("POST", "/v2/grants/prepare", bytes.NewReader([]byte(grantChallengeBody("idem-unavailable-1", "read:orders", agentKey))))
 	pw := httptest.NewRecorder()
@@ -288,7 +304,8 @@ func TestDurablePendingGrantFailsClosedWhenPostgresUnavailable(t *testing.T) {
 	if pw.Code != http.StatusServiceUnavailable {
 		t.Fatalf("a prepare whose durable write fails must be rejected 503 (fail-closed), got %d: %s", pw.Code, pw.Body.String())
 	}
-	if _, ok := s.pending[pendingKey("p1", "idem-unavailable-1")]; ok {
-		t.Fatalf("a failed durable write must NOT be cached in-memory (fail-open)")
+	st2 := connectProjectStore(t, dsn)
+	if _, ok, err := st2.PendingGrant("p1", "idem-unavailable-1"); err != nil || ok {
+		t.Fatalf("failed prepare leaked into durable state: %v, %v", ok, err)
 	}
 }
