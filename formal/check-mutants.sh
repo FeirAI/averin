@@ -52,6 +52,7 @@ kani_expectation() {
 
 named_detector() {
   case "$1" in
+    m15-*) echo 'golden|authority_subject_v3_matches_govder_vector' ;;
     m16-*|m17-*|m20-*) echo 'verdict|verdict_differential' ;;
     m18-*) echo 'adversarial|tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation' ;;
     m19-*) echo 'adversarial|tier_b_two_phase_failed_pop_intent_does_not_consume_outcome' ;;
@@ -59,13 +60,27 @@ named_detector() {
   esac
 }
 
-if [ -n "${MUTANTS_ONLY:-}" ]; then
+if [ "${MUTANTS_ONLY+x}" = x ]; then
+  case "$MUTANTS_ONLY" in
+    ''|,*|*,|*,,*) echo "check-mutants: MUTANTS_ONLY has an empty entry" >&2; exit 2 ;;
+  esac
   IFS=',' read -r -a selected_mutants <<<"$MUTANTS_ONLY"
   for selected in "${selected_mutants[@]}"; do
-    if [ -z "$selected" ] || [ ! -f "formal/mutants/$selected.patch" ]; then
+    valid=0
+    for patch in formal/mutants/*.patch; do
+      [ "$(basename "$patch" .patch)" = "$selected" ] && valid=1
+    done
+    if [ "$valid" != 1 ]; then
       echo "check-mutants: unknown MUTANTS_ONLY entry: $selected" >&2
       exit 2
     fi
+    for previous in "${seen_mutants[@]:-}"; do
+      if [ "$previous" = "$selected" ]; then
+        echo "check-mutants: duplicate MUTANTS_ONLY entry: $selected" >&2
+        exit 2
+      fi
+    done
+    seen_mutants+=("$selected")
   done
 fi
 
@@ -134,15 +149,17 @@ fi
 echo "   ok"
 
 survivors=0
+executed=0
 for patch in formal/mutants/*.patch; do
   name="$(basename "$patch" .patch)"
-  if [ -n "${MUTANTS_ONLY:-}" ]; then
+  if [ "${MUTANTS_ONLY+x}" = x ]; then
     selected=0
     for candidate in "${selected_mutants[@]}"; do
       [ "$candidate" = "$name" ] && selected=1
     done
     [ "$selected" = 1 ] || continue
   fi
+  executed=$((executed + 1))
   fresh_tree
   if ! patch -s -p1 -d "$tree" <"$patch" >"$logs/$name-apply.log" 2>&1; then
     echo "check-mutants: FAIL: $name no longer applies (update the patch to the current source)" >&2
@@ -199,8 +216,21 @@ for patch in formal/mutants/*.patch; do
   fi
 done
 
+requested=$executed
+if [ "${MUTANTS_ONLY+x}" = x ]; then
+  requested=${#selected_mutants[@]}
+fi
+if [ "$executed" -eq 0 ] || [ "$executed" -ne "$requested" ]; then
+  echo "check-mutants: FAIL: selected $executed mutants but requested $requested" >&2
+  exit 2
+fi
+
 if [ "$survivors" -ne 0 ]; then
   echo "check-mutants: FAIL: $survivors mutant(s) survived, or escaped their named Kani harness (logs in $logs)" >&2
   exit 1
 fi
-echo "check-mutants: OK (every mutant killed)"
+if [ "${MUTANTS_ONLY+x}" = x ]; then
+  echo "check-mutants: OK ($executed selected mutants killed: ${selected_mutants[*]})"
+else
+  echo "check-mutants: OK (all $executed mutants killed)"
+fi
