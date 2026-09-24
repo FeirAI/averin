@@ -318,9 +318,7 @@ impl ValidatedFacts {
             && revocation
             && (!self.policy.require_disclosure || self.disclosure_complete)
             && (!self.policy.require_attestation || self.attestation_valid);
-        let authorized = if adverse {
-            Refuted
-        } else if authenticated == Refuted {
+        let authorized = if adverse || authenticated == Refuted {
             Refuted
         } else if authenticated == Satisfied
             && evidence_ready

@@ -432,6 +432,9 @@ pub unsafe extern "C" fn averin_sign_evidence(
 /// Returns JSON with subject_digest and evidence_sig; never signs a caller's
 /// opaque subject hash. The record must contain v3 proof metadata but may omit
 /// the two recursive fields that this call creates.
+///
+/// # Safety
+/// `record_json` and `seed_hex` must be valid null-terminated C strings.
 #[no_mangle]
 pub unsafe extern "C" fn averin_sign_authority_record_v3(
     record_json: *const c_char,
@@ -459,6 +462,9 @@ pub unsafe extern "C" fn averin_sign_authority_record_v3(
 /// Verify a record's authority proof under one pinned key using the Rust
 /// projection, including v3 digest rederivation. Returns "verified",
 /// "legacy_unbound", or a non-elevated status.
+///
+/// # Safety
+/// `record_json` and `public_key` must be valid null-terminated C strings.
 #[no_mangle]
 pub unsafe extern "C" fn averin_verify_authority_record(
     record_json: *const c_char,
