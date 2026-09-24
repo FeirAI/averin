@@ -30,6 +30,7 @@ REQUIRED = (
     f"{STORE_PACKAGE}:TestPostgresRecoveryFenceContract",
     f"{STORE_PACKAGE}:TestBrokerSeqRecoveryOldRuntimeCredentialCutoff",
     f"{PGSCHEMA_PACKAGE}:TestTenantNonceCutoverV3V4V5PreservesUnknownOwners",
+    f"{PGSCHEMA_PACKAGE}:TestTenantNonceCutoverInterruptedBeforeCommitRetriesOnce",
     f"{PGSCHEMA_PACKAGE}:TestTenantNonceCutoverRejectsLiveAndInheritedOldWriter",
     f"{PGSCHEMA_PACKAGE}:TestTenantNonceRuntimeReadinessRequiresLeastPrivilege",
     f"{PGSCHEMA_PACKAGE}:TestTenantNonceLegacyPurgeRequiresDBTimeHold",

@@ -428,6 +428,92 @@ func TestTenantNonceCutoverV3V4V5PreservesUnknownOwners(t *testing.T) {
 	}
 }
 
+func TestTenantNonceCutoverInterruptedBeforeCommitRetriesOnce(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+	for v := 1; v <= 5; v++ {
+		if _, err := admin.Exec(ctx, steps[v-1]); err != nil {
+			t.Fatalf("apply v%d: %v", v, err)
+		}
+	}
+	if _, err := admin.Exec(ctx, `CREATE TABLE schema_migrations(version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+		t.Fatal(err)
+	}
+	for v := 1; v <= 5; v++ {
+		if _, err := admin.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES($1)`, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var original time.Time
+	if err := admin.QueryRow(ctx, `INSERT INTO consume_ledger(kind,consume_key,consumed_at)
+		VALUES('nonce','unknown-owner',clock_timestamp()-interval '1 hour') RETURNING consumed_at`).Scan(&original); err != nil {
+		t.Fatal(err)
+	}
+	// A test-owned function conflicts with v6's CREATE FUNCTION, after its
+	// ALTER TABLE RENAME has already run. Exercise the real selected Cutover
+	// runner and force its transaction to roll back mid-step.
+	if _, err := admin.Exec(ctx, `CREATE FUNCTION legacy_consume_reject_mutation() RETURNS trigger
+		LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$`); err != nil {
+		t.Fatal(err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	old, next := "averin_old_"+suffix, "averin_new_"+suffix
+	for _, sql := range []string{"CREATE ROLE " + old + " NOLOGIN", "CREATE ROLE " + next + " LOGIN"} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+old)
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+next)
+	}()
+	if err := Cutover(ctx, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), "apply step v6") {
+		t.Fatalf("conflicting function did not abort real v6 cutover: %v", err)
+	}
+	if got := maxVersion(t, admin); got != 5 {
+		t.Fatalf("interrupted cutover left version %d, want v5", got)
+	}
+	if !regExists(t, admin, "consume_ledger") || regExists(t, admin, "legacy_consume_exclusions") ||
+		regExists(t, admin, "consumed_nonces") || regExists(t, admin, "consumed_jtis") ||
+		regExists(t, admin, "nonce_ledger_cutover") {
+		t.Fatal("interrupted cutover leaked a renamed relation, new claims, or cutoff marker")
+	}
+	var preserved time.Time
+	if err := admin.QueryRow(ctx, `SELECT consumed_at FROM consume_ledger WHERE kind='nonce' AND consume_key='unknown-owner'`).Scan(&preserved); err != nil || !preserved.Equal(original) {
+		t.Fatalf("interrupted cutover altered old exclusion: got=%v original=%v err=%v", preserved, original, err)
+	}
+	if _, err := admin.Exec(ctx, `DROP FUNCTION legacy_consume_reject_mutation()`); err != nil {
+		t.Fatal(err)
+	}
+	// A real authorized retry migrates once; its DB clock marker and the old
+	// exclusion remain unchanged on a later steady-state startup.
+	if err := Cutover(ctx, scoped, []string{old}, next); err != nil {
+		t.Fatalf("retry cutover: %v", err)
+	}
+	if got := maxVersion(t, admin); got != 6 || regExists(t, admin, "consume_ledger") {
+		t.Fatalf("retry left version %d or old writable relation", got)
+	}
+	if err := admin.QueryRow(ctx, `SELECT consumed_at FROM legacy_consume_exclusions WHERE kind='nonce' AND consume_key='unknown-owner'`).Scan(&preserved); err != nil || !preserved.Equal(original) {
+		t.Fatalf("retry lost old exclusion: got=%v original=%v err=%v", preserved, original, err)
+	}
+	var stamped int
+	var cutoff time.Time
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM schema_migrations WHERE version=6`).Scan(&stamped); err != nil || stamped != 1 {
+		t.Fatalf("retry stamped v6 %d times: %v", stamped, err)
+	}
+	if err := admin.QueryRow(ctx, `SELECT legacy_exclusion_until FROM nonce_ledger_cutover WHERE singleton`).Scan(&cutoff); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatal(err)
+	}
+	var cutoffAfter time.Time
+	if err := admin.QueryRow(ctx, `SELECT legacy_exclusion_until FROM nonce_ledger_cutover WHERE singleton`).Scan(&cutoffAfter); err != nil || !cutoffAfter.Equal(cutoff) {
+		t.Fatalf("steady-state startup reset cutoff: before=%v after=%v err=%v", cutoff, cutoffAfter, err)
+	}
+}
+
 func TestTenantNonceCutoverRejectsLiveAndInheritedOldWriter(t *testing.T) {
 	scoped, admin, cleanup := newTestSchema(t)
 	defer cleanup()
