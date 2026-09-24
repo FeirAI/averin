@@ -146,8 +146,8 @@ def validate_fail_closed_guard(source: str, runner: str) -> None:
         "python3 formal/check-kani-domains.py >/dev/null || return 2",
         "kani_flags=(-Z stubbing)",
         "guard_flag=(--expect-guard)",
-        'cargo kani "${kani_flags[@]}"',
-        '"${guard_flag[@]}"',
+        'cargo kani ${kani_flags[@]+"${kani_flags[@]}"}',
+        '${guard_flag[@]+"${guard_flag[@]}"}',
     ):
         if required not in runner:
             raise ValueError(f"Kani runner omits fail-closed guard wiring: {required}")

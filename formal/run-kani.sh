@@ -28,10 +28,10 @@ run_harness() {
   log="$(mktemp)"
   # Stream progress as well as saving it: an outer CI timeout must not hide the last CBMC phase.
   set +e
-  cargo kani "${kani_flags[@]}" -p averin-decision-core --lib --no-default-features --exact --harness "$qualified" 2>&1 | tee "$log"
+  cargo kani ${kani_flags[@]+"${kani_flags[@]}"} -p averin-decision-core --lib --no-default-features --exact --harness "$qualified" 2>&1 | tee "$log"
   proof_exit=${PIPESTATUS[0]}
   set -e
-  if ! python3 formal/check-kani-success.py "$log" "$proof_exit" "$qualified" "${guard_flag[@]}"; then
+  if ! python3 formal/check-kani-success.py "$log" "$proof_exit" "$qualified" ${guard_flag[@]+"${guard_flag[@]}"}; then
     echo "run-kani: proof log retained at $log" >&2
     # Preserve Kani's actual exit for the mutant checker: exit 1 is a completed
     # counterexample, while tool errors and signals must never count as kills.
