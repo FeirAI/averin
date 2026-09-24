@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/pgschema"
 	"github.com/feirai/averin/server/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -179,8 +180,9 @@ func exerciseBrokerSeqVoidConcurrentGrantPostgres(t *testing.T, abort bool) {
 			close(hold.release)
 		}
 	}()
-	grantHandler := api.New(mustCore(t), hold, "k0").WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).Routes()
-	voidHandler := api.New(mustCore(t), other, "k0").WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+	sharedContent := content.NewMemStore()
+	grantHandler := api.New(mustCore(t), hold, "k0").WithContent(sharedContent).WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).Routes()
+	voidHandler := api.New(mustCore(t), other, "k0").WithContent(sharedContent).WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 	type result struct {
 		code int
