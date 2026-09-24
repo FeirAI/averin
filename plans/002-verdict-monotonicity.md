@@ -35,13 +35,17 @@ The actual conjunction continues through PoP, grant log, attestation, delegation
 
 Model separate dimensions: integrity, authenticated provenance, authorization, temporal certainty and completeness. Use an explicit information/claim order; do not order string labels lexically. An unknown result cannot satisfy a caller's required claim. A malformed optional disclosure disappearing may remove a parsing error; that alone must not become proof of a stronger claim. Thus do not assert the impossible property that every textual issue persists under arbitrary deletion.
 
-For fixed signed records/checkpoints, fixed out-of-band pins, fixed verification policy/time and a fixed requested claim:
+For fixed signed records/checkpoints, fixed authenticated adverse evidence (including independent revocation statements, validated commitment openings and contradictory verified TSA anchors), fixed out-of-band pins, fixed verification policy/time and a fixed requested claim:
 
-- Deleting anchors or other unsigned attachments cannot add authenticated/authorized/complete claims.
+- Deleting supporting attachments such as anchors, disclosures or Merkle paths cannot add authenticated/authorized/complete claims.
 - Any contradiction derivable from unchanged committed records remains a contradiction, regardless of closure branches.
 - Missing required revocation, attestation or disclosure evidence yields insufficient evidence, never affirmative satisfaction of that claim.
 - A capstone implies integrity success and all necessary externally pinned role evidence, including record provenance; embedded keys alone never satisfy authentication.
 - `grant_void` can close a sequence gap but cannot supply grant authority; no failed intent consumes an outcome.
+
+Execution review identified a necessary mathematical bound: a fresh non-revoking list plus a separately signed root proving revocation must be rejected, but removing that adverse root can leave sufficient disclosed evidence. A validated commitment opening that contradicts a credential label has the same limitation when its disclosure is optional: deleting the opening hides the contradiction. No verifier can retain unseen adverse evidence without a committed or out-of-band inventory. Do not claim monotonic acceptance under arbitrary deletion of authenticated adverse evidence. Keep both counterexamples as regressions/documented boundaries; always honor adverse authenticated evidence that is present. Do not require disclosure of every credential secret or add an inventory protocol merely to rescue an overbroad theorem. Prove committed-record contradiction preservation under all attachment deletion, and separately prove missing required artifacts/paths cannot satisfy a fixed caller policy. Default pinned mode resolves to disclosed evidence; Merkle or both modes are explicit caller choices, never selected from bundle presence. Where an existing signed deployment attestation commits artifact digests, test its omission protection. This correction does not weaken the implementation checks or substitute for production evidence-to-fact proofs.
+
+The executable Lean decision function must be related to its support predicate. Enumerate every production capstone prerequisite in the model, rather than hiding them in a single opaque completeness boolean. A contradiction-preservation theorem must conclude that authorization/completeness are refuted across attachment changes; an identity implication on a contradiction field is insufficient. Plan 012 closes the remaining source-refinement boundary.
 
 ## Steps and verification
 

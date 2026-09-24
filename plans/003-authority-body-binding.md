@@ -51,6 +51,8 @@ Inventory authority producers by source and role before editing: policy/human/de
 
 Use `averin.authority.v3` with explicit version/projection identification and a framed body commitment in addition to source/project/record/evidence hash. Version selection is explicit: malformed/unknown v3 fails, never falls back to v2. Old v2 remains cryptographically verifiable as `legacy_unbound`, cannot satisfy a body-bound-authority requirement, and is not rewritten. Preserve existing stronger Tier-B rederivation checks.
 
+Execution review: Govder already pins `golang.org/x/text v0.29.0` indirectly; promote it for v3 NFC rather than copy normalization tables or change the record body shape. Its Unicode 15 tables and Rust's Unicode 17 tables agree under normalization stability for their common assigned repertoire. Test that repertoire and newer characters explicitly. Averin must recompute the subject before sealing and reject a canonicalization mismatch without fallback. Opaque identities must be NFC-valid before lookup/signing; do not silently normalize them. Keep v2 helpers byte-stable, and replace non-ASCII-to-null fallbacks in the new v3 evidence path with explicit errors. Document the version boundary honestly until toolchains align.
+
 ## Steps and verification
 
 1. Specify the complete projection, exclusion list, canonical bytes and compatibility matrix. Add vectors for semantic defaults, unknown extensions, hiding commitments and every exclusion. Add tests reproducing the v2 substitution and requiring v3 failure.

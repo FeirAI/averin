@@ -53,7 +53,11 @@ Run each extended harness individually and record memory, time, unwind, and solv
 
 If needed, factor production parsing/decoding error data into typed codes and leave human-readable formatting at `Display`/API boundaries; do not substitute a simpler success/rejection algorithm only under `cfg(kani)`. Preserve user-visible errors with regression tests. Shard full-chunk, UTF-16, integer, string and panic-freedom proofs so solver memory is isolated; larger runners are acceptable. Retain the original named input domains at minimum. Any additional component proof with a smaller domain must state its composition argument and cannot silently replace the original goal. Remove the current identity-NFC stubs for any claim about actual normalization.
 
-**Verify**: `bash formal/run-kani.sh --extended` → every named harness reports `VERIFICATION SUCCESSFUL`; no `--skip`, stub, or timeout-as-pass path exists.
+**Verify**: `bash formal/run-kani.sh --extended` → every named harness reports `VERIFICATION SUCCESSFUL`; no skipped obligation, reachable target replacement, or timeout-as-pass path exists.
+
+Execution refinement (2026-09-24): exhaustive disjoint sign/decimal-width shards may discharge the original integer domain only when a machine-checked union covers every integer in `[-99999,99999]` exactly once and every shard passes the same production round-trip obligations. A prefix lemma must be asserted before it is assumed; its failure remains a failing proof, as checked by an intentionally false lemma. Diagnostic formatting and a numeric-first top-level dispatch may be factored without changing accepted input, errors or trailing-data handling.
+
+CBMC symbolic expansion still visits generic string/object branches for formatted integers even after the checked prefix lemma. A narrowly scoped compositional proof may replace a separately factored, unreachable general-dispatch helper with an unconditional assertion failure, subject to primary review. This replacement supplies no successful behavior: a passing proof must establish that the helper is never entered over the entire original shard domain. The real public typed entry dispatch, number parser, value equality, serializer and trailing checks remain executed. Require an exact wrong-route mutant to fail that guard, source wiring checks rejecting an empty/successful guard, and explicit documentation that the numeric proof establishes branch unreachability. General-parser and NFC obligations still require their actual reachable production paths; this exception cannot justify replacing a reachable parser or normalization function. Do not claim the exception accepted until its actual proof and mutant pass.
 
 ### Step 3: Wire the extended set into CI and mutations
 
@@ -74,7 +78,7 @@ Exercise full accepted/rejected base64 chunks and tail bits, strict UTF-16/lone 
 ## Done criteria
 
 - [ ] All eight extended harnesses pass by name in CI.
-- [ ] No target parser/NFC implementation is stubbed.
+- [ ] No reachable target parser/NFC behavior is stubbed; any reviewed fail-closed unreachable-branch guard has a proved domain and mandatory wrong-route mutant.
 - [ ] Bounds are explicit, checked, and documented.
 - [ ] Mutation coverage demonstrates the proofs are load-bearing.
 - [ ] Lean/golden/fuzz complements remain enabled.
@@ -82,7 +86,7 @@ Exercise full accepted/rejected base64 chunks and tail bits, strict UTF-16/lone 
 
 ## STOP conditions
 
-Stop if a harness can pass only by stubbing a production function, disabling NFC/Unicode behavior, omitting parser branches, hiding an unwind failure, or treating timeout as success. Stop if resource needs exceed the available CI class without an approved runner change.
+Stop if a harness can pass only by substituting behavior for a reachable production function, disabling NFC/Unicode behavior, omitting reachable parser branches, hiding an unwind failure, or treating timeout as success. The checked fail-closed unreachable-branch exception above must not conceal any successful execution. Stop if resource needs exceed the available CI class without an approved runner change.
 
 ## Maintenance notes
 

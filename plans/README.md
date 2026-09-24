@@ -10,20 +10,24 @@ The largest immediate gains are body-bound authority, verifier claim monotonicit
 
 | Plan | Result | Priority | Depends on | Change risk | Status |
 |---|---|---|---|---|---|
-| [001](001-assurance-baseline.md) | Mandatory real-Postgres API race tests; accurate claim/gate inventory | P1 | — | Low | TODO |
-| [002](002-verdict-monotonicity.md) | Evidence deletion cannot strengthen a requested trust claim; proved verdict model | P1 | 001 | High | TODO |
-| [003](003-authority-body-binding.md) | Authority v3 authenticates the semantic record it approves, including Govder producers | P1 | 001; align 002 report contract | High | TODO |
-| [004](004-grant-pop-context.md) | PoP binds the effective request; capability tenant identity stays authenticated at use | P1 | 001 | High | TODO |
-| [005](005-tenant-nonce-ledger.md) | Tenant-isolated nonce state with replay-safe migration | P1 | 001, 004 | High | TODO |
-| [006](006-recovery-authorization.md) | Project writers cannot exercise operator sequence-recovery powers | P1 | 001 | Medium | TODO |
-| [007](007-project-transactions.md) | Database-enforced project serialization and authoritative replica state | P1 | 001; integrate 004/005 for full use-path HA | High | TODO |
-| [008](008-bounded-sequence-recovery.md) | Durable fencing resolves retry-starved reservations without global ingest stalls | P1 | 001, 006, 007 | High | TODO |
-| [009](009-temporal-revocation.md) | Proven historical ordering separated from current revocation, with conservative fallback | P2 | 001, 002, 007; coordinate 003/004 formats | High | TODO |
-| [010](010-oracle-and-normalization.md) | Exact production preimage bytes and systematic identity/NFC conformance | P1 | 001 | Medium | TODO |
-| [011](011-bounded-parser-proofs.md) | Extended parser/encoding proofs actually pass; reproducible fuzzing | P1 | 001 | Medium | TODO |
+| [001](001-assurance-baseline.md) | Mandatory real-Postgres API race tests; accurate claim/gate inventory | P1 | — | Low | DONE — `ef02563`, local gates independently verified |
+| [002](002-verdict-monotonicity.md) | Supporting-evidence deletion cannot strengthen claims while authenticated adverse evidence is fixed; proved verdict model | P1 | 001 | High | DONE — combined `f810504`, source and native/server/PG/WASM/formal gates independently verified |
+| [003](003-authority-body-binding.md) | Authority v3 authenticates the semantic record it approves, including Govder producers | P1 | 001; align 002 report contract | High | DONE — combined `f810504`, Govder `0a22220`; producer and cross-plane gates verified |
+| [004](004-grant-pop-context.md) | PoP binds the effective request; capability tenant identity stays authenticated at use | P1 | 001 | High | DONE — combined `f810504`, Vultrino `85b386f`; exact-byte and real producer gates verified |
+| [005](005-tenant-nonce-ledger.md) | Tenant-isolated nonce state with replay-safe migration | P1 | 001, 004, 007, 008 schema step | High | DONE — `52518ab`, reviewed source/upgrade/rollback/composition and primary server/PG/TLC gates passed |
+| [006](006-recovery-authorization.md) | Project writers cannot exercise operator sequence-recovery powers | P1 | 001 | Medium | DONE — `a2e3233`, `87d75e2`; server/PG gates independently verified |
+| [007](007-project-transactions.md) | Database-enforced project serialization and authoritative replica state | P1 | 001; integrate 004/005 for full use-path HA | High | DONE — `33743c6`, source/server/PG/race reviewed and full TLC matrix passed |
+| [008](008-bounded-sequence-recovery.md) | Durable fencing resolves retry-starved reservations without global ingest stalls | P1 | 001, 006, 007 | High | DONE — `7e9b614`, primary source/fresh server/uncached PG and new TLC checks passed |
+| [009](009-temporal-revocation.md) | Proven historical ordering separated from current revocation, with conservative fallback | P2 | 001, 002, 005, 007, 008; coordinate 003/004 formats | High | TODO — reconciled plan ready after user resumes |
+| [010](010-oracle-and-normalization.md) | Exact production preimage bytes and systematic identity/NFC conformance | P1 | 001 | Medium | DONE — `03eaf11`, core/server/PG/oracle/SDK gates independently verified |
+| [011](011-bounded-parser-proofs.md) | Extended parser/encoding proofs actually pass; reproducible fuzzing | P1 | 001 | Medium | IN PROGRESS — checkpoint `a8d1db0`; five extended families remain unverified, not integrated |
 | [012](012-production-refinement.md) | Production seal and verdict code connected to checked proofs | P1 | 002, 010, 011 | High | TODO |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED (reason), REJECTED (new evidence and rationale). A successful tool spike is not completion of 012. A proof timing out is not completion of 011. Writing a migration is not completion of 005/007 without upgrade and concurrency gates.
+
+User selected a checkpoint after nonce verification/integration on 2026-09-24, then authorized pushing the task branches and preparing a handover. Nine plans are accepted; 009, 011 and 012 remain selected and incomplete. See [CONTINUATION.md](CONTINUATION.md) for exact branches, evidence and next steps, and [HANDOVER.md](HANDOVER.md) for the continuation prompt. No background implementation is intended to continue after the checkpoint. Earlier per-plan statements withholding push authorization describe the original implementation scope; this later request authorizes publication of the four named task branches only.
+
+Implementation authorized on 2026-09-23 using **GPT-6 Sol, high reasoning** subagents. The integration worktree is `/Users/dzcodes/Projects/feir-ai/.worktrees/averin-trust-implementation`, branch `advisor/averin-trust-implementation`, starting at the reviewed PR head. The primary agent owns review and verification; separate worktrees isolate executor changes. Live handoff/evidence is recorded in [EXECUTION.md](EXECUTION.md). Historical review notes below describe the planning pass, not the current implementation state.
 
 After 001, work can proceed in independent tracks: verifier/proofs (002/010/011), authority producer migration (003), request/ledger migration (004→005), and operator/database recovery (006/007→008). Coordinate overlapping `verify.rs`, API and migration edits; these are not independent write scopes. Give migrations monotonic numbers at integration, never edit an already-shipped migration. Integrate 009 only after the authoritative ordering and verifier claim contracts exist. Continue 012 into the verdict kernel after 002; retain independent golden/oracle tests.
 
@@ -66,7 +70,7 @@ This inventory covers the PR's six “Known gaps” bullets, limitations embedde
 
 ## Verification and handoff rules
 
-Before implementation, use the planned PR revision or reconcile against its merged descendant; these plans are intentionally stored on the local main checkout without switching it. Each file is self-contained with scope, current behavior, migration contract, tests and STOP conditions. Any unknown prerequisite must be resolved without weakening a trust claim to satisfy a test.
+Before implementation, reconcile against the accepted integration branch and any task-specific checkpoint. These plans were originally stored on the local main checkout without switching it; the publication checkpoint also commits them on the integration branch. Each file is self-contained with scope, current behavior, migration contract, tests and STOP conditions. Any unknown prerequisite must be resolved without weakening a trust claim to satisfy a test.
 
 Repository gates discovered during review:
 
