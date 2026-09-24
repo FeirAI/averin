@@ -481,7 +481,7 @@ func (m *Mem) PutRecord(projectID, idemKey string, rec Record) (Record, bool, er
 	}
 	if rid := recordIDOf(rec.JSON); rid != "" {
 		for _, f := range p.fences {
-			if f.GrantID == rid && !recoveryTombstoneInsert(rec.JSON, idemKey, f.Seq) {
+			if f.GrantID == rid && !recoveryTombstoneInsert(rec.JSON, idemKey, f) {
 				return Record{}, false, ErrRecoveryFenced
 			}
 		}

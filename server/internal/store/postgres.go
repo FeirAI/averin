@@ -312,7 +312,7 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 	if rid := recordIDOf(rec.JSON); rid != "" {
 		if f, found, err := p.RecoveryFenceByGrant(projectID, rid); err != nil {
 			return Record{}, false, err
-		} else if found && !recoveryTombstoneInsert(rec.JSON, idemKey, f.Seq) {
+		} else if found && !recoveryTombstoneInsert(rec.JSON, idemKey, f) {
 			return Record{}, false, ErrRecoveryFenced
 		}
 	}

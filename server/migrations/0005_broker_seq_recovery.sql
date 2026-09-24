@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS broker_seq_recovery_result (
     completed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (project_id, seq),
     FOREIGN KEY (project_id, seq, generation)
-        REFERENCES broker_seq_recovery_fence(project_id, seq, generation)
+        REFERENCES broker_seq_recovery_fence(project_id, seq, generation),
+    FOREIGN KEY (project_id, winning_record_hash)
+        REFERENCES records(project_id, content_hash)
 );
 
 DO $$
