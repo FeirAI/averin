@@ -237,7 +237,11 @@ pub(super) struct ValidatedFacts {
     pub(super) brokered_use_valid: bool,
     pub(super) introspected_use_valid: bool,
     pub(super) capstone: CapstoneFacts,
-    pub(super) committed_contradiction: bool,
+    /// Contradiction entirely inside fixed signed records/checkpoints, independent of support.
+    pub(super) immutable_record_contradiction: bool,
+    /// Other contradictions established by checked Tier-B passes (including policy-pinned
+    /// external facts). They are still adverse while present but may have a narrower erasure law.
+    pub(super) checked_contradiction: bool,
     pub(super) adverse_disclosure: bool,
     /// Contradictory/noncanonical times among independently verified TSA anchors.
     pub(super) adverse_anchor: bool,
@@ -245,6 +249,9 @@ pub(super) struct ValidatedFacts {
     pub(super) revocation_issuer_pinned: bool,
     pub(super) disclosed_revocation_fresh: bool,
     pub(super) merkle_revocation_fresh: bool,
+    /// Every brokered use and indexed native credential supplied a valid non-membership path
+    /// against the checked root. Root freshness alone never certifies a hidden grant set.
+    pub(super) merkle_nonmembership_complete: bool,
     pub(super) disclosure_complete: bool,
     pub(super) policy: ClaimPolicy,
 }
@@ -284,15 +291,19 @@ impl ValidatedFacts {
                 self.revocation_issuer_pinned && self.disclosed_revocation_fresh
             }
             RevocationRequirement::Merkle => {
-                self.revocation_issuer_pinned && self.merkle_revocation_fresh
+                self.revocation_issuer_pinned
+                    && self.merkle_revocation_fresh
+                    && self.merkle_nonmembership_complete
             }
             RevocationRequirement::Both => {
                 self.revocation_issuer_pinned
                     && self.disclosed_revocation_fresh
                     && self.merkle_revocation_fresh
+                    && self.merkle_nonmembership_complete
             }
         };
-        let adverse = self.committed_contradiction
+        let adverse = self.immutable_record_contradiction
+            || self.checked_contradiction
             || self.revoked_membership
             || self.adverse_disclosure
             || self.adverse_anchor;
@@ -349,6 +360,203 @@ impl ValidatedFacts {
             complete_introspected,
             requested: self.policy.requested,
             requested_decision,
+        }
+    }
+}
+
+#[cfg(test)]
+mod differential {
+    use super::*;
+
+    fn bit(n: usize, k: usize) -> bool {
+        n & (1 << k) != 0
+    }
+
+    // Mirrors Oracle/Verdict.lean's checked-fact projection. The Lean oracle also models the
+    // signed records and support attachments used to derive these facts. Bundle-byte extraction
+    // remains a separate end-to-end obligation, covered by adversarial tests.
+    fn facts(name: &str) -> ValidatedFacts {
+        let n = name
+            .strip_prefix("bits_")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(191);
+        let pin = bit(n, 0);
+        let anchor = bit(n, 1);
+        let role = bit(n, 2);
+        let use_ok = bit(n, 3);
+        let rev_fresh = bit(n, 4) && anchor;
+        let attestation = bit(n, 5) && anchor;
+        let revoked = bit(n, 6);
+        let disclosed = bit(n, 7);
+        let key = [1; 32];
+        let mut result = ValidatedFacts {
+            structural_integrity: true,
+            record_count: 1,
+            pinned_record_seals: if pin && anchor {
+                vec![PinnedRecordSeal {
+                    record_hash: "h1".into(),
+                    key_bytes: key,
+                }]
+            } else {
+                vec![]
+            },
+            pinned_signer_keys: if pin { vec![key] } else { vec![] },
+            pinned_role_authority: role,
+            latest_checkpoint_sequence: 10,
+            anchors: if anchor {
+                vec![AnchoredCheckpoint {
+                    checkpoint_hash: "cp10".into(),
+                    timestamp: "5".into(),
+                    sequence: 10,
+                }]
+            } else {
+                vec![]
+            },
+            attestation_valid: attestation,
+            brokered_use_valid: use_ok,
+            introspected_use_valid: false,
+            capstone: CapstoneFacts {
+                manifest: true,
+                two_phase: true,
+                no_incomplete_intent: true,
+                taxonomy: true,
+                every_action_verified: true,
+                every_pop_reverified: true,
+                grant_log: true,
+                attestation: true,
+                no_violation: true,
+                no_pending: true,
+                bounded_reuse: true,
+                cosignatures: true,
+                delegation: true,
+                revocation: true,
+                federation: true,
+                coverage: true,
+                brokered_surface: true,
+                introspected_surface: false,
+            },
+            immutable_record_contradiction: false,
+            checked_contradiction: false,
+            adverse_disclosure: false,
+            adverse_anchor: false,
+            revoked_membership: revoked,
+            revocation_issuer_pinned: true,
+            disclosed_revocation_fresh: rev_fresh,
+            merkle_revocation_fresh: false,
+            merkle_nonmembership_complete: false,
+            disclosure_complete: disclosed,
+            policy: ClaimPolicy {
+                requested: RequestedClaim::Authorized,
+                revocation: RevocationRequirement::Pinned,
+                require_disclosure: true,
+                require_attestation: false,
+            },
+        };
+        if let Some(i) = name
+            .strip_prefix("capstone_")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            match i {
+                0 => result.capstone.manifest = false,
+                1 => result.capstone.two_phase = false,
+                2 | 6 => result.capstone.no_incomplete_intent = false,
+                3 | 18 | 19 => result.capstone.brokered_surface = false,
+                4 => result.capstone.every_pop_reverified = false,
+                5 => result.capstone.every_action_verified = false,
+                7 => result.capstone.taxonomy = false,
+                8 => result.capstone.grant_log = false,
+                9 => result.capstone.attestation = false,
+                10 => result.capstone.no_violation = false,
+                11 => result.capstone.no_pending = false,
+                12 => result.capstone.bounded_reuse = false,
+                13 => result.capstone.cosignatures = false,
+                14 => result.capstone.delegation = false,
+                15 => result.capstone.revocation = false,
+                16 => result.capstone.federation = false,
+                17 => result.capstone.coverage = false,
+                _ => panic!("unknown capstone case {i}"),
+            }
+        }
+        match name {
+            "adverse_opening" => result.adverse_disclosure = true,
+            "adverse_anchor" => result.adverse_anchor = true,
+            "missing_seal" => {
+                result.structural_integrity = false;
+                result.pinned_record_seals.clear();
+            }
+            "missing_path" | "present_path" => {
+                result.policy.revocation = RevocationRequirement::Both;
+                result.merkle_revocation_fresh = true;
+                result.merkle_nonmembership_complete = name == "present_path";
+            }
+            "anchorless_default" => {
+                result.anchors.clear();
+                result.attestation_valid = false;
+                result.revocation_issuer_pinned = false;
+                result.disclosed_revocation_fresh = false;
+                result.policy.require_disclosure = false;
+            }
+            "required_attestation_missing" => {
+                result.attestation_valid = false;
+                result.policy.require_attestation = true;
+            }
+            "noncontributor_role" | "non_grant_shared_gid" => {
+                result.record_count = 2;
+                result.pinned_record_seals.push(PinnedRecordSeal {
+                    record_hash: "h2".into(),
+                    key_bytes: key,
+                });
+            }
+            "introspected" => {
+                result.brokered_use_valid = false;
+                result.introspected_use_valid = true;
+                result.capstone.brokered_surface = false;
+                result.capstone.introspected_surface = true;
+            }
+            "committed_conflict" => {
+                result.record_count = 2;
+                result.pinned_record_seals.push(PinnedRecordSeal {
+                    record_hash: "h2".into(),
+                    key_bytes: key,
+                });
+                result.immutable_record_contradiction = true;
+            }
+            _ if name.starts_with("bits_") || name.starts_with("capstone_") => {}
+            _ => panic!("unknown verdict oracle case {name}"),
+        }
+        result
+    }
+
+    #[test]
+    fn verdict_differential() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../formal/oracle/verdict-expected.json"
+        );
+        let expected = std::fs::read_to_string(path).expect("build verdict_oracle first");
+        let rows = CanonValue::parse(&expected).expect("verdict oracle JSON");
+        let rows = rows.as_array().expect("oracle rows");
+        assert_eq!(rows.len(), 287, "all finite fact and capstone cases");
+        for row in rows {
+            let name = row
+                .get("name")
+                .and_then(CanonValue::as_str)
+                .expect("case name");
+            let got = facts(name).decide();
+            for (field, actual) in [
+                ("integrity", got.integrity),
+                ("authenticated", got.authenticated),
+                ("authorized", got.authorized),
+                ("temporal", got.temporal),
+                ("complete_brokered", got.complete_brokered),
+                ("complete_introspected", got.complete_introspected),
+            ] {
+                assert_eq!(
+                    row.get(field).and_then(CanonValue::as_str),
+                    Some(actual.as_str()),
+                    "{name}.{field}"
+                );
+            }
         }
     }
 }

@@ -1,0 +1,14 @@
+Mutant: m16-verdict-omits-pop-capstone. Named detector: verdict_differential.
+
+--- a/core/src/verify/verdict.rs
++++ b/core/src/verify/verdict.rs
+@@ -204,9 +204,8 @@
+             && self.two_phase
+             && self.no_incomplete_intent
+             && self.taxonomy
+             && self.every_action_verified
+-            && self.every_pop_reverified
+             && self.grant_log
+             && self.attestation
+             && self.no_violation
+             && self.no_pending

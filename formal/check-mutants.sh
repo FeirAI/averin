@@ -7,6 +7,8 @@
 #   inventory  python3 formal/check-refinement.py            (tag literals <-> Preimage.lean families)
 #   oracle     cargo test --test oracle                        (Rust bytes == executable Lean model)
 #   golden     cargo test --test golden                        (committed golden vectors)
+#   verdict    cargo test --lib verdict_differential          (Lean model vs pure verdict kernel)
+#   adversarial cargo test --test adversarial                   (bundle evidence-to-fact regressions)
 #   kani       the named bounded proof, only for m3 / m4       (see kani_harness below); for those two
 #              mutants the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
 #
@@ -58,6 +60,8 @@ run_gate() {
       inventory) python3 formal/check-refinement.py ;;
       oracle) cargo test -q -p averin-decision-core --test oracle ;;
       golden) cargo test -q -p averin-decision-core --test golden ;;
+      verdict) cargo test -q -p averin-decision-core --lib verdict_differential ;;
+      adversarial) cargo test -q -p averin-decision-core --test adversarial ;;
       kani) cargo kani -p averin-decision-core --no-default-features -Z stubbing --harness "$3" ;;
     esac
   ) >"$log" 2>&1
@@ -73,7 +77,7 @@ fi
 
 echo "== baseline (unmutated): every gate must pass"
 fresh_tree
-for g in inventory oracle golden; do
+for g in inventory oracle golden verdict adversarial; do
   if ! run_gate baseline "$g"; then
     echo "check-mutants: FAIL: gate '$g' fails on the unmutated tree (see $logs/baseline-$g.log)" >&2
     exit 1
@@ -98,7 +102,7 @@ for patch in formal/mutants/*.patch; do
     cat "$logs/$name-apply.log" >&2
     exit 1
   fi
-  gates=(inventory oracle golden)
+  gates=(inventory oracle golden verdict adversarial)
   h="$(kani_harness "$name")"
   killed=()
   # A mutant with a named harness must be killed by that harness itself (a real counterexample, not an

@@ -133,6 +133,7 @@
     </div>
 
     <script type="module">
+      import { claimVerdict } from "./claim-verdict.js";
       import { initAverin } from "./averin.js";
 
       // PINNED trust root. The .wasm is the verifier. A swapped binary could certify anything. This digest
@@ -283,6 +284,7 @@
         // (sequence_verified/gateway_enforced = pinned + elevated; the value itself is the honest signal).
         const acct = `<div class="sec">accountability</div>
           <div class="stats">
+            ${r.claims_version === "1" && r.claims ? stat(esc(r.claims.requested_decision), `required ${esc(r.claims.requested)} claim · claims v1`) : ""}
             ${stat(esc(r.grant_accountability || "n/a"), `grants · ${r.grant_verified ?? 0}/${r.grant_total ?? 0} verified`)}
             ${stat(`${r.uses_matched ?? 0}`, `uses matched · ${r.unmatched_pending ?? 0} pending · ${r.unmatched_violation ?? 0} violations`)}
             ${stat(esc(r.action_completeness || "n/a"), `action completeness · resource ${esc(r.resource_trust || "n/a")}`)}
@@ -308,10 +310,17 @@
         // (a self-signed bundle satisfies it), gets a visually distinct amber "CONSISTENT" verdict with the
         // caveat above the fold, NOT a plain green PASS.
         const pinned = !!r.keys_externally_pinned;
-        const verdictClass = !r.ok ? "fail" : pinned ? "pass" : "qual";
-        const verdictWord = !r.ok ? "FAIL" : pinned ? "PASS" : "CONSISTENT";
+        const claim = claimVerdict(r);
+        const requestedDecision = claim.valid ? r.claims.requested_decision : null;
+        const claimUnmet = claim.word === "INSUFFICIENT" || requestedDecision === "refuted";
+        const verdictClass = claim.className;
+        const verdictWord = claim.word;
         const verdictCaveat = !r.ok
           ? ""
+          : !claim.valid
+            ? `<div class="vsub">The claims contract is missing or unsupported. Required-claim acceptance is unavailable.</div>`
+          : claimUnmet
+            ? `<div class="vsub">The required ${esc(r.claims.requested)} claim is ${esc(requestedDecision)}. Missing evidence never counts as satisfaction.</div>`
           : pinned
             ? `<div class="vsub ok">Trust roots externally pinned: record <b>authenticity</b> is proven against keys you supplied out of band.</div>`
             : `<div class="vsub">Structure valid &amp; internally consistent, but trust roots were <b>NOT externally pinned</b> (the only trust root is the bundle's own embedded keys, so a fully self-signed bundle reaches this same state). <b>Authenticity is unverified.</b> Pin <code>signing_keys</code> below to earn a green PASS.</div>`;

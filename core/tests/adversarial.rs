@@ -19,6 +19,7 @@ use averin_decision_core::verify::{
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 fn fixture() -> CanonValue {
@@ -36,6 +37,99 @@ fn arr(b: &CanonValue, k: &str) -> Vec<CanonValue> {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default()
+}
+
+#[test]
+fn shared_attachment_corpus_native_claim_support_erasure() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures");
+    let source = CanonValue::parse(
+        &std::fs::read_to_string(fixture_dir.join("bundle-broker-valid.json")).unwrap(),
+    )
+    .unwrap();
+    let cases = CanonValue::parse(
+        &std::fs::read_to_string(fixture_dir.join("verdict-attachment-cases.json")).unwrap(),
+    )
+    .unwrap();
+    let mut support = BTreeMap::<String, BTreeSet<String>>::new();
+    for case in cases.as_array().unwrap() {
+        let name = case.get("name").and_then(CanonValue::as_str).unwrap();
+        let mut bundle = source.get("bundle").unwrap().clone();
+        let mut opts = source.get("opts").unwrap().clone();
+        if case.get("strip_anchor") == Some(&CanonValue::Bool(true)) {
+            let checkpoints = arr(&bundle, "checkpoints")
+                .into_iter()
+                .map(|cp| cp.without_keys(&["anchor"]))
+                .collect();
+            bundle = change_field(&bundle, "checkpoints", CanonValue::Array(checkpoints));
+        }
+        if case.get("malformed_disclosures") == Some(&CanonValue::Bool(true)) {
+            bundle = change_field(
+                &bundle,
+                "disclosures",
+                CanonValue::string("bad optional disclosure"),
+            );
+        }
+        if case.get("pin_signer") == Some(&CanonValue::Bool(true)) {
+            let keys = arr(&bundle, "keys")
+                .iter()
+                .map(|key| key.get("public_key").unwrap().clone())
+                .collect();
+            opts = change_field(&opts, "signing_keys", CanonValue::Array(keys));
+        }
+        let report = CanonValue::parse(&verify_bundle_with_json(
+            &bundle.serialize(),
+            &opts.serialize(),
+        ))
+        .unwrap();
+        assert_eq!(
+            report.get("claims_version").and_then(CanonValue::as_str),
+            Some("1")
+        );
+        let claims = report.get("claims").unwrap();
+        let requested = claims
+            .get("requested")
+            .and_then(CanonValue::as_str)
+            .unwrap();
+        assert_eq!(
+            claims.get("requested_decision"),
+            claims.get(requested),
+            "{name} requested decision"
+        );
+        let satisfied = [
+            "integrity",
+            "authenticated",
+            "authorized",
+            "temporal",
+            "complete_brokered",
+            "complete_introspected",
+        ]
+        .into_iter()
+        .filter(|field| claims.get(field).and_then(CanonValue::as_str) == Some("satisfied"))
+        .map(str::to_owned)
+        .collect();
+        support.insert(name.to_owned(), satisfied);
+    }
+    let subset = |small: &str, large: &str| {
+        assert!(
+            support[small].is_subset(&support[large]),
+            "support gained after erasure {large} -> {small}: {:?} vs {:?}",
+            support[small],
+            support[large]
+        );
+    };
+    subset("anchor_removed", "full");
+    subset("self_signed_anchor_removed", "self_signed");
+    subset("anchor_removed_malformed", "malformed_optional");
+    subset(
+        "self_signed_anchor_removed_malformed",
+        "self_signed_malformed",
+    );
+    subset("full", "malformed_optional");
+    subset("malformed_optional", "full");
+    subset("self_signed", "full");
 }
 
 fn rebuild(
@@ -3050,11 +3144,14 @@ fn duplicate_signed_record_id_refutes_structural_claim_even_with_a_valid_chain()
         "checkpoints",
         CanonValue::Array(vec![cp]),
     );
-    let r = verify_bundle_with(&conflict, &opts);
-    assert_eq!(r.records_proven, r.records_total, "{:?}", r.issues);
-    assert!(r.dag_ok && r.chain_ok, "{:?}", r.issues);
-    assert_eq!(r.claims().integrity, ClaimDecision::Refuted);
-    assert_eq!(r.claims().authorized, ClaimDecision::Refuted);
+    let stripped = strip_anchors(&conflict);
+    for candidate in [&conflict, &stripped] {
+        let r = verify_bundle_with(candidate, &opts);
+        assert_eq!(r.records_proven, r.records_total, "{:?}", r.issues);
+        assert!(r.dag_ok && r.chain_ok, "{:?}", r.issues);
+        assert_eq!(r.claims().integrity, ClaimDecision::Refuted);
+        assert_eq!(r.claims().authorized, ClaimDecision::Refuted);
+    }
 }
 
 fn claim_two_checkpoint_bundle(backdated: bool, mask: u8) -> (CanonValue, VerifyOptions) {
@@ -6013,6 +6110,113 @@ fn validated_adverse_opening_is_enforced_and_bounds_support_erasure() {
         ClaimDecision::Satisfied,
         "removing a valid contradictory opening changes adverse evidence: {:?}",
         stripped.issues
+    );
+}
+
+#[test]
+fn required_disclosure_covers_every_committed_broker_grant() {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let descriptor1 = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true);
+    let binding1 = sha256_prefixed(descriptor1.serialize().as_bytes());
+    let grant1_bundle = cred_bundle(
+        &rec,
+        &tsa,
+        &descriptor1,
+        &cred_ge(&vk_cnf_kid(&cnf.verifying_key()), &binding1),
+    );
+    let grant1 = arr(&grant1_bundle, "records").remove(0);
+    let disclosure1 = arr(&grant1_bundle, "disclosures").remove(0);
+    let second_id = "grant-2";
+    let descriptor2 = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, second_id, EXP, true);
+    let binding2 = sha256_prefixed(descriptor2.serialize().as_bytes());
+    let ge2 = change_field(
+        &cred_ge(&vk_cnf_kid(&cnf.verifying_key()), &binding2),
+        "grant_id",
+        CanonValue::string(second_id),
+    );
+    let nonce = [0x22u8; 32];
+    let commitment2 = averin_decision_core::commit(
+        averin_decision_core::FieldDomain::parse("credential").unwrap(),
+        descriptor2.serialize().as_bytes(),
+        &nonce,
+    )
+    .unwrap();
+    let grant2 = seal_grant_cred(&rec, &rec, second_id, &ge2, &commitment2);
+    let disclosure2 = CanonValue::object(vec![
+        ("record_id".into(), CanonValue::string(second_id)),
+        ("field".into(), CanonValue::string("credential")),
+        (
+            "value_b64".into(),
+            CanonValue::string(averin_decision_core::b64::encode(
+                descriptor2.serialize().as_bytes(),
+            )),
+        ),
+        (
+            "nonce_hex".into(),
+            CanonValue::string(averin_decision_core::hashx::hex_lower(&nonce)),
+        ),
+    ])
+    .unwrap();
+    let pc = sha256_prefixed(b"params-commit");
+    let use_rec = seal_d2_use_with_binding(
+        &rec,
+        &res,
+        "use-1",
+        &[content_hash_of(&grant1)],
+        USED,
+        &pc,
+        &pc,
+        &vk_cnf_kid(&cnf.verifying_key()),
+        &cnf.verifying_key(),
+        &cnf,
+        &binding1,
+    );
+    let cp = checkpoint_over(
+        &rec,
+        &[content_hash_of(&use_rec), content_hash_of(&grant2)],
+        3,
+        Some(&tsa),
+    );
+    let base = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant1, grant2, use_rec],
+        vec![cp],
+    );
+    let (_, mut opts) = claim_ready_bundle();
+    opts.claim_policy.require_disclosure = true;
+    let partial = change_field(
+        &base,
+        "disclosures",
+        CanonValue::Array(vec![disclosure1.clone()]),
+    );
+    let partial_report = verify_bundle_with(&partial, &opts);
+    assert_eq!(partial_report.cred_label_checks, 1);
+    assert_eq!(partial_report.cred_label_matched, 1);
+    assert_eq!(
+        partial_report.claims().authorized,
+        ClaimDecision::Insufficient,
+        "one opened grant cannot prove disclosure over both: {:?}",
+        partial_report.issues
+    );
+    let full = change_field(
+        &base,
+        "disclosures",
+        CanonValue::Array(vec![disclosure1, disclosure2]),
+    );
+    let full_report = verify_bundle_with(&full, &opts);
+    assert_eq!(
+        full_report.cred_label_matched, 2,
+        "{:?}",
+        full_report.issues
+    );
+    assert_eq!(
+        full_report.claims().authorized,
+        ClaimDecision::Satisfied,
+        "all contributing grants are opened: {:?}",
+        full_report.issues
     );
 }
 
@@ -9215,6 +9419,26 @@ fn merkle_rev_bundle_verify(
     root_obj: CanonValue,
     proofs: Vec<(String, CanonValue)>,
 ) -> VerifyReport {
+    merkle_rev_bundle_verify_with_policy(
+        rec,
+        res,
+        tsa,
+        rev,
+        root_obj,
+        proofs,
+        RevocationRequirement::Pinned,
+    )
+}
+
+fn merkle_rev_bundle_verify_with_policy(
+    rec: &SigningKey,
+    res: &SigningKey,
+    tsa: &SigningKey,
+    rev: &SigningKey,
+    root_obj: CanonValue,
+    proofs: Vec<(String, CanonValue)>,
+    requirement: RevocationRequirement,
+) -> VerifyReport {
     let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
     let grant = seal_grant(rec, rec, GID, &ge);
     let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
@@ -9236,6 +9460,7 @@ fn merkle_rev_bundle_verify(
         tsa.verifying_key(),
     );
     opts.revocation_keys = vec![rev.verifying_key()];
+    opts.claim_policy.revocation = requirement;
     verify_bundle_with(&bundle, &opts)
 }
 
@@ -9372,6 +9597,92 @@ fn tier_b_merkle_revocation_missing_proof_is_fail_closed() {
         "issues: {:?}",
         r.issues
     );
+}
+
+#[test]
+fn fresh_merkle_root_without_nonmembership_path_cannot_satisfy_temporal_claim() {
+    let (rec, res, tsa, rev) = rev_keys();
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let attest = signing_key_from_seed(&[12u8; 32]);
+    let ge = change_field(
+        &grant_evidence_d6(GID, 1),
+        "cnf_kid",
+        CanonValue::string(vk_cnf_kid(&cnf.verifying_key())),
+    );
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let gh = content_hash_of(&grant);
+    let pc = sha256_prefixed(b"params-commit");
+    let use_rec = seal_d2_use(
+        &rec,
+        &res,
+        "use-1",
+        &[gh.clone()],
+        USED,
+        &pc,
+        &pc,
+        &vk_cnf_kid(&cnf.verifying_key()),
+        &cnf.verifying_key(),
+        &cnf,
+    );
+    let head_root = ghr(&[(1, &gh)]);
+    let head = grant_head_cv(1, &ghr(&[]), &head_root);
+    let cp = checkpoint_with_head(&rec, &[content_hash_of(&use_rec)], 2, head, Some(&tsa));
+    let mut bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp.clone()]);
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let mut subject = honest_subject(&rec, &res, &checkpoint_hash(&cp), &head_root);
+    subject = change_field(&subject, "revocation_digest", CanonValue::string(""));
+    subject = change_field(
+        &subject,
+        "revocation_merkle_digest",
+        CanonValue::string(sha256_prefixed(root.serialize().as_bytes())),
+    );
+    let att = attestation(
+        &cnf_kid(&attest.verifying_key()),
+        ATT_ISSUED,
+        ATT_NOT_AFTER,
+        subject,
+        &attest,
+    );
+    bundle = change_field(&bundle, "deployment_attestation", att);
+    bundle = change_field(&bundle, "revocation_merkle_root", root);
+    let mut opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    opts.trusted_keys = Some(vec![TrustedKey::from(rec.verifying_key())]);
+    opts.revocation_keys = vec![rev.verifying_key()];
+    opts.attestation_keys = vec![attest.verifying_key()];
+    opts.claim_policy.revocation = RevocationRequirement::Merkle;
+    let missing = verify_bundle_with(&bundle, &opts);
+    assert_eq!(missing.revocation_merkle_status, "fresh");
+    assert_eq!(
+        missing.attestation_status, "attested_claims",
+        "{:?}",
+        missing.issues
+    );
+    assert_eq!(missing.claims().temporal, ClaimDecision::Insufficient);
+    assert_eq!(missing.claims().authorized, ClaimDecision::Insufficient);
+    let present_bundle = change_field(
+        &bundle,
+        "revocation_proofs",
+        CanonValue::object(vec![(GID.into(), nonmembership_proof(&leaves, GID))]).unwrap(),
+    );
+    let present = verify_bundle_with(&present_bundle, &opts);
+    assert_eq!(present.revocation_merkle_status, "fresh");
+    assert_eq!(
+        present.attestation_status, "attested_claims",
+        "{:?}",
+        present.issues
+    );
+    assert_eq!(
+        present.claims().temporal,
+        ClaimDecision::Satisfied,
+        "fresh root plus validated path and attestation establish temporal evidence: {:?}",
+        present.issues
+    );
+    assert_eq!(present.revocation_nonmembership_verified, 1);
 }
 
 #[test]
@@ -13517,6 +13828,589 @@ fn grant_void_use_of_voided_grant_id_never_joins() {
     assert_eq!(r.uses_matched, 0, "a use must never join a tombstone");
     assert_eq!(r.unmatched_violation, 1, "issues: {:?}", r.issues);
     assert_eq!(r.grant_total, 0);
+}
+
+// Opt-in deterministic corpus emitter. The committed JSON is replayed byte-for-byte by native,
+// browser WASM and cgo tests; it is generated only when the v3 positive fixture is available.
+// `AVERIN_WRITE_VERDICT_CORPUS=spec/fixtures/verdict-generated.json cargo test ... --ignored`
+#[test]
+#[ignore]
+fn write_generated_verdict_corpus() {
+    let output = std::env::var("AVERIN_WRITE_VERDICT_CORPUS")
+        .expect("set AVERIN_WRITE_VERDICT_CORPUS to an output path");
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/claim-authorized-v3.json");
+    let v3 = CanonValue::parse(&std::fs::read_to_string(fixture_path).unwrap()).unwrap();
+    let v3_bundle = v3.get("bundle").unwrap().clone();
+    let v3_opts = v3.get("opts").unwrap().clone();
+    let v3_report = CanonValue::parse(&verify_bundle_with_json(
+        &v3_bundle.serialize(),
+        &v3_opts.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(
+        v3_report
+            .get("claims")
+            .unwrap()
+            .get("authorized")
+            .and_then(CanonValue::as_str),
+        Some("satisfied"),
+        "v3 base must make authorization reachable"
+    );
+    let capstone_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/claim-complete-v3.json");
+    let capstone_fixture =
+        CanonValue::parse(&std::fs::read_to_string(capstone_path).unwrap()).unwrap();
+    let capstone_bundle = capstone_fixture.get("bundle").unwrap().clone();
+    let capstone_opts = capstone_fixture.get("opts").unwrap().clone();
+    let capstone_report = CanonValue::parse(&verify_bundle_with_json(
+        &capstone_bundle.serialize(),
+        &capstone_opts.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(
+        capstone_report
+            .get("claims")
+            .unwrap()
+            .get("complete_brokered")
+            .and_then(CanonValue::as_str),
+        Some("satisfied"),
+        "v3 real-producer base must make the complete brokered claim reachable"
+    );
+    let native_capstone_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/claim-native-capstone-v3.json");
+    let native_capstone_fixture =
+        CanonValue::parse(&std::fs::read_to_string(native_capstone_path).unwrap()).unwrap();
+    let native_capstone_bundle = native_capstone_fixture.get("bundle").unwrap().clone();
+    let native_capstone_opts = native_capstone_fixture.get("opts").unwrap().clone();
+    let native_capstone_report = CanonValue::parse(&verify_bundle_with_json(
+        &native_capstone_bundle.serialize(),
+        &native_capstone_opts.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(
+        native_capstone_report
+            .get("claims")
+            .unwrap()
+            .get("complete_introspected")
+            .and_then(CanonValue::as_str),
+        Some("satisfied"),
+        "v3 real-producer native base must make the complete introspected claim reachable"
+    );
+    let (rec, res, tsa, rev) = rev_keys();
+    let opts = |rec: &SigningKey, res: &SigningKey, tsa: &SigningKey| {
+        CanonValue::object(vec![
+            (
+                "signing_keys".into(),
+                CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+                    &rec.verifying_key(),
+                ))]),
+            ),
+            (
+                "broker_authority_keys".into(),
+                CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+                    &rec.verifying_key(),
+                ))]),
+            ),
+            (
+                "resource_authority_keys".into(),
+                CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+                    &res.verifying_key(),
+                ))]),
+            ),
+            (
+                "tsa_keys".into(),
+                CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+                    &tsa.verifying_key(),
+                ))]),
+            ),
+            (
+                "claim_policy".into(),
+                CanonValue::object(vec![("requested".into(), CanonValue::string("authorized"))])
+                    .unwrap(),
+            ),
+        ])
+        .unwrap()
+    };
+    let mut bases: Vec<(String, CanonValue, CanonValue)> = vec![
+        ("v3_authorized".into(), v3_bundle.clone(), v3_opts.clone()),
+        ("v3_capstone".into(), capstone_bundle, capstone_opts),
+        (
+            "v3_native_capstone".into(),
+            native_capstone_bundle,
+            native_capstone_opts,
+        ),
+    ];
+    let (two_checkpoint, _) = claim_two_checkpoint_bundle(false, 3);
+    bases.push((
+        "two_checkpoint".into(),
+        two_checkpoint,
+        opts(&rec, &res, &tsa),
+    ));
+
+    // A fully recorded two-phase intent/outcome and its failed-PoP counterpart. These exercise
+    // closure and orphan accounting independently of the newer body-bound claim level.
+    let ih = intent_hash(&rec, &res);
+    let outcome = seal_outcome(&rec, &res, "outcome-1", &[ih], "intent-1", "intent-1", GID);
+    bases.push((
+        "two_phase".into(),
+        two_phase_bundle(&rec, &res, &tsa, Some(outcome)),
+        opts(&rec, &res, &tsa),
+    ));
+    bases.push((
+        "missing_outcome".into(),
+        two_phase_bundle(&rec, &res, &tsa, None),
+        opts(&rec, &res, &tsa),
+    ));
+
+    // Recreate the latest partial-anchor regression as an exact-byte cross-target family:
+    // cp0 closes a failed-PoP intent, cp1 closes its outcome, and every anchor subset is
+    // generated below. In particular cp0-only must retain the violation and orphan outcome.
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let grant = seal_grant(
+        &rec,
+        &rec,
+        GID,
+        &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP),
+    );
+    let gh = content_hash_of(&grant);
+    let ue = change_field(
+        &change_field(
+            &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED),
+            "cnf_pub",
+            CanonValue::string(b64enc(cnf.verifying_key().as_bytes())),
+        ),
+        "use_sig",
+        CanonValue::string(b64enc(&[7u8; 64])),
+    );
+    let intent = seal_intent(&rec, &res, "intent-1", &[gh], ACTION, &ue);
+    let ih = content_hash_of(&intent);
+    let outcome = seal_outcome(
+        &rec,
+        &res,
+        "outcome-1",
+        &[ih.clone()],
+        "intent-1",
+        "intent-1",
+        GID,
+    );
+    let oh = content_hash_of(&outcome);
+    let cp0 = checkpoint_seqd(&rec, "cp0", 0, None, &[ih], 2, None, Some(&tsa));
+    let cp1 = checkpoint_seqd(
+        &rec,
+        "cp1",
+        1,
+        Some(&checkpoint_hash(&cp0)),
+        &[oh],
+        3,
+        None,
+        Some(&tsa),
+    );
+    bases.push((
+        "failed_pop_partial_anchor".into(),
+        tier_b_bundle(
+            &rec.verifying_key(),
+            vec![grant, intent, outcome],
+            vec![cp0, cp1],
+        ),
+        opts(&rec, &res, &tsa),
+    ));
+
+    // A valid signed void fills a grant-log gap. Dropping its anchor must not make a gap sound.
+    let tombstone = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let grant2 = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let (th, gh) = (content_hash_of(&tombstone), content_hash_of(&grant2));
+    bases.push((
+        "void_gap".into(),
+        void_bundle(
+            &rec,
+            &tsa,
+            vec![tombstone, grant2],
+            &[(1, &th), (2, &gh)],
+            2,
+        ),
+        opts(&rec, &res, &tsa),
+    ));
+
+    // Native credential introspection and two federated broker partitions are distinct surfaces.
+    let (native_bundle, _) = native_attested_bundle(&rec, &res, &tsa, &rev);
+    bases.push(("native".into(), native_bundle, opts(&rec, &res, &tsa)));
+    let ga = seal_grant(
+        &rec,
+        &rec,
+        "rec-a1",
+        &grant_evidence_fed("grant-a1", BID_A, 1),
+    );
+    let gb = seal_grant(
+        &rec,
+        &rec,
+        "rec-b1",
+        &grant_evidence_fed("grant-b1", BID_B, 1),
+    );
+    let (ha, hb) = (content_hash_of(&ga), content_hash_of(&gb));
+    let heads = fed_heads(&[
+        (BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)]))),
+        (BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)]))),
+    ]);
+    let cp = checkpoint_with_fed_heads(
+        &rec,
+        "cp0",
+        0,
+        None,
+        &[ha.clone(), hb.clone()],
+        2,
+        heads,
+        Some(&tsa),
+    );
+    bases.push((
+        "federated".into(),
+        tier_b_bundle(&rec.verifying_key(), vec![ga, gb], vec![cp]),
+        opts(&rec, &res, &tsa),
+    ));
+
+    // Independently signed disclosed and Merkle revocation modes over the v3 action. Both
+    // statements are fixed adverse evidence when valid membership is present.
+    let list = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[]);
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let both_bundle = change_field(&v3_bundle, "revocation_list", list);
+    let both_bundle = change_field(&both_bundle, "revocation_merkle_root", root);
+    let both_bundle = change_field(
+        &both_bundle,
+        "revocation_proofs",
+        CanonValue::object(vec![(GID.into(), nonmembership_proof(&leaves, GID))]).unwrap(),
+    );
+    let both_opts = change_field(
+        &v3_opts,
+        "revocation_keys",
+        CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+            &rev.verifying_key(),
+        ))]),
+    );
+    let both_opts = change_field(
+        &both_opts,
+        "claim_policy",
+        CanonValue::object(vec![
+            ("requested".into(), CanonValue::string("authorized")),
+            ("revocation".into(), CanonValue::string("both")),
+        ])
+        .unwrap(),
+    );
+    bases.push(("disclosed_merkle".into(), both_bundle, both_opts));
+    let adverse_list = change_field(
+        &v3_bundle,
+        "revocation_list",
+        revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[GID]),
+    );
+    let adverse_opts = change_field(
+        &v3_opts,
+        "revocation_keys",
+        CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+            &rev.verifying_key(),
+        ))]),
+    );
+    bases.push((
+        "signed_adverse_list".into(),
+        adverse_list,
+        adverse_opts.clone(),
+    ));
+    let adverse_leaves = rev_leaves(&[GID]);
+    let adverse_root = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &adverse_leaves);
+    let nonrevoking_list = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[]);
+    let adverse_merkle = change_field(&v3_bundle, "revocation_list", nonrevoking_list);
+    let adverse_merkle = change_field(&adverse_merkle, "revocation_merkle_root", adverse_root);
+    let adverse_merkle = change_field(
+        &adverse_merkle,
+        "revocation_proofs",
+        CanonValue::object(vec![(GID.into(), membership_proof(&adverse_leaves, GID))]).unwrap(),
+    );
+    bases.push(("signed_adverse_merkle".into(), adverse_merkle, adverse_opts));
+
+    // Signed key status is fixed caller policy, not a removable bundle attachment.
+    let changed = CanonValue::object(vec![
+        (
+            "key".into(),
+            CanonValue::string(encode_pubkey(&rec.verifying_key())),
+        ),
+        ("status".into(), CanonValue::string("compromised")),
+        (
+            "status_changed_at".into(),
+            CanonValue::string("2026-06-15T10:05:00.000Z"),
+        ),
+    ])
+    .unwrap();
+    let rotated_opts = change_field(&v3_opts, "signing_keys", CanonValue::Array(vec![changed]));
+    bases.push(("compromised_signer".into(), v3_bundle.clone(), rotated_opts));
+
+    let mut corrupted_records = arr(&v3_bundle, "records");
+    corrupted_records[0] = change_field(
+        &corrupted_records[0],
+        "action",
+        CanonValue::string("tampered-grant"),
+    );
+    bases.push((
+        "mixed_valid_invalid".into(),
+        change_field(&v3_bundle, "records", CanonValue::Array(corrupted_records)),
+        v3_opts,
+    ));
+
+    let mut rows = Vec::new();
+    for (base_name, original, opts) in bases {
+        let checkpoints = arr(&original, "checkpoints");
+        assert!(checkpoints.len() <= 3, "small histories only");
+        let removable: Vec<&str> = [
+            "disclosures",
+            "revocation_proofs",
+            "revocation_list",
+            "revocation_merkle_root",
+            "deployment_attestation",
+            "coverage_manifest",
+        ]
+        .into_iter()
+        .filter(|name| original.get(name).is_some())
+        .collect();
+        // Every anchor subset and every combination of top-level attachments. Expand the
+        // proof-map entries separately, including combinations with the other attachments.
+        // Independently signed adverse artifacts are compared exactly, not subjected to the
+        // positive-support erasure theorem.
+        for mask in 0..(1usize << checkpoints.len()) {
+            let cps = checkpoints
+                .iter()
+                .enumerate()
+                .map(|(i, cp)| {
+                    if mask & (1 << i) == 0 {
+                        cp.without_keys(&["anchor"])
+                    } else {
+                        cp.clone()
+                    }
+                })
+                .collect();
+            let anchored = change_field(&original, "checkpoints", CanonValue::Array(cps));
+            let mut variants = Vec::new();
+            for removal_mask in 0..(1usize << removable.len()) {
+                let dropped: Vec<&str> = removable
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, name)| (removal_mask & (1 << i) != 0).then_some(*name))
+                    .collect();
+                let stripped = anchored.without_keys(&dropped);
+                let variant_name = if dropped.is_empty() {
+                    "base".to_string()
+                } else {
+                    format!("drop_{}", dropped.join("+"))
+                };
+                variants.push((variant_name.clone(), stripped.clone()));
+                if let Some(proofs) = stripped
+                    .get("revocation_proofs")
+                    .and_then(CanonValue::as_object)
+                {
+                    for proof_mask in 0..((1usize << proofs.len()) - 1) {
+                        let retained: Vec<(String, CanonValue)> = proofs
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| proof_mask & (1 << i) != 0)
+                            .map(|(_, pair)| pair.clone())
+                            .collect();
+                        variants.push((
+                            format!("{variant_name}/proof_subset_{proof_mask}"),
+                            change_field(
+                                &stripped,
+                                "revocation_proofs",
+                                CanonValue::object(retained).unwrap(),
+                            ),
+                        ));
+                    }
+                }
+            }
+            for (variant_name, bundle) in variants {
+                let bundle_json = bundle.serialize();
+                let opts_json = opts.serialize();
+                let report =
+                    CanonValue::parse(&verify_bundle_with_json(&bundle_json, &opts_json)).unwrap();
+                let name = format!("{base_name}/anchors_{mask}/{variant_name}");
+                if name == "failed_pop_partial_anchor/anchors_1/base" {
+                    assert_eq!(report.get("ok"), Some(&CanonValue::Bool(false)));
+                    assert!(
+                        report
+                            .get("unmatched_violation")
+                            .and_then(CanonValue::as_int)
+                            .unwrap()
+                            > 0,
+                        "the partial-anchor PoP failure must remain a violation"
+                    );
+                }
+                if name == "signed_adverse_merkle/anchors_1/base"
+                    || name == "signed_adverse_list/anchors_1/base"
+                {
+                    assert_eq!(
+                        report
+                            .get("claims")
+                            .unwrap()
+                            .get("authorized")
+                            .and_then(CanonValue::as_str),
+                        Some("refuted"),
+                        "authenticated adverse authority evidence must refute {name}"
+                    );
+                }
+                if name == "signed_adverse_merkle/anchors_1/drop_revocation_merkle_root" {
+                    assert_eq!(
+                        report
+                            .get("claims")
+                            .unwrap()
+                            .get("authorized")
+                            .and_then(CanonValue::as_str),
+                        Some("satisfied"),
+                        "removing an independent signed adverse root changes the evidence set"
+                    );
+                }
+                rows.push(
+                    CanonValue::object(vec![
+                        ("name".into(), CanonValue::string(name)),
+                        ("bundle_json".into(), CanonValue::string(bundle_json)),
+                        ("opts_json".into(), CanonValue::string(opts_json)),
+                        (
+                            "expected_bundle_digest".into(),
+                            report.get("bundle_digest").unwrap().clone(),
+                        ),
+                        (
+                            "expected_claims".into(),
+                            report.get("claims").unwrap().clone(),
+                        ),
+                        ("expected_ok".into(), report.get("ok").unwrap().clone()),
+                        (
+                            "expected_action_completeness".into(),
+                            report.get("action_completeness").unwrap().clone(),
+                        ),
+                        (
+                            "expected_unmatched_violation".into(),
+                            report.get("unmatched_violation").unwrap().clone(),
+                        ),
+                    ])
+                    .unwrap(),
+                );
+            }
+        }
+    }
+    std::fs::write(output, CanonValue::Array(rows).serialize()).unwrap();
+}
+
+#[test]
+fn generated_verdict_corpus_matches_native() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/verdict-generated.json");
+    let rows = CanonValue::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert!(
+        rows.len() >= 30,
+        "exercise every small-history anchor and artifact subset"
+    );
+    let mut saw_authorized = false;
+    let mut saw_capstone = false;
+    let mut saw_native_capstone = false;
+    let mut saw_partial_anchor_pop = false;
+    let mut families = BTreeSet::new();
+    for row in rows {
+        let name = row.get("name").and_then(CanonValue::as_str).unwrap();
+        families.insert(name.split('/').next().unwrap().to_string());
+        let bundle_json = row.get("bundle_json").and_then(CanonValue::as_str).unwrap();
+        let opts_json = row.get("opts_json").and_then(CanonValue::as_str).unwrap();
+        let report = CanonValue::parse(&verify_bundle_with_json(bundle_json, opts_json)).unwrap();
+        assert_eq!(
+            report.get("bundle_digest"),
+            row.get("expected_bundle_digest"),
+            "{name}.input_bytes"
+        );
+        assert_eq!(
+            report.get("claims"),
+            row.get("expected_claims"),
+            "{name}.claims"
+        );
+        assert_eq!(report.get("ok"), row.get("expected_ok"), "{name}.ok");
+        assert_eq!(
+            report.get("action_completeness"),
+            row.get("expected_action_completeness"),
+            "{name}.capstone"
+        );
+        assert_eq!(
+            report.get("unmatched_violation"),
+            row.get("expected_unmatched_violation"),
+            "{name}.unmatched_violation"
+        );
+        if name == "v3_authorized/anchors_1/base" {
+            saw_authorized = report
+                .get("claims")
+                .unwrap()
+                .get("authorized")
+                .and_then(CanonValue::as_str)
+                == Some("satisfied");
+        }
+        if name.starts_with("v3_capstone/") && name.ends_with("/base") {
+            saw_capstone |= report
+                .get("claims")
+                .unwrap()
+                .get("complete_brokered")
+                .and_then(CanonValue::as_str)
+                == Some("satisfied");
+        }
+        if name.starts_with("v3_native_capstone/") && name.ends_with("/base") {
+            saw_native_capstone |= report
+                .get("claims")
+                .unwrap()
+                .get("complete_introspected")
+                .and_then(CanonValue::as_str)
+                == Some("satisfied");
+        }
+        if name == "failed_pop_partial_anchor/anchors_1/base" {
+            saw_partial_anchor_pop = report.get("ok") == Some(&CanonValue::Bool(false))
+                && report
+                    .get("unmatched_violation")
+                    .and_then(CanonValue::as_int)
+                    .is_some_and(|n| n > 0);
+        }
+    }
+    assert!(
+        saw_authorized,
+        "corpus must have a genuinely authorized v3 baseline"
+    );
+    assert!(
+        saw_capstone,
+        "corpus must have a genuinely complete v3 producer baseline"
+    );
+    assert!(
+        saw_native_capstone,
+        "corpus must have a genuinely complete v3 native producer baseline"
+    );
+    assert!(
+        saw_partial_anchor_pop,
+        "corpus must preserve the cp0-only failed-PoP intent violation"
+    );
+    for family in [
+        "two_checkpoint",
+        "two_phase",
+        "missing_outcome",
+        "failed_pop_partial_anchor",
+        "void_gap",
+        "native",
+        "federated",
+        "disclosed_merkle",
+        "signed_adverse_list",
+        "signed_adverse_merkle",
+        "compromised_signer",
+        "mixed_valid_invalid",
+    ] {
+        assert!(
+            families.contains(family),
+            "missing generated family {family}"
+        );
+    }
 }
 
 #[test]

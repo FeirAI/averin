@@ -492,7 +492,9 @@ Key fields:
 | Field | Type | Meaning |
 |-------|------|---------|
 | `ok` | bool | The integrity verdict: every record sealed + linked + checkpoint-consistent, no hard violation. **Not** the accountability capstone. |
-| `keys_externally_pinned` | bool | `true` only when you passed an `opts.json` — i.e. authentic vs internal-consistency. |
+| `keys_externally_pinned` | bool | `true` only when record `signing_keys` were pinned out of band; merely passing other options does not authenticate record provenance. |
+| `body_bound_role_evidence` | bool | Every contributing committed broker/resource/void role record has a verified body-bound authority proof; historical v2 role signatures remain useful for forensic joins but cannot satisfy this stronger prerequisite. |
+| `claims_version`, `claims` | string/object | Version `1` typed decisions for `integrity`, `authenticated`, `authorized`, `temporal`, `complete_brokered`, and `complete_introspected`. Each is `satisfied`, `insufficient`, or `refuted`; `requested` and `requested_decision` identify the caller's required claim. Only `satisfied` accepts a required claim. |
 | `records_total`, `records_proven` | int | |
 | `dag_ok`, `dag_heads`, `collapsed_duplicates` | bool/int | DAG validity, head count, deduped retries (#8). |
 | `checkpoints_total`, `checkpoints_verified`, `chain_ok` | int/bool | |
@@ -506,7 +508,23 @@ Key fields:
 | `cosig_status`, `delegation_status`, `taxonomy_status`, `attestation_status`, `revocation_status`, `revocation_merkle_status`, `introspection_status`, `federation_status` | string | Mode gates: `absent` / `unevaluated` (no key pinned) → an evaluated verdict when the role's key set is pinned. |
 | `issues` | []string | Human-readable violations (omission/fork/tamper/role-overlap/…). |
 
-The CLI prints a digest of this and a `RESULT: PASS (integrity)` / `RESULT: FAIL` line. PASS is the
-**integrity** verdict; the `action_completeness` / `grant_accountability` / `broker_trust` capstone
-on the same line is the higher claim, and `not_claimed` / `incomplete` are normal when no role keys
-were pinned. Even a `*_complete` capstone is bounded by `resource_trust: assumed_truthful`.
+`ok` retains the legacy bundle diagnostic meaning. It is not an authorization acceptance
+predicate. An optional malformed disclosure can make `ok` false; removing it may remove that
+parsing issue without proving any stronger claim. The CLI exits successfully only when `ok` is
+true **and** the explicitly requested claim is `satisfied`. The default request is `integrity`.
+Even a complete claim remains bounded by `resource_trust: assumed_truthful`.
+
+Set `claim_policy` in verifier options, for example
+`{"requested":"authorized","revocation":"disclosed","require_disclosure":true}`.
+`requested` is `integrity`, `authenticated`, `authorized`, `complete_brokered`, or
+`complete_introspected`. `revocation` is `pinned` (default: a disclosed list required whenever
+`revocation_keys` are pinned), `disclosed`, `merkle`, or `both`; Merkle mode must be selected by
+the caller, not by the bundle. A pinned revocation issuer always requires current evidence for
+authorization and completeness. `require_disclosure` and `require_attestation` are optional
+booleans. `require_disclosure` demands a valid matching credential opening for every accepted
+committed broker grant, including unused grants; counting only supplied openings is insufficient.
+Explicit `merkle` and `both` modes require both a fresh signed root and valid non-membership
+paths for every brokered use and indexed native credential. Root freshness alone does not prove
+non-revocation. Present malformed policy fields are fatal configuration errors. Missing required
+evidence gives `insufficient`; a committed contradiction or authenticated revocation gives
+`refuted`. Neither accepts the claim.

@@ -5037,6 +5037,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         closed: bool,
     }
     let mut grants_by_id: BTreeMap<String, GrantInfo> = BTreeMap::new();
+    // A required credential disclosure applies to every accepted committed broker grant,
+    // including an unused grant. Counting only disclosures the exporter chose to provide would
+    // let one opened grant mask a second grant's missing descriptor.
+    let mut required_descriptor_record_ids: BTreeSet<String> = BTreeSet::new();
     // D4 (ADR 0004): grant_ids flagged mis-scoped at issuance (a single_operation grant for an action a
     // signed+pinned taxonomy marks ESCALATING). Rejected here, NOT only when exercised, so a dangerous
     // capability is visible even with no use receipt; a use against one is then skipped (single violation).
@@ -5321,6 +5325,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         continue; // fail-closed: not Tier-B-eligible
                     }
                 };
+                required_descriptor_record_ids.insert(rt.record_id.clone());
                 grants_by_id.entry(gid).or_insert(GrantInfo {
                     action,
                     resource_id,
@@ -5370,6 +5375,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
     let mut cred_label_checks = 0usize;
     let mut cred_label_matched = 0usize;
+    let mut matched_descriptor_record_ids: BTreeSet<String> = BTreeSet::new();
     for (rid, descriptor_bytes) in &cred_descriptors {
         let rec = match grant_labels.get(rid.as_str()) {
             Some(r) => *r,
@@ -5482,6 +5488,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
         if mism.is_empty() {
             cred_label_matched += 1;
+            matched_descriptor_record_ids.insert(rid.clone());
         } else {
             issues.push(format!("grant {rid}: disclosed credential descriptor contradicts signed grant labels — broker mislabel/equivocation (D6.4): {}", mism.join("; ")));
         }
@@ -6641,15 +6648,15 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 && report.native_credential_present
                 && report.introspection_status == "attested",
         },
-        committed_contradiction: report.unmatched_violation > 0
-            || duplicate_record_id
-            || semantic_record_conflict
+        immutable_record_contradiction: duplicate_record_id
             || checkpoint_project_conflict
+            || !grant_equivocations.is_empty(),
+        checked_contradiction: report.unmatched_violation > 0
+            || semantic_record_conflict
             || committed_grant_rejected
             || void_contradiction
             || grant_contradiction
             || broker_log_contradiction
-            || !grant_equivocations.is_empty()
             || report.bounded_reuse_overspent > 0
             || report.bounded_reuse_seq_replays > 0
             || report.cosig_threshold_failures > 0
@@ -6661,9 +6668,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         revocation_issuer_pinned: !opts.revocation_keys.is_empty(),
         disclosed_revocation_fresh: revocation.status == "fresh",
         merkle_revocation_fresh: merkle_rev.status == "fresh",
-        disclosure_complete: report.cred_label_checks > 0
-            && report.cred_label_checks == report.cred_label_matched
-            && report.disclosures_total == report.disclosures_verified,
+        merkle_nonmembership_complete: merkle_rev.root.is_some()
+            && report.revoked_uses_blocked == 0
+            && report.revocation_nonmembership_verified
+                == report.uses_total + native_grants_by_id.len(),
+        disclosure_complete: !required_descriptor_record_ids.is_empty()
+            && required_descriptor_record_ids.is_subset(&matched_descriptor_record_ids),
         policy: opts.claim_policy,
     };
     report.claims = facts.decide();
