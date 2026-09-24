@@ -126,6 +126,17 @@ Other results:
   authority proof binds the structured semantic subject and is reported as `verified`; only
   that body-bound state can satisfy the stronger authorization and completeness claims.
 
+`spec/fixtures/verdict-generated.json` is the shared end-to-end verdict corpus. Its 92 rows
+store exact `bundle_json` and caller `opts_json` strings, then native Rust, cgo, and browser WASM
+compare the bundle digest, all typed claims, legacy `ok`, completeness label, and violation count.
+The positive inputs come from a v3 signed grant/use/PoP Rust test, a real Go two-phase capstone
+export, and a real Go native grant/introspection capstone export; each generator asserts its
+positive claim before emitting a fixture. The Rust `write_generated_verdict_corpus` test expands
+every anchor subset in these small histories and combinations of removable attachments, including
+nested Merkle paths. It also keeps the cp0-only failed-PoP intent and independently signed adverse
+revocation cases. Regenerate these fixtures only with a freshly rebuilt Rust staticlib before Go
+tests, then review changed expected decisions rather than accepting them automatically.
+
 ## Refinement gate (CI job `formal-refinement`)
 
 Three checks, each doing what it is good at:

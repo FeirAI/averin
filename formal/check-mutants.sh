@@ -19,6 +19,8 @@
 #   bash formal/check-mutants.sh            # all gates for every mutant
 #   bash formal/check-mutants.sh --first    # stop at the first killing gate per mutant (faster)
 #   SKIP_KANI=1 bash formal/check-mutants.sh  # without cargo-kani (m3/m4 must then die to another gate)
+#   MUTANTS_ONLY=m16-verdict-omits-pop-capstone,m17-verdict-missing-revocation-is-absent \
+#     bash formal/check-mutants.sh --first  # scoped local run; unmutated baseline still required
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -47,6 +49,25 @@ kani_expectation() {
     *) echo 'core/src/canon.rs|assertion failed' ;;
   esac
 }
+
+named_detector() {
+  case "$1" in
+    m16-*|m17-*|m20-*) echo 'verdict|verdict_differential' ;;
+    m18-*) echo 'adversarial|tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation' ;;
+    m19-*) echo 'adversarial|tier_b_two_phase_failed_pop_intent_does_not_consume_outcome' ;;
+    m21-*) echo 'adversarial|required_disclosure_covers_every_committed_broker_grant' ;;
+  esac
+}
+
+if [ -n "${MUTANTS_ONLY:-}" ]; then
+  IFS=',' read -r -a selected_mutants <<<"$MUTANTS_ONLY"
+  for selected in "${selected_mutants[@]}"; do
+    if [ -z "$selected" ] || [ ! -f "formal/mutants/$selected.patch" ]; then
+      echo "check-mutants: unknown MUTANTS_ONLY entry: $selected" >&2
+      exit 2
+    fi
+  done
+fi
 
 fresh_tree() {
   rm -rf "$tree"
@@ -115,13 +136,28 @@ echo "   ok"
 survivors=0
 for patch in formal/mutants/*.patch; do
   name="$(basename "$patch" .patch)"
+  if [ -n "${MUTANTS_ONLY:-}" ]; then
+    selected=0
+    for candidate in "${selected_mutants[@]}"; do
+      [ "$candidate" = "$name" ] && selected=1
+    done
+    [ "$selected" = 1 ] || continue
+  fi
   fresh_tree
   if ! patch -s -p1 -d "$tree" <"$patch" >"$logs/$name-apply.log" 2>&1; then
     echo "check-mutants: FAIL: $name no longer applies (update the patch to the current source)" >&2
     cat "$logs/$name-apply.log" >&2
     exit 1
   fi
+  detector="$(named_detector "$name")"
   gates=(inventory oracle golden verdict adversarial)
+  if [ -n "$detector" ]; then
+    IFS='|' read -r detector_gate detector_test <<<"$detector"
+    gates=("$detector_gate")
+    for g in inventory oracle golden verdict adversarial; do
+      [ "$g" = "$detector_gate" ] || gates+=("$g")
+    done
+  fi
   h="$(kani_harness "$name")"
   killed=()
   # A mutant with a named harness must be killed by that harness itself (a real counterexample, not an
@@ -140,9 +176,16 @@ for patch in formal/mutants/*.patch; do
   for g in "${gates[@]}"; do
     gate_exit=0
     run_gate "$name" "$g" || gate_exit=$?
-    if python3 formal/check-kani-mutant.py --gate "$g" "$logs/$name-$g.log" "$gate_exit"; then
+    checker_args=(--gate "$g")
+    if [ -n "$detector" ] && [ "$g" = "$detector_gate" ]; then
+      checker_args+=(--required-test "$detector_test")
+    fi
+    if python3 formal/check-kani-mutant.py "${checker_args[@]}" "$logs/$name-$g.log" "$gate_exit"; then
       killed+=("$g")
       [ "$first" = 1 ] && break
+    elif [ -n "$detector" ] && [ "$g" = "$detector_gate" ]; then
+      echo "check-mutants: FAIL: named detector $detector_test did not refute $name (see $logs/$name-$g.log)" >&2
+      exit 1
     elif [ "$gate_exit" -ne 0 ]; then
       echo "check-mutants: FAIL: gate '$g' did not finish with a recognized mutant counterexample (see $logs/$name-$g.log)" >&2
       exit 1
