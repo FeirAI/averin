@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,24 @@ func keyFromByte(b byte) ed25519.PrivateKey {
 }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+func testNonce(t *testing.T, nonce string) NonceClaim {
+	t.Helper()
+	c, err := NewNonceClaim("p1", testResource, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func testJTI(t *testing.T, key string) JTIClaim {
+	t.Helper()
+	c, err := NewJTIClaim(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
 
 const (
 	testAction   = "db.query:orders-ro"
@@ -79,6 +98,81 @@ func signDefault(t *testing.T, agent ed25519.PrivateKey, token, paramsCommit, no
 	return signUse(t, agent, token, testGrantID, testResource, testAction, paramsCommit, nonce)
 }
 
+func resignTimes(t *testing.T, signing ed25519.PrivateKey, token string, fields map[string]int64) string {
+	t.Helper()
+	encoded, _, ok := strings.Cut(token, ".")
+	if !ok {
+		t.Fatal("malformed fixture capability")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var descriptor map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &descriptor); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range fields {
+		descriptor[key], _ = json.Marshal(value)
+	}
+	payload, err = json.Marshal(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = b64(payload)
+	return encoded + "." + b64(ed25519.Sign(signing, []byte(encoded)))
+}
+
+func TestAcceptedCapabilityLifetimeBoundsBeforeLedger(t *testing.T) {
+	issuing, agent := keyFromByte(1), keyFromByte(2)
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	base := defaultCap(t, issuing, agent, time.Hour, now)
+	iat := now.Unix()
+	for _, tc := range []struct {
+		name   string
+		fields map[string]int64
+	}{
+		{"overlong", map[string]int64{"exp": iat + 3601}},
+		{"zero lifetime", map[string]int64{"exp": iat}},
+		{"max signed integer", map[string]int64{"iat": math.MaxInt64 - 1, "nbf": math.MaxInt64 - 1, "exp": math.MaxInt64}},
+		{"min signed integer", map[string]int64{"iat": math.MinInt64, "nbf": math.MinInt64, "exp": math.MaxInt64}},
+		{"nbf before issue", map[string]int64{"nbf": iat - 1}},
+		{"nbf at expiry", map[string]int64{"nbf": iat + 3600}},
+		{"future issue", map[string]int64{"iat": iat + 31, "nbf": iat + 31, "exp": iat + 91}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger := NewMemLedger()
+			token := resignTimes(t, issuing, base, tc.fields)
+			shim := New(issuing.Public().(ed25519.PublicKey), testResource, ledger).WithProject("p1")
+			_, err := shim.ValidateUse(token, signDefault(t, agent, token, testParams, "not-burned"),
+				Op{Action: testAction, ParamsCommitment: testParams}, "not-burned", now)
+			if err == nil {
+				t.Fatal("invalid lifetime accepted")
+			}
+			if err := ledger.ConsumeNonce(testNonce(t, "not-burned")); err != nil {
+				t.Fatalf("rejected capability burned nonce: %v", err)
+			}
+		})
+	}
+}
+
+func TestMemLedgerNonceScopeTupleDoesNotAlias(t *testing.T) {
+	ledger := NewMemLedger()
+	a, _ := NewNonceClaim("a\x00b", "c", "n")
+	b, _ := NewNonceClaim("a", "b\x00c", "n")
+	if err := ledger.ConsumeNonce(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.ConsumeNonce(b); err != nil {
+		t.Fatalf("distinct tuple aliased: %v", err)
+	}
+	ledger.ReleaseNonce(a)
+	c, _ := NewNonceClaim("a", "b\x00c", "n")
+	if err := ledger.ConsumeNonce(c); !errors.Is(err, ErrConsumed) {
+		t.Fatalf("release crossed tuple boundary: %v", err)
+	}
+}
+
 func TestValidUseProducesCanonicalEvidence(t *testing.T) {
 	issuing, agent := keyFromByte(1), keyFromByte(2)
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
@@ -126,7 +220,7 @@ func TestSignedCapabilityProjectCheckedBeforeLedgerOrRevocation(t *testing.T) {
 	if revocationCalled {
 		t.Fatal("revocation read preceded project validation")
 	}
-	if err := ledger.ConsumeNonce("n"); err != nil {
+	if err := ledger.ConsumeNonce(testNonce(t, "n")); err != nil {
 		t.Fatalf("wrong-project token consumed nonce: %v", err)
 	}
 }
@@ -158,7 +252,7 @@ func TestV2CapabilityMissingProjectRejectedBeforeLedger(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "project") {
 		t.Fatalf("missing v2 project accepted: %v", err)
 	}
-	if err := ledger.ConsumeNonce("n"); err != nil {
+	if err := ledger.ConsumeNonce(testNonce(t, "n")); err != nil {
 		t.Fatalf("missing-project token consumed nonce: %v", err)
 	}
 }
@@ -175,7 +269,7 @@ func TestRevocationReadFailurePrecedesLedger(t *testing.T) {
 	if !errors.Is(err, ErrRevocationCheck) {
 		t.Fatalf("revocation read error = %v", err)
 	}
-	if err := ledger.ConsumeNonce("n"); err != nil {
+	if err := ledger.ConsumeNonce(testNonce(t, "n")); err != nil {
 		t.Fatalf("revocation failure consumed nonce: %v", err)
 	}
 }
@@ -318,10 +412,10 @@ func TestRevokedGrantRejectedBeforeConsume(t *testing.T) {
 	if !errors.Is(err, ErrRevoked) {
 		t.Fatalf("a revoked grant's use must be rejected with ErrRevoked, got: %v", err)
 	}
-	if err := ledger.ConsumeNonce("n1"); err != nil {
+	if err := ledger.ConsumeNonce(testNonce(t, "n1")); err != nil {
 		t.Fatalf("a revoked use must not consume the nonce: %v", err)
 	}
-	if err := ledger.ConsumeJTI(testGrantID); err != nil {
+	if err := ledger.ConsumeJTI(testJTI(t, testGrantID)); err != nil {
 		t.Fatalf("a revoked use must not consume the jti: %v", err)
 	}
 	// CONTROL: another grant (not revoked) still validates.
@@ -349,7 +443,7 @@ func TestDoubleSpendReleasesNonce(t *testing.T) {
 		t.Fatal("double-spend should be rejected")
 	}
 	// ...and n2 must be free again — the failed use released it (else ConsumeNonce would report it consumed).
-	if err := ledger.ConsumeNonce("n2"); err != nil {
+	if err := ledger.ConsumeNonce(testNonce(t, "n2")); err != nil {
 		t.Fatalf("the double-spend's nonce must be released, not burned: %v", err)
 	}
 }

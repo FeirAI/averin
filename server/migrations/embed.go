@@ -30,3 +30,8 @@ var ProjectTransactions string
 // BrokerSeqRecovery adds immutable fence and terminal rows (schema version 5).
 //go:embed 0005_broker_seq_recovery.sql
 var BrokerSeqRecovery string
+
+// TenantNonceLedger keeps unknown-owner historical claims as immutable exclusions
+// and creates project/resource nonce and global JTI ledgers (schema version 6).
+//go:embed 0006_tenant_nonce_ledger.sql
+var TenantNonceLedger string

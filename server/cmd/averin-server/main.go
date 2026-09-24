@@ -98,10 +98,15 @@ func main() {
 	if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
 		mctx, mcancel := context.WithTimeout(context.Background(), 60*time.Second)
 		err := pgschema.Migrate(mctx, dsn)
-		mcancel()
 		if err != nil {
+			mcancel()
 			log.Fatalf("storage: schema migration: %v", err)
 		}
+		if err := pgschema.CheckRuntime(mctx, dsn); err != nil {
+			mcancel()
+			log.Fatalf("storage: runtime credential readiness: %v", err)
+		}
+		mcancel()
 		log.Printf("storage: schema migrated (averin DB at version %d)", pgschema.CurrentSchemaVersion)
 	}
 	st := selectStore()

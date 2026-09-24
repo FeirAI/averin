@@ -6,66 +6,48 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/feirai/averin/server/migrations"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TestSweepConsumedDeletesOnlyAgedRows (averin#9): the periodic TTL sweep removes entries whose consumed_at is
-// older than retention and LEAVES fresher ones (so a still-live nonce/jti is never pruned into a replay). It is
-// an INTERNAL test (package pgledger) so it can insert rows with explicit consumed_at timestamps via the pool —
-// one aged, one fresh — and assert selectivity without sleeping. Postgres-gated like the other ledger tests.
-func TestSweepConsumedDeletesOnlyAgedRows(t *testing.T) {
-	dsn := os.Getenv("AVERIN_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("set AVERIN_TEST_DATABASE_URL to run the Postgres ledger sweep test")
+func TestSweepFailureRetainsClaims(t *testing.T) {
+	base := os.Getenv("AVERIN_TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("set AVERIN_TEST_DATABASE_URL for real Postgres ledger test")
 	}
 	ctx := context.Background()
+	root, err := pgxpool.New(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	schema := fmt.Sprintf("averin_sweep_%d", time.Now().UnixNano())
+	if _, err := root.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer root.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") //nolint:errcheck
+	dsn := base + "&search_path=" + schema
 	l, err := New(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
-
-	// New no longer applies DDL (the versioned migration runner internal/pgschema owns it); ensure the
-	// ledger table exists (idempotent) before inserting rows directly through the pool.
-	if _, err := l.pool.Exec(ctx, SchemaSQL); err != nil {
-		t.Fatalf("apply ledger schema: %v", err)
+	if _, err := l.pool.Exec(ctx, SchemaSQL+"\n"+migrations.TenantNonceLedger); err != nil {
+		t.Fatal(err)
 	}
-
-	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	oldKey := "sweep-old-" + suffix
-	freshKey := "sweep-fresh-" + suffix
-
-	if _, err := l.pool.Exec(ctx,
-		`INSERT INTO consume_ledger (kind, consume_key, consumed_at) VALUES ('nonce', $1, now() - interval '100 days')`, oldKey); err != nil {
-		t.Fatalf("insert aged row: %v", err)
+	if _, err := l.pool.Exec(ctx, `INSERT INTO consumed_nonces(project_id,resource_id,nonce,owner_id,consumed_at)
+		VALUES ('p','r','old','00000000000000000000000000000000',clock_timestamp()-interval '2 days')`); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := l.pool.Exec(ctx,
-		`INSERT INTO consume_ledger (kind, consume_key, consumed_at) VALUES ('nonce', $1, now())`, freshKey); err != nil {
-		t.Fatalf("insert fresh row: %v", err)
+	if _, err := l.pool.Exec(ctx, `ALTER TABLE consumed_jtis RENAME TO unavailable_jtis`); err != nil {
+		t.Fatal(err)
 	}
-	defer func() {
-		_, _ = l.pool.Exec(context.Background(), `DELETE FROM consume_ledger WHERE consume_key IN ($1, $2)`, oldKey, freshKey)
-	}()
-
-	// retention 30 days: the 100-day-old row ages out; the fresh row survives.
-	removed, err := l.SweepConsumed(ctx, 30*24*time.Hour)
-	if err != nil {
-		t.Fatalf("sweep: %v", err)
+	if _, err := l.SweepConsumed(ctx, 24*time.Hour); err == nil {
+		t.Fatal("missing JTI table did not fail the atomic sweep")
 	}
-	if removed < 1 {
-		t.Fatalf("sweep should have removed at least the aged row, removed=%d", removed)
-	}
-
-	exists := func(key string) bool {
-		var n int
-		if err := l.pool.QueryRow(ctx, `SELECT count(*) FROM consume_ledger WHERE consume_key = $1`, key).Scan(&n); err != nil {
-			t.Fatalf("count %s: %v", key, err)
-		}
-		return n > 0
-	}
-	if exists(oldKey) {
-		t.Fatalf("aged row %s should have been swept", oldKey)
-	}
-	if !exists(freshKey) {
-		t.Fatalf("fresh row %s must NOT be swept (retention not elapsed)", freshKey)
+	var count int
+	if err := l.pool.QueryRow(ctx, `SELECT count(*) FROM consumed_nonces WHERE nonce='old'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("failed sweep removed nonce count=%d err=%v", count, err)
 	}
 }

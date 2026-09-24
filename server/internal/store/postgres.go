@@ -26,6 +26,7 @@ type Postgres struct {
 	projectID string
 	ctx       context.Context
 	active    *atomic.Bool
+	claims    map[ledgerKey]string // claims acquired by this exact bound transaction
 }
 
 func (p *Postgres) callContext() context.Context {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/feirai/averin/server/internal/api"
 	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/resourceshim"
 	"github.com/feirai/averin/server/internal/store"
 )
 
@@ -21,7 +22,11 @@ func TestWithResourceUsesProjectStoreLedger(t *testing.T) {
 	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithResource(resourceCore, "orders-db").Routes()
 	ak := grantAgentKey()
 	grantID, capability := mkGrant(t, h, ak, "idem-ledger")
-	if err := base.WithProjectWrite(context.Background(), "p1", func(st store.Store) error { return st.ConsumeNonce("nonce-1") }); err != nil {
+	claim, err := resourceshim.NewNonceClaim("p1", "orders-db", "nonce-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := base.WithProjectWrite(context.Background(), "p1", func(st store.Store) error { return st.ConsumeNonce(claim) }); err != nil {
 		t.Fatal(err)
 	}
 	if code, response := do(t, h, "POST", "/v2/use", useBody(t, "idem-use-1", capability, grantID, ak, "SELECT 1", "nonce-1")); code == http.StatusCreated {

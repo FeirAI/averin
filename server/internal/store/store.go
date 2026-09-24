@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/feirai/averin/server/internal/resourceshim"
 )
 
 // Record is a sealed Decision Record plus the few fields the store indexes on.
@@ -135,10 +137,10 @@ type Store interface {
 	RevokeGrant(projectID, grantID string) (bool, error)
 	RevokedGrantIDs(projectID string) ([]string, error)
 	// Ledger claims made on the bound Store commit with the use receipt.
-	ConsumeNonce(nonce string) error
-	ConsumeJTI(jti string) error
-	ReleaseNonce(nonce string)
-	ReleaseJTI(jti string)
+	ConsumeNonce(claim resourceshim.NonceClaim) error
+	ConsumeJTI(claim resourceshim.JTIClaim) error
+	ReleaseNonce(claim resourceshim.NonceClaim)
+	ReleaseJTI(claim resourceshim.JTIClaim)
 	// PutRecord stores a record under an idempotency key. If the key was already used, it returns
 	// the previously stored record and created=false (threat #8: retry duplication collapses). A NEW record
 	// whose record_id is already held by a different record in the project fails with ErrRecordIDConflict.
@@ -268,9 +270,9 @@ type Store interface {
 type Mem struct {
 	mu           sync.Mutex
 	ledgerMu     sync.Mutex
-	ledgerClaims map[string]*Mem // nil owner means committed; bound owner means reserved
+	ledgerClaims map[ledgerKey]memClaimOwner // nil transaction means committed
 	root         *Mem
-	claimed      []string
+	claimed      []ledgerKey
 	projectLocks sync.Map // project ID -> chan struct{}; one token per project
 	projects     map[string]*project
 	now          func() time.Time // the store's clock (broker_seq allocated_at); WithClock injects one for tests
@@ -364,9 +366,10 @@ func (m *Mem) WithProjectWrite(ctx context.Context, projectID string, fn func(St
 	defer func() {
 		m.ledgerMu.Lock()
 		for _, key := range tmp.claimed {
-			if owner, ok := m.ledgerClaims[key]; ok && owner == tmp {
+			if owner, ok := m.ledgerClaims[key]; ok && owner.tx == tmp {
 				if committed {
-					m.ledgerClaims[key] = nil
+					owner.tx = nil
+					m.ledgerClaims[key] = owner
 				} else {
 					delete(m.ledgerClaims, key)
 				}

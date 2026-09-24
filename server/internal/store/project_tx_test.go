@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,214 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func claimJTI(t *testing.T, key string) resourceshim.JTIClaim {
+	t.Helper()
+	c, err := resourceshim.NewJTIClaim(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func claimNonce(t *testing.T, project, resource, nonce string) resourceshim.NonceClaim {
+	t.Helper()
+	c, err := resourceshim.NewNonceClaim(project, resource, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func exerciseNonceClaims(t *testing.T, first, second Store) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	shared := "nonce-shared"
+	for _, item := range []struct {
+		st                Store
+		project, resource string
+	}{
+		{first, "p1", "resource"}, {second, "p2", "resource"}, {first, "p1", "other-resource"},
+	} {
+		c := claimNonce(t, item.project, item.resource, shared)
+		if err := item.st.WithProjectWrite(ctx, item.project, func(st Store) error { return st.ConsumeNonce(c) }); err != nil {
+			t.Fatalf("distinct nonce scope %s/%s: %v", item.project, item.resource, err)
+		}
+	}
+	duplicate := claimNonce(t, "p1", "resource", shared)
+	if err := second.WithProjectWrite(ctx, "p1", func(st Store) error { return st.ConsumeNonce(duplicate) }); !errors.Is(err, resourceshim.ErrConsumed) {
+		t.Fatalf("same-project/resource replay = %v", err)
+	}
+	// A claim from another project, or from a prior committed transaction in
+	// this project, cannot be released by the current request.
+	otherProject := claimNonce(t, "p2", "resource", shared)
+	if err := second.WithProjectWrite(ctx, "p2", func(st Store) error {
+		st.ReleaseNonce(duplicate)
+		st.ReleaseNonce(otherProject)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.WithProjectWrite(ctx, "p2", func(st Store) error { return st.ConsumeNonce(claimNonce(t, "p2", "resource", shared)) }); !errors.Is(err, resourceshim.ErrConsumed) {
+		t.Fatalf("cross-project/prior-tx release deleted committed claim: %v", err)
+	}
+
+	owned := claimNonce(t, "p1", "resource", "rollback")
+	wrongOwner := claimNonce(t, "p1", "resource", "rollback")
+	if err := first.WithProjectWrite(ctx, "p1", func(st Store) error {
+		if err := st.ConsumeNonce(owned); err != nil {
+			return err
+		}
+		st.ReleaseNonce(wrongOwner)
+		if err := st.ConsumeNonce(wrongOwner); !errors.Is(err, resourceshim.ErrConsumed) {
+			return fmt.Errorf("unowned release removed claim: %v", err)
+		}
+		st.ReleaseNonce(owned)
+		return st.ConsumeNonce(wrongOwner)
+	}); err != nil {
+		t.Fatalf("exact owner rollback: %v", err)
+	}
+}
+
+func TestMemScopedNonceClaimsAndOwnedRollback(t *testing.T) {
+	m := NewMem()
+	exerciseNonceClaims(t, m, m)
+}
+
+func TestPostgresScopedNonceClaimsAndOwnedRollback(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	ctx := context.Background()
+	pool, err := pgxpool.NewWithConfig(ctx, p.pool.Config().Copy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	exerciseNonceClaims(t, p, &Postgres{pool: pool})
+}
+
+func TestPostgresIndependentPoolsNonceRace(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.NewWithConfig(ctx, p.pool.Config().Copy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	other := &Postgres{pool: pool}
+	run := func(projects [2]string, nonce string) [2]error {
+		var wg sync.WaitGroup
+		var errs [2]error
+		claims := [2]resourceshim.NonceClaim{
+			claimNonce(t, projects[0], "resource", nonce),
+			claimNonce(t, projects[1], "resource", nonce),
+		}
+		for i, st := range []Store{p, other} {
+			wg.Add(1)
+			go func(i int, st Store) {
+				defer wg.Done()
+				errs[i] = st.WithProjectWrite(ctx, projects[i], func(bound Store) error { return bound.ConsumeNonce(claims[i]) })
+			}(i, st)
+		}
+		wg.Wait()
+		return errs
+	}
+	for i, err := range run([2]string{"p1", "p2"}, "equal-across-tenants") {
+		if err != nil {
+			t.Fatalf("distinct tenant race %d: %v", i, err)
+		}
+	}
+	errs := run([2]string{"p3", "p3"}, "equal-same-tenant")
+	wins, replays := 0, 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			wins++
+		case errors.Is(err, resourceshim.ErrConsumed):
+			replays++
+		default:
+			t.Fatalf("nonce race unexpected error: %v", err)
+		}
+	}
+	if wins != 1 || replays != 1 {
+		t.Fatalf("same-tenant race wins=%d replays=%d", wins, replays)
+	}
+}
+
+func TestPostgresLegacyGlobalExclusionsUntilDBCutoff(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	ctx := context.Background()
+	// Seed historical rows through the privileged test connection. Production
+	// never writes this table after v6; the migration preserves preexisting rows.
+	for _, sql := range []string{
+		`ALTER TABLE legacy_consume_exclusions DISABLE TRIGGER legacy_consume_rows_immutable`,
+		`INSERT INTO legacy_consume_exclusions(kind,consume_key) VALUES ('nonce','unknown-owner'),('jti','unknown-jti')`,
+		`ALTER TABLE legacy_consume_exclusions ENABLE TRIGGER legacy_consume_rows_immutable`,
+	} {
+		if _, err := p.pool.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, project := range []string{"p1", "p2"} {
+		c := claimNonce(t, project, "resource", "unknown-owner")
+		if err := p.WithProjectWrite(ctx, project, func(st Store) error { return st.ConsumeNonce(c) }); !errors.Is(err, resourceshim.ErrConsumed) {
+			t.Fatalf("legacy unknown-owner nonce accepted by %s: %v", project, err)
+		}
+	}
+	if err := p.WithProjectWrite(ctx, "p1", func(st Store) error { return st.ConsumeJTI(claimJTI(t, "unknown-jti")) }); !errors.Is(err, resourceshim.ErrConsumed) {
+		t.Fatalf("legacy global JTI reopened: %v", err)
+	}
+	// The DB clock is the sole authority for the transition. Move the test
+	// cutover timestamps to a mature 24-hour hold, then new independent claims
+	// can proceed; no application clock or guessed legacy owner is involved.
+	for _, sql := range []string{
+		`ALTER TABLE nonce_ledger_cutover DISABLE TRIGGER nonce_cutover_rows_immutable`,
+		`UPDATE nonce_ledger_cutover SET cutover_at=clock_timestamp()-interval '25 hours', legacy_exclusion_until=clock_timestamp()-interval '1 hour'`,
+		`ALTER TABLE nonce_ledger_cutover ENABLE TRIGGER nonce_cutover_rows_immutable`,
+	} {
+		if _, err := p.pool.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, project := range []string{"p1", "p2"} {
+		c := claimNonce(t, project, "resource", "unknown-owner")
+		if err := p.WithProjectWrite(ctx, project, func(st Store) error { return st.ConsumeNonce(c) }); err != nil {
+			t.Fatalf("mature legacy exclusion still blocked new %s claim: %v", project, err)
+		}
+	}
+	if err := p.WithProjectWrite(ctx, "p1", func(st Store) error { return st.ConsumeJTI(claimJTI(t, "unknown-jti")) }); err != nil {
+		t.Fatalf("mature legacy JTI exclusion still blocked new claim: %v", err)
+	}
+}
+
+func TestPostgresMissingCutoverMetadataRejectsClaims(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	ctx := context.Background()
+	for _, sql := range []string{
+		`ALTER TABLE nonce_ledger_cutover DISABLE TRIGGER nonce_cutover_rows_immutable`,
+		`DELETE FROM nonce_ledger_cutover`,
+		`ALTER TABLE nonce_ledger_cutover ENABLE TRIGGER nonce_cutover_rows_immutable`,
+	} {
+		if _, err := p.pool.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.WithProjectWrite(ctx, "p", func(st Store) error {
+		return st.ConsumeNonce(claimNonce(t, "p", "r", "n"))
+	}); !errors.Is(err, resourceshim.ErrConsumed) {
+		t.Fatalf("missing cutover metadata admitted nonce: %v", err)
+	}
+	if err := p.WithProjectWrite(ctx, "p", func(st Store) error {
+		return st.ConsumeJTI(claimJTI(t, "j"))
+	}); !errors.Is(err, resourceshim.ErrConsumed) {
+		t.Fatalf("missing cutover metadata admitted JTI: %v", err)
+	}
+}
 
 func TestMemProjectWriteRollbackAndIsolation(t *testing.T) {
 	m := NewMem()
@@ -116,7 +325,7 @@ func TestMemLedgerClaimsRemainGlobalAcrossProjects(t *testing.T) {
 	first := make(chan error, 1)
 	go func() {
 		first <- m.WithProjectWrite(ctx, "p1", func(st Store) error {
-			if err := st.ConsumeJTI("same-jti"); err != nil {
+			if err := st.ConsumeJTI(claimJTI(t, "same-jti")); err != nil {
 				return err
 			}
 			close(entered)
@@ -129,17 +338,17 @@ func TestMemLedgerClaimsRemainGlobalAcrossProjects(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("claim did not start")
 	}
-	if err := m.WithProjectWrite(ctx, "p2", func(st Store) error { return st.ConsumeJTI("same-jti") }); !errors.Is(err, resourceshim.ErrConsumed) {
+	if err := m.WithProjectWrite(ctx, "p2", func(st Store) error { return st.ConsumeJTI(claimJTI(t, "same-jti")) }); !errors.Is(err, resourceshim.ErrConsumed) {
 		t.Fatalf("cross-project in-flight JTI claim = %v", err)
 	}
 	close(release)
 	if err := <-first; err == nil {
 		t.Fatal("first claim did not abort")
 	}
-	if err := m.WithProjectWrite(ctx, "p2", func(st Store) error { return st.ConsumeJTI("same-jti") }); err != nil {
+	if err := m.WithProjectWrite(ctx, "p2", func(st Store) error { return st.ConsumeJTI(claimJTI(t, "same-jti")) }); err != nil {
 		t.Fatalf("aborted claim was not released: %v", err)
 	}
-	if err := m.WithProjectWrite(ctx, "p1", func(st Store) error { return st.ConsumeJTI("same-jti") }); !errors.Is(err, resourceshim.ErrConsumed) {
+	if err := m.WithProjectWrite(ctx, "p1", func(st Store) error { return st.ConsumeJTI(claimJTI(t, "same-jti")) }); !errors.Is(err, resourceshim.ErrConsumed) {
 		t.Fatalf("committed cross-project JTI claim = %v", err)
 	}
 }
@@ -386,7 +595,7 @@ func TestPostgresLedgerClaimsGlobalAndAtomic(t *testing.T) {
 	first := make(chan error, 1)
 	go func() {
 		first <- p.WithProjectWrite(ctx, "p1", func(st Store) error {
-			if err := st.ConsumeJTI("shared"); err != nil {
+			if err := st.ConsumeJTI(claimJTI(t, "shared")); err != nil {
 				return err
 			}
 			close(entered)
@@ -408,7 +617,7 @@ func TestPostgresLedgerClaimsGlobalAndAtomic(t *testing.T) {
 	}()
 	second := make(chan error, 1)
 	go func() {
-		second <- other.WithProjectWrite(ctx, "p2", func(st Store) error { return st.ConsumeJTI("shared") })
+		second <- other.WithProjectWrite(ctx, "p2", func(st Store) error { return st.ConsumeJTI(claimJTI(t, "shared")) })
 	}()
 	select {
 	case err := <-second:
@@ -422,21 +631,21 @@ func TestPostgresLedgerClaimsGlobalAndAtomic(t *testing.T) {
 	if err := <-second; !errors.Is(err, resourceshim.ErrConsumed) {
 		t.Fatalf("second claim = %v", err)
 	}
-	if err := p.WithProjectWrite(ctx, "p3", func(st Store) error { return st.ConsumeJTI("rollback") }); err != nil {
+	if err := p.WithProjectWrite(ctx, "p3", func(st Store) error { return st.ConsumeJTI(claimJTI(t, "rollback")) }); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.WithProjectWrite(ctx, "p4", func(st Store) error { return st.ConsumeJTI("rollback") }); !errors.Is(err, resourceshim.ErrConsumed) {
+	if err := p.WithProjectWrite(ctx, "p4", func(st Store) error { return st.ConsumeJTI(claimJTI(t, "rollback")) }); !errors.Is(err, resourceshim.ErrConsumed) {
 		t.Fatalf("committed claim = %v", err)
 	}
 	if err := p.WithProjectWrite(ctx, "p3", func(st Store) error {
-		if err := st.ConsumeJTI("aborted"); err != nil {
+		if err := st.ConsumeJTI(claimJTI(t, "aborted")); err != nil {
 			return err
 		}
 		return errors.New("abort")
 	}); err == nil {
 		t.Fatal("abort was lost")
 	}
-	if err := other.WithProjectWrite(ctx, "p4", func(st Store) error { return st.ConsumeJTI("aborted") }); err != nil {
+	if err := other.WithProjectWrite(ctx, "p4", func(st Store) error { return st.ConsumeJTI(claimJTI(t, "aborted")) }); err != nil {
 		t.Fatalf("aborted claim remained consumed: %v", err)
 	}
 }

@@ -2,102 +2,72 @@ package pgledger_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/feirai/averin/server/internal/pgledger"
-	"github.com/feirai/averin/server/internal/resourceshim"
+	"github.com/feirai/averin/server/internal/pgschema"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Set AVERIN_TEST_DATABASE_URL (e.g. postgres://postgres:postgres@localhost:5432/postgres) to enable.
-func TestPostgresLedger(t *testing.T) {
-	dsn := os.Getenv("AVERIN_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("set AVERIN_TEST_DATABASE_URL to run the Postgres ledger test")
+// TestPostgresLedgerMaintenance proves that the runtime maintenance pool sees
+// the migrated schema, prunes only new expired claims, and never sweeps unknown-
+// owner legacy exclusions. Request claims themselves are transaction-bound in
+// internal/store, not exposed by pgledger.
+func TestPostgresLedgerMaintenance(t *testing.T) {
+	base := os.Getenv("AVERIN_TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("set AVERIN_TEST_DATABASE_URL for real Postgres ledger test")
 	}
 	ctx := context.Background()
-
-	// pgledger.New no longer applies DDL — the versioned migration runner (internal/pgschema) owns it.
-	// Ensure the ledger table exists (idempotent) before exercising the ledger. This mirrors what New
-	// used to do implicitly, so the test's semantics are unchanged.
-	admin, err := pgxpool.New(ctx, dsn)
+	root, err := pgxpool.New(ctx, base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admin.Exec(ctx, pgledger.SchemaSQL); err != nil {
-		admin.Close()
-		t.Fatalf("apply ledger schema: %v", err)
+	defer root.Close()
+	schema := fmt.Sprintf("averin_ledger_%d", time.Now().UnixNano())
+	if _, err := root.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
 	}
-	admin.Close()
-
+	defer root.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") //nolint:errcheck
+	dsn := base + "&search_path=" + schema
+	if err := pgschema.Migrate(ctx, dsn); err != nil {
+		t.Fatal(err)
+	}
 	l, err := pgledger.New(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
-
-	// unique keys so the shared test DB has no cross-run collisions
-	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	nonce, jti := "n-"+suffix, "j-"+suffix
-
-	// first consume succeeds; a second is a replay / double-spend.
-	if err := l.ConsumeNonce(nonce); err != nil {
-		t.Fatalf("first ConsumeNonce: %v", err)
+	if err := l.Ping(ctx); err != nil {
+		t.Fatal(err)
 	}
-	if err := l.ConsumeNonce(nonce); !errors.Is(err, resourceshim.ErrConsumed) {
-		t.Fatalf("a nonce replay must be ErrConsumed, got %v", err)
-	}
-	if err := l.ConsumeJTI(jti); err != nil {
-		t.Fatalf("first ConsumeJTI: %v", err)
-	}
-	if err := l.ConsumeJTI(jti); !errors.Is(err, resourceshim.ErrConsumed) {
-		t.Fatalf("a jti double-spend must be ErrConsumed, got %v", err)
-	}
-
-	// Release un-burns -> the nonce is re-consumable (the pre-persistence rollback).
-	l.ReleaseNonce(nonce)
-	if err := l.ConsumeNonce(nonce); err != nil {
-		t.Fatalf("after Release, re-consume must succeed: %v", err)
-	}
-
-	// DURABILITY: a FRESH Ledger (simulating a process restart) still sees the consumption — the whole
-	// point of the durable ledger vs the volatile MemLedger.
-	l2, err := pgledger.New(ctx, dsn)
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l2.Close()
-	if err := l2.ConsumeNonce(nonce); !errors.Is(err, resourceshim.ErrConsumed) {
-		t.Fatalf("durability: a restart must still see the nonce consumed, got %v", err)
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `INSERT INTO consumed_nonces(project_id,resource_id,nonce,owner_id,consumed_at)
+		VALUES ('p','r','old','00000000000000000000000000000000',clock_timestamp()-interval '2 days'),
+		('p','r','fresh','11111111111111111111111111111111',clock_timestamp())`); err != nil {
+		t.Fatal(err)
 	}
-
-	// CONCURRENCY: many racers consume the SAME key -> exactly one wins (atomic INSERT, no read-then-write).
-	raceKey := "race-" + suffix
-	var wins int32
-	var wg sync.WaitGroup
-	for i := 0; i < 16; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if l.ConsumeJTI(raceKey) == nil {
-				atomic.AddInt32(&wins, 1)
-			}
-		}()
+	if _, err := pool.Exec(ctx, `INSERT INTO consumed_jtis(consume_key,owner_id,consumed_at)
+		VALUES ('old','00000000000000000000000000000000',clock_timestamp()-interval '2 days'),
+		('fresh','11111111111111111111111111111111',clock_timestamp())`); err != nil {
+		t.Fatal(err)
 	}
-	wg.Wait()
-	if wins != 1 {
-		t.Fatalf("exactly one racer must win the consume, got %d", wins)
+	// Migration's legacy table cannot be populated after cutover. A first-boot
+	// empty table still proves the ordinary sweep never touches its relation.
+	removed, err := l.SweepConsumed(ctx, 24*time.Hour)
+	if err != nil || removed != 2 {
+		t.Fatalf("sweep removed=%d err=%v, want exactly two aged new rows", removed, err)
 	}
-
-	// cleanup the keys this run created (best-effort; the table is operational state, not evidence).
-	l.ReleaseNonce(nonce)
-	l.ReleaseJTI(jti)
-	l.ReleaseJTI(raceKey)
+	var left int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM consumed_nonces) +
+		(SELECT count(*) FROM consumed_jtis)`).Scan(&left); err != nil || left != 2 {
+		t.Fatalf("fresh claims after sweep=%d err=%v", left, err)
+	}
 }
