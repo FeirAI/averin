@@ -259,49 +259,6 @@ fn claim_contract_satisfied(report: &CanonValue) -> bool {
         && claims.get(requested).and_then(CanonValue::as_str) == Some("satisfied")
 }
 
-#[cfg(test)]
-mod claim_contract_tests {
-    use super::*;
-
-    fn report(version: &str, decision: &str) -> CanonValue {
-        CanonValue::object(vec![
-            ("claims_version".into(), CanonValue::string(version)),
-            (
-                "claims".into(),
-                CanonValue::object(vec![
-                    ("requested".into(), CanonValue::string("authorized")),
-                    ("authorized".into(), CanonValue::string(decision)),
-                    ("requested_decision".into(), CanonValue::string(decision)),
-                ])
-                .unwrap(),
-            ),
-        ])
-        .unwrap()
-    }
-
-    #[test]
-    fn unsupported_or_malformed_claims_never_pass() {
-        assert!(claim_contract_satisfied(&report("1", "satisfied")));
-        assert!(!claim_contract_satisfied(&report("2", "satisfied")));
-        assert!(!claim_contract_satisfied(&report("1", "insufficient")));
-        assert!(!claim_contract_satisfied(&report("1", "refuted")));
-        assert!(!claim_contract_satisfied(
-            &CanonValue::object(vec![]).unwrap()
-        ));
-        let mut mismatched = report("1", "satisfied");
-        if let CanonValue::Object(ref mut fields) = mismatched {
-            if let Some((_, CanonValue::Object(claims))) =
-                fields.iter_mut().find(|(k, _)| k == "claims")
-            {
-                if let Some((_, value)) = claims.iter_mut().find(|(k, _)| k == "authorized") {
-                    *value = CanonValue::string("insufficient");
-                }
-            }
-        }
-        assert!(!claim_contract_satisfied(&mismatched));
-    }
-}
-
 fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -350,5 +307,48 @@ fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod claim_contract_tests {
+    use super::*;
+
+    fn report(version: &str, decision: &str) -> CanonValue {
+        CanonValue::object(vec![
+            ("claims_version".into(), CanonValue::string(version)),
+            (
+                "claims".into(),
+                CanonValue::object(vec![
+                    ("requested".into(), CanonValue::string("authorized")),
+                    ("authorized".into(), CanonValue::string(decision)),
+                    ("requested_decision".into(), CanonValue::string(decision)),
+                ])
+                .unwrap(),
+            ),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn unsupported_or_malformed_claims_never_pass() {
+        assert!(claim_contract_satisfied(&report("1", "satisfied")));
+        assert!(!claim_contract_satisfied(&report("2", "satisfied")));
+        assert!(!claim_contract_satisfied(&report("1", "insufficient")));
+        assert!(!claim_contract_satisfied(&report("1", "refuted")));
+        assert!(!claim_contract_satisfied(
+            &CanonValue::object(vec![]).unwrap()
+        ));
+        let mut mismatched = report("1", "satisfied");
+        if let CanonValue::Object(ref mut fields) = mismatched {
+            if let Some((_, CanonValue::Object(claims))) =
+                fields.iter_mut().find(|(k, _)| k == "claims")
+            {
+                if let Some((_, value)) = claims.iter_mut().find(|(k, _)| k == "authorized") {
+                    *value = CanonValue::string("insufficient");
+                }
+            }
+        }
+        assert!(!claim_contract_satisfied(&mismatched));
     }
 }
