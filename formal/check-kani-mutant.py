@@ -29,7 +29,8 @@ def failed_checks(output: str) -> list[dict[str, str]]:
 
 
 def target_counterexample(
-    output: str, exit_code: int, harness: str, source: str, description: str
+    output: str, exit_code: int, harness: str, source: str, description: str,
+    expect_guard: bool = False,
 ) -> tuple[bool, str]:
     # Kani 0.68.0 returns 1 for a completed failed verification (observed on m9).
     # Any other exit is a tool, timeout, or signal failure, not a mutant kill.
@@ -40,6 +41,13 @@ def target_counterexample(
     selected = re.findall(r"^Checking harness (.+)\.\.\.$", output, re.MULTILINE)
     if selected != [harness]:
         return False, f"selected harnesses {selected!r} differ from {harness!r}"
+    stub_lines = [line.strip() for line in output.splitlines() if "- Stub:" in line]
+    expected = "- Stub: parse_top_level_general -> reject_general_in_integer_proof"
+    if expect_guard:
+        if stub_lines != [expected]:
+            return False, "integer counterexample lacks its exact fail-closed branch guard"
+    elif stub_lines:
+        return False, "unexpected stub in parser counterexample"
     failed_harnesses = re.findall(r"^Verification failed for - (.+)$", output, re.MULTILINE)
     if failed_harnesses != [harness]:
         return False, "intended harness lacks an exact failed-harness summary"
@@ -88,8 +96,9 @@ def self_test() -> None:
     tail = f"\nSUMMARY:\n ** 1 of 2 failed\nVERIFICATION:- FAILED\nVerification failed for - {harness}\nComplete - 0 successfully verified harnesses, 1 failures, 1 total.\n"
     good = selected + prefix + tail
     def accepted(log: str, exit_code: int = 1, name: str = harness,
-                 source: str = "core/src/b64.rs", description: str = "assertion failed") -> bool:
-        return target_counterexample(log, exit_code, name, source, description)[0]
+                 source: str = "core/src/b64.rs", description: str = "assertion failed",
+                 expect_guard: bool = False) -> bool:
+        return target_counterexample(log, exit_code, name, source, description, expect_guard)[0]
 
     assert accepted(good)
     for bad_exit in (0, 2, 124, 137, 143):
@@ -107,6 +116,14 @@ def self_test() -> None:
                                     f"Verification failed for - {harness}_suffix"))
     assert not accepted(good.replace("1 failures, 1 total", "2 failures, 2 total"))
     assert not accepted(good + "Complete - 0 successfully verified harnesses, 1 failures, 1 total.\n")
+    guard_line = "  - Stub: parse_top_level_general -> reject_general_in_integer_proof\n"
+    guarded = good.replace(selected, selected + guard_line)
+    assert accepted(guarded, expect_guard=True)
+    assert not accepted(good, expect_guard=True)
+    assert not accepted(guarded)
+    assert not accepted(guarded.replace("reject_general_in_integer_proof", "empty_stub"), expect_guard=True)
+    assert not accepted(guarded.replace("- Stub: parse_top_level_general", "- Stub: other::parse_top_level_general"), expect_guard=True)
+    assert not accepted(guarded + "  - Stub: another -> stub\n", expect_guard=True)
     assert completed_simple_gate("oracle", "test result: FAILED. 1 failed", 101, False)[0]
     assert not completed_simple_gate("oracle", "error: could not compile", 101, False)[0]
     assert not completed_simple_gate("golden", "test result: FAILED. 1 failed", 124, False)[0]
@@ -130,6 +147,7 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--gate", choices=("inventory", "oracle", "golden"))
     parser.add_argument("--expect-success", action="store_true")
+    parser.add_argument("--expect-guard", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -143,7 +161,8 @@ def main() -> int:
         if None in (args.harness, args.source, args.description):
             parser.error("harness, source and description are required for Kani")
         okay, why = target_counterexample(
-            output, args.exit_code, args.harness, args.source, args.description
+            output, args.exit_code, args.harness, args.source, args.description,
+            args.expect_guard,
         )
     print(f"check-kani-mutant: {why}")
     return 0 if okay else 1

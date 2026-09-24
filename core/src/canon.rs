@@ -86,20 +86,17 @@ impl CanonValue {
         // A number at byte zero cannot start with insignificant whitespace. Route that
         // common top-level case straight to the same number parser used by parse_value.
         // Nested and all other top-level values retain the general dispatcher.
-        let v = if input
+        if input
             .as_bytes()
             .first()
             .is_some_and(|b| *b == b'-' || b.is_ascii_digit())
         {
-            p.parse_number()?
-        } else {
-            p.skip_ws();
-            p.parse_value()?
-        };
-        p.skip_ws();
-        if p.i != p.s.len() {
-            return Err(p.err("trailing data after top-level value"));
+            let n = p.parse_number()?;
+            p.finish_top_level()?;
+            return Ok(CanonValue::Int(n));
         }
+        let v = parse_top_level_general(&mut p)?;
+        p.finish_top_level()?;
         Ok(v)
     }
 
@@ -292,6 +289,14 @@ struct Parser<'a> {
     depth: usize,
 }
 
+// The top-level nonnumeric route also handles leading whitespace before a value.
+// Numeric-first input has no leading whitespace and uses the same parse_number method
+// that parse_value would select, so this helper is unreachable for that input domain.
+fn parse_top_level_general(p: &mut Parser<'_>) -> Result<CanonValue, ParseError> {
+    p.skip_ws();
+    p.parse_value()
+}
+
 impl<'a> Parser<'a> {
     fn err(&self, msg: &'static str) -> ParseError {
         ParseError {
@@ -315,6 +320,15 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn finish_top_level(&mut self) -> Result<(), ParseError> {
+        self.skip_ws();
+        if self.i != self.s.len() {
+            Err(self.err("trailing data after top-level value"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn parse_value(&mut self) -> Result<CanonValue, ParseError> {
         match self.peek() {
             Some(b'{') => self.parse_object(),
@@ -322,7 +336,7 @@ impl<'a> Parser<'a> {
             Some(b'"') => Ok(CanonValue::Str(self.parse_string()?)),
             Some(b't') | Some(b'f') => self.parse_bool(),
             Some(b'n') => self.parse_null(),
-            Some(b'-') | Some(b'0'..=b'9') => self.parse_number(),
+            Some(b'-') | Some(b'0'..=b'9') => self.parse_number().map(CanonValue::Int),
             Some(_) => Err(self.err("unexpected character")),
             None => Err(self.err("unexpected end of input")),
         }
@@ -367,7 +381,7 @@ impl<'a> Parser<'a> {
         Ok(CanonValue::Null)
     }
 
-    fn parse_number(&mut self) -> Result<CanonValue, ParseError> {
+    fn parse_number(&mut self) -> Result<i64, ParseError> {
         let start = self.i;
         if self.peek() == Some(b'-') {
             self.i += 1;
@@ -404,7 +418,7 @@ impl<'a> Parser<'a> {
             });
         }
         match lexeme.parse::<i64>() {
-            Ok(n) => Ok(CanonValue::Int(n)),
+            Ok(n) => Ok(n),
             Err(_) => Err(ParseError {
                 message: ParseMessage::Static("integer out of signed 64-bit range"),
                 pos: start,
@@ -740,6 +754,13 @@ mod error_compat_tests {
 mod kani_proofs {
     use super::*;
 
+    // This guard replaces only the top-level general route in integer harnesses. A proof
+    // fails if the real numeric-first dispatcher ever takes it; no successful behavior is
+    // supplied. The parser's number scanner and final trailing-data check remain real.
+    fn reject_general_in_integer_proof(_: &mut Parser<'_>) -> Result<CanonValue, ParseError> {
+        panic!("numeric spelling reached general top-level parser")
+    }
+
     /// The exact assertion body shared by the original full-domain proof and every exhaustive
     /// decimal-width shard below. Only the input domain changes between harnesses.
     fn integer_roundtrip_case(n: i64) {
@@ -752,12 +773,16 @@ mod kani_proofs {
             .is_some_and(|b| *b == b'-' || b.is_ascii_digit());
         assert!(numeric_prefix, "decimal spelling needs sign or digit");
         kani::assume(numeric_prefix);
-        let v = match CanonValue::parse_typed(&text) {
-            Ok(v) => v,
+        let parsed_n = match CanonValue::parse_typed(&text) {
+            Ok(CanonValue::Int(parsed_n)) => parsed_n,
+            Ok(_) => panic!("formatted integer parsed as non-integer"),
             Err(_) => panic!("formatted integer was rejected"),
         };
-        assert!(v == CanonValue::Int(n), "parsed integer differs");
-        assert!(v.serialize() == text, "serialized integer spelling differs");
+        assert!(parsed_n == n, "parsed integer differs");
+        assert!(
+            CanonValue::Int(parsed_n).serialize() == text,
+            "serialized integer spelling differs"
+        );
     }
 
     /// `parse(n.to_string()) == Int(n)` and serialization writes that same spelling back, for every
@@ -765,6 +790,7 @@ mod kani_proofs {
     /// harness remains available for direct verification; CI can instead prove the exact union of
     /// the disjoint shards below, checked by `formal/check-kani-domains.py`.
     #[kani::proof]
+    #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
     #[kani::unwind(8)]
     fn integer_roundtrip() {
         let n: i64 = kani::any_where(|n: &i64| *n > -100_000 && *n < 100_000);
@@ -776,6 +802,7 @@ mod kani_proofs {
         // formatting path would otherwise remain symbolic to CBMC.
         ($name:ident, u8, zero, 0, 0) => {
             #[kani::proof]
+            #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
             #[kani::unwind(8)]
             fn $name() {
                 integer_roundtrip_case(0);
@@ -783,6 +810,7 @@ mod kani_proofs {
         };
         ($name:ident, $ty:ty, positive, $lo:expr, $hi:expr) => {
             #[kani::proof]
+            #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
             #[kani::unwind(8)]
             fn $name() {
                 let magnitude: $ty = kani::any_where(|m: &$ty| *m >= $lo && *m <= $hi);
@@ -791,6 +819,7 @@ mod kani_proofs {
         };
         ($name:ident, $ty:ty, negative, $lo:expr, $hi:expr) => {
             #[kani::proof]
+            #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
             #[kani::unwind(8)]
             fn $name() {
                 let magnitude: $ty = kani::any_where(|m: &$ty| *m >= $lo && *m <= $hi);

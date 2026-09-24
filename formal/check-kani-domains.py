@@ -45,13 +45,16 @@ def validate_wiring(source: str, runner: str) -> None:
         "is_some_and(|b|*b==b'-'||b.is_ascii_digit());"
         'assert!(numeric_prefix,"decimalspellingneedssignordigit");'
         "kani::assume(numeric_prefix);"
-        'letv=matchCanonValue::parse_typed(&text){Ok(v)=>v,Err(_)=>panic!("formattedintegerwasrejected"),};'
+        'letparsed_n=matchCanonValue::parse_typed(&text){'
+        'Ok(CanonValue::Int(parsed_n))=>parsed_n,'
+        'Ok(_)=>panic!("formattedintegerparsedasnon-integer"),'
+        'Err(_)=>panic!("formattedintegerwasrejected"),};'
     )
     if checked_prefix not in helper or helper.count("kani::assume(") != 1:
         raise ValueError("integer prefix must be asserted before the identical assumption and parse")
     for required in (
-        'assert!(v==CanonValue::Int(n),"parsedintegerdiffers");',
-        'assert!(v.serialize()==text,"serializedintegerspellingdiffers");',
+        'assert!(parsed_n==n,"parsedintegerdiffers");',
+        'assert!(CanonValue::Int(parsed_n).serialize()==text,"serializedintegerspellingdiffers");',
     ):
         if required not in helper:
             raise ValueError(f"shared integer assertion body changed: {required}")
@@ -100,6 +103,55 @@ def validate_wiring(source: str, runner: str) -> None:
             raise ValueError(f"extended runner omits integer shards: {required}")
 
 
+def validate_fail_closed_guard(source: str, runner: str) -> None:
+    compact = re.sub(r"\s+", "", re.sub(r"//[^\n]*", "", source))
+    route = (
+        "ifinput.as_bytes().first().is_some_and(|b|*b==b'-'||b.is_ascii_digit())"
+        "{letn=p.parse_number()?;p.finish_top_level()?;returnOk(CanonValue::Int(n));}"
+        "letv=parse_top_level_general(&mutp)?;p.finish_top_level()?;Ok(v)"
+    )
+    if route not in compact:
+        raise ValueError("numeric-first production dispatch or trailing check changed")
+    finish = (
+        "fnfinish_top_level(&mutself)->Result<(),ParseError>{self.skip_ws();"
+        'ifself.i!=self.s.len(){Err(self.err("trailingdataaftertop-levelvalue"))}'
+        "else{Ok(())}}"
+    )
+    if finish not in compact:
+        raise ValueError("shared top-level trailing check changed")
+    for required in (
+        "Some(b'-')|Some(b'0'..=b'9')=>self.parse_number().map(CanonValue::Int),",
+        "fnparse_number(&mutself)->Result<i64,ParseError>{",
+        "matchlexeme.parse::<i64>(){Ok(n)=>Ok(n),",
+    ):
+        if required not in compact:
+            raise ValueError(f"numeric parser type boundary changed: {required}")
+    if (
+        "fnparse_top_level_general(p:&mutParser<'_>)->Result<CanonValue,ParseError>"
+        "{p.skip_ws();p.parse_value()}"
+    ) not in compact:
+        raise ValueError("general top-level helper no longer delegates to production parser")
+    guard = (
+        "fnreject_general_in_integer_proof(_:&mutParser<'_>)->Result<CanonValue,ParseError>"
+        '{panic!("numericspellingreachedgeneraltop-levelparser")}'
+    )
+    if guard not in compact:
+        raise ValueError("integer general-branch guard must fail unconditionally")
+    annotation = "#[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]"
+    if source.count(annotation) != 4:
+        raise ValueError("original integer harness and all shard macro arms need the guard")
+    for required in (
+        'if [[ "$1" == integer_roundtrip* ]]; then',
+        "python3 formal/check-kani-domains.py >/dev/null || return 2",
+        "kani_flags=(-Z stubbing)",
+        "guard_flag=(--expect-guard)",
+        'cargo kani "${kani_flags[@]}"',
+        '"${guard_flag[@]}"',
+    ):
+        if required not in runner:
+            raise ValueError(f"Kani runner omits fail-closed guard wiring: {required}")
+
+
 def validate(ranges: list[tuple[str, str, str, int, int]]) -> list[str]:
     expected = expected_ranges()
     names = [name for name, _, _, _, _ in ranges]
@@ -144,9 +196,12 @@ def self_test() -> None:
         'fn integer_roundtrip_case(n: i64) { let text = n.to_string(); '
         'let numeric_prefix = text.as_bytes().first().is_some_and(|b| *b == b\'-\' || b.is_ascii_digit()); '
         'assert!(numeric_prefix, "decimal spelling needs sign or digit"); kani::assume(numeric_prefix); '
-        'let v = match CanonValue::parse_typed(&text) { Ok(v) => v, Err(_) => panic!("formatted integer was rejected"), }; '
-        'assert!(v == CanonValue::Int(n), "parsed integer differs"); '
-        'assert!(v.serialize() == text, "serialized integer spelling differs"); } '
+        'let parsed_n = match CanonValue::parse_typed(&text) { '
+        'Ok(CanonValue::Int(parsed_n)) => parsed_n, '
+        'Ok(_) => panic!("formatted integer parsed as non-integer"), '
+        'Err(_) => panic!("formatted integer was rejected"), }; '
+        'assert!(parsed_n == n, "parsed integer differs"); '
+        'assert!(CanonValue::Int(parsed_n).serialize() == text, "serialized integer spelling differs"); } '
         "fn integer_roundtrip() { let n: i64 = kani::any_where(|n: &i64| "
         "*n > -100_000 && *n < 100_000); integer_roundtrip_case(n); } "
         "($name:ident, u8, zero, 0, 0) => { fn $name() { integer_roundtrip_case(0); } };"
@@ -180,7 +235,11 @@ def self_test() -> None:
         original.replace("kani::assume(numeric_prefix);", "kani::assume(true);"),
         original.replace("b.is_ascii_digit()", "b.is_ascii_alphabetic()"),
         original.replace('Err(_) => panic!("formatted integer was rejected"),',
-                         'Err(_) => CanonValue::Int(n),'),
+                         'Err(_) => n,'),
+        original.replace('Ok(_) => panic!("formatted integer parsed as non-integer"),',
+                         'Ok(_) => n,'),
+        original.replace('assert!(parsed_n == n, "parsed integer differs");', ''),
+        original.replace('CanonValue::Int(parsed_n).serialize()', 'CanonValue::Int(n).serialize()'),
     ):
         try:
             validate_wiring(changed, runner)
@@ -206,6 +265,35 @@ def self_test() -> None:
         pass
     else:
         raise AssertionError("negative-shard sign drift escaped the checker")
+    real_source, real_runner = SOURCE.read_text(), RUNNER.read_text()
+    validate_fail_closed_guard(real_source, real_runner)
+    for changed in (
+        real_source.replace('panic!("numeric spelling reached general top-level parser")',
+                            'Ok(CanonValue::Int(0))'),
+        real_source.replace('panic!("numeric spelling reached general top-level parser")',
+                            'Err(ParseError { message: ParseMessage::Static("x"), pos: 0 })'),
+        real_source.replace('panic!("numeric spelling reached general top-level parser")', ''),
+        real_source.replace('#[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]', '', 1),
+        real_source.replace('parse_top_level_general(&mut p)?', 'p.parse_value()?'),
+        real_source.replace('p.skip_ws();\n    p.parse_value()', 'p.parse_value()'),
+        real_source.replace('return Ok(CanonValue::Int(n));', 'return Ok(CanonValue::Int(0));'),
+        real_source.replace('p.finish_top_level()?;', '', 1),
+        real_source.replace('Err(self.err("trailing data after top-level value"))', 'Ok(())'),
+        real_source.replace('Ok(n) => Ok(n),', 'Ok(n) => Ok(n + 1),'),
+        real_source.replace('self.parse_number().map(CanonValue::Int)', 'self.parse_number().map(CanonValue::Bool)'),
+    ):
+        try:
+            validate_fail_closed_guard(changed, real_runner)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("fail-closed numeric guard drift escaped the checker")
+    try:
+        validate_fail_closed_guard(real_source, real_runner.replace("kani_flags=(-Z stubbing)", ""))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("missing Kani guard flag escaped the checker")
     print("check-kani-domains: self-test passed")
 
 
@@ -220,7 +308,9 @@ def main() -> int:
         return 0
     try:
         source = SOURCE.read_text()
-        validate_wiring(source, RUNNER.read_text())
+        runner = RUNNER.read_text()
+        validate_wiring(source, runner)
+        validate_fail_closed_guard(source, runner)
         names = validate(read_ranges(source))
     except ValueError as error:
         print(f"check-kani-domains: FAIL: {error}", file=sys.stderr)

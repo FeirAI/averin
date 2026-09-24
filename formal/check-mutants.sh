@@ -42,6 +42,7 @@ kani_harness() {
     m13-*) echo accepted_integer_spelling_is_canonical ;;
     m14-*) echo parse_never_panics ;;
     m22-*) echo integer_roundtrip_zero ;;
+    m23-*) echo integer_roundtrip_zero ;;
   esac
 }
 
@@ -60,6 +61,7 @@ kani_expectation() {
     m4-*) echo 'core/src/hashx.rs|assertion failed' ;;
     m9-*|m10-*|m11-*) echo 'core/src/b64.rs|assertion failed' ;;
     m14-*) echo 'core/src/canon.rs|index out of bounds' ;;
+    m23-*) echo 'core/src/canon.rs|numeric spelling reached general top-level parser' ;;
     *) echo 'core/src/canon.rs|assertion failed' ;;
   esac
 }
@@ -85,7 +87,15 @@ run_gate() {
       inventory) python3 formal/check-refinement.py ;;
       oracle) cargo test -q -p averin-decision-core --test oracle ;;
       golden) cargo test -q -p averin-decision-core --test golden ;;
-      kani) "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" bash formal/run-kani.sh --harness "$3" ;;
+      kani)
+        if [[ "$label" == m23-* ]]; then
+          # This mutant deliberately changes the production route pinned by check-kani-domains.py.
+          # Run its exact proof directly so the named fail-closed guard, not the textual check,
+          # must refute the route drift.
+          "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" cargo kani -Z stubbing -p averin-decision-core --lib --no-default-features --exact --harness "$(kani_qualified "$3")"
+        else
+          "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" bash formal/run-kani.sh --harness "$3"
+        fi ;;
     esac
   ) >"$log" 2>&1
 }
@@ -144,7 +154,9 @@ for patch in formal/mutants/*.patch; do
     proof_exit=0
     run_gate "$name" kani "$h" || proof_exit=$?
     IFS='|' read -r source description <<<"$(kani_expectation "$name")"
-    if python3 formal/check-kani-mutant.py "$logs/$name-kani.log" "$proof_exit" "$(kani_qualified "$h")" "$source" "$description"; then
+    guard_flag=()
+    [[ "$name" == m22-* || "$name" == m23-* ]] && guard_flag=(--expect-guard)
+    if python3 formal/check-kani-mutant.py "${guard_flag[@]}" "$logs/$name-kani.log" "$proof_exit" "$(kani_qualified "$h")" "$source" "$description"; then
       killed+=("kani:$h")
     else
       echo "check-mutants: FAIL: Kani harness $h did not refute $name (see $logs/$name-kani.log)" >&2

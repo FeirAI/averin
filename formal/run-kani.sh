@@ -11,19 +11,27 @@ cd "$(dirname "$0")/.."
 
 run_harness() {
   local module qualified log proof_exit
+  local -a kani_flags=() guard_flag=()
   case "$1" in
     alphabet_is_a_bijection|one_byte_tail_is_canonical|two_byte_tail_is_canonical|full_chunk_is_canonical) module=b64 ;;
     hex_byte_roundtrip|hex_digit_is_canonical|lp_into_frames_exactly) module=hashx ;;
     *) module=canon ;;
   esac
   qualified="$module::kani_proofs::$1"
+  if [[ "$1" == integer_roundtrip* ]]; then
+    # The original full-domain harness and every shard must keep their checked domain,
+    # production route, and fail-closed guard wiring before any Kani run.
+    python3 formal/check-kani-domains.py >/dev/null || return 2
+    kani_flags=(-Z stubbing)
+    guard_flag=(--expect-guard)
+  fi
   log="$(mktemp)"
   # Stream progress as well as saving it: an outer CI timeout must not hide the last CBMC phase.
   set +e
-  cargo kani -p averin-decision-core --lib --no-default-features --exact --harness "$qualified" 2>&1 | tee "$log"
+  cargo kani "${kani_flags[@]}" -p averin-decision-core --lib --no-default-features --exact --harness "$qualified" 2>&1 | tee "$log"
   proof_exit=${PIPESTATUS[0]}
   set -e
-  if ! python3 formal/check-kani-success.py "$log" "$proof_exit" "$qualified"; then
+  if ! python3 formal/check-kani-success.py "$log" "$proof_exit" "$qualified" "${guard_flag[@]}"; then
     echo "run-kani: proof log retained at $log" >&2
     # Preserve Kani's actual exit for the mutant checker: exit 1 is a completed
     # counterexample, while tool errors and signals must never count as kills.

@@ -1,0 +1,13 @@
+Mutant: Force a numeric top-level input onto the general parser branch; the fail-closed integer guard must fire.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -84,7 +84,7 @@
+         // A number at byte zero cannot start with insignificant whitespace. Route that
+         // common top-level case straight to the same number parser used by parse_value.
+         // Nested and all other top-level values retain the general dispatcher.
+-        if input
++        if false && input
+             .as_bytes()
+             .first()
+             .is_some_and(|b| *b == b'-' || b.is_ascii_digit())
