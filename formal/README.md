@@ -29,7 +29,11 @@ fixed corpus. The TLA+ recovery liveness result depends on its retry and fairnes
 
 > A signature cannot be replayed across contexts even if roles share a key: if a record body's
 > signature verifies under the pinned key, the body is **exactly** one the key holder sealed,
-> unless SHA-256 has a collision.
+> unless SHA-256 collides on this body's preimage and a sealed body's preimage.
+
+Formally the conclusion is `body ∈ records ∨ ∃ B ∈ records, recordPre body ≠ recordPre B ∧
+H (recordPre body) = H (recordPre B)`: the counterexample is an explicit collision on two specific,
+named preimages, which is the standard reduction to SHA-256 collision resistance.
 
 The signer model (`Seal.HonestSigner`) lets the same key also sign checkpoints, every other
 signed family with *arbitrary* field values, raw 32-byte challenge digests, and **any** message whose
@@ -71,12 +75,15 @@ Everything between "signature verifies" and "same body" is proved, not assumed:
    arbitrary nesting, and members in serialization order. Rust sorts members by UTF-16 key, and
    `ser` is injective on the sorted form.
 4. **UTF-8 is injective** (`utf8_inj`), derived from Lean core's verified encoder.
-5. **Hash binding** (`recordHashOf_binding`). Equal content hashes mean equal bodies, or an
-   explicit collision `x ≠ y ∧ H x = H y`. `record_ne_checkpoint_hash` rules out
-   record/checkpoint type confusion.
+5. **Hash binding** (`recordHashOf_binding`). Equal content hashes of `a` and `b` mean `a = b`, or
+   `recordPre a ≠ recordPre b ∧ H (recordPre a) = H (recordPre b)` (`Seal.CollidesOn`): a collision
+   on those two specific framed preimages. `record_ne_checkpoint_hash` rules out record/checkpoint
+   type confusion the same way: equal hashes give `CollidesOn H (recordPre a) (checkpointPre b)`.
 
 Cryptography is never axiomatised as injective. SHA-256 compresses, so that axiom would be false
-and every theorem vacuous. Hash results carry an explicit collision disjunct. Ed25519
+and every theorem vacuous. Hash results carry an explicit collision disjunct naming the two
+colliding inputs. A bare `∃ x y, x ≠ y ∧ H x = H y` is deliberately not used: it holds for every
+compressing `H`, so a theorem ending in it would be trivially true. Ed25519
 unforgeability is a hypothesis about which messages were signed. `check-axioms.sh` audits **every**
 declaration in the `Averin` namespace (the script prints the count), not a hand-picked list. That
 includes the oracle glue in `Averin.Oracle` (`utf8c_eq`, `recordPre_spec`, `checkpointPre_spec`),
@@ -89,14 +96,14 @@ decoder is fuel-bounded rather than `partial` for this reason).
 Other results:
 
 * `Seal.commitment_binding`: a hiding commitment opens to exactly one
-  `(field_domain, nonce, value)`.
+  `(field_domain, nonce, value)`, or SHA-256 collides on the two commitment preimages.
 * `Dag.bundle_eq_closure`: under the checks `dag.rs` and `validate_chain` perform (parents
   resolve, acyclic, latest frontier equals the heads), a bundle's records are **exactly** the
   ancestor-closure, in the *signed* history, of the latest checkpoint's frontier. No omission,
   no injection. `earlier_checkpoint_closed` gives the same guarantee for every earlier frontier.
 * `Chain.unique_history`: two chains that pass the checks and end in the same checkpoint hash
-  are identical, or the hash has a collision. The latest signed checkpoint commits the whole
-  history.
+  are identical, or the hash collides on a pair of distinct checkpoints drawn from the two chains
+  (`Chain.CollidesIn`). The latest signed checkpoint commits the whole history.
 
 ### What the model does **not** cover (trust boundary)
 
@@ -110,7 +117,11 @@ Other results:
   message are extracted from `core/src` with Charon/Aeneas and proved to compute the model's
   `ser`/`lp`/`Family.msg`/`recordHashOf`, so `recordHashOf_binding` and `record_seal_sound` apply to the
   production hashes (`Refinement.record_hash_is_model`, `production_record_seal_sound`), and an explicit
-  binding theorem (`Refinement.record_hash_binding`) holds for them directly. The trusted base is the
+  binding theorem (`Refinement.record_hash_binding`) holds for them directly. These are partial
+  correctness results (they describe the output when the extracted function returns `Ok`; a panic or
+  error produces no hash). `serialize()`'s final `from_utf8` and the `PreimageFault`→`RecordError`
+  mapping are unextracted glue pinned by call-path checks, and base64 (`core/src/b64.rs`) is excluded
+  because it is not on the hashed or signed preimage path (plan 011's Kani proofs cover it). The trusted base is the
   extraction toolchain, NFC and SHA-256 as arbitrary functions, and a small `String`/`str` model; see
   that README. The executable oracle, golden vectors and Kani harnesses below remain as independent
   regression evidence. The verifier's decision logic (which calls the proved functions) is not yet

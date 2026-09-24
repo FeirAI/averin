@@ -160,6 +160,12 @@ Algorithms 1–6 have a Lean 4 counterpart in [`formal/lean/Averin/`](../../form
 | 5 | `Dag.lean` | `bundle_eq_closure` |
 | 6 | `Chain.lean` | `unique_history` |
 
+Every hash-dependent conclusion is in explicit-witness form: equal hashes give equal bodies, or a
+SHA-256 collision on the two specific framed preimages involved (`Seal.CollidesOn`,
+`Chain.CollidesIn`), i.e. the standard reduction to SHA-256 collision resistance. For the seal core,
+plan 012 ([`formal/production/`](../../formal/production/README.md)) proves the production Rust
+computes these model definitions (partial correctness: when the extracted function returns `Ok`).
+
 The executable Lean oracle (`formal/lean/Oracle`, checked by `core/tests/oracle.rs`) and the tag
 inventory in `formal/check-refinement.py` keep the models in step with this code; `formal/check-mutants.sh`
 checks that those gates catch known drifts. Algorithm 7's verdict logic

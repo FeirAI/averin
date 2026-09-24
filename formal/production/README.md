@@ -14,9 +14,11 @@ stale. The Averin model is compiled into the same Lean environment (`lean_lib Av
 
 ## What is proved
 
-All theorems are **partial correctness**: they describe the result whenever the production
-function returns (it may otherwise panic or abort, for example on allocation failure, and then
-produces nothing). The two `sign_preimage_*` theorems also prove termination with `Some`.
+All theorems are **partial correctness**: they describe the result when the extracted function
+returns `Ok` (Aeneas `ok`). They say nothing about whether it returns: a panic, an arithmetic
+overflow, an abort (for example on allocation failure) or a `RecordError` produces no hash and no
+signature message, so no claim is needed about it. The two `sign_preimage_*` theorems also prove
+termination with `Some` for the production tags.
 
 | Production function (`core/src`) | Theorem (`Refinement/`) | Statement |
 |---|---|---|
@@ -48,9 +50,14 @@ produces nothing). The two `sign_preimage_*` theorems also prove termination wit
 * `production_record_binding_model`, `production_record_seal_sound`,
   `production_checkpoint_seal_sound`, `production_record_ne_checkpoint` — the model's
   `recordHashOf_binding`, `record_seal_sound`, `checkpoint_seal_sound` and `record_ne_checkpoint_hash`
-  applied to production hashes and the production signature message. Caveat: the model states
-  collisions as `Seal.Collision H := ∃ x y, x ≠ y ∧ H x = H y`, which is provable for any compressing
-  `H`; the explicit `*_hash_binding` theorems above do not have this weakness.
+  applied to production hashes and the production signature message. All are in explicit-witness
+  form: the second arm is `Seal.CollidesOn prodH p q`, a SHA-256 collision on the two **specific**
+  preimages `p`, `q` (`Seal.recordPre m` / `Seal.checkpointPre m`, which `record_preimage_is_model`
+  shows are the bytes production hashes). For example, `production_record_seal_sound` concludes
+  `m ∈ records ∨ ∃ B ∈ records, recordPre m ≠ recordPre B ∧ H (recordPre m) = H (recordPre B)`.
+  Turning a counterexample into a SHA-256 collision is the standard reduction to collision
+  resistance. (An earlier model form ended in `∃ x y, x ≠ y ∧ H x = H y`, which holds for every
+  compressing `H` and so was vacuous; it has been removed.)
 
 **What a value means** (`Spec.lean`). `Canon v m` relates a production `CanonValue` to the model value
 it denotes: strings and keys are NFC-normalized (through the trusted `nfc`), and an object denotes its
@@ -83,11 +90,15 @@ production hash paths reject it (`RecordError::DuplicateKey`).
   Tier-B joins, capstone) is not extracted. `check-production.py` requires those functions to call the
   proved code (`manifest.json` `callers`), but their comparisons are glue checked by the existing tests
   and mutants. Refining the verdict kernel is plan 012 phase B (after plan 009).
-* The parser (`CanonValue::parse`) is plan 011 (Kani). `serialize()`'s final `String::from_utf8` and the
-  public error mapping (`PreimageFault::into_record_error`) are not extracted; the call-path check pins
-  that the public functions only map errors.
-* base64 is not on the hashed or signed path (it only spells the signature bytes); it is not extracted
-  here and remains covered by its Kani harnesses and tests.
+* The parser (`CanonValue::parse`) is plan 011 (Kani).
+* **Unextracted glue.** `serialize()`'s final `String::from_utf8` (a debug-asserted conversion of the
+  proved byte output) and the public error mapping (`PreimageFault::into_record_error`, and the
+  `compute_*`/`*_preimage` wrappers' `map_err`) are not extracted. `check-production.py` pins them
+  with call-path checks (`manifest.json` `callers`, exact-body and contains checks): the public
+  functions may only call the proved function and map its error.
+* **base64 (`core/src/b64.rs`) is excluded.** It is not on the hashed or signed preimage path (it only
+  spells signature and key bytes after hashing/signing), so it is not extracted here. It is covered by
+  plan 011's full-domain Kani proofs (alphabet bijection, chunk harnesses) and its tests.
 
 ## Running
 
