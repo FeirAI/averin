@@ -216,7 +216,7 @@ func (s *Server) handleBrokerSeqRecovery(w http.ResponseWriter, r *http.Request)
 					}
 				}
 				if s.revocationKey != nil {
-					if _, e := st.RevokeGrant(v.ProjectID, res.GrantID); e != nil {
+					if e := recordVoidRevocation(st, v.ProjectID, res.GrantID); e != nil {
 						return e
 					}
 				}
@@ -262,7 +262,7 @@ func (s *Server) handleBrokerSeqRecovery(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			if s.revocationKey != nil {
-				if _, e := st.RevokeGrant(v.ProjectID, res.GrantID); e != nil {
+				if e := recordVoidRevocation(st, v.ProjectID, res.GrantID); e != nil {
 					return e
 				}
 			}
@@ -449,4 +449,14 @@ func (s *Server) handleBrokerSeqPreflight(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// recordVoidRevocation retires a voided grant with a total revocation event (plan 009): a void is
+// never a cancellation with a cutoff, so no earlier use of the grant can be proven historical.
+func recordVoidRevocation(st store.Store, projectID, grantID string) error {
+	_, _, err := st.PutRevocationEvent(store.RevocationEvent{
+		ProjectID: projectID, GrantID: grantID, Mode: store.RevocationTotal,
+		Issuer: "averin-recovery", Reason: "recovery_void",
+	})
+	return err
 }

@@ -346,30 +346,48 @@ fn lp4(pre: &mut Vec<u8>, b: &[u8]) {
 
 /// The v2 Merkle sort key for a grant: `sha256(LP4("averin.broker.revocation.key.v2") ‖ LP4(grant_id))`.
 pub fn revocation_key_v2(grant_id: &str) -> [u8; 32] {
+    crate::hashx::sha256(&revocation_key_v2_preimage(grant_id))
+}
+
+/// Exact bytes hashed by [`revocation_key_v2`].
+#[doc(hidden)]
+pub fn revocation_key_v2_preimage(grant_id: &str) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.broker.revocation.key.v2");
     lp4(&mut pre, grant_id.as_bytes());
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// The committed state digest: `sha256(LP4("averin.broker.revocation.state.v2") ‖ LP4(mode) ‖ BE8(cutoff))`,
 /// with mode `total` (cutoff 0), `prospective` (cutoff >= 1) or `sentinel` (cutoff 0).
 pub fn revocation_state_digest_v2(mode: &str, cutoff: i64) -> [u8; 32] {
+    crate::hashx::sha256(&revocation_state_v2_preimage(mode, cutoff))
+}
+
+/// Exact bytes hashed by [`revocation_state_digest_v2`].
+#[doc(hidden)]
+pub fn revocation_state_v2_preimage(mode: &str, cutoff: i64) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.broker.revocation.state.v2");
     lp4(&mut pre, mode.as_bytes());
     pre.extend_from_slice(&(cutoff as u64).to_be_bytes());
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// The 32-byte leaf value folded by the RFC6962 tree:
 /// `sha256(LP4("averin.broker.revocation.entry.v2") ‖ key ‖ state_digest)`.
 pub fn revocation_entry_v2(key: &[u8; 32], state_digest: &[u8; 32]) -> [u8; 32] {
+    crate::hashx::sha256(&revocation_entry_v2_preimage(key, state_digest))
+}
+
+/// Exact bytes hashed by [`revocation_entry_v2`].
+#[doc(hidden)]
+pub fn revocation_entry_v2_preimage(key: &[u8; 32], state_digest: &[u8; 32]) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.broker.revocation.entry.v2");
     pre.extend_from_slice(key);
     pre.extend_from_slice(state_digest);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Producer reference for the v2 Merkle root over `(grant_id, state)` entries: leaves sorted by key

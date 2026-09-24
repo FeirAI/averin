@@ -97,6 +97,38 @@ type RecoveryFence struct {
 	FencedAt                                                                   time.Time
 }
 
+// RevocationEventFormat versions the immutable revocation event (plan 009).
+const RevocationEventFormat = "averin.revocation.event.v1"
+
+// Revocation modes. A total revocation (compromise, legacy boolean, recovery void) invalidates
+// every use of the grant. A prospective revocation cancels the grant from CutoffOrder on: a
+// receipt whose authorization ordinal is below the cutoff was admitted before it.
+const (
+	RevocationTotal       = "total"
+	RevocationProspective = "prospective"
+)
+
+// RevocationEvent is one immutable revocation fact. At most one event per (project, grant,
+// mode) exists, so a retry never moves a cutoff later and a later total upgrade is always
+// recordable. Readers combine conservatively: any total wins, else the earliest cutoff.
+type RevocationEvent struct {
+	ProjectID, GrantID string
+	Mode               string
+	CutoffOrder        int64 // prospective only
+	Issuer, Reason     string
+	Created            time.Time
+}
+
+// AuthorizationReceipt is the operational backstop row for one ordered receipt: the signed
+// receipt carries the ordinal; this row makes ordinals unique per project and per record.
+type AuthorizationReceipt struct {
+	Ordinal                 int64
+	RecordID, GrantID, Kind string
+}
+
+// ErrAuthorizationOrderConflict means an ordinal or record already has a different receipt row.
+var ErrAuthorizationOrderConflict = errors.New("store: authorization ordinal or record already ordered")
+
 type RecoveryResult struct {
 	ProjectID, Outcome, WinningRecordHash string
 	Seq, Generation                       int64
@@ -133,9 +165,28 @@ type Store interface {
 	PutRecoveryFence(fence RecoveryFence) (RecoveryFence, bool, error)
 	RecoveryResultAt(projectID string, seq int64) (RecoveryResult, bool, error)
 	PutRecoveryResult(result RecoveryResult) (RecoveryResult, bool, error)
+	// IsRevoked reports any revocation event (total or prospective) or signed grant_void
+	// tombstone for the grant: current validity is revoked whatever the history.
 	IsRevoked(projectID, grantID string) (bool, error)
+	// RevokeGrant records a total revocation (issuer "averin", reason "total").
 	RevokeGrant(projectID, grantID string) (bool, error)
+	// RevokedGrantIDs lists every grant with at least one revocation event, sorted.
 	RevokedGrantIDs(projectID string) ([]string, error)
+	// PutRevocationEvent records ev inside the project write transaction. A prospective event
+	// with CutoffOrder 0 allocates its cutoff from the authorization order. An existing event
+	// of the same mode is returned unchanged with created=false.
+	PutRevocationEvent(ev RevocationEvent) (stored RevocationEvent, created bool, err error)
+	// RevocationEvents returns the project's events ordered by (grant_id, mode).
+	RevocationEvents(projectID string) ([]RevocationEvent, error)
+	// AllocateAuthorizationOrder advances the project's authorization order and returns the new
+	// ordinal (>= 1). Write transaction only; the guard row serializes it.
+	AllocateAuthorizationOrder(projectID string) (int64, error)
+	// PutAuthorizationReceipt records the ordered receipt's backstop row in the same transaction.
+	PutAuthorizationReceipt(projectID string, r AuthorizationReceipt) error
+	// SnapshotBoundary returns the snapshot's database boundary time and authorization high
+	// watermark. Inside WithProjectRead it is read from the same repeatable-read snapshot; the
+	// boundary is never later than the snapshot, so every commit before it is visible.
+	SnapshotBoundary(projectID string) (boundary time.Time, watermark int64, err error)
 	// Ledger claims made on the bound Store commit with the use receipt.
 	ConsumeNonce(claim resourceshim.NonceClaim) error
 	ConsumeJTI(claim resourceshim.JTIClaim) error
@@ -269,6 +320,7 @@ type Mem struct {
 	projects     map[string]*project
 	now          func() time.Time // the store's clock (broker_seq allocated_at); WithClock injects one for tests
 	boundProject string
+	snapshotAt   time.Time // WithProjectRead: the clock reading taken with the snapshot copy
 	readOnly     bool
 	inTx         bool
 	active       *atomic.Bool
@@ -332,7 +384,8 @@ func memSnapshot(p *project) *project {
 		discSeen: maps.Clone(p.discSeen), anchors: maps.Clone(p.anchors),
 		brokerSeq: maps.Clone(p.brokerSeq), brokerAt: maps.Clone(p.brokerAt), voided: maps.Clone(p.voided),
 		fences: maps.Clone(p.fences), results: maps.Clone(p.results),
-		pending: pending, revoked: maps.Clone(p.revoked),
+		pending: pending, revEvents: maps.Clone(p.revEvents),
+		authOrder: p.authOrder, receipts: maps.Clone(p.receipts), receiptByRecord: maps.Clone(p.receiptByRecord),
 	}
 }
 
@@ -394,7 +447,8 @@ func (m *Mem) WithProjectRead(ctx context.Context, projectID string, fn func(Sto
 	m.mu.Lock()
 	active := &atomic.Bool{}
 	active.Store(true)
-	tmp := &Mem{projects: map[string]*project{projectID: memSnapshot(m.proj(projectID))}, now: m.now, boundProject: projectID, readOnly: true, inTx: true, active: active}
+	tmp := &Mem{projects: map[string]*project{projectID: memSnapshot(m.proj(projectID))}, now: m.now, boundProject: projectID, readOnly: true, inTx: true, active: active,
+		snapshotAt: m.now()}
 	m.mu.Unlock()
 	defer active.Store(false)
 	return fn(tmp)
@@ -416,7 +470,12 @@ type project struct {
 	fences     map[int64]RecoveryFence
 	results    map[int64]RecoveryResult
 	pending    map[string]PendingGrant
-	revoked    map[string]struct{}
+	// Plan 009: immutable revocation events keyed by grant_id + "\x00" + mode, the project's
+	// authorization order and the ordered-receipt backstop.
+	revEvents       map[string]RevocationEvent
+	authOrder       int64
+	receipts        map[int64]AuthorizationReceipt
+	receiptByRecord map[string]int64
 }
 
 func NewMem() *Mem { return &Mem{projects: map[string]*project{}, now: time.Now} }
@@ -452,7 +511,8 @@ func (m *Mem) proj(id string) *project {
 			brokerAt:  map[string]time.Time{},
 			voided:    map[string]struct{}{},
 			pending:   map[string]PendingGrant{},
-			revoked:   map[string]struct{}{},
+			revEvents: map[string]RevocationEvent{},
+			receipts:  map[int64]AuthorizationReceipt{}, receiptByRecord: map[string]int64{},
 		}
 		m.projects[id] = p
 	}

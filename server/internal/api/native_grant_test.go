@@ -95,20 +95,20 @@ func TestNativeGrantAndIntrospectionRoundTripsThroughRustVerifier(t *testing.T) 
 		}
 	}
 
-	// NEGATIVE: an introspection whose credential_ref != the grant's lease_id must not verify (the verifier
-	// re-checks credential_ref == lease_id). Build a second grant+transcript with a mismatched credential_ref.
+	// NEGATIVE (plan 009): the server validates the actual native grant BEFORE allocating an ordinal or
+	// signing, so a transcript whose credential_ref != the grant's lease_id is refused and nothing is
+	// sealed. (The offline verifier independently re-checks credential_ref == lease_id for transcripts
+	// from other producers: tier_b_native_transcript_credential_ref_mismatch_is_a_violation.)
 	introBad, _ := json.Marshal(map[string]any{
 		"idempotency_key": "intro-bad", "project_id": "p1", "session_id": "s1",
 		"grant_id": gout.GrantID, "credential_ref": "lease-OTHER", "effective_scope": "read:orders",
 		"effective_exp": grantExp,
 	})
-	if code, _ := do(t, h, "POST", "/v2/introspection", string(introBad)); code != http.StatusCreated {
-		t.Fatalf("the server records the transcript regardless (the verifier enforces the binding); code %d", code)
+	if code, body := do(t, h, "POST", "/v2/introspection", string(introBad)); code != http.StatusBadRequest || !strings.Contains(body, "credential_ref") {
+		t.Fatalf("a credential_ref-mismatched transcript must be refused before signing: %d %s", code, body)
 	}
-	do(t, h, "POST", "/v2/checkpoints?project=p1", "")
 	_, exp2 := do(t, h, "GET", "/v2/export?project=p1", "")
-	rep2 := c.VerifyBundleWith(attachTestAnchor(t, exp2, tsa), opts)
-	if !strings.Contains(rep2, `"ok":false`) || !strings.Contains(rep2, "credential_ref") {
-		t.Fatalf("a credential_ref-mismatched transcript must fail offline:\n%s", rep2)
+	if strings.Contains(exp2, "lease-OTHER") {
+		t.Fatalf("a refused transcript was sealed:\n%s", exp2)
 	}
 }

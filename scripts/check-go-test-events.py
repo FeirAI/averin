@@ -42,6 +42,15 @@ REQUIRED = (
     f"{PGLEDGER_PACKAGE}:TestPostgresLedgerMaintenance",
     f"{PGLEDGER_PACKAGE}:TestSweepFailureRetainsClaims",
     f"{RESOURCESHIM_PACKAGE}:TestAcceptedCapabilityLifetimeBoundsBeforeLedger",
+    # Plan 009: temporal revocation ordering on real Postgres.
+    f"{API_PACKAGE}:TestTemporalRevokeRacesUseAcrossPoolsPostgres",
+    f"{API_PACKAGE}:TestTemporalCausalRevokeUseSchedulesPostgres",
+    f"{API_PACKAGE}:TestTemporalRepeatedRevokeAcrossPoolsPostgres",
+    f"{API_PACKAGE}:TestTemporalSnapshotExportConsistencyPostgres",
+    f"{API_PACKAGE}:TestTemporalRevocationProcessCrashCutsPostgres",
+    f"{STORE_PACKAGE}:TestPostgresTemporalRevocationContract",
+    f"{PGSCHEMA_PACKAGE}:TestTemporalRevocationCutoverFromV6",
+    f"{PGSCHEMA_PACKAGE}:TestTemporalRevocationCutoverInterruptedRollsBackAndRetries",
 )
 
 

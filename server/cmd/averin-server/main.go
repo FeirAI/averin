@@ -451,6 +451,20 @@ func main() {
 		revocationEnabled = true
 		log.Printf("revocation enabled (POST /v2/revoke; exports carry a signed revocation_list)")
 	}
+	// Plan 009: the revocation export format. "v1" (default) keeps the legacy total-only list; "v2"
+	// exports averin.revocation.list.v2 (per-grant mode/cutoff plus the database snapshot) and accepts
+	// prospective revocations. Roll out reader-first: upgrade every relying verifier before "v2".
+	switch f := os.Getenv("AVERIN_REVOCATION_EXPORT_FORMAT"); f {
+	case "", "v1":
+	case "v2":
+		if !revocationEnabled {
+			log.Fatal("AVERIN_REVOCATION_EXPORT_FORMAT=v2 requires AVERIN_REVOCATION_SEED")
+		}
+		srv.WithRevocationExportV2()
+		log.Printf("revocation export format v2 (prospective revocations accepted; legacy verifiers reject these lists)")
+	default:
+		log.Fatalf("AVERIN_REVOCATION_EXPORT_FORMAT must be v1 or v2, got %q", f)
+	}
 
 	// Auxiliary durable-state connection for startup diagnostics, readiness and
 	// legacy cache rehydration. Request-time pending and revocation authority uses

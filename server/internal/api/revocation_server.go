@@ -6,10 +6,12 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
 
+	"github.com/feirai/averin/server/internal/broker"
 	"github.com/feirai/averin/server/internal/store"
 )
 
@@ -72,16 +74,34 @@ func (s *Server) WithRevocation(revKey ed25519.PrivateKey) *Server {
 // grants per project is far past any realistic operational need while still capping abuse.
 const maxRevokedPerProject = 100_000
 
+// WithRevocationExportV2 selects the plan 009 export format: every /v2/export carries a signed
+// `averin.revocation.list.v2` (per-grant mode and cutoff, plus the database snapshot boundary time
+// and authorization high watermark), and POST /v2/revoke accepts mode "prospective". Roll out
+// reader-first: a legacy verifier rejects a v2 list instead of misreading it, so enable this only
+// after every relying verifier understands v2. Without it no prospective revocation is accepted,
+// because a v1 list can only state total revocations.
+func (s *Server) WithRevocationExportV2() *Server {
+	s.revocationExportV2 = true
+	return s
+}
+
 // revokeRequest is the POST /v2/revoke wire shape.
 type revokeRequest struct {
 	ProjectID string `json:"project_id"`
 	GrantID   string `json:"grant_id"`
-	Reason    string `json:"reason"` // optional, audit-only (not bound into the list)
+	// Mode is "total" (default: compromise, every use invalid) or "prospective" (cancellation
+	// effective at the next authorization ordinal; requires the v2 export).
+	Mode   string `json:"mode"`
+	Reason string `json:"reason"` // optional, recorded with the immutable event
 }
 
-// handleRevoke marks a grant_id revoked for a project (M5). Idempotent. The resource gateway rejects any later
-// /v2/use[-intent] of the grant immediately (isRevoked, before consuming), and the NEXT export carries it in the
-// signed revocation_list — the verifier blocks any use of the revoked grant once that list is fresh.
+// maxRevocationReasonBytes bounds the stored, unsigned reason text.
+const maxRevocationReasonBytes = 512
+
+// handleRevoke records an immutable revocation event (M5, plan 009). Idempotent per (grant, mode):
+// a retried prospective revocation returns its original cutoff, never a later one. The resource
+// gateway rejects any later /v2/use[-intent] and introspection of the grant immediately (any mode),
+// and the NEXT export carries it in the signed revocation_list.
 func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	if s.revocationKey == nil {
 		writeErr(w, http.StatusNotImplemented, "revocation not enabled (set AVERIN_REVOCATION_SEED)")
@@ -109,27 +129,64 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	mode := rr.Mode
+	if mode == "" {
+		mode = store.RevocationTotal
+	}
+	switch mode {
+	case store.RevocationTotal:
+	case store.RevocationProspective:
+		if !s.revocationExportV2 {
+			writeErr(w, http.StatusBadRequest, "prospective revocation requires the v2 revocation export (AVERIN_REVOCATION_EXPORT_FORMAT=v2); a v1 revocation_list can only state total revocations")
+			return
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, `mode must be "total" or "prospective"`)
+		return
+	}
+	if len(rr.Reason) > maxRevocationReasonBytes {
+		writeErr(w, http.StatusBadRequest, "reason is too long")
+		return
+	}
 	// Revocation is intentionally PERMISSIVE by grant_id: we do NOT require the id to already exist in this
 	// server's store. The primitive is "block any use of this id," and an operator must be able to revoke a
 	// compromised id preemptively (or a federated grant minted by a peer broker) that this instance has not yet
 	// observed. Gating on existence would turn a security action into a fail-open ("unknown grant_id" read as
 	// "nothing to worry about"). Abuse is bounded by auth (project-scoped) + the per-project size cap below.
-
-	n, code, msg := s.revokeGrantIDTotalCtx(r.Context(), rr.ProjectID, rr.GrantID)
+	reason := rr.Reason
+	if reason == "" {
+		reason = mode
+	}
+	res, code, msg := s.revokeGrantEvent(r.Context(), store.RevocationEvent{
+		ProjectID: rr.ProjectID, GrantID: rr.GrantID, Mode: mode,
+		Issuer: broker.KeyID(s.revocationKey.Public().(ed25519.PublicKey)), Reason: reason,
+	})
 	if msg != "" {
 		writeErr(w, code, msg)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
+	out := map[string]any{
 		"revoked":       rr.GrantID,
 		"project_id":    rr.ProjectID,
-		"revoked_total": n,
+		"mode":          res.effective.Mode,
+		"created":       res.created,
+		"revoked_total": res.total,
 		"note":          "enforced at /v2/use immediately; carried in the next /v2/export's signed revocation_list",
-	})
+	}
+	if res.effective.Mode == store.RevocationProspective {
+		out["cutoff_order"] = res.effective.CutoffOrder
+	}
+	writeJSON(w, http.StatusCreated, out)
 }
 
-// revokeGrantID revokes grantID in projectID (the handleRevoke core, also used by the broker_seq void to retire a
-// voided grant's capability). msg == "" on success; otherwise code/msg are the HTTP error to surface.
+type revokeResult struct {
+	effective store.RevocationEvent // the grant's combined state: any total wins, else the event's cutoff
+	created   bool
+	total     int
+}
+
+// revokeGrantID records a total revocation (used by legacy callers and tests). msg == "" on success;
+// otherwise code/msg are the HTTP error to surface.
 func (s *Server) revokeGrantID(projectID, grantID string) (code int, msg string) {
 	_, code, msg = s.revokeGrantIDTotal(projectID, grantID)
 	return code, msg
@@ -137,50 +194,69 @@ func (s *Server) revokeGrantID(projectID, grantID string) (code int, msg string)
 
 // revokeGrantIDTotal is revokeGrantID that also returns the project's revoked-set size after the call.
 func (s *Server) revokeGrantIDTotal(projectID, grantID string) (total, code int, msg string) {
-	return s.revokeGrantIDTotalCtx(context.Background(), projectID, grantID)
+	res, code, msg := s.revokeGrantEvent(context.Background(), store.RevocationEvent{
+		ProjectID: projectID, GrantID: grantID, Mode: store.RevocationTotal, Issuer: "averin", Reason: store.RevocationTotal,
+	})
+	return res.total, code, msg
 }
 
-func (s *Server) revokeGrantIDTotalCtx(ctx context.Context, projectID, grantID string) (total, code int, msg string) {
-	// The guard serializes the cap check and insert across every replica.
-	err := s.withProjectWrite(ctx, projectID, func(st store.Store) error {
-		ids, err := st.RevokedGrantIDs(projectID)
+func (s *Server) revokeGrantEvent(ctx context.Context, ev store.RevocationEvent) (res revokeResult, code int, msg string) {
+	// The guard serializes the cap check, the cutoff allocation and the insert across every replica.
+	err := s.withProjectWrite(ctx, ev.ProjectID, func(st store.Store) error {
+		ids, err := st.RevokedGrantIDs(ev.ProjectID)
 		if err != nil {
 			return err
 		}
+		known := false
 		for _, id := range ids {
-			if id == grantID {
-				total = len(ids)
-				return nil
+			if id == ev.GrantID {
+				known = true
+				break
 			}
 		}
-		if len(ids) >= s.revocationCap {
+		if !known && len(ids) >= s.revocationCap {
 			code = http.StatusTooManyRequests
 			return errRevocationCap
 		}
-		if _, err := st.RevokeGrant(projectID, grantID); err != nil {
+		stored, created, err := st.PutRevocationEvent(ev)
+		if err != nil {
 			return err
 		}
-		total = len(ids) + 1
+		res.created, res.effective = created, stored
+		// Report the combined state: a total event for the grant overrides any cutoff.
+		events, err := st.RevocationEvents(ev.ProjectID)
+		if err != nil {
+			return err
+		}
+		for _, e := range events {
+			if e.GrantID == ev.GrantID && e.Mode == store.RevocationTotal {
+				res.effective = e
+			}
+		}
+		res.total = len(ids)
+		if !known {
+			res.total++
+		}
 		return nil
 	})
 	if err != nil {
 		if code == http.StatusTooManyRequests {
-			return 0, code, "the project's revoked-grant set is at capacity; this revocation did not take effect"
+			return revokeResult{}, code, "the project's revoked-grant set is at capacity; this revocation did not take effect"
 		}
-		return 0, http.StatusServiceUnavailable, "revocation could not be durably persisted: " + err.Error()
+		return revokeResult{}, http.StatusServiceUnavailable, "revocation could not be durably persisted: " + err.Error()
 	}
 	// Retain the local cache only for legacy introspection; admission and export
 	// consult the transaction-bound durable state instead.
 	s.revokedMu.Lock()
-	set := s.revoked[projectID]
+	set := s.revoked[ev.ProjectID]
 	next := make(map[string]struct{}, len(set)+1)
 	for id := range set {
 		next[id] = struct{}{}
 	}
-	next[grantID] = struct{}{}
-	s.revoked[projectID] = next
+	next[ev.GrantID] = struct{}{}
+	s.revoked[ev.ProjectID] = next
 	s.revokedMu.Unlock()
-	return total, 0, ""
+	return res, 0, ""
 }
 
 var errRevocationCap = errors.New("revocation capacity reached")
@@ -195,29 +271,10 @@ func (s *Server) isRevoked(projectID, grantID string) bool {
 	return revoked
 }
 
-// buildRevocationListForExport produces the signed revocation_list for a project's revoked set, with a freshness
-// window anchored to the latest checkpoint's created_ts (the same basis the deployment_attestation uses), so the
-// verifier reads it `fresh` for THIS bundle and `stale` for a much-later one. Never nil: an empty revoked set
-// yields a signed list with `revoked_grant_ids: []`.
-func (s *Server) buildRevocationListForExport(projectID string, checks []store.Checkpoint) (map[string]any, error) {
-	// Read the published immutable snapshot (copy-on-write, see handleRevoke): ranging it needs no lock.
-	s.revokedMu.Lock()
-	set := s.revoked[projectID]
-	s.revokedMu.Unlock()
-	ids := make([]string, 0, len(set))
-	for id := range set {
-		ids = append(ids, id)
-	}
-	// An EMPTY list is still emitted (and signed): with a revocation key pinned, the verifier reads a bundle with
-	// no revocation evidence as `missing` (a stripped list must not read as a clean `absent`), so "nothing is
-	// revoked" has to be an affirmative, signed, dated statement — otherwise every export of a deployment with
-	// revocation configured and zero revocations would be blocked from the capstone.
-	return s.buildRevocationListForExportIDs(ids, checks)
-}
-
-func (s *Server) buildRevocationListForExportIDs(ids []string, checks []store.Checkpoint) (map[string]any, error) {
-	sort.Strings(ids) // deterministic order (the list is canonicalized + signed)
-
+// revocationWindow is the legacy freshness window both list formats carry, anchored to the latest
+// checkpoint's created_ts (the same basis the deployment_attestation uses), so the verifier reads it
+// `fresh` for THIS bundle and `stale` for a much-later one.
+func (s *Server) revocationWindow(checks []store.Checkpoint) (issuedAt, notAfter string) {
 	createdTS := ""
 	if len(checks) > 0 {
 		var cp struct {
@@ -227,6 +284,34 @@ func (s *Server) buildRevocationListForExportIDs(ids []string, checks []store.Ch
 			createdTS = cp.CreatedTS
 		}
 	}
-	issuedAt, notAfter := attestationWindow(createdTS, s.now(), time.Hour, s.revocationValidity)
+	return attestationWindow(createdTS, s.now(), time.Hour, s.revocationValidity)
+}
+
+// buildRevocationListForExportEvents produces the signed revocation_list from the events, boundary
+// time and watermark read in ONE repeatable-read project snapshot. It signs exactly those captured
+// values; no later wall-clock time replaces the boundary. Never nil: an empty set is still a signed,
+// dated statement (a verifier pinning the key reads a missing list as `missing`).
+func (s *Server) buildRevocationListForExportEvents(projectID string, events []store.RevocationEvent, boundary time.Time, watermark int64, checks []store.Checkpoint) (map[string]any, error) {
+	issuedAt, notAfter := s.revocationWindow(checks)
+	entries := CombineRevocationEvents(events)
+	if s.revocationExportV2 {
+		return BuildRevocationListV2(s.core, s.revocationKey, issuedAt, notAfter,
+			RevocationSnapshot{ProjectID: projectID, BoundaryTime: boundary, Watermark: watermark}, entries)
+	}
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		// Any v1 membership is total, even for a temporal verifier. A prospective revocation must
+		// never be emitted as a v1 id, and silently omitting it would un-revoke it: refuse.
+		if e.Mode != store.RevocationTotal {
+			return nil, fmt.Errorf("revocation_list: grant %q has a prospective revocation, which the v1 export cannot represent; enable the v2 revocation export", e.GrantID)
+		}
+		ids = append(ids, e.GrantID)
+	}
+	return s.buildRevocationListForExportIDs(ids, checks)
+}
+
+func (s *Server) buildRevocationListForExportIDs(ids []string, checks []store.Checkpoint) (map[string]any, error) {
+	sort.Strings(ids) // deterministic order (the list is canonicalized + signed)
+	issuedAt, notAfter := s.revocationWindow(checks)
 	return BuildRevocationList(s.core, s.revocationKey, issuedAt, notAfter, ids)
 }

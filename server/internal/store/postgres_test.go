@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feirai/averin/server/internal/pgdurable"
 	"github.com/feirai/averin/server/internal/pgledger"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -112,6 +113,16 @@ func newTestStore(t *testing.T) (*Postgres, func()) {
 	if _, err := pool.Exec(ctx, string(migration6)); err != nil {
 		pool.Close()
 		t.Fatalf("apply migration 0006: %v", err)
+	}
+	// Plan 009 (0007) retires the baseline boolean revocations table into immutable events.
+	migration7, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0007_temporal_revocation.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0007: %v", err)
+	}
+	if _, err := pool.Exec(ctx, pgdurable.SchemaSQL+"\n"+string(migration7)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0007: %v", err)
 	}
 
 	p := &Postgres{pool: pool}

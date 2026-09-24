@@ -53,7 +53,7 @@ import (
 
 // CurrentSchemaVersion is the schema version this binary understands. A stored version above this is a
 // fail-closed refusal to open; a stored version below it is migrated forward, step by step, to this.
-const CurrentSchemaVersion = 6
+const CurrentSchemaVersion = 7
 
 // LegacyExclusionFloor is stamped using the database clock by migration 0006.
 // It must exceed every capability accepted by the new resource shim.
@@ -83,6 +83,9 @@ var baselineV1 = migrations.Schema + "\n" + pgledger.SchemaSQL + "\n" + pgdurabl
 //     sealed JSON's record_id (UNIQUE unless historical duplicates already exist; see the migration header).
 //   - v3 (migrations.BrokerSeqVoid): broker_seq.allocated_at + the insert-only broker_seq_void table behind the
 //     operator's POST /v2/broker-seq/void remediation for a reserved-but-never-recorded broker_seq.
+//   - v7 (migrations.TemporalRevocation): the per-project authorization order on the project guard,
+//     immutable revocation events (pre-v7 revocations become total) and the receipt-ordinal backstop.
+//     It needs its own validated writer barrier even after a v6 cutover (plan 009).
 var steps = []string{
 	baselineV1,
 	migrations.RecordIDUnique,
@@ -90,6 +93,7 @@ var steps = []string{
 	migrations.ProjectTransactions,
 	migrations.BrokerSeqRecovery,
 	migrations.TenantNonceLedger,
+	migrations.TemporalRevocation,
 }
 
 // Migrate brings the averin Postgres DB at dsn up to CurrentSchemaVersion under a single advisory lock,
@@ -99,8 +103,10 @@ var steps = []string{
 // a newer-than-binary DB, or a DB that cannot be migrated, must never be served against.
 func Migrate(ctx context.Context, dsn string) error { return migrate(ctx, dsn, nil) }
 
-// Cutover applies an existing database's v6 transition only after the operator
-// has retired every explicitly named old runtime identity. It never manages
+// Cutover applies an existing database's forward transitions (v6 nonce ledger,
+// v7 temporal revocation) only after the operator has retired every explicitly
+// named old runtime identity. The barrier is re-validated for every advancing
+// run, even when an earlier version was already cut over. It never manages
 // roles or sessions itself; failed barriers leave the schema unchanged.
 func Cutover(ctx context.Context, dsn string, oldRoles []string, newRole string) error {
 	if len(oldRoles) == 0 || newRole == "" {
@@ -192,7 +198,7 @@ func migrate(ctx context.Context, dsn string, roles *cutoverRoles) error {
 		return nil
 	}
 	if roles == nil && !fresh {
-		return fmt.Errorf("pgschema: database schema version %d requires explicit averin-migrate maintenance cutover to v6; stop old writers first", stored)
+		return fmt.Errorf("pgschema: database schema version %d requires explicit averin-migrate maintenance cutover to v%d; stop old writers first", stored, CurrentSchemaVersion)
 	}
 
 	// stored < CurrentSchemaVersion: apply the ordered forward steps, stamping each in THIS tx so the
@@ -341,7 +347,8 @@ func CheckRuntime(ctx context.Context, dsn string) error {
 	err = pool.QueryRow(ctx, `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
 		WHERE n.nspname=current_schema() AND c.relkind IN ('r','p')
 		AND c.relname = ANY($1) AND pg_has_role(current_user,c.relowner,'MEMBER')
-		LIMIT 1`, []string{"records", "broker_seq", "legacy_consume_exclusions", "consumed_nonces", "consumed_jtis", "nonce_ledger_cutover"}).Scan(&owned)
+		LIMIT 1`, []string{"records", "broker_seq", "legacy_consume_exclusions", "consumed_nonces", "consumed_jtis", "nonce_ledger_cutover",
+		"project_write_guard", "authorization_receipts", "revocation_events"}).Scan(&owned)
 	if err == nil {
 		return fmt.Errorf("pgschema: runtime role %q owns or inherits owner membership for %s; use a distinct least-privilege identity", name, owned)
 	}
@@ -366,6 +373,8 @@ func CheckRuntime(ctx context.Context, dsn string) error {
 		"records":                   {"SELECT", "INSERT"},
 		"broker_seq":                {"SELECT", "INSERT"},
 		"project_write_guard":       {"SELECT", "INSERT", "UPDATE"},
+		"authorization_receipts":    {"SELECT", "INSERT"},
+		"revocation_events":         {"SELECT", "INSERT"},
 	} {
 		for _, privilege := range privileges {
 			var allowed bool

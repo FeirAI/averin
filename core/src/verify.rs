@@ -28,8 +28,9 @@ use std::collections::{BTreeMap, BTreeSet};
 mod temporal;
 mod verdict;
 pub use temporal::{
-    canonical_ts_millis, revocation_entry_v2, revocation_key_v2, revocation_leaves_v2,
-    revocation_merkle_root_v2, revocation_state_digest_v2, DbSerializedPolicy, GrantRevocation,
+    canonical_ts_millis, revocation_entry_v2, revocation_entry_v2_preimage, revocation_key_v2,
+    revocation_key_v2_preimage, revocation_leaves_v2, revocation_merkle_root_v2,
+    revocation_state_digest_v2, revocation_state_v2_preimage, DbSerializedPolicy, GrantRevocation,
     HistoricalOrdering, RevState, Snapshot, TemporalPolicy, AUTHORIZATION_ORDER_FORMAT,
     DB_SERIALIZED_V1_TRUST_BASIS, MERKLE_ROOT_V2_DOMAIN, MERKLE_ROOT_V2_FORMAT,
     REVOCATION_LIST_V2_DOMAIN, REVOCATION_LIST_V2_FORMAT,

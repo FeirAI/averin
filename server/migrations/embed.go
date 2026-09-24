@@ -35,3 +35,10 @@ var BrokerSeqRecovery string
 // and creates project/resource nonce and global JTI ledgers (schema version 6).
 //go:embed 0006_tenant_nonce_ledger.sql
 var TenantNonceLedger string
+
+// TemporalRevocation adds the per-project authorization order on the project guard,
+// the receipt-ordinal backstop and immutable revocation events, and retires the
+// boolean revocations table (schema version 7, plan 009).
+//
+//go:embed 0007_temporal_revocation.sql
+var TemporalRevocation string
