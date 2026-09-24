@@ -83,6 +83,26 @@
       "gates": ["core", "store-postgres", "wasm"]
     },
     {
+      "id": "authority-v3-semantic-body-binding",
+      "claim": "A verified v3 authority proof binds the finalized semantic record, including commitments and unknown extensions. Receipt, display sequence, causal parents and signing-key envelope are recorder-authenticated exclusions; the authority does not approve their values.",
+      "class": "model-and-tested-implementation",
+      "targets": ["native Rust verifier", "Go server producer and ingest"],
+      "assumptions": ["external authority approves the actual structured subject", "SHA-256 collision resistance", "Ed25519 signatures", "recording key remains trusted", "the enumerated projection is reviewed when the record schema changes"],
+      "sources": [{"file": "core/src/authority.rs", "symbol": "pub fn subject_projection"}, {"file": "server/internal/api/authority_v3.go", "symbol": "finalizeSemanticRecord"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "authority_v3_digest_bound"}],
+      "proofs": [{"file": "core/tests/golden.rs", "symbol": "sdk_prepared_v3_record_matches_govder_subject_bytes"}, {"file": "core/tests/adversarial.rs", "symbol": "v3_signed_grant_and_pop_use_satisfy_body_bound_authorization"}, {"file": "core/src/authority.rs", "symbol": "v3_binds_semantic_body_but_not_recorder_envelope"}, {"file": "server/internal/api/authority_v3_test.go", "symbol": "TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal"}, {"file": "server/internal/api/authority_v3_test.go", "symbol": "TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite"}],
+      "gates": ["core", "server", "formal-lean", "formal-refinement"]
+    },
+    {
+      "id": "historical-v2-authority-is-unbound",
+      "claim": "Valid historical v2 authority evidence remains signature-valid and eligible for its independent Tier-B evidence joins, but carries an explicit legacy_unbound status and cannot satisfy body-bound authorization or completeness claims.",
+      "class": "backward-compatibility-test",
+      "targets": ["native Rust verifier", "Go server exports"],
+      "assumptions": ["historical v2 evidence bytes are immutable", "the original authority verification key remains pinned"],
+      "sources": [{"file": "core/src/authority.rs", "symbol": "LegacyUnbound"}, {"file": "core/src/verify.rs", "symbol": "body_bound_role_evidence"}],
+      "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "v2_role_evidence_retains_tier_b_joins_but_cannot_satisfy_body_bound_claim"}, {"file": "server/internal/api/server_authority_test.go", "symbol": "legacy_unbound"}],
+      "gates": ["core", "server"]
+    },
+    {
       "id": "external-authenticity-pins",
       "claim": "Authentic role and TSA verdicts require independently obtained public keys; self-reported bundle keys do not establish operator authenticity.",
       "class": "deployment-assumption",
