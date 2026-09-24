@@ -9,6 +9,11 @@
 #   golden     cargo test --test golden                        (committed golden vectors)
 #   verdict    cargo test --lib verdict_differential          (Lean model vs pure verdict kernel)
 #   adversarial cargo test --test adversarial                   (bundle evidence-to-fact regressions)
+#   production python3 formal/production/check-production.py   (plan 012: extraction freshness, call paths
+#                                                                into the proved code, no cfg-selected code)
+#   production-proof  formal/run-production-refinement.sh --write  (regenerate the extraction from the
+#              mutated source and rebuild every production proof; only for mutants that name it, and
+#              skipped with SKIP_PRODUCTION_PROOF=1 when the pinned Charon/Aeneas/Lean toolchain is absent)
 #   kani       the named bounded proof, only for m3 / m4       (see kani_harness below); for those two
 #              mutants the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
 #
@@ -57,6 +62,10 @@ named_detector() {
     m18-*) echo 'adversarial|tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation' ;;
     m19-*) echo 'adversarial|tier_b_two_phase_failed_pop_intent_does_not_consume_outcome' ;;
     m21-*) echo 'adversarial|required_disclosure_covers_every_committed_broker_grant' ;;
+    m40-*) [ "${SKIP_PRODUCTION_PROOF:-0}" = 1 ] || echo 'production-proof|proof' ;;
+    m41-*) echo 'production|stale' ;;
+    m42-*) echo 'production|call-path' ;;
+    m43-*) echo 'production|cfg' ;;
   esac
 }
 
@@ -90,7 +99,7 @@ fresh_tree() {
   cp -R core spec server sdk verifier Cargo.toml Cargo.lock rust-toolchain.toml "$tree/"
   mkdir -p "$tree/web" && cp -R web/src "$tree/web/"  # swept by the tag inventory
   # formal/ minus build outputs (the Lean .lake dir is large and irrelevant here).
-  (cd formal && find . -path ./lean/.lake -prune -o -type f -print) | while read -r f; do
+  (cd formal && find . \( -path ./lean/.lake -o -path ./production/.lake \) -prune -o -type f -print) | while read -r f; do
     mkdir -p "$tree/formal/$(dirname "$f")"
     cp "formal/$f" "$tree/formal/$f"
   done
@@ -107,6 +116,10 @@ run_gate() {
       golden) cargo test -q -p averin-decision-core --test golden ;;
       verdict) cargo test -q -p averin-decision-core --lib verdict_differential ;;
       adversarial) cargo test -q -p averin-decision-core --test adversarial ;;
+      production) python3 formal/production/check-production.py ;;
+      production-proof)
+        AVERIN_LAKE_PACKAGES="$production_packages" AVERIN_CHARON_TARGET_DIR="$work/charon-target" \
+          bash formal/run-production-refinement.sh --write ;;
       kani) "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" cargo kani -p averin-decision-core --lib --no-default-features -Z stubbing --harness "$3" ;;
     esac
   ) >"$log" 2>&1
@@ -114,6 +127,22 @@ run_gate() {
 
 use_kani=1
 python3 formal/check-kani-mutant.py --self-test || exit 2
+# The production proofs reuse this checkout's Lake packages (mathlib is never rebuilt per mutant).
+production_packages=""
+if [ -e formal/production/.lake/packages ]; then
+  production_packages="$(cd formal/production/.lake/packages && pwd -P)"
+fi
+# The scratch tree is outside this checkout, so resolve the pinned toolchain here (same search as
+# formal/run-production-refinement.sh).
+if [ -z "${AVERIN_AENEAS_TOOLS:-}" ]; then
+  d="$(pwd)"
+  while [ "$d" != "/" ]; do
+    if [ -f "$d/.verification-tools/aeneas-557f7a/with-aeneas.sh" ]; then
+      export AVERIN_AENEAS_TOOLS="$d/.verification-tools/aeneas-557f7a"; break
+    fi
+    d="$(dirname "$d")"
+  done
+fi
 if [ "${SKIP_KANI:-0}" = 1 ]; then
   use_kani=0
 elif ! command -v cargo-kani >/dev/null 2>&1; then
@@ -130,7 +159,9 @@ fi
 
 echo "== baseline (unmutated): every gate must pass"
 fresh_tree
-for g in inventory oracle golden verdict adversarial; do
+baseline_gates=(inventory oracle golden verdict adversarial production)
+[ "${SKIP_PRODUCTION_PROOF:-0}" = 1 ] || baseline_gates+=(production-proof)
+for g in "${baseline_gates[@]}"; do
   gate_exit=0
   run_gate baseline "$g" || gate_exit=$?
   if ! python3 formal/check-kani-mutant.py --gate "$g" --expect-success "$logs/baseline-$g.log" "$gate_exit"; then
@@ -167,11 +198,11 @@ for patch in formal/mutants/*.patch; do
     exit 1
   fi
   detector="$(named_detector "$name")"
-  gates=(inventory oracle golden verdict adversarial)
+  gates=(inventory oracle golden verdict adversarial production)
   if [ -n "$detector" ]; then
     IFS='|' read -r detector_gate detector_test <<<"$detector"
     gates=("$detector_gate")
-    for g in inventory oracle golden verdict adversarial; do
+    for g in inventory oracle golden verdict adversarial production; do
       [ "$g" = "$detector_gate" ] || gates+=("$g")
     done
   fi

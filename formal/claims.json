@@ -23,6 +23,16 @@
       "gates": ["formal-refinement", "formal-mutants"]
     },
     {
+      "id": "production-seal-refinement",
+      "claim": "The production seal core (canonical serializer, LP framing, sha256 digest string, record/checkpoint preimages and hashes, signature message) is extracted from core/src by Charon/Aeneas and proved to compute the Lean model's definitions; the model's seal theorems are applied to it and an explicit-collision binding theorem holds for production hashes. Partial correctness only; the verifier's decision logic is not refined.",
+      "class": "extracted-refinement-proof",
+      "targets": ["native Rust", "WASM Rust (same source)"],
+      "assumptions": ["Charon/Aeneas/Lean toolchain and Aeneas std models", "rustc", "NFC and SHA-256 as arbitrary functions", "String/str UTF-8 model"],
+      "sources": [{"file": "core/src/record.rs", "symbol": "pub(crate) fn record_hash"}, {"file": "core/src/canon.rs", "symbol": "pub(crate) fn write_canonical"}, {"file": "core/src/sign.rs", "symbol": "pub fn preimage"}],
+      "proofs": [{"file": "formal/production/Refinement/Seal.lean", "symbol": "record_hash_binding"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_seal_sound"}, {"file": "formal/run-production-refinement.sh", "symbol": "production refinement: OK"}],
+      "gates": ["formal-production", "formal-mutants"]
+    },
+    {
       "id": "bounded-real-encoders",
       "claim": "Kani proves selected parser and encoder properties of the real Rust implementation only within harness bounds.",
       "class": "bounded-implementation-proof",

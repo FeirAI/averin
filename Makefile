@@ -52,8 +52,8 @@ vuln:
 supply-chain: deny vuln
 
 # Formal verification gates (see formal/README.md). Needs elan/Lean 4.30.0, cargo-kani 0.68, Java.
-.PHONY: formal formal-lean formal-refinement formal-mutants formal-kani formal-tla
-formal: formal-lean formal-refinement formal-mutants formal-kani formal-tla
+.PHONY: formal formal-lean formal-refinement formal-production formal-mutants formal-kani formal-tla
+formal: formal-lean formal-refinement formal-production formal-mutants formal-kani formal-tla
 
 formal-lean:
 	cd formal/lean && lake build --wfail && ./check-axioms.sh
@@ -66,6 +66,11 @@ formal-refinement:
 	git diff --exit-code -- formal/oracle/verdict-expected.json
 	cargo test -p averin-decision-core --test oracle
 	cargo test -p averin-decision-core --lib verdict_differential
+
+# Plan 012: the production seal core, extracted from core/src with Charon/Aeneas and proved in
+# formal/production (needs the pinned toolchain; see formal/production/README.md).
+formal-production:
+	bash formal/run-production-refinement.sh
 
 formal-mutants:
 	bash formal/check-mutants.sh

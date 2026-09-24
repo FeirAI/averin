@@ -1,0 +1,12 @@
+Mutant: the serializer source changes (here only by a comment line) but the committed extraction is not regenerated: the production refinement must report it stale.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -180,6 +180,7 @@
+ /// Append the canonical RCP bytes of `v` to `out` (RCP §2–§4). Returns false if some object in `v`
+ /// has two members whose keys coincide after NFC (RCP §5); the bytes are still written in full, so
+ /// `serialize` produces the same text as before for every value.
++// (edited without regenerating formal/production)
+ pub(crate) fn write_canonical(v: &CanonValue, out: &mut Vec<u8>) -> bool {
+     match v {
+         CanonValue::Null => {
