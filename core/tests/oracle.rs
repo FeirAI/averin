@@ -251,6 +251,14 @@ fn every_preimage_family_matches_model() {
             }
             "test anchor" => check(name, &anchor::anchor_preimage(st(&f[0]), st(&f[1])), want),
             "grant PoP v2" => {
+                let shared_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("spec/golden-vectors/broker-preimages.json");
+                let shared =
+                    CanonValue::parse(&std::fs::read_to_string(&shared_path).unwrap()).unwrap();
+                let grant_case = &arr(&shared, "grant_pop_v2")[0];
+                assert_eq!(s(grant_case, "expect_preimage_hex"), want);
                 let mut pre = Vec::new();
                 assert!(lp_into(&mut pre, b"averin.broker.pop.v2"));
                 for part in &f[..12] {

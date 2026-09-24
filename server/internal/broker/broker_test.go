@@ -131,6 +131,13 @@ func TestGrantPoPV2SharedVector(t *testing.T) {
 			AgentID: c.AgentID, Action: c.Action, Resource: c.Resource, Scope: c.Scope, ScopeClass: ScopeClass(c.ScopeClass),
 			AgentPubKey: c.AgentPubKey, Principal: c.Principal, Justification: c.Justification, UseLimit: c.UseLimit,
 			TTL: time.Duration(c.TTLSeconds) * time.Second, DelegationChain: c.DelegationChain, IssuedAt: c.IssuedAt, RequestExpiresAt: c.RequestExpiresAt}
+		preimage, err := r.v2ChallengePreimage()
+		if err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		if got := hex.EncodeToString(preimage); got != c.PreimageHex {
+			t.Fatalf("%s preimage: %s != %s", c.Name, got, c.PreimageHex)
+		}
 		if got := hex.EncodeToString(r.Challenge()); got != c.ExpectHex {
 			t.Fatalf("%s: %s != %s", c.Name, got, c.ExpectHex)
 		}

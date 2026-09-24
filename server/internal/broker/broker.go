@@ -237,17 +237,27 @@ func (r Request) SemanticHash() (string, error) {
 	return "sha256:" + hex.EncodeToString(h[:]), nil
 }
 
+// v2ChallengePreimage is the exact byte sequence hashed by Challenge. Keeping
+// framing here lets the shared vector test the production encoder before hashing.
+func (r Request) v2ChallengePreimage() ([]byte, error) {
+	b, err := r.v2Subject()
+	if err != nil {
+		return nil, err
+	}
+	b = appendBE8(b, r.IssuedAt)
+	b = appendBE8(b, r.RequestExpiresAt)
+	return b, nil
+}
+
 // Challenge returns the v2 SHA-256 digest of the length-prefixed semantic request
 // and signed freshness envelope. Historical v1 requests retain their JSON preimage
 // for verification of historical signatures and tests.
 func (r Request) Challenge() []byte {
 	if r.PoPVersion == 2 {
-		b, err := r.v2Subject()
+		b, err := r.v2ChallengePreimage()
 		if err != nil {
 			return nil
 		}
-		b = appendBE8(b, r.IssuedAt)
-		b = appendBE8(b, r.RequestExpiresAt)
 		h := sha256.Sum256(b)
 		return h[:]
 	}

@@ -64,6 +64,7 @@ type GrantPoPV2Case struct {
 	DelegationChain  []string `json:"delegation_chain"`
 	IssuedAt         int64    `json:"issued_at"`
 	RequestExpiresAt int64    `json:"request_expires_at"`
+	PreimageHex      string   `json:"expect_preimage_hex"`
 	ExpectHex        string   `json:"expect_hex"`
 }
 
