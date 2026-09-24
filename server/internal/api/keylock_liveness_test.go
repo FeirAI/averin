@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
