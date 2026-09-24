@@ -202,26 +202,38 @@ fn every_preimage_family_matches_model() {
         let tail_field = i.get("tail").filter(|t| !t.is_null()).map(field);
         let tail = || st(tail_field.as_ref().expect("tail"));
         match name {
-            "record sig" => check(name, &sign::preimage(sign::RECORD_SIG_TAG, tail()), want),
+            "record sig" => check(
+                name,
+                &sign::preimage(sign::RECORD_SIG_TAG, tail()).unwrap(),
+                want,
+            ),
             "checkpoint sig" => check(
                 name,
-                &sign::preimage(sign::CHECKPOINT_SIG_TAG, tail()),
+                &sign::preimage(sign::CHECKPOINT_SIG_TAG, tail()).unwrap(),
                 want,
             ),
             // verify.rs verifies these through sign::verify with a literal tag; the literals are
             // inventoried against Preimage.lean by formal/check-refinement.py.
-            "taxonomy statement" => {
-                check(name, &sign::preimage("averin.taxonomy.v1", tail()), want)
-            }
-            "revocation statement" => {
-                check(name, &sign::preimage("averin.revocation.v1", tail()), want)
-            }
-            "revocation merkle root" => check(
+            "taxonomy statement" => check(
                 name,
-                &sign::preimage("averin.broker.revocation.merkleroot.v1", tail()),
+                &sign::preimage("averin.taxonomy.v1", tail()).unwrap(),
                 want,
             ),
-            "attestation" => check(name, &sign::preimage("averin.attestation.v1", tail()), want),
+            "revocation statement" => check(
+                name,
+                &sign::preimage("averin.revocation.v1", tail()).unwrap(),
+                want,
+            ),
+            "revocation merkle root" => check(
+                name,
+                &sign::preimage("averin.broker.revocation.merkleroot.v1", tail()).unwrap(),
+                want,
+            ),
+            "attestation" => check(
+                name,
+                &sign::preimage("averin.attestation.v1", tail()).unwrap(),
+                want,
+            ),
             "authority evidence" => check(
                 name,
                 &authority::preimage(st(&f[0]), st(&f[1]), st(&f[2]), tail()),
@@ -386,12 +398,12 @@ fn every_preimage_family_matches_model() {
             "revocation leaf" => check(name, &verify::revocation_leaf_preimage(st(&f[0])), want),
             "revocation statement v2" => check(
                 name,
-                &sign::preimage(verify::REVOCATION_LIST_V2_DOMAIN, tail()),
+                &sign::preimage(verify::REVOCATION_LIST_V2_DOMAIN, tail()).unwrap(),
                 want,
             ),
             "revocation merkle root v2" => check(
                 name,
-                &sign::preimage(verify::MERKLE_ROOT_V2_DOMAIN, tail()),
+                &sign::preimage(verify::MERKLE_ROOT_V2_DOMAIN, tail()).unwrap(),
                 want,
             ),
             "revocation key v2" => {

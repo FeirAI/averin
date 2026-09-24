@@ -5,16 +5,12 @@
 use crate::canon::CanonValue;
 use crate::dag::Dag;
 use crate::hashx::{parse_sha256, sha256_prefixed};
-use crate::record::{hash_body_preimage, RecordError};
+use crate::record::{body_preimage, PreimageFault, RecordError};
 use crate::sign::{self, CHECKPOINT_SIG_TAG};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
 pub const CHECKPOINT_DOMAIN: &str = "flightrecorder.checkpoint.v2";
 pub const CHECKPOINT_CANON_VERSION: &str = "rcp-1";
-
-/// Keys excluded from the checkpoint hash preimage: `anchor` is added AFTER signing; the hash and
-/// sig obviously cannot cover themselves.
-const STRIP: &[&str] = &["anchor", "checkpoint_hash", "sig"];
 
 #[derive(Debug, PartialEq)]
 pub enum CheckpointError {
@@ -120,14 +116,24 @@ fn int_field(o: &CanonValue, k: &'static str) -> Result<i64, CheckpointError> {
 }
 
 pub fn compute_checkpoint_hash(cp: &CanonValue) -> Result<String, RecordError> {
-    Ok(sha256_prefixed(&checkpoint_hash_preimage(cp)?))
+    checkpoint_hash(cp).map_err(PreimageFault::into_record_error)
+}
+
+pub(crate) fn checkpoint_hash(cp: &CanonValue) -> Result<String, PreimageFault> {
+    Ok(sha256_prefixed(&checkpoint_preimage(cp)?))
 }
 
 /// The exact bytes [`compute_checkpoint_hash`] feeds SHA-256 (`anchor`/`checkpoint_hash`/`sig`
 /// stripped). Hidden `pub` for the Lean-oracle differential test (`core/tests/oracle.rs`).
 #[doc(hidden)]
 pub fn checkpoint_hash_preimage(cp: &CanonValue) -> Result<Vec<u8>, RecordError> {
-    hash_body_preimage(cp, STRIP)
+    checkpoint_preimage(cp).map_err(PreimageFault::into_record_error)
+}
+
+/// Keys excluded from the checkpoint hash preimage: `anchor` is added AFTER signing; the hash and
+/// sig obviously cannot cover themselves.
+pub(crate) fn checkpoint_preimage(cp: &CanonValue) -> Result<Vec<u8>, PreimageFault> {
+    body_preimage(cp, &["anchor", "checkpoint_hash", "sig"])
 }
 
 /// Build a frontier-checkpoint body from heads + chain metadata (helper for producers/tests).

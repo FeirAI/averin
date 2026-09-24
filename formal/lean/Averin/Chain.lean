@@ -36,17 +36,20 @@ def Valid (hash : CP Body → Hash) : List (CP Body) → Prop
     c.prev = (match rest with | [] => none | d :: _ => some (hash d)) ∧
     Valid hash rest
 
-def Collision (hash : CP Body → Hash) : Prop := ∃ x y, x ≠ y ∧ hash x = hash y
+/-- An explicit checkpoint-hash collision between a checkpoint of `cs` and a checkpoint of `ds`. A
+bare `∃ x y, x ≠ y ∧ hash x = hash y` is not used: it holds for every compressing hash. -/
+def CollidesIn (hash : CP Body → Hash) (cs ds : List (CP Body)) : Prop :=
+  ∃ x ∈ cs, ∃ y ∈ ds, x ≠ y ∧ hash x = hash y
 
 theorem seq_eq_length (hash : CP Body → Hash) {c : CP Body} {rest : List (CP Body)}
     (h : Valid hash (c :: rest)) : c.seq = rest.length := h.1
 
 /-- **History uniqueness.** Valid chains with the same newest checkpoint hash are identical, or the
-checkpoint hash has a collision. -/
+checkpoint hash collides on a pair of checkpoints drawn from the two chains. -/
 theorem unique_history (hash : CP Body → Hash) :
     ∀ (cs ds : List (CP Body)) (c d : CP Body),
       Valid hash (c :: cs) → Valid hash (d :: ds) → hash c = hash d →
-      (c :: cs = d :: ds) ∨ Collision hash
+      (c :: cs = d :: ds) ∨ CollidesIn hash (c :: cs) (d :: ds)
   | cs, ds, c, d, hc, hd, h => by
     by_cases hcd : c = d
     · subst hcd
@@ -61,8 +64,9 @@ theorem unique_history (hash : CP Body → Hash) :
         simp only [Option.some.injEq] at hp2
         rcases unique_history hash cs' ds' c' d' hv1 hv2 hp2 with he | hcol
         · exact Or.inl (by rw [he])
-        · exact Or.inr hcol
-    · exact Or.inr ⟨c, d, hcd, h⟩
+        · obtain ⟨x, hx, y, hy, hxy⟩ := hcol
+          exact Or.inr ⟨x, List.mem_cons_of_mem _ hx, y, List.mem_cons_of_mem _ hy, hxy⟩
+    · exact Or.inr ⟨c, List.mem_cons_self .., d, List.mem_cons_self .., hcd, h⟩
 
 /-- Every checkpoint in a valid chain sits at seq = its depth from the root (no gaps, no repeats). -/
 theorem seqs_exact (hash : CP Body → Hash) :

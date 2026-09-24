@@ -2,11 +2,11 @@ Mutant: The string serializer silently drops DEL (U+007F): ser is no longer inje
 
 --- a/core/src/canon.rs
 +++ b/core/src/canon.rs
-@@ -203,6 +203,7 @@
-         match c {
-             '"' => out.push_str("\\\""),
-             '\\' => out.push_str("\\\\"),
-+            '\u{7F}' => {}
-             '\u{08}' => out.push_str("\\b"),
-             '\u{09}' => out.push_str("\\t"),
-             '\u{0A}' => out.push_str("\\n"),
+@@ -442,6 +442,7 @@
+         match b {
+             b'"' => out.extend_from_slice(b"\\\""),
+             b'\\' => out.extend_from_slice(b"\\\\"),
++            0x7F => {}
+             0x08 => out.extend_from_slice(b"\\b"),
+             0x09 => out.extend_from_slice(b"\\t"),
+             0x0A => out.extend_from_slice(b"\\n"),

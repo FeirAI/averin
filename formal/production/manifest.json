@@ -1,0 +1,278 @@
+{
+  "comment": "Plan 012 phase A: the production seal core, extracted from core/src by Charon/Aeneas and proved in formal/production. `bash formal/run-production-refinement.sh` regenerates the extraction from the checked-out source, requires it to equal the committed Extracted/{Types,Funs}.lean, checks the glue and the call paths below, builds every proof and runs the axiom audit. `--write` refreshes the generated files and the source hashes after an intended source change (the proofs must then still build). Nothing here is proved about any function not listed under `extracted`.",
+  "toolchain": {
+    "aeneas_commit": "557f7a15f3b75e18ddae224fc65db0807b70acdf",
+    "charon_commit": "62585970fc75f61d83c7898ff8dfdd7edaa3c073",
+    "charon_rust_toolchain": "nightly-2026-09-17",
+    "lean": "leanprover/lean4:v4.31.0",
+    "mathlib_rev": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+  },
+  "charon": {
+    "crate_dir": "core",
+    "cargo_args": [
+      "--lib"
+    ],
+    "features": "default (no --features / --no-default-features); the extracted files contain no cfg(feature) code (checked)",
+    "options": [
+      "--preset=aeneas"
+    ],
+    "start_from": [
+      "crate::record::record_hash",
+      "crate::record::record_preimage",
+      "crate::record::body_hash",
+      "crate::checkpoint::checkpoint_hash",
+      "crate::checkpoint::checkpoint_preimage",
+      "crate::sign::preimage",
+      "crate::sign::RECORD_SIG_TAG",
+      "crate::sign::CHECKPOINT_SIG_TAG",
+      "crate::record::RECORD_DOMAIN",
+      "crate::record::CANON_VERSION",
+      "crate::checkpoint::CHECKPOINT_DOMAIN",
+      "crate::checkpoint::CHECKPOINT_CANON_VERSION"
+    ],
+    "opaque": [
+      "crate::canon::nfc",
+      "crate::hashx::sha256"
+    ]
+  },
+  "aeneas": {
+    "options": [
+      "-backend",
+      "lean",
+      "-split-files",
+      "-use-lean-modules",
+      "false",
+      "-loops-to-rec",
+      "-abort-on-error",
+      "-subdir",
+      "Extracted"
+    ],
+    "generated": [
+      "Extracted/Types.lean",
+      "Extracted/Funs.lean"
+    ],
+    "glue": [
+      "Extracted/TypesExternal.lean",
+      "Extracted/FunsExternal.lean"
+    ],
+    "externals": {
+      "types": [
+        "alloc.string.FromUtf8Error"
+      ],
+      "funs": [
+        "core.str.Str.as_bytes",
+        "alloc.string.String.from_utf8",
+        "alloc.string.String.as_bytes",
+        "alloc.string.String.Insts.CoreOpsDerefDerefStr.deref",
+        "canon.nfc",
+        "hashx.sha256"
+      ]
+    }
+  },
+  "trusted": {
+    "axioms": {
+      "AverinTrusted.nfc": "Unicode NFC normalization (unicode-normalization 0.1.25) behind canon::nfc; an arbitrary total function, no property assumed",
+      "AverinTrusted.sha256": "SHA-256 (sha2 0.10.9) behind hashx::sha256; an arbitrary total function, collision resistance never assumed"
+    },
+    "std_models": {
+      "core.str.Str.as_bytes": "identity (Aeneas represents &str by its UTF-8 bytes)",
+      "alloc.string.String.as_bytes": "UTF-8 bytes of the Lean String modelling the Rust String; fails only above usize::MAX bytes",
+      "alloc.string.String.Insts.CoreOpsDerefDerefStr.deref": "same bytes as String::as_bytes",
+      "alloc.string.String.from_utf8": "Ok with exactly the given bytes iff they are valid UTF-8 (Lean's verified String.fromUTF8?)",
+      "alloc.string.FromUtf8Error": "Unit; never inspected",
+      "averin_decision_core.toStr": "Aeneas.Std.toStr with a kernel-checked (not native) size bound for string literals"
+    },
+    "toolchain": "rustc (nightly-2026-09-17 for extraction, 1.92.0 for production builds), Charon 6258597, Aeneas 557f7a1 and its Lean standard library, Lean 4.31.0 and mathlib"
+  },
+  "sources": {
+    "core/Cargo.toml": "0d90d1e08d2d474dcec1648f76a36aab993b098e47ec34d60614e9c67811cc2e",
+    "core/src/canon.rs": "6f24a8c8bb28086ec27745e977d5ca8d23d6889d99208e563ec07e9fa85ff4aa",
+    "core/src/hashx.rs": "3193a42763c19e681181c07bbb8e7ab6f37d0d27dd0bc6124d8f7067b7d043c7",
+    "core/src/record.rs": "52dac5bd61b1609803f82824291d270eefd8774065cb9a78b2988d9276e2e1f4",
+    "core/src/checkpoint.rs": "90ba12e80e5e89811f119840fe44b07a9e90a7d650b9f365b49f9feed3f455c4",
+    "core/src/sign.rs": "cd3611f1ee9bfa13c9fa61353b6ea4412254bb539ae4a48ccfeb73babb3e80b3",
+    "formal/production/Extracted/Types.lean": "9c4604b2faf61ed53ad9bfe97afbb2f11f6f59175236240c2a7ab3c4c39d940a",
+    "formal/production/Extracted/Funs.lean": "71408e551bdc753f539574b3c7519310c8512139cdd7e6c067101be44b25e2e0"
+  },
+  "extracted": {
+    "canon::write_canonical": [
+      "Refinement.write_canonical_model"
+    ],
+    "canon::write_object": [
+      "Refinement.write_object_ok"
+    ],
+    "canon::escape_into": [
+      "Refinement.escape_into_model"
+    ],
+    "canon::write_int": [
+      "Refinement.write_int_model"
+    ],
+    "canon::utf16_units": [
+      "Refinement.utf16_units_model"
+    ],
+    "canon::units_lt": [
+      "Refinement.units_lt_model"
+    ],
+    "canon::sort_by_units": [
+      "Refinement.sort_ok"
+    ],
+    "canon::member": [
+      "Refinement.member_ok"
+    ],
+    "hashx::lp_into": [
+      "Refinement.lp_into_model"
+    ],
+    "hashx::lp_str_into": [
+      "Refinement.lp_str_into_model"
+    ],
+    "hashx::sha256_prefixed": [
+      "Refinement.sha256_prefixed_model",
+      "Refinement.fmtP_inj",
+      "Refinement.fmtM_inj"
+    ],
+    "record::body_preimage": [
+      "Refinement.body_preimage_model"
+    ],
+    "record::body_hash": [
+      "Refinement.body_hash_model"
+    ],
+    "record::record_preimage": [
+      "Refinement.record_preimage_model"
+    ],
+    "record::record_hash": [
+      "Refinement.record_hash_model",
+      "Refinement.record_hash_binding",
+      "Refinement.record_hash_is_model",
+      "Refinement.production_record_binding_model",
+      "Refinement.production_record_seal_sound",
+      "Refinement.production_record_ne_checkpoint"
+    ],
+    "checkpoint::checkpoint_preimage": [
+      "Refinement.checkpoint_preimage_model"
+    ],
+    "checkpoint::checkpoint_hash": [
+      "Refinement.checkpoint_hash_model",
+      "Refinement.checkpoint_hash_binding",
+      "Refinement.checkpoint_hash_is_model",
+      "Refinement.production_checkpoint_seal_sound"
+    ],
+    "sign::preimage": [
+      "Refinement.sign_preimage_model",
+      "Refinement.sign_preimage_record",
+      "Refinement.sign_preimage_checkpoint"
+    ]
+  },
+  "callers": [
+    {
+      "file": "core/src/record.rs",
+      "fn": "compute_content_hash",
+      "body": "record_hash(record).map_err(PreimageFault::into_record_error)"
+    },
+    {
+      "file": "core/src/record.rs",
+      "fn": "content_hash_preimage",
+      "body": "record_preimage(record).map_err(PreimageFault::into_record_error)"
+    },
+    {
+      "file": "core/src/record.rs",
+      "fn": "hash_body",
+      "body": "body_hash(value, strip).map_err(PreimageFault::into_record_error)"
+    },
+    {
+      "file": "core/src/record.rs",
+      "fn": "hash_body_preimage",
+      "body": "body_preimage(value, strip).map_err(PreimageFault::into_record_error)"
+    },
+    {
+      "file": "core/src/record.rs",
+      "fn": "verify_content_hash",
+      "contains": [
+        "domain != RECORD_DOMAIN",
+        "cv != CANON_VERSION",
+        "let computed = compute_content_hash(record)?;",
+        "if stored != computed {"
+      ]
+    },
+    {
+      "file": "core/src/record.rs",
+      "fn": "seal",
+      "contains": [
+        "let content_hash = compute_content_hash(record)?;",
+        "sign::sign(sign::RECORD_SIG_TAG, &content_hash, sk)"
+      ]
+    },
+    {
+      "file": "core/src/record.rs",
+      "fn": "verify_signature",
+      "contains": [
+        "sign::verify(sign::RECORD_SIG_TAG, content_hash, sig, vk)"
+      ]
+    },
+    {
+      "file": "core/src/record.rs",
+      "fn": "verify_sealed",
+      "contains": [
+        "validate_record_shape(record)?;",
+        "verify_content_hash(record)?;",
+        "verify_signature(record, vk)"
+      ]
+    },
+    {
+      "file": "core/src/checkpoint.rs",
+      "fn": "compute_checkpoint_hash",
+      "body": "checkpoint_hash(cp).map_err(PreimageFault::into_record_error)"
+    },
+    {
+      "file": "core/src/checkpoint.rs",
+      "fn": "checkpoint_hash_preimage",
+      "body": "checkpoint_preimage(cp).map_err(PreimageFault::into_record_error)"
+    },
+    {
+      "file": "core/src/checkpoint.rs",
+      "fn": "seal_checkpoint",
+      "contains": [
+        "let ch = compute_checkpoint_hash(cp_body)?;",
+        "sign::sign(CHECKPOINT_SIG_TAG, &ch, sk)"
+      ]
+    },
+    {
+      "file": "core/src/checkpoint.rs",
+      "fn": "verify_checkpoint_sealed",
+      "contains": [
+        "domain != CHECKPOINT_DOMAIN",
+        "cv != CHECKPOINT_CANON_VERSION",
+        "let computed = compute_checkpoint_hash(cp).map_err(CheckpointError::Hash)?;",
+        "sign::verify(CHECKPOINT_SIG_TAG, &computed, sig, vk)"
+      ]
+    },
+    {
+      "file": "core/src/sign.rs",
+      "fn": "sign",
+      "contains": [
+        "let msg = preimage(tag, content_hash).expect(",
+        "sk.sign(&msg)"
+      ]
+    },
+    {
+      "file": "core/src/sign.rs",
+      "fn": "verify",
+      "contains": [
+        "let msg = preimage(tag, content_hash).ok_or(SigError::Invalid)?;",
+        "vk.verify_strict(&msg, &signature)"
+      ]
+    },
+    {
+      "file": "core/src/canon.rs",
+      "fn": "serialize",
+      "contains": [
+        "let unique = write_canonical(self, &mut out);",
+        "match String::from_utf8(out)"
+      ]
+    },
+    {
+      "file": "core/src/canon.rs",
+      "fn": "get",
+      "body": "member(self, key)"
+    }
+  ]
+}

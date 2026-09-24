@@ -6,6 +6,7 @@
 //! and byte-exact escaping + UTF-16 key ordering. This module is the golden-vector contract;
 //! any divergence here is threat #10 (verifier skew).
 
+#[cfg(kani)]
 use core::cmp::Ordering;
 use core::fmt;
 use std::collections::BTreeSet;
@@ -84,54 +85,21 @@ impl CanonValue {
     }
 
     /// Serialize to the canonical RCP byte string (UTF-8).
+    ///
+    /// Duplicate keys after NFC are a caller invariant violation (use `CanonValue::object`); they are
+    /// asserted against in debug builds. The hash/seal paths reject them outright (see
+    /// [`write_object`]'s result and `record::hash_body_preimage`).
     pub fn serialize(&self) -> String {
-        let mut out = String::new();
-        self.write(&mut out);
-        out
-    }
-
-    fn write(&self, out: &mut String) {
-        match self {
-            CanonValue::Null => out.push_str("null"),
-            CanonValue::Bool(true) => out.push_str("true"),
-            CanonValue::Bool(false) => out.push_str("false"),
-            CanonValue::Int(n) => out.push_str(&n.to_string()),
-            CanonValue::Str(s) => write_string(&nfc(s), out),
-            CanonValue::Array(items) => {
-                out.push('[');
-                for (i, it) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    it.write(out);
-                }
-                out.push(']');
-            }
-            CanonValue::Object(members) => {
-                // RCP §2/§4/§5: keys are NFC-normalized here (defense in depth — the hashed
-                // bytes are always canonical even if a `CanonValue` was built programmatically
-                // without going through `parse`/`object`), then sorted by UTF-16 code unit.
-                // Values produced by `parse` are already NFC, so this is idempotent on the
-                // signing path. Duplicate keys are a caller invariant violation (use
-                // `CanonValue::object`); we assert against them in debug builds.
-                let keys: Vec<String> = members.iter().map(|(k, _)| nfc(k)).collect();
-                let mut idx: Vec<usize> = (0..members.len()).collect();
-                idx.sort_by(|&a, &b| utf16_cmp(&keys[a], &keys[b]));
-                debug_assert!(
-                    idx.windows(2).all(|w| keys[w[0]] != keys[w[1]]),
-                    "RCP invariant: duplicate object key after NFC in serialize()"
-                );
-                out.push('{');
-                for (n, &mi) in idx.iter().enumerate() {
-                    if n > 0 {
-                        out.push(',');
-                    }
-                    write_string(&keys[mi], out);
-                    out.push(':');
-                    members[mi].1.write(out);
-                }
-                out.push('}');
-            }
+        let mut out = Vec::new();
+        let unique = write_canonical(self, &mut out);
+        debug_assert!(
+            unique,
+            "RCP invariant: duplicate object key after NFC in serialize()"
+        );
+        match String::from_utf8(out) {
+            Ok(text) => text,
+            // Every byte comes from a `String` (UTF-8) or is ASCII punctuation/escapes.
+            Err(_) => panic!("RCP canonical text is always UTF-8"),
         }
     }
 
@@ -143,11 +111,9 @@ impl CanonValue {
             _ => None,
         }
     }
+    /// The first member whose key equals `key` (byte-for-byte; no normalization).
     pub fn get(&self, key: &str) -> Option<&CanonValue> {
-        self.as_object()?
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v)
+        member(self, key)
     }
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -186,9 +152,284 @@ impl CanonValue {
     }
 }
 
-/// Compare two strings by their UTF-16 code-unit sequences (RFC 8785 §3.2.3 / RCP §2).
+// ---- the canonical serializer (RCP §2–§5) ----
+//
+// Written over bytes with explicit loops and no iterator adapters, closures, `str` formatting or
+// library sorting, so that `formal/run-production-refinement.sh` extracts exactly this code with
+// Charon/Aeneas and proves it against the Lean model (`formal/production`). The only opaque
+// operation is `nfc` (the unicode-normalization crate, a stated trust boundary).
+
+/// [`CanonValue::get`], as a free function so the extracted model names it outside the
+/// `CanonValue` namespace (whose `Str` constructor would shadow Aeneas' `Str` type).
+pub(crate) fn member<'a>(v: &'a CanonValue, key: &str) -> Option<&'a CanonValue> {
+    let members = match v {
+        CanonValue::Object(m) => m,
+        _ => return None,
+    };
+    let mut i = 0;
+    while i < members.len() && members[i].0.as_bytes() != key.as_bytes() {
+        i += 1;
+    }
+    if i < members.len() {
+        Some(&members[i].1)
+    } else {
+        None
+    }
+}
+
+/// Append the canonical RCP bytes of `v` to `out` (RCP §2–§4). Returns false if some object in `v`
+/// has two members whose keys coincide after NFC (RCP §5); the bytes are still written in full, so
+/// `serialize` produces the same text as before for every value.
+pub(crate) fn write_canonical(v: &CanonValue, out: &mut Vec<u8>) -> bool {
+    match v {
+        CanonValue::Null => {
+            out.extend_from_slice(b"null");
+            true
+        }
+        CanonValue::Bool(b) => {
+            if *b {
+                out.extend_from_slice(b"true");
+            } else {
+                out.extend_from_slice(b"false");
+            }
+            true
+        }
+        CanonValue::Int(n) => {
+            write_int(*n, out);
+            true
+        }
+        CanonValue::Str(s) => {
+            escape_into(nfc(s).as_bytes(), out);
+            true
+        }
+        CanonValue::Array(items) => write_array(items, out),
+        CanonValue::Object(members) => write_object(members, &[], out),
+    }
+}
+
+fn write_array(items: &[CanonValue], out: &mut Vec<u8>) -> bool {
+    out.push(b'[');
+    let mut unique = true;
+    let mut i = 0;
+    while i < items.len() {
+        if i > 0 {
+            out.push(b',');
+        }
+        if !write_canonical(&items[i], out) {
+            unique = false;
+        }
+        i += 1;
+    }
+    out.push(b']');
+    unique
+}
+
+/// Append the canonical bytes of the object `members` without the members whose (raw) key is in
+/// `strip` (RCP §9.1 strips `content_hash`/`sig` this way). Keys are NFC-normalized here (defense in
+/// depth — the hashed bytes are always canonical even if a `CanonValue` was built programmatically
+/// without going through `parse`/`object`), then sorted by UTF-16 code unit (RCP §2). Values
+/// produced by `parse` are already NFC, so this is idempotent on the signing path. Returns false on
+/// a duplicate key after NFC, here or in any nested object.
+#[allow(clippy::ptr_arg)]
+pub(crate) fn write_object(
+    members: &Vec<(String, CanonValue)>,
+    strip: &[&str],
+    out: &mut Vec<u8>,
+) -> bool {
+    let mut keep = vec![true; members.len()];
+    unmark_stripped(members, strip, 0, &mut keep);
+    write_members(members, &keep, out)
+}
+
+/// Clear `keep[j]` for every member whose key equals `strip[i..]`. Recursion over the (constant,
+/// short) strip list rather than a loop keeps nested `&[&str]` borrows out of loop state.
+#[allow(clippy::ptr_arg)]
+fn unmark_stripped(
+    members: &Vec<(String, CanonValue)>,
+    strip: &[&str],
+    i: usize,
+    keep: &mut [bool],
+) {
+    if i < strip.len() {
+        unmark_key(members, strip[i].as_bytes(), keep);
+        unmark_stripped(members, strip, i + 1, keep);
+    }
+}
+
+// `&Vec`, not a slice, here and in `write_members`/`write_object`: Aeneas cannot yet translate the
+// indexed loops below over a slice of pairs.
+#[allow(clippy::ptr_arg)]
+fn unmark_key(members: &Vec<(String, CanonValue)>, key: &[u8], keep: &mut [bool]) {
+    let mut j = 0;
+    while j < members.len() {
+        if members[j].0.as_bytes() == key {
+            keep[j] = false;
+        }
+        j += 1;
+    }
+}
+
+#[allow(clippy::ptr_arg)]
+fn write_members(members: &Vec<(String, CanonValue)>, keep: &[bool], out: &mut Vec<u8>) -> bool {
+    // The kept members, as NFC keys, their UTF-16 sort keys and their member index.
+    let mut keys: Vec<String> = Vec::new();
+    let mut units: Vec<Vec<u16>> = Vec::new();
+    let mut src: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i < members.len() {
+        if keep[i] {
+            let key = nfc(&members[i].0);
+            units.push(utf16_units(key.as_bytes()));
+            keys.push(key);
+            src.push(i);
+        }
+        i += 1;
+    }
+    let order = sort_by_units(&units, &positions(units.len()));
+    out.push(b'{');
+    let mut unique = true;
+    let mut n = 0;
+    while n < order.len() {
+        if n > 0 {
+            out.push(b',');
+            // Sorted, so a duplicate key is always adjacent to its twin.
+            if units[order[n - 1]] == units[order[n]] {
+                unique = false;
+            }
+        }
+        escape_into(keys[order[n]].as_bytes(), out);
+        out.push(b':');
+        if !write_canonical(&members[src[order[n]]].1, out) {
+            unique = false;
+        }
+        n += 1;
+    }
+    out.push(b'}');
+    unique
+}
+
+/// `[0, 1, …, n-1]`.
+fn positions(n: usize) -> Vec<usize> {
+    let mut pos = Vec::with_capacity(n);
+    let mut p = 0;
+    while p < n {
+        pos.push(p);
+        p += 1;
+    }
+    pos
+}
+
+/// Stable merge sort of `pos` by `units[pos[_]]` in UTF-16 code-unit order (RFC 8785 §3.2.3 /
+/// RCP §2): split at `(len + 1) / 2`, sort both halves, merge preferring the left run on ties.
+fn sort_by_units(units: &[Vec<u16>], pos: &[usize]) -> Vec<usize> {
+    if pos.len() <= 1 {
+        pos.to_vec()
+    } else {
+        let mid = pos.len() - pos.len() / 2;
+        let left = sort_by_units(units, &pos[..mid]);
+        let right = sort_by_units(units, &pos[mid..]);
+        merge_by_units(units, &left, &right)
+    }
+}
+
+fn merge_by_units(units: &[Vec<u16>], left: &[usize], right: &[usize]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let mut i = 0;
+    let mut j = 0;
+    while i < left.len() || j < right.len() {
+        if j == right.len() || (i < left.len() && !units_lt(&units[right[j]], &units[left[i]])) {
+            out.push(left[i]);
+            i += 1;
+        } else {
+            out.push(right[j]);
+            j += 1;
+        }
+    }
+    out
+}
+
+/// Strict lexicographic order on UTF-16 code-unit sequences (a proper prefix sorts first).
+fn units_lt(a: &[u16], b: &[u16]) -> bool {
+    let n = if a.len() < b.len() { a.len() } else { b.len() };
+    let mut i = 0;
+    while i < n && a[i] == b[i] {
+        i += 1;
+    }
+    if i < n {
+        a[i] < b[i]
+    } else {
+        a.len() < b.len()
+    }
+}
+
+/// The UTF-16 code units of UTF-8 text `s` (which is always valid: it comes from a `String`).
+fn utf16_units(s: &[u8]) -> Vec<u16> {
+    let mut units = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let b0 = s[i] as u32;
+        let (cp, width) = if b0 < 0x80 {
+            (b0, 1)
+        } else if b0 < 0xE0 {
+            ((b0 - 0xC0) * 0x40 + (s[i + 1] as u32 - 0x80), 2)
+        } else if b0 < 0xF0 {
+            (
+                (b0 - 0xE0) * 0x1000 + (s[i + 1] as u32 - 0x80) * 0x40 + (s[i + 2] as u32 - 0x80),
+                3,
+            )
+        } else {
+            (
+                (b0 - 0xF0) * 0x40000
+                    + (s[i + 1] as u32 - 0x80) * 0x1000
+                    + (s[i + 2] as u32 - 0x80) * 0x40
+                    + (s[i + 3] as u32 - 0x80),
+                4,
+            )
+        };
+        if cp < 0x10000 {
+            units.push(cp as u16);
+        } else {
+            units.push((0xD800 + (cp - 0x10000) / 0x400) as u16);
+            units.push((0xDC00 + (cp - 0x10000) % 0x400) as u16);
+        }
+        i += width;
+    }
+    units
+}
+
+/// Kani adapter: the order harnesses below drive the production key order through a `&str` API.
+#[cfg(kani)]
 fn utf16_cmp(a: &str, b: &str) -> Ordering {
-    a.encode_utf16().cmp(b.encode_utf16())
+    let (ua, ub) = (utf16_units(a.as_bytes()), utf16_units(b.as_bytes()));
+    if units_lt(&ua, &ub) {
+        Ordering::Less
+    } else if units_lt(&ub, &ua) {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
+/// Append `n` in shortest decimal, `-` for negatives (RCP §3).
+fn write_int(n: i64, out: &mut Vec<u8>) {
+    // |n| as u64 without overflow at i64::MIN.
+    let mut u: u64 = if n < 0 {
+        out.push(b'-');
+        (-(n + 1)) as u64 + 1
+    } else {
+        n as u64
+    };
+    let mut digits = [0u8; 20];
+    let mut k = 20;
+    loop {
+        k -= 1;
+        digits[k] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&digits[k..]);
 }
 
 /// NFC-normalize a string (RCP §4). Idempotent on already-normalized input.
@@ -196,35 +437,47 @@ fn nfc(s: &str) -> String {
     s.nfc().collect()
 }
 
-/// Write a JSON string with RCP-minimal escaping (RCP §4).
-fn write_string(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{09}' => out.push_str("\\t"),
-            '\u{0A}' => out.push_str("\\n"),
-            '\u{0C}' => out.push_str("\\f"),
-            '\u{0D}' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => {
-                out.push_str("\\u00");
-                let b = c as u32;
-                out.push(hex_digit((b >> 4) as u8));
-                out.push(hex_digit((b & 0xF) as u8));
+/// Append a JSON string with RCP-minimal escaping (RCP §4). Byte-wise over UTF-8: every byte the
+/// table escapes is ASCII, and every byte of a multi-byte scalar is ≥ 0x80 and copied as is, so
+/// this is exactly the per-scalar escape.
+fn escape_into(s: &[u8], out: &mut Vec<u8>) {
+    out.push(b'"');
+    let mut i = 0;
+    while i < s.len() {
+        let b = s[i];
+        match b {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            0x08 => out.extend_from_slice(b"\\b"),
+            0x09 => out.extend_from_slice(b"\\t"),
+            0x0A => out.extend_from_slice(b"\\n"),
+            0x0C => out.extend_from_slice(b"\\f"),
+            0x0D => out.extend_from_slice(b"\\r"),
+            0x00..=0x1F => {
+                out.extend_from_slice(b"\\u00");
+                out.push(hex_digit(b >> 4));
+                out.push(hex_digit(b & 0xF));
             }
-            c => out.push(c),
+            _ => out.push(b),
         }
+        i += 1;
     }
-    out.push('"');
+    out.push(b'"');
 }
 
-fn hex_digit(n: u8) -> char {
-    match n {
-        0..=9 => (b'0' + n) as char,
-        10..=15 => (b'a' + (n - 10)) as char,
-        _ => unreachable!(),
+/// Kani adapter: the escape harness below drives the production escaper through a `&str`/`String` API.
+#[cfg(kani)]
+fn write_string(s: &str, out: &mut String) {
+    let mut bytes = Vec::new();
+    escape_into(s.as_bytes(), &mut bytes);
+    out.push_str(core::str::from_utf8(&bytes).unwrap());
+}
+
+fn hex_digit(n: u8) -> u8 {
+    if n < 10 {
+        b'0' + n
+    } else {
+        b'a' + (n - 10)
     }
 }
 

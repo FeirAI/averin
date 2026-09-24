@@ -1,0 +1,13 @@
+Mutant: LP writes the length little-endian: every production preimage byte order changes. The regenerated extraction no longer satisfies Refinement.lp_into_model (a proof failure, not a stale vector).
+
+--- a/core/src/hashx.rs
++++ b/core/src/hashx.rs
+@@ -11,7 +11,7 @@
+     if b.len() > MAX_LP_LEN {
+         return false;
+     }
+-    out.extend_from_slice(&(b.len() as u32).to_be_bytes());
++    out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+     out.extend_from_slice(b);
+     true
+ }

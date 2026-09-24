@@ -281,7 +281,42 @@ jobs:
           kani-version: 0.68.0
           command: cargo-kani
           args: --version
-      - run: bash formal/check-mutants.sh
+      # The production-proof detector (m50) needs the pinned Charon/Aeneas/Lean toolchain; it runs in
+      # formal-production. Here m50 must still die to another gate, and the toolchain-free production
+      # checks (m51-m53) run for every mutant.
+      - run: SKIP_PRODUCTION_PROOF=1 bash formal/check-mutants.sh
+
+  formal-production:
+    name: formal — production seal core extracted by Charon/Aeneas and proved against the Lean model (plan 012)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain-free checks (extraction freshness, call paths into the proved code, no cfg code, glue)
+        run: python3 formal/production/check-production.py
+      - name: cache the pinned toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/averin-aeneas
+            ~/.rustup/toolchains
+            ~/.elan
+          key: averin-aeneas-${{ runner.os }}-${{ hashFiles('formal/production/manifest.json', 'formal/production/setup-toolchain.sh') }}
+      - name: system packages for opam
+        run: sudo apt-get update && sudo apt-get install -y opam libgmp-dev pkg-config
+      - name: build pinned Charon, Aeneas and Lean
+        run: bash formal/production/setup-toolchain.sh "$HOME/averin-aeneas"
+      - name: mathlib build cache at the manifest revision
+        working-directory: formal/production
+        run: |
+          ln -sfn "$HOME/averin-aeneas/sources/aeneas" .aeneas
+          "$HOME/averin-aeneas/with-aeneas.sh" lake exe cache get
+      - name: regenerate from core/src, require the committed extraction, build every proof, audit axioms
+        run: AVERIN_AENEAS_TOOLS="$HOME/averin-aeneas" bash formal/run-production-refinement.sh
+      - name: a changed preimage byte fails the regenerated proof (mutant m50)
+        run: |
+          AVERIN_AENEAS_TOOLS="$HOME/averin-aeneas" SKIP_KANI=1 MUTANTS_ONLY=m50-lp-little-endian \
+            bash formal/check-mutants.sh --first
 
   formal-kani:
     name: formal — Kani bounded proofs over the real encoders

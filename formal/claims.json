@@ -4,11 +4,11 @@
   "claims": [
     {
       "id": "seal-and-closure-model",
-      "claim": "The Lean model gives seal binding and closed DAG/checkpoint history under its cryptographic and honest-signer assumptions.",
+      "claim": "The Lean model gives seal binding and closed DAG/checkpoint history under its honest-signer assumption; every hash-dependent conclusion is in explicit-witness form (equal bodies, or a SHA-256 collision on the two specific framed preimages), the standard reduction to SHA-256 collision resistance.",
       "class": "unbounded-model-proof",
       "targets": ["Lean model"],
       "assumptions": ["SHA-256 collision resistance", "Ed25519 signatures", "honest signer", "model inputs are post-NFC"],
-      "sources": [{"file": "formal/lean/Averin/Seal.lean", "symbol": "recordHashOf_binding"}, {"file": "formal/lean/Averin/Dag.lean", "symbol": "bundle_eq_closure"}, {"file": "formal/lean/Averin/Chain.lean", "symbol": "unique_history"}],
+      "sources": [{"file": "formal/lean/Averin/Seal.lean", "symbol": "recordHashOf_binding"}, {"file": "formal/lean/Averin/Seal.lean", "symbol": "record_seal_sound"}, {"file": "formal/lean/Averin/Dag.lean", "symbol": "bundle_eq_closure"}, {"file": "formal/lean/Averin/Chain.lean", "symbol": "unique_history"}],
       "proofs": [{"file": "formal/lean/check-axioms.sh", "symbol": "check"}],
       "gates": ["formal-lean"]
     },
@@ -21,6 +21,16 @@
       "sources": [{"file": "core/src/canon.rs", "symbol": "pub fn serialize"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "Family.msg"}],
       "proofs": [{"file": "core/tests/oracle.rs", "symbol": "every_preimage_family_matches_model"}, {"file": "formal/check-refinement.py", "symbol": "main"}],
       "gates": ["formal-refinement", "formal-mutants"]
+    },
+    {
+      "id": "production-seal-refinement",
+      "claim": "The production seal core (canonical serializer, LP framing, sha256 digest string, record/checkpoint preimages and hashes, signature message) is extracted from core/src by Charon/Aeneas and proved to compute the Lean model's definitions; the model's explicit-witness seal theorems are applied to it (equal hashes give the same body or a SHA-256 collision on the two specific production preimages). Partial correctness only (results when the extracted function returns Ok; a panic or error yields no hash). serialize()'s final from_utf8 and the PreimageFault-to-RecordError mapping are unextracted glue pinned by call-path checks; base64 (core/src/b64.rs) is excluded as off the hashed/signed path and covered by plan 011's Kani proofs; the verifier's decision logic is not refined.",
+      "class": "extracted-refinement-proof",
+      "targets": ["native Rust", "WASM Rust (same source)"],
+      "assumptions": ["Charon/Aeneas/Lean toolchain and Aeneas std models", "rustc", "NFC and SHA-256 as arbitrary functions", "String/str UTF-8 model"],
+      "sources": [{"file": "core/src/record.rs", "symbol": "pub(crate) fn record_hash"}, {"file": "core/src/canon.rs", "symbol": "pub(crate) fn write_canonical"}, {"file": "core/src/sign.rs", "symbol": "pub fn preimage"}],
+      "proofs": [{"file": "formal/production/Refinement/Seal.lean", "symbol": "record_hash_binding"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_seal_sound"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_ne_checkpoint"}, {"file": "formal/run-production-refinement.sh", "symbol": "production refinement: OK"}],
+      "gates": ["formal-production", "formal-mutants"]
     },
     {
       "id": "bounded-real-encoders",

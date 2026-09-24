@@ -1,0 +1,14 @@
+Mutant: sign::verify builds its own unframed message instead of calling the proved sign::preimage (a production call site bypassing a proved helper).
+
+--- a/core/src/sign.rs
++++ b/core/src/sign.rs
+@@ -59,7 +59,8 @@
+     let raw = sig.strip_prefix(SIG_PREFIX).ok_or(SigError::BadPrefix)?;
+     let bytes = b64::decode_fixed::<64>(raw).map_err(SigError::BadEncoding)?;
+     let signature = Signature::from_bytes(&bytes);
+-    let msg = preimage(tag, content_hash).ok_or(SigError::Invalid)?;
++    let mut msg = tag.as_bytes().to_vec();
++    msg.extend_from_slice(content_hash.as_bytes());
+     vk.verify_strict(&msg, &signature)
+         .map_err(|_| SigError::Invalid)
+ }

@@ -5933,7 +5933,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // the anchored committed sets). COMMITTED = transitively committed by ANY verified (signed, key-honored)
     // checkpoint, anchored or not; CLOSED ⊆ COMMITTED.
     //
-    // MONOTONICITY (the reason for the split): `anchor` is outside the checkpoint hash (checkpoint.rs STRIP), so
+    // MONOTONICITY (the reason for the split): `anchor` is outside the checkpoint hash (checkpoint.rs `checkpoint_preimage`), so
     // it is UNSIGNED, optional data — anyone can delete it and the checkpoints still verify. When the join ran
     // over CLOSED alone, deleting every anchor turned every closed use into `unmatched_pending` (never a
     // violation), so an action-without-credential, a double-spend, a revoked use, a cosig/delegation failure or a

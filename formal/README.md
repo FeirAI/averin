@@ -19,6 +19,7 @@ fixed corpus. The TLA+ recovery liveness result depends on its retry and fairnes
 | Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every message a key signs and every tagged or verifier-recomputed preimage (catalogue includes JSON challenges, capability tokens, raw keys, Merkle nodes, the RFC 3161 imprint string and server id derivations; untagged server-local digests are listed as out of scope), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
 | Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order and transitive (parser-level and base64 chunk harnesses in an extended set) | `bash formal/run-kani.sh` |
 | Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log, consume-before-act ledger, and two-replica project transactions with checkpoints, ambiguous commits, crash/restart, pending grants and revocations | `bash formal/tla/run-tlc.sh` |
+| Production refinement (plan 012) | Charon + Aeneas + Lean 4.31 (`production/`, `run-production-refinement.sh`) | the production seal core (serializer, LP framing, `sha256:` digest string, record/checkpoint preimages and hashes, signature message) is extracted from `core/src` and proved to be the model's `ser`/`lp`/`Family.msg`/`recordHashOf`; the model's seal theorems are applied to it; axioms: standard + NFC + SHA-256 as arbitrary functions | `bash formal/run-production-refinement.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
 | Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
 
@@ -28,7 +29,11 @@ fixed corpus. The TLA+ recovery liveness result depends on its retry and fairnes
 
 > A signature cannot be replayed across contexts even if roles share a key: if a record body's
 > signature verifies under the pinned key, the body is **exactly** one the key holder sealed,
-> unless SHA-256 has a collision.
+> unless SHA-256 collides on this body's preimage and a sealed body's preimage.
+
+Formally the conclusion is `body ∈ records ∨ ∃ B ∈ records, recordPre body ≠ recordPre B ∧
+H (recordPre body) = H (recordPre B)`: the counterexample is an explicit collision on two specific,
+named preimages, which is the standard reduction to SHA-256 collision resistance.
 
 The signer model (`Seal.HonestSigner`) lets the same key also sign checkpoints, every other
 signed family with *arbitrary* field values, raw 32-byte challenge digests, and **any** message whose
@@ -70,12 +75,15 @@ Everything between "signature verifies" and "same body" is proved, not assumed:
    arbitrary nesting, and members in serialization order. Rust sorts members by UTF-16 key, and
    `ser` is injective on the sorted form.
 4. **UTF-8 is injective** (`utf8_inj`), derived from Lean core's verified encoder.
-5. **Hash binding** (`recordHashOf_binding`). Equal content hashes mean equal bodies, or an
-   explicit collision `x ≠ y ∧ H x = H y`. `record_ne_checkpoint_hash` rules out
-   record/checkpoint type confusion.
+5. **Hash binding** (`recordHashOf_binding`). Equal content hashes of `a` and `b` mean `a = b`, or
+   `recordPre a ≠ recordPre b ∧ H (recordPre a) = H (recordPre b)` (`Seal.CollidesOn`): a collision
+   on those two specific framed preimages. `record_ne_checkpoint_hash` rules out record/checkpoint
+   type confusion the same way: equal hashes give `CollidesOn H (recordPre a) (checkpointPre b)`.
 
 Cryptography is never axiomatised as injective. SHA-256 compresses, so that axiom would be false
-and every theorem vacuous. Hash results carry an explicit collision disjunct. Ed25519
+and every theorem vacuous. Hash results carry an explicit collision disjunct naming the two
+colliding inputs. A bare `∃ x y, x ≠ y ∧ H x = H y` is deliberately not used: it holds for every
+compressing `H`, so a theorem ending in it would be trivially true. Ed25519
 unforgeability is a hypothesis about which messages were signed. `check-axioms.sh` audits **every**
 declaration in the `Averin` namespace (the script prints the count), not a hand-picked list. That
 includes the oracle glue in `Averin.Oracle` (`utf8c_eq`, `recordPre_spec`, `checkpointPre_spec`),
@@ -88,14 +96,14 @@ decoder is fuel-bounded rather than `partial` for this reason).
 Other results:
 
 * `Seal.commitment_binding`: a hiding commitment opens to exactly one
-  `(field_domain, nonce, value)`.
+  `(field_domain, nonce, value)`, or SHA-256 collides on the two commitment preimages.
 * `Dag.bundle_eq_closure`: under the checks `dag.rs` and `validate_chain` perform (parents
   resolve, acyclic, latest frontier equals the heads), a bundle's records are **exactly** the
   ancestor-closure, in the *signed* history, of the latest checkpoint's frontier. No omission,
   no injection. `earlier_checkpoint_closed` gives the same guarantee for every earlier frontier.
 * `Chain.unique_history`: two chains that pass the checks and end in the same checkpoint hash
-  are identical, or the hash has a collision. The latest signed checkpoint commits the whole
-  history.
+  are identical, or the hash collides on a pair of distinct checkpoints drawn from the two chains
+  (`Chain.CollidesIn`). The latest signed checkpoint commits the whole history.
 
 ### What the model does **not** cover (trust boundary)
 
@@ -103,13 +111,21 @@ Other results:
 * **NFC.** The model starts from post-NFC scalar values. NFC-equivalent inputs are
   *intentionally* the same record (RCP §4). Anything that deduplicates or authorizes on raw,
   un-normalized bytes will disagree with `content_hash`.
-* **The link from each Lean definition to its Rust function.** This is checked by running the
-  model: the executable oracle evaluates the Lean definitions over a fixed corpus and the Rust must
-  reproduce the bytes (see "Refinement gate" below). Kani adds symbolic checks on small inputs, and
-  the golden vectors pin cross-implementation bytes. This is differential testing over a corpus, not
-  a mechanised refinement proof: a drift the corpus does not exercise can pass. To get a proof,
-  translate `canon.rs`/`hashx.rs` into Lean with Aeneas or prove them in place with Verus (see
-  below).
+* **The link from each Lean definition to its Rust function.** For the seal core this is now a
+  mechanised refinement proof (plan 012 phase A, [`production/`](production/README.md)): the production
+  serializer, LP framing, digest string, record/checkpoint preimages and hashes, and the signature
+  message are extracted from `core/src` with Charon/Aeneas and proved to compute the model's
+  `ser`/`lp`/`Family.msg`/`recordHashOf`, so `recordHashOf_binding` and `record_seal_sound` apply to the
+  production hashes (`Refinement.record_hash_is_model`, `production_record_seal_sound`), and an explicit
+  binding theorem (`Refinement.record_hash_binding`) holds for them directly. These are partial
+  correctness results (they describe the output when the extracted function returns `Ok`; a panic or
+  error produces no hash). `serialize()`'s final `from_utf8` and the `PreimageFault`→`RecordError`
+  mapping are unextracted glue pinned by call-path checks, and base64 (`core/src/b64.rs`) is excluded
+  because it is not on the hashed or signed preimage path (plan 011's Kani proofs cover it). The trusted base is the
+  extraction toolchain, NFC and SHA-256 as arbitrary functions, and a small `String`/`str` model; see
+  that README. The executable oracle, golden vectors and Kani harnesses below remain as independent
+  regression evidence. The verifier's decision logic (which calls the proved functions) is not yet
+  refined (phase B).
 * **Offline-verifier verdict logic** (`verify.rs` Tier-B joins, capstone, key status). `Verdict.lean`
   proves inclusion of supported claims when supporting attachments are removed while signed
   records/checkpoints, pins, policy and authenticated adverse evidence remain fixed. The Lean
@@ -376,9 +392,9 @@ pinned to the immutable `v1.7.4` release and verified by sha256.
   induction proofs, which SMT does not do well. A Z3 model would be a third, unconnected copy of
   the semantics.
 * **What *would* add value next:**
-  1. **Aeneas** (Rust → Lean) or **Verus** for `canon.rs`, `hashx.rs`, `b64.rs` and
-     `record.rs`. This replaces the corpus-based oracle gate with a mechanised proof that the Rust
-     *is* the Lean model. It is the one real gap left in the seal argument.
+  1. ~~Aeneas for the seal core~~ — done for `canon.rs` (serializer), `hashx.rs`, `record.rs`,
+     `checkpoint.rs` and `sign::preimage` (`production/`, plan 012 phase A). `b64.rs` is not on the
+     hashed or signed path and is not extracted.
   2. Prove the production verifier's evidence-pass-to-fact projection refines `Verdict.lean`;
      the current executable corpus is differential, not a universal source-level proof. The
      capstone intentionally requires externally pinned signer and role provenance while legacy
