@@ -76,6 +76,7 @@ func exerciseVoidMarkerFails(t *testing.T, base store.Store) {
 	t.Helper()
 	fs := &failMarkStore{Store: base, failMark: true}
 	h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+	ak := grantAgentKey()
 	reserveGrantSeq(t, base, "idem-mf1")
 	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusInternalServerError || !strings.Contains(resp, "void marker") {
 		t.Fatalf("marker failure must fail (%d): %s", code, resp)
