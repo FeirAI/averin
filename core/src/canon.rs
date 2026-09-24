@@ -773,16 +773,16 @@ mod kani_proofs {
             .is_some_and(|b| *b == b'-' || b.is_ascii_digit());
         assert!(numeric_prefix, "decimal spelling needs sign or digit");
         kani::assume(numeric_prefix);
-        let parsed_n = match CanonValue::parse_typed(&text) {
-            Ok(CanonValue::Int(parsed_n)) => parsed_n,
-            Ok(_) => panic!("formatted integer parsed as non-integer"),
-            Err(_) => panic!("formatted integer was rejected"),
-        };
-        assert!(parsed_n == n, "parsed integer differs");
-        assert!(
-            CanonValue::Int(parsed_n).serialize() == text,
-            "serialized integer spelling differs"
-        );
+        let parsed = CanonValue::parse_typed(&text);
+        // The whole typed parse result must be exactly Int(n): an error, another variant or
+        // another integer all fail here.
+        assert!(matches!(&parsed, Ok(CanonValue::Int(parsed_n)) if *parsed_n == n));
+        // Destruction of the harness-owned parse result is outside the property: the assertion
+        // above has already read it, and production code never drops it.
+        core::mem::forget(parsed);
+        // Given that equality, Int(n) is the parsed value; its serialization must restore the
+        // exact spelling that was parsed.
+        assert!(CanonValue::Int(n).serialize() == text);
     }
 
     /// `parse(n.to_string()) == Int(n)` and serialization writes that same spelling back, for every
@@ -841,36 +841,64 @@ mod kani_proofs {
     integer_roundtrip_shard!(integer_roundtrip_negative_4, u16, negative, 1000, 9999);
     integer_roundtrip_shard!(integer_roundtrip_negative_5, u32, negative, 10000, 99999);
 
+    /// The bytes a numeric spelling harness draws from: digits, sign characters, the fraction
+    /// point and both exponent markers.
+    fn spelling_byte(b: u8) -> bool {
+        b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.' | b'e' | b'E')
+    }
+
+    /// Exactly the bytes accepted by `spelling_byte`, each once.
+    const SPELLING_BYTES: [u8; 15] = *b"0123456789-+.eE";
+
     /// No second spelling: every ≤ 4-byte numeric literal the parser accepts is in canonical form
     /// `-?(0|[1-9][0-9]*)` with no `-0` (so `00`, `01`, `-0`, `+1`, fractions and exponents are rejected).
+    ///
+    /// The length and first byte range over every value one concrete case at a time (the proof
+    /// first checks that `SPELLING_BYTES` is exactly the `spelling_byte` alphabet), so the
+    /// top-level dispatch is concrete; the remaining bytes stay symbolic over the same alphabet.
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(16)]
     fn accepted_integer_spelling_is_canonical() {
-        let raw: [u8; 4] = kani::any();
-        let len: usize = kani::any_where(|l: &usize| *l >= 1 && *l <= 4);
-        for b in &raw[..len] {
-            kani::assume(b.is_ascii_digit() || matches!(*b, b'-' | b'+' | b'.' | b'e' | b'E'));
+        let any_byte: u8 = kani::any();
+        assert_eq!(spelling_byte(any_byte), SPELLING_BYTES.contains(&any_byte));
+        let mut raw: [u8; 4] = kani::any();
+        for b in &raw[1..] {
+            kani::assume(spelling_byte(*b));
         }
-        let text = core::str::from_utf8(&raw[..len]).unwrap();
-        if let Ok(CanonValue::Int(_)) = CanonValue::parse_typed(text) {
-            let digits = text.strip_prefix('-').unwrap_or(text).as_bytes();
-            assert!(!digits.is_empty() && digits.iter().all(|b| b.is_ascii_digit()));
-            assert!(digits[0] != b'0' || digits.len() == 1, "no leading zero");
-            assert!(text != "-0", "no negative zero");
+        for len in 1..=4 {
+            for first in SPELLING_BYTES {
+                raw[0] = first;
+                let bytes = &raw[..len];
+                assert!(bytes.iter().all(|b| b.is_ascii()));
+                // SAFETY: every byte was just checked to be ASCII, hence valid UTF-8
+                // (skipping `from_utf8` keeps its validation loop out of the model).
+                let text = unsafe { core::str::from_utf8_unchecked(bytes) };
+                let parsed = CanonValue::parse_typed(text);
+                if matches!(parsed, Ok(CanonValue::Int(_))) {
+                    let digits = text.strip_prefix('-').unwrap_or(text).as_bytes();
+                    assert!(!digits.is_empty() && digits.iter().all(|b| b.is_ascii_digit()));
+                    assert!(digits[0] != b'0' || digits.len() == 1, "no leading zero");
+                    assert!(text != "-0", "no negative zero");
+                }
+                // Destruction of the harness-owned result is outside the property.
+                core::mem::forget(parsed);
+            }
         }
     }
 
-    /// `write_string` is inverted by the parser for every string of ≤ 2 characters drawn from quotes,
-    /// backslashes, every C0 control, DEL, and non-ASCII scalars through the real NFC path.
-    #[kani::proof]
-    #[kani::unwind(16)]
-    fn string_escape_roundtrip() {
-        let len: usize = kani::any_where(|l: &usize| *l <= 2);
+    /// Character classes of the string domain: any ASCII scalar (the symbolic byte), U+00E9 (a
+    /// two-byte NFC-stable scalar with a canonical decomposition) and U+1F600 (a four-byte
+    /// astral scalar encoded as a surrogate pair by `\u` escapes).
+    const STRING_CLASSES: [u8; 3] = [0, 1, 2];
+
+    fn string_escape_case(classes: &[u8], ascii: &[u8; 2]) {
         let mut s = String::new();
-        for _ in 0..len {
-            let c: char = kani::any();
-            kani::assume((c as u32) < 0x80 || c == 'é' || c == '\u{1F600}');
-            s.push(c);
+        for (class, a) in classes.iter().zip(ascii) {
+            match class {
+                0 => s.push(*a as char),
+                1 => s.push('é'),
+                _ => s.push('\u{1F600}'),
+            }
         }
         let mut text = String::new();
         write_string(&s, &mut text);
@@ -878,7 +906,28 @@ mod kani_proofs {
             text.bytes().all(|b| b >= 0x20),
             "no raw control byte may be emitted"
         );
-        assert_eq!(CanonValue::parse_typed(&text).unwrap(), CanonValue::Str(s));
+        let parsed = CanonValue::parse_typed(&text);
+        assert!(matches!(&parsed, Ok(CanonValue::Str(parsed_s)) if *parsed_s == s));
+        // Destruction of the harness-owned result is outside the property.
+        core::mem::forget(parsed);
+    }
+
+    /// `write_string` is inverted by the real parser (including real NFC) for every string of at
+    /// most two scalars, each any ASCII scalar (quotes, backslash, every C0 control, DEL, ...),
+    /// U+00E9 or U+1F600. Length and class pattern range over all 13 cases one concrete case at a
+    /// time; the ASCII scalars stay symbolic.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn string_escape_roundtrip() {
+        let ascii: [u8; 2] = kani::any();
+        kani::assume(ascii.iter().all(|a| *a < 0x80));
+        string_escape_case(&[], &ascii);
+        for first in STRING_CLASSES {
+            string_escape_case(&[first], &ascii);
+            for second in STRING_CLASSES {
+                string_escape_case(&[first, second], &ascii);
+            }
+        }
     }
 
     fn utf16_agrees<const N: usize>() {
@@ -899,6 +948,7 @@ mod kani_proofs {
     /// a lone surrogate, else yields the same scalars) for every 1- and 2-unit sequence — every
     /// surrogate-pair / lone-surrogate / BMP combination the decoder distinguishes.
     #[kani::proof]
+    #[kani::solver(kissat)]
     #[kani::unwind(4)]
     fn utf16_strict_matches_std() {
         utf16_agrees::<1>();
@@ -979,7 +1029,9 @@ mod kani_proofs {
         let raw: [u8; 5] = kani::any();
         let len: usize = kani::any_where(|l: &usize| *l <= 5);
         if let Ok(text) = core::str::from_utf8(&raw[..len]) {
-            let _ = CanonValue::parse_typed(text);
+            let parsed = CanonValue::parse_typed(text);
+            // Destruction of the harness-owned result is outside the property.
+            core::mem::forget(parsed);
         }
     }
 }

@@ -78,12 +78,9 @@ if [ "${1:-}" = "--extended" ]; then
   # Full 4-symbol chunk, checked through the fixed-width functions used by the public codec.
   run_harness full_chunk_is_canonical
   run_harness utf16_strict_matches_std
-  # Prove the original [-99999,99999] obligation as an exhaustive, checked union of eleven
-  # disjoint sign/decimal-width ranges. The original unsplit harness remains available above.
-  integer_shards="$(python3 formal/check-kani-domains.py --list-integer)"
-  while IFS= read -r integer_harness; do
-    run_harness "$integer_harness"
-  done <<< "$integer_shards"
+  # The original unsplit [-99999,99999] harness. Its eleven checked disjoint shards
+  # (check-kani-domains.py --list-integer) remain available through --harness for CI sharding.
+  run_harness integer_roundtrip
   run_harness accepted_integer_spelling_is_canonical
   run_harness string_escape_roundtrip
   run_harness parse_never_panics

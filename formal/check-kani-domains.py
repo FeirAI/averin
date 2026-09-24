@@ -37,7 +37,10 @@ def validate_wiring(source: str, runner: str) -> None:
     original_start = source.find("fn integer_roundtrip()")
     if helper_start == -1 or original_start <= helper_start:
         raise ValueError("shared integer assertion body missing or out of order")
-    helper_without_comments = re.sub(r"//[^\n]*", "", source[helper_start:original_start])
+    # The helper body is everything up to its first closing brace at item indentation.
+    helper_end = source.find("\n    }\n", helper_start)
+    helper_end = original_start if helper_end == -1 or helper_end > original_start else helper_end + 6
+    helper_without_comments = re.sub(r"//[^\n]*", "", source[helper_start:helper_end])
     helper = re.sub(r"\s+", "", helper_without_comments)
     checked_prefix = (
         "lettext=n.to_string();"
@@ -45,19 +48,18 @@ def validate_wiring(source: str, runner: str) -> None:
         "is_some_and(|b|*b==b'-'||b.is_ascii_digit());"
         'assert!(numeric_prefix,"decimalspellingneedssignordigit");'
         "kani::assume(numeric_prefix);"
-        'letparsed_n=matchCanonValue::parse_typed(&text){'
-        'Ok(CanonValue::Int(parsed_n))=>parsed_n,'
-        'Ok(_)=>panic!("formattedintegerparsedasnon-integer"),'
-        'Err(_)=>panic!("formattedintegerwasrejected"),};'
+        "letparsed=CanonValue::parse_typed(&text);"
+        "assert!(matches!(&parsed,Ok(CanonValue::Int(parsed_n))if*parsed_n==n));"
+        "core::mem::forget(parsed);"
+        "assert!(CanonValue::Int(n).serialize()==text);}"
     )
-    if checked_prefix not in helper or helper.count("kani::assume(") != 1:
+    # The whole body is pinned: the prefix lemma is asserted before its identical assumption,
+    # the entire typed parse result must equal Int(n), only the harness-owned result is
+    # forgotten (after it is read), and the serializer must restore the parsed spelling.
+    if not helper.endswith(checked_prefix) or helper.count("kani::assume(") != 1:
         raise ValueError("integer prefix must be asserted before the identical assumption and parse")
-    for required in (
-        'assert!(parsed_n==n,"parsedintegerdiffers");',
-        'assert!(CanonValue::Int(parsed_n).serialize()==text,"serializedintegerspellingdiffers");',
-    ):
-        if required not in helper:
-            raise ValueError(f"shared integer assertion body changed: {required}")
+    if helper.count("forget(") != 1:
+        raise ValueError("integer body may forget only the harness-owned parse result")
     original = re.search(
         r"fn integer_roundtrip\(\)\s*\{\s*"
         r"let n: i64 = kani::any_where\(\|n: &i64\| \*n > -100_000 && \*n < 100_000\);\s*"
@@ -95,12 +97,11 @@ def validate_wiring(source: str, runner: str) -> None:
         if "let magnitude: $ty = kani::any_where(|m: &$ty| *m >= $lo && *m <= $hi);" not in body:
             raise ValueError("integer magnitude shard changed its bounded input construction")
     for required in (
-        'integer_shards="$(python3 formal/check-kani-domains.py --list-integer)"',
-        'run_harness "$integer_harness"',
-        'done <<< "$integer_shards"',
+        "  run_harness integer_roundtrip\n",
+        "python3 formal/check-kani-domains.py --has-integer",
     ):
         if required not in runner:
-            raise ValueError(f"extended runner omits integer shards: {required}")
+            raise ValueError(f"runner omits the integer harness or its shards: {required}")
 
 
 def validate_fail_closed_guard(source: str, runner: str) -> None:
@@ -196,12 +197,10 @@ def self_test() -> None:
         'fn integer_roundtrip_case(n: i64) { let text = n.to_string(); '
         'let numeric_prefix = text.as_bytes().first().is_some_and(|b| *b == b\'-\' || b.is_ascii_digit()); '
         'assert!(numeric_prefix, "decimal spelling needs sign or digit"); kani::assume(numeric_prefix); '
-        'let parsed_n = match CanonValue::parse_typed(&text) { '
-        'Ok(CanonValue::Int(parsed_n)) => parsed_n, '
-        'Ok(_) => panic!("formatted integer parsed as non-integer"), '
-        'Err(_) => panic!("formatted integer was rejected"), }; '
-        'assert!(parsed_n == n, "parsed integer differs"); '
-        'assert!(CanonValue::Int(parsed_n).serialize() == text, "serialized integer spelling differs"); } '
+        'let parsed = CanonValue::parse_typed(&text); '
+        'assert!(matches!(&parsed, Ok(CanonValue::Int(parsed_n)) if *parsed_n == n)); '
+        'core::mem::forget(parsed); '
+        'assert!(CanonValue::Int(n).serialize() == text); } '
         "fn integer_roundtrip() { let n: i64 = kani::any_where(|n: &i64| "
         "*n > -100_000 && *n < 100_000); integer_roundtrip_case(n); } "
         "($name:ident, u8, zero, 0, 0) => { fn $name() { integer_roundtrip_case(0); } };"
@@ -213,9 +212,9 @@ def self_test() -> None:
         "integer_roundtrip_case(-(magnitude as i64)); };"
         "// These eleven lines are the proof-domain table"
     )
-    runner = '\n'.join(('integer_shards="$(python3 formal/check-kani-domains.py --list-integer)"', 'run_harness "$integer_harness"', 'done <<< "$integer_shards"'))
+    runner = '\n'.join(("  run_harness integer_roundtrip", "python3 formal/check-kani-domains.py --has-integer", ""))
     validate_wiring(original, runner)
-    for missing in runner.splitlines():
+    for missing in runner.splitlines()[:2]:
         try:
             validate_wiring(original, runner.replace(missing, ""))
         except ValueError:
@@ -234,12 +233,15 @@ def self_test() -> None:
                          'kani::assume(numeric_prefix); assert!(numeric_prefix, "decimal spelling needs sign or digit");'),
         original.replace("kani::assume(numeric_prefix);", "kani::assume(true);"),
         original.replace("b.is_ascii_digit()", "b.is_ascii_alphabetic()"),
-        original.replace('Err(_) => panic!("formatted integer was rejected"),',
-                         'Err(_) => n,'),
-        original.replace('Ok(_) => panic!("formatted integer parsed as non-integer"),',
-                         'Ok(_) => n,'),
-        original.replace('assert!(parsed_n == n, "parsed integer differs");', ''),
-        original.replace('CanonValue::Int(parsed_n).serialize()', 'CanonValue::Int(n).serialize()'),
+        original.replace("Ok(CanonValue::Int(parsed_n)) if *parsed_n == n", "Ok(_)"),
+        original.replace("Ok(CanonValue::Int(parsed_n)) if *parsed_n == n", "Ok(CanonValue::Int(_))"),
+        original.replace("if *parsed_n == n", ""),
+        original.replace("assert!(matches!(&parsed, Ok(CanonValue::Int(parsed_n)) if *parsed_n == n)); ", ""),
+        original.replace("core::mem::forget(parsed); ", "core::mem::forget(parsed); core::mem::forget(text.clone()); "),
+        original.replace("core::mem::forget(parsed); assert!(CanonValue::Int(n).serialize() == text); ",
+                         "assert!(CanonValue::Int(n).serialize() == text); core::mem::forget(parsed); kani::assume(false); "),
+        original.replace("assert!(CanonValue::Int(n).serialize() == text); ", ""),
+        original.replace("CanonValue::Int(n).serialize() == text", "CanonValue::Int(n).serialize() != text"),
     ):
         try:
             validate_wiring(changed, runner)
