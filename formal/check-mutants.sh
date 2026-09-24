@@ -13,7 +13,7 @@
 #              mutants the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
 #
 # The suite passes only if every mutant is killed by a completed test failure; m15–m21 and the plan
-# 009 temporal mutants m40–m46 additionally require their named detector to fail. It first checks that every gate runs at least one passing test
+# 009 temporal mutants m40–m47 additionally require their named detector to fail. It first checks that every gate runs at least one passing test
 # on the unmutated tree, so an empty or broken gate cannot count as a kill.
 #
 #   bash formal/check-mutants.sh            # all gates for every mutant
@@ -57,11 +57,12 @@ named_detector() {
     m18-*) echo 'adversarial|tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation' ;;
     m19-*) echo 'adversarial|tier_b_two_phase_failed_pop_intent_does_not_consume_outcome' ;;
     m21-*) echo 'adversarial|required_disclosure_covers_every_committed_broker_grant' ;;
-    # Plan 009 temporal revocation (m40-m46).
+    # Plan 009 temporal revocation (m40-m47).
     m40-*|m43-*|m44-*|m45-*) echo 'adversarial|temporal_revocation_decision_table' ;;
     m41-*) echo 'verdict|verdict_differential' ;;
     m42-*) echo 'adversarial|temporal_blocked_use_runs_every_later_check_before_a_historical_positive' ;;
     m46-*) echo 'adversarial|temporal_merkle_v2_commits_mode_and_cutoff' ;;
+    m47-*) echo 'adversarial|temporal_merkle_v2_rejects_cutoff_beyond_watermark' ;;
   esac
 }
 

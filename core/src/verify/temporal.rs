@@ -573,9 +573,15 @@ pub enum GrantRevocation {
     /// Not revoked in the complete v2 snapshot state.
     NotRevokedAsOfSnapshot,
     Prospective(i64),
+    /// Authenticated total revocation: a usable v2 total entry, or any v1 membership.
     Total,
-    /// A Merkle root is present but this grant has no valid proof.
-    Unproven,
+    /// Named by a signed v2 artifact that is unusable (malformed body or snapshot, or an issuer
+    /// key not honored at the snapshot). Current use is blocked; for history it is not
+    /// authenticated adverse evidence, so it never refutes and never proves.
+    RevokedUnverified,
+    /// A Merkle root is present but this grant has no valid proof. The cutoff of a usable v2
+    /// source, if any, still decides an adverse `at_or_after`.
+    Unproven(Option<i64>),
 }
 
 impl GrantRevocation {
@@ -587,16 +593,26 @@ impl GrantRevocation {
             }
             GrantRevocation::Prospective(_) => "revoked_prospective",
             GrantRevocation::Total => "revoked_total",
-            GrantRevocation::Unproven => "unproven",
+            GrantRevocation::RevokedUnverified => "revoked_unverified",
+            GrantRevocation::Unproven(_) => "unproven",
+        }
+    }
+    /// The authenticated prospective cutoff that decides an adverse ordering, if any.
+    pub fn adverse_cutoff(self) -> Option<i64> {
+        match self {
+            GrantRevocation::Prospective(c) | GrantRevocation::Unproven(Some(c)) => Some(c),
+            _ => None,
         }
     }
 }
 
 /// Accumulates one grant's revocation over the present artifacts. v1 artifacts can only add a
-/// total revocation or an unproven path; only v2 artifacts can support "not revoked as of snapshot".
+/// total revocation or an unproven path; only usable v2 artifacts can support "not revoked as of
+/// snapshot" or a cutoff.
 #[derive(Default)]
 pub(super) struct GrantRevocationAcc {
     total: bool,
+    unverified: bool,
     unproven: bool,
     cutoff: Option<i64>,
     v2_sources: usize,
@@ -611,6 +627,11 @@ impl GrantRevocationAcc {
     }
     pub(super) fn legacy_nonmember(&mut self) {
         self.any_source = true;
+    }
+    /// Named by an unusable v2 artifact: blocks current use, not authenticated history.
+    pub(super) fn unusable_member(&mut self) {
+        self.any_source = true;
+        self.unverified = true;
     }
     pub(super) fn unproven(&mut self) {
         self.any_source = true;
@@ -631,7 +652,9 @@ impl GrantRevocationAcc {
         if self.total {
             GrantRevocation::Total
         } else if self.unproven {
-            GrantRevocation::Unproven
+            GrantRevocation::Unproven(self.cutoff)
+        } else if self.unverified {
+            GrantRevocation::RevokedUnverified
         } else if let Some(c) = self.cutoff {
             GrantRevocation::Prospective(c)
         } else if self.v2_sources > 0 && self.v2_nonmember == self.v2_sources {
@@ -686,7 +709,8 @@ pub(super) fn classify(
     if !validated {
         return HistoricalOrdering::Indeterminate;
     }
-    if let GrantRevocation::Prospective(c) = grant {
+    // An authenticated cutoff decides the adverse case even when another source is unproven.
+    if let Some(c) = grant.adverse_cutoff() {
         if *ordinal >= c {
             return HistoricalOrdering::AtOrAfter;
         }
@@ -785,10 +809,16 @@ mod tests {
             classify(Some(&snap), true, &at(4), GrantRevocation::Total),
             ind
         );
+        let unproven = GrantRevocation::Unproven;
+        assert_eq!(classify(Some(&snap), true, &at(4), unproven(None)), ind);
+        assert_eq!(classify(Some(&snap), true, &at(4), unproven(Some(5))), ind);
         assert_eq!(
-            classify(Some(&snap), true, &at(4), GrantRevocation::Unproven),
-            ind
+            classify(None, true, &at(5), unproven(Some(5))),
+            aa,
+            "cutoff beats unproven"
         );
+        let unverified = GrantRevocation::RevokedUnverified;
+        assert_eq!(classify(Some(&snap), true, &at(9), unverified), ind);
         assert_eq!(
             classify(
                 Some(&snap),

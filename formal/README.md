@@ -130,7 +130,11 @@ Other results:
   `historical_requires_snapshot`), that an ordinal at or after a cutoff and a total revocation refute
   it (`at_or_after_refutes`, `total_revocation_refutes`), that an earlier honest snapshot cannot turn
   an at/after receipt into one ordered before the cutoff (`earlier_snapshot_cannot_flip`), and that
-  record-asserted times cannot change any claim (`self_times_cannot_strengthen`). The order is
+  the caller's revocation mode (pinned issuer; disclosed list, Merkle root with paths, or both)
+  gates the claim (`SnapshotReady`, `historical_requires_pinned_issuer`). Self-reported record times
+  are simply not model inputs; no theorem is claimed about them. The model is weaker than the
+  implementation in one place: it does not require all present v2 artifacts to sign the identical
+  snapshot (not a monotone attachment condition; covered by Rust tests). The order is
   averin's database order under honest resource and revocation signers and PostgreSQL
   serialization; it is not physical action time, and no TSA-based ordering is claimed. A snapshot
   that predates a later total revocation is bounded only by the caller's freshness and watermark
@@ -228,6 +232,7 @@ selection still runs the full unmutated baseline and accepts only exact patch ba
 | m44 | an ordinal above the snapshot watermark counts | adversarial `temporal_revocation_decision_table` |
 | m45 | the caller's maximum snapshot age is ignored | adversarial `temporal_revocation_decision_table` |
 | m46 | a v2 Merkle membership proof no longer re-derives the committed cutoff | adversarial `temporal_merkle_v2_commits_mode_and_cutoff` |
+| m47 | a v2 Merkle membership proof accepts a cutoff above the signed watermark | adversarial `temporal_merkle_v2_rejects_cutoff_beyond_watermark` |
 
 A new drift class gets a new patch here before the gate that catches it is called done.
 

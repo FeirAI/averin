@@ -4163,7 +4163,13 @@ fn evaluate_revocation(
             "revocation_list",
             issues,
         );
-        (entries.ids, Some(artifact))
+        // A malformed v2 list that also carries legacy `revoked_grant_ids` is unusable for
+        // history, but every grant it names under the signature still blocks current use.
+        let mut ids = entries.ids;
+        if let Some(extra) = rl.get("revoked_grant_ids").and_then(|v| v.as_array()) {
+            ids.extend(extra.iter().filter_map(|x| x.as_str().map(String::from)));
+        }
+        (ids, Some(artifact))
     } else {
         let ids = rl
             .get("revoked_grant_ids")
@@ -7172,9 +7178,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if revocation.signed {
             match &revocation.v2 {
                 Some(v2) if v2.usable => acc.v2(v2.states.get(gid).copied()),
-                // An unusable v2 list still revokes every grant it names (conservatively total)
-                // but cannot certify absence.
-                Some(v2) if v2.states.contains_key(gid) => acc.legacy_member(),
+                // An unusable v2 list still blocks current use of every grant it names, but it is
+                // not authenticated evidence for history and cannot certify absence.
+                Some(_) if revocation.revoked.contains(gid) => acc.unusable_member(),
                 Some(_) => acc.legacy_nonmember(),
                 None if revocation.revoked.contains(gid) => acc.legacy_member(),
                 None => acc.legacy_nonmember(),
@@ -7184,6 +7190,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             None => {}
             Some(ProofV2::Unproven) => acc.unproven(),
             Some(ProofV2::Revoked(st)) if merkle_v2_usable => acc.v2(Some(st)),
+            Some(ProofV2::Revoked(_)) if merkle_rev.v2.is_some() => acc.unusable_member(),
             Some(ProofV2::Revoked(_)) => acc.legacy_member(),
             Some(ProofV2::NotRevoked) if merkle_v2_usable => acc.v2(None),
             Some(ProofV2::NotRevoked) => acc.legacy_nonmember(),
@@ -7263,6 +7270,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             .keys()
             .all(|gid| covered_native_hist.contains(gid))
         && every_receipt_proven;
+    // The caller's revocation mode applies to the historical claim too (v2 analogue of the
+    // `authorized` requirement): which usable v2 artifacts must be present, and for Merkle mode
+    // a valid v2 proof for every receipt's grant.
+    let hist_v2_list_usable = revocation.v2.as_ref().is_some_and(|v| v.usable);
+    let hist_merkle_paths_complete = merkle_v2_usable
+        && receipts.iter().all(|r| {
+            r.grant_id.as_deref().is_some_and(|g| {
+                matches!(
+                    merkle_rev.proof(revocation_proofs, g),
+                    Some(ProofV2::NotRevoked | ProofV2::Revoked(_))
+                )
+            })
+        });
     let historical_counts = [
         HistoricalOrdering::ProvenBefore,
         HistoricalOrdering::AtOrAfter,
@@ -7627,6 +7647,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             introspected_use_valid: hist_introspected_valid,
             adverse: historical_adverse,
             checked_contradiction: hist_unmatched_violation > 0 || checked_other,
+            v2_list_usable: hist_v2_list_usable,
+            v2_merkle_usable: merkle_v2_usable,
+            merkle_paths_complete: hist_merkle_paths_complete,
         },
         structural_integrity,
         record_count: report.records_total,

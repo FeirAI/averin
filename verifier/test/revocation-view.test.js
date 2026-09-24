@@ -32,3 +32,13 @@ test("an unknown claims contract never shows a historical decision", () => {
   expect(revocationView({ ...report("db_serialized_v1"), claims_version: "1" }).historical.decision).toBe("unavailable");
   expect(revocationView({})).toBeNull();
 });
+
+test("unevaluated revocation is never presented as clean", () => {
+  const r = {claims_version: "2", revocation_temporal: {policy: "strict", grant_revocations: [
+    {grant_id: "g1", current_revocation: "not_evaluated", cutoff_order: null}]}};
+  const v = revocationView(r);
+  expect(v.evaluated).toBe(false);
+  expect(v.current).toEqual([]);
+  expect(revocationView({...r, revocation_temporal: {...r.revocation_temporal, grant_revocations: [
+    {grant_id: "g1", current_revocation: "not_revoked", cutoff_order: null}]}}).evaluated).toBe(true);
+});

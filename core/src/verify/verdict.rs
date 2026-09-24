@@ -255,6 +255,12 @@ pub(super) struct HistoricalFacts {
     pub(super) adverse: bool,
     /// Checked Tier-B contradictions, counting violations among revocation-blocked receipts.
     pub(super) checked_contradiction: bool,
+    /// A usable signed v2 disclosed list is present.
+    pub(super) v2_list_usable: bool,
+    /// A usable signed v2 Merkle root is present.
+    pub(super) v2_merkle_usable: bool,
+    /// Every receipt's grant has a valid v2 membership or non-membership proof.
+    pub(super) merkle_paths_complete: bool,
 }
 
 pub(super) struct ValidatedFacts {
@@ -366,6 +372,16 @@ impl ValidatedFacts {
         // Every other obligation of `authorized` still applies. Under the strict policy it is
         // never positive.
         let h = &self.historical;
+        // The caller's revocation mode, applied to the v2 snapshot evidence.
+        let historical_revocation = self.revocation_issuer_pinned
+            && match self.policy.revocation {
+                RevocationRequirement::Pinned => true,
+                RevocationRequirement::Disclosed => h.v2_list_usable,
+                RevocationRequirement::Merkle => h.v2_merkle_usable && h.merkle_paths_complete,
+                RevocationRequirement::Both => {
+                    h.v2_list_usable && h.v2_merkle_usable && h.merkle_paths_complete
+                }
+            };
         let historical_authorized_as_of_snapshot = if !h.selected {
             Insufficient
         } else if self.immutable_record_contradiction
@@ -379,6 +395,7 @@ impl ValidatedFacts {
         } else if authenticated == Satisfied
             && self.pinned_role_authority
             && h.snapshot_verified
+            && historical_revocation
             && (!self.policy.require_disclosure || self.disclosure_complete)
             && (!self.policy.require_attestation || self.attestation_valid)
             && (h.brokered_use_valid || h.introspected_use_valid)
@@ -438,42 +455,50 @@ mod differential {
     // remains a separate end-to-end obligation, covered by adversarial tests.
     // Mirrors Oracle/Verdict.lean `histFacts`/`histAttachments` and its named cases: one receipt
     // of grant 7 with ordinal 4 (or `order`), evaluation time 8, maximum age 5, minimum watermark 3.
+    // `list`/`merkle` are the present snapshot attachments as (boundary, watermark).
     struct Hist {
         n: usize,
         order: Option<i64>,
-        boundary: Option<i64>,
-        watermark: i64,
-        merkle: bool,
+        list: Option<(i64, i64)>,
+        merkle: Option<(i64, i64)>,
         path: bool,
         contradiction: bool,
+        cutoffs: Option<Vec<i64>>,
+        mode: RevocationRequirement,
+        issuer: bool,
     }
 
     fn historical(h: &Hist) -> (HistoricalFacts, bool) {
         let n = h.n;
         let validated = bit(n, 4);
         let revoked = bit(n, 7);
-        let cutoffs: Vec<i64> = [(5, 9), (6, 4)]
-            .into_iter()
-            .filter(|(b, _)| bit(n, *b))
-            .map(|(_, c)| c)
-            .collect();
+        let cutoffs: Vec<i64> = h.cutoffs.clone().unwrap_or_else(|| {
+            [(5, 9), (6, 4)]
+                .into_iter()
+                .filter(|(b, _)| bit(n, *b))
+                .map(|(_, c)| c)
+                .collect()
+        });
+        let snapshot = h.list.or(h.merkle);
+        let watermark = snapshot.map_or(0, |(_, w)| w);
         let proven = validated
             && !revoked
             && h.order
-                .is_some_and(|o| o <= h.watermark && cutoffs.iter().all(|c| o < *c));
-        let fresh = h
-            .boundary
-            .is_some_and(|b| b <= 8 && 8 <= b + 5 && 3 <= h.watermark);
+                .is_some_and(|o| o <= watermark && cutoffs.iter().all(|c| o < *c));
+        let fresh = snapshot.is_some_and(|(b, w)| b <= 8 && 8 <= b + 5 && 3 <= w);
         let adverse =
             validated && (revoked || h.order.is_some_and(|o| cutoffs.iter().any(|c| *c <= o)));
         (
             HistoricalFacts {
                 selected: bit(n, 0),
                 snapshot_verified: fresh,
-                brokered_use_valid: bit(n, 8) && proven && (!h.merkle || h.path),
+                brokered_use_valid: bit(n, 8) && proven && (h.merkle.is_none() || h.path),
                 introspected_use_valid: false,
                 adverse,
                 checked_contradiction: h.contradiction,
+                v2_list_usable: h.list.is_some(),
+                v2_merkle_usable: h.merkle.is_some(),
+                merkle_paths_complete: h.merkle.is_some() && h.path,
             },
             revoked,
         )
@@ -483,33 +508,64 @@ mod differential {
         let base = |n: usize| Hist {
             n,
             order: bit(n, 3).then_some(4),
-            boundary: bit(n, 1).then_some(if bit(n, 2) { 1 } else { 5 }),
-            watermark: if bit(n, 9) { 2 } else { 10 },
-            merkle: false,
+            list: bit(n, 1).then_some((
+                if bit(n, 2) { 1 } else { 5 },
+                if bit(n, 9) { 2 } else { 10 },
+            )),
+            merkle: None,
             path: false,
             contradiction: false,
+            cutoffs: None,
+            mode: RevocationRequirement::Pinned,
+            issuer: true,
         };
         let special = base(0x11B);
+        let merkle_only = |path: bool, mode| Hist {
+            list: None,
+            merkle: Some((5, 10)),
+            path,
+            mode,
+            ..base(0x11B)
+        };
         Some(match name {
             "hist_beyond_watermark" => Hist {
                 order: Some(11),
                 ..special
             },
-            "hist_merkle_missing_path" => Hist {
-                merkle: true,
-                ..special
-            },
-            "hist_merkle_path" => Hist {
-                merkle: true,
-                path: true,
-                ..special
-            },
+            "hist_merkle_missing_path" => merkle_only(false, RevocationRequirement::Pinned),
+            "hist_merkle_path" => merkle_only(true, RevocationRequirement::Pinned),
             "hist_contradiction" => Hist {
                 contradiction: true,
                 ..special
             },
             "hist_future_boundary" => Hist {
-                boundary: Some(9),
+                list: Some((9, 10)),
+                ..special
+            },
+            "hist_merkle_missing_path_at_cutoff" => Hist {
+                cutoffs: Some(vec![4]),
+                ..merkle_only(false, RevocationRequirement::Pinned)
+            },
+            "hist_disclosed_mode_merkle_snapshot" => {
+                merkle_only(true, RevocationRequirement::Disclosed)
+            }
+            "hist_merkle_mode_list_snapshot" => Hist {
+                mode: RevocationRequirement::Merkle,
+                ..special
+            },
+            "hist_merkle_mode_merkle_snapshot" => merkle_only(true, RevocationRequirement::Merkle),
+            "hist_both_mode_list_only" => Hist {
+                mode: RevocationRequirement::Both,
+                ..special
+            },
+            "hist_both_mode_both_snapshots" => Hist {
+                merkle: Some((5, 10)),
+                path: true,
+                mode: RevocationRequirement::Both,
+                ..special
+            },
+            "hist_issuer_unpinned" => Hist {
+                issuer: false,
                 ..special
             },
             _ => base(name.strip_prefix("hist_")?.parse().ok()?),
@@ -522,6 +578,8 @@ mod differential {
             let (historical, revoked) = historical(&h);
             result.historical = historical;
             result.revoked_membership = revoked;
+            result.policy.revocation = h.mode;
+            result.revocation_issuer_pinned = h.issuer;
             return result;
         }
         let n = name
@@ -545,6 +603,9 @@ mod differential {
                 introspected_use_valid: false,
                 adverse: false,
                 checked_contradiction: false,
+                v2_list_usable: false,
+                v2_merkle_usable: false,
+                merkle_paths_complete: false,
             },
             structural_integrity: true,
             record_count: 1,
@@ -694,7 +755,7 @@ mod differential {
         let rows = rows.as_array().expect("oracle rows");
         assert_eq!(
             rows.len(),
-            1316,
+            1323,
             "all finite fact, capstone and historical cases"
         );
         for row in rows {

@@ -15466,7 +15466,8 @@ fn temporal_malformed_mixed_and_downgraded_revocation_evidence_never_proves_hist
     let ord = || Some(t_order(T_ORD));
     let db = t_opts(&k, t_db_policy(3600, 0));
     // A prospective entry whose cutoff exceeds the signed watermark, or which omits its cutoff, is
-    // malformed. The named grant stays revoked (conservatively total); nothing is proven.
+    // malformed. The named grant stays revoked for current use; the unusable artifact is not
+    // authenticated evidence for history, so the claim is insufficient (never proven, never refuted).
     for bad in [
         CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"prospective","cutoff_order":99}]"#)
             .unwrap(),
@@ -15485,8 +15486,8 @@ fn temporal_malformed_mixed_and_downgraded_revocation_evidence_never_proves_hist
         );
         let row = t_observe(&r);
         assert!(!row.ok && row.revoked_uses_blocked == 1, "{bad:?}");
-        assert_eq!(row.current, "revoked_total", "{bad:?}");
-        assert_eq!(row.historical, R, "{bad:?}");
+        assert_eq!(row.current, "revoked_unverified", "{bad:?}");
+        assert_eq!(row.historical, I, "{bad:?}");
         assert_eq!(r.temporal.snapshot_status, "unverified", "{bad:?}");
     }
     // Unknown format and a v2 list re-labelled as v1 both fail signature/format checks (issue, stale).
@@ -15773,7 +15774,7 @@ fn temporal_blocked_use_runs_every_later_check_before_a_historical_positive() {
 
 #[test]
 fn temporal_role_key_rotation_rows() {
-    use ClaimDecision::{Refuted as R, Satisfied as S};
+    use ClaimDecision::{Insufficient as I, Satisfied as S};
     let k = t_keys();
     let bundle = t_use_bundle(
         &k,
@@ -15797,19 +15798,19 @@ fn temporal_role_key_rotation_rows() {
             .historical_authorized_as_of_snapshot
     };
     // A revocation key cleanly rotated after the snapshot still certifies it; a rotation before the
-    // snapshot, or any compromise, does not. The signed revocation itself still stands, and with
-    // its cutoff unauthenticated it is combined conservatively as total: the history is refuted.
+    // snapshot, or any compromise, does not. The signed revocation still blocks current use, but an
+    // unusable artifact is not authenticated adverse evidence: the history is insufficient.
     assert_eq!(
         with_status(&k.rev, "rotated", "2026-06-15T10:15:00.000Z"),
         S
     );
     assert_eq!(
         with_status(&k.rev, "rotated", "2026-06-15T10:10:00.000Z"),
-        R
+        I
     );
     assert_eq!(
         with_status(&k.rev, "compromised", "2026-06-15T10:15:00.000Z"),
-        R
+        I
     );
     // A resource key compromised before the receipt was anchored cannot sign an ordinal.
     assert_ne!(
@@ -16088,4 +16089,130 @@ fn temporal_mixed_surfaces_require_every_receipt_proven() {
         "{:?}",
         r.issues
     );
+}
+
+#[test]
+fn temporal_review_followups_modes_cutoffs_and_malformed_v2() {
+    use ClaimDecision::{Insufficient as I, Refuted as R, Satisfied as S};
+    use RevocationRequirement::{Both, Disclosed, Merkle, Pinned};
+    let k = t_keys();
+    let ord = || Some(t_order(T_ORD));
+    let with_mode = |mode: RevocationRequirement| {
+        let mut o = t_opts(&k, t_db_policy(3600, 0));
+        o.claim_policy.revocation = mode;
+        o
+    };
+    let none: [(&str, RevState); 0] = [];
+    let list_bundle = t_use_bundle(&k, ord(), vec![("revocation_list", t_list(&k, &[]))]);
+    let merkle_bundle = t_use_bundle(
+        &k,
+        ord(),
+        vec![
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &none, T_BOUNDARY),
+            ),
+            (
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), t_merkle_proof(&none, GID))]).unwrap(),
+            ),
+        ],
+    );
+    let both_bundle = change_field(&merkle_bundle, "revocation_list", t_list(&k, &[]));
+    let hist = |b: &CanonValue, m| {
+        verify_bundle_with(b, &with_mode(m))
+            .claims()
+            .historical_authorized_as_of_snapshot
+    };
+    // M1: the caller's revocation mode selects which v2 artifacts the historical claim needs.
+    for (name, bundle, mode, want) in [
+        ("pinned/list", &list_bundle, Pinned, S),
+        ("pinned/merkle", &merkle_bundle, Pinned, S),
+        ("disclosed/list", &list_bundle, Disclosed, S),
+        ("disclosed/merkle only", &merkle_bundle, Disclosed, I),
+        ("merkle/list only", &list_bundle, Merkle, I),
+        ("merkle/merkle", &merkle_bundle, Merkle, S),
+        ("both/list only", &list_bundle, Both, I),
+        ("both/merkle only", &merkle_bundle, Both, I),
+        ("both/both", &both_bundle, Both, S),
+    ] {
+        assert_eq!(hist(bundle, mode), want, "{name}");
+    }
+    // Merkle mode needs a valid v2 proof for every receipt's grant.
+    let stripped = merkle_bundle.without_keys(&["revocation_proofs"]);
+    assert_eq!(hist(&stripped, Merkle), I);
+    // L1: an authenticated v2 list cutoff at/before the ordinal refutes even when the grant's
+    // Merkle path is missing.
+    let at_cutoff = t_use_bundle(
+        &k,
+        ord(),
+        vec![
+            (
+                "revocation_list",
+                t_list(&k, &[(GID, RevState::Prospective(T_ORD))]),
+            ),
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &[(GID, RevState::Prospective(T_ORD))], T_BOUNDARY),
+            ),
+        ],
+    );
+    let r = verify_bundle_with(&at_cutoff, &t_opts(&k, t_db_policy(3600, 0)));
+    assert_eq!(t_observe(&r).current, "unproven");
+    assert_eq!(t_observe(&r).ordering, "at_or_after");
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, R);
+    // L5: a signed v2 list that also carries legacy `revoked_grant_ids` is unusable, but the
+    // grants it names under the signature still block current use.
+    let odd = t_sign(
+        &change_field(
+            &t_list_body(&k, T_PROJECT, T_BOUNDARY, T_WATERMARK, t_entries(&[])),
+            "revoked_grant_ids",
+            CanonValue::Array(vec![CanonValue::string(GID)]),
+        ),
+        REVOCATION_LIST_V2_DOMAIN,
+        &k.rev,
+    );
+    let r = verify_bundle_with(
+        &t_use_bundle(&k, ord(), vec![("revocation_list", odd)]),
+        &t_opts(&k, t_db_policy(3600, 0)),
+    );
+    let row = t_observe(&r);
+    assert_eq!(
+        (row.ok, row.revoked_uses_blocked, row.current),
+        (false, 1, "revoked_unverified")
+    );
+    assert_eq!(row.historical, I);
+    assert_eq!(r.temporal.snapshot_status, "unverified");
+}
+
+// L7: a signed v2 Merkle leaf whose prospective cutoff exceeds the snapshot watermark is malformed
+// (no honest producer allocates a cutoff above the watermark it signs). Its membership proof must
+// not authenticate, so the receipt is never proven before it.
+#[test]
+fn temporal_merkle_v2_rejects_cutoff_beyond_watermark() {
+    let k = t_keys();
+    let beyond = [(GID, RevState::Prospective(T_WATERMARK + 5))];
+    let bundle = t_use_bundle(
+        &k,
+        Some(t_order(T_ORD)),
+        vec![
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &beyond, T_BOUNDARY),
+            ),
+            (
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), t_merkle_proof(&beyond, GID))]).unwrap(),
+            ),
+        ],
+    );
+    let r = verify_bundle_with(&bundle, &t_opts(&k, t_db_policy(3600, 0)));
+    let row = t_observe(&r);
+    assert_eq!(
+        (row.ok, row.revoked_uses_blocked),
+        (false, 1),
+        "blocked fail-closed"
+    );
+    assert_ne!(row.ordering, "proven_before");
+    assert_ne!(row.historical, ClaimDecision::Satisfied);
 }

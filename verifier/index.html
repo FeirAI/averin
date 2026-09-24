@@ -310,7 +310,9 @@
         const rv = revocationView(r);
         const revocationSec = rv && (rv.current.length || rv.historical)
           ? `<div class="sec">current revocation</div>
-             ${rv.current.length ? rv.current.map((l) => `<div class="mode bad">${esc(l)}</div>`).join("") : `<div class="mode good">no listed grant is revoked</div>`}
+             ${!rv.evaluated
+               ? `<div class="mode bad">revocation was not evaluated (no pinned revocation issuer or no signed revocation artifact): a revoked grant would not show here</div>`
+               : rv.current.length ? rv.current.map((l) => `<div class="mode bad">${esc(l)}</div>`).join("") : `<div class="mode good">no listed grant is revoked</div>`}
              ${rv.historical ? `<div class="sec">historical ordering (separate from current revocation)</div>
                <div class="stats">${stat(esc(rv.historical.decision), `historical authorization as of the snapshot · ${esc(rv.historical.snapshot)}`)}</div>
                ${rv.historical.receipts.map((l) => `<div class="mode">${esc(l)}</div>`).join("")}

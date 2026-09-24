@@ -118,7 +118,8 @@ the issues, `authorized`, `complete_*` and the D8 capstone. A use of a revoked g
 them even when it is `proven_before`. The new information is separate:
 
 - `revocation_temporal.grant_revocations[]`: per grant, `current_revocation` ∈ `not_evaluated`,
-  `not_revoked`, `revoked_prospective` (with `cutoff_order`), `revoked_total`, `unproven`.
+  `not_revoked`, `revoked_prospective` (with `cutoff_order`), `revoked_total`,
+  `revoked_unverified` (named only by an unusable v2 artifact), `unproven`.
 - `revocation_temporal.receipt_ordering[]`: per committed use/intent/transcript, the authenticated
   `authorization_order` and `historical_ordering` ∈ `proven_before`, `at_or_after`,
   `indeterminate`.
@@ -135,7 +136,8 @@ Classification of one receipt:
    ordinal. For an intent, its outcome must sign the same ordinal (a different signed ordinal is an
    adverse contradiction; a missing one leaves the pair indeterminate).
 2. `at_or_after` if a usable v2 artifact commits a prospective cutoff `c` for the grant and the
-   ordinal is `≥ c`. Cutoffs never move later, so this needs no snapshot.
+   ordinal is `≥ c`. Cutoffs never move later, so this needs no snapshot, and an unproven Merkle
+   path for the same grant does not suppress it (a positive still requires every path).
 3. `proven_before` only if, additionally, the caller selected `db_serialized_v1`, the snapshot is
    `verified` (below), the ordinal's project is the snapshot's project, the ordinal is `≤` the
    signed watermark, and every present v2 source states "not revoked" or a prospective cutoff above
@@ -147,16 +149,23 @@ The snapshot is `verified` iff there is a usable signed v2 artifact (well formed
 snapshot, issuer honored at the boundary time under ADR 0006 rotation rules), a v2 list and a v2
 root (if both present) sign the identical snapshot, its project is the bundle's, `boundary_time ≤
 evaluation_time`, `evaluation_time − boundary_time ≤ max_snapshot_age_seconds`, and the watermark
-is at least the caller's minimum. An unusable v2 artifact is an issue, and its named grants are
-still revoked (conservatively total).
+is at least the caller's minimum. An unusable v2 artifact is an issue. Every grant it names under
+its signature (including any legacy `revoked_grant_ids` it carries) still blocks current use, but
+it is not authenticated evidence for history: such a grant is `revoked_unverified`, its receipts
+stay `indeterminate`, and it never refutes the claim (plan 002: `refuted` needs authenticated
+adverse facts). An authenticated total revocation (a usable v2 total entry, or any v1 membership)
+does refute it.
 
 `historical_authorized_as_of_snapshot` is `insufficient` under `strict`. Under `db_serialized_v1`
 it is `refuted` on an immutable-record contradiction, a checked Tier-B contradiction (counting
 violations found among revocation-blocked receipts), an adverse opening or anchor, a validated
-receipt at/after its cutoff or of a totally revoked grant, or an outcome/intent ordinal conflict. It
-is `satisfied` when `authenticated` is satisfied, role authority is pinned, the snapshot is
-verified, the disclosure and attestation requirements of the claim policy hold, and every receipt of
-the brokered (or introspected) surface is `proven_before` with the same use obligations as
+receipt at/after its cutoff or of an authenticated totally revoked grant, or an outcome/intent
+ordinal conflict. It is `satisfied` when `authenticated` is satisfied, role authority is pinned, the
+snapshot is verified, the caller's `claim_policy.revocation` mode holds for the v2 evidence (a
+pinned revocation issuer, and: `pinned` any verified snapshot; `disclosed` a usable v2 list; `merkle`
+a usable v2 root and a valid v2 proof for every receipt's grant; `both` all of these), the
+disclosure and attestation requirements of the claim policy hold, and every receipt (brokered and
+native) is `proven_before` with the same use obligations as
 `authorized` (every use matched and PoP re-verified, no violation or pending use, validated
 taxonomy with every action verified; for the native surface, every transcript verified and every
 native grant covered). Otherwise it is `insufficient`.
@@ -190,7 +199,9 @@ immutability triggers; migrates every boolean revocation, void marker and signed
 tombstone as a total event; and renames `revocations` to `legacy_boolean_revocations` with
 immutability triggers. There is no compatibility trigger mapping a boolean insert into an event, so
 nothing can hide a later total upgrade; old prepared statements naming `revocations` fail. 0006's
-nonce cutover row, including its legacy-exclusion time, is not touched.
+nonce cutover row, including its legacy-exclusion time, is not touched. An advancing cutover also
+requires the new runtime identity to have no session and the database to have no prepared
+transaction, so a still-running old binary reusing the new identity cannot straddle the step.
 
 ## 3. Trust assumptions of `db_serialized_v1`
 
@@ -219,7 +230,8 @@ deployment attestation that binds the list digest bound that window.
 - An external (TSA) temporal mode. It needs an independently trusted no-earlier-than bound on when a
   revocation takes effect, or a revocation defined to take effect after a receipt witness. Bare
   anchor ordering is insufficient.
-- Server export of the v2 Merkle root (the builder exists; the server exports the disclosed list).
+- Server export of a Merkle root, v1 or v2 (both are builder-only; the server exports the disclosed
+  list).
 
 ## 5. Evidence
 
@@ -230,8 +242,12 @@ deployment attestation that binds the list digest bound that window.
 - `formal/lean/Averin/Verdict.lean`: the claim model, support erasure including the snapshot,
   `historical_requires_policy`, `historical_requires_order`, `historical_requires_snapshot`,
   `at_or_after_refutes`, `total_revocation_refutes`, `earlier_snapshot_cannot_flip` and
-  `self_times_cannot_strengthen`; the verdict oracle rows `hist_*`; mutants m40–m46.
+  `historical_requires_pinned_issuer`; the verdict oracle rows `hist_*` (including the revocation
+  modes); mutants m40–m47. The model does not encode the implementation's rule that every present
+  v2 artifact signs the identical snapshot (it is not a monotone attachment condition); Rust tests
+  cover it, so the model is weaker than the implementation there.
 - Server: `temporal_revocation_test.go` (ordinals, revoke modes, v2 export, introspection,
   producer-to-verifier), `temporal_revocation_pg_test.go` (races across pools, causal schedules,
   repeated revokes, snapshot consistency, child-process crash cuts), `temporal_cutover_test.go`
-  (v7 barrier, rollback and retry) and `store/temporal_test.go`.
+  (v7 barrier, rollback and retry, live new-runtime session) , `temporal_conflict_test.go` (no
+  ordinal survives a conflict or collapse; store errors are 5xx) and `store/temporal_test.go`.

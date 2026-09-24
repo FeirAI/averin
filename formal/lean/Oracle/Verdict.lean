@@ -45,7 +45,7 @@ def facts (n : Nat) : Fixed := {
   capstone,
   temporalPolicy := false, evalTime := 8, maxAge := 5, minWatermark := 3,
   receipts := [], cutoffs := [], histUseValid := false,
-  historicalContradiction := false, selfTimes := []
+  historicalContradiction := false
 }
 
 def attachments (n : Nat) : List Attachment :=
@@ -110,8 +110,7 @@ def histFacts (n : Nat) : Fixed :=
     temporalPolicy := bit n 0,
     receipts := [⟨1, 7, if bit n 3 then some 4 else none, bit n 4⟩],
     cutoffs := (if bit n 5 then [(7, 9)] else []) ++ (if bit n 6 then [(7, 4)] else []),
-    histUseValid := bit n 8,
-    selfTimes := [(1, n)] }
+    histUseValid := bit n 8 }
 
 def histAttachments (n : Nat) : List Attachment :=
   let boundary := if bit n 2 then 1 else 5
@@ -174,7 +173,25 @@ def run : String :=
     row "hist_merkle_missing_path" hf (.snapshot 5 10 true :: attachments full),
     row "hist_merkle_path" hf (.path 7 :: .snapshot 5 10 true :: attachments full),
     row "hist_contradiction" { hf with historicalContradiction := true } (histAttachments 0x11B),
-    row "hist_future_boundary" hf (.snapshot 9 10 false :: attachments full)
+    row "hist_future_boundary" hf (.snapshot 9 10 false :: attachments full),
+    -- An authenticated cutoff decides at/after even when the Merkle path is missing.
+    row "hist_merkle_missing_path_at_cutoff" { hf with cutoffs := [(7, 4)] }
+      (.snapshot 5 10 true :: attachments full),
+    -- The caller's revocation mode selects the snapshot kinds the claim needs.
+    row "hist_disclosed_mode_merkle_snapshot"
+      { hf with policy := { hf.policy with revocation := .disclosed } }
+      (.path 7 :: .snapshot 5 10 true :: attachments full),
+    row "hist_merkle_mode_list_snapshot"
+      { hf with policy := { hf.policy with revocation := .merkle } } (histAttachments 0x11B),
+    row "hist_merkle_mode_merkle_snapshot"
+      { hf with policy := { hf.policy with revocation := .merkle } }
+      (.path 7 :: .snapshot 5 10 true :: attachments full),
+    row "hist_both_mode_list_only"
+      { hf with policy := { hf.policy with revocation := .both } } (histAttachments 0x11B),
+    row "hist_both_mode_both_snapshots"
+      { hf with policy := { hf.policy with revocation := .both } }
+      (.path 7 :: .snapshot 5 10 true :: histAttachments 0x11B),
+    row "hist_issuer_unpinned" { hf with revocationIssuerPinned := false } (histAttachments 0x11B)
   ]
   "[\n" ++ ",\n".intercalate
     (ordinary ++ capstoneCases ++ adverseCases ++ histCases ++ histSpecial) ++ "\n]\n"

@@ -122,7 +122,11 @@
     {#if revocation && (revocation.current.length || revocation.historical)}
       <section class="panel">
         <h2>Current revocation</h2>
-        {#each revocation.current as line}<div class="broken">{line}</div>{:else}<div class="lvl">No listed grant is revoked.</div>{/each}
+        {#if !revocation.evaluated}
+          <div class="lvl">Revocation was not evaluated (no pinned revocation issuer or no signed revocation artifact): a revoked grant would not show here.</div>
+        {:else}
+          {#each revocation.current as line}<div class="broken">{line}</div>{:else}<div class="lvl">No listed grant is revoked.</div>{/each}
+        {/if}
         {#if revocation.historical}
           <h2>Historical ordering (separate from current revocation)</h2>
           <div class="lvl">Historical authorization as of the snapshot: {revocation.historical.decision} · {revocation.historical.snapshot}</div>

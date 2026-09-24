@@ -16,7 +16,8 @@ export function revocationView(report) {
       const cutoff = g.current_revocation === "revoked_prospective" ? ` (cutoff ordinal ${g.cutoff_order})` : "";
       return `${g.grant_id}: ${String(g.current_revocation).replace("_", " ")}${cutoff} — current uses are blocked`;
     });
-  if (t.policy !== "db_serialized_v1") return { current, historical: null };
+  const evaluated = t.grant_revocations.some((g) => g?.current_revocation && g.current_revocation !== "not_evaluated");
+  if (t.policy !== "db_serialized_v1") return { current, evaluated, historical: null };
   const snap = t.snapshot ?? {};
   const snapshot = snap.status === "verified"
     ? `verified snapshot of ${snap.project_id} at ${snap.boundary_time} (watermark ${snap.authorization_high_watermark})`
@@ -28,6 +29,7 @@ export function revocationView(report) {
   });
   return {
     current,
+    evaluated,
     historical: {
       policy: t.policy,
       snapshot,
