@@ -20,7 +20,7 @@ fixed corpus. The TLA+ recovery liveness result depends on its retry and fairnes
 | Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order and transitive (parser-level and base64 chunk harnesses in an extended set) | `bash formal/run-kani.sh` |
 | Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log under failures, ambiguous commits, lost rollbacks and the operator `grant_void` tombstone (no anchored gap, no duplicate seq, no permanent checkpoint outage); consume-before-act ledger with multiple gateways, releases and TTL sweeps | `bash formal/tla/run-tlc.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
-| Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | fourteen known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
+| Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | fifteen known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
 | Deterministic differential fuzz | `run-fuzz.sh`, `fuzz/regressions.tsv`, `core/tests/rcp_fuzz.rs` | sampled RCP lexical acceptance/rejection and canonical bytes, native C ABI parity, browser WASM parity, base64url round trips | `bash formal/run-fuzz.sh pr` |
 
 ## Reproducible RCP fuzz complement
@@ -197,18 +197,26 @@ Three checks, each doing what it is good at:
 `check-mutants.sh` applies each `mutants/*.patch` to a scratch copy of the tree (`core/`, `spec/`,
 `formal/` and the directories the tag inventory sweeps), runs the gates, and passes only if every mutant is killed. It first checks that every
 gate passes on the unmutated tree, so a broken gate cannot count as a kill. For m3 and m4 the named
-Kani harness must itself report `VERIFICATION:- FAILED`.
+Kani harness must itself report `VERIFICATION:- FAILED`. The same named-counterexample rule now
+applies to m2, m9–m14, and m22; an unwind failure, tool error, or timeout does not count.
 
 | Mutant | Drift | Killed by (local run) |
 |---|---|---|
 | m1 | authority preimage: `LP(project_id)` and `LP(record_id)` swapped | oracle |
-| m2 | `write_string` drops DEL (`ser` no longer injective) | oracle |
+| m2 | `write_string` drops DEL (`ser` no longer injective) | oracle; Kani `string_escape_roundtrip` (pending full suite) |
 | m3 | `utf16_cmp` replaced by byte order | Kani `utf16_key_order_is_exact`, oracle, golden |
 | m4 | `lp_into` writes a 2-byte length | Kani `lp_into_frames_exactly`, oracle, golden |
 | m5 | commitment preimage drops `LP(field_domain)` | oracle |
 | m6 | `compute_content_hash` strips an extra field | oracle, golden |
 | m7 | `verify_content_hash` stops pinning `canon_version` | oracle (pinned-constants check) |
 | m8 | `verify.rs` taxonomy tag renamed | tag inventory |
+| m9 | base64url one-byte tail accepts nonzero trailing bits | Kani `one_byte_tail_is_canonical` (confirmed) |
+| m10 | base64url two-byte tail accepts nonzero trailing bits | Kani `two_byte_tail_is_canonical` (pending full suite) |
+| m11 | full base64url chunk writes wrong fourth symbol | Kani `full_chunk_is_canonical` (pending full suite) |
+| m12 | strict UTF-16 decoder rejects one valid low surrogate | Kani `utf16_strict_matches_std` (pending full suite) |
+| m13 | parser accepts negative zero | Kani `accepted_integer_spelling_is_canonical` (pending full suite) |
+| m14 | truncated `\u` escape indexes beyond input | Kani `parse_never_panics` (pending full suite) |
+| m22 | `Int(0)` serializes as `1` | Kani `integer_roundtrip_zero` (confirmed) |
 
 A new drift class gets a new patch here before the gate that catches it is called done.
 
@@ -243,7 +251,14 @@ and single spelling, `write_string` inverted by the parser, and parser panic-fre
 base64 chunk harnesses have completed successfully with Kani 0.68.0 over their original 2-, 3-,
 and 4-symbol domains. The other five require completed proof runs before any verification claim:
 the unmodified `integer_roundtrip` harness timed out at 1,801 seconds without a result, with a
-sampled CBMC peak of 1.75 GB. A timeout is not a pass. Parser harnesses call the production-used
+sampled CBMC peak of 1.75 GB. The original full-domain harness remains callable. The extended
+runner also has eleven disjoint sign/decimal-width shards, all calling its unchanged assertion
+body. `check-kani-domains.py` parses their actual macro invocations and counts every integer in
+[-99,999, 99,999] exactly once, rejecting missing or changed ranges and runner omissions. Their
+magnitudes use `u8` for widths 1–2, `u16` for 3–4, and `u32` for 5; every magnitude is at most
+99,999, so conversion to `i64` and optional negation are lossless. The zero shard uses the
+equivalent literal `0` and has completed successfully; the other shards need results before the
+aggregate integer claim is verified. A timeout is not a pass. Parser harnesses call the production-used
 typed parser core; public diagnostic text is materialized after that core returns. The real NFC
 normalizer is used on non-ASCII paths. The Lean model, golden vectors, adversarial tests, and
 deterministic finite fuzz campaign complement these bounded claims; none makes a timed-out Kani

@@ -653,17 +653,66 @@ mod error_compat_tests {
 mod kani_proofs {
     use super::*;
 
-    /// `parse(n.to_string()) == Int(n)` and serialization writes that same spelling back, for every
-    /// |n| < 10^5 (the i64 extremes are pinned by the golden vectors).
-    #[kani::proof]
-    #[kani::unwind(8)]
-    fn integer_roundtrip() {
-        let n: i64 = kani::any_where(|n: &i64| *n > -100_000 && *n < 100_000);
+    /// The exact assertion body shared by the original full-domain proof and every exhaustive
+    /// decimal-width shard below. Only the input domain changes between harnesses.
+    fn integer_roundtrip_case(n: i64) {
         let text = n.to_string();
         let v = CanonValue::parse_typed(&text).unwrap();
         assert_eq!(v, CanonValue::Int(n));
         assert_eq!(v.serialize(), text);
     }
+
+    /// `parse(n.to_string()) == Int(n)` and serialization writes that same spelling back, for every
+    /// |n| < 10^5 (the i64 extremes are pinned by the golden vectors). This original full-domain
+    /// harness remains available for direct verification; CI can instead prove the exact union of
+    /// the disjoint shards below, checked by `formal/check-kani-domains.py`.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn integer_roundtrip() {
+        let n: i64 = kani::any_where(|n: &i64| *n > -100_000 && *n < 100_000);
+        integer_roundtrip_case(n);
+    }
+
+    macro_rules! integer_roundtrip_shard {
+        // The singleton shard is the same n == 0 domain without a symbolic i64 whose
+        // formatting path would otherwise remain symbolic to CBMC.
+        ($name:ident, u8, zero, 0, 0) => {
+            #[kani::proof]
+            #[kani::unwind(8)]
+            fn $name() {
+                integer_roundtrip_case(0);
+            }
+        };
+        ($name:ident, $ty:ty, positive, $lo:expr, $hi:expr) => {
+            #[kani::proof]
+            #[kani::unwind(8)]
+            fn $name() {
+                let magnitude: $ty = kani::any_where(|m: &$ty| *m >= $lo && *m <= $hi);
+                integer_roundtrip_case(magnitude as i64);
+            }
+        };
+        ($name:ident, $ty:ty, negative, $lo:expr, $hi:expr) => {
+            #[kani::proof]
+            #[kani::unwind(8)]
+            fn $name() {
+                let magnitude: $ty = kani::any_where(|m: &$ty| *m >= $lo && *m <= $hi);
+                integer_roundtrip_case(-(magnitude as i64));
+            }
+        };
+    }
+
+    // These eleven lines are the proof-domain table parsed by formal/check-kani-domains.py.
+    integer_roundtrip_shard!(integer_roundtrip_zero, u8, zero, 0, 0);
+    integer_roundtrip_shard!(integer_roundtrip_positive_1, u8, positive, 1, 9);
+    integer_roundtrip_shard!(integer_roundtrip_positive_2, u8, positive, 10, 99);
+    integer_roundtrip_shard!(integer_roundtrip_positive_3, u16, positive, 100, 999);
+    integer_roundtrip_shard!(integer_roundtrip_positive_4, u16, positive, 1000, 9999);
+    integer_roundtrip_shard!(integer_roundtrip_positive_5, u32, positive, 10000, 99999);
+    integer_roundtrip_shard!(integer_roundtrip_negative_1, u8, negative, 1, 9);
+    integer_roundtrip_shard!(integer_roundtrip_negative_2, u8, negative, 10, 99);
+    integer_roundtrip_shard!(integer_roundtrip_negative_3, u16, negative, 100, 999);
+    integer_roundtrip_shard!(integer_roundtrip_negative_4, u16, negative, 1000, 9999);
+    integer_roundtrip_shard!(integer_roundtrip_negative_5, u32, negative, 10000, 99999);
 
     /// No second spelling: every ≤ 4-byte numeric literal the parser accepts is in canonical form
     /// `-?(0|[1-9][0-9]*)` with no `-0` (so `00`, `01`, `-0`, `+1`, fractions and exponents are rejected).

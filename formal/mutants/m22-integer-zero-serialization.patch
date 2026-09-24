@@ -1,0 +1,18 @@
+Mutant: Serialize Int(0) as 1; the zero round-trip shard must find the wrong spelling.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -130,7 +130,13 @@
+             CanonValue::Null => out.push_str("null"),
+             CanonValue::Bool(true) => out.push_str("true"),
+             CanonValue::Bool(false) => out.push_str("false"),
+-            CanonValue::Int(n) => out.push_str(&n.to_string()),
++            CanonValue::Int(n) => {
++                if *n == 0 {
++                    out.push('1');
++                } else {
++                    out.push_str(&n.to_string());
++                }
++            }
+             CanonValue::Str(s) => write_string(&nfc(s), out),
+             CanonValue::Array(items) => {

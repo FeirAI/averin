@@ -41,6 +41,7 @@ kani_harness() {
     m12-*) echo utf16_strict_matches_std ;;
     m13-*) echo accepted_integer_spelling_is_canonical ;;
     m14-*) echo parse_never_panics ;;
+    m22-*) echo integer_roundtrip_zero ;;
   esac
 }
 
@@ -74,7 +75,7 @@ run_gate() {
       inventory) python3 formal/check-refinement.py ;;
       oracle) cargo test -q -p averin-decision-core --test oracle ;;
       golden) cargo test -q -p averin-decision-core --test golden ;;
-      kani) "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" cargo kani -p averin-decision-core --lib --no-default-features --harness "$3" ;;
+      kani) "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" bash formal/run-kani.sh --harness "$3" ;;
     esac
   ) >"$log" 2>&1
 }
@@ -106,7 +107,7 @@ for g in inventory oracle golden; do
   fi
 done
 if [ "$use_kani" = 1 ]; then
-  for h in string_escape_roundtrip utf16_key_order_is_exact lp_into_frames_exactly one_byte_tail_is_canonical two_byte_tail_is_canonical full_chunk_is_canonical utf16_strict_matches_std accepted_integer_spelling_is_canonical parse_never_panics; do
+  for h in string_escape_roundtrip utf16_key_order_is_exact lp_into_frames_exactly one_byte_tail_is_canonical two_byte_tail_is_canonical full_chunk_is_canonical utf16_strict_matches_std accepted_integer_spelling_is_canonical parse_never_panics integer_roundtrip_zero; do
     if ! run_gate "baseline-$h" kani "$h" || ! grep -q 'VERIFICATION:- SUCCESSFUL' "$logs/baseline-$h-kani.log"; then
       echo "check-mutants: FAIL: Kani harness $h fails on the unmutated tree" >&2
       exit 1
