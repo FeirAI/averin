@@ -216,7 +216,7 @@ A new drift class gets a new patch here before the gate that catches it is calle
 
 The harnesses live next to the code (`#[cfg(kani)] mod kani_proofs` in `b64.rs`, `hashx.rs` and
 `canon.rs`). `run-kani.sh` runs them with `--no-default-features` (no `getrandom`) and
-`-Z stubbing`.
+no production-function stubs. `run-kani.sh --harness NAME` runs one named proof for profiling.
 
 **Default set** (each harness finishes in under two minutes on a 4-core, 16 GB runner; CI runs
 these):
@@ -238,16 +238,16 @@ these):
 
 **Extended set** (`run-kani.sh --extended`): base64 tail canonicality (non-zero trailing bits
 rejected), the full 4-symbol chunk (`full_chunk_is_canonical`: every accepted 4-symbol spelling
-is `encode` of the 3 bytes it decodes to, which completes "every byte string has exactly one
-accepted spelling" chunk by chunk; it ran out of memory under an 8 GB cap after about 12 minutes
-locally because `decode`'s error path formats a `char`, which pulls Unicode tables into CBMC),
-strict UTF-16 decoder
-versus std, integer round trip and single spelling, `write_string` inverted by the parser, and
-parser panic-freedom. These harnesses symbolically execute the full RCP parser and heap `String`
-growth. On the 16 GB machine used for this work CBMC ran out of memory or passed a 25-minute
-timeout, so **they are not claimed as verified**. Run them on a larger runner, or shrink them
-further. The same properties are covered today by the Lean `Canon` proof over the model, the
-golden vectors, the adversarial suite, and the audit's 200k-document differential fuzz.
+is `encode` of the 3 bytes it decodes to), strict UTF-16 decoder versus std, integer round trip
+and single spelling, `write_string` inverted by the parser, and parser panic-freedom. The three
+base64 chunk harnesses have completed successfully with Kani 0.68.0 over their original 2-, 3-,
+and 4-symbol domains. The other five require completed proof runs before any verification claim:
+the unmodified `integer_roundtrip` harness timed out at 1,801 seconds without a result, with a
+sampled CBMC peak of 1.75 GB. A timeout is not a pass. Parser harnesses call the production-used
+typed parser core; public diagnostic text is materialized after that core returns. The real NFC
+normalizer is used on non-ASCII paths. The Lean model, golden vectors, adversarial tests, and
+deterministic finite fuzz campaign complement these bounded claims; none makes a timed-out Kani
+harness verified.
 
 ## TLA+ (server protocols)
 

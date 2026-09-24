@@ -78,6 +78,7 @@ impl CanonValue {
 
     fn parse_typed(input: &str) -> Result<CanonValue, ParseError> {
         let mut p = Parser {
+            source: input,
             s: input.as_bytes(),
             i: 0,
             depth: 0,
@@ -274,6 +275,7 @@ fn hex_digit(n: u8) -> char {
 const MAX_DEPTH: usize = 256;
 
 struct Parser<'a> {
+    source: &'a str,
     s: &'a [u8],
     i: usize,
     depth: usize,
@@ -379,7 +381,10 @@ impl<'a> Parser<'a> {
         if let Some(b'e') | Some(b'E') = self.peek() {
             return Err(self.err("exponent not allowed in RCP (integers only)"));
         }
-        let lexeme = std::str::from_utf8(&self.s[start..self.i]).unwrap();
+        // The scanner above consumed only ASCII '-' and digits. Keep the original validated
+        // string so this slice does not need a second UTF-8 validation pass. Every cursor
+        // advance elsewhere is ASCII or a whole scalar, so both indices are char boundaries.
+        let lexeme = &self.source[start..self.i];
         // RCP §3: `-0` is not a canonical integer spelling (consistent with rejecting `00`/`01`).
         if lexeme == "-0" {
             return Err(ParseError {
@@ -702,17 +707,15 @@ mod kani_proofs {
 
     fn utf16_agrees<const N: usize>() {
         let units: [u16; N] = kani::any();
-        let std_ok = char::decode_utf16(units.iter().copied()).all(|r| r.is_ok());
+        let mut reference = char::decode_utf16(units.iter().copied());
         match decode_utf16_strict(&units) {
             Ok(s) => {
-                assert!(std_ok);
-                let mut theirs = char::decode_utf16(units.iter().copied());
                 for c in s.chars() {
-                    assert_eq!(theirs.next().map(|r| r.ok()), Some(Some(c)));
+                    assert_eq!(reference.next().map(|r| r.ok()), Some(Some(c)));
                 }
-                assert!(theirs.next().is_none());
+                assert!(reference.next().is_none());
             }
-            Err(_) => assert!(!std_ok),
+            Err(_) => assert!(reference.any(|r| r.is_err())),
         }
     }
 
@@ -792,7 +795,8 @@ mod kani_proofs {
         assert_eq!(ab == Ordering::Equal, a == b);
     }
 
-    /// The parser never panics on any valid UTF-8 input of ≤ 5 bytes, including real NFC.
+    /// The production parser core never panics on any valid UTF-8 input of ≤ 5 bytes, including
+    /// real NFC. Public error text is materialized after this typed result is returned.
     #[kani::proof]
     #[kani::unwind(8)]
     fn parse_never_panics() {
