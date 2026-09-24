@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/store"
 )
 
@@ -59,6 +60,77 @@ func TestBrokerSeqRecoveryFencePersistsAcrossReplicasPostgres(t *testing.T) {
 func TestBrokerSeqRecoveryTerminalVoidBlocksUsePostgres(t *testing.T) {
 	pg, _ := newVoidTestPostgres(t)
 	exerciseVoidWithoutRevocationKeyBlocksPreparedCapability(t, pg)
+}
+
+// Cancellation while a grant transaction is open cannot be interpreted as
+// rollback. When that grant later commits, the same recovery action converges
+// on recorded without sealing a tombstone or revoking the winner.
+func TestBrokerSeqRecoveryCancelThenGrantCommitsPostgres(t *testing.T) {
+	pg, admin := newVoidTestPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	other, err := store.NewPostgres(ctx, admin.Config().ConnConfig.ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	const idem = "cancel-then-commit"
+	reserveGrantSeq(t, pg, idem)
+	hold := &holdGrantAfterInsertStore{Store: pg, idem: idem, inserted: make(chan struct{}), release: make(chan struct{})}
+	released := false
+	defer func() {
+		if !released {
+			close(hold.release)
+		}
+	}()
+	shared := content.NewMemStore()
+	grantHandler := api.New(mustCore(t), hold, "k0").WithContent(shared).WithBroker(brokerIssuingKey()).Routes()
+	recoveryHandler := api.New(mustCore(t), other, "k0").WithContent(shared).WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
+	grantDone := make(chan struct {
+		code int
+		body string
+	}, 1)
+	ak := grantAgentKey()
+	go func() {
+		code, body := do(t, grantHandler, http.MethodPost, "/v2/grants", grantBody(idem, "read:orders", ak, ak))
+		grantDone <- struct {
+			code int
+			body string
+		}{code, body}
+	}()
+	select {
+	case <-hold.inserted:
+	case <-ctx.Done():
+		t.Fatalf("grant did not reach uncommitted INSERT: %v", ctx.Err())
+	}
+	reqCtx, stop := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer stop()
+	req := httptest.NewRequest(http.MethodPost, "/v2/broker-seq/void?project=p1", strings.NewReader(voidBody(1))).WithContext(reqCtx)
+	req.Header.Set("Authorization", "Bearer test-recovery-token")
+	w := httptest.NewRecorder()
+	recoveryHandler.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"retryable":true`) {
+		t.Fatalf("cancelled recovery claimed a final outcome: %d %s", w.Code, w.Body.String())
+	}
+	close(hold.release)
+	released = true
+	select {
+	case granted := <-grantDone:
+		if granted.code != http.StatusCreated || grantSeqOf(t, granted.body) != 1 {
+			t.Fatalf("held grant did not commit after cancellation: %d %s", granted.code, granted.body)
+		}
+	case <-ctx.Done():
+		t.Fatalf("held grant did not finish: %v", ctx.Err())
+	}
+	if code, body := doRecovery(t, recoveryHandler, http.MethodPost, "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(body, `"outcome":"recorded"`) || !strings.Contains(body, `"winning_record_hash":"sha256:`) {
+		t.Fatalf("same recovery operation did not recognize landed grant: %d %s", code, body)
+	}
+	if _, found, err := other.RecordByIdem("p1", "grant-void:1"); err != nil || found {
+		t.Fatalf("late recovery sealed a tombstone: %v %v", found, err)
+	}
+	if ids, err := other.RevokedGrantIDs("p1"); err != nil || len(ids) != 0 {
+		t.Fatalf("late recovery revoked winning grant: %v %v", ids, err)
+	}
 }
 
 // A held project transaction gives the operator a bounded retryable response.

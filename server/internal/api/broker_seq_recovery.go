@@ -19,7 +19,9 @@ import (
 // recoveryTombstone returns "same", "legacy", or "conflict". A legacy
 // tombstone lacks BOTH attribution fields; present null/empty fields are not
 // silently attributed to today's operator.
-func recoveryTombstone(raw string, vr brokerSeqVoidRequest, grantID string) string {
+// boundVoidRecord recognizes only a tombstone with the complete reserved
+// project/grant/sequence tuple and broker role. An inert marker is not enough.
+func boundVoidRecord(raw, projectID, grantID string) (int64, map[string]json.RawMessage, string, bool) {
 	var r struct {
 		RecordID  string `json:"record_id"`
 		ProjectID string `json:"project_id"`
@@ -37,21 +39,30 @@ func recoveryTombstone(raw string, vr brokerSeqVoidRequest, grantID string) stri
 			} `json:"broker"`
 		} `json:"extensions"`
 	}
-	if json.Unmarshal([]byte(raw), &r) != nil || r.RecordID != grantID || r.ProjectID != vr.ProjectID ||
+	if json.Unmarshal([]byte(raw), &r) != nil || r.RecordID != grantID || r.ProjectID != projectID ||
 		r.EventType != "credential_grant_void" || r.Authority.Source != "gateway_enforced" ||
 		r.Authority.EnforcementPoint != "credential_broker" || r.Authority.GrantID != grantID ||
 		r.Extensions.Broker.Kind != "grant_void" {
-		return "conflict"
+		return 0, nil, "", false
 	}
 	ev := r.Extensions.Broker.VoidEvidence
-	var domain, project, gid, actor, op, reason string
+	var domain, project, gid string
 	var seq int64
 	if json.Unmarshal(ev["domain"], &domain) != nil || domain != grantVoidDomain ||
-		json.Unmarshal(ev["project_id"], &project) != nil || project != vr.ProjectID ||
+		json.Unmarshal(ev["project_id"], &project) != nil || project != projectID ||
 		json.Unmarshal(ev["grant_id"], &gid) != nil || gid != grantID ||
-		json.Unmarshal(ev["broker_seq"], &seq) != nil || seq != vr.BrokerSeq {
+		json.Unmarshal(ev["broker_seq"], &seq) != nil || seq < 1 {
+		return 0, nil, "", false
+	}
+	return seq, ev, r.SessionID, true
+}
+
+func recoveryTombstone(raw string, vr brokerSeqVoidRequest, grantID string) string {
+	seq, ev, sessionID, valid := boundVoidRecord(raw, vr.ProjectID, grantID)
+	if !valid || seq != vr.BrokerSeq {
 		return "conflict"
 	}
+	var actor, op, reason string
 	_, hasActor := ev["actor_id"]
 	_, hasOp := ev["operation_id"]
 	if !hasActor && !hasOp {
@@ -60,7 +71,7 @@ func recoveryTombstone(raw string, vr brokerSeqVoidRequest, grantID string) stri
 	if !hasActor || !hasOp || json.Unmarshal(ev["actor_id"], &actor) != nil ||
 		json.Unmarshal(ev["operation_id"], &op) != nil || json.Unmarshal(ev["reason"], &reason) != nil ||
 		actor == "" || op == "" || actor != vr.ActorID || op != vr.OperationID ||
-		reason != vr.Reason || r.SessionID != vr.SessionID {
+		reason != vr.Reason || sessionID != vr.SessionID {
 		return "conflict"
 	}
 	return "same"
@@ -326,6 +337,32 @@ func (s *Server) grantFencedBeforeMint(ctx context.Context, projectID, grantID s
 		}
 		return store.ErrRecoveryFenced
 	})
+}
+
+func (s *Server) terminalGrantVoided(st store.Store, projectID, grantID string) (bool, error) {
+	f, found, err := st.RecoveryFenceByGrant(projectID, grantID)
+	if err != nil {
+		return false, err
+	}
+	if found {
+		r, done, e := st.RecoveryResultAt(projectID, f.Seq)
+		if e != nil || (done && r.Outcome == "voided") {
+			return done && r.Outcome == "voided", e
+		}
+	}
+	// Legacy tombstones can predate the fence/result or have committed before
+	// their operational marker. The signed, append-only record is the authority;
+	// a marker alone must not retire a landed grant.
+	winner, foundRecord, err := st.RecordByRecordID(projectID, grantID)
+	if err != nil || !foundRecord {
+		return false, err
+	}
+	seq, _, _, bound := boundVoidRecord(winner.JSON, projectID, grantID)
+	if !bound || (found && f.Seq != seq) {
+		return false, nil
+	}
+	res, reserved, err := st.BrokerSeqAt(projectID, seq)
+	return reserved && res.GrantID == grantID, err
 }
 
 func (s *Server) handleBrokerSeqPreflight(w http.ResponseWriter, r *http.Request) {

@@ -273,7 +273,7 @@ available. A signed tombstone makes `/v2/use` reject the grant ID even when revo
 disabled. When enabled, durable revocation commits with the tombstone; the next signed
 revocation list publishes it. Check the export's list before claiming offline publication.
 
-A pre-`0006` tombstone whose signed `void_evidence` has **both** actor and operation fields
+A tombstone from before authenticated recovery attribution whose signed `void_evidence` has **both** actor and operation fields
 absent can be reconciled without modifying its original JSON or hash. The response and
 preflight distinguish `original_void_actor_unattributed` from the new
 `reconciliation_actor_id`; the new operational fence is local diagnostic state, not

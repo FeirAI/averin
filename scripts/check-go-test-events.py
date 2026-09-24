@@ -20,6 +20,8 @@ REQUIRED = (
     f"{API_PACKAGE}:TestBrokerSeqRecoveryLegacyTombstoneAttribution",
     f"{API_PACKAGE}:TestBrokerSeqRecoveryFencePersistsAcrossReplicasPostgres",
     f"{API_PACKAGE}:TestBrokerSeqRecoveryTerminalVoidBlocksUsePostgres",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryCancelThenGrantCommitsPostgres",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryProcessCrashCutsPostgres",
     f"{API_PACKAGE}:TestBrokerSeqRecoveryBlockedGuardDeadlinePostgres",
     f"{STORE_PACKAGE}:TestPostgresRecoveryFenceContract",
     f"{STORE_PACKAGE}:TestBrokerSeqRecoveryOldRuntimeCredentialCutoff",

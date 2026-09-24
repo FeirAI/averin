@@ -2492,9 +2492,24 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 	// erasable content blob. ValidateUse repeats this pure check inside the
 	// project transaction before revocation, ledger claims, and receipt sealing.
 	preflight := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, nil).WithProject(trustedProject)
-	if err := preflight.PreflightUse(ur.Capability, ur.UseSig, op, ur.Nonce, s.now()); err != nil {
+	preflightGrantID, err := preflight.PreflightUseGrantID(ur.Capability, ur.UseSig, op, ur.Nonce, s.now())
+	if err != nil {
 		s.mUseOutcome.WithLabelValue("deny").Inc()
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var terminalVoid bool
+	if err := s.st.WithProjectRead(r.Context(), trustedProject, func(st store.Store) error {
+		var e error
+		terminalVoid, e = s.terminalGrantVoided(st, trustedProject, preflightGrantID)
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "terminal void lookup: "+err.Error())
+		return
+	}
+	if terminalVoid {
+		s.mUseOutcome.WithLabelValue("deny").Inc()
+		writeErr(w, http.StatusBadRequest, "resourceshim: grant is revoked by terminal recovery void")
 		return
 	}
 	paramsAddr, err := s.content.Put(content.WithTenant(r.Context(), ur.ProjectID), rawParams)
@@ -2543,18 +2558,12 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		// retires the grant even when no revocation signing key is configured.
 		// Read both decisions in this guarded transaction, before consumption.
 		shim.WithRevocationCheckErr(func(id string) (bool, error) {
-			fence, found, err := st.RecoveryFenceByGrant(trustedProject, id)
+			voided, err := s.terminalGrantVoided(st, trustedProject, id)
 			if err != nil {
 				return false, err
 			}
-			if found {
-				result, done, err := st.RecoveryResultAt(trustedProject, fence.Seq)
-				if err != nil {
-					return false, err
-				}
-				if done && result.Outcome == "voided" {
-					return true, nil
-				}
+			if voided {
+				return true, nil
 			}
 			return st.IsRevoked(trustedProject, id)
 		})
