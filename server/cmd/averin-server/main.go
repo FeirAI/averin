@@ -314,21 +314,6 @@ func main() {
 			srv.WithBrokerID(bid)
 			log.Printf("federation enabled: grants tagged broker_id=%q (per-broker broker_grant_heads in checkpoints)", bid)
 		}
-		// D6 operator remediation (POST /v2/broker-seq/void): how old a reserved-but-unrecorded broker_seq must be
-		// before it may be filled with a grant_void tombstone. A SAFETY parameter: it must comfortably exceed the
-		// longest time a grant can still be committing (statement timeout 30s, two-phase pending TTL 15m), so the
-		// floor rejects anything shorter at startup. Default 1h.
-		if raw := strings.TrimSpace(os.Getenv("AVERIN_BROKER_SEQ_VOID_MIN_AGE")); raw != "" {
-			const voidMinAgeFloor = 20 * time.Minute
-			d, perr := time.ParseDuration(raw)
-			if perr != nil || d <= 0 {
-				log.Fatalf("AVERIN_BROKER_SEQ_VOID_MIN_AGE must be a positive Go duration (e.g. 1h): %v", perr)
-			}
-			if d < voidMinAgeFloor {
-				log.Fatalf("AVERIN_BROKER_SEQ_VOID_MIN_AGE %s is below the safe floor %s — a void could race a grant commit (or a two-phase finalize) that is still landing", d, voidMinAgeFloor)
-			}
-			srv.WithBrokerSeqVoidMinAge(d)
-		}
 	}
 	// M6 (ADR 0005): the ONLINE two-phase cosig policy (POST /v2/grants/prepare + /v2/grants/finalize). The
 	// M-of-N approver keys are role-separated GOVERNANCE keys — the offline verifier re-pins them as

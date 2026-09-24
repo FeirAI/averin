@@ -51,6 +51,29 @@ func (p *pauseBoundStore) PutRecord(projectID, idem string, rec store.Record) (s
 	}
 	return stored, created, err
 }
+func (p *pauseBoundStore) PutRecoveryFence(f store.RecoveryFence) (store.RecoveryFence, bool, error) {
+	stored, created, err := p.Store.PutRecoveryFence(f)
+	if err == nil && created && p.root.stage == "after_recovery_fence" {
+		p.root.mu.Lock()
+		p.root.matched = true
+		p.root.mu.Unlock()
+	}
+	return stored, created, err
+}
+func (p *pauseBoundStore) PutRecoveryResult(r store.RecoveryResult) (store.RecoveryResult, bool, error) {
+	stored, created, err := p.Store.PutRecoveryResult(r)
+	if err == nil && created {
+		switch p.root.stage {
+		case "before_recovery_terminal":
+			p.root.pause()
+		case "after_recovery_terminal":
+			p.root.mu.Lock()
+			p.root.matched = true
+			p.root.mu.Unlock()
+		}
+	}
+	return stored, created, err
+}
 func (p *pauseProjectStore) pause() {
 	if err := os.WriteFile(p.marker, []byte(p.stage), 0600); err != nil {
 		panic(err)
@@ -59,7 +82,7 @@ func (p *pauseProjectStore) pause() {
 }
 func (p *pauseProjectStore) WithProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
 	err := p.Store.WithProjectWrite(ctx, projectID, func(bound store.Store) error { return fn(&pauseBoundStore{Store: bound, root: p}) })
-	if err == nil && p.stage == "after_commit" {
+	if err == nil && (p.stage == "after_commit" || p.stage == "after_recovery_fence" || p.stage == "after_recovery_terminal") {
 		p.mu.Lock()
 		matched := p.matched
 		p.mu.Unlock()
@@ -297,7 +320,16 @@ func sendProjectTxAsync(process *projectTxProcess, path, body string) <-chan pro
 	done := make(chan processReply, 1)
 	go func() {
 		client := http.Client{Timeout: 15 * time.Second}
-		response, err := client.Post("http://"+process.addr+path, "application/json", strings.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, "http://"+process.addr+path, strings.NewReader(body))
+		if err != nil {
+			done <- processReply{err: err}
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if strings.HasPrefix(path, "/v2/broker-seq/void") {
+			req.Header.Set("Authorization", "Bearer test-recovery-token")
+		}
+		response, err := client.Do(req)
 		if err != nil {
 			done <- processReply{err: err}
 			return
@@ -436,5 +468,60 @@ func TestProjectTransactionProcessCuts(t *testing.T) {
 	}
 	if count, err := pg.RecordCount("p1"); err != nil || count != 4 {
 		t.Fatalf("unexpected record count after cuts: %d %v", count, err)
+	}
+}
+
+func TestBrokerSeqRecoveryProcessCrashCutsPostgres(t *testing.T) {
+	for _, tc := range []struct {
+		stage          string
+		terminalBefore bool
+	}{
+		{"after_recovery_fence", false},
+		{"before_recovery_terminal", false},
+		{"after_recovery_terminal", true},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			pg, admin := newVoidTestPostgres(t)
+			reserveGrantSeq(t, pg, "crash-orphan")
+			dsn, dir := admin.Config().ConnConfig.ConnString(), t.TempDir()
+			marker := filepath.Join(t.TempDir(), "recovery-cut")
+			child := startProjectTxPausedProcess(t, dsn, dir, tc.stage, "", marker)
+			inFlight := sendProjectTxAsync(child, "/v2/broker-seq/void?project=p1", voidBody(1))
+			waitProjectTxPause(t, child, marker)
+			child.stop()
+			<-inFlight // the lost HTTP response is never treated as a rollback proof.
+			if f, found, err := pg.RecoveryFenceAt("p1", 1); err != nil || !found || f.OperationID != "recovery-test-1" {
+				t.Fatalf("fence did not survive process kill: %+v %v %v", f, found, err)
+			}
+			result, found, err := pg.RecoveryResultAt("p1", 1)
+			if err != nil || found != tc.terminalBefore || (found && result.Outcome != "voided") {
+				t.Fatalf("wrong terminal state across process kill: %+v %v %v", result, found, err)
+			}
+			if res := reservation(t, pg, 1); res.Voided != tc.terminalBefore {
+				t.Fatalf("marker survived independently of terminal transaction: %+v", res)
+			}
+			if _, found, err := pg.RecordByIdem("p1", "grant-void:1"); err != nil || found != tc.terminalBefore {
+				t.Fatalf("tombstone survived independently of terminal transaction: %v %v", found, err)
+			}
+			grantID := reservation(t, pg, 1).GrantID
+			if ids, err := pg.RevokedGrantIDs("p1"); err != nil || len(ids) != btoi(tc.terminalBefore) || (tc.terminalBefore && ids[0] != grantID) {
+				t.Fatalf("revocation survived independently of terminal transaction: %v %v", ids, err)
+			}
+			peer := startProjectTxProcess(t, dsn, dir)
+			code, body := callProjectTxProcess(t, peer, http.MethodPost, "/v2/broker-seq/void?project=p1", voidBody(1))
+			want := http.StatusCreated
+			if tc.terminalBefore {
+				want = http.StatusOK
+			}
+			if code != want || !strings.Contains(body, `"outcome":"voided"`) || !strings.Contains(body, `"winning_record_hash":"sha256:`) {
+				t.Fatalf("new process did not converge after %s: %d %s", tc.stage, code, body)
+			}
+			if result, found, err := pg.RecoveryResultAt("p1", 1); err != nil || !found || result.Outcome != "voided" {
+				t.Fatalf("new process left recovery incomplete: %+v %v %v", result, found, err)
+			}
+			if ids, err := pg.RevokedGrantIDs("p1"); err != nil || len(ids) != 1 || ids[0] != grantID {
+				t.Fatalf("new process did not publish one durable revoke: %v %v", ids, err)
+			}
+		})
 	}
 }

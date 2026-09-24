@@ -119,10 +119,12 @@ verdict logic and authority-evidence binding.
   constant-time over SHA-256 digests; it **fails closed** (unknown project / empty token ⇒ deny); a
   zero-key config refuses to start (no silent deny-all); tokens are never logged. The dev-only
   open-store mode is explicit and warned about.
-- **Recovery authz:** `POST /v2/broker-seq/void` requires a separate `AVERIN_RECOVERY_KEYS`
+- **Recovery authz:** `GET` preflight and `POST /v2/broker-seq/void` require separate `AVERIN_RECOVERY_KEYS`
   credential for the exact project. Ordinary writer possession, absent recovery config, and dev-open
   ordinary auth do not grant recovery. The credential identifies an actor signed into the tombstone
-  with the required reason and operation ID. This is one narrow permission, not general RBAC.
+  with the required reason and operation ID for a new void. A permanent operational fence binds
+  the same action before reconciliation; a legacy tombstone without original actor/operation metadata
+  is never retroactively attributed. This is one narrow permission, not general RBAC.
 - **Ordinary API authz is Phase-1 limited.** Full RBAC/SSO/scoped-and-expiring tokens are outside
   this implementation. With `AVERIN_API_KEYS` unset, ordinary app API routes are unauthenticated.
 - Without `AVERIN_API_KEYS` set, the API is unauthenticated, so keep it on loopback.

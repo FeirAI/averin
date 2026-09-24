@@ -55,6 +55,11 @@ check GrantLog.tla GrantLog_fair_retry.cfg pass                # ...recovers onl
 check GrantLog.tla GrantLog_void_starved.cfg CheckpointRecovers # a client retrying forever, every attempt failing, starves the void
 check GrantLog.tla GrantLog_fixed_live.cfg pass                # with operator void: no permanent checkpoint outage
 
+# Permanent recovery fence over legacy/residual reservations. The unsafe
+# counterexample demonstrates why already-running old credentials must be cut off.
+check GrantRecovery.tla GrantRecovery_old_writer.cfg NoDuplicateSeq
+check GrantRecovery.tla GrantRecovery_safe.cfg pass
+
 # Consume-before-act ledger (ConsumeLedger.tla).
 check ConsumeLedger.tla ConsumeLedger_safe.cfg pass                               # Retention >= MaxTTL: at most once per key
 check ConsumeLedger.tla ConsumeLedger_short_retention_replay.cfg AtMostOncePerKey # Retention < MaxTTL: replay

@@ -296,6 +296,18 @@ func (s *Shim) PreflightUse(token, useSigB64 string, op Op, nonce string, now ti
 	return err
 }
 
+// PreflightUseGrantID returns the signature-verified, project-bound grant ID
+// after the same pure checks. Callers can reject a terminal void before
+// staging content; ValidateUse must still repeat the check under the write
+// transaction before consuming the credential.
+func (s *Shim) PreflightUseGrantID(token, useSigB64 string, op Op, nonce string, now time.Time) (string, error) {
+	checked, err := s.preflightUse(token, useSigB64, op, nonce, now)
+	if err != nil {
+		return "", err
+	}
+	return checked.claims.Jti, nil
+}
+
 func (s *Shim) preflightUse(token, useSigB64 string, op Op, nonce string, now time.Time) (preflightResult, error) {
 	// 1. Capability signature + decode (the broker minted and signed this descriptor).
 	claims, err := broker.VerifyCapability(token, s.issuingPub)

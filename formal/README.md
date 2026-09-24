@@ -246,9 +246,10 @@ golden vectors, the adversarial suite, and the audit's 200k-document differentia
 
 ## TLA+ (server protocols)
 
-`tla/GrantLog.tla` models the broker_seq grant-transparency log:
+`tla/GrantLog.tla` models the historical broker_seq grant-transparency log
+and its pre-fence age-based recovery design:
 
-- Allocate, seal and insert run under `ingestMu`.
+- Allocate, seal and insert run under its modeled `ingestMu`.
 - A commit can be *ambiguous*: the server sees an error and frees `ingestMu` while the
   transaction is still open at the database. It later lands or aborts in a separate step, so an
   operator void can interleave with it.
@@ -257,15 +258,16 @@ golden vectors, the adversarial suite, and the audit's 200k-document differentia
 - `createCheckpoint` signs the recorded set.
 - An operator may void a reserved, unrecorded seq with a signed `grant_void` tombstone. The voided
   seq stays in the allocation max, and the voided grant id is retired: a later allocation for it is
-  refused (409), as in the Go server.
+  refused (409).
 - Two void guards are modelled as independent switches. `AgeFromLastAttempt` is a guard on the
   void itself: its minimum age is measured from the grant's last attempt, so none of its commits
   can still be open. `UniqueIndex` is not a void guard; it acts on the landing: once a tombstone
   holds the grant's record_id, an in-flight insert of that grant can only abort. Migration 0002
   falls back to a non-unique index when a historical duplicate exists.
-- The model has one global `ingestMu` and one attempt map, i.e. **one server process**. In Go the
-  latest-attempt map is per process, so on a multi-replica deployment only the UNIQUE index closes
-  the race; `void_index_only` is the result that carries over, `void_age_only` is not.
+- The model has one global `ingestMu` and one attempt map, i.e. **one historical server process**.
+  The current Go protocol uses a persisted project guard and fence instead. The old model remains
+  useful because it exhibits the starvation and unsafe-writer counterexamples that motivated the
+  replacement.
 
 There is no `CONSTRAINT`: TLC's liveness checking is unsound under one. Allocation beyond a bound
 is disabled inside `Begin`, and every passing config also asserts `BoundNotBinding`, so the bound
@@ -284,12 +286,30 @@ Each configuration fixes one implementation variant and asserts **one** outcome:
 | `GrantLog_void_age_only.cfg` | void age from the last attempt, no UNIQUE index (one process) | `AnchoredGapless` and `NoDuplicateSeq` hold (2.45M states) |
 | `GrantLog_void_index_only.cfg` | UNIQUE index, void age from the allocation | `AnchoredGapless` and `NoDuplicateSeq` hold (2.98M states: a different graph, in which voids do race in-flight retries) |
 | `GrantLog_void_backstop.cfg` | as `void_index_only`, non-vacuity | **violates** `NoVoidDuringFlight`: a grant is voided while a retry of it is in flight, and only the index stops that retry landing |
-| `GrantLog_void_reachable.cfg` | shipped design, non-vacuity | **violates** `NoVoid`: the guarded void is reachable, so the passing configs exercise it |
-| `GrantLog_fixed.cfg` | shipped design: release only fresh, max seqs; fail-closed checkpoint; operator void with both guards | `AnchoredGapless` and `NoDuplicateSeq` hold, exhaustively for 3 grants (2.45M states; with the age guard in force the void never races an in-flight insert, so this is the same graph as `void_age_only`) |
+| `GrantLog_void_reachable.cfg` | historical age-based design, non-vacuity | **violates** `NoVoid`: the guarded void is reachable, so the passing configs exercise it |
+| `GrantLog_fixed.cfg` | historical age-based design: release only fresh, max seqs; fail-closed checkpoint; operator void with both guards | `AnchoredGapless` and `NoDuplicateSeq` hold, exhaustively for 3 grants (2.45M states; with the age guard in force the void never races an in-flight insert, so this is the same graph as `void_age_only`) |
 | `GrantLog_wedge.cfg` | no void; clients may never retry | **violates** `CheckpointRecovers`: an orphaned seq wedges checkpointing forever |
 | `GrantLog_fair_retry.cfg` | no void; every client retries until it commits | `CheckpointRecovers` holds |
 | `GrantLog_void_starved.cfg` | operator void; a client may retry forever with every attempt failing | **violates** `CheckpointRecovers`: each retry restarts the void's last-attempt age, so the void is never enabled |
 | `GrantLog_fixed_live.cfg` | operator void; clients may give up at any point, and a grant retried forever eventually commits | `CheckpointRecovers` holds, with strong fairness on the operator and weak fairness on open transactions resolving, for 2 grants (liveness over 3 grants is too slow for CI) |
+
+`GrantLog` retains the historical age-based recovery design and its
+`GrantLog_void_starved.cfg` counterexample. The current durable protocol is
+modeled separately in `tla/GrantRecovery.tla`. A supported grant transaction
+owns the exact project guard; an authorized recovery inserts one immutable
+fence after earlier transactions drain, then a second guarded transaction
+records the landed grant or atomically inserts the void, marker and terminal
+result. A failed grant may retry forever without changing the fence. Crashes
+stutter after any transition, and a competing operation cannot replace the
+first operator's identity. The safe config checks no duplicate sequence, no
+late grant after void, a winning record for every terminal result, and eventual
+resolution. That liveness result assumes open database transactions eventually
+commit or abort, and the authorized operator is eventually scheduled at a
+guard opening and for reconciliation. It makes no progress claim during a
+permanent database outage. `GrantRecovery_old_writer.cfg` deliberately enables
+an already-running pre-fence writer and finds a duplicate-sequence
+counterexample; the deployment credential/session cutoff is therefore part of
+the protocol, not an optional operational convenience.
 
 `tla/ConsumeLedger.tla` models consume-before-act. Several gateways race on one ledger through
 `INSERT … ON CONFLICT DO NOTHING`, release on provable non-action, and run the TTL sweep.

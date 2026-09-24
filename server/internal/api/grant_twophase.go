@@ -185,6 +185,11 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 			finalized = existing.JSON
 			return nil
 		}
+		if _, fenced, e := st.RecoveryFenceByGrant(gr.ProjectID, grantID); e != nil {
+			return e
+		} else if fenced {
+			return store.ErrRecoveryFenced
+		}
 		if e := req.ValidateAt(s.now()); e != nil {
 			freshnessErr = e
 			return nil
@@ -247,7 +252,11 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "prepare grant: "+err.Error())
+		if isVoidedGrant(err) {
+			writeErr(w, http.StatusConflict, err.Error())
+		} else {
+			writeErr(w, http.StatusServiceUnavailable, "prepare grant: "+err.Error())
+		}
 		return
 	}
 	if conflict != "" {
@@ -372,13 +381,20 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 	var found bool
 	var existing store.Record
 	var committed bool
+	var fenced bool
 	err = s.st.WithProjectRead(r.Context(), fr.ProjectID, func(st store.Store) error {
 		var e error
 		row, found, e = st.PendingGrant(fr.ProjectID, idem)
-		if e != nil || found {
+		if e != nil {
 			return e
 		}
-		existing, committed, e = st.RecordByIdem(fr.ProjectID, idem)
+		if !found {
+			existing, committed, e = st.RecordByIdem(fr.ProjectID, idem)
+			if e != nil {
+				return e
+			}
+		}
+		_, fenced, e = st.RecoveryFenceByGrant(fr.ProjectID, grantID)
 		return e
 	})
 	if err != nil {
@@ -394,7 +410,15 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 			s.respondFinalized(w, fr.ProjectID, grantID, existing.JSON, false)
 			return
 		}
+		if fenced {
+			writeErr(w, http.StatusConflict, store.ErrRecoveryFenced.Error())
+			return
+		}
 		writeErr(w, http.StatusConflict, "no pending grant for this idempotency_key — call /v2/grants/prepare first")
+		return
+	}
+	if fenced {
+		writeErr(w, http.StatusConflict, store.ErrRecoveryFenced.Error())
 		return
 	}
 	if e := req.ValidateAt(s.now()); e != nil {
@@ -498,7 +522,6 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 			freshnessErr = fmt.Errorf("original pending grant deadline expired")
 			return nil
 		}
-		s.noteSeqAttempt(fr.ProjectID, grantID)
 		seq, _, e := st.AllocateBrokerSeq(fr.ProjectID, grantID)
 		if e != nil {
 			return e

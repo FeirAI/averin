@@ -21,7 +21,11 @@ import (
 )
 
 func TestVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T) {
-	base := store.NewMem()
+	exerciseVoidWithoutRevocationKeyBlocksPreparedCapability(t, store.NewMem())
+}
+
+func exerciseVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T, base store.Store) {
+	t.Helper()
 	resourceCore, err := core.New(resourceSeed)
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +174,7 @@ func TestBrokerSeqVoidUnwedgesCheckpoint(t *testing.T) {
 	}
 
 	// g1's client comes back: its grant_id is retired, never handed the voided seq (nor a new one).
-	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusConflict || !strings.Contains(resp, "voided") {
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusConflict || !strings.Contains(resp, "fenced") {
 		t.Fatalf("a retry of the voided grant must 409 (got %d): %s", code, resp)
 	}
 	// a repeat void returns the existing tombstone.
@@ -203,27 +207,26 @@ func TestBrokerSeqVoidRefusals(t *testing.T) {
 	t.Run("recorded", func(t *testing.T) {
 		h := api.New(mustCore(t), store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 		mkGrant(t, h, ak, "idem-rec")
-		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "is recorded") {
+		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, `"outcome":"recorded"`) {
 			t.Fatalf("voiding a recorded seq must 409 (got %d): %s", code, resp)
 		}
 	})
-	t.Run("too young", func(t *testing.T) {
+	t.Run("fresh reservation can be fenced", func(t *testing.T) {
 		base := store.NewMem()
 		h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes() // default safety age (1h)
 		reserveGrantSeq(t, base, "idem-young")
-		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "AVERIN_BROKER_SEQ_VOID_MIN_AGE") {
-			t.Fatalf("voiding a reservation younger than the safety age must 409 (got %d): %s", code, resp)
+		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated || !strings.Contains(resp, `"outcome":"voided"`) {
+			t.Fatalf("fresh reservation must fence and void (got %d): %s", code, resp)
 		}
-		// the reservation is untouched: the grant's retry still reclaims seq 1.
-		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-young", "read:orders", ak, ak)); code != http.StatusCreated || grantSeqOf(t, resp) != 1 {
-			t.Fatalf("a refused void must leave the reservation for the retry (%d): %s", code, resp)
+		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-young", "read:orders", ak, ak)); code != http.StatusConflict || !strings.Contains(resp, "fenced") {
+			t.Fatalf("a fenced reservation must reject the retry (%d): %s", code, resp)
 		}
 	})
 	t.Run("committed grant cannot be voided", func(t *testing.T) {
 		base := store.NewMem()
 		h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 		mkGrant(t, h, ak, "idem-landed")
-		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "is recorded") {
+		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, `"outcome":"recorded"`) {
 			t.Fatalf("voiding a seq whose ambiguous commit landed must 409 (got %d): %s", code, resp)
 		}
 	})
