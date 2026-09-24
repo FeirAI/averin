@@ -657,9 +657,12 @@ mod kani_proofs {
     /// decimal-width shard below. Only the input domain changes between harnesses.
     fn integer_roundtrip_case(n: i64) {
         let text = n.to_string();
-        let v = CanonValue::parse_typed(&text).unwrap();
-        assert_eq!(v, CanonValue::Int(n));
-        assert_eq!(v.serialize(), text);
+        let v = match CanonValue::parse_typed(&text) {
+            Ok(v) => v,
+            Err(_) => panic!("formatted integer was rejected"),
+        };
+        assert!(v == CanonValue::Int(n), "parsed integer differs");
+        assert!(v.serialize() == text, "serialized integer spelling differs");
     }
 
     /// `parse(n.to_string()) == Int(n)` and serialization writes that same spelling back, for every

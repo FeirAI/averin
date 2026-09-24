@@ -45,6 +45,16 @@ kani_harness() {
   esac
 }
 
+kani_qualified() {
+  local module
+  case "$1" in
+    one_byte_tail_is_canonical|two_byte_tail_is_canonical|full_chunk_is_canonical) module=b64 ;;
+    lp_into_frames_exactly) module=hashx ;;
+    *) module=canon ;;
+  esac
+  printf '%s::kani_proofs::%s\n' "$module" "$1"
+}
+
 kani_expectation() {
   case "$1" in
     m4-*) echo 'core/src/hashx.rs|assertion failed' ;;
@@ -134,7 +144,7 @@ for patch in formal/mutants/*.patch; do
     proof_exit=0
     run_gate "$name" kani "$h" || proof_exit=$?
     IFS='|' read -r source description <<<"$(kani_expectation "$name")"
-    if python3 formal/check-kani-mutant.py "$logs/$name-kani.log" "$proof_exit" "$source" "$description"; then
+    if python3 formal/check-kani-mutant.py "$logs/$name-kani.log" "$proof_exit" "$(kani_qualified "$h")" "$source" "$description"; then
       killed+=("kani:$h")
     else
       echo "check-mutants: FAIL: Kani harness $h did not refute $name (see $logs/$name-kani.log)" >&2
