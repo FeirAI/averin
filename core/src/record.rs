@@ -1,7 +1,7 @@
 //! Decision Record integrity: compute/verify `content_hash` (RCP §9.1). Signing lives in
 //! `sign.rs`; this module owns the hashing preimage.
 
-use crate::canon::CanonValue;
+use crate::canon::{member, write_object, CanonValue};
 use crate::hashx::{lp_str_into, sha256_prefixed};
 use crate::sign;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -20,6 +20,7 @@ pub enum RecordError {
     ContentHashMismatch { expected: String, computed: String },
     SignatureInvalid(String),
     UnknownField(String),
+    DuplicateKey,
 }
 
 impl std::fmt::Display for RecordError {
@@ -50,6 +51,9 @@ impl std::fmt::Display for RecordError {
                     f,
                     "unknown top-level field '{k}' (only 'extensions' may hold unknown keys)"
                 )
+            }
+            RecordError::DuplicateKey => {
+                write!(f, "duplicate object key after NFC normalization")
             }
         }
     }
@@ -151,13 +155,45 @@ fn str_field<'a>(obj: &'a CanonValue, key: &'static str) -> Result<&'a str, Reco
         .ok_or(RecordError::FieldNotString(key))
 }
 
+/// Why a body has no hash preimage. Free of borrowed data so the preimage builder below stays in the
+/// subset `formal/run-production-refinement.sh` extracts and proves; mapped to [`RecordError`] at
+/// the public API.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PreimageFault {
+    NotObject,
+    MissingDomain,
+    DomainNotString,
+    MissingCanonVersion,
+    CanonVersionNotString,
+    TooLong,
+    DuplicateKey,
+}
+
+impl PreimageFault {
+    pub(crate) fn into_record_error(self) -> RecordError {
+        match self {
+            PreimageFault::NotObject => RecordError::NotObject,
+            PreimageFault::MissingDomain => RecordError::MissingField("domain"),
+            PreimageFault::DomainNotString => RecordError::FieldNotString("domain"),
+            PreimageFault::MissingCanonVersion => RecordError::MissingField("canon_version"),
+            PreimageFault::CanonVersionNotString => RecordError::FieldNotString("canon_version"),
+            PreimageFault::TooLong => RecordError::TooLong,
+            PreimageFault::DuplicateKey => RecordError::DuplicateKey,
+        }
+    }
+}
+
 /// Generic domain-separated body hash (RCP §9.1): reads `domain`/`canon_version` from the body,
 /// strips `strip` keys, and returns
 /// `sha256:hex( SHA-256( LP(domain) ‖ LP(canon_version) ‖ RCP-serialize(body \ strip) ) )`.
 /// Shared by records (`strip = [content_hash, sig]`) and checkpoints
 /// (`strip = [anchor, checkpoint_hash, sig]`).
 pub fn hash_body(value: &CanonValue, strip: &[&str]) -> Result<String, RecordError> {
-    Ok(sha256_prefixed(&hash_body_preimage(value, strip)?))
+    body_hash(value, strip).map_err(PreimageFault::into_record_error)
+}
+
+pub(crate) fn body_hash(value: &CanonValue, strip: &[&str]) -> Result<String, PreimageFault> {
+    Ok(sha256_prefixed(&body_preimage(value, strip)?))
 }
 
 /// The exact bytes [`hash_body`] feeds SHA-256:
@@ -165,20 +201,33 @@ pub fn hash_body(value: &CanonValue, strip: &[&str]) -> Result<String, RecordErr
 /// `core/tests/oracle.rs` can compare it byte-for-byte against the Lean model's preimage.
 #[doc(hidden)]
 pub fn hash_body_preimage(value: &CanonValue, strip: &[&str]) -> Result<Vec<u8>, RecordError> {
-    if value.as_object().is_none() {
-        return Err(RecordError::NotObject);
-    }
-    let domain = str_field(value, "domain")?.to_string();
-    let canon_version = str_field(value, "canon_version")?.to_string();
+    body_preimage(value, strip).map_err(PreimageFault::into_record_error)
+}
 
-    let body = value.without_keys(strip);
-    let canon = body.serialize();
-
-    let mut preimage = Vec::with_capacity(8 + domain.len() + canon_version.len() + canon.len());
-    if !lp_str_into(&mut preimage, &domain) || !lp_str_into(&mut preimage, &canon_version) {
-        return Err(RecordError::TooLong);
+/// [`hash_body_preimage`] before error mapping. A body with a duplicate key after NFC, at any depth,
+/// has no preimage: it has no single canonical meaning to commit to (RCP §5).
+pub(crate) fn body_preimage(value: &CanonValue, strip: &[&str]) -> Result<Vec<u8>, PreimageFault> {
+    let members = match value {
+        CanonValue::Object(m) => m,
+        _ => return Err(PreimageFault::NotObject),
+    };
+    let domain = match member(value, "domain") {
+        Some(CanonValue::Str(s)) => s,
+        Some(_) => return Err(PreimageFault::DomainNotString),
+        None => return Err(PreimageFault::MissingDomain),
+    };
+    let canon_version = match member(value, "canon_version") {
+        Some(CanonValue::Str(s)) => s,
+        Some(_) => return Err(PreimageFault::CanonVersionNotString),
+        None => return Err(PreimageFault::MissingCanonVersion),
+    };
+    let mut preimage = Vec::new();
+    if !lp_str_into(&mut preimage, domain) || !lp_str_into(&mut preimage, canon_version) {
+        return Err(PreimageFault::TooLong);
     }
-    preimage.extend_from_slice(canon.as_bytes());
+    if !write_object(members, strip, &mut preimage) {
+        return Err(PreimageFault::DuplicateKey);
+    }
     Ok(preimage)
 }
 
@@ -188,14 +237,24 @@ pub fn hash_body_preimage(value: &CanonValue, strip: &[&str]) -> Result<Vec<u8>,
 /// verifying a record should additionally confirm they equal the expected constants (see
 /// [`verify_content_hash`]).
 pub fn compute_content_hash(record: &CanonValue) -> Result<String, RecordError> {
-    Ok(sha256_prefixed(&content_hash_preimage(record)?))
+    record_hash(record).map_err(PreimageFault::into_record_error)
+}
+
+// `body`, not `record`: a parameter named like the module would shadow it in the extracted model.
+pub(crate) fn record_hash(body: &CanonValue) -> Result<String, PreimageFault> {
+    Ok(sha256_prefixed(&record_preimage(body)?))
 }
 
 /// The exact bytes [`compute_content_hash`] feeds SHA-256 (body with `content_hash`/`sig` stripped).
 /// Hidden `pub` for the Lean-oracle differential test (`core/tests/oracle.rs`).
 #[doc(hidden)]
 pub fn content_hash_preimage(record: &CanonValue) -> Result<Vec<u8>, RecordError> {
-    hash_body_preimage(record, &["content_hash", "sig"])
+    record_preimage(record).map_err(PreimageFault::into_record_error)
+}
+
+/// The record preimage: the body without `content_hash`/`sig` (RCP §9.1).
+pub(crate) fn record_preimage(body: &CanonValue) -> Result<Vec<u8>, PreimageFault> {
+    body_preimage(body, &["content_hash", "sig"])
 }
 
 /// Verify a record's stored `content_hash` and that its declared domain/canon_version match
@@ -265,4 +324,50 @@ pub fn verify_sealed(record: &CanonValue, vk: &VerifyingKey) -> Result<(), Recor
     validate_record_shape(record)?;
     verify_content_hash(record)?;
     verify_signature(record, vk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(extensions: CanonValue) -> CanonValue {
+        CanonValue::Object(vec![
+            ("domain".into(), CanonValue::string(RECORD_DOMAIN)),
+            ("canon_version".into(), CanonValue::string(CANON_VERSION)),
+            ("extensions".into(), extensions),
+        ])
+    }
+
+    /// A programmatically built body whose nested object has two keys that coincide only after NFC
+    /// (`é` precomposed and decomposed) has no single canonical meaning: hashing fails closed
+    /// instead of committing to text with a repeated key (RCP §5).
+    #[test]
+    fn nested_nfc_duplicate_key_has_no_content_hash() {
+        let dup = CanonValue::Object(vec![
+            ("\u{e9}".into(), CanonValue::Int(1)),
+            ("e\u{301}".into(), CanonValue::Int(2)),
+        ]);
+        assert_eq!(
+            compute_content_hash(&body(dup)),
+            Err(RecordError::DuplicateKey)
+        );
+        let distinct = CanonValue::Object(vec![
+            ("\u{e9}".into(), CanonValue::Int(1)),
+            ("e".into(), CanonValue::Int(2)),
+        ]);
+        assert!(compute_content_hash(&body(distinct)).is_ok());
+    }
+
+    /// Stripped keys are matched before NFC and do not count as duplicates.
+    #[test]
+    fn stripped_keys_are_not_hashed() {
+        let mut members = body(CanonValue::Null).as_object().unwrap().clone();
+        let base = content_hash_preimage(&CanonValue::Object(members.clone())).unwrap();
+        members.push(("content_hash".into(), CanonValue::string("x")));
+        members.push(("sig".into(), CanonValue::string("y")));
+        assert_eq!(
+            content_hash_preimage(&CanonValue::Object(members)).unwrap(),
+            base
+        );
+    }
 }
