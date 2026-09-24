@@ -5197,7 +5197,16 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_int(rec, "grant_evidence", "issued_at"),
             ev_int(rec, "grant_evidence", "exp"),
         ) {
-            (Some(gid), Some(action), Some(resource_id), Some(scope_class), Some(cnf_kid), Some(credential_binding), Some(issued_at), Some(exp)) => {
+            (
+                Some(gid),
+                Some(action),
+                Some(resource_id),
+                Some(scope_class),
+                Some(cnf_kid),
+                Some(credential_binding),
+                Some(issued_at),
+                Some(exp),
+            ) => {
                 // v2 brokered grants carry the authorized project inside the
                 // broker-signed evidence as well as the sealed record. This gate
                 // applies even when the credential descriptor is not disclosed.
@@ -5206,8 +5215,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     || (pop_version == Some(2)
                         && (ev_str(rec, "grant_evidence", "project_id") != s(rec, "project_id")
                             || ev_str(rec, "grant_evidence", "request_hash").is_none_or(|h| {
-                                !h.starts_with("sha256:") || h.len() != 71
-                                    || !h[7..].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                                !h.starts_with("sha256:")
+                                    || h.len() != 71
+                                    || !h[7..]
+                                        .bytes()
+                                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
                             })))
                 {
                     issues.push(format!("grant {} ({}): v2 signed project/request identity does not match sealed grant", rt.index, rt.record_id));
