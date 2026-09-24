@@ -1895,7 +1895,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	// verifies the Ed25519 agent_sig, so a caller that cannot sign the challenge is rejected here.
 	if e := req.Validate(); e != nil {
 		if errors.Is(e, broker.ErrTTLExceeded) {
-			s.rejectAuthenticatedGrantPolicy(w, gr, req, idem, "ttl_exceeded", e)
+			s.rejectAuthenticatedGrantPolicy(r.Context(), w, gr, req, idem, "ttl_exceeded", e)
 			return
 		}
 		writeErr(w, http.StatusBadRequest, e.Error())
@@ -1903,7 +1903,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, e := broker.ClassifyScope(req.Scope, req.ScopeClass); e != nil {
 		if errors.Is(e, broker.ErrForbiddenScope) {
-			s.rejectAuthenticatedGrantPolicy(w, gr, req, idem, "forbidden_scope", e)
+			s.rejectAuthenticatedGrantPolicy(r.Context(), w, gr, req, idem, "forbidden_scope", e)
 			return
 		}
 		writeErr(w, http.StatusBadRequest, e.Error())
@@ -1912,10 +1912,17 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	// A committed exact retry remains readable after its signed request window.
 	// Check before staging the descriptor: staging a fresh candidate would both
 	// reject the expired proof and leave an unnecessary content-store write.
-	if existing, found, e := s.st.RecordByIdem(gr.ProjectID, idem); e != nil {
+	var existing store.Record
+	var found bool
+	if e := s.st.WithProjectRead(r.Context(), gr.ProjectID, func(st store.Store) error {
+		var readErr error
+		existing, found, readErr = st.RecordByIdem(gr.ProjectID, idem)
+		return readErr
+	}); e != nil {
 		writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+e.Error())
 		return
-	} else if found {
+	}
+	if found {
 		if same, e := storedGrantMatchesRequest(existing.JSON, req); e != nil || !same {
 			writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
 			return
@@ -2130,19 +2137,25 @@ func (s *Server) reconstructCapability(projectID, grantID string) (string, error
 // A validly re-signed different request under an existing grant key is a 409,
 // never a new denial record. The denial writer repeats this lookup under its
 // project transaction to close a concurrent grant/denial race.
-func (s *Server) rejectAuthenticatedGrantPolicy(w http.ResponseWriter, gr grantRequest, req broker.Request, idem, reason string, policyErr error) {
+func (s *Server) rejectAuthenticatedGrantPolicy(ctx context.Context, w http.ResponseWriter, gr grantRequest, req broker.Request, idem, reason string, policyErr error) {
 	if e := req.FreshAt(s.now()); e != nil {
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
-	if _, found, e := s.st.RecordByIdem(gr.ProjectID, idem); e != nil {
+	var found bool
+	if e := s.st.WithProjectRead(ctx, gr.ProjectID, func(st store.Store) error {
+		_, matched, readErr := st.RecordByIdem(gr.ProjectID, idem)
+		found = matched
+		return readErr
+	}); e != nil {
 		writeErr(w, http.StatusInternalServerError, "idempotency lookup: "+e.Error())
 		return
-	} else if found {
+	}
+	if found {
 		writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
 		return
 	}
-	if s.denyLog && s.sealGrantDenial(gr, req, reason, policyErr.Error()) {
+	if s.denyLog && s.sealGrantDenial(ctx, gr, req, reason, policyErr.Error()) {
 		writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
 		return
 	}
@@ -2155,7 +2168,7 @@ func (s *Server) rejectAuthenticatedGrantPolicy(w http.ResponseWriter, gr grantR
 // grant_evidence, or capability: nothing was issued or elevated, and the grant
 // sequence is untouched. Its distinct event_type keeps it out of grant counts.
 // Best-effort: a seal failure is logged and never changes the caller's 400.
-func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, detail string) (conflict bool) {
+func (s *Server) sealGrantDenial(ctx context.Context, gr grantRequest, req broker.Request, reason, detail string) (conflict bool) {
 	// #47: bound the best-effort denial log. A drop changes NOTHING the caller sees — every call site invokes
 	// this from inside the denial branch and writes the same 4xx immediately after it returns, regardless of
 	// whether a seal happened — it only declines to seal one more best-effort record once a sweep exceeds the
@@ -2235,7 +2248,7 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 			},
 		},
 	}
-	err := s.withProjectWrite(context.Background(), gr.ProjectID, func(st store.Store) error {
+	err := s.withProjectWrite(ctx, gr.ProjectID, func(st store.Store) error {
 		if _, found, e := st.RecordByIdem(gr.ProjectID, gr.IdempotencyKey); e != nil {
 			return e
 		} else if found {
