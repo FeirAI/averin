@@ -581,7 +581,9 @@ Absent (or `{"policy":"strict"}`) the claim is always `insufficient`. Any malfor
 partial value is a fatal configuration error. The claim is `satisfied` only if an authenticated,
 fresh v2 revocation snapshot for this project shows every receipt ordered strictly before any
 prospective cutoff of its grant (or its grant not revoked) and at or below the snapshot watermark,
-with every other obligation of `authorized`. A use of a totally revoked grant, a receipt at or after
+with every other obligation of `authorized`, and only if the `claim_policy.revocation` mode holds
+for the v2 evidence (a pinned issuer; `disclosed` needs a usable v2 list, `merkle` a usable v2 root
+with a valid proof for every receipt's grant, `both` all of these). A use of a totally revoked grant, a receipt at or after
 its cutoff, or an outcome signing another ordinal than its intent refutes it. Current revocation is
 reported separately and still blocks `ok`, `revoked_uses_blocked`, `authorized` and the capstone, so
 a bundle can be `ok:false` with the historical claim satisfied; the CLI and viewers show both. The

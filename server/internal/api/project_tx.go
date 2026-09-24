@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 
 	"github.com/feirai/averin/server/internal/store"
 )
@@ -32,6 +33,20 @@ func (s *Server) withProjectWrite(ctx context.Context, projectID string, fn func
 	})
 	if err == nil && count != 0 {
 		s.meter.RecordsIngested(projectID, count)
+	}
+	return err
+}
+
+// errRollbackDecided rolls back a project transaction whose HTTP outcome the callback has
+// already decided (a conflict, or an idempotent answer from another committed row). Plan 009:
+// an authorization ordinal allocated in that transaction must not persist without its receipt.
+var errRollbackDecided = errors.New("project transaction rolled back after a decided non-success outcome")
+
+// decidedRollback maps errRollbackDecided back to "no store error"; the caller then answers from
+// the outcome its callback recorded.
+func decidedRollback(err error) error {
+	if errors.Is(err, errRollbackDecided) {
+		return nil
 	}
 	return err
 }

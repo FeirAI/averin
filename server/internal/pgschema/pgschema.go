@@ -201,6 +201,12 @@ func migrate(ctx context.Context, dsn string, roles *cutoverRoles) error {
 		return fmt.Errorf("pgschema: database schema version %d requires explicit averin-migrate maintenance cutover to v%d; stop old writers first", stored, CurrentSchemaVersion)
 	}
 
+	// Only an advancing cutover needs the new runtime idle; a re-run at the current version is a no-op.
+	if roles != nil {
+		if err := validateNewRuntimeIdle(ctx, tx, roles.next); err != nil {
+			return err
+		}
+	}
 	// stored < CurrentSchemaVersion: apply the ordered forward steps, stamping each in THIS tx so the
 	// version and its DDL commit together — a crash can never leave version-ahead-of-schema (which would
 	// then read as "already migrated" and skip real work) or schema-ahead-of-version (which would re-run).
@@ -266,6 +272,25 @@ func validateCutoverRoles(ctx context.Context, tx pgx.Tx, roles cutoverRoles) er
 		if err != pgx.ErrNoRows {
 			return fmt.Errorf("pgschema: inspect old runtime privileges: %w", err)
 		}
+	}
+	return nil
+}
+
+// validateNewRuntimeIdle is the schema-cutover-only part of the barrier (plan 009 review). The
+// new runtime starts only after the cutover commits, so a live session of it now would be an old
+// binary reusing that identity: it could keep writing unordered receipts or untyped revocations
+// across the step. Any prepared transaction in this database, whatever its owner, would commit
+// against the old schema. (PurgeLegacy runs later, with the new runtime live, and skips this.)
+func validateNewRuntimeIdle(ctx context.Context, tx pgx.Tx, next string) error {
+	var nextSessions, prepared int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE usename=$1`, next).Scan(&nextSessions); err != nil {
+		return fmt.Errorf("pgschema: new runtime sessions: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_prepared_xacts WHERE database=current_database()`).Scan(&prepared); err != nil {
+		return fmt.Errorf("pgschema: prepared transactions: %w", err)
+	}
+	if nextSessions != 0 || prepared != 0 {
+		return fmt.Errorf("pgschema: new runtime role %q has %d sessions and the database has %d prepared transactions; start new runtimes only after the cutover", next, nextSessions, prepared)
 	}
 	return nil
 }

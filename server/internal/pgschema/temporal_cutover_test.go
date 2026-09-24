@@ -235,3 +235,44 @@ func TestTemporalRevocationCutoverInterruptedRollsBackAndRetries(t *testing.T) {
 		t.Fatalf("steady-state startup re-migrated events: %d %v", events, err)
 	}
 }
+
+// Review L4: a still-running v6 runtime identity reused as the new runtime cannot pass the v7
+// barrier while it holds a session.
+func TestTemporalRevocationCutoverRefusesLiveNewRuntimeSession(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedV6(t, admin)
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	old, next := "averin_v6_retired_"+suffix, "averin_v7_reused_"+suffix
+	for _, sql := range []string{"CREATE ROLE " + old + " NOLOGIN", "CREATE ROLE " + next + " LOGIN PASSWORD 'temporary-test-only'"} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+old)
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+next)
+	}()
+	cfg, err := pgx.ParseConfig(scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.User, cfg.Password = next, "temporary-test-only"
+	live, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Cutover(ctx, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), "sessions") {
+		t.Fatalf("v7 cutover accepted a live session of the new runtime identity: %v", err)
+	}
+	if maxVersion(t, admin) != 6 || regExists(t, admin, "revocation_events") {
+		t.Fatal("refused cutover changed the schema")
+	}
+	if err := live.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := Cutover(ctx, scoped, []string{old}, next); err != nil {
+		t.Fatalf("cutover after the new runtime's session closed: %v", err)
+	}
+}

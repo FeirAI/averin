@@ -162,6 +162,10 @@ func BuildRevocationMerkleRootV2(canon Sealer, revKey ed25519.PrivateKey, issued
 	if err != nil {
 		return nil, err
 	}
+	// Like the list builder: a cutoff above the signed watermark is never emitted.
+	if tree.MaxCutoff() > snap.Watermark {
+		return nil, fmt.Errorf("revocation_merkle_root v2: a prospective cutoff exceeds the snapshot watermark %d", snap.Watermark)
+	}
 	body := map[string]any{
 		"format":     merkleRootV2Format,
 		"issuer_kid": broker.KeyID(revKey.Public().(ed25519.PublicKey)),

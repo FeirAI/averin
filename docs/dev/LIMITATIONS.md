@@ -158,8 +158,10 @@ prospective (cancellation) revocations exported in the v2 list format. Its limit
   every v1 list or v1 Merkle membership never yield a historical positive.
 - Only receipts with a body-bound (v3) resource signature and an ordinal (produced at
   schema v7 or later) can be `proven_before`; older receipts stay `indeterminate`.
-- The server exports the v2 disclosed list; the v2 Merkle root has a producer builder but
-  is not exported by the server.
+- The server exports only the disclosed list (v1, or v2 with the v2 export). Merkle roots,
+  v1 and v2, are builder-only: the Go builders exist but the server does not export them.
+- An unusable signed v2 artifact still blocks current use of the grants it names, but gives
+  no historical judgment (the claim stays `insufficient`, never `refuted` or `satisfied`).
 - There is no external (TSA-based) temporal mode.
 
 Two-phase prepare/finalize and void read the same durable pending row on every

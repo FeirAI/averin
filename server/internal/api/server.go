@@ -2603,22 +2603,25 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			// is this exact operation; otherwise it is another record's receipt — returning it as ours would report
 			// an action that has no receipt of its own. Nothing of ours persisted and the caller has not acted, so
 			// release the consumed credential and 409.
+			// Either way this transaction persisted nothing of its own; roll it back so the
+			// allocated ordinal is not burned (plan 009).
 			if _, same := s.priorUseMatchesRequest(sealed, useID, ur, brokerKind, paramsCommitment); same {
 				idempotent = true
-				return nil
+				return errRollbackDecided
 			}
 			shim.RollbackUse(ev)
 			sealed, grantID = "", ""
 			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
-			return nil
+			return errRollbackDecided
 		}
 		if e != nil {
 			if errors.Is(e, store.ErrRecordIDConflict) {
 				// A different record already holds this deterministic use id (persisted nothing): a conflict, not
-				// an infra failure — release the credential (the caller has not acted) and 409.
+				// an infra failure — release the credential (the caller has not acted), roll back the
+				// ordinal allocation, and 409.
 				shim.RollbackUse(ev)
 				conflictErr = e
-				return nil
+				return errRollbackDecided
 			}
 			// The transaction owns both ledger claims and the receipt. Returning
 			// an error rolls all three back; a COMMIT error is classified only
@@ -2630,6 +2633,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			Ordinal: ordinal, RecordID: useID, GrantID: ev.GrantID, Kind: brokerKind,
 		})
 	})
+	storeErr = decidedRollback(storeErr)
 	if conflictErr != nil {
 		writeErr(w, http.StatusConflict, "use rejected: "+conflictErr.Error())
 		return

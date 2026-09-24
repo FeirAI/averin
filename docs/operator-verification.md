@@ -222,7 +222,9 @@ barrier before starting any new writer or enabling recovery:
    This single transaction validates the retired-role barrier, applies pending steps through
    `0007`, and records the DB-time legacy nonce-exclusion cutoff (the `0007` step leaves an
    existing cutoff unchanged). The v7 step retires the boolean `revocations` table: grant the new
-   runtime `SELECT, INSERT` on `authorization_receipts` and `revocation_events` before starting it. A fresh, truly empty DB instead
+   runtime `SELECT, INSERT` on `authorization_receipts` and `revocation_events` before starting it.
+   An advancing cutover refuses while the new runtime identity has any session or the database has
+   any prepared transaction, so do not start new runtimes before the command commits. A fresh, truly empty DB instead
    uses `AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate --init`.
    Do not use ordinary server startup to migrate an existing or unstamped database.
 3. Prove the cutoff: `pg_stat_activity` has no old backends, `pg_prepared_xacts` has no old

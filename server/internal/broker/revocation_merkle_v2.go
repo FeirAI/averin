@@ -147,6 +147,17 @@ func BuildRevocationTreeV2(entries []RevocationStateEntry) (*RevocationTreeV2, e
 	return t, nil
 }
 
+// MaxCutoff returns the largest prospective cutoff committed in the tree (0 if none).
+func (t *RevocationTreeV2) MaxCutoff() int64 {
+	var max int64
+	for _, e := range t.entries {
+		if e.Mode == "prospective" && e.CutoffOrder > max {
+			max = e.CutoffOrder
+		}
+	}
+	return max
+}
+
 func (t *RevocationTreeV2) RootHex() string { return t.tree.RootHex() }
 func (t *RevocationTreeV2) LeafCount() int  { return t.tree.LeafCount() }
 

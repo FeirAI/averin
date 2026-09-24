@@ -545,3 +545,28 @@ func TestTemporalMerkleV2ProducerToVerifier(t *testing.T) {
 		}
 	}
 }
+
+// Review L6: the v2 Merkle root builder refuses a cutoff above the snapshot watermark, like the
+// list builder.
+func TestTemporalMerkleV2BuilderRejectsCutoffBeyondWatermark(t *testing.T) {
+	c, _ := core.New(seed)
+	tree, err := broker.BuildRevocationTreeV2([]broker.RevocationStateEntry{{GrantID: "g", Mode: "prospective", CutoffOrder: 6}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := func(w int64) api.RevocationSnapshot {
+		return api.RevocationSnapshot{ProjectID: "p1", BoundaryTime: time.Now(), Watermark: w}
+	}
+	if _, err := api.BuildRevocationMerkleRootV2(c, revocationKey(), "2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z", snap(5), tree); err == nil {
+		t.Fatal("cutoff 6 accepted under watermark 5")
+	}
+	if _, err := api.BuildRevocationMerkleRootV2(c, revocationKey(), "2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z", snap(6), tree); err != nil {
+		t.Fatalf("cutoff at the watermark refused: %v", err)
+	}
+	for _, bad := range [][]broker.RevocationStateEntry{{{GrantID: "b", Mode: "prospective", CutoffOrder: 9}}} {
+		list := []broker.RevocationStateEntry(bad)
+		if _, err := api.BuildRevocationListV2(c, revocationKey(), "2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z", snap(5), list); err == nil {
+			t.Fatal("list builder accepted a cutoff above the watermark")
+		}
+	}
+}

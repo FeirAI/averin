@@ -48,6 +48,8 @@ REQUIRED = (
     f"{API_PACKAGE}:TestTemporalRepeatedRevokeAcrossPoolsPostgres",
     f"{API_PACKAGE}:TestTemporalSnapshotExportConsistencyPostgres",
     f"{API_PACKAGE}:TestTemporalRevocationProcessCrashCutsPostgres",
+    f"{API_PACKAGE}:TestTemporalConflictsBurnNoOrdinalPostgres",
+    f"{PGSCHEMA_PACKAGE}:TestTemporalRevocationCutoverRefusesLiveNewRuntimeSession",
     f"{STORE_PACKAGE}:TestPostgresTemporalRevocationContract",
     f"{PGSCHEMA_PACKAGE}:TestTemporalRevocationCutoverFromV6",
     f"{PGSCHEMA_PACKAGE}:TestTemporalRevocationCutoverInterruptedRollsBackAndRetries",

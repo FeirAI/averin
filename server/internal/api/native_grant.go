@@ -233,8 +233,12 @@ func (s *Server) handleIntrospection(w http.ResponseWriter, r *http.Request) {
 		if introspectedAt == 0 {
 			introspectedAt = now.Unix()
 		}
-		if e := s.validateNativeIntrospection(st, ir, introspectedAt, now); e != nil {
-			clientErr = e
+		refusal, e := s.validateNativeIntrospection(st, ir, introspectedAt, now)
+		if e != nil {
+			return e // a store/database failure is a retryable 5xx, never a client refusal
+		}
+		if refusal != nil {
+			clientErr = refusal
 			return nil
 		}
 		ordinal, e := st.AllocateAuthorizationOrder(ir.ProjectID)
@@ -252,24 +256,26 @@ func (s *Server) handleIntrospection(w http.ResponseWriter, r *http.Request) {
 		stored, c, se := s.sealAndStore(st, ir.ProjectID, ir.SessionID, ir.IdempotencyKey, rec, nil)
 		if errors.Is(se, store.ErrRecordIDConflict) {
 			conflictErr = se
-			return nil
+			return errRollbackDecided // nothing of ours persisted: do not burn the ordinal
 		}
 		if se != nil {
 			return se
 		}
 		if !c {
 			// A same-key insert raced past the lookup: echo it only if it is this exact request.
+			// Either way this transaction persisted nothing of its own: roll back the ordinal.
 			if !s.storedIntrospectionMatches(stored, recordID, ir, transcriptHash) {
 				conflictErr = errors.New("idempotency_key is already bound to a different record in this project")
 			}
 			sealed = stored
-			return nil
+			return errRollbackDecided
 		}
 		sealed, created = stored, true
 		return st.PutAuthorizationReceipt(ir.ProjectID, store.AuthorizationReceipt{
 			Ordinal: ordinal, RecordID: recordID, GrantID: ir.GrantID, Kind: "introspection_transcript",
 		})
 	})
+	commitErr = decidedRollback(commitErr)
 	if conflictErr != nil {
 		writeErr(w, http.StatusConflict, "introspection rejected: "+conflictErr.Error())
 		return
@@ -332,13 +338,13 @@ func (s *Server) storedIntrospectionMatches(recordJSON, recordID string, ir intr
 // a token_exchange grant of this resource, lease == credential_ref, effective scope within the grant
 // scope, effective expiry and introspection time within the grant window, the grant not expired now,
 // and no revocation (any mode) or terminal void.
-func (s *Server) validateNativeIntrospection(st store.Store, ir introspectionRequest, introspectedAt int64, now time.Time) error {
+func (s *Server) validateNativeIntrospection(st store.Store, ir introspectionRequest, introspectedAt int64, now time.Time) (refusal, err error) {
 	grantRec, found, err := st.RecordByRecordID(ir.ProjectID, ir.GrantID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !found {
-		return fmt.Errorf("grant %q is not a committed native grant in this project", ir.GrantID)
+		return fmt.Errorf("grant %q is not a committed native grant in this project", ir.GrantID), nil
 	}
 	var g struct {
 		Extensions struct {
@@ -358,36 +364,36 @@ func (s *Server) validateNativeIntrospection(st store.Store, ir introspectionReq
 	}
 	if json.Unmarshal([]byte(grantRec.JSON), &g) != nil || g.Extensions.Broker.Kind != "grant" ||
 		g.Extensions.Broker.Evidence.Mode != "token_exchange" || g.Extensions.Broker.Evidence.GrantID != ir.GrantID {
-		return fmt.Errorf("grant %q is not a committed native (token_exchange) grant", ir.GrantID)
+		return fmt.Errorf("grant %q is not a committed native (token_exchange) grant", ir.GrantID), nil
 	}
 	ge := g.Extensions.Broker.Evidence
 	switch {
 	case ge.ResourceID != s.resourceID:
-		return fmt.Errorf("native grant %q is for resource %q, not this resource", ir.GrantID, ge.ResourceID)
+		return fmt.Errorf("native grant %q is for resource %q, not this resource", ir.GrantID, ge.ResourceID), nil
 	case ge.LeaseID != ir.CredentialRef:
-		return fmt.Errorf("credential_ref does not match native grant %q's lease", ir.GrantID)
+		return fmt.Errorf("credential_ref does not match native grant %q's lease", ir.GrantID), nil
 	case !scopeSubset(ir.EffectiveScope, ge.Scope):
-		return fmt.Errorf("effective_scope is not within native grant %q's scope", ir.GrantID)
+		return fmt.Errorf("effective_scope is not within native grant %q's scope", ir.GrantID), nil
 	case ir.EffectiveExp > ge.Exp:
-		return fmt.Errorf("effective_exp outlives native grant %q", ir.GrantID)
+		return fmt.Errorf("effective_exp outlives native grant %q", ir.GrantID), nil
 	case introspectedAt < ge.IssuedAt || introspectedAt >= ge.Exp:
-		return fmt.Errorf("introspected_at is outside native grant %q's validity window", ir.GrantID)
+		return fmt.Errorf("introspected_at is outside native grant %q's validity window", ir.GrantID), nil
 	case introspectedAt > now.Add(broker.RequestClockSkew).Unix():
-		return errors.New("introspected_at is in the future")
+		return errors.New("introspected_at is in the future"), nil
 	case now.Unix() >= ge.Exp:
-		return fmt.Errorf("native grant %q has expired", ir.GrantID)
+		return fmt.Errorf("native grant %q has expired", ir.GrantID), nil
 	}
 	if voided, err := s.terminalGrantVoided(st, ir.ProjectID, ir.GrantID); err != nil {
-		return err
+		return nil, err
 	} else if voided {
-		return fmt.Errorf("native grant %q is voided", ir.GrantID)
+		return fmt.Errorf("native grant %q is voided", ir.GrantID), nil
 	}
 	if revoked, err := st.IsRevoked(ir.ProjectID, ir.GrantID); err != nil {
-		return err
+		return nil, err
 	} else if revoked {
-		return fmt.Errorf("native grant %q is revoked", ir.GrantID)
+		return fmt.Errorf("native grant %q is revoked", ir.GrantID), nil
 	}
-	return nil
+	return nil, nil
 }
 
 // scopeSubset reports whether every space-delimited token of sub is a token of sup (the verifier's
