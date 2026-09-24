@@ -32,20 +32,25 @@ impl std::fmt::Display for SigError {
 }
 impl std::error::Error for SigError {}
 
-/// The exact bytes an Ed25519 signature under `tag` covers. Hidden `pub` for the Lean-oracle
-/// differential test (`core/tests/oracle.rs`).
+/// The exact bytes an Ed25519 signature under `tag` covers: `LP(tag) ‖ utf8(content_hash)`
+/// (RCP §9.2). `None` if `tag` is too long to length-prefix, which no constant tag is; callers fail
+/// closed on it rather than signing or verifying an unframed message. Hidden `pub` for the
+/// Lean-oracle differential test (`core/tests/oracle.rs`).
 #[doc(hidden)]
-pub fn preimage(tag: &str, content_hash: &str) -> Vec<u8> {
-    // LP(tag) ‖ utf8(content_hash)   (RCP §9.2)
-    let mut pre = Vec::with_capacity(4 + tag.len() + content_hash.len());
-    lp_str_into(&mut pre, tag);
+pub fn preimage(tag: &str, content_hash: &str) -> Option<Vec<u8>> {
+    let mut pre = Vec::new();
+    if !lp_str_into(&mut pre, tag) {
+        return None;
+    }
     pre.extend_from_slice(content_hash.as_bytes());
-    pre
+    Some(pre)
 }
 
-/// Sign `content_hash` under `tag`; returns `ed25519:<base64url-no-pad>`.
+/// Sign `content_hash` under `tag`; returns `ed25519:<base64url-no-pad>`. Panics (signs nothing) if
+/// `tag` exceeds the 4-byte length prefix.
 pub fn sign(tag: &str, content_hash: &str, sk: &SigningKey) -> String {
-    let sig = sk.sign(&preimage(tag, content_hash));
+    let msg = preimage(tag, content_hash).expect("signature tag exceeds the LP length bound");
+    let sig = sk.sign(&msg);
     format!("{SIG_PREFIX}{}", b64::encode(&sig.to_bytes()))
 }
 
@@ -54,7 +59,8 @@ pub fn verify(tag: &str, content_hash: &str, sig: &str, vk: &VerifyingKey) -> Re
     let raw = sig.strip_prefix(SIG_PREFIX).ok_or(SigError::BadPrefix)?;
     let bytes = b64::decode_fixed::<64>(raw).map_err(SigError::BadEncoding)?;
     let signature = Signature::from_bytes(&bytes);
-    vk.verify_strict(&preimage(tag, content_hash), &signature)
+    let msg = preimage(tag, content_hash).ok_or(SigError::Invalid)?;
+    vk.verify_strict(&msg, &signature)
         .map_err(|_| SigError::Invalid)
 }
 
@@ -117,6 +123,18 @@ mod tests {
             decode_pubkey(&format!("ed25519pub:{short}")),
             Err(SigError::BadEncoding(_))
         ));
+    }
+
+    /// Every production tag fits the 4-byte length prefix, so the preimage is exactly
+    /// `uint32_be(len) ‖ tag ‖ content_hash`.
+    #[test]
+    fn production_tags_frame() {
+        for tag in [RECORD_SIG_TAG, CHECKPOINT_SIG_TAG] {
+            let pre = preimage(tag, "sha256:00").unwrap();
+            assert_eq!(pre[..4], (tag.len() as u32).to_be_bytes());
+            assert_eq!(&pre[4..4 + tag.len()], tag.as_bytes());
+            assert_eq!(&pre[4 + tag.len()..], b"sha256:00");
+        }
     }
 
     #[test]

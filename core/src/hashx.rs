@@ -27,19 +27,37 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-pub fn hex_lower(b: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(b.len() * 2);
-    for &byte in b {
-        s.push(HEX[(byte >> 4) as usize] as char);
-        s.push(HEX[(byte & 0xF) as usize] as char);
+const HEX: [u8; 16] = *b"0123456789abcdef";
+
+/// Append the two lowercase hex digits of every byte of `b` to `out`.
+fn hex_lower_into(b: &[u8], out: &mut Vec<u8>) {
+    let mut i = 0;
+    while i < b.len() {
+        out.push(HEX[(b[i] >> 4) as usize]);
+        out.push(HEX[(b[i] & 0xF) as usize]);
+        i += 1;
     }
-    s
+}
+
+fn ascii_string(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => panic!("hex digest text is ASCII"),
+    }
+}
+
+pub fn hex_lower(b: &[u8]) -> String {
+    let mut s = Vec::with_capacity(b.len() * 2);
+    hex_lower_into(b, &mut s);
+    ascii_string(s)
 }
 
 /// `"sha256:" ‖ lowerhex(SHA-256(data))`.
 pub fn sha256_prefixed(data: &[u8]) -> String {
-    format!("sha256:{}", hex_lower(&sha256(data)))
+    let mut s = Vec::with_capacity(71);
+    s.extend_from_slice(b"sha256:");
+    hex_lower_into(&sha256(data), &mut s);
+    ascii_string(s)
 }
 
 /// Parse a `sha256:<64-hex>` string into 32 raw bytes (None if malformed).
