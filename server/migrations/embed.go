@@ -26,3 +26,7 @@ var BrokerSeqVoid string
 //
 //go:embed 0004_project_transactions.sql
 var ProjectTransactions string
+
+// BrokerSeqRecovery adds immutable fence and terminal rows (schema version 5).
+//go:embed 0005_broker_seq_recovery.sql
+var BrokerSeqRecovery string

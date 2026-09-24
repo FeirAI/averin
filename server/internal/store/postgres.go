@@ -309,6 +309,13 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 			return existing, false, nil
 		}
 	}
+	if rid := recordIDOf(rec.JSON); rid != "" {
+		if f, found, err := p.RecoveryFenceByGrant(projectID, rid); err != nil {
+			return Record{}, false, err
+		} else if found && !recoveryTombstoneInsert(rec.JSON, idemKey, f.Seq) {
+			return Record{}, false, ErrRecoveryFenced
+		}
+	}
 
 	// record_id is unique per project (see ErrRecordIDConflict). Probed AFTER the idem fast path (an exact replay
 	// still returns its row) and before the insert: a row holding this record_id with a DIFFERENT content_hash is
@@ -411,6 +418,7 @@ func (p *Postgres) ReleaseBrokerSeq(projectID, grantID string) error {
 		WHERE project_id = $1 AND grant_id = $2
 		  AND seq = (SELECT MAX(seq) FROM broker_seq WHERE project_id = $1)
 		  AND NOT EXISTS (SELECT 1 FROM broker_seq_void v WHERE v.project_id = $1 AND v.grant_id = $2)
+		  AND NOT EXISTS (SELECT 1 FROM broker_seq_recovery_fence f WHERE f.project_id = $1 AND f.grant_id = $2)
 		  AND NOT EXISTS (
 			SELECT 1 FROM records r
 			WHERE r.project_id = $1 AND md5(r.json::jsonb ->> 'record_id') = md5($2) AND (r.json::jsonb ->> 'record_id') = $2
@@ -968,6 +976,11 @@ func (p *Postgres) AllocateBrokerSeq(projectID, grantID string) (int64, bool, er
 	}
 	if voided {
 		return 0, false, ErrBrokerSeqVoided
+	}
+	if _, fenced, err := p.RecoveryFenceByGrant(projectID, grantID); err != nil {
+		return 0, false, err
+	} else if fenced {
+		return 0, false, ErrRecoveryFenced
 	}
 	// RETURNING yields a row only when THIS statement inserted (a fresh allocation); on the grant_id conflict it
 	// yields none and the existing reservation is read back below (fresh=false).
