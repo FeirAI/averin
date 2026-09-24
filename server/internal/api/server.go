@@ -2139,14 +2139,12 @@ func (s *Server) rejectAuthenticatedGrantPolicy(w http.ResponseWriter, gr grantR
 	writeErr(w, http.StatusBadRequest, policyErr.Error())
 }
 
-// sealGrantDenial seals a B11 denied-grant record for an authenticated POLICY refusal (forbidden
-// scope / over-cap TTL). It deliberately classifies to BrokerRole::None in the verifier — event_type
-// credential_grant_denied (so it is never counted as a grant), authority.enforcement_point
-// credential_broker_denied and extensions.broker.kind grant_denied (so it matches no grant-role tuple) —
-// and carries NO broker_seq / grant_evidence / capability: nothing was issued, so the gapless D6 grant
-// sequence is untouched. It records the REQUESTED scope metadata (the probe target). A deterministic
-// record_id collapses retries of the same probe. Best-effort: a seal failure is logged and never changes
-// the caller's 400.
+// sealGrantDenial seals an integrity-only B11 record for a cryptographically
+// authenticated POLICY refusal (forbidden scope or over-cap TTL). Invalid PoP
+// never reaches this function. The record has no authority block, broker_seq,
+// grant_evidence, or capability: nothing was issued or elevated, and the grant
+// sequence is untouched. Its distinct event_type keeps it out of grant counts.
+// Best-effort: a seal failure is logged and never changes the caller's 400.
 func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, detail string) (conflict bool) {
 	// #47: bound the best-effort denial log. A drop changes NOTHING the caller sees — every call site invokes
 	// this from inside the denial branch and writes the same 4xx immediately after it returns, regardless of
@@ -2188,19 +2186,10 @@ func (s *Server) sealGrantDenial(gr grantRequest, req broker.Request, reason, de
 	if pub, err := base64.RawURLEncoding.DecodeString(idReq.AgentPubKey); err == nil {
 		idReq.AgentPubKey = base64.RawURLEncoding.EncodeToString(pub)
 	}
-	// agent_sig is part of the probe identity ONLY for pop_failed: there each DISTINCT failed proof is a
-	// distinct attempt the B11 log must COUNT (a PoP brute-force should leave one record per attempt; volume
-	// is bounded by the per-project denial budget, not by hiding attempts). For forbidden_scope/ttl the sig
-	// is incidental — and since a key-OWNER can craft many distinct VALID ed25519 sigs over one challenge
-	// (Verify accepts any canonical sig, not just the deterministic one), keeping it would let them inflate
-	// one logical operation into N denials; so it is excluded there. When kept, canonicalize it the same way.
-	if reason == "pop_failed" {
-		if sig, err := base64.RawURLEncoding.DecodeString(idReq.AgentSig); err == nil {
-			idReq.AgentSig = base64.RawURLEncoding.EncodeToString(sig)
-		}
-	} else {
-		idReq.AgentSig = ""
-	}
+	// agent_sig is incidental to an authenticated policy denial. Excluding it
+	// prevents alternate valid signatures over one request from inflating the
+	// denial count; unauthenticated PoP failures produce no denial record.
+	idReq.AgentSig = ""
 	reqJSON, _ := json.Marshal(idReq)
 	// ROOT defense against pre-seeding (C2b–C2e): mix a SERVER SECRET into the id so a caller can never
 	// precompute denial:<denialID> and squat the key in ANY version. The salt is a deterministic ed25519
