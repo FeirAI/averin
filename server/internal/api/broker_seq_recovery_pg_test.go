@@ -56,6 +56,11 @@ func TestBrokerSeqRecoveryFencePersistsAcrossReplicasPostgres(t *testing.T) {
 	}
 }
 
+func TestBrokerSeqRecoveryTerminalVoidBlocksUsePostgres(t *testing.T) {
+	pg, _ := newVoidTestPostgres(t)
+	exerciseVoidWithoutRevocationKeyBlocksPreparedCapability(t, pg)
+}
+
 // A held project transaction gives the operator a bounded retryable response.
 // It does not stall another project or turn cancellation into proof of rollback.
 func TestBrokerSeqRecoveryBlockedGuardDeadlinePostgres(t *testing.T) {

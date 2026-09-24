@@ -21,7 +21,11 @@ import (
 )
 
 func TestVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T) {
-	base := store.NewMem()
+	exerciseVoidWithoutRevocationKeyBlocksPreparedCapability(t, store.NewMem())
+}
+
+func exerciseVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T, base store.Store) {
+	t.Helper()
 	resourceCore, err := core.New(resourceSeed)
 	if err != nil {
 		t.Fatal(err)

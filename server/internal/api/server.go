@@ -2539,10 +2539,23 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			return nil
 		}
 		shim := resourceshim.New(s.brokerKey.Public().(ed25519.PublicKey), s.resourceID, st).WithProject(trustedProject)
-		// The callback receives the signature-verified JTI. A database read
-		// failure rejects the request before ledger consumption, never falling
-		// back to this replica's boot-time revoked cache.
+		// The callback receives the signature-verified JTI. A terminal void
+		// retires the grant even when no revocation signing key is configured.
+		// Read both decisions in this guarded transaction, before consumption.
 		shim.WithRevocationCheckErr(func(id string) (bool, error) {
+			fence, found, err := st.RecoveryFenceByGrant(trustedProject, id)
+			if err != nil {
+				return false, err
+			}
+			if found {
+				result, done, err := st.RecoveryResultAt(trustedProject, fence.Seq)
+				if err != nil {
+					return false, err
+				}
+				if done && result.Outcome == "voided" {
+					return true, nil
+				}
+			}
 			return st.IsRevoked(trustedProject, id)
 		})
 		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, op, ur.Nonce, s.now())
