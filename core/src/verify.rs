@@ -2535,13 +2535,18 @@ fn pop_reverify(rec: &CanonValue, credential_binding: &str) -> Result<bool, Stri
     Ok(true)
 }
 
-/// Read an integer field from a record's canonical evidence payload (used for issued_at/exp/used_at).
-fn ev_int(rec: &CanonValue, payload_key: &str, field: &str) -> Option<i64> {
+/// Read a field from a record's canonical evidence payload. Callers that
+/// negotiate a protocol version must distinguish absent from present-but-bad.
+fn ev_value<'a>(rec: &'a CanonValue, payload_key: &str, field: &str) -> Option<&'a CanonValue> {
     rec.get("extensions")
         .and_then(|e| e.get("broker"))
         .and_then(|b| b.get(payload_key))
         .and_then(|p| p.get(field))
-        .and_then(|v| v.as_int())
+}
+
+/// Read an integer field from a record's canonical evidence payload (used for issued_at/exp/used_at).
+fn ev_int(rec: &CanonValue, payload_key: &str, field: &str) -> Option<i64> {
+    ev_value(rec, payload_key, field).and_then(CanonValue::as_int)
 }
 
 /// A checkpoint's `broker_grant_head` (ADR 0004 D6 / MF2), parsed fail-closed.
@@ -5210,18 +5215,22 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 // v2 brokered grants carry the authorized project inside the
                 // broker-signed evidence as well as the sealed record. This gate
                 // applies even when the credential descriptor is not disclosed.
-                let pop_version = ev_int(rec, "grant_evidence", "pop_version");
-                if (pop_version.is_some() && pop_version != Some(2))
-                    || (pop_version == Some(2)
-                        && (ev_str(rec, "grant_evidence", "project_id") != s(rec, "project_id")
-                            || ev_str(rec, "grant_evidence", "request_hash").is_none_or(|h| {
-                                !h.starts_with("sha256:")
-                                    || h.len() != 71
-                                    || !h[7..]
-                                        .bytes()
-                                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                            })))
+                let pop_version = ev_value(rec, "grant_evidence", "pop_version");
+                let v2_fields_present = pop_version.is_some()
+                    || ev_value(rec, "grant_evidence", "project_id").is_some()
+                    || ev_value(rec, "grant_evidence", "request_hash").is_some();
+                if v2_fields_present
+                    && (pop_version.and_then(CanonValue::as_int) != Some(2)
+                        || ev_str(rec, "grant_evidence", "project_id") != s(rec, "project_id")
+                        || ev_str(rec, "grant_evidence", "request_hash").is_none_or(|h| {
+                            !h.starts_with("sha256:")
+                                || h.len() != 71
+                                || !h[7..]
+                                    .bytes()
+                                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                        }))
                 {
+                    committed_grant_rejected = true;
                     issues.push(format!("grant {} ({}): v2 signed project/request identity does not match sealed grant", rt.index, rt.record_id));
                     continue;
                 }
@@ -5470,8 +5479,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if jti != gid.as_str() {
             mism.push(format!("jti '{jti}' != grant_id '{gid}'"));
         }
-        if ev_int(rec, "grant_evidence", "pop_version") == Some(2)
-            || descriptor.get("version").and_then(|v| v.as_int()) == Some(2)
+        if ev_value(rec, "grant_evidence", "pop_version").is_some()
+            || ev_value(rec, "grant_evidence", "project_id").is_some()
+            || ev_value(rec, "grant_evidence", "request_hash").is_some()
+            || descriptor.get("version").is_some()
+            || descriptor.get("project_id").is_some()
         {
             if descriptor.get("version").and_then(|v| v.as_int()) != Some(2) {
                 mism.push("v2 descriptor.version is missing or wrong".to_string());

@@ -254,10 +254,10 @@ fn every_preimage_family_matches_model() {
                 let mut pre = Vec::new();
                 assert!(lp_into(&mut pre, b"averin.broker.pop.v2"));
                 for part in &f[..12] {
-                    assert!(lp_into(&mut pre, raw(part)));
+                    assert!(lp_into(&mut pre, st(part).as_bytes()));
                 }
                 for part in &f[12..15] {
-                    pre.extend_from_slice(raw(part));
+                    pre.extend_from_slice(&int(part).to_be_bytes());
                 }
                 pre.extend_from_slice(raw(tail_field
                     .as_ref()

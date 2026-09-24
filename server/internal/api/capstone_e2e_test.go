@@ -43,7 +43,7 @@ func TestCapstoneAttestedCompleteEndToEnd(t *testing.T) {
 		WithCoverageManifest(manifest).
 		Routes()
 
-	grantID, cap := mkGrant(t, h, ak, "idem-grant")
+	grantID, cap := mkGrantAt(t, h, ak, "idem-grant", fixedNow())
 
 	// Two-phase use (the capstone forbids a one-phase `use`): use-intent then use-outcome.
 	code, resp := do(t, h, "POST", "/v2/use-intent", useBody(t, "idem-intent", cap, grantID, ak, "SELECT 1", "nonce-1"))
