@@ -12,9 +12,9 @@
 #   kani       the named bounded proof, only for m3 / m4       (see kani_harness below); for those two
 #              mutants the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
 #
-# The suite passes only if every mutant is killed by at least one gate; it prints which gates killed each.
-# It first checks that every gate passes on the unmutated tree, so a gate that is simply broken cannot
-# count as a kill.
+# The suite passes only if every mutant is killed by a completed test failure; m15–m21 additionally
+# require their named detector to fail. It first checks that every gate runs at least one passing test
+# on the unmutated tree, so an empty or broken gate cannot count as a kill.
 #
 #   bash formal/check-mutants.sh            # all gates for every mutant
 #   bash formal/check-mutants.sh --first    # stop at the first killing gate per mutant (faster)

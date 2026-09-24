@@ -183,7 +183,9 @@ Three checks, each doing what it is good at:
 `check-mutants.sh` applies each `mutants/*.patch` to a scratch copy of the tree (`core/`, `spec/`,
 `formal/` and the directories the tag inventory sweeps), runs the gates, and passes only if every mutant is killed. It first checks that every
 gate passes on the unmutated tree, so a broken gate cannot count as a kill. For m3 and m4 the named
-Kani harness must itself report `VERIFICATION:- FAILED`.
+Kani harness must itself report `VERIFICATION:- FAILED`. For m15–m21 the designated native test
+must complete and fail; an unrelated failure does not kill the mutant. The optional `MUTANTS_ONLY`
+selection still runs the full unmutated baseline and accepts only exact patch basenames.
 
 | Mutant | Drift | Killed by (local run) |
 |---|---|---|
