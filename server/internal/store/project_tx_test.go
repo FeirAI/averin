@@ -149,7 +149,10 @@ func TestPostgresProjectWriteTwoPools(t *testing.T) {
 	defer done()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	otherPool, err := pgxpool.NewWithConfig(ctx, p.pool.Config().Copy())
+	otherConfig := p.pool.Config().Copy()
+	otherAppName := fmt.Sprintf("averin_project_guard_wait_%d", time.Now().UnixNano())
+	otherConfig.ConnConfig.RuntimeParams["application_name"] = otherAppName
+	otherPool, err := pgxpool.NewWithConfig(ctx, otherConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,6 +185,22 @@ func TestPostgresProjectWriteTwoPools(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
+	independent := make(chan error, 1)
+	go func() {
+		independent <- other.WithProjectWrite(ctx, "q", func(st Store) error { _, _, err := st.PutRecord("q", "q1", rec("qh", "s")); return err })
+	}()
+	select {
+	case err := <-independent:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("project q could not commit while project p held its guard: %v", ctx.Err())
+	}
+	// Start the same-project waiter only after q has committed, so a slow CI
+	// host cannot spend its 10s database lock timeout waiting for unrelated
+	// connection setup. Observe the actual blocked backend rather than inferring
+	// serialization from a short period with no callback progress.
 	second := make(chan error, 1)
 	go func() {
 		second <- other.WithProjectWrite(ctx, "p", func(st Store) error {
@@ -196,22 +215,26 @@ func TestPostgresProjectWriteTwoPools(t *testing.T) {
 			return err
 		})
 	}()
-	independent := make(chan error, 1)
-	go func() {
-		independent <- other.WithProjectWrite(ctx, "q", func(st Store) error { _, _, err := st.PutRecord("q", "q1", rec("qh", "s")); return err })
-	}()
-	select {
-	case err := <-independent:
-		if err != nil {
-			t.Fatal(err)
+	for {
+		select {
+		case err := <-second:
+			t.Fatalf("same-project writer returned before guard release: %v", err)
+		case <-ctx.Done():
+			t.Fatalf("same-project writer did not reach database lock wait: %v", ctx.Err())
+		default:
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("project q stalled behind project p")
-	}
-	select {
-	case err := <-second:
-		t.Fatalf("second writer escaped project guard: %v", err)
-	case <-time.After(100 * time.Millisecond):
+		var waiting bool
+		if err := p.pool.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE application_name=$1 AND state='active' AND wait_event_type='Lock'
+			  AND query LIKE '%project_write_guard%'
+		)`, otherAppName).Scan(&waiting); err != nil {
+			t.Fatalf("inspect project guard wait: %v", err)
+		}
+		if waiting {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	close(release)
 	released = true
