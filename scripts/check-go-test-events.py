@@ -12,6 +12,7 @@ PGSCHEMA_PACKAGE = "github.com/feirai/averin/server/internal/pgschema"
 PGLEDGER_PACKAGE = "github.com/feirai/averin/server/internal/pgledger"
 RESOURCESHIM_PACKAGE = "github.com/feirai/averin/server/internal/resourceshim"
 REQUIRED = (
+    f"{API_PACKAGE}:TestTenantNonceOfflineProjectComposition",
     f"{API_PACKAGE}:TestBrokerSeqVoidPostgres",
     f"{API_PACKAGE}:TestBrokerSeqVoidGrantLandsFirstPostgres",
     f"{API_PACKAGE}:TestBrokerSeqVoidGrantRollsBackPostgres",

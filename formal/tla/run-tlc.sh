@@ -66,7 +66,7 @@ check ConsumeLedger.tla ConsumeLedger_short_retention_replay.cfg AtMostOncePerKe
 check ConsumeLedger.tla ConsumeLedger_short_retention.cfg InFlightRecorded       # ...and a live in-flight key is pruned
 check ConsumeLedger.tla ConsumeLedger_tenant_safe.cfg pass               # unknown-owner legacy rows block replays through expiry
 check ConsumeLedger.tla ConsumeLedger_tenant_unsafe.cfg TenantAtMostOnce # premature legacy exclusion deletion reopens replay
-check ConsumeLedger.tla ConsumeLedger_tenant_isolation.cfg pass          # equal nonce in separate projects is independent
+check ConsumeLedger.tla ConsumeLedger_tenant_isolation.cfg NoBothTenantsConsumed # witness: both projects can consume the equal nonce
 
 # Exact project guard and authoritative operational state across two replicas.
 check ProjectTx.tla ProjectTx_unserialized.cfg NoFrontierFork        # process-local locks fork a project frontier

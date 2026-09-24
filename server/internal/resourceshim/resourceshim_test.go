@@ -480,8 +480,9 @@ func TestNotYetValidRejected(t *testing.T) {
 	token := defaultCap(t, issuing, agent, time.Hour, now)
 	sh := New(issuing.Public().(ed25519.PublicKey), testResource, NewMemLedger()).WithProject("p1")
 	useSig := signDefault(t, agent, token, testParams, "n")
-	// validate BEFORE nbf (one minute before issuance)
-	_, err := sh.ValidateUse(token, useSig, Op{Action: testAction, ParamsCommitment: testParams}, "n", now.Add(-time.Minute))
+	// Within the accepted issuance skew, nbf must still gate use; the skew
+	// bounds issuance, it does not widen the capability's validity window.
+	_, err := sh.ValidateUse(token, useSig, Op{Action: testAction, ParamsCommitment: testParams}, "n", now.Add(-15*time.Second))
 	if err == nil || !strings.Contains(err.Error(), "not yet valid") {
 		t.Fatalf("a not-yet-valid (nbf in the future) credential should be rejected, got: %v", err)
 	}

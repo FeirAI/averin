@@ -32,7 +32,7 @@ TypeOK ==
   /\ pc \in [Instances -> {"idle", "consumed", "done"}]
   /\ key \in [Instances -> Keys]
 
-Init ==
+LegacyInit ==
   /\ clock = 0
   /\ ledger = {}
   /\ acted = [k \in Keys |-> 0]
@@ -75,13 +75,13 @@ Tick ==
   /\ clock' = clock + 1
   /\ UNCHANGED <<ledger, acted, pc, key>>
 
-Next ==
+LegacyNext ==
   \/ \E i \in Instances, k \in Keys : Consume(i, k)
   \/ \E i \in Instances : Act(i) \/ FailBeforeAct(i)
   \/ Sweep
   \/ Tick
 
-Spec == Init /\ [][Next]_vars
+LegacySpec == LegacyInit /\ [][LegacyNext]_vars
 
 (* SAFETY: each use key is acted on at most once, so total spends <= UseLimit. *)
 AtMostOncePerKey == \A k \in Keys : acted[k] <= 1
@@ -112,7 +112,7 @@ TenantTypeOK ==
   /\ tenantPending \subseteq Projects
   /\ tenantActed \in [Projects -> Nat]
 TenantInit ==
-  /\ Init
+  /\ LegacyInit
   /\ tenantClock = 0
   /\ tenantPhase = "old"
   /\ tenantCutoverAt = 0
@@ -163,9 +163,21 @@ TenantNext0 ==
   \/ \E p \in Projects : TenantConsume(p) \/ TenantAct(p)
   \/ TenantPurge
   \/ TenantTick
+Init ==
+  /\ LegacyInit
+  /\ tenantClock = 0
+  /\ tenantPhase = "old"
+  /\ tenantCutoverAt = 0
+  /\ tenantLegacy = FALSE
+  /\ tenantLedger = {}
+  /\ tenantPending = {}
+  /\ tenantActed = [p \in Projects |-> 0]
+Next == LegacyNext /\ UNCHANGED tenantVars
+Spec == Init /\ [][Next]_<<vars, tenantVars>>
 TenantNext == TenantNext0 /\ UNCHANGED vars
 TenantSpec == TenantInit /\ [][TenantNext]_<<tenantVars, vars>>
 TenantAtMostOnce == \A p \in Projects : tenantActed[p] <= 1
+NoBothTenantsConsumed == ~({P1, P2} \subseteq tenantLedger)
 TenantIsolation ==
   (tenantPhase = "new" /\ ~tenantLegacy /\ tenantClock <= MaxTTL /\
    P1 \in tenantLedger /\ P2 \notin tenantLedger) => TenantCanConsume(P2)

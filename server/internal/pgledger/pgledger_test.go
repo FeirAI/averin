@@ -59,8 +59,45 @@ func TestPostgresLedgerMaintenance(t *testing.T) {
 		('fresh','11111111111111111111111111111111',clock_timestamp())`); err != nil {
 		t.Fatal(err)
 	}
-	// Migration's legacy table cannot be populated after cutover. A first-boot
-	// empty table still proves the ordinary sweep never touches its relation.
+	// Privileged fixture setup simulates aged rows inherited at cutover. Disable
+	// the immutable row trigger only inside this transaction, then restore it
+	// before exercising the ordinary runtime sweeper.
+	fixture, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.Rollback(ctx) //nolint:errcheck
+	if _, err := fixture.Exec(ctx, `ALTER TABLE legacy_consume_exclusions DISABLE TRIGGER legacy_consume_rows_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.Exec(ctx, `INSERT INTO legacy_consume_exclusions(kind,consume_key,consumed_at)
+		VALUES ('nonce','legacy-old-nonce',clock_timestamp()-interval '2 days'),
+		('jti','legacy-old-jti',clock_timestamp()-interval '2 days')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.Exec(ctx, `ALTER TABLE legacy_consume_exclusions ENABLE TRIGGER legacy_consume_rows_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	legacyBefore := make(map[string]time.Time)
+	rows, err := pool.Query(ctx, `SELECT kind || ':' || consume_key, consumed_at FROM legacy_consume_exclusions`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var key string
+		var consumed time.Time
+		if err := rows.Scan(&key, &consumed); err != nil {
+			t.Fatal(err)
+		}
+		legacyBefore[key] = consumed
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || len(legacyBefore) != 2 {
+		t.Fatalf("legacy fixture rows=%d err=%v", len(legacyBefore), err)
+	}
 	removed, err := l.SweepConsumed(ctx, 24*time.Hour)
 	if err != nil || removed != 2 {
 		t.Fatalf("sweep removed=%d err=%v, want exactly two aged new rows", removed, err)
@@ -69,5 +106,27 @@ func TestPostgresLedgerMaintenance(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM consumed_nonces) +
 		(SELECT count(*) FROM consumed_jtis)`).Scan(&left); err != nil || left != 2 {
 		t.Fatalf("fresh claims after sweep=%d err=%v", left, err)
+	}
+	rows, err = pool.Query(ctx, `SELECT kind || ':' || consume_key, consumed_at FROM legacy_consume_exclusions`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyAfter := make(map[string]time.Time)
+	for rows.Next() {
+		var key string
+		var consumed time.Time
+		if err := rows.Scan(&key, &consumed); err != nil {
+			t.Fatal(err)
+		}
+		legacyAfter[key] = consumed
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || len(legacyAfter) != len(legacyBefore) {
+		t.Fatalf("legacy rows after sweep=%d err=%v", len(legacyAfter), err)
+	}
+	for key, before := range legacyBefore {
+		if !legacyAfter[key].Equal(before) {
+			t.Fatalf("legacy exclusion %q changed during ordinary sweep", key)
+		}
 	}
 }
