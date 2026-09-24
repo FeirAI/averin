@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Plan 012 (phase A): regenerate the production seal core from core/src with Charon + Aeneas, and
-# prove it against the Averin model (formal/production). See formal/production/README.md.
+# Plan 012: regenerate the production seal core (phase A) and the verifier's claim kernel (phase B)
+# from core/src with Charon + Aeneas, and prove them against the Averin model (formal/production).
+# See formal/production/README.md.
 #
 #   bash formal/run-production-refinement.sh           # verify: regenerate into a scratch dir, require
 #                                                      # it to equal the committed extraction, then

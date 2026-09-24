@@ -579,6 +579,9 @@ theorem historical_adverse_ok (h : Corresponds f m a) :
     by_cases h1 : CommittedContradiction m <;> by_cases h2 : HistoricalAdverse m <;>
     by_cases h3 : m.adverseOpening = true <;> by_cases h4 : m.adverseAnchor = true <;> simp_all
 
+theorem ite_ok_and (b c : Bool) : (if b = true then ok c else ok false : Result Bool) = ok (b && c) := by
+  cases b <;> rfl
+
 open Classical in
 theorem historical_ready_ok (h : Corresponds f m a) :
     verify.verdict.historical_ready f =
@@ -587,35 +590,46 @@ theorem historical_ready_ok (h : Corresponds f m a) :
   have hs := h.single
   have hu := h.historicalUse
   have hm := h.mode
+  have kf := fun k => (kindReady_false (m := m) hs).mp k
+  have kt := fun k => (kindReady_true (m := m) hs).mp k
+  have kf' := fun k => (kindReady_false (m := m) hs).mpr k
+  have kt' := fun k => (kindReady_true (m := m) hs).mpr k
+  have kp := fun hS hP => pinned_kind (m := m) hs hS hP
   unfold verify.verdict.historical_ready verify.verdict.historical_revocation
   simp only [policy_evidence_ready_ok h, bind_tc_ok, bool_eq_decide h.role,
     bool_eq_decide h.snapshotVerified, h.issuer, bool_eq_decide h.listUsable,
     bool_eq_decide h.merkleUsable, bool_eq_decide h.merklePaths, ite_ok_or]
   rw [bool_eq_decide hu]
   unfold SnapshotReady
-  cases hr : f.policy.revocation <;> rw [hr] at hm <;> simp only [modeOf] at hm <;> simp only [← hm]
-  · -- pinned
-    by_cases hsp : SnapshotFresh m a ∧ ReceiptsProvenBefore m a
-    · have hk := pinned_kind hs hsp.1 hsp.2
-      by_cases h1 : RoleContributorsProven m a <;> by_cases h2 : m.revocationIssuerPinned = true <;>
-        by_cases h3 : m.histUseValid = true <;> by_cases h4 : PolicyEvidence m a <;> simp_all
-    · have hk : ¬ (SnapshotKindReady m a false ∨ SnapshotKindReady m a true) := by
-        rintro (k | k)
-        · exact hsp ⟨((kindReady_false hs).mp k).2.1, ((kindReady_false hs).mp k).2.2⟩
-        · exact hsp ⟨((kindReady_true hs).mp k).2.1, ((kindReady_true hs).mp k).2.2.2⟩
-      by_cases h1 : RoleContributorsProven m a <;> by_cases h2 : m.revocationIssuerPinned = true <;>
-        by_cases h3 : m.histUseValid = true <;> by_cases h4 : PolicyEvidence m a <;>
-        by_cases h5 : SnapshotFresh m a <;> by_cases h6 : ReceiptsProvenBefore m a <;> simp_all
-  all_goals
-    simp only [kindReady_false hs, kindReady_true hs]
-    by_cases h1 : RoleContributorsProven m a <;> by_cases h2 : m.revocationIssuerPinned = true <;>
-      by_cases h3 : m.histUseValid = true <;> by_cases h4 : PolicyEvidence m a <;>
-      by_cases h5 : SnapshotFresh m a <;> by_cases h6 : ReceiptsProvenBefore m a <;>
-      by_cases h7 : SnapshotOfKind a false <;> by_cases h8 : SnapshotOfKind a true <;>
-      by_cases h9 : ReceiptPaths m a <;> simp_all
-
-theorem ite_ok_and (b c : Bool) : (if b = true then ok c else ok false : Result Bool) = ok (b && c) := by
-  cases b <;> rfl
+  cases hr : f.policy.revocation <;> rw [hr] at hm <;> simp only [modeOf] at hm <;>
+    simp only [← hm, ite_ok_and, bind_tc_ok, ok_eq_ok] <;> rw [Bool.eq_iff_iff] <;>
+    simp only [Bool.and_eq_true, decide_eq_true_eq, and_true]
+  · -- pinned: a fresh snapshot under which every receipt is proven is a ready snapshot
+    constructor
+    · rintro ⟨h1, hS, hi, hpe, hh, hp⟩
+      exact ⟨h1, hh, ⟨hi, kp hS hp⟩, hpe⟩
+    · rintro ⟨h1, hh, ⟨hi, k | k⟩, hpe⟩
+      · exact ⟨h1, (kf k).2.1, hi, hpe, hh, (kf k).2.2⟩
+      · exact ⟨h1, (kt k).2.1, hi, hpe, hh, (kt k).2.2.2⟩
+  · -- disclosed
+    constructor
+    · rintro ⟨h1, hS, ⟨hi, hl⟩, hpe, hh, hp⟩
+      exact ⟨h1, hh, ⟨hi, kf' ⟨hl, hS, hp⟩⟩, hpe⟩
+    · rintro ⟨h1, hh, ⟨hi, k⟩, hpe⟩
+      exact ⟨h1, (kf k).2.1, ⟨hi, (kf k).1⟩, hpe, hh, (kf k).2.2⟩
+  · -- merkle
+    constructor
+    · rintro ⟨h1, hS, ⟨hi, hk, -, hpa⟩, hpe, hh, hp⟩
+      exact ⟨h1, hh, ⟨hi, kt' ⟨hk, hS, hpa, hp⟩⟩, hpe⟩
+    · rintro ⟨h1, hh, ⟨hi, k⟩, hpe⟩
+      exact ⟨h1, (kt k).2.1, ⟨hi, (kt k).1, (kt k).1, (kt k).2.2.1⟩, hpe, hh, (kt k).2.2.2⟩
+  · -- both
+    constructor
+    · rintro ⟨h1, hS, ⟨hi, hl, hk, -, hpa⟩, hpe, hh, hp⟩
+      exact ⟨h1, hh, ⟨hi, kf' ⟨hl, hS, hp⟩, kt' ⟨hk, hS, hpa, hp⟩⟩, hpe⟩
+    · rintro ⟨h1, hh, ⟨hi, k, k'⟩, hpe⟩
+      exact ⟨h1, (kf k).2.1, ⟨hi, (kf k).1, (kt k').1, (kt k').1, (kt k').2.2.1⟩, hpe, hh,
+        (kf k).2.2⟩
 
 theorem capstone_base_ok (h : Corresponds f m a) :
     verify.verdict.CapstoneFacts.base f.capstone =
@@ -757,12 +771,30 @@ theorem complete_claim_ok (h : Corresponds f m a) (c : Prop) [Decidable c] :
   have hl : LatestAnchored f ↔ HasAnchor m a := h.anchored
   have hat : AttestationReady m a → HasAnchor m a := fun h => h.2
   unfold verify.verdict.complete_claim
-  simp only [authorization_refuted_ok h, authorized_ok h, temporal_ok h, bind_tc_ok, decision_ok]
-  by_cases hI : IntegrityP m <;> by_cases hA : CurrentAdverse m <;>
-    by_cases hR : RecordsProven m a <;> by_cases h1 : RoleContributorsProven m a <;>
-    by_cases h2 : RevocationReady m a <;> by_cases h3 : PolicyEvidence m a <;>
-    by_cases h4 : UseSurfaceValid m <;> by_cases h5 : AttestationReady m a <;>
-    by_cases h6 : c <;> simp_all
+  simp only [authorization_refuted_ok h, authorized_ok h, temporal_ok h, bind_tc_ok, decision_ok,
+    ite_ok_and]
+  by_cases hR : ¬ IntegrityP m ∨ CurrentAdverse m
+  · simp [hR]
+  · have hI : IntegrityP m := by simp only [not_or, not_not] at hR; exact hR.1
+    have e : ((decide (IntegrityP m ∧ decide (SealsPinned f) = true ∧ RoleContributorsProven m a ∧
+          decide (RevocationReady m a) = true ∧ PolicyEvidence m a ∧ UseSurfaceValid m) &&
+        (decide (decide (LatestAnchored f) = true ∧ AttestationReady m a ∧
+          decide (RevocationReady m a) = true) && decide c)) = true) ↔
+        ((RecordsProven m a ∧ RoleContributorsProven m a ∧ RevocationReady m a ∧
+          PolicyEvidence m a ∧ UseSurfaceValid m) ∧
+          (RevocationReady m a ∧ AttestationReady m a) ∧ c) := by
+      simp only [Bool.and_eq_true, decide_eq_true_eq]
+      constructor
+      · rintro ⟨⟨-, hp, h1, h2, h3, h4⟩, ⟨-, h5, -⟩, h6⟩
+        exact ⟨⟨hs.mp hp, h1, h2, h3, h4⟩, ⟨h2, h5⟩, h6⟩
+      · rintro ⟨⟨hp, h1, h2, h3, h4⟩, ⟨-, h5⟩, h6⟩
+        exact ⟨⟨hI, hs.mpr hp, h1, h2, h3, h4⟩, ⟨hl.mpr (hat h5), h5, h2⟩, h6⟩
+    rw [decide_eq_false hR]
+    simp only [Bool.false_eq_true, ↓reduceIte, hR]
+    by_cases hS : (RecordsProven m a ∧ RoleContributorsProven m a ∧ RevocationReady m a ∧
+          PolicyEvidence m a ∧ UseSurfaceValid m) ∧ (RevocationReady m a ∧ AttestationReady m a) ∧ c
+    · rw [if_pos (e.mpr hS), if_pos hS]; rfl
+    · rw [if_neg (fun x => hS (e.mp x)), if_neg hS]; rfl
 
 end
 

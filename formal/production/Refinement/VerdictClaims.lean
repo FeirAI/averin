@@ -236,3 +236,112 @@ theorem production_total_revocation_refutes (h : Corresponds f m a)
 end Production
 
 end Refinement
+
+namespace Refinement
+
+/-! ## The correspondence is not vacuous
+
+For every model evidence state whose snapshot attachments name one snapshot, some production fact
+vector corresponds to it. So `decide_claims_refines` and the theorems above constrain the kernel on
+the whole (single-snapshot) model domain, not on an empty set of inputs. -/
+
+/-- The model's revocation mode as the production policy value. -/
+def revOf : RevocationMode → verify.verdict.RevocationRequirement
+  | .pinned => .Pinned
+  | .disclosed => .Disclosed
+  | .merkle => .Merkle
+  | .both => .Both
+
+theorem modeOf_revOf (r : RevocationMode) : modeOf (revOf r) = r := by cases r <;> rfl
+
+theorem corresponds_exists {m : Fixed} {a : List Attachment} (hs : SingleSnapshot a) :
+    ∃ f, Corresponds f m a := by
+  classical
+  let key : Key := Std.Array.repeat 32#usize 0#u8
+  let sl : verify.verdict.PinnedRecordSeal := ⟨"h", key⟩
+  let anchor : verify.verdict.AnchoredCheckpoint := ⟨"c", "t", 0#i64⟩
+  let one {α : Type} (x : α) : alloc.vec.Vec α := alloc.vec.Vec.from [x] (by simp; scalar_tac)
+  let none' {α : Type} : alloc.vec.Vec α := alloc.vec.Vec.from [] (by simp)
+  have hh : Nonempty' "h" := by decide
+  have hc : Nonempty' "c" := by decide
+  have ht : Nonempty' "t" := by decide
+  refine ⟨{
+    historical := {
+      selected := m.temporalPolicy
+      snapshot_verified := decide (SnapshotFresh m a)
+      brokered_use_valid := decide (m.histUseValid = true ∧ ReceiptsProvenBefore m a)
+      introspected_use_valid := false
+      adverse := decide (HistoricalAdverse m)
+      checked_contradiction := false
+      v2_list_usable := decide (SnapshotOfKind a false)
+      v2_merkle_usable := decide (SnapshotOfKind a true)
+      merkle_paths_complete := decide (SnapshotOfKind a true ∧ ReceiptPaths m a) }
+    structural_integrity := decide (IntegrityP m)
+    record_count := if RecordsProven m a then 1#usize else 0#usize
+    pinned_record_seals := if RecordsProven m a then one sl else none'
+    pinned_signer_keys := one key
+    pinned_role_authority := decide (RoleContributorsProven m a)
+    latest_checkpoint_sequence := 0#i64
+    anchors := if HasAnchor m a then one anchor else none'
+    attestation_valid := decide (AttestationReady m a)
+    brokered_use_valid := m.brokeredUseValid
+    introspected_use_valid := m.introspectedUseValid
+    capstone := {
+      manifest := m.capstone.manifest
+      two_phase := m.capstone.twoPhase
+      no_incomplete_intent := decide (m.capstone.noIncompleteIntent = true ∧
+        ∀ u ∈ m.capstone.uses, u ∈ m.capstone.twoPhaseCompleted)
+      taxonomy := m.capstone.taxonomy
+      every_action_verified := decide (∀ u ∈ m.capstone.uses, u ∈ m.capstone.actionVerified)
+      every_pop_reverified := decide (∀ u ∈ m.capstone.uses, u ∈ m.capstone.popVerified)
+      grant_log := m.capstone.grantLog
+      attestation := m.capstone.attestation
+      no_violation := m.capstone.noViolation
+      no_pending := m.capstone.noPending
+      bounded_reuse := m.capstone.boundedReuse
+      cosignatures := m.capstone.cosignatures
+      delegation := m.capstone.delegation
+      revocation := m.capstone.revocation
+      federation := m.capstone.federation
+      coverage := m.capstone.coverage
+      brokered_surface := decide (m.capstone.uses ≠ [] ∧ m.capstone.nativePresent = false ∧
+        ∀ u ∈ m.capstone.uses, u ∈ m.capstone.matched)
+      introspected_surface := decide (m.capstone.uses = [] ∧ m.capstone.nativePresent = true ∧
+        m.capstone.introspection = true) }
+    immutable_record_contradiction := decide (CommittedContradiction m)
+    checked_contradiction := m.checkedContradiction
+    adverse_disclosure := m.adverseOpening
+    adverse_anchor := m.adverseAnchor
+    revoked_membership := decide (¬ NoAuthenticatedRevocation m)
+    revocation_issuer_pinned := m.revocationIssuerPinned
+    disclosed_revocation_fresh := decide (m.disclosedFresh = true ∧ HasAnchor m a)
+    merkle_revocation_fresh := decide (m.merkleFresh = true ∧ HasAnchor m a)
+    merkle_nonmembership_complete := decide (PathReady m a)
+    disclosure_complete := decide (DisclosureComplete m a)
+    policy := {
+      requested := .Integrity
+      revocation := revOf m.policy.revocation
+      require_disclosure := m.policy.requireDisclosure
+      require_attestation := m.policy.requireAttestation } }, ?_⟩
+  constructor
+  case single => exact hs
+  case mode => exact modeOf_revOf _
+  case seals =>
+    by_cases hr : RecordsProven m a
+    · have hr' : m.records ≠ [] ∧ ∀ r ∈ m.records, RecordProven m a r := hr
+      simp only [hr, ↓reduceIte]
+      refine ⟨fun _ => hr', fun _ => ?_⟩
+      simp [SealsPinned, one, sl, alloc.vec.Vec.from_val, hh]
+    · have hr' : ¬ (m.records ≠ [] ∧ ∀ r ∈ m.records, RecordProven m a r) := hr
+      simp only [hr, ↓reduceIte]
+      refine ⟨fun h => absurd h.1 ?_, fun h => absurd h hr'⟩
+      simp
+  case anchored =>
+    by_cases ha : HasAnchor m a
+    · simp only [ha, ↓reduceIte, iff_true]
+      simp [LatestAnchored, one, anchor, alloc.vec.Vec.from_val, AnchorsCheckpoint, hc, ht]
+    · simp only [ha, ↓reduceIte, iff_false]
+      simp [LatestAnchored, none', alloc.vec.Vec.from_val]
+  all_goals simp
+
+end Refinement

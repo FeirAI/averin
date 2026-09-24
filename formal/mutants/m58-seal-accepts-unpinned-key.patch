@@ -1,4 +1,4 @@
-Mutant: a seal counts without its key being externally pinned (an embedded key authenticates, plan 002). Named detector: the regenerated production refinement proof (Refinement.seal_pinned_ok), not a test.
+Mutant: a seal with a record hash counts even when its key is not externally pinned (an embedded key authenticates, plan 002). Named detector: the regenerated production refinement proof (Refinement.seal_pinned_ok), not a test.
 
 --- a/core/src/verify/verdict.rs
 +++ b/core/src/verify/verdict.rs
@@ -7,7 +7,7 @@ Mutant: a seal counts without its key being externally pinned (an embedded key a
  /// The seal names a record hash and an externally pinned key.
  fn seal_pinned(seal: &PinnedRecordSeal, keys: &[[u8; 32]]) -> bool {
 -    !seal.record_hash.is_empty() && key_pinned(keys, &seal.key_bytes)
-+    !seal.record_hash.is_empty()
++    !seal.record_hash.is_empty() || key_pinned(keys, &seal.key_bytes)
  }
  
  /// Every seal names a record hash and an externally pinned key.

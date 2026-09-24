@@ -1,8 +1,9 @@
-# Production refinement of the seal core (plan 012, phase A)
+# Production refinement of the seal core and the verdict kernel (plan 012)
 
 This project proves that the **production Rust** that computes record and checkpoint hashes and
-signature messages implements the Averin model in `formal/lean`, so the model's seal theorems apply
-to the code that runs, not only to a model of it.
+signature messages (phase A), and the verifier's claim decision kernel (phase B), implement the
+Averin model in `formal/lean`, so the model's seal and verdict theorems apply to the code that runs,
+not only to a model of it.
 
 The Rust is not re-implemented in Lean. `formal/run-production-refinement.sh` extracts it from
 `core/src` with [Charon](https://github.com/AeneasVerif/charon) and
@@ -66,6 +67,62 @@ denotes at most one model value; `canon_perm_members` shows that permuting an ob
 not change its denotation. A value with two keys equal after NFC at any depth denotes nothing, and the
 production hash paths reject it (`RecordError::DuplicateKey`).
 
+## The verdict kernel (phase B)
+
+`verify::verdict::decide_claims` maps the verifier's checked facts (`ValidatedFacts`: seals, pins,
+anchors, attestation, revocation freshness and paths, role authority, use validity, the capstone
+checks, the plan 009 historical facts, the adverse facts) and the caller's `ClaimPolicy` to the
+claim results. It and every function it calls are extracted from `core/src/verify/verdict.rs`.
+
+**The correspondence.** `Refinement.Corresponds f m a` says, fact by fact, which model predicate
+each checked fact is, for a model evidence state (`Averin.Verdict.Fixed` `m`, attachments `a`): for
+example `structural_integrity` is `IntegrityP m`, the seal vector attests `RecordProven` for every
+record, `pinned_role_authority` is `RoleContributorsProven m a`, `disclosed_revocation_fresh` is
+`m.disclosedFresh ∧ HasAnchor m a`, `capstone.every_pop_reverified` is "every use is PoP-verified",
+`historical.snapshot_verified` is "an attached snapshot is fresh for the caller's clock, age and
+watermark", and all snapshot attachments name one signed snapshot (`SingleSnapshot`, which
+production requires of v2 artifacts and the model does not). It names meanings; it contains no
+kernel logic. It is not vacuous: `corresponds_exists` builds a corresponding fact vector for every
+single-snapshot model state, so the theorems below constrain the kernel on that whole domain.
+
+| Production function (`core/src/verify/verdict.rs`) | Theorem (`Refinement/`) | Statement |
+|---|---|---|
+| `key_pinned`, `seal_pinned`, `seals_pinned` | `VerdictLists.key_pinned_ok`, `seal_pinned_ok`, `seals_pinned_ok` | return (total) whether every seal names a record hash and a pinned key |
+| `anchors_checkpoint`, `anchored_at` | `anchors_checkpoint_ok`, `anchored_at_ok` | return (total) whether some anchor names the latest checkpoint |
+| `pinned_record_keys`, `revocation_ready`, `adverse`, `policy_evidence_ready`, `authorization_ready`, `authorization_refuted`, `authorized`, `temporal`, `historical_adverse`, `historical_revocation`/`historical_ready`, `CapstoneFacts::{base,brokered,introspected}` | `Verdict.*_ok` | under `Corresponds`, return the model predicate (`RevocationReady`, `BrokeredCapstone`, the caller-mode `SnapshotReady` of plan 009, ...) |
+| `integrity_claim`, `authenticated_claim`, `authorized_claim`, `temporal_claim`, `historical_claim`, `complete_claim` | `integrity_claim_ok`, ..., `complete_claim_ok` | each claim is `decideClaim m a c` |
+| `decide_claims` | `decide_claims_refines` | returns, and every claim of the result, including the requested one, is `decideClaim m a c` |
+
+**The model's theorems for production** (`Refinement/VerdictClaims.lean`, all total, standard
+axioms only):
+
+* `production_support_erasure` — two kernel runs on facts corresponding to the same fixed evidence
+  `m` with attachments `small ⊆ large`: every claim satisfied with `small` is satisfied with
+  `large`, and a claim is refuted with one exactly when it is refuted with the other (plan 002's
+  claim order: deleting support can only move a claim from satisfied to insufficient).
+* `production_satisfied_supports`, `production_requested_supports` — a satisfied production claim
+  has a `Supports` derivation; with `production_capstone_prerequisites` (pinned signers and role
+  keys, revocation and attestation readiness, no committed contradiction, every capstone check) and
+  `production_introspected_capstone_prerequisites`.
+* `production_committed_contradiction_refuted` — authorized and both capstones are refuted.
+* Plan 009: `production_historical_requires_policy`, `production_historical_requires_order`,
+  `production_historical_requires_snapshot`, `production_at_or_after_refutes`,
+  `production_total_revocation_refutes`, `production_historical_supports`.
+
+**Not covered.** That `verify.rs` computes facts satisfying `Corresponds` is not proved: the
+signature, pin, join, Merkle-path and snapshot passes and the counter-to-fact joins in
+`verify_bundle_with` are the trusted boundary. `check-production.py` pins the call path (the
+kernel's result is the only value written to `report.claims`; no `ClaimResults` is built in
+`verify.rs`), and the verdict oracle differential and the adversarial suite test the projection.
+The claim-policy parser (`ClaimPolicy::parse`), `ClaimDecision::as_str` and the report
+serialization are not extracted. Finding the kernel's model while refining it exposed one fact the
+model lacked (`checkedContradiction`, added to `Averin.Verdict.Fixed`).
+
+**Extraction constraints** (documented at the kernel): search loops instead of closures and
+iterator adapters, helper functions instead of derived `PartialEq`, helpers called before a
+function branches on a field of the facts, a negation first in a disjunction, and `&`/`|` for a
+conjunction with a `bool` parameter. All are semantics-preserving; the tests are unchanged.
+
 ## Trusted base
 
 * **Axioms** (the only ones; `scripts/Audit.lean` fails on any other):
@@ -76,7 +133,8 @@ production hash paths reject it (`RecordError::DuplicateKey`).
   `str::as_bytes` is the identity on Aeneas' UTF-8 representation of `&str`; `String::as_bytes` and
   `Deref<Target = str>` are the UTF-8 bytes of the Lean `String` Aeneas uses for `String`;
   `String::from_utf8` is `Ok` with the same bytes exactly on valid UTF-8 (Lean's verified decoder);
-  `FromUtf8Error` is `Unit` (never inspected). `averin_decision_core.toStr` is Aeneas' literal
+  `FromUtf8Error` is `Unit` (never inspected); `String::is_empty` is true exactly when the string has
+  no UTF-8 bytes (verdict kernel). `averin_decision_core.toStr` is Aeneas' literal
   conversion with a kernel-checked instead of `decide +native` bound.
 * **Toolchain**: rustc (the pinned nightly for extraction; production builds use 1.92.0), Charon
   `6258597`, Aeneas `557f7a1` and its Lean standard library (the semantics of `Vec`, slices, scalars,
@@ -86,10 +144,11 @@ production hash paths reject it (`RecordError::DuplicateKey`).
 
 ## Not covered (by design, or later phases)
 
-* The verifier's decision logic (`verify_content_hash`, `verify_checkpoint_sealed`, `verify_signature`,
-  Tier-B joins, capstone) is not extracted. `check-production.py` requires those functions to call the
-  proved code (`manifest.json` `callers`), but their comparisons are glue checked by the existing tests
-  and mutants. Refining the verdict kernel is plan 012 phase B (after plan 009).
+* The verifier's seal checks and evidence passes (`verify_content_hash`, `verify_checkpoint_sealed`,
+  `verify_signature`, Tier-B joins, the counters feeding the capstone) are not extracted.
+  `check-production.py` requires those functions to call the proved code (`manifest.json` `callers`),
+  but their comparisons are glue checked by the existing tests and mutants. The claim kernel they
+  feed is refined (phase B, above).
 * The parser (`CanonValue::parse`) is plan 011 (Kani).
 * **Unextracted glue.** `serialize()`'s final `String::from_utf8` (a debug-asserted conversion of the
   proved byte output) and the public error mapping (`PreimageFault::into_record_error`, and the
@@ -115,3 +174,8 @@ manifest revision (use `lake exe cache get`, or point `AVERIN_LAKE_PACKAGES` at 
 Mutants `m50`–`m53` in `formal/mutants` keep these gates load-bearing: a changed preimage byte order
 fails the regenerated proof (`proof`), an edited but unregenerated source fails as `stale`, a call site
 that bypasses `sign::preimage` fails `call-path`, and a feature-selected alternative fails `cfg`.
+For the verdict kernel, `m54`–`m58` each make a refinement theorem false and fail the regenerated
+proof: the capstone skips `temporal` when unanchored (deleting the anchor strengthens the capstone),
+dual mode needs Merkle paths only alongside the list (deleting the list strengthens `authorized`),
+the historical claim drops the verified-snapshot gate or the Merkle-mode path gate, and a seal
+counts with an unpinned key. `m59` overwrites a claim after the kernel and fails `call-path`.

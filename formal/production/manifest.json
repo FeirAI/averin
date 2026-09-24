@@ -1,5 +1,5 @@
 {
-  "comment": "Plan 012 phase A: the production seal core, extracted from core/src by Charon/Aeneas and proved in formal/production. `bash formal/run-production-refinement.sh` regenerates the extraction from the checked-out source, requires it to equal the committed Extracted/{Types,Funs}.lean, checks the glue and the call paths below, builds every proof and runs the axiom audit. `--write` refreshes the generated files and the source hashes after an intended source change (the proofs must then still build). Nothing here is proved about any function not listed under `extracted`.",
+  "comment": "Plan 012: the production seal core (phase A) and the verifier's claim kernel verify::verdict::decide_claims (phase B), extracted from core/src by Charon/Aeneas and proved in formal/production. `bash formal/run-production-refinement.sh` regenerates the extraction from the checked-out source, requires it to equal the committed Extracted/{Types,Funs}.lean, checks the glue and the call paths below, builds every proof and runs the axiom audit. `--write` refreshes the generated files and the source hashes after an intended source change (the proofs must then still build). Nothing here is proved about any function not listed under `extracted`; for the verdict kernel the input facts' meaning (Refinement.Corresponds) is the trusted boundary.",
   "toolchain": {
     "aeneas_commit": "557f7a15f3b75e18ddae224fc65db0807b70acdf",
     "charon_commit": "62585970fc75f61d83c7898ff8dfdd7edaa3c073",
@@ -246,6 +246,7 @@
     ],
     "verify::verdict::decide_claims": [
       "Refinement.decide_claims_refines",
+      "Refinement.corresponds_exists",
       "Refinement.production_claim",
       "Refinement.production_support_erasure",
       "Refinement.production_satisfied_supports",

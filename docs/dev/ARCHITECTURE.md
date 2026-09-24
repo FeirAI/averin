@@ -168,8 +168,11 @@ computes these model definitions (partial correctness: when the extracted functi
 
 The executable Lean oracle (`formal/lean/Oracle`, checked by `core/tests/oracle.rs`) and the tag
 inventory in `formal/check-refinement.py` keep the models in step with this code; `formal/check-mutants.sh`
-checks that those gates catch known drifts. Algorithm 7's verdict logic
-is covered by the adversarial suite; it is not formally modelled yet.
+checks that those gates catch known drifts. Algorithm 7's claim kernel (`verify/verdict.rs`
+`decide_claims`, from checked facts to claim decisions) is modelled in `Verdict.lean` and, plan 012
+phase B, the production kernel is extracted and proved equal to that model; the evidence passes
+that compute its input facts are covered by the adversarial suite and the verdict oracle, not by a
+proof.
 
 ## Domain model
 

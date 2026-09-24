@@ -160,8 +160,10 @@ properties. These are checked by machine in [`formal/`](formal/README.md), not o
   and a mutation suite (`formal/check-mutants.sh`) checks that these gates catch eight known drifts.
   This is differential testing over a corpus, not a mechanised refinement proof.
 
-What is *not* proved yet (verifier verdict logic, authority-evidence body binding, and a
-mechanised Rust↔Lean refinement) is listed in [`formal/README.md`](formal/README.md).
+A mechanised Rust↔Lean refinement (plan 012, Charon/Aeneas) covers the seal core and the
+verifier's claim kernel. What is *not* proved yet (among it the verifier evidence passes that
+compute the kernel's input facts, and authority-evidence body binding) is listed in
+[`formal/README.md`](formal/README.md).
 
 ```
 cd formal/lean && lake build --wfail && ./check-axioms.sh   # Lean proofs
