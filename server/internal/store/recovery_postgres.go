@@ -96,6 +96,24 @@ func (p *Postgres) PutRecoveryResult(r RecoveryResult) (RecoveryResult, bool, er
 	if err := p.checkProject(r.ProjectID); err != nil {
 		return RecoveryResult{}, false, err
 	}
+	f, found, err := p.RecoveryFenceAt(r.ProjectID, r.Seq)
+	if err != nil {
+		return RecoveryResult{}, false, err
+	}
+	if !found || f.Generation != r.Generation {
+		return RecoveryResult{}, false, ErrRecoveryConflict
+	}
+	var winning string
+	err = p.tx.QueryRow(p.callContext(), `SELECT json FROM records WHERE project_id=$1 AND content_hash=$2`, r.ProjectID, r.WinningRecordHash).Scan(&winning)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RecoveryResult{}, false, ErrRecoveryConflict
+	}
+	if err != nil {
+		return RecoveryResult{}, false, err
+	}
+	if !validRecoveryWinner(winning, f, r.Outcome) {
+		return RecoveryResult{}, false, ErrRecoveryConflict
+	}
 	stored, created, err := scanResult(p.tx.QueryRow(p.callContext(), `INSERT INTO broker_seq_recovery_result (project_id,seq,generation,outcome,winning_record_hash)
 		VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING `+resultColumns,
 		r.ProjectID, r.Seq, r.Generation, r.Outcome, r.WinningRecordHash))
@@ -105,7 +123,7 @@ func (p *Postgres) PutRecoveryResult(r RecoveryResult) (RecoveryResult, bool, er
 	if created {
 		return stored, true, nil
 	}
-	stored, found, err := p.RecoveryResultAt(r.ProjectID, r.Seq)
+	stored, found, err = p.RecoveryResultAt(r.ProjectID, r.Seq)
 	if err != nil {
 		return RecoveryResult{}, false, err
 	}

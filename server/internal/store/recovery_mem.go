@@ -9,18 +9,76 @@ import (
 var ErrRecoveryConflict = errors.New("store: recovery operation conflicts with an immutable fence or result")
 var ErrRecoveryFenced = errors.New("store: grant reservation is permanently fenced for recovery")
 
-func recoveryTombstoneInsert(raw, idem string, seq int64) bool {
-	if idem != fmt.Sprintf("grant-void:%d", seq) {
+func recoveryTombstoneInsert(raw, idem string, fence RecoveryFence) bool {
+	if idem != fmt.Sprintf("grant-void:%d", fence.Seq) || !validRecoveryWinner(raw, fence, "voided") {
 		return false
 	}
-	var shape struct {
+	var r struct {
 		Extensions struct {
 			Broker struct {
-				Kind string `json:"kind"`
+				VoidEvidence map[string]json.RawMessage `json:"void_evidence"`
 			} `json:"broker"`
 		} `json:"extensions"`
 	}
-	return json.Unmarshal([]byte(raw), &shape) == nil && shape.Extensions.Broker.Kind == "grant_void"
+	if json.Unmarshal([]byte(raw), &r) != nil {
+		return false
+	}
+	_, actor := r.Extensions.Broker.VoidEvidence["actor_id"]
+	_, op := r.Extensions.Broker.VoidEvidence["operation_id"]
+	return actor && op // old unattributed tombstones may be repaired, never newly inserted after a fence.
+}
+
+func validRecoveryWinner(raw string, f RecoveryFence, outcome string) bool {
+	var r struct {
+		ProjectID string `json:"project_id"`
+		RecordID  string `json:"record_id"`
+		SessionID string `json:"session_id"`
+		EventType string `json:"event_type"`
+		Authority struct {
+			Source           string `json:"source"`
+			EnforcementPoint string `json:"enforcement_point"`
+			GrantID          string `json:"grant_id"`
+		} `json:"authority"`
+		Extensions struct {
+			Broker struct {
+				Kind          string `json:"kind"`
+				GrantEvidence struct {
+					BrokerSeq int64 `json:"broker_seq"`
+				} `json:"grant_evidence"`
+				VoidEvidence map[string]json.RawMessage `json:"void_evidence"`
+			} `json:"broker"`
+		} `json:"extensions"`
+	}
+	if json.Unmarshal([]byte(raw), &r) != nil || r.ProjectID != f.ProjectID || r.RecordID != f.GrantID ||
+		r.Authority.Source != "gateway_enforced" || r.Authority.EnforcementPoint != "credential_broker" ||
+		r.Authority.GrantID != f.GrantID {
+		return false
+	}
+	b := r.Extensions.Broker
+	if outcome == "recorded" {
+		return r.EventType == "credential_grant" && b.Kind == "grant" && b.GrantEvidence.BrokerSeq == f.Seq
+	}
+	if outcome != "voided" || r.EventType != "credential_grant_void" || b.Kind != "grant_void" {
+		return false
+	}
+	var domain, project, grant, actor, op, reason string
+	var seq int64
+	ev := b.VoidEvidence
+	if json.Unmarshal(ev["domain"], &domain) != nil || domain != "averin.broker.grant_void.v1" ||
+		json.Unmarshal(ev["project_id"], &project) != nil || project != f.ProjectID ||
+		json.Unmarshal(ev["grant_id"], &grant) != nil || grant != f.GrantID ||
+		json.Unmarshal(ev["broker_seq"], &seq) != nil || seq != f.Seq {
+		return false
+	}
+	_, hasActor := ev["actor_id"]
+	_, hasOp := ev["operation_id"]
+	if !hasActor && !hasOp {
+		return true
+	}
+	return hasActor && hasOp && r.SessionID == f.SessionID &&
+		json.Unmarshal(ev["actor_id"], &actor) == nil && actor != "" && actor == f.ActorID &&
+		json.Unmarshal(ev["operation_id"], &op) == nil && op != "" && op == f.OperationID &&
+		json.Unmarshal(ev["reason"], &reason) == nil && reason == f.Reason
 }
 
 func (m *Mem) PendingGrantByGrant(projectID, grantID string) (PendingGrant, bool, error) {
@@ -92,7 +150,8 @@ func (m *Mem) PutRecoveryFence(f RecoveryFence) (RecoveryFence, bool, error) {
 			return old, false, ErrRecoveryConflict
 		}
 	}
-	if p.brokerSeq[f.GrantID] != f.Seq || f.Generation != 1 {
+	reserved, exists := p.brokerSeq[f.GrantID]
+	if !exists || f.Seq < 1 || reserved != f.Seq || f.Generation != 1 {
 		return RecoveryFence{}, false, ErrRecoveryConflict
 	}
 	f.FencedAt = m.now()
@@ -126,6 +185,16 @@ func (m *Mem) PutRecoveryResult(r RecoveryResult) (RecoveryResult, bool, error) 
 	if !ok || f.Generation != r.Generation || (r.Outcome != "recorded" && r.Outcome != "voided") || r.WinningRecordHash == "" {
 		return RecoveryResult{}, false, ErrRecoveryConflict
 	}
+	winning := false
+	for _, rec := range p.records {
+		if rec.ContentHash == r.WinningRecordHash && validRecoveryWinner(rec.JSON, f, r.Outcome) {
+			winning = true
+			break
+		}
+	}
+	if !winning {
+		return RecoveryResult{}, false, ErrRecoveryConflict
+	}
 	if old, ok := p.results[r.Seq]; ok {
 		if old.Outcome != r.Outcome || old.WinningRecordHash != r.WinningRecordHash {
 			return old, false, ErrRecoveryConflict
@@ -145,6 +214,7 @@ func (m *Mem) RecordByRecordID(projectID, recordID string) (Record, bool, error)
 	defer m.mu.Unlock()
 	for _, r := range m.proj(projectID).records {
 		if recordIDOf(r.JSON) == recordID {
+			r.Parents = append([]string(nil), r.Parents...)
 			return r, true, nil
 		}
 	}
