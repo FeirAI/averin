@@ -4,7 +4,7 @@ import { claimVerdict } from "../claim-verdict.js";
 const report = (decision = "satisfied") => ({
   ok: true,
   keys_externally_pinned: true,
-  claims_version: "1",
+  claims_version: "2",
   claims: {requested: "authenticated", authenticated: decision, requested_decision: decision},
 });
 
@@ -14,7 +14,7 @@ test("accepts only a pinned satisfied versioned claim", () => {
 });
 
 test("unknown or missing claims never accept a required claim", () => {
-  expect(claimVerdict({...report(), claims_version: "2"}).word).toBe("INSUFFICIENT");
+  expect(claimVerdict({...report(), claims_version: "3"}).word).toBe("INSUFFICIENT");
   expect(claimVerdict({...report(), claims: undefined}).word).toBe("INSUFFICIENT");
   expect(claimVerdict({...report(), claims: {...report().claims, requested_decision: "unknown"}}).word).toBe("INSUFFICIENT");
   expect(claimVerdict({...report(), claims: {...report().claims, authenticated: "insufficient"}}).word).toBe("INSUFFICIENT");

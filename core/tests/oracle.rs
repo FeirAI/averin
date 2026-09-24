@@ -369,7 +369,7 @@ fn every_preimage_family_matches_model() {
                 } else {
                     assert_eq!(
                         hex_lower(&acc),
-                        verify::grant_head_root(&[first_grant.clone()])
+                        verify::grant_head_root(std::slice::from_ref(&first_grant))
                             .trim_start_matches("sha256:"),
                         "step accumulator must come from the actual prior production fold"
                     );

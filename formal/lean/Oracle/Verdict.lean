@@ -42,7 +42,10 @@ def facts (n : Nat) : Fixed := {
   revocationIssuerPinned := true, disclosedFresh := bit n 4, merkleFresh := false,
   policy := ⟨.authorized, .pinned, true, false⟩,
   brokeredUseValid := bit n 3, introspectedUseValid := false,
-  capstone
+  capstone,
+  temporalPolicy := false, evalTime := 8, maxAge := 5, minWatermark := 3,
+  receipts := [], cutoffs := [], histUseValid := false,
+  historicalContradiction := false, selfTimes := []
 }
 
 def attachments (n : Nat) : List Attachment :=
@@ -90,9 +93,30 @@ def row (name : String) (f : Fixed) (a : List Attachment) : String :=
     field "integrity" .integrity,
     field "authenticated" .authenticated,
     field "authorized" .authorized,
+    field "historical_authorized_as_of_snapshot" .historicalAuthorized,
     field "temporal" .temporal,
     field "complete_brokered" .completeBrokered,
     field "complete_introspected" .completeIntrospected] ++ "}"
+
+/-- Plan 009 cases over one validated receipt of grant 7 with ordinal 4. The supporting base is
+the fully supported `full` fact set; bits select the historical inputs:
+0 policy selected · 1 snapshot attached · 2 snapshot stale · 3 receipt ordinal present ·
+4 receipt validated · 5 cutoff 9 (after) · 6 cutoff 4 (equality: at/after) · 7 grant totally
+revoked · 8 historical use obligations hold · 9 snapshot watermark 2 (below the minimum 3). -/
+def histFacts (n : Nat) : Fixed :=
+  let f := facts full
+  { f with
+    revoked := if bit n 7 then [7] else [],
+    temporalPolicy := bit n 0,
+    receipts := [⟨1, 7, if bit n 3 then some 4 else none, bit n 4⟩],
+    cutoffs := (if bit n 5 then [(7, 9)] else []) ++ (if bit n 6 then [(7, 4)] else []),
+    histUseValid := bit n 8,
+    selfTimes := [(1, n)] }
+
+def histAttachments (n : Nat) : List Attachment :=
+  let boundary := if bit n 2 then 1 else 5
+  let watermark := if bit n 9 then 2 else 10
+  (if bit n 1 then [.snapshot boundary watermark false] else []) ++ attachments full
 
 def run : String :=
   let ordinary := (List.range 256).map fun n => row s!"bits_{n}" (facts n) (attachments n)
@@ -139,7 +163,21 @@ def run : String :=
     row "introspected" introspected (attachments full),
     row "committed_conflict" conflict (.disclosure 2 :: attachments full)
   ]
-  "[\n" ++ ",\n".intercalate (ordinary ++ capstoneCases ++ adverseCases) ++ "\n]\n"
+  let histCases := (List.range 1024).map fun n =>
+    row s!"hist_{n}" (histFacts n) (histAttachments n)
+  -- Named plan 009 cases: an ordinal beyond the watermark, a Merkle snapshot with and without
+  -- the per-grant path, a contradiction among blocked receipts, and a future boundary time.
+  let hf := histFacts 0x11B
+  let histSpecial := [
+    row "hist_beyond_watermark" { hf with receipts := [⟨1, 7, some 11, true⟩] }
+      (histAttachments 0x11B),
+    row "hist_merkle_missing_path" hf (.snapshot 5 10 true :: attachments full),
+    row "hist_merkle_path" hf (.path 7 :: .snapshot 5 10 true :: attachments full),
+    row "hist_contradiction" { hf with historicalContradiction := true } (histAttachments 0x11B),
+    row "hist_future_boundary" hf (.snapshot 9 10 false :: attachments full)
+  ]
+  "[\n" ++ ",\n".intercalate
+    (ordinary ++ capstoneCases ++ adverseCases ++ histCases ++ histSpecial) ++ "\n]\n"
 
 end Averin.Oracle.Verdict
 

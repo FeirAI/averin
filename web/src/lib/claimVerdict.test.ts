@@ -2,7 +2,7 @@ import {expect, test} from "vitest";
 import {claimVerdict} from "./claimVerdict";
 
 const report = (decision = "satisfied") => ({
-  ok: true, keys_externally_pinned: true, claims_version: "1",
+  ok: true, keys_externally_pinned: true, claims_version: "2",
   claims: {requested: "authorized", authorized: decision, requested_decision: decision},
 });
 
@@ -12,7 +12,7 @@ test("accepts only a pinned, versioned satisfied required claim", () => {
 });
 
 test("missing and malformed claim contracts never show PASS", () => {
-  expect(claimVerdict({...report(), claims_version: "2"}).word).toBe("INSUFFICIENT");
+  expect(claimVerdict({...report(), claims_version: "3"}).word).toBe("INSUFFICIENT");
   expect(claimVerdict({...report(), claims: undefined}).word).toBe("INSUFFICIENT");
   expect(claimVerdict({...report(), claims: {...report().claims, requested_decision: "unknown"}}).word).toBe("INSUFFICIENT");
   expect(claimVerdict({...report(), claims: {...report().claims, authorized: "insufficient"}}).word).toBe("INSUFFICIENT");

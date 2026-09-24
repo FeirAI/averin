@@ -27,6 +27,9 @@ pub enum RequestedClaim {
     Integrity,
     Authenticated,
     Authorized,
+    /// Plan 009: every receipt was authorized as of an authenticated revocation snapshot, ordered
+    /// before any applicable prospective cutoff under the caller's `db_serialized_v1` policy.
+    HistoricalAuthorizedAsOfSnapshot,
     CompleteBrokered,
     CompleteIntrospected,
 }
@@ -37,6 +40,7 @@ impl RequestedClaim {
             Self::Integrity => "integrity",
             Self::Authenticated => "authenticated",
             Self::Authorized => "authorized",
+            Self::HistoricalAuthorizedAsOfSnapshot => "historical_authorized_as_of_snapshot",
             Self::CompleteBrokered => "complete_brokered",
             Self::CompleteIntrospected => "complete_introspected",
         }
@@ -81,6 +85,9 @@ impl ClaimPolicy {
             Some(CanonValue::Str(s)) if s == "integrity" => RequestedClaim::Integrity,
             Some(CanonValue::Str(s)) if s == "authenticated" => RequestedClaim::Authenticated,
             Some(CanonValue::Str(s)) if s == "authorized" => RequestedClaim::Authorized,
+            Some(CanonValue::Str(s)) if s == "historical_authorized_as_of_snapshot" => {
+                RequestedClaim::HistoricalAuthorizedAsOfSnapshot
+            }
             Some(CanonValue::Str(s)) if s == "complete_brokered" => {
                 RequestedClaim::CompleteBrokered
             }
@@ -120,6 +127,9 @@ pub struct ClaimResults {
     pub integrity: ClaimDecision,
     pub authenticated: ClaimDecision,
     pub authorized: ClaimDecision,
+    /// Plan 009. Distinct from `temporal` (anchor/attestation freshness): this is the historical
+    /// authorization of every receipt as of the authenticated revocation snapshot.
+    pub historical_authorized_as_of_snapshot: ClaimDecision,
     pub temporal: ClaimDecision,
     pub complete_brokered: ClaimDecision,
     pub complete_introspected: ClaimDecision,
@@ -133,6 +143,7 @@ impl ClaimResults {
             integrity: ClaimDecision::Refuted,
             authenticated: ClaimDecision::Refuted,
             authorized: ClaimDecision::Refuted,
+            historical_authorized_as_of_snapshot: ClaimDecision::Refuted,
             temporal: ClaimDecision::Refuted,
             complete_brokered: ClaimDecision::Refuted,
             complete_introspected: ClaimDecision::Refuted,
@@ -148,6 +159,10 @@ impl ClaimResults {
             field("integrity", self.integrity),
             field("authenticated", self.authenticated),
             field("authorized", self.authorized),
+            field(
+                "historical_authorized_as_of_snapshot",
+                self.historical_authorized_as_of_snapshot,
+            ),
             field("temporal", self.temporal),
             field("complete_brokered", self.complete_brokered),
             field("complete_introspected", self.complete_introspected),
@@ -225,7 +240,25 @@ impl CapstoneFacts {
     }
 }
 
+/// Plan 009 facts, each produced by the checked historical pass in `verify.rs`.
+pub(super) struct HistoricalFacts {
+    /// The caller selected `db_serialized_v1`. Never derived from the bundle.
+    pub(super) selected: bool,
+    /// A usable signed v2 snapshot matched the project, the caller's clock, age and watermark.
+    pub(super) snapshot_verified: bool,
+    /// Every brokered receipt passed the shared validation path (legacy or shadow) and is
+    /// `proven_before`; the other brokered-use obligations of `authorized` hold.
+    pub(super) brokered_use_valid: bool,
+    pub(super) introspected_use_valid: bool,
+    /// A validated receipt at/after its cutoff, a receipt of a totally revoked grant, or an
+    /// outcome/intent ordinal contradiction.
+    pub(super) adverse: bool,
+    /// Checked Tier-B contradictions, counting violations among revocation-blocked receipts.
+    pub(super) checked_contradiction: bool,
+}
+
 pub(super) struct ValidatedFacts {
+    pub(super) historical: HistoricalFacts,
     pub(super) structural_integrity: bool,
     pub(super) record_count: usize,
     pub(super) pinned_record_seals: Vec<PinnedRecordSeal>,
@@ -328,6 +361,32 @@ impl ValidatedFacts {
         } else {
             Insufficient
         };
+        // Plan 009: the historical claim replaces current-revocation readiness and adverse
+        // revocation membership with the per-receipt ordering against an authenticated snapshot.
+        // Every other obligation of `authorized` still applies. Under the strict policy it is
+        // never positive.
+        let h = &self.historical;
+        let historical_authorized_as_of_snapshot = if !h.selected {
+            Insufficient
+        } else if self.immutable_record_contradiction
+            || h.checked_contradiction
+            || self.adverse_disclosure
+            || self.adverse_anchor
+            || h.adverse
+            || authenticated == Refuted
+        {
+            Refuted
+        } else if authenticated == Satisfied
+            && self.pinned_role_authority
+            && h.snapshot_verified
+            && (!self.policy.require_disclosure || self.disclosure_complete)
+            && (!self.policy.require_attestation || self.attestation_valid)
+            && (h.brokered_use_valid || h.introspected_use_valid)
+        {
+            Satisfied
+        } else {
+            Insufficient
+        };
         let complete_brokered = if authorized == Refuted {
             Refuted
         } else if authorized == Satisfied && temporal == Satisfied && self.capstone.brokered() {
@@ -346,6 +405,9 @@ impl ValidatedFacts {
             RequestedClaim::Integrity => integrity,
             RequestedClaim::Authenticated => authenticated,
             RequestedClaim::Authorized => authorized,
+            RequestedClaim::HistoricalAuthorizedAsOfSnapshot => {
+                historical_authorized_as_of_snapshot
+            }
             RequestedClaim::CompleteBrokered => complete_brokered,
             RequestedClaim::CompleteIntrospected => complete_introspected,
         };
@@ -353,6 +415,7 @@ impl ValidatedFacts {
             integrity,
             authenticated,
             authorized,
+            historical_authorized_as_of_snapshot,
             temporal,
             complete_brokered,
             complete_introspected,
@@ -373,7 +436,94 @@ mod differential {
     // Mirrors Oracle/Verdict.lean's checked-fact projection. The Lean oracle also models the
     // signed records and support attachments used to derive these facts. Bundle-byte extraction
     // remains a separate end-to-end obligation, covered by adversarial tests.
+    // Mirrors Oracle/Verdict.lean `histFacts`/`histAttachments` and its named cases: one receipt
+    // of grant 7 with ordinal 4 (or `order`), evaluation time 8, maximum age 5, minimum watermark 3.
+    struct Hist {
+        n: usize,
+        order: Option<i64>,
+        boundary: Option<i64>,
+        watermark: i64,
+        merkle: bool,
+        path: bool,
+        contradiction: bool,
+    }
+
+    fn historical(h: &Hist) -> (HistoricalFacts, bool) {
+        let n = h.n;
+        let validated = bit(n, 4);
+        let revoked = bit(n, 7);
+        let cutoffs: Vec<i64> = [(5, 9), (6, 4)]
+            .into_iter()
+            .filter(|(b, _)| bit(n, *b))
+            .map(|(_, c)| c)
+            .collect();
+        let proven = validated
+            && !revoked
+            && h.order
+                .is_some_and(|o| o <= h.watermark && cutoffs.iter().all(|c| o < *c));
+        let fresh = h
+            .boundary
+            .is_some_and(|b| b <= 8 && 8 <= b + 5 && 3 <= h.watermark);
+        let adverse =
+            validated && (revoked || h.order.is_some_and(|o| cutoffs.iter().any(|c| *c <= o)));
+        (
+            HistoricalFacts {
+                selected: bit(n, 0),
+                snapshot_verified: fresh,
+                brokered_use_valid: bit(n, 8) && proven && (!h.merkle || h.path),
+                introspected_use_valid: false,
+                adverse,
+                checked_contradiction: h.contradiction,
+            },
+            revoked,
+        )
+    }
+
+    fn hist_case(name: &str) -> Option<Hist> {
+        let base = |n: usize| Hist {
+            n,
+            order: bit(n, 3).then_some(4),
+            boundary: bit(n, 1).then_some(if bit(n, 2) { 1 } else { 5 }),
+            watermark: if bit(n, 9) { 2 } else { 10 },
+            merkle: false,
+            path: false,
+            contradiction: false,
+        };
+        let special = base(0x11B);
+        Some(match name {
+            "hist_beyond_watermark" => Hist {
+                order: Some(11),
+                ..special
+            },
+            "hist_merkle_missing_path" => Hist {
+                merkle: true,
+                ..special
+            },
+            "hist_merkle_path" => Hist {
+                merkle: true,
+                path: true,
+                ..special
+            },
+            "hist_contradiction" => Hist {
+                contradiction: true,
+                ..special
+            },
+            "hist_future_boundary" => Hist {
+                boundary: Some(9),
+                ..special
+            },
+            _ => base(name.strip_prefix("hist_")?.parse().ok()?),
+        })
+    }
+
     fn facts(name: &str) -> ValidatedFacts {
+        if let Some(h) = hist_case(name) {
+            let mut result = facts("bits_191");
+            let (historical, revoked) = historical(&h);
+            result.historical = historical;
+            result.revoked_membership = revoked;
+            return result;
+        }
         let n = name
             .strip_prefix("bits_")
             .and_then(|s| s.parse().ok())
@@ -388,6 +538,14 @@ mod differential {
         let disclosed = bit(n, 7);
         let key = [1; 32];
         let mut result = ValidatedFacts {
+            historical: HistoricalFacts {
+                selected: false,
+                snapshot_verified: false,
+                brokered_use_valid: false,
+                introspected_use_valid: false,
+                adverse: false,
+                checked_contradiction: false,
+            },
             structural_integrity: true,
             record_count: 1,
             pinned_record_seals: if pin && anchor {
@@ -534,7 +692,11 @@ mod differential {
         let expected = std::fs::read_to_string(path).expect("build verdict_oracle first");
         let rows = CanonValue::parse(&expected).expect("verdict oracle JSON");
         let rows = rows.as_array().expect("oracle rows");
-        assert_eq!(rows.len(), 287, "all finite fact and capstone cases");
+        assert_eq!(
+            rows.len(),
+            1316,
+            "all finite fact, capstone and historical cases"
+        );
         for row in rows {
             let name = row
                 .get("name")
@@ -545,6 +707,10 @@ mod differential {
                 ("integrity", got.integrity),
                 ("authenticated", got.authenticated),
                 ("authorized", got.authorized),
+                (
+                    "historical_authorized_as_of_snapshot",
+                    got.historical_authorized_as_of_snapshot,
+                ),
                 ("temporal", got.temporal),
                 ("complete_brokered", got.complete_brokered),
                 ("complete_introspected", got.complete_introspected),

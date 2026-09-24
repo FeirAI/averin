@@ -143,7 +143,7 @@ func TestSharedAttachmentCorpusClaimSupportErasure(t *testing.T) {
 		if err := json.Unmarshal([]byte(core.VerifyBundleWith(string(bundleJSON), string(optsJSON))), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.ClaimsVersion != "1" {
+		if report.ClaimsVersion != "2" {
 			t.Fatalf("%s: claims version %q", tc.Name, report.ClaimsVersion)
 		}
 		if report.Claims["requested_decision"] != report.Claims[report.Claims["requested"]] {
