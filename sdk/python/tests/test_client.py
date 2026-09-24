@@ -1,7 +1,49 @@
 import json
 import re
+from pathlib import Path
 
 import averin
+
+
+def test_v3_prepared_fixture_is_the_exact_submitted_semantic_record():
+    fixture = json.loads((Path(__file__).resolve().parents[3] / "spec/golden-vectors/authority-sdk-v3.json").read_text())
+    draft = fixture["draft_record"]
+    before = json.dumps(draft, sort_keys=True)
+    prepared = averin.prepare_v3_authority_subject(draft)
+    assert prepared == fixture["prepared_record"]
+    assert json.dumps(draft, sort_keys=True) == before
+    prepared["authority"]["subject_digest"] = fixture["subject_digest"]
+    prepared["authority"]["evidence_sig"] = "ed25519:external-approver-proof"
+    signed_semantics = json.dumps(prepared, sort_keys=True)
+    captured = {}
+
+    def transport(_url, _headers, body):
+        sent = json.loads(body)
+        assert sent.pop("idempotency_key") == "sdk-v3-fixed"
+        captured["sent"] = sent
+        return json.dumps({"results": [{"record": {"content_hash": "sha256:sealed"}}]})
+
+    c = averin.Client("http://localhost:8080", "p1", transport=transport)
+    c.submit(prepared, idempotency_key="sdk-v3-fixed")
+    assert json.dumps(captured["sent"], sort_keys=True) == signed_semantics
+    assert json.dumps(prepared, sort_keys=True) == signed_semantics
+
+
+def test_v3_prepare_rejects_incomplete_or_server_rewritten_subjects():
+    fixture = json.loads((Path(__file__).resolve().parents[3] / "spec/golden-vectors/authority-sdk-v3.json").read_text())
+    for change in (
+        {"record_id": ""},
+        {"agent_ts": ""},
+        {"schema_version": "3"},
+        {"idempotency_key": "inside-subject"},
+        {"input": "raw secret"},
+    ):
+        draft = dict(fixture["draft_record"], **change)
+        try:
+            averin.prepare_v3_authority_subject(draft)
+            assert False, f"accepted {change}"
+        except ValueError:
+            pass
 
 
 def test_build_record_basics():
@@ -49,6 +91,19 @@ def test_client_submits_with_idempotency_and_returns_record():
     assert captured["body"]["project_id"] == "p1"
     assert captured["body"]["extensions"]["content_preview"]["rationale"] == "why"
     assert out["content_hash"] == "sha256:abc"
+
+
+def test_transport_preserves_opaque_identity_for_server_validation():
+    captured = {}
+
+    def transport(_url, _headers, body):
+        captured["project_id"] = json.loads(body)["project_id"]
+        return json.dumps({"error": "project_id must be NFC-normalized"})
+
+    c = averin.Client("http://x", "e\u0301", transport=transport)
+    # Python SDK does not inspect server error bodies, but it must send the exact identity.
+    c.record("s", "read", idempotency_key="k")
+    assert captured["project_id"] == "e\u0301"
 
 
 def test_auto_idempotency_key_is_unique():

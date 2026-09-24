@@ -4,8 +4,9 @@
 //! #9 key compromise, plus integrity tamper.
 
 use averin_decision_core::anchor::{make_test_anchor, test_tsa_key};
-use averin_decision_core::authority::sign_evidence;
-use averin_decision_core::authority::AuthorityTrust;
+use averin_decision_core::authority::{
+    sign_evidence, sign_evidence_v3, AuthorityTrust, SUBJECT_PROJECTION,
+};
 use averin_decision_core::canon::CanonValue;
 use averin_decision_core::checkpoint::{attach_anchor, checkpoint_body, seal_checkpoint};
 use averin_decision_core::hashx::sha256_prefixed;
@@ -14,8 +15,8 @@ use averin_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use averin_decision_core::verify::{
     cnf_kid, cosig_approval_challenge, delegation_hop_challenge, federation_cert_challenge,
     introspection_transcript_challenge, report_to_json, verify_bundle, verify_bundle_with,
-    verify_bundle_with_json, ActionCompleteness, RoleKeyStatus, TrustLevel, TrustedKey,
-    VerifyOptions, VerifyReport,
+    verify_bundle_with_json, ActionCompleteness, ClaimDecision, ClaimPolicy, RequestedClaim,
+    RevocationRequirement, RoleKeyStatus, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::collections::BTreeMap;
@@ -442,21 +443,20 @@ fn govder_record_evidence_binding_r1() {
     assert_eq!(r_good.record_trust.len(), 1);
     assert_eq!(
         r_good.record_trust[0].authority,
-        AuthorityTrust::Verified,
-        "the real signature must classify Verified"
+        AuthorityTrust::LegacyUnbound,
+        "the historical v2 signature remains valid but cannot bind the record body"
     );
 
     // R1: extensions.govder.outcome changed AFTER signing (the signature was computed over
     // "ok"). The signature still verifies (govder's real key, unchanged bytes) — authority stays
-    // Verified — but the re-derivation must catch that the VISIBLE decision no longer matches
+    // LegacyUnbound — but the re-derivation must catch that the VISIBLE decision no longer matches
     // what was signed.
     let tampered = seal(&CanonValue::parse(&mk_body("error")).unwrap(), &seal_key).unwrap();
     let r_bad = verify_bundle_with(&bundle_of(tampered), &pinned());
     assert_eq!(
         r_bad.record_trust[0].authority,
-        AuthorityTrust::Verified,
-        "the signature is untouched and must still classify Verified — this is the whole finding: \
-         a valid signature over the WRONG evidence still reads 'verified'"
+        AuthorityTrust::LegacyUnbound,
+        "the historical signature is untouched and valid; re-derivation must catch the wrong evidence"
     );
     assert!(
         r_bad
@@ -533,8 +533,8 @@ fn govder_record_with_no_agent_id_evidence_binding() {
     assert_eq!(r.record_trust.len(), 1);
     assert_eq!(
         r.record_trust[0].authority,
-        AuthorityTrust::Verified,
-        "a real govder signature over a no-agent_id record must still classify Verified"
+        AuthorityTrust::LegacyUnbound,
+        "a historical v2 govder signature remains valid without claiming body binding"
     );
     assert!(
         !r.issues
@@ -2725,9 +2725,44 @@ fn seal_d2_use(
     cnf_pub_carried: &VerifyingKey,
     sign_with: &SigningKey,
 ) -> CanonValue {
+    seal_d2_use_with_binding(
+        rec_sk,
+        res_sk,
+        record_id,
+        prev,
+        used_at,
+        bound_commitment,
+        record_commitment,
+        cnf_kid_str,
+        cnf_pub_carried,
+        sign_with,
+        &test_credential_binding(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seal_d2_use_with_binding(
+    rec_sk: &SigningKey,
+    res_sk: &SigningKey,
+    record_id: &str,
+    prev: &[String],
+    used_at: i64,
+    bound_commitment: &str,
+    record_commitment: &str,
+    cnf_kid_str: &str,
+    cnf_pub_carried: &VerifyingKey,
+    sign_with: &SigningKey,
+    credential_binding: &str,
+) -> CanonValue {
     let nonce = format!("nonce-{used_at}");
-    let cb = test_credential_binding();
-    let challenge = use_pop_challenge(GID, RESOURCE, ACTION, bound_commitment, &cb, &nonce);
+    let challenge = use_pop_challenge(
+        GID,
+        RESOURCE,
+        ACTION,
+        bound_commitment,
+        credential_binding,
+        &nonce,
+    );
     let use_sig = b64enc(&sign_with.sign(&challenge).to_bytes());
     let pch = format!("sha256:{}", hex_lower(&challenge));
     let ue = CanonValue::object(vec![
@@ -2828,6 +2863,439 @@ fn tier_b_pop_reverified_under_carried_cnf() {
         "the PoP should be independently re-run offline"
     );
     assert!(averin_decision_core::verify::report_to_json(&r).contains(r#""uses_pop_reverified":1"#));
+}
+
+// Upgrade an actual structured role record to v3, then have the recorder reseal it.
+// The proof sees the finalized semantic body and has no caller-supplied digest seam.
+fn body_bind_role_record(
+    record: &CanonValue,
+    authority: &SigningKey,
+    recorder: &SigningKey,
+) -> CanonValue {
+    let auth = record.get("authority").unwrap();
+    let auth = change_field(auth, "proof_version", CanonValue::string("v3"));
+    let auth = change_field(
+        &auth,
+        "subject_projection",
+        CanonValue::string(SUBJECT_PROJECTION),
+    );
+    let body = change_field(record, "authority", auth);
+    let (digest, signature) = sign_evidence_v3(&body, authority).unwrap();
+    let auth = body.get("authority").unwrap();
+    let auth = change_field(auth, "subject_digest", CanonValue::string(digest));
+    let auth = change_field(&auth, "evidence_sig", CanonValue::string(signature));
+    seal(&change_field(&body, "authority", auth), recorder).unwrap()
+}
+
+// A real signed grant and resource use with offline PoP, taxonomy, record-key and role pins.
+// Claim properties below vary only unsigned attachments and the fixed caller policy.
+fn claim_ready_bundle_with_version(body_bound: bool) -> (CanonValue, VerifyOptions) {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let tax = signing_key_from_seed(&[11u8; 32]);
+    let pc = sha256_prefixed(b"params-commit");
+    let mut grant = d2_grant(&rec, &cnf.verifying_key());
+    if body_bound {
+        grant = body_bind_role_record(&grant, &rec, &rec);
+    }
+    let mut use_rec = seal_d2_use(
+        &rec,
+        &res,
+        "use-1",
+        &[content_hash_of(&grant)],
+        USED,
+        &pc,
+        &pc,
+        &vk_cnf_kid(&cnf.verifying_key()),
+        &cnf.verifying_key(),
+        &cnf,
+    );
+    if body_bound {
+        use_rec = body_bind_role_record(&use_rec, &res, &rec);
+    }
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
+    let mut opts = pinned_roles_tax(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+        t,
+        tax.verifying_key(),
+    );
+    opts.trusted_keys = Some(vec![TrustedKey::from(rec.verifying_key())]);
+    opts.claim_policy = ClaimPolicy {
+        requested: RequestedClaim::Authorized,
+        ..Default::default()
+    };
+    (bundle, opts)
+}
+
+fn claim_ready_bundle() -> (CanonValue, VerifyOptions) {
+    claim_ready_bundle_with_version(true)
+}
+
+#[test]
+fn v3_signed_grant_and_pop_use_satisfy_body_bound_authorization() {
+    let (bundle, opts) = claim_ready_bundle();
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(r.ok, "v3 grant/use bundle failed: {:?}", r.issues);
+    assert_eq!(r.grant_verified, 1);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.uses_pop_reverified, 1);
+    assert!(r.body_bound_role_evidence);
+    assert!(r
+        .record_trust
+        .iter()
+        .all(|entry| entry.authority == AuthorityTrust::Verified));
+    assert_eq!(r.claims().authorized, ClaimDecision::Satisfied);
+
+    // Exercise the public JSON options path over exactly these signed bytes,
+    // then optionally emit them for native, cgo and WASM differential tests.
+    let pubkey = |seed: u8| {
+        CanonValue::string(encode_pubkey(
+            &signing_key_from_seed(&[seed; 32]).verifying_key(),
+        ))
+    };
+    let opts_json = CanonValue::object(vec![
+        ("signing_keys".into(), CanonValue::Array(vec![pubkey(0)])),
+        (
+            "broker_authority_keys".into(),
+            CanonValue::Array(vec![pubkey(0)]),
+        ),
+        (
+            "resource_authority_keys".into(),
+            CanonValue::Array(vec![pubkey(3)]),
+        ),
+        ("tsa_keys".into(), CanonValue::Array(vec![pubkey(200)])),
+        ("taxonomy_keys".into(), CanonValue::Array(vec![pubkey(11)])),
+        ("taxonomy".into(), opts.taxonomy.clone().unwrap()),
+        (
+            "taxonomy_digest".into(),
+            CanonValue::string(opts.taxonomy_digest.as_ref().unwrap()),
+        ),
+        (
+            "taxonomy_version".into(),
+            CanonValue::Int(opts.taxonomy_version.unwrap()),
+        ),
+        (
+            "claim_policy".into(),
+            CanonValue::object(vec![("requested".into(), CanonValue::string("authorized"))])
+                .unwrap(),
+        ),
+    ])
+    .unwrap();
+    let public = verify_bundle_with_json(&bundle.serialize(), &opts_json.serialize());
+    let public = CanonValue::parse(&public).unwrap();
+    assert_eq!(
+        public
+            .get("claims")
+            .and_then(|claims| claims.get("authorized"))
+            .and_then(CanonValue::as_str),
+        Some("satisfied")
+    );
+    if let Ok(path) = std::env::var("AVERIN_WRITE_V3_CLAIM_FIXTURE") {
+        let fixture =
+            CanonValue::object(vec![("bundle".into(), bundle), ("opts".into(), opts_json)])
+                .unwrap();
+        std::fs::write(path, fixture.serialize()).unwrap();
+    }
+}
+
+#[test]
+fn v2_role_evidence_retains_tier_b_joins_but_cannot_satisfy_body_bound_claim() {
+    let (bundle, opts) = claim_ready_bundle_with_version(false);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(
+        r.ok,
+        "historical v2 bundle should remain valid: {:?}",
+        r.issues
+    );
+    assert_eq!(r.grant_verified, 1);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.uses_pop_reverified, 1);
+    assert!(r
+        .record_trust
+        .iter()
+        .all(|entry| entry.authority == AuthorityTrust::LegacyUnbound));
+    assert!(!r.body_bound_role_evidence);
+    assert_eq!(r.claims().authorized, ClaimDecision::Insufficient);
+}
+
+#[test]
+fn claim_results_require_pinned_record_and_revocation_evidence() {
+    let (bundle, mut opts) = claim_ready_bundle();
+    let base = verify_bundle_with(&bundle, &opts);
+    assert!(base.ok, "{:?}", base.issues);
+    assert_eq!(base.claims().authorized, ClaimDecision::Satisfied);
+    assert_eq!(base.claims().requested_decision, ClaimDecision::Satisfied);
+    opts.trusted_keys = None;
+    let unpinned = verify_bundle_with(&bundle, &opts);
+    assert!(unpinned.ok);
+    assert_eq!(unpinned.claims().integrity, ClaimDecision::Satisfied);
+    assert_eq!(unpinned.claims().authenticated, ClaimDecision::Insufficient);
+    assert_eq!(unpinned.claims().authorized, ClaimDecision::Insufficient);
+    opts.trusted_keys = Some(vec![TrustedKey::from(
+        signing_key_from_seed(&[0u8; 32]).verifying_key(),
+    )]);
+    let rev = signing_key_from_seed(&[77u8; 32]);
+    opts.revocation_keys = vec![rev.verifying_key()];
+    let missing = verify_bundle_with(&bundle, &opts);
+    assert!(
+        missing.ok,
+        "legacy integrity remains compatible: {:?}",
+        missing.issues
+    );
+    assert_eq!(missing.revocation_status, "missing");
+    assert_eq!(missing.claims().authorized, ClaimDecision::Insufficient);
+    let list = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[]);
+    let disclosed = change_field(&bundle, "revocation_list", list);
+    let fresh = verify_bundle_with(&disclosed, &opts);
+    assert!(fresh.ok, "{:?}", fresh.issues);
+    assert_eq!(fresh.claims().authorized, ClaimDecision::Satisfied);
+    assert_eq!(
+        verify_bundle_with(&bundle, &opts).claims().authorized,
+        ClaimDecision::Insufficient
+    );
+}
+
+#[test]
+fn claim_results_anchor_and_malformed_optional_erasure_never_add_authority() {
+    let (bundle, opts) = claim_ready_bundle();
+    let full = verify_bundle_with(&bundle, &opts);
+    assert_eq!(
+        full.claims().authorized,
+        ClaimDecision::Satisfied,
+        "{:?}",
+        full.issues
+    );
+    let no_anchor = verify_bundle_with(&strip_anchors(&bundle), &opts);
+    assert_eq!(no_anchor.claims().authorized, ClaimDecision::Insufficient);
+    let malformed = change_field(
+        &bundle,
+        "disclosures",
+        CanonValue::string("bad optional disclosure"),
+    );
+    let malformed_report = verify_bundle_with(&malformed, &opts);
+    assert!(!malformed_report.ok);
+    assert_eq!(
+        malformed_report.claims().authorized,
+        ClaimDecision::Satisfied
+    );
+    assert_eq!(full.claims().authorized, ClaimDecision::Satisfied);
+}
+
+#[test]
+fn independently_signed_adverse_revocation_is_enforced_and_bounds_erasure_theorem() {
+    // The signed root is an authority statement, not unsigned support. Removing it changes
+    // authenticated authority evidence. The formal support-erasure theorem fixes that evidence.
+    let (bundle, mut opts) = claim_ready_bundle();
+    let rev = signing_key_from_seed(&[77u8; 32]);
+    opts.revocation_keys = vec![rev.verifying_key()];
+    let nonrevoking_list = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[]);
+    let listed = change_field(&bundle, "revocation_list", nonrevoking_list);
+    assert_eq!(
+        verify_bundle_with(&listed, &opts).claims().authorized,
+        ClaimDecision::Satisfied
+    );
+    let leaves = rev_leaves(&[GID]);
+    let root = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let both = change_field(&listed, "revocation_merkle_root", root);
+    let both = change_field(
+        &both,
+        "revocation_proofs",
+        CanonValue::object(vec![(GID.into(), membership_proof(&leaves, GID))]).unwrap(),
+    );
+    let adverse = verify_bundle_with(&both, &opts);
+    assert_eq!(
+        adverse.claims().authorized,
+        ClaimDecision::Refuted,
+        "every present authenticated adverse statement blocks: {:?}",
+        adverse.issues
+    );
+    // With explicit dual mode, stripping either signed artifact loses required proof.
+    opts.claim_policy.revocation = RevocationRequirement::Both;
+    let stripped = verify_bundle_with(&listed, &opts);
+    assert_eq!(stripped.claims().authorized, ClaimDecision::Insufficient);
+    // Default disclosed mode has a narrower, honest theorem: removal of an independently
+    // signed adverse authority statement is not support erasure.
+    opts.claim_policy.revocation = RevocationRequirement::Pinned;
+    assert_eq!(
+        verify_bundle_with(&listed, &opts).claims().authorized,
+        ClaimDecision::Satisfied
+    );
+}
+
+#[test]
+fn malformed_claim_policy_is_a_fatal_configuration_error() {
+    let (bundle, _) = claim_ready_bundle();
+    for raw in [
+        r#"{"claim_policy":{"requested":null}}"#,
+        r#"{"claim_policy":{"requested":42}}"#,
+        r#"{"claim_policy":{"revocation":false}}"#,
+        r#"{"claim_policy":{"require_disclosure":"false"}}"#,
+        r#"{"claim_policy":{"unexpected":true}}"#,
+    ] {
+        let out = verify_bundle_with_json(&bundle.serialize(), raw);
+        assert!(
+            out.contains("\"ok\":false") && out.contains("\"error\":"),
+            "{out}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_signed_record_id_refutes_structural_claim_even_with_a_valid_chain() {
+    let (bundle, opts) = claim_ready_bundle();
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let mut records = arr(&bundle, "records");
+    let mut use_rec = change_field(&records[1], "record_id", CanonValue::string(GID));
+    let auth = use_rec.get("authority").unwrap();
+    let eh = auth.get("evidence_hash").unwrap().as_str().unwrap();
+    let auth = change_field(
+        auth,
+        "evidence_sig",
+        CanonValue::string(sign_evidence("gateway_enforced", "proj-001", GID, eh, &res)),
+    );
+    use_rec = seal(&change_field(&use_rec, "authority", auth), &rec).unwrap();
+    records[1] = use_rec;
+    let cp = checkpoint_over(&rec, &[content_hash_of(&records[1])], 2, Some(&tsa));
+    let conflict = change_field(
+        &change_field(&bundle, "records", CanonValue::Array(records)),
+        "checkpoints",
+        CanonValue::Array(vec![cp]),
+    );
+    let r = verify_bundle_with(&conflict, &opts);
+    assert_eq!(r.records_proven, r.records_total, "{:?}", r.issues);
+    assert!(r.dag_ok && r.chain_ok, "{:?}", r.issues);
+    assert_eq!(r.claims().integrity, ClaimDecision::Refuted);
+    assert_eq!(r.claims().authorized, ClaimDecision::Refuted);
+}
+
+fn claim_two_checkpoint_bundle(backdated: bool, mask: u8) -> (CanonValue, VerifyOptions) {
+    let (bundle, opts) = claim_ready_bundle();
+    let records = arr(&bundle, "records");
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let key = CanonValue::parse(r#"{"signing_key_id":"k0","key_epoch":0,"key_status":"active"}"#)
+        .unwrap();
+    let mut cp0 = seal_checkpoint(
+        &checkpoint_body(
+            "cp0",
+            "proj-001",
+            0,
+            None,
+            &[content_hash_of(&records[0])],
+            1,
+            "2026-06-15T10:05:00.000Z",
+            key.clone(),
+        )
+        .unwrap(),
+        &rec,
+    )
+    .unwrap();
+    let cp0_hash = checkpoint_hash(&cp0);
+    let mut cp1 = seal_checkpoint(
+        &checkpoint_body(
+            "cp1",
+            "proj-001",
+            1,
+            Some(&cp0_hash),
+            &[content_hash_of(&records[1])],
+            2,
+            "2026-06-15T10:10:00.000Z",
+            key,
+        )
+        .unwrap(),
+        &rec,
+    )
+    .unwrap();
+    if mask & 1 != 0 {
+        let ts = if backdated {
+            "2026-06-15T10:11:00.000Z"
+        } else {
+            "2026-06-15T10:05:01.000Z"
+        };
+        cp0 = attach_anchor(&cp0, make_test_anchor(&cp0_hash, ts, &tsa, "tsa-1"));
+    }
+    if mask & 2 != 0 {
+        cp1 = attach_anchor(
+            &cp1,
+            make_test_anchor(
+                &checkpoint_hash(&cp1),
+                "2026-06-15T10:10:01.000Z",
+                &tsa,
+                "tsa-1",
+            ),
+        );
+    }
+    (
+        change_field(&bundle, "checkpoints", CanonValue::Array(vec![cp0, cp1])),
+        opts,
+    )
+}
+
+#[test]
+fn all_two_checkpoint_anchor_subsets_only_remove_positive_claims() {
+    let (full_bundle, opts) = claim_two_checkpoint_bundle(false, 3);
+    let full = verify_bundle_with(&full_bundle, &opts);
+    assert_eq!(
+        full.claims().authorized,
+        ClaimDecision::Satisfied,
+        "{:?}",
+        full.issues
+    );
+    for mask in 0..4 {
+        let (bundle, opts) = claim_two_checkpoint_bundle(false, mask);
+        let r = verify_bundle_with(&bundle, &opts);
+        for (name, reduced, original) in [
+            (
+                "authenticated",
+                r.claims().authenticated,
+                full.claims().authenticated,
+            ),
+            (
+                "authorized",
+                r.claims().authorized,
+                full.claims().authorized,
+            ),
+            (
+                "complete_brokered",
+                r.claims().complete_brokered,
+                full.claims().complete_brokered,
+            ),
+        ] {
+            assert!(
+                reduced != ClaimDecision::Satisfied || original == ClaimDecision::Satisfied,
+                "mask {mask}: {name} gained support"
+            );
+        }
+    }
+}
+
+#[test]
+fn verified_adverse_anchor_refutes_and_is_outside_support_erasure() {
+    let (good_bundle, opts) = claim_two_checkpoint_bundle(false, 3);
+    assert_eq!(
+        verify_bundle_with(&good_bundle, &opts).claims().authorized,
+        ClaimDecision::Satisfied
+    );
+    let (bad_bundle, opts) = claim_two_checkpoint_bundle(true, 3);
+    let bad = verify_bundle_with(&bad_bundle, &opts);
+    assert!(
+        bad.issues.iter().any(|i| i.contains("backdating")),
+        "{:?}",
+        bad.issues
+    );
+    assert_eq!(bad.claims().authorized, ClaimDecision::Refuted);
+    assert_eq!(bad.claims().temporal, ClaimDecision::Refuted);
+    let (removed_adverse_anchor, opts) = claim_two_checkpoint_bundle(true, 2);
+    let less = verify_bundle_with(&removed_adverse_anchor, &opts);
+    assert_ne!(less.claims().authorized, ClaimDecision::Refuted);
 }
 
 #[test]
@@ -5608,6 +6076,64 @@ fn tier_b_cred_descriptor_action_mismatch_is_violation() {
         r.issues
     );
     assert_eq!((r.cred_label_checks, r.cred_label_matched), (1, 0));
+}
+
+#[test]
+fn validated_adverse_opening_is_enforced_and_bounds_support_erasure() {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let descriptor = cred_descriptor(
+        &cnf.verifying_key(),
+        "db.admin:orders-rw",
+        RESOURCE,
+        GID,
+        EXP,
+        true,
+    );
+    let binding = sha256_prefixed(descriptor.serialize().as_bytes());
+    let ge = cred_ge(&vk_cnf_kid(&cnf.verifying_key()), &binding);
+    let disclosed_grant = cred_bundle(&rec, &tsa, &descriptor, &ge);
+    let grant = body_bind_role_record(&arr(&disclosed_grant, "records").remove(0), &rec, &rec);
+    let pc = sha256_prefixed(b"params-commit");
+    let use_rec = seal_d2_use_with_binding(
+        &rec,
+        &res,
+        "use-1",
+        &[content_hash_of(&grant)],
+        USED,
+        &pc,
+        &pc,
+        &vk_cnf_kid(&cnf.verifying_key()),
+        &cnf.verifying_key(),
+        &cnf,
+        &binding,
+    );
+    let use_rec = body_bind_role_record(&use_rec, &res, &rec);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let base = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let opened = change_field(
+        &base,
+        "disclosures",
+        disclosed_grant.get("disclosures").unwrap().clone(),
+    );
+    let (_, opts) = claim_ready_bundle();
+    let adverse = verify_bundle_with(&opened, &opts);
+    assert_eq!(
+        (adverse.cred_label_checks, adverse.cred_label_matched),
+        (1, 0),
+        "{:?}",
+        adverse.issues
+    );
+    assert_eq!(adverse.claims().authorized, ClaimDecision::Refuted);
+    let stripped = verify_bundle_with(&base, &opts);
+    assert_eq!(
+        stripped.claims().authorized,
+        ClaimDecision::Satisfied,
+        "removing a valid contradictory opening changes adverse evidence: {:?}",
+        stripped.issues
+    );
 }
 
 #[test]
@@ -9172,6 +9698,10 @@ fn capstone_report() -> VerifyReport {
         ),
     );
     assert!(r.ok, "baseline must verify: {:?}", r.issues);
+    // This helper intentionally synthesizes the remaining capstone predicates below; model
+    // externally pinned record provenance explicitly as another required predicate.
+    r.keys_externally_pinned = true;
+    r.body_bound_role_evidence = true;
     assert_eq!(
         r.side_effect_closure_status, "closed",
         "the real manifest must compute closed (T6 e2e): {:?}",
@@ -10190,6 +10720,8 @@ fn introspected_capstone_report() -> VerifyReport {
         Some(closure_manifest(&[(RESOURCE, ACTION, &[])])),
     );
     assert!(r.ok, "native baseline must verify: {:?}", r.issues);
+    r.keys_externally_pinned = true;
+    r.body_bound_role_evidence = true;
     assert!(r.native_credential_present);
     assert_eq!(r.introspection_status, "attested", "issues: {:?}", r.issues);
     assert_eq!(r.uses_matched, 0);
@@ -12026,6 +12558,8 @@ fn federation_capstone_report() -> VerifyReport {
         ),
     );
     assert!(r.ok, "federation baseline must verify: {:?}", r.issues);
+    r.keys_externally_pinned = true;
+    r.body_bound_role_evidence = true;
     assert_eq!(r.federation_status, "sequence_verified");
     assert_eq!(r.brokers_total, 2);
     assert_eq!(r.brokers_seq_verified, 2);

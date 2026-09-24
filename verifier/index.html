@@ -273,7 +273,7 @@
           const ok = t.trust === "integrity_proven";
           return `<div class="rec"><span class="mark ${ok ? "ok" : "bad"}">${ok ? "✓" : "✗"}</span>
             <span>${esc(t.record_id || t.content_hash)}</span>
-            <span style="color:var(--mut)">via ${esc(t.observed_via)} · key ${esc(t.key_status)}</span>
+            <span style="color:var(--mut)">via ${esc(t.observed_via)} · key ${esc(t.key_status)} · authority ${esc(t.authority || "none")}</span>
             ${t.notes && t.notes[0] ? `<span style="color:var(--bad)">${esc(t.notes[0])}</span>` : ""}</div>`;
         }).join("");
         const stat = (b, s) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`;
@@ -281,8 +281,10 @@
         // Accountability is the LEVEL ABOVE integrity: who is answerable for the grants/uses, and whether the
         // bundle is a complete account (the capstone). broker_trust reflects whether the ROLE keys were pinned
         // (sequence_verified/gateway_enforced = pinned + elevated; the value itself is the honest signal).
+        const legacyUnbound = (r.record_trust || []).filter((t) => t.authority === "legacy_unbound").length;
         const acct = `<div class="sec">accountability</div>
           <div class="stats">
+            ${legacyUnbound ? stat(legacyUnbound, "historical authority proofs verify but do not bind the semantic body") : ""}
             ${stat(esc(r.grant_accountability || "n/a"), `grants · ${r.grant_verified ?? 0}/${r.grant_total ?? 0} verified`)}
             ${stat(`${r.uses_matched ?? 0}`, `uses matched · ${r.unmatched_pending ?? 0} pending · ${r.unmatched_violation ?? 0} violations`)}
             ${stat(esc(r.action_completeness || "n/a"), `action completeness · resource ${esc(r.resource_trust || "n/a")}`)}

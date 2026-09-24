@@ -380,7 +380,8 @@ separates it from every framed family), the denial-salt message, and the server 
 `formal/check-refinement.py` fails unless every `averin.*.vN` literal in `core/src` and
 `server/internal` is a `Family` tag or appears here. -/
 def catalogueTags : List String :=
-  ["averin.broker.pop.v1", "averin.broker.grant_void.v1", "averin.denial.salt.v1"] ++
+  ["averin.broker.pop.v1", "averin.broker.grant_void.v1", "averin.denial.salt.v1",
+   "averin.authority.subject.v1"] ++
     serverIdNamespaces
 
 /-- No catalogue domain string reuses a framed-family tag, and they are pairwise distinct. -/

@@ -135,7 +135,7 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
 		return
 	}
-	if err := rejectNUL("project_id", gr.ProjectID, "idempotency_key", idem); err != nil {
+	if err := s.rejectGrantIdentity(gr, idem); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -337,7 +337,7 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project_id and idempotency_key are required")
 		return
 	}
-	if err := rejectNUL("project_id", fr.ProjectID, "idempotency_key", idem); err != nil {
+	if err := s.rejectGrantIdentity(fr.grantRequest, idem); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -412,6 +412,8 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "original pending grant deadline expired")
 		return
 	}
+	dto.Created = row.Created
+	p := dto.toPendingGrant(idem)
 	if same, pe := pendingGrantMatchesRequest(p, req); pe != nil || !same {
 		writeErr(w, http.StatusConflict, "the pending grant under this idempotency_key was prepared for a different grant request")
 		return

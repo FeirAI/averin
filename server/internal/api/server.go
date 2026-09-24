@@ -23,10 +23,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/broker"
 	"github.com/feirai/averin/server/internal/content"
+	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/meter"
 	"github.com/feirai/averin/server/internal/metrics"
 	"github.com/feirai/averin/server/internal/otel"
@@ -37,6 +39,7 @@ import (
 
 // Sealer is the subset of the Rust core the API needs.
 type Sealer interface {
+	RcpCanonicalize(jsonDoc string) string
 	SealRecord(bodyJSON string) (string, error)
 	SealCheckpoint(bodyJSON string) (string, error)
 	VerifyBundle(bundleJSON string) string
@@ -56,6 +59,8 @@ type Sealer interface {
 	Commit(domain string, value []byte, nonceHex string) (string, error)
 	// authority evidence: the credential broker signs a gateway_enforced grant (RCP §11).
 	SignEvidence(source, projectID, recordID, evidenceHash string) (string, error)
+	SignAuthorityRecordV3(recordJSON string) (core.V3AuthorityProof, error)
+	VerifyAuthorityRecord(recordJSON, publicKey string) (string, error)
 	// RcpEvidenceHash derives evidence_hash = sha256(RCP-canonicalize(payload)) so the verifier can
 	// re-derive it from the embedded grant_evidence (ADR 0003 R1).
 	RcpEvidenceHash(payloadJSON string) (string, error)
@@ -205,6 +210,8 @@ type Server struct {
 	// averin-server binary get the SAME posture — a test suite running fail-open while production runs
 	// fail-closed would be testing a different server than the one that ships. See normalizeAuthority.
 	requirePinnedAuthority bool
+	// Explicit rollout gate: require v3 for newly ingested external elevation.
+	requireBodyBoundAuthority bool
 	// authorityDowngradeLogAt throttles the WARNING that names a failed authority elevation (a govder/averin
 	// key misalignment can otherwise spam it on every ingest). Guarded by ingestMu around updates.
 	authorityDowngradeLogAt time.Time
@@ -391,6 +398,9 @@ func (s *Server) WithBrokerID(brokerID string) *Server {
 	if s.brokerKey == nil {
 		panic("WithBrokerID requires WithBroker (broker_id tags the grants this broker issues)")
 	}
+	if err := s.rejectOpaqueIdentity("broker_id", brokerID); err != nil {
+		panic("WithBrokerID: " + err.Error())
+	}
 	s.brokerID = brokerID
 	return s
 }
@@ -416,6 +426,13 @@ func (s *Server) WithDeniedGrantLog() *Server {
 // elevation to fail). See normalizeAuthority.
 func (s *Server) WithRequirePinnedAuthority(v bool) *Server {
 	s.requirePinnedAuthority = v
+	return s
+}
+
+// WithRequireBodyBoundAuthority rejects new external v2 authority claims at
+// ingest. Historical v2 records remain readable as legacy_unbound on export.
+func (s *Server) WithRequireBodyBoundAuthority(v bool) *Server {
+	s.requireBodyBoundAuthority = v
 	return s
 }
 
@@ -476,6 +493,9 @@ func (s *Server) WithProjectAuthorityKey(project, source string, key ed25519.Pub
 	default:
 		panic("WithPolicyEngineKey: source must be policy_engine_signed, human_signed, or delegate_signed")
 	}
+	if err := s.rejectOpaqueIdentity("authority project_id", project); err != nil {
+		panic("WithProjectAuthorityKey: " + err.Error())
+	}
 	if serverPub, err := decodePubKey(s.core.PubKey()); err == nil && key.Equal(serverPub) {
 		panic("WithPolicyEngineKey: the authority key must be role-separated from the server signing key")
 	}
@@ -507,6 +527,9 @@ func (s *Server) WithProjectAuthorityKey(project, source string, key ed25519.Pub
 // key). The configured project Store supplies consume-before-act claims in the
 // same transaction as each receipt. Nil resourceCore disables /v2/use.
 func (s *Server) WithResource(resourceCore Sealer, resourceID string) *Server {
+	if err := s.rejectOpaqueIdentity("resource_id", resourceID); err != nil {
+		panic("WithResource: " + err.Error())
+	}
 	// R2 (ADR 0003): the resource recording key MUST be disjoint from the server signing key and the
 	// broker issuing key, else a grant could forge its own use receipt. The offline verifier rejects an
 	// overlap as a fatal config error and averin-server checks it at startup — this fail-fasts an embedder
@@ -911,7 +934,7 @@ func (s *Server) Routes() http.Handler {
 		handler = s.rateLimitIngest(mux)
 	}
 	if s.auth == nil || auth.IsOpen(s.auth) {
-		return rejectNULParams(handler) // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
+		return s.rejectIdentityParams(handler) // dev/single-tenant: no per-project auth (documented Phase-1/dev posture)
 	}
 	// gate every /v2/* route behind project-scoped auth; /healthz, /readyz, /metrics stay open (health/
 	// observability endpoints are unauthenticated by design, matching /healthz's existing posture).
@@ -921,7 +944,7 @@ func (s *Server) Routes() http.Handler {
 	guarded.HandleFunc("GET /readyz", s.readyz)
 	guarded.HandleFunc("GET /metrics", s.metrics.Handler())
 	guarded.Handle("/v2/", gate(handler))
-	return rejectNULParams(guarded)
+	return s.rejectIdentityParams(guarded)
 }
 
 // rateLimitIngest wraps h with the opt-in per-project + global ingest token bucket (averin#20). It governs ONLY
@@ -970,9 +993,56 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 // decode preserves integer literals (json.Number) so cost_micros_usd etc. never round-trip through
 // float64 (RCP forbids floats; the Rust core would reject a re-emitted exponent/precision-loss).
 func decode(b []byte, v any) error {
+	if err := rejectUnpairedSurrogates(b); err != nil {
+		return err
+	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	return dec.Decode(v)
+}
+
+// encoding/json replaces unpaired \uD800-\uDFFF escapes with U+FFFD. Check the raw JSON
+// string tokens first so an opaque identifier cannot silently change before the Rust RCP
+// canonicalizer sees it. JSON syntax and all other escapes remain the decoder's job.
+func rejectUnpairedSurrogates(b []byte) error {
+	inString := false
+	for i := 0; i < len(b); i++ {
+		switch b[i] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString || i+1 >= len(b) {
+				continue
+			}
+			if b[i+1] != 'u' {
+				i++ // escaped quote/backslash cannot open or close a string
+				continue
+			}
+			if i+5 >= len(b) {
+				continue // encoding/json reports the truncated escape
+			}
+			cp, err := strconv.ParseUint(string(b[i+2:i+6]), 16, 16)
+			if err != nil {
+				continue // encoding/json reports the malformed hex escape
+			}
+			if cp >= 0xDC00 && cp <= 0xDFFF {
+				return errors.New("unpaired low surrogate in JSON string")
+			}
+			if cp >= 0xD800 && cp <= 0xDBFF {
+				if i+11 >= len(b) || b[i+6] != '\\' || b[i+7] != 'u' {
+					return errors.New("unpaired high surrogate in JSON string")
+				}
+				low, err := strconv.ParseUint(string(b[i+8:i+12]), 16, 16)
+				if err != nil || low < 0xDC00 || low > 0xDFFF {
+					return errors.New("unpaired high surrogate in JSON string")
+				}
+				i += 11
+			} else {
+				i += 5
+			}
+		}
+	}
+	return nil
 }
 
 // ---- ingestion ----
@@ -1040,7 +1110,7 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, reservedIdemMsg)
 			return
 		}
-		if err := rejectNUL("idempotency_key", idem); err != nil {
+		if err := s.rejectOpaqueIdentity("idempotency_key", idem); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1058,6 +1128,10 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			batchIdem[dedupKey] = struct{}{}
 		}
 		if err := s.validateGenericRecordItem(probe); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := s.validateExternalAuthoritySubject(probe); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1100,7 +1174,11 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 		// (checkAuthority is pure) and reject the whole batch before anything is sealed, with the same retryable
 		// 500 + metric/WARNING ingestOne would produce. A record with no record_id cannot verify either way
 		// (ingestOne would assign a fresh random one), so the dry-run's verdict matches.
-		if _, isMap := probe["authority"].(map[string]any); isMap && s.requirePinnedAuthority {
+		if authorityV3Claim(probe) {
+			delete(probe, "idempotency_key")
+			finalizeSemanticRecord(probe, s.now())
+		}
+		if _, isMap := probe["authority"].(map[string]any); isMap && (s.requirePinnedAuthority || authorityV3Claim(probe)) {
 			if v := s.checkAuthority(probe); v.failedElevation {
 				s.ingestMu.Lock() // onFailedElevation's log throttle is guarded by ingestMu
 				s.mAuthorityDowngrades.Inc()
@@ -1169,26 +1247,54 @@ func reservedIdem(idem string) bool {
 	return strings.HasPrefix(idem, denialIdemPrefix) || strings.HasPrefix(idem, grantVoidIdemPrefix)
 }
 
-// rejectNUL returns an error naming the first (name, value) pair whose value contains U+0000. project_id,
-// idempotency_key and record_id feed NUL-DELIMITED derivations — the deterministic grant/use/outcome/introspection
-// ids (uuidV5Shaped hashes namespace‖0‖project‖0‖idem), the two-phase pendingKey, the batch dedup keys and the
-// verify cache key — so (project "a", idem "b\x00c") and (project "a\x00b", idem "c") would derive the SAME id
-// and pending key across projects. The RCP parser accepts an escaped \u0000, so reject it at every entry point.
-func rejectNUL(pairs ...string) error {
+// rejectOpaqueIdentity checks IDs before lookup, deduplication or authentication. RCP normalizes
+// strings during sealing, so accepting a decomposed opaque ID here would give the lookup and the
+// signed bytes different identities. Ask the shipped Rust canonicalizer to decide NFC: Go's
+// Unicode tables can be older than the Rust core's. Compare decoded strings, not JSON text, since
+// JSON escaping is irrelevant. NUL is rejected before crossing the C-string FFI boundary and also
+// prevents ambiguity in the server's NUL-delimited deterministic IDs and cache keys.
+func (s *Server) rejectOpaqueIdentity(pairs ...string) error {
 	for i := 0; i+1 < len(pairs); i += 2 {
-		if strings.IndexByte(pairs[i+1], 0) >= 0 {
+		name, value := pairs[i], pairs[i+1]
+		if strings.IndexByte(value, 0) >= 0 {
 			return fmt.Errorf("%s must not contain a NUL (U+0000) character", pairs[i])
+		}
+		if !utf8.ValidString(value) {
+			return fmt.Errorf("%s must be valid UTF-8", name)
+		}
+		if value == "" || isASCII(value) {
+			continue // ASCII is NFC in every Unicode edition; avoid FFI on the common path.
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("%s cannot be encoded as JSON: %w", name, err)
+		}
+		canonical := s.core.RcpCanonicalize(string(encoded))
+		var normalized string
+		if err := json.Unmarshal([]byte(canonical), &normalized); err != nil {
+			return fmt.Errorf("%s cannot be validated as RCP text", name)
+		}
+		if normalized != value {
+			return fmt.Errorf("%s must be NFC-normalized", name)
 		}
 	}
 	return nil
 }
 
-// rejectNULParams is the outermost handler: it refuses a NUL in the ?project= query parameter or the
-// Idempotency-Key header on EVERY route (the same 400 whether or not auth is enabled), before auth scoping,
-// rate limiting or any handler derives a key from them. Body fields are checked by each handler (rejectNUL).
-func rejectNULParams(h http.Handler) http.Handler {
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// rejectIdentityParams checks the ?project= query and Idempotency-Key header before auth, rate
+// limiting or handlers derive or look up IDs. Body identities are checked by each handler.
+func (s *Server) rejectIdentityParams(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := rejectNUL("project", r.URL.Query().Get("project"), "Idempotency-Key", r.Header.Get("Idempotency-Key")); err != nil {
+		if err := s.rejectOpaqueIdentity("project", r.URL.Query().Get("project"), "Idempotency-Key", r.Header.Get("Idempotency-Key")); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1276,7 +1382,11 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	if stringField(rec, "project_id") == "" || stringField(rec, "session_id") == "" {
 		return fmt.Errorf("project_id and session_id are required")
 	}
-	if err := rejectNUL("project_id", stringField(rec, "project_id"), "record_id", stringField(rec, "record_id")); err != nil {
+	if err := s.rejectOpaqueIdentity(
+		"project_id", stringField(rec, "project_id"), "session_id", stringField(rec, "session_id"),
+		"record_id", stringField(rec, "record_id"), "agent_id", stringField(rec, "agent_id"),
+		"span_id", stringField(rec, "span_id"), "parent_span_id", stringField(rec, "parent_span_id"),
+	); err != nil {
 		return err
 	}
 	if err := s.validateDelegationEvidence(rec); err != nil {
@@ -1361,6 +1471,16 @@ func (s *Server) validateDelegationEvidence(rec map[string]any) error {
 	if id == "" {
 		return errors.New("delegation_hop requires grant_id or handoff_id")
 	}
+	if err := s.rejectOpaqueIdentity(
+		"delegation.grant_id", stringField(payload, "grant_id"),
+		"delegation.handoff_id", stringField(payload, "handoff_id"),
+		"delegation.from_agent_id", stringField(payload, "from_agent_id"),
+		"delegation.to_agent_id", stringField(payload, "to_agent_id"),
+		"delegation.delegate_agent_id", stringField(payload, "delegate_agent_id"),
+		"delegation.delegator", stringField(payload, "delegator"),
+	); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(hopValue)
 	if err != nil {
 		return fmt.Errorf("delegation_hop: %w", err)
@@ -1368,6 +1488,13 @@ func (s *Server) validateDelegationEvidence(rec map[string]any) error {
 	var hop broker.DelegationHop
 	if err := json.Unmarshal(raw, &hop); err != nil {
 		return fmt.Errorf("delegation_hop: %w", err)
+	}
+	if err := s.rejectOpaqueIdentity(
+		"delegation_hop.action", hop.Action,
+		"delegation_hop.resource_id", hop.ResourceID,
+		"delegation_hop.scope", hop.Scope,
+	); err != nil {
+		return err
 	}
 	delegator, err := broker.VerifyDelegationHop(id, 0, hop)
 	if err != nil {
@@ -1457,7 +1584,7 @@ func (s *Server) ingestOne(ctx context.Context, raw []byte, headerIdem string) (
 	if reservedIdem(idem) { // see denialIdemPrefix: no caller may squat the denied-grant log namespace
 		return "", false, errors.New(reservedIdemMsg)
 	}
-	if err := rejectNUL("idempotency_key", idem); err != nil {
+	if err := s.rejectOpaqueIdentity("idempotency_key", idem); err != nil {
 		return "", false, err
 	}
 	delete(rec, "idempotency_key") // not part of the signed record
@@ -1467,10 +1594,16 @@ func (s *Server) ingestOne(ctx context.Context, raw []byte, headerIdem string) (
 	if err := s.validateGenericRecordItem(rec); err != nil {
 		return "", false, err
 	}
+	if err := s.validateExternalAuthoritySubject(rec); err != nil {
+		return "", false, err
+	}
 	projectID := stringField(rec, "project_id")
 	sessionID := stringField(rec, "session_id")
 	if stringField(rec, "record_id") == "" {
 		rec["record_id"] = newUUID()
+	}
+	if authorityV3Claim(rec) {
+		finalizeSemanticRecord(rec, s.now())
 	}
 	// authority is declared by default — never silently presented as verified (threat #4). With
 	// AVERIN_REQUIRE_PINNED_AUTHORITY on, a claimed elevation that fails key verification returns
@@ -1510,23 +1643,11 @@ func (s *Server) ingestOne(ctx context.Context, raw []byte, headerIdem string) (
 // the broker's verified authority being clobbered back to caller_declared.
 func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string, rec map[string]any, disclosures []store.DisclosureSecret) (string, bool, error) {
 	now := s.now()
-	// server-controlled fields (override anything the caller sent)
-	rec["schema_version"] = "2"
-	rec["canon_version"] = "rcp-1"
-	rec["domain"] = "flightrecorder.record.v2"
+	// Every semantic default and lineage field is finalized before v3 signing.
+	// For legacy records this remains the server's ordinary defaulting path.
+	finalizeSemanticRecord(rec, now)
+	// Recorder-controlled envelope is outside the authority subject.
 	rec["received_ts"] = ts(now)
-	if stringField(rec, "agent_ts") == "" {
-		rec["agent_ts"] = ts(now) // agent clock untrusted; default to receipt if absent
-	}
-	if stringField(rec, "record_id") == "" {
-		rec["record_id"] = newUUID() // safety net; callers normally set it before committing fields
-	}
-	if stringField(rec, "span_id") == "" {
-		rec["span_id"] = "span-" + newUUID()
-	}
-	if _, ok := rec["parent_span_id"]; !ok {
-		rec["parent_span_id"] = nil
-	}
 	// FAIL-CLOSED on the frontier reads: this store is append-only + signed, so a record sealed against a
 	// silently-defaulted frontier is a permanent defect. A NextDisplaySeq error must abort (never seal with a
 	// bogus display_seq), mirroring createCheckpoint's fail-closed snapshot reads. Callers treat a sealAndStore
@@ -1536,27 +1657,6 @@ func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string,
 		return "", false, fmt.Errorf("seal: read display seq: %w", err)
 	}
 	rec["display_seq"] = seq
-
-	// sensible defaults for required semantic fields so a minimal record is still valid
-	setDefault(rec, "agent_id", "unknown")
-	setDefault(rec, "agent_version", "unknown")
-	setDefault(rec, "event_type", "decision")
-	setDefault(rec, "action", "")
-	setDefault(rec, "observed_via", "sdk")
-	setDefault(rec, "status", "ok")
-
-	// feir_evidence lineage/authority are stamped HERE — after the span_id/observed_via
-	// defaults above — so the sealed evidence block can never disagree with the record's
-	// own top-level fields (the commit pass runs before these defaults exist).
-	if extensions, _ := rec["extensions"].(map[string]any); extensions != nil {
-		if evidence, _ := extensions["feir_evidence"].(map[string]any); evidence != nil {
-			evidence["capture_authority"] = rec["observed_via"]
-			evidence["lineage"] = map[string]any{
-				"session_id": rec["session_id"], "span_id": rec["span_id"],
-				"parent_span_id": rec["parent_span_id"],
-			}
-		}
-	}
 
 	// causal DAG links = the session's current heads (server-derived, never client-trusted).
 	// Heads, seal inputs and insert share the project write transaction.
@@ -1590,6 +1690,9 @@ func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string,
 		"key_epoch":      0,
 		"key_valid_from": s.keyValidFrom,
 		"key_status":     "active",
+	}
+	if err := s.assertFinalAuthorityV3(rec); err != nil {
+		return "", false, fmt.Errorf("seal: %w", err)
 	}
 
 	bodyJSON, err := json.Marshal(rec)
@@ -1643,6 +1746,24 @@ type grantRequest struct {
 	// required). LeaseID is the external credential reference a later introspection transcript must match.
 	Mode    string `json:"mode"`
 	LeaseID string `json:"lease_id"`
+}
+
+// A grant's exact-match labels become both authorization inputs and signed evidence.
+// Validate them before PoP checks, deterministic IDs, or pending/finalized lookup.
+func (s *Server) rejectGrantIdentity(gr grantRequest, idem string) error {
+	if err := s.rejectOpaqueIdentity(
+		"project_id", gr.ProjectID, "session_id", gr.SessionID, "idempotency_key", idem,
+		"agent_id", gr.AgentID, "action", gr.Action, "resource", gr.Resource,
+		"scope", gr.Scope, "authorizing_principal", gr.Principal, "lease_id", gr.LeaseID,
+	); err != nil {
+		return err
+	}
+	for i, id := range gr.DelegationChain {
+		if err := s.rejectOpaqueIdentity(fmt.Sprintf("delegation_chain[%d]", i), id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // uuidV5Shaped derives a DETERMINISTIC, UUIDv5-shaped id from (namespace, project, idempotency_key),
@@ -1709,7 +1830,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
 		return
 	}
-	if err := rejectNUL("project_id", gr.ProjectID, "idempotency_key", idem); err != nil {
+	if err := s.rejectGrantIdentity(gr, idem); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -2180,11 +2301,6 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 	if err != nil {
 		return nil, nil, fmt.Errorf("derive grant evidence_hash: %w", err)
 	}
-	// Sign the gateway_enforced evidence (record_id-bound) — this is what the verifier elevates.
-	evidenceSig, err := s.core.SignEvidence("gateway_enforced", gr.ProjectID, grantID, evidenceHash)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sign grant evidence: %w", err)
-	}
 	// Commit the credential descriptor (hiding) under the dedicated `credential` domain (ADR 0004 D1 —
 	// a grant no longer overloads `input`): store the bytes content-addressed, mint a nonce, and commit.
 	// Selective disclosure can later reveal the descriptor to prove the grant↔credential binding
@@ -2220,7 +2336,6 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 			"authorizing_principal": req.Principal,
 			"delegation_chain":      delegation,
 			"evidence_hash":         evidenceHash,
-			"evidence_sig":          evidenceSig,
 			"evaluated_at":          p.EvaluatedAt,
 			"expires_at":            p.ExpiresAt,
 		},
@@ -2245,6 +2360,9 @@ func (s *Server) buildGrantRecord(grantID string, gr grantRequest, req broker.Re
 	}
 	disclosures := []store.DisclosureSecret{
 		{RecordID: grantID, Field: "credential", ValueDigest: descriptorDigest, NonceHex: nonce},
+	}
+	if err := s.signLocalAuthorityV3(rec, s.core); err != nil {
+		return nil, nil, err
 	}
 	return rec, disclosures, nil
 }
@@ -2322,7 +2440,7 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
 		return
 	}
-	if err := rejectNUL("project_id", ur.ProjectID, "idempotency_key", idem); err != nil {
+	if err := s.rejectOpaqueIdentity("project_id", ur.ProjectID, "session_id", ur.SessionID, "idempotency_key", idem, "action", ur.Action, "nonce", ur.Nonce); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -2693,10 +2811,6 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 	if err != nil {
 		return nil, nil, fmt.Errorf("derive use evidence_hash: %w", err)
 	}
-	evidenceSig, err := s.resourceCore.SignEvidence("gateway_enforced", ur.ProjectID, useID, evidenceHash)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sign use evidence (resource key): %w", err)
-	}
 	// Store the raw params content-addressed for selective disclosure. D2: input_commit IS the agent's
 	// PoP-bound hiding commitment (over (params, params_nonce)) — the SAME value the offline verifier
 	// reconstructs the PoP challenge from. The disclosure opens it with the agent's params_nonce.
@@ -2724,7 +2838,6 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 			"enforcement_point": "tool_gateway",
 			"grant_id":          ev.GrantID,
 			"evidence_hash":     evidenceHash,
-			"evidence_sig":      evidenceSig,
 			"evaluated_at":      ts(s.now()),
 		},
 		"input_commit": map[string]any{
@@ -2745,6 +2858,9 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 	}
 	disclosures := []store.DisclosureSecret{
 		{RecordID: useID, Field: "input", ValueDigest: paramsDigest, NonceHex: nonce},
+	}
+	if err := s.signLocalAuthorityV3(rec, s.resourceCore); err != nil {
+		return nil, nil, err
 	}
 	return rec, disclosures, nil
 }
@@ -2800,7 +2916,7 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, reservedIdemMsg)
 		return
 	}
-	if err := rejectNUL("project_id", or.ProjectID, "idempotency_key", idem); err != nil {
+	if err := s.rejectOpaqueIdentity("project_id", or.ProjectID, "session_id", or.SessionID, "intent_record_id", or.IntentRecordID, "idempotency_key", idem); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -2939,11 +3055,7 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 	// Do NOT seal an outcome carrying an unsigned/invalid evidence_sig into the append-only log: propagate a
 	// sign failure so the caller gets a 500 and can retry. The intent is already recorded, so a missing valid
 	// outcome surfaces as intent_without_outcome — never a permanently-unverifiable record (adversarial review).
-	evidenceSig, err := s.resourceCore.SignEvidence("gateway_enforced", projectID, outcomeID, evidenceHash)
-	if err != nil {
-		return nil, fmt.Errorf("use-outcome evidence sign: %w", err)
-	}
-	return map[string]any{
+	rec := map[string]any{
 		"record_id": outcomeID,
 		// FORCE the causal edge to the intent (unioned with session heads in sealAndStore) so the outcome
 		// links to its intent even if a record was appended between the two phases — the verifier requires
@@ -2962,7 +3074,6 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 			"enforcement_point": "tool_gateway",
 			"grant_id":          grantID,
 			"evidence_hash":     evidenceHash,
-			"evidence_sig":      evidenceSig,
 			"evaluated_at":      ts(s.now()),
 		},
 		"extensions": map[string]any{
@@ -2973,7 +3084,11 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 				"use_outcome": payload,
 			},
 		},
-	}, nil
+	}
+	if err := s.signLocalAuthorityV3(rec, s.resourceCore); err != nil {
+		return nil, err
+	}
+	return rec, nil
 }
 
 // commitLowEntropyFields replaces each raw input/output/rationale field in rec with a hiding
@@ -3088,6 +3203,9 @@ func (s *Server) normalizeAuthority(rec map[string]any) error {
 	}
 	if v.failedElevation {
 		s.mAuthorityDowngrades.Inc()
+		if authorityV3Claim(rec) {
+			return fmt.Errorf("%w: v3 proof failed or authority key is not pinned", errAuthorityRejected)
+		}
 		if err := s.onFailedElevation(v.claimed, v.keyID); err != nil {
 			return err
 		}
@@ -3125,6 +3243,16 @@ func (s *Server) checkAuthority(rec map[string]any) authorityVerdict {
 	key, pinned := s.authorityKeyFor(recProjectID, claimed)
 	if !pinned {
 		return authorityVerdict{claimed: claimed, keyID: "unpinned", failedElevation: attemptedElevation}
+	}
+	if authorityV3Claim(rec) {
+		raw, err := json.Marshal(rec)
+		if err == nil {
+			status, verifyErr := s.core.VerifyAuthorityRecord(string(raw), "ed25519pub:"+base64.RawURLEncoding.EncodeToString(key))
+			if verifyErr == nil && status == "verified" {
+				return authorityVerdict{claimed: claimed, elevate: true}
+			}
+		}
+		return authorityVerdict{claimed: claimed, keyID: authorityKeyID(key), failedElevation: true}
 	}
 	// T7 model (b): elevate to the claimed source ONLY if the caller-supplied evidence_sig verifies under that
 	// source's pinned key over the canonical authority preimage; else fall back to caller_declared.
@@ -4297,6 +4425,9 @@ func readBody(r *http.Request) ([]byte, error) {
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(http.MaxBytesReader(nil, r.Body, 8<<20)); err != nil {
 		return nil, err
+	}
+	if !utf8.Valid(buf.Bytes()) {
+		return nil, errors.New("JSON body must be valid UTF-8")
 	}
 	return buf.Bytes(), nil
 }

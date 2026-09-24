@@ -229,6 +229,26 @@ fn every_preimage_family_matches_model() {
                 &authority::preimage(st(&f[0]), st(&f[1]), st(&f[2]), tail()),
                 want,
             ),
+            "body-bound authority evidence" => {
+                assert_eq!(st(&f[0]), authority::SUBJECT_PROJECTION);
+                check(
+                    name,
+                    &authority::preimage_v3(st(&f[1]), st(&f[2]), st(&f[3]), st(&f[4]), st(&f[5]))
+                        .expect("framed v3 preimage"),
+                    want,
+                )
+            }
+            "authority subject digest" => {
+                assert_eq!(st(&f[0]), authority::SUBJECT_PROJECTION);
+                check(
+                    name,
+                    &authority::subject_digest_preimage(
+                        &CanonValue::parse(tail()).expect("canonical subject"),
+                    )
+                    .expect("subject digest preimage"),
+                    want,
+                )
+            }
             "test anchor" => check(name, &anchor::anchor_preimage(st(&f[0]), st(&f[1])), want),
             "grant PoP v2" => {
                 let mut pre = Vec::new();

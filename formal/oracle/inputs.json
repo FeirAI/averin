@@ -35,6 +35,8 @@
     {"family": "revocation merkle root", "fields": [], "tail": {"s": "sha256:0505050505050505050505050505050505050505050505050505050505050505"}},
     {"family": "attestation", "fields": [], "tail": {"s": "sha256:0606060606060606060606060606060606060606060606060606060606060606"}},
     {"family": "authority evidence", "fields": [{"s": "policy-engine"}, {"s": "proj-A"}, {"s": "rec-01"}], "tail": {"s": "sha256:0707070707070707070707070707070707070707070707070707070707070707"}},
+    {"family": "body-bound authority evidence", "fields": [{"s": "averin.authority.subject.v1"}, {"s": "human_signed"}, {"s": "p1"}, {"s": "r1"}, {"s": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}, {"s": "sha256:183e080b0ac9cc7c3738939dcd1ae1fc49578cdd859b5ee563785fc539d24596"}]},
+    {"family": "authority subject digest", "fields": [{"s": "averin.authority.subject.v1"}], "tail": {"s": "{\"action\":\"approve\"}"}},
     {"family": "test anchor", "fields": [{"s": "sha256:0808080808080808080808080808080808080808080808080808080808080808"}, {"s": "2026-06-15T10:00:00.000Z"}]},
     {"family": "grant PoP v2", "fields": [{"s":"p1"},{"s":"idem-1"},{"s":"s1"},{"s":"agent-1"},{"s":"db.query:orders-ro"},{"s":"orders-db"},{"s":"read:orders"},{"s":"single_operation"},{"s":"AAAA"},{"s":""},{"s":""},{"s":"capability"},{"u64":0},{"u64":300},{"u64":0}], "tail": {"hex":"00000000666d63c800000000666d674c"}},
     {"family": "use PoP", "fields": [{"s": "grant-1"}, {"s": "res-2"}, {"s": "read"}, {"s": "sha256:params"}, {"s": "cb-5"}, {"s": "nonce-6"}]},
