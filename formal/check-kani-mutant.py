@@ -40,9 +40,11 @@ def target_counterexample(
     selected = re.findall(r"^Checking harness (.+)\.\.\.$", output, re.MULTILINE)
     if selected != [harness]:
         return False, f"selected harnesses {selected!r} differ from {harness!r}"
-    if f"Verification failed for - {harness}" not in output:
-        return False, "intended harness lacks a failed-harness summary"
-    if not re.search(r"^Complete - 0 successfully verified harnesses, 1 failures, 1 total\.$", output, re.MULTILINE):
+    failed_harnesses = re.findall(r"^Verification failed for - (.+)$", output, re.MULTILINE)
+    if failed_harnesses != [harness]:
+        return False, "intended harness lacks an exact failed-harness summary"
+    completions = re.findall(r"^Complete - (.+)$", output, re.MULTILINE)
+    if completions != ["0 successfully verified harnesses, 1 failures, 1 total."]:
         return False, "missing exact one-harness failure completion"
     failures = failed_checks(output)
     if not failures:
@@ -101,7 +103,10 @@ def self_test() -> None:
     assert not accepted(good, name="b64::kani_proofs::two_byte_tail_is_canonical")
     assert not accepted(good.replace(f"Verification failed for - {harness}",
                                     "Verification failed for - another::harness"))
+    assert not accepted(good.replace(f"Verification failed for - {harness}",
+                                    f"Verification failed for - {harness}_suffix"))
     assert not accepted(good.replace("1 failures, 1 total", "2 failures, 2 total"))
+    assert not accepted(good + "Complete - 0 successfully verified harnesses, 1 failures, 1 total.\n")
     assert completed_simple_gate("oracle", "test result: FAILED. 1 failed", 101, False)[0]
     assert not completed_simple_gate("oracle", "error: could not compile", 101, False)[0]
     assert not completed_simple_gate("golden", "test result: FAILED. 1 failed", 124, False)[0]

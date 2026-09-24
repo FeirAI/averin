@@ -25,6 +25,11 @@ run_harness() {
   set -e
   if ! python3 formal/check-kani-success.py "$log" "$proof_exit" "$qualified"; then
     echo "run-kani: proof log retained at $log" >&2
+    # Preserve Kani's actual exit for the mutant checker: exit 1 is a completed
+    # counterexample, while tool errors and signals must never count as kills.
+    if [ "$proof_exit" -ne 0 ]; then
+      return "$proof_exit"
+    fi
     return 1
   fi
   rm "$log"
