@@ -150,6 +150,11 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 			finalized = existing.JSON
 			return nil
 		}
+		if _, fenced, e := st.RecoveryFenceByGrant(gr.ProjectID, grantID); e != nil {
+			return e
+		} else if fenced {
+			return store.ErrRecoveryFenced
+		}
 		row, found, e := st.PendingGrant(gr.ProjectID, idem)
 		if e != nil {
 			return e
@@ -200,7 +205,11 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "prepare grant: "+err.Error())
+		if isVoidedGrant(err) {
+			writeErr(w, http.StatusConflict, err.Error())
+		} else {
+			writeErr(w, http.StatusServiceUnavailable, "prepare grant: "+err.Error())
+		}
 		return
 	}
 	if conflict != "" {
@@ -417,7 +426,6 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 			conflict = "pending challenge expired; prepare again"
 			return nil
 		}
-		s.noteSeqAttempt(fr.ProjectID, grantID)
 		seq, _, e := st.AllocateBrokerSeq(fr.ProjectID, grantID)
 		if e != nil {
 			return e

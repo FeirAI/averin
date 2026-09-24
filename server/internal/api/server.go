@@ -79,23 +79,6 @@ type Server struct {
 	// can be combined with OTHER brokers' bundles without one broker's grants masking another's. "" = single-broker
 	// (legacy byte-identical path — no broker_id, no map).
 	brokerID string
-	// brokerSeqVoidMinAge is the safety age a reserved broker_seq must reach before POST /v2/broker-seq/void may
-	// fill it with a grant_void tombstone (AVERIN_BROKER_SEQ_VOID_MIN_AGE; DefaultBrokerSeqVoidMinAge).
-	brokerSeqVoidMinAge time.Duration
-	// seqAttempts is the void's second age input: the app-clock time of the LATEST attempt (allocate or settle) of
-	// each grant_id that allocated/reused a broker_seq on THIS process, keyed project\x00grant_id. The store's
-	// allocated_at is stamped only on the fresh insert (Postgres cannot refresh it — broker_seq is insert-only), so
-	// without this a retry at T0+59m whose commit is still in flight would not stop a void at T0+60m. Entries older
-	// than brokerSeqVoidMinAge can no longer block a void and are pruned (see noteSeqAttempt). Guarded by
-	// seqAttemptsMu. Process-local: a multi-instance deployment is closed only by the UNIQUE record_id index.
-	seqAttemptsMu      sync.Mutex
-	seqAttempts        map[string]time.Time
-	seqAttemptsPruneAt int
-	// processStart is the BOOT FLOOR of the void's age: seqAttempts is in-memory, so after a restart it has
-	// forgotten every attempt made by the previous process (a retry whose commit may still be in flight). The age
-	// is therefore measured from max(allocated_at, latest attempt, processStart). Stamped from the server's clock
-	// at construction (New) and re-stamped by WithClock, so a test clock drives it too.
-	processStart time.Time
 	// M5 (ADR 0005): the revocation authority key (role-separated from broker/resource/signing/attestation/TSA).
 	// When set, POST /v2/revoke records a grant_id as revoked, and each /v2/export carries a signed, time-bounded
 	// revocation_list over the project's revoked set (the verifier blocks any use of a revoked grant). nil =
@@ -263,12 +246,9 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		signingKeyID:  signingKeyID,
 		keyValidFrom:  "2026-01-01T00:00:00.000Z",
 		now:           time.Now,
-		processStart:  time.Now(), // the void's boot floor (re-stamped by WithClock)
 		revocationCap: maxRevokedPerProject,
 		pending:       make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
-		// D6 operator remediation (POST /v2/broker-seq/void): a conservative default safety age.
-		brokerSeqVoidMinAge: DefaultBrokerSeqVoidMinAge,
-		bundleSem:           make(chan struct{}, maxConcurrentBundleReads),
+		bundleSem:     make(chan struct{}, maxConcurrentBundleReads),
 		// F3: fail-CLOSED authority posture by default. A record CLAIMING an elevated source that averin
 		// cannot verify under a pinned key is REJECTED, never silently sealed at the forgeable
 		// caller_declared. WithRequirePinnedAuthority(false) is the explicit opt-out.
@@ -341,11 +321,10 @@ func (s *Server) WithGauge(name, help string, fn func() float64) *Server {
 	return s
 }
 
-// WithClock replaces the server's clock (default time.Now) — for tests that must drive time-dependent paths such as
-// the broker_seq void's safety age. Pair it with the store's clock (store.Mem.WithClock) when both must agree.
+// WithClock replaces the server's clock (default time.Now). Pair it with the
+// store's clock (store.Mem.WithClock) when both must agree.
 func (s *Server) WithClock(now func() time.Time) *Server {
 	s.now = now
-	s.processStart = now() // construction-time boot floor, taken from the injected clock (see processStart)
 	return s
 }
 
@@ -910,7 +889,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v2/grants/finalize", s.handleGrantFinalize) // M6/M2 online two-phase: phase 2 (attach+commit)
 	mux.HandleFunc("POST /v2/introspection", s.handleIntrospection)   // M3 native/STS: record a resource introspection transcript
 	mux.HandleFunc("POST /v2/revoke", s.handleRevoke)                 // M5: mark a grant_id revoked (export carries a signed revocation_list)
-	mux.HandleFunc("POST /v2/broker-seq/void", s.handleBrokerSeqVoid) // D6 remediation: fill a reserved, never-recorded broker_seq with a signed tombstone
+	mux.HandleFunc("POST /v2/broker-seq/void", s.handleBrokerSeqRecovery)
+	mux.HandleFunc("GET /v2/broker-seq/void", s.handleBrokerSeqPreflight)
 	mux.HandleFunc("POST /v2/use", s.handleUse)
 	mux.HandleFunc("POST /v2/use-intent", s.handleUseIntent)
 	mux.HandleFunc("POST /v2/use-outcome", s.handleUseOutcome)
@@ -937,6 +917,7 @@ func (s *Server) Routes() http.Handler {
 	// remains fail-closed even in dev-open mode and does not grant the operator
 	// credential access to other writer routes.
 	guarded.Handle("POST /v2/broker-seq/void", auth.RecoveryMiddleware(s.recovery)(handler))
+	guarded.Handle("GET /v2/broker-seq/void", auth.RecoveryMiddleware(s.recovery)(handler))
 	if s.auth == nil || auth.IsOpen(s.auth) {
 		guarded.Handle("/v2/", handler)
 	} else {
@@ -1908,6 +1889,14 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, e.Error())
 		return
 	}
+	if e := s.grantFencedBeforeMint(r.Context(), gr.ProjectID, grantID); e != nil {
+		if isVoidedGrant(e) {
+			writeErr(w, http.StatusConflict, e.Error())
+		} else {
+			writeErr(w, http.StatusServiceUnavailable, "recovery fence lookup: "+e.Error())
+		}
+		return
+	}
 	// Stage the immutable credential descriptor before taking the project guard.
 	// Its bytes do not depend on broker_seq; the authoritative prepare below
 	// replaces only the sequence inside signed grant evidence.
@@ -1963,7 +1952,6 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		// New grant: allocate (after validation, inside the lock), build, seal+store. Roll back the seq on
 		// ANY callback failure after allocation rolls back the grant and reservation together.
 		prepared, e = broker.Prepare(req, grantID, func() (int64, error) {
-			s.noteSeqAttempt(gr.ProjectID, grantID)
 			seq, _, aerr := st.AllocateBrokerSeq(gr.ProjectID, grantID)
 			if aerr == nil && seq < 1 {
 				// a store-contract violation (non-positive seq with no error) is a 500 dependency bug,
@@ -3461,7 +3449,7 @@ func checkGaplessGrantLog(gl []broker.GrantSeqHash, maxAllocated int64) error {
 		}
 	}
 	if n := int64(len(gl)); maxAllocated != n {
-		return fmt.Errorf("allocated broker_seq max %d != %d recorded grants (a reserved or orphaned seq has no recorded grant; retry that grant before checkpointing, or void the seq with POST /v2/broker-seq/void once it is older than AVERIN_BROKER_SEQ_VOID_MIN_AGE)", maxAllocated, n)
+		return fmt.Errorf("allocated broker_seq max %d != %d recorded grants (a reserved or orphaned seq has no recorded grant; retry that grant or inspect and recover it with GET/POST /v2/broker-seq/void)", maxAllocated, n)
 	}
 	return nil
 }

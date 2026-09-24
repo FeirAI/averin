@@ -266,6 +266,24 @@ Each configuration fixes one implementation variant and asserts **one** outcome:
 | `GrantLog_void_starved.cfg` | operator void; a client may retry forever with every attempt failing | **violates** `CheckpointRecovers`: each retry restarts the void's last-attempt age, so the void is never enabled |
 | `GrantLog_fixed_live.cfg` | operator void; clients may give up at any point, and a grant retried forever eventually commits | `CheckpointRecovers` holds, with strong fairness on the operator and weak fairness on open transactions resolving, for 2 grants (liveness over 3 grants is too slow for CI) |
 
+`GrantLog` retains the historical age-based recovery design and its
+`GrantLog_void_starved.cfg` counterexample. The current durable protocol is
+modeled separately in `tla/GrantRecovery.tla`. A supported grant transaction
+owns the exact project guard; an authorized recovery inserts one immutable
+fence after earlier transactions drain, then a second guarded transaction
+records the landed grant or atomically inserts the void, marker and terminal
+result. A failed grant may retry forever without changing the fence. Crashes
+stutter after any transition, and a competing operation cannot replace the
+first operator's identity. The safe config checks no duplicate sequence, no
+late grant after void, a winning record for every terminal result, and eventual
+resolution. That liveness result assumes open database transactions eventually
+commit or abort, and the authorized operator is eventually scheduled at a
+guard opening and for reconciliation. It makes no progress claim during a
+permanent database outage. `GrantRecovery_old_writer.cfg` deliberately enables
+an already-running pre-fence writer and finds a duplicate-sequence
+counterexample; the deployment credential/session cutoff is therefore part of
+the protocol, not an optional operational convenience.
+
 `tla/ConsumeLedger.tla` models consume-before-act. Several gateways race on one ledger through
 `INSERT … ON CONFLICT DO NOTHING`, release on provable non-action, and run the TTL sweep.
 `AtMostOncePerKey` holds when `Retention ≥ MaxTTL`, which is the floor `main.go` enforces

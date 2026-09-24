@@ -4,13 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/feirai/averin/server/internal/pgschema"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // TestBrokerSeqRecoveryOldRuntimeCredentialCutoff proves the migration barrier
@@ -39,13 +41,19 @@ func TestBrokerSeqRecoveryOldRuntimeCredentialCutoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	newPassword := hex.EncodeToString(secret)
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	scopedDSN := base + "&search_path=" + schema
+	if err := pgschema.Migrate(ctx, scopedDSN); err != nil {
+		t.Fatalf("migrate actual Averin schema: %v", err)
+	}
 	create := []string{
-		"CREATE SCHEMA " + schema,
 		fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", oldRole, oldPassword),
 		fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", newRole, newPassword),
-		"CREATE TABLE " + schema + ".cutover_probe (n integer)",
 		fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s,%s", schema, oldRole, newRole),
-		fmt.Sprintf("GRANT INSERT ON %s.cutover_probe TO %s,%s", schema, oldRole, newRole),
+		fmt.Sprintf("GRANT SELECT,INSERT ON %s.project_write_guard,%s.broker_seq,%s.broker_seq_void,%s.records,%s.broker_seq_recovery_fence,%s.broker_seq_recovery_result TO %s,%s", schema, schema, schema, schema, schema, schema, oldRole, newRole),
+		fmt.Sprintf("GRANT UPDATE ON %s.project_write_guard TO %s,%s", schema, oldRole, newRole),
 	}
 	for _, sql := range create {
 		if _, err := admin.Exec(ctx, sql); err != nil {
@@ -74,13 +82,13 @@ func TestBrokerSeqRecoveryOldRuntimeCredentialCutoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer old.Close(context.Background())
-	if _, err := old.Exec(ctx, "INSERT INTO cutover_probe VALUES (1)"); err != nil {
+	if _, err := old.Exec(ctx, "INSERT INTO broker_seq(project_id,grant_id,seq) VALUES ('old-project','old-before',1)"); err != nil {
 		t.Fatalf("old runtime initially unable to write: %v", err)
 	}
 	if _, err := admin.Exec(ctx, "ALTER ROLE "+oldRole+" NOLOGIN PASSWORD 'rotated-unusable'"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := old.Exec(ctx, "INSERT INTO cutover_probe VALUES (2)"); err != nil {
+	if _, err := old.Exec(ctx, "INSERT INTO broker_seq(project_id,grant_id,seq) VALUES ('old-project','old-after-nologin',2)"); err != nil {
 		t.Fatalf("NOLOGIN unexpectedly killed established session: %v", err)
 	}
 	var prepared int
@@ -91,7 +99,7 @@ func TestBrokerSeqRecoveryOldRuntimeCredentialCutoff(t *testing.T) {
 		t.Fatalf("old runtime has %d unresolved prepared transactions; cutover must resolve them", prepared)
 	}
 	for _, sql := range []string{
-		fmt.Sprintf("REVOKE ALL ON %s.cutover_probe FROM %s", schema, oldRole),
+		fmt.Sprintf("REVOKE ALL ON ALL TABLES IN SCHEMA %s FROM %s", schema, oldRole),
 		fmt.Sprintf("REVOKE ALL ON SCHEMA %s FROM %s", schema, oldRole),
 	} {
 		if _, err := admin.Exec(ctx, sql); err != nil {
@@ -101,7 +109,7 @@ func TestBrokerSeqRecoveryOldRuntimeCredentialCutoff(t *testing.T) {
 	if _, err := admin.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename=$1 AND pid<>pg_backend_pid()`, oldRole); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := old.Exec(ctx, "INSERT INTO cutover_probe VALUES (3)"); err == nil {
+	if _, err := old.Exec(ctx, "INSERT INTO broker_seq(project_id,grant_id,seq) VALUES ('old-project','old-after-cutoff',3)"); err == nil {
 		t.Fatal("terminated old session could still write")
 	}
 	if stale, err := connect(oldRole, oldPassword); err == nil {
@@ -113,14 +121,58 @@ func TestBrokerSeqRecoveryOldRuntimeCredentialCutoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer newConn.Close(context.Background())
-	if _, err := newConn.Exec(ctx, "INSERT INTO cutover_probe VALUES (4)"); err != nil {
-		t.Fatalf("new runtime could not write after cutoff: %v", err)
-	}
-	var values string
-	if err := admin.QueryRow(ctx, "SELECT string_agg(n::text, ',' ORDER BY n) FROM "+schema+".cutover_probe").Scan(&values); err != nil {
+	roleCfg, err := pgxpool.ParseConfig(scopedDSN)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(values) != "1,2,4" {
-		t.Fatalf("cutover writes = %q", values)
+	roleCfg.ConnConfig.User, roleCfg.ConnConfig.Password = newRole, newPassword
+	rolePool, err := pgxpool.NewWithConfig(ctx, roleCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rolePool.Close()
+	actualNew := &Postgres{pool: rolePool}
+	if err := actualNew.WithProjectWrite(ctx, "p", func(st Store) error {
+		seq, _, e := st.AllocateBrokerSeq("p", "g1")
+		if e != nil || seq != 1 {
+			return fmt.Errorf("new guarded allocation seq=%d: %w", seq, e)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := actualNew.WithProjectWrite(ctx, "p", func(st Store) error {
+		_, _, e := st.PutRecoveryFence(RecoveryFence{ProjectID: "p", Seq: 1, GrantID: "g1", Generation: 1, OperationID: "cutover", ActorID: "operator", SessionID: "recovery", Reason: "abandoned", RequestDigest: "digest"})
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := actualNew.WithProjectWrite(ctx, "p", func(st Store) error {
+		if _, _, e := st.AllocateBrokerSeq("p", "g1"); !errors.Is(e, ErrRecoveryFenced) {
+			return fmt.Errorf("fenced allocation: %v", e)
+		}
+		seq, _, e := st.AllocateBrokerSeq("p", "g2")
+		if e != nil || seq != 2 {
+			return fmt.Errorf("new allocation seq=%d: %w", seq, e)
+		}
+		_, _, e = st.PutRecord("p", "new-grant", Record{JSON: `{"project_id":"p","record_id":"g2"}`, ContentHash: "new-record", SessionID: "s"})
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"broker_seq_recovery_fence", "broker_seq_recovery_result"} {
+		if _, err := newConn.Exec(ctx, "UPDATE "+table+" SET generation=2 WHERE project_id='p'"); err == nil {
+			t.Fatalf("runtime role updated immutable %s", table)
+		}
+		if _, err := newConn.Exec(ctx, "DELETE FROM "+table+" WHERE project_id='p'"); err == nil {
+			t.Fatalf("runtime role deleted immutable %s", table)
+		}
+	}
+	var oldWrites int
+	if err := admin.QueryRow(ctx, "SELECT count(*) FROM "+schema+".broker_seq WHERE project_id='old-project'").Scan(&oldWrites); err != nil {
+		t.Fatal(err)
+	}
+	if oldWrites != 2 {
+		t.Fatalf("old writes after cutoff = %d, want only pre-cutoff writes", oldWrites)
 	}
 }

@@ -78,8 +78,11 @@ func exerciseVoidMarkerFails(t *testing.T, base store.Store) {
 	h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 	reserveGrantSeq(t, base, "idem-mf1")
-	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusInternalServerError || !strings.Contains(resp, "void marker") {
+	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusServiceUnavailable || !strings.Contains(resp, "injected void-marker") || !strings.Contains(resp, `"fenced":true`) {
 		t.Fatalf("marker failure must fail (%d): %s", code, resp)
+	}
+	if f, found, err := base.RecoveryFenceAt("p1", 1); err != nil || !found || f.OperationID != "recovery-test-1" {
+		t.Fatalf("marker failure lost durable fence: %+v %v %v", f, found, err)
 	}
 	if res := reservation(t, base, 1); res.Voided {
 		t.Fatalf("failed transaction marked reservation: %+v", res)
@@ -96,7 +99,7 @@ func exerciseVoidMarkerFails(t *testing.T, base store.Store) {
 	if _, ok, err := base.RecordByIdem("p1", "grant-void:1"); err != nil || !ok {
 		t.Fatalf("successful void lacks tombstone: %v %v", ok, err)
 	}
-	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-mf1", "read:orders", ak, ak)); code != http.StatusConflict || !strings.Contains(resp, "voided") {
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-mf1", "read:orders", ak, ak)); code != http.StatusConflict || !strings.Contains(resp, "fenced") {
 		t.Fatalf("late grant retry (%d): %s", code, resp)
 	}
 	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
@@ -113,7 +116,7 @@ func TestBrokerSeqVoidInertLegacyMarker(t *testing.T) {
 	if err := base.VoidBrokerSeq("p1", res.GrantID, 1); err != nil {
 		t.Fatal(err)
 	}
-	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "grant landed; nothing to void") || !strings.Contains(resp, "INERT") {
+	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "grant landed; nothing to void") || !strings.Contains(resp, `"outcome":"recorded"`) {
 		t.Fatalf("legacy marker over grant (%d): %s", code, resp)
 	}
 	if _, ok, _ := base.RecordByIdem("p1", "grant-void:1"); ok {
@@ -128,11 +131,11 @@ func TestBrokerSeqVoidBootFloor(t *testing.T) {
 	clk.Advance(3 * time.Hour)
 	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
 	clk.Advance(10 * time.Minute)
-	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "before this process started") {
-		t.Fatalf("boot floor (%d): %s", code, resp)
-	}
-	clk.Advance(51 * time.Minute)
 	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
-		t.Fatalf("after boot floor (%d): %s", code, resp)
+		t.Fatalf("durable fence does not reset at boot (%d): %s", code, resp)
+	}
+	restarted := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
+	if code, resp := doRecovery(t, restarted, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusOK || !strings.Contains(resp, `"outcome":"voided"`) {
+		t.Fatalf("restart lost terminal result (%d): %s", code, resp)
 	}
 }

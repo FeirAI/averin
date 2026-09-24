@@ -57,7 +57,6 @@ func (s *Server) handleNativeGrant(ctx context.Context, w http.ResponseWriter, g
 			sealed, created = existing.JSON, false
 			return nil
 		}
-		s.noteSeqAttempt(gr.ProjectID, grantID)
 		seq, _, aerr := st.AllocateBrokerSeq(gr.ProjectID, grantID)
 		if aerr != nil {
 			return fmt.Errorf("allocate broker_seq: %w", aerr)

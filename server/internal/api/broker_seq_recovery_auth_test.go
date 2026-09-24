@@ -13,6 +13,33 @@ import (
 	"github.com/feirai/averin/server/internal/store"
 )
 
+func TestBrokerSeqRecoveryPreflightReadOnly(t *testing.T) {
+	base := store.NewMem()
+	if _, _, err := base.AllocateBrokerSeq("p1", "reserved-grant"); err != nil {
+		t.Fatal(err)
+	}
+	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
+	path := "/v2/broker-seq/void?project=p1&broker_seq=1"
+	if code, _ := do(t, h, "GET", path, ""); code != http.StatusForbidden {
+		t.Fatalf("ordinary GET accessed recovery preflight: %d", code)
+	}
+	if code, body := doRecovery(t, h, "GET", path, ""); code != http.StatusOK || !strings.Contains(body, `"record_id_unique_enforced":true`) || !strings.Contains(body, `"fence":null`) || !strings.Contains(body, `"void_marker":false`) || !strings.Contains(body, `"result":null`) {
+		t.Fatalf("preflight (%d): %s", code, body)
+	}
+	if _, found, _ := base.RecoveryFenceAt("p1", 1); found {
+		t.Fatal("preflight created a fence")
+	}
+	if _, found, _ := base.RecordByIdem("p1", "grant-void:1"); found {
+		t.Fatal("preflight sealed a tombstone")
+	}
+	if code, body := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
+		t.Fatalf("recovery (%d): %s", code, body)
+	}
+	if code, body := doRecovery(t, h, "GET", path, ""); code != http.StatusOK || !strings.Contains(body, `"outcome":"voided"`) || !strings.Contains(body, `"void_marker":true`) || !strings.Contains(body, `"winning_record_hash":"sha256:`) {
+		t.Fatalf("terminal preflight (%d): %s", code, body)
+	}
+}
+
 func recoveryRequest(h http.Handler, token, body string) (int, string) {
 	r := httptest.NewRequest(http.MethodPost, "/v2/broker-seq/void?project=p1", strings.NewReader(body))
 	if token != "" {

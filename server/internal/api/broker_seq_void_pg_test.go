@@ -125,6 +125,9 @@ func TestBrokerSeqVoidPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		h := api.New(mustCore(t), pg, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+		if code, resp := doRecovery(t, h, "GET", "/v2/broker-seq/void?project=p1&broker_seq=1", ""); code != http.StatusOK || !strings.Contains(resp, `"record_id_unique_enforced":false`) || !strings.Contains(resp, `"fence":null`) {
+			t.Fatalf("read-only preflight must diagnose unsafe index (%d): %s", code, resp)
+		}
 		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusServiceUnavailable || !strings.Contains(resp, "UNIQUE") {
 			t.Fatalf("unsafe void (%d): %s", code, resp)
 		}
