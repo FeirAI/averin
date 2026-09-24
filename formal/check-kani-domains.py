@@ -33,6 +33,28 @@ def read_ranges(source: str) -> list[tuple[str, str, str, int, int]]:
 
 
 def validate_wiring(source: str, runner: str) -> None:
+    helper_start = source.find("fn integer_roundtrip_case(n: i64)")
+    original_start = source.find("fn integer_roundtrip()")
+    if helper_start == -1 or original_start <= helper_start:
+        raise ValueError("shared integer assertion body missing or out of order")
+    helper_without_comments = re.sub(r"//[^\n]*", "", source[helper_start:original_start])
+    helper = re.sub(r"\s+", "", helper_without_comments)
+    checked_prefix = (
+        "lettext=n.to_string();"
+        "letnumeric_prefix=text.as_bytes().first()."
+        "is_some_and(|b|*b==b'-'||b.is_ascii_digit());"
+        'assert!(numeric_prefix,"decimalspellingneedssignordigit");'
+        "kani::assume(numeric_prefix);"
+        'letv=matchCanonValue::parse_typed(&text){Ok(v)=>v,Err(_)=>panic!("formattedintegerwasrejected"),};'
+    )
+    if checked_prefix not in helper or helper.count("kani::assume(") != 1:
+        raise ValueError("integer prefix must be asserted before the identical assumption and parse")
+    for required in (
+        'assert!(v==CanonValue::Int(n),"parsedintegerdiffers");',
+        'assert!(v.serialize()==text,"serializedintegerspellingdiffers");',
+    ):
+        if required not in helper:
+            raise ValueError(f"shared integer assertion body changed: {required}")
     original = re.search(
         r"fn integer_roundtrip\(\)\s*\{\s*"
         r"let n: i64 = kani::any_where\(\|n: &i64\| \*n > -100_000 && \*n < 100_000\);\s*"
@@ -54,6 +76,8 @@ def validate_wiring(source: str, runner: str) -> None:
         raise ValueError("integer shard table marker missing")
     bodies = [source[positions[i] : positions[i + 1]] for i in range(2)]
     bodies.append(source[positions[-1] : table_start])
+    if any("kani::assume(" in body for body in bodies):
+        raise ValueError("integer shard macro added a narrowing assumption")
     for body, required in zip(
         bodies,
         (
@@ -117,6 +141,12 @@ def self_test() -> None:
     fixture = "\n".join(f"integer_roundtrip_shard!({name}, {ty}, {sign}, {lo}, {hi});" for name, ty, sign, lo, hi in rows)
     assert read_ranges(fixture) == rows
     original = (
+        'fn integer_roundtrip_case(n: i64) { let text = n.to_string(); '
+        'let numeric_prefix = text.as_bytes().first().is_some_and(|b| *b == b\'-\' || b.is_ascii_digit()); '
+        'assert!(numeric_prefix, "decimal spelling needs sign or digit"); kani::assume(numeric_prefix); '
+        'let v = match CanonValue::parse_typed(&text) { Ok(v) => v, Err(_) => panic!("formatted integer was rejected"), }; '
+        'assert!(v == CanonValue::Int(n), "parsed integer differs"); '
+        'assert!(v.serialize() == text, "serialized integer spelling differs"); } '
         "fn integer_roundtrip() { let n: i64 = kani::any_where(|n: &i64| "
         "*n > -100_000 && *n < 100_000); integer_roundtrip_case(n); } "
         "($name:ident, u8, zero, 0, 0) => { fn $name() { integer_roundtrip_case(0); } };"
@@ -143,12 +173,33 @@ def self_test() -> None:
         pass
     else:
         raise AssertionError("full-domain harness shrink escaped the checker")
+    for changed in (
+        original.replace('assert!(numeric_prefix, "decimal spelling needs sign or digit"); ', ""),
+        original.replace('assert!(numeric_prefix, "decimal spelling needs sign or digit"); kani::assume(numeric_prefix);',
+                         'kani::assume(numeric_prefix); assert!(numeric_prefix, "decimal spelling needs sign or digit");'),
+        original.replace("kani::assume(numeric_prefix);", "kani::assume(true);"),
+        original.replace("b.is_ascii_digit()", "b.is_ascii_alphabetic()"),
+        original.replace('Err(_) => panic!("formatted integer was rejected"),',
+                         'Err(_) => CanonValue::Int(n),'),
+    ):
+        try:
+            validate_wiring(changed, runner)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("checked integer prefix drift escaped the checker")
     try:
         validate_wiring(original.replace("integer_roundtrip_case(0);", "integer_roundtrip_case(1);"), runner)
     except ValueError:
         pass
     else:
         raise AssertionError("zero-shard input drift escaped the checker")
+    try:
+        validate_wiring(original.replace("integer_roundtrip_case(0);", "kani::assume(false); integer_roundtrip_case(0);"), runner)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("extra shard assumption escaped the checker")
     try:
         validate_wiring(original.replace("integer_roundtrip_case(-(magnitude as i64));", "integer_roundtrip_case(magnitude as i64);"), runner)
     except ValueError:

@@ -83,8 +83,19 @@ impl CanonValue {
             i: 0,
             depth: 0,
         };
-        p.skip_ws();
-        let v = p.parse_value()?;
+        // A number at byte zero cannot start with insignificant whitespace. Route that
+        // common top-level case straight to the same number parser used by parse_value.
+        // Nested and all other top-level values retain the general dispatcher.
+        let v = if input
+            .as_bytes()
+            .first()
+            .is_some_and(|b| *b == b'-' || b.is_ascii_digit())
+        {
+            p.parse_number()?
+        } else {
+            p.skip_ws();
+            p.parse_value()?
+        };
         p.skip_ws();
         if p.i != p.s.len() {
             return Err(p.err("trailing data after top-level value"));
@@ -618,6 +629,82 @@ fn decode_utf16_strict(units: &[u16]) -> Result<String, &'static str> {
 mod error_compat_tests {
     use super::*;
 
+    // Keep a copy of the prior top-level dispatch as an independent regression oracle for
+    // the numeric-first fast path. Both routes call the same production parser methods.
+    fn general_top_level_parse(input: &str) -> Result<CanonValue, CanonError> {
+        let mut p = Parser {
+            source: input,
+            s: input.as_bytes(),
+            i: 0,
+            depth: 0,
+        };
+        let typed = (|| {
+            p.skip_ws();
+            let value = p.parse_value()?;
+            p.skip_ws();
+            if p.i != p.s.len() {
+                return Err(p.err("trailing data after top-level value"));
+            }
+            Ok(value)
+        })();
+        typed.map_err(ParseError::into_public)
+    }
+
+    #[test]
+    fn numeric_first_dispatch_matches_general_parser() {
+        let check = |input: &str| {
+            assert_eq!(
+                CanonValue::parse(input),
+                general_top_level_parse(input),
+                "{input:?}"
+            );
+        };
+        for line in include_str!("../../formal/fuzz/regressions.tsv")
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+        {
+            let input_hex = line.split('\t').nth(1).expect("fuzz corpus input");
+            let bytes = input_hex
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect();
+            check(&String::from_utf8(bytes).unwrap());
+        }
+        for input in [
+            "",
+            "0",
+            "-0",
+            "00",
+            "01",
+            "-01",
+            "-",
+            "-x",
+            "1.0",
+            "1e0",
+            "1E",
+            "1!",
+            "1 2",
+            "1\n",
+            " 1",
+            "\t-2\r",
+            "+1",
+            "9223372036854775807",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "-9223372036854775809",
+            "true",
+            "[1]",
+            "\"é\"",
+            "{\"a\":1}",
+        ] {
+            check(input);
+        }
+        for n in [-99_999, -10_000, -100, -1, 0, 1, 9, 10, 100, 99_999] {
+            check(&n.to_string());
+        }
+    }
+
     #[test]
     fn public_parser_errors_keep_their_text_and_position() {
         let cases = [
@@ -657,6 +744,14 @@ mod kani_proofs {
     /// decimal-width shard below. Only the input domain changes between harnesses.
     fn integer_roundtrip_case(n: i64) {
         let text = n.to_string();
+        // Prove the formatter's first byte before using it to prune impossible parser paths.
+        // The parse result and both round-trip equalities remain unconstrained.
+        let numeric_prefix = text
+            .as_bytes()
+            .first()
+            .is_some_and(|b| *b == b'-' || b.is_ascii_digit());
+        assert!(numeric_prefix, "decimal spelling needs sign or digit");
+        kani::assume(numeric_prefix);
         let v = match CanonValue::parse_typed(&text) {
             Ok(v) => v,
             Err(_) => panic!("formatted integer was rejected"),
