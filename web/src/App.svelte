@@ -101,6 +101,9 @@
       ({report.checkpoints_anchors_attached ?? report.checkpoints_anchored} anchors attached,
       {report.checkpoints_anchored} verified-anchored) ·
       chain {report.chain_ok ? "ok" : "BROKEN"}
+      {#if report.record_trust?.some((r: any) => r.authority === "legacy_unbound")}
+        <div class="lvl">Historical authority signatures verify, but do not bind their record bodies.</div>
+      {/if}
       {#if report.first_broken_link}<div class="broken">{report.first_broken_link}</div>{/if}
       {#if verdict.valid}
         <div class="lvl">Required {report.claims.requested} claim: {report.claims.requested_decision}. Only satisfied accepts the claim.</div>

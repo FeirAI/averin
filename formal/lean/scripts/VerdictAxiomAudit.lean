@@ -13,7 +13,7 @@ in AxiomAudit. Audit this exact module and require a sentinel declaration from i
   let mut bad : Array (Name × Name) := #[]
   let mut count := 0
   for (name, _) in env.constants.toList do
-    if (`Averin.Oracle.Verdict).isPrefixOf name && !name.isInternal then
+    if ((`Averin.Oracle.Verdict).isPrefixOf name || name == `main) && !name.isInternal then
       count := count + 1
       let axs ← liftCoreM <| collectAxioms name
       for a in axs do

@@ -1,0 +1,41 @@
+{
+  "record": {
+    "schema_version": "2",
+    "canon_version": "rcp-1",
+    "domain": "flightrecorder.record.v2",
+    "record_id": "r1",
+    "project_id": "p1",
+    "session_id": "s1",
+    "agent_id": "a1",
+    "agent_version": "1",
+    "span_id": "sp1",
+    "parent_span_id": null,
+    "agent_ts": "2026-01-01T00:00:00.000Z",
+    "event_type": "decision",
+    "action": "approve",
+    "observed_via": "sdk",
+    "status": "ok",
+    "authority": {
+      "source": "human_signed",
+      "enforcement_point": "sdk",
+      "proof_version": "v3",
+      "subject_projection": "averin.authority.subject.v1",
+      "evidence_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "extensions": {
+      "govder": {
+        "body": {
+          "reason": "café"
+        }
+      }
+    },
+    "received_ts": "2026-01-01T00:00:01.000Z",
+    "display_seq": 1,
+    "causal_prev_hashes": [],
+    "key": {
+      "signing_key_id": "k1"
+    }
+  },
+  "subject_digest": "sha256:183e080b0ac9cc7c3738939dcd1ae1fc49578cdd859b5ee563785fc539d24596",
+  "preimage_hex": "0000001361766572696e2e617574686f726974792e76330000001b61766572696e2e617574686f726974792e7375626a6563742e76310000000c68756d616e5f7369676e6564000000027031000000027231000000477368613235363a31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131000000477368613235363a31383365303830623061633963633763333733383933396463643161653166633439353738636464383539623565653536333738356663353339643234353936"
+}

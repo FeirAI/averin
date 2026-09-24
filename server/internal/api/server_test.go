@@ -64,6 +64,95 @@ func postRecord(t *testing.T, h http.Handler, body string) (map[string]any, bool
 	return out.Results[0].Record, out.Results[0].Created
 }
 
+func TestOpaqueIdentityRejectsNonNFCBeforeIngest(t *testing.T) {
+	h := newSrv(t)
+	for _, body := range []string{
+		`{"idempotency_key":"k","project_id":"e\u0301","session_id":"s"}`,
+		`{"idempotency_key":"e\u0301","project_id":"p","session_id":"s"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"s","record_id":"e\u0301"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"e\u0301"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"s","span_id":"e\u0301"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"s","parent_span_id":"e\u0301"}`,
+	} {
+		if code, resp := do(t, h, "POST", "/v2/records", body); code != http.StatusBadRequest || !strings.Contains(resp, "NFC") {
+			t.Fatalf("non-NFC identity accepted (%d): %s", code, resp)
+		}
+	}
+	if code, resp := do(t, h, "GET", "/v2/verify?project=e%CC%81", ""); code != http.StatusBadRequest || !strings.Contains(resp, "NFC") {
+		t.Fatalf("non-NFC project query accepted (%d): %s", code, resp)
+	}
+	req := httptest.NewRequest("POST", "/v2/records", strings.NewReader(`{"project_id":"p","session_id":"s"}`))
+	req.Header.Set("Idempotency-Key", "e\u0301")
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "NFC") {
+		t.Fatalf("non-NFC idempotency header accepted (%d): %s", res.Code, res.Body.String())
+	}
+	rec, _ := postRecord(t, h, `{"idempotency_key":"é","project_id":"p","session_id":"s","record_id":"ré","content":{"note":"e\u0301"}}`)
+	if got := rec["content"].(map[string]any)["note"]; got != "é" {
+		t.Fatalf("structured text was not NFC-normalized at seal: %v", got)
+	}
+}
+
+func TestV3AuthorityRejectsNonNFCIdentityBeforeLookupOrSeal(t *testing.T) {
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewMem()
+	h := api.New(c, st, "k0").Routes()
+	for _, identity := range []struct{ field, value string }{
+		{"project_id", "e\u0301"}, {"record_id", "e\u0301"},
+	} {
+		body := map[string]any{
+			"idempotency_key": "v3-bad-identity", "project_id": "p", "session_id": "s",
+			"record_id": "r", "span_id": "sp", "parent_span_id": nil,
+			"agent_ts": "2026-01-01T00:00:00.000Z",
+			"authority": map[string]any{
+				"source": "human_signed", "proof_version": "v3",
+				"subject_projection": "averin.authority.subject.v1",
+				"evidence_hash":      "sha256:" + strings.Repeat("1", 64),
+				"subject_digest":     "sha256:" + strings.Repeat("2", 64),
+				"evidence_sig":       "ed25519:invalid",
+			},
+		}
+		body[identity.field] = identity.value
+		raw, _ := json.Marshal(body)
+		if code, resp := do(t, h, "POST", "/v2/records", string(raw)); code != http.StatusBadRequest || !strings.Contains(resp, "NFC") {
+			t.Fatalf("v3 %s non-NFC accepted (%d): %s", identity.field, code, resp)
+		}
+	}
+	for _, project := range []string{"p", "e\u0301", "é"} {
+		recs, err := st.AllRecords(project)
+		if err != nil || len(recs) != 0 {
+			t.Fatalf("invalid v3 identity persisted a record in %q: %d, %v", project, len(recs), err)
+		}
+	}
+}
+
+func TestMalformedUTF8JSONIsRejectedBeforeDecode(t *testing.T) {
+	h := newSrv(t)
+	body := `{"idempotency_key":"k","project_id":"p","session_id":"s","content":{"note":"` + string([]byte{0xff}) + `"}}`
+	if code, resp := do(t, h, "POST", "/v2/records", body); code != http.StatusBadRequest || !strings.Contains(resp, "UTF-8") {
+		t.Fatalf("invalid UTF-8 was accepted (%d): %s", code, resp)
+	}
+}
+
+func TestUnpairedSurrogateInOpaqueIDIsRejectedBeforeDecode(t *testing.T) {
+	h := newSrv(t)
+	for _, body := range []string{
+		`{"idempotency_key":"k","project_id":"\uD800","session_id":"s"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"s","record_id":"\uDC00"}`,
+		`{"idempotency_key":"k","project_id":"p","session_id":"s","content":{"\uD800":"bad"}}`,
+	} {
+		if code, resp := do(t, h, "POST", "/v2/records", body); code != http.StatusBadRequest {
+			t.Fatalf("unpaired surrogate accepted (%d): %s", code, resp)
+		}
+	}
+	postRecord(t, h, `{"idempotency_key":"pair","project_id":"p","session_id":"s","content":{"note":"\uD83D\uDE00"}}`)
+	postRecord(t, h, `{"idempotency_key":"literal","project_id":"p","session_id":"s","content":{"note":"\\uD800"}}`)
+}
+
 func TestIngestSealCheckpointVerifyExport(t *testing.T) {
 	h := newSrv(t)
 	r1, _ := postRecord(t, h, `{"idempotency_key":"k1","project_id":"p1","session_id":"s1","action":"db.read"}`)

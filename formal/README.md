@@ -121,12 +121,10 @@ Other results:
   revocations, validated contradictory commitment openings and conflicting verified TSA anchors
   must be enforced while present; removing one changes the fixed adverse evidence and can
   improve a decision, so a blanket deletion theorem would be false.
-* **Authority evidence is not bound to the record body.** The authority preimage signs
-  `(source, project_id, record_id, evidence_hash)`. For generic `human_signed` /
-  `policy_engine_signed` records, nothing re-derives `evidence_hash` from the record. A holder of
-  the signing key can therefore move a valid evidence triple onto a different body with the same
-  `record_id` and it still reads `verified`. Closing this needs an `averin.authority.v3` preimage
-  that adds a body commitment. That is a coordinated producer change and has not been made yet.
+* **Historical v2 authority evidence is not bound to the semantic record body.** It remains
+  readable as `legacy_unbound` and retains its historical signature and join checks. The v3
+  authority proof binds the structured semantic subject and is reported as `verified`; only
+  that body-bound state can satisfy the stronger authorization and completeness claims.
 
 ## Refinement gate (CI job `formal-refinement`)
 
@@ -186,10 +184,13 @@ Kani harness must itself report `VERIFICATION:- FAILED`.
 | m6 | `compute_content_hash` strips an extra field | oracle, golden |
 | m7 | `verify_content_hash` stops pinning `canon_version` | oracle (pinned-constants check) |
 | m8 | `verify.rs` taxonomy tag renamed | tag inventory |
+| m15 | v3 authority signature preimage drops the semantic subject digest | oracle, golden |
 | m16 | capstone omits offline PoP verification | verdict differential (`capstone_4`) |
 | m17 | missing pinned revocation evidence treated as clean | verdict differential (missing-freshness cases) |
 | m18 | partial closure skips a failing PoP | adversarial partial-anchor regression |
 | m19 | failed-PoP intent consumes its outcome | adversarial orphan-outcome regression |
+| m20 | fresh Merkle root accepted without a non-membership path | verdict differential (`missing_path`) |
+| m21 | disclosure completeness counts only supplied openings | two-grant adversarial regression |
 
 A new drift class gets a new patch here before the gate that catches it is called done.
 

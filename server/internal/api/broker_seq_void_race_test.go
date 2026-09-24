@@ -46,24 +46,23 @@ func TestBrokerSeqVoidAgeCountsLatestAttempt(t *testing.T) {
 
 	t.Run("a recent retry blocks a void that allocated_at alone would pass", func(t *testing.T) {
 		clk := newFakeClock()
-		ls := &lateCommitStore{flakyGrantStore: flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}}
+		ls := &flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}
 		h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).Routes() // default 1h
 
-		ls.ambiguousPut = true // T0: ambiguous commit that never lands
-		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusInternalServerError {
-			t.Fatalf("T0 ambiguous commit must 500 (got %d): %s", code, resp)
-		}
+		reserveGrantSeq(t, ls.Store, "idem-race") // T0: an orphaned durable reservation
 		clk.Advance(59 * time.Minute)
-		ls.holdNext = true // T0+59m: the retry reuses seq 1; its commit is in flight (invisible to the store reads)
+		ls.failHeads = true // T0+59m: a failed retry still refreshes the local attempt clock
 		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusInternalServerError {
-			t.Fatalf("T0+59m retry with an in-flight commit must 500 (got %d): %s", code, resp)
+			t.Fatalf("T0+59m failed retry must 500 (got %d): %s", code, resp)
 		}
 		clk.Advance(2 * time.Minute) // T0+61m: allocated_at is 61m old
 		code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 		if code != http.StatusConflict || !strings.Contains(resp, "last attempted by its grant") {
 			t.Fatalf("a void within the safety age of the grant's latest attempt must 409 (got %d): %s", code, resp)
 		}
-		ls.land(t) // the retry's commit lands: the seq is recorded, so no void can ever take it
+		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusCreated || grantSeqOf(t, resp) != 1 {
+			t.Fatalf("retry records seq 1 (%d): %s", code, resp)
+		}
 		clk.Advance(2 * time.Hour)
 		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "is recorded") {
 			t.Fatalf("once the commit landed the void must 409 as recorded (got %d): %s", code, resp)
@@ -78,8 +77,7 @@ func TestBrokerSeqVoidAgeCountsLatestAttempt(t *testing.T) {
 		fs := &flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}
 		h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).Routes()
 
-		fs.ambiguousPut = true
-		do(t, h, "POST", "/v2/grants", grantBody("idem-ctl", "read:orders", ak, ak))
+		reserveGrantSeq(t, fs.Store, "idem-ctl")
 		clk.Advance(30 * time.Minute)
 		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "AVERIN_BROKER_SEQ_VOID_MIN_AGE") {
 			t.Fatalf("a 30m-old reservation must be refused (got %d): %s", code, resp)
@@ -101,8 +99,7 @@ func TestBrokerSeqVoidRevokesVoidedGrant(t *testing.T) {
 	h := api.New(c, fs, "k0").WithBroker(brokerIssuingKey()).WithRevocation(rev).WithBrokerSeqVoidMinAge(0).Routes()
 	ak := grantAgentKey()
 
-	fs.ambiguousPut = true
-	do(t, h, "POST", "/v2/grants", grantBody("idem-rv1", "read:orders", ak, ak))
+	reserveGrantSeq(t, fs.Store, "idem-rv1")
 	mkGrant(t, h, ak, "idem-rv2")
 	code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 	if code != http.StatusCreated || !strings.Contains(resp, `"revoked":true`) {
