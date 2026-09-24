@@ -139,4 +139,3 @@ Two-phase prepare/finalize and void read the same durable pending row on every
 replica. A restart or route to another live replica does not lose the challenge
 in Postgres mode; a missing or expired row fails closed. In-memory mode loses
 pending and revocation state on process restart.
-
