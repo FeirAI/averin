@@ -40,7 +40,7 @@ func TestBrokerSeqRecoveryLegacyTombstoneAttribution(t *testing.T) {
 		removeActor, removeOp bool
 		want                  int
 	}{
-		{"pre006 absent attribution", "", "", true, true, http.StatusOK},
+		{"pre-attribution tombstone", "", "", true, true, http.StatusOK},
 		{"partial attribution", "original", "", false, true, http.StatusConflict},
 		{"different operation", "original", "original-op", false, false, http.StatusConflict},
 	} {
@@ -122,7 +122,7 @@ func TestBrokerSeqRecoveryLegacyTombstoneAttribution(t *testing.T) {
 				if code, body := call("GET", "recovery-secret", "/v2/broker-seq/void?project=p1&broker_seq=1", ""); code != http.StatusOK || !strings.Contains(body, `"original_void_actor_unattributed":true`) {
 					t.Fatalf("legacy preflight (%d): %s", code, body)
 				}
-				// A pre-006 tombstone can predate its marker, fence and result.
+				// A pre-attribution tombstone can predate its marker, fence and result.
 				// It still blocks a valid pre-minted capability at both use entrypoints
 				// even though this server has no revocation signing key.
 				agent := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))

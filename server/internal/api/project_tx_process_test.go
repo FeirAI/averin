@@ -503,6 +503,10 @@ func TestBrokerSeqRecoveryProcessCrashCutsPostgres(t *testing.T) {
 			if _, found, err := pg.RecordByIdem("p1", "grant-void:1"); err != nil || found != tc.terminalBefore {
 				t.Fatalf("tombstone survived independently of terminal transaction: %v %v", found, err)
 			}
+			grantID := reservation(t, pg, 1).GrantID
+			if ids, err := pg.RevokedGrantIDs("p1"); err != nil || len(ids) != btoi(tc.terminalBefore) || (tc.terminalBefore && ids[0] != grantID) {
+				t.Fatalf("revocation survived independently of terminal transaction: %v %v", ids, err)
+			}
 			peer := startProjectTxProcess(t, dsn, dir)
 			code, body := callProjectTxProcess(t, peer, http.MethodPost, "/v2/broker-seq/void?project=p1", voidBody(1))
 			want := http.StatusCreated
@@ -514,6 +518,9 @@ func TestBrokerSeqRecoveryProcessCrashCutsPostgres(t *testing.T) {
 			}
 			if result, found, err := pg.RecoveryResultAt("p1", 1); err != nil || !found || result.Outcome != "voided" {
 				t.Fatalf("new process left recovery incomplete: %+v %v %v", result, found, err)
+			}
+			if ids, err := pg.RevokedGrantIDs("p1"); err != nil || len(ids) != 1 || ids[0] != grantID {
+				t.Fatalf("new process did not publish one durable revoke: %v %v", ids, err)
 			}
 		})
 	}
