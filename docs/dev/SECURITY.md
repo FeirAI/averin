@@ -77,8 +77,19 @@ what truly happened in the world.
   overlap at startup; the offline verifier rejects an overlapping `opts.json` as a fatal config
   error. This prevents one authority signing across a role boundary (a broker self-attesting, a
   resource self-validating).
+- **Brokered grant requests bind the tenant and full effective request.** New online issuance uses
+  the [v2 grant PoP](../../spec/grant-pop-v2.md): the agent signs the authenticated project, resolved
+  idempotency key, session, scope and authorization context, TTL, and a bounded issue/expiry window.
+  A committed exact retry may read the original grant after that window, but cannot mint again.
+  The signed capability carries `project_id`; the resource compares it to its authenticated route
+  project before revocation or replay-ledger access. Historical capabilities without that signed
+  claim are denied online at the coordinated cutoff.
 - **Consume-before-act.** A Tier-B use is recorded and its single-use/bounded capability is consumed
   in the ledger *before* the resource acts. (Durable only with the Postgres ledger — see below.)
+  New uses verify the broker signature, signed project and sender PoP before raw
+  params reach the content store. The same checks run again in the project
+  transaction. Revocation, replay or expiry detected after preflight can leave
+  only an unreferenced content blob subject to the configured retention purge.
 
 ## Machine-checked evidence for these invariants
 
@@ -104,13 +115,18 @@ verdict logic and authority-evidence binding.
 - **Record authenticity** is cryptographic and offline: pin the signer's `ed25519pub:` key (logged
   at startup, or carried in the bundle's `keys`) and verify — no server trust needed.
 - **API authn** (`server/internal/auth`): optional project-scoped API keys (`AVERIN_API_KEYS`). When
-  configured, every `/v2/*` route requires a valid token for the `?project=`; comparison is
+  configured, ordinary `/v2/*` routes require a valid token for the `?project=`; comparison is
   constant-time over SHA-256 digests; it **fails closed** (unknown project / empty token ⇒ deny); a
   zero-key config refuses to start (no silent deny-all); tokens are never logged. The dev-only
   open-store mode is explicit and warned about.
-- **API authz is Phase-1 limited.** This answers only "is this token valid for this project?" Full
-  RBAC/SSO/scoped-and-expiring tokens/per-route permissions are Phase 2. With `AVERIN_API_KEYS` unset
-  the app API is fully unauthenticated.
+- **Recovery authz:** `GET` preflight and `POST /v2/broker-seq/void` require separate `AVERIN_RECOVERY_KEYS`
+  credential for the exact project. Ordinary writer possession, absent recovery config, and dev-open
+  ordinary auth do not grant recovery. The credential identifies an actor signed into the tombstone
+  with the required reason and operation ID for a new void. A permanent operational fence binds
+  the same action before reconciliation; a legacy tombstone without original actor/operation metadata
+  is never retroactively attributed. This is one narrow permission, not general RBAC.
+- **Ordinary API authz is Phase-1 limited.** Full RBAC/SSO/scoped-and-expiring tokens are outside
+  this implementation. With `AVERIN_API_KEYS` unset, ordinary app API routes are unauthenticated.
 - Without `AVERIN_API_KEYS` set, the API is unauthenticated, so keep it on loopback.
 
 ## Trust boundaries

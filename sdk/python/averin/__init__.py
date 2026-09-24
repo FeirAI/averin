@@ -14,6 +14,7 @@ Quickstart:
 """
 
 from .client import Client, build_record
+from .authority import prepare_v3_authority_subject
 
-__all__ = ["Client", "build_record"]
+__all__ = ["Client", "build_record", "prepare_v3_authority_subject"]
 __version__ = "0.1.0"

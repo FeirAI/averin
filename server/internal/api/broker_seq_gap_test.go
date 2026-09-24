@@ -1,6 +1,8 @@
 package api_test
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,14 +21,45 @@ type flakyGrantStore struct {
 	store.Store
 	failHeads    bool
 	ambiguousPut bool
+	parent       *flakyGrantStore
 }
 
 func (f *flakyGrantStore) Heads(projectID, sessionID string) ([]string, error) {
+	if f.parent != nil {
+		if f.parent.failHeads {
+			f.parent.failHeads = false
+			return nil, errors.New("injected transient heads read failure")
+		}
+		return f.Store.Heads(projectID, sessionID)
+	}
 	if f.failHeads {
 		f.failHeads = false
 		return nil, errors.New("injected transient heads read failure")
 	}
 	return f.Store.Heads(projectID, sessionID)
+}
+
+func (f *flakyGrantStore) WithProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
+	return f.Store.WithProjectWrite(ctx, projectID, func(st store.Store) error {
+		return fn(&flakyGrantStore{Store: st, parent: f})
+	})
+}
+
+func reservedGrantID(idem string) string {
+	sum := sha256.Sum256([]byte("averin.grant.id.v1\x00p1\x00" + idem))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x50
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+func reserveGrantSeq(t *testing.T, st store.Store, idem string) int64 {
+	t.Helper()
+	seq, _, err := st.AllocateBrokerSeq("p1", reservedGrantID(idem))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seq
 }
 
 func (f *flakyGrantStore) PutRecord(p, k string, rec store.Record) (store.Record, bool, error) {
@@ -88,35 +121,22 @@ func TestGrantTransientSealErrorReleasesSeq(t *testing.T) {
 // commit), g2 then takes and records seq 2, and g1's next retry fails with a plain (releasable) error. Releasing
 // g1's seq now would punch a hole at 1 that no allocation refills (g1's next allocation would be MAX+1=3) —
 // checkpoints could never be signed again. The store must KEEP it, so g1's successful retry records seq 1.
-func TestNonMaxReservedSeqIsRefilledNotReleased(t *testing.T) {
+func TestFailedGrantTransactionDoesNotReserveSequence(t *testing.T) {
 	fs := &flakyGrantStore{Store: store.NewMem()}
 	h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).Routes()
 	ak := grantAgentKey()
-
-	fs.ambiguousPut = true
+	fs.failHeads = true
 	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusInternalServerError {
-		t.Fatalf("g1 ambiguous commit must 500 (got %d): %s", code, resp)
+		t.Fatalf("failed grant should 500 (%d): %s", code, resp)
 	}
-	code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g2", "read:orders", ak, ak))
-	if code != http.StatusCreated || grantSeqOf(t, resp) != 2 {
-		t.Fatalf("g2 must record seq 2 while g1 holds 1 (%d): %s", code, resp)
+	if max, err := fs.Store.MaxBrokerSeq("p1"); err != nil || max != 0 {
+		t.Fatalf("failed transaction leaked allocation: max=%d err=%v", max, err)
 	}
-	fs.failHeads = true // g1's retry fails with a NON-ambiguous error → release attempted on a non-max seq
-	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusInternalServerError {
-		t.Fatalf("g1 retry with a transient failure must 500 (got %d): %s", code, resp)
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g2", "read:orders", ak, ak)); code != http.StatusCreated || grantSeqOf(t, resp) != 1 {
+		t.Fatalf("next committed grant must take seq 1 (%d): %s", code, resp)
 	}
-	code, resp = do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak))
-	if code != http.StatusCreated {
-		t.Fatalf("g1 retry (%d): %s", code, resp)
-	}
-	if seq := grantSeqOf(t, resp); seq != 1 {
-		t.Fatalf("g1 retry broker_seq = %d, want the kept reservation 1 (a released non-max seq leaves a permanent hole)", seq)
-	}
-	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
-		t.Fatalf("checkpoint over the gapless {1,2} (%d): %s", code, resp)
-	}
-	if code, report := do(t, h, "GET", "/v2/verify?project=p1", ""); code != http.StatusOK || !strings.Contains(report, `"ok":true`) {
-		t.Fatalf("bundle must verify (%d): %s", code, report)
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusCreated || grantSeqOf(t, resp) != 2 {
+		t.Fatalf("retry must take seq 2 (%d): %s", code, resp)
 	}
 }
 
@@ -124,31 +144,20 @@ func TestNonMaxReservedSeqIsRefilledNotReleased(t *testing.T) {
 // grant is retried that seq has no recorded grant — a checkpoint signed now would anchor the gap forever. It must
 // FAIL CLOSED (refuse to sign); once the retry records the grant, checkpointing succeeds and verifies.
 func TestCheckpointRefusesReservedSeqGap(t *testing.T) {
-	fs := &flakyGrantStore{Store: store.NewMem()}
-	h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).Routes()
+	base := store.NewMem()
+	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).Routes()
 	ak := grantAgentKey()
-
-	fs.ambiguousPut = true
-	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-amb", "read:orders", ak, ak)); code != http.StatusInternalServerError {
-		t.Fatalf("an ambiguous commit must 500 (got %d): %s", code, resp)
+	if seq := reserveGrantSeq(t, base, "idem-amb"); seq != 1 {
+		t.Fatalf("reserved seq = %d", seq)
 	}
-	code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", "")
-	if code != http.StatusInternalServerError || !strings.Contains(resp, "checkpoint refused") {
-		t.Fatalf("a checkpoint over a reserved-but-unrecorded broker_seq must be refused (got %d): %s", code, resp)
+	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusInternalServerError || !strings.Contains(resp, "checkpoint refused") {
+		t.Fatalf("checkpoint over an orphaned reservation must fail (%d): %s", code, resp)
 	}
-	// the retry reclaims the reserved seq 1 and records it; the gap closes.
-	code, resp = do(t, h, "POST", "/v2/grants", grantBody("idem-amb", "read:orders", ak, ak))
-	if code != http.StatusCreated {
-		t.Fatalf("retry (%d): %s", code, resp)
-	}
-	if seq := grantSeqOf(t, resp); seq != 1 {
-		t.Fatalf("retry broker_seq = %d, want the reserved 1", seq)
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-amb", "read:orders", ak, ak)); code != http.StatusCreated || grantSeqOf(t, resp) != 1 {
+		t.Fatalf("retry must reclaim reserved seq 1 (%d): %s", code, resp)
 	}
 	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
-		t.Fatalf("checkpoint after the gap closed (%d): %s", code, resp)
-	}
-	if code, report := do(t, h, "GET", "/v2/verify?project=p1", ""); code != http.StatusOK || !strings.Contains(report, `"ok":true`) {
-		t.Fatalf("bundle must verify (%d): %s", code, report)
+		t.Fatalf("checkpoint after gap closed (%d): %s", code, resp)
 	}
 }
 
@@ -191,31 +200,25 @@ func (l *lateCommitStore) land(t *testing.T) {
 // number the in-flight commit still holds: once it lands, the next grant was allocated seq 1 AGAIN — a duplicate
 // broker_seq no checkpoint could ever sign over. A retry must only release a seq it freshly allocated.
 func TestRetryNeverReleasesReusedSeq(t *testing.T) {
-	ls := &lateCommitStore{flakyGrantStore: flakyGrantStore{Store: store.NewMem()}}
-	h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).Routes()
+	base := store.NewMem()
+	fs := &flakyGrantStore{Store: base}
+	h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).Routes()
 	ak := grantAgentKey()
-
-	ls.holdNext = true
+	reserveGrantSeq(t, base, "idem-g1")
+	fs.failHeads = true
 	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusInternalServerError {
-		t.Fatalf("g1 ambiguous commit must 500 (got %d): %s", code, resp)
+		t.Fatalf("retry over reserved seq should fail before commit (%d): %s", code, resp)
 	}
-	ls.failHeads = true // the immediate retry reuses seq 1, then fails with a releasable-looking error
-	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusInternalServerError {
-		t.Fatalf("g1 retry with a transient failure must 500 (got %d): %s", code, resp)
+	if res, ok, err := base.BrokerSeqAt("p1", 1); err != nil || !ok || res.GrantID != reservedGrantID("idem-g1") {
+		t.Fatalf("preexisting reservation lost: %+v ok=%v err=%v", res, ok, err)
 	}
-	ls.land(t) // the original commit becomes durable, holding seq 1
-
-	code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g2", "read:orders", ak, ak))
-	if code != http.StatusCreated {
-		t.Fatalf("g2 (%d): %s", code, resp)
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g2", "read:orders", ak, ak)); code != http.StatusCreated || grantSeqOf(t, resp) != 2 {
+		t.Fatalf("new grant must take seq 2 (%d): %s", code, resp)
 	}
-	if seq := grantSeqOf(t, resp); seq != 2 {
-		t.Fatalf("g2 broker_seq = %d, want 2 (seq 1 is held by g1's landed commit; releasing it on the retry re-issued it)", seq)
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusCreated || grantSeqOf(t, resp) != 1 {
+		t.Fatalf("retry must refill seq 1 (%d): %s", code, resp)
 	}
 	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
-		t.Fatalf("checkpoint over {1,2} (%d): %s", code, resp)
-	}
-	if code, report := do(t, h, "GET", "/v2/verify?project=p1", ""); code != http.StatusOK || !strings.Contains(report, `"ok":true`) {
-		t.Fatalf("bundle must verify (no duplicate broker_seq) (%d): %s", code, report)
+		t.Fatalf("checkpoint over refilled log (%d): %s", code, resp)
 	}
 }

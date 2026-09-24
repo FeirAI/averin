@@ -1,0 +1,15 @@
+Mutant: m17-verdict-missing-revocation-is-absent. Named detector: verdict_differential.
+
+--- a/core/src/verify/verdict.rs
++++ b/core/src/verify/verdict.rs
+@@ -277,9 +277,9 @@
+             Insufficient
+         };
+         let revocation = match self.policy.revocation {
+             RevocationRequirement::Pinned => {
+-                !self.revocation_issuer_pinned || self.disclosed_revocation_fresh
++                true // BUG: missing pinned-issuer evidence treated as clean
+             }
+             RevocationRequirement::Disclosed => {
+                 self.revocation_issuer_pinned && self.disclosed_revocation_fresh
+             }

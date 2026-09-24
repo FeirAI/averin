@@ -1,0 +1,14 @@
+Mutant: partial closure bypasses failed PoP. Named detector: tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation.
+
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -5909,8 +5909,9 @@
+         // consumes its outcome, so the outcome is still reported as an orphan.
+         let pop_reverified = match pop_reverify(rec, &g.credential_binding) {
+             Ok(r) => r,
+             Err(msg) => {
++                if pending_consume.is_some_and(|i| !outcomes[i].5) { intent_without_outcome += 1; continue; } // BUG: partial closure skips PoP
+                 unmatched_violation += 1;
+                 violation(&mut issues, format!("offline PoP re-verification: {msg}"));
+                 continue;
+             }

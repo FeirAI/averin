@@ -1,0 +1,14 @@
+Mutant: V3 authority signature preimage omits the semantic subject digest.
+
+--- a/core/src/authority.rs
++++ b/core/src/authority.rs
+@@ -208,9 +208,8 @@
+         source,
+         project_id,
+         record_id,
+         evidence_hash,
+-        digest,
+     ] {
+         if !lp_str_into(&mut bytes, value) {
+             return Err("authority v3 preimage framing overflow");
+         }

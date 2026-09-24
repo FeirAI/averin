@@ -5,10 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -73,6 +76,25 @@ func regExists(t *testing.T, admin *pgxpool.Pool, name string) bool {
 	return reg != nil
 }
 
+func migrateExisting(t *testing.T, dsn string, admin *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	old, next := "averin_old_"+suffix, "averin_new_"+suffix
+	for _, sql := range []string{"CREATE ROLE " + old + " NOLOGIN", "CREATE ROLE " + next + " LOGIN"} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+old)
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+next)
+	}()
+	if err := Cutover(ctx, dsn, []string{old}, next); err != nil {
+		t.Fatalf("maintenance cutover: %v", err)
+	}
+}
+
 // TestMigrateFreshAdoptsCurrentAndIsIdempotent: a fresh DB migrates to CurrentSchemaVersion, creating
 // every baseline table, and a SECOND migrate is a steady-state no-op — it issues no DDL and does NOT
 // re-stamp (the row count and the v1 applied_at are unchanged), which is what lets the runtime role drop
@@ -89,10 +111,13 @@ func TestMigrateFreshAdoptsCurrentAndIsIdempotent(t *testing.T) {
 		t.Fatalf("version after migrate = %d, want %d", got, CurrentSchemaVersion)
 	}
 	// Every baseline table from all three folded stores must exist under the single version.
-	for _, tbl := range []string{"records", "checkpoints", "anchors", "disclosures", "display_seq", "broker_seq", "consume_ledger", "revocations", "pending_grants"} {
+	for _, tbl := range []string{"records", "checkpoints", "anchors", "disclosures", "display_seq", "broker_seq", "legacy_consume_exclusions", "consumed_nonces", "consumed_jtis", "nonce_ledger_cutover", "revocations", "pending_grants", "broker_seq_recovery_fence", "broker_seq_recovery_result"} {
 		if !regExists(t, admin, tbl) {
 			t.Fatalf("baseline table %q missing after migrate", tbl)
 		}
+	}
+	if regExists(t, admin, "consume_ledger") {
+		t.Fatal("old writable ledger relation survives v6")
 	}
 
 	// Capture the steady-state fingerprint: one stamp per version, and v1's applied_at.
@@ -149,9 +174,7 @@ func TestMigrateBaselineAdoptIsNoOpOnExistingData(t *testing.T) {
 	}
 
 	// Adopt the stamp (v0 -> v1). Must be a no-op on data.
-	if err := Migrate(ctx, scoped); err != nil {
-		t.Fatalf("adopt migrate: %v", err)
-	}
+	migrateExisting(t, scoped, admin)
 	if got := maxVersion(t, admin); got != CurrentSchemaVersion {
 		t.Fatalf("version after adopt = %d, want %d", got, CurrentSchemaVersion)
 	}
@@ -219,9 +242,7 @@ func TestMigrateV2RecordIDUniqueness(t *testing.T) {
 		if err := insert(admin, "sha256:a", "r1"); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		if err := Migrate(ctx, scoped); err != nil {
-			t.Fatalf("migrate v1->current: %v", err)
-		}
+		migrateExisting(t, scoped, admin)
 		if got := maxVersion(t, admin); got != CurrentSchemaVersion {
 			t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
 		}
@@ -247,9 +268,7 @@ func TestMigrateV2RecordIDUniqueness(t *testing.T) {
 		if err := insert(admin, "sha256:a", long); err != nil {
 			t.Fatalf("seed long record_id: %v", err)
 		}
-		if err := Migrate(ctx, scoped); err != nil {
-			t.Fatalf("a long historical record_id must NOT make the migration refuse to boot: %v", err)
-		}
+		migrateExisting(t, scoped, admin)
 		if got := maxVersion(t, admin); got != CurrentSchemaVersion {
 			t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
 		}
@@ -273,9 +292,7 @@ func TestMigrateV2RecordIDUniqueness(t *testing.T) {
 		if err := insert(admin, "sha256:b", "r1"); err != nil {
 			t.Fatalf("seed historical duplicate: %v", err)
 		}
-		if err := Migrate(ctx, scoped); err != nil {
-			t.Fatalf("a historical duplicate must NOT make the migration refuse to boot: %v", err)
-		}
+		migrateExisting(t, scoped, admin)
 		if got := maxVersion(t, admin); got != CurrentSchemaVersion {
 			t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
 		}
@@ -300,11 +317,9 @@ func TestMigrateV3BrokerSeqVoid(t *testing.T) {
 		INSERT INTO broker_seq (project_id, grant_id, seq) VALUES ('p', 'g-orphan', 1)`); err != nil {
 		t.Fatalf("stamp v2 + seed an orphan reservation: %v", err)
 	}
-	if err := Migrate(ctx, scoped); err != nil {
-		t.Fatalf("migrate v2->v3: %v", err)
-	}
-	if got := maxVersion(t, admin); got != 3 {
-		t.Fatalf("version = %d, want 3", got)
+	migrateExisting(t, scoped, admin)
+	if got := maxVersion(t, admin); got != CurrentSchemaVersion {
+		t.Fatalf("version = %d, want %d", got, CurrentSchemaVersion)
 	}
 	var seq int64
 	var allocatedAt time.Time
@@ -316,5 +331,372 @@ func TestMigrateV3BrokerSeqVoid(t *testing.T) {
 	}
 	if !regExists(t, admin, "broker_seq_void") {
 		t.Fatal("v3 must create broker_seq_void")
+	}
+}
+
+func TestTenantNonceCutoverV3V4V5PreservesUnknownOwners(t *testing.T) {
+	for _, version := range []int{3, 4, 5} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			scoped, admin, cleanup := newTestSchema(t)
+			defer cleanup()
+			ctx := context.Background()
+			for v := 1; v <= version; v++ {
+				if _, err := admin.Exec(ctx, steps[v-1]); err != nil {
+					t.Fatalf("apply v%d: %v", v, err)
+				}
+			}
+			if _, err := admin.Exec(ctx, `CREATE TABLE schema_migrations(version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+				t.Fatal(err)
+			}
+			for v := 1; v <= version; v++ {
+				if _, err := admin.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES($1)`, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := admin.Exec(ctx, `INSERT INTO consume_ledger(kind,consume_key) VALUES ('nonce','unknown-owner'),('jti','used-jti')`); err != nil {
+				t.Fatal(err)
+			}
+			if err := Migrate(ctx, scoped); err == nil {
+				t.Fatal("ordinary startup migrated a live legacy schema without maintenance barrier")
+			}
+			if maxVersion(t, admin) != version {
+				t.Fatal("refused startup changed schema version")
+			}
+			oldConn, err := pgx.Connect(ctx, scoped)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer oldConn.Close(context.Background())
+			if _, err := oldConn.Prepare(ctx, "old-insert", `INSERT INTO consume_ledger(kind,consume_key) VALUES ('nonce','old-prepared')`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := oldConn.Prepare(ctx, "old-delete", `DELETE FROM consume_ledger WHERE consume_key='old-prepared-delete'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := admin.Exec(ctx, `INSERT INTO consume_ledger(kind,consume_key) VALUES ('nonce','old-prepared-delete')`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := oldConn.Exec(ctx, `EXECUTE "old-insert"`); err != nil {
+				t.Fatalf("old prepared insert did not work before cutover: %v", err)
+			}
+			deleted, err := oldConn.Exec(ctx, `EXECUTE "old-delete"`)
+			if err != nil || deleted.RowsAffected() != 1 {
+				t.Fatalf("old prepared delete failed before cutover: rows=%d err=%v", deleted.RowsAffected(), err)
+			}
+			if _, err := admin.Exec(ctx, `INSERT INTO consume_ledger(kind,consume_key) VALUES ('nonce','old-prepared-delete')`); err != nil {
+				t.Fatal(err)
+			}
+			migrateExisting(t, scoped, admin)
+			if maxVersion(t, admin) != CurrentSchemaVersion || regExists(t, admin, "consume_ledger") {
+				t.Fatal("cutover did not remove old writable relation")
+			}
+			var legacyCount int
+			if err := admin.QueryRow(ctx, `SELECT count(*) FROM legacy_consume_exclusions`).Scan(&legacyCount); err != nil || legacyCount != 4 {
+				t.Fatalf("historical rows lost/assigned count=%d err=%v", legacyCount, err)
+			}
+			for _, sql := range []string{
+				`INSERT INTO legacy_consume_exclusions(kind,consume_key) VALUES ('nonce','bypass')`,
+				`UPDATE legacy_consume_exclusions SET consume_key='bypass' WHERE consume_key='unknown-owner'`,
+				`DELETE FROM legacy_consume_exclusions WHERE consume_key='unknown-owner'`,
+				`TRUNCATE legacy_consume_exclusions`,
+				`INSERT INTO consume_ledger(kind,consume_key) VALUES ('nonce','old-ordinary')`,
+			} {
+				if _, err := admin.Exec(ctx, sql); err == nil {
+					t.Fatalf("old writer SQL accepted after cutover: %s", sql)
+				}
+			}
+			for _, prepared := range []string{"old-insert", "old-delete"} {
+				if _, err := oldConn.Exec(ctx, `EXECUTE "`+prepared+`"`); err == nil {
+					t.Fatalf("old prepared %s accepted after cutover", prepared)
+				}
+			}
+			var retained int
+			if err := admin.QueryRow(ctx, `SELECT count(*) FROM legacy_consume_exclusions WHERE consume_key='old-prepared-delete'`).Scan(&retained); err != nil || retained != 1 {
+				t.Fatalf("prepared delete removed inherited exclusion: count=%d err=%v", retained, err)
+			}
+			var before, after time.Time
+			if err := admin.QueryRow(ctx, `SELECT legacy_exclusion_until FROM nonce_ledger_cutover`).Scan(&before); err != nil {
+				t.Fatal(err)
+			}
+			if err := Migrate(ctx, scoped); err != nil {
+				t.Fatalf("steady-state migrate: %v", err)
+			}
+			if err := admin.QueryRow(ctx, `SELECT legacy_exclusion_until FROM nonce_ledger_cutover`).Scan(&after); err != nil || !after.Equal(before) {
+				t.Fatalf("repeat migration reset hold before=%v after=%v err=%v", before, after, err)
+			}
+		})
+	}
+}
+
+func TestTenantNonceCutoverInterruptedBeforeCommitRetriesOnce(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+	for v := 1; v <= 5; v++ {
+		if _, err := admin.Exec(ctx, steps[v-1]); err != nil {
+			t.Fatalf("apply v%d: %v", v, err)
+		}
+	}
+	if _, err := admin.Exec(ctx, `CREATE TABLE schema_migrations(version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+		t.Fatal(err)
+	}
+	for v := 1; v <= 5; v++ {
+		if _, err := admin.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES($1)`, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var original time.Time
+	if err := admin.QueryRow(ctx, `INSERT INTO consume_ledger(kind,consume_key,consumed_at)
+		VALUES('nonce','unknown-owner',clock_timestamp()-interval '1 hour') RETURNING consumed_at`).Scan(&original); err != nil {
+		t.Fatal(err)
+	}
+	// A test-owned function conflicts with v6's CREATE FUNCTION, after its
+	// ALTER TABLE RENAME has already run. Exercise the real selected Cutover
+	// runner and force its transaction to roll back mid-step.
+	if _, err := admin.Exec(ctx, `CREATE FUNCTION legacy_consume_reject_mutation() RETURNS trigger
+		LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$`); err != nil {
+		t.Fatal(err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	old, next := "averin_old_"+suffix, "averin_new_"+suffix
+	for _, sql := range []string{"CREATE ROLE " + old + " NOLOGIN", "CREATE ROLE " + next + " LOGIN"} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+old)
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+next)
+	}()
+	if err := Cutover(ctx, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), "apply step v6") {
+		t.Fatalf("conflicting function did not abort real v6 cutover: %v", err)
+	}
+	if got := maxVersion(t, admin); got != 5 {
+		t.Fatalf("interrupted cutover left version %d, want v5", got)
+	}
+	if !regExists(t, admin, "consume_ledger") || regExists(t, admin, "legacy_consume_exclusions") ||
+		regExists(t, admin, "consumed_nonces") || regExists(t, admin, "consumed_jtis") ||
+		regExists(t, admin, "nonce_ledger_cutover") {
+		t.Fatal("interrupted cutover leaked a renamed relation, new claims, or cutoff marker")
+	}
+	var preserved time.Time
+	if err := admin.QueryRow(ctx, `SELECT consumed_at FROM consume_ledger WHERE kind='nonce' AND consume_key='unknown-owner'`).Scan(&preserved); err != nil || !preserved.Equal(original) {
+		t.Fatalf("interrupted cutover altered old exclusion: got=%v original=%v err=%v", preserved, original, err)
+	}
+	if _, err := admin.Exec(ctx, `DROP FUNCTION legacy_consume_reject_mutation()`); err != nil {
+		t.Fatal(err)
+	}
+	// A real authorized retry migrates once; its DB clock marker and the old
+	// exclusion remain unchanged on a later steady-state startup.
+	if err := Cutover(ctx, scoped, []string{old}, next); err != nil {
+		t.Fatalf("retry cutover: %v", err)
+	}
+	if got := maxVersion(t, admin); got != 6 || regExists(t, admin, "consume_ledger") {
+		t.Fatalf("retry left version %d or old writable relation", got)
+	}
+	if err := admin.QueryRow(ctx, `SELECT consumed_at FROM legacy_consume_exclusions WHERE kind='nonce' AND consume_key='unknown-owner'`).Scan(&preserved); err != nil || !preserved.Equal(original) {
+		t.Fatalf("retry lost old exclusion: got=%v original=%v err=%v", preserved, original, err)
+	}
+	var stamped int
+	var cutoff time.Time
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM schema_migrations WHERE version=6`).Scan(&stamped); err != nil || stamped != 1 {
+		t.Fatalf("retry stamped v6 %d times: %v", stamped, err)
+	}
+	if err := admin.QueryRow(ctx, `SELECT legacy_exclusion_until FROM nonce_ledger_cutover WHERE singleton`).Scan(&cutoff); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatal(err)
+	}
+	var cutoffAfter time.Time
+	if err := admin.QueryRow(ctx, `SELECT legacy_exclusion_until FROM nonce_ledger_cutover WHERE singleton`).Scan(&cutoffAfter); err != nil || !cutoffAfter.Equal(cutoff) {
+		t.Fatalf("steady-state startup reset cutoff: before=%v after=%v err=%v", cutoff, cutoffAfter, err)
+	}
+}
+
+func TestTenantNonceCutoverRejectsLiveAndInheritedOldWriter(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+	for v := 1; v <= 5; v++ {
+		if _, err := admin.Exec(ctx, steps[v-1]); err != nil {
+			t.Fatalf("apply v%d: %v", v, err)
+		}
+	}
+	if _, err := admin.Exec(ctx, `CREATE TABLE schema_migrations(version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+		INSERT INTO schema_migrations(version) VALUES (1),(2),(3),(4),(5)`); err != nil {
+		t.Fatal(err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	old, next, inherited := "averin_live_"+suffix, "averin_next_"+suffix, "averin_group_"+suffix
+	for _, sql := range []string{
+		"CREATE ROLE " + old + " LOGIN PASSWORD 'temporary-test-only'",
+		"CREATE ROLE " + next + " LOGIN",
+		"CREATE ROLE " + inherited + " NOLOGIN",
+		"GRANT INSERT ON records TO " + inherited,
+		"GRANT " + inherited + " TO " + old,
+	} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+old+","+next+","+inherited)
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+old)
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+next)
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+inherited)
+	}()
+	cutover := func() error { return Cutover(ctx, scoped, []string{old}, next) }
+	if err := cutover(); err == nil {
+		t.Fatal("LOGIN old runtime accepted")
+	}
+	cfg, err := pgx.ParseConfig(scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.User, cfg.Password = old, "temporary-test-only"
+	oldConn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, "ALTER ROLE "+old+" NOLOGIN PASSWORD 'rotated-unusable'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cutover(); err == nil || !strings.Contains(err.Error(), "sessions") {
+		t.Fatalf("established old session did not block cutover: %v", err)
+	}
+	if err := oldConn.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := cutover(); err == nil || !strings.Contains(err.Error(), "write privilege") {
+		t.Fatalf("inherited write privilege did not block cutover: %v", err)
+	}
+	if _, err := admin.Exec(ctx, "REVOKE "+inherited+" FROM "+old); err != nil {
+		t.Fatal(err)
+	}
+	if err := cutover(); err != nil {
+		t.Fatalf("retired old runtime refused: %v", err)
+	}
+}
+
+func TestTenantNonceRuntimeReadinessRequiresLeastPrivilege(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckRuntime(ctx, scoped); err == nil {
+		t.Fatal("schema owner accepted as runtime")
+	}
+	role := fmt.Sprintf("averin_runtime_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, "CREATE ROLE "+role+" LOGIN PASSWORD 'test-only-password'"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+role)
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+role)
+	}()
+	u, err := url.Parse(scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.UserPassword(role, "test-only-password")
+	if err := CheckRuntime(ctx, u.String()); err == nil {
+		t.Fatal("unprivileged runtime passed readiness")
+	}
+	var schema string
+	if err := admin.QueryRow(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		"GRANT USAGE ON SCHEMA " + schema + " TO " + role,
+		"GRANT SELECT ON schema_migrations,legacy_consume_exclusions,nonce_ledger_cutover TO " + role,
+		"GRANT SELECT,INSERT,DELETE ON consumed_nonces,consumed_jtis TO " + role,
+		"GRANT SELECT,INSERT ON records,broker_seq TO " + role,
+		"GRANT SELECT,INSERT,UPDATE ON project_write_guard TO " + role,
+	} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := CheckRuntime(ctx, u.String()); err != nil {
+		t.Fatalf("least-privilege runtime not ready: %v", err)
+	}
+	var owner string
+	if err := admin.QueryRow(ctx, `SELECT current_user`).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, "GRANT "+owner+" TO "+role); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckRuntime(ctx, u.String()); err == nil || !strings.Contains(err.Error(), "owner membership") {
+		t.Fatalf("runtime inherited migration ownership: %v", err)
+	}
+	if _, err := admin.Exec(ctx, "REVOKE "+owner+" FROM "+role); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTenantNonceLegacyPurgeRequiresDBTimeHold(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatal(err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	old, next := "averin_purge_old_"+suffix, "averin_purge_new_"+suffix
+	for _, sql := range []string{"CREATE ROLE " + old + " NOLOGIN", "CREATE ROLE " + next + " LOGIN"} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+old)
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+next)
+	}()
+	for _, sql := range []string{
+		`ALTER TABLE legacy_consume_exclusions DISABLE TRIGGER legacy_consume_rows_immutable`,
+		`INSERT INTO legacy_consume_exclusions(kind,consume_key) VALUES ('nonce','unowned')`,
+		`ALTER TABLE legacy_consume_exclusions ENABLE TRIGGER legacy_consume_rows_immutable`,
+	} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := PurgeLegacy(ctx, scoped, []string{old}, next); err == nil {
+		t.Fatal("legacy exclusion purged before database-time hold elapsed")
+	}
+	for _, sql := range []string{
+		`ALTER TABLE nonce_ledger_cutover DISABLE TRIGGER nonce_cutover_rows_immutable`,
+		`UPDATE nonce_ledger_cutover SET cutover_at=clock_timestamp()-interval '25 hours', legacy_exclusion_until=clock_timestamp()-interval '1 hour'`,
+		`ALTER TABLE nonce_ledger_cutover ENABLE TRIGGER nonce_cutover_rows_immutable`,
+	} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := PurgeLegacy(ctx, scoped, []string{old}, next)
+	if err != nil || n != 1 {
+		t.Fatalf("mature purge rows=%d err=%v", n, err)
+	}
+	if _, err := admin.Exec(ctx, `INSERT INTO legacy_consume_exclusions(kind,consume_key) VALUES ('nonce','old-writer')`); err == nil {
+		t.Fatal("legacy table became writable after maintenance purge")
+	}
+}
+
+func TestTenantNonceOrdinaryStartupRefusesEmptyLegacyVersionTable(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := admin.Exec(ctx, `CREATE TABLE schema_migrations(version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, scoped); err == nil {
+		t.Fatal("preexisting empty version table bypassed maintenance cutover")
+	}
+	if regExists(t, admin, "records") {
+		t.Fatal("refused migration changed legacy schema")
 	}
 }

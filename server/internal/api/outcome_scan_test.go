@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -14,12 +15,23 @@ import (
 // process-wide ingestMu.
 type sessionScanCounter struct {
 	store.Store
-	scans int
+	scans  int
+	parent *sessionScanCounter
 }
 
 func (c *sessionScanCounter) SessionRecords(projectID, sessionID string) ([]store.Record, error) {
-	c.scans++
+	if c.parent != nil {
+		c.parent.scans++
+	} else {
+		c.scans++
+	}
 	return c.Store.SessionRecords(projectID, sessionID)
+}
+
+func (c *sessionScanCounter) WithProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
+	return c.Store.WithProjectWrite(ctx, projectID, func(st store.Store) error {
+		return fn(&sessionScanCounter{Store: st, parent: c})
+	})
 }
 
 // TestUseOutcomeScansSessionOnce (review, low): resolving the intent an outcome completes and checking that no other

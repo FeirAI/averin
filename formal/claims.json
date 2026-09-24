@@ -54,23 +54,23 @@
     },
     {
       "id": "revocation-live-and-durable",
-      "claim": "A successful revoke blocks later uses on that server; Postgres mode persists and rehydrates revocations across restart. Live cross-replica coherence is not established.",
+      "claim": "With a shared Postgres project Store, an acknowledged revoke is committed before a later use checks revocation on any replica; restart does not restore an older admission view. This is tested behavior, while the bounded TLA+ model checks its operational abstraction.",
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "Postgres mode"],
-      "assumptions": ["revocation enabled", "single writer per project", "Postgres durable store configured"],
-      "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "isRevoked"}, {"file": "server/internal/api/durable.go", "symbol": "WithDurable"}],
-      "proofs": [{"file": "server/internal/api/durable_internal_test.go", "symbol": "TestDurableRevocationSurvivesRestart"}],
-      "gates": ["store-postgres"]
+      "assumptions": ["revocation enabled", "shared Postgres project Store", "all use and revoke paths obey WithProjectWrite"],
+      "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "revokeGrantIDTotalCtx"}, {"file": "server/internal/store/operational_postgres.go", "symbol": "IsRevoked"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
+      "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoRevokedUse"}],
+      "gates": ["store-postgres", "formal-tla"]
     },
     {
       "id": "pending-grant-durability",
-      "claim": "Postgres mode persists and rehydrates pending two-phase grants at boot; live replicas are not a coherent shared pending cache.",
+      "claim": "With a shared Postgres project Store, a committed prepare is visible to finalize on another replica and after issuer restart; retries read the durable pending row. This is tested behavior, while the bounded TLA+ model checks its operational abstraction.",
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "Postgres mode"],
-      "assumptions": ["Postgres durable store configured", "single writer or sticky routing for live two-phase requests"],
-      "sources": [{"file": "server/internal/api/durable.go", "symbol": "WithDurable"}],
-      "proofs": [{"file": "server/internal/api/durable_internal_test.go", "symbol": "TestDurablePendingTwoPhaseGrantSurvivesRestart"}],
-      "gates": ["store-postgres"]
+      "assumptions": ["shared Postgres project Store", "prepare and finalize use WithProjectWrite", "pending expiry is checked from the authoritative row"],
+      "sources": [{"file": "server/internal/api/grant_twophase.go", "symbol": "PutPendingGrant"}, {"file": "server/internal/store/operational_postgres.go", "symbol": "PendingGrantLive"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
+      "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoGhostFinalize"}],
+      "gates": ["store-postgres", "formal-tla"]
     },
     {
       "id": "native-rfc3161",
@@ -83,6 +83,26 @@
       "gates": ["core", "store-postgres", "wasm"]
     },
     {
+      "id": "authority-v3-semantic-body-binding",
+      "claim": "A verified v3 authority proof binds the finalized semantic record, including commitments and unknown extensions. Receipt, display sequence, causal parents and signing-key envelope are recorder-authenticated exclusions; the authority does not approve their values.",
+      "class": "model-and-tested-implementation",
+      "targets": ["native Rust verifier", "Go server producer and ingest"],
+      "assumptions": ["external authority approves the actual structured subject", "SHA-256 collision resistance", "Ed25519 signatures", "recording key remains trusted", "the enumerated projection is reviewed when the record schema changes"],
+      "sources": [{"file": "core/src/authority.rs", "symbol": "pub fn subject_projection"}, {"file": "server/internal/api/authority_v3.go", "symbol": "finalizeSemanticRecord"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "authority_v3_digest_bound"}],
+      "proofs": [{"file": "core/tests/golden.rs", "symbol": "sdk_prepared_v3_record_matches_govder_subject_bytes"}, {"file": "core/tests/adversarial.rs", "symbol": "v3_signed_grant_and_pop_use_satisfy_body_bound_authorization"}, {"file": "core/src/authority.rs", "symbol": "v3_binds_semantic_body_but_not_recorder_envelope"}, {"file": "server/internal/api/authority_v3_test.go", "symbol": "TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal"}, {"file": "server/internal/api/authority_v3_test.go", "symbol": "TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite"}],
+      "gates": ["core", "server", "formal-lean", "formal-refinement"]
+    },
+    {
+      "id": "historical-v2-authority-is-unbound",
+      "claim": "Valid historical v2 authority evidence remains signature-valid and eligible for its independent Tier-B evidence joins, but carries an explicit legacy_unbound status and cannot satisfy body-bound authorization or completeness claims.",
+      "class": "backward-compatibility-test",
+      "targets": ["native Rust verifier", "Go server exports"],
+      "assumptions": ["historical v2 evidence bytes are immutable", "the original authority verification key remains pinned"],
+      "sources": [{"file": "core/src/authority.rs", "symbol": "LegacyUnbound"}, {"file": "core/src/verify.rs", "symbol": "body_bound_role_evidence"}],
+      "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "v2_role_evidence_retains_tier_b_joins_but_cannot_satisfy_body_bound_claim"}, {"file": "server/internal/api/server_authority_test.go", "symbol": "legacy_unbound"}],
+      "gates": ["core", "server"]
+    },
+    {
       "id": "external-authenticity-pins",
       "claim": "Authentic role and TSA verdicts require independently obtained public keys; self-reported bundle keys do not establish operator authenticity.",
       "class": "deployment-assumption",
@@ -93,14 +113,14 @@
       "gates": ["core"]
     },
     {
-      "id": "resource-truth-and-single-writer",
-      "claim": "The strongest completeness label is conditional on truthful resource labeling, and the server requires one writer per project for DAG frontier consistency.",
-      "class": "deployment-assumption",
+      "id": "resource-truth-and-project-serialization",
+      "claim": "The strongest completeness label remains conditional on truthful resource labeling. Project frontier and checkpoint writes now serialize through a persisted Postgres guard, tested with two pools and separate processes; full multi-instance deployment remains gated by authenticated capability-project binding, scoped nonce claims, and bounded recovery. The finite TLA+ model is not a production proof.",
+      "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "offline verifier"],
-      "assumptions": ["resource honestly labels covered actions", "one writer per project; no distributed frontier lock"],
-      "sources": [{"file": "core/src/verify.rs", "symbol": "assumed_truthful"}, {"file": "server/internal/api/server.go", "symbol": "ingestMu"}],
-      "proofs": [{"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
-      "gates": ["core", "server"]
+      "assumptions": ["resource honestly labels covered actions", "all project writers use WithProjectWrite", "required unique record_id index remains valid", "shared Postgres database"],
+      "sources": [{"file": "core/src/verify.rs", "symbol": "assumed_truthful"}, {"file": "server/internal/store/postgres.go", "symbol": "lockProject"}, {"file": "server/internal/api/server.go", "symbol": "createCheckpointTx"}],
+      "proofs": [{"file": "server/internal/store/project_tx_test.go", "symbol": "TestPostgresProjectWriteTwoPools"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionProcessCuts"}, {"file": "formal/tla/ProjectTx_safe.cfg", "symbol": "NoFrontierFork"}, {"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
+      "gates": ["core", "server", "store-postgres", "formal-tla"]
     }
   ]
 }

@@ -6,3 +6,4 @@ import Averin.Seal
 import Averin.Dag
 import Averin.Chain
 import Averin.Catalogue
+import Averin.Verdict

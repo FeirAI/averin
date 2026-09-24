@@ -1,18 +1,99 @@
 package api_test
 
 import (
+	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/auth"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/resourceshim"
 	"github.com/feirai/averin/server/internal/store"
 )
 
+func TestVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T) {
+	exerciseVoidWithoutRevocationKeyBlocksPreparedCapability(t, store.NewMem())
+}
+
+func exerciseVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T, base store.Store) {
+	t.Helper()
+	resourceCore, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithResource(resourceCore, "orders-db").WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+	ak := grantAgentKey()
+	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
+	now := time.Now()
+	req := broker.Request{
+		PoPVersion: 2, ProjectID: "p1", IdempotencyKey: "idem-prepared-void", SessionID: "s1",
+		IssuedAt: now.Unix(), RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
+		AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "read:orders",
+		ScopeClass: broker.ScopeSingleOperation, AgentPubKey: pub, TTL: time.Minute,
+	}
+	req.AgentSig = base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
+	grantID := reservedGrantID("idem-prepared-void")
+	prepared, err := broker.Prepare(req, grantID, func() (int64, error) { return 1, nil }, time.Now(), brokerIssuingKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserveGrantSeq(t, base, "idem-prepared-void")
+	use := useBody(t, "idem-use-void", prepared.Capability, grantID, ak, "SELECT 1", "nonce-void")
+	var presented struct {
+		UseSig string `json:"use_sig"`
+	}
+	if err := json.Unmarshal([]byte(use), &presented); err != nil {
+		t.Fatal(err)
+	}
+	commitment, err := mustCore(t).Commit("input", []byte("SELECT 1"), strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This independently verifies the issuer signature, audience, action, PoP,
+	// and freshness before void. The test must not pass merely because the
+	// prepared descriptor was malformed or expired.
+	shim := resourceshim.New(brokerIssuingKey().Public().(ed25519.PublicKey), "orders-db", resourceshim.NewMemLedger()).WithProject("p1")
+	ev, err := shim.ValidateUse(prepared.Capability, presented.UseSig, resourceshim.Op{Action: "db.query:orders-ro", ParamsCommitment: commitment}, "nonce-void", time.Now())
+	if err != nil {
+		t.Fatalf("prepared capability was not otherwise valid: %v", err)
+	}
+	shim.RollbackUse(ev)
+	if code, response := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
+		t.Fatalf("void (%d): %s", code, response)
+	}
+	if code, response := do(t, h, "POST", "/v2/use", use); code != http.StatusBadRequest || !strings.Contains(response, "revoked") {
+		t.Fatalf("prepared capability was not denied specifically by signed void (%d): %s", code, response)
+	}
+}
+
 func voidBody(seq int64) string {
-	return fmt.Sprintf(`{"project_id":"p1","broker_seq":%d,"reason":"orphaned by an ambiguous commit"}`, seq)
+	return fmt.Sprintf(`{"project_id":"p1","broker_seq":%d,"operation_id":"recovery-test-1","reason":"orphaned by an ambiguous commit"}`, seq)
+}
+
+func testRecoveryStore() auth.RecoveryStore {
+	rs, _, err := auth.ParseRecoveryKeys(`[{"project_id":"p1","actor_id":"test-operator","token":"test-recovery-token"},{"project_id":"p1","actor_id":"second-operator","token":"second-recovery-token"}]`)
+	if err != nil {
+		panic(err)
+	}
+	return rs
+}
+
+func doRecovery(t *testing.T, h http.Handler, method, path, body string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-recovery-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
 }
 
 // pinnedBrokerOpts pins the recording/broker key and the test TSA, so the offline verifier evaluates D6 under trust.
@@ -28,15 +109,11 @@ func pinnedBrokerOpts(t *testing.T) string {
 // under pinned keys with a sequence_verified broker log and exactly ONE grant (the tombstone is never a grant).
 // g1's late retry is refused (409) — it must never get the voided seq back — and a repeat void is idempotent.
 func TestBrokerSeqVoidUnwedgesCheckpoint(t *testing.T) {
-	fs := &flakyGrantStore{Store: store.NewMem()}
+	base := store.NewMem()
 	c := mustCore(t)
-	h := api.New(c, fs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
+	h := api.New(c, base, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
-
-	fs.ambiguousPut = true
-	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusInternalServerError {
-		t.Fatalf("g1 ambiguous commit must 500 (got %d): %s", code, resp)
-	}
+	reserveGrantSeq(t, base, "idem-g1")
 	code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g2", "read:orders", ak, ak))
 	if code != http.StatusCreated || grantSeqOf(t, resp) != 2 {
 		t.Fatalf("g2 must record seq 2 (%d): %s", code, resp)
@@ -45,7 +122,7 @@ func TestBrokerSeqVoidUnwedgesCheckpoint(t *testing.T) {
 		t.Fatalf("the wedge: a checkpoint over the orphaned seq 1 must be refused (got %d): %s", code, resp)
 	}
 
-	code, resp = do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
+	code, resp = doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 	if code != http.StatusCreated {
 		t.Fatalf("void seq 1 (%d): %s", code, resp)
 	}
@@ -97,11 +174,11 @@ func TestBrokerSeqVoidUnwedgesCheckpoint(t *testing.T) {
 	}
 
 	// g1's client comes back: its grant_id is retired, never handed the voided seq (nor a new one).
-	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusConflict || !strings.Contains(resp, "voided") {
+	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusConflict || !strings.Contains(resp, "fenced") {
 		t.Fatalf("a retry of the voided grant must 409 (got %d): %s", code, resp)
 	}
 	// a repeat void returns the existing tombstone.
-	if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusOK || !strings.Contains(resp, `"created":false`) {
+	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusOK || !strings.Contains(resp, `"created":false`) {
 		t.Fatalf("a repeat void must return the existing tombstone (got %d): %s", code, resp)
 	}
 	// new grants continue after the voided number.
@@ -122,43 +199,39 @@ func TestBrokerSeqVoidRefusals(t *testing.T) {
 	ak := grantAgentKey()
 
 	t.Run("not allocated", func(t *testing.T) {
-		h := api.New(mustCore(t), store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
-		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(7)); code != http.StatusNotFound {
+		h := api.New(mustCore(t), store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(7)); code != http.StatusNotFound {
 			t.Fatalf("voiding an unallocated seq must 404 (got %d): %s", code, resp)
 		}
 	})
 	t.Run("recorded", func(t *testing.T) {
-		h := api.New(mustCore(t), store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
+		h := api.New(mustCore(t), store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 		mkGrant(t, h, ak, "idem-rec")
-		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "is recorded") {
+		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, `"outcome":"recorded"`) {
 			t.Fatalf("voiding a recorded seq must 409 (got %d): %s", code, resp)
 		}
 	})
-	t.Run("too young", func(t *testing.T) {
-		fs := &flakyGrantStore{Store: store.NewMem()}
-		h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).Routes() // default safety age (1h)
-		fs.ambiguousPut = true
-		do(t, h, "POST", "/v2/grants", grantBody("idem-young", "read:orders", ak, ak))
-		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "AVERIN_BROKER_SEQ_VOID_MIN_AGE") {
-			t.Fatalf("voiding a reservation younger than the safety age must 409 (got %d): %s", code, resp)
+	t.Run("fresh reservation can be fenced", func(t *testing.T) {
+		base := store.NewMem()
+		h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes() // default safety age (1h)
+		reserveGrantSeq(t, base, "idem-young")
+		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated || !strings.Contains(resp, `"outcome":"voided"`) {
+			t.Fatalf("fresh reservation must fence and void (got %d): %s", code, resp)
 		}
-		// the reservation is untouched: the grant's retry still reclaims seq 1.
-		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-young", "read:orders", ak, ak)); code != http.StatusCreated || grantSeqOf(t, resp) != 1 {
-			t.Fatalf("a refused void must leave the reservation for the retry (%d): %s", code, resp)
+		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-young", "read:orders", ak, ak)); code != http.StatusConflict || !strings.Contains(resp, "fenced") {
+			t.Fatalf("a fenced reservation must reject the retry (%d): %s", code, resp)
 		}
 	})
-	t.Run("ambiguous commit that landed", func(t *testing.T) {
-		ls := &lateCommitStore{flakyGrantStore: flakyGrantStore{Store: store.NewMem()}}
-		h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
-		ls.holdNext = true
-		do(t, h, "POST", "/v2/grants", grantBody("idem-landed", "read:orders", ak, ak))
-		ls.land(t)
-		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "is recorded") {
+	t.Run("committed grant cannot be voided", func(t *testing.T) {
+		base := store.NewMem()
+		h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+		mkGrant(t, h, ak, "idem-landed")
+		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, `"outcome":"recorded"`) {
 			t.Fatalf("voiding a seq whose ambiguous commit landed must 409 (got %d): %s", code, resp)
 		}
 	})
 	t.Run("reserved idempotency prefix", func(t *testing.T) {
-		h := api.New(mustCore(t), store.NewMem(), "k0").Routes()
+		h := api.New(mustCore(t), store.NewMem(), "k0").WithRecoveryAuth(testRecoveryStore()).Routes()
 		if code, resp := do(t, h, "POST", "/v2/records", `{"idempotency_key":"grant-void:1","project_id":"p1","session_id":"s1"}`); code != http.StatusBadRequest {
 			t.Fatalf("a caller must not squat a tombstone's idempotency key (got %d): %s", code, resp)
 		}
@@ -169,9 +242,18 @@ func TestBrokerSeqVoidRefusals(t *testing.T) {
 type reissuingStore struct {
 	store.Store
 	forceSeq int64
+	parent   *reissuingStore
 }
 
 func (r *reissuingStore) AllocateBrokerSeq(projectID, grantID string) (int64, bool, error) {
+	if r.parent != nil {
+		if r.parent.forceSeq > 0 {
+			seq := r.parent.forceSeq
+			r.parent.forceSeq = 0
+			return seq, true, nil
+		}
+		return r.Store.AllocateBrokerSeq(projectID, grantID)
+	}
 	if r.forceSeq > 0 {
 		seq := r.forceSeq
 		r.forceSeq = 0
@@ -180,19 +262,26 @@ func (r *reissuingStore) AllocateBrokerSeq(projectID, grantID string) (int64, bo
 	return r.Store.AllocateBrokerSeq(projectID, grantID)
 }
 
+func (r *reissuingStore) WithProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
+	return r.Store.WithProjectWrite(ctx, projectID, func(st store.Store) error {
+		return fn(&reissuingStore{Store: st, parent: r})
+	})
+}
+
 // TestVerifierRejectsGrantDuplicatingVoidedSeq: once seq 1 is filled by a grant_void tombstone, a real grant that
 // ALSO claims seq 1 is a duplicate broker_seq — the producer refuses to checkpoint over it, and the offline verifier
 // names the violation (it never lets the tombstone and the grant both fill the one seq).
 func TestVerifierRejectsGrantDuplicatingVoidedSeq(t *testing.T) {
-	fs := &flakyGrantStore{Store: store.NewMem()}
-	rs := &reissuingStore{Store: fs}
+	base := store.NewMem()
+	rs := &reissuingStore{Store: base}
 	c := mustCore(t)
-	h := api.New(c, rs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).Routes()
+	h := api.New(c, rs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 
-	fs.ambiguousPut = true
-	do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak))
-	if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
+	if _, _, err := base.AllocateBrokerSeq("p1", "abandoned-grant"); err != nil {
+		t.Fatal(err)
+	}
+	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
 		t.Fatalf("void (%d): %s", code, resp)
 	}
 	if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {

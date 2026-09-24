@@ -98,10 +98,15 @@ func main() {
 	if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
 		mctx, mcancel := context.WithTimeout(context.Background(), 60*time.Second)
 		err := pgschema.Migrate(mctx, dsn)
-		mcancel()
 		if err != nil {
+			mcancel()
 			log.Fatalf("storage: schema migration: %v", err)
 		}
+		if err := pgschema.CheckRuntime(mctx, dsn); err != nil {
+			mcancel()
+			log.Fatalf("storage: runtime credential readiness: %v", err)
+		}
+		mcancel()
 		log.Printf("storage: schema migrated (averin DB at version %d)", pgschema.CurrentSchemaVersion)
 	}
 	st := selectStore()
@@ -129,16 +134,26 @@ func main() {
 	srv.WithMeter(meterReporter)
 
 	// project-scoped API keys: AVERIN_API_KEYS="proj-a:tok1,tok2;proj-b:tok3". Unset = no auth (dev).
+	var writerKeys auth.KeyStore
 	if raw := os.Getenv("AVERIN_API_KEYS"); raw != "" {
 		ks, n := auth.ParseKeys(raw)
 		if n == 0 {
 			log.Fatal("AVERIN_API_KEYS is set but parsed to zero keys — refusing to start in silent deny-all (use 'proj:tok' form)")
 		}
 		srv.WithAuth(ks)
+		writerKeys = ks
 		log.Printf("per-project API-key auth enabled (%d projects)", n)
 	} else {
 		log.Printf("WARNING: no AVERIN_API_KEYS set — the app API is UNAUTHENTICATED (dev/single-tenant only)")
 	}
+	// AVERIN_RECOVERY_KEYS is a separate broker_seq:recover authority. An absent
+	// configuration denies all recovery actions even when ordinary auth is open.
+	recoveryKeys, recoveryCount, err := auth.ParseRecoveryKeys(os.Getenv("AVERIN_RECOVERY_KEYS"), writerKeys)
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.WithRecoveryAuth(recoveryKeys)
+	log.Printf("project-scoped recovery auth configured (%d credentials)", recoveryCount)
 	// T7: pin EXTERNAL authority verifying keys so a generic record carrying a policy_engine_signed
 	// OR human_signed authority block, with an evidence_sig that verifies under the key pinned FOR
 	// THAT source, is elevated to that source at ingest (else forced to the forgeable
@@ -208,6 +223,16 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 	srv.WithRequirePinnedAuthority(requirePinned)
+	// Reader-first rollout: enable after every external authority producer has
+	// moved to v3. This never changes the classification of immutable v2 history.
+	switch raw := os.Getenv("AVERIN_REQUIRE_BODY_BOUND_AUTHORITY"); raw {
+	case "", "0", "false":
+		srv.WithRequireBodyBoundAuthority(false)
+	case "1", "true":
+		srv.WithRequireBodyBoundAuthority(true)
+	default:
+		log.Fatalf("AVERIN_REQUIRE_BODY_BOUND_AUTHORITY must be 1/true/0/false (got %q)", raw)
+	}
 	if requirePinned {
 		log.Printf("AVERIN_REQUIRE_PINNED_AUTHORITY on (default): a claimed authority elevation that fails key verification is REJECTED (fail-closed), not downgraded to caller_declared")
 	} else {
@@ -289,21 +314,6 @@ func main() {
 			srv.WithBrokerID(bid)
 			log.Printf("federation enabled: grants tagged broker_id=%q (per-broker broker_grant_heads in checkpoints)", bid)
 		}
-		// D6 operator remediation (POST /v2/broker-seq/void): how old a reserved-but-unrecorded broker_seq must be
-		// before it may be filled with a grant_void tombstone. A SAFETY parameter: it must comfortably exceed the
-		// longest time a grant can still be committing (statement timeout 30s, two-phase pending TTL 15m), so the
-		// floor rejects anything shorter at startup. Default 1h.
-		if raw := strings.TrimSpace(os.Getenv("AVERIN_BROKER_SEQ_VOID_MIN_AGE")); raw != "" {
-			const voidMinAgeFloor = 20 * time.Minute
-			d, perr := time.ParseDuration(raw)
-			if perr != nil || d <= 0 {
-				log.Fatalf("AVERIN_BROKER_SEQ_VOID_MIN_AGE must be a positive Go duration (e.g. 1h): %v", perr)
-			}
-			if d < voidMinAgeFloor {
-				log.Fatalf("AVERIN_BROKER_SEQ_VOID_MIN_AGE %s is below the safe floor %s — a void could race a grant commit (or a two-phase finalize) that is still landing", d, voidMinAgeFloor)
-			}
-			srv.WithBrokerSeqVoidMinAge(d)
-		}
 	}
 	// M6 (ADR 0005): the ONLINE two-phase cosig policy (POST /v2/grants/prepare + /v2/grants/finalize). The
 	// M-of-N approver keys are role-separated GOVERNANCE keys — the offline verifier re-pins them as
@@ -357,8 +367,8 @@ func main() {
 			log.Fatal("AVERIN_RESOURCE_SEED must differ from AVERIN_BROKER_ISSUING_SEED (keep the capability-issuing and use-recording key roles distinct)")
 		}
 		resourcePubKey = rc.PubKey() // for the R2 revocation∩resource disjointness check below
-		// Durable consume-before-act ledger when Postgres is configured; else the volatile MemLedger.
-		// WithLedger must precede WithResource (which installs the MemLedger default only if none is set).
+		// The store transaction owns replay claims and the signed use receipt.
+		// pgledger is retained for maintenance sweeping and a separate readiness probe.
 		if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
 			lctx, lcancel := context.WithTimeout(context.Background(), 30*time.Second)
 			pl, err := pgledger.New(lctx, dsn)
@@ -366,7 +376,6 @@ func main() {
 			if err != nil {
 				log.Fatalf("resource ledger: Postgres requested but unavailable: %v", err)
 			}
-			srv.WithLedger(pl)
 			// Periodic TTL sweep of the consume_ledger (it otherwise grows one row per PoP nonce + per jti
 			// forever; only a Release ever deletes). AVERIN_LEDGER_RETENTION sets how long a consumed
 			// nonce/jti is kept — a CORRECTNESS parameter, NOT tuning: it MUST exceed the longest credential
@@ -395,9 +404,9 @@ func main() {
 				func() float64 { return float64(pl.PoolStat().IdleConns) })
 			srv.WithGauge("averin_ledger_pool_max_conns", "Resource ledger Postgres pool: configured max connections.",
 				func() float64 { return float64(pl.PoolStat().MaxConns) })
-			log.Printf("consume-before-act ledger -> Postgres (durable)")
+			log.Printf("consume-before-act claims -> project store transaction; pgledger sweep/readiness enabled")
 		} else {
-			log.Printf("WARNING: the consume-before-act ledger is in-memory (volatile) — consumed single-use jti/nonce reset on restart, reopening a replay window for /v2/use. Set AVERIN_DATABASE_URL for the durable Postgres-backed ledger.")
+			log.Printf("WARNING: consume-before-act claims use the volatile in-memory project store; set AVERIN_DATABASE_URL for durable claims")
 		}
 		srv.WithResource(rc, rid)
 		log.Printf("resource gateway enabled (POST /v2/use) for resource %q", rid)
@@ -443,13 +452,9 @@ func main() {
 		log.Printf("revocation enabled (POST /v2/revoke; exports carry a signed revocation_list)")
 	}
 
-	// M5/M6/M2 durability: back the revoked-grant set and the pending two-phase grant mint state with
-	// Postgres when AVERIN_DATABASE_URL is set, so a pod restart or SIGTERM does not silently forget a
-	// revoke or lose a mint awaiting cosig/delegation approval (both were in-memory-only in Phase 1). Must
-	// run AFTER srv.WithRevocation (which (re)initializes the in-memory revoked set that WithDurable then
-	// rehydrates). A failed connection/rehydrate is fatal — same fail-closed posture as selectStore/pgledger:
-	// starting with a silently-empty revoked set would let an operator believe a revoke is enforced when it
-	// is not.
+	// Auxiliary durable-state connection for startup diagnostics, readiness and
+	// legacy cache rehydration. Request-time pending and revocation authority uses
+	// the transaction-bound project Store, connected to the same database.
 	var durableStore *pgdurable.Store
 	if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
 		dctx, dcancel := context.WithTimeout(context.Background(), 30*time.Second)

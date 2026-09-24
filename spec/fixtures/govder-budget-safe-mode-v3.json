@@ -1,0 +1,47 @@
+{
+  "public_key": "ed25519pub:YqYRtHLYmw5fyTwGm59wC0xVLVW8Doe1YAjvF7ayvr4",
+  "record": {
+    "action": "budget-safe-mode",
+    "agent_id": "agent-7",
+    "agent_ts": "2026-06-19T10:00:00.000Z",
+    "agent_version": "unknown",
+    "authority": {
+      "enforcement_point": "sdk",
+      "evidence_hash": "sha256:27d340194acb13a056f65d93b7d2099cba9dff6e94d494570b2e7b5a2d5a78f4",
+      "evidence_sig": "ed25519:cpVd_LeofU-1bVr6A5whcL-IYiWxnNt-YJJRnsFwjcS2LgSVkAUuprCgEg0TDVwUYNLQPqQbma0Wml1EMGspBA",
+      "proof_version": "v3",
+      "source": "policy_engine_signed",
+      "subject_digest": "sha256:e081c6e78d6e5ea68a61b6ccf9ca04cc0d6be2b9860db2eff0b04c6cd56e8623",
+      "subject_projection": "averin.authority.subject.v1"
+    },
+    "canon_version": "rcp-1",
+    "domain": "flightrecorder.record.v2",
+    "event_type": "decision",
+    "extensions": {
+      "govder": {
+        "body": {
+          "budget_id": "budget-1",
+          "topic": "budget.exhausted"
+        },
+        "event_id": "ev-budget-exhausted-1",
+        "links": {
+          "span_id": "s1",
+          "trace_id": "trace-1"
+        },
+        "occurred_at": "2026-06-19T10:00:00.000Z",
+        "outcome": "blocked",
+        "type": "budget-safe-mode",
+        "v": "1.0.0"
+      }
+    },
+    "idempotency_key": "govder:ev-budget-exhausted-1",
+    "observed_via": "sdk",
+    "parent_span_id": null,
+    "project_id": "acme",
+    "record_id": "govder-v3-39a7ccd0-7947-58e5-a1bb-0ca8f35d9ffe",
+    "schema_version": "2",
+    "session_id": "trace:trace-1",
+    "span_id": "s1",
+    "status": "blocked"
+  }
+}

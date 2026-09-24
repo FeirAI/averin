@@ -1,92 +1,83 @@
 package api
 
 import (
-	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/store"
 )
 
-// blockingDurable is a durable store whose Revoke blocks until released — a slow/degraded Postgres round-trip.
-type blockingDurable struct {
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (b *blockingDurable) Revoke(string, string) error {
-	close(b.entered)
-	<-b.release
-	return nil
-}
-
-func (b *blockingDurable) PutPending(_, _, _ string, payload []byte, created time.Time) ([]byte, time.Time, error) {
-	return payload, created, nil
-}
-
-func (b *blockingDurable) DeletePending(string, string) error { return nil }
-
-// TestSlowRevokeDoesNotStallUseCheck (review finding 3): handleRevoke holds the per-project revoke lock across the
-// durable Postgres write, and isRevoked runs on the /v2/use path under the process-wide ingestMu. If isRevoked took
-// that same lock, ONE slow revoke would stall every ingest on the process. It must read the published snapshot
-// instead: return immediately while the revoke is in flight (not yet revoked — persist-then-publish), and observe
-// the revocation once the revoke has returned.
-func TestSlowRevokeDoesNotStallUseCheck(t *testing.T) {
-	c, err := core.New("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
-	if err != nil {
-		t.Fatal(err)
-	}
+// A repeatable-read export may see the previous committed cutoff while a
+// revocation transaction is in flight. Once it commits, subsequent snapshots
+// and use transactions must see the new revocation.
+func TestInFlightRevokeSnapshotAndCommitVisibility(t *testing.T) {
 	_, rev, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(c, store.NewMem(), "k0").WithRevocation(rev)
-	bd := &blockingDurable{entered: make(chan struct{}), release: make(chan struct{})}
-	s.durable = bd
-
-	done := make(chan int, 1)
+	st := store.NewMem()
+	s := New(testCore(t), st, "k0").WithRevocation(rev)
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	go func() {
-		body, _ := json.Marshal(map[string]any{"project_id": "p1", "grant_id": "g-slow"})
-		w := httptest.NewRecorder()
-		s.handleRevoke(w, httptest.NewRequest("POST", "/v2/revoke?project=p1", bytes.NewReader(body)))
-		done <- w.Code
+		done <- st.WithProjectWrite(ctx, "p1", func(bound store.Store) error {
+			if _, err := bound.RevokeGrant("p1", "g-slow"); err != nil {
+				return err
+			}
+			close(entered)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
 	}()
-	<-bd.entered // the revoke now holds revokeLocks(p1) inside the durable write
-
-	checked := make(chan bool, 1)
-	go func() { checked <- s.isRevoked("p1", "g-slow") }()
 	select {
-	case revoked := <-checked:
-		if revoked {
-			t.Fatal("a revocation must not be visible before it is durably persisted")
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	finished := false
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
 		}
-	case <-time.After(2 * time.Second):
-		close(bd.release)
-		t.Fatal("isRevoked blocked behind an in-flight durable revoke — a slow revoke stalls /v2/use (and ingestMu)")
+		if !finished {
+			<-done
+		}
+	}()
+	if yes, err := st.IsRevoked("p1", "g-slow"); err != nil || yes {
+		t.Fatalf("uncommitted revoke visible: %v, %v", yes, err)
 	}
 	exported := make(chan error, 1)
-	go func() { _, err := s.buildRevocationListForExport("p1", nil); exported <- err }()
+	go func() { _, err := s.buildBundle("p1", false); exported <- err }()
 	select {
 	case err := <-exported:
 		if err != nil {
 			t.Fatal(err)
 		}
 	case <-time.After(2 * time.Second):
-		close(bd.release)
-		t.Fatal("the export blocked behind an in-flight durable revoke")
+		t.Fatal("read snapshot blocked behind writer")
 	}
-
-	close(bd.release)
-	if code := <-done; code != http.StatusCreated {
-		t.Fatalf("revoke = %d, want 201", code)
+	close(release)
+	err = <-done
+	finished = true
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !s.isRevoked("p1", "g-slow") {
-		t.Fatal("a revoke that returned 201 must be observed by the next use check")
+	if yes, err := st.IsRevoked("p1", "g-slow"); err != nil || !yes {
+		t.Fatalf("committed revoke invisible: %v, %v", yes, err)
+	}
+	bundle, err := s.buildBundle("p1", false)
+	if err != nil || !strings.Contains(bundle, `"g-slow"`) {
+		t.Fatalf("later export missing revoke: %v, %s", err, bundle)
 	}
 }

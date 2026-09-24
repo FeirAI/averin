@@ -36,57 +36,44 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// TestBrokerSeqVoidAgeCountsLatestAttempt (review finding 1): seq 1 is reserved at T0 by an ambiguous commit that
-// never lands. At T0+59m the client retries — AllocateBrokerSeq returns the SAME seq (fresh=false, so the store's
-// allocated_at stays T0) and the retry's commit is in flight. At T0+61m the reservation is 61m old by allocated_at
-// alone, which would pass the default 1h safety age; the void must still be refused because the grant's LATEST
-// attempt was only 2m ago. Once the in-flight commit lands, the store read refuses the void for good.
-func TestBrokerSeqVoidAgeCountsLatestAttempt(t *testing.T) {
+// A continuously failing client cannot postpone the durable recovery fence.
+// The project guard drains earlier attempts and its permanent fence bars later
+// attempts, independently of local attempt age or process start time.
+func TestBrokerSeqRecoveryPerpetualFailedRetries(t *testing.T) {
 	ak := grantAgentKey()
 
-	t.Run("a recent retry blocks a void that allocated_at alone would pass", func(t *testing.T) {
+	t.Run("failed retries cannot postpone the permanent fence", func(t *testing.T) {
 		clk := newFakeClock()
-		ls := &lateCommitStore{flakyGrantStore: flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}}
-		h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).Routes() // default 1h
+		ls := &flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}
+		h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
 
-		ls.ambiguousPut = true // T0: ambiguous commit that never lands
-		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusInternalServerError {
-			t.Fatalf("T0 ambiguous commit must 500 (got %d): %s", code, resp)
+		reserveGrantSeq(t, ls.Store, "idem-race") // T0: an orphaned durable reservation
+		for i := 0; i < 3; i++ {
+			ls.failHeads = true
+			if code, resp := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-race", "read:orders", ak, ak, clk.Now())); code != http.StatusInternalServerError {
+				t.Fatalf("failed retry %d (%d): %s", i, code, resp)
+			}
+			clk.Advance(time.Minute)
 		}
-		clk.Advance(59 * time.Minute)
-		ls.holdNext = true // T0+59m: the retry reuses seq 1; its commit is in flight (invisible to the store reads)
-		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusInternalServerError {
-			t.Fatalf("T0+59m retry with an in-flight commit must 500 (got %d): %s", code, resp)
+		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated || !strings.Contains(resp, `"outcome":"voided"`) {
+			t.Fatalf("recovery starved by failed retries (%d): %s", code, resp)
 		}
-		clk.Advance(2 * time.Minute) // T0+61m: allocated_at is 61m old
-		code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
-		if code != http.StatusConflict || !strings.Contains(resp, "last attempted by its grant") {
-			t.Fatalf("a void within the safety age of the grant's latest attempt must 409 (got %d): %s", code, resp)
-		}
-		ls.land(t) // the retry's commit lands: the seq is recorded, so no void can ever take it
-		clk.Advance(2 * time.Hour)
-		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "is recorded") {
-			t.Fatalf("once the commit landed the void must 409 as recorded (got %d): %s", code, resp)
+		if code, resp := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-race", "read:orders", ak, ak, clk.Now())); code != http.StatusConflict || !strings.Contains(resp, "fenced") {
+			t.Fatalf("late retry bypassed fence (%d): %s", code, resp)
 		}
 		if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
-			t.Fatalf("the landed grant fills seq 1, so a checkpoint signs (%d): %s", code, resp)
+			t.Fatalf("the tombstone fills seq 1, so a checkpoint signs (%d): %s", code, resp)
 		}
 	})
 
-	t.Run("control: without a retry the same void passes at T0+61m", func(t *testing.T) {
+	t.Run("fresh reservation needs no wall clock delay", func(t *testing.T) {
 		clk := newFakeClock()
 		fs := &flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}
-		h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).Routes()
+		h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
 
-		fs.ambiguousPut = true
-		do(t, h, "POST", "/v2/grants", grantBody("idem-ctl", "read:orders", ak, ak))
-		clk.Advance(30 * time.Minute)
-		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusConflict || !strings.Contains(resp, "AVERIN_BROKER_SEQ_VOID_MIN_AGE") {
-			t.Fatalf("a 30m-old reservation must be refused (got %d): %s", code, resp)
-		}
-		clk.Advance(31 * time.Minute)
-		if code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
-			t.Fatalf("a 61m-old, never-retried reservation must void (got %d): %s", code, resp)
+		reserveGrantSeq(t, fs.Store, "idem-ctl")
+		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
+			t.Fatalf("fresh reservation must fence and void (got %d): %s", code, resp)
 		}
 	})
 }
@@ -98,13 +85,12 @@ func TestBrokerSeqVoidRevokesVoidedGrant(t *testing.T) {
 	fs := &flakyGrantStore{Store: store.NewMem()}
 	c := mustCore(t)
 	rev := revocationKey()
-	h := api.New(c, fs, "k0").WithBroker(brokerIssuingKey()).WithRevocation(rev).WithBrokerSeqVoidMinAge(0).Routes()
+	h := api.New(c, fs, "k0").WithBroker(brokerIssuingKey()).WithRevocation(rev).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 
-	fs.ambiguousPut = true
-	do(t, h, "POST", "/v2/grants", grantBody("idem-rv1", "read:orders", ak, ak))
+	reserveGrantSeq(t, fs.Store, "idem-rv1")
 	mkGrant(t, h, ak, "idem-rv2")
-	code, resp := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
+	code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1))
 	if code != http.StatusCreated || !strings.Contains(resp, `"revoked":true`) {
 		t.Fatalf("a void under revocation must revoke the voided grant_id (%d): %s", code, resp)
 	}
@@ -120,7 +106,7 @@ func TestBrokerSeqVoidRevokesVoidedGrant(t *testing.T) {
 		t.Fatalf("the voided grant_id must already be in the revoked set (%d): %s", code, r)
 	}
 	// a repeat void (idempotent) re-applies the revocation harmlessly.
-	if code, r := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusOK || !strings.Contains(r, `"revoked":true`) {
+	if code, r := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusOK || !strings.Contains(r, `"revoked":true`) {
 		t.Fatalf("a repeat void must return the tombstone and keep the revocation (%d): %s", code, r)
 	}
 	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {

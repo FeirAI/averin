@@ -11,3 +11,8 @@ name = "Averin"
 [[lean_exe]]
 name = "oracle"
 root = "Oracle.Main"
+
+# The versioned claim kernel's separate executable differential corpus.
+[[lean_exe]]
+name = "verdict_oracle"
+root = "Oracle.Verdict"

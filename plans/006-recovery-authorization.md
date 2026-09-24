@@ -40,6 +40,8 @@ MapStore is fail-closed and constant-time; `NewOpenStore` is an explicit develop
 
 ## Done criteria
 
+Execution reconciliation: implementation changes only Go/server documentation; the existing grant-void evidence hash already authenticates added actor/operation fields, so no Rust tag/schema/formal change is needed. Run the full native rebuild, Go vet/test and mandatory uncached Postgres gate here. Run the unchanged core/WASM/formal suites once on the integrated result alongside 003/007/008 rather than rebuilding them repeatedly for this Go-only step. This sequences the same required final coverage; it does not waive it. Human-readable reasons use Rust RCP NFC before both sealing and retry comparison; new actor/operation machine IDs are restricted to 1–128 visible non-whitespace ASCII bytes.
+
 - Ordinary project writers cannot void, fence or resume recovery operations.
 - Recovery is independently authorized for the exact project and actor identity is authenticated in evidence.
 - Denied operations have no durable side effect; operator credential failure never falls back to writer/open mode.

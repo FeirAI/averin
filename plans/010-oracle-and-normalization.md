@@ -6,6 +6,8 @@
 
 ## Status
 
+- **Accepted**: `03eaf11`, 2026-09-24. Primary reviewed the complete source/tests/docs diff and reran the full core suite (45 unit, 270 adversarial, 15 golden, 10 oracle, 5 signing tests), fresh RFC3161 `make test-server` with real Postgres, uncached `make test-server-postgres`, exact Lean oracle regeneration, refinement inventory, TypeScript tests/typecheck, Python tests, formatting/diff and staticlib freshness checks. All passed. Combined-branch gates remain required after integration.
+
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: MED
@@ -69,12 +71,12 @@ Use `core/tests/oracle.rs` as the structural pattern. Cover all eight builders, 
 
 ## Done criteria
 
-- [ ] Every production-called verifier builder has direct byte and digest assertions.
-- [ ] Oracle corpus includes all eight families and NFC/identity boundary cases.
-- [ ] Go and SDK producer conformance tests pass.
-- [ ] No opaque identifier/token is silently NFC-normalized.
-- [ ] Formal oracle output is reproducible with no diff.
-- [ ] Only scoped files are modified.
+- [x] Every production-called verifier builder has direct byte and digest assertions.
+- [x] Oracle corpus includes all eight families and NFC/identity boundary cases.
+- [x] Go and SDK producer conformance tests pass.
+- [x] No opaque identifier/token is silently NFC-normalized.
+- [x] Formal oracle output is reproducible with no diff.
+- [x] Only scoped files are modified.
 
 ## STOP conditions
 

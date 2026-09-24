@@ -239,6 +239,17 @@ def run (inp : Json) : M String := do
     if n ≥ 18446744073709551616 then throw s!"be64 out of range {n}"
     pure (row [("n", jstr str), ("hex", jstr (hex (be64 n)))])
   let fams ← (← arrOf inp "families").mapM familyMsg
+  let variants ← (← arrOf inp "preimage_variants").mapM familyMsg
+  let merkle ← (← arrOf inp "merkle").mapM fun c => do
+    let kind ← c.getObjValAs? String "kind"
+    let left ← unhex (← c.getObjValAs? String "left")
+    if left.length != 32 then throw s!"merkle {kind}: left must be 32 bytes"
+    let bytes ← if kind == "leaf" then pure (merkleLeaf left) else if kind == "node" then do
+      let right ← unhex (← c.getObjValAs? String "right")
+      if right.length != 32 then throw "merkle node: right must be 32 bytes"
+      pure (merkleNode left right)
+    else throw s!"unknown merkle kind {kind}"
+    pure (kind, bytes)
   let recs ← (← arrOf inp "records").mapM (bodyPre recordHash recordPre)
   let cps ← (← arrOf inp "checkpoints").mapM (bodyPre checkpointHash checkpointPre)
   -- Completeness: every catalogued family has a byte-level sample.
@@ -248,10 +259,14 @@ def run (inp : Json) : M String := do
       (F.name == checkpointHash.name && !cps.isEmpty)
     unless covered do throw s!"no corpus sample for family {F.name}"
   let famRows := fams.map fun (n, b) => row [("family", jstr n), ("hex", jstr (hex b))]
+  let variantRows := variants.map fun (n, b) => row [("family", jstr n), ("hex", jstr (hex b))]
+  let merkleRows := merkle.map fun (n, b) => row [("kind", jstr n), ("hex", jstr (hex b))]
   let bodyRows (xs : List (String × Bytes)) := xs.map fun (n, b) => row [("name", jstr n), ("hex", jstr (hex b))]
   pure <| "{\n" ++ ",\n".intercalate [
     section_ "canon" canon, section_ "esc" esc, section_ "ints" ints, section_ "lp" lps,
     section_ "be32" be32s, section_ "be64" be64s, section_ "families" famRows,
+    section_ "preimage_variants" variantRows,
+    section_ "merkle" merkleRows,
     section_ "records" (bodyRows recs), section_ "checkpoints" (bodyRows cps)] ++ "\n}\n"
 
 end Averin.Oracle

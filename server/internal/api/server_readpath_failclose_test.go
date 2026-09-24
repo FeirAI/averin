@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -17,6 +18,18 @@ import (
 type failReadStore struct {
 	store.Store
 	failAll, failCheckpoints, failSessions, failSessionRecords bool
+}
+
+func (f *failReadStore) bound(st store.Store) *failReadStore {
+	return &failReadStore{Store: st, failAll: f.failAll, failCheckpoints: f.failCheckpoints, failSessions: f.failSessions, failSessionRecords: f.failSessionRecords}
+}
+
+func (f *failReadStore) WithProjectRead(ctx context.Context, projectID string, fn func(store.Store) error) error {
+	return f.Store.WithProjectRead(ctx, projectID, func(st store.Store) error { return fn(f.bound(st)) })
+}
+
+func (f *failReadStore) WithProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
+	return f.Store.WithProjectWrite(ctx, projectID, func(st store.Store) error { return fn(f.bound(st)) })
 }
 
 func (f *failReadStore) AllRecords(p string) ([]store.Record, error) {

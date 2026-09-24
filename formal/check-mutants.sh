@@ -7,16 +7,21 @@
 #   inventory  python3 formal/check-refinement.py            (tag literals <-> Preimage.lean families)
 #   oracle     cargo test --test oracle                        (Rust bytes == executable Lean model)
 #   golden     cargo test --test golden                        (committed golden vectors)
+#   verdict    cargo test --lib verdict_differential          (Lean model vs pure verdict kernel)
+#   adversarial cargo test --test adversarial                   (bundle evidence-to-fact regressions)
 #   kani       the named bounded proof for every property-bearing mutant (see kani_harness below);
 #              the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
 #
-# The suite passes only if every mutant is killed by at least one gate; it prints which gates killed each.
-# It first checks that every gate passes on the unmutated tree, so a gate that is simply broken cannot
-# count as a kill.
+# The suite passes only if every mutant is killed by a completed test failure; m15–m21 additionally
+# require their named detector to fail, and every mutant with a named Kani harness (m2–m4, m9–m14, m22+)
+# must also be refuted by that harness's own completed failed verification. It first checks that every gate runs at least one passing test
+# on the unmutated tree, so an empty or broken gate cannot count as a kill.
 #
 #   bash formal/check-mutants.sh            # all gates for every mutant
 #   bash formal/check-mutants.sh --first    # stop at the first killing gate per mutant (faster)
 #   SKIP_KANI=1 bash formal/check-mutants.sh  # diagnostic only; Kani-only mutants may survive
+#   MUTANTS_ONLY=m16-verdict-omits-pop-capstone,m17-verdict-missing-revocation-is-absent \
+#     bash formal/check-mutants.sh --first  # scoped local run; unmutated baseline still required
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -66,6 +71,40 @@ kani_expectation() {
   esac
 }
 
+named_detector() {
+  case "$1" in
+    m15-*) echo 'golden|authority_subject_v3_matches_govder_vector' ;;
+    m16-*|m17-*|m20-*) echo 'verdict|verdict_differential' ;;
+    m18-*) echo 'adversarial|tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation' ;;
+    m19-*) echo 'adversarial|tier_b_two_phase_failed_pop_intent_does_not_consume_outcome' ;;
+    m21-*) echo 'adversarial|required_disclosure_covers_every_committed_broker_grant' ;;
+  esac
+}
+
+if [ "${MUTANTS_ONLY+x}" = x ]; then
+  case "$MUTANTS_ONLY" in
+    ''|,*|*,|*,,*) echo "check-mutants: MUTANTS_ONLY has an empty entry" >&2; exit 2 ;;
+  esac
+  IFS=',' read -r -a selected_mutants <<<"$MUTANTS_ONLY"
+  for selected in "${selected_mutants[@]}"; do
+    valid=0
+    for patch in formal/mutants/*.patch; do
+      [ "$(basename "$patch" .patch)" = "$selected" ] && valid=1
+    done
+    if [ "$valid" != 1 ]; then
+      echo "check-mutants: unknown MUTANTS_ONLY entry: $selected" >&2
+      exit 2
+    fi
+    for previous in "${seen_mutants[@]:-}"; do
+      if [ "$previous" = "$selected" ]; then
+        echo "check-mutants: duplicate MUTANTS_ONLY entry: $selected" >&2
+        exit 2
+      fi
+    done
+    seen_mutants+=("$selected")
+  done
+fi
+
 fresh_tree() {
   rm -rf "$tree"
   mkdir -p "$tree/formal"
@@ -87,6 +126,8 @@ run_gate() {
       inventory) python3 formal/check-refinement.py ;;
       oracle) cargo test -q -p averin-decision-core --test oracle ;;
       golden) cargo test -q -p averin-decision-core --test golden ;;
+      verdict) cargo test -q -p averin-decision-core --lib verdict_differential ;;
+      adversarial) cargo test -q -p averin-decision-core --test adversarial ;;
       kani)
         if [[ "$label" == m23-* ]]; then
           # This mutant deliberately changes the production route pinned by check-kani-domains.py.
@@ -118,7 +159,7 @@ fi
 
 echo "== baseline (unmutated): every gate must pass"
 fresh_tree
-for g in inventory oracle golden; do
+for g in inventory oracle golden verdict adversarial; do
   gate_exit=0
   run_gate baseline "$g" || gate_exit=$?
   if ! python3 formal/check-kani-mutant.py --gate "$g" --expect-success "$logs/baseline-$g.log" "$gate_exit"; then
@@ -137,15 +178,32 @@ fi
 echo "   ok"
 
 survivors=0
+executed=0
 for patch in formal/mutants/*.patch; do
   name="$(basename "$patch" .patch)"
+  if [ "${MUTANTS_ONLY+x}" = x ]; then
+    selected=0
+    for candidate in "${selected_mutants[@]}"; do
+      [ "$candidate" = "$name" ] && selected=1
+    done
+    [ "$selected" = 1 ] || continue
+  fi
+  executed=$((executed + 1))
   fresh_tree
   if ! patch -s -p1 -d "$tree" <"$patch" >"$logs/$name-apply.log" 2>&1; then
     echo "check-mutants: FAIL: $name no longer applies (update the patch to the current source)" >&2
     cat "$logs/$name-apply.log" >&2
     exit 1
   fi
-  gates=(inventory oracle golden)
+  detector="$(named_detector "$name")"
+  gates=(inventory oracle golden verdict adversarial)
+  if [ -n "$detector" ]; then
+    IFS='|' read -r detector_gate detector_test <<<"$detector"
+    gates=("$detector_gate")
+    for g in inventory oracle golden verdict adversarial; do
+      [ "$g" = "$detector_gate" ] || gates+=("$g")
+    done
+  fi
   h="$(kani_harness "$name")"
   killed=()
   # A mutant with a named harness must be killed by that harness itself (a real counterexample, not an
@@ -166,9 +224,16 @@ for patch in formal/mutants/*.patch; do
   for g in "${gates[@]}"; do
     gate_exit=0
     run_gate "$name" "$g" || gate_exit=$?
-    if python3 formal/check-kani-mutant.py --gate "$g" "$logs/$name-$g.log" "$gate_exit"; then
+    checker_args=(--gate "$g")
+    if [ -n "$detector" ] && [ "$g" = "$detector_gate" ]; then
+      checker_args+=(--required-test "$detector_test")
+    fi
+    if python3 formal/check-kani-mutant.py "${checker_args[@]}" "$logs/$name-$g.log" "$gate_exit"; then
       killed+=("$g")
       [ "$first" = 1 ] && break
+    elif [ -n "$detector" ] && [ "$g" = "$detector_gate" ]; then
+      echo "check-mutants: FAIL: named detector $detector_test did not refute $name (see $logs/$name-$g.log)" >&2
+      exit 1
     elif [ "$gate_exit" -ne 0 ]; then
       echo "check-mutants: FAIL: gate '$g' did not finish with a recognized mutant counterexample (see $logs/$name-$g.log)" >&2
       exit 1
@@ -182,8 +247,21 @@ for patch in formal/mutants/*.patch; do
   fi
 done
 
+requested=$executed
+if [ "${MUTANTS_ONLY+x}" = x ]; then
+  requested=${#selected_mutants[@]}
+fi
+if [ "$executed" -eq 0 ] || [ "$executed" -ne "$requested" ]; then
+  echo "check-mutants: FAIL: selected $executed mutants but requested $requested" >&2
+  exit 2
+fi
+
 if [ "$survivors" -ne 0 ]; then
   echo "check-mutants: FAIL: $survivors mutant(s) survived, or escaped their named Kani harness (logs in $logs)" >&2
   exit 1
 fi
-echo "check-mutants: OK (every mutant killed)"
+if [ "${MUTANTS_ONLY+x}" = x ]; then
+  echo "check-mutants: OK ($executed selected mutants killed: ${selected_mutants[*]})"
+else
+  echo "check-mutants: OK (all $executed mutants killed)"
+fi

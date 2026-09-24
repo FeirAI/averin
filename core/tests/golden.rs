@@ -2,6 +2,7 @@
 //! are the cross-implementation contract; this asserts the Rust core reproduces them
 //! byte-for-byte, and that RCP rejection rules hold.
 
+use averin_decision_core::authority::{preimage_v3, subject_digest};
 use averin_decision_core::canon::CanonValue;
 use averin_decision_core::hashx::hex_lower;
 use averin_decision_core::record::compute_content_hash;
@@ -71,6 +72,41 @@ fn record_content_hash_golden() {
     let rec = CanonValue::parse(&input).expect("record parses");
     assert_eq!(hex_lower(rec.serialize().as_bytes()), expected_canon_hex);
     assert_eq!(compute_content_hash(&rec).unwrap(), expected_ch);
+}
+
+#[test]
+fn authority_subject_v3_matches_govder_vector() {
+    let vector = read_manifest("authority-subject-v3.json");
+    let record = vector.get("record").unwrap();
+    let digest = vector.get("subject_digest").unwrap().as_str().unwrap();
+    assert_eq!(subject_digest(record).unwrap(), digest);
+    let actual = preimage_v3(
+        "human_signed",
+        "p1",
+        "r1",
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        digest,
+    )
+    .unwrap();
+    assert_eq!(
+        hex_lower(&actual),
+        vector.get("preimage_hex").unwrap().as_str().unwrap()
+    );
+}
+
+#[test]
+fn sdk_prepared_v3_record_matches_govder_subject_bytes() {
+    let vector = read_manifest("authority-sdk-v3.json");
+    let record = vector.get("prepared_record").unwrap();
+    assert_eq!(
+        subject_digest(record).unwrap(),
+        vector.get("subject_digest").unwrap().as_str().unwrap()
+    );
+    let draft = vector.get("draft_record").unwrap();
+    assert!(
+        subject_digest(draft).is_err(),
+        "draft is not signable before preparation"
+    );
 }
 
 // ---- RCP rejection rules (negative vectors) ----
@@ -194,4 +230,19 @@ fn nfc_equivalent_inputs_have_equal_content_hash() {
         compute_content_hash(&a).unwrap(),
         compute_content_hash(&b).unwrap()
     );
+}
+
+#[test]
+fn unicode17_combining_mark_has_pinned_nfc_result() {
+    // U+1ADD acquired combining class 220 after Unicode 15. Go 1.25's x/text
+    // tables treat it as class 0, so Go-only NFC checks would accept this
+    // spelling even though the shipped Rust RCP core composes a + acute.
+    let raw = "a\u{1add}\u{301}";
+    let canonical = "\u{e1}\u{1add}";
+    assert_ne!(raw, canonical);
+    assert_eq!(
+        CanonValue::parse(r#""a\u1add\u0301""#).unwrap().as_str(),
+        Some(canonical)
+    );
+    assert_eq!(CanonValue::string(raw).as_str(), Some(canonical));
 }

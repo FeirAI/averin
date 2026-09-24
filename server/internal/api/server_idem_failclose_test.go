@@ -26,6 +26,12 @@ func (f *failIdemStore) RecordByIdem(projectID, idemKey string) (store.Record, b
 	return f.Store.RecordByIdem(projectID, idemKey)
 }
 
+func (f *failIdemStore) WithProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
+	return f.Store.WithProjectWrite(ctx, projectID, func(st store.Store) error {
+		return fn(&failIdemStore{Store: st, fail: f.fail})
+	})
+}
+
 // TestUseFailsClosedOnIdemStoreError (adversarial review C1): a RecordByIdem store error during /v2/use must abort with
 // 500 BEFORE ValidateUse consumes the single-use credential — so a transient read failure never burns a
 // nonce/jti and leave no receipt. After the store recovers, the SAME credential still validates (proof it
@@ -70,6 +76,12 @@ func (f *failHeadsStore) Heads(projectID, sessionID string) ([]string, error) {
 		return nil, errors.New("injected Heads failure")
 	}
 	return f.Store.Heads(projectID, sessionID)
+}
+
+func (f *failHeadsStore) WithProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
+	return f.Store.WithProjectWrite(ctx, projectID, func(st store.Store) error {
+		return fn(&failHeadsStore{Store: st, fail: f.fail})
+	})
 }
 
 // TestSealFailsClosedOnHeadsStoreError (averin#4): a Heads() store error inside sealAndStore must abort the
@@ -130,6 +142,12 @@ func (f *failPutStore) PutRecord(projectID, idemKey string, rec store.Record) (s
 		return store.Record{}, false, errors.New("injected pre-commit store failure")
 	}
 	return f.Store.PutRecord(projectID, idemKey, rec)
+}
+
+func (f *failPutStore) WithProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
+	return f.Store.WithProjectWrite(ctx, projectID, func(st store.Store) error {
+		return fn(&failPutStore{Store: st, fail: f.fail})
+	})
 }
 
 // TestUseReleasesCredentialOnPreCommitPutFailure (adversarial review pass-10 high): a PutRecord error that is NOT

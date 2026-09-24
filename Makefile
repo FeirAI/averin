@@ -31,7 +31,7 @@ test-server: core
 test-server-postgres: core check-staticlib
 	@test -n "$(AVERIN_TEST_DATABASE_URL)" || (echo 'AVERIN_TEST_DATABASE_URL is required' >&2; exit 1)
 	python3 -m unittest discover -s scripts -p test_check_go_test_events.py
-	cd server && bash -o pipefail -c 'go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... | python3 ../scripts/check-go-test-events.py'
+	cd server && bash -o pipefail -c 'go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... ./internal/pgschema/... ./internal/resourceshim/... | python3 ../scripts/check-go-test-events.py'
 
 check-claims:
 	python3 -m unittest discover -s scripts -p test_check_claims.py
@@ -61,8 +61,11 @@ formal-lean:
 formal-refinement:
 	python3 formal/check-refinement.py
 	cd formal/lean && lake build --wfail oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json
+	cd formal/lean && lake build --wfail verdict_oracle && lake exe verdict_oracle ../oracle/verdict-expected.json
 	git diff --exit-code -- formal/oracle/expected.json
+	git diff --exit-code -- formal/oracle/verdict-expected.json
 	cargo test -p averin-decision-core --test oracle
+	cargo test -p averin-decision-core --lib verdict_differential
 
 formal-mutants:
 	bash formal/check-mutants.sh
