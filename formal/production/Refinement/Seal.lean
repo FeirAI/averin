@@ -17,9 +17,13 @@ preimage, and the production formatter's injectivity (`fmtP_inj`).
 string is *exactly* `Seal.recordHashOf prodH fmtM m`, with `fmtM` injective (`fmtM_inj`, the `hfmt`
 hypothesis) and `fmtM ∘ prodH` always 71 bytes (`prodH_len`, the `hlen` hypothesis). So the model's
 `recordHashOf_binding`, `record_ne_checkpoint_hash` and `record_seal_sound` apply verbatim to
-production hashes (`production_record_seal_sound`). Note that the model's `Collision H` is an
-existential; for a compressing `H` it is provable outright, so the explicit form above is the
-load-bearing binding statement.
+production hashes (`production_record_seal_sound`). Every such conclusion is in explicit-witness
+form: its second arm is a collision of `prodH` (production SHA-256, `prodH_prod`) on the two specific
+preimages `Seal.recordPre ma`/`Seal.recordPre mb`, which are exactly the bytes production hashed
+(`record_preimage_is_model`). That is the standard reduction to SHA-256 collision resistance.
+
+**Partial correctness.** Every theorem here is about a run where the extracted function returned
+`ok (.Ok _)`. A panic, an arithmetic overflow or a `RecordError` produces no hash and so no claim.
 -/
 
 open Aeneas Aeneas.Std Result Aeneas.Std.WP averin_decision_core
@@ -222,7 +226,7 @@ theorem production_record_binding_model {a b : canon.CanonValue} {s : String}
     (ha : record.record_hash a = ok (.Ok s)) (hb : record.record_hash b = ok (.Ok s))
     (hda : BodyDenotes recordStrip a da cva ma) (hdb : BodyDenotes recordStrip b db cvb mb)
     (hpa : RecordPinned da cva) (hpb : RecordPinned db cvb) :
-    ma = mb ∨ Seal.Collision prodH :=
+    ma = mb ∨ Seal.CollidesOn prodH (Seal.recordPre ma) (Seal.recordPre mb) :=
   Seal.recordHashOf_binding prodH fmtM fmtM_inj
     ((record_hash_is_model ha hda hpa).symm.trans (record_hash_is_model hb hdb hpb))
 
@@ -230,7 +234,7 @@ theorem production_record_binding_model {a b : canon.CanonValue} {s : String}
 honest-signer interface of the model (`Seal.HonestSigner`, instantiated with the production hash),
 and a record body's production content hash `s`, framed by the production `sign::preimage` under
 `RECORD_SIG_TAG`, is a signed message, then the body's denotation is one the key holder sealed, or
-SHA-256 (the model's `Collision`) collides. -/
+SHA-256 collides on this body's preimage and the preimage of a sealed body. -/
 theorem production_record_seal_sound (Signed : Bytes → Prop) (records checkpoints : List CV)
     (honest : Seal.HonestSigner prodH fmtM Signed records checkpoints)
     {body : canon.CanonValue} {s : String} {d cv : String} {m : CV}
@@ -238,7 +242,7 @@ theorem production_record_seal_sound (Signed : Bytes → Prop) (records checkpoi
     (hpin : RecordPinned d cv) {ch : Str} (hch : vals (strSlice ch).val = utf8 s.toList)
     {msg : alloc.vec.Vec Std.U8}
     (hmsg : sign.preimage sign.RECORD_SIG_TAG ch = ok (some msg)) (verified : Signed (vals msg.val)) :
-    m ∈ records ∨ Seal.Collision prodH := by
+    m ∈ records ∨ ∃ B ∈ records, Seal.CollidesOn prodH (Seal.recordPre m) (Seal.recordPre B) := by
   have hm := ((sign_preimage_model hmsg).1 msg rfl).2
   rw [record_tag_vals, hch, record_hash_is_model h hden hpin, ← sign_msg_eq recordSig rfl rfl] at hm
   rw [hm] at verified
@@ -254,7 +258,8 @@ theorem production_checkpoint_seal_sound (Signed : Bytes → Prop) (records chec
     (hch : vals (strSlice ch).val = utf8 s.toList) {msg : alloc.vec.Vec Std.U8}
     (hmsg : sign.preimage sign.CHECKPOINT_SIG_TAG ch = ok (some msg))
     (verified : Signed (vals msg.val)) :
-    m ∈ checkpoints ∨ Seal.Collision prodH := by
+    m ∈ checkpoints ∨
+      ∃ C ∈ checkpoints, Seal.CollidesOn prodH (Seal.checkpointPre m) (Seal.checkpointPre C) := by
   have hm := ((sign_preimage_model hmsg).1 msg rfl).2
   rw [checkpoint_tag_vals, hch, checkpoint_hash_is_model h hden hpin,
     ← sign_msg_eq checkpointSig rfl rfl] at hm
@@ -262,13 +267,15 @@ theorem production_checkpoint_seal_sound (Signed : Bytes → Prop) (records chec
   exact Seal.checkpoint_seal_sound prodH fmtM fmtM_inj prodH_len Signed records checkpoints honest m
     verified
 
-/-- A production record hash never equals a production checkpoint hash of a pinned body except
-through the model's `Collision` (record/checkpoint type confusion, `Seal.record_ne_checkpoint_hash`). -/
+/-- A production record hash equals a production checkpoint hash of a pinned body only through a
+SHA-256 collision on those two preimages (no record/checkpoint type confusion,
+`Seal.record_ne_checkpoint_hash`). -/
 theorem production_record_ne_checkpoint {a b : canon.CanonValue} {s : String} {da cva db cvb : String}
     {ma mb : CV} (ha : record.record_hash a = ok (.Ok s))
     (hb : checkpoint.checkpoint_hash b = ok (.Ok s))
     (hda : BodyDenotes recordStrip a da cva ma) (hdb : BodyDenotes checkpointStrip b db cvb mb)
-    (hpa : RecordPinned da cva) (hpb : CheckpointPinned db cvb) : Seal.Collision prodH :=
+    (hpa : RecordPinned da cva) (hpb : CheckpointPinned db cvb) :
+    Seal.CollidesOn prodH (Seal.recordPre ma) (Seal.checkpointPre mb) :=
   Seal.record_ne_checkpoint_hash prodH fmtM fmtM_inj ma mb
     ((record_hash_is_model ha hda hpa).symm.trans (checkpoint_hash_is_model hb hdb hpb))
 
