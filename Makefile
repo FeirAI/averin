@@ -61,8 +61,11 @@ formal-lean:
 formal-refinement:
 	python3 formal/check-refinement.py
 	cd formal/lean && lake build --wfail oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json
+	cd formal/lean && lake build --wfail verdict_oracle && lake exe verdict_oracle ../oracle/verdict-expected.json
 	git diff --exit-code -- formal/oracle/expected.json
+	git diff --exit-code -- formal/oracle/verdict-expected.json
 	cargo test -p averin-decision-core --test oracle
+	cargo test -p averin-decision-core --lib verdict_differential
 
 formal-mutants:
 	bash formal/check-mutants.sh

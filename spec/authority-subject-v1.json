@@ -1,0 +1,30 @@
+{
+  "projection": "averin.authority.subject.v1",
+  "record_profile": {
+    "schema_version": "2",
+    "canon_version": "rcp-1",
+    "domain": "flightrecorder.record.v2"
+  },
+  "digest": {
+    "algorithm": "sha256",
+    "preimage": ["LP(averin.authority.subject.digest.v1)", "LP(averin.authority.subject.v1)", "RCP(subject)"]
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "preimage": ["LP(averin.authority.v3)", "LP(averin.authority.subject.v1)", "LP(authority.source)", "LP(project_id)", "LP(record_id)", "LP(authority.evidence_hash)", "LP(authority.subject_digest)"]
+  },
+  "required_semantic_fields": [
+    "schema_version", "canon_version", "domain", "record_id", "project_id",
+    "agent_id", "agent_version", "session_id", "span_id", "parent_span_id",
+    "agent_ts", "event_type", "action", "observed_via", "status", "authority"
+  ],
+  "excluded_top_level": [
+    "received_ts", "display_seq", "causal_prev_hashes", "key", "content_hash", "sig"
+  ],
+  "excluded_authority": ["evidence_sig", "subject_digest"],
+  "unknown_top_level": "reject_by_record_schema",
+  "unknown_authority": "reject_by_record_schema",
+  "extensions": "include_all_nested_fields",
+  "all_other_admitted_fields": "include",
+  "raw_input_output_rationale_for_elevated_ingest": "reject_until_prepared_commitment_workflow"
+}

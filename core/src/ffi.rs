@@ -428,6 +428,63 @@ pub unsafe extern "C" fn averin_sign_evidence(
     ))
 }
 
+/// Sign v3 authority over the supplied structured, finalized semantic record.
+/// Returns JSON with subject_digest and evidence_sig; never signs a caller's
+/// opaque subject hash. The record must contain v3 proof metadata but may omit
+/// the two recursive fields that this call creates.
+///
+/// # Safety
+/// `record_json` and `seed_hex` must be valid null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn averin_sign_authority_record_v3(
+    record_json: *const c_char,
+    seed_hex: *const c_char,
+) -> *mut c_char {
+    let (Some(record_json), Some(seed_hex)) = (cstr(record_json), cstr(seed_hex)) else {
+        return into_cstring(json_error("record and seed must be non-null UTF-8"));
+    };
+    let Some(seed) = crate::hashx::hex32(seed_hex) else {
+        return into_cstring(json_error("seed must be 64 lowercase hex chars"));
+    };
+    let record = match crate::canon::CanonValue::parse(record_json) {
+        Ok(record) => record,
+        Err(err) => return into_cstring(json_error(&format!("record parse error: {err}"))),
+    };
+    let key = crate::sign::signing_key_from_seed(&seed);
+    match crate::authority::sign_evidence_v3(&record, &key) {
+        Ok((digest, signature)) => into_cstring(format!(
+            "{{\"subject_digest\":\"{digest}\",\"evidence_sig\":\"{signature}\"}}"
+        )),
+        Err(err) => into_cstring(json_error(err)),
+    }
+}
+
+/// Verify a record's authority proof under one pinned key using the Rust
+/// projection, including v3 digest rederivation. Returns "verified",
+/// "legacy_unbound", or a non-elevated status.
+///
+/// # Safety
+/// `record_json` and `public_key` must be valid null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn averin_verify_authority_record(
+    record_json: *const c_char,
+    public_key: *const c_char,
+) -> *mut c_char {
+    let (Some(record_json), Some(public_key)) = (cstr(record_json), cstr(public_key)) else {
+        return into_cstring(json_error("record and public key must be non-null UTF-8"));
+    };
+    let record = match crate::canon::CanonValue::parse(record_json) {
+        Ok(record) => record,
+        Err(err) => return into_cstring(json_error(&format!("record parse error: {err}"))),
+    };
+    let key = match crate::sign::decode_pubkey(public_key) {
+        Ok(key) => key,
+        Err(err) => return into_cstring(json_error(&format!("public key: {err}"))),
+    };
+    let status = crate::authority::verify_authority(&record, &[key]);
+    into_cstring(status.as_str().to_string())
+}
+
 /// Borrow a C string as `&str` (None if null or non-UTF-8).
 ///
 /// # Safety
@@ -812,7 +869,7 @@ mod tests {
         };
         assert_eq!(
             verify_authority(&mk("proj-1", "rec-1", "gateway_enforced", &eh), &[vk]),
-            AuthorityTrust::Verified
+            AuthorityTrust::LegacyUnbound
         );
         // Binding holds: a different project_id (cross-tenant replay), record_id, source, or evidence_hash fails.
         assert_eq!(

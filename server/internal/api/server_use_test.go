@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feirai/averin/server/internal/api"
 	"github.com/feirai/averin/server/internal/core"
@@ -66,8 +67,12 @@ func useBody(t *testing.T, idem, capability, grantID string, ak ed25519.PrivateK
 
 // mkGrant creates a grant and returns (grantID, capability).
 func mkGrant(t *testing.T, h http.Handler, ak ed25519.PrivateKey, idem string) (string, string) {
+	return mkGrantAt(t, h, ak, idem, time.Now())
+}
+
+func mkGrantAt(t *testing.T, h http.Handler, ak ed25519.PrivateKey, idem string, now time.Time) (string, string) {
 	t.Helper()
-	code, resp := do(t, h, "POST", "/v2/grants", grantBody(idem, "read:orders", ak, ak))
+	code, resp := do(t, h, "POST", "/v2/grants", grantBodyAt(idem, "read:orders", ak, ak, now))
 	if code != http.StatusCreated {
 		t.Fatalf("grant failed (%d): %s", code, resp)
 	}

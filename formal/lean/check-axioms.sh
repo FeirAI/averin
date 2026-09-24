@@ -10,5 +10,6 @@ if grep -rnE '^\s*(axiom|opaque)\b|\bpartial\s+def\b|@\[(implemented_by|extern)|
   echo "check-axioms: FAIL (forbidden token above)" >&2
   exit 1
 fi
-lake build Averin oracle >/dev/null
+lake build Averin oracle verdict_oracle >/dev/null
 lake env lean scripts/AxiomAudit.lean
+lake env lean scripts/VerdictAxiomAudit.lean

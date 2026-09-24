@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feirai/averin/server/internal/api"
 	"github.com/feirai/averin/server/internal/broker"
@@ -154,6 +155,15 @@ func TestGrantDelegationChainRejectsNonNFCBeforeSeal(t *testing.T) {
 	}
 	assertRecordCount(t, st, "p1", 0)
 	gr["delegation_chain"] = []string{"é"}
+	// v2 PoP binds the delegation chain, so the canonical control must sign its changed subject.
+	req := broker.Request{
+		PoPVersion: 2, ProjectID: "p1", IdempotencyKey: "delegation-1", SessionID: "s1",
+		IssuedAt: int64(gr["issued_at"].(float64)), RequestExpiresAt: int64(gr["request_expires_at"].(float64)),
+		AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db",
+		Scope: "read:orders", AgentPubKey: gr["agent_pubkey"].(string), TTL: time.Minute,
+		DelegationChain: []string{"é"},
+	}
+	gr["agent_sig"] = base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
 	body, _ = json.Marshal(gr)
 	if code, resp := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusCreated {
 		t.Fatalf("canonical delegation identity rejected (%d): %s", code, resp)

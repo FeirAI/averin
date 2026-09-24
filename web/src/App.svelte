@@ -8,6 +8,7 @@
     setToken,
   } from "./lib/api";
   import { buildWaterfall, recLabel, type Rec } from "./lib/trace";
+  import { claimVerdict } from "./lib/claimVerdict";
 
   let project = $state("proj-001");
   // API token for AVERIN_API_KEYS-authenticated servers. Empty = authless dev server (averin#19).
@@ -16,6 +17,7 @@
   let selected = $state<string | null>(null);
   let rows = $state<ReturnType<typeof buildWaterfall>>([]);
   let report = $state<any>(null);
+  let verdict = $derived(claimVerdict(report));
   let error = $state<string>("");
 
   function applyToken() {
@@ -91,15 +93,23 @@
   {#if error}<p class="err">{error}</p>{/if}
 
   {#if report}
-    <section class="panel verdict {report.ok ? 'pass' : 'fail'}">
-      <strong>{report.ok ? "PASS" : "FAIL"}</strong>
+    <section class="panel verdict {verdict.className}">
+      <strong>{verdict.word}</strong>
       {report.records_proven}/{report.records_total} records proven ·
       DAG {report.dag_ok ? "ok" : "INVALID"} ·
       checkpoints {report.checkpoints_verified}/{report.checkpoints_total}
       ({report.checkpoints_anchors_attached ?? report.checkpoints_anchored} anchors attached,
       {report.checkpoints_anchored} verified-anchored) ·
       chain {report.chain_ok ? "ok" : "BROKEN"}
+      {#if report.record_trust?.some((r: any) => r.authority === "legacy_unbound")}
+        <div class="lvl">Historical authority signatures verify, but do not bind their record bodies.</div>
+      {/if}
       {#if report.first_broken_link}<div class="broken">{report.first_broken_link}</div>{/if}
+      {#if verdict.valid}
+        <div class="lvl">Required {report.claims.requested} claim: {report.claims.requested_decision}. Only satisfied accepts the claim.</div>
+      {:else}
+        <div class="lvl">The claims contract is missing or unsupported. Required-claim acceptance is unavailable.</div>
+      {/if}
       {#if !report.keys_externally_pinned}
         <div class="lvl">Keys are bundle-supplied (not externally pinned): this proves internal
           consistency under the bundle's own key claims, not authenticity against an out-of-band
@@ -151,7 +161,7 @@
   .err { color: #f87171; font-family: ui-monospace, monospace; }
   .panel { background: #171a21; border: 1px solid #262b35; border-radius: 12px; padding: 14px; margin: 18px 0; }
   .verdict strong { font-size: 18px; margin-right: 8px; }
-  .pass strong { color: #34d399; } .fail strong { color: #f87171; }
+  .pass strong { color: #34d399; } .qual strong { color: #fbbf24; } .fail strong { color: #f87171; }
   .broken { color: #f87171; font-family: ui-monospace, monospace; font-size: 13px; margin-top: 6px; }
   .lvl { color: #9aa4b2; font-size: 12px; margin-top: 6px; }
   .cols { display: grid; grid-template-columns: 220px 1fr; gap: 18px; margin-top: 12px; }

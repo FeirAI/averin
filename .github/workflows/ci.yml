@@ -255,14 +255,18 @@ jobs:
         run: python3 formal/check-refinement.py
       - name: build the executable Lean oracle
         working-directory: formal/lean
-        run: lake build --wfail oracle
+        run: lake build --wfail oracle verdict_oracle
       - name: regenerate expected.json from the model; the committed file must be its exact output
         working-directory: formal/lean
         run: |
           lake exe oracle ../oracle/inputs.json ../oracle/expected.json
           git diff --exit-code -- ../oracle/expected.json
+          lake exe verdict_oracle ../oracle/verdict-expected.json
+          git diff --exit-code -- ../oracle/verdict-expected.json
       - name: Rust produces the model's bytes (canon, escapes, framing, every preimage family)
         run: cargo test -p averin-decision-core --test oracle
+      - name: Rust verdict kernel matches the Lean evidence oracle
+        run: cargo test -p averin-decision-core --lib verdict_differential
 
   formal-mutants:
     name: formal — mutation suite (every known drift must be caught by a gate)

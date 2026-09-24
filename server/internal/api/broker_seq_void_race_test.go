@@ -36,21 +36,21 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// A continuously failing client cannot reset the durable recovery deadline.
+// A continuously failing client cannot postpone the durable recovery fence.
 // The project guard drains earlier attempts and its permanent fence bars later
 // attempts, independently of local attempt age or process start time.
-func TestBrokerSeqVoidAgeCountsLatestAttempt(t *testing.T) {
+func TestBrokerSeqRecoveryPerpetualFailedRetries(t *testing.T) {
 	ak := grantAgentKey()
 
-	t.Run("a recent retry blocks a void that allocated_at alone would pass", func(t *testing.T) {
+	t.Run("failed retries cannot postpone the permanent fence", func(t *testing.T) {
 		clk := newFakeClock()
 		ls := &flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}
-		h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes() // default 1h
+		h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
 
 		reserveGrantSeq(t, ls.Store, "idem-race") // T0: an orphaned durable reservation
 		for i := 0; i < 3; i++ {
 			ls.failHeads = true
-			if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusInternalServerError {
+			if code, resp := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-race", "read:orders", ak, ak, clk.Now())); code != http.StatusInternalServerError {
 				t.Fatalf("failed retry %d (%d): %s", i, code, resp)
 			}
 			clk.Advance(time.Minute)
@@ -58,7 +58,7 @@ func TestBrokerSeqVoidAgeCountsLatestAttempt(t *testing.T) {
 		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated || !strings.Contains(resp, `"outcome":"voided"`) {
 			t.Fatalf("recovery starved by failed retries (%d): %s", code, resp)
 		}
-		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusConflict || !strings.Contains(resp, "fenced") {
+		if code, resp := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-race", "read:orders", ak, ak, clk.Now())); code != http.StatusConflict || !strings.Contains(resp, "fenced") {
 			t.Fatalf("late retry bypassed fence (%d): %s", code, resp)
 		}
 		if code, resp := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {

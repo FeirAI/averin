@@ -1,0 +1,14 @@
+Mutant: m21-disclosure-only-counts-present-openings. Named detector: required_disclosure_covers_every_committed_broker_grant.
+
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -6672,7 +6672,7 @@
+             && report.revoked_uses_blocked == 0
+             && report.revocation_nonmembership_verified
+                 == report.uses_total + native_grants_by_id.len(),
+-        disclosure_complete: !required_descriptor_record_ids.is_empty()
+-            && required_descriptor_record_ids.is_subset(&matched_descriptor_record_ids),
++        disclosure_complete: report.cred_label_checks > 0
++            && report.cred_label_checks == report.cred_label_matched,
+         policy: opts.claim_policy,
+     };

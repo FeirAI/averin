@@ -140,10 +140,10 @@ otherwise).
 
 A checkpoint is **refused** (`500`, `checkpoint refused: ...`) while the project's grant log is not a
 gapless `[1..N]` prefix: a `broker_seq` is reserved but no grant (or tombstone) records it. This happens
-when a grant's commit was ambiguous (or its seq release failed) and its client never retried. Retry the
-grant under its original `idempotency_key` (it reclaims the reserved seq), or, once the reservation is
-older than `AVERIN_BROKER_SEQ_VOID_MIN_AGE`, void it with
-[`POST /v2/broker-seq/void`](#post-v2broker-seqvoidprojectid).
+when a grant's commit was ambiguous (or its seq release failed) and its client never retried. Inspect the reservation with the authenticated
+[`GET /v2/broker-seq/void`](#get-v2broker-seqvoidprojectidbroker_seqn), then retry the
+original grant if it can still finish or run the bounded operator
+[`POST /v2/broker-seq/void`](#post-v2broker-seqvoidprojectid) action.
 
 ---
 
@@ -208,6 +208,8 @@ Request (`grantRequest`):
 | Field | Type | Notes |
 |-------|------|-------|
 | `idempotency_key` | string | Required (or `Idempotency-Key` header). Deterministically fixes `grant_id`. |
+| `pop_version` | int | `2` for new brokered issuance; native `token_exchange` has its separate proof contract. |
+| `issued_at`, `request_expires_at` | int64 Unix seconds | Agent-signed freshness window. Maximum 15 minutes; 30 seconds of clock skew accepted. |
 | `project_id`, `session_id` | string | Required. |
 | `agent_id`, `action`, `resource`, `scope` | string | The operation being authorized. |
 | `scope_class` | string | Scope classification input (see broker `ScopeClass`). |
@@ -226,7 +228,7 @@ Request (`grantRequest`):
   "grant_id": "<uuid>",
   "capability": "<minted sender-constrained token>",
   "expires_at": "2026-...Z",
-  "scope_class": "single_use"
+  "scope_class": "single_operation"
 }
 ```
 
@@ -234,19 +236,20 @@ Errors: `400` (validation, failed PoP, forbidden scope, malformed), `409` (idemp
 for a *different* grant request, or the grant's reserved `broker_seq` was voided by the operator —
 re-issue under a new `idempotency_key`), `500` (store/seal failure), `501` (broker not enabled). When an
 M-of-N cosig policy is pinned, single-phase issuance is refused (`400`) — use prepare/finalize.
+An invalid signature, stale proof, or conflicting project/idempotency representation is rejected
+without allocating a grant sequence or sealing authorization or denial evidence. An authenticated
+fresh request that fails broker policy may produce a signed denied-grant record when denial logging
+is enabled.
 
-**What `agent_sig` binds.** `agent_sig` is an Ed25519 signature, under the key in `agent_pubkey`, over
-the JSON object `{"tag":"averin.broker.pop.v1","agent_id","action","resource","scope","agent_pubkey"}`
-(keys sorted). It proves the caller holds the cnf key and binds the operation to it. It does **not**
-bind a nonce, an expiry, the `project_id`, the `session_id`, the `idempotency_key`, `scope_class`,
-`use_limit`, `ttl_seconds`, the principal or the delegation chain. So a captured request body is
-replayable: under a new `idempotency_key` (or in another project the replayer can write to) it yields
-another grant for the same operation, bound to the same agent key, which only the holder of that key can
-use (resources re-check PoP at use time). Against the two-phase flow, a captured body lets a third party
-drive `prepare`/`finalize` for that agent's pending grant under its `idempotency_key`; it cannot change
-what the grant authorizes or which key it is bound to. Treat grant request bodies as sensitive in transit
-and logs. Binding the project and idempotency key into the challenge (with a new tag) is a planned
-wire-format change.
+**What `agent_sig` binds.** For `pop_version: 2`, the agent signs a SHA-256 digest of the
+length-prefixed effective request, including authenticated `project_id`, resolved `idempotency_key`,
+`session_id`, operation and sender key, effective scope class/use limit, TTL, authorizing principal,
+delegation chain, justification, and the signed issue/expiry envelope. The exact field order and
+encoding are specified in [grant-pop-v2.md](../../spec/grant-pop-v2.md). A captured proof cannot be
+moved to another project or idempotency key, and it cannot mint after the signed freshness window.
+An exact v2 committed retry can return the original capability after that window; it does not re-mint or
+extend the capability. Historical v1 signatures remain inspectable under their original format but
+are not accepted by online brokered grant routes after the cutoff, including committed retries.
 
 ### POST `/v2/grants/prepare` and `/v2/grants/finalize` (two-phase)
 
@@ -273,7 +276,22 @@ receipt the offline verifier joins back to its grant.
 
 Request (`useRequest`): `idempotency_key`, `project_id`, `session_id`, `capability`, `use_sig`
 (base64url Ed25519 PoP), `action`, `params`, `nonce`, `params_nonce`, and `use_sequence_number`
-(bounded_reuse only).
+(bounded_reuse only). For other capability classes, the server currently ignores a supplied
+`use_sequence_number` and records the effective value `0`; committed retry matching uses that
+effective value as well.
+
+A bounded project read returns an exact committed retry, including after capability
+expiry, without another content write or ledger claim; a changed request under
+the same key is `409`. That retry still verifies the presented capability under
+the configured broker issuer key; an issuer key rotation without a compatible
+keyring cannot recover the old receipt through this endpoint. For a new use,
+the resource verifies the capability,
+signed project, and use PoP before storing raw params. It repeats that preflight
+inside the project transaction, then checks revocation and consumes the ledger
+with receipt insertion. A request that passes the first preflight but later
+fails revocation, replay, or time revalidation can leave an immutable,
+unreferenced content blob until normal content retention purges it; it leaves
+no receipt or committed ledger claim.
 
 **Response `201`:**
 `{ "use_id": "use-<uuid>", "grant_id": "<uuid>", "record": { /* sealed receipt */ }, "idempotent": false }`
@@ -311,107 +329,85 @@ fail-open), `501` (revocation not enabled).
 
 ---
 
+## GET `/v2/broker-seq/void?project=<id>&broker_seq=<n>`
+
+Recovery-authenticated, read-only preflight for an allocated sequence. It reports the
+reservation and database allocation time, pending grant and liveness, winning record and
+hash, void marker, immutable fence, terminal result, and actual required `record_id`
+uniqueness status. `diagnostic_only: true` means it cannot reserve or promise an outcome;
+POST revalidates under the project guard. Unlike a write, it remains available when the
+historical non-unique index fallback blocks mutations. Requires the separate exact-project
+`broker_seq:recover` credential; ordinary writer keys receive `403`.
+
 ## POST `/v2/broker-seq/void?project=<id>`
 
-Operator remediation for a **wedged** grant-transparency log (ADR 0004 D6). A `broker_seq` that was
-reserved for a grant which never recorded leaves the recorded log short of `[1..max]`, and every
-`POST /v2/checkpoints` is refused until it is filled. This seals a **signed `grant_void` tombstone** that
-fills exactly that seq:
+Authenticated operator recovery for a legacy or residual reserved sequence without a
+recorded grant. Request:
 
-- It binds `project_id`, `broker_seq` and the reserved `grant_id` in `extensions.broker.void_evidence`
-  (domain `averin.broker.grant_void.v1`), is signed like a grant's authority (`gateway_enforced`,
-  `evidence_sig` over `sha256(RCP(void_evidence))`), and its `record_id` is the reserved `grant_id`.
-- The signed evidence also binds the authenticated `actor_id`, caller-supplied `operation_id`, and
-  required `reason`.
-- It is folded into `broker_grant_head` exactly like a grant, so the next checkpoint signs. The offline
-  verifier accepts it as filling its seq, **never** counts it as a grant or matches a use to it, and
-  reports a real grant claiming the same seq as a duplicate-seq violation.
-- The reservation stays in the allocation ledger (the voided number is never re-issued), and the
-  reserved `grant_id` is retired: a later retry of that grant is a `409`. Re-issue it under a new
-  `idempotency_key`.
+```json
+{"project_id":"p1","broker_seq":1,"session_id":"broker-seq-void","operation_id":"incident-123","reason":"abandoned grant transaction"}
+```
 
-Only a seq that meets **all** of these is voided:
+`session_id` defaults to `broker-seq-void`; `operation_id` is 1–128 printable
+non-whitespace ASCII bytes and `reason` is nonblank, at most 512 bytes, and normalized to
+NFC by the Rust RCP canonicalizer. The authenticated actor comes from
+`AVERIN_RECOVERY_KEYS`, never the request body. The same actor, operation ID, session and
+normalized reason must be used for every retry. The token grants only recovery for its
+configured project.
 
-1. It is currently allocated (`404` otherwise).
-2. It is **not recorded**: no record holds the reserved `grant_id` and no grant or tombstone carries that
-   `broker_seq`. The store read decides this, so a seq whose ambiguous commit actually landed is refused
-   whatever its age (`409`).
-3. It does not back a live two-phase pending grant (`409`, retry its finalize or wait 15 minutes).
-4. Both the reservation **and the latest attempt of its grant** are at least
-   `AVERIN_BROKER_SEQ_VOID_MIN_AGE` old (default `1h`; `409` otherwise). The store's `allocated_at` is
-   stamped once, on the first allocation, and a retry that reuses the seq does not refresh it, so the
-   server also tracks, in memory, the last time each grant attempted its seq (allocate or failed commit)
-   and measures the age from the later of the two. A retry at `T0+59m` whose commit is still in flight
-   therefore blocks a void at `T0+60m`. Those attempt times are lost on a restart, so the age is also
-   floored at the server's start: it runs from the latest of `allocated_at`, the last attempt and the
-   process start, and no void passes until `AVERIN_BROKER_SEQ_VOID_MIN_AGE` after a restart.
-5. The store enforces per-project `record_id` uniqueness. On Postgres this means migration `0002` built the
-   UNIQUE index `records_project_record_id_uniq`. If the database held historical duplicate `record_id`s,
-   `0002` builds a non-unique index and logs a WARNING. In that case every project write is refused with a retryable server error,
-   because the tombstone's `record_id` is the voided `grant_id` and only that UNIQUE index guarantees that
-   at most one of {the grant, its tombstone} lands. Resolve the duplicate and build the UNIQUE index first.
-   The in-memory store always enforces uniqueness.
+The first exact project transaction drains earlier supported writes and commits a
+permanent immutable fence for the reserved grant ID and sequence, bound to actor, action,
+reason, request digest, generation 1, and database time. Every supported grant path checks
+that fence; allocation and record insertion enforce it inside their final project
+transaction. A second guarded transaction observes the winner. If the grant landed first,
+it commits a `recorded` terminal result, leaves the grant and its revocation state
+unchanged, and returns `409` with `outcome: recorded` and `winning_record_hash`. Exact
+readback of that prior issuance remains available. Otherwise, it commits the signed
+`grant_void` tombstone, reservation void marker, optional durable revocation, and
+`voided` terminal result atomically. No sequence or grant ID is reissued. A live pending
+grant is not a landed grant; the fence prevents it finalizing. Existing pre-protocol
+partial tombstones are reconciled without resealing.
 
-**Atomic transaction.** The exact project guard serializes grant and void on
-every replica. The tombstone, reservation marker and optional revocation commit
-together. If any write fails, none of them persists. A lost COMMIT response has
-an unknown outcome; repeat the same void operation to reconcile the durable
-tombstone and marker. A grant that committed first causes `409` ("grant landed;
-nothing to void"). A legacy marker without a tombstone is checked against the
-record log before repair. The Postgres store validates the actual UNIQUE index
-shape, predicate, readiness and validity before any project write; a damaged
-index refuses unsafe writes while history remains readable.
+The `grant_void` binds project, sequence, and grant ID in signed
+`extensions.broker.void_evidence` (domain `averin.broker.grant_void.v1`), with the actor,
+operation ID, and reason. Its `record_id` equals the grant ID. It fills the gap in
+`broker_grant_head` for the next checkpoint but is never counted as a grant or matched to
+a use. `/v2/use` rejects that ID because of the terminal void even without a revocation
+signing key. With revocation enabled, the durable revoke commits in the same transaction;
+offline publication requires the next signed revocation list.
 
-The safety age still uses the reservation time, latest local attempt and process
-start. PostgreSQL supplies the project serialization, so a slow void does not
-hold a process-global ingest mutex or stall another project's writers. The
-index is over `md5(record_id)`; an md5 collision in one project yields a `409`
-on the second distinct id.
+A completed new void returns `201` with `operation_id`, `outcome: voided`,
+`winning_record_hash`, `grant_id`, `broker_seq`, `created: true`, and the sealed `record`.
+Exact replay returns `200` and `created: false`. A different operation or actor returns
+`409` `action_conflict`. A missing reservation returns `404`; broker disabled returns
+`501`. A `503` `retryable: true` may follow a bounded lock wait, failed reconciliation,
+cancellation, or ambiguous commit. Query preflight and repeat the **same** operation;
+never treat a timeout as proof of rollback. Other projects do not wait on this project's
+guard. A client retrying a failing grant cannot extend the fence, and process restarts do
+not reset it. There is no minimum reservation age.
 
-**Capability retirement and revocation.** The signed tombstone itself makes
-`/v2/use` reject the reserved `grant_id`, even when a revocation signing key is
-not configured. When revocation is enabled, the same transaction also adds the
-ID to the durable revoked set so the next signed export list carries it. A
-failure in either step rolls back tombstone, marker and revocation together.
+For a tombstone from before authenticated attribution, repair is allowed only when both
+`actor_id` and `operation_id` fields are absent and the complete project, grant ID,
+sequence, domain, and broker role match. Its original signed JSON and hash remain
+unchanged. `legacy_tombstone: true` and `original_void_actor_unattributed: true` explicitly
+distinguish original void evidence from the current `reconciliation_actor_id` on the
+operational fence. These rows are local diagnostics, not new offline proof. A present
+empty, null, partial, mismatched, or malformed attribution fails closed; a legacy marker
+alone is not evidence of revocation.
 
-**Authorization.** This route requires a separate `broker_seq:recover` credential for the exact
-`?project=`. An ordinary `AVERIN_API_KEYS` writer receives `403`; unset recovery configuration also
-denies. The route does not accept an actor identity from the request body. Rotate a recovery token by
-configuring a new token for the same actor, restarting, then removing the old token and restarting.
-The token is accepted only here; it does not grant ordinary writer access.
+The project write guard and the exact valid per-project `record_id` UNIQUE index decide
+grant-versus-void races across replicas. Every project write is refused when the index is
+absent, non-unique, invalid, partial, or has the wrong expression. Preflight reports the
+condition; preserve duplicate signed history and follow the
+[operator runbook](../operator-verification.md) rather than deleting evidence. Existing
+sessions of pre-fence writer binaries can ignore the fence. Deploy only after the runbook's
+traffic drain, prepared-transaction resolution, old runtime credential revocation and
+session termination, and explicit old-credential write refusal test.
 
-Request: `{ "project_id": "...", "broker_seq": <n>, "session_id": "...", "operation_id": "...", "reason": "..." }`
-(`project_id`, `broker_seq`, `operation_id` and `reason` required; `session_id` defaults to
-`broker-seq-void`; `operation_id` is at most 128 bytes and `reason` at most 512 bytes).
-`operation_id` must be 1–128 printable non-whitespace ASCII bytes. The authenticated `actor_id`
-has the same format. These identifiers remain byte-exact; the human-readable `reason` is
-NFC-normalized through the Rust RCP canonicalizer before signing and retry comparison.
-Use the same `operation_id`, `reason`, session and credential for a retry. A conflicting retry is
-`409` and leaves the original tombstone untouched. Historical tombstones remain readable; because
-they lack an authenticated actor and operation ID, a new recovery action cannot claim them.
-
-**Response `201`:** `{ "voided_broker_seq": <n>, "grant_id": "...", "created": true, "record": { /* tombstone */ } }`
-(plus `"revoked": true` when revocation is enabled).
-A repeat of the same completed recovery action returns the tombstone with `200` and
-`"created": false`. Errors include `400`, `403`, `404`, `409` (recorded grant,
-live pending grant, too young, or conflicting actor/operation/reason/session),
-`503` for unavailable durable state or unsafe index shape, `500` for a failed
-transaction that rolls back all new void writes, and `501` when the broker is
-disabled. A lost COMMIT acknowledgement is retryable under the exact same
-authenticated operation identity. Legacy partial voids may require repair, but
-new tombstone, marker and revocation writes commit together.
-
-**Verifier compatibility.** Verifier builds from before `grant_void` existed do not recognise the
-tombstone's role. They report it as an unrecognized broker record and **fail the bundle**. Auditors must
-use a verifier that includes ADR 0004 amendment A1 (`docs/decisions/0004-tier-b-residual-reduction.md`)
-to verify a bundle that contains a void.
-
-**Upgrade note.** Before this release, any failure after a seq was allocated could leave it reserved, so
-a project that ever hit a transient grant seal or insert error may refuse every checkpoint once this
-build (which fails closed on the gap) is deployed. Find the seq in the `checkpoint refused` message
-(`allocated broker_seq max M != N recorded grants`) and void each unrecorded seq in `[1..M]`. On
-Postgres, reservations that predate migration `0003` are dated at the migration, so they become voidable
-one safety age after the upgrade.
+Verifier builds from before `grant_void` existed do not recognize its role and fail the
+bundle; auditors need a verifier with ADR 0004 amendment A1. The historical
+`GrantLog_void_starved.cfg` models the replaced age-based protocol; current liveness also
+assumes database transactions resolve and authorized recovery is eventually scheduled.
 
 ---
 
@@ -491,7 +487,9 @@ Key fields:
 | Field | Type | Meaning |
 |-------|------|---------|
 | `ok` | bool | The integrity verdict: every record sealed + linked + checkpoint-consistent, no hard violation. **Not** the accountability capstone. |
-| `keys_externally_pinned` | bool | `true` only when you passed an `opts.json` — i.e. authentic vs internal-consistency. |
+| `keys_externally_pinned` | bool | `true` only when record `signing_keys` were pinned out of band; merely passing other options does not authenticate record provenance. |
+| `body_bound_role_evidence` | bool | Every contributing committed broker/resource/void role record has a verified body-bound authority proof; historical v2 role signatures remain useful for forensic joins but cannot satisfy this stronger prerequisite. |
+| `claims_version`, `claims` | string/object | Version `1` typed decisions for `integrity`, `authenticated`, `authorized`, `temporal`, `complete_brokered`, and `complete_introspected`. Each is `satisfied`, `insufficient`, or `refuted`; `requested` and `requested_decision` identify the caller's required claim. Only `satisfied` accepts a required claim. |
 | `records_total`, `records_proven` | int | |
 | `dag_ok`, `dag_heads`, `collapsed_duplicates` | bool/int | DAG validity, head count, deduped retries (#8). |
 | `checkpoints_total`, `checkpoints_verified`, `chain_ok` | int/bool | |
@@ -505,7 +503,23 @@ Key fields:
 | `cosig_status`, `delegation_status`, `taxonomy_status`, `attestation_status`, `revocation_status`, `revocation_merkle_status`, `introspection_status`, `federation_status` | string | Mode gates: `absent` / `unevaluated` (no key pinned) → an evaluated verdict when the role's key set is pinned. |
 | `issues` | []string | Human-readable violations (omission/fork/tamper/role-overlap/…). |
 
-The CLI prints a digest of this and a `RESULT: PASS (integrity)` / `RESULT: FAIL` line. PASS is the
-**integrity** verdict; the `action_completeness` / `grant_accountability` / `broker_trust` capstone
-on the same line is the higher claim, and `not_claimed` / `incomplete` are normal when no role keys
-were pinned. Even a `*_complete` capstone is bounded by `resource_trust: assumed_truthful`.
+`ok` retains the legacy bundle diagnostic meaning. It is not an authorization acceptance
+predicate. An optional malformed disclosure can make `ok` false; removing it may remove that
+parsing issue without proving any stronger claim. The CLI exits successfully only when `ok` is
+true **and** the explicitly requested claim is `satisfied`. The default request is `integrity`.
+Even a complete claim remains bounded by `resource_trust: assumed_truthful`.
+
+Set `claim_policy` in verifier options, for example
+`{"requested":"authorized","revocation":"disclosed","require_disclosure":true}`.
+`requested` is `integrity`, `authenticated`, `authorized`, `complete_brokered`, or
+`complete_introspected`. `revocation` is `pinned` (default: a disclosed list required whenever
+`revocation_keys` are pinned), `disclosed`, `merkle`, or `both`; Merkle mode must be selected by
+the caller, not by the bundle. A pinned revocation issuer always requires current evidence for
+authorization and completeness. `require_disclosure` and `require_attestation` are optional
+booleans. `require_disclosure` demands a valid matching credential opening for every accepted
+committed broker grant, including unused grants; counting only supplied openings is insufficient.
+Explicit `merkle` and `both` modes require both a fresh signed root and valid non-membership
+paths for every brokered use and indexed native credential. Root freshness alone does not prove
+non-revocation. Present malformed policy fields are fatal configuration errors. Missing required
+evidence gives `insufficient`; a committed contradiction or authenticated revocation gives
+`refuted`. Neither accepts the claim.

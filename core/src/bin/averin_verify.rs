@@ -31,6 +31,9 @@ fn main() -> ExitCode {
             eprintln!("  taxonomy_digest/taxonomy_version, attestation_keys, cosig_approver_keys, revocation_keys,");
             eprintln!("  federated_broker_keys (a {{broker_id: [keys]}} map), authority_keys — all base64url");
             eprintln!("  ed25519pub: strings (see docs/operator-verification.md).");
+            eprintln!("  claim_policy: {{requested: integrity|authenticated|authorized|complete_brokered|");
+            eprintln!("    complete_introspected, revocation: pinned|disclosed|merkle|both,");
+            eprintln!("    require_disclosure: bool, require_attestation: bool}}.");
             ExitCode::from(2)
         }
     }
@@ -182,6 +185,19 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         gs("action_completeness"),
         gs("resource_trust")
     );
+    let claims = report.get("claims");
+    let requested = claims
+        .and_then(|c| c.get("requested"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("integrity");
+    let requested_decision = claims
+        .and_then(|c| c.get("requested_decision"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("insufficient");
+    println!(
+        "  requested claim: {requested} — {requested_decision} (claims v{})",
+        gs("claims_version")
+    );
     if let Some(issues) = report.get("issues").and_then(|v| v.as_array()) {
         for (i, iss) in issues.iter().enumerate() {
             if i >= 8 {
@@ -194,12 +210,11 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         }
     }
     println!();
-    if gb("ok") {
-        // PASS is the INTEGRITY verdict (records sealed/linked, checkpoint chain consistent, no hard violation).
-        // It is NOT the accountability capstone — echo that level on the same line so a reader never mistakes a
-        // PASS for "fully accountable" when no role keys were pinned and the capstone is `not_claimed`.
+    if gb("ok") && claim_contract_satisfied(&report) {
+        // PASS requires both clean legacy diagnostics and the caller's versioned claim.
+        // Echo the bounded capstone level separately so the requested claim stays explicit.
         println!(
-            "RESULT: PASS (integrity) — every record sealed, linked, and checkpoint-consistent."
+            "RESULT: PASS ({requested}) — requested claim satisfied; integrity diagnostics clean."
         );
         println!(
             "        capstone: action_completeness={} · grant_accountability={} · broker_trust={}",
@@ -207,14 +222,41 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
             gs("grant_accountability"),
             gs("broker_trust")
         );
-        println!("NOTE: PASS is integrity-level; the capstone above is the higher claim. `not_claimed`/`incomplete`");
-        println!("      are normal when role keys were not pinned (pass an opts.json to elevate). A `*_complete`");
-        println!("      capstone is itself bounded by resource_trust:assumed_truthful (MF1).");
+        println!("NOTE: The capstone remains bounded by resource_trust:assumed_truthful (MF1).");
         ExitCode::SUCCESS
     } else {
-        println!("RESULT: FAIL — see issues above.");
+        println!(
+            "RESULT: FAIL — integrity diagnostics or requested claim are not satisfied; see above."
+        );
         ExitCode::from(1)
     }
+}
+
+fn claim_contract_satisfied(report: &CanonValue) -> bool {
+    if report.get("claims_version").and_then(CanonValue::as_str) != Some("1") {
+        return false;
+    }
+    let Some(claims) = report.get("claims") else {
+        return false;
+    };
+    let Some(requested) = claims.get("requested").and_then(CanonValue::as_str) else {
+        return false;
+    };
+    if !matches!(
+        requested,
+        "integrity"
+            | "authenticated"
+            | "authorized"
+            | "complete_brokered"
+            | "complete_introspected"
+    ) {
+        return false;
+    }
+    claims
+        .get("requested_decision")
+        .and_then(CanonValue::as_str)
+        == Some("satisfied")
+        && claims.get(requested).and_then(CanonValue::as_str) == Some("satisfied")
 }
 
 fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
@@ -265,5 +307,48 @@ fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod claim_contract_tests {
+    use super::*;
+
+    fn report(version: &str, decision: &str) -> CanonValue {
+        CanonValue::object(vec![
+            ("claims_version".into(), CanonValue::string(version)),
+            (
+                "claims".into(),
+                CanonValue::object(vec![
+                    ("requested".into(), CanonValue::string("authorized")),
+                    ("authorized".into(), CanonValue::string(decision)),
+                    ("requested_decision".into(), CanonValue::string(decision)),
+                ])
+                .unwrap(),
+            ),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn unsupported_or_malformed_claims_never_pass() {
+        assert!(claim_contract_satisfied(&report("1", "satisfied")));
+        assert!(!claim_contract_satisfied(&report("2", "satisfied")));
+        assert!(!claim_contract_satisfied(&report("1", "insufficient")));
+        assert!(!claim_contract_satisfied(&report("1", "refuted")));
+        assert!(!claim_contract_satisfied(
+            &CanonValue::object(vec![]).unwrap()
+        ));
+        let mut mismatched = report("1", "satisfied");
+        if let CanonValue::Object(ref mut fields) = mismatched {
+            if let Some((_, CanonValue::Object(claims))) =
+                fields.iter_mut().find(|(k, _)| k == "claims")
+            {
+                if let Some((_, value)) = claims.iter_mut().find(|(k, _)| k == "authorized") {
+                    *value = CanonValue::string("insufficient");
+                }
+            }
+        }
+        assert!(!claim_contract_satisfied(&mismatched));
     }
 }

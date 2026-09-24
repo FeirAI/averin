@@ -216,36 +216,28 @@ type Store interface {
 	// instead KEPT (a no-op, nil error): the grant's idempotent retry reclaims that exact seq and fills the hole.
 	// (Found by TLA+ model checking, formal/tla/GrantLog.tla.)
 	//
-	// ROLLBACK is BEST-EFFORT, not atomic with the allocation: the Mem store never errors here (so the Mem
-	// path is fully gapless), but a Postgres DELETE can fail. The api SURFACES that failure (it does not
-	// swallow it). A surfaced orphan SELF-HEALS — the deterministic grant_id makes AllocateBrokerSeq
-	// idempotent, so a retry of the same grant reuses the orphaned seq and records it. A PERMANENT gap
-	// therefore needs the narrow triple of {failure after allocation, failed rollback, client never
-	// retries}, which surfaces as a transparency anomaly the operator investigates — and the api's checkpoint
-	// creation refuses to sign while any allocated seq (MaxBrokerSeq) lacks a recorded grant, so such a gap is
-	// never ANCHORED (checkpoints are append-only; an anchored gap would fail verification forever). The full production
-	// hardening is to make allocation and record insertion ONE transaction (held across the cgo signing),
-	// which also subsumes the multi-instance ordering lock — out of scope for the single-instance demo.
+	// Current grant paths allocate and insert inside one project transaction; this operation primarily
+	// handles historical or residual reservations. A fence prevents release. Checkpoints still refuse
+	// any unrecorded gap, and authenticated recovery can retire an abandoned reservation without age.
 	ReleaseBrokerSeq(projectID, grantID string) error
 	// MaxBrokerSeq returns the highest broker_seq currently ALLOCATED for the project (0 if none). Checkpoint
-	// creation compares it against the recorded grant set under the ingest lock and refuses to sign when an
+	// creation compares it against the recorded grant set under the project guard and refuses to sign when an
 	// allocated seq has no recorded grant (a reserved/orphaned seq), so a gap can never be anchored.
 	MaxBrokerSeq(projectID string) (int64, error)
 	// BrokerSeqAt returns the allocation-ledger row holding seq in the project (found=false if none). The operator
-	// void endpoint uses it to name the reserved grant_id and check the reservation's age.
+	// recovery endpoint uses it to bind the exact reserved grant_id to a permanent fence.
 	BrokerSeqAt(projectID string, seq int64) (res BrokerSeqReservation, found bool, err error)
 	// VoidBrokerSeq marks the reservation (grantID, seq) VOIDED. The allocation row is KEPT, so MaxBrokerSeq still
 	// counts it and MAX+1 never re-issues the voided number; ReleaseBrokerSeq never deletes it; and
 	// AllocateBrokerSeq(grantID) fails with ErrBrokerSeqVoided from now on (the grant_id is retired, never handed
 	// the voided seq back). Idempotent for the same (grantID, seq); an error if seq is not reserved by grantID. The
-	// caller (the api, under ingestMu) seals the grant_void tombstone that fills the seq in the recorded log FIRST
-	// and writes this marker SECOND: the tombstone's record_id IS grantID, so once it is sealed the grant can never
-	// record (record_id uniqueness), and a marker is only ever written for a void that actually won.
+	// caller writes the tombstone, marker, optional revoke, and terminal result in one guarded transaction.
+	// A legacy tombstone that committed before its marker may be repaired without modifying the record.
 	VoidBrokerSeq(projectID, grantID string, seq int64) error
 	// RecordIDUniqueEnforced reports whether the store itself (not just the api's under-lock probe) enforces
-	// per-project record_id uniqueness. The operator void relies on it: the tombstone's record_id IS the voided
-	// grant_id, so a UNIQUE record_id backstop makes a void and a still-in-flight commit of that grant mutually
-	// exclusive even when the api's process-local checks cannot see the in-flight commit. Mem always enforces it
+	// per-project record_id uniqueness. Recovery relies on it: the tombstone's record_id IS the voided
+	// grant_id, so the UNIQUE backstop makes a void and a still-in-flight commit mutually exclusive.
+	// Mem always enforces it
 	// (under its mutex); Postgres does only when migration 0002 built the UNIQUE index records_project_record_id_uniq
 	// (on a DB that held historical duplicates it falls back to a NON-unique index, and this returns false).
 	RecordIDUniqueEnforced() (bool, error)
@@ -416,7 +408,7 @@ type project struct {
 	discSeen   map[string]struct{}  // record_id\x00field -> present (dedupe)
 	anchors    map[int64]string     // checkpoint seq -> token_b64
 	brokerSeq  map[string]int64     // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
-	brokerAt   map[string]time.Time // grant_id -> allocation time (the operator void's safety age)
+	brokerAt   map[string]time.Time // grant_id -> allocation time for diagnostics
 	voided     map[string]struct{}  // grant_id -> voided (row kept in brokerSeq; never released or re-allocated)
 	fences     map[int64]RecoveryFence
 	results    map[int64]RecoveryResult
@@ -426,8 +418,7 @@ type project struct {
 
 func NewMem() *Mem { return &Mem{projects: map[string]*project{}, now: time.Now} }
 
-// WithClock sets the clock the Mem store stamps broker_seq allocations with (allocated_at, the operator void's
-// safety age), so tests can drive it together with the api's injectable clock (api.Server.WithClock).
+// WithClock sets the clock the Mem store stamps broker_seq allocations and recovery diagnostics with.
 func (m *Mem) WithClock(now func() time.Time) *Mem {
 	m.mu.Lock()
 	defer m.mu.Unlock()

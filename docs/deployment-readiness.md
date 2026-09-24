@@ -10,7 +10,7 @@ boundary between "averin ships this" and "your deployment provides this."
 |------|---------------|------------------|--------|
 | 1. Per-project authn/authz (Phase 2) | API-key auth (`auth.KeyStore` + `Middleware`, wired) | IdP (SSO/SAML/OIDC), secrets store, RBAC/scoped-token layer | **Phase-1 done; Phase-2 layered design** |
 | 2. HSM/TPM sender-key (B12) | raw ed25519 keys + PoP binding (theft-fails-PoP test) | HSM/TPM/KMS + agent secure element | **Needs a `Signer` interface + hardware** |
-| 3. Multi-instance project writes (D6) | persisted project guard and bound transactions | capability-project binding, scoped nonce claims, bounded recovery and a failure matrix | **Transaction seam done; full HA gate pending** |
+| 3. Multi-instance project writes (D6) | persisted project guard, bound transactions and authenticated capability-project binding | scoped nonce claims, bounded recovery and a failure matrix | **Transaction and project-binding seams done; full HA gate pending** |
 | 4. TEE/remote-attestation enforcement (D7) | signed `deployment_attestation` claim | TEE hardware + attestation service + quote-verify lib | **Assertion today; hardware-root design** |
 | 5. git remote + push | clean tree, `.gitignore` hardened | remote URL + push credentials | **Repo push-ready; operator action** |
 | 6. Durable consume-before-act ledger (R5) | project Store claims and receipt share one transaction; `pgledger` sweeps | shared Postgres and resource-scoped nonce claims | **Atomic seam done; scope gate pending** |
@@ -97,7 +97,7 @@ connection; a separate project can proceed while a guard is held. The
 repeatable-read snapshot. Independent-pool tests cover these seams.
 
 **Deployment policy.** Continue using one writer per project until the
-capability-project binding, scoped nonce claims and bounded sequence recovery
+scoped nonce claims and bounded sequence recovery
 are integrated and their two-process failure matrix
 passes. This project transaction seam alone does not justify an end-to-end
 multi-replica safety claim. On DB outage, writes fail closed rather than

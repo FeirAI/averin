@@ -67,6 +67,11 @@ func TestBrokerSeqRecoveryLegacyTombstoneAttribution(t *testing.T) {
 				t.Fatal(err)
 			}
 			authority := rec["authority"].(map[string]any)
+			// Model the original pre-006 v2 signature, not the v3 proof
+			// produced by the current tombstone builder.
+			delete(authority, "proof_version")
+			delete(authority, "subject_projection")
+			delete(authority, "subject_digest")
 			authority["evidence_hash"], authority["evidence_sig"] = hash, sig
 			var original string
 			if err := s.withProjectWrite(t.Context(), "p1", func(st store.Store) error {

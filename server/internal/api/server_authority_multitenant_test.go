@@ -114,7 +114,7 @@ func TestPerTenantAuthorityKeysElevateInTheirOwnProject(t *testing.T) {
 		for _, rt := range report.RecordTrust {
 			if rt.RecordID == recordID {
 				found = true
-				if rt.Authority != "verified" {
+				if rt.Authority != "legacy_unbound" {
 					t.Fatalf("%s (%s) offline authority = %q, want verified: %s", recordID, project, rt.Authority, rep)
 				}
 			}

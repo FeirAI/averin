@@ -1,0 +1,14 @@
+Mutant: m19-failed-intent-consumes-outcome. Named detector: tier_b_two_phase_failed_pop_intent_does_not_consume_outcome.
+
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -5909,8 +5909,9 @@
+         // consumes its outcome, so the outcome is still reported as an orphan.
+         let pop_reverified = match pop_reverify(rec, &g.credential_binding) {
+             Ok(r) => r,
+             Err(msg) => {
++                if let Some(i) = pending_consume { consumed_outcomes.insert(outcomes[i].2.clone()); } // BUG
+                 unmatched_violation += 1;
+                 violation(&mut issues, format!("offline PoP re-verification: {msg}"));
+                 continue;
+             }

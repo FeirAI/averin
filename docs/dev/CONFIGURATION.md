@@ -116,6 +116,7 @@ kill/approval/policy evidence rejected (or, under the explicit fail-open opt-out
 | `AVERIN_DELEGATE_SIGNED_PUBKEY` | unset | No | Pins one **global** key for the `delegate_signed` source (govder's delegate-agent approval records). This is the third value `govder-derive-pubkeys` prints. Bad value ⇒ fatal. |
 | `AVERIN_AUTHORITY_KEYS` | unset | No | General `[project:]source=pubkey,...` list (sources: `policy_engine_signed`, `human_signed`, `delegate_signed`). Without a `project:` prefix the key is the global default for that source; with one it is pinned for that project only. A malformed entry, an unknown source, an empty project, or a duplicate `(project, source)` is fatal. Pinning the **same** `(project, source)` twice across any of these forms is a fatal config error. |
 | `AVERIN_REQUIRE_PINNED_AUTHORITY` | **`1` (on)** | No | **Fail-closed authority posture (the default).** A record that CLAIMS an elevated source (`policy_engine_signed`/`human_signed`/`delegate_signed`) whose `evidence_sig` fails to verify under the key pinned for its `(project, source)` — or whose source is **unpinned for that project** — is **REJECTED** with a retryable `500` instead of silently sealed downgraded to the forgeable `caller_declared`. `0`/`false` is the **explicit fail-OPEN opt-out** (restores the Phase-1 silent downgrade + a rate-limited WARNING + the `averin_authority_downgrades_total` counter) and logs a loud WARNING naming what that means; any other value is **fatal** (a typo must not select a security posture). Ordinary `caller_declared` traffic is never affected either way. |
+| `AVERIN_REQUIRE_BODY_BOUND_AUTHORITY` | `0` (reader-first rollout) | No | When `1`/`true`, new generic ingest rejects elevated external authority claims without a complete v3 subject proof. Historical v2 exports remain readable as `legacy_unbound`. Local broker/resource builders always emit v3. Set this after external Govder and approval producers have moved to v3; unknown values are fatal. |
 
 Every pinned authority key must be role-separated (it is rejected if it equals the server signing
 key or the resource key, or if one key is reused across two **sources**; the same key across two
@@ -147,8 +148,12 @@ the pinned-key id — so a govder/averin key misalignment is visible in both met
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
 | `AVERIN_BROKER_ISSUING_SEED` (or `_FILE`) | unset ⇒ broker disabled | No | 64-hex (32-byte) Ed25519 seed; the key that signs the minted capabilities. Bad value ⇒ fatal. Unset ⇒ `POST /v2/grants` returns `501 Not Implemented`. The recording key for the grant's `gateway_enforced` evidence is the server's own signing key (Tier-A `broker_trust: assumed`). |
-| `AVERIN_BROKER_SEQ_VOID_MIN_AGE` | `1h` | No | Safety age a reserved-but-unrecorded `broker_seq` must reach before `POST /v2/broker-seq/void` may fill it with a signed `grant_void` tombstone (the operator remediation for a checkpoint refused over a broker_seq gap). A Go duration; below the floor of `20m` (it must exceed any in-flight commit and the 15-minute two-phase pending window) or unparseable ⇒ fatal. The age runs from the latest of the reservation (`allocated_at`, the Postgres clock), the grant's latest attempt on this server and the server's start (attempt times are in memory), so keep it far above any DB-to-app clock skew. Requires the broker. |
 | `AVERIN_BROKER_ID` | unset | No | This broker's federation identity (ADR 0005 M4). When set, grants carry `grant_evidence.broker_id` and checkpoints carry a per-broker `broker_grant_heads` map (verify under `federated_broker_keys[<id>]`). Requires the broker. |
+
+Broker sequence recovery uses an authenticated permanent database fence and has no age
+setting. `AVERIN_BROKER_SEQ_VOID_MIN_AGE` is no longer read by the server. Deploy the
+new writer credential only after the old-runtime session and credential cutoff in the
+[operator runbook](../operator-verification.md).
 
 ### Online M-of-N cosign policy (`POST /v2/grants/prepare` + `/finalize`)
 

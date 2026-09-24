@@ -20,7 +20,7 @@ fixed corpus. The TLA+ recovery liveness result depends on its retry and fairnes
 | Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order and transitive (parser-level and base64 chunk harnesses in an extended set) | `bash formal/run-kani.sh` |
 | Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log, consume-before-act ledger, and two-replica project transactions with checkpoints, ambiguous commits, crash/restart, pending grants and revocations | `bash formal/tla/run-tlc.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
-| Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | eight known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
+| Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
 
 ## The seal, precisely
 
@@ -110,16 +110,32 @@ Other results:
   a mechanised refinement proof: a drift the corpus does not exercise can pass. To get a proof,
   translate `canon.rs`/`hashx.rs` into Lean with Aeneas or prove them in place with Verus (see
   below).
-* **Offline-verifier verdict logic** (`verify.rs` Tier-B joins, capstone, key status). This is
-  covered by the adversarial suite and the audit fixes, not by a proof yet. The monotonicity
-  property is the natural next theorem: *deleting unsigned data (anchors, revocation data,
-  disclosures) never improves the verdict*.
-* **Authority evidence is not bound to the record body.** The authority preimage signs
-  `(source, project_id, record_id, evidence_hash)`. For generic `human_signed` /
-  `policy_engine_signed` records, nothing re-derives `evidence_hash` from the record. A holder of
-  the signing key can therefore move a valid evidence triple onto a different body with the same
-  `record_id` and it still reads `verified`. Closing this needs an `averin.authority.v3` preimage
-  that adds a body commitment. That is a coordinated producer change and has not been made yet.
+* **Offline-verifier verdict logic** (`verify.rs` Tier-B joins, capstone, key status). `Verdict.lean`
+  proves inclusion of supported claims when supporting attachments are removed while signed
+  records/checkpoints, pins, policy and authenticated adverse evidence remain fixed. The Lean
+  executable decider agrees with its inductive evidence rules and refutes immutable committed
+  grant-ID equivocation between actual grant records for every attachment set. The production
+  immutable-fact projection also includes duplicate record IDs and checkpoint project conflicts;
+  those have direct bundle tests but are not encoded by `CommittedContradiction`. This is a model proof plus differential Rust oracle,
+  not a mechanised refinement of the verifier's extraction passes. Independently signed adverse
+  revocations, validated contradictory commitment openings and conflicting verified TSA anchors
+  must be enforced while present; removing one changes the fixed adverse evidence and can
+  improve a decision, so a blanket deletion theorem would be false.
+* **Historical v2 authority evidence is not bound to the semantic record body.** It remains
+  readable as `legacy_unbound` and retains its historical signature and join checks. The v3
+  authority proof binds the structured semantic subject and is reported as `verified`; only
+  that body-bound state can satisfy the stronger authorization and completeness claims.
+
+`spec/fixtures/verdict-generated.json` is the shared end-to-end verdict corpus. Its 92 rows
+store exact `bundle_json` and caller `opts_json` strings, then native Rust, cgo, and browser WASM
+compare the bundle digest, all typed claims, legacy `ok`, completeness label, and violation count.
+The positive inputs come from a v3 signed grant/use/PoP Rust test, a real Go two-phase capstone
+export, and a real Go native grant/introspection capstone export; each generator asserts its
+positive claim before emitting a fixture. The Rust `write_generated_verdict_corpus` test expands
+every anchor subset in these small histories and combinations of removable attachments, including
+nested Merkle paths. It also keeps the cp0-only failed-PoP intent and independently signed adverse
+revocation cases. Regenerate these fixtures only with a freshly rebuilt Rust staticlib before Go
+tests, then review changed expected decisions rather than accepting them automatically.
 
 ## Refinement gate (CI job `formal-refinement`)
 
@@ -167,7 +183,9 @@ Three checks, each doing what it is good at:
 `check-mutants.sh` applies each `mutants/*.patch` to a scratch copy of the tree (`core/`, `spec/`,
 `formal/` and the directories the tag inventory sweeps), runs the gates, and passes only if every mutant is killed. It first checks that every
 gate passes on the unmutated tree, so a broken gate cannot count as a kill. For m3 and m4 the named
-Kani harness must itself report `VERIFICATION:- FAILED`.
+Kani harness must itself report `VERIFICATION:- FAILED`. For m15–m21 the designated native test
+must complete and fail; an unrelated failure does not kill the mutant. The optional `MUTANTS_ONLY`
+selection still runs the full unmutated baseline and accepts only exact patch basenames.
 
 | Mutant | Drift | Killed by (local run) |
 |---|---|---|
@@ -179,6 +197,13 @@ Kani harness must itself report `VERIFICATION:- FAILED`.
 | m6 | `compute_content_hash` strips an extra field | oracle, golden |
 | m7 | `verify_content_hash` stops pinning `canon_version` | oracle (pinned-constants check) |
 | m8 | `verify.rs` taxonomy tag renamed | tag inventory |
+| m15 | v3 authority signature preimage drops the semantic subject digest | oracle, golden |
+| m16 | capstone omits offline PoP verification | verdict differential (`capstone_4`) |
+| m17 | missing pinned revocation evidence treated as clean | verdict differential (missing-freshness cases) |
+| m18 | partial closure skips a failing PoP | adversarial partial-anchor regression |
+| m19 | failed-PoP intent consumes its outcome | adversarial orphan-outcome regression |
+| m20 | fresh Merkle root accepted without a non-membership path | verdict differential (`missing_path`) |
+| m21 | disclosure completeness counts only supplied openings | two-grant adversarial regression |
 
 A new drift class gets a new patch here before the gate that catches it is called done.
 
@@ -221,9 +246,10 @@ golden vectors, the adversarial suite, and the audit's 200k-document differentia
 
 ## TLA+ (server protocols)
 
-`tla/GrantLog.tla` models the broker_seq grant-transparency log:
+`tla/GrantLog.tla` models the historical broker_seq grant-transparency log
+and its pre-fence age-based recovery design:
 
-- Allocate, seal and insert run under `ingestMu`.
+- Allocate, seal and insert run under its modeled `ingestMu`.
 - A commit can be *ambiguous*: the server sees an error and frees `ingestMu` while the
   transaction is still open at the database. It later lands or aborts in a separate step, so an
   operator void can interleave with it.
@@ -232,15 +258,16 @@ golden vectors, the adversarial suite, and the audit's 200k-document differentia
 - `createCheckpoint` signs the recorded set.
 - An operator may void a reserved, unrecorded seq with a signed `grant_void` tombstone. The voided
   seq stays in the allocation max, and the voided grant id is retired: a later allocation for it is
-  refused (409), as in the Go server.
+  refused (409).
 - Two void guards are modelled as independent switches. `AgeFromLastAttempt` is a guard on the
   void itself: its minimum age is measured from the grant's last attempt, so none of its commits
   can still be open. `UniqueIndex` is not a void guard; it acts on the landing: once a tombstone
   holds the grant's record_id, an in-flight insert of that grant can only abort. Migration 0002
   falls back to a non-unique index when a historical duplicate exists.
-- The model has one global `ingestMu` and one attempt map, i.e. **one server process**. In Go the
-  latest-attempt map is per process, so on a multi-replica deployment only the UNIQUE index closes
-  the race; `void_index_only` is the result that carries over, `void_age_only` is not.
+- The model has one global `ingestMu` and one attempt map, i.e. **one historical server process**.
+  The current Go protocol uses a persisted project guard and fence instead. The old model remains
+  useful because it exhibits the starvation and unsafe-writer counterexamples that motivated the
+  replacement.
 
 There is no `CONSTRAINT`: TLC's liveness checking is unsound under one. Allocation beyond a bound
 is disabled inside `Begin`, and every passing config also asserts `BoundNotBinding`, so the bound
@@ -259,8 +286,8 @@ Each configuration fixes one implementation variant and asserts **one** outcome:
 | `GrantLog_void_age_only.cfg` | void age from the last attempt, no UNIQUE index (one process) | `AnchoredGapless` and `NoDuplicateSeq` hold (2.45M states) |
 | `GrantLog_void_index_only.cfg` | UNIQUE index, void age from the allocation | `AnchoredGapless` and `NoDuplicateSeq` hold (2.98M states: a different graph, in which voids do race in-flight retries) |
 | `GrantLog_void_backstop.cfg` | as `void_index_only`, non-vacuity | **violates** `NoVoidDuringFlight`: a grant is voided while a retry of it is in flight, and only the index stops that retry landing |
-| `GrantLog_void_reachable.cfg` | shipped design, non-vacuity | **violates** `NoVoid`: the guarded void is reachable, so the passing configs exercise it |
-| `GrantLog_fixed.cfg` | shipped design: release only fresh, max seqs; fail-closed checkpoint; operator void with both guards | `AnchoredGapless` and `NoDuplicateSeq` hold, exhaustively for 3 grants (2.45M states; with the age guard in force the void never races an in-flight insert, so this is the same graph as `void_age_only`) |
+| `GrantLog_void_reachable.cfg` | historical age-based design, non-vacuity | **violates** `NoVoid`: the guarded void is reachable, so the passing configs exercise it |
+| `GrantLog_fixed.cfg` | historical age-based design: release only fresh, max seqs; fail-closed checkpoint; operator void with both guards | `AnchoredGapless` and `NoDuplicateSeq` hold, exhaustively for 3 grants (2.45M states; with the age guard in force the void never races an in-flight insert, so this is the same graph as `void_age_only`) |
 | `GrantLog_wedge.cfg` | no void; clients may never retry | **violates** `CheckpointRecovers`: an orphaned seq wedges checkpointing forever |
 | `GrantLog_fair_retry.cfg` | no void; every client retries until it commits | `CheckpointRecovers` holds |
 | `GrantLog_void_starved.cfg` | operator void; a client may retry forever with every attempt failing | **violates** `CheckpointRecovers`: each retry restarts the void's last-attempt age, so the void is never enabled |
@@ -323,8 +350,9 @@ pinned to the immutable `v1.7.4` release and verified by sha256.
   1. **Aeneas** (Rust → Lean) or **Verus** for `canon.rs`, `hashx.rs`, `b64.rs` and
      `record.rs`. This replaces the corpus-based oracle gate with a mechanised proof that the Rust
      *is* the Lean model. It is the one real gap left in the seal argument.
-  2. A Lean model of the verifier verdict. Prove monotonicity under deletion of unsigned fields,
-     and that the capstone implies `ok ∧ keys_externally_pinned`. This would have caught audit
-     findings A and D by construction.
+  2. Prove the production verifier's evidence-pass-to-fact projection refines `Verdict.lean`;
+     the current executable corpus is differential, not a universal source-level proof. The
+     capstone intentionally requires externally pinned signer and role provenance while legacy
+     `ok` remains a separate integrity/diagnostic Boolean.
   3. Apalache or TLC on the checkpoint/anchor pipeline across replicas, if multi-instance
      deployment becomes supported.

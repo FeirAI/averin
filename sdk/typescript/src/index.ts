@@ -27,6 +27,83 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   "credential_grant",
 ]);
 
+/** Finalize server semantic defaults before an external authority signs v3 evidence.
+ * Sign this returned structured record, attach subject_digest/evidence_sig to its authority,
+ * then submit that same object. The idempotency key is supplied separately at submit time.
+ */
+export function prepareV3AuthoritySubject(draft: Record<string, unknown>): Record<string, unknown> {
+  const rec = structuredClone(draft);
+  if ("idempotency_key" in rec) throw new Error("supply idempotency_key to Client.submit");
+  for (const field of ["input", "output", "rationale"]) {
+    if (field in rec) throw new Error(`v3 requires a preapproved ${field}_commit, not raw ${field}`);
+  }
+  const profile: Record<string, string> = {
+    schema_version: "2", canon_version: "rcp-1", domain: "flightrecorder.record.v2",
+  };
+  for (const [field, value] of Object.entries(profile)) {
+    if (field in rec && rec[field] !== value) throw new Error(`v3 requires ${field}=${value}`);
+    rec[field] = value;
+  }
+  const defaults: Record<string, string> = {
+    agent_id: "unknown", agent_version: "unknown", event_type: "decision",
+    action: "", observed_via: "sdk", status: "ok",
+  };
+  for (const [field, value] of Object.entries(defaults)) {
+    if (!(field in rec)) rec[field] = value;
+  }
+  if (!("parent_span_id" in rec)) rec.parent_span_id = null;
+  for (const field of ["project_id", "record_id", "session_id", "span_id", "agent_ts",
+    "agent_id", "agent_version", "event_type", "action", "observed_via", "status"]) {
+    if (typeof rec[field] !== "string" || (field !== "action" && rec[field] === "")) {
+      throw new Error(`v3 requires final string ${field} before signing`);
+    }
+  }
+  if (rec.parent_span_id !== null && typeof rec.parent_span_id !== "string") {
+    throw new Error("v3 parent_span_id must be a string or null");
+  }
+  const authority = rec.authority;
+  if (authority === null || typeof authority !== "object" || Array.isArray(authority)) {
+    throw new Error("v3 requires a pinned external authority block");
+  }
+  const proof = authority as Record<string, unknown>;
+  if (!["policy_engine_signed", "human_signed", "delegate_signed"].includes(String(proof.source))) {
+    throw new Error("v3 requires a policy, human, or delegate authority source");
+  }
+  if (typeof proof.evidence_hash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(proof.evidence_hash)) {
+    throw new Error("v3 requires a canonical evidence_hash");
+  }
+  if ("subject_digest" in proof || "evidence_sig" in proof) {
+    throw new Error("v3 subject must be prepared before attaching its proof");
+  }
+  const projection = "averin.authority.subject.v1";
+  if (("proof_version" in proof && proof.proof_version !== "v3") ||
+      ("subject_projection" in proof && proof.subject_projection !== projection)) {
+    throw new Error("unsupported v3 authority proof profile");
+  }
+  proof.proof_version = "v3";
+  proof.subject_projection = projection;
+  if ("extensions" in rec && rec.extensions !== null) {
+    const extensions = rec.extensions;
+    if (typeof extensions !== "object" || Array.isArray(extensions)) {
+      throw new Error("v3 extensions must be an object");
+    }
+    const ext = extensions as Record<string, unknown>;
+    if ("content_preview" in ext) throw new Error("v3 requires commitments instead of raw content_preview");
+    if ("feir_evidence" in ext && ext.feir_evidence !== null) {
+      const evidence = ext.feir_evidence;
+      if (typeof evidence !== "object" || Array.isArray(evidence)) {
+        throw new Error("v3 feir_evidence must be an object");
+      }
+      const feir = evidence as Record<string, unknown>;
+      feir.capture_authority = rec.observed_via;
+      feir.lineage = {
+        session_id: rec.session_id, span_id: rec.span_id, parent_span_id: rec.parent_span_id,
+      };
+    }
+  }
+  return rec;
+}
+
 export interface RecordOpts {
   eventType?: EventType;
   status?: string;

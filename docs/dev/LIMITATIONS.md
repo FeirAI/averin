@@ -76,10 +76,19 @@ request may leave a COMMIT result unknown. Retry only the same idempotency or
 operation identity and reconcile the durable result. A database outage fails
 closed; it does not promise write availability.
 
+Recovery of older stranded broker sequences uses a permanent project fence. It
+requires a coordinated rollout that removes all pre-fence writer credentials,
+sessions, and prepared transactions before new writers or recovery run. A
+schema startup check cannot stop an already-running old writer. See the
+[operator cutoff](../operator-verification.md). Recovery liveness assumes the
+database resolves in-flight transactions and an authorized operator is
+eventually scheduled; permanent database failure has no liveness promise.
+
 The in-memory implementation mirrors transactional rollback and project
-isolation but is volatile across process restart. A multi-replica deployment
-claim still needs authenticated capability-project binding, scoped nonce
-claims and bounded sequence recovery tested together. Until then, keep the
+isolation but is volatile across process restart. Online capability use now
+checks its signed project against the authenticated project. A multi-replica
+deployment claim still needs scoped nonce claims and bounded sequence recovery
+tested together. Until then, keep the
 single-writer-per-project deployment policy even though frontier and checkpoint
 writes now serialize across replicas.
 
