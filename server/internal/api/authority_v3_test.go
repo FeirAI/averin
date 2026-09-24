@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -14,6 +15,71 @@ import (
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/store"
 )
+
+// Govder emits this exact signed budget-safe-mode wire record in its fixture
+// test. The generic endpoint must accept its v3 ID and body-bound proof, while
+// continuing to reserve bare UUIDv5 IDs for broker/introspection records.
+func TestGovderBudgetSafeModeV3FixtureSealsAtGenericIngest(t *testing.T) {
+	fixtureBytes, err := os.ReadFile("../../../spec/fixtures/govder-budget-safe-mode-v3.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		PublicKey string         `json:"public_key"`
+		Record    map[string]any `json:"record"`
+	}
+	if err := json.Unmarshal(fixtureBytes, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	encoded := strings.TrimPrefix(fixture.PublicKey, "ed25519pub:")
+	if encoded == fixture.PublicKey {
+		t.Fatal("Govder fixture has no ed25519pub key prefix")
+	}
+	pub, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		t.Fatalf("invalid Govder fixture public key: %v", err)
+	}
+	id, _ := fixture.Record["record_id"].(string)
+	if !strings.HasPrefix(id, "govder-v3-") {
+		t.Fatalf("Govder fixture record ID is outside its event namespace: %q", id)
+	}
+	recorder, err := core.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewMem()
+	h := api.New(recorder, st, "k0").WithPolicyEngineKey("policy_engine_signed", ed25519.PublicKey(pub)).Routes()
+	raw, err := json.Marshal(fixture.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := do(t, h, "POST", "/v2/records", string(raw)); code != http.StatusCreated {
+		t.Fatalf("Govder v3 budget event did not seal (%d): %s", code, body)
+	}
+	stored, err := st.AllRecords("acme")
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("Govder budget event storage: %d, %v", len(stored), err)
+	}
+	if got, err := recorder.VerifyAuthorityRecord(stored[0].JSON, string(fixture.PublicKey)); err != nil || got != "verified" {
+		t.Fatalf("Govder budget event v3 authority = %q, %v", got, err)
+	}
+	// The guard remains effective for the same producer's historical bare
+	// UUIDv5-shaped ID, even if accompanied by an otherwise valid v3 proof.
+	bare := strings.TrimPrefix(id, "govder-v3-")
+	fixture.Record["record_id"] = bare
+	fixture.Record["idempotency_key"] = "govder:bare-uuid-v5-rejected"
+	raw, err = json.Marshal(fixture.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := do(t, h, "POST", "/v2/records", string(raw)); code != http.StatusBadRequest || !strings.Contains(body, "reserved") {
+		t.Fatalf("bare UUIDv5 namespace was not rejected before seal (%d): %s", code, body)
+	}
+	stored, err = st.AllRecords("acme")
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("rejected bare UUIDv5 caused durable effect: %d, %v", len(stored), err)
+	}
+}
 
 func TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite(t *testing.T) {
 	fixtureBytes, err := os.ReadFile("../../../spec/golden-vectors/authority-sdk-v3.json")
