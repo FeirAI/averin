@@ -12,7 +12,8 @@ Cryptographic validity is represented by the fixed `sealed` and `roleSigned` set
 oracle and Rust property corpus check the production extraction against this model.
 
 Removing independently authenticated adverse evidence is outside `support_erasure`: it changes
-`Fixed.revoked`, `adverseOpening` or `adverseAnchor` and can remove a real contradiction.
+`Fixed.revoked`, `checkedContradiction`, `adverseOpening` or `adverseAnchor` and can remove a real
+contradiction.
 Production must still honor every such item while present.
 
 Plan 009 adds `historicalAuthorized` (`historical_authorized_as_of_snapshot`). Its positive
@@ -123,6 +124,11 @@ structure Fixed where
   adverseOpening : Bool
   -- Verified TSA anchors with reversed or noncanonical time also contradict temporal authority.
   adverseAnchor : Bool
+  -- Other checked Tier-B contradictions (an unmatched-use violation, a rejected committed grant,
+  -- bounded-reuse overspend or replay, a cosignature, delegation or broker-log failure). Like
+  -- `revoked`, authenticated adverse evidence against current authorization and the capstones;
+  -- the historical claim uses its own count, `historicalContradiction`, instead.
+  checkedContradiction : Bool
   revocationIssuerPinned : Bool
   disclosedFresh : Bool
   merkleFresh : Bool
@@ -385,7 +391,7 @@ inductive Supports (f : Fixed) (a : List Attachment) : Claim → Prop where
       (hr : RoleContributorsProven f a)
       (hu : UseSurfaceValid f)
       (hc : ¬ CommittedContradiction f) (hn : NoAuthenticatedRevocation f)
-      (ho : NoAdverseOpening f)
+      (hk : f.checkedContradiction = false) (ho : NoAdverseOpening f)
       (hv : RevocationReady f a) (hd : DisclosureReady f a)
       (hat : f.policy.requireAttestation = false ∨ AttestationReady f a) :
       Supports f a .authorized
@@ -397,7 +403,8 @@ inductive Supports (f : Fixed) (a : List Attachment) : Claim → Prop where
       (hat : f.policy.requireAttestation = false ∨ AttestationReady f a) :
       Supports f a .historicalAuthorized
   | temporal (hc : ¬ CommittedContradiction f)
-      (hn : NoAuthenticatedRevocation f) (ho : NoAdverseOpening f)
+      (hn : NoAuthenticatedRevocation f) (hk : f.checkedContradiction = false)
+      (ho : NoAdverseOpening f)
       (hv : RevocationReady f a) (hat : AttestationReady f a) : Supports f a .temporal
   | completeBrokered (ha : Supports f a .authorized)
       (ht : Supports f a .temporal) (hc : BrokeredCapstone f) : Supports f a .completeBrokered
@@ -425,7 +432,8 @@ instance (f : Fixed) (a : List Attachment) : Decidable (AuthenticatedP f a) := b
 
 def AuthorizedP (f : Fixed) (a : List Attachment) : Prop :=
   AuthenticatedP f a ∧ RoleContributorsProven f a ∧ UseSurfaceValid f ∧
-  ¬ CommittedContradiction f ∧ NoAuthenticatedRevocation f ∧ NoAdverseOpening f ∧
+  ¬ CommittedContradiction f ∧ NoAuthenticatedRevocation f ∧
+  f.checkedContradiction = false ∧ NoAdverseOpening f ∧
   RevocationReady f a ∧ DisclosureReady f a ∧
   (f.policy.requireAttestation = false ∨ AttestationReady f a)
 
@@ -445,7 +453,8 @@ instance (f : Fixed) (a : List Attachment) : Decidable (HistoricalP f a) := by
 
 def TemporalP (f : Fixed) (a : List Attachment) : Prop :=
   ¬ CommittedContradiction f ∧ NoAuthenticatedRevocation f ∧
-  NoAdverseOpening f ∧ RevocationReady f a ∧ AttestationReady f a
+  f.checkedContradiction = false ∧ NoAdverseOpening f ∧ RevocationReady f a ∧
+  AttestationReady f a
 
 instance (f : Fixed) (a : List Attachment) : Decidable (TemporalP f a) := by
   unfold TemporalP
@@ -474,16 +483,17 @@ def supportB (f : Fixed) (a : List Attachment) : Claim → Bool
 theorem authorizedP_iff (f : Fixed) (a : List Attachment) :
     AuthorizedP f a ↔ Supports f a .authorized := by
   constructor
-  · rintro ⟨ha, hr, hu, hc, hn, ho, hv, hd, hp⟩
+  · rintro ⟨ha, hr, hu, hc, hn, hk, ho, hv, hd, hp⟩
     exact .authorized (.authenticated (.integrity ha.1.1 ha.1.2) ha.2)
-      hr hu hc hn ho hv hd hp
+      hr hu hc hn hk ho hv hd hp
   · intro h
     cases h with
-    | authorized ha hr hu hc hn ho hv hd hp =>
+    | authorized ha hr hu hc hn hk ho hv hd hp =>
         cases ha with
         | authenticated hi hrec =>
             cases hi with
-            | integrity hne hs => exact ⟨⟨⟨hne, hs⟩, hrec⟩, hr, hu, hc, hn, ho, hv, hd, hp⟩
+            | integrity hne hs =>
+                exact ⟨⟨⟨hne, hs⟩, hrec⟩, hr, hu, hc, hn, hk, ho, hv, hd, hp⟩
 
 theorem historicalP_iff (f : Fixed) (a : List Attachment) :
     HistoricalP f a ↔ Supports f a .historicalAuthorized := by
@@ -511,34 +521,34 @@ theorem supportP_iff (f : Fixed) (a : List Attachment) (c : Claim) :
     | authorized =>
         exact (authorizedP_iff f a).mp h
     | historicalAuthorized => exact (historicalP_iff f a).mp h
-    | temporal => exact .temporal h.1 h.2.1 h.2.2.1 h.2.2.2.1 h.2.2.2.2
+    | temporal => exact .temporal h.1 h.2.1 h.2.2.1 h.2.2.2.1 h.2.2.2.2.1 h.2.2.2.2.2
     | completeBrokered =>
         rcases h with ⟨ha, ht, hb⟩
         exact .completeBrokered ((authorizedP_iff f a).mp ha)
-          (.temporal ht.1 ht.2.1 ht.2.2.1 ht.2.2.2.1 ht.2.2.2.2) hb
+          (.temporal ht.1 ht.2.1 ht.2.2.1 ht.2.2.2.1 ht.2.2.2.2.1 ht.2.2.2.2.2) hb
     | completeIntrospected =>
         rcases h with ⟨ha, ht, hb⟩
         exact .completeIntrospected ((authorizedP_iff f a).mp ha)
-          (.temporal ht.1 ht.2.1 ht.2.2.1 ht.2.2.2.1 ht.2.2.2.2) hb
+          (.temporal ht.1 ht.2.1 ht.2.2.1 ht.2.2.2.1 ht.2.2.2.2.1 ht.2.2.2.2.2) hb
   · intro h
     cases h with
     | integrity hn hs => exact ⟨hn, hs⟩
     | authenticated hi hp =>
         cases hi with
         | integrity hn hs => exact ⟨⟨hn, hs⟩, hp⟩
-    | authorized ha hr hu hc hn ho hv hd hp =>
-        exact (authorizedP_iff f a).mpr (.authorized ha hr hu hc hn ho hv hd hp)
+    | authorized ha hr hu hc hn hk ho hv hd hp =>
+        exact (authorizedP_iff f a).mpr (.authorized ha hr hu hc hn hk ho hv hd hp)
     | historicalAuthorized ha hsel hr hu hc ho hh hs hd hat =>
         exact (historicalP_iff f a).mpr (.historicalAuthorized ha hsel hr hu hc ho hh hs hd hat)
-    | temporal hc hn ho hv hat => exact ⟨hc, hn, ho, hv, hat⟩
+    | temporal hc hn hk ho hv hat => exact ⟨hc, hn, hk, ho, hv, hat⟩
     | completeBrokered ha ht hb =>
         cases ht with
-        | temporal hc hn ho hv hat =>
-            exact ⟨(authorizedP_iff f a).mpr ha, ⟨hc, hn, ho, hv, hat⟩, hb⟩
+        | temporal hc hn hk ho hv hat =>
+            exact ⟨(authorizedP_iff f a).mpr ha, ⟨hc, hn, hk, ho, hv, hat⟩, hb⟩
     | completeIntrospected ha ht hb =>
         cases ht with
-        | temporal hc hn ho hv hat =>
-            exact ⟨(authorizedP_iff f a).mpr ha, ⟨hc, hn, ho, hv, hat⟩, hb⟩
+        | temporal hc hn hk ho hv hat =>
+            exact ⟨(authorizedP_iff f a).mpr ha, ⟨hc, hn, hk, ho, hv, hat⟩, hb⟩
 
 theorem supportB_iff (f : Fixed) (a : List Attachment) (c : Claim) :
     supportB f a c = true ↔ Supports f a c := by
@@ -578,7 +588,8 @@ def decideClaim (f : Fixed) (a : List Attachment) (c : Claim) : Decision :=
   else if (c = .authorized ∨ c = .temporal ∨ c = .completeBrokered ∨
       c = .completeIntrospected) ∧
       (CommittedContradiction f ∨ ¬ NoAuthenticatedRevocation f ∨
-        f.adverseOpening = true ∨ f.adverseAnchor = true) then .refuted
+        f.checkedContradiction = true ∨ f.adverseOpening = true ∨
+        f.adverseAnchor = true) then .refuted
   else if c != .temporal && !supportB f a .integrity then .refuted
   else if supportB f a c then .satisfied else .insufficient
 
@@ -699,16 +710,16 @@ theorem support_erasure {f : Fixed} {small large : List Attachment}
   | integrity hn hs => exact .integrity hn hs
   | authenticated hi hp ih =>
       exact .authenticated ih (fun r hr => recordProven_mono h (hp r hr))
-  | authorized ha hr hu hc hn ho hv hd hat ih =>
-      exact .authorized ih (roleContributors_mono h hr) hu hc hn ho
+  | authorized ha hr hu hc hn hk ho hv hd hat ih =>
+      exact .authorized ih (roleContributors_mono h hr) hu hc hn hk ho
         (revocationReady_mono h hv) (disclosureReady_mono h hd)
         (hat.elim Or.inl (fun ha => Or.inr (attestationReady_mono h ha)))
   | historicalAuthorized ha hsel hr hu hc ho hh hs hd hat ih =>
       exact .historicalAuthorized ih hsel (roleContributors_mono h hr) hu hc ho hh
         (snapshotReady_mono h hs) (disclosureReady_mono h hd)
         (hat.elim Or.inl (fun ha => Or.inr (attestationReady_mono h ha)))
-  | temporal hc hn ho hv hat =>
-      exact .temporal hc hn ho (revocationReady_mono h hv) (attestationReady_mono h hat)
+  | temporal hc hn hk ho hv hat =>
+      exact .temporal hc hn hk ho (revocationReady_mono h hv) (attestationReady_mono h hat)
   | completeBrokered ha ht hc iha iht => exact .completeBrokered iha iht hc
   | completeIntrospected ha ht hc iha iht => exact .completeIntrospected iha iht hc
 
@@ -731,7 +742,7 @@ theorem committed_contradiction_refutes_authorization (f : Fixed) (a : List Atta
     (h : CommittedContradiction f) : ¬ Supports f a .authorized := by
   intro hs
   cases hs with
-  | authorized _ _ _ hc _ _ _ _ _ => exact hc h
+  | authorized _ _ _ hc _ _ _ _ _ _ => exact hc h
 
 theorem committed_contradiction_refutes_capstones (f : Fixed) (a : List Attachment)
     (h : CommittedContradiction f) :
@@ -756,11 +767,11 @@ theorem capstone_prerequisites {f : Fixed} {a : List Attachment}
   cases hc with
   | completeBrokered ha ht hcap =>
       cases ha with
-      | authorized hAuth hr _ hcontra _ _ _ _ _ =>
+      | authorized hAuth hr _ hcontra _ _ _ _ _ _ =>
           cases hAuth with
           | authenticated _ hp =>
               cases ht with
-              | temporal _ _ _ hv hat =>
+              | temporal _ _ _ _ hv hat =>
                   exact ⟨(fun r hm => (hp r hm).2.2.1),
                     (fun r hm hrole => (hr.2 r hm hrole).2.2), hv, hat, hcontra, hcap⟩
 
@@ -774,11 +785,11 @@ theorem introspected_capstone_prerequisites {f : Fixed} {a : List Attachment}
   cases hc with
   | completeIntrospected ha ht hcap =>
       cases ha with
-      | authorized hAuth hr _ hcontra _ _ _ _ _ =>
+      | authorized hAuth hr _ hcontra _ _ _ _ _ _ =>
           cases hAuth with
           | authenticated _ hp =>
               cases ht with
-              | temporal _ _ _ hv hat =>
+              | temporal _ _ _ _ hv hat =>
                   exact ⟨(fun r hm => (hp r hm).2.2.1),
                     (fun r hm hrole => (hr.2 r hm hrole).2.2), hv, hat, hcontra, hcap⟩
 

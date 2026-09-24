@@ -295,150 +295,272 @@ pub(super) struct ValidatedFacts {
     pub(super) policy: ClaimPolicy,
 }
 
-impl ValidatedFacts {
-    pub(super) fn decide(&self) -> ClaimResults {
-        use ClaimDecision::{Insufficient, Refuted, Satisfied};
-        // Require one externally pinned signing key for every verified record, with the record
-        // hash bound to that exact key. The vector is emitted only after the seal check passes.
-        let pinned_record_keys = self.record_count > 0
-            && self.pinned_record_seals.len() == self.record_count
-            && self.pinned_record_seals.iter().all(|p| {
-                !p.record_hash.is_empty() && self.pinned_signer_keys.contains(&p.key_bytes)
-            });
-        let anchored_latest = self.anchors.iter().any(|a| {
-            a.sequence == self.latest_checkpoint_sequence
-                && !a.checkpoint_hash.is_empty()
-                && !a.timestamp.is_empty()
-        });
-        let integrity = if self.structural_integrity {
-            Satisfied
-        } else {
-            Refuted
-        };
-        let authenticated = if integrity != Satisfied {
-            integrity
-        } else if pinned_record_keys {
-            Satisfied
-        } else {
-            Insufficient
-        };
-        let revocation = match self.policy.revocation {
-            RevocationRequirement::Pinned => {
-                !self.revocation_issuer_pinned || self.disclosed_revocation_fresh
-            }
-            RevocationRequirement::Disclosed => {
-                self.revocation_issuer_pinned && self.disclosed_revocation_fresh
-            }
-            RevocationRequirement::Merkle => {
-                self.revocation_issuer_pinned
-                    && self.merkle_revocation_fresh
-                    && self.merkle_nonmembership_complete
-            }
-            RevocationRequirement::Both => {
-                self.revocation_issuer_pinned
-                    && self.disclosed_revocation_fresh
-                    && self.merkle_revocation_fresh
-                    && self.merkle_nonmembership_complete
-            }
-        };
-        let adverse = self.immutable_record_contradiction
-            || self.checked_contradiction
-            || self.revoked_membership
-            || self.adverse_disclosure
-            || self.adverse_anchor;
-        let temporal = if adverse {
-            Refuted
-        } else if anchored_latest && self.attestation_valid && revocation {
-            Satisfied
-        } else {
-            Insufficient
-        };
-        let evidence_ready = self.pinned_role_authority
-            && revocation
-            && (!self.policy.require_disclosure || self.disclosure_complete)
-            && (!self.policy.require_attestation || self.attestation_valid);
-        let authorized = if adverse || authenticated == Refuted {
-            Refuted
-        } else if authenticated == Satisfied
-            && evidence_ready
-            && (self.brokered_use_valid || self.introspected_use_valid)
-        {
-            Satisfied
-        } else {
-            Insufficient
-        };
-        // Plan 009: the historical claim replaces current-revocation readiness and adverse
-        // revocation membership with the per-receipt ordering against an authenticated snapshot.
-        // Every other obligation of `authorized` still applies. Under the strict policy it is
-        // never positive.
-        let h = &self.historical;
-        // The caller's revocation mode, applied to the v2 snapshot evidence.
-        let historical_revocation = self.revocation_issuer_pinned
-            && match self.policy.revocation {
-                RevocationRequirement::Pinned => true,
-                RevocationRequirement::Disclosed => h.v2_list_usable,
-                RevocationRequirement::Merkle => h.v2_merkle_usable && h.merkle_paths_complete,
-                RevocationRequirement::Both => {
-                    h.v2_list_usable && h.v2_merkle_usable && h.merkle_paths_complete
-                }
-            };
-        let historical_authorized_as_of_snapshot = if !h.selected {
-            Insufficient
-        } else if self.immutable_record_contradiction
-            || h.checked_contradiction
-            || self.adverse_disclosure
-            || self.adverse_anchor
-            || h.adverse
-            || authenticated == Refuted
-        {
-            Refuted
-        } else if authenticated == Satisfied
-            && self.pinned_role_authority
-            && h.snapshot_verified
-            && historical_revocation
-            && (!self.policy.require_disclosure || self.disclosure_complete)
-            && (!self.policy.require_attestation || self.attestation_valid)
-            && (h.brokered_use_valid || h.introspected_use_valid)
-        {
-            Satisfied
-        } else {
-            Insufficient
-        };
-        let complete_brokered = if authorized == Refuted {
-            Refuted
-        } else if authorized == Satisfied && temporal == Satisfied && self.capstone.brokered() {
-            Satisfied
-        } else {
-            Insufficient
-        };
-        let complete_introspected = if authorized == Refuted {
-            Refuted
-        } else if authorized == Satisfied && temporal == Satisfied && self.capstone.introspected() {
-            Satisfied
-        } else {
-            Insufficient
-        };
-        let requested_decision = match self.policy.requested {
-            RequestedClaim::Integrity => integrity,
-            RequestedClaim::Authenticated => authenticated,
-            RequestedClaim::Authorized => authorized,
-            RequestedClaim::HistoricalAuthorizedAsOfSnapshot => {
-                historical_authorized_as_of_snapshot
-            }
-            RequestedClaim::CompleteBrokered => complete_brokered,
-            RequestedClaim::CompleteIntrospected => complete_introspected,
-        };
-        ClaimResults {
-            integrity,
-            authenticated,
-            authorized,
-            historical_authorized_as_of_snapshot,
-            temporal,
-            complete_brokered,
-            complete_introspected,
-            requested: self.policy.requested,
-            requested_decision,
+// The list checks of the kernel are search loops: the loop condition is the search (no closure,
+// iterator adapter or early return), so Charon/Aeneas extract them (plan 012,
+// `formal/production/Refinement/VerdictLists.lean`).
+
+/// `key` is one of the externally pinned signer keys.
+fn key_pinned(keys: &[[u8; 32]], key: &[u8; 32]) -> bool {
+    let mut i = 0;
+    while i < keys.len() && keys[i] != *key {
+        i += 1;
+    }
+    i < keys.len()
+}
+
+/// The seal names a record hash and an externally pinned key.
+fn seal_pinned(seal: &PinnedRecordSeal, keys: &[[u8; 32]]) -> bool {
+    !seal.record_hash.is_empty() && key_pinned(keys, &seal.key_bytes)
+}
+
+/// Every seal names a record hash and an externally pinned key.
+fn seals_pinned(seals: &[PinnedRecordSeal], keys: &[[u8; 32]]) -> bool {
+    let mut i = 0;
+    while i < seals.len() && seal_pinned(&seals[i], keys) {
+        i += 1;
+    }
+    i == seals.len()
+}
+
+/// The anchor is a verified TSA anchor of the checkpoint with this sequence.
+fn anchors_checkpoint(a: &AnchoredCheckpoint, sequence: i64) -> bool {
+    a.sequence == sequence && !a.checkpoint_hash.is_empty() && !a.timestamp.is_empty()
+}
+
+/// Some anchor is a verified TSA anchor of the checkpoint with this sequence.
+fn anchored_at(anchors: &[AnchoredCheckpoint], sequence: i64) -> bool {
+    let mut i = 0;
+    while i < anchors.len() && !anchors_checkpoint(&anchors[i], sequence) {
+        i += 1;
+    }
+    i < anchors.len()
+}
+
+// The claim decision kernel. Plan 012 extracts every function from here to `decide_claims` from
+// this source with Charon/Aeneas and proves each claim function equal to the Lean verdict model's
+// `decideClaim` (`formal/production/Refinement/Verdict.lean`), so the model's support-erasure and
+// claim-order theorems hold for this code. Keep it in the extractable subset: plain search loops,
+// small helper functions, no closures, iterator adapters or derived `PartialEq`. A function that
+// takes `f` calls its helpers before it branches on a field of `f` (otherwise Aeneas passes a
+// rebuilt `f` to the helper), a negation is kept first in a disjunction (Aeneas mistypes a
+// trailing `!x` operand as `Prop`), and a conjunction with a `bool` parameter uses the
+// non-short-circuit `&`/`|` (Aeneas cannot join that branch; every operand is a plain value, so
+// the result is the same).
+
+/// A claim is refuted by fixed adverse evidence, else satisfied by its support, else insufficient.
+fn decision(refuted: bool, satisfied: bool) -> ClaimDecision {
+    if refuted {
+        ClaimDecision::Refuted
+    } else if satisfied {
+        ClaimDecision::Satisfied
+    } else {
+        ClaimDecision::Insufficient
+    }
+}
+
+/// Require one externally pinned signing key for every verified record, with the record hash
+/// bound to that exact key. The vector is emitted only after the seal check passes.
+fn pinned_record_keys(f: &ValidatedFacts) -> bool {
+    f.record_count > 0
+        && f.pinned_record_seals.len() == f.record_count
+        && seals_pinned(&f.pinned_record_seals, &f.pinned_signer_keys)
+}
+
+/// Current revocation readiness under the caller's revocation mode.
+fn revocation_ready(f: &ValidatedFacts) -> bool {
+    match f.policy.revocation {
+        RevocationRequirement::Pinned => {
+            !f.revocation_issuer_pinned || f.disclosed_revocation_fresh
         }
+        RevocationRequirement::Disclosed => {
+            f.revocation_issuer_pinned && f.disclosed_revocation_fresh
+        }
+        RevocationRequirement::Merkle => {
+            f.revocation_issuer_pinned
+                && f.merkle_revocation_fresh
+                && f.merkle_nonmembership_complete
+        }
+        RevocationRequirement::Both => {
+            f.revocation_issuer_pinned
+                && f.disclosed_revocation_fresh
+                && f.merkle_revocation_fresh
+                && f.merkle_nonmembership_complete
+        }
+    }
+}
+
+/// Authenticated adverse evidence against current authorization, the temporal claim and the
+/// capstones.
+fn adverse(f: &ValidatedFacts) -> bool {
+    f.immutable_record_contradiction
+        || f.checked_contradiction
+        || f.revoked_membership
+        || f.adverse_disclosure
+        || f.adverse_anchor
+}
+
+/// The caller's disclosure and attestation requirements, shared by `authorized` and the
+/// historical claim.
+fn policy_evidence_ready(f: &ValidatedFacts) -> bool {
+    (!f.policy.require_disclosure || f.disclosure_complete)
+        && (!f.policy.require_attestation || f.attestation_valid)
+}
+
+/// Every obligation of `authorized` beyond authentication and the absence of adverse evidence.
+fn authorization_ready(f: &ValidatedFacts, revocation: bool) -> bool {
+    f.pinned_role_authority
+        && revocation
+        && policy_evidence_ready(f)
+        && (f.brokered_use_valid || f.introspected_use_valid)
+}
+
+/// `authorized`, `complete_brokered` and `complete_introspected` are refuted by adverse evidence
+/// or with `integrity`.
+fn authorization_refuted(f: &ValidatedFacts) -> bool {
+    let adverse = adverse(f);
+    !f.structural_integrity || adverse
+}
+
+/// The positive `authorized` claim (when it is not refuted).
+fn authorized(f: &ValidatedFacts, pinned_record_keys: bool, revocation: bool) -> bool {
+    let ready = authorization_ready(f, revocation);
+    f.structural_integrity && pinned_record_keys && ready
+}
+
+/// The positive `temporal` claim (when it is not refuted).
+fn temporal(f: &ValidatedFacts, anchored_latest: bool, revocation: bool) -> bool {
+    anchored_latest && f.attestation_valid && revocation
+}
+
+/// Plan 009: the caller's revocation mode, applied to the v2 snapshot evidence.
+fn historical_revocation(f: &ValidatedFacts) -> bool {
+    let h = &f.historical;
+    f.revocation_issuer_pinned
+        && match f.policy.revocation {
+            RevocationRequirement::Pinned => true,
+            RevocationRequirement::Disclosed => h.v2_list_usable,
+            RevocationRequirement::Merkle => h.v2_merkle_usable && h.merkle_paths_complete,
+            RevocationRequirement::Both => {
+                h.v2_list_usable && h.v2_merkle_usable && h.merkle_paths_complete
+            }
+        }
+}
+
+/// Plan 009: adverse evidence against the historical claim. The per-receipt ordering and the
+/// historical contradiction count replace current revocation membership and the legacy count.
+fn historical_adverse(f: &ValidatedFacts) -> bool {
+    f.immutable_record_contradiction
+        || f.historical.checked_contradiction
+        || f.adverse_disclosure
+        || f.adverse_anchor
+        || f.historical.adverse
+}
+
+/// Plan 009: every obligation of the historical claim beyond authentication and the absence of
+/// adverse evidence.
+fn historical_ready(f: &ValidatedFacts) -> bool {
+    f.pinned_role_authority
+        && f.historical.snapshot_verified
+        && historical_revocation(f)
+        && policy_evidence_ready(f)
+        && (f.historical.brokered_use_valid || f.historical.introspected_use_valid)
+}
+
+/// `integrity` is satisfied or refuted.
+fn integrity_claim(f: &ValidatedFacts) -> ClaimDecision {
+    decision(!f.structural_integrity, true)
+}
+
+fn authenticated_claim(f: &ValidatedFacts, pinned_record_keys: bool) -> ClaimDecision {
+    let integrity = f.structural_integrity;
+    let refuted = !integrity;
+    let satisfied = integrity & pinned_record_keys;
+    decision(refuted, satisfied)
+}
+
+fn authorized_claim(
+    f: &ValidatedFacts,
+    pinned_record_keys: bool,
+    revocation: bool,
+) -> ClaimDecision {
+    let refuted = authorization_refuted(f);
+    let satisfied = authorized(f, pinned_record_keys, revocation);
+    decision(refuted, satisfied)
+}
+
+fn temporal_claim(f: &ValidatedFacts, anchored_latest: bool, revocation: bool) -> ClaimDecision {
+    let refuted = adverse(f);
+    let satisfied = temporal(f, anchored_latest, revocation);
+    decision(refuted, satisfied)
+}
+
+/// Plan 009: the historical claim replaces current-revocation readiness and adverse revocation
+/// membership with the per-receipt ordering against an authenticated snapshot. Every other
+/// obligation of `authorized` still applies. Under the strict policy it is never positive (and
+/// never refuted).
+fn historical_claim(f: &ValidatedFacts, pinned_record_keys: bool) -> ClaimDecision {
+    let adverse = historical_adverse(f);
+    let ready = historical_ready(f);
+    let selected = f.historical.selected;
+    let integrity = f.structural_integrity;
+    let refuted = selected & (!integrity | adverse);
+    let satisfied = selected & integrity & pinned_record_keys & ready;
+    decision(refuted, satisfied)
+}
+
+/// A capstone: `authorized` and `temporal` satisfied and the surface's capstone checks.
+fn complete_claim(
+    f: &ValidatedFacts,
+    pinned_record_keys: bool,
+    anchored_latest: bool,
+    revocation: bool,
+    surface: bool,
+) -> ClaimDecision {
+    let refuted = authorization_refuted(f);
+    let authorized = authorized(f, pinned_record_keys, revocation);
+    let temporal = temporal(f, anchored_latest, revocation);
+    decision(refuted, authorized && temporal && surface)
+}
+
+/// The claim decision kernel: a pure function of the checked facts and the caller's policy.
+pub(super) fn decide_claims(f: &ValidatedFacts) -> ClaimResults {
+    let pinned_record_keys = pinned_record_keys(f);
+    let anchored_latest = anchored_at(&f.anchors, f.latest_checkpoint_sequence);
+    let revocation = revocation_ready(f);
+    let brokered = f.capstone.brokered();
+    let introspected = f.capstone.introspected();
+    let integrity = integrity_claim(f);
+    let authenticated = authenticated_claim(f, pinned_record_keys);
+    let authorized = authorized_claim(f, pinned_record_keys, revocation);
+    let historical_authorized_as_of_snapshot = historical_claim(f, pinned_record_keys);
+    let temporal = temporal_claim(f, anchored_latest, revocation);
+    let complete_brokered =
+        complete_claim(f, pinned_record_keys, anchored_latest, revocation, brokered);
+    let complete_introspected = complete_claim(
+        f,
+        pinned_record_keys,
+        anchored_latest,
+        revocation,
+        introspected,
+    );
+    let requested_decision = match f.policy.requested {
+        RequestedClaim::Integrity => integrity,
+        RequestedClaim::Authenticated => authenticated,
+        RequestedClaim::Authorized => authorized,
+        RequestedClaim::HistoricalAuthorizedAsOfSnapshot => historical_authorized_as_of_snapshot,
+        RequestedClaim::CompleteBrokered => complete_brokered,
+        RequestedClaim::CompleteIntrospected => complete_introspected,
+    };
+    ClaimResults {
+        integrity,
+        authenticated,
+        authorized,
+        historical_authorized_as_of_snapshot,
+        temporal,
+        complete_brokered,
+        complete_introspected,
+        requested: f.policy.requested,
+        requested_decision,
     }
 }
 
@@ -492,7 +614,9 @@ mod differential {
             HistoricalFacts {
                 selected: bit(n, 0),
                 snapshot_verified: fresh,
-                brokered_use_valid: bit(n, 8) && proven && (h.merkle.is_none() || h.path),
+                // Each receipt's grant state is certified by the disclosed list or by its own
+                // Merkle path (the `historicalUse` fact of `Refinement.Corresponds`).
+                brokered_use_valid: bit(n, 8) && proven && (h.list.is_some() || h.path),
                 introspected_use_valid: false,
                 adverse,
                 checked_contradiction: h.contradiction,
@@ -697,6 +821,7 @@ mod differential {
         match name {
             "adverse_opening" => result.adverse_disclosure = true,
             "adverse_anchor" => result.adverse_anchor = true,
+            "checked_contradiction" => result.checked_contradiction = true,
             "missing_seal" => {
                 result.structural_integrity = false;
                 result.pinned_record_seals.clear();
@@ -755,7 +880,7 @@ mod differential {
         let rows = rows.as_array().expect("oracle rows");
         assert_eq!(
             rows.len(),
-            1323,
+            1324,
             "all finite fact, capstone and historical cases"
         );
         for row in rows {
@@ -763,7 +888,7 @@ mod differential {
                 .get("name")
                 .and_then(CanonValue::as_str)
                 .expect("case name");
-            let got = facts(name).decide();
+            let got = decide_claims(&facts(name));
             for (field, actual) in [
                 ("integrity", got.integrity),
                 ("authenticated", got.authenticated),

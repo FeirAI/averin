@@ -1063,4 +1063,573 @@ def sign.preimage
     ok (some pre1)
   else ok none
 
+/-- [averin_decision_core::verify::verdict::{averin_decision_core::verify::verdict::CapstoneFacts}::base]:
+    Source: 'core/src/verify/verdict.rs', lines 217:4-234:5 -/
+def verify.verdict.CapstoneFacts.base
+  (self : verify.verdict.CapstoneFacts) : Result Bool := do
+  if self.manifest
+  then
+    if self.two_phase
+    then
+      if self.no_incomplete_intent
+      then
+        if self.taxonomy
+        then
+          if self.every_action_verified
+          then
+            if self.every_pop_reverified
+            then
+              if self.grant_log
+              then
+                if self.attestation
+                then
+                  if self.no_violation
+                  then
+                    if self.no_pending
+                    then
+                      if self.bounded_reuse
+                      then
+                        if self.cosignatures
+                        then
+                          if self.delegation
+                          then
+                            if self.revocation
+                            then
+                              if self.federation
+                              then ok self.coverage
+                              else ok false
+                            else ok false
+                          else ok false
+                        else ok false
+                      else ok false
+                    else ok false
+                  else ok false
+                else ok false
+              else ok false
+            else ok false
+          else ok false
+        else ok false
+      else ok false
+    else ok false
+  else ok false
+
+/-- [averin_decision_core::verify::verdict::{averin_decision_core::verify::verdict::CapstoneFacts}::brokered]:
+    Source: 'core/src/verify/verdict.rs', lines 235:4-237:5 -/
+def verify.verdict.CapstoneFacts.brokered
+  (self : verify.verdict.CapstoneFacts) : Result Bool := do
+  let b ← verify.verdict.CapstoneFacts.base self
+  if b
+  then ok self.brokered_surface
+  else ok false
+
+/-- [averin_decision_core::verify::verdict::{averin_decision_core::verify::verdict::CapstoneFacts}::introspected]:
+    Source: 'core/src/verify/verdict.rs', lines 238:4-240:5 -/
+def verify.verdict.CapstoneFacts.introspected
+  (self : verify.verdict.CapstoneFacts) : Result Bool := do
+  let b ← verify.verdict.CapstoneFacts.base self
+  if b
+  then ok self.introspected_surface
+  else ok false
+
+/-- [averin_decision_core::verify::verdict::key_pinned]: loop 0:
+    Source: 'core/src/verify/verdict.rs', lines 305:4-307:5 -/
+@[rust_loop]
+def verify.verdict.key_pinned_loop
+  (keys : Slice (Array Std.U8 32#usize)) (key : Array Std.U8 32#usize)
+  (i : Std.Usize) :
+  Result Std.Usize
+  := do
+  let i1 := Slice.len keys
+  if i < i1
+  then
+    let a ← Slice.index_usize keys i
+    let b ← core.array.equality.PartialEqArray.ne core.cmp.PartialEqU8 a key
+    if b
+    then let i2 ← i + 1#usize
+         verify.verdict.key_pinned_loop keys key i2
+    else ok i
+  else ok i
+partial_fixpoint
+
+/-- [averin_decision_core::verify::verdict::key_pinned]:
+    Source: 'core/src/verify/verdict.rs', lines 303:0-309:1 -/
+def verify.verdict.key_pinned
+  (keys : Slice (Array Std.U8 32#usize)) (key : Array Std.U8 32#usize) :
+  Result Bool
+  := do
+  let i ← verify.verdict.key_pinned_loop keys key 0#usize
+  let i1 := Slice.len keys
+  ok (i < i1)
+
+/-- [averin_decision_core::verify::verdict::seal_pinned]:
+    Source: 'core/src/verify/verdict.rs', lines 312:0-314:1 -/
+def verify.verdict.seal_pinned
+  («seal» : verify.verdict.PinnedRecordSeal)
+  (keys : Slice (Array Std.U8 32#usize)) :
+  Result Bool
+  := do
+  let b ← alloc.string.String.is_empty «seal».record_hash
+  if b
+  then ok false
+  else verify.verdict.key_pinned keys «seal».key_bytes
+
+/-- [averin_decision_core::verify::verdict::seals_pinned]: loop 0:
+    Source: 'core/src/verify/verdict.rs', lines 319:4-321:5 -/
+@[rust_loop]
+def verify.verdict.seals_pinned_loop
+  (seals : Slice verify.verdict.PinnedRecordSeal)
+  (keys : Slice (Array Std.U8 32#usize)) (i : Std.Usize) :
+  Result Std.Usize
+  := do
+  let i1 := Slice.len seals
+  if i < i1
+  then
+    let prs ← Slice.index_usize seals i
+    let b ← verify.verdict.seal_pinned prs keys
+    if b
+    then let i2 ← i + 1#usize
+         verify.verdict.seals_pinned_loop seals keys i2
+    else ok i
+  else ok i
+partial_fixpoint
+
+/-- [averin_decision_core::verify::verdict::seals_pinned]:
+    Source: 'core/src/verify/verdict.rs', lines 317:0-323:1 -/
+def verify.verdict.seals_pinned
+  (seals : Slice verify.verdict.PinnedRecordSeal)
+  (keys : Slice (Array Std.U8 32#usize)) :
+  Result Bool
+  := do
+  let i ← verify.verdict.seals_pinned_loop seals keys 0#usize
+  let i1 := Slice.len seals
+  ok (i = i1)
+
+/-- [averin_decision_core::verify::verdict::anchors_checkpoint]:
+    Source: 'core/src/verify/verdict.rs', lines 326:0-328:1 -/
+def verify.verdict.anchors_checkpoint
+  (a : verify.verdict.AnchoredCheckpoint) (sequence : Std.I64) :
+  Result Bool
+  := do
+  if a.sequence = sequence
+  then
+    let b ← alloc.string.String.is_empty a.checkpoint_hash
+    if b
+    then ok false
+    else let b1 ← alloc.string.String.is_empty a.timestamp
+         ok (¬ b1)
+  else ok false
+
+/-- [averin_decision_core::verify::verdict::anchored_at]: loop 0:
+    Source: 'core/src/verify/verdict.rs', lines 333:4-335:5 -/
+@[rust_loop]
+def verify.verdict.anchored_at_loop
+  (anchors : Slice verify.verdict.AnchoredCheckpoint) (sequence : Std.I64)
+  (i : Std.Usize) :
+  Result Std.Usize
+  := do
+  let i1 := Slice.len anchors
+  if i < i1
+  then
+    let ac ← Slice.index_usize anchors i
+    let b ← verify.verdict.anchors_checkpoint ac sequence
+    if b
+    then ok i
+    else
+      let i2 ← i + 1#usize
+      verify.verdict.anchored_at_loop anchors sequence i2
+  else ok i
+partial_fixpoint
+
+/-- [averin_decision_core::verify::verdict::anchored_at]:
+    Source: 'core/src/verify/verdict.rs', lines 331:0-337:1 -/
+def verify.verdict.anchored_at
+  (anchors : Slice verify.verdict.AnchoredCheckpoint) (sequence : Std.I64) :
+  Result Bool
+  := do
+  let i ← verify.verdict.anchored_at_loop anchors sequence 0#usize
+  let i1 := Slice.len anchors
+  ok (i < i1)
+
+/-- [averin_decision_core::verify::verdict::decision]:
+    Source: 'core/src/verify/verdict.rs', lines 351:0-359:1 -/
+def verify.verdict.decision
+  (refuted : Bool) (satisfied : Bool) :
+  Result verify.verdict.ClaimDecision
+  := do
+  if refuted
+  then ok verify.verdict.ClaimDecision.Refuted
+  else
+    if satisfied
+    then ok verify.verdict.ClaimDecision.Satisfied
+    else ok verify.verdict.ClaimDecision.Insufficient
+
+/-- [averin_decision_core::verify::verdict::pinned_record_keys]:
+    Source: 'core/src/verify/verdict.rs', lines 363:0-367:1 -/
+def verify.verdict.pinned_record_keys
+  (f : verify.verdict.ValidatedFacts) : Result Bool := do
+  if f.record_count > 0#usize
+  then
+    let i := alloc.vec.Vec.len f.pinned_record_seals
+    if i = f.record_count
+    then
+      let s := alloc.vec.Vec.deref f.pinned_record_seals
+      let s1 := alloc.vec.Vec.deref f.pinned_signer_keys
+      verify.verdict.seals_pinned s s1
+    else ok false
+  else ok false
+
+/-- [averin_decision_core::verify::verdict::revocation_ready]:
+    Source: 'core/src/verify/verdict.rs', lines 370:0-390:1 -/
+def verify.verdict.revocation_ready
+  (f : verify.verdict.ValidatedFacts) : Result Bool := do
+  match f.policy.revocation with
+  | verify.verdict.RevocationRequirement.Pinned =>
+    if f.revocation_issuer_pinned
+    then ok f.disclosed_revocation_fresh
+    else ok true
+  | verify.verdict.RevocationRequirement.Disclosed =>
+    if f.revocation_issuer_pinned
+    then ok f.disclosed_revocation_fresh
+    else ok false
+  | verify.verdict.RevocationRequirement.Merkle =>
+    if f.revocation_issuer_pinned
+    then
+      if f.merkle_revocation_fresh
+      then ok f.merkle_nonmembership_complete
+      else ok false
+    else ok false
+  | verify.verdict.RevocationRequirement.Both =>
+    if f.revocation_issuer_pinned
+    then
+      if f.disclosed_revocation_fresh
+      then
+        if f.merkle_revocation_fresh
+        then ok f.merkle_nonmembership_complete
+        else ok false
+      else ok false
+    else ok false
+
+/-- [averin_decision_core::verify::verdict::adverse]:
+    Source: 'core/src/verify/verdict.rs', lines 394:0-400:1 -/
+def verify.verdict.adverse
+  (f : verify.verdict.ValidatedFacts) : Result Bool := do
+  if f.immutable_record_contradiction
+  then ok true
+  else
+    if f.checked_contradiction
+    then ok true
+    else
+      if f.revoked_membership
+      then ok true
+      else if f.adverse_disclosure
+           then ok true
+           else ok f.adverse_anchor
+
+/-- [averin_decision_core::verify::verdict::policy_evidence_ready]:
+    Source: 'core/src/verify/verdict.rs', lines 404:0-407:1 -/
+def verify.verdict.policy_evidence_ready
+  (f : verify.verdict.ValidatedFacts) : Result Bool := do
+  if f.policy.require_disclosure
+  then
+    if f.disclosure_complete
+    then
+      if f.policy.require_attestation
+      then ok f.attestation_valid
+      else ok true
+    else ok false
+  else if f.policy.require_attestation
+       then ok f.attestation_valid
+       else ok true
+
+/-- [averin_decision_core::verify::verdict::authorization_ready]:
+    Source: 'core/src/verify/verdict.rs', lines 410:0-415:1 -/
+def verify.verdict.authorization_ready
+  (f : verify.verdict.ValidatedFacts) (revocation : Bool) : Result Bool := do
+  if f.pinned_role_authority
+  then
+    if revocation
+    then
+      let b ← verify.verdict.policy_evidence_ready f
+      if b
+      then
+        if f.brokered_use_valid
+        then ok true
+        else ok f.introspected_use_valid
+      else ok false
+    else ok false
+  else ok false
+
+/-- [averin_decision_core::verify::verdict::authorization_refuted]:
+    Source: 'core/src/verify/verdict.rs', lines 419:0-422:1 -/
+def verify.verdict.authorization_refuted
+  (f : verify.verdict.ValidatedFacts) : Result Bool := do
+  let adverse ← verify.verdict.adverse f
+  if f.structural_integrity
+  then ok adverse
+  else ok true
+
+/-- [averin_decision_core::verify::verdict::authorized]:
+    Source: 'core/src/verify/verdict.rs', lines 425:0-428:1 -/
+def verify.verdict.authorized
+  (f : verify.verdict.ValidatedFacts) (pinned_record_keys : Bool)
+  (revocation : Bool) :
+  Result Bool
+  := do
+  let ready ← verify.verdict.authorization_ready f revocation
+  if f.structural_integrity
+  then if pinned_record_keys
+       then ok ready
+       else ok false
+  else ok false
+
+/-- [averin_decision_core::verify::verdict::temporal]:
+    Source: 'core/src/verify/verdict.rs', lines 431:0-433:1 -/
+def verify.verdict.temporal
+  (f : verify.verdict.ValidatedFacts) (anchored_latest : Bool)
+  (revocation : Bool) :
+  Result Bool
+  := do
+  if anchored_latest
+  then if f.attestation_valid
+       then ok revocation
+       else ok false
+  else ok false
+
+/-- [averin_decision_core::verify::verdict::historical_revocation]:
+    Source: 'core/src/verify/verdict.rs', lines 436:0-447:1 -/
+def verify.verdict.historical_revocation
+  (f : verify.verdict.ValidatedFacts) : Result Bool := do
+  if f.revocation_issuer_pinned
+  then
+    match f.policy.revocation with
+    | verify.verdict.RevocationRequirement.Pinned => ok true
+    | verify.verdict.RevocationRequirement.Disclosed =>
+      ok f.historical.v2_list_usable
+    | verify.verdict.RevocationRequirement.Merkle =>
+      if f.historical.v2_merkle_usable
+      then ok f.historical.merkle_paths_complete
+      else ok false
+    | verify.verdict.RevocationRequirement.Both =>
+      if f.historical.v2_list_usable
+      then
+        if f.historical.v2_merkle_usable
+        then ok f.historical.merkle_paths_complete
+        else ok false
+      else ok false
+  else ok false
+
+/-- [averin_decision_core::verify::verdict::historical_adverse]:
+    Source: 'core/src/verify/verdict.rs', lines 451:0-457:1 -/
+def verify.verdict.historical_adverse
+  (f : verify.verdict.ValidatedFacts) : Result Bool := do
+  if f.immutable_record_contradiction
+  then ok true
+  else
+    if f.historical.checked_contradiction
+    then ok true
+    else
+      if f.adverse_disclosure
+      then ok true
+      else if f.adverse_anchor
+           then ok true
+           else ok f.historical.adverse
+
+/-- [averin_decision_core::verify::verdict::historical_ready]:
+    Source: 'core/src/verify/verdict.rs', lines 461:0-467:1 -/
+def verify.verdict.historical_ready
+  (f : verify.verdict.ValidatedFacts) : Result Bool := do
+  if f.pinned_role_authority
+  then
+    if f.historical.snapshot_verified
+    then
+      let b ← verify.verdict.historical_revocation f
+      if b
+      then
+        let b1 ← verify.verdict.policy_evidence_ready f
+        if b1
+        then
+          if f.historical.brokered_use_valid
+          then ok true
+          else ok f.historical.introspected_use_valid
+        else ok false
+      else ok false
+    else ok false
+  else ok false
+
+/-- [averin_decision_core::verify::verdict::integrity_claim]:
+    Source: 'core/src/verify/verdict.rs', lines 470:0-472:1 -/
+def verify.verdict.integrity_claim
+  (f : verify.verdict.ValidatedFacts) :
+  Result verify.verdict.ClaimDecision
+  := do
+  verify.verdict.decision (¬ f.structural_integrity) true
+
+/-- [averin_decision_core::verify::verdict::authenticated_claim]:
+    Source: 'core/src/verify/verdict.rs', lines 474:0-479:1 -/
+def verify.verdict.authenticated_claim
+  (f : verify.verdict.ValidatedFacts) (pinned_record_keys : Bool) :
+  Result verify.verdict.ClaimDecision
+  := do
+  verify.verdict.decision (¬ f.structural_integrity) (f.structural_integrity
+    && pinned_record_keys)
+
+/-- [averin_decision_core::verify::verdict::authorized_claim]:
+    Source: 'core/src/verify/verdict.rs', lines 481:0-489:1 -/
+def verify.verdict.authorized_claim
+  (f : verify.verdict.ValidatedFacts) (pinned_record_keys : Bool)
+  (revocation : Bool) :
+  Result verify.verdict.ClaimDecision
+  := do
+  let refuted ← verify.verdict.authorization_refuted f
+  let satisfied ← verify.verdict.authorized f pinned_record_keys revocation
+  verify.verdict.decision refuted satisfied
+
+/-- [averin_decision_core::verify::verdict::temporal_claim]:
+    Source: 'core/src/verify/verdict.rs', lines 491:0-495:1 -/
+def verify.verdict.temporal_claim
+  (f : verify.verdict.ValidatedFacts) (anchored_latest : Bool)
+  (revocation : Bool) :
+  Result verify.verdict.ClaimDecision
+  := do
+  let refuted ← verify.verdict.adverse f
+  let satisfied ← verify.verdict.temporal f anchored_latest revocation
+  verify.verdict.decision refuted satisfied
+
+/-- [averin_decision_core::verify::verdict::historical_claim]:
+    Source: 'core/src/verify/verdict.rs', lines 501:0-509:1 -/
+def verify.verdict.historical_claim
+  (f : verify.verdict.ValidatedFacts) (pinned_record_keys : Bool) :
+  Result verify.verdict.ClaimDecision
+  := do
+  let adverse ← verify.verdict.historical_adverse f
+  let ready ← verify.verdict.historical_ready f
+  verify.verdict.decision (f.historical.selected && ((¬
+    f.structural_integrity) || adverse)) (((f.historical.selected &&
+    f.structural_integrity) && pinned_record_keys) && ready)
+
+/-- [averin_decision_core::verify::verdict::complete_claim]:
+    Source: 'core/src/verify/verdict.rs', lines 512:0-523:1 -/
+def verify.verdict.complete_claim
+  (f : verify.verdict.ValidatedFacts) (pinned_record_keys : Bool)
+  (anchored_latest : Bool) (revocation : Bool) (surface : Bool) :
+  Result verify.verdict.ClaimDecision
+  := do
+  let refuted ← verify.verdict.authorization_refuted f
+  let authorized ← verify.verdict.authorized f pinned_record_keys revocation
+  let temporal ← verify.verdict.temporal f anchored_latest revocation
+  let surface1 ←
+    if authorized
+    then if temporal
+         then ok surface
+         else ok false
+    else ok false
+  verify.verdict.decision refuted surface1
+
+/-- [averin_decision_core::verify::verdict::decide_claims]:
+    Source: 'core/src/verify/verdict.rs', lines 526:0-565:1 -/
+def verify.verdict.decide_claims
+  (f : verify.verdict.ValidatedFacts) :
+  Result verify.verdict.ClaimResults
+  := do
+  let pinned_record_keys ← verify.verdict.pinned_record_keys f
+  let s := alloc.vec.Vec.deref f.anchors
+  let anchored_latest ←
+    verify.verdict.anchored_at s f.latest_checkpoint_sequence
+  let revocation ← verify.verdict.revocation_ready f
+  let brokered ← verify.verdict.CapstoneFacts.brokered f.capstone
+  let introspected ← verify.verdict.CapstoneFacts.introspected f.capstone
+  let integrity ← verify.verdict.integrity_claim f
+  let authenticated ← verify.verdict.authenticated_claim f pinned_record_keys
+  let authorized ←
+    verify.verdict.authorized_claim f pinned_record_keys revocation
+  let historical_authorized_as_of_snapshot ←
+    verify.verdict.historical_claim f pinned_record_keys
+  let temporal ← verify.verdict.temporal_claim f anchored_latest revocation
+  let complete_brokered ←
+    verify.verdict.complete_claim f pinned_record_keys anchored_latest
+      revocation brokered
+  let complete_introspected ←
+    verify.verdict.complete_claim f pinned_record_keys anchored_latest
+      revocation introspected
+  match f.policy.requested with
+  | verify.verdict.RequestedClaim.Integrity =>
+    ok
+      {
+        integrity,
+        authenticated,
+        authorized,
+        historical_authorized_as_of_snapshot,
+        temporal,
+        complete_brokered,
+        complete_introspected,
+        requested := verify.verdict.RequestedClaim.Integrity,
+        requested_decision := integrity
+      }
+  | verify.verdict.RequestedClaim.Authenticated =>
+    ok
+      {
+        integrity,
+        authenticated,
+        authorized,
+        historical_authorized_as_of_snapshot,
+        temporal,
+        complete_brokered,
+        complete_introspected,
+        requested := verify.verdict.RequestedClaim.Authenticated,
+        requested_decision := authenticated
+      }
+  | verify.verdict.RequestedClaim.Authorized =>
+    ok
+      {
+        integrity,
+        authenticated,
+        authorized,
+        historical_authorized_as_of_snapshot,
+        temporal,
+        complete_brokered,
+        complete_introspected,
+        requested := verify.verdict.RequestedClaim.Authorized,
+        requested_decision := authorized
+      }
+  | verify.verdict.RequestedClaim.HistoricalAuthorizedAsOfSnapshot =>
+    ok
+      {
+        integrity,
+        authenticated,
+        authorized,
+        historical_authorized_as_of_snapshot,
+        temporal,
+        complete_brokered,
+        complete_introspected,
+        requested :=
+          verify.verdict.RequestedClaim.HistoricalAuthorizedAsOfSnapshot,
+        requested_decision := historical_authorized_as_of_snapshot
+      }
+  | verify.verdict.RequestedClaim.CompleteBrokered =>
+    ok
+      {
+        integrity,
+        authenticated,
+        authorized,
+        historical_authorized_as_of_snapshot,
+        temporal,
+        complete_brokered,
+        complete_introspected,
+        requested := verify.verdict.RequestedClaim.CompleteBrokered,
+        requested_decision := complete_brokered
+      }
+  | verify.verdict.RequestedClaim.CompleteIntrospected =>
+    ok
+      {
+        integrity,
+        authenticated,
+        authorized,
+        historical_authorized_as_of_snapshot,
+        temporal,
+        complete_brokered,
+        complete_introspected,
+        requested := verify.verdict.RequestedClaim.CompleteIntrospected,
+        requested_decision := complete_introspected
+      }
+
 end averin_decision_core

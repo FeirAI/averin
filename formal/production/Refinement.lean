@@ -13,3 +13,6 @@ import Refinement.Hash
 import Refinement.Preimage
 import Refinement.Sign
 import Refinement.Seal
+import Refinement.VerdictLists
+import Refinement.Verdict
+import Refinement.VerdictClaims

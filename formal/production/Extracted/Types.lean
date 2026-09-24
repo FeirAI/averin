@@ -42,4 +42,133 @@ inductive record.PreimageFault where
 | TooLong : record.PreimageFault
 | DuplicateKey : record.PreimageFault
 
+/-- [averin_decision_core::verify::verdict::ClaimDecision]
+    Source: 'core/src/verify/verdict.rs', lines 8:0-12:1
+    Visibility: public -/
+@[discriminant isize]
+inductive verify.verdict.ClaimDecision where
+| Satisfied : verify.verdict.ClaimDecision
+| Insufficient : verify.verdict.ClaimDecision
+| Refuted : verify.verdict.ClaimDecision
+
+/-- [averin_decision_core::verify::verdict::RequestedClaim]
+    Source: 'core/src/verify/verdict.rs', lines 25:0-35:1
+    Visibility: public -/
+@[discriminant isize]
+inductive verify.verdict.RequestedClaim where
+| Integrity : verify.verdict.RequestedClaim
+| Authenticated : verify.verdict.RequestedClaim
+| Authorized : verify.verdict.RequestedClaim
+| HistoricalAuthorizedAsOfSnapshot : verify.verdict.RequestedClaim
+| CompleteBrokered : verify.verdict.RequestedClaim
+| CompleteIntrospected : verify.verdict.RequestedClaim
+
+/-- [averin_decision_core::verify::verdict::RevocationRequirement]
+    Source: 'core/src/verify/verdict.rs', lines 51:0-59:1
+    Visibility: public -/
+@[discriminant isize]
+inductive verify.verdict.RevocationRequirement where
+| Pinned : verify.verdict.RevocationRequirement
+| Disclosed : verify.verdict.RevocationRequirement
+| Merkle : verify.verdict.RevocationRequirement
+| Both : verify.verdict.RevocationRequirement
+
+/-- [averin_decision_core::verify::verdict::ClaimPolicy]
+    Source: 'core/src/verify/verdict.rs', lines 62:0-67:1
+    Visibility: public -/
+structure verify.verdict.ClaimPolicy where
+  requested : verify.verdict.RequestedClaim
+  revocation : verify.verdict.RevocationRequirement
+  require_disclosure : Bool
+  require_attestation : Bool
+
+/-- [averin_decision_core::verify::verdict::ClaimResults]
+    Source: 'core/src/verify/verdict.rs', lines 126:0-138:1
+    Visibility: public -/
+structure verify.verdict.ClaimResults where
+  integrity : verify.verdict.ClaimDecision
+  authenticated : verify.verdict.ClaimDecision
+  authorized : verify.verdict.ClaimDecision
+  historical_authorized_as_of_snapshot : verify.verdict.ClaimDecision
+  temporal : verify.verdict.ClaimDecision
+  complete_brokered : verify.verdict.ClaimDecision
+  complete_introspected : verify.verdict.ClaimDecision
+  requested : verify.verdict.RequestedClaim
+  requested_decision : verify.verdict.ClaimDecision
+
+/-- [averin_decision_core::verify::verdict::PinnedRecordSeal]
+    Source: 'core/src/verify/verdict.rs', lines 182:0-185:1 -/
+structure verify.verdict.PinnedRecordSeal where
+  record_hash : String
+  key_bytes : Array Std.U8 32#usize
+
+/-- [averin_decision_core::verify::verdict::AnchoredCheckpoint]
+    Source: 'core/src/verify/verdict.rs', lines 187:0-191:1 -/
+structure verify.verdict.AnchoredCheckpoint where
+  checkpoint_hash : String
+  timestamp : String
+  sequence : Std.I64
+
+/-- [averin_decision_core::verify::verdict::CapstoneFacts]
+    Source: 'core/src/verify/verdict.rs', lines 195:0-214:1 -/
+structure verify.verdict.CapstoneFacts where
+  manifest : Bool
+  two_phase : Bool
+  no_incomplete_intent : Bool
+  taxonomy : Bool
+  every_action_verified : Bool
+  every_pop_reverified : Bool
+  grant_log : Bool
+  attestation : Bool
+  no_violation : Bool
+  no_pending : Bool
+  bounded_reuse : Bool
+  cosignatures : Bool
+  delegation : Bool
+  revocation : Bool
+  federation : Bool
+  coverage : Bool
+  brokered_surface : Bool
+  introspected_surface : Bool
+
+/-- [averin_decision_core::verify::verdict::HistoricalFacts]
+    Source: 'core/src/verify/verdict.rs', lines 244:0-264:1 -/
+structure verify.verdict.HistoricalFacts where
+  selected : Bool
+  snapshot_verified : Bool
+  brokered_use_valid : Bool
+  introspected_use_valid : Bool
+  adverse : Bool
+  checked_contradiction : Bool
+  v2_list_usable : Bool
+  v2_merkle_usable : Bool
+  merkle_paths_complete : Bool
+
+/-- [averin_decision_core::verify::verdict::ValidatedFacts]
+    Source: 'core/src/verify/verdict.rs', lines 266:0-296:1 -/
+structure verify.verdict.ValidatedFacts where
+  historical : verify.verdict.HistoricalFacts
+  structural_integrity : Bool
+  record_count : Std.Usize
+  pinned_record_seals : alloc.vec.Vec verify.verdict.PinnedRecordSeal
+  pinned_signer_keys : alloc.vec.Vec (Array Std.U8 32#usize)
+  pinned_role_authority : Bool
+  latest_checkpoint_sequence : Std.I64
+  anchors : alloc.vec.Vec verify.verdict.AnchoredCheckpoint
+  attestation_valid : Bool
+  brokered_use_valid : Bool
+  introspected_use_valid : Bool
+  capstone : verify.verdict.CapstoneFacts
+  immutable_record_contradiction : Bool
+  checked_contradiction : Bool
+  adverse_disclosure : Bool
+  adverse_anchor : Bool
+  revoked_membership : Bool
+  revocation_issuer_pinned : Bool
+  disclosed_revocation_fresh : Bool
+  merkle_revocation_fresh : Bool
+  merkle_nonmembership_complete : Bool
+  disclosure_complete : Bool
+  policy : verify.verdict.ClaimPolicy
+
 end averin_decision_core

@@ -7714,6 +7714,6 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             && required_descriptor_record_ids.is_subset(&matched_descriptor_record_ids),
         policy: opts.claim_policy,
     };
-    report.claims = facts.decide();
+    report.claims = verdict::decide_claims(&facts);
     report
 }

@@ -38,7 +38,7 @@ def facts (n : Nat) : Fixed := {
   checkpoint := 10, changedAt := some 6,
   revoked := if bit n 6 then [7] else [],
   usedGrantIds := [7],
-  adverseOpening := false, adverseAnchor := false,
+  adverseOpening := false, adverseAnchor := false, checkedContradiction := false,
   revocationIssuerPinned := true, disclosedFresh := bit n 4, merkleFresh := false,
   policy := ⟨.authorized, .pinned, true, false⟩,
   brokeredUseValid := bit n 3, introspectedUseValid := false,
@@ -150,6 +150,7 @@ def run : String :=
   let adverseCases := [
     row "adverse_opening" { f with adverseOpening := true } (attachments full),
     row "adverse_anchor" { f with adverseAnchor := true } (attachments full),
+    row "checked_contradiction" { f with checkedContradiction := true } (attachments full),
     row "missing_seal" { f with sealed := [] } (attachments full),
     row "missing_path" both (attachments full),
     row "present_path" both (.path 7 :: attachments full),

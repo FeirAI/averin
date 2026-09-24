@@ -87,13 +87,20 @@ def check_callers(m: dict) -> None:
         for frag in c.get("contains", []):
             if norm(frag) not in b:
                 fail("call-path", f"{c['file']}::{c['fn']} does not contain {frag!r}")
+        # whole-file occurrence counts (comments stripped), e.g. the only write of the claims
+        whole = norm(src)
+        for pattern, want in c.get("file_counts", {}).items():
+            got = len(re.findall(pattern, whole))
+            if got != want:
+                fail("call-path", f"{c['file']}: /{pattern}/ occurs {got} times, expected {want}")
     # every extracted function is defined once in its module, not also elsewhere under another cfg
     for sym in m["extracted"]:
-        mod, name = sym.split("::")
-        src = (ROOT / "core" / "src" / f"{mod}.rs").read_text()
+        *mods, name = sym.split("::")
+        rel = "core/src/" + "/".join(mods) + ".rs"
+        src = (ROOT / rel).read_text()
         _, n = fn_body(src, name)
         if n != 1:
-            fail("call-path", f"core/src/{mod}.rs: expected exactly one `fn {name}`, found {n}")
+            fail("call-path", f"{rel}: expected exactly one `fn {name}`, found {n}")
 
 
 def check_cfg(m: dict) -> None:

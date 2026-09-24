@@ -27,6 +27,8 @@ maps to Lean's `String` and to `Slice U8`):
   (never succeeds wrongly) beyond that.
 * `String::from_utf8` returns `Ok` with exactly the given bytes when they are valid UTF-8 (Lean's
   verified decoder `String.fromUTF8?`), else `Err`.
+* `String::is_empty` is true exactly when the string has no UTF-8 bytes (used by the verdict
+  kernel's seal and anchor checks).
 
 **Toolchain adjustment.** Aeneas elaborates string literals with `Aeneas.Std.toStr`, whose default
 bound proof is `decide +native` (an extra axiom). `averin_decision_core.toStr` below shadows it
@@ -67,6 +69,11 @@ def core.str.Str.as_bytes (s : Str) : Result (Slice Std.U8) := ok s
 
 @[rust_fun "alloc::string::{alloc::string::String}::as_bytes"]
 def alloc.string.String.as_bytes (s : String) : Result (Slice Std.U8) := AverinGlue.stringSlice s
+
+/-- `String::is_empty`: the string has no UTF-8 bytes (Rust's `len() == 0`). Total. -/
+@[rust_fun "alloc::string::{alloc::string::String}::is_empty"]
+def alloc.string.String.is_empty (s : String) : Result Bool :=
+  ok (decide (AverinGlue.stringBytes s = []))
 
 @[rust_fun
   "alloc::string::{core::ops::deref::Deref<alloc::string::String, str>}::deref"]

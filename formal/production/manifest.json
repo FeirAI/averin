@@ -28,7 +28,8 @@
       "crate::record::RECORD_DOMAIN",
       "crate::record::CANON_VERSION",
       "crate::checkpoint::CHECKPOINT_DOMAIN",
-      "crate::checkpoint::CHECKPOINT_CANON_VERSION"
+      "crate::checkpoint::CHECKPOINT_CANON_VERSION",
+      "crate::verify::verdict::decide_claims"
     ],
     "opaque": [
       "crate::canon::nfc",
@@ -64,6 +65,7 @@
         "alloc.string.String.from_utf8",
         "alloc.string.String.as_bytes",
         "alloc.string.String.Insts.CoreOpsDerefDerefStr.deref",
+        "alloc.string.String.is_empty",
         "canon.nfc",
         "hashx.sha256"
       ]
@@ -80,7 +82,8 @@
       "alloc.string.String.Insts.CoreOpsDerefDerefStr.deref": "same bytes as String::as_bytes",
       "alloc.string.String.from_utf8": "Ok with exactly the given bytes iff they are valid UTF-8 (Lean's verified String.fromUTF8?)",
       "alloc.string.FromUtf8Error": "Unit; never inspected",
-      "averin_decision_core.toStr": "Aeneas.Std.toStr with a kernel-checked (not native) size bound for string literals"
+      "averin_decision_core.toStr": "Aeneas.Std.toStr with a kernel-checked (not native) size bound for string literals",
+      "alloc.string.String.is_empty": "true exactly when the Lean String modelling the Rust String has no UTF-8 bytes; total"
     },
     "toolchain": "rustc (nightly-2026-09-17 for extraction, 1.92.0 for production builds), Charon 6258597, Aeneas 557f7a1 and its Lean standard library, Lean 4.31.0 and mathlib"
   },
@@ -91,8 +94,9 @@
     "core/src/record.rs": "52dac5bd61b1609803f82824291d270eefd8774065cb9a78b2988d9276e2e1f4",
     "core/src/checkpoint.rs": "90ba12e80e5e89811f119840fe44b07a9e90a7d650b9f365b49f9feed3f455c4",
     "core/src/sign.rs": "cd3611f1ee9bfa13c9fa61353b6ea4412254bb539ae4a48ccfeb73babb3e80b3",
-    "formal/production/Extracted/Types.lean": "9c4604b2faf61ed53ad9bfe97afbb2f11f6f59175236240c2a7ab3c4c39d940a",
-    "formal/production/Extracted/Funs.lean": "71408e551bdc753f539574b3c7519310c8512139cdd7e6c067101be44b25e2e0"
+    "core/src/verify/verdict.rs": "3b1cb80cbadf608c51e3731191344e7ff9d0f39b83dd9832335b539fb27aee08",
+    "formal/production/Extracted/Types.lean": "cb9aa96b5da6eb5a7f151f58df811fcb801da21102e38d73036164ac94d9888f",
+    "formal/production/Extracted/Funs.lean": "12dc014e1919dad520d2eedaf5b1237a7b4e606d59e4274e4c3c21048e08a2a6"
   },
   "extracted": {
     "canon::write_canonical": [
@@ -160,6 +164,101 @@
       "Refinement.sign_preimage_model",
       "Refinement.sign_preimage_record",
       "Refinement.sign_preimage_checkpoint"
+    ],
+    "verify::verdict::key_pinned": [
+      "Refinement.key_pinned_ok"
+    ],
+    "verify::verdict::seal_pinned": [
+      "Refinement.seal_pinned_ok"
+    ],
+    "verify::verdict::seals_pinned": [
+      "Refinement.seals_pinned_ok"
+    ],
+    "verify::verdict::anchors_checkpoint": [
+      "Refinement.anchors_checkpoint_ok"
+    ],
+    "verify::verdict::anchored_at": [
+      "Refinement.anchored_at_ok",
+      "Refinement.anchored_latest_ok"
+    ],
+    "verify::verdict::decision": [
+      "Refinement.decision_ok"
+    ],
+    "verify::verdict::pinned_record_keys": [
+      "Refinement.pinned_record_keys_ok"
+    ],
+    "verify::verdict::revocation_ready": [
+      "Refinement.revocation_ready_ok"
+    ],
+    "verify::verdict::adverse": [
+      "Refinement.adverse_ok"
+    ],
+    "verify::verdict::policy_evidence_ready": [
+      "Refinement.policy_evidence_ready_ok"
+    ],
+    "verify::verdict::authorization_ready": [
+      "Refinement.authorization_ready_ok"
+    ],
+    "verify::verdict::authorization_refuted": [
+      "Refinement.authorization_refuted_ok"
+    ],
+    "verify::verdict::authorized": [
+      "Refinement.authorized_ok"
+    ],
+    "verify::verdict::temporal": [
+      "Refinement.temporal_ok"
+    ],
+    "verify::verdict::historical_revocation": [
+      "Refinement.historical_ready_ok"
+    ],
+    "verify::verdict::historical_adverse": [
+      "Refinement.historical_adverse_ok"
+    ],
+    "verify::verdict::historical_ready": [
+      "Refinement.historical_ready_ok"
+    ],
+    "verify::verdict::base": [
+      "Refinement.capstone_base_ok"
+    ],
+    "verify::verdict::brokered": [
+      "Refinement.brokered_ok"
+    ],
+    "verify::verdict::introspected": [
+      "Refinement.introspected_ok"
+    ],
+    "verify::verdict::integrity_claim": [
+      "Refinement.integrity_claim_ok"
+    ],
+    "verify::verdict::authenticated_claim": [
+      "Refinement.authenticated_claim_ok"
+    ],
+    "verify::verdict::authorized_claim": [
+      "Refinement.authorized_claim_ok"
+    ],
+    "verify::verdict::temporal_claim": [
+      "Refinement.temporal_claim_ok"
+    ],
+    "verify::verdict::historical_claim": [
+      "Refinement.historical_claim_ok"
+    ],
+    "verify::verdict::complete_claim": [
+      "Refinement.complete_claim_ok"
+    ],
+    "verify::verdict::decide_claims": [
+      "Refinement.decide_claims_refines",
+      "Refinement.production_claim",
+      "Refinement.production_support_erasure",
+      "Refinement.production_satisfied_supports",
+      "Refinement.production_requested_supports",
+      "Refinement.production_committed_contradiction_refuted",
+      "Refinement.production_capstone_prerequisites",
+      "Refinement.production_introspected_capstone_prerequisites",
+      "Refinement.production_historical_requires_policy",
+      "Refinement.production_historical_supports",
+      "Refinement.production_historical_requires_order",
+      "Refinement.production_historical_requires_snapshot",
+      "Refinement.production_at_or_after_refutes",
+      "Refinement.production_total_revocation_refutes"
     ]
   },
   "callers": [
@@ -273,6 +372,18 @@
       "file": "core/src/canon.rs",
       "fn": "get",
       "body": "member(self, key)"
+    },
+    {
+      "file": "core/src/verify.rs",
+      "fn": "verify_bundle_with",
+      "contains": [
+        "report.claims = verdict::decide_claims(&facts);"
+      ],
+      "file_counts": {
+        "claims(\\.[a-z_]+)?\\s*=[^=]": 1,
+        "claims: ClaimResults::fatal\\(\\)": 2,
+        "ClaimResults \\{ [a-z_]+ ?[:,}]": 0
+      }
     }
   ]
 }
