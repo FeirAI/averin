@@ -55,6 +55,28 @@
       "expect_hex": "3f274a9c975514017ea1e324db94dc1fc018ded8bd733e26eddd113250672889"
     }
   ],
+  "grant_pop_v2": [
+    {
+      "name": "default-single-operation",
+      "project_id": "p1",
+      "idempotency_key": "idem-1",
+      "session_id": "s1",
+      "agent_id": "agent-1",
+      "action": "db.query:orders-ro",
+      "resource": "orders-db",
+      "scope": "read:orders",
+      "scope_class": "single_operation",
+      "agent_pubkey": "AAAA",
+      "principal": "",
+      "justification": "",
+      "use_limit": 0,
+      "ttl_seconds": 300,
+      "delegation_chain": [],
+      "issued_at": 1718445000,
+      "request_expires_at": 1718445900,
+      "expect_hex": "20809965afd8dd263d5f02afb1461cdce5a8cb7adf1187ba0feb43a46b48fe94"
+    }
+  ],
   "cnf_kid": [
     {
       "seed_hex": "0505050505050505050505050505050505050505050505050505050505050505",

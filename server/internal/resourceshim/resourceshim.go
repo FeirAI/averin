@@ -42,6 +42,10 @@ var ErrConsumed = errors.New("resourceshim: credential jti or nonce already cons
 // it BEFORE consuming anything, so a revoked credential is never exercised and never burns a nonce.
 var ErrRevoked = errors.New("resourceshim: the capability's grant is revoked")
 
+// ErrRevocationCheck marks an unavailable authoritative revocation lookup.
+// Callers must surface it as a server failure rather than a rejected credential.
+var ErrRevocationCheck = errors.New("resourceshim: revocation check failed")
+
 // Ledger is the durable consume-before-act store. Consumption is marked BEFORE the resource performs
 // the side effect, so a crash after consumption cannot leave a live credential.
 type Ledger interface {
@@ -164,10 +168,12 @@ func consumeKey(jti string, useSeq int) string {
 // Shim is the resource-side gateway, configured once with the broker's capability-issuing public key,
 // this resource's id, and the durable ledger.
 type Shim struct {
-	issuingPub ed25519.PublicKey
-	resourceID string
-	ledger     Ledger
-	isRevoked  func(grantID string) bool // nil = no use-time revocation check
+	issuingPub   ed25519.PublicKey
+	resourceID   string
+	projectID    string // authenticated route context; never inferred from the request body
+	ledger       Ledger
+	isRevoked    func(grantID string) bool // nil = no use-time revocation check
+	isRevokedErr func(grantID string) (bool, error)
 }
 
 // New constructs a Shim. resourceID is this resource's audience id (capabilities whose aud differs are
@@ -176,12 +182,25 @@ func New(issuingPub ed25519.PublicKey, resourceID string, ledger Ledger) *Shim {
 	return &Shim{issuingPub: issuingPub, resourceID: resourceID, ledger: ledger}
 }
 
+// WithProject binds this shim to the project authenticated for the route.
+func (s *Shim) WithProject(projectID string) *Shim {
+	s.projectID = projectID
+	return s
+}
+
 // WithRevocationCheck makes ValidateUse consult the revoked set at use time: a capability whose grant_id (== the
 // verified jti) isRevoked reports as revoked is rejected with ErrRevoked BEFORE anything is consumed. Without it
 // a revoked grant stays usable at the resource until its expiry (the offline verifier only flags the use after
 // the fact).
 func (s *Shim) WithRevocationCheck(isRevoked func(grantID string) bool) *Shim {
 	s.isRevoked = isRevoked
+	return s
+}
+
+// WithRevocationCheckErr uses an authoritative lookup that can fail. A failed
+// read fails closed before any ledger access and retains its server-error type.
+func (s *Shim) WithRevocationCheckErr(isRevoked func(grantID string) (bool, error)) *Shim {
+	s.isRevokedErr = isRevoked
 	return s
 }
 
@@ -196,53 +215,82 @@ func (s *Shim) RollbackUse(ev UseEvidence) {
 	s.ledger.ReleaseJTI(consumeKey(ev.JTI, ev.UseSequenceNumber))
 }
 
-// ValidateUse validates a presented capability + proof-of-possession for op, consumes the credential
-// (consume-before-act), and returns the canonical use_evidence. The ordering is: validate everything
-// that can fail WITHOUT consuming (capability signature, validity window, audience/action coverage,
-// PoP-at-use), and only THEN consume the nonce (replay) and, for a single-use credential, the jti
-// (double-spend). This keeps a failed/forged request from burning a victim's credential, while still
-// consuming before the side effect (which the caller performs only after a successful return).
-func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now time.Time) (UseEvidence, error) {
+type preflightResult struct {
+	claims    broker.Claims
+	unix      int64
+	challenge []byte
+	cnfPub    ed25519.PublicKey
+	useSig    []byte
+	bounded   bool
+	useSeq    int
+}
+
+// PreflightUse checks the signed capability, tenant, validity, audience, action,
+// sender PoP, and sequence without reading revocation or touching the ledger.
+// The caller must call ValidateUse again inside its project transaction before
+// issuing a receipt: time, revocation, and replay state can change after this check.
+func (s *Shim) PreflightUse(token, useSigB64 string, op Op, nonce string, now time.Time) error {
+	_, err := s.preflightUse(token, useSigB64, op, nonce, now)
+	return err
+}
+
+func (s *Shim) preflightUse(token, useSigB64 string, op Op, nonce string, now time.Time) (preflightResult, error) {
 	// 1. Capability signature + decode (the broker minted and signed this descriptor).
 	claims, err := broker.VerifyCapability(token, s.issuingPub)
 	if err != nil {
-		return UseEvidence{}, err
+		return preflightResult{}, err
+	}
+	// Tenant binding is an authorization gate, ahead of revocation and every
+	// nonce/JTI read or write. Legacy capabilities have no signed project claim
+	// and are refused by this explicit online cutoff.
+	if s.projectID == "" {
+		return preflightResult{}, errors.New("resourceshim: authenticated project is required")
+	}
+	switch claims.Version {
+	case 2:
+		if claims.ProjectID == "" || claims.ProjectID != s.projectID {
+			return preflightResult{}, errors.New("resourceshim: capability project does not match authenticated project")
+		}
+	case 0:
+		return preflightResult{}, errors.New("resourceshim: legacy capability project cannot be authenticated")
+	default:
+		return preflightResult{}, errors.New("resourceshim: unsupported capability version")
 	}
 	// 2. Validity window (threat B8: short-lived credentials).
 	unix := now.UTC().Unix()
 	if unix < claims.Nbf {
-		return UseEvidence{}, fmt.Errorf("resourceshim: capability not yet valid (nbf %d > now %d)", claims.Nbf, unix)
+		return preflightResult{}, fmt.Errorf("resourceshim: capability not yet valid (nbf %d > now %d)", claims.Nbf, unix)
 	}
 	if unix >= claims.Exp {
-		return UseEvidence{}, fmt.Errorf("resourceshim: capability expired (exp %d <= now %d)", claims.Exp, unix)
+		return preflightResult{}, fmt.Errorf("resourceshim: capability expired (exp %d <= now %d)", claims.Exp, unix)
 	}
 	// 3. Audience + action coverage: the capability must authorize THIS resource and THIS action.
 	if claims.Aud != s.resourceID {
-		return UseEvidence{}, fmt.Errorf("resourceshim: capability audience %q does not match this resource %q", claims.Aud, s.resourceID)
+		return preflightResult{}, fmt.Errorf("resourceshim: capability audience %q does not match this resource %q", claims.Aud, s.resourceID)
 	}
 	if op.Action == "" || op.Action != claims.Act {
-		return UseEvidence{}, fmt.Errorf("resourceshim: operation %q is not the authorized action %q", op.Action, claims.Act)
+		return preflightResult{}, fmt.Errorf("resourceshim: operation %q is not the authorized action %q", op.Action, claims.Act)
 	}
 	if strings.TrimSpace(nonce) == "" {
-		return UseEvidence{}, errors.New("resourceshim: a one-time PoP nonce is required")
+		return preflightResult{}, errors.New("resourceshim: a one-time PoP nonce is required")
 	}
 	// 4. PoP-at-use (R4): the holder must sign the fully-bound challenge with the cnf private key, so a
 	// stolen token (without the cnf key) cannot be used.
 	cnfPub, err := base64.RawURLEncoding.DecodeString(claims.Cnf)
 	if err != nil || len(cnfPub) != ed25519.PublicKeySize {
-		return UseEvidence{}, errors.New("resourceshim: capability cnf is not a valid ed25519 public key")
+		return preflightResult{}, errors.New("resourceshim: capability cnf is not a valid ed25519 public key")
 	}
 	binding, err := credentialBinding(token)
 	if err != nil {
-		return UseEvidence{}, err
+		return preflightResult{}, err
 	}
 	challenge := usePoPChallenge(claims.Jti, s.resourceID, op.Action, op.ParamsCommitment, binding, nonce)
 	useSig, err := base64.RawURLEncoding.DecodeString(useSigB64)
 	if err != nil || len(useSig) != ed25519.SignatureSize {
-		return UseEvidence{}, errors.New("resourceshim: use_sig must be a base64url-no-pad ed25519 signature")
+		return preflightResult{}, errors.New("resourceshim: use_sig must be a base64url-no-pad ed25519 signature")
 	}
 	if !ed25519.Verify(ed25519.PublicKey(cnfPub), challenge, useSig) {
-		return UseEvidence{}, errors.New("resourceshim: use_sig does not prove possession of the cnf key (PoP failed)")
+		return preflightResult{}, errors.New("resourceshim: use_sig does not prove possession of the cnf key (PoP failed)")
 	}
 	// 4.5 M1 (bounded_reuse): the descriptor carries use_limit (>0) iff this is a bounded_reuse capability.
 	// Validate the sequence number BEFORE consuming anything, so a bad usn never burns the nonce/credential.
@@ -251,12 +299,38 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 	if bounded {
 		useSeq = op.UseSequenceNumber
 		if useSeq < 1 || useSeq > claims.UseLimit {
-			return UseEvidence{}, fmt.Errorf("resourceshim: use_sequence_number %d outside [1, %d] for bounded_reuse", useSeq, claims.UseLimit)
+			return preflightResult{}, fmt.Errorf("resourceshim: use_sequence_number %d outside [1, %d] for bounded_reuse", useSeq, claims.UseLimit)
 		}
 	}
+	return preflightResult{
+		claims: claims, unix: unix, challenge: challenge,
+		cnfPub: ed25519.PublicKey(cnfPub), useSig: useSig,
+		bounded: bounded, useSeq: useSeq,
+	}, nil
+}
+
+// ValidateUse repeats the pure preflight under the project transaction, then
+// checks authoritative revocation and atomically consumes nonce/JTI before the
+// caller records a receipt or performs the side effect.
+func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now time.Time) (UseEvidence, error) {
+	checked, err := s.preflightUse(token, useSigB64, op, nonce, now)
+	if err != nil {
+		return UseEvidence{}, err
+	}
+	claims, unix := checked.claims, checked.unix
+	challenge, cnfPub, useSig := checked.challenge, checked.cnfPub, checked.useSig
+	bounded, useSeq := checked.bounded, checked.useSeq
 	// 4.6 M5 revocation: a revoked grant must not be exercised. Checked on the SIGNATURE-VERIFIED jti (== the
 	// grant_id) and BEFORE consuming, so a revoked credential burns neither its nonce nor its jti.
-	if s.isRevoked != nil && s.isRevoked(claims.Jti) {
+	if s.isRevokedErr != nil {
+		revoked, err := s.isRevokedErr(claims.Jti)
+		if err != nil {
+			return UseEvidence{}, fmt.Errorf("%w: %v", ErrRevocationCheck, err)
+		}
+		if revoked {
+			return UseEvidence{}, fmt.Errorf("%w: grant %s", ErrRevoked, claims.Jti)
+		}
+	} else if s.isRevoked != nil && s.isRevoked(claims.Jti) {
 		return UseEvidence{}, fmt.Errorf("%w: grant %s", ErrRevoked, claims.Jti)
 	}
 	// 5. Consume-before-act (R5): mark the nonce (replay) and the credential's double-spend key consumed

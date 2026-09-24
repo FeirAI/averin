@@ -18,7 +18,7 @@ fixed corpus. The TLA+ recovery liveness result depends on its retry and fairnes
 |---|---|---|---|
 | Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every message a key signs and every tagged or verifier-recomputed preimage (catalogue includes JSON challenges, capability tokens, raw keys, Merkle nodes, the RFC 3161 imprint string and server id derivations; untagged server-local digests are listed as out of scope), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
 | Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order and transitive (parser-level and base64 chunk harnesses in an extended set) | `bash formal/run-kani.sh` |
-| Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log under failures, ambiguous commits, lost rollbacks and the operator `grant_void` tombstone (no anchored gap, no duplicate seq, no permanent checkpoint outage); consume-before-act ledger with multiple gateways, releases and TTL sweeps | `bash formal/tla/run-tlc.sh` |
+| Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log, consume-before-act ledger, and two-replica project transactions with checkpoints, ambiguous commits, crash/restart, pending grants and revocations | `bash formal/tla/run-tlc.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
 | Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
 
@@ -284,6 +284,18 @@ Each configuration fixes one implementation variant and asserts **one** outcome:
 (`ConsumeLedger_safe.cfg`). With a shorter retention, TLC finds the **replay**, where the
 resource acts twice on one key (`ConsumeLedger_short_retention_replay.cfg`). It also finds a live
 in-flight key being pruned (`ConsumeLedger_short_retention.cfg`).
+
+`tla/ProjectTx.tla` models two replicas with separate local caches and a
+database project guard. Its core safety exploration splits a record's frontier
+read from commit, permits an unknown commit acknowledgement and crash/restart,
+and attaches anchors only after checkpoint commit. With serialization disabled,
+TLC finds `NoFrontierFork` and `NoCheckpointFork` counterexamples. Its separate
+operational exploration treats revoke/use and pending/finalize as atomic project
+transactions, then shows that consulting a stale replica cache violates
+`NoRevokedUse` or `NoGhostFinalize`. The safe configurations check the named
+safety invariants. The split avoids a product-state explosion; it does not
+establish liveness, model SQL error handling, or prove code refinement. Tests
+with independent PostgreSQL pools exercise the corresponding transaction order.
 
 `tla/run-tlc.sh` runs every configuration and checks its **expected** outcome. The fixed designs
 must pass, and each unsafe variant must still produce the counterexample named above. TLC is

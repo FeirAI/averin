@@ -208,6 +208,8 @@ Request (`grantRequest`):
 | Field | Type | Notes |
 |-------|------|-------|
 | `idempotency_key` | string | Required (or `Idempotency-Key` header). Deterministically fixes `grant_id`. |
+| `pop_version` | int | `2` for new brokered issuance; native `token_exchange` has its separate proof contract. |
+| `issued_at`, `request_expires_at` | int64 Unix seconds | Agent-signed freshness window. Maximum 15 minutes; 30 seconds of clock skew accepted. |
 | `project_id`, `session_id` | string | Required. |
 | `agent_id`, `action`, `resource`, `scope` | string | The operation being authorized. |
 | `scope_class` | string | Scope classification input (see broker `ScopeClass`). |
@@ -226,7 +228,7 @@ Request (`grantRequest`):
   "grant_id": "<uuid>",
   "capability": "<minted sender-constrained token>",
   "expires_at": "2026-...Z",
-  "scope_class": "single_use"
+  "scope_class": "single_operation"
 }
 ```
 
@@ -234,19 +236,20 @@ Errors: `400` (validation, failed PoP, forbidden scope, malformed), `409` (idemp
 for a *different* grant request, or the grant's reserved `broker_seq` was voided by the operator —
 re-issue under a new `idempotency_key`), `500` (store/seal failure), `501` (broker not enabled). When an
 M-of-N cosig policy is pinned, single-phase issuance is refused (`400`) — use prepare/finalize.
+An invalid signature, stale proof, or conflicting project/idempotency representation is rejected
+without allocating a grant sequence or sealing authorization or denial evidence. An authenticated
+fresh request that fails broker policy may produce a signed denied-grant record when denial logging
+is enabled.
 
-**What `agent_sig` binds.** `agent_sig` is an Ed25519 signature, under the key in `agent_pubkey`, over
-the JSON object `{"tag":"averin.broker.pop.v1","agent_id","action","resource","scope","agent_pubkey"}`
-(keys sorted). It proves the caller holds the cnf key and binds the operation to it. It does **not**
-bind a nonce, an expiry, the `project_id`, the `session_id`, the `idempotency_key`, `scope_class`,
-`use_limit`, `ttl_seconds`, the principal or the delegation chain. So a captured request body is
-replayable: under a new `idempotency_key` (or in another project the replayer can write to) it yields
-another grant for the same operation, bound to the same agent key, which only the holder of that key can
-use (resources re-check PoP at use time). Against the two-phase flow, a captured body lets a third party
-drive `prepare`/`finalize` for that agent's pending grant under its `idempotency_key`; it cannot change
-what the grant authorizes or which key it is bound to. Treat grant request bodies as sensitive in transit
-and logs. Binding the project and idempotency key into the challenge (with a new tag) is a planned
-wire-format change.
+**What `agent_sig` binds.** For `pop_version: 2`, the agent signs a SHA-256 digest of the
+length-prefixed effective request, including authenticated `project_id`, resolved `idempotency_key`,
+`session_id`, operation and sender key, effective scope class/use limit, TTL, authorizing principal,
+delegation chain, justification, and the signed issue/expiry envelope. The exact field order and
+encoding are specified in [grant-pop-v2.md](../../spec/grant-pop-v2.md). A captured proof cannot be
+moved to another project or idempotency key, and it cannot mint after the signed freshness window.
+An exact v2 committed retry can return the original capability after that window; it does not re-mint or
+extend the capability. Historical v1 signatures remain inspectable under their original format but
+are not accepted by online brokered grant routes after the cutoff, including committed retries.
 
 ### POST `/v2/grants/prepare` and `/v2/grants/finalize` (two-phase)
 
@@ -273,7 +276,22 @@ receipt the offline verifier joins back to its grant.
 
 Request (`useRequest`): `idempotency_key`, `project_id`, `session_id`, `capability`, `use_sig`
 (base64url Ed25519 PoP), `action`, `params`, `nonce`, `params_nonce`, and `use_sequence_number`
-(bounded_reuse only).
+(bounded_reuse only). For other capability classes, the server currently ignores a supplied
+`use_sequence_number` and records the effective value `0`; committed retry matching uses that
+effective value as well.
+
+A bounded project read returns an exact committed retry, including after capability
+expiry, without another content write or ledger claim; a changed request under
+the same key is `409`. That retry still verifies the presented capability under
+the configured broker issuer key; an issuer key rotation without a compatible
+keyring cannot recover the old receipt through this endpoint. For a new use,
+the resource verifies the capability,
+signed project, and use PoP before storing raw params. It repeats that preflight
+inside the project transaction, then checks revocation and consumes the ledger
+with receipt insertion. A request that passes the first preflight but later
+fails revocation, replay, or time revalidation can leave an immutable,
+unreferenced content blob until normal content retention purges it; it leaves
+no receipt or committed ledger claim.
 
 **Response `201`:**
 `{ "use_id": "use-<uuid>", "grant_id": "<uuid>", "record": { /* sealed receipt */ }, "idempotent": false }`
@@ -298,8 +316,9 @@ revoked" is an affirmative, signed statement rather than an absent field. (Known
 use recorded **before** the revoke is also reported blocked; distinguishing pre-revocation uses needs a
 verifier-side change.)
 
-In Postgres mode, the revoke is durable before `201` and is reloaded at boot. Other live replicas do
-not refresh their local revoked set from that write; route uses and revokes for a project together.
+In Postgres mode, the revoke is durable before `201`. Later use transactions on
+any live replica check the same durable project state. An already admitted use
+may complete; a failed revocation lookup rejects rather than trusting a cache.
 
 Request: `{ "project_id": "...", "grant_id": "..." }` (both required).
 
@@ -344,46 +363,32 @@ Only a seq that meets **all** of these is voided:
    process start, and no void passes until `AVERIN_BROKER_SEQ_VOID_MIN_AGE` after a restart.
 5. The store enforces per-project `record_id` uniqueness. On Postgres this means migration `0002` built the
    UNIQUE index `records_project_record_id_uniq`. If the database held historical duplicate `record_id`s,
-   `0002` builds a non-unique index and logs a WARNING. In that case every void is refused with `409`,
+   `0002` builds a non-unique index and logs a WARNING. In that case every project write is refused with a retryable server error,
    because the tombstone's `record_id` is the voided `grant_id` and only that UNIQUE index guarantees that
    at most one of {the grant, its tombstone} lands. Resolve the duplicate and build the UNIQUE index first.
    The in-memory store always enforces uniqueness.
 
-**Order of operations.** The tombstone is sealed first, and the reservation is marked voided second.
-Because the tombstone's `record_id` is the reserved `grant_id`, a sealed tombstone already stops the
-grant from recording. If a commit of that grant was still in flight and lands first, the UNIQUE
-`record_id` index lets the grant win: the call returns `409` ("grant landed; nothing to void"), nothing
-is marked, and the grant's retry returns its record. If the tombstone is sealed but marking the
-reservation fails, the call returns `500`. Repeat it: the repeat finds the tombstone and only writes the
-mark. A retry of the grant in between gets a `409` and does not release or reuse the seq. A reservation
-marked voided by an older server with no tombstone behind it is re-checked like an unmarked one, and if
-its grant landed the `409` says the mark is inert.
+**Atomic transaction.** The exact project guard serializes grant and void on
+every replica. The tombstone, reservation marker and optional revocation commit
+together. If any write fails, none of them persists. A lost COMMIT response has
+an unknown outcome; repeat the same void operation to reconcile the durable
+tombstone and marker. A grant that committed first causes `409` ("grant landed;
+nothing to void"). A legacy marker without a tombstone is checked against the
+record log before repair. The Postgres store validates the actual UNIQUE index
+shape, predicate, readiness and validity before any project write; a damaged
+index refuses unsafe writes while history remains readable.
 
-**Limits of these checks.**
+The safety age still uses the reservation time, latest local attempt and process
+start. PostgreSQL supplies the project serialization, so a slow void does not
+hold a process-global ingest mutex or stall another project's writers. The
+index is over `md5(record_id)`; an md5 collision in one project yields a `409`
+on the second distinct id.
 
-- Checks 2 to 4 run inside one server process, under its ingest lock and against its in-memory attempt
-  times. With several instances sharing one Postgres, a retry on instance A and a void on instance B do
-  not see each other. Only the UNIQUE `record_id` index (check 5) closes that race.
-- The age compares Postgres `now()` (the DB host's clock, used for `allocated_at`) with the server's own
-  clock. If the DB clock runs behind the app clock, reservations look older by the difference. Keep
-  `AVERIN_BROKER_SEQ_VOID_MIN_AGE` far above any plausible clock skew. The latest-attempt time uses the
-  server clock on both sides, so skew does not affect it.
-- The whole void runs under the ingest lock. On Postgres the tombstone insert waits on any uncommitted row
-  holding the same `record_id` (a grant commit still in flight, for example on another instance), for up
-  to the 30 s statement timeout, and every ingest, grant and use on that server waits with it.
-- The uniqueness index is over `md5(record_id)`. A tenant that writes two *different* `record_id`s with
-  equal md5 into one project gets a `409` (`record_id already used`) on the second. This only affects
-  that tenant's own project: taking another record's id would require an md5 second preimage.
-
-**Capability revocation.** A void retires the `grant_id` for issuance, but on its own it does not
-invalidate a capability already minted for that `grant_id`. When revocation is enabled
-(`AVERIN_REVOCATION_SEED`), the void also **revokes** the voided `grant_id`, exactly as
-[`POST /v2/revoke`](#post-v2revoke) would. `/v2/use` then rejects the capability immediately,
-and the next export's signed `revocation_list` carries the id. The response then includes
-`"revoked": true`. If that revocation fails (`429` revoked-set cap, `503` durable persist), the call
-returns that error after the tombstone is sealed. Repeating the call, which is idempotent, retries the
-revocation. **Without revocation enabled**, such a capability stays usable at `/v2/use` until it expires.
-In that case, enable revocation, or wait out the grant's TTL, before you rely on the void.
+**Capability retirement and revocation.** The signed tombstone itself makes
+`/v2/use` reject the reserved `grant_id`, even when a revocation signing key is
+not configured. When revocation is enabled, the same transaction also adds the
+ID to the durable revoked set so the next signed export list carries it. A
+failure in either step rolls back tombstone, marker and revocation together.
 
 **Authorization.** The server has no separate operator or admin privilege. This route is gated only by
 the project-scoped API key, like every `/v2/` route, so **any writer for a project can void that
@@ -396,11 +401,12 @@ bound into the signed evidence).
 
 **Response `201`:** `{ "voided_broker_seq": <n>, "grant_id": "...", "created": true, "record": { /* tombstone */ } }`
 (plus `"revoked": true` when revocation is enabled).
-A repeat of a completed void returns the same tombstone with `200` and `"created": false`. Errors:
-`400`, `403`, `404`, `409` (recorded or the grant landed during the void, live pending grant, too young,
-or no UNIQUE `record_id` index), `429`/`503` (the void completed but revoking its `grant_id` failed;
-repeat the call), `500` (nothing voided, or the tombstone is sealed but the mark failed; repeat the call
-in both cases), `501` (broker not enabled).
+A repeat of a completed void returns the same tombstone with `200` and
+`"created": false`. Errors include `400`, `403`, `404`, `409` (recorded grant,
+live pending grant or too young), `503` for unavailable durable state or unsafe
+index shape, `500` for a failed transaction that rolls back all new void writes,
+and `501` when the broker is disabled. A lost COMMIT acknowledgement is
+retryable under the same operation identity.
 
 **Verifier compatibility.** Verifier builds from before `grant_void` existed do not recognise the
 tombstone's role. They report it as an unrecognized broker record and **fail the bundle**. Auditors must

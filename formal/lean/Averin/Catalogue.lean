@@ -9,7 +9,8 @@ distinguishable from the framed families and from each other:
 
 | Family | Source | Shape |
 |---|---|---|
-| grant PoP challenge | `server/internal/broker/broker.go` `Request.Challenge` | canonical JSON object, first byte `{` (signed by the agent key) |
+| historical grant PoP v1 | `server/internal/broker/broker.go` `Request.Challenge` | canonical JSON object, first byte `{` |
+| grant PoP v2 preimage | `server/internal/broker/broker.go` `Request.Challenge` | LP4/BE8 framed, SHA-256 digest signed by the agent |
 | denial salt | `server/internal/api/server.go` (`averin.denial.salt.v1`) | fixed ASCII string (signed by the broker key) |
 | capability token | `server/internal/broker/broker.go::mint` | `base64url(descriptor)` text, first byte `e` (signed by the broker key) |
 | `cnf_kid` input | `core/src/verify.rs::cnf_kid` | raw 32-byte Ed25519 public key |
@@ -91,7 +92,7 @@ theorem msg_length_min (F : Family) (vs : List Bytes) (t : Bytes) (h : F.Admits 
 
 /-- Every fixed-schema framed hash family (all but the body hashes, the commitment and the
 grant-head seed, which are handled separately) is at least 34 bytes. -/
-theorem framed_long : ∀ F ∈ [usePop, cosig, delegationHop, introspection, federation,
+theorem framed_long : ∀ F ∈ [grantPopV2, usePop, cosig, delegationHop, introspection, federation,
     ledger, grantHeadStep, revocationLeaf],
     34 ≤ 4 + (ascii F.tag).length + minLen F.schema := by
   decide
@@ -124,7 +125,7 @@ theorem grantHeadSeed_length (t : Bytes) : (grantHeadSeed.msg [] t).length = 31 
 
 /-- A framed hash-family preimage, with the verifier's own shape constraints. -/
 def FramedHashInput (m : Bytes) : Prop :=
-  (∃ F ∈ [usePop, cosig, delegationHop, introspection, federation, ledger, grantHeadStep,
+  (∃ F ∈ [grantPopV2, usePop, cosig, delegationHop, introspection, federation, ledger, grantHeadStep,
       revocationLeaf], ∃ vs t, F.Admits vs ∧ m = F.msg vs t) ∨
   (∃ F ∈ [recordHash, checkpointHash], ∃ t, 2 ≤ t.length ∧ m = F.msg [ascii "rcp-1"] t) ∨
   (∃ vs t, commitment.Admits vs ∧ (∃ d n v, vs = [d, n, v] ∧ n.length = 32) ∧
@@ -148,7 +149,7 @@ theorem merkle_leaf_ne_framed (v : Bytes) (hv : v.length = 32) (m : Bytes)
   simp [merkleLeaf, hv] at this
 
 theorem framed_head (m : Bytes) (hm : FramedHashInput m) : m.head? = some 0 := by
-  have hs : ∀ F ∈ [usePop, cosig, delegationHop, introspection, federation, ledger,
+  have hs : ∀ F ∈ [grantPopV2, usePop, cosig, delegationHop, introspection, federation, ledger,
       grantHeadStep, revocationLeaf], (ascii F.tag).length < 256 := by
     decide
   have hs' : ∀ F ∈ [recordHash, checkpointHash], (ascii F.tag).length < 256 := by decide

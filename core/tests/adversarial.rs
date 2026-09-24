@@ -3099,6 +3099,85 @@ fn v3_signed_grant_and_pop_use_satisfy_body_bound_authorization() {
 }
 
 #[test]
+fn mixed_committed_v3_grant_rejects_malformed_pop_version_as_adverse_evidence() {
+    let (base, opts) = claim_ready_bundle();
+    assert_eq!(
+        verify_bundle_with(&base, &opts).claims().authorized,
+        ClaimDecision::Satisfied
+    );
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let ge = grant_evidence(
+        "grant-2",
+        ACTION,
+        RESOURCE,
+        "single_operation",
+        &vk_cnf_kid(&cnf.verifying_key()),
+        ISSUED,
+        EXP,
+    );
+    let ge = change_field(&ge, "project_id", CanonValue::string("proj-001"));
+    let ge = change_field(
+        &ge,
+        "request_hash",
+        CanonValue::string(format!("sha256:{}", "0".repeat(64))),
+    );
+    let valid_ge = change_field(&ge, "pop_version", CanonValue::Int(2));
+    let with_extra = |extra_ge: &CanonValue| {
+        let mut records = arr(&base, "records");
+        let parent = content_hash_of(records.last().unwrap());
+        let extra = seal_grant_prev(&rec, &rec, "grant-2", extra_ge, &[parent]);
+        let extra = body_bind_role_record(&extra, &rec, &rec);
+        let cp = checkpoint_over(&rec, &[content_hash_of(&extra)], 3, Some(&tsa));
+        records.push(extra);
+        let bundle = change_field(&base, "records", CanonValue::Array(records));
+        change_field(&bundle, "checkpoints", CanonValue::Array(vec![cp]))
+    };
+    let control = verify_bundle_with(&with_extra(&valid_ge), &opts);
+    assert_eq!(
+        control.claims().authorized,
+        ClaimDecision::Satisfied,
+        "control issues: {:?}",
+        control.issues
+    );
+
+    let cases = [
+        (
+            "integer-one",
+            change_field(&ge, "pop_version", CanonValue::Int(1)),
+        ),
+        (
+            "string-two",
+            change_field(&ge, "pop_version", CanonValue::string("2")),
+        ),
+        ("null", change_field(&ge, "pop_version", CanonValue::Null)),
+        ("missing-with-v2-fields", ge.clone()),
+        (
+            "wrong-project",
+            change_field(&valid_ge, "project_id", CanonValue::string("other")),
+        ),
+    ];
+    for (name, bad_ge) in cases {
+        let adverse = verify_bundle_with(&with_extra(&bad_ge), &opts);
+        assert_eq!(
+            adverse.claims().authorized,
+            ClaimDecision::Refuted,
+            "{name}: {:?}",
+            adverse.issues
+        );
+        assert!(
+            adverse
+                .issues
+                .iter()
+                .any(|i| i.contains("v2 signed project/request identity")),
+            "{name}: {:?}",
+            adverse.issues
+        );
+    }
+}
+
+#[test]
 fn v2_role_evidence_retains_tier_b_joins_but_cannot_satisfy_body_bound_claim() {
     let (bundle, opts) = claim_ready_bundle_with_version(false);
     let r = verify_bundle_with(&bundle, &opts);
@@ -6130,6 +6209,47 @@ fn tier_b_cred_descriptor_match() {
     );
     assert_eq!((r.cred_label_checks, r.cred_label_matched), (1, 1));
     assert_eq!(r.disclosures_verified, 1);
+}
+
+#[test]
+fn present_invalid_descriptor_version_never_falls_back_to_legacy() {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let kid = vk_cnf_kid(&cnf.verifying_key());
+    let legacy = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true);
+    for (name, version) in [
+        ("integer-one", CanonValue::Int(1)),
+        ("string-two", CanonValue::string("2")),
+        ("null", CanonValue::Null),
+    ] {
+        let descriptor = change_field(&legacy, "version", version);
+        let binding = sha256_prefixed(descriptor.serialize().as_bytes());
+        let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &binding));
+        let report = verify_bundle_with(
+            &bundle,
+            &pinned_roles(
+                rec.verifying_key(),
+                res.verifying_key(),
+                tsa.verifying_key(),
+            ),
+        );
+        assert_eq!(
+            (report.cred_label_checks, report.cred_label_matched),
+            (1, 0),
+            "{name}: {:?}",
+            report.issues
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.contains("descriptor.version is missing or wrong")),
+            "{name}: {:?}",
+            report.issues
+        );
+    }
 }
 
 #[test]

@@ -77,8 +77,19 @@ what truly happened in the world.
   overlap at startup; the offline verifier rejects an overlapping `opts.json` as a fatal config
   error. This prevents one authority signing across a role boundary (a broker self-attesting, a
   resource self-validating).
+- **Brokered grant requests bind the tenant and full effective request.** New online issuance uses
+  the [v2 grant PoP](../../spec/grant-pop-v2.md): the agent signs the authenticated project, resolved
+  idempotency key, session, scope and authorization context, TTL, and a bounded issue/expiry window.
+  A committed exact retry may read the original grant after that window, but cannot mint again.
+  The signed capability carries `project_id`; the resource compares it to its authenticated route
+  project before revocation or replay-ledger access. Historical capabilities without that signed
+  claim are denied online at the coordinated cutoff.
 - **Consume-before-act.** A Tier-B use is recorded and its single-use/bounded capability is consumed
   in the ledger *before* the resource acts. (Durable only with the Postgres ledger — see below.)
+  New uses verify the broker signature, signed project and sender PoP before raw
+  params reach the content store. The same checks run again in the project
+  transaction. Revocation, replay or expiry detected after preflight can leave
+  only an unreferenced content blob subject to the configured retention purge.
 
 ## Machine-checked evidence for these invariants
 

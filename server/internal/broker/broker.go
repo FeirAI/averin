@@ -19,6 +19,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -54,6 +55,11 @@ const ConformanceL1GrantOnly = "L1_grant_only"
 // a caller asks for more — Prepare rejects TTL above this. Short by design; a longer-lived standing
 // credential is exactly what the broker exists to avoid.
 const MaxTTL = time.Hour
+
+// MaxRequestAge bounds how long a captured issuance proof can create a grant.
+// A committed identical grant may still be read back after this interval.
+const MaxRequestAge = 15 * time.Minute
+const RequestClockSkew = 30 * time.Second
 
 // IsForbiddenSingleOp reports whether scope is too powerful to be a single_operation grant. This is a
 // COARSE PRE-FILTER, NOT the source of truth, and intentionally has both false positives and false
@@ -140,14 +146,20 @@ func ClassifyScope(scope string, requested ScopeClass) (ScopeClass, error) {
 
 // Request is a validated grant request.
 type Request struct {
-	AgentID     string     // the agent's identity (subject)
-	Action      string     // stable operation id, e.g. "db.query:orders-ro"
-	Resource    string     // the target (audience)
-	Scope       string     // the requested scope string
-	ScopeClass  ScopeClass // requested class; "" -> single_operation
-	UseLimit    int        // bounded_reuse only: the cap N (must be >= 1); ignored for other classes
-	AgentPubKey string     // base64url ed25519 public key for the sender constraint (cnf)
-	AgentSig    string     // base64url ed25519 signature over Challenge() — proves the
+	PoPVersion       int // 1 is historical; new online brokered issuance requires 2.
+	ProjectID        string
+	IdempotencyKey   string
+	SessionID        string
+	IssuedAt         int64      // signed Unix seconds, v2 only
+	RequestExpiresAt int64      // signed Unix seconds, v2 only
+	AgentID          string     // the agent's identity (subject)
+	Action           string     // stable operation id, e.g. "db.query:orders-ro"
+	Resource         string     // the target (audience)
+	Scope            string     // the requested scope string
+	ScopeClass       ScopeClass // requested class; "" -> single_operation
+	UseLimit         int        // bounded_reuse only: the cap N (must be >= 1); ignored for other classes
+	AgentPubKey      string     // base64url ed25519 public key for the sender constraint (cnf)
+	AgentSig         string     // base64url ed25519 signature over Challenge() — proves the
 	// requester controls AgentPubKey (so it can't bind a key it
 	// doesn't hold; see PoPVerify).
 	Principal       string        // authorizing principal (policy/human/service)
@@ -161,13 +173,84 @@ type Request struct {
 }
 
 const popTag = "averin.broker.pop.v1"
+const popTagV2 = "averin.broker.pop.v2"
 
-// Challenge is the deterministic bytes the agent must sign with its cnf private key to prove
-// possession (binding the request's identity + operation + the cnf key itself). Domain-separated so
-// a signature here cannot be repurposed. NOTE: it carries no nonce/timestamp, so a captured valid
-// request is replayable — replay only yields a duplicate grant bound to the SAME agent key (usable
-// only by that agent under resource-side PoP); anti-replay (a request nonce/expiry) is a hardening.
+// v2Subject is the fully resolved security request. Its hash is the retry identity;
+// the freshness envelope is deliberately separate so a durable caller can re-sign
+// the same subject after a crash without changing or renewing an existing grant.
+func (r Request) v2Subject() ([]byte, error) {
+	class := r.ScopeClass
+	if class == "" {
+		class = ScopeSingleOperation
+	}
+	limit := int64(0)
+	if class == ScopeBoundedReuse {
+		limit = int64(r.UseLimit)
+	}
+	var b []byte
+	for _, s := range []string{popTagV2, r.ProjectID, r.IdempotencyKey, r.SessionID,
+		r.AgentID, r.Action, r.Resource, r.Scope, string(class), r.AgentPubKey,
+		r.Principal, r.Justification, "capability"} {
+		if !fitsLP4Length(uint64(len(s))) {
+			return nil, errors.New("v2 grant field exceeds the 32-bit length framing limit")
+		}
+		b = appendLP4(b, s)
+	}
+	b = appendBE8(b, limit)
+	b = appendBE8(b, int64(r.TTL/time.Second))
+	b = appendBE8(b, int64(len(r.DelegationChain)))
+	for _, s := range r.DelegationChain {
+		if !fitsLP4Length(uint64(len(s))) {
+			return nil, errors.New("v2 grant delegation field exceeds the 32-bit length framing limit")
+		}
+		b = appendLP4(b, s)
+	}
+	return b, nil
+}
+
+func fitsLP4Length(n uint64) bool { return n <= uint64(^uint32(0)) }
+
+// appendLP4 is called only after v2Subject checks the unsigned 32-bit length.
+func appendLP4(b []byte, s string) []byte {
+	var n [4]byte
+	binary.BigEndian.PutUint32(n[:], uint32(len(s)))
+	b = append(b, n[:]...)
+	return append(b, s...)
+}
+func appendBE8(b []byte, n int64) []byte {
+	var v [8]byte
+	binary.BigEndian.PutUint64(v[:], uint64(n))
+	return append(b, v[:]...)
+}
+
+// SemanticHash is signed into grant evidence and used to compare retries. Only
+// IssuedAt, RequestExpiresAt and AgentSig are omitted.
+func (r Request) SemanticHash() (string, error) {
+	if r.PoPVersion != 2 {
+		return "", errors.New("semantic hash requires PoP v2")
+	}
+	b, err := r.v2Subject()
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(h[:]), nil
+}
+
+// Challenge returns the v2 SHA-256 digest of the length-prefixed semantic request
+// and signed freshness envelope. Historical v1 requests retain their JSON preimage
+// for verification of historical signatures and tests.
 func (r Request) Challenge() []byte {
+	if r.PoPVersion == 2 {
+		b, err := r.v2Subject()
+		if err != nil {
+			return nil
+		}
+		b = appendBE8(b, r.IssuedAt)
+		b = appendBE8(b, r.RequestExpiresAt)
+		h := sha256.Sum256(b)
+		return h[:]
+	}
 	c, _ := json.Marshal(map[string]any{
 		"tag":          popTag,
 		"agent_id":     r.AgentID,
@@ -182,6 +265,9 @@ func (r Request) Challenge() []byte {
 // Validate checks required fields, the sender-constraint key shape, the TTL cap, and proof of
 // possession of the cnf key.
 func (r Request) Validate() error {
+	if r.PoPVersion != 0 && r.PoPVersion != 1 && r.PoPVersion != 2 {
+		return errors.New("unsupported grant PoP version")
+	}
 	switch {
 	case strings.TrimSpace(r.AgentID) == "":
 		return errors.New("agent_id is required")
@@ -194,10 +280,34 @@ func (r Request) Validate() error {
 	case r.TTL <= 0:
 		return errors.New("ttl must be positive")
 	}
+	if r.PoPVersion == 2 {
+		if _, err := r.v2Subject(); err != nil {
+			return err
+		}
+		if r.ProjectID == "" || r.IdempotencyKey == "" || r.SessionID == "" {
+			return errors.New("v2 grant PoP requires project_id, idempotency_key and session_id")
+		}
+		if r.TTL%time.Second != 0 || r.IssuedAt <= 0 || r.RequestExpiresAt <= r.IssuedAt ||
+			r.RequestExpiresAt-r.IssuedAt > int64(MaxRequestAge/time.Second) {
+			return errors.New("invalid v2 grant request issue/expiry interval")
+		}
+		if r.ScopeClass != "" && r.ScopeClass != ScopeSingleOperation && r.ScopeClass != ScopeBoundedReuse && r.ScopeClass != ScopeSession && r.ScopeClass != ScopeBatch {
+			return errors.New("invalid v2 scope_class")
+		}
+		if r.ScopeClass == ScopeBoundedReuse && r.UseLimit < 1 {
+			return errors.New("bounded_reuse requires use_limit >= 1")
+		}
+		if r.ScopeClass != ScopeBoundedReuse && r.UseLimit != 0 {
+			return errors.New("use_limit only applies to bounded_reuse")
+		}
+	}
 	// cnf: a sender-constrained credential needs the agent's ed25519 public key (32 bytes).
 	pub, err := base64.RawURLEncoding.DecodeString(r.AgentPubKey)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return errors.New("agent_pubkey must be a base64url-no-pad ed25519 public key (32 bytes)")
+	}
+	if r.PoPVersion == 2 && base64.RawURLEncoding.EncodeToString(pub) != r.AgentPubKey {
+		return errors.New("agent_pubkey must use canonical base64url-no-pad encoding")
 	}
 	// Proof of possession: the requester must sign the challenge with the cnf private key, so it
 	// cannot bind a public key it does not control (e.g. a victim's) into the recorded grant.
@@ -214,6 +324,30 @@ func (r Request) Validate() error {
 	// metadata. (The positive-TTL check above is a shape error, never logged.)
 	if r.TTL > MaxTTL {
 		return fmt.Errorf("ttl %s exceeds the maximum %s (credentials must be short-lived): %w", r.TTL, MaxTTL, ErrTTLExceeded)
+	}
+	return nil
+}
+
+// ValidateAt adds the server-time freshness gate for NEW issuance and pending
+// prepare/finalize. Call Validate alone only when returning a committed exact retry.
+func (r Request) ValidateAt(now time.Time) error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	return r.FreshAt(now)
+}
+
+// FreshAt checks the signed issue/expiry envelope separately from policy
+// validation. An authenticated policy denial may be sealed only when this
+// succeeds; a committed exact retry may be returned without it.
+func (r Request) FreshAt(now time.Time) error {
+	if r.PoPVersion != 2 {
+		return errors.New("new online brokered issuance requires grant PoP v2")
+	}
+	n := now.UTC().Unix()
+	skew := int64(RequestClockSkew / time.Second)
+	if n < r.IssuedAt-skew || n >= r.RequestExpiresAt+skew {
+		return errors.New("v2 grant request is outside its signed freshness window")
 	}
 	return nil
 }
@@ -249,6 +383,11 @@ func KeyID(pub ed25519.PublicKey) string {
 func Prepare(req Request, grantID string, allocSeq func() (int64, error), now time.Time, issuingKey ed25519.PrivateKey) (Prepared, error) {
 	if err := req.Validate(); err != nil {
 		return Prepared{}, err
+	}
+	if req.PoPVersion == 2 {
+		if err := req.ValidateAt(now); err != nil {
+			return Prepared{}, err
+		}
 	}
 	if strings.TrimSpace(grantID) == "" {
 		return Prepared{}, errors.New("grantID is required")
@@ -311,6 +450,10 @@ func Prepare(req Request, grantID string, allocSeq func() (int64, error), now ti
 		"exp":        expiresAt.Unix(),
 		"single_use": singleUse,
 	}
+	if req.PoPVersion == 2 {
+		descriptor["version"] = 2
+		descriptor["project_id"] = req.ProjectID
+	}
 	// M1: bounded_reuse carries its cap in BOTH the descriptor (so the resource shim enforces it and a
 	// disclosed-descriptor cross-check can confirm it) and the grant_evidence below.
 	if scopeClass == ScopeBoundedReuse {
@@ -348,6 +491,12 @@ func Prepare(req Request, grantID string, allocSeq func() (int64, error), now ti
 		"broker_seq": brokerSeq,
 		"issued_at":  evaluatedAt.Unix(),
 		"exp":        expiresAt.Unix(),
+	}
+	if req.PoPVersion == 2 {
+		h, _ := req.SemanticHash() // ValidateAt established the subject's shape.
+		evidence["project_id"] = req.ProjectID
+		evidence["pop_version"] = 2
+		evidence["request_hash"] = h
 	}
 	if scopeClass == ScopeBoundedReuse {
 		evidence["use_limit"] = req.UseLimit // the verifier reads the cap from the SIGNED grant_evidence
@@ -395,6 +544,8 @@ func MintCapability(descriptorBytes []byte, issuingKey ed25519.PrivateKey) strin
 // Claims is the typed credential descriptor a resource reads back from a capability. Numeric times
 // are int64 (a typed struct avoids the float64 footgun of decoding into map[string]any).
 type Claims struct {
+	Version   int    `json:"version,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
 	Typ       string `json:"typ"`
 	Alg       string `json:"alg"`
 	Kid       string `json:"kid"`

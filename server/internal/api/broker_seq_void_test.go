@@ -2,15 +2,72 @@ package api_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/broker"
+	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/resourceshim"
 	"github.com/feirai/averin/server/internal/store"
 )
+
+func TestVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T) {
+	base := store.NewMem()
+	resourceCore, err := core.New(resourceSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithResource(resourceCore, "orders-db").WithBrokerSeqVoidMinAge(0).Routes()
+	ak := grantAgentKey()
+	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
+	now := time.Now()
+	req := broker.Request{
+		PoPVersion: 2, ProjectID: "p1", IdempotencyKey: "idem-prepared-void", SessionID: "s1",
+		IssuedAt: now.Unix(), RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
+		AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "read:orders",
+		ScopeClass: broker.ScopeSingleOperation, AgentPubKey: pub, TTL: time.Minute,
+	}
+	req.AgentSig = base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
+	grantID := reservedGrantID("idem-prepared-void")
+	prepared, err := broker.Prepare(req, grantID, func() (int64, error) { return 1, nil }, time.Now(), brokerIssuingKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserveGrantSeq(t, base, "idem-prepared-void")
+	use := useBody(t, "idem-use-void", prepared.Capability, grantID, ak, "SELECT 1", "nonce-void")
+	var presented struct {
+		UseSig string `json:"use_sig"`
+	}
+	if err := json.Unmarshal([]byte(use), &presented); err != nil {
+		t.Fatal(err)
+	}
+	commitment, err := mustCore(t).Commit("input", []byte("SELECT 1"), strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This independently verifies the issuer signature, audience, action, PoP,
+	// and freshness before void. The test must not pass merely because the
+	// prepared descriptor was malformed or expired.
+	shim := resourceshim.New(brokerIssuingKey().Public().(ed25519.PublicKey), "orders-db", resourceshim.NewMemLedger()).WithProject("p1")
+	ev, err := shim.ValidateUse(prepared.Capability, presented.UseSig, resourceshim.Op{Action: "db.query:orders-ro", ParamsCommitment: commitment}, "nonce-void", time.Now())
+	if err != nil {
+		t.Fatalf("prepared capability was not otherwise valid: %v", err)
+	}
+	shim.RollbackUse(ev)
+	if code, response := do(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
+		t.Fatalf("void (%d): %s", code, response)
+	}
+	if code, response := do(t, h, "POST", "/v2/use", use); code != http.StatusBadRequest || !strings.Contains(response, "revoked") {
+		t.Fatalf("prepared capability was not denied specifically by signed void (%d): %s", code, response)
+	}
+}
 
 func voidBody(seq int64) string {
 	return fmt.Sprintf(`{"project_id":"p1","broker_seq":%d,"reason":"orphaned by an ambiguous commit"}`, seq)

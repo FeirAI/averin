@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -44,27 +43,41 @@ func pendingKey(projectID, idem string) string { return projectID + "\x00" + ide
 // grantRequestToBroker maps the wire grantRequest to a broker.Request (the same mapping handleGrant uses).
 func grantRequestToBroker(gr grantRequest) broker.Request {
 	return broker.Request{
-		AgentID:         gr.AgentID,
-		Action:          gr.Action,
-		Resource:        gr.Resource,
-		Scope:           gr.Scope,
-		ScopeClass:      broker.ScopeClass(gr.ScopeClass),
-		UseLimit:        gr.UseLimit,
-		AgentPubKey:     gr.AgentPubKey,
-		AgentSig:        gr.AgentSig,
-		Principal:       gr.Principal,
-		DelegationChain: gr.DelegationChain,
-		Justification:   gr.Justification,
-		TTL:             time.Duration(gr.TTLSeconds) * time.Second,
+		PoPVersion:       gr.PoPVersion,
+		ProjectID:        gr.ProjectID,
+		IdempotencyKey:   gr.IdempotencyKey,
+		SessionID:        gr.SessionID,
+		IssuedAt:         gr.IssuedAt,
+		RequestExpiresAt: gr.RequestExpiresAt,
+		AgentID:          gr.AgentID,
+		Action:           gr.Action,
+		Resource:         gr.Resource,
+		Scope:            gr.Scope,
+		ScopeClass:       broker.ScopeClass(gr.ScopeClass),
+		UseLimit:         gr.UseLimit,
+		AgentPubKey:      gr.AgentPubKey,
+		AgentSig:         gr.AgentSig,
+		Principal:        gr.Principal,
+		DelegationChain:  gr.DelegationChain,
+		Justification:    gr.Justification,
+		TTL:              time.Duration(gr.TTLSeconds) * time.Second,
 	}
 }
 
 // grantIdem resolves the idempotency key from the body field or the Idempotency-Key header.
-func grantIdem(gr grantRequest, r *http.Request) string {
-	if gr.IdempotencyKey != "" {
-		return gr.IdempotencyKey
+func grantIdem(gr grantRequest, r *http.Request) (string, error) {
+	values := r.Header.Values("Idempotency-Key")
+	if len(values) > 1 {
+		return "", fmt.Errorf("multiple Idempotency-Key headers are not supported")
 	}
-	return r.Header.Get("Idempotency-Key")
+	header := r.Header.Get("Idempotency-Key")
+	if gr.IdempotencyKey != "" && header != "" && gr.IdempotencyKey != header {
+		return "", fmt.Errorf("idempotency_key conflicts with Idempotency-Key header")
+	}
+	if gr.IdempotencyKey != "" {
+		return gr.IdempotencyKey, nil
+	}
+	return header, nil
 }
 
 // copyEvidence shallow-copies a grant_evidence map. AttachCosignatures/AttachDelegation/the broker_seq overwrite
@@ -76,33 +89,6 @@ func copyEvidence(m map[string]any) map[string]any {
 		c[k] = v
 	}
 	return c
-}
-
-// prunePending drops pending grants older than pendingTTL (an abandoned prepare must not leak memory). It
-// takes pendingMu itself (callers must NOT already hold it) and only for the brief in-memory sweep — the
-// durable deletes below run AFTER releasing it, so a slow/degraded Postgres pruning one stale entry cannot
-// stall the pendingMu-guarded map for every other in-flight prepare/finalize (finding C). When a durable
-// store is configured each pruned row is also dropped there — best-effort (a failed delete just leaves a
-// stale row that WithDurable's boot-time TTL check prunes again later; it is never rehydrated as live
-// because it is already past pendingTTL by then too).
-func (s *Server) prunePending(now time.Time) {
-	s.pendingMu.Lock()
-	var expired []*pendingGrant
-	for k, p := range s.pending {
-		if now.Sub(p.created) > pendingTTL {
-			delete(s.pending, k)
-			expired = append(expired, p)
-		}
-	}
-	s.pendingMu.Unlock()
-	if s.durable == nil {
-		return
-	}
-	for _, p := range expired {
-		if err := s.durable.DeletePending(p.gr.ProjectID, p.idemKey); err != nil {
-			log.Printf("WARNING: durable two-phase grants: prune expired pending row (project=%q idem=%q): %v", p.gr.ProjectID, p.idemKey, err)
-		}
-	}
 }
 
 // handleGrantPrepare is PHASE 1 of the online two-phase grant flow (ADR 0005 M6 Cosig / M2 Delegation): it
@@ -125,15 +111,22 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid grant request: "+err.Error())
 		return
 	}
-	if qp := r.URL.Query().Get("project"); qp != "" && gr.ProjectID != qp {
-		writeErr(w, http.StatusForbidden, "project_id does not match the authorized ?project=")
-		return
+	if qp := r.URL.Query().Get("project"); qp != "" {
+		if gr.ProjectID != "" && gr.ProjectID != qp {
+			writeErr(w, http.StatusForbidden, "project_id does not match the authorized ?project=")
+			return
+		}
+		gr.ProjectID = qp
 	}
 	if gr.ProjectID == "" || gr.SessionID == "" {
 		writeErr(w, http.StatusBadRequest, "project_id and session_id are required")
 		return
 	}
-	idem := grantIdem(gr, r)
+	idem, idemErr := grantIdem(gr, r)
+	if idemErr != nil {
+		writeErr(w, http.StatusBadRequest, idemErr.Error())
+		return
+	}
 	if idem == "" {
 		writeErr(w, http.StatusBadRequest, "idempotency_key is required (field or Idempotency-Key header) so a retry cannot double-issue a credential")
 		return
@@ -147,9 +140,22 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grantID := deterministicGrantID(gr.ProjectID, idem)
+	if gr.Mode != "" && gr.Mode != "capability" || gr.LeaseID != "" {
+		writeErr(w, http.StatusBadRequest, "brokered grants require capability mode and no lease_id")
+		return
+	}
+	if gr.TTLSeconds <= 0 || int64(gr.TTLSeconds) > (1<<63-1)/int64(time.Second) {
+		writeErr(w, http.StatusBadRequest, "ttl_seconds must be positive and fit the server duration")
+		return
+	}
+	gr.IdempotencyKey = idem
 
 	req := grantRequestToBroker(gr)
 	req.BrokerID = s.brokerID // M4: tag the grant with this broker's federation id ("" = single-broker)
+	if req.PoPVersion != 2 {
+		writeErr(w, http.StatusBadRequest, "online brokered grants require grant PoP v2")
+		return
+	}
 	// Validate proof-of-possession + scope BEFORE anything else (same gate as the single-phase /v2/grants) — so
 	// an unsigned/forbidden request can never read back a committed grant or a pending challenge by reusing a
 	// known idempotency key.
@@ -167,6 +173,7 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 	var p *pendingGrant
 	var finalized string
 	var conflict string
+	var freshnessErr error
 	err = s.withProjectWrite(r.Context(), gr.ProjectID, func(st store.Store) error {
 		if existing, found, e := st.RecordByIdem(gr.ProjectID, idem); e != nil {
 			return e
@@ -176,6 +183,10 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 			finalized = existing.JSON
+			return nil
+		}
+		if e := req.ValidateAt(s.now()); e != nil {
+			freshnessErr = e
 			return nil
 		}
 		row, found, e := st.PendingGrant(gr.ProjectID, idem)
@@ -194,6 +205,10 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 				}
 				dto.Created = row.Created
 				p = dto.toPendingGrant(idem)
+				if e := p.req.FreshAt(s.now()); e != nil {
+					freshnessErr = fmt.Errorf("original pending grant proof expired: %w", e)
+					return nil
+				}
 				if same, pe := pendingGrantMatchesRequest(p, req); pe != nil || !same {
 					conflict = "idempotency_key already has a pending grant for a different grant request"
 				}
@@ -227,6 +242,10 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	if freshnessErr != nil {
+		writeErr(w, http.StatusBadRequest, freshnessErr.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "prepare grant: "+err.Error())
 		return
@@ -302,13 +321,17 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid finalize request: "+err.Error())
 		return
 	}
-	if qp := r.URL.Query().Get("project"); qp != "" && fr.ProjectID != qp {
-		writeErr(w, http.StatusForbidden, "project_id does not match the authorized ?project=")
-		return
+	if qp := r.URL.Query().Get("project"); qp != "" {
+		if fr.ProjectID != "" && fr.ProjectID != qp {
+			writeErr(w, http.StatusForbidden, "project_id does not match the authorized ?project=")
+			return
+		}
+		fr.ProjectID = qp
 	}
-	idem := fr.IdempotencyKey
-	if idem == "" {
-		idem = r.Header.Get("Idempotency-Key")
+	idem, idemErr := grantIdem(fr.grantRequest, r)
+	if idemErr != nil {
+		writeErr(w, http.StatusBadRequest, idemErr.Error())
+		return
 	}
 	if fr.ProjectID == "" || idem == "" {
 		writeErr(w, http.StatusBadRequest, "project_id and idempotency_key are required")
@@ -319,12 +342,25 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grantID := deterministicGrantID(fr.ProjectID, idem)
+	if fr.Mode != "" && fr.Mode != "capability" || fr.LeaseID != "" {
+		writeErr(w, http.StatusBadRequest, "brokered grants require capability mode and no lease_id")
+		return
+	}
+	if fr.TTLSeconds <= 0 || int64(fr.TTLSeconds) > (1<<63-1)/int64(time.Second) {
+		writeErr(w, http.StatusBadRequest, "ttl_seconds must be positive and fit the server duration")
+		return
+	}
+	fr.IdempotencyKey = idem
 
 	// Proof-of-possession FIRST (mirroring single-phase /v2/grants): finalize returns a live capability, so the
 	// caller must present the SAME PoP-signed grant request it prepared — project_id + idempotency_key alone
 	// (both guessable/observable) must never retrieve or commit someone else's grant.
 	req := grantRequestToBroker(fr.grantRequest)
 	req.BrokerID = s.brokerID
+	if req.PoPVersion != 2 {
+		writeErr(w, http.StatusBadRequest, "online brokered grants require grant PoP v2")
+		return
+	}
 	if e := req.Validate(); e != nil {
 		writeErr(w, http.StatusBadRequest, "finalize must carry the prepared grant request with a valid agent_sig: "+e.Error())
 		return
@@ -332,16 +368,25 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 
 	// Read the durable pending challenge for expensive signature checks, then
 	// revalidate this exact row under the project transaction at commit.
-	row, found, err := s.st.PendingGrant(fr.ProjectID, idem)
+	var row store.PendingGrant
+	var found bool
+	var existing store.Record
+	var committed bool
+	err = s.st.WithProjectRead(r.Context(), fr.ProjectID, func(st store.Store) error {
+		var e error
+		row, found, e = st.PendingGrant(fr.ProjectID, idem)
+		if e != nil || found {
+			return e
+		}
+		existing, committed, e = st.RecordByIdem(fr.ProjectID, idem)
+		return e
+	})
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "pending lookup: "+err.Error())
 		return
 	}
 	if !found {
-		if existing, ok, e := s.st.RecordByIdem(fr.ProjectID, idem); e != nil {
-			writeErr(w, http.StatusServiceUnavailable, "idempotency lookup: "+e.Error())
-			return
-		} else if ok {
+		if committed {
 			if same, pe := storedGrantMatchesRequest(existing.JSON, req); pe != nil || !same {
 				writeErr(w, http.StatusConflict, "idempotency_key already used for a different record or grant request")
 				return
@@ -352,6 +397,10 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "no pending grant for this idempotency_key — call /v2/grants/prepare first")
 		return
 	}
+	if e := req.ValidateAt(s.now()); e != nil {
+		writeErr(w, http.StatusBadRequest, e.Error())
+		return
+	}
 	var dto pendingGrantDTO
 	if e := json.Unmarshal(row.Payload, &dto); e != nil {
 		writeErr(w, http.StatusServiceUnavailable, "invalid durable pending grant: "+e.Error())
@@ -359,6 +408,10 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 	}
 	dto.Created = row.Created
 	p := dto.toPendingGrant(idem)
+	if e := p.req.FreshAt(s.now()); e != nil || !s.now().Before(p.created.Add(pendingTTL)) {
+		writeErr(w, http.StatusBadRequest, "original pending grant deadline expired")
+		return
+	}
 	if same, pe := pendingGrantMatchesRequest(p, req); pe != nil || !same {
 		writeErr(w, http.StatusConflict, "the pending grant under this idempotency_key was prepared for a different grant request")
 		return
@@ -409,6 +462,7 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 	var sealed string
 	var created bool
 	var conflict string
+	var freshnessErr error
 	commitErr := s.withProjectWrite(r.Context(), fr.ProjectID, func(st store.Store) error {
 		if existing, ok, e := st.RecordByIdem(fr.ProjectID, idem); e != nil {
 			return e
@@ -436,6 +490,14 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 			conflict = "pending challenge expired; prepare again"
 			return nil
 		}
+		if e := req.ValidateAt(s.now()); e != nil {
+			freshnessErr = e
+			return nil
+		}
+		if e := p.req.FreshAt(s.now()); e != nil || !s.now().Before(p.created.Add(pendingTTL)) {
+			freshnessErr = fmt.Errorf("original pending grant deadline expired")
+			return nil
+		}
 		s.noteSeqAttempt(fr.ProjectID, grantID)
 		seq, _, e := st.AllocateBrokerSeq(fr.ProjectID, grantID)
 		if e != nil {
@@ -455,6 +517,10 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		}
 		return st.DeletePendingGrant(fr.ProjectID, idem)
 	})
+	if freshnessErr != nil {
+		writeErr(w, http.StatusBadRequest, freshnessErr.Error())
+		return
+	}
 	if conflict != "" {
 		writeErr(w, http.StatusConflict, conflict)
 		return

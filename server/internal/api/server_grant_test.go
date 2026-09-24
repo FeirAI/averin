@@ -37,14 +37,20 @@ func newBrokerServer(t *testing.T) http.Handler {
 // grantBody builds a JSON grant request whose agent_sig proves possession of the agent key (PoP),
 // carrying idempotency key `idem`.
 func grantBody(idem, scope string, ak ed25519.PrivateKey, sigKey ed25519.PrivateKey) string {
+	return grantBodyAt(idem, scope, ak, sigKey, time.Now())
+}
+
+func grantBodyAt(idem, scope string, ak ed25519.PrivateKey, sigKey ed25519.PrivateKey, now time.Time) string {
 	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
-	// the challenge is over agent_id/action/resource/scope/agent_pubkey
 	req := broker.Request{
+		PoPVersion: 2, ProjectID: "p1", IdempotencyKey: idem, SessionID: "s1",
+		IssuedAt: now.Unix(), RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
 		AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db",
-		Scope: scope, AgentPubKey: pub,
+		Scope: scope, AgentPubKey: pub, TTL: time.Minute,
 	}
 	sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(sigKey, req.Challenge()))
 	b, _ := json.Marshal(map[string]any{
+		"pop_version": 2, "issued_at": req.IssuedAt, "request_expires_at": req.RequestExpiresAt,
 		"idempotency_key": idem,
 		"project_id":      "p1", "session_id": "s1",
 		"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",
@@ -544,13 +550,18 @@ func TestGrantAmbiguousCommitDoesNotReleaseSeq(t *testing.T) {
 func TestGrantIdempotencyConflictOnShapingFields(t *testing.T) {
 	h := newBrokerServer(t)
 	ak := grantAgentKey()
-	// the agent_sig is over agent_id/action/resource/scope/agent_pubkey — NOT ttl or scope_class — so a
-	// valid sig can be reused while changing those grant-shaping fields.
+	// Each shaping choice is signed. A validly re-signed different subject still
+	// conflicts under the same idempotency key.
 	bodyWith := func(idem string, ttl int, scopeClass string) string {
 		pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
-		sr := broker.Request{AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "read:orders", AgentPubKey: pub}
+		now := time.Now().UTC()
+		sr := broker.Request{PoPVersion: 2, ProjectID: "p1", IdempotencyKey: idem, SessionID: "s1",
+			IssuedAt: now.Unix(), RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
+			AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "read:orders",
+			ScopeClass: broker.ScopeClass(scopeClass), AgentPubKey: pub, TTL: time.Duration(ttl) * time.Second}
 		sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, sr.Challenge()))
 		m := map[string]any{
+			"pop_version": 2, "issued_at": sr.IssuedAt, "request_expires_at": sr.RequestExpiresAt,
 			"idempotency_key": idem, "project_id": "p1", "session_id": "s1",
 			"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",
 			"scope": "read:orders", "agent_pubkey": pub, "agent_sig": sig, "ttl_seconds": ttl,

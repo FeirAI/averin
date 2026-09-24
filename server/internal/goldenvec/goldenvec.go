@@ -46,6 +46,27 @@ type PoPCase struct {
 	ExpectHex         string `json:"expect_hex"`
 }
 
+type GrantPoPV2Case struct {
+	Name             string   `json:"name"`
+	ProjectID        string   `json:"project_id"`
+	IdempotencyKey   string   `json:"idempotency_key"`
+	SessionID        string   `json:"session_id"`
+	AgentID          string   `json:"agent_id"`
+	Action           string   `json:"action"`
+	Resource         string   `json:"resource"`
+	Scope            string   `json:"scope"`
+	ScopeClass       string   `json:"scope_class"`
+	AgentPubKey      string   `json:"agent_pubkey"`
+	Principal        string   `json:"principal"`
+	Justification    string   `json:"justification"`
+	UseLimit         int      `json:"use_limit"`
+	TTLSeconds       int      `json:"ttl_seconds"`
+	DelegationChain  []string `json:"delegation_chain"`
+	IssuedAt         int64    `json:"issued_at"`
+	RequestExpiresAt int64    `json:"request_expires_at"`
+	ExpectHex        string   `json:"expect_hex"`
+}
+
 // CnfKidCase pins the cnf key-id derived from a 32-byte ed25519 seed.
 type CnfKidCase struct {
 	SeedHex string `json:"seed_hex"`
@@ -121,6 +142,7 @@ type RevocationMerkleRootCase struct {
 
 // Vectors is the whole shared file.
 type Vectors struct {
+	GrantPoPV2                       []GrantPoPV2Case           `json:"grant_pop_v2"`
 	GrantHeadRoot                    []GrantHeadCase            `json:"grant_head_root"`
 	LedgerCommitment                 []LedgerCase               `json:"ledger_commitment"`
 	UsePoPChallenge                  []PoPCase                  `json:"use_pop_challenge"`

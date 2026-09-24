@@ -44,14 +44,14 @@ deeper. This is the paged read path; the export/verify bound above is separate.
 ## Checkpoint grant-head read is filtered, not indexed
 
 Checkpoint creation folds the D6 grant-transparency head from `store.GrantRecords` (the grant-tuple
-records) instead of a full-history scan, under `ingestMu` — so it no longer materializes the whole
+records) instead of a full-history scan, under the project write transaction — so it no longer materializes the whole
 project history per checkpoint, and the single-snapshot D6 consistency (no grant insert can interleave
 between the frontier read and the grant-log read) is preserved. The filter is a **superset** of the
 transparency-log membership set (it matches the necessary marker `extensions.broker.kind == "grant"`;
 `grantLog` re-applies the exact rule, so a real grant can never be omitted → no suppression).
 
 This is a **RAM/parse** reduction, not a scan-latency one: `json` is a `text` column, so the Postgres
-read still scans `O(records)` (a per-row `::jsonb` cast), holding `ingestMu` for the query. A truly
+read still scans `O(records)` (a per-row `::jsonb` cast), holding the project guard for the query. A truly
 `O(grants)` **indexed** grant head — a durable incremental head keyed off `broker_seq` with a
 `content_hash` column — is a **deferred** rearchitecture: it needs a schema migration/backfill and is
 not worth reopening a grant-suppression race for here.
@@ -65,36 +65,23 @@ existing record's plaintext `otel_attrs` **cannot be retroactively scrubbed**. S
 best-effort pattern/keyword matching, not a guarantee that every possible secret shape is caught;
 treat the raw OTel attribute bridge as a lower-trust ingest path (Level-2 observation).
 
-## Ingest is serialized by a process-global mutex (head-of-line latency bound)
+## Project writes wait on a database guard
 
-The `/v2/use` (+ `/v2/use-intent`, `/v2/use-outcome`) enforcement path and generic ingest run their
-whole `RecordByIdem → ValidateUse → buildUseRecord → seal → PutRecord` critical section under a **single
-process-global mutex** (`ingestMu` in `server/internal/api/server.go`). `ValidateUse` performs the
-consume-before-act ledger writes (two ~10s-bounded Postgres consumes: the nonce and the double-spend
-key), and `buildUseRecord` does content-store I/O — **all while holding `ingestMu`**. Because the lock
-is process-global (not per-project), **one stuck ledger/content dependency stalls ALL ingest, grants,
-and checkpoints for every project** for up to the dependency timeout (~tens of seconds). This bounds
-throughput to one in-flight seal at a time and makes tail latency sensitive to the slowest dependency.
+Postgres serializes each project's authoritative writes with a persisted guard
+row. Frontier reads, broker sequence allocation, grant/use receipts, ledger
+claims, voids, revocations, pending transitions and checkpoints use one
+transaction and connection. Another project can proceed while a guard is held.
+The project session has finite pool, lock and statement waits; a canceled
+request may leave a COMMIT result unknown. Retry only the same idempotency or
+operation identity and reconcile the durable result. A database outage fails
+closed; it does not promise write availability.
 
-This is the single-writer invariant that prevents DAG forks (see *Storage model* in
-[ARCHITECTURE.md](ARCHITECTURE.md)) — correctness is preserved; the cost is contention. Item-5's
-checkpoint-scan narrowing already removed the whole-history grant-head scan from the checkpoint path's
-share of this lock (see *Checkpoint grant-head read* above), so checkpoints no longer hold `ingestMu`
-for an `O(records)` parse. **Deferred:** splitting the lock so the ledger consumes + content I/O run
-under a **per-idempotency-key** lock while `ingestMu` covers only `heads → seal → put` would let
-different projects' ingests proceed concurrently. It is deliberately NOT attempted as a quick reorder:
-it is on the hot enforcement path and the D6 single-snapshot `heads → seal → put` invariant (and the
-replay/double-spend ordering — `ValidateUse`'s consume must stay before the seal) must be preserved, so
-a wrong split reopens DAG-fork or replay. Treated as a design item, not a patch.
-
-## Cross-replica ingest is not coordinated (single-writer-per-project required)
-
-`ingestMu` is in-process only. Two averin replicas pointed at the **same** `AVERIN_DATABASE_URL` do not
-share it, so concurrent ingests across replicas can read the same frontier and **silently fork a
-project's DAG**. Deploy averin as a **single writer per project** — one replica, or shard projects so no
-project is written by more than one replica. **Deferred:** a real per-project `pg_advisory_xact_lock`
-over the ingest frontier (the sole advisory lock today covers only `broker_seq` allocation) would make
-multi-replica ingest safe; until then single-writer-per-project is a **hard deploy requirement**.
+The in-memory implementation mirrors transactional rollback and project
+isolation but is volatile across process restart. A multi-replica deployment
+claim still needs authenticated capability-project binding, scoped nonce
+claims and bounded sequence recovery tested together. Until then, keep the
+single-writer-per-project deployment policy even though frontier and checkpoint
+writes now serialize across replicas.
 
 ## Storage growth is unbounded and append-only (monitoring is a hard deploy requirement)
 
@@ -138,25 +125,18 @@ would reopen the single-use replay the ledger exists to close. A configured valu
 floor is fatal at startup. A sweep failure is logged, never fatal: it only defers reclaiming space, it
 can never reopen a replay window.
 
-## Revocation blocks later local uses, with a replica-coherence limit
+## Revocation and pending-grant visibility
 
-When revocation is enabled, a successful `POST /v2/revoke` publishes the revoked grant ID before it
-returns `201`. This server then rejects later `/v2/use` and `/v2/use-intent` calls for that grant before
-consumption. The next export contains a signed revocation list for offline verification. With the
-Postgres durable store, the revoke is persisted before publication and reloaded at startup; a failed
-durable write does not acknowledge the revoke. Without Postgres the revoked set is volatile.
+When revocation is enabled, an acknowledged revoke is durable before `201` and
+all later project transactions on any live replica reject a new use for that
+grant. A use already admitted before the revoke's linearization point may
+complete. Query failure rejects or retries; no replica treats a boot cache as
+authority. Export signs the revoked set at its repeatable-read cutoff. The
+offline verifier still evaluates earlier uses against the current export list,
+so a pre-revocation use can be reported blocked.
 
-Each running replica reads its own in-memory snapshot. A revoke acknowledged by one replica is **not**
-automatically visible to another live replica, even when both use Postgres; restart rehydration is
-not live synchronization. Keep each project's use traffic on the writer that handles revocation, or
-enforce credential revocation at the upstream gateway. The offline verifier evaluates the exported
-list as of export, so a use recorded before the revoke is also reported blocked under a fresh list.
+Two-phase prepare/finalize and void read the same durable pending row on every
+replica. A restart or route to another live replica does not lose the challenge
+in Postgres mode; a missing or expired row fails closed. In-memory mode loses
+pending and revocation state on process restart.
 
-## Two-phase pending grants survive restart in Postgres mode, not live replica handoff
-
-The `prepare` challenge is held in an in-memory pending cache. With the Postgres durable store it is
-also persisted and rehydrated at startup, so a restart need not lose a pending grant. A live
-`finalize` request routed to a different replica does not load the other replica's pending cache and
-can return `409`. Run one issuer per project or route prepare and finalize to the same replica. In a
-non-Postgres deployment pending grants remain volatile. This bound is specific to the online
-two-phase flow.

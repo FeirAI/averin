@@ -367,8 +367,8 @@ func main() {
 			log.Fatal("AVERIN_RESOURCE_SEED must differ from AVERIN_BROKER_ISSUING_SEED (keep the capability-issuing and use-recording key roles distinct)")
 		}
 		resourcePubKey = rc.PubKey() // for the R2 revocation∩resource disjointness check below
-		// Durable consume-before-act ledger when Postgres is configured; else the volatile MemLedger.
-		// WithLedger must precede WithResource (which installs the MemLedger default only if none is set).
+		// The store transaction owns replay claims and the signed use receipt.
+		// pgledger is retained for maintenance sweeping and a separate readiness probe.
 		if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
 			lctx, lcancel := context.WithTimeout(context.Background(), 30*time.Second)
 			pl, err := pgledger.New(lctx, dsn)
@@ -376,7 +376,6 @@ func main() {
 			if err != nil {
 				log.Fatalf("resource ledger: Postgres requested but unavailable: %v", err)
 			}
-			srv.WithLedger(pl)
 			// Periodic TTL sweep of the consume_ledger (it otherwise grows one row per PoP nonce + per jti
 			// forever; only a Release ever deletes). AVERIN_LEDGER_RETENTION sets how long a consumed
 			// nonce/jti is kept — a CORRECTNESS parameter, NOT tuning: it MUST exceed the longest credential
@@ -405,9 +404,9 @@ func main() {
 				func() float64 { return float64(pl.PoolStat().IdleConns) })
 			srv.WithGauge("averin_ledger_pool_max_conns", "Resource ledger Postgres pool: configured max connections.",
 				func() float64 { return float64(pl.PoolStat().MaxConns) })
-			log.Printf("consume-before-act ledger -> Postgres (durable)")
+			log.Printf("consume-before-act claims -> project store transaction; pgledger sweep/readiness enabled")
 		} else {
-			log.Printf("WARNING: the consume-before-act ledger is in-memory (volatile) — consumed single-use jti/nonce reset on restart, reopening a replay window for /v2/use. Set AVERIN_DATABASE_URL for the durable Postgres-backed ledger.")
+			log.Printf("WARNING: consume-before-act claims use the volatile in-memory project store; set AVERIN_DATABASE_URL for durable claims")
 		}
 		srv.WithResource(rc, rid)
 		log.Printf("resource gateway enabled (POST /v2/use) for resource %q", rid)
@@ -453,13 +452,9 @@ func main() {
 		log.Printf("revocation enabled (POST /v2/revoke; exports carry a signed revocation_list)")
 	}
 
-	// M5/M6/M2 durability: back the revoked-grant set and the pending two-phase grant mint state with
-	// Postgres when AVERIN_DATABASE_URL is set, so a pod restart or SIGTERM does not silently forget a
-	// revoke or lose a mint awaiting cosig/delegation approval (both were in-memory-only in Phase 1). Must
-	// run AFTER srv.WithRevocation (which (re)initializes the in-memory revoked set that WithDurable then
-	// rehydrates). A failed connection/rehydrate is fatal — same fail-closed posture as selectStore/pgledger:
-	// starting with a silently-empty revoked set would let an operator believe a revoke is enforced when it
-	// is not.
+	// Auxiliary durable-state connection for startup diagnostics, readiness and
+	// legacy cache rehydration. Request-time pending and revocation authority uses
+	// the transaction-bound project Store, connected to the same database.
 	var durableStore *pgdurable.Store
 	if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
 		dctx, dcancel := context.WithTimeout(context.Background(), 30*time.Second)

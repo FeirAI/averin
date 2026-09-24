@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/feirai/averin/server/internal/resourceshim"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -45,6 +47,28 @@ func TestMemProjectWriteRollbackAndIsolation(t *testing.T) {
 	}
 	if seq, _ := m.NextDisplaySeq("p", "s"); seq != 0 {
 		t.Fatalf("aborted display seq persisted: %d", seq)
+	}
+}
+
+func TestProjectCommitClassification(t *testing.T) {
+	if err := classifyProjectCommit(pgx.ErrTxCommitRollback); !errors.Is(err, ErrTransactionAborted) || errors.Is(err, ErrCommitAmbiguous) {
+		t.Fatalf("known rollback classified as ambiguous: %v", err)
+	}
+	if err := classifyProjectCommit(&pgconn.PgError{Code: "40001", Message: "serialization failure"}); !errors.Is(err, ErrTransactionAborted) || errors.Is(err, ErrCommitAmbiguous) {
+		t.Fatalf("server-rejected commit classified as ambiguous: %v", err)
+	}
+	for _, code := range []string{"40003", "08007", "57P01", "XX999"} {
+		if err := classifyProjectCommit(&pgconn.PgError{Code: code}); !errors.Is(err, ErrCommitAmbiguous) || errors.Is(err, ErrTransactionAborted) {
+			t.Fatalf("commit SQLSTATE %s classified as definite abort: %v", code, err)
+		}
+	}
+	for _, code := range []string{"40P01", "25P02", "23503"} {
+		if err := classifyProjectCommit(&pgconn.PgError{Code: code}); !errors.Is(err, ErrTransactionAborted) || errors.Is(err, ErrCommitAmbiguous) {
+			t.Fatalf("commit SQLSTATE %s classified as unknown: %v", code, err)
+		}
+	}
+	if err := classifyProjectCommit(context.DeadlineExceeded); !errors.Is(err, ErrCommitAmbiguous) || errors.Is(err, ErrTransactionAborted) {
+		t.Fatalf("unknown commit result classified as abort: %v", err)
 	}
 }
 
@@ -125,7 +149,10 @@ func TestPostgresProjectWriteTwoPools(t *testing.T) {
 	defer done()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	otherPool, err := pgxpool.NewWithConfig(ctx, p.pool.Config().Copy())
+	otherConfig := p.pool.Config().Copy()
+	otherAppName := fmt.Sprintf("averin_project_guard_wait_%d", time.Now().UnixNano())
+	otherConfig.ConnConfig.RuntimeParams["application_name"] = otherAppName
+	otherPool, err := pgxpool.NewWithConfig(ctx, otherConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +185,22 @@ func TestPostgresProjectWriteTwoPools(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
+	independent := make(chan error, 1)
+	go func() {
+		independent <- other.WithProjectWrite(ctx, "q", func(st Store) error { _, _, err := st.PutRecord("q", "q1", rec("qh", "s")); return err })
+	}()
+	select {
+	case err := <-independent:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("project q could not commit while project p held its guard: %v", ctx.Err())
+	}
+	// Start the same-project waiter only after q has committed, so a slow CI
+	// host cannot spend its 10s database lock timeout waiting for unrelated
+	// connection setup. Observe the actual blocked backend rather than inferring
+	// serialization from a short period with no callback progress.
 	second := make(chan error, 1)
 	go func() {
 		second <- other.WithProjectWrite(ctx, "p", func(st Store) error {
@@ -172,22 +215,26 @@ func TestPostgresProjectWriteTwoPools(t *testing.T) {
 			return err
 		})
 	}()
-	independent := make(chan error, 1)
-	go func() {
-		independent <- other.WithProjectWrite(ctx, "q", func(st Store) error { _, _, err := st.PutRecord("q", "q1", rec("qh", "s")); return err })
-	}()
-	select {
-	case err := <-independent:
-		if err != nil {
-			t.Fatal(err)
+	for {
+		select {
+		case err := <-second:
+			t.Fatalf("same-project writer returned before guard release: %v", err)
+		case <-ctx.Done():
+			t.Fatalf("same-project writer did not reach database lock wait: %v", ctx.Err())
+		default:
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("project q stalled behind project p")
-	}
-	select {
-	case err := <-second:
-		t.Fatalf("second writer escaped project guard: %v", err)
-	case <-time.After(100 * time.Millisecond):
+		var waiting bool
+		if err := p.pool.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE application_name=$1 AND state='active' AND wait_event_type='Lock'
+			  AND query LIKE '%project_write_guard%'
+		)`, otherAppName).Scan(&waiting); err != nil {
+			t.Fatalf("inspect project guard wait: %v", err)
+		}
+		if waiting {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	close(release)
 	released = true
@@ -199,6 +246,60 @@ func TestPostgresProjectWriteTwoPools(t *testing.T) {
 	}
 	if heads, err := p.Heads("p", "s"); err != nil || len(heads) != 1 || heads[0] != "h2" {
 		t.Fatalf("heads=%v err=%v", heads, err)
+	}
+}
+
+func TestPostgresProjectWriteDeadlineBoundaries(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	ctx := context.Background()
+	// Pool acquisition must observe the caller's deadline.
+	cfg := p.pool.Config().Copy()
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	err = (&Postgres{pool: pool}).WithProjectWrite(deadline, "p", func(Store) error { t.Fatal("callback ran without connection"); return nil })
+	cancel()
+	conn.Release()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pool wait = %v", err)
+	}
+
+	// The same deadline also bounds a blocked guard and a statement after it.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	holder := make(chan error, 1)
+	go func() {
+		holder <- p.WithProjectWrite(ctx, "p", func(Store) error { close(entered); <-release; return nil })
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("holder did not enter")
+	}
+	defer func() { close(release); <-holder }()
+	deadline, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
+	err = p.WithProjectWrite(deadline, "p", func(Store) error { t.Fatal("callback escaped guard"); return nil })
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("guard wait = %v", err)
+	}
+	deadline, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
+	err = p.WithProjectRead(deadline, "q", func(st Store) error {
+		_, e := st.(*Postgres).tx.Exec(st.(*Postgres).callContext(), `SELECT pg_sleep(5)`)
+		return e
+	})
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("statement = %v", err)
 	}
 }
 
@@ -215,6 +316,9 @@ func TestPostgresProjectWriteRejectsWrongIndex(t *testing.T) {
 	err := p.WithProjectWrite(ctx, "p", func(Store) error { t.Fatal("unsafe callback ran"); return nil })
 	if err == nil {
 		t.Fatal("wrong index accepted")
+	}
+	if _, _, err := p.PutRecord("p", "k", rec("h", "s")); err == nil {
+		t.Fatal("standalone write bypassed project transaction index check")
 	}
 	if _, err := p.AllRecords("p"); err != nil {
 		t.Fatalf("damaged history must remain readable: %v", err)
