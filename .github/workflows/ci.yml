@@ -135,7 +135,7 @@ jobs:
         run: |
           set -o pipefail
           : "${AVERIN_TEST_DATABASE_URL:?Postgres DSN is required for the API race gate}"
-          go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... | tee "${RUNNER_TEMP}/averin-go-events.json" | python3 ../scripts/check-go-test-events.py
+          go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... ./internal/pgschema/... ./internal/resourceshim/... | tee "${RUNNER_TEMP}/averin-go-events.json" | python3 ../scripts/check-go-test-events.py
       - name: save Go test events on failure
         if: failure()
         uses: actions/upload-artifact@v4

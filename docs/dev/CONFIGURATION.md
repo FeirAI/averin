@@ -36,7 +36,7 @@ The ingestion + app API. Started with `./averin-server`.
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_DATABASE_URL` | unset ⇒ **in-memory** | No (but see note) | Postgres DSN. When set, uses the append-only Postgres store. A persisted per-project guard row serializes each project write; the authoritative reads and inserts share one transaction and connection. At startup a single **versioned migration** (see "Schema versioning & upgrades" below) brings the DB to the current schema under an advisory lock. **Connection failure — or a DB newer than this binary — is fatal**: it refuses to silently fall back to a volatile store and lose evidence, and refuses to open a DB it might misread. Unset ⇒ in-memory store (NOT durable; logs a loud WARNING). The same project transaction owns durable consume-before-act claims and the signed use receipt. |
+| `AVERIN_DATABASE_URL` | unset ⇒ **in-memory** | No (but see note) | Postgres DSN for a separate, least-privilege runtime role. Existing databases must first use the explicit maintenance cutover below; ordinary startup refuses an older schema. Connection failure, a missing nonce cutover marker, or a newer schema is fatal. Unset ⇒ in-memory store (NOT durable; logs a WARNING). The project transaction owns consume-before-act claims and the signed use receipt. |
 | `AVERIN_CONTENT_DIR` | unset ⇒ in-memory | No | Filesystem directory for the durable content store (the raw low-entropy `input`/`output`/`rationale` values committed at ingest, revealed on selective disclosure). Blobs are stored **AES-256-GCM encrypted at rest**, under a per-tenant subdirectory (`<dir>/tenant-<hash>/sha256-<hex>`); the per-tenant key is derived from `AVERIN_CONTENT_MASTER_KEY` via HMAC, with tenant+plaintext-digest as GCM additional-authenticated-data. Encryption is **at-rest only** — a disclosing export still ships the plaintext value, so offline verification is unchanged. A bad/uncreatable dir is fatal. Unset ⇒ in-memory (disclosures don't survive a restart; logs a WARNING). |
 | `AVERIN_CONTENT_MASTER_KEY` (or `_FILE`) | — | **Yes** when `AVERIN_CONTENT_DIR` is set | 64 hex chars = 32-byte master key from which each tenant's content-encryption key is derived. **Missing/invalid with the dir set ⇒ fatal** (`log.Fatal`) — the content store never runs unencrypted. The `_FILE` form reads the value from a mounted secret file (setting both the inline and `_FILE` form is fatal). No effect when the content store is in-memory. |
 | `AVERIN_RAW_RETENTION_DAYS` | `30` | No | Retention window for the encrypted raw payloads: a daily purge deletes blobs older than N days (by file mtime). Must be a positive integer (else fatal). Re-committing identical content refreshes its mtime, restarting the window. Purging removes only the raw opening material — the sealed record keeps its hiding commitment, so a post-purge export reports `raw_content_available:false` while the proofs stay verifiable. Only applies when `AVERIN_CONTENT_DIR` is set. |
@@ -55,18 +55,18 @@ The ingestion + app API. Started with `./averin-server`.
 
 averin's three Postgres-backed stores — the append-only evidence store, the consume-before-act ledger,
 and the durable revocation / two-phase grant state — share the one `AVERIN_DATABASE_URL`. At startup a
-single **versioned migration runner** (`server/internal/pgschema`) brings that DB to the schema version
-this binary understands, under a `pg_advisory_xact_lock` so two replicas booting against one DB (a
-rolling deploy) cannot race the DDL. It writes one `schema_migrations(version int PRIMARY KEY, applied_at
+single **versioned migration runner** (`server/internal/pgschema`) checks the schema at ordinary
+startup. Only a truly empty DB can bootstrap automatically. Existing databases need a selected
+maintenance cutover before new writers start. The runner uses `pg_advisory_xact_lock` and writes one
+`schema_migrations(version int PRIMARY KEY, applied_at
 timestamptz)` ledger for the whole averin DB, so an operator sees **one** version, not three. (It is
 named `schema_migrations`, distinct from the flight-recorder record's own `schema_version` field.)
 
 The runner reads the stored version (an existing **unstamped** DB reads as `0`) and:
 
-- **stored < binary** ⇒ applies the ordered forward steps and stamps each in the same transaction as its
-  DDL (a crash can never leave version-ahead-of-schema). An unstamped DB adopts version 1, whose step is
-  exactly today's idempotent `CREATE ... IF NOT EXISTS` baseline — **a no-op on existing data** (no
-  rebuild, no drop); just take a backup first, as always.
+- **stored < binary** ⇒ existing DB startup fails closed, even when its version table is empty.
+  Run the explicit cutover command below after retiring every old writer. A truly empty DB can be
+  initialized with `averin-migrate --init` using the migration credential.
 - **stored == binary** ⇒ no-op; a steady-state boot issues **zero DDL**. This is what lets the runtime
   role drop `CREATE`/`ALTER` (run migrations as a privileged role, the server as a least-privilege one;
   see the append-only role split in `migrations/0001_init.sql`).
@@ -77,6 +77,10 @@ The runner reads the stored version (an existing **unstamped** DB reads as `0`) 
 
 **To add a migration:** bump `CurrentSchemaVersion` and append one ordered DDL step in
 `server/internal/pgschema` — it is a version stamp, not a framework.
+
+For a fresh empty database, run `cd server && AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate --init`, then grant a distinct runtime role its application privileges and set `AVERIN_DATABASE_URL` to that role's DSN. For an existing database, stop old servers/workers and producers, drain sessions and prepared transactions, revoke/rotate every old runtime identity, and run `cd server && AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate --old-runtime old_role[,other_old_role] --new-runtime new_role`. The command verifies each named old identity is `NOLOGIN`, has no live sessions or prepared transactions, and has no effective write privilege on Averin tables (including inherited grants); it applies pending migrations and records the v6 cutover in one transaction. The operator must supply a complete retired-identity inventory and distribute the new secret only to new binaries; a database role cannot identify a binary version. The new runtime must be non-owner, non-superuser, and unable to inherit ownership. A later migration needs a fresh barrier for its own version; the v6 marker is not a reusable authorization. See [the operator cutover runbook](../operator-verification.md#required-deployment-cutoff).
+
+Migration `0006` keeps unknown-owner old nonce/JTI rows as immutable global exclusions. Scoped `(authenticated project, configured resource, nonce)` claims are checked against these exclusions within the receipt transaction; JTI claims remain global. Ordinary sweep never removes legacy exclusions. The explicit `--purge-legacy` maintenance command requires the same retired-role barrier and waits for the DB-time v6 cutoff plus the 24-hour retention floor, which exceeds the new maximum accepted capability TTL (one hour) and request issuance skew (30 seconds). New online uses reject malformed or overlong capability lifetimes before claiming; this does not alter historical offline bytes. Increasing TTL, skew, or accepted credential modes requires a new retention review.
 
 Versions: **1** is the baseline above; **2** (`migrations/0002_record_id_unique.sql`) adds a per-project
 `record_id` uniqueness index (an expression index over the sealed JSON — no new column, no row rewrite).
@@ -148,8 +152,12 @@ the pinned-key id — so a govder/averin key misalignment is visible in both met
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
 | `AVERIN_BROKER_ISSUING_SEED` (or `_FILE`) | unset ⇒ broker disabled | No | 64-hex (32-byte) Ed25519 seed; the key that signs the minted capabilities. Bad value ⇒ fatal. Unset ⇒ `POST /v2/grants` returns `501 Not Implemented`. The recording key for the grant's `gateway_enforced` evidence is the server's own signing key (Tier-A `broker_trust: assumed`). |
-| `AVERIN_BROKER_SEQ_VOID_MIN_AGE` | `1h` | No | Safety age a reserved-but-unrecorded `broker_seq` must reach before `POST /v2/broker-seq/void` may fill it with a signed `grant_void` tombstone (the operator remediation for a checkpoint refused over a broker_seq gap). A Go duration; below the floor of `20m` (it must exceed any in-flight commit and the 15-minute two-phase pending window) or unparseable ⇒ fatal. The age runs from the latest of the reservation (`allocated_at`, the Postgres clock), the grant's latest attempt on this server and the server's start (attempt times are in memory), so keep it far above any DB-to-app clock skew. Requires the broker. |
 | `AVERIN_BROKER_ID` | unset | No | This broker's federation identity (ADR 0005 M4). When set, grants carry `grant_evidence.broker_id` and checkpoints carry a per-broker `broker_grant_heads` map (verify under `federated_broker_keys[<id>]`). Requires the broker. |
+
+Broker sequence recovery uses an authenticated permanent database fence and has no age
+setting. `AVERIN_BROKER_SEQ_VOID_MIN_AGE` is no longer read by the server. Deploy the
+new writer credential only after the old-runtime session and credential cutoff in the
+[operator runbook](../operator-verification.md).
 
 ### Online M-of-N cosign policy (`POST /v2/grants/prepare` + `/finalize`)
 
@@ -172,7 +180,7 @@ sweeper and its own readiness probe, not a separate request-time claim path.
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_LEDGER_RETENTION` | `720h` (30 days) | No | TTL for the Postgres consume-before-act ledger. A background hourly sweep deletes consumed `nonce`/`jti` rows older than this (the ledger otherwise grows one row per PoP nonce + per credential double-spend key, forever). **This is a correctness parameter, not tuning:** it MUST exceed the longest credential validity window (`broker.MaxTTL` = 1h) — a value that prunes a still-live nonce/jti would reopen the single-use replay this ledger closes. A configured value **below the 24h safe floor is fatal at startup**; a non-positive/malformed duration is fatal. Only applies with the durable (Postgres) ledger. |
+| `AVERIN_LEDGER_RETENTION` | `720h` (30 days) | No | TTL for new Postgres nonce/JTI claims only. The hourly sweep never deletes unknown-owner legacy exclusions. This correctness floor must exceed the maximum accepted capability lifetime (one hour); below 24h or malformed is fatal. Legacy deletion is a separate, DB-time-gated maintenance operation. |
 
 ### Revocation authority (`POST /v2/revoke`)
 

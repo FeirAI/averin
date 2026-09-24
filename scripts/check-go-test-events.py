@@ -6,18 +6,49 @@ import json
 import sys
 
 
-REQUIRED = (
-    "TestBrokerSeqVoidPostgres",
-    "TestBrokerSeqVoidGrantLandsFirstPostgres",
-    "TestBrokerSeqVoidMarkerFailsPostgres",
-)
 API_PACKAGE = "github.com/feirai/averin/server/internal/api"
+STORE_PACKAGE = "github.com/feirai/averin/server/internal/store"
+PGSCHEMA_PACKAGE = "github.com/feirai/averin/server/internal/pgschema"
+PGLEDGER_PACKAGE = "github.com/feirai/averin/server/internal/pgledger"
+RESOURCESHIM_PACKAGE = "github.com/feirai/averin/server/internal/resourceshim"
+REQUIRED = (
+    f"{API_PACKAGE}:TestBrokerSeqVoidPostgres",
+    f"{API_PACKAGE}:TestBrokerSeqVoidGrantLandsFirstPostgres",
+    f"{API_PACKAGE}:TestBrokerSeqVoidGrantRollsBackPostgres",
+    f"{API_PACKAGE}:TestBrokerSeqVoidMarkerFailsPostgres",
+    f"{API_PACKAGE}:TestVoidWithoutRevocationKeyBlocksPreparedCapability",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryPreflightReadOnly",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryDeniedPostgres",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryPerpetualFailedRetries",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryLegacyTombstoneAttribution",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryFencePersistsAcrossReplicasPostgres",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryTerminalVoidBlocksUsePostgres",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryCancelThenGrantCommitsPostgres",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryProcessCrashCutsPostgres",
+    f"{API_PACKAGE}:TestBrokerSeqRecoveryBlockedGuardDeadlinePostgres",
+    f"{STORE_PACKAGE}:TestPostgresRecoveryFenceContract",
+    f"{STORE_PACKAGE}:TestBrokerSeqRecoveryOldRuntimeCredentialCutoff",
+    f"{PGSCHEMA_PACKAGE}:TestTenantNonceCutoverV3V4V5PreservesUnknownOwners",
+    f"{PGSCHEMA_PACKAGE}:TestTenantNonceCutoverRejectsLiveAndInheritedOldWriter",
+    f"{PGSCHEMA_PACKAGE}:TestTenantNonceRuntimeReadinessRequiresLeastPrivilege",
+    f"{PGSCHEMA_PACKAGE}:TestTenantNonceLegacyPurgeRequiresDBTimeHold",
+    f"{PGSCHEMA_PACKAGE}:TestTenantNonceOrdinaryStartupRefusesEmptyLegacyVersionTable",
+    f"{STORE_PACKAGE}:TestPostgresScopedNonceClaimsAndOwnedRollback",
+    f"{STORE_PACKAGE}:TestPostgresIndependentPoolsNonceRace",
+    f"{STORE_PACKAGE}:TestPostgresLegacyGlobalExclusionsUntilDBCutoff",
+    f"{STORE_PACKAGE}:TestPostgresMissingCutoverMetadataRejectsClaims",
+    f"{PGLEDGER_PACKAGE}:TestPostgresLedgerMaintenance",
+    f"{PGLEDGER_PACKAGE}:TestSweepFailureRetainsClaims",
+    f"{RESOURCESHIM_PACKAGE}:TestAcceptedCapabilityLifetimeBoundsBeforeLedger",
+)
 
 
 def check_events(lines, required=REQUIRED):
     required = tuple(required)
     if len(set(required)) != len(required) or not required:
         return ["required test list must be nonempty and unique"]
+    if any(item.count(":") != 1 or not all(item.split(":", 1)) for item in required):
+        return ["required tests must be qualified as package:TestName"]
     seen_run = set()
     seen_pass = set()
     errors = []
@@ -37,14 +68,15 @@ def check_events(lines, required=REQUIRED):
         action = event.get("Action", "")
         if action == "fail":
             errors.append(f"{package or '<unknown package>'} {name or '<package>'}: fail")
-        if package != API_PACKAGE or not isinstance(name, str):
+        if not isinstance(name, str):
             continue
         for root in required:
-            if name != root and not name.startswith(root + "/"):
+            required_package, required_name = root.split(":", 1)
+            if package != required_package or (name != required_name and not name.startswith(required_name + "/")):
                 continue
-            if name == root and action == "run":
+            if name == required_name and action == "run":
                 seen_run.add(root)
-            if name == root and action == "pass":
+            if name == required_name and action == "pass":
                 seen_pass.add(root)
             if action == "skip":
                 errors.append(f"{name}: {action}")
@@ -65,7 +97,7 @@ def main():
         for error in errors:
             print(error, file=sys.stderr)
         return 1
-    print("required Postgres API tests ran and passed without skipped subtests")
+    print("required Postgres tests ran and passed without skipped subtests")
     return 0
 
 

@@ -172,25 +172,95 @@ claim monotonicity for that operation. The same boundary applies to a validated 
 credential opening or conflicting verified TSA timestamps. All three are enforced while present.
 Committed-record contradictions remain contradictions under any attachment deletion.
 
-## Unwedging a refused checkpoint: `grant_void` tombstones (D6)
+## Recovering an abandoned broker sequence
 
-The server refuses to sign a checkpoint while a `broker_seq` is reserved but no grant records it
-(`checkpoint refused: allocated broker_seq max M != N recorded grants`), because an anchored gap would fail
-verification forever. The usual cause is a grant whose commit was ambiguous (or whose seq release failed) and
-whose client never retried. **Upgrade hazard:** before this release any post-allocation failure left the seq
-reserved, so a project that ever hit a transient grant error can start refusing checkpoints as soon as this
-build is deployed (no new anchoring; after the revocation validity window its exported `revocation_list` reads
-`stale`).
+A checkpoint refuses a grant log with a reserved `broker_seq` but no recorded grant or
+`grant_void` (`allocated broker_seq max M != N recorded grants`). The current grant path
+stages content before one project transaction allocates, seals, and inserts the grant, so
+new failed grants do not leave reservations. Older deployments and residual failures can
+still leave gaps. Preserve the original bundle and investigate the reservation before an
+operator action.
 
-Remediation, per unrecorded seq `k` in `[1..M]`:
+### Required deployment cutoff
 
-Configure `AVERIN_RECOVERY_KEYS` with a separate credential for the exact project and a stable
-non-secret `actor_id` (see [configuration](dev/CONFIGURATION.md)). Keep the token in your secret
-manager, send it as `Authorization: Bearer <token>`, and rotate it by briefly configuring old and
-new tokens for the same actor. Ordinary API writer keys cannot call this route. An unset recovery
-configuration denies recovery, including when ordinary API auth is in dev-open mode.
+Migrations `0004`–`0006` and the recovery handler require a coordinated cutoff. An
+already-running old writer does **not** check the new fence or nonce scope, and a schema-version
+check at its startup cannot stop it later. Complete this
+barrier before starting any new writer or enabling recovery:
 
-For an emergency action, use a fresh incident ID and a specific reason:
+1. Stop external traffic, producers, old servers, and background workers. Drain ordinary
+   transactions, then identify any remaining runtime backends and terminate them. Inspect
+   `pg_prepared_xacts`; explicitly commit or roll back each prepared transaction after
+   investigation. A prepared transaction can finish after a session is terminated.
+2. Provision a **new, non-owner, non-superuser** runtime role with only the application table
+   privileges it needs. Rotate every old runtime password, set each old role `NOLOGIN`, revoke
+   direct and inherited table writes, and terminate remaining backends. A role that owns tables
+   or is a superuser cannot be made safe by `REVOKE` alone; replace that topology. Run from
+   `server/` with a separate migration credential:
+
+   ```sh
+   AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate \
+     --old-runtime old_role[,other_old_role] --new-runtime new_role
+   ```
+
+   This single transaction validates the retired-role barrier, applies pending steps through
+   `0006`, and records the DB-time legacy nonce-exclusion cutoff. A fresh, truly empty DB instead
+   uses `AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate --init`.
+   Do not use ordinary server startup to migrate an existing or unstamped database.
+3. Prove the cutoff: `pg_stat_activity` has no old backends, `pg_prepared_xacts` has no old
+   prepared transactions, a previously connected old session cannot perform a rollback-only
+   `project_write_guard` insert, and the old credential cannot reconnect. Verify a new
+   runtime connection can perform a guarded application write and cannot update/delete
+   recovery fence or result rows. The real-Postgres regression
+   `TestBrokerSeqRecoveryOldRuntimeCredentialCutoff` executes this sequence against the
+   migrated Averin tables, including the fact that `NOLOGIN` alone leaves an existing
+   connection able to write.
+4. Give the new runtime secret only to new binaries; then start new servers/workers and reopen
+   producers and traffic. Never run a
+   pre-fence binary with a still-valid writer credential alongside the recovery protocol.
+   The command cannot infer binary identity or discover an omitted retired credential. Its
+   role list must be complete. New runtime startup checks non-ownership and the v6 marker.
+
+Legacy nonce/JTI rows have unknown owners and remain global replay exclusions. Ordinary ledger
+sweeps leave them intact. Only after the recorded DB-time cutoff plus the 24-hour hold can an
+operator invoke `averin-migrate --purge-legacy` with the same role flags and migration credential.
+Do not reset that clock during later schema cutovers. If a later migration requires retiring
+writers, repeat its maintenance barrier; the v6 marker cannot authorize a new rollout.
+
+For a dedicated old role, the administrative checks include:
+
+```sql
+SELECT gid, owner, prepared FROM pg_prepared_xacts WHERE owner = 'averin_old_runtime';
+SELECT pid, state, xact_start FROM pg_stat_activity WHERE usename = 'averin_old_runtime';
+ALTER ROLE averin_old_runtime NOLOGIN PASSWORD 'rotated-unusable-secret';
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM averin_old_runtime;
+REVOKE ALL ON SCHEMA public FROM averin_old_runtime;
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+  WHERE usename = 'averin_old_runtime' AND pid <> pg_backend_pid();
+```
+
+Resolve the first query's rows before the `ALTER ROLE`; rerun both queries afterward.
+Adapt the schema and role names. On the *previously established* old connection, attempt
+`BEGIN; INSERT INTO project_write_guard(project_id) VALUES ('cutover-probe'); ROLLBACK;`
+with a fresh probe ID; the insert must fail (the connection will normally be terminated).
+Attempt a fresh connection with the old password; it must fail. Check both outcomes, not
+just `NOLOGIN` or the new server's migration check.
+
+### Inspect, fence, and reconcile
+
+Configure a project-scoped `AVERIN_RECOVERY_KEYS` token with stable `actor_id`. Ordinary
+writer keys cannot call recovery, even in dev-open ordinary API mode. First inspect the
+read-only authenticated preflight:
+
+```sh
+curl -H "Authorization: Bearer ${AVERIN_RECOVERY_TOKEN}" \
+  'https://<averin-host>/v2/broker-seq/void?project=<project>&broker_seq=<k>'
+```
+
+It reports the reservation, pending grant and whether it is live, winning record, void
+marker, immutable fence/terminal result, and whether the exact required per-project
+`record_id` UNIQUE index is enforced. It is diagnostic only; POST rechecks every condition
+inside guarded transactions. Use a fresh stable incident ID and a specific reason:
 
 ```sh
 curl -X POST 'https://<averin-host>/v2/broker-seq/void?project=<project>' \
@@ -199,51 +269,53 @@ curl -X POST 'https://<averin-host>/v2/broker-seq/void?project=<project>' \
   --data '{"project_id":"<project>","broker_seq":1,"operation_id":"<incident-id>","reason":"<specific cause>"}'
 ```
 
-1. If the grant's client is still around, have it retry under its original `idempotency_key`: the retry
-   reclaims seq `k` and the gap closes.
-2. Otherwise, once the reservation, its grant's latest attempt **and the server's start** are all older
-   than `AVERIN_BROKER_SEQ_VOID_MIN_AGE` (default `1h`), call `POST /v2/broker-seq/void?project=<id>` with
-   `{"project_id":"<id>","broker_seq":k,"operation_id":"<ticket-or-incident-id>","reason":"<specific cause>"}`.
-   The authenticated actor, operation ID and reason are bound into the signed tombstone. Reuse
-   those exact values and the same session for retries; changed values return `409`. The server confirms from the store that nothing
-   records seq `k` (a seq whose ambiguous commit actually landed is refused), retires the reserved `grant_id`
-   (a later retry of it is a `409`; re-issue under a new key), and seals a broker-signed `grant_void`
-   tombstone binding the project, `k` and that `grant_id`. The tombstone is sealed before the reservation is
-   marked voided. A `409` "grant landed; nothing to void" means the grant's own commit won: seq `k` is
-   recorded and nothing was voided. A `500` means either nothing was voided or the tombstone is sealed and
-   only the mark is missing. In both cases repeat the call; it finishes the void without re-sealing. When revocation is enabled, it also **revokes**
-   that `grant_id`, so a capability minted for it stops working at `/v2/use`. Without revocation, such a
-   capability stays usable until it expires. In that case, enable `AVERIN_REVOCATION_SEED` and
-   `POST /v2/revoke` the `grant_id`, or wait out its TTL.
-3. `POST /v2/checkpoints` now signs. The offline verifier accepts the tombstone as filling seq `k`
-   (`broker_trust: sequence_verified`), does not count it in `grant_total`, and never matches a use to it.
+The first guarded transaction waits for earlier supported project writes, then commits an
+immutable fence binding project, sequence, reserved grant ID, actor, operation ID, session,
+NFC-normalized reason, request digest, generation 1, and database time. New supported
+attempts for that grant cannot allocate or seal a record after the fence. A second guarded
+transaction either records that the grant already landed (`409`, `outcome: recorded`,
+`winning_record_hash`; no tombstone or revocation) or commits the broker-signed tombstone,
+void marker, optional durable revocation, and `outcome: voided` terminal result together.
+The sequence and grant ID are never reissued. A continuously failing retry cannot extend
+the fence or postpone this authorized action; a restart or different replica can finish it.
+There is no wall-clock minimum age and no process-global ingest lock. A blocked project
+transaction has a bounded wait; other projects remain writable.
 
-What makes a void safe against a commit that is still in flight:
+A `503` with `retryable: true` means the fence or reconciliation outcome may be unknown,
+including after cancellation or an ambiguous commit. Query preflight and repeat **the
+same** operation ID, actor credential, session, and reason; never infer rollback from a
+timeout. A different actor or action receives `409` `action_conflict`. A completed void
+returns `201` when first sealed or `200` on replay with `outcome: voided`,
+`operation_id`, and `winning_record_hash`. A landed grant returns `409` with
+`outcome: recorded` and its winning hash; exact previous issuance readback remains
+available. A signed tombstone makes `/v2/use` reject the grant ID even when revocation is
+disabled. When enabled, durable revocation commits with the tombstone; the next signed
+revocation list publishes it. Check the export's list before claiming offline publication.
 
-- **Latest-attempt age.** The age is measured from the later of the seq's `allocated_at` and the last time
-  its grant attempted the seq on this server (every retry refreshes that time, although a retry never
-  refreshes `allocated_at`). A client that keeps retrying a persistently failing grant therefore keeps the
-  void refused; stop that client first (the TLA+ model's `GrantLog_void_starved.cfg` shows the outage).
-  Attempt times are kept in memory, so after a restart the age also counts from the server's start: no void
-  passes until the minimum age has elapsed since the restart.
-- **Ingest lock.** Within one process the void and every grant commit are serialized. The void holds that lock
-  while its tombstone insert waits on any in-flight row with the same `record_id`, up to the 30 s Postgres
-  statement timeout, so ingest on that server can stall for that long.
-- **UNIQUE `record_id` index.** On Postgres, the void requires the UNIQUE index `records_project_record_id_uniq`
-  from migration `0002`. The tombstone's `record_id` is the voided `grant_id`, so at most one of the two can
-  land. If `0002` logged its WARNING and built a non-unique index (historical duplicate `record_id`s), every
-  void is refused with `409` until you resolve the duplicate and rebuild the index as UNIQUE. Check with
-  `SELECT indisunique FROM pg_index WHERE indexrelid = 'records_project_record_id_uniq'::regclass;`.
+A tombstone from before authenticated recovery attribution whose signed `void_evidence` has **both** actor and operation fields
+absent can be reconciled without modifying its original JSON or hash. The response and
+preflight distinguish `original_void_actor_unattributed` from the new
+`reconciliation_actor_id`; the new operational fence is local diagnostic state, not
+retroactive signed attribution or an offline proof. If either field is present, empty,
+null, malformed, or names another action, recovery fails closed. A lone legacy void
+marker does not prove revocation or make a grant disappear.
 
-The first two guards are process-local. On a multi-instance deployment only the UNIQUE index closes the race
-between a retry on one instance and a void on another. The age compares the database clock (`allocated_at`
-is Postgres `now()`) with the server clock. If the database clock runs behind, reservations look older by
-that difference, so keep the minimum age far above any plausible clock skew. The route has no separate
-operator privilege: any holder of the project's write key can call it.
+The exact `records_project_record_id_uniq` index from migration `0002` is a required
+backstop. The server validates its shape, predicate, readiness, validity, and uniqueness
+before every project write; a historical non-unique fallback or invalid index makes the
+project degraded and POST returns `503` without mutation. Preflight remains readable.
+Inspect with `SELECT indexdef FROM pg_indexes WHERE indexname =
+'records_project_record_id_uniq';` and the original migration warning. Preserve the
+original bundle and duplicate signed records: do **not** delete or rewrite evidence to
+manufacture uniqueness. Repair only if the original signed history can remain intact and
+the exact unique index can be built. Otherwise migrate to a new project with an explicit
+link to the preserved historical project, document the degraded old project, and do not
+claim its old checkpoints have been repaired. An operator override must never bypass the
+unique backstop.
 
-A tombstone is the broker's signed statement that seq `k` was never issued. An auditor who holds a credential
-carrying seq `k`, or finds a grant record claiming it, has evidence of equivocation: the verifier reports a
-bundle carrying both as a duplicate `broker_seq`.
+A `grant_void` is a signed statement that the broker did not issue that sequence. An
+auditor who holds a credential with the same sequence, or finds a grant record claiming
+it, has evidence of equivocation; the verifier reports a duplicate sequence.
 
 ## Producing the optional M4/M5 artifacts
 

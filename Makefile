@@ -31,7 +31,7 @@ test-server: core
 test-server-postgres: core check-staticlib
 	@test -n "$(AVERIN_TEST_DATABASE_URL)" || (echo 'AVERIN_TEST_DATABASE_URL is required' >&2; exit 1)
 	python3 -m unittest discover -s scripts -p test_check_go_test_events.py
-	cd server && bash -o pipefail -c 'go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... | python3 ../scripts/check-go-test-events.py'
+	cd server && bash -o pipefail -c 'go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... ./internal/pgschema/... ./internal/resourceshim/... | python3 ../scripts/check-go-test-events.py'
 
 check-claims:
 	python3 -m unittest discover -s scripts -p test_check_claims.py

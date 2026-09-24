@@ -89,4 +89,84 @@ AtMostOncePerKey == \A k \in Keys : acted[k] <= 1
 (* While the capability is still live, the ledger never forgets an in-flight key. *)
 InFlightRecorded ==
   \A i \in Instances : (pc[i] = "consumed" /\ clock <= MaxTTL) => InLedger(key[i])
+
+(***************************************************************************)
+(* Version 0006: old unknown-owner nonces stay global exclusions; new       *)
+(* claims are project-scoped. The issue-time bound here is t=0; legacy     *)
+(* exclusion removal is safe only after the final old writer was cut off   *)
+(* and every old accepted capability is expired. UnsafeMigration switches  *)
+(* on premature removal solely to retain its replay counterexample.        *)
+(***************************************************************************)
+CONSTANTS Projects, P1, P2, LegacyPresent, UnsafeMigration
+VARIABLES tenantClock, tenantPhase, tenantCutoverAt, tenantLegacy,
+          tenantLedger, tenantPending, tenantActed
+
+tenantVars == <<tenantClock, tenantPhase, tenantCutoverAt, tenantLegacy,
+                tenantLedger, tenantPending, tenantActed>>
+TenantTypeOK ==
+  /\ tenantClock \in 0..MaxTime
+  /\ tenantPhase \in {"old", "new"}
+  /\ tenantCutoverAt \in 0..MaxTime
+  /\ tenantLegacy \in BOOLEAN
+  /\ tenantLedger \subseteq Projects
+  /\ tenantPending \subseteq Projects
+  /\ tenantActed \in [Projects -> Nat]
+TenantInit ==
+  /\ Init
+  /\ tenantClock = 0
+  /\ tenantPhase = "old"
+  /\ tenantCutoverAt = 0
+  /\ tenantLegacy = LegacyPresent
+  /\ tenantLedger = {}
+  /\ tenantPending = {}
+  /\ tenantActed = [p \in Projects |-> IF p = P1 /\ LegacyPresent THEN 1 ELSE 0]
+TenantOldAct ==
+  /\ tenantPhase = "old"
+  /\ ~tenantLegacy
+  /\ tenantClock <= MaxTTL
+  /\ tenantLegacy' = TRUE
+  /\ tenantActed' = [tenantActed EXCEPT ![P1] = @ + 1]
+  /\ UNCHANGED <<tenantClock, tenantPhase, tenantCutoverAt, tenantLedger, tenantPending>>
+TenantCutover ==
+  /\ tenantPhase = "old"
+  /\ tenantPhase' = "new"
+  /\ tenantCutoverAt' = tenantClock
+  /\ UNCHANGED <<tenantClock, tenantLegacy, tenantLedger, tenantPending, tenantActed>>
+TenantCanConsume(p) ==
+  /\ tenantPhase = "new"
+  /\ tenantClock <= MaxTTL
+  /\ ~tenantLegacy
+  /\ p \notin tenantLedger
+TenantConsume(p) ==
+  /\ TenantCanConsume(p)
+  /\ tenantLedger' = tenantLedger \cup {p}
+  /\ tenantPending' = tenantPending \cup {p}
+  /\ UNCHANGED <<tenantClock, tenantPhase, tenantCutoverAt, tenantLegacy, tenantActed>>
+TenantAct(p) ==
+  /\ p \in tenantPending
+  /\ tenantPending' = tenantPending \ {p}
+  /\ tenantActed' = [tenantActed EXCEPT ![p] = @ + 1]
+  /\ UNCHANGED <<tenantClock, tenantPhase, tenantCutoverAt, tenantLegacy, tenantLedger>>
+TenantPurge ==
+  /\ tenantPhase = "new"
+  /\ tenantLegacy
+  /\ (UnsafeMigration \/ tenantClock > tenantCutoverAt + MaxTTL)
+  /\ tenantLegacy' = FALSE
+  /\ UNCHANGED <<tenantClock, tenantPhase, tenantCutoverAt, tenantLedger, tenantPending, tenantActed>>
+TenantTick ==
+  /\ tenantClock < MaxTime
+  /\ tenantClock' = tenantClock + 1
+  /\ UNCHANGED <<tenantPhase, tenantCutoverAt, tenantLegacy, tenantLedger, tenantPending, tenantActed>>
+TenantNext0 ==
+  \/ TenantOldAct
+  \/ TenantCutover
+  \/ \E p \in Projects : TenantConsume(p) \/ TenantAct(p)
+  \/ TenantPurge
+  \/ TenantTick
+TenantNext == TenantNext0 /\ UNCHANGED vars
+TenantSpec == TenantInit /\ [][TenantNext]_<<tenantVars, vars>>
+TenantAtMostOnce == \A p \in Projects : tenantActed[p] <= 1
+TenantIsolation ==
+  (tenantPhase = "new" /\ ~tenantLegacy /\ tenantClock <= MaxTTL /\
+   P1 \in tenantLedger /\ P2 \notin tenantLedger) => TenantCanConsume(P2)
 =============================================================================

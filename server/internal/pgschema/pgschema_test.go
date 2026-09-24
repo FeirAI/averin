@@ -373,17 +373,25 @@ func TestTenantNonceCutoverV3V4V5PreservesUnknownOwners(t *testing.T) {
 			if _, err := oldConn.Prepare(ctx, "old-delete", `DELETE FROM consume_ledger WHERE consume_key='old-prepared-delete'`); err != nil {
 				t.Fatal(err)
 			}
-			for _, prepared := range []string{"old-insert", "old-delete"} {
-				if _, err := oldConn.Exec(ctx, `EXECUTE "`+prepared+`"`); err != nil {
-					t.Fatalf("old prepared %s did not work before cutover: %v", prepared, err)
-				}
+			if _, err := admin.Exec(ctx, `INSERT INTO consume_ledger(kind,consume_key) VALUES ('nonce','old-prepared-delete')`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := oldConn.Exec(ctx, `EXECUTE "old-insert"`); err != nil {
+				t.Fatalf("old prepared insert did not work before cutover: %v", err)
+			}
+			deleted, err := oldConn.Exec(ctx, `EXECUTE "old-delete"`)
+			if err != nil || deleted.RowsAffected() != 1 {
+				t.Fatalf("old prepared delete failed before cutover: rows=%d err=%v", deleted.RowsAffected(), err)
+			}
+			if _, err := admin.Exec(ctx, `INSERT INTO consume_ledger(kind,consume_key) VALUES ('nonce','old-prepared-delete')`); err != nil {
+				t.Fatal(err)
 			}
 			migrateExisting(t, scoped, admin)
 			if maxVersion(t, admin) != CurrentSchemaVersion || regExists(t, admin, "consume_ledger") {
 				t.Fatal("cutover did not remove old writable relation")
 			}
 			var legacyCount int
-			if err := admin.QueryRow(ctx, `SELECT count(*) FROM legacy_consume_exclusions`).Scan(&legacyCount); err != nil || legacyCount != 3 {
+			if err := admin.QueryRow(ctx, `SELECT count(*) FROM legacy_consume_exclusions`).Scan(&legacyCount); err != nil || legacyCount != 4 {
 				t.Fatalf("historical rows lost/assigned count=%d err=%v", legacyCount, err)
 			}
 			for _, sql := range []string{
@@ -401,6 +409,10 @@ func TestTenantNonceCutoverV3V4V5PreservesUnknownOwners(t *testing.T) {
 				if _, err := oldConn.Exec(ctx, `EXECUTE "`+prepared+`"`); err == nil {
 					t.Fatalf("old prepared %s accepted after cutover", prepared)
 				}
+			}
+			var retained int
+			if err := admin.QueryRow(ctx, `SELECT count(*) FROM legacy_consume_exclusions WHERE consume_key='old-prepared-delete'`).Scan(&retained); err != nil || retained != 1 {
+				t.Fatalf("prepared delete removed inherited exclusion: count=%d err=%v", retained, err)
 			}
 			var before, after time.Time
 			if err := admin.QueryRow(ctx, `SELECT legacy_exclusion_until FROM nonce_ledger_cutover`).Scan(&before); err != nil {
