@@ -11,14 +11,11 @@ use crate::canon::CanonValue;
 use crate::hashx::{lp_str_into, parse_sha256, sha256_prefixed};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
-// `v2` binds `project_id` into the preimage (tenant isolation; T7/adversarial review). It is a HARD cutover from `v1`:
-// the verifier accepts ONLY v2, so a v1 signature (no project_id) does not verify. This is safe as a
-// PRE-DEPLOYMENT break — averin has shipped no v1-signed records (the golden vectors carry no authority sig),
-// so there is nothing to migrate and adding a v1-accept fallback would only reintroduce a (downgraded)
-// cross-project replay surface for zero benefit. FORWARD-COMPAT POLICY (for any change AFTER deployment):
-// because authority evidence is append-only and cannot be re-signed in place, a future preimage change must
-// NOT hard-cutover — it must verify the newest version first and fall back to older versions under an
-// explicitly downgraded/legacy status, never silently dropping historical authority verification.
+// Historical v1→v2 was a pre-deployment hard cutover: v2 added project_id to prevent cross-project
+// replay, and no v1-signed records had shipped. The current verifier accepts body-bound v3 and
+// valid historical v2 under the explicit LegacyUnbound status. Append-only evidence cannot be
+// re-signed in place; future versions must retain a visibly weaker legacy classification rather
+// than silently upgrading or discarding valid old signatures.
 pub const AUTHORITY_SIG_TAG: &str = "averin.authority.v2";
 pub const AUTHORITY_SIG_TAG_V3: &str = "averin.authority.v3";
 pub const SUBJECT_PROJECTION: &str = "averin.authority.subject.v1";
