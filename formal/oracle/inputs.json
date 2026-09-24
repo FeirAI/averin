@@ -39,6 +39,7 @@
     {"family": "authority subject digest", "fields": [{"s": "averin.authority.subject.v1"}], "tail": {"s": "{\"action\":\"approve\"}"}},
     {"family": "test anchor", "fields": [{"s": "sha256:0808080808080808080808080808080808080808080808080808080808080808"}, {"s": "2026-06-15T10:00:00.000Z"}]},
     {"family": "grant PoP v2", "fields": [{"s":"p1"},{"s":"idem-1"},{"s":"s1"},{"s":"agent-1"},{"s":"db.query:orders-ro"},{"s":"orders-db"},{"s":"read:orders"},{"s":"single_operation"},{"s":"AAAA"},{"s":""},{"s":""},{"s":"capability"},{"u64":0},{"u64":300},{"u64":0}], "tail": {"hex":"00000000666d63c800000000666d674c"}},
+    {"family": "grant PoP v2", "fields": [{"s":"p-équipe"},{"s":"idem-2"},{"s":"s2"},{"s":"agent-2"},{"s":"db.query:orders-ro"},{"s":"orders-db"},{"s":"read:café"},{"s":"bounded_reuse"},{"s":"AAAA"},{"s":"acct:café"},{"s":"approved by Zoë"},{"s":"capability"},{"u64":7},{"u64":120},{"u64":2}], "tail": {"hex":"0000000b64656c65676174653aceb10000000f64656c65676174653ae69db1e4baac00000000666d63c800000000666d674c"}},
     {"family": "use PoP", "fields": [{"s": "grant-1"}, {"s": "res-2"}, {"s": "read"}, {"s": "sha256:params"}, {"s": "cb-5"}, {"s": "nonce-6"}]},
     {"family": "cosig approval", "fields": [{"s": "grant-1"}, {"s": "approver-kid"}, {"s": "cb-3"}, {"u64": 2}, {"u64": 1767225600}]},
     {"family": "delegation hop", "fields": [{"s": "grant-1"}, {"u64": 3}, {"s": "delegator"}, {"s": "delegate"}, {"s": "scope:x"}, {"s": "write"}, {"s": "res-7"}, {"u64": 72623859790382856}]},

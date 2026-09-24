@@ -257,8 +257,16 @@ fn every_preimage_family_matches_model() {
                     .join("spec/golden-vectors/broker-preimages.json");
                 let shared =
                     CanonValue::parse(&std::fs::read_to_string(&shared_path).unwrap()).unwrap();
-                let grant_case = &arr(&shared, "grant_pop_v2")[0];
-                assert_eq!(s(grant_case, "expect_preimage_hex"), want);
+                let matching: Vec<_> = arr(&shared, "grant_pop_v2")
+                    .iter()
+                    .filter(|case| s(case, "expect_preimage_hex") == want)
+                    .collect();
+                assert_eq!(
+                    matching.len(),
+                    1,
+                    "each Lean preimage needs one shared producer vector"
+                );
+                let grant_case = matching[0];
                 let mut pre = Vec::new();
                 assert!(lp_into(&mut pre, b"averin.broker.pop.v2"));
                 for part in &f[..12] {
@@ -271,10 +279,7 @@ fn every_preimage_family_matches_model() {
                     .as_ref()
                     .expect("v2 variable chain/times tail")));
                 check(name, &pre, want);
-                assert_eq!(
-                    hex_lower(&sha256(&pre)),
-                    "20809965afd8dd263d5f02afb1461cdce5a8cb7adf1187ba0feb43a46b48fe94"
-                );
+                assert_eq!(hex_lower(&sha256(&pre)), s(grant_case, "expect_hex"));
             }
             "use PoP" => check_digest(
                 name,
