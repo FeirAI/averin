@@ -86,6 +86,21 @@ type PendingGrant struct {
 	Created time.Time
 }
 
+// RecoveryFence is an immutable, transaction-guarded retirement of one
+// reservation. Generation is deliberately fixed at one: a fence is never
+// replaced, renewed, or garbage-collected.
+type RecoveryFence struct {
+	ProjectID, GrantID, OperationID, ActorID, SessionID, Reason, RequestDigest string
+	Seq, Generation                                                            int64
+	FencedAt                                                                   time.Time
+}
+
+type RecoveryResult struct {
+	ProjectID, Outcome, WinningRecordHash string
+	Seq, Generation                       int64
+	CompletedAt                           time.Time
+}
+
 // recordIDOf extracts the record_id carried in a sealed record's JSON ("" if absent/unparseable — such a record
 // does not participate in the uniqueness check, matching the Postgres expression index, where NULL never conflicts).
 func recordIDOf(recordJSON string) string {
@@ -110,6 +125,12 @@ type Store interface {
 	PutPendingGrant(projectID, idemKey string, row PendingGrant) (PendingGrant, bool, error)
 	DeletePendingGrant(projectID, idemKey string) error
 	PendingGrantLive(projectID, grantID string, now time.Time, ttl time.Duration) (bool, error)
+	PendingGrantByGrant(projectID, grantID string) (PendingGrant, bool, error)
+	RecoveryFenceAt(projectID string, seq int64) (RecoveryFence, bool, error)
+	RecoveryFenceByGrant(projectID, grantID string) (RecoveryFence, bool, error)
+	PutRecoveryFence(fence RecoveryFence) (RecoveryFence, bool, error)
+	RecoveryResultAt(projectID string, seq int64) (RecoveryResult, bool, error)
+	PutRecoveryResult(result RecoveryResult) (RecoveryResult, bool, error)
 	IsRevoked(projectID, grantID string) (bool, error)
 	RevokeGrant(projectID, grantID string) (bool, error)
 	RevokedGrantIDs(projectID string) ([]string, error)
@@ -130,6 +151,7 @@ type Store interface {
 	// pre-pass uses it to reject a record_id collision BEFORE any batch item is sealed (all-or-nothing); the
 	// authoritative check is PutRecord's ErrRecordIDConflict.
 	HasRecordID(projectID, recordID string) (bool, error)
+	RecordByRecordID(projectID, recordID string) (Record, bool, error)
 	// Heads returns the current head content_hashes for a session (records not referenced as a
 	// causal parent within that session), byte-sorted.
 	Heads(projectID, sessionID string) ([]string, error)
@@ -315,6 +337,7 @@ func memSnapshot(p *project) *project {
 		seqBySess: maps.Clone(p.seqBySess), disclosure: append([]DisclosureSecret(nil), p.disclosure...),
 		discSeen: maps.Clone(p.discSeen), anchors: maps.Clone(p.anchors),
 		brokerSeq: maps.Clone(p.brokerSeq), brokerAt: maps.Clone(p.brokerAt), voided: maps.Clone(p.voided),
+		fences: maps.Clone(p.fences), results: maps.Clone(p.results),
 		pending: pending, revoked: maps.Clone(p.revoked),
 	}
 }
@@ -395,6 +418,8 @@ type project struct {
 	brokerSeq  map[string]int64     // grant_id -> broker_seq (idempotent allocation, D6); next = max(values)+1
 	brokerAt   map[string]time.Time // grant_id -> allocation time (the operator void's safety age)
 	voided     map[string]struct{}  // grant_id -> voided (row kept in brokerSeq; never released or re-allocated)
+	fences     map[int64]RecoveryFence
+	results    map[int64]RecoveryResult
 	pending    map[string]PendingGrant
 	revoked    map[string]struct{}
 }
@@ -425,14 +450,15 @@ func (m *Mem) proj(id string) *project {
 			idem:       map[string]int{},
 			byHash:     map[string]struct{}{},
 			byRecordID: map[string]struct{}{},
-			seqBySess:  map[string]int64{},
-			discSeen:   map[string]struct{}{},
-			anchors:    map[int64]string{},
-			brokerSeq:  map[string]int64{},
-			brokerAt:   map[string]time.Time{},
-			voided:     map[string]struct{}{},
-			pending:    map[string]PendingGrant{},
-			revoked:    map[string]struct{}{},
+			fences:     map[int64]RecoveryFence{}, results: map[int64]RecoveryResult{},
+			seqBySess: map[string]int64{},
+			discSeen:  map[string]struct{}{},
+			anchors:   map[int64]string{},
+			brokerSeq: map[string]int64{},
+			brokerAt:  map[string]time.Time{},
+			voided:    map[string]struct{}{},
+			pending:   map[string]PendingGrant{},
+			revoked:   map[string]struct{}{},
 		}
 		m.projects[id] = p
 	}
@@ -451,6 +477,13 @@ func (m *Mem) PutRecord(projectID, idemKey string, rec Record) (Record, bool, er
 	if idemKey != "" {
 		if i, ok := p.idem[idemKey]; ok {
 			return p.records[i], false, nil
+		}
+	}
+	if rid := recordIDOf(rec.JSON); rid != "" {
+		for _, f := range p.fences {
+			if f.GrantID == rid && !recoveryTombstoneInsert(rec.JSON, idemKey, f.Seq) {
+				return Record{}, false, ErrRecoveryFenced
+			}
 		}
 	}
 	// collapse exact duplicate content (same bytes == same content_hash) — threat #8. Match Postgres
@@ -718,6 +751,11 @@ func (m *Mem) AllocateBrokerSeq(projectID, grantID string) (int64, bool, error) 
 	if _, v := p.voided[grantID]; v {
 		return 0, false, ErrBrokerSeqVoided // never hand a voided seq back (it is filled by a tombstone)
 	}
+	for _, f := range p.fences {
+		if f.GrantID == grantID {
+			return 0, false, ErrRecoveryFenced
+		}
+	}
 	if seq, ok := p.brokerSeq[grantID]; ok {
 		return seq, false, nil // idempotent: a retry of the same grant_id gets its original seq (no gap)
 	}
@@ -751,6 +789,11 @@ func (m *Mem) ReleaseBrokerSeq(projectID, grantID string) error {
 	}
 	if _, v := p.voided[grantID]; v {
 		return nil // a voided seq is filled by its tombstone: never released (MAX+1 would re-issue it)
+	}
+	for _, f := range p.fences {
+		if f.GrantID == grantID {
+			return nil
+		}
 	}
 	if _, held := p.byRecordID[grantID]; held {
 		return nil // a record (the grant, or a tombstone sealed before its void marker) fills the seq: keep it

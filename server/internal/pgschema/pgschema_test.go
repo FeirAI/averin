@@ -89,7 +89,7 @@ func TestMigrateFreshAdoptsCurrentAndIsIdempotent(t *testing.T) {
 		t.Fatalf("version after migrate = %d, want %d", got, CurrentSchemaVersion)
 	}
 	// Every baseline table from all three folded stores must exist under the single version.
-	for _, tbl := range []string{"records", "checkpoints", "anchors", "disclosures", "display_seq", "broker_seq", "consume_ledger", "revocations", "pending_grants"} {
+	for _, tbl := range []string{"records", "checkpoints", "anchors", "disclosures", "display_seq", "broker_seq", "consume_ledger", "revocations", "pending_grants", "broker_seq_recovery_fence", "broker_seq_recovery_result"} {
 		if !regExists(t, admin, tbl) {
 			t.Fatalf("baseline table %q missing after migrate", tbl)
 		}

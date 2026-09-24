@@ -91,6 +91,15 @@ func newTestStore(t *testing.T) (*Postgres, func()) {
 		pool.Close()
 		t.Fatalf("apply migration 0004: %v", err)
 	}
+	migration5, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0005_broker_seq_recovery.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0005: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration5)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0005: %v", err)
+	}
 	if _, err := pool.Exec(ctx, pgledger.SchemaSQL); err != nil {
 		pool.Close()
 		t.Fatalf("apply ledger schema: %v", err)
