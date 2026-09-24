@@ -1,0 +1,10 @@
+[
+  {"name":"full", "strip_anchor":false, "malformed_disclosures":false, "pin_signer":true},
+  {"name":"anchor_removed", "strip_anchor":true, "malformed_disclosures":false, "pin_signer":true},
+  {"name":"malformed_optional", "strip_anchor":false, "malformed_disclosures":true, "pin_signer":true},
+  {"name":"anchor_removed_malformed", "strip_anchor":true, "malformed_disclosures":true, "pin_signer":true},
+  {"name":"self_signed", "strip_anchor":false, "malformed_disclosures":false, "pin_signer":false},
+  {"name":"self_signed_anchor_removed", "strip_anchor":true, "malformed_disclosures":false, "pin_signer":false},
+  {"name":"self_signed_malformed", "strip_anchor":false, "malformed_disclosures":true, "pin_signer":false},
+  {"name":"self_signed_anchor_removed_malformed", "strip_anchor":true, "malformed_disclosures":true, "pin_signer":false}
+]

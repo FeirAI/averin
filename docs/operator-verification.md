@@ -149,6 +149,29 @@ The object form works for **every** role key (`signing_keys` uses the RCP §10.2
 - `transitive_grants` — grants from an UNPINNED subject broker that elevated to `transitive` trust via a `cross_broker_cert` signed by a PINNED issuer broker (M4 optional). The cert binds the subject's KEY (not just its id), and the subject key is rejected if it collides with any non-broker role.
 - `action_completeness` — the D8 capstone (`attested_complete_over_brokered_surface` / `..._introspected_surface` / `claimed_over_manifest` / `not_claimed`), **always** bounded by `resource_trust: assumed_truthful` (MF1 — the irreducible resource TCB).
 
+For a decision beyond legacy `ok`, supply a fixed `claim_policy` in the verifier options and
+read `claims_version: "1"` with `claims.requested_decision`. Only `satisfied` accepts the
+requested claim; `insufficient` means the required evidence is unavailable or stale, while
+`refuted` means validated contrary evidence exists. `ok` remains a bundle diagnostic and may
+change when a malformed optional attachment is deleted. The default policy requests
+`integrity`. Set `requested: "authorized"`, `"complete_brokered"`, or
+`"complete_introspected"` for stronger decisions, and pin record `signing_keys` separately
+from role keys. The completeness label now also requires those external record-signing pins.
+
+With pinned `revocation_keys`, the default `revocation: "pinned"` policy requires a fresh
+disclosed list. A Merkle-only deployment must request `"merkle"`; a deployment requiring both
+signed modes must request `"both"`. The bundle cannot choose its own requirement. Every
+brokered use and indexed native credential needs a valid non-membership path when Merkle mode
+is required; a fresh root without those paths yields `insufficient` temporal/authorization
+claims. With `require_disclosure: true`, every accepted committed broker grant must have a
+valid matching credential opening, including grants that were never used. Every present
+authenticated statement that revokes a used grant blocks authorization, even if a
+different mode supplies a fresh nonrevoking statement. Deleting a separately signed adverse
+statement changes the authority evidence itself, so the support-deletion theorem does not
+claim monotonicity for that operation. The same boundary applies to a validated contradictory
+credential opening or conflicting verified TSA timestamps. All three are enforced while present.
+Committed-record contradictions remain contradictions under any attachment deletion.
+
 ## Unwedging a refused checkpoint: `grant_void` tombstones (D6)
 
 The server refuses to sign a checkpoint while a `broker_seq` is reserved but no grant records it

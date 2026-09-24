@@ -77,9 +77,10 @@ operation identity and reconcile the durable result. A database outage fails
 closed; it does not promise write availability.
 
 The in-memory implementation mirrors transactional rollback and project
-isolation but is volatile across process restart. A multi-replica deployment
-claim still needs authenticated capability-project binding, scoped nonce
-claims and bounded sequence recovery tested together. Until then, keep the
+isolation but is volatile across process restart. Online capability use now
+checks its signed project against the authenticated project. A multi-replica
+deployment claim still needs scoped nonce claims and bounded sequence recovery
+tested together. Until then, keep the
 single-writer-per-project deployment policy even though frontier and checkpoint
 writes now serialize across replicas.
 

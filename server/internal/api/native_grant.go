@@ -116,11 +116,7 @@ func (s *Server) buildNativeGrantRecord(gr grantRequest, grantID string, evidenc
 	if err != nil {
 		return nil, fmt.Errorf("derive native grant evidence_hash: %w", err)
 	}
-	evidenceSig, err := s.core.SignEvidence("gateway_enforced", gr.ProjectID, grantID, evidenceHash)
-	if err != nil {
-		return nil, fmt.Errorf("sign native grant evidence: %w", err)
-	}
-	return map[string]any{
+	rec := map[string]any{
 		"record_id":     grantID,
 		"project_id":    gr.ProjectID,
 		"session_id":    gr.SessionID,
@@ -136,7 +132,6 @@ func (s *Server) buildNativeGrantRecord(gr grantRequest, grantID string, evidenc
 			"grant_type":        "oauth-scope",
 			"grant_id":          grantID,
 			"evidence_hash":     evidenceHash,
-			"evidence_sig":      evidenceSig,
 		},
 		"extensions": map[string]any{
 			"broker": map[string]any{
@@ -144,7 +139,11 @@ func (s *Server) buildNativeGrantRecord(gr grantRequest, grantID string, evidenc
 				"grant_evidence": evidence,
 			},
 		},
-	}, nil
+	}
+	if err := s.signLocalAuthorityV3(rec, s.core); err != nil {
+		return nil, err
+	}
+	return rec, nil
 }
 
 // introspectionRequest is the POST /v2/introspection wire shape (ADR 0005 M3).
@@ -250,11 +249,7 @@ func (s *Server) buildIntrospectionRecord(ir introspectionRequest, recordID stri
 	if err != nil {
 		return nil, fmt.Errorf("derive introspection evidence_hash: %w", err)
 	}
-	evidenceSig, err := s.resourceCore.SignEvidence("gateway_enforced", ir.ProjectID, recordID, evidenceHash)
-	if err != nil {
-		return nil, fmt.Errorf("sign introspection evidence (resource): %w", err)
-	}
-	return map[string]any{
+	rec := map[string]any{
 		"record_id":     recordID,
 		"project_id":    ir.ProjectID,
 		"session_id":    ir.SessionID,
@@ -269,7 +264,6 @@ func (s *Server) buildIntrospectionRecord(ir introspectionRequest, recordID stri
 			"enforcement_point": "tool_gateway",
 			"grant_id":          ir.GrantID,
 			"evidence_hash":     evidenceHash,
-			"evidence_sig":      evidenceSig,
 		},
 		"extensions": map[string]any{
 			"broker": map[string]any{
@@ -279,5 +273,9 @@ func (s *Server) buildIntrospectionRecord(ir introspectionRequest, recordID stri
 				"introspection_evidence": ie,
 			},
 		},
-	}, nil
+	}
+	if err := s.signLocalAuthorityV3(rec, s.resourceCore); err != nil {
+		return nil, err
+	}
+	return rec, nil
 }

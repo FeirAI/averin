@@ -199,8 +199,8 @@ fn every_preimage_family_matches_model() {
         assert_eq!(name, s(&e, "family"));
         let want = s(&e, "hex");
         let f: Vec<F> = arr(&i, "fields").iter().map(field).collect();
-        let tail = i.get("tail").filter(|t| !t.is_null()).map(field);
-        let tail = || st(tail.as_ref().expect("tail"));
+        let tail_field = i.get("tail").filter(|t| !t.is_null()).map(field);
+        let tail = || st(tail_field.as_ref().expect("tail"));
         match name {
             "record sig" => check(name, &sign::preimage(sign::RECORD_SIG_TAG, tail()), want),
             "checkpoint sig" => check(
@@ -227,7 +227,58 @@ fn every_preimage_family_matches_model() {
                 &authority::preimage(st(&f[0]), st(&f[1]), st(&f[2]), tail()),
                 want,
             ),
+            "body-bound authority evidence" => {
+                assert_eq!(st(&f[0]), authority::SUBJECT_PROJECTION);
+                check(
+                    name,
+                    &authority::preimage_v3(st(&f[1]), st(&f[2]), st(&f[3]), st(&f[4]), st(&f[5]))
+                        .expect("framed v3 preimage"),
+                    want,
+                )
+            }
+            "authority subject digest" => {
+                assert_eq!(st(&f[0]), authority::SUBJECT_PROJECTION);
+                check(
+                    name,
+                    &authority::subject_digest_preimage(
+                        &CanonValue::parse(tail()).expect("canonical subject"),
+                    )
+                    .expect("subject digest preimage"),
+                    want,
+                )
+            }
             "test anchor" => check(name, &anchor::anchor_preimage(st(&f[0]), st(&f[1])), want),
+            "grant PoP v2" => {
+                let shared_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("spec/golden-vectors/broker-preimages.json");
+                let shared =
+                    CanonValue::parse(&std::fs::read_to_string(&shared_path).unwrap()).unwrap();
+                let matching: Vec<_> = arr(&shared, "grant_pop_v2")
+                    .iter()
+                    .filter(|case| s(case, "expect_preimage_hex") == want)
+                    .collect();
+                assert_eq!(
+                    matching.len(),
+                    1,
+                    "each Lean preimage needs one shared producer vector"
+                );
+                let grant_case = matching[0];
+                let mut pre = Vec::new();
+                assert!(lp_into(&mut pre, b"averin.broker.pop.v2"));
+                for part in &f[..12] {
+                    assert!(lp_into(&mut pre, st(part).as_bytes()));
+                }
+                for part in &f[12..15] {
+                    pre.extend_from_slice(&int(part).to_be_bytes());
+                }
+                pre.extend_from_slice(raw(tail_field
+                    .as_ref()
+                    .expect("v2 variable chain/times tail")));
+                check(name, &pre, want);
+                assert_eq!(hex_lower(&sha256(&pre)), s(grant_case, "expect_hex"));
+            }
             "use PoP" => check(
                 name,
                 &verify::use_pop_preimage(

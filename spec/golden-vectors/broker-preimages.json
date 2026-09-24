@@ -55,6 +55,53 @@
       "expect_hex": "3f274a9c975514017ea1e324db94dc1fc018ded8bd733e26eddd113250672889"
     }
   ],
+  "grant_pop_v2": [
+    {
+      "name": "default-single-operation",
+      "project_id": "p1",
+      "idempotency_key": "idem-1",
+      "session_id": "s1",
+      "agent_id": "agent-1",
+      "action": "db.query:orders-ro",
+      "resource": "orders-db",
+      "scope": "read:orders",
+      "scope_class": "single_operation",
+      "agent_pubkey": "AAAA",
+      "principal": "",
+      "justification": "",
+      "use_limit": 0,
+      "ttl_seconds": 300,
+      "delegation_chain": [],
+      "issued_at": 1718445000,
+      "request_expires_at": 1718445900,
+      "expect_preimage_hex": "0000001461766572696e2e62726f6b65722e706f702e7632000000027031000000066964656d2d31000000027331000000076167656e742d310000001264622e71756572793a6f72646572732d726f000000096f72646572732d64620000000b726561643a6f72646572730000001073696e676c655f6f7065726174696f6e000000044141414100000000000000000000000a6361706162696c6974790000000000000000000000000000012c000000000000000000000000666d63c800000000666d674c",
+      "expect_hex": "20809965afd8dd263d5f02afb1461cdce5a8cb7adf1187ba0feb43a46b48fe94"
+    },
+    {
+      "name": "bounded-multihop-unicode",
+      "project_id": "p-équipe",
+      "idempotency_key": "idem-2",
+      "session_id": "s2",
+      "agent_id": "agent-2",
+      "action": "db.query:orders-ro",
+      "resource": "orders-db",
+      "scope": "read:café",
+      "scope_class": "bounded_reuse",
+      "agent_pubkey": "AAAA",
+      "principal": "acct:café",
+      "justification": "approved by Zoë",
+      "use_limit": 7,
+      "ttl_seconds": 120,
+      "delegation_chain": [
+        "delegate:α",
+        "delegate:東京"
+      ],
+      "issued_at": 1718445000,
+      "request_expires_at": 1718445900,
+      "expect_preimage_hex": "0000001461766572696e2e62726f6b65722e706f702e763200000009702dc3a97175697065000000066964656d2d32000000027332000000076167656e742d320000001264622e71756572793a6f72646572732d726f000000096f72646572732d64620000000a726561643a636166c3a90000000d626f756e6465645f726575736500000004414141410000000a616363743a636166c3a900000010617070726f766564206279205a6fc3ab0000000a6361706162696c6974790000000000000007000000000000007800000000000000020000000b64656c65676174653aceb10000000f64656c65676174653ae69db1e4baac00000000666d63c800000000666d674c",
+      "expect_hex": "4b134bc82d3d5bce854c3c63e4f6e85f50f5aad710e8fefded9ea303cf5f7ce1"
+    }
+  ],
   "cnf_kid": [
     {
       "seed_hex": "0505050505050505050505050505050505050505050505050505050505050505",

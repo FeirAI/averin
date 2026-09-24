@@ -29,7 +29,13 @@ func TestVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T) {
 	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithResource(resourceCore, "orders-db").WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
-	req := broker.Request{AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "read:orders", AgentPubKey: pub, TTL: time.Minute}
+	now := time.Now()
+	req := broker.Request{
+		PoPVersion: 2, ProjectID: "p1", IdempotencyKey: "idem-prepared-void", SessionID: "s1",
+		IssuedAt: now.Unix(), RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
+		AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "read:orders",
+		ScopeClass: broker.ScopeSingleOperation, AgentPubKey: pub, TTL: time.Minute,
+	}
 	req.AgentSig = base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
 	grantID := reservedGrantID("idem-prepared-void")
 	prepared, err := broker.Prepare(req, grantID, func() (int64, error) { return 1, nil }, time.Now(), brokerIssuingKey())
@@ -51,7 +57,7 @@ func TestVoidWithoutRevocationKeyBlocksPreparedCapability(t *testing.T) {
 	// This independently verifies the issuer signature, audience, action, PoP,
 	// and freshness before void. The test must not pass merely because the
 	// prepared descriptor was malformed or expired.
-	shim := resourceshim.New(brokerIssuingKey().Public().(ed25519.PublicKey), "orders-db", resourceshim.NewMemLedger())
+	shim := resourceshim.New(brokerIssuingKey().Public().(ed25519.PublicKey), "orders-db", resourceshim.NewMemLedger()).WithProject("p1")
 	ev, err := shim.ValidateUse(prepared.Capability, presented.UseSig, resourceshim.Op{Action: "db.query:orders-ro", ParamsCommitment: commitment}, "nonce-void", time.Now())
 	if err != nil {
 		t.Fatalf("prepared capability was not otherwise valid: %v", err)

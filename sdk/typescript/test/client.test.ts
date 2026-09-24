@@ -1,5 +1,39 @@
 import { test, expect } from "bun:test";
-import { buildRecord, stringify, Client, AverinError } from "../src/index";
+import { buildRecord, stringify, Client, AverinError, prepareV3AuthoritySubject } from "../src/index";
+
+test("v3 prepared fixture is exactly the submitted semantic record", async () => {
+  const fixture = await Bun.file(new URL("../../../spec/golden-vectors/authority-sdk-v3.json", import.meta.url)).json();
+  const draft = fixture.draft_record as Record<string, unknown>;
+  const before = stringify(draft);
+  const prepared = prepareV3AuthoritySubject(draft);
+  expect(prepared).toEqual(fixture.prepared_record);
+  expect(stringify(draft)).toBe(before);
+  const authority = prepared.authority as Record<string, unknown>;
+  authority.subject_digest = fixture.subject_digest;
+  authority.evidence_sig = "ed25519:external-approver-proof";
+  const signedSemantics = stringify(prepared);
+  let submitted: Record<string, unknown> = {};
+  const transport = async (_url: string, _headers: Record<string, string>, body: string) => {
+    const sent = JSON.parse(body) as Record<string, unknown>;
+    expect(sent.idempotency_key).toBe("sdk-v3-fixed");
+    delete sent.idempotency_key;
+    submitted = sent;
+    return JSON.stringify({ results: [{ record: { content_hash: "sha256:sealed" } }] });
+  };
+  await new Client("http://localhost:8080", "p1", { transport }).submit(prepared, "sdk-v3-fixed");
+  expect(submitted).toEqual(JSON.parse(signedSemantics));
+  expect(stringify(prepared)).toBe(signedSemantics);
+});
+
+test("v3 prepare rejects incomplete or server-rewritten subjects", async () => {
+  const fixture = await Bun.file(new URL("../../../spec/golden-vectors/authority-sdk-v3.json", import.meta.url)).json();
+  for (const change of [
+    { record_id: "" }, { agent_ts: "" }, { schema_version: "3" },
+    { idempotency_key: "inside-subject" }, { input: "raw secret" },
+  ]) {
+    expect(() => prepareV3AuthoritySubject({ ...fixture.draft_record, ...change })).toThrow();
+  }
+});
 
 test("buildRecord basics + bigint cost", () => {
   const rec = buildRecord("p1", "s1", "db.query", { eventType: "tool_call", costMicrosUsd: 18000n });

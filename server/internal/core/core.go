@@ -217,6 +217,50 @@ func (c *Core) SignEvidence(source, projectID, recordID, evidenceHash string) (s
 	return checkValue(goStrFree(C.averin_sign_evidence(cs, cproj, crid, ceh, cseed)))
 }
 
+// V3AuthorityProof is derived by Rust from the structured semantic record.
+type V3AuthorityProof struct {
+	SubjectDigest string `json:"subject_digest"`
+	EvidenceSig   string `json:"evidence_sig"`
+}
+
+// SignAuthorityRecordV3 signs the actual finalized semantic record; the caller
+// cannot provide a blind digest. The Rust core owns projection and RCP bytes.
+func (c *Core) SignAuthorityRecordV3(recordJSON string) (V3AuthorityProof, error) {
+	if i := strings.IndexByte(recordJSON, 0); i >= 0 {
+		return V3AuthorityProof{}, fmt.Errorf("v3 authority record contains NUL byte at %d", i)
+	}
+	cr := C.CString(recordJSON)
+	cs := C.CString(c.seedHex)
+	defer C.free(unsafe.Pointer(cr))
+	defer C.free(unsafe.Pointer(cs))
+	out, err := checkValue(goStrFree(C.averin_sign_authority_record_v3(cr, cs)))
+	if err != nil {
+		return V3AuthorityProof{}, err
+	}
+	var proof V3AuthorityProof
+	if err := json.Unmarshal([]byte(out), &proof); err != nil {
+		return V3AuthorityProof{}, fmt.Errorf("decode v3 authority proof: %w", err)
+	}
+	if proof.SubjectDigest == "" || proof.EvidenceSig == "" {
+		return V3AuthorityProof{}, errors.New("v3 authority proof is incomplete")
+	}
+	return proof, nil
+}
+
+// VerifyAuthorityRecord uses the same Rust v3 projection as the offline verifier.
+func (c *Core) VerifyAuthorityRecord(recordJSON, publicKey string) (string, error) {
+	for _, input := range []string{recordJSON, publicKey} {
+		if i := strings.IndexByte(input, 0); i >= 0 {
+			return "", fmt.Errorf("authority verify input contains NUL byte at %d", i)
+		}
+	}
+	cr := C.CString(recordJSON)
+	cp := C.CString(publicKey)
+	defer C.free(unsafe.Pointer(cr))
+	defer C.free(unsafe.Pointer(cp))
+	return checkValue(goStrFree(C.averin_verify_authority_record(cr, cp)))
+}
+
 // VerifyCommitment reports whether the disclosed (value, nonce) opens commitment under domain.
 func (c *Core) VerifyCommitment(commitment, domain string, value []byte, nonceHex string) (bool, error) {
 	cc := C.CString(commitment)

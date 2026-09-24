@@ -52,7 +52,7 @@ func TestBrokerSeqVoidAgeCountsLatestAttempt(t *testing.T) {
 		reserveGrantSeq(t, ls.Store, "idem-race") // T0: an orphaned durable reservation
 		clk.Advance(59 * time.Minute)
 		ls.failHeads = true // T0+59m: a failed retry still refreshes the local attempt clock
-		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusInternalServerError {
+		if code, resp := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-race", "read:orders", ak, ak, clk.Now())); code != http.StatusInternalServerError {
 			t.Fatalf("T0+59m failed retry must 500 (got %d): %s", code, resp)
 		}
 		clk.Advance(2 * time.Minute) // T0+61m: allocated_at is 61m old
@@ -60,7 +60,7 @@ func TestBrokerSeqVoidAgeCountsLatestAttempt(t *testing.T) {
 		if code != http.StatusConflict || !strings.Contains(resp, "last attempted by its grant") {
 			t.Fatalf("a void within the safety age of the grant's latest attempt must 409 (got %d): %s", code, resp)
 		}
-		if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-race", "read:orders", ak, ak)); code != http.StatusCreated || grantSeqOf(t, resp) != 1 {
+		if code, resp := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-race", "read:orders", ak, ak, clk.Now())); code != http.StatusCreated || grantSeqOf(t, resp) != 1 {
 			t.Fatalf("retry records seq 1 (%d): %s", code, resp)
 		}
 		clk.Advance(2 * time.Hour)

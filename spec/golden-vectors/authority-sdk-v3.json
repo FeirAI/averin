@@ -1,0 +1,61 @@
+{
+  "draft_record": {
+    "project_id": "p1",
+    "record_id": "sdk-r1",
+    "session_id": "s1",
+    "span_id": "sp1",
+    "agent_ts": "2026-01-01T00:00:00.000Z",
+    "action": "approve",
+    "input_commit": {
+      "alg": "sha256",
+      "commitment": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "low_entropy": true
+    },
+    "authority": {
+      "source": "human_signed",
+      "enforcement_point": "sdk",
+      "evidence_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "extensions": {
+      "new_vendor": {"meaning": "approved"},
+      "feir_evidence": {}
+    }
+  },
+  "subject_digest": "sha256:7c1f910ca26bd9392fce5b845b2e8a81d8e508a6e8b0140a6cc99141e5447c36",
+  "prepared_record": {
+    "project_id": "p1",
+    "record_id": "sdk-r1",
+    "session_id": "s1",
+    "span_id": "sp1",
+    "agent_ts": "2026-01-01T00:00:00.000Z",
+    "action": "approve",
+    "input_commit": {
+      "alg": "sha256",
+      "commitment": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "low_entropy": true
+    },
+    "authority": {
+      "source": "human_signed",
+      "enforcement_point": "sdk",
+      "evidence_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "proof_version": "v3",
+      "subject_projection": "averin.authority.subject.v1"
+    },
+    "extensions": {
+      "new_vendor": {"meaning": "approved"},
+      "feir_evidence": {
+        "capture_authority": "sdk",
+        "lineage": {"session_id": "s1", "span_id": "sp1", "parent_span_id": null}
+      }
+    },
+    "schema_version": "2",
+    "canon_version": "rcp-1",
+    "domain": "flightrecorder.record.v2",
+    "agent_id": "unknown",
+    "agent_version": "unknown",
+    "event_type": "decision",
+    "observed_via": "sdk",
+    "status": "ok",
+    "parent_span_id": null
+  }
+}

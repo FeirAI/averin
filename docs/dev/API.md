@@ -208,6 +208,8 @@ Request (`grantRequest`):
 | Field | Type | Notes |
 |-------|------|-------|
 | `idempotency_key` | string | Required (or `Idempotency-Key` header). Deterministically fixes `grant_id`. |
+| `pop_version` | int | `2` for new brokered issuance; native `token_exchange` has its separate proof contract. |
+| `issued_at`, `request_expires_at` | int64 Unix seconds | Agent-signed freshness window. Maximum 15 minutes; 30 seconds of clock skew accepted. |
 | `project_id`, `session_id` | string | Required. |
 | `agent_id`, `action`, `resource`, `scope` | string | The operation being authorized. |
 | `scope_class` | string | Scope classification input (see broker `ScopeClass`). |
@@ -226,7 +228,7 @@ Request (`grantRequest`):
   "grant_id": "<uuid>",
   "capability": "<minted sender-constrained token>",
   "expires_at": "2026-...Z",
-  "scope_class": "single_use"
+  "scope_class": "single_operation"
 }
 ```
 
@@ -234,19 +236,20 @@ Errors: `400` (validation, failed PoP, forbidden scope, malformed), `409` (idemp
 for a *different* grant request, or the grant's reserved `broker_seq` was voided by the operator —
 re-issue under a new `idempotency_key`), `500` (store/seal failure), `501` (broker not enabled). When an
 M-of-N cosig policy is pinned, single-phase issuance is refused (`400`) — use prepare/finalize.
+An invalid signature, stale proof, or conflicting project/idempotency representation is rejected
+without allocating a grant sequence or sealing authorization or denial evidence. An authenticated
+fresh request that fails broker policy may produce a signed denied-grant record when denial logging
+is enabled.
 
-**What `agent_sig` binds.** `agent_sig` is an Ed25519 signature, under the key in `agent_pubkey`, over
-the JSON object `{"tag":"averin.broker.pop.v1","agent_id","action","resource","scope","agent_pubkey"}`
-(keys sorted). It proves the caller holds the cnf key and binds the operation to it. It does **not**
-bind a nonce, an expiry, the `project_id`, the `session_id`, the `idempotency_key`, `scope_class`,
-`use_limit`, `ttl_seconds`, the principal or the delegation chain. So a captured request body is
-replayable: under a new `idempotency_key` (or in another project the replayer can write to) it yields
-another grant for the same operation, bound to the same agent key, which only the holder of that key can
-use (resources re-check PoP at use time). Against the two-phase flow, a captured body lets a third party
-drive `prepare`/`finalize` for that agent's pending grant under its `idempotency_key`; it cannot change
-what the grant authorizes or which key it is bound to. Treat grant request bodies as sensitive in transit
-and logs. Binding the project and idempotency key into the challenge (with a new tag) is a planned
-wire-format change.
+**What `agent_sig` binds.** For `pop_version: 2`, the agent signs a SHA-256 digest of the
+length-prefixed effective request, including authenticated `project_id`, resolved `idempotency_key`,
+`session_id`, operation and sender key, effective scope class/use limit, TTL, authorizing principal,
+delegation chain, justification, and the signed issue/expiry envelope. The exact field order and
+encoding are specified in [grant-pop-v2.md](../../spec/grant-pop-v2.md). A captured proof cannot be
+moved to another project or idempotency key, and it cannot mint after the signed freshness window.
+An exact v2 committed retry can return the original capability after that window; it does not re-mint or
+extend the capability. Historical v1 signatures remain inspectable under their original format but
+are not accepted by online brokered grant routes after the cutoff, including committed retries.
 
 ### POST `/v2/grants/prepare` and `/v2/grants/finalize` (two-phase)
 
@@ -273,7 +276,22 @@ receipt the offline verifier joins back to its grant.
 
 Request (`useRequest`): `idempotency_key`, `project_id`, `session_id`, `capability`, `use_sig`
 (base64url Ed25519 PoP), `action`, `params`, `nonce`, `params_nonce`, and `use_sequence_number`
-(bounded_reuse only).
+(bounded_reuse only). For other capability classes, the server currently ignores a supplied
+`use_sequence_number` and records the effective value `0`; committed retry matching uses that
+effective value as well.
+
+A bounded project read returns an exact committed retry, including after capability
+expiry, without another content write or ledger claim; a changed request under
+the same key is `409`. That retry still verifies the presented capability under
+the configured broker issuer key; an issuer key rotation without a compatible
+keyring cannot recover the old receipt through this endpoint. For a new use,
+the resource verifies the capability,
+signed project, and use PoP before storing raw params. It repeats that preflight
+inside the project transaction, then checks revocation and consumes the ledger
+with receipt insertion. A request that passes the first preflight but later
+fails revocation, replay, or time revalidation can leave an immutable,
+unreferenced content blob until normal content retention purges it; it leaves
+no receipt or committed ledger claim.
 
 **Response `201`:**
 `{ "use_id": "use-<uuid>", "grant_id": "<uuid>", "record": { /* sealed receipt */ }, "idempotent": false }`
@@ -491,7 +509,9 @@ Key fields:
 | Field | Type | Meaning |
 |-------|------|---------|
 | `ok` | bool | The integrity verdict: every record sealed + linked + checkpoint-consistent, no hard violation. **Not** the accountability capstone. |
-| `keys_externally_pinned` | bool | `true` only when you passed an `opts.json` — i.e. authentic vs internal-consistency. |
+| `keys_externally_pinned` | bool | `true` only when record `signing_keys` were pinned out of band; merely passing other options does not authenticate record provenance. |
+| `body_bound_role_evidence` | bool | Every contributing committed broker/resource/void role record has a verified body-bound authority proof; historical v2 role signatures remain useful for forensic joins but cannot satisfy this stronger prerequisite. |
+| `claims_version`, `claims` | string/object | Version `1` typed decisions for `integrity`, `authenticated`, `authorized`, `temporal`, `complete_brokered`, and `complete_introspected`. Each is `satisfied`, `insufficient`, or `refuted`; `requested` and `requested_decision` identify the caller's required claim. Only `satisfied` accepts a required claim. |
 | `records_total`, `records_proven` | int | |
 | `dag_ok`, `dag_heads`, `collapsed_duplicates` | bool/int | DAG validity, head count, deduped retries (#8). |
 | `checkpoints_total`, `checkpoints_verified`, `chain_ok` | int/bool | |
@@ -505,7 +525,23 @@ Key fields:
 | `cosig_status`, `delegation_status`, `taxonomy_status`, `attestation_status`, `revocation_status`, `revocation_merkle_status`, `introspection_status`, `federation_status` | string | Mode gates: `absent` / `unevaluated` (no key pinned) → an evaluated verdict when the role's key set is pinned. |
 | `issues` | []string | Human-readable violations (omission/fork/tamper/role-overlap/…). |
 
-The CLI prints a digest of this and a `RESULT: PASS (integrity)` / `RESULT: FAIL` line. PASS is the
-**integrity** verdict; the `action_completeness` / `grant_accountability` / `broker_trust` capstone
-on the same line is the higher claim, and `not_claimed` / `incomplete` are normal when no role keys
-were pinned. Even a `*_complete` capstone is bounded by `resource_trust: assumed_truthful`.
+`ok` retains the legacy bundle diagnostic meaning. It is not an authorization acceptance
+predicate. An optional malformed disclosure can make `ok` false; removing it may remove that
+parsing issue without proving any stronger claim. The CLI exits successfully only when `ok` is
+true **and** the explicitly requested claim is `satisfied`. The default request is `integrity`.
+Even a complete claim remains bounded by `resource_trust: assumed_truthful`.
+
+Set `claim_policy` in verifier options, for example
+`{"requested":"authorized","revocation":"disclosed","require_disclosure":true}`.
+`requested` is `integrity`, `authenticated`, `authorized`, `complete_brokered`, or
+`complete_introspected`. `revocation` is `pinned` (default: a disclosed list required whenever
+`revocation_keys` are pinned), `disclosed`, `merkle`, or `both`; Merkle mode must be selected by
+the caller, not by the bundle. A pinned revocation issuer always requires current evidence for
+authorization and completeness. `require_disclosure` and `require_attestation` are optional
+booleans. `require_disclosure` demands a valid matching credential opening for every accepted
+committed broker grant, including unused grants; counting only supplied openings is insufficient.
+Explicit `merkle` and `both` modes require both a fresh signed root and valid non-membership
+paths for every brokered use and indexed native credential. Root freshness alone does not prove
+non-revocation. Present malformed policy fields are fatal configuration errors. Missing required
+evidence gives `insufficient`; a committed contradiction or authenticated revocation gives
+`refuted`. Neither accepts the claim.
