@@ -73,6 +73,12 @@ named_detector() {
     m51-*) echo 'production|stale' ;;
     m52-*) echo 'production|call-path' ;;
     m53-*) echo 'production|cfg' ;;
+    # Plan 012 phase B, verdict kernel refinement (m54-m59): a production verdict change that makes
+    # deletion strengthen a claim (m54 capstone, m55 authorized), drops a plan 009 historical gate
+    # (m56 snapshot verified, m57 Merkle-mode paths) or lets an unpinned key authenticate (m58) must
+    # fail the regenerated proof; a call site overriding the kernel's claims fails call-path (m59).
+    m54-*|m55-*|m56-*|m57-*|m58-*) [ "${SKIP_PRODUCTION_PROOF:-0}" = 1 ] || echo 'production-proof|proof' ;;
+    m59-*) echo 'production|call-path' ;;
   esac
 }
 

@@ -1,0 +1,11 @@
+Mutant: the verifier overwrites a claim after the proved kernel decided it (a production call site that bypasses decide_claims). Named detector: check-production.py call-path (the only write of report.claims is the kernel's).
+
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -7715,5 +7715,6 @@
+         policy: opts.claim_policy,
+     };
+     report.claims = verdict::decide_claims(&facts);
++    report.claims.complete_brokered = ClaimDecision::Satisfied;
+     report
+ }
