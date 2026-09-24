@@ -14149,6 +14149,36 @@ fn write_generated_verdict_corpus() {
         Some("satisfied"),
         "v3 real-producer native base must make the complete introspected claim reachable"
     );
+    // Plan 009: a real Go producer export with a two-phase use, a prospective revocation after the
+    // intent and the outcome recorded after it, verified under the caller's db_serialized_v1
+    // policy. Current revocation blocks; the historical claim is satisfied.
+    let historical_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/claim-historical-v3.json");
+    let historical_fixture =
+        CanonValue::parse(&std::fs::read_to_string(historical_path).unwrap()).unwrap();
+    let historical_bundle = historical_fixture.get("bundle").unwrap().clone();
+    let historical_opts = historical_fixture.get("opts").unwrap().clone();
+    let historical_report = CanonValue::parse(&verify_bundle_with_json(
+        &historical_bundle.serialize(),
+        &historical_opts.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(
+        historical_report
+            .get("claims")
+            .unwrap()
+            .get("historical_authorized_as_of_snapshot")
+            .and_then(CanonValue::as_str),
+        Some("satisfied"),
+        "v3 real-producer historical base must make the historical claim reachable"
+    );
+    assert_eq!(
+        historical_report.get("ok"),
+        Some(&CanonValue::Bool(false)),
+        "current revocation still blocks ok"
+    );
     let (rec, res, tsa, rev) = rev_keys();
     let opts = |rec: &SigningKey, res: &SigningKey, tsa: &SigningKey| {
         CanonValue::object(vec![
@@ -14192,6 +14222,7 @@ fn write_generated_verdict_corpus() {
             native_capstone_bundle,
             native_capstone_opts,
         ),
+        ("v3_historical".into(), historical_bundle, historical_opts),
     ];
     let (two_checkpoint, _) = claim_two_checkpoint_bundle(false, 3);
     bases.push((
@@ -14562,6 +14593,8 @@ fn generated_verdict_corpus_matches_native() {
     let mut saw_capstone = false;
     let mut saw_native_capstone = false;
     let mut saw_partial_anchor_pop = false;
+    let mut saw_historical = false;
+    let mut saw_historical_stripped = false;
     let mut families = BTreeSet::new();
     for row in rows {
         let name = row.get("name").and_then(CanonValue::as_str).unwrap();
@@ -14614,6 +14647,19 @@ fn generated_verdict_corpus_matches_native() {
                 .and_then(CanonValue::as_str)
                 == Some("satisfied");
         }
+        let historical = report
+            .get("claims")
+            .unwrap()
+            .get("historical_authorized_as_of_snapshot")
+            .and_then(CanonValue::as_str);
+        if name == "v3_historical/anchors_1/base" {
+            saw_historical = historical == Some("satisfied")
+                && report.get("ok") == Some(&CanonValue::Bool(false));
+        }
+        if name.starts_with("v3_historical/") && name.contains("drop_revocation_list") {
+            assert_ne!(historical, Some("satisfied"), "{name}: stripped snapshot");
+            saw_historical_stripped = true;
+        }
         if name == "failed_pop_partial_anchor/anchors_1/base" {
             saw_partial_anchor_pop = report.get("ok") == Some(&CanonValue::Bool(false))
                 && report
@@ -14638,6 +14684,10 @@ fn generated_verdict_corpus_matches_native() {
         saw_partial_anchor_pop,
         "corpus must preserve the cp0-only failed-PoP intent violation"
     );
+    assert!(
+        saw_historical && saw_historical_stripped,
+        "corpus must have a real-producer historical positive (with current revocation still blocking) and its stripped-snapshot variants"
+    );
     for family in [
         "two_checkpoint",
         "two_phase",
@@ -14651,6 +14701,7 @@ fn generated_verdict_corpus_matches_native() {
         "signed_adverse_merkle",
         "compromised_signer",
         "mixed_valid_invalid",
+        "v3_historical",
     ] {
         assert!(
             families.contains(family),
@@ -15977,5 +16028,64 @@ fn temporal_native_introspection_orders_transcripts_against_the_grant_cutoff() {
             r.claims().historical_authorized_as_of_snapshot
         ),
         ("indeterminate", I)
+    );
+}
+
+#[test]
+fn temporal_mixed_surfaces_require_every_receipt_proven() {
+    use ClaimDecision::Satisfied as S;
+    let k = t_keys();
+    let grant = t_grant(&k);
+    let use_rec = t_use(&k, &[content_hash_of(&grant)], Some(t_order(T_ORD)));
+    let native = body_bind_role_record(
+        &seal_grant(
+            &k.rec,
+            &k.rec,
+            "native-1",
+            &native_grant_evidence("native-1", NSCOPE, RESOURCE, LEASE, ISSUED, EXP),
+        ),
+        &k.rec,
+        &k.rec,
+    );
+    let transcript = |order: Option<CanonValue>| {
+        let mut ie = introspection_evidence(&k.res, "native-1", LEASE, NSCOPE, RESOURCE, USED, EXP);
+        if let Some(o) = order {
+            ie = change_field(&ie, "authorization_order", o);
+        }
+        body_bind_role_record(
+            &seal_introspection(&k.rec, &k.res, "intro-1", &[content_hash_of(&native)], &ie),
+            &k.res,
+            &k.rec,
+        )
+    };
+    let run = |t: CanonValue| {
+        let frontier = [content_hash_of(&use_rec), content_hash_of(&t)];
+        let cp = checkpoint_over(&k.rec, &frontier, 4, Some(&k.tsa));
+        let b = tier_b_bundle(
+            &k.rec.verifying_key(),
+            vec![grant.clone(), use_rec.clone(), native.clone(), t],
+            vec![cp],
+        );
+        let b = change_field(&b, "revocation_list", t_list(&k, &[]));
+        verify_bundle_with(&b, &t_opts(&k, t_db_policy(3600, 0)))
+    };
+    // The brokered use alone is proven before, but the native transcript carries no ordinal: the
+    // claim speaks for every receipt, so it is not satisfied.
+    let r = run(transcript(None));
+    assert_eq!(r.temporal.receipt_ordering.len(), 2, "{:?}", r.issues);
+    assert_ne!(r.claims().historical_authorized_as_of_snapshot, S);
+    // With both receipts ordered and proven, the mixed bundle can satisfy it.
+    let r = run(transcript(Some(t_order(T_ORD + 1))));
+    assert!(r
+        .temporal
+        .receipt_ordering
+        .iter()
+        .all(|o| o.historical_ordering
+            == averin_decision_core::verify::HistoricalOrdering::ProvenBefore));
+    assert_eq!(
+        r.claims().historical_authorized_as_of_snapshot,
+        S,
+        "{:?}",
+        r.issues
     );
 }

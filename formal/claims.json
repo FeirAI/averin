@@ -58,7 +58,7 @@
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "Postgres mode"],
       "assumptions": ["revocation enabled", "shared Postgres project Store", "all use and revoke paths obey WithProjectWrite"],
-      "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "revokeGrantIDTotalCtx"}, {"file": "server/internal/store/operational_postgres.go", "symbol": "IsRevoked"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
+      "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "revokeGrantEvent"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "IsRevoked"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
       "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoRevokedUse"}],
       "gates": ["store-postgres", "formal-tla"]
     },
@@ -121,6 +121,16 @@
       "sources": [{"file": "core/src/verify.rs", "symbol": "assumed_truthful"}, {"file": "server/internal/store/postgres.go", "symbol": "lockProject"}, {"file": "server/internal/api/server.go", "symbol": "createCheckpointTx"}],
       "proofs": [{"file": "server/internal/store/project_tx_test.go", "symbol": "TestPostgresProjectWriteTwoPools"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionProcessCuts"}, {"file": "formal/tla/ProjectTx_safe.cfg", "symbol": "NoFrontierFork"}, {"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
       "gates": ["core", "server", "store-postgres", "formal-tla"]
+    },
+    {
+      "id": "historical-revocation-ordering",
+      "claim": "Under the caller-selected db_serialized_v1 policy, historical_authorized_as_of_snapshot is satisfied only when every validated receipt carries a body-bound resource-signed authorization ordinal below its grant's authenticated prospective cutoff and at or below the watermark of an authenticated, fresh v2 revocation snapshot for the project. Current revocation still blocks ok, revoked_uses_blocked, authorized and the capstone under every policy; strict, total, legacy v1, stripped, stale or malformed evidence never yields a historical positive. The model theorem covers the claim kernel and support erasure, not the verifier's extraction passes; the order is Averin's database order, not physical action time.",
+      "class": "model-and-tested-implementation",
+      "targets": ["native Rust verifier", "WASM", "Go cgo", "Go server producer", "Postgres mode"],
+      "assumptions": ["honest resource signer signs one ordinal per receipt in its committing transaction", "honest revocation signer signs the boundary time and watermark it read", "PostgreSQL serializes the project guard row", "caller supplies a trustworthy evaluation time and freshness bound"],
+      "sources": [{"file": "core/src/verify/temporal.rs", "symbol": "pub(super) fn classify"}, {"file": "core/src/verify/verdict.rs", "symbol": "historical_authorized_as_of_snapshot"}, {"file": "core/src/verify.rs", "symbol": "fn check_use"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "AllocateAuthorizationOrder"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "SnapshotBoundary"}, {"file": "server/migrations/0007_temporal_revocation.sql", "symbol": "revocation_events"}],
+      "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "temporal_revocation_decision_table"}, {"file": "core/tests/adversarial.rs", "symbol": "temporal_blocked_use_runs_every_later_check_before_a_historical_positive"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "earlier_snapshot_cannot_flip"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "historical_requires_policy"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalCausalRevokeUseSchedulesPostgres"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalSnapshotExportConsistencyPostgres"}, {"file": "server/internal/api/temporal_revocation_test.go", "symbol": "TestTemporalProducerToVerifierHistoricalClaim"}],
+      "gates": ["core", "server", "store-postgres", "formal-lean", "formal-refinement", "formal-mutants"]
     }
   ]
 }

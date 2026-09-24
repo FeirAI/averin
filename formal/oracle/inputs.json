@@ -49,7 +49,12 @@
     {"family": "use ledger", "fields": [{"s": "jti-1"}, {"s": "nonce-2"}, {"u64": 1767225602}]},
     {"family": "grant head seed", "fields": []},
     {"family": "grant head step", "fields": [{"hex": "b807ef08eb667015cab8143ac303bcb60e23f6dc72c873d7f5119b12967e804f"}, {"u64": 7}, {"s": "sha256:0909090909090909090909090909090909090909090909090909090909090909"}]},
-    {"family": "revocation leaf", "fields": [{"s": "grant-revoked-1"}]}
+    {"family": "revocation leaf", "fields": [{"s": "grant-revoked-1"}]},
+    {"family": "revocation statement v2", "fields": [], "tail": {"s": "sha256:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"}},
+    {"family": "revocation merkle root v2", "fields": [], "tail": {"s": "sha256:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"}},
+    {"family": "revocation key v2", "fields": [{"s": "grant-revoked-\u00e9"}]},
+    {"family": "revocation state v2", "fields": [{"s": "prospective"}, {"u64": 7}]},
+    {"family": "revocation entry v2", "fields": [{"hex": "7f6f07a2bb8eccd195273b91b84f39604e8bfaf5f941525c8a0bff6529b5cf8a"}, {"hex": "5985c96da2d55acee243cc976826270b4cd1c63d824248babd26864b29f9ea74"}]}
   ],
   "preimage_variants": [
     {"family":"grant head step","fields":[{"hex":"8431a2cbb1eaf40085dc810a7144e500f81873ef4c808c58421b3bc6b44eac8b"},{"u64":8},{"s":"sha256:abababababababababababababababababababababababababababababababab"}]},

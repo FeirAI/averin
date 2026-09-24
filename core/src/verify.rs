@@ -7236,13 +7236,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             || r.outcome_conflict
             || (r.validated && state_of(r) == GrantRevocation::Total)
     });
-    let all_proven = |native: bool| {
-        receipts
-            .iter()
-            .zip(&receipt_ordering)
-            .filter(|(r, _)| r.native == native)
-            .all(|(_, o)| o.historical_ordering == HistoricalOrdering::ProvenBefore)
-    };
+    // The claim speaks for every receipt in the bundle: a mixed brokered/native bundle is
+    // historically authorized only if the receipts of both surfaces are proven before.
+    let every_receipt_proven = receipt_ordering
+        .iter()
+        .all(|o| o.historical_ordering == HistoricalOrdering::ProvenBefore);
     // The legacy orphan-outcome count includes outcomes whose intent was blocked by revocation;
     // the historical view replaces it with the outcomes neither validation consumed, and adds the
     // violations the shadow validation found among the blocked uses.
@@ -7250,7 +7248,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         unmatched_violation - legacy_orphans + shadow.orphans + shadow.violations;
     let hist_matched = uses_matched + shadow.matched;
     let hist_brokered_valid = uses_total > 0
-        && all_proven(false)
+        && every_receipt_proven
         && hist_matched == uses_total
         && uses_pop_reverified + shadow.pop_reverified == hist_matched
         && hist_unmatched_violation == 0
@@ -7264,7 +7262,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         && native_grants_by_id
             .keys()
             .all(|gid| covered_native_hist.contains(gid))
-        && all_proven(true);
+        && every_receipt_proven;
     let historical_counts = [
         HistoricalOrdering::ProvenBefore,
         HistoricalOrdering::AtOrAfter,

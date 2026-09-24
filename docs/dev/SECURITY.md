@@ -142,6 +142,16 @@ verdict logic and authority-evidence binding.
 - **External authorities hold their own private keys off-box.** averin only *verifies* their
   `evidence_sig` under the pinned public key; the policy engine / human-approval service stays out of
   averin's TCB.
+- **Historical ordering against revocation trusts averin's own serialization (plan 009, ADR 0007).**
+  The optional `historical_authorized_as_of_snapshot` claim (caller-selected `db_serialized_v1`
+  policy) proves that a receipt's authorization ordinal precedes a prospective revocation cutoff
+  in averin's project database, as of a signed snapshot. It assumes an honest resource signer (one
+  ordinal per receipt, signed in its committing transaction), an honest revocation signer (signs the
+  boundary time and watermark it read) and correct PostgreSQL serialization of the project guard row.
+  It does not prove physical action time or independent database membership, and it gives nothing
+  against a party holding the resource and revocation keys and the database. Current revocation is
+  unaffected: a revoked grant still blocks `ok`, `authorized` and the capstone. A TSA anchor never
+  establishes this order: two anchors are only upper bounds on existence.
 
 ## What averin deliberately does NOT do (honest non-goals / limits)
 
@@ -171,9 +181,10 @@ verdict logic and authority-evidence binding.
 - **In-memory deployments lose evidence on restart** and are not serializable; use Postgres for any
   durability/integrity guarantee. The in-memory consume-before-act ledger reopens a single-use replay
   window on restart (warned about) — use the Postgres-backed ledger in production.
-- **Revocation and two-phase pending grants use local request caches.** In Postgres mode they persist
-  and rehydrate at boot, but a live replica does not automatically see another replica's revoke or
-  pending prepare. Route each project's requests to one writer; see [LIMITATIONS.md](LIMITATIONS.md).
+- **Revocation and two-phase pending state are read from the project transaction.** In Postgres mode
+  an acknowledged revoke is durable and every replica's later use transaction rejects the grant; the
+  in-process revoked set is a diagnostic cache only. In-memory mode loses this state on restart; see
+  [LIMITATIONS.md](LIMITATIONS.md).
 
 ## Data retention & erasure (append-only — no in-store deletion)
 

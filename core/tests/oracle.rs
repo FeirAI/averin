@@ -384,6 +384,32 @@ fn every_preimage_family_matches_model() {
                 );
             }
             "revocation leaf" => check(name, &verify::revocation_leaf_preimage(st(&f[0])), want),
+            "revocation statement v2" => check(
+                name,
+                &sign::preimage(verify::REVOCATION_LIST_V2_DOMAIN, tail()),
+                want,
+            ),
+            "revocation merkle root v2" => check(
+                name,
+                &sign::preimage(verify::MERKLE_ROOT_V2_DOMAIN, tail()),
+                want,
+            ),
+            "revocation key v2" => {
+                check(name, &verify::revocation_key_v2_preimage(st(&f[0])), want)
+            }
+            "revocation state v2" => check(
+                name,
+                &verify::revocation_state_v2_preimage(st(&f[0]), int(&f[1])),
+                want,
+            ),
+            "revocation entry v2" => check(
+                name,
+                &verify::revocation_entry_v2_preimage(
+                    &raw(&f[0]).try_into().unwrap(),
+                    &raw(&f[1]).try_into().unwrap(),
+                ),
+                want,
+            ),
             other => panic!("no Rust builder mapped for Lean family {other:?}: add one here"),
         }
         // Check the production hash result separately from its production preimage bytes.
@@ -446,6 +472,17 @@ fn every_preimage_family_matches_model() {
                 .to_vec(),
             ),
             "revocation leaf" => Some(verify::revocation_leaf(st(&f[0])).to_vec()),
+            "revocation key v2" => Some(verify::revocation_key_v2(st(&f[0])).to_vec()),
+            "revocation state v2" => {
+                Some(verify::revocation_state_digest_v2(st(&f[0]), int(&f[1])).to_vec())
+            }
+            "revocation entry v2" => Some(
+                verify::revocation_entry_v2(
+                    &raw(&f[0]).try_into().unwrap(),
+                    &raw(&f[1]).try_into().unwrap(),
+                )
+                .to_vec(),
+            ),
             "use ledger" => Some(unhex(
                 verify::ledger_commitment(st(&f[0]), st(&f[1]), int(&f[2]))
                     .trim_start_matches("sha256:"),

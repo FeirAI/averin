@@ -121,16 +121,33 @@ Other results:
   revocations, validated contradictory commitment openings and conflicting verified TSA anchors
   must be enforced while present; removing one changes the fixed adverse evidence and can
   improve a decision, so a blanket deletion theorem would be false.
+* **Historical ordering against revocation (plan 009, ADR 0007).** `Verdict.lean` adds
+  `historicalAuthorized` (`historical_authorized_as_of_snapshot`). Receipt ordinals and authenticated
+  cutoffs are fixed evidence; the signed revocation snapshot (boundary time, watermark) is a removable
+  attachment. The model proves support erasure including the snapshot, that the strict policy never
+  decides the claim (`historical_requires_policy`), that a receipt without an ordinal or a bundle
+  without a snapshot cannot support it (`historical_requires_order`,
+  `historical_requires_snapshot`), that an ordinal at or after a cutoff and a total revocation refute
+  it (`at_or_after_refutes`, `total_revocation_refutes`), that an earlier honest snapshot cannot turn
+  an at/after receipt into one ordered before the cutoff (`earlier_snapshot_cannot_flip`), and that
+  record-asserted times cannot change any claim (`self_times_cannot_strengthen`). The order is
+  averin's database order under honest resource and revocation signers and PostgreSQL
+  serialization; it is not physical action time, and no TSA-based ordering is claimed. A snapshot
+  that predates a later total revocation is bounded only by the caller's freshness and watermark
+  requirements.
 * **Historical v2 authority evidence is not bound to the semantic record body.** It remains
   readable as `legacy_unbound` and retains its historical signature and join checks. The v3
   authority proof binds the structured semantic subject and is reported as `verified`; only
   that body-bound state can satisfy the stronger authorization and completeness claims.
 
-`spec/fixtures/verdict-generated.json` is the shared end-to-end verdict corpus. Its 92 rows
+`spec/fixtures/verdict-generated.json` is the shared end-to-end verdict corpus. Its 96 rows
 store exact `bundle_json` and caller `opts_json` strings, then native Rust, cgo, and browser WASM
 compare the bundle digest, all typed claims, legacy `ok`, completeness label, and violation count.
 The positive inputs come from a v3 signed grant/use/PoP Rust test, a real Go two-phase capstone
-export, and a real Go native grant/introspection capstone export; each generator asserts its
+export, a real Go native grant/introspection capstone export, and a real Go plan 009 export (a
+two-phase use, a prospective revocation after the intent, the outcome recorded after it) verified
+under a caller-selected `db_serialized_v1` policy passed through the same options JSON the cgo and
+WASM targets use; each generator asserts its
 positive claim before emitting a fixture. The Rust `write_generated_verdict_corpus` test expands
 every anchor subset in these small histories and combinations of removable attachments, including
 nested Merkle paths. It also keeps the cp0-only failed-PoP intent and independently signed adverse
@@ -204,6 +221,13 @@ selection still runs the full unmutated baseline and accepts only exact patch ba
 | m19 | failed-PoP intent consumes its outcome | adversarial orphan-outcome regression |
 | m20 | fresh Merkle root accepted without a non-membership path | verdict differential (`missing_path`) |
 | m21 | disclosure completeness counts only supplied openings | two-grant adversarial regression |
+| m40 | a receipt at the cutoff ordinal reads as before it | adversarial `temporal_revocation_decision_table` |
+| m41 | the strict policy decides the historical claim | verdict differential (`hist_*` rows with the policy unselected) |
+| m42 | a revocation-blocked receipt is relabeled without the remaining checks | adversarial `temporal_blocked_use_runs_every_later_check_before_a_historical_positive` |
+| m43 | a legacy v1 revocation-list membership is not total | adversarial `temporal_revocation_decision_table` |
+| m44 | an ordinal above the snapshot watermark counts | adversarial `temporal_revocation_decision_table` |
+| m45 | the caller's maximum snapshot age is ignored | adversarial `temporal_revocation_decision_table` |
+| m46 | a v2 Merkle membership proof no longer re-derives the committed cutoff | adversarial `temporal_merkle_v2_commits_mode_and_cutoff` |
 
 A new drift class gets a new patch here before the gate that catches it is called done.
 

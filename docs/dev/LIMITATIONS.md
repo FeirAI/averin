@@ -140,9 +140,27 @@ When revocation is enabled, an acknowledged revoke is durable before `201` and
 all later project transactions on any live replica reject a new use for that
 grant. A use already admitted before the revoke's linearization point may
 complete. Query failure rejects or retries; no replica treats a boot cache as
-authority. Export signs the revoked set at its repeatable-read cutoff. The
-offline verifier still evaluates earlier uses against the current export list,
-so a pre-revocation use can be reported blocked.
+authority. Export signs the revocation state at its repeatable-read cutoff.
+
+Current revocation is total for verification: a use of any listed grant, even one
+admitted before the revoke, is reported blocked (`ok:false`, `revoked_uses_blocked`,
+`authorized` refuted, no capstone), under every verifier policy. Plan 009 adds a
+separate, caller-selected historical result (`db_serialized_v1`, ADR 0007) for
+prospective (cancellation) revocations exported in the v2 list format. Its limits:
+
+- It orders receipts against cutoffs inside averin's project database only, under an
+  honest resource signer, revocation signer and database. It does not prove when the
+  physical action happened (the Vultrino one-phase path records after the side effect).
+- A snapshot is "as of" its boundary: an older snapshot within the caller's maximum age
+  can predate a later compromise (total) revocation. Callers bound this with
+  `max_snapshot_age_seconds`, `min_authorization_watermark` or a required attestation.
+- Total revocations (compromise, every recovery void and every pre-v7 revocation) and
+  every v1 list or v1 Merkle membership never yield a historical positive.
+- Only receipts with a body-bound (v3) resource signature and an ordinal (produced at
+  schema v7 or later) can be `proven_before`; older receipts stay `indeterminate`.
+- The server exports the v2 disclosed list; the v2 Merkle root has a producer builder but
+  is not exported by the server.
+- There is no external (TSA-based) temporal mode.
 
 Two-phase prepare/finalize and void read the same durable pending row on every
 replica. A restart or route to another live replica does not lose the challenge

@@ -1,0 +1,15 @@
+Mutant: m40-temporal-equality-is-before. Named detector: temporal_revocation_decision_table.
+
+diff --git a/core/src/verify/temporal.rs b/core/src/verify/temporal.rs
+index c03e15d..a8c29cc 100644
+--- a/core/src/verify/temporal.rs
++++ b/core/src/verify/temporal.rs
+@@ -687,7 +687,7 @@ pub(super) fn classify(
+         return HistoricalOrdering::Indeterminate;
+     }
+     if let GrantRevocation::Prospective(c) = grant {
+-        if *ordinal >= c {
++        if *ordinal > c { // BUG: a receipt at the cutoff ordinal reads as before it
+             return HistoricalOrdering::AtOrAfter;
+         }
+     }

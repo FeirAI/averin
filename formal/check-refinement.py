@@ -119,6 +119,9 @@ TAG_SITES = [
     ("core/src/verify.rs", r'lp4\(&mut \w+, b"([^"]+)"'),
     ("core/src/verify.rs", r'for part in \[\s*"([^"]+)"'),
     ("core/src/verify.rs", r'const TAG: &str = "([^"]+)"'),
+    # Plan 009 v2 revocation tree preimages and signature domains.
+    ("core/src/verify/temporal.rs", r'lp4\(&mut \w+, b"([^"]+)"'),
+    ("core/src/verify/temporal.rs", r'_DOMAIN: &str = "([^"]+)"'),
 ]
 
 ALLOWLIST: dict[str, str] = {

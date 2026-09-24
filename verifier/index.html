@@ -134,6 +134,7 @@
 
     <script type="module">
       import { claimVerdict } from "./claim-verdict.js";
+      import { revocationView } from "./revocation-view.js";
       import { initAverin } from "./averin.js";
 
       // PINNED trust root. The .wasm is the verifier. A swapped binary could certify anything. This digest
@@ -285,7 +286,7 @@
         const legacyUnbound = (r.record_trust || []).filter((t) => t.authority === "legacy_unbound").length;
         const acct = `<div class="sec">accountability</div>
           <div class="stats">
-            ${r.claims_version === "1" && r.claims ? stat(esc(r.claims.requested_decision), `required ${esc(r.claims.requested)} claim · claims v1`) : ""}
+            ${r.claims_version === "2" && r.claims ? stat(esc(r.claims.requested_decision), `required ${esc(r.claims.requested)} claim · claims v2`) : ""}
             ${legacyUnbound ? stat(legacyUnbound, "historical authority proofs verify but do not bind the semantic body") : ""}
             ${stat(esc(r.grant_accountability || "n/a"), `grants · ${r.grant_verified ?? 0}/${r.grant_total ?? 0} verified`)}
             ${stat(`${r.uses_matched ?? 0}`, `uses matched · ${r.unmatched_pending ?? 0} pending · ${r.unmatched_violation ?? 0} violations`)}
@@ -304,6 +305,17 @@
         ].filter(([, v]) => v && v !== "absent" && v !== "unevaluated")
           .map(([label, v]) => `<div class="mode ${BAD.test(v) ? "bad" : "good"}">${label}: <b>${esc(v)}</b></div>`)
           .join("");
+
+        // ---- Plan 009: current revocation and historical ordering, shown separately. ----
+        const rv = revocationView(r);
+        const revocationSec = rv && (rv.current.length || rv.historical)
+          ? `<div class="sec">current revocation</div>
+             ${rv.current.length ? rv.current.map((l) => `<div class="mode bad">${esc(l)}</div>`).join("") : `<div class="mode good">no listed grant is revoked</div>`}
+             ${rv.historical ? `<div class="sec">historical ordering (separate from current revocation)</div>
+               <div class="stats">${stat(esc(rv.historical.decision), `historical authorization as of the snapshot · ${esc(rv.historical.snapshot)}`)}</div>
+               ${rv.historical.receipts.map((l) => `<div class="mode">${esc(l)}</div>`).join("")}
+               <div class="note">${esc(rv.historical.basis)}</div>` : ""}`
+          : "";
 
         // ---- Verdict reflects the TRUST AXIS, not just internal consistency (averin-verifier#0). ----
         // A green PASS is reserved for a bundle whose record signing keys were EXTERNALLY pinned
@@ -373,6 +385,7 @@
           </div>
           ${acct}
           ${modes ? `<div class="sec">modes</div><div class="modes">${modes}</div>` : ""}
+          ${revocationSec}
           ${recs}
           ${r.first_broken_link ? `<div class="issues">first broken link:\n${esc(r.first_broken_link)}</div>` : ""}
           <div class="note">

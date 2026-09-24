@@ -206,8 +206,16 @@ leaving history readable. A lost COMMIT acknowledgment is typed as ambiguous;
 callers reconcile only the exact operation identity before reporting success.
 Known server-side rejection is a definite abort.
 
+The guard row also carries the project's authorization order (schema v7, plan 009). A use,
+use-intent or native introspection transaction allocates the next ordinal from it and binds
+the ordinal into the resource-signed receipt before sealing; a prospective revocation
+allocates its cutoff from the same order. Revocations are immutable `revocation_events`
+rows (total or prospective). See ADR 0007.
+
 Exports read records, checkpoints, anchors, revocations and selected disclosure
-metadata from one repeatable-read snapshot. An RFC 3161 anchor is attached only
+metadata from one repeatable-read snapshot. Its first read captures the database
+boundary time (transaction start) and the authorization high watermark, which the v2
+revocation list signs as captured. An RFC 3161 anchor is attached only
 after its checkpoint commits and can be backfilled idempotently. Live replicas
 read pending grants and revocations from the project Store, not from boot
 caches. Keep the single-writer deployment policy until authenticated

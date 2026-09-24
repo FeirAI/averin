@@ -1,0 +1,15 @@
+Mutant: m41-temporal-strict-decides-history. Named detector: verdict_differential.
+
+diff --git a/core/src/verify/verdict.rs b/core/src/verify/verdict.rs
+index d93357d..c6c203b 100644
+--- a/core/src/verify/verdict.rs
++++ b/core/src/verify/verdict.rs
+@@ -366,7 +366,7 @@ impl ValidatedFacts {
+         // Every other obligation of `authorized` still applies. Under the strict policy it is
+         // never positive.
+         let h = &self.historical;
+-        let historical_authorized_as_of_snapshot = if !h.selected {
++        let historical_authorized_as_of_snapshot = if false { // BUG: strict policy decides history
+             Insufficient
+         } else if self.immutable_record_contradiction
+             || h.checked_contradiction

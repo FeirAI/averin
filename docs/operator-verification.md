@@ -62,6 +62,12 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
   // carries `revocation_merkle_root` + a `revocation_proofs` map (see "Producing the optional artifacts").
   "revocation_keys": ["ed25519pub:<revocation-issuer-key>"],
 
+  // Plan 009 (ADR 0007), optional: decide historical_authorized_as_of_snapshot against a v2
+  // revocation snapshot. YOU supply the evaluation time and freshness bounds; absent = strict
+  // (history never decided). Any malformed value is a configuration error, never a fallback.
+  "revocation_temporal": {"policy": "db_serialized_v1", "evaluation_time": "2026-09-24T12:00:00.000Z",
+                          "max_snapshot_age_seconds": 3600, "min_authorization_watermark": 0},
+
   // M4 Federation (per-broker_id authority): a MAP of broker_id -> its authority key set. When set,
   // a grant carrying that broker_id elevates ONLY under its own broker's keys. Every set above must be
   // disjoint from the UNION of all per-broker sets too.
@@ -149,13 +155,23 @@ The object form works for **every** role key (`signing_keys` uses the RCP §10.2
 - `transitive_grants` — grants from an UNPINNED subject broker that elevated to `transitive` trust via a `cross_broker_cert` signed by a PINNED issuer broker (M4 optional). The cert binds the subject's KEY (not just its id), and the subject key is rejected if it collides with any non-broker role.
 - `action_completeness` — the D8 capstone (`attested_complete_over_brokered_surface` / `..._introspected_surface` / `claimed_over_manifest` / `not_claimed`), **always** bounded by `resource_trust: assumed_truthful` (MF1 — the irreducible resource TCB).
 
+- `revocation_temporal` (plan 009) — `grant_revocations[].current_revocation` is current validity
+  and always blocks as above. Under `db_serialized_v1`, `receipt_ordering[].historical_ordering` is
+  `proven_before` only for a validated, body-bound receipt whose authorization ordinal is below its
+  grant's prospective cutoff (or whose grant is not revoked) in a verified, fresh v2 snapshot, and
+  `snapshot` names the signed boundary time and watermark it is bound to. This is averin's database
+  order under honest resource and revocation signers, not the physical time of the action; TSA
+  anchors never establish it. A bundle can therefore be `ok: false` (a revoked grant was used) while
+  `historical_authorized_as_of_snapshot` is `satisfied` (that use preceded the cancellation).
+
 For a decision beyond legacy `ok`, supply a fixed `claim_policy` in the verifier options and
-read `claims_version: "1"` with `claims.requested_decision`. Only `satisfied` accepts the
+read `claims_version: "2"` with `claims.requested_decision`. Only `satisfied` accepts the
 requested claim; `insufficient` means the required evidence is unavailable or stale, while
 `refuted` means validated contrary evidence exists. `ok` remains a bundle diagnostic and may
 change when a malformed optional attachment is deleted. The default policy requests
 `integrity`. Set `requested: "authorized"`, `"complete_brokered"`, or
-`"complete_introspected"` for stronger decisions, and pin record `signing_keys` separately
+`"complete_introspected"` for stronger decisions (or `"historical_authorized_as_of_snapshot"` with
+`revocation_temporal`), and pin record `signing_keys` separately
 from role keys. The completeness label now also requires those external record-signing pins.
 
 With pinned `revocation_keys`, the default `revocation: "pinned"` policy requires a fresh
@@ -204,7 +220,9 @@ barrier before starting any new writer or enabling recovery:
    ```
 
    This single transaction validates the retired-role barrier, applies pending steps through
-   `0006`, and records the DB-time legacy nonce-exclusion cutoff. A fresh, truly empty DB instead
+   `0007`, and records the DB-time legacy nonce-exclusion cutoff (the `0007` step leaves an
+   existing cutoff unchanged). The v7 step retires the boolean `revocations` table: grant the new
+   runtime `SELECT, INSERT` on `authorization_receipts` and `revocation_events` before starting it. A fresh, truly empty DB instead
    uses `AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate --init`.
    Do not use ordinary server startup to migrate an existing or unstamped database.
 3. Prove the cutoff: `pg_stat_activity` has no old backends, `pg_prepared_xacts` has no old
@@ -225,7 +243,8 @@ Legacy nonce/JTI rows have unknown owners and remain global replay exclusions. O
 sweeps leave them intact. Only after the recorded DB-time cutoff plus the 24-hour hold can an
 operator invoke `averin-migrate --purge-legacy` with the same role flags and migration credential.
 Do not reset that clock during later schema cutovers. If a later migration requires retiring
-writers, repeat its maintenance barrier; the v6 marker cannot authorize a new rollout.
+writers, repeat its maintenance barrier; the v6 marker cannot authorize a new rollout. Migration
+`0007` is such a step: a database already at v6 needs the same retired-role barrier again.
 
 For a dedicated old role, the administrative checks include:
 
