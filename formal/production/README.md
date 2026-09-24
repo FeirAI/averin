@@ -101,6 +101,6 @@ The pinned toolchain is described in `plans/preflight/PROVENANCE.md`; `setup-too
 from the pinned sources. The first build compiles the Aeneas library and needs mathlib at the
 manifest revision (use `lake exe cache get`, or point `AVERIN_LAKE_PACKAGES` at an existing build).
 
-Mutants `m40`–`m43` in `formal/mutants` keep these gates load-bearing: a changed preimage byte order
+Mutants `m50`–`m53` in `formal/mutants` keep these gates load-bearing: a changed preimage byte order
 fails the regenerated proof (`proof`), an edited but unregenerated source fails as `stale`, a call site
 that bypasses `sign::preimage` fails `call-path`, and a feature-selected alternative fails `cfg`.

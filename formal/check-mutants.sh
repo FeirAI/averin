@@ -62,10 +62,10 @@ named_detector() {
     m18-*) echo 'adversarial|tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation' ;;
     m19-*) echo 'adversarial|tier_b_two_phase_failed_pop_intent_does_not_consume_outcome' ;;
     m21-*) echo 'adversarial|required_disclosure_covers_every_committed_broker_grant' ;;
-    m40-*) [ "${SKIP_PRODUCTION_PROOF:-0}" = 1 ] || echo 'production-proof|proof' ;;
-    m41-*) echo 'production|stale' ;;
-    m42-*) echo 'production|call-path' ;;
-    m43-*) echo 'production|cfg' ;;
+    m50-*) [ "${SKIP_PRODUCTION_PROOF:-0}" = 1 ] || echo 'production-proof|proof' ;;
+    m51-*) echo 'production|stale' ;;
+    m52-*) echo 'production|call-path' ;;
+    m53-*) echo 'production|cfg' ;;
   esac
 }
 
