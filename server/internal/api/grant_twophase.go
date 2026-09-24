@@ -412,8 +412,6 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "original pending grant deadline expired")
 		return
 	}
-	dto.Created = row.Created
-	p := dto.toPendingGrant(idem)
 	if same, pe := pendingGrantMatchesRequest(p, req); pe != nil || !same {
 		writeErr(w, http.StatusConflict, "the pending grant under this idempotency_key was prepared for a different grant request")
 		return
