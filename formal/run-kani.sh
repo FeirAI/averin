@@ -24,6 +24,11 @@ run_harness() {
     python3 formal/check-kani-domains.py >/dev/null || return 2
     kani_flags=(-Z stubbing)
     guard_flag=(--expect-guard)
+  elif [[ "$1" == utf16_key_order_is_* ]]; then
+    # The key-order proofs carry the fail-closed Vec::push growth guard (G1); its body and
+    # attachment sites are pinned by check-kani-shards.py, its stub line by check-kani-success.py.
+    python3 formal/check-kani-shards.py >/dev/null || return 2
+    kani_flags=(-Z stubbing)
   fi
   log="$(mktemp)"
   # Stream progress as well as saving it: an outer CI timeout must not hide the last CBMC phase.
@@ -46,7 +51,7 @@ run_harness() {
 if [ "${1:-}" = "--harness" ]; then
   [ "$#" -eq 2 ] || { echo "usage: $0 --harness NAME" >&2; exit 2; }
   case "$2" in
-    alphabet_is_a_bijection|hex_byte_roundtrip|hex_digit_is_canonical|lp_into_frames_exactly|utf16_key_order_is_exact|utf16_key_order_is_transitive|one_byte_tail_is_canonical|two_byte_tail_is_canonical|full_chunk_is_canonical|utf16_strict_matches_std|integer_roundtrip|string_escape_roundtrip|parse_never_panics)
+    alphabet_is_a_bijection|hex_byte_roundtrip|hex_digit_is_canonical|lp_into_frames_exactly|utf16_key_order_is_transitive|one_byte_tail_is_canonical|two_byte_tail_is_canonical|full_chunk_is_canonical|utf16_strict_matches_std|integer_roundtrip|string_escape_roundtrip|parse_never_panics)
       run_harness "$2" ;;
     integer_roundtrip_*)
       python3 formal/check-kani-domains.py --has-integer "$2" || { echo "unknown integer shard: $2" >&2; exit 2; }
@@ -71,8 +76,9 @@ run_harness hex_byte_roundtrip
 run_harness hex_digit_is_canonical
 run_harness lp_into_frames_exactly
 # canon.rs — member-key order is exactly UTF-16 code-unit order (checked against a reference order,
-# including the BMP-vs-astral region where byte order disagrees) and is transitive.
-run_harness utf16_key_order_is_exact
+# including the BMP-vs-astral region where byte order disagrees; four checked scalar-count shards
+# plus the steered conjunct) and is transitive.
+bash formal/run-kani-shards.sh utf16_key_order_is_exact
 run_harness utf16_key_order_is_transitive
 
 if [ "${1:-}" = "--extended" ]; then

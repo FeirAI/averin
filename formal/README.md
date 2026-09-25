@@ -214,7 +214,8 @@ Three checks, each doing what it is good at:
 `formal/` and the directories the tag inventory sweeps), runs the gates, and passes only if every mutant is killed. It first checks that every
 gate passes on the unmutated tree, so a broken gate cannot count as a kill. For m3 and m4 the named
 Kani harness must itself report `VERIFICATION:- FAILED`. The same named-counterexample rule
-applies to m2, m9–m14, and m22–m23; an unwind failure, tool error, or timeout does not count.
+applies to m9–m13 and m22–m24 (m2 and m14 have no verified Kani harness and die to native gates);
+an unwind failure, tool error, or timeout does not count.
 For m15–m21 the designated native test must complete and fail; an unrelated failure does not
 kill the mutant. The optional `MUTANTS_ONLY` selection still runs the full unmutated baseline and
 accepts only exact patch basenames.
@@ -222,8 +223,8 @@ accepts only exact patch basenames.
 | Mutant | Drift | Killed by (local run) |
 |---|---|---|
 | m1 | authority preimage: `LP(project_id)` and `LP(record_id)` swapped | oracle |
-| m2 | `write_string` drops DEL (`ser` no longer injective) | oracle; Kani `string_escape_roundtrip` (pending full suite) |
-| m3 | `utf16_cmp` replaced by byte order | Kani `utf16_key_order_is_exact`, oracle, golden |
+| m2 | `write_string` drops DEL (`ser` no longer injective) | oracle (native only: `string_escape_roundtrip` is not verified) |
+| m3 | UTF-16 sort key of astral scalars broken (byte-order-like key) | Kani `utf16_key_order_is_exact_steered` (confirmed on final source), oracle, golden |
 | m4 | `lp_into` writes a 2-byte length | Kani `lp_into_frames_exactly`, oracle, golden |
 | m5 | commitment preimage drops `LP(field_domain)` | oracle |
 | m6 | `compute_content_hash` strips an extra field | oracle, golden |
@@ -233,8 +234,8 @@ accepts only exact patch basenames.
 | m10 | base64url two-byte tail accepts nonzero trailing bits | Kani `two_byte_tail_is_canonical` (pending full suite) |
 | m11 | full base64url chunk writes wrong fourth symbol | Kani `full_chunk_is_canonical` (pending full suite) |
 | m12 | strict UTF-16 decoder rejects one valid low surrogate | Kani `utf16_strict_matches_std` (pending full suite) |
-| m13 | parser accepts negative zero | Kani `accepted_integer_spelling_is_canonical` (pending full suite) |
-| m14 | truncated `\u` escape indexes beyond input | Kani `parse_never_panics` (pending full suite) |
+| m13 | parser accepts negative zero | Kani shard `accepted_integer_spelling_2_minus` (confirmed on final source) |
+| m14 | truncated `\u` escape indexes beyond input | native gates only (`parse_never_panics` is not verified) |
 | m15 | v3 authority signature preimage drops the semantic subject digest | oracle, golden |
 | m16 | capstone omits offline PoP verification | verdict differential (`capstone_4`) |
 | m17 | missing pinned revocation evidence treated as clean | verdict differential (missing-freshness cases) |
@@ -242,24 +243,57 @@ accepts only exact patch basenames.
 | m19 | failed-PoP intent consumes its outcome | adversarial orphan-outcome regression |
 | m20 | fresh Merkle root accepted without a non-membership path | verdict differential (`missing_path`) |
 | m21 | disclosure completeness counts only supplied openings | two-grant adversarial regression |
-| m22 | `Int(0)` serializes as `1` | Kani `integer_roundtrip_zero` (confirmed on an earlier source revision; final rerun pending) |
-| m23 | numeric input takes the general parser route | Kani fail-closed route guard in `integer_roundtrip_zero` (confirmed on an earlier source revision; final rerun pending) |
+| m22 | `Int(0)` serializes as `1` | Kani `integer_roundtrip_zero` (confirmed on final source) |
+| m23 | numeric input takes the general parser route | Kani fail-closed route guard in `integer_roundtrip_zero` (confirmed on final source) |
+| m24 | `utf16_units` preallocates half its input length | Kani fail-closed growth guard G1 in `utf16_key_order_is_transitive` (confirmed on final source) |
 
 A new drift class gets a new patch here before the gate that catches it is called done.
 
 ## Kani (bounded, real code)
 
 The harnesses live next to the code (`#[cfg(kani)] mod kani_proofs` in `b64.rs`, `hashx.rs` and
-`canon.rs`). `run-kani.sh` runs them with `--no-default-features` (no `getrandom`).
-Integer harnesses replace only the top-level nonnumeric dispatcher with an unconditional
-panic. The numeric entry, scanner, trailing-data check, and serializer remain production code;
-reaching the replacement fails the proof. `check-kani-domains.py` pins this wiring and the
-runner checks Kani's active stub mapping. This decomposition is useful only when a complete
-proof succeeds; it does not establish the numeric property by itself.
-`run-kani.sh --harness NAME` runs one named proof for profiling.
+`canon.rs`). `run-kani.sh` runs them with `--no-default-features` (no `getrandom`); every
+result must be one exact harness with `VERIFICATION:- SUCCESSFUL`, `0 of N failed` and no failed
+property (`check-kani-success.py`). Unwinding assertions stay on everywhere, so a bound that is too
+small fails the proof. A timeout, out-of-memory kill or interruption is a failure, never a pass.
+`run-kani.sh --harness NAME` runs one named proof or shard.
 
-**Default set** (each harness finishes in under two minutes on a 4-core, 16 GB runner; CI runs
-these):
+**Sharded families.** Where one harness is too large for CBMC, the original domain is split into
+disjoint shards that all call one unchanged assertion body. `check-kani-shards.py` (spelling and
+key order) and `check-kani-domains.py` (integers) parse the actual shard tables from the source,
+pin the shared bodies and macros (no extra assumption or stub), and enumerate the original domain
+to prove every input lies in exactly one shard. `run-kani-shards.sh FAMILY` runs every shard,
+records `PASS`/`FAIL` per shard against a digest of the proof sources (so an interrupted batch
+resumes without trusting stale results), and fails unless every shard passes.
+
+**Replacements in proofs.** No reachable parser, NFC or target function is replaced. Exactly three
+replacements exist, each attached with `#[kani::stub]` only to the named harnesses below;
+`check-kani-shards.py` pins their bodies and attachment sites and `check-kani-success.py` requires
+each harness to report exactly its allowlisted stub lines:
+
+- *Numeric route guard* (integer harnesses): the top-level general parser, which a numeric spelling
+  never reaches, is replaced by an unconditional panic. The numeric entry, number scanner,
+  trailing-data check and serializer stay production code. Mutant m23 (numeric input forced onto
+  the general route) must hit the guard.
+- *A1, a std-permitted behavior selection* (integer harnesses): `<*const u8>::align_offset`
+  returns `usize::MAX`. std documents that "it is permissible for the implementation to always
+  return `usize::MAX`. Only your algorithm's performance can depend on getting a usable offset
+  here, not its correctness." The proofs therefore cover std's UTF-8 validator on its
+  byte-at-a-time path; the word-at-a-time fast path (documented to give the same result) and its
+  internal panic-freedom stay inside the trusted Rust std boundary. Without A1, CBMC treats the
+  heap alignment as symbolic and `String::from_utf8` in `serialize()` does not finish.
+- *G1, a fail-closed std-path guard* (key-order harnesses): `Vec::push` asserts
+  `len < capacity` and then runs exactly std's non-growth branch (write at `len`, set the length to
+  `len + 1`). It supplies no behavior std would not; a push that would reallocate is a
+  counterexample. `utf16_units` preallocates `with_capacity(s.len())` and never needs more (native
+  test `utf16_units_fit_their_preallocation`); mutant m24 halves that capacity and must hit the
+  guard. The proofs rely on std's semantics for the non-growth path.
+
+`#![cfg_attr(kani, feature(allocator_api))]` in `core/src/lib.rs` exists only so G1 can name
+`Vec<T, A>`; production builds are unchanged.
+
+**Default set** (CI job `formal-kani`, `bash formal/run-kani.sh`; measured with Kani 0.68.0 /
+CBMC 6.11 on a 10-core, 24 GB host, one solver at a time):
 
 - `alphabet_is_a_bijection`: base64url `val` and `ENC` are mutually inverse over the 64 symbols,
   and every other byte is rejected.
@@ -268,36 +302,39 @@ these):
   and read at fixed width, so `"sha256:" ‖ hex_lower(d)` is injective and canonical for every
   length. This is the `fmt` hypothesis in `Seal.lean`.
 - `lp_into_frames_exactly`: `lp_into` emits exactly `uint32_be(len) ‖ b`.
-- `utf16_key_order_is_exact`: for every pair of keys of one or two scalars, `utf16_cmp` equals
-  the lexicographic order of their UTF-16 code units, computed independently per scalar. One case
-  is pinned to U+E000..U+FFFF against astral scalars, where byte order disagrees. Loops are fully
-  unrolled, so a byte-order `utf16_cmp` (mutant m3) fails with a counterexample, not an unwinding
-  bound.
-- `utf16_key_order_is_transitive`: `a ≤ b ∧ b ≤ c ⇒ a ≤ c` for any three single-scalar keys, and
-  `Equal` only for equal keys, so sorting members is well defined.
+- `utf16_key_order_is_exact` (family, G1): for every pair of keys of one or two arbitrary scalars,
+  `utf16_cmp` (the production `utf16_units` plus `units_lt`) equals the lexicographic order of
+  their UTF-16 code units computed independently by `char::encode_utf16`. Four shards, one per
+  pair of scalar counts (1 or 2 per key), plus `utf16_key_order_is_exact_steered`, which pins
+  U+E000..U+FFFF against astral scalars where byte order disagrees (mutant m3 fails there with a
+  counterexample). 279 s wall for all five, peak 3.6 GB.
+- `utf16_key_order_is_transitive` (G1): `a ≤ b ∧ b ≤ c ⇒ a ≤ c` for any three single-scalar keys,
+  and `Equal` only for equal keys. 142 s, peak 4.0 GB.
 
-**Extended set** (`run-kani.sh --extended`): base64 tail canonicality (non-zero trailing bits
-rejected), the full 4-symbol chunk (`full_chunk_is_canonical`: every accepted 4-symbol spelling
-is `encode` of the 3 bytes it decodes to), strict UTF-16 decoder versus std, integer round trip
-and single spelling, `write_string` inverted by the parser, and parser panic-freedom. The three
-base64 chunk harnesses have completed successfully with Kani 0.68.0 over their original 2-, 3-,
-and 4-symbol domains. The other five require completed proof runs before any verification claim:
-the unmodified `integer_roundtrip` harness timed out at 1,801 seconds without a result, with a
-sampled CBMC peak of 1.75 GB. The original full-domain harness remains callable. The extended
-runner also has eleven disjoint sign/decimal-width shards, all calling its unchanged assertion
-body. `check-kani-domains.py` parses their actual macro invocations and counts every integer in
-[-99,999, 99,999] exactly once, rejecting missing or changed ranges and runner omissions. Their
-magnitudes use `u8` for widths 1–2, `u16` for 3–4, and `u32` for 5; every magnitude is at most
-99,999, so conversion to `i64` and optional negation are lossless. The zero shard uses the
-equivalent literal `0` and completed successfully on an earlier source revision; it needs a
-final-source rerun. The other shards need results before the aggregate integer claim is verified.
-On the current source, `integer_roundtrip_positive_1` remained in recursive `CanonValue`
-destructor expansion after 5:05 of CBMC CPU time and was interrupted without a proof result.
-A timeout or interrupted run is not a pass. Parser harnesses call the production-used
-typed parser core; public diagnostic text is materialized after that core returns. The real NFC
-normalizer is used on non-ASCII paths. The Lean model, golden vectors, adversarial tests, and
-deterministic finite fuzz campaign complement these bounded claims; none makes a timed-out Kani
-harness verified.
+**Extended set** (`run-kani.sh --extended`; CI job `formal-kani-extended`, one matrix job per
+harness or family):
+
+- `one_byte_tail_is_canonical`, `two_byte_tail_is_canonical`, `full_chunk_is_canonical`: base64
+  tails reject non-zero trailing bits, and every accepted 4-symbol spelling is `encode` of the 3
+  bytes it decodes to, over the full 2-, 3- and 4-symbol domains (about 5 s each).
+- `utf16_strict_matches_std` (kissat): `decode_utf16_strict` agrees with std's strict decoder on
+  every 1- and 2-unit sequence. 1,641 s wall, peak 7.9 GB.
+- `integer_roundtrip` (numeric guard, A1): for every `n` in [-99,999, 99,999] the typed parser
+  returns exactly `Int(n)` for `n.to_string()` and `serialize()` restores that spelling. The
+  original unsplit harness runs in 142 s, peak 3.9 GB. Its eleven checked sign/decimal-width
+  shards remain available through `--harness` (the zero shard is the m22/m23 detector).
+- `accepted_integer_spelling` (family): every numeric literal of 1..=4 bytes over
+  `0-9 - + . e E` that the parser accepts is in canonical form (no leading zero, no `-0`, no sign
+  `+`, fraction or exponent). 60 shards, one per concrete (length, first byte), with the other
+  bytes symbolic over the whole alphabet, plus the lemma `spelling_alphabet_is_exact`. 757 s wall
+  for all 61, peak 577 MB. Mutant m13 (`-0` accepted) fails `accepted_integer_spelling_2_minus`.
+- `string_escape_roundtrip` and `parse_never_panics` are **not verified**. With symbolic bytes
+  CBMC's symbolic execution cannot fix the parser's cursor or the escaper's output length, so it
+  explores infeasible parser routes and does not finish (see the plan 011 execution notes for
+  measurements). They are not claimed.
+
+The Lean model, golden vectors, adversarial tests and the deterministic fuzz campaign complement
+these bounded claims; none makes an unverified Kani harness verified.
 
 ## TLA+ (server protocols)
 

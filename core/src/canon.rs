@@ -998,6 +998,44 @@ mod error_compat_tests {
             CanonValue::Str("é".into())
         );
     }
+
+    // Native complement to the key-order proofs' fail-closed growth guard (G1): utf16_units never
+    // needs more than its `with_capacity(s.len())` preallocation, and yields std's UTF-16 units.
+    #[test]
+    fn utf16_units_fit_their_preallocation() {
+        let check = |s: &str| {
+            let units = utf16_units(s.as_bytes());
+            assert!(units.len() <= s.len(), "{s:?}");
+            assert_eq!(units, s.encode_utf16().collect::<Vec<u16>>(), "{s:?}");
+        };
+        let scalars: Vec<char> = (0..=0x10FFFFu32).filter_map(char::from_u32).collect();
+        for c in &scalars {
+            check(c.encode_utf8(&mut [0; 4]));
+        }
+        // Pairs over a spread of every width and the BMP/astral boundaries.
+        let sample: Vec<char> = scalars
+            .iter()
+            .copied()
+            .step_by(4099)
+            .chain([
+                '\0',
+                '\u{7F}',
+                '\u{80}',
+                '\u{7FF}',
+                '\u{800}',
+                '\u{D7FF}',
+                '\u{E000}',
+                '\u{FFFF}',
+                '\u{10000}',
+                '\u{10FFFF}',
+            ])
+            .collect();
+        for a in &sample {
+            for b in &sample {
+                check(&format!("{a}{b}"));
+            }
+        }
+    }
 }
 
 /// Bounded proofs over this exact code (run by `formal/run-kani.sh`), complementing the unbounded Lean
@@ -1012,6 +1050,40 @@ mod kani_proofs {
     // supplied. The parser's number scanner and final trailing-data check remain real.
     fn reject_general_in_integer_proof(_: &mut Parser<'_>) -> Result<CanonValue, ParseError> {
         panic!("numeric spelling reached general top-level parser")
+    }
+
+    // ---- Fail-closed std-path guards and std-permitted behavior selections ----
+    //
+    // Each item below replaces a Rust std function only in the named harnesses that attach it
+    // with `#[kani::stub]`; `formal/check-kani-success.py` holds the exact per-harness allowlist
+    // and `formal/check-kani-shards.py` pins these bodies. See formal/README.md.
+
+    /// A1, a std-permitted behavior selection. `<*const T>::align_offset` documents (Rust
+    /// nightly-2026-08-21, the Kani 0.68 toolchain, library/core/src/ptr/const_ptr.rs): "It is
+    /// permissible for the implementation to always return `usize::MAX`. Only your algorithm's
+    /// performance can depend on getting a usable offset here, not its correctness." Selecting that
+    /// answer keeps std's UTF-8 validator on its byte-at-a-time path; its word-at-a-time fast path
+    /// (whose result std documents as identical) stays inside the trusted std boundary.
+    fn align_offset_usize_max<T>(_: *const T, _: usize) -> usize {
+        usize::MAX
+    }
+
+    /// G1, a fail-closed std-path guard. std's `Vec::push` (same toolchain,
+    /// library/alloc/src/vec/mod.rs) is `if len == self.buf.capacity() { self.buf.grow_one() }`
+    /// followed by writing `value` at `len` and setting the length to `len + 1`. This body asserts
+    /// (never assumes) that the growth branch is not taken, then runs exactly the non-growth branch,
+    /// so a proof passes only if no push on its whole domain would reallocate.
+    fn push_without_growth<T, A: std::alloc::Allocator>(v: &mut Vec<T, A>, value: T) {
+        let len = v.len();
+        assert!(
+            len < v.capacity(),
+            "Vec::push reached reallocation in a no-growth proof"
+        );
+        // SAFETY: len < capacity, so slot `len` is allocated and unused; std's non-growth branch.
+        unsafe {
+            v.as_mut_ptr().add(len).write(value);
+            v.set_len(len + 1);
+        }
     }
 
     /// The exact assertion body shared by the original full-domain proof and every exhaustive
@@ -1044,6 +1116,7 @@ mod kani_proofs {
     /// the disjoint shards below, checked by `formal/check-kani-domains.py`.
     #[kani::proof]
     #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
+    #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
     #[kani::unwind(8)]
     fn integer_roundtrip() {
         let n: i64 = kani::any_where(|n: &i64| *n > -100_000 && *n < 100_000);
@@ -1056,6 +1129,7 @@ mod kani_proofs {
         ($name:ident, u8, zero, 0, 0) => {
             #[kani::proof]
             #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
+            #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
             #[kani::unwind(8)]
             fn $name() {
                 integer_roundtrip_case(0);
@@ -1064,6 +1138,7 @@ mod kani_proofs {
         ($name:ident, $ty:ty, positive, $lo:expr, $hi:expr) => {
             #[kani::proof]
             #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
+            #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
             #[kani::unwind(8)]
             fn $name() {
                 let magnitude: $ty = kani::any_where(|m: &$ty| *m >= $lo && *m <= $hi);
@@ -1073,6 +1148,7 @@ mod kani_proofs {
         ($name:ident, $ty:ty, negative, $lo:expr, $hi:expr) => {
             #[kani::proof]
             #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
+            #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
             #[kani::unwind(8)]
             fn $name() {
                 let magnitude: $ty = kani::any_where(|m: &$ty| *m >= $lo && *m <= $hi);
@@ -1281,44 +1357,66 @@ mod kani_proofs {
         utf16_agrees::<2>();
     }
 
-    /// A key of one or two symbolic scalars, spelled into a caller buffer (no heap), together with the
-    /// reference order key: its UTF-16 code units computed independently of `utf16_cmp`, per scalar, by
-    /// `char::encode_utf16`.
-    fn key<'a>(buf: &'a mut [u8; 8], units: &mut [u16; 4]) -> (&'a str, usize) {
+    /// A key of exactly `count` (1 or 2) symbolic scalars, spelled into a caller buffer, together with
+    /// the reference order key: its UTF-16 code units computed independently of `utf16_cmp`, per
+    /// scalar, by `char::encode_utf16`.
+    fn key<'a>(count: usize, buf: &'a mut [u8; 8], units: &mut [u16; 4]) -> (&'a str, usize) {
         let c1: char = kani::any();
-        let c2: char = kani::any();
-        let two: bool = kani::any();
         let n1 = c1.len_utf8();
         c1.encode_utf8(&mut buf[..4]);
         let mut u = c1.encode_utf16(&mut units[..2]).len();
         let mut n = n1;
-        if two {
+        if count == 2 {
+            let c2: char = kani::any();
             let n2 = c2.len_utf8();
             c2.encode_utf8(&mut buf[n1..n1 + 4]);
             u += c2.encode_utf16(&mut units[u..u + 2]).len();
             n += n2;
         }
-        // SAFETY: `buf[..n]` is exactly the UTF-8 encoding of one or two scalars written just above
+        // SAFETY: `buf[..n]` is exactly the UTF-8 encoding of the scalars written just above
         // (skipping `from_utf8` keeps its validation loop out of the model).
         (unsafe { core::str::from_utf8_unchecked(&buf[..n]) }, u)
     }
 
-    /// Key order is exactly RFC 8785 / RCP §2 order: for every pair of keys of one or two scalars,
-    /// `utf16_cmp` equals the lexicographic order of their UTF-16 code units. The order is checked against
-    /// that reference (not merely for antisymmetry), and one case is pinned to the BMP-above-surrogates vs
-    /// astral region, where UTF-8 byte order and UTF-16 order disagree (U+E000..U+FFFF sorts AFTER every
-    /// astral scalar in UTF-16, before it in UTF-8), so a byte-order `utf16_cmp` fails here with a
-    /// counterexample rather than an unwinding assertion.
-    #[kani::proof]
-    #[kani::unwind(10)]
-    fn utf16_key_order_is_exact() {
+    /// The assertion body shared by the four scalar-count shards of `utf16_key_order_is_exact`.
+    fn utf16_key_order_exact_case(count_a: usize, count_b: usize) {
         let (mut ba, mut bb) = ([0u8; 8], [0u8; 8]);
         let (mut ua, mut ub) = ([0u16; 4], [0u16; 4]);
-        let (sa, na) = key(&mut ba, &mut ua);
-        let (sb, nb) = key(&mut bb, &mut ub);
+        let (sa, na) = key(count_a, &mut ba, &mut ua);
+        let (sb, nb) = key(count_b, &mut bb, &mut ub);
         assert_eq!(utf16_cmp(sa, sb), ua[..na].cmp(&ub[..nb]));
+    }
 
-        // Steered case: a single BMP scalar at or above U+E000 against a single astral scalar.
+    /// Key order is exactly RFC 8785 / RCP §2 order: for every pair of keys of one or two scalars,
+    /// `utf16_cmp` equals the lexicographic order of their UTF-16 code units. The order is checked
+    /// against that reference (not merely for antisymmetry). The original domain (each key one or two
+    /// arbitrary scalars) is proved as four disjoint shards, one per concrete pair of scalar counts,
+    /// plus the steered harness below; `check-kani-shards.py` checks that exact partition.
+    macro_rules! key_order_shard {
+        ($name:ident, $count_a:literal, $count_b:literal) => {
+            #[kani::proof]
+            #[kani::stub(std::vec::Vec::push, push_without_growth)]
+            #[kani::unwind(6)]
+            fn $name() {
+                utf16_key_order_exact_case($count_a, $count_b);
+            }
+        };
+    }
+
+    // These four lines are the proof-domain table parsed by formal/check-kani-shards.py.
+    key_order_shard!(utf16_key_order_is_exact_1_1, 1, 1);
+    key_order_shard!(utf16_key_order_is_exact_1_2, 1, 2);
+    key_order_shard!(utf16_key_order_is_exact_2_1, 2, 1);
+    key_order_shard!(utf16_key_order_is_exact_2_2, 2, 2);
+
+    /// The steered conjunct of `utf16_key_order_is_exact`: a single BMP scalar at or above U+E000
+    /// against a single astral scalar, where UTF-8 byte order and UTF-16 order disagree (U+E000..U+FFFF
+    /// sorts AFTER every astral scalar in UTF-16, before it in UTF-8), so a byte-order `utf16_cmp`
+    /// fails here with a counterexample rather than an unwinding assertion.
+    #[kani::proof]
+    #[kani::stub(std::vec::Vec::push, push_without_growth)]
+    #[kani::unwind(6)]
+    fn utf16_key_order_is_exact_steered() {
         let hi: char = kani::any();
         let astral: char = kani::any();
         kani::assume(('\u{E000}'..='\u{FFFF}').contains(&hi) && astral as u32 >= 0x10000);
@@ -1331,6 +1429,7 @@ mod kani_proofs {
     /// Key order is transitive (so sorting members is well defined): for any three single-scalar keys,
     /// `a ≤ b` and `b ≤ c` imply `a ≤ c`, and `Equal` holds only between identical keys.
     #[kani::proof]
+    #[kani::stub(std::vec::Vec::push, push_without_growth)]
     #[kani::unwind(6)]
     fn utf16_key_order_is_transitive() {
         let (a, b, c): (char, char, char) = (kani::any(), kani::any(), kani::any());

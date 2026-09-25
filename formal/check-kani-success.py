@@ -7,19 +7,47 @@ import sys
 from pathlib import Path
 
 
+# The only replacements any proof may carry, as Kani prints them. Each is attached by
+# `#[kani::stub]` to named harnesses only (core/src/canon.rs, formal/README.md):
+#   the numeric-route guard: the general top-level parser panics if a numeric spelling reaches it;
+#   A1, a std-permitted behavior selection: `align_offset` returns `usize::MAX`;
+#   G1, a fail-closed std-path guard: `Vec::push` asserts it never reallocates.
+NUMERIC_GUARD = "- Stub: parse_top_level_general -> reject_general_in_integer_proof"
+ALIGN_A1 = "- Stub: < * const u8 > :: align_offset -> align_offset_usize_max"
+PUSH_G1 = "- Stub: std :: vec :: Vec :: push -> push_without_growth"
+
+
+def expected_stubs(qualified: str) -> list[str]:
+    """The exact, sorted stub lines a fully qualified harness must report (and no others)."""
+    module, _, name = qualified.rpartition("::")
+    if module != "canon::kani_proofs":
+        return []
+    if name == "integer_roundtrip" or name.startswith("integer_roundtrip_"):
+        return sorted([NUMERIC_GUARD, ALIGN_A1])
+    if name == "utf16_key_order_is_transitive" or name.startswith("utf16_key_order_is_exact_"):
+        return [PUSH_G1]
+    return []
+
+
+def stubs_match(output: str, harness: str, expect_guard: bool) -> tuple[bool, str]:
+    stub_lines = sorted(line.strip() for line in output.splitlines() if "- Stub:" in line)
+    expected = expected_stubs(harness)
+    if expect_guard != (NUMERIC_GUARD in expected):
+        return False, "numeric guard expectation does not match the harness allowlist"
+    if stub_lines != expected:
+        return False, f"stubs {stub_lines!r} differ from the exact allowlist {expected!r}"
+    return True, "exact stub allowlist"
+
+
 def successful(output: str, exit_code: int, harness: str, expect_guard: bool = False) -> tuple[bool, str]:
     if exit_code != 0:
         return False, "Kani exited nonzero"
     selected = re.findall(r"^Checking harness (.+)\.\.\.$", output, re.MULTILINE)
     if selected != [harness]:
         return False, f"selected harnesses {selected!r} differ from {harness!r}"
-    stub_lines = [line.strip() for line in output.splitlines() if "- Stub:" in line]
-    expected = "- Stub: parse_top_level_general -> reject_general_in_integer_proof"
-    if expect_guard:
-        if stub_lines != [expected]:
-            return False, f"numeric proof lacks its exact fail-closed branch guard: {stub_lines!r}"
-    elif stub_lines:
-        return False, f"unexpected stubs in production proof: {stub_lines!r}"
+    okay, why = stubs_match(output, harness, expect_guard)
+    if not okay:
+        return False, why
     if output.count("VERIFICATION:- SUCCESSFUL") != 1:
         return False, "missing or repeated successful verification marker"
     if not re.search(r"^\s*\*\* 0 of [1-9]\d* failed(?: \([^)]*\))?$", output, re.MULTILINE):
@@ -44,19 +72,27 @@ def self_test() -> None:
         "Manual Harness Summary:\n"
         "Complete - 1 successfully verified harnesses, 0 failures, 1 total.\n"
     )
-    assert successful(good, 0, harness)[0]
-    guarded = good.replace(
-        f"Checking harness {harness}...\n",
-        f"Checking harness {harness}...\n"
-        "  - Stub: parse_top_level_general -> reject_general_in_integer_proof\n",
-    )
+    plain = "canon::kani_proofs::accepted_integer_spelling_2_minus"
+    assert successful(good.replace(harness, plain), 0, plain)[0]
+    assert not successful(good, 0, harness)[0], "integer proof without its guards"
+    header = f"Checking harness {harness}...\n"
+    guarded = good.replace(header, header + f"  {ALIGN_A1}\n  {NUMERIC_GUARD}\n")
     assert successful(guarded, 0, harness, expect_guard=True)[0]
-    assert not successful(good, 0, harness, expect_guard=True)[0]
     assert not successful(guarded, 0, harness)[0]
+    assert not successful(guarded.replace(f"  {ALIGN_A1}\n", ""), 0, harness, expect_guard=True)[0]
     assert not successful(guarded.replace("reject_general_in_integer_proof", "empty_stub"), 0, harness, expect_guard=True)[0]
+    assert not successful(guarded.replace("align_offset_usize_max", "align_offset_zero"), 0, harness, expect_guard=True)[0]
     assert not successful(guarded.replace("- Stub: parse_top_level_general", "- Stub: other::parse_top_level_general"), 0, harness, expect_guard=True)[0]
     assert not successful(guarded.replace("- Stub: parse_top_level_general", "- Stub: parse_top_level_general_extra"), 0, harness, expect_guard=True)[0]
     assert not successful(guarded + "  - Stub: another -> stub\n", 0, harness, expect_guard=True)[0]
+    assert not successful(guarded + f"  {PUSH_G1}\n", 0, harness, expect_guard=True)[0]
+    order = "canon::kani_proofs::utf16_key_order_is_exact_2_2"
+    ordered = good.replace(harness, order).replace(f"Checking harness {order}...\n", f"Checking harness {order}...\n  {PUSH_G1}\n")
+    assert successful(ordered, 0, order)[0]
+    assert not successful(ordered.replace("push_without_growth", "push_that_grows"), 0, order)[0]
+    assert not successful(ordered + f"  {ALIGN_A1}\n", 0, order)[0]
+    assert not successful(ordered.replace(order, "canon::kani_proofs::string_escape_roundtrip"), 0, "canon::kani_proofs::string_escape_roundtrip")[0]
+    assert not successful(ordered.replace(order, "b64::kani_proofs::utf16_key_order_is_exact_2_2"), 0, "b64::kani_proofs::utf16_key_order_is_exact_2_2")[0]
     for bad, code in (
         (good, 124),
         (good.replace(harness, "canon::kani_proofs::integer_roundtrip_positive_1"), 0),

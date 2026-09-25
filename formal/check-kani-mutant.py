@@ -4,9 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import sys
 from pathlib import Path
+
+_spec = importlib.util.spec_from_file_location(
+    "check_kani_success", Path(__file__).resolve().parent / "check-kani-success.py"
+)
+_success = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_success)
 
 
 def failed_checks(output: str) -> list[dict[str, str]]:
@@ -43,13 +50,9 @@ def target_counterexample(
     selected = re.findall(r"^Checking harness (.+)\.\.\.$", output, re.MULTILINE)
     if selected != [harness]:
         return False, f"selected harnesses {selected!r} differ from {harness!r}"
-    stub_lines = [line.strip() for line in output.splitlines() if "- Stub:" in line]
-    expected = "- Stub: parse_top_level_general -> reject_general_in_integer_proof"
-    if expect_guard:
-        if stub_lines != [expected]:
-            return False, "integer counterexample lacks its exact fail-closed branch guard"
-    elif stub_lines:
-        return False, "unexpected stub in parser counterexample"
+    okay, why = _success.stubs_match(output, harness, expect_guard)
+    if not okay:
+        return False, why
     failed_harnesses = re.findall(r"^Verification failed for - (.+)$", output, re.MULTILINE)
     if failed_harnesses != [harness]:
         return False, "intended harness lacks an exact failed-harness summary"
@@ -135,14 +138,17 @@ def self_test() -> None:
                                     f"Verification failed for - {harness}_suffix"))
     assert not accepted(good.replace("1 failures, 1 total", "2 failures, 2 total"))
     assert not accepted(good + "Complete - 0 successfully verified harnesses, 1 failures, 1 total.\n")
-    guard_line = "  - Stub: parse_top_level_general -> reject_general_in_integer_proof\n"
-    guarded = good.replace(selected, selected + guard_line)
-    assert accepted(guarded, expect_guard=True)
-    assert not accepted(good, expect_guard=True)
-    assert not accepted(guarded)
-    assert not accepted(guarded.replace("reject_general_in_integer_proof", "empty_stub"), expect_guard=True)
-    assert not accepted(guarded.replace("- Stub: parse_top_level_general", "- Stub: other::parse_top_level_general"), expect_guard=True)
-    assert not accepted(guarded + "  - Stub: another -> stub\n", expect_guard=True)
+    integer = "canon::kani_proofs::integer_roundtrip_zero"
+    int_log = good.replace(harness, integer)
+    int_sel = f"Checking harness {integer}...\n"
+    guarded = int_log.replace(int_sel, int_sel + f"  {_success.NUMERIC_GUARD}\n  {_success.ALIGN_A1}\n")
+    assert accepted(guarded, name=integer, expect_guard=True)
+    assert not accepted(int_log, name=integer, expect_guard=True)
+    assert not accepted(guarded, name=integer)
+    assert not accepted(guarded.replace("reject_general_in_integer_proof", "empty_stub"), name=integer, expect_guard=True)
+    assert not accepted(guarded.replace("- Stub: parse_top_level_general", "- Stub: other::parse_top_level_general"), name=integer, expect_guard=True)
+    assert not accepted(guarded + "  - Stub: another -> stub\n", name=integer, expect_guard=True)
+    assert not accepted(good.replace(selected, selected + f"  {_success.PUSH_G1}\n"))
     assert completed_simple_gate("oracle", "test result: FAILED. 0 passed; 1 failed;", 101, False)[0]
     assert not completed_simple_gate("oracle", "error: could not compile", 101, False)[0]
     assert not completed_simple_gate("golden", "test result: FAILED. 0 passed; 1 failed;", 124, False)[0]
