@@ -1,4 +1,5 @@
 import Refinement.Sort
+import Refinement.VerdictLists
 open Aeneas Aeneas.Std Result Aeneas.Std.WP averin_decision_core
 
 namespace Refinement.ParseTest
@@ -85,7 +86,7 @@ theorem decimal_i64_loop_spec (s : Slice Std.U8) (hiI : Std.Usize) (limit mag : 
   · simp only [hm, if_false]
     step*
 termination_by hiI.val - k.val
-decreasing_by all_goals (simp_wf; have : k.val < hiI.val := by scalar_tac
+decreasing_by all_goals (have : k.val < hiI.val := by scalar_tac
                          simp at *; omega)
 
 @[step]
@@ -120,7 +121,7 @@ theorem short_escape_spec (e : Std.U8) : canon.short_escape e ⦃ _ => True ⦄ 
 
 @[step]
 theorem hex_value_spec (c : Std.U8) : canon.hex_value c ⦃ d => d.val ≤ 16 ⦄ := by
-  unfold canon.hex_value; step* <;> scalar_tac
+  unfold canon.hex_value; step*
 
 @[step]
 theorem parse_hex4_spec (s : Slice Std.U8) (i : Std.Usize) (hi : i.val ≤ s.length) :
@@ -157,9 +158,209 @@ theorem utf8_scalar_spec (s : Slice Std.U8) (i len : Std.Usize) (h : i.val + len
   all_goals (
     by_cases e0 : b0 = 224#u32 <;> by_cases e1 : b0 = 240#u32 <;>
       by_cases e2 : b0 = 237#u32 <;> by_cases e3 : b0 = 244#u32 <;>
-      simp (config := {decide := true}) only [e0, e1, e2, e3, if_true, if_false, bind_tc_ok, ↓reduceIte] <;> step* <;>
+      simp (config := {decide := true}) only [e0, e1, e2, e3, bind_tc_ok, ↓reduceIte] <;> step* <;>
       (intro c hc; simp only [Option.some.injEq] at hc; subst hc
        simp only [wc]; simp_all only [UScalar.cast_val_eq]; split_ifs <;> scalar_tac))
 
+
+@[step]
+theorem next_utf8_char_spec (s : Slice Std.U8) (i : Std.Usize) (hi : i.val < s.length) :
+    canon.next_utf8_char s i ⦃ r => ∀ c l, r = .Ok (c, l) →
+      1 ≤ l.val ∧ i.val + l.val ≤ s.length ∧ c.val < 0x110000 ∧ wc c.val ≤ l.val ⦄ := by
+  unfold canon.next_utf8_char
+  step*
+  all_goals (intros; simp_all [Nat.shiftRight_eq_div_pow, UScalar.eq_equiv, UScalar.lt_equiv] <;> omega)
+
+/-- UTF-8 bytes that decoding a UTF-16 unit produces (a surrogate is half of a 4-byte scalar). -/
+def w (u : Nat) : Nat :=
+  if u < 0x80 then 1 else if u < 0x800 then 2 else if 0xD800 ≤ u ∧ u < 0xE000 then 2 else 3
+
+/-- The UTF-8 size of a unit sequence; at least its length. -/
+def W (l : List Std.U16) : Nat := (l.map (fun u => w u.val)).sum
+
+theorem W_append (a b : List Std.U16) : W (a ++ b) = W a + W b := by simp [W]
+
+theorem W_push (l : List Std.U16) (u : Std.U16) : W (l ++ [u]) = W l + w u.val := by
+  simp [W]
+
+theorem length_le_W (l : List Std.U16) : l.length ≤ W l := by
+  induction l with
+  | nil => simp [W]
+  | cons u l ih =>
+    have : 1 ≤ w u.val := by unfold w; split_ifs <;> omega
+    simp only [W, List.map_cons, List.sum_cons, List.length_cons] at *; omega
+
+@[step]
+theorem push_utf16_spec (units : alloc.vec.Vec Std.U16) (c : Std.U32) (hc : c.val < 0x110000)
+    (hb : units.length + wc c.val ≤ Usize.max) :
+    canon.push_utf16 units c ⦃ u' => W u'.val ≤ W units.val + wc c.val ⦄ := by
+  have h1 : 1 ≤ wc c.val := by unfold wc; split_ifs <;> omega
+  have h4 : 65536 ≤ c.val → wc c.val = 4 := by intro h; unfold wc; split_ifs <;> omega
+  have hbmp : c.val < 65536 → w c.val ≤ wc c.val := by intro h; unfold w wc; split_ifs <;> omega
+  unfold canon.push_utf16
+  split
+  · have hlt : c.val < 65536 := by scalar_tac
+    have hcv : (UScalar.cast UScalarTy.U16 c).val = c.val := cast16_val c hlt
+    step*
+    rw [u'_post, W_push, i_post, hcv]
+    have := hbmp hlt; omega
+  · have hge : 65536 ≤ c.val := by scalar_tac
+    have := h4 hge
+    step*
+    · simp only [units1_post, List.length_append, List.length_cons, List.length_nil]
+      have : units.length = units.val.length := rfl
+      omega
+    · have c2 : (UScalar.cast UScalarTy.U16 i2).val = i2.val := cast16_val i2 (by omega)
+      have c5 : (UScalar.cast UScalarTy.U16 i5).val = i5.val := cast16_val i5 (by omega)
+      rw [u'_post, W_push, units1_post, W_push, i3_post, i6_post, c2, c5]
+      unfold w; split_ifs <;> omega
+
+@[step]
+theorem push_utf8_spec (out : alloc.vec.Vec Std.U8) (c : Std.U32)
+    (hb : out.length + wc c.val ≤ Usize.max) :
+    canon.push_utf8 out c ⦃ o => o.length = out.length + wc c.val ⦄ := by
+  have h1 : c.val < 128 → wc c.val = 1 := by intro h; simp [wc, h]
+  have h2 : 128 ≤ c.val → c.val < 2048 → wc c.val = 2 := by intro h h'; unfold wc; split_ifs <;> omega
+  have h3 : 2048 ≤ c.val → c.val < 65536 → wc c.val = 3 := by
+    intro h h'; unfold wc; split_ifs <;> omega
+  have h4 : 65536 ≤ c.val → wc c.val = 4 := by intro h; unfold wc; split_ifs <;> omega
+  unfold canon.push_utf8
+  step* <;> simp_all <;> omega
+
+
+theorem W_drop (l : List Std.U16) (i : Nat) (hi : i < l.length) :
+    W (l.drop i) = w (l[i]'hi).val + W (l.drop (i + 1)) := by
+  unfold W; rw [List.drop_eq_getElem_cons hi, List.map_cons, List.sum_cons]
+
+theorem w_bmp {u : Nat} (h : u < 0xD800 ∨ (0xE000 ≤ u ∧ u < 0x10000)) : wc u = w u := by
+  unfold wc w; split_ifs <;> omega
+
+theorem pair_W (l : List Std.U16) (i : Nat) (h : i + 1 < l.length)
+    (hu : 0xD800 ≤ (l[i]'(by omega)).val ∧ (l[i]'(by omega)).val ≤ 0xDBFF)
+    (hl : 0xDC00 ≤ (l[i + 1]'h).val ∧ (l[i + 1]'h).val ≤ 0xDFFF) :
+    W (l.drop i) = 4 + W (l.drop (i + 2)) := by
+  rw [W_drop l i (by omega), W_drop l (i + 1) h]
+  have e1 : w (l[i]'(by omega)).val = 2 := by unfold w; split_ifs <;> omega
+  have e2 : w (l[i + 1]'h).val = 2 := by unfold w; split_ifs <;> omega
+  have e3 : i + 1 + 1 = i + 2 := by omega
+  rw [e1, e2, e3]; omega
+
+theorem cast32_of16 (x : Std.U16) : (UScalar.cast UScalarTy.U32 x).val = x.val := by simp
+
+@[step]
+theorem decode_loop_spec (units : Slice Std.U16) (out : alloc.vec.Vec Std.U8)
+    (fault : canon.ParseError) (ok1 : Bool) (i : Std.Usize) (Wt : Nat)
+    (hi : i.val ≤ units.length) (hinv : out.length + W (units.val.drop i.val) ≤ Wt)
+    (hWt : Wt ≤ Usize.max) :
+    canon.decode_utf16_strict_loop units out fault ok1 i ⦃ (o, _, _) => o.length ≤ Wt ⦄ := by
+  unfold canon.decode_utf16_strict_loop
+  step*
+  all_goals first
+    | (have hi0 : i3.val < units.val.length := by scalar_tac
+       have hi1 : i.val + 1 < units.val.length := by omega
+       have cu : (units.val[i.val]'(by omega)).val = u.val := by rw [u_post, cast32_of16, i2_post]
+       have cl : (units.val[i.val + 1]'hi1).val = lo.val := by
+         rw [lo_post, cast32_of16, i5_post]; simp only [i3_post]
+       clear u_post i2_post lo_post i5_post
+       have hW := pair_W units.val i.val hi1 (by rw [cu]; scalar_tac) (by rw [cl]; scalar_tac)
+       have hwc : wc i10.val = 4 := by unfold wc; split_ifs <;> scalar_tac
+       simp only [Slice.length] at *
+       scalar_tac)
+    | (have hlt : i.val < units.val.length := by scalar_tac
+       have cu : (units.val[i.val]'hlt).val = u.val := by rw [u_post, cast32_of16, i2_post]
+       clear u_post i2_post
+       have hW := W_drop units.val i.val hlt
+       have hwc : wc u.val = w u.val := w_bmp (by scalar_tac)
+       rw [cu] at hW
+       simp only [Slice.length] at *
+       scalar_tac)
+termination_by 2 * (units.length - i.val) + (if ok1 then 1 else 0)
+decreasing_by all_goals (simp_wf; scalar_tac)
+
+
+/-- The glue's `String::from_utf8` returns (always) and keeps the bytes. -/
+@[step]
+theorem from_utf8_spec (v : alloc.vec.Vec Std.U8) :
+    alloc.string.String.from_utf8 v ⦃ r => ∀ t, r = .Ok t →
+      (AverinGlue.stringBytes t).length = v.length ⦄ := by
+  unfold alloc.string.String.from_utf8
+  split
+  · rename_i t h
+    simp only [String.fromUTF8?] at h
+    split at h
+    · simp only [Option.some.injEq] at h; subst h
+      simp [AverinGlue.stringBytes, String.fromUTF8]
+      exact (by simp : ((List.map AverinGlue.uint8OfU8 v.val).toArray).size = v.val.length)
+    · simp at h
+  · simp
+
+@[step]
+theorem decode_spec (units : Slice Std.U16) (hW : W units.val ≤ Usize.max) :
+    canon.decode_utf16_strict units ⦃ r => ∀ t, r = .Ok t →
+      (AverinGlue.stringBytes t).length ≤ Usize.max ⦄ := by
+  unfold canon.decode_utf16_strict
+  step*
+  simp [alloc.vec.Vec.with_capacity]
+
+
+theorem w_le3 (u : Nat) : w u ≤ 3 := by unfold w; split_ifs <;> omega
+
+@[step]
+theorem parse_string_loop_spec (s : Slice Std.U8) (i : Std.Usize) (units : alloc.vec.Vec Std.U16)
+    (fault : Option canon.ParseFault) (op : Bool) (hi : i.val ≤ s.length)
+    (hW : W units.val ≤ i.val) :
+    canon.parse_string_loop s i units fault op ⦃ (j, u', _) =>
+      i.val ≤ j.val ∧ j.val ≤ s.length ∧ W u'.val ≤ j.val ⦄ := by
+  have hl := length_le_W units.val
+  unfold canon.parse_string_loop
+  step*
+  any_goals (rename_i p hp; obtain ⟨a, b⟩ := p; have hab := r_post _ _ hp)
+  all_goals try step*
+  all_goals (rw [units1_post, W_push])
+  · have := w_le3 a.val; scalar_tac
+  · have : w u.val = 1 := by unfold w; split_ifs <;> scalar_tac
+    scalar_tac
+termination_by 2 * (s.length - i.val) + (if op then 1 else 0)
+decreasing_by all_goals (simp_wf; split_ifs; scalar_tac)
+
+
+@[step]
+theorem deref_spec (t : String) (h : (AverinGlue.stringBytes t).length ≤ Usize.max) :
+    alloc.string.String.Insts.CoreOpsDerefDerefStr.deref t ⦃ _ => True ⦄ := by
+  simp only [alloc.string.String.Insts.CoreOpsDerefDerefStr.deref, AverinGlue.stringSlice, h,
+    dif_pos]
+  exact WP.spec.ret trivial
+
+@[step]
+theorem nfc_spec (x : Str) : canon.nfc x ⦃ r => r = AverinTrusted.nfc x ⦄ := by
+  simp [canon.nfc]
+
+/-- What `parse_string` returns: an NFC output (a value of the trusted primitive) ending after `i`. -/
+def StrOk (s : Slice Std.U8) (i : Std.Usize) :
+    core.result.Result (String × Std.Usize) canon.ParseFault → Prop
+  | .Ok (t, j) => i.val < j.val ∧ j.val ≤ s.length ∧ ∃ x, t = AverinTrusted.nfc x
+  | .Err _ => True
+
+@[step]
+theorem parse_string_spec (s : Slice Std.U8) (i : Std.Usize) :
+    canon.parse_string s i ⦃ r => StrOk s i r ⦄ := by
+  unfold canon.parse_string
+  step as ⟨r, hr⟩
+  cases r with
+  | Err e =>
+    simp [core.result.Result.Insts.CoreOpsTry.branch,
+      core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual, StrOk]
+  | Ok j =>
+    obtain ⟨hj1, hj2⟩ := hr j rfl
+    simp only [core.result.Result.Insts.CoreOpsTry.branch, bind_tc_ok]
+    step*
+    · simp [W, alloc.vec.Vec.new]
+    · have hs := s.property
+      show W (alloc.vec.Vec.deref units).val ≤ Usize.max
+      simp only [alloc.vec.Vec.deref, Slice.from_val]
+      simp only [Slice.length] at *; omega
+    all_goals first
+      | (simp only [StrOk]; done)
+      | (simp only [StrOk]; exact ⟨by scalar_tac, by scalar_tac, _, by assumption⟩)
 
 end Refinement.ParseTest
