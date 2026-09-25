@@ -29,6 +29,7 @@ maps to Lean's `String` and to `Slice U8`):
   verified decoder `String.fromUTF8?`), else `Err`.
 * `String::is_empty` is true exactly when the string has no UTF-8 bytes (used by the verdict
   kernel's seal and anchor checks).
+* `String::clone` returns an equal string (used by the parser's duplicate-key bookkeeping).
 
 **Toolchain adjustment.** Aeneas elaborates string literals with `Aeneas.Std.toStr`, whose default
 bound proof is `decide +native` (an extra axiom). `averin_decision_core.toStr` below shadows it
@@ -74,6 +75,10 @@ def alloc.string.String.as_bytes (s : String) : Result (Slice Std.U8) := AverinG
 @[rust_fun "alloc::string::{alloc::string::String}::is_empty"]
 def alloc.string.String.is_empty (s : String) : Result Bool :=
   ok (decide (AverinGlue.stringBytes s = []))
+
+/-- `String::clone`: an equal string (the parser's key bookkeeping). Total. -/
+@[rust_fun "alloc::string::{core::clone::Clone<alloc::string::String>}::clone"]
+def alloc.string.String.Insts.CoreCloneClone.clone (s : String) : Result String := ok s
 
 @[rust_fun
   "alloc::string::{core::ops::deref::Deref<alloc::string::String, str>}::deref"]

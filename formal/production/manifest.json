@@ -29,7 +29,8 @@
       "crate::record::CANON_VERSION",
       "crate::checkpoint::CHECKPOINT_DOMAIN",
       "crate::checkpoint::CHECKPOINT_CANON_VERSION",
-      "crate::verify::verdict::decide_claims"
+      "crate::verify::verdict::decide_claims",
+      "crate::canon::parse_document"
     ],
     "opaque": [
       "crate::canon::nfc",
@@ -66,6 +67,7 @@
         "alloc.string.String.as_bytes",
         "alloc.string.String.Insts.CoreOpsDerefDerefStr.deref",
         "alloc.string.String.is_empty",
+        "alloc.string.String.Insts.CoreCloneClone.clone",
         "canon.nfc",
         "hashx.sha256"
       ]
@@ -83,20 +85,21 @@
       "alloc.string.String.from_utf8": "Ok with exactly the given bytes iff they are valid UTF-8 (Lean's verified String.fromUTF8?)",
       "alloc.string.FromUtf8Error": "Unit; never inspected",
       "averin_decision_core.toStr": "Aeneas.Std.toStr with a kernel-checked (not native) size bound for string literals",
-      "alloc.string.String.is_empty": "true exactly when the Lean String modelling the Rust String has no UTF-8 bytes; total"
+      "alloc.string.String.is_empty": "true exactly when the Lean String modelling the Rust String has no UTF-8 bytes; total",
+      "alloc.string.String.Insts.CoreCloneClone.clone": "an equal string (Rust's String::clone copies the bytes); total"
     },
     "toolchain": "rustc (nightly-2026-09-17 for extraction, 1.92.0 for production builds), Charon 6258597, Aeneas 557f7a1 and its Lean standard library, Lean 4.31.0 and mathlib"
   },
   "sources": {
     "core/Cargo.toml": "0d90d1e08d2d474dcec1648f76a36aab993b098e47ec34d60614e9c67811cc2e",
-    "core/src/canon.rs": "6f24a8c8bb28086ec27745e977d5ca8d23d6889d99208e563ec07e9fa85ff4aa",
+    "core/src/canon.rs": "a5c5e37b89b6d2d2939a68904f14ddd09b55b2decde89f0eda3fe4b8fd9ffa5b",
     "core/src/hashx.rs": "3193a42763c19e681181c07bbb8e7ab6f37d0d27dd0bc6124d8f7067b7d043c7",
     "core/src/record.rs": "52dac5bd61b1609803f82824291d270eefd8774065cb9a78b2988d9276e2e1f4",
     "core/src/checkpoint.rs": "90ba12e80e5e89811f119840fe44b07a9e90a7d650b9f365b49f9feed3f455c4",
     "core/src/sign.rs": "cd3611f1ee9bfa13c9fa61353b6ea4412254bb539ae4a48ccfeb73babb3e80b3",
     "core/src/verify/verdict.rs": "3b1cb80cbadf608c51e3731191344e7ff9d0f39b83dd9832335b539fb27aee08",
-    "formal/production/Extracted/Types.lean": "cb9aa96b5da6eb5a7f151f58df811fcb801da21102e38d73036164ac94d9888f",
-    "formal/production/Extracted/Funs.lean": "12dc014e1919dad520d2eedaf5b1237a7b4e606d59e4274e4c3c21048e08a2a6"
+    "formal/production/Extracted/Types.lean": "9bec3fded374c003b9014e78723700e2699522a9513f00d65b0d09af5946c321",
+    "formal/production/Extracted/Funs.lean": "93cd06f3e361d1dd682adfd249c88904d7f7ec276f86b4520002583d4f811094"
   },
   "extracted": {
     "canon::write_canonical": [

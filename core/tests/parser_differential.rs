@@ -662,3 +662,82 @@ fn rewrite_matches_reference_on_generated_corpus() {
     println!("differential: {cases} generated documents ({accepted} accepted, {rejected} rejected) + {cases} noise strings");
     assert!(accepted > cases / 20 && rejected > cases / 20);
 }
+
+/// Parse with both parsers, require identical results, and return the error message and offset.
+fn rejected(input: &str) -> (String, usize) {
+    same(input);
+    let e = CanonValue::parse(input).expect_err("must reject");
+    (e.msg, e.pos)
+}
+
+const DUP: &str = "duplicate object key after NFC normalization";
+
+#[test]
+fn deferred_duplicate_check_reports_what_the_online_check_did() {
+    // A duplicate followed by a syntax error in the same object: the duplicate, at its quote.
+    for tail in ["2 \"x\"}", "}", "2,}", "2", "2,\"b\"", "[1 2]}"] {
+        let (msg, pos) = rejected(&format!("{{\"a\":1,\"a\":{tail}"));
+        assert!(msg.starts_with(DUP), "{tail}: {msg}");
+        assert_eq!(pos, 7);
+    }
+    // A duplicate followed by an error inside its (nested) value.
+    for value in [
+        "[1,}",
+        "{\"b\":tru}",
+        "\"\\uD800\"",
+        "-0",
+        "[[[",
+        "{\"b\":1,\"b\":2}",
+    ] {
+        let (msg, pos) = rejected(&format!("{{\"a\":1,\"a\":{value}}}"));
+        assert!(
+            msg.starts_with(DUP) && msg.ends_with("\"a\""),
+            "{value}: {msg}"
+        );
+        assert_eq!(pos, 7, "{value}: the outer duplicate wins");
+    }
+    // An inner error before the outer duplicate: the inner error wins.
+    let (msg, pos) = rejected("{\"a\":{\"b\":1,\"b\":2},\"a\":1}");
+    assert!(msg.starts_with(DUP) && msg.ends_with("\"b\""), "{msg}");
+    assert_eq!(pos, 12);
+    let (msg, pos) = rejected("{\"a\":[1,],\"a\":1}");
+    assert_eq!((msg.as_str(), pos), ("unexpected character", 8));
+    // The earliest repeat wins among several, whatever the key order.
+    let (msg, pos) = rejected("{\"b\":1,\"a\":2,\"b\":3,\"a\":4}");
+    assert!(msg.ends_with("\"b\"") && pos == 13, "{msg} {pos}");
+    let (msg, pos) = rejected("{\"b\":1,\"a\":2,\"a\":3,\"b\":4}");
+    assert!(msg.ends_with("\"a\"") && pos == 13, "{msg} {pos}");
+    // NFC-equivalent keys (composed, decomposed raw and escaped): reported as the normalized key.
+    for (k1, k2) in [
+        ("é", "e\u{301}"),
+        ("é", "e\\u0301"),
+        ("\\u00e9", "é"),
+        ("Å", "\u{212B}"),
+    ] {
+        let input = format!("{{\"{k1}\":1,\"{k2}\":2}}");
+        let (msg, pos) = rejected(&input);
+        assert!(msg.starts_with(DUP), "{input}: {msg}");
+        assert_eq!(pos, k1.len() + 6, "{input}");
+    }
+    // Duplicates at the depth limit: an object at depth 256 is parsed and its duplicate reported;
+    // at 257 the depth error comes first.
+    for d in [255usize, 256] {
+        let input = format!(
+            "{}{{\"a\":1,\"a\":2}}{}",
+            "[".repeat(d - 1),
+            "]".repeat(d - 1)
+        );
+        let (msg, _) = rejected(&input);
+        assert!(msg.starts_with(DUP), "depth {d}: {msg}");
+    }
+    let input = format!("{}{{\"a\":1,\"a\":2}}{}", "[".repeat(256), "]".repeat(256));
+    assert_eq!(rejected(&input).0, "nesting depth limit exceeded");
+    // A duplicate whose value nests past the limit: the duplicate still wins.
+    let input = format!("{{\"a\":1,\"a\":{}0{}}}", "[".repeat(300), "]".repeat(300));
+    assert_eq!(rejected(&input), (format!("{DUP}: \"a\""), 7));
+    // Trailing garbage after an object with a duplicate: the duplicate.
+    for t in [" x", "}", ",", "{}", "\"a\""] {
+        let (msg, pos) = rejected(&format!("{{\"a\":1,\"a\":2}}{t}"));
+        assert!(msg.starts_with(DUP) && pos == 7, "{t}: {msg}");
+    }
+}

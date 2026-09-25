@@ -35,7 +35,7 @@ impl_def Slice.Insts.CoreCmpPartialEqSlice {T : Type} {U : Type}
 }
 
 /-- [averin_decision_core::canon::member]: loop 0:
-    Source: 'core/src/canon.rs', lines 170:4-172:5 -/
+    Source: 'core/src/canon.rs', lines 159:4-161:5 -/
 @[rust_loop]
 def canon.member_loop
   (members : alloc.vec.Vec (String × canon.CanonValue)) (key : Str)
@@ -61,7 +61,7 @@ def canon.member_loop
 partial_fixpoint
 
 /-- [averin_decision_core::canon::member]:
-    Source: 'core/src/canon.rs', lines 164:0-178:1 -/
+    Source: 'core/src/canon.rs', lines 153:0-167:1 -/
 def canon.member
   (v : canon.CanonValue) (key : Str) : Result (Option canon.CanonValue) := do
   match v with
@@ -82,7 +82,7 @@ def canon.member
     else ok none
 
 /-- [averin_decision_core::canon::hex_digit]:
-    Source: 'core/src/canon.rs', lines 476:0-482:1 -/
+    Source: 'core/src/canon.rs', lines 465:0-471:1 -/
 def canon.hex_digit (n : Std.U8) : Result Std.U8 := do
   if n < 10#u8
   then 48#u8 + n
@@ -90,7 +90,7 @@ def canon.hex_digit (n : Std.U8) : Result Std.U8 := do
        97#u8 + i
 
 /-- [averin_decision_core::canon::escape_into]: loop 0:
-    Source: 'core/src/canon.rs', lines 446:4-464:5 -/
+    Source: 'core/src/canon.rs', lines 435:4-453:5 -/
 @[rust_loop]
 def canon.escape_into_loop
   (s : Slice Std.U8) (out : alloc.vec.Vec Std.U8) (i : Std.Usize) :
@@ -155,7 +155,7 @@ def canon.escape_into_loop
 partial_fixpoint
 
 /-- [averin_decision_core::canon::escape_into]:
-    Source: 'core/src/canon.rs', lines 443:0-466:1 -/
+    Source: 'core/src/canon.rs', lines 432:0-455:1 -/
 def canon.escape_into
   (s : Slice Std.U8) (out : alloc.vec.Vec Std.U8) :
   Result (alloc.vec.Vec Std.U8)
@@ -165,7 +165,7 @@ def canon.escape_into
   alloc.vec.Vec.push out2 34#u8
 
 /-- [averin_decision_core::canon::write_int]: loop 0:
-    Source: 'core/src/canon.rs', lines 424:4-431:5 -/
+    Source: 'core/src/canon.rs', lines 413:4-420:5 -/
 @[rust_loop]
 def canon.write_int_loop
   (u : Std.U64) (digits : Array Std.U8 20#usize) (k : Std.Usize) :
@@ -184,7 +184,7 @@ def canon.write_int_loop
 partial_fixpoint
 
 /-- [averin_decision_core::canon::write_int]:
-    Source: 'core/src/canon.rs', lines 414:0-433:1 -/
+    Source: 'core/src/canon.rs', lines 403:0-422:1 -/
 def canon.write_int
   (n : Std.I64) (out : alloc.vec.Vec Std.U8) :
   Result (alloc.vec.Vec Std.U8)
@@ -211,7 +211,7 @@ def canon.write_int
   alloc.vec.Vec.extend_from_slice core.clone.CloneU8 out1 s
 
 /-- [averin_decision_core::canon::utf16_units]: loop 0:
-    Source: 'core/src/canon.rs', lines 369:4-396:5 -/
+    Source: 'core/src/canon.rs', lines 358:4-385:5 -/
 @[rust_loop]
 def canon.utf16_units_loop
   (s : Slice Std.U8) (units : alloc.vec.Vec Std.U16) (i : Std.Usize) :
@@ -300,14 +300,14 @@ def canon.utf16_units_loop
 partial_fixpoint
 
 /-- [averin_decision_core::canon::utf16_units]:
-    Source: 'core/src/canon.rs', lines 366:0-398:1 -/
+    Source: 'core/src/canon.rs', lines 355:0-387:1 -/
 def canon.utf16_units (s : Slice Std.U8) : Result (alloc.vec.Vec Std.U16) := do
   let i := Slice.len s
   let units := alloc.vec.Vec.with_capacity Std.U16 i
   canon.utf16_units_loop s units 0#usize
 
 /-- [averin_decision_core::canon::units_lt]: loop 0:
-    Source: 'core/src/canon.rs', lines 355:4-357:5 -/
+    Source: 'core/src/canon.rs', lines 344:4-346:5 -/
 @[rust_loop]
 def canon.units_lt_loop
   (a : Slice Std.U16) (b : Slice Std.U16) (n : Std.Usize) (i : Std.Usize) :
@@ -325,7 +325,7 @@ def canon.units_lt_loop
 partial_fixpoint
 
 /-- [averin_decision_core::canon::units_lt]:
-    Source: 'core/src/canon.rs', lines 352:0-363:1 -/
+    Source: 'core/src/canon.rs', lines 341:0-352:1 -/
 def canon.units_lt (a : Slice Std.U16) (b : Slice Std.U16) : Result Bool := do
   let i := Slice.len a
   let i1 := Slice.len b
@@ -343,7 +343,7 @@ def canon.units_lt (a : Slice Std.U16) (b : Slice Std.U16) : Result Bool := do
        ok (i3 < i4)
 
 /-- [averin_decision_core::canon::merge_by_units]: loop 0:
-    Source: 'core/src/canon.rs', lines 339:4-347:5 -/
+    Source: 'core/src/canon.rs', lines 328:4-336:5 -/
 @[rust_loop]
 def canon.merge_by_units_loop
   (units : Slice (alloc.vec.Vec Std.U16)) (left : Slice Std.Usize)
@@ -426,7 +426,7 @@ def canon.merge_by_units_loop
 partial_fixpoint
 
 /-- [averin_decision_core::canon::merge_by_units]:
-    Source: 'core/src/canon.rs', lines 335:0-349:1 -/
+    Source: 'core/src/canon.rs', lines 324:0-338:1 -/
 def canon.merge_by_units
   (units : Slice (alloc.vec.Vec Std.U16)) (left : Slice Std.Usize)
   (right : Slice Std.Usize) :
@@ -439,7 +439,7 @@ def canon.merge_by_units
   canon.merge_by_units_loop units left right out 0#usize 0#usize
 
 /-- [averin_decision_core::canon::sort_by_units]:
-    Source: 'core/src/canon.rs', lines 324:0-333:1 -/
+    Source: 'core/src/canon.rs', lines 313:0-322:1 -/
 def canon.sort_by_units
   (units : Slice (alloc.vec.Vec Std.U16)) (pos : Slice Std.Usize) :
   Result (alloc.vec.Vec Std.Usize)
@@ -468,7 +468,7 @@ def canon.sort_by_units
 partial_fixpoint
 
 /-- [averin_decision_core::canon::positions]: loop 0:
-    Source: 'core/src/canon.rs', lines 315:4-318:5 -/
+    Source: 'core/src/canon.rs', lines 304:4-307:5 -/
 @[rust_loop]
 def canon.positions_loop
   (n : Std.Usize) (pos : alloc.vec.Vec Std.Usize) (p : Std.Usize) :
@@ -483,13 +483,13 @@ def canon.positions_loop
 partial_fixpoint
 
 /-- [averin_decision_core::canon::positions]:
-    Source: 'core/src/canon.rs', lines 312:0-320:1 -/
+    Source: 'core/src/canon.rs', lines 301:0-309:1 -/
 def canon.positions (n : Std.Usize) : Result (alloc.vec.Vec Std.Usize) := do
   let pos := alloc.vec.Vec.with_capacity Std.Usize n
   canon.positions_loop n pos 0#usize
 
 /-- [averin_decision_core::canon::unmark_key]: loop 0:
-    Source: 'core/src/canon.rs', lines 264:4-269:5 -/
+    Source: 'core/src/canon.rs', lines 253:4-258:5 -/
 @[rust_loop]
 def canon.unmark_key_loop
   (members : alloc.vec.Vec (String × canon.CanonValue)) (key : Slice Std.U8)
@@ -513,7 +513,7 @@ def canon.unmark_key_loop
 partial_fixpoint
 
 /-- [averin_decision_core::canon::unmark_key]:
-    Source: 'core/src/canon.rs', lines 262:0-270:1 -/
+    Source: 'core/src/canon.rs', lines 251:0-259:1 -/
 @[reducible]
 def canon.unmark_key
   (members : alloc.vec.Vec (String × canon.CanonValue)) (key : Slice Std.U8)
@@ -523,7 +523,7 @@ def canon.unmark_key
   canon.unmark_key_loop members key keep 0#usize
 
 /-- [averin_decision_core::canon::unmark_stripped]:
-    Source: 'core/src/canon.rs', lines 247:0-257:1 -/
+    Source: 'core/src/canon.rs', lines 236:0-246:1 -/
 def canon.unmark_stripped
   (members : alloc.vec.Vec (String × canon.CanonValue)) (strip : Slice Str)
   (i : Std.Usize) (keep : Slice Bool) :
@@ -541,7 +541,7 @@ def canon.unmark_stripped
 partial_fixpoint
 
 /-- [averin_decision_core::canon::write_members]: loop 0:
-    Source: 'core/src/canon.rs', lines 279:4-287:5 -/
+    Source: 'core/src/canon.rs', lines 268:4-276:5 -/
 @[rust_loop]
 def canon.write_members_loop0
   (members : alloc.vec.Vec (String × canon.CanonValue)) (keep : Slice Bool)
@@ -578,7 +578,7 @@ partial_fixpoint
 mutual
 
 /-- [averin_decision_core::canon::write_canonical]:
-    Source: 'core/src/canon.rs', lines 183:0-208:1 -/
+    Source: 'core/src/canon.rs', lines 172:0-197:1 -/
 def canon.write_canonical
   (v : canon.CanonValue) (out : alloc.vec.Vec Std.U8) :
   Result (Bool × (alloc.vec.Vec Std.U8))
@@ -622,7 +622,7 @@ def canon.write_canonical
 partial_fixpoint
 
 /-- [averin_decision_core::canon::write_array]: loop 0:
-    Source: 'core/src/canon.rs', lines 214:4-222:5 -/
+    Source: 'core/src/canon.rs', lines 203:4-211:5 -/
 @[rust_loop]
 def canon.write_array_loop
   (items : Slice canon.CanonValue) (out : alloc.vec.Vec Std.U8) (unique : Bool)
@@ -646,7 +646,7 @@ def canon.write_array_loop
 partial_fixpoint
 
 /-- [averin_decision_core::canon::write_array]:
-    Source: 'core/src/canon.rs', lines 210:0-225:1 -/
+    Source: 'core/src/canon.rs', lines 199:0-214:1 -/
 def canon.write_array
   (items : Slice canon.CanonValue) (out : alloc.vec.Vec Std.U8) :
   Result (Bool × (alloc.vec.Vec Std.U8))
@@ -658,7 +658,7 @@ def canon.write_array
 partial_fixpoint
 
 /-- [averin_decision_core::canon::write_object]:
-    Source: 'core/src/canon.rs', lines 234:0-242:1 -/
+    Source: 'core/src/canon.rs', lines 223:0-231:1 -/
 def canon.write_object
   (members : alloc.vec.Vec (String × canon.CanonValue)) (strip : Slice Str)
   (out : alloc.vec.Vec Std.U8) :
@@ -674,7 +674,7 @@ def canon.write_object
 partial_fixpoint
 
 /-- [averin_decision_core::canon::write_members]: loop 1:
-    Source: 'core/src/canon.rs', lines 292:4-306:5 -/
+    Source: 'core/src/canon.rs', lines 281:4-295:5 -/
 @[rust_loop]
 def canon.write_members_loop1
   (members : alloc.vec.Vec (String × canon.CanonValue))
@@ -737,7 +737,7 @@ def canon.write_members_loop1
 partial_fixpoint
 
 /-- [averin_decision_core::canon::write_members]:
-    Source: 'core/src/canon.rs', lines 273:0-309:1 -/
+    Source: 'core/src/canon.rs', lines 262:0-298:1 -/
 def canon.write_members
   (members : alloc.vec.Vec (String × canon.CanonValue)) (keep : Slice Bool)
   (out : alloc.vec.Vec Std.U8) :
@@ -760,6 +760,1239 @@ def canon.write_members
 partial_fixpoint
 
 end
+
+/-- [averin_decision_core::canon::MAX_DEPTH]
+    Source: 'core/src/canon.rs', lines 476:0-476:29 -/
+@[global_simps, irreducible] def canon.MAX_DEPTH : Std.Usize := 256#usize
+
+/-- [averin_decision_core::canon::push_utf8]:
+    Source: 'core/src/canon.rs', lines 1108:0-1124:1 -/
+def canon.push_utf8
+  (out : alloc.vec.Vec Std.U8) (c : Std.U32) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  if c < 128#u32
+  then let i ← lift (UScalar.cast .U8 c)
+       alloc.vec.Vec.push out i
+  else
+    if c < 2048#u32
+    then
+      let i ← c / 64#u32
+      let i1 ← 192#u32 + i
+      let i2 ← lift (UScalar.cast .U8 i1)
+      let out1 ← alloc.vec.Vec.push out i2
+      let i3 ← c % 64#u32
+      let i4 ← 128#u32 + i3
+      let i5 ← lift (UScalar.cast .U8 i4)
+      alloc.vec.Vec.push out1 i5
+    else
+      if c < 65536#u32
+      then
+        let i ← c / 4096#u32
+        let i1 ← 224#u32 + i
+        let i2 ← lift (UScalar.cast .U8 i1)
+        let out1 ← alloc.vec.Vec.push out i2
+        let i3 ← c / 64#u32
+        let i4 ← i3 % 64#u32
+        let i5 ← 128#u32 + i4
+        let i6 ← lift (UScalar.cast .U8 i5)
+        let out2 ← alloc.vec.Vec.push out1 i6
+        let i7 ← c % 64#u32
+        let i8 ← 128#u32 + i7
+        let i9 ← lift (UScalar.cast .U8 i8)
+        alloc.vec.Vec.push out2 i9
+      else
+        let i ← c / 262144#u32
+        let i1 ← 240#u32 + i
+        let i2 ← lift (UScalar.cast .U8 i1)
+        let out1 ← alloc.vec.Vec.push out i2
+        let i3 ← c / 4096#u32
+        let i4 ← i3 % 64#u32
+        let i5 ← 128#u32 + i4
+        let i6 ← lift (UScalar.cast .U8 i5)
+        let out2 ← alloc.vec.Vec.push out1 i6
+        let i7 ← c / 64#u32
+        let i8 ← i7 % 64#u32
+        let i9 ← 128#u32 + i8
+        let i10 ← lift (UScalar.cast .U8 i9)
+        let out3 ← alloc.vec.Vec.push out2 i10
+        let i11 ← c % 64#u32
+        let i12 ← 128#u32 + i11
+        let i13 ← lift (UScalar.cast .U8 i12)
+        alloc.vec.Vec.push out3 i13
+
+/-- [averin_decision_core::canon::decode_utf16_strict]: loop 0:
+    Source: 'core/src/canon.rs', lines 1133:4-1157:5 -/
+@[rust_loop]
+def canon.decode_utf16_strict_loop
+  (units : Slice Std.U16) (out : alloc.vec.Vec Std.U8)
+  (fault : canon.ParseError) (ok1 : Bool) (i : Std.Usize) :
+  Result ((alloc.vec.Vec Std.U8) × canon.ParseError × Bool)
+  := do
+  if ok1
+  then
+    let i1 := Slice.len units
+    if i < i1
+    then
+      let i2 ← Slice.index_usize units i
+      let u ← lift (UScalar.cast .U32 i2)
+      if u >= 55296#u32
+      then
+        if u <= 56319#u32
+        then
+          let i3 ← i + 1#usize
+          let i4 := Slice.len units
+          if i3 >= i4
+          then
+            canon.decode_utf16_strict_loop units out
+              canon.ParseError.UnpairedHigh false i
+          else
+            let i5 ← Slice.index_usize units i3
+            let lo ← lift (UScalar.cast .U32 i5)
+            if lo < 56320#u32
+            then
+              canon.decode_utf16_strict_loop units out
+                canon.ParseError.HighNotLow false i
+            else
+              if lo > 57343#u32
+              then
+                canon.decode_utf16_strict_loop units out
+                  canon.ParseError.HighNotLow false i
+              else
+                let i6 ← u - 55296#u32
+                let i7 ← i6 * 1024#u32
+                let i8 ← 65536#u32 + i7
+                let i9 ← lo - 56320#u32
+                let i10 ← i8 + i9
+                let out1 ← canon.push_utf8 out i10
+                let i11 ← i + 2#usize
+                canon.decode_utf16_strict_loop units out1 fault true i11
+        else
+          if u >= 56320#u32
+          then
+            if u <= 57343#u32
+            then
+              canon.decode_utf16_strict_loop units out
+                canon.ParseError.UnpairedLow false i
+            else
+              let out1 ← canon.push_utf8 out u
+              let i3 ← i + 1#usize
+              canon.decode_utf16_strict_loop units out1 fault true i3
+          else
+            let out1 ← canon.push_utf8 out u
+            let i3 ← i + 1#usize
+            canon.decode_utf16_strict_loop units out1 fault true i3
+      else
+        if u >= 56320#u32
+        then
+          if u <= 57343#u32
+          then
+            canon.decode_utf16_strict_loop units out
+              canon.ParseError.UnpairedLow false i
+          else
+            let out1 ← canon.push_utf8 out u
+            let i3 ← i + 1#usize
+            canon.decode_utf16_strict_loop units out1 fault true i3
+        else
+          let out1 ← canon.push_utf8 out u
+          let i3 ← i + 1#usize
+          canon.decode_utf16_strict_loop units out1 fault true i3
+    else ok (out, fault, true)
+  else ok (out, fault, false)
+partial_fixpoint
+
+/-- [averin_decision_core::canon::decode_utf16_strict]:
+    Source: 'core/src/canon.rs', lines 1128:0-1166:1 -/
+def canon.decode_utf16_strict
+  (units : Slice Std.U16) :
+  Result (core.result.Result String canon.ParseError)
+  := do
+  let i := Slice.len units
+  let out := alloc.vec.Vec.with_capacity Std.U8 i
+  let (out1, fault, ok1) ←
+    canon.decode_utf16_strict_loop units out canon.ParseError.InvalidScalar
+      true 0#usize
+  if ok1
+  then
+    let r ← alloc.string.String.from_utf8 out1
+    match r with
+    | core.result.Result.Ok t => ok (core.result.Result.Ok t)
+    | core.result.Result.Err _ =>
+      ok (core.result.Result.Err canon.ParseError.InvalidScalar)
+  else ok (core.result.Result.Err fault)
+
+/-- [averin_decision_core::canon::push_utf16]:
+    Source: 'core/src/canon.rs', lines 1098:0-1105:1 -/
+def canon.push_utf16
+  (units : alloc.vec.Vec Std.U16) (c : Std.U32) :
+  Result (alloc.vec.Vec Std.U16)
+  := do
+  if c < 65536#u32
+  then let i ← lift (UScalar.cast .U16 c)
+       alloc.vec.Vec.push units i
+  else
+    let i ← c - 65536#u32
+    let i1 ← i / 1024#u32
+    let i2 ← 55296#u32 + i1
+    let i3 ← lift (UScalar.cast .U16 i2)
+    let units1 ← alloc.vec.Vec.push units i3
+    let i4 ← i % 1024#u32
+    let i5 ← 56320#u32 + i4
+    let i6 ← lift (UScalar.cast .U16 i5)
+    alloc.vec.Vec.push units1 i6
+
+/-- [averin_decision_core::canon::is_continuation]:
+    Source: 'core/src/canon.rs', lines 1044:0-1046:1 -/
+def canon.is_continuation (b : Std.U8) : Result Bool := do
+  if 128#u8 <= b
+  then if b <= 191#u8
+       then ok true
+       else ok false
+  else ok false
+
+/-- [averin_decision_core::canon::utf8_scalar]:
+    Source: 'core/src/canon.rs', lines 1051:0-1095:1 -/
+def canon.utf8_scalar
+  (s : Slice Std.U8) (i : Std.Usize) (len : Std.Usize) :
+  Result (Option Std.U32)
+  := do
+  let i1 ← Slice.index_usize s i
+  let b0 ← lift (UScalar.cast .U32 i1)
+  if len = 1#usize
+  then ok (some b0)
+  else
+    let i2 ← i + 1#usize
+    let b1 ← Slice.index_usize s i2
+    if len = 2#usize
+    then
+      if b0 >= 194#u32
+      then
+        let b ← canon.is_continuation b1
+        if b
+        then
+          let i3 ← b0 - 192#u32
+          let i4 ← i3 * 64#u32
+          let i5 ← lift (UScalar.cast .U32 b1)
+          let i6 ← i5 - 128#u32
+          let i7 ← i4 + i6
+          ok (some i7)
+        else ok none
+      else ok none
+    else
+      let i3 ← i + 2#usize
+      let b2 ← Slice.index_usize s i3
+      let lo ←
+        if b0 = 224#u32
+        then ok 160#u8
+        else if b0 = 240#u32
+             then ok 144#u8
+             else ok 128#u8
+      let hi ←
+        if b0 = 237#u32
+        then ok 159#u8
+        else if b0 = 244#u32
+             then ok 143#u8
+             else ok 191#u8
+      if b1 < lo
+      then ok none
+      else
+        if b1 > hi
+        then ok none
+        else
+          let b ← canon.is_continuation b2
+          if b
+          then
+            if len = 3#usize
+            then
+              let i4 ← b0 - 224#u32
+              let i5 ← i4 * 4096#u32
+              let i6 ← lift (UScalar.cast .U32 b1)
+              let i7 ← i6 - 128#u32
+              let i8 ← i7 * 64#u32
+              let i9 ← i5 + i8
+              let i10 ← lift (UScalar.cast .U32 b2)
+              let i11 ← i10 - 128#u32
+              let i12 ← i9 + i11
+              ok (some i12)
+            else
+              let i4 ← i + 3#usize
+              let b3 ← Slice.index_usize s i4
+              if b0 > 244#u32
+              then ok none
+              else
+                let b4 ← canon.is_continuation b3
+                if b4
+                then
+                  let i5 ← b0 - 240#u32
+                  let i6 ← i5 * 262144#u32
+                  let i7 ← lift (UScalar.cast .U32 b1)
+                  let i8 ← i7 - 128#u32
+                  let i9 ← i8 * 4096#u32
+                  let i10 ← i6 + i9
+                  let i11 ← lift (UScalar.cast .U32 b2)
+                  let i12 ← i11 - 128#u32
+                  let i13 ← i12 * 64#u32
+                  let i14 ← i10 + i13
+                  let i15 ← lift (UScalar.cast .U32 b3)
+                  let i16 ← i15 - 128#u32
+                  let i17 ← i14 + i16
+                  ok (some i17)
+                else ok none
+          else ok none
+
+/-- [averin_decision_core::canon::next_utf8_char]:
+    Source: 'core/src/canon.rs', lines 1021:0-1042:1 -/
+def canon.next_utf8_char
+  (s : Slice Std.U8) (i : Std.Usize) :
+  Result (core.result.Result (Std.U32 × Std.Usize) canon.ParseFault)
+  := do
+  let lead ← Slice.index_usize s i
+  if lead < 128#u8
+  then
+    let i1 := Slice.len s
+    let i2 ← i1 - i
+    if i2 < 1#usize
+    then
+      ok (core.result.Result.Err (canon.ParseFault.At
+        canon.ParseError.Utf8Truncated i))
+    else
+      let o ← canon.utf8_scalar s i 1#usize
+      match o with
+      | none =>
+        ok (core.result.Result.Err (canon.ParseFault.At
+          canon.ParseError.Utf8Invalid i))
+      | some c => ok (core.result.Result.Ok (c, 1#usize))
+  else
+    let i1 ← lead >>> 5#i32
+    if i1 = 6#u8
+    then
+      let i2 := Slice.len s
+      let i3 ← i2 - i
+      if i3 < 2#usize
+      then
+        ok (core.result.Result.Err (canon.ParseFault.At
+          canon.ParseError.Utf8Truncated i))
+      else
+        let o ← canon.utf8_scalar s i 2#usize
+        match o with
+        | none =>
+          ok (core.result.Result.Err (canon.ParseFault.At
+            canon.ParseError.Utf8Invalid i))
+        | some c => ok (core.result.Result.Ok (c, 2#usize))
+    else
+      let i2 ← lead >>> 4#i32
+      if i2 = 14#u8
+      then
+        let i3 := Slice.len s
+        let i4 ← i3 - i
+        if i4 < 3#usize
+        then
+          ok (core.result.Result.Err (canon.ParseFault.At
+            canon.ParseError.Utf8Truncated i))
+        else
+          let o ← canon.utf8_scalar s i 3#usize
+          match o with
+          | none =>
+            ok (core.result.Result.Err (canon.ParseFault.At
+              canon.ParseError.Utf8Invalid i))
+          | some c => ok (core.result.Result.Ok (c, 3#usize))
+      else
+        let i3 ← lead >>> 3#i32
+        if i3 = 30#u8
+        then
+          let i4 := Slice.len s
+          let i5 ← i4 - i
+          if i5 < 4#usize
+          then
+            ok (core.result.Result.Err (canon.ParseFault.At
+              canon.ParseError.Utf8Truncated i))
+          else
+            let o ← canon.utf8_scalar s i 4#usize
+            match o with
+            | none =>
+              ok (core.result.Result.Err (canon.ParseFault.At
+                canon.ParseError.Utf8Invalid i))
+            | some c => ok (core.result.Result.Ok (c, 4#usize))
+        else
+          ok (core.result.Result.Err (canon.ParseFault.At
+            canon.ParseError.Utf8Lead i))
+
+/-- [averin_decision_core::canon::hex_value]:
+    Source: 'core/src/canon.rs', lines 987:0-994:1 -/
+def canon.hex_value (c : Std.U8) : Result Std.U16 := do
+  if 48#u8 <= c
+  then
+    if c <= 57#u8
+    then let i ← c - 48#u8
+         ok (UScalar.cast .U16 i)
+    else
+      if 97#u8 <= c
+      then
+        if c <= 102#u8
+        then let i ← c - 97#u8
+             let i1 ← i + 10#u8
+             ok (UScalar.cast .U16 i1)
+        else
+          if 65#u8 <= c
+          then
+            if c <= 70#u8
+            then
+              let i ← c - 65#u8
+              let i1 ← i + 10#u8
+              ok (UScalar.cast .U16 i1)
+            else ok 16#u16
+          else ok 16#u16
+      else
+        if 65#u8 <= c
+        then
+          if c <= 70#u8
+          then
+            let i ← c - 65#u8
+            let i1 ← i + 10#u8
+            ok (UScalar.cast .U16 i1)
+          else ok 16#u16
+        else ok 16#u16
+  else
+    if 97#u8 <= c
+    then
+      if c <= 102#u8
+      then let i ← c - 97#u8
+           let i1 ← i + 10#u8
+           ok (UScalar.cast .U16 i1)
+      else
+        if 65#u8 <= c
+        then
+          if c <= 70#u8
+          then
+            let i ← c - 65#u8
+            let i1 ← i + 10#u8
+            ok (UScalar.cast .U16 i1)
+          else ok 16#u16
+        else ok 16#u16
+    else
+      if 65#u8 <= c
+      then
+        if c <= 70#u8
+        then let i ← c - 65#u8
+             let i1 ← i + 10#u8
+             ok (UScalar.cast .U16 i1)
+        else ok 16#u16
+      else ok 16#u16
+
+/-- [averin_decision_core::canon::parse_hex4]:
+    Source: 'core/src/canon.rs', lines 997:0-1018:1 -/
+def canon.parse_hex4
+  (s : Slice Std.U8) (i : Std.Usize) :
+  Result (core.result.Result (Std.U16 × Std.Usize) canon.ParseFault)
+  := do
+  let i1 := Slice.len s
+  let i2 ← i1 - i
+  if i2 < 4#usize
+  then
+    ok (core.result.Result.Err (canon.ParseFault.At
+      canon.ParseError.TruncatedUnicodeEscape i))
+  else
+    let i3 ← Slice.index_usize s i
+    let d0 ← canon.hex_value i3
+    if d0 > 15#u16
+    then
+      ok (core.result.Result.Err (canon.ParseFault.At
+        canon.ParseError.InvalidHexDigit i))
+    else
+      let i4 ← i + 1#usize
+      let i5 ← Slice.index_usize s i4
+      let d1 ← canon.hex_value i5
+      if d1 > 15#u16
+      then
+        ok (core.result.Result.Err (canon.ParseFault.At
+          canon.ParseError.InvalidHexDigit i4))
+      else
+        let i6 ← i + 2#usize
+        let i7 ← Slice.index_usize s i6
+        let d2 ← canon.hex_value i7
+        if d2 > 15#u16
+        then
+          ok (core.result.Result.Err (canon.ParseFault.At
+            canon.ParseError.InvalidHexDigit i6))
+        else
+          let i8 ← i + 3#usize
+          let i9 ← Slice.index_usize s i8
+          let d3 ← canon.hex_value i9
+          if d3 > 15#u16
+          then
+            ok (core.result.Result.Err (canon.ParseFault.At
+              canon.ParseError.InvalidHexDigit i8))
+          else
+            let i10 ← d0 * 4096#u16
+            let i11 ← d1 * 256#u16
+            let i12 ← i10 + i11
+            let i13 ← d2 * 16#u16
+            let i14 ← i12 + i13
+            let i15 ← i14 + d3
+            let i16 ← i + 4#usize
+            ok (core.result.Result.Ok (i15, i16))
+
+/-- [averin_decision_core::canon::short_escape]:
+    Source: 'core/src/canon.rs', lines 972:0-984:1 -/
+def canon.short_escape (e : Std.U8) : Result Std.U16 := do
+  match e with
+  | 34#uscalar => ok 34#u16
+  | 92#uscalar => ok 92#u16
+  | 47#uscalar => ok 47#u16
+  | 98#uscalar => ok 8#u16
+  | 102#uscalar => ok 12#u16
+  | 110#uscalar => ok 10#u16
+  | 114#uscalar => ok 13#u16
+  | 116#uscalar => ok 9#u16
+  | _ => ok 65535#u16
+
+/-- [averin_decision_core::canon::at]:
+    Source: 'core/src/canon.rs', lines 610:0-612:1 -/
+def canon.at
+  (s : Slice Std.U8) (i : Std.Usize) (b : Std.U8) : Result Bool := do
+  let i1 := Slice.len s
+  if i < i1
+  then let i2 ← Slice.index_usize s i
+       ok (i2 = b)
+  else ok false
+
+/-- [averin_decision_core::canon::expect]:
+    Source: 'core/src/canon.rs', lines 622:0-628:1 -/
+def canon.expect
+  (s : Slice Std.U8) (i : Std.Usize) (b : Std.U8) :
+  Result (core.result.Result Std.Usize canon.ParseFault)
+  := do
+  let b1 ← canon.at s i b
+  if b1
+  then let i1 ← i + 1#usize
+       ok (core.result.Result.Ok i1)
+  else ok (core.result.Result.Err (canon.ParseFault.Expected b i))
+
+/-- [averin_decision_core::canon::parse_string]: loop 0:
+    Source: 'core/src/canon.rs', lines 903:4-958:5 -/
+@[rust_loop]
+def canon.parse_string_loop
+  (s : Slice Std.U8) (i : Std.Usize) (units : alloc.vec.Vec Std.U16)
+  (fault : Option canon.ParseFault) («open» : Bool) :
+  Result (Std.Usize × (alloc.vec.Vec Std.U16) × (Option canon.ParseFault))
+  := do
+  if «open»
+  then
+    let i1 := Slice.len s
+    if i >= i1
+    then
+      canon.parse_string_loop s i units (some (canon.ParseFault.At
+        canon.ParseError.UnterminatedString i)) false
+    else
+      let b ← Slice.index_usize s i
+      if b = 34#u8
+      then
+        let i2 ← i + 1#usize
+        canon.parse_string_loop s i2 units fault false
+      else
+        if b = 92#u8
+        then
+          let i2 ← i + 1#usize
+          let i3 := Slice.len s
+          if i2 >= i3
+          then
+            canon.parse_string_loop s i2 units (some (canon.ParseFault.At
+              canon.ParseError.UnterminatedEscape i2)) false
+          else
+            let e ← Slice.index_usize s i2
+            let i4 ← i2 + 1#usize
+            if e = 117#u8
+            then
+              let r ← canon.parse_hex4 s i4
+              match r with
+              | core.result.Result.Ok p =>
+                let (u, j) := p
+                let units1 ← alloc.vec.Vec.push units u
+                canon.parse_string_loop s j units1 fault true
+              | core.result.Result.Err f =>
+                canon.parse_string_loop s i4 units (some f) false
+            else
+              let u ← canon.short_escape e
+              if u < 128#u16
+              then
+                let units1 ← alloc.vec.Vec.push units u
+                canon.parse_string_loop s i4 units1 fault true
+              else
+                canon.parse_string_loop s i4 units (some (canon.ParseFault.At
+                  canon.ParseError.InvalidEscape i4)) false
+        else
+          if b < 32#u8
+          then
+            canon.parse_string_loop s i units (some (canon.ParseFault.At
+              canon.ParseError.RawControl i)) false
+          else
+            let r ← canon.next_utf8_char s i
+            match r with
+            | core.result.Result.Ok p =>
+              let (c, len) := p
+              let units1 ← canon.push_utf16 units c
+              let i2 ← i + len
+              canon.parse_string_loop s i2 units1 fault true
+            | core.result.Result.Err f =>
+              canon.parse_string_loop s i units (some f) false
+  else ok (i, units, fault)
+partial_fixpoint
+
+/-- [averin_decision_core::canon::parse_string]:
+    Source: 'core/src/canon.rs', lines 898:0-969:1 -/
+def canon.parse_string
+  (s : Slice Std.U8) (i : Std.Usize) :
+  Result (core.result.Result (String × Std.Usize) canon.ParseFault)
+  := do
+  let r ← canon.expect s i 34#u8
+  let cf ← core.result.Result.Insts.CoreOpsTry.branch r
+  match cf with
+  | core.ops.control_flow.ControlFlow.Continue val =>
+    let (i1, units, fault) ←
+      canon.parse_string_loop s val (alloc.vec.Vec.new Std.U16) none true
+    match fault with
+    | none =>
+      let s1 := alloc.vec.Vec.deref units
+      let r1 ← canon.decode_utf16_strict s1
+      match r1 with
+      | core.result.Result.Ok t =>
+        let s2 ← alloc.string.String.Insts.CoreOpsDerefDerefStr.deref t
+        let s3 ← canon.nfc s2
+        ok (core.result.Result.Ok (s3, i1))
+      | core.result.Result.Err e =>
+        ok (core.result.Result.Err (canon.ParseFault.At e i1))
+    | some f => ok (core.result.Result.Err f)
+  | core.ops.control_flow.ControlFlow.Break residual =>
+    core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+      (String × Std.Usize) (core.convert.FromSame canon.ParseFault) residual
+
+/-- [averin_decision_core::canon::first_repeat]: loop 0:
+    Source: 'core/src/canon.rs', lines 887:4-892:5 -/
+@[rust_loop]
+def canon.first_repeat_loop
+  (units : alloc.vec.Vec (alloc.vec.Vec Std.U16))
+  (order : alloc.vec.Vec Std.Usize) (first : Std.Usize) (n : Std.Usize) :
+  Result Std.Usize
+  := do
+  let i := alloc.vec.Vec.len order
+  if n < i
+  then
+    let i1 ← n - 1#usize
+    let i2 ←
+      alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice Std.Usize)
+        order i1
+    let v ←
+      alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice (alloc.vec.Vec
+        Std.U16)) units i2
+    let i3 ←
+      alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice Std.Usize)
+        order n
+    let v1 ←
+      alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice (alloc.vec.Vec
+        Std.U16)) units i3
+    let b ← alloc.vec.partial_eq.PartialEqVec.eq core.cmp.PartialEqU16 v v1
+    let first1 ←
+      if b
+      then if i3 < first
+           then ok i3
+           else ok first
+      else ok first
+    let n1 ← n + 1#usize
+    canon.first_repeat_loop units order first1 n1
+  else ok first
+partial_fixpoint
+
+/-- [averin_decision_core::canon::first_repeat]:
+    Source: 'core/src/canon.rs', lines 883:0-894:1 -/
+def canon.first_repeat
+  (units : alloc.vec.Vec (alloc.vec.Vec Std.U16)) : Result Std.Usize := do
+  let s := alloc.vec.Vec.deref units
+  let i := alloc.vec.Vec.len units
+  let v ← canon.positions i
+  let s1 := alloc.vec.Vec.deref v
+  let order ← canon.sort_by_units s s1
+  let first := alloc.vec.Vec.len units
+  canon.first_repeat_loop units order first 1#usize
+
+/-- [averin_decision_core::canon::decimal_i64]: loop 0:
+    Source: 'core/src/canon.rs', lines 739:4-747:5 -/
+@[rust_loop]
+def canon.decimal_i64_loop
+  (s : Slice Std.U8) («to» : Std.Usize) (limit : Std.U64) (mag : Std.U64)
+  (in_range : Bool) (k : Std.Usize) :
+  Result (Std.U64 × Bool)
+  := do
+  if k < «to»
+  then
+    let i ← Slice.index_usize s k
+    let i1 ← i - 48#u8
+    let d ← lift (UScalar.cast .U64 i1)
+    let i2 ← limit - d
+    let i3 ← i2 / 10#u64
+    let (mag1, in_range1) ←
+      if mag > i3
+      then ok (mag, false)
+      else do
+           let i4 ← mag * 10#u64
+           let mag2 ← i4 + d
+           ok (mag2, in_range)
+    let k1 ← k + 1#usize
+    canon.decimal_i64_loop s «to» limit mag1 in_range1 k1
+  else ok (mag, in_range)
+partial_fixpoint
+
+/-- [averin_decision_core::canon::decimal_i64]:
+    Source: 'core/src/canon.rs', lines 729:0-757:1 -/
+def canon.decimal_i64
+  (s : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize)
+  (negative : Bool) :
+  Result (Option Std.I64)
+  := do
+  let limit ←
+    if negative
+    then ok 9223372036854775808#u64
+    else ok 9223372036854775807#u64
+  let (mag, in_range) ←
+    canon.decimal_i64_loop s «to» limit 0#u64 true «from»
+  if in_range
+  then
+    if negative
+    then
+      if mag = limit
+      then ok (some core.num.I64.MIN)
+      else let i ← lift (UScalar.hcast .I64 mag)
+           let i1 ← -. i
+           ok (some i1)
+    else let i ← lift (UScalar.hcast .I64 mag)
+         ok (some i)
+  else ok none
+
+/-- [averin_decision_core::canon::is_digit]:
+    Source: 'core/src/canon.rs', lines 605:0-607:1 -/
+def canon.is_digit (b : Std.U8) : Result Bool := do
+  if 48#u8 <= b
+  then if b <= 57#u8
+       then ok true
+       else ok false
+  else ok false
+
+/-- [averin_decision_core::canon::parse_number]: loop 0:
+    Source: 'core/src/canon.rs', lines 704:8-706:9 -/
+@[rust_loop]
+def canon.parse_number_loop
+  (s : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  let i1 := Slice.len s
+  if i < i1
+  then
+    let i2 ← Slice.index_usize s i
+    let b ← canon.is_digit i2
+    if b
+    then let i3 ← i + 1#usize
+         canon.parse_number_loop s i3
+    else ok i
+  else ok i
+partial_fixpoint
+
+/-- [averin_decision_core::canon::parse_number]:
+    Source: 'core/src/canon.rs', lines 692:0-725:1 -/
+def canon.parse_number
+  (s : Slice Std.U8) (start : Std.Usize) :
+  Result (core.result.Result (canon.CanonValue × Std.Usize) canon.ParseFault)
+  := do
+  let negative ← canon.at s start 45#u8
+  let digits ← if negative
+                 then start + 1#usize
+                 else ok start
+  let b ← canon.at s digits 48#u8
+  if b
+  then
+    let i ← digits + 1#usize
+    let b1 ← canon.at s i 46#u8
+    if b1
+    then
+      ok (core.result.Result.Err (canon.ParseFault.At canon.ParseError.Fraction
+        i))
+    else
+      let b2 ← canon.at s i 101#u8
+      if b2
+      then
+        ok (core.result.Result.Err (canon.ParseFault.At
+          canon.ParseError.Exponent i))
+      else
+        let b3 ← canon.at s i 69#u8
+        if b3
+        then
+          ok (core.result.Result.Err (canon.ParseFault.At
+            canon.ParseError.Exponent i))
+        else
+          if negative
+          then
+            let i1 ← i - digits
+            if i1 = 1#usize
+            then
+              let i2 ← Slice.index_usize s digits
+              if i2 = 48#u8
+              then
+                ok (core.result.Result.Err (canon.ParseFault.At
+                  canon.ParseError.NegativeZero start))
+              else
+                let o ← canon.decimal_i64 s digits i true
+                match o with
+                | none =>
+                  ok (core.result.Result.Err (canon.ParseFault.At
+                    canon.ParseError.OutOfRange start))
+                | some n =>
+                  ok (core.result.Result.Ok (canon.CanonValue.Int n, i))
+            else
+              let o ← canon.decimal_i64 s digits i true
+              match o with
+              | none =>
+                ok (core.result.Result.Err (canon.ParseFault.At
+                  canon.ParseError.OutOfRange start))
+              | some n =>
+                ok (core.result.Result.Ok (canon.CanonValue.Int n, i))
+          else
+            let o ← canon.decimal_i64 s digits i false
+            match o with
+            | none =>
+              ok (core.result.Result.Err (canon.ParseFault.At
+                canon.ParseError.OutOfRange start))
+            | some n => ok (core.result.Result.Ok (canon.CanonValue.Int n, i))
+  else
+    let i := Slice.len s
+    if digits < i
+    then
+      let i1 ← Slice.index_usize s digits
+      let b1 ← canon.is_digit i1
+      if b1
+      then
+        let i2 ← digits + 1#usize
+        let i3 ← canon.parse_number_loop s i2
+        let b2 ← canon.at s i3 46#u8
+        if b2
+        then
+          ok (core.result.Result.Err (canon.ParseFault.At
+            canon.ParseError.Fraction i3))
+        else
+          let b3 ← canon.at s i3 101#u8
+          if b3
+          then
+            ok (core.result.Result.Err (canon.ParseFault.At
+              canon.ParseError.Exponent i3))
+          else
+            let b4 ← canon.at s i3 69#u8
+            if b4
+            then
+              ok (core.result.Result.Err (canon.ParseFault.At
+                canon.ParseError.Exponent i3))
+            else
+              if negative
+              then
+                let i4 ← i3 - digits
+                if i4 = 1#usize
+                then
+                  let i5 ← Slice.index_usize s digits
+                  if i5 = 48#u8
+                  then
+                    ok (core.result.Result.Err (canon.ParseFault.At
+                      canon.ParseError.NegativeZero start))
+                  else
+                    let o ← canon.decimal_i64 s digits i3 true
+                    match o with
+                    | none =>
+                      ok (core.result.Result.Err (canon.ParseFault.At
+                        canon.ParseError.OutOfRange start))
+                    | some n =>
+                      ok (core.result.Result.Ok (canon.CanonValue.Int n, i3))
+                else
+                  let o ← canon.decimal_i64 s digits i3 true
+                  match o with
+                  | none =>
+                    ok (core.result.Result.Err (canon.ParseFault.At
+                      canon.ParseError.OutOfRange start))
+                  | some n =>
+                    ok (core.result.Result.Ok (canon.CanonValue.Int n, i3))
+              else
+                let o ← canon.decimal_i64 s digits i3 false
+                match o with
+                | none =>
+                  ok (core.result.Result.Err (canon.ParseFault.At
+                    canon.ParseError.OutOfRange start))
+                | some n =>
+                  ok (core.result.Result.Ok (canon.CanonValue.Int n, i3))
+      else
+        ok (core.result.Result.Err (canon.ParseFault.At
+          canon.ParseError.MissingDigits digits))
+    else
+      ok (core.result.Result.Err (canon.ParseFault.At
+        canon.ParseError.MissingDigits digits))
+
+/-- [averin_decision_core::canon::parse_literal]: loop 0:
+    Source: 'core/src/canon.rs', lines 681:8-683:9 -/
+@[rust_loop]
+def canon.parse_literal_loop
+  (s : Slice Std.U8) (i : Std.Usize) (kw : Slice Std.U8) (k : Std.Usize) :
+  Result Std.Usize
+  := do
+  let i1 := Slice.len kw
+  if k < i1
+  then
+    let i2 ← i + k
+    let i3 ← Slice.index_usize s i2
+    let i4 ← Slice.index_usize kw k
+    if i3 = i4
+    then let k1 ← k + 1#usize
+         canon.parse_literal_loop s i kw k1
+    else ok k
+  else ok k
+partial_fixpoint
+
+/-- [averin_decision_core::canon::parse_literal]:
+    Source: 'core/src/canon.rs', lines 671:0-690:1 -/
+def canon.parse_literal
+  (s : Slice Std.U8) (i : Std.Usize) (kw : Slice Std.U8)
+  (err : canon.ParseError) (v : canon.CanonValue) :
+  Result (core.result.Result (canon.CanonValue × Std.Usize) canon.ParseFault)
+  := do
+  let i1 := Slice.len s
+  let i2 ← i1 - i
+  let i3 := Slice.len kw
+  if i2 >= i3
+  then
+    let k ← canon.parse_literal_loop s i kw 0#usize
+    let i4 := Slice.len kw
+    if k = i4
+    then let i5 ← i + k
+         ok (core.result.Result.Ok (v, i5))
+    else ok (core.result.Result.Err (canon.ParseFault.At err i))
+  else
+    let i4 := Slice.len kw
+    if 0#usize = i4
+    then let i5 ← i + 0#usize
+         ok (core.result.Result.Ok (v, i5))
+    else ok (core.result.Result.Err (canon.ParseFault.At err i))
+
+/-- [averin_decision_core::canon::is_ws]:
+    Source: 'core/src/canon.rs', lines 599:0-602:1 -/
+def canon.is_ws (b : Std.U8) : Result Bool := do
+  if b = 32#u8
+  then ok true
+  else
+    if b = 9#u8
+    then ok true
+    else if b = 10#u8
+         then ok true
+         else ok (b = 13#u8)
+
+/-- [averin_decision_core::canon::skip_ws]: loop 0:
+    Source: 'core/src/canon.rs', lines 616:4-618:5 -/
+@[rust_loop]
+def canon.skip_ws_loop
+  (s : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  let i1 := Slice.len s
+  if i < i1
+  then
+    let i2 ← Slice.index_usize s i
+    let b ← canon.is_ws i2
+    if b
+    then let i3 ← i + 1#usize
+         canon.skip_ws_loop s i3
+    else ok i
+  else ok i
+partial_fixpoint
+
+/-- [averin_decision_core::canon::skip_ws]:
+    Source: 'core/src/canon.rs', lines 614:0-620:1 -/
+@[reducible]
+def canon.skip_ws (s : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  canon.skip_ws_loop s i
+
+mutual
+
+/-- [averin_decision_core::canon::parse_value]:
+    Source: 'core/src/canon.rs', lines 632:0-669:1 -/
+def canon.parse_value
+  (s : Slice Std.U8) (i : Std.Usize) (depth : Std.Usize) :
+  Result (core.result.Result (canon.CanonValue × Std.Usize) canon.ParseFault)
+  := do
+  let i1 := Slice.len s
+  if i >= i1
+  then
+    ok (core.result.Result.Err (canon.ParseFault.At
+      canon.ParseError.UnexpectedEnd i))
+  else
+    let b ← Slice.index_usize s i
+    if b = 123#u8
+    then canon.parse_object s i depth
+    else
+      if b = 91#u8
+      then canon.parse_array s i depth
+      else
+        if b = 34#u8
+        then
+          let r ← canon.parse_string s i
+          match r with
+          | core.result.Result.Ok p =>
+            let (t, j) := p
+            ok (core.result.Result.Ok (canon.CanonValue.Str t, j))
+          | core.result.Result.Err e => ok (core.result.Result.Err e)
+        else
+          if b = 116#u8
+          then
+            let s1 ←
+              lift (Array.to_slice
+                (Array.make 4#usize [ 116#u8, 114#u8, 117#u8, 101#u8 ]))
+            canon.parse_literal s i s1 canon.ParseError.LiteralTrue
+              (canon.CanonValue.Bool true)
+          else
+            if b = 102#u8
+            then
+              let s1 ←
+                lift (Array.to_slice
+                  (Array.make 5#usize [
+                    102#u8, 97#u8, 108#u8, 115#u8, 101#u8
+                    ]))
+              canon.parse_literal s i s1 canon.ParseError.LiteralFalse
+                (canon.CanonValue.Bool false)
+            else
+              if b = 110#u8
+              then
+                let s1 ←
+                  lift (Array.to_slice
+                    (Array.make 4#usize [ 110#u8, 117#u8, 108#u8, 108#u8 ]))
+                canon.parse_literal s i s1 canon.ParseError.LiteralNull
+                  canon.CanonValue.Null
+              else
+                if b = 45#u8
+                then canon.parse_number s i
+                else
+                  let b1 ← canon.is_digit b
+                  if b1
+                  then canon.parse_number s i
+                  else
+                    ok (core.result.Result.Err (canon.ParseFault.At
+                      canon.ParseError.UnexpectedChar i))
+partial_fixpoint
+
+/-- [averin_decision_core::canon::parse_array]: loop 0:
+    Source: 'core/src/canon.rs', lines 771:4-792:5 -/
+@[rust_loop]
+def canon.parse_array_loop
+  (s : Slice Std.U8) (depth : Std.Usize) (i : Std.Usize)
+  (items : alloc.vec.Vec canon.CanonValue) (fault : Option canon.ParseFault)
+  («open» : Bool) :
+  Result (Std.Usize × (alloc.vec.Vec canon.CanonValue) × (Option
+    canon.ParseFault))
+  := do
+  if «open»
+  then
+    let i1 ← canon.skip_ws s i
+    let i2 ← depth + 1#usize
+    let r ← canon.parse_value s i1 i2
+    match r with
+    | core.result.Result.Ok p =>
+      let (v, j) := p
+      let items1 ← alloc.vec.Vec.push items v
+      let i3 ← canon.skip_ws s j
+      let b ← canon.at s i3 44#u8
+      if b
+      then
+        let i4 ← i3 + 1#usize
+        canon.parse_array_loop s depth i4 items1 fault true
+      else
+        let b1 ← canon.at s i3 93#u8
+        if b1
+        then
+          let i4 ← i3 + 1#usize
+          canon.parse_array_loop s depth i4 items1 fault false
+        else
+          canon.parse_array_loop s depth i3 items1 (some (canon.ParseFault.At
+            canon.ParseError.ArrayDelimiter i3)) false
+    | core.result.Result.Err e =>
+      canon.parse_array_loop s depth i1 items (some e) false
+  else ok (i, items, fault)
+partial_fixpoint
+
+/-- [averin_decision_core::canon::parse_array]:
+    Source: 'core/src/canon.rs', lines 759:0-797:1 -/
+def canon.parse_array
+  (s : Slice Std.U8) (i : Std.Usize) (depth : Std.Usize) :
+  Result (core.result.Result (canon.CanonValue × Std.Usize) canon.ParseFault)
+  := do
+  let r ← canon.expect s i 91#u8
+  let cf ← core.result.Result.Insts.CoreOpsTry.branch r
+  match cf with
+  | core.ops.control_flow.ControlFlow.Continue val =>
+    if depth >= canon.MAX_DEPTH
+    then
+      ok (core.result.Result.Err (canon.ParseFault.At
+        canon.ParseError.DepthLimit val))
+    else
+      let i1 ← canon.skip_ws s val
+      let b ← canon.at s i1 93#u8
+      if b
+      then
+        let i2 ← i1 + 1#usize
+        ok (core.result.Result.Ok (canon.CanonValue.Array (alloc.vec.Vec.new
+          canon.CanonValue), i2))
+      else
+        let (i2, items, fault) ←
+          canon.parse_array_loop s depth i1 (alloc.vec.Vec.new
+            canon.CanonValue) none true
+        match fault with
+        | none => ok (core.result.Result.Ok (canon.CanonValue.Array items, i2))
+        | some e => ok (core.result.Result.Err e)
+  | core.ops.control_flow.ControlFlow.Break residual =>
+    core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+      (canon.CanonValue × Std.Usize) (core.convert.FromSame canon.ParseFault)
+      residual
+partial_fixpoint
+
+/-- [averin_decision_core::canon::parse_object]: loop 0:
+    Source: 'core/src/canon.rs', lines 816:4-865:5 -/
+@[rust_loop]
+def canon.parse_object_loop
+  (s : Slice Std.U8) (depth : Std.Usize) (i : Std.Usize)
+  (members : alloc.vec.Vec (String × canon.CanonValue))
+  (units : alloc.vec.Vec (alloc.vec.Vec Std.U16))
+  (starts : alloc.vec.Vec Std.Usize) (keys : alloc.vec.Vec String)
+  (fault : Option canon.ParseFault) («open» : Bool) :
+  Result (Std.Usize × (alloc.vec.Vec (String × canon.CanonValue)) ×
+    (alloc.vec.Vec (alloc.vec.Vec Std.U16)) × (alloc.vec.Vec Std.Usize) ×
+    (alloc.vec.Vec String) × (Option canon.ParseFault))
+  := do
+  if «open»
+  then
+    let i1 ← canon.skip_ws s i
+    let b ← canon.at s i1 34#u8
+    if b
+    then
+      let r ← canon.parse_string s i1
+      match r with
+      | core.result.Result.Ok p =>
+        let (key, j) := p
+        let s1 ← alloc.string.String.as_bytes key
+        let v ← canon.utf16_units s1
+        let units1 ← alloc.vec.Vec.push units v
+        let starts1 ← alloc.vec.Vec.push starts i1
+        let s2 ← alloc.string.String.Insts.CoreCloneClone.clone key
+        let keys1 ← alloc.vec.Vec.push keys s2
+        let i2 ← canon.skip_ws s j
+        let r1 ← canon.expect s i2 58#u8
+        match r1 with
+        | core.result.Result.Ok j1 =>
+          let i3 ← canon.skip_ws s j1
+          let i4 ← depth + 1#usize
+          let r2 ← canon.parse_value s i3 i4
+          match r2 with
+          | core.result.Result.Ok p1 =>
+            let (v1, j2) := p1
+            let members1 ← alloc.vec.Vec.push members (key, v1)
+            let i5 ← canon.skip_ws s j2
+            let b1 ← canon.at s i5 44#u8
+            if b1
+            then
+              let i6 ← i5 + 1#usize
+              canon.parse_object_loop s depth i6 members1 units1 starts1 keys1
+                fault true
+            else
+              let b2 ← canon.at s i5 125#u8
+              if b2
+              then
+                let i6 ← i5 + 1#usize
+                canon.parse_object_loop s depth i6 members1 units1 starts1
+                  keys1 fault false
+              else
+                canon.parse_object_loop s depth i5 members1 units1 starts1
+                  keys1 (some (canon.ParseFault.At
+                  canon.ParseError.ObjectDelimiter i5)) false
+          | core.result.Result.Err e =>
+            canon.parse_object_loop s depth i3 members units1 starts1 keys1
+              (some e) false
+        | core.result.Result.Err e =>
+          canon.parse_object_loop s depth i2 members units1 starts1 keys1 (some
+            e) false
+      | core.result.Result.Err e =>
+        canon.parse_object_loop s depth i1 members units starts keys (some e)
+          false
+    else
+      canon.parse_object_loop s depth i1 members units starts keys (some
+        (canon.ParseFault.At canon.ParseError.ExpectedKey i1)) false
+  else ok (i, members, units, starts, keys, fault)
+partial_fixpoint
+
+/-- [averin_decision_core::canon::parse_object]:
+    Source: 'core/src/canon.rs', lines 799:0-877:1 -/
+def canon.parse_object
+  (s : Slice Std.U8) (i : Std.Usize) (depth : Std.Usize) :
+  Result (core.result.Result (canon.CanonValue × Std.Usize) canon.ParseFault)
+  := do
+  let r ← canon.expect s i 123#u8
+  let cf ← core.result.Result.Insts.CoreOpsTry.branch r
+  match cf with
+  | core.ops.control_flow.ControlFlow.Continue val =>
+    if depth >= canon.MAX_DEPTH
+    then
+      ok (core.result.Result.Err (canon.ParseFault.At
+        canon.ParseError.DepthLimit val))
+    else
+      let i1 ← canon.skip_ws s val
+      let b ← canon.at s i1 125#u8
+      if b
+      then
+        let i2 ← i1 + 1#usize
+        ok (core.result.Result.Ok (canon.CanonValue.Object (alloc.vec.Vec.new
+          (String × canon.CanonValue)), i2))
+      else
+        let (i2, members, units, starts, keys, fault) ←
+          canon.parse_object_loop s depth i1 (alloc.vec.Vec.new (String ×
+            canon.CanonValue)) (alloc.vec.Vec.new (alloc.vec.Vec Std.U16))
+            (alloc.vec.Vec.new Std.Usize) (alloc.vec.Vec.new String) none true
+        let dup ← canon.first_repeat units
+        let i3 := alloc.vec.Vec.len units
+        if dup < i3
+        then
+          let s1 ←
+            alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice String)
+              keys dup
+          let s2 ← alloc.string.String.Insts.CoreCloneClone.clone s1
+          let i4 ←
+            alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice
+              Std.Usize) starts dup
+          ok (core.result.Result.Err (canon.ParseFault.DuplicateKey s2 i4))
+        else
+          match fault with
+          | none =>
+            ok (core.result.Result.Ok (canon.CanonValue.Object members, i2))
+          | some e => ok (core.result.Result.Err e)
+  | core.ops.control_flow.ControlFlow.Break residual =>
+    core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual
+      (canon.CanonValue × Std.Usize) (core.convert.FromSame canon.ParseFault)
+      residual
+partial_fixpoint
+
+end
+
+/-- [averin_decision_core::canon::parse_document]:
+    Source: 'core/src/canon.rs', lines 583:0-597:1 -/
+def canon.parse_document
+  (input : Str) :
+  Result (core.result.Result canon.CanonValue canon.ParseFault)
+  := do
+  let s ← core.str.Str.as_bytes input
+  let i ← canon.skip_ws s 0#usize
+  let r ← canon.parse_value s i 0#usize
+  match r with
+  | core.result.Result.Ok p =>
+    let (v, j) := p
+    let k ← canon.skip_ws s j
+    let i1 := Slice.len s
+    if k != i1
+    then
+      ok (core.result.Result.Err (canon.ParseFault.At
+        canon.ParseError.TrailingData k))
+    else ok (core.result.Result.Ok v)
+  | core.result.Result.Err e => ok (core.result.Result.Err e)
 
 /-- [averin_decision_core::checkpoint::CHECKPOINT_DOMAIN]
     Source: 'core/src/checkpoint.rs', lines 12:0-12:67
