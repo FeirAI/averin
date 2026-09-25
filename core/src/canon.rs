@@ -806,8 +806,9 @@ fn parse_object(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize),
     if at(s, i, b'}') {
         return Ok((CanonValue::Object(members), i + 1));
     }
-    // Every key parsed so far (already NFC-normalized), in input order: its UTF-16 code units, the
-    // offset of its opening quote and its text, for the duplicate check below.
+    // Every key parsed so far (already NFC-normalized), in input order: its bytes widened to `u16`
+    // (a sort key for `sort_by_units`; only equality matters here), the offset of its opening quote
+    // and its text, for the duplicate check below.
     let mut units: Vec<Vec<u16>> = Vec::new();
     let mut starts: Vec<usize> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
@@ -822,7 +823,7 @@ fn parse_object(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize),
             let key_pos = i;
             match parse_string(s, i) {
                 Ok((key, j)) => {
-                    units.push(utf16_units(key.as_bytes()));
+                    units.push(widen(key.as_bytes()));
                     starts.push(key_pos);
                     keys.push(key.clone());
                     i = skip_ws(s, j);
@@ -891,6 +892,17 @@ fn first_repeat(units: &Vec<Vec<u16>>) -> usize {
         n += 1;
     }
     first
+}
+
+/// `s`, one `u16` per byte: equal exactly when the byte strings are equal.
+fn widen(s: &[u8]) -> Vec<u16> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        out.push(s[i] as u16);
+        i += 1;
+    }
+    out
 }
 
 /// Parse a JSON string, decode escapes (rejecting lone surrogates and raw control chars),
