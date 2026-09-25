@@ -336,7 +336,8 @@ jobs:
           - full_chunk_is_canonical
           - utf16_strict_matches_std
           - integer_roundtrip
-          - accepted_integer_spelling_is_canonical
+          # A checked shard family (formal/check-kani-shards.py): every shard must pass.
+          - accepted_integer_spelling
     steps:
       - uses: actions/checkout@v4
       - uses: model-checking/kani-github-action@v1.1
@@ -344,7 +345,12 @@ jobs:
           kani-version: 0.68.0
           command: cargo-kani
           args: --version
-      - run: timeout 8400 bash formal/run-kani.sh --harness ${{ matrix.harness }}
+      - run: |
+          if python3 formal/check-kani-shards.py --families | grep -qxF "${{ matrix.harness }}"; then
+            timeout 8400 bash formal/run-kani-shards.sh "${{ matrix.harness }}"
+          else
+            timeout 8400 bash formal/run-kani.sh --harness "${{ matrix.harness }}"
+          fi
 
   formal-tla:
     name: formal — TLA+ grant-log and consume-ledger models (expected outcomes)

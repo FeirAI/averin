@@ -4,7 +4,7 @@
 #
 #   bash formal/run-kani.sh              # default set: verified on a 4-core / 16 GB runner (each < 2 min)
 #   bash formal/run-kani.sh --extended   # also all eight extended property families
-#   bash formal/run-kani.sh --harness NAME  # one named harness for profiling and CI sharding
+#   bash formal/run-kani.sh --harness NAME  # one named harness (or checked shard) for profiling and CI sharding
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -46,12 +46,15 @@ run_harness() {
 if [ "${1:-}" = "--harness" ]; then
   [ "$#" -eq 2 ] || { echo "usage: $0 --harness NAME" >&2; exit 2; }
   case "$2" in
-    alphabet_is_a_bijection|hex_byte_roundtrip|hex_digit_is_canonical|lp_into_frames_exactly|utf16_key_order_is_exact|utf16_key_order_is_transitive|one_byte_tail_is_canonical|two_byte_tail_is_canonical|full_chunk_is_canonical|utf16_strict_matches_std|integer_roundtrip|accepted_integer_spelling_is_canonical|string_escape_roundtrip|parse_never_panics)
+    alphabet_is_a_bijection|hex_byte_roundtrip|hex_digit_is_canonical|lp_into_frames_exactly|utf16_key_order_is_exact|utf16_key_order_is_transitive|one_byte_tail_is_canonical|two_byte_tail_is_canonical|full_chunk_is_canonical|utf16_strict_matches_std|integer_roundtrip|string_escape_roundtrip|parse_never_panics)
       run_harness "$2" ;;
     integer_roundtrip_*)
       python3 formal/check-kani-domains.py --has-integer "$2" || { echo "unknown integer shard: $2" >&2; exit 2; }
       run_harness "$2" ;;
-    *) echo "unknown Kani harness: $2" >&2; exit 2 ;;
+    *)
+      # A shard or lemma of a checked sharded family (formal/check-kani-shards.py).
+      python3 formal/check-kani-shards.py --has "$2" || { echo "unknown Kani harness: $2" >&2; exit 2; }
+      run_harness "$2" ;;
   esac
   exit
 fi
@@ -81,7 +84,8 @@ if [ "${1:-}" = "--extended" ]; then
   # The original unsplit [-99999,99999] harness. Its eleven checked disjoint shards
   # (check-kani-domains.py --list-integer) remain available through --harness for CI sharding.
   run_harness integer_roundtrip
-  run_harness accepted_integer_spelling_is_canonical
+  # Sixty checked (length, first byte) shards plus the alphabet lemma; every shard must pass.
+  bash formal/run-kani-shards.sh accepted_integer_spelling
   run_harness string_escape_roundtrip
   run_harness parse_never_panics
 fi

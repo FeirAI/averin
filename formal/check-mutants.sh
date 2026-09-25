@@ -45,7 +45,7 @@ kani_harness() {
     m10-*) echo two_byte_tail_is_canonical ;;
     m11-*) echo full_chunk_is_canonical ;;
     m12-*) echo utf16_strict_matches_std ;;
-    m13-*) echo accepted_integer_spelling_is_canonical ;;
+    m13-*) echo accepted_integer_spelling_2_minus ;;
     m22-*) echo integer_roundtrip_zero ;;
     m23-*) echo integer_roundtrip_zero ;;
   esac
@@ -65,6 +65,7 @@ kani_expectation() {
   case "$1" in
     m4-*) echo 'core/src/hashx.rs|assertion failed' ;;
     m9-*|m10-*|m11-*) echo 'core/src/b64.rs|assertion failed' ;;
+    m13-*) echo 'core/src/canon.rs|no negative zero' ;;
     m23-*) echo 'core/src/canon.rs|numeric spelling reached general top-level parser' ;;
     *) echo 'core/src/canon.rs|assertion failed' ;;
   esac
@@ -167,7 +168,7 @@ for g in inventory oracle golden verdict adversarial; do
   fi
 done
 if [ "$use_kani" = 1 ]; then
-  for h in utf16_key_order_is_exact lp_into_frames_exactly one_byte_tail_is_canonical two_byte_tail_is_canonical full_chunk_is_canonical utf16_strict_matches_std accepted_integer_spelling_is_canonical integer_roundtrip_zero; do
+  for h in utf16_key_order_is_exact lp_into_frames_exactly one_byte_tail_is_canonical two_byte_tail_is_canonical full_chunk_is_canonical utf16_strict_matches_std accepted_integer_spelling_2_minus integer_roundtrip_zero; do
     if ! run_gate "baseline-$h" kani "$h" || ! grep -q 'VERIFICATION:- SUCCESSFUL' "$logs/baseline-$h-kani.log"; then
       echo "check-mutants: FAIL: Kani harness $h fails on the unmutated tree" >&2
       exit 1

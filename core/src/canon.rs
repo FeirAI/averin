@@ -1103,41 +1103,114 @@ mod kani_proofs {
     /// Exactly the bytes accepted by `spelling_byte`, each once.
     const SPELLING_BYTES: [u8; 15] = *b"0123456789-+.eE";
 
-    /// No second spelling: every ≤ 4-byte numeric literal the parser accepts is in canonical form
-    /// `-?(0|[1-9][0-9]*)` with no `-0` (so `00`, `01`, `-0`, `+1`, fractions and exponents are rejected).
-    ///
-    /// The length and first byte range over every value one concrete case at a time (the proof
-    /// first checks that `SPELLING_BYTES` is exactly the `spelling_byte` alphabet), so the
-    /// top-level dispatch is concrete; the remaining bytes stay symbolic over the same alphabet.
+    /// `SPELLING_BYTES` is exactly the `spelling_byte` alphabet, so the per-first-byte shards
+    /// below enumerate every first byte of the original domain.
     #[kani::proof]
-    #[kani::unwind(16)]
-    fn accepted_integer_spelling_is_canonical() {
+    fn spelling_alphabet_is_exact() {
         let any_byte: u8 = kani::any();
         assert_eq!(spelling_byte(any_byte), SPELLING_BYTES.contains(&any_byte));
+    }
+
+    /// The assertion body shared by every spelling shard: a `len`-byte literal whose first byte is
+    /// `first` and whose other bytes range symbolically over the whole spelling alphabet.
+    fn accepted_integer_spelling_case(len: usize, first: u8) {
         let mut raw: [u8; 4] = kani::any();
         for b in &raw[1..] {
             kani::assume(spelling_byte(*b));
         }
-        for len in 1..=4 {
-            for first in SPELLING_BYTES {
-                raw[0] = first;
-                let bytes = &raw[..len];
-                assert!(bytes.iter().all(|b| b.is_ascii()));
-                // SAFETY: every byte was just checked to be ASCII, hence valid UTF-8
-                // (skipping `from_utf8` keeps its validation loop out of the model).
-                let text = unsafe { core::str::from_utf8_unchecked(bytes) };
-                let parsed = CanonValue::parse_typed(text);
-                if matches!(parsed, Ok(CanonValue::Int(_))) {
-                    let digits = text.strip_prefix('-').unwrap_or(text).as_bytes();
-                    assert!(!digits.is_empty() && digits.iter().all(|b| b.is_ascii_digit()));
-                    assert!(digits[0] != b'0' || digits.len() == 1, "no leading zero");
-                    assert!(text != "-0", "no negative zero");
-                }
-                // Destruction of the harness-owned result is outside the property.
-                core::mem::forget(parsed);
-            }
+        raw[0] = first;
+        let bytes = &raw[..len];
+        assert!(bytes.iter().all(|b| b.is_ascii()));
+        // SAFETY: every byte was just checked to be ASCII, hence valid UTF-8
+        // (skipping `from_utf8` keeps its validation loop out of the model).
+        let text = unsafe { core::str::from_utf8_unchecked(bytes) };
+        let parsed = CanonValue::parse_typed(text);
+        if matches!(parsed, Ok(CanonValue::Int(_))) {
+            let digits = text.strip_prefix('-').unwrap_or(text).as_bytes();
+            assert!(!digits.is_empty() && digits.iter().all(|b| b.is_ascii_digit()));
+            assert!(digits[0] != b'0' || digits.len() == 1, "no leading zero");
+            assert!(text != "-0", "no negative zero");
         }
+        // Destruction of the harness-owned result is outside the property.
+        core::mem::forget(parsed);
     }
+
+    /// No second spelling: every ≤ 4-byte numeric literal the parser accepts is in canonical form
+    /// `-?(0|[1-9][0-9]*)` with no `-0` (so `00`, `01`, `-0`, `+1`, fractions and exponents are
+    /// rejected). The original domain (length 1..=4, every byte in the spelling alphabet) is proved
+    /// as the 60 disjoint shards below, one per concrete (length, first byte), so the top-level
+    /// dispatch is concrete; `check-kani-shards.py` checks the table covers every pair exactly once.
+    macro_rules! spelling_shard {
+        ($name:ident, $len:literal, $first:literal) => {
+            #[kani::proof]
+            #[kani::unwind(16)]
+            fn $name() {
+                accepted_integer_spelling_case($len, $first);
+            }
+        };
+    }
+
+    // These sixty lines are the proof-domain table parsed by formal/check-kani-shards.py.
+    spelling_shard!(accepted_integer_spelling_1_digit_0, 1, b'0');
+    spelling_shard!(accepted_integer_spelling_1_digit_1, 1, b'1');
+    spelling_shard!(accepted_integer_spelling_1_digit_2, 1, b'2');
+    spelling_shard!(accepted_integer_spelling_1_digit_3, 1, b'3');
+    spelling_shard!(accepted_integer_spelling_1_digit_4, 1, b'4');
+    spelling_shard!(accepted_integer_spelling_1_digit_5, 1, b'5');
+    spelling_shard!(accepted_integer_spelling_1_digit_6, 1, b'6');
+    spelling_shard!(accepted_integer_spelling_1_digit_7, 1, b'7');
+    spelling_shard!(accepted_integer_spelling_1_digit_8, 1, b'8');
+    spelling_shard!(accepted_integer_spelling_1_digit_9, 1, b'9');
+    spelling_shard!(accepted_integer_spelling_1_minus, 1, b'-');
+    spelling_shard!(accepted_integer_spelling_1_plus, 1, b'+');
+    spelling_shard!(accepted_integer_spelling_1_dot, 1, b'.');
+    spelling_shard!(accepted_integer_spelling_1_e, 1, b'e');
+    spelling_shard!(accepted_integer_spelling_1_upper_e, 1, b'E');
+    spelling_shard!(accepted_integer_spelling_2_digit_0, 2, b'0');
+    spelling_shard!(accepted_integer_spelling_2_digit_1, 2, b'1');
+    spelling_shard!(accepted_integer_spelling_2_digit_2, 2, b'2');
+    spelling_shard!(accepted_integer_spelling_2_digit_3, 2, b'3');
+    spelling_shard!(accepted_integer_spelling_2_digit_4, 2, b'4');
+    spelling_shard!(accepted_integer_spelling_2_digit_5, 2, b'5');
+    spelling_shard!(accepted_integer_spelling_2_digit_6, 2, b'6');
+    spelling_shard!(accepted_integer_spelling_2_digit_7, 2, b'7');
+    spelling_shard!(accepted_integer_spelling_2_digit_8, 2, b'8');
+    spelling_shard!(accepted_integer_spelling_2_digit_9, 2, b'9');
+    spelling_shard!(accepted_integer_spelling_2_minus, 2, b'-');
+    spelling_shard!(accepted_integer_spelling_2_plus, 2, b'+');
+    spelling_shard!(accepted_integer_spelling_2_dot, 2, b'.');
+    spelling_shard!(accepted_integer_spelling_2_e, 2, b'e');
+    spelling_shard!(accepted_integer_spelling_2_upper_e, 2, b'E');
+    spelling_shard!(accepted_integer_spelling_3_digit_0, 3, b'0');
+    spelling_shard!(accepted_integer_spelling_3_digit_1, 3, b'1');
+    spelling_shard!(accepted_integer_spelling_3_digit_2, 3, b'2');
+    spelling_shard!(accepted_integer_spelling_3_digit_3, 3, b'3');
+    spelling_shard!(accepted_integer_spelling_3_digit_4, 3, b'4');
+    spelling_shard!(accepted_integer_spelling_3_digit_5, 3, b'5');
+    spelling_shard!(accepted_integer_spelling_3_digit_6, 3, b'6');
+    spelling_shard!(accepted_integer_spelling_3_digit_7, 3, b'7');
+    spelling_shard!(accepted_integer_spelling_3_digit_8, 3, b'8');
+    spelling_shard!(accepted_integer_spelling_3_digit_9, 3, b'9');
+    spelling_shard!(accepted_integer_spelling_3_minus, 3, b'-');
+    spelling_shard!(accepted_integer_spelling_3_plus, 3, b'+');
+    spelling_shard!(accepted_integer_spelling_3_dot, 3, b'.');
+    spelling_shard!(accepted_integer_spelling_3_e, 3, b'e');
+    spelling_shard!(accepted_integer_spelling_3_upper_e, 3, b'E');
+    spelling_shard!(accepted_integer_spelling_4_digit_0, 4, b'0');
+    spelling_shard!(accepted_integer_spelling_4_digit_1, 4, b'1');
+    spelling_shard!(accepted_integer_spelling_4_digit_2, 4, b'2');
+    spelling_shard!(accepted_integer_spelling_4_digit_3, 4, b'3');
+    spelling_shard!(accepted_integer_spelling_4_digit_4, 4, b'4');
+    spelling_shard!(accepted_integer_spelling_4_digit_5, 4, b'5');
+    spelling_shard!(accepted_integer_spelling_4_digit_6, 4, b'6');
+    spelling_shard!(accepted_integer_spelling_4_digit_7, 4, b'7');
+    spelling_shard!(accepted_integer_spelling_4_digit_8, 4, b'8');
+    spelling_shard!(accepted_integer_spelling_4_digit_9, 4, b'9');
+    spelling_shard!(accepted_integer_spelling_4_minus, 4, b'-');
+    spelling_shard!(accepted_integer_spelling_4_plus, 4, b'+');
+    spelling_shard!(accepted_integer_spelling_4_dot, 4, b'.');
+    spelling_shard!(accepted_integer_spelling_4_e, 4, b'e');
+    spelling_shard!(accepted_integer_spelling_4_upper_e, 4, b'E');
 
     /// Character classes of the string domain: any ASCII scalar (the symbolic byte), U+00E9 (a
     /// two-byte NFC-stable scalar with a canonical decomposition) and U+1F600 (a four-byte
