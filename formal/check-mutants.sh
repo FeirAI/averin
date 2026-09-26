@@ -104,6 +104,9 @@ named_detector() {
     # fail the regenerated proof; a call site overriding the kernel's claims fails call-path (m59).
     m54-*|m55-*|m56-*|m57-*|m58-*) [ "${SKIP_PRODUCTION_PROOF:-0}" = 1 ] || echo 'production-proof|proof' ;;
     m59-*) echo 'production|call-path' ;;
+    # Parser panic-freedom (m60-m64): an out-of-bounds index, an arithmetic overflow or a panic on a
+    # reachable parser path must fail the regenerated totality proof (Refinement.Parse).
+    m60-*|m61-*|m62-*|m63-*|m64-*) [ "${SKIP_PRODUCTION_PROOF:-0}" = 1 ] || echo 'production-proof|proof' ;;
   esac
 }
 

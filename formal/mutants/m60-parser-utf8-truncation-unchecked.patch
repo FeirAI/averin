@@ -1,0 +1,15 @@
+Mutant: next_utf8_char no longer checks that the whole announced UTF-8 sequence is in the input,
+so utf8_scalar can index past the end (reachable only with invalid UTF-8 bytes, which the proof's
+all-byte-strings domain includes).
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -1093,7 +1093,7 @@
+     } else {
+         return Err(ParseError::At(ErrorKind::Utf8Lead, i));
+     };
+-    if s.len() - i < len {
++    if s.len() - i < 1 {
+         return Err(ParseError::At(ErrorKind::Utf8Truncated, i));
+     }
+     match utf8_scalar(s, i, len) {

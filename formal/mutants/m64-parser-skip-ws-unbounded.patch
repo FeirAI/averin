@@ -1,0 +1,14 @@
+Mutant: skip_ws reads the next byte without checking the end of input, so whitespace at the end of
+the input indexes past it.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -663,7 +663,7 @@
+ 
+ fn skip_ws(s: &[u8], i: usize) -> usize {
+     let mut i = i;
+-    while i < s.len() && is_ws(s[i]) {
++    while is_ws(s[i]) {
+         i += 1;
+     }
+     i

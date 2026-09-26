@@ -1,0 +1,13 @@
+Mutant: parse_value panics on an unexpected character instead of returning a parse error.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -714,7 +714,7 @@
+     } else if b == b'-' || is_digit(b) {
+         parse_number(s, i)
+     } else {
+-        Err(ParseError::At(ErrorKind::UnexpectedChar, i))
++        panic!("unexpected character")
+     }
+ }
+ 
