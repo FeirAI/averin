@@ -291,9 +291,10 @@ jobs:
     name: formal — mutation suite (every known drift must be caught by a gate)
     runs-on: ubuntu-latest
     # The unmutated baseline reruns every mutant-bearing Kani harness before the mutants.
+    # utf16_strict_matches_std alone took 1,641 s idle and several times that under load locally.
     timeout-minutes: 360
     env:
-      KANI_TIMEOUT_SECONDS: "5400"
+      KANI_TIMEOUT_SECONDS: "7200"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -388,6 +389,27 @@ jobs:
           else
             timeout 8400 bash formal/run-kani.sh --harness "${{ matrix.harness }}"
           fi
+
+  formal-kani-strings:
+    # string_escape_roundtrip: 17,031 concrete cases (check-kani-shards.py proves the case list is
+    # exactly the original domain), split into 26 contiguous slices of at most 656 cases. Measured
+    # locally: about 6 s of CBMC per ASCII case, about 30 s per case with U+00E9/U+1F600, and much
+    # longer for the NFC-heavy astral pair; every case must pass, a timeout is a failure.
+    name: formal — Kani string round trip (slice ${{ matrix.slice }}/26)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: model-checking/kani-github-action@v1.1
+        with:
+          kani-version: 0.68.0
+          command: cargo-kani
+          args: --version
+      - run: KANI_SHARD_GROUP=64 KANI_SHARD_SLICE=${{ matrix.slice }}/26 timeout 21000 bash formal/run-kani-shards.sh string_escape_roundtrip
 
   formal-tla:
     name: formal — TLA+ grant-log and consume-ledger models (expected outcomes)
