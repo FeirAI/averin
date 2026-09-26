@@ -2,6 +2,17 @@ import Refinement.Sort
 import Refinement.VerdictLists
 open Aeneas Aeneas.Std Result Aeneas.Std.WP averin_decision_core
 
+/-!
+# The parser's leaf functions return
+
+Total specifications (`f args ⦃ r => P r ⦄`: returns `ok r` with `P r`) of the extracted parser's
+non-recursive helpers and loops: whitespace, literals, numbers (with the checked i64 magnitude
+accumulation), `\u` escapes, UTF-8 scalar validation, UTF-16 and UTF-8 encoding, the strict UTF-16
+decoder and `parse_string`. Loops terminate by `termination_by` on the bytes left. String lengths
+use the weight `W` (UTF-8 bytes each UTF-16 unit decodes to), bounded by the input consumed.
+See "Parser panic-freedom" in `formal/production/README.md`.
+-/
+
 namespace Refinement.Parse
 
 @[step]

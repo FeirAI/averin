@@ -1,6 +1,15 @@
 import Refinement.ParseSort
 open Aeneas Aeneas.Std Result Aeneas.Std.WP averin_decision_core
 
+/-!
+# The production RCP parser returns for every input
+
+`parse_document_total`: the extracted `canon::parse_document` (the body of
+`CanonValue::parse_typed`) evaluates to `ok` for every input byte string, under `NfcFits`.
+The mutually recursive `parse_value`/`parse_array`/`parse_object` and their loops are proved
+together by well-founded recursion on `4 * (bytes left) + rank` (`parse_decreasing`).
+-/
+
 namespace Refinement.Parse
 
 /-- Rust's `String` invariant for the values the trusted NFC primitive returns: a `String` fits in

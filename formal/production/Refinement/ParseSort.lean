@@ -1,6 +1,14 @@
 import Refinement.ParseLeaf
 open Aeneas Aeneas.Std Result Aeneas.Std.WP averin_decision_core
 
+/-!
+# The duplicate-key check returns
+
+Totality of `canon::first_repeat` (the parser's post-NFC duplicate-key check) and of what it calls:
+`widen`, `positions`, `units_lt`, the merge loop and the production merge sort `sort_by_units`
+(whose results stay a permutation-sized list of in-range positions).
+-/
+
 namespace Refinement.Parse
 
 /-- Close list-length/membership side goals left by `step*`. -/

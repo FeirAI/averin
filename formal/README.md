@@ -19,7 +19,7 @@ fixed corpus. The TLA+ recovery liveness result depends on its retry and fairnes
 | Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every message a key signs and every tagged or verifier-recomputed preimage (catalogue includes JSON challenges, capability tokens, raw keys, Merkle nodes, the RFC 3161 imprint string and server id derivations; untagged server-local digests are listed as out of scope), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
 | Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order and transitive (parser-level and base64 chunk harnesses in an extended set) | `bash formal/run-kani.sh` |
 | Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log, consume-before-act ledger, and two-replica project transactions with checkpoints, ambiguous commits, crash/restart, pending grants and revocations | `bash formal/tla/run-tlc.sh` |
-| Production refinement (plan 012) | Charon + Aeneas + Lean 4.31 (`production/`, `run-production-refinement.sh`) | the production seal core (serializer, LP framing, `sha256:` digest string, record/checkpoint preimages and hashes, signature message) is extracted from `core/src` and proved to be the model's `ser`/`lp`/`Family.msg`/`recordHashOf`; the model's seal theorems are applied to it. The verifier's claim kernel (`verify::verdict::decide_claims`) is extracted and proved to return the model's `decideClaim` for every claim, for every evidence state its checked facts correspond to; the verdict model's support-erasure, claim-order, capstone and historical theorems are transported to it. Axioms: standard + NFC + SHA-256 as arbitrary functions (the verdict theorems use only the standard axioms) | `bash formal/run-production-refinement.sh` |
+| Production refinement (plan 012) | Charon + Aeneas + Lean 4.31 (`production/`, `run-production-refinement.sh`) | the production seal core (serializer, LP framing, `sha256:` digest string, record/checkpoint preimages and hashes, signature message) is extracted from `core/src` and proved to be the model's `ser`/`lp`/`Family.msg`/`recordHashOf`; the model's seal theorems are applied to it. The verifier's claim kernel (`verify::verdict::decide_claims`) is extracted and proved to return the model's `decideClaim` for every claim, for every evidence state its checked facts correspond to; the verdict model's support-erasure, claim-order, capstone and historical theorems are transported to it. The production RCP parser (`CanonValue::parse`, via `parse_typed`/`parse_document`) is extracted and proved to return for every input of any length (`Refinement.Parse.parse_document_total`: no panic, overflow or out-of-bounds index, and termination), under the hypothesis that NFC's outputs are representable Rust strings. Axioms: standard + NFC + SHA-256 as arbitrary functions (the verdict theorems use only the standard axioms) | `bash formal/run-production-refinement.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
 | Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
 | Deterministic differential fuzz | `run-fuzz.sh`, `fuzz/regressions.tsv`, `core/tests/rcp_fuzz.rs` | sampled RCP lexical acceptance/rejection and canonical bytes, native C ABI parity, browser WASM parity, base64url round trips | `bash formal/run-fuzz.sh pr` |
@@ -298,6 +298,11 @@ accepts only exact patch basenames.
 | m22 | `Int(0)` serializes as `1` | Kani `integer_roundtrip_zero` (confirmed on final source) |
 | m23 | numeric input takes the general parser route | Kani fail-closed route guard in `integer_roundtrip_zero` (confirmed on final source) |
 | m24 | `utf16_units` preallocates half its input length | Kani fail-closed growth guard G1 in `utf16_key_order_is_transitive` (confirmed on final source) |
+| m60 | `next_utf8_char` stops checking that the announced UTF-8 sequence fits the input | regenerated production proof (`Refinement.Parse`, reason `proof`) only: reachable with invalid UTF-8 bytes, which no `&str` caller can supply |
+| m61 | `parse_literal` compares without checking the remaining length (`tru` reads past the end) | regenerated production proof (`proof`); also native gates |
+| m62 | `decimal_i64` drops its overflow guard (u64 magnitude overflows) | regenerated production proof (`proof`) |
+| m63 | `parse_value` panics on an unexpected character | regenerated production proof (`proof`); also native gates |
+| m64 | `skip_ws` reads past the end of input | regenerated production proof (`proof`); also native gates |
 | m40 | a receipt at the cutoff ordinal reads as before it | adversarial `temporal_revocation_decision_table` |
 | m41 | the strict policy decides the historical claim | verdict differential (`hist_*` rows with the policy unselected) |
 | m42 | a revocation-blocked receipt is relabeled without the remaining checks | adversarial `temporal_blocked_use_runs_every_later_check_before_a_historical_positive` |
@@ -428,8 +433,12 @@ harness or family):
   the leaf `Parser::next_utf8_char` is panic-free for every state (8 s). Function contracts cannot
   split `parse_string` (its byte loop, escapes, UTF-16 decoding and NFC share one function), and
   a hand-written `kani::Arbitrary` for `CanonValue` would be unsound. The harness stays in the
-  tree unchanged; unbounded parser panic-freedom is being pursued through the Aeneas/Lean
-  toolchain instead. Mutant m14 (a truncated `\u` escape check inverted) dies to native gates only.
+  tree unchanged and remains unverified on its domain. **It is superseded as the parser's
+  panic-freedom evidence** by the unbounded Lean theorem `Refinement.Parse.parse_document_total`
+  (`formal/production`, see "Parser panic-freedom" in `production/README.md`): the extracted
+  production parser returns `ok` for every byte string of any length, which covers every input
+  `parse_never_panics` would have checked. Mutant m14 (a truncated `\u` escape check inverted)
+  dies to the native gates; its out-of-bounds read is exactly what the Lean theorem excludes.
 
 **Resources and timeouts.** On a shared workstation run proofs under `kani-watchdog.sh`, which
 kills the whole process group (cargo, CBMC and CBMC's external SAT solver, whose process is

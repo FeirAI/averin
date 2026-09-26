@@ -1,9 +1,10 @@
-# Production refinement of the seal core and the verdict kernel (plan 012)
+# Production refinement of the seal core, the verdict kernel and the parser (plan 012)
 
 This project proves that the **production Rust** that computes record and checkpoint hashes and
 signature messages (phase A), and the verifier's claim decision kernel (phase B), implement the
 Averin model in `formal/lean`, so the model's seal and verdict theorems apply to the code that runs,
-not only to a model of it.
+not only to a model of it. It also proves that the production RCP parser returns for every input
+(panic-freedom and termination, below).
 
 The Rust is not re-implemented in Lean. `formal/run-production-refinement.sh` extracts it from
 `core/src` with [Charon](https://github.com/AeneasVerif/charon) and
@@ -123,18 +124,115 @@ iterator adapters, helper functions instead of derived `PartialEq`, helpers call
 function branches on a field of the facts, a negation first in a disjunction, and `&`/`|` for a
 conjunction with a `bool` parameter. All are semantics-preserving; the tests are unchanged.
 
+## Parser panic-freedom
+
+`canon::parse_document` is the body of `CanonValue::parse_typed`, which `CanonValue::parse` calls
+and whose typed error it renders into `CanonError` (`ParseError::into_public`: `format!` of fixed
+messages, not extracted; `check-production.py` pins `parse` and `parse_typed` to exactly these
+bodies). It and every function it calls are extracted, and `Refinement/Parse.lean` proves:
+
+```lean
+theorem Refinement.Parse.parse_document_total (hnfc : NfcFits) (input : Str) :
+    ∃ r, canon.parse_document input = ok r
+```
+
+`input` is any Aeneas `Str`: any byte string of any length up to `usize::MAX`, not only valid UTF-8,
+so the theorem covers more than any `&str` caller can supply. `ok r` excludes a panic (`fail`), an
+arithmetic overflow, an out-of-bounds index, a `Vec` growing past `usize::MAX` elements, and
+divergence: `r` is `Ok value` or `Err parse error`. Termination is proved, not assumed. The loops
+and the mutually recursive `parse_value`/`parse_array`/`parse_object` (Aeneas `partial_fixpoint`
+definitions) are handled by well-founded recursion on `4 * (bytes left) + rank`, where the rank is
+2 for a value, 1 for an array or object, and 3 for an open loop (0 once it has decided to stop).
+Every leaf has its own total specification (`Refinement/ParseLeaf.lean`: whitespace, literals,
+numbers with the checked i64 accumulation, `\u` escapes, UTF-8 validation, UTF-16 and UTF-8
+encoding, the strict UTF-16 decoder, `parse_string`; `Refinement/ParseSort.lean`: the
+duplicate-key check `first_repeat` through the production merge sort). A vector's length is
+bounded by the input bytes consumed. For decoded strings this uses a byte-weight invariant: each
+UTF-16 unit counts the UTF-8 bytes it decodes to, and the total never exceeds the input consumed.
+
+**Hypothesis `NfcFits`**: every string the trusted NFC primitive returns has at most `usize::MAX`
+UTF-8 bytes. This is Rust's `String` invariant (a returned `String` fits in memory, at most
+`isize::MAX` bytes). It is needed because the glue maps a Rust `String` to an unbounded Lean `String`,
+and the parser reads the bytes of each NFC-normalized object key for the duplicate check. It is a
+hypothesis of the theorem, never an axiom, and it constrains only NFC's outputs. `canon::nfc`, including its
+ASCII fast path (`if s.is_ascii() { s.to_string() }`, correct because every ASCII string is already
+NFC), is opaque to Charon: its panic-freedom and its agreement with Unicode NFC stay inside the
+trusted NFC boundary.
+
+**The parser rewrite and its equivalence evidence.** To be extractable, the parser
+(`core/src/canon.rs`) was rewritten:
+- It uses an explicit byte cursor, loops that record their outcome in state variables instead of
+  returning early, and a typed `ParseError` rendered only at the public boundary.
+- It uses manual UTF-8 scalar validation and i64 accumulation instead of `str::from_utf8`,
+  `chars().next().unwrap()`, `parse::<i64>` and `encode_utf16`.
+- Length checks are written as `s.len() - i < n` instead of `i + n > s.len()`, which cannot
+  overflow.
+- The post-NFC duplicate-key check moved from a `BTreeSet` to the production merge sort, as
+  described below.
+- The interfaces plan 011's Kani harnesses use (`parse_typed`, the numeric-first route,
+  `parse_top_level_general(&mut Parser)`, `decode_utf16_strict`) are kept with identical semantics.
+
+Accepted inputs, values, error messages and positions are unchanged. The evidence:
+- `core/tests/parser_differential.rs` runs the pre-rewrite parser (011's `canon.rs` at 8e5bf3d,
+  copied into the test as an oracle only) against production and requires identical `Result`s on:
+  - the fuzz regressions and, with `DIFF_CORPUS`, the `run-fuzz.sh` corpus;
+  - 200,000 generated documents (valid, mutated and doubly mutated) plus 200,000 noise strings;
+  - depth, width, integer-limit and scalar-range boundaries;
+  - the duplicate-key precedence cases.
+- `formal/run-fuzz.sh`: identical corpora across runs and equal to the pre-rewrite run, native
+  C-ABI and WASM parity.
+- The golden, adversarial, oracle and plan 010 conformance tests.
+
+**The duplicate-key check.** A key equal after NFC to an earlier key of the same object is rejected
+at its opening quote. The rewrite records each key's bytes widened to `u16`, its offset and its text
+as it is parsed, and runs the check once the object's loop stops, at `}` or at the first error. The
+check is `first_repeat`: the stable `sort_by_units` merge sort, then a scan of adjacent equal keys,
+O(n log n). The earliest repeated key precedes every later fault, which the original online check
+never reached, so reporting it first gives exactly the original result. The differential cases
+cover each ordering:
+- a duplicate followed by a syntax error;
+- a duplicate followed by an error inside its value;
+- an inner duplicate before and after an outer one;
+- NFC-equivalent keys;
+- the depth limit;
+- trailing data.
+
+The extra reading is bounded. After a duplicate, the parser reads at most the rest of that object,
+never past the end of the input or past the first error. Nesting stays capped at `MAX_DEPTH` = 256,
+and each byte is read once. So a rejected document costs no more time (O(n log n) for the checks)
+or memory (O(n)) than an accepted document of the same length.
+
+**Not proved.**
+- That the parser's results are correct, for example that an accepted document is valid RCP or
+  that no two keys of a parsed object coincide after NFC. The tests, fuzzing and the plan 011 Kani
+  families cover this.
+- A stronger form of the duplicate-key invariant, stated with the spec's `Canon`: that no two keys
+  of a parsed object coincide after a second NFC pass. With NFC an arbitrary function (no
+  idempotence assumed), this does not follow from the parser's check.
+- The error rendering `into_public`.
+
+Mutants `m60`–`m64` change a parser bound or add a reachable panic and fail the regenerated proof:
+- m60: UTF-8 truncation unchecked;
+- m61: literal compared past the end of input;
+- m62: decimal overflow guard dropped;
+- m63: panic on an unexpected character;
+- m64: whitespace scan past the end of input.
+
 ## Trusted base
 
 * **Axioms** (the only ones; `scripts/Audit.lean` fails on any other):
   `AverinTrusted.nfc` — Unicode NFC normalization (`unicode-normalization` 0.1.25, behind `canon::nfc`),
   and `AverinTrusted.sha256` — SHA-256 (`sha2` 0.10.9, behind `hashx::sha256`). Both are arbitrary total
-  functions: no property of either is assumed.
+  functions: no property of either is assumed. `canon::nfc` includes an ASCII fast path
+  (`s.to_string()` for ASCII input, which is already NFC); it is part of the opaque primitive.
+* **Theorem hypothesis `NfcFits`** (parser only, not an axiom): NFC's outputs are representable Rust
+  `String`s (at most `usize::MAX` bytes), Rust's `String` invariant; see "Parser panic-freedom".
 * **Rust standard library models** (definitions in `Extracted/FunsExternal.lean`, not axioms):
   `str::as_bytes` is the identity on Aeneas' UTF-8 representation of `&str`; `String::as_bytes` and
   `Deref<Target = str>` are the UTF-8 bytes of the Lean `String` Aeneas uses for `String`;
   `String::from_utf8` is `Ok` with the same bytes exactly on valid UTF-8 (Lean's verified decoder);
   `FromUtf8Error` is `Unit` (never inspected); `String::is_empty` is true exactly when the string has
-  no UTF-8 bytes (verdict kernel). `averin_decision_core.toStr` is Aeneas' literal
+  no UTF-8 bytes (verdict kernel); `String::clone` returns an equal string (parser key bookkeeping). `averin_decision_core.toStr` is Aeneas' literal
   conversion with a kernel-checked instead of `decide +native` bound.
 * **Toolchain**: rustc (the pinned nightly for extraction; production builds use 1.92.0), Charon
   `6258597`, Aeneas `557f7a1` and its Lean standard library (the semantics of `Vec`, slices, scalars,
@@ -149,7 +247,8 @@ conjunction with a `bool` parameter. All are semantics-preserving; the tests are
   `check-production.py` requires those functions to call the proved code (`manifest.json` `callers`),
   but their comparisons are glue checked by the existing tests and mutants. The claim kernel they
   feed is refined (phase B, above).
-* The parser (`CanonValue::parse`) is plan 011 (Kani).
+* The parser's functional correctness (which documents it accepts and what they parse to) is covered by
+  tests, fuzzing and plan 011's Kani families; this project proves only that it returns (above).
 * **Unextracted glue.** `serialize()`'s final `String::from_utf8` (a debug-asserted conversion of the
   proved byte output) and the public error mapping (`PreimageFault::into_record_error`, and the
   `compute_*`/`*_preimage` wrappers' `map_err`) are not extracted. `check-production.py` pins them
