@@ -77,6 +77,9 @@ theorem parse_value_spec (hnfc : NfcFits) (s : Slice Std.U8) (i depth : Std.Usiz
     | (rename_i p hp; obtain ⟨t, j⟩ := p; rw [hp] at r_post; simp only [StrOk] at r_post
        step*
        simp only [Adv]; exact ⟨r_post.1, r_post.2.1⟩)
+    | (rename_i p hp; obtain ⟨n, j⟩ := p; rw [hp] at r_post; simp only [Adv] at r_post
+       step*
+       simp only [Adv]; exact r_post)
 termination_by 4 * (s.length - i.val) + 2
 decreasing_by all_goals parse_decreasing
 
@@ -165,8 +168,8 @@ theorem digit_at_spec (s : Slice Std.U8) (i : Std.Usize) :
   unfold canon.digit_at; step*
 
 @[step]
-theorem finish_top_level_spec (s : Slice Std.U8) (v : canon.CanonValue) (i : Std.Usize)
-    (hi : i.val ≤ s.length) : canon.finish_top_level s v i ⦃ _ => True ⦄ := by
+theorem finish_top_level_spec (s : Slice Std.U8) (i : Std.Usize)
+    (hi : i.val ≤ s.length) : canon.finish_top_level s i ⦃ _ => True ⦄ := by
   unfold canon.finish_top_level
   step*
 

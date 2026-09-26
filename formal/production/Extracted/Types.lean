@@ -72,7 +72,7 @@ inductive canon.ParseError where
 | DuplicateKey : String → Std.Usize → canon.ParseError
 
 /-- [averin_decision_core::canon::Parser]
-    Source: 'core/src/canon.rs', lines 615:0-618:1 -/
+    Source: 'core/src/canon.rs', lines 623:0-626:1 -/
 structure canon.Parser where
   s : Slice Std.U8
   i : Std.Usize

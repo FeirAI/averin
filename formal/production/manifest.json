@@ -92,14 +92,14 @@
   },
   "sources": {
     "core/Cargo.toml": "0d90d1e08d2d474dcec1648f76a36aab993b098e47ec34d60614e9c67811cc2e",
-    "core/src/canon.rs": "265e0d880e9996cbba4472d18ee32337f596e12b6c682d4aa21002e541bf3b84",
+    "core/src/canon.rs": "b167ac5e381626f83a71493f05aa21e50da3650ed76e9737197a5fea8c3b90da",
     "core/src/hashx.rs": "3193a42763c19e681181c07bbb8e7ab6f37d0d27dd0bc6124d8f7067b7d043c7",
     "core/src/record.rs": "52dac5bd61b1609803f82824291d270eefd8774065cb9a78b2988d9276e2e1f4",
     "core/src/checkpoint.rs": "90ba12e80e5e89811f119840fe44b07a9e90a7d650b9f365b49f9feed3f455c4",
     "core/src/sign.rs": "cd3611f1ee9bfa13c9fa61353b6ea4412254bb539ae4a48ccfeb73babb3e80b3",
     "core/src/verify/verdict.rs": "3b1cb80cbadf608c51e3731191344e7ff9d0f39b83dd9832335b539fb27aee08",
-    "formal/production/Extracted/Types.lean": "0908515945140de6234d4f97632a04a87ee70f4c84f372a8650c646c41d9913d",
-    "formal/production/Extracted/Funs.lean": "b55629445996178fe4d2357022017d0df67967ac85aa5905ea96db52c154afbe"
+    "formal/production/Extracted/Types.lean": "f7999c3caef0caaae12617e0576067bb85748c171b992d85b7fa824b5eaac681",
+    "formal/production/Extracted/Funs.lean": "1986c890a5c2d0f1a89a340e92dfbb388429a728b82741b62a6c382ae71e0b58"
   },
   "extracted": {
     "canon::write_canonical": [
