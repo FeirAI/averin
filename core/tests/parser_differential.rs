@@ -1,7 +1,9 @@
 //! Differential test for the extractable parser rewrite (formal/production, parser panic-freedom).
 //!
-//! `reference` is the parser exactly as it was before that rewrite (core/src/canon.rs at 9513a97,
-//! `CanonValue::parse` and the `Parser` it drove), copied here only as a test oracle. Production
+//! `reference` is the parser exactly as it was before that rewrite (core/src/canon.rs on
+//! advisor/011-bounded-parser-proofs at 8e5bf3d: `CanonValue::parse`/`parse_typed`, its numeric
+//! top-level route, the `Parser` they drive and `nfc` with its ASCII fast path), copied here only
+//! as a test oracle. Production
 //! `CanonValue::parse` must return the identical `Result` (value, or error message and offset) on the
 //! fuzz corpus, the committed regressions, and a large generated corpus of valid, near-valid and
 //! random inputs.
@@ -13,23 +15,70 @@ mod reference {
     use std::collections::BTreeSet;
     use unicode_normalization::UnicodeNormalization;
 
-    fn nfc(s: &str) -> String {
-        s.nfc().collect()
+    // Keep parser decisions independent of diagnostic formatting. The public API still constructs
+    // precisely the same `CanonError` text at its boundary.
+    #[derive(Debug)]
+    struct ParseError {
+        message: ParseMessage,
+        pos: usize,
+    }
+
+    #[derive(Debug)]
+    enum ParseMessage {
+        Static(&'static str),
+        Expected(u8),
+        InvalidLiteral(&'static str),
+        DuplicateKey(String),
+    }
+
+    impl ParseError {
+        fn into_public(self) -> CanonError {
+            let msg = match self.message {
+                ParseMessage::Static(msg) => msg.to_string(),
+                ParseMessage::Expected(b) => format!("expected '{}'", b as char),
+                ParseMessage::InvalidLiteral(kw) => format!("invalid literal, expected '{kw}'"),
+                ParseMessage::DuplicateKey(key) => {
+                    format!("duplicate object key after NFC normalization: {key:?}")
+                }
+            };
+            CanonError { msg, pos: self.pos }
+        }
     }
 
     pub fn parse(input: &str) -> Result<CanonValue, CanonError> {
+        parse_typed(input).map_err(ParseError::into_public)
+    }
+
+    fn parse_typed(input: &str) -> Result<CanonValue, ParseError> {
         let mut p = Parser {
+            source: input,
             s: input.as_bytes(),
             i: 0,
             depth: 0,
         };
-        p.skip_ws();
-        let v = p.parse_value()?;
-        p.skip_ws();
-        if p.i != p.s.len() {
-            return Err(p.err("trailing data after top-level value"));
+        // A number at byte zero cannot start with insignificant whitespace. Route that
+        // common top-level case straight to the same number parser used by parse_value.
+        // Nested and all other top-level values retain the general dispatcher.
+        if input
+            .as_bytes()
+            .first()
+            .is_some_and(|b| *b == b'-' || b.is_ascii_digit())
+        {
+            let n = p.parse_number()?;
+            p.finish_top_level()?;
+            return Ok(CanonValue::Int(n));
         }
+        let v = parse_top_level_general(&mut p)?;
+        p.finish_top_level()?;
         Ok(v)
+    }
+
+    fn nfc(s: &str) -> String {
+        if s.is_ascii() {
+            s.to_string()
+        } else {
+            s.nfc().collect()
+        }
     }
 
     /// Maximum array/object nesting depth. Bounds recursion so deeply-nested untrusted input cannot
@@ -38,15 +87,24 @@ mod reference {
     const MAX_DEPTH: usize = 256;
 
     struct Parser<'a> {
+        source: &'a str,
         s: &'a [u8],
         i: usize,
         depth: usize,
     }
 
+    // The top-level nonnumeric route also handles leading whitespace before a value.
+    // Numeric-first input has no leading whitespace and uses the same parse_number method
+    // that parse_value would select, so this helper is unreachable for that input domain.
+    fn parse_top_level_general(p: &mut Parser<'_>) -> Result<CanonValue, ParseError> {
+        p.skip_ws();
+        p.parse_value()
+    }
+
     impl<'a> Parser<'a> {
-        fn err(&self, msg: &str) -> CanonError {
-            CanonError {
-                msg: msg.to_string(),
+        fn err(&self, msg: &'static str) -> ParseError {
+            ParseError {
+                message: ParseMessage::Static(msg),
                 pos: self.i,
             }
         }
@@ -66,38 +124,53 @@ mod reference {
             }
         }
 
-        fn parse_value(&mut self) -> Result<CanonValue, CanonError> {
+        fn finish_top_level(&mut self) -> Result<(), ParseError> {
+            self.skip_ws();
+            if self.i != self.s.len() {
+                Err(self.err("trailing data after top-level value"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn parse_value(&mut self) -> Result<CanonValue, ParseError> {
             match self.peek() {
                 Some(b'{') => self.parse_object(),
                 Some(b'[') => self.parse_array(),
                 Some(b'"') => Ok(CanonValue::Str(self.parse_string()?)),
                 Some(b't') | Some(b'f') => self.parse_bool(),
                 Some(b'n') => self.parse_null(),
-                Some(b'-') | Some(b'0'..=b'9') => self.parse_number(),
+                Some(b'-') | Some(b'0'..=b'9') => self.parse_number().map(CanonValue::Int),
                 Some(_) => Err(self.err("unexpected character")),
                 None => Err(self.err("unexpected end of input")),
             }
         }
 
-        fn expect(&mut self, b: u8) -> Result<(), CanonError> {
+        fn expect(&mut self, b: u8) -> Result<(), ParseError> {
             if self.peek() == Some(b) {
                 self.i += 1;
                 Ok(())
             } else {
-                Err(self.err(&format!("expected '{}'", b as char)))
+                Err(ParseError {
+                    message: ParseMessage::Expected(b),
+                    pos: self.i,
+                })
             }
         }
 
-        fn parse_keyword(&mut self, kw: &str) -> Result<(), CanonError> {
+        fn parse_keyword(&mut self, kw: &'static str) -> Result<(), ParseError> {
             if self.s[self.i..].starts_with(kw.as_bytes()) {
                 self.i += kw.len();
                 Ok(())
             } else {
-                Err(self.err(&format!("invalid literal, expected '{kw}'")))
+                Err(ParseError {
+                    message: ParseMessage::InvalidLiteral(kw),
+                    pos: self.i,
+                })
             }
         }
 
-        fn parse_bool(&mut self) -> Result<CanonValue, CanonError> {
+        fn parse_bool(&mut self) -> Result<CanonValue, ParseError> {
             if self.peek() == Some(b't') {
                 self.parse_keyword("true")?;
                 Ok(CanonValue::Bool(true))
@@ -107,12 +180,12 @@ mod reference {
             }
         }
 
-        fn parse_null(&mut self) -> Result<CanonValue, CanonError> {
+        fn parse_null(&mut self) -> Result<CanonValue, ParseError> {
             self.parse_keyword("null")?;
             Ok(CanonValue::Null)
         }
 
-        fn parse_number(&mut self) -> Result<CanonValue, CanonError> {
+        fn parse_number(&mut self) -> Result<i64, ParseError> {
             let start = self.i;
             if self.peek() == Some(b'-') {
                 self.i += 1;
@@ -137,24 +210,27 @@ mod reference {
             if let Some(b'e') | Some(b'E') = self.peek() {
                 return Err(self.err("exponent not allowed in RCP (integers only)"));
             }
-            let lexeme = std::str::from_utf8(&self.s[start..self.i]).unwrap();
+            // The scanner above consumed only ASCII '-' and digits. Keep the original validated
+            // string so this slice does not need a second UTF-8 validation pass. Every cursor
+            // advance elsewhere is ASCII or a whole scalar, so both indices are char boundaries.
+            let lexeme = &self.source[start..self.i];
             // RCP §3: `-0` is not a canonical integer spelling (consistent with rejecting `00`/`01`).
             if lexeme == "-0" {
-                return Err(CanonError {
-                    msg: "negative zero is not a canonical integer".to_string(),
+                return Err(ParseError {
+                    message: ParseMessage::Static("negative zero is not a canonical integer"),
                     pos: start,
                 });
             }
             match lexeme.parse::<i64>() {
-                Ok(n) => Ok(CanonValue::Int(n)),
-                Err(_) => Err(CanonError {
-                    msg: "integer out of signed 64-bit range".to_string(),
+                Ok(n) => Ok(n),
+                Err(_) => Err(ParseError {
+                    message: ParseMessage::Static("integer out of signed 64-bit range"),
                     pos: start,
                 }),
             }
         }
 
-        fn enter(&mut self) -> Result<(), CanonError> {
+        fn enter(&mut self) -> Result<(), ParseError> {
             self.depth += 1;
             if self.depth > MAX_DEPTH {
                 return Err(self.err("nesting depth limit exceeded"));
@@ -162,7 +238,7 @@ mod reference {
             Ok(())
         }
 
-        fn parse_array(&mut self) -> Result<CanonValue, CanonError> {
+        fn parse_array(&mut self) -> Result<CanonValue, ParseError> {
             self.expect(b'[')?;
             self.enter()?;
             let mut items = Vec::new();
@@ -191,7 +267,7 @@ mod reference {
             Ok(CanonValue::Array(items))
         }
 
-        fn parse_object(&mut self) -> Result<CanonValue, CanonError> {
+        fn parse_object(&mut self) -> Result<CanonValue, ParseError> {
             self.expect(b'{')?;
             self.enter()?;
             let mut members: Vec<(String, CanonValue)> = Vec::new();
@@ -213,8 +289,8 @@ mod reference {
                 let key = self.parse_string()?; // already NFC-normalized
                                                 // RCP §5: reject duplicate keys, checked AFTER NFC normalization.
                 if !seen.insert(key.clone()) {
-                    return Err(CanonError {
-                        msg: format!("duplicate object key after NFC normalization: {key:?}"),
+                    return Err(ParseError {
+                        message: ParseMessage::DuplicateKey(key),
                         pos: key_pos,
                     });
                 }
@@ -241,7 +317,7 @@ mod reference {
 
         /// Parse a JSON string, decode escapes (rejecting lone surrogates and raw control chars),
         /// and NFC-normalize (RCP §4).
-        fn parse_string(&mut self) -> Result<String, CanonError> {
+        fn parse_string(&mut self) -> Result<String, ParseError> {
             self.expect(b'"')?;
             let mut units: Vec<u16> = Vec::new(); // collect UTF-16 to handle surrogate pairs cleanly
             loop {
@@ -286,16 +362,15 @@ mod reference {
                 }
             }
             // Decode the UTF-16 units; a lone surrogate is invalid (RCP §4 — no U+FFFD substitution).
-            let s = decode_utf16_strict(&units).map_err(|m| CanonError {
-                msg: m,
+            let s = decode_utf16_strict(&units).map_err(|m| ParseError {
+                message: ParseMessage::Static(m),
                 pos: self.i,
             })?;
-            // NFC normalize (RCP §4). Through `nfc` (not `s.nfc()` inline) so the Kani harnesses can stub
-            // the Unicode tables and check the escape decoder itself.
+            // NFC normalize (RCP §4), including non-ASCII scalars and combining sequences.
             Ok(nfc(&s))
         }
 
-        fn parse_hex4(&mut self) -> Result<u16, CanonError> {
+        fn parse_hex4(&mut self) -> Result<u16, ParseError> {
             if self.i + 4 > self.s.len() {
                 return Err(self.err("truncated \\u escape"));
             }
@@ -315,7 +390,7 @@ mod reference {
         }
 
         /// Read one UTF-8 scalar value at the cursor, advancing past it. Returns (char, byte_len).
-        fn next_utf8_char(&mut self) -> Result<(char, usize), CanonError> {
+        fn next_utf8_char(&mut self) -> Result<(char, usize), ParseError> {
             let rest = &self.s[self.i..];
             // Determine length from lead byte, then validate via std.
             let lead = rest[0];
@@ -342,7 +417,7 @@ mod reference {
     }
 
     /// Strictly decode a UTF-16 unit sequence; reject unpaired surrogates.
-    fn decode_utf16_strict(units: &[u16]) -> Result<String, String> {
+    fn decode_utf16_strict(units: &[u16]) -> Result<String, &'static str> {
         let mut out = String::with_capacity(units.len());
         let mut i = 0;
         while i < units.len() {
@@ -350,22 +425,17 @@ mod reference {
             match u {
                 0xD800..=0xDBFF => {
                     // high surrogate; need a following low surrogate
-                    let lo = *units
-                        .get(i + 1)
-                        .ok_or_else(|| "unpaired high surrogate".to_string())?;
+                    let lo = *units.get(i + 1).ok_or("unpaired high surrogate")?;
                     if !(0xDC00..=0xDFFF).contains(&lo) {
-                        return Err("high surrogate not followed by low surrogate".to_string());
+                        return Err("high surrogate not followed by low surrogate");
                     }
                     let c = 0x10000 + (((u as u32 - 0xD800) << 10) | (lo as u32 - 0xDC00));
-                    out.push(char::from_u32(c).ok_or_else(|| "invalid scalar value".to_string())?);
+                    out.push(char::from_u32(c).ok_or("invalid scalar value")?);
                     i += 2;
                 }
-                0xDC00..=0xDFFF => return Err("unpaired low surrogate".to_string()),
+                0xDC00..=0xDFFF => return Err("unpaired low surrogate"),
                 _ => {
-                    out.push(
-                        char::from_u32(u as u32)
-                            .ok_or_else(|| "invalid scalar value".to_string())?,
-                    );
+                    out.push(char::from_u32(u as u32).ok_or("invalid scalar value")?);
                     i += 1;
                 }
             }

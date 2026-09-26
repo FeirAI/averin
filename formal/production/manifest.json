@@ -388,6 +388,16 @@
         "claims: ClaimResults::fatal\\(\\)": 2,
         "ClaimResults \\{ [a-z_]+ ?[:,}]": 0
       }
+    },
+    {
+      "file": "core/src/canon.rs",
+      "fn": "parse",
+      "body": "Self::parse_typed(input).map_err(ParseError::into_public)"
+    },
+    {
+      "file": "core/src/canon.rs",
+      "fn": "parse_typed",
+      "body": "parse_document(input)"
     }
   ]
 }

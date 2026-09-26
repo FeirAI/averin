@@ -1,0 +1,14 @@
+Mutant: utf16_units preallocates half the input length, so a key's pushes reallocate; the
+fail-closed Vec::push growth guard (G1) must refute it in the key-order proofs.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -407,7 +407,7 @@
+ 
+ /// The UTF-16 code units of UTF-8 text `s` (which is always valid: it comes from a `String`).
+ fn utf16_units(s: &[u8]) -> Vec<u16> {
+-    let mut units = Vec::with_capacity(s.len());
++    let mut units = Vec::with_capacity(s.len() / 2);
+     let mut i = 0;
+     while i < s.len() {
+         let b0 = s[i] as u32;

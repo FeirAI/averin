@@ -55,7 +55,7 @@ if [ -n "${AVERIN_LAKE_PACKAGES:-}" ] && [ ! -e "$PROD/.lake/packages" ]; then
 fi
 
 # ---- 1. toolchain-free checks (call paths, cfg, glue); staleness is checked after regeneration ----
-python3 "$PROD/check-production.py" --no-stale || exit 1
+python3 "$PROD/check-production.py" --self-test && python3 "$PROD/check-production.py" --no-stale || exit 1
 
 # ---- 2. regenerate the extraction from the checked-out source ------------------------------------
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/averin-012-extract.XXXXXX")"

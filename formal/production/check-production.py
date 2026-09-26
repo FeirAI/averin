@@ -5,14 +5,16 @@
   python3 formal/production/check-production.py --glue DIR  # also: DIR's *_Template.lean externals
   python3 formal/production/check-production.py --no-stale  # skip 1 (used before regeneration)
   python3 formal/production/check-production.py --update-hashes
+  python3 formal/production/check-production.py --self-test  # the cfg filter's accepted/rejected forms
 
 1. stale: the recorded sha256 of every extracted source file and of the committed generated Lean
    match the checkout. Any edit to the extracted Rust must be followed by a regeneration
    (run-production-refinement.sh --write), which re-proves everything.
 2. call-path: each production entry point in manifest.json calls the extracted, proved function
    (exact body, or required fragments), and every proved function is defined exactly once.
-3. cfg: the extracted source files contain no cfg-selected code other than `#[cfg(test)]` and
-   `#[cfg(kani)]` items, so no feature selection can swap in unproved code.
+3. cfg: the extracted source files contain no cfg-selected code other than `#[cfg(test)]`,
+   `#[cfg(kani)]` and `#[cfg(any(kani, test))]` items, so no feature selection can swap in
+   unproved code (`--self-test` checks the accepted and rejected forms).
 4. glue: Extracted/{Types,Funs}External.lean define exactly the externals the manifest lists, the
    generated files contain no `sorry`/`axiom`, and (with --glue) Aeneas requested exactly those.
 
@@ -103,17 +105,46 @@ def check_callers(m: dict) -> None:
             fail("call-path", f"{rel}: expected exactly one `fn {name}`, found {n}")
 
 
+# The only cfg attributes an extracted file may carry: test-only and proof-only items, which the
+# production build never compiles. Anything else (a feature, a target, `not(..)`) could select code
+# the proofs never saw.
+ALLOWED_CFG = ("#[cfg(test)]", "#[cfg(kani)]", "#[cfg(any(kani, test))]")
+
+
+def cfg_violation(line: str) -> str | None:
+    """Why `line` (one source line) is cfg-selected production code, or None."""
+    s = line.strip()
+    if s.startswith("//"):
+        return None
+    if "cfg!(" in s or "cfg_attr" in s:
+        return "cfg-selected code in an extracted file"
+    if s.startswith("#[cfg") and s not in ALLOWED_CFG:
+        return "only " + ", ".join(ALLOWED_CFG) + " items are allowed"
+    return None
+
+
 def check_cfg(m: dict) -> None:
     files = {k for k in m["sources"] if k.startswith("core/src/")}
     for rel in sorted(files):
         for ln, line in enumerate((ROOT / rel).read_text().splitlines(), 1):
-            s = line.strip()
-            if s.startswith("//"):
-                continue
-            if "cfg!(" in s or "cfg_attr" in s:
-                fail("cfg", f"{rel}:{ln}: `{s}` (cfg-selected code in an extracted file)")
-            if s.startswith("#[cfg") and s not in ("#[cfg(test)]", "#[cfg(kani)]"):
-                fail("cfg", f"{rel}:{ln}: `{s}` (only #[cfg(test)] and #[cfg(kani)] items are allowed)")
+            why = cfg_violation(line)
+            if why:
+                fail("cfg", f"{rel}:{ln}: `{line.strip()}` ({why})")
+
+
+def self_test() -> None:
+    ok = ["#[cfg(test)]", "#[cfg(kani)]", "#[cfg(any(kani, test))]", "    #[cfg(test)]",
+          "// #[cfg(feature = \"x\")] in a comment", "let x = 1;"]
+    bad = ["#[cfg(feature = \"x\")]", "#[cfg(any(kani, feature = \"x\"))]", "#[cfg(not(test))]",
+           "#[cfg(any(test, kani))]", "#[cfg(all(kani, test))]", "#[cfg(target_arch = \"wasm32\")]",
+           "#[cfg_attr(test, derive(Debug))]", "if cfg!(debug_assertions) {", "#[cfg(any(kani,test))]"]
+    for s in ok:
+        if cfg_violation(s):
+            fail("cfg", f"self-test: accepted form rejected: {s!r}")
+    for s in bad:
+        if not cfg_violation(s):
+            fail("cfg", f"self-test: feature/target-selected form accepted: {s!r}")
+    print("production refinement: cfg self-test OK")
 
 
 def defined_names(text: str) -> set[str]:
@@ -160,6 +191,9 @@ def check_glue(m: dict, template_dir: Path | None) -> None:
 def main() -> int:
     m = json.loads(MANIFEST.read_text())
     args = sys.argv[1:]
+    if args[:1] == ["--self-test"]:
+        self_test()
+        return 0
     if args[:1] == ["--update-hashes"]:
         for rel in m["sources"]:
             m["sources"][rel] = sha256(ROOT / rel)

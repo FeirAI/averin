@@ -4,9 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import sys
 from pathlib import Path
+
+_spec = importlib.util.spec_from_file_location(
+    "check_kani_success", Path(__file__).resolve().parent / "check-kani-success.py"
+)
+_success = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_success)
 
 
 def failed_checks(output: str) -> list[dict[str, str]]:
@@ -31,7 +38,8 @@ def failed_checks(output: str) -> list[dict[str, str]]:
 
 
 def target_counterexample(
-    output: str, exit_code: int, source: str, description: str
+    output: str, exit_code: int, harness: str, source: str, description: str,
+    expect_guard: bool = False,
 ) -> tuple[bool, str]:
     # Kani 0.68.0 returns 1 for a completed failed verification (observed on m9).
     # Any other exit is a tool, timeout, or signal failure, not a mutant kill.
@@ -39,6 +47,18 @@ def target_counterexample(
         return False, "Kani did not exit as a completed failed verification"
     if "VERIFICATION:- FAILED" not in output:
         return False, "Kani did not report a completed failed verification"
+    selected = re.findall(r"^Checking harness (.+)\.\.\.$", output, re.MULTILINE)
+    if selected != [harness]:
+        return False, f"selected harnesses {selected!r} differ from {harness!r}"
+    okay, why = _success.stubs_match(output, harness, expect_guard)
+    if not okay:
+        return False, why
+    failed_harnesses = re.findall(r"^Verification failed for - (.+)$", output, re.MULTILINE)
+    if failed_harnesses != [harness]:
+        return False, "intended harness lacks an exact failed-harness summary"
+    completions = re.findall(r"^Complete - (.+)$", output, re.MULTILINE)
+    if completions != ["0 successfully verified harnesses, 1 failures, 1 total."]:
+        return False, "missing exact one-harness failure completion"
     failures = failed_checks(output)
     if not failures:
         return False, "no failed property in Kani output"
@@ -102,6 +122,8 @@ def completed_simple_gate(
 
 
 def self_test() -> None:
+    harness = "b64::kani_proofs::one_byte_tail_is_canonical"
+    selected = f"Checking harness {harness}...\n"
     prefix = """Check 1: target.assertion.1
 \t - Status: FAILURE
 \t - Description: \"assertion failed: expected equality\"
@@ -112,18 +134,40 @@ def self_test() -> None:
 \t - Description: \"unwinding assertion loop.0\"
 \t - Location: core/src/b64.rs:190:10 in function target
 """
-    tail = "\nSUMMARY:\n ** 1 of 2 failed\nVERIFICATION:- FAILED\n"
-    assert target_counterexample(prefix + tail, 1, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + tail, 0, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + tail, 124, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + tail, 137, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + tail, 143, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + tail, 2, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix, 1, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(unwind + tail, 1, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + unwind + tail, 1, "core/src/b64.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + tail, 1, "core/src/canon.rs", "assertion failed")[0]
-    assert not target_counterexample(prefix + tail, 1, "core/src/b64.rs", "index out of bounds")[0]
+    tail = f"\nSUMMARY:\n ** 1 of 2 failed\nVERIFICATION:- FAILED\nVerification failed for - {harness}\nComplete - 0 successfully verified harnesses, 1 failures, 1 total.\n"
+    good = selected + prefix + tail
+    def accepted(log: str, exit_code: int = 1, name: str = harness,
+                 source: str = "core/src/b64.rs", description: str = "assertion failed",
+                 expect_guard: bool = False) -> bool:
+        return target_counterexample(log, exit_code, name, source, description, expect_guard)[0]
+
+    assert accepted(good)
+    for bad_exit in (0, 2, 124, 137, 143):
+        assert not accepted(good, bad_exit)
+    assert not accepted(selected + prefix)
+    assert not accepted(selected + unwind + tail)
+    assert not accepted(selected + prefix + unwind + tail)
+    assert not accepted(good, source="core/src/canon.rs")
+    assert not accepted(good, description="index out of bounds")
+    assert not accepted(prefix + tail)
+    assert not accepted(good, name="b64::kani_proofs::two_byte_tail_is_canonical")
+    assert not accepted(good.replace(f"Verification failed for - {harness}",
+                                    "Verification failed for - another::harness"))
+    assert not accepted(good.replace(f"Verification failed for - {harness}",
+                                    f"Verification failed for - {harness}_suffix"))
+    assert not accepted(good.replace("1 failures, 1 total", "2 failures, 2 total"))
+    assert not accepted(good + "Complete - 0 successfully verified harnesses, 1 failures, 1 total.\n")
+    integer = "canon::kani_proofs::integer_roundtrip_zero"
+    int_log = good.replace(harness, integer)
+    int_sel = f"Checking harness {integer}...\n"
+    guarded = int_log.replace(int_sel, int_sel + f"  {_success.NUMERIC_GUARD}\n  {_success.ALIGN_A1}\n")
+    assert accepted(guarded, name=integer, expect_guard=True)
+    assert not accepted(int_log, name=integer, expect_guard=True)
+    assert not accepted(guarded, name=integer)
+    assert not accepted(guarded.replace("reject_general_in_integer_proof", "empty_stub"), name=integer, expect_guard=True)
+    assert not accepted(guarded.replace("- Stub: parse_top_level_general", "- Stub: other::parse_top_level_general"), name=integer, expect_guard=True)
+    assert not accepted(guarded + "  - Stub: another -> stub\n", name=integer, expect_guard=True)
+    assert not accepted(good.replace(selected, selected + f"  {_success.PUSH_G1}\n"))
     assert completed_simple_gate("oracle", "test result: FAILED. 0 passed; 1 failed;", 101, False)[0]
     assert not completed_simple_gate("oracle", "error: could not compile", 101, False)[0]
     assert not completed_simple_gate("golden", "test result: FAILED. 0 passed; 1 failed;", 124, False)[0]
@@ -160,6 +204,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", nargs="?", type=Path)
     parser.add_argument("exit_code", nargs="?", type=int)
+    parser.add_argument("harness", nargs="?")
     parser.add_argument("source", nargs="?")
     parser.add_argument("description", nargs="?")
     parser.add_argument("--self-test", action="store_true")
@@ -167,6 +212,7 @@ def main() -> int:
                                            "production", "production-proof"))
     parser.add_argument("--expect-success", action="store_true")
     parser.add_argument("--required-test")
+    parser.add_argument("--expect-guard", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -179,10 +225,11 @@ def main() -> int:
             args.gate, output, args.exit_code, args.expect_success, args.required_test
         )
     else:
-        if None in (args.source, args.description):
-            parser.error("source and description are required for Kani")
+        if None in (args.harness, args.source, args.description):
+            parser.error("harness, source and description are required for Kani")
         okay, why = target_counterexample(
-            output, args.exit_code, args.source, args.description
+            output, args.exit_code, args.harness, args.source, args.description,
+            args.expect_guard,
         )
     print(f"check-kani-mutant: {why}")
     return 0 if okay else 1

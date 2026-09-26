@@ -1,0 +1,13 @@
+Mutant: The strict UTF-16 decoder rejects the final valid low surrogate.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -1200,7 +1200,7 @@
+                 ok = false;
+             } else {
+                 let lo = units[i + 1] as u32;
+-                if lo < 0xDC00 || lo > 0xDFFF {
++                if lo < 0xDC00 || lo > 0xDFFE {
+                     fault = ErrorKind::HighNotLow;
+                     ok = false;
+                 } else {

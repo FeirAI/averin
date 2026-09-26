@@ -44,7 +44,13 @@ impl CanonValue {
     /// Parse a JSON document under RCP v1 rules. Rejects floats, out-of-range integers,
     /// duplicate keys (post-NFC), lone surrogates, and trailing garbage.
     pub fn parse(input: &str) -> Result<CanonValue, CanonError> {
-        parse_document(input).map_err(ParseFault::into_error)
+        Self::parse_typed(input).map_err(ParseError::into_public)
+    }
+
+    /// The parse with its typed error (the Kani harnesses call this); the body is `parse_document`,
+    /// which `formal/production` extracts and proves.
+    fn parse_typed(input: &str) -> Result<CanonValue, ParseError> {
+        parse_document(input)
     }
 
     /// Checked string constructor — NFC-normalizes (RCP §4). Preferred over `Str(..)` for
@@ -423,7 +429,13 @@ fn write_int(n: i64, out: &mut Vec<u8>) {
 
 /// NFC-normalize a string (RCP §4). Idempotent on already-normalized input.
 fn nfc(s: &str) -> String {
-    s.nfc().collect()
+    if s.is_ascii() {
+        // Every ASCII scalar is already NFC. This common production path also keeps symbolic
+        // ASCII parser proofs out of the Unicode normalization tables.
+        s.to_string()
+    } else {
+        s.nfc().collect()
+    }
 }
 
 /// Append a JSON string with RCP-minimal escaping (RCP §4). Byte-wise over UTF-8: every byte the
@@ -479,13 +491,13 @@ const MAX_DEPTH: usize = 256;
 //
 // Written, like the serializer, in the subset that `formal/run-production-refinement.sh` extracts with
 // Charon/Aeneas: the cursor is an explicit byte index, loops keep their outcome in state variables
-// instead of returning early, and a failure is a `ParseFault` that `CanonValue::parse` renders into a
+// instead of returning early, and a failure is a `ParseError` that `CanonValue::parse` renders into a
 // `CanonError` only at the public boundary. `formal/production` proves that `parse_document` returns
-// (a value or a `ParseFault`) for every input: no panic, overflow or out-of-bounds index, and it
+// (a value or a `ParseError`) for every input: no panic, overflow or out-of-bounds index, and it
 // terminates. The only opaque call is `nfc`.
 
 /// Why the parser stopped; `message` is the public `CanonError` text.
-pub(crate) enum ParseError {
+pub(crate) enum ErrorKind {
     TrailingData,
     UnexpectedChar,
     UnexpectedEnd,
@@ -516,62 +528,62 @@ pub(crate) enum ParseError {
     UnpairedLow,
 }
 
-impl ParseError {
+impl ErrorKind {
     fn message(&self) -> &'static str {
         match self {
-            ParseError::TrailingData => "trailing data after top-level value",
-            ParseError::UnexpectedChar => "unexpected character",
-            ParseError::UnexpectedEnd => "unexpected end of input",
-            ParseError::LiteralTrue => "invalid literal, expected 'true'",
-            ParseError::LiteralFalse => "invalid literal, expected 'false'",
-            ParseError::LiteralNull => "invalid literal, expected 'null'",
-            ParseError::MissingDigits => "invalid number: missing integer digits",
-            ParseError::Fraction => "floating-point not allowed in RCP (use integer micros)",
-            ParseError::Exponent => "exponent not allowed in RCP (integers only)",
-            ParseError::NegativeZero => "negative zero is not a canonical integer",
-            ParseError::OutOfRange => "integer out of signed 64-bit range",
-            ParseError::DepthLimit => "nesting depth limit exceeded",
-            ParseError::ArrayDelimiter => "expected ',' or ']' in array",
-            ParseError::ExpectedKey => "expected string key",
-            ParseError::ObjectDelimiter => "expected ',' or '}' in object",
-            ParseError::UnterminatedString => "unterminated string",
-            ParseError::UnterminatedEscape => "unterminated escape",
-            ParseError::InvalidEscape => "invalid string escape",
-            ParseError::RawControl => "raw control character in string (must be escaped)",
-            ParseError::TruncatedUnicodeEscape => "truncated \\u escape",
-            ParseError::InvalidHexDigit => "invalid hex digit in \\u escape",
-            ParseError::Utf8Lead => "invalid UTF-8 lead byte in string",
-            ParseError::Utf8Truncated => "truncated UTF-8 sequence in string",
-            ParseError::Utf8Invalid => "invalid UTF-8 in string",
-            ParseError::UnpairedHigh => "unpaired high surrogate",
-            ParseError::HighNotLow => "high surrogate not followed by low surrogate",
-            ParseError::InvalidScalar => "invalid scalar value",
-            ParseError::UnpairedLow => "unpaired low surrogate",
+            ErrorKind::TrailingData => "trailing data after top-level value",
+            ErrorKind::UnexpectedChar => "unexpected character",
+            ErrorKind::UnexpectedEnd => "unexpected end of input",
+            ErrorKind::LiteralTrue => "invalid literal, expected 'true'",
+            ErrorKind::LiteralFalse => "invalid literal, expected 'false'",
+            ErrorKind::LiteralNull => "invalid literal, expected 'null'",
+            ErrorKind::MissingDigits => "invalid number: missing integer digits",
+            ErrorKind::Fraction => "floating-point not allowed in RCP (use integer micros)",
+            ErrorKind::Exponent => "exponent not allowed in RCP (integers only)",
+            ErrorKind::NegativeZero => "negative zero is not a canonical integer",
+            ErrorKind::OutOfRange => "integer out of signed 64-bit range",
+            ErrorKind::DepthLimit => "nesting depth limit exceeded",
+            ErrorKind::ArrayDelimiter => "expected ',' or ']' in array",
+            ErrorKind::ExpectedKey => "expected string key",
+            ErrorKind::ObjectDelimiter => "expected ',' or '}' in object",
+            ErrorKind::UnterminatedString => "unterminated string",
+            ErrorKind::UnterminatedEscape => "unterminated escape",
+            ErrorKind::InvalidEscape => "invalid string escape",
+            ErrorKind::RawControl => "raw control character in string (must be escaped)",
+            ErrorKind::TruncatedUnicodeEscape => "truncated \\u escape",
+            ErrorKind::InvalidHexDigit => "invalid hex digit in \\u escape",
+            ErrorKind::Utf8Lead => "invalid UTF-8 lead byte in string",
+            ErrorKind::Utf8Truncated => "truncated UTF-8 sequence in string",
+            ErrorKind::Utf8Invalid => "invalid UTF-8 in string",
+            ErrorKind::UnpairedHigh => "unpaired high surrogate",
+            ErrorKind::HighNotLow => "high surrogate not followed by low surrogate",
+            ErrorKind::InvalidScalar => "invalid scalar value",
+            ErrorKind::UnpairedLow => "unpaired low surrogate",
         }
     }
 }
 
 /// A parse failure and its byte offset.
-pub(crate) enum ParseFault {
-    At(ParseError, usize),
+pub(crate) enum ParseError {
+    At(ErrorKind, usize),
     /// `expected '<byte>'`.
     Expected(u8, usize),
     /// A key equal after NFC to an earlier key of the same object (RCP §5), at its opening quote.
     DuplicateKey(String, usize),
 }
 
-impl ParseFault {
-    fn into_error(self) -> CanonError {
+impl ParseError {
+    fn into_public(self) -> CanonError {
         match self {
-            ParseFault::At(e, pos) => CanonError {
+            ParseError::At(e, pos) => CanonError {
                 msg: e.message().to_string(),
                 pos,
             },
-            ParseFault::Expected(b, pos) => CanonError {
+            ParseError::Expected(b, pos) => CanonError {
                 msg: format!("expected '{}'", b as char),
                 pos,
             },
-            ParseFault::DuplicateKey(key, pos) => CanonError {
+            ParseError::DuplicateKey(key, pos) => CanonError {
                 msg: format!("duplicate object key after NFC normalization: {key:?}"),
                 pos,
             },
@@ -580,19 +592,52 @@ impl ParseFault {
 }
 
 /// [`CanonValue::parse`] before rendering the error: one value, surrounded by optional whitespace.
-pub(crate) fn parse_document(input: &str) -> Result<CanonValue, ParseFault> {
+pub(crate) fn parse_document(input: &str) -> Result<CanonValue, ParseError> {
     let s = input.as_bytes();
-    let i = skip_ws(s, 0);
-    match parse_value(s, i, 0) {
+    // A number at byte zero cannot start with insignificant whitespace. Route that common top-level
+    // case straight to the same number parser `parse_value` selects; every other top-level value
+    // takes the general route (which the Kani integer proofs replace with a fail-closed guard).
+    if at(s, 0, b'-') || digit_at(s, 0) {
+        match parse_number(s, 0) {
+            Ok((v, j)) => finish_top_level(s, v, j),
+            Err(e) => Err(e),
+        }
+    } else {
+        let mut p = Parser { s, i: 0 };
+        match parse_top_level_general(&mut p) {
+            Ok(v) => finish_top_level(s, v, p.i),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// The input and the cursor of the general top-level route.
+struct Parser<'a> {
+    s: &'a [u8],
+    i: usize,
+}
+
+// The top-level nonnumeric route also handles leading whitespace before a value. Numeric-first
+// input has no leading whitespace and uses the same `parse_number` that `parse_value` would select,
+// so this helper is unreachable for that input domain.
+fn parse_top_level_general(p: &mut Parser<'_>) -> Result<CanonValue, ParseError> {
+    let i = skip_ws(p.s, p.i);
+    match parse_value(p.s, i, 0) {
         Ok((v, j)) => {
-            let k = skip_ws(s, j);
-            if k != s.len() {
-                Err(ParseFault::At(ParseError::TrailingData, k))
-            } else {
-                Ok(v)
-            }
+            p.i = j;
+            Ok(v)
         }
         Err(e) => Err(e),
+    }
+}
+
+/// The value `v` ending at `i` is the whole document: only whitespace may follow it.
+fn finish_top_level(s: &[u8], v: CanonValue, i: usize) -> Result<CanonValue, ParseError> {
+    let k = skip_ws(s, i);
+    if k != s.len() {
+        Err(ParseError::At(ErrorKind::TrailingData, k))
+    } else {
+        Ok(v)
     }
 }
 
@@ -604,6 +649,11 @@ fn is_ws(b: u8) -> bool {
 #[allow(clippy::manual_is_ascii_check)] // `u8::is_ascii_digit` is not in the extracted subset
 fn is_digit(b: u8) -> bool {
     matches!(b, b'0'..=b'9')
+}
+
+/// Whether the byte at `i` exists and is an ASCII digit.
+fn digit_at(s: &[u8], i: usize) -> bool {
+    i < s.len() && is_digit(s[i])
 }
 
 /// Whether the byte at `i` exists and is `b`.
@@ -619,19 +669,19 @@ fn skip_ws(s: &[u8], i: usize) -> usize {
     i
 }
 
-fn expect(s: &[u8], i: usize, b: u8) -> Result<usize, ParseFault> {
+fn expect(s: &[u8], i: usize, b: u8) -> Result<usize, ParseError> {
     if at(s, i, b) {
         Ok(i + 1)
     } else {
-        Err(ParseFault::Expected(b, i))
+        Err(ParseError::Expected(b, i))
     }
 }
 
 /// The value starting at `i`, and the offset just past it. `depth` counts the enclosing arrays and
 /// objects.
-fn parse_value(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), ParseFault> {
+fn parse_value(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), ParseError> {
     if i >= s.len() {
-        return Err(ParseFault::At(ParseError::UnexpectedEnd, i));
+        return Err(ParseError::At(ErrorKind::UnexpectedEnd, i));
     }
     let b = s[i];
     if b == b'{' {
@@ -648,7 +698,7 @@ fn parse_value(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), 
             s,
             i,
             b"true",
-            ParseError::LiteralTrue,
+            ErrorKind::LiteralTrue,
             CanonValue::Bool(true),
         )
     } else if b == b'f' {
@@ -656,15 +706,15 @@ fn parse_value(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), 
             s,
             i,
             b"false",
-            ParseError::LiteralFalse,
+            ErrorKind::LiteralFalse,
             CanonValue::Bool(false),
         )
     } else if b == b'n' {
-        parse_literal(s, i, b"null", ParseError::LiteralNull, CanonValue::Null)
+        parse_literal(s, i, b"null", ErrorKind::LiteralNull, CanonValue::Null)
     } else if b == b'-' || is_digit(b) {
         parse_number(s, i)
     } else {
-        Err(ParseFault::At(ParseError::UnexpectedChar, i))
+        Err(ParseError::At(ErrorKind::UnexpectedChar, i))
     }
 }
 
@@ -672,9 +722,9 @@ fn parse_literal(
     s: &[u8],
     i: usize,
     kw: &[u8],
-    err: ParseError,
+    err: ErrorKind,
     v: CanonValue,
-) -> Result<(CanonValue, usize), ParseFault> {
+) -> Result<(CanonValue, usize), ParseError> {
     // `s[i..].starts_with(kw)`, for `i <= s.len()`.
     let mut k = 0;
     if s.len() - i >= kw.len() {
@@ -685,11 +735,11 @@ fn parse_literal(
     if k == kw.len() {
         Ok((v, i + k))
     } else {
-        Err(ParseFault::At(err, i))
+        Err(ParseError::At(err, i))
     }
 }
 
-fn parse_number(s: &[u8], start: usize) -> Result<(CanonValue, usize), ParseFault> {
+fn parse_number(s: &[u8], start: usize) -> Result<(CanonValue, usize), ParseError> {
     let mut i = start;
     let negative = at(s, i, b'-');
     if negative {
@@ -705,22 +755,22 @@ fn parse_number(s: &[u8], start: usize) -> Result<(CanonValue, usize), ParseFaul
             i += 1;
         }
     } else {
-        return Err(ParseFault::At(ParseError::MissingDigits, i));
+        return Err(ParseError::At(ErrorKind::MissingDigits, i));
     }
     // RCP §3: floats are forbidden. A fraction or exponent here is a hard error.
     if at(s, i, b'.') {
-        return Err(ParseFault::At(ParseError::Fraction, i));
+        return Err(ParseError::At(ErrorKind::Fraction, i));
     }
     if at(s, i, b'e') || at(s, i, b'E') {
-        return Err(ParseFault::At(ParseError::Exponent, i));
+        return Err(ParseError::At(ErrorKind::Exponent, i));
     }
     // RCP §3: `-0` is not a canonical integer spelling (consistent with rejecting `00`/`01`).
     if negative && i - digits == 1 && s[digits] == b'0' {
-        return Err(ParseFault::At(ParseError::NegativeZero, start));
+        return Err(ParseError::At(ErrorKind::NegativeZero, start));
     }
     match decimal_i64(s, digits, i, negative) {
         Some(n) => Ok((CanonValue::Int(n), i)),
-        None => Err(ParseFault::At(ParseError::OutOfRange, start)),
+        None => Err(ParseError::At(ErrorKind::OutOfRange, start)),
     }
 }
 
@@ -756,10 +806,10 @@ fn decimal_i64(s: &[u8], from: usize, to: usize, negative: bool) -> Option<i64> 
     }
 }
 
-fn parse_array(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), ParseFault> {
+fn parse_array(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), ParseError> {
     let mut i = expect(s, i, b'[')?;
     if depth >= MAX_DEPTH {
-        return Err(ParseFault::At(ParseError::DepthLimit, i));
+        return Err(ParseError::At(ErrorKind::DepthLimit, i));
     }
     let mut items = Vec::new();
     i = skip_ws(s, i);
@@ -780,7 +830,7 @@ fn parse_array(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), 
                     i += 1;
                     open = false;
                 } else {
-                    fault = Some(ParseFault::At(ParseError::ArrayDelimiter, i));
+                    fault = Some(ParseError::At(ErrorKind::ArrayDelimiter, i));
                     open = false;
                 }
             }
@@ -796,10 +846,10 @@ fn parse_array(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), 
     }
 }
 
-fn parse_object(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), ParseFault> {
+fn parse_object(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), ParseError> {
     let mut i = expect(s, i, b'{')?;
     if depth >= MAX_DEPTH {
-        return Err(ParseFault::At(ParseError::DepthLimit, i));
+        return Err(ParseError::At(ErrorKind::DepthLimit, i));
     }
     let mut members: Vec<(String, CanonValue)> = Vec::new();
     i = skip_ws(s, i);
@@ -817,7 +867,7 @@ fn parse_object(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize),
     while open {
         i = skip_ws(s, i);
         if !at(s, i, b'"') {
-            fault = Some(ParseFault::At(ParseError::ExpectedKey, i));
+            fault = Some(ParseError::At(ErrorKind::ExpectedKey, i));
             open = false;
         } else {
             let key_pos = i;
@@ -840,8 +890,7 @@ fn parse_object(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize),
                                         i += 1;
                                         open = false;
                                     } else {
-                                        fault =
-                                            Some(ParseFault::At(ParseError::ObjectDelimiter, i));
+                                        fault = Some(ParseError::At(ErrorKind::ObjectDelimiter, i));
                                         open = false;
                                     }
                                 }
@@ -869,7 +918,7 @@ fn parse_object(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize),
     // fault, so reporting it first is what stopping at it would report.
     let dup = first_repeat(&units);
     if dup < units.len() {
-        return Err(ParseFault::DuplicateKey(keys[dup].clone(), starts[dup]));
+        return Err(ParseError::DuplicateKey(keys[dup].clone(), starts[dup]));
     }
     match fault {
         Some(e) => Err(e),
@@ -907,14 +956,14 @@ fn widen(s: &[u8]) -> Vec<u16> {
 
 /// Parse a JSON string, decode escapes (rejecting lone surrogates and raw control chars),
 /// and NFC-normalize (RCP §4).
-fn parse_string(s: &[u8], i: usize) -> Result<(String, usize), ParseFault> {
+fn parse_string(s: &[u8], i: usize) -> Result<(String, usize), ParseError> {
     let mut i = expect(s, i, b'"')?;
     let mut units: Vec<u16> = Vec::new(); // collect UTF-16 to handle surrogate pairs cleanly
     let mut fault = None;
     let mut open = true;
     while open {
         if i >= s.len() {
-            fault = Some(ParseFault::At(ParseError::UnterminatedString, i));
+            fault = Some(ParseError::At(ErrorKind::UnterminatedString, i));
             open = false;
         } else {
             let b = s[i];
@@ -924,7 +973,7 @@ fn parse_string(s: &[u8], i: usize) -> Result<(String, usize), ParseFault> {
             } else if b == b'\\' {
                 i += 1;
                 if i >= s.len() {
-                    fault = Some(ParseFault::At(ParseError::UnterminatedEscape, i));
+                    fault = Some(ParseError::At(ErrorKind::UnterminatedEscape, i));
                     open = false;
                 } else {
                     let e = s[i];
@@ -945,13 +994,13 @@ fn parse_string(s: &[u8], i: usize) -> Result<(String, usize), ParseFault> {
                         if u < 0x80 {
                             units.push(u);
                         } else {
-                            fault = Some(ParseFault::At(ParseError::InvalidEscape, i));
+                            fault = Some(ParseError::At(ErrorKind::InvalidEscape, i));
                             open = false;
                         }
                     }
                 }
             } else if b < 0x20 {
-                fault = Some(ParseFault::At(ParseError::RawControl, i));
+                fault = Some(ParseError::At(ErrorKind::RawControl, i));
                 open = false;
             } else {
                 // One UTF-8 scalar value, collected as UTF-16 units.
@@ -976,7 +1025,7 @@ fn parse_string(s: &[u8], i: usize) -> Result<(String, usize), ParseFault> {
         // NFC normalize (RCP §4). Through `nfc` (not `s.nfc()` inline) so the Kani harnesses can stub
         // the Unicode tables and check the escape decoder itself.
         Ok(t) => Ok((nfc(&t), i)),
-        Err(e) => Err(ParseFault::At(e, i)),
+        Err(e) => Err(ParseError::At(e, i)),
     }
 }
 
@@ -1006,31 +1055,31 @@ fn hex_value(c: u8) -> u16 {
 }
 
 /// The four hex digits of a `\u` escape at `i` (`i <= s.len()`), and the offset past them.
-fn parse_hex4(s: &[u8], i: usize) -> Result<(u16, usize), ParseFault> {
+fn parse_hex4(s: &[u8], i: usize) -> Result<(u16, usize), ParseError> {
     if s.len() - i < 4 {
-        return Err(ParseFault::At(ParseError::TruncatedUnicodeEscape, i));
+        return Err(ParseError::At(ErrorKind::TruncatedUnicodeEscape, i));
     }
     let d0 = hex_value(s[i]);
     if d0 > 15 {
-        return Err(ParseFault::At(ParseError::InvalidHexDigit, i));
+        return Err(ParseError::At(ErrorKind::InvalidHexDigit, i));
     }
     let d1 = hex_value(s[i + 1]);
     if d1 > 15 {
-        return Err(ParseFault::At(ParseError::InvalidHexDigit, i + 1));
+        return Err(ParseError::At(ErrorKind::InvalidHexDigit, i + 1));
     }
     let d2 = hex_value(s[i + 2]);
     if d2 > 15 {
-        return Err(ParseFault::At(ParseError::InvalidHexDigit, i + 2));
+        return Err(ParseError::At(ErrorKind::InvalidHexDigit, i + 2));
     }
     let d3 = hex_value(s[i + 3]);
     if d3 > 15 {
-        return Err(ParseFault::At(ParseError::InvalidHexDigit, i + 3));
+        return Err(ParseError::At(ErrorKind::InvalidHexDigit, i + 3));
     }
     Ok((d0 * 0x1000 + d1 * 0x100 + d2 * 0x10 + d3, i + 4))
 }
 
 /// Read one UTF-8 scalar value at `i < s.len()`. Returns (scalar, byte_len).
-fn next_utf8_char(s: &[u8], i: usize) -> Result<(u32, usize), ParseFault> {
+fn next_utf8_char(s: &[u8], i: usize) -> Result<(u32, usize), ParseError> {
     // Determine length from lead byte, then validate.
     let lead = s[i];
     let len = if lead < 0x80 {
@@ -1042,14 +1091,14 @@ fn next_utf8_char(s: &[u8], i: usize) -> Result<(u32, usize), ParseFault> {
     } else if lead >> 3 == 0b11110 {
         4
     } else {
-        return Err(ParseFault::At(ParseError::Utf8Lead, i));
+        return Err(ParseError::At(ErrorKind::Utf8Lead, i));
     };
     if s.len() - i < len {
-        return Err(ParseFault::At(ParseError::Utf8Truncated, i));
+        return Err(ParseError::At(ErrorKind::Utf8Truncated, i));
     }
     match utf8_scalar(s, i, len) {
         Some(c) => Ok((c, len)),
-        None => Err(ParseFault::At(ParseError::Utf8Invalid, i)),
+        None => Err(ParseError::At(ErrorKind::Utf8Invalid, i)),
     }
 }
 
@@ -1137,9 +1186,9 @@ fn push_utf8(out: &mut Vec<u8>, c: u32) {
 
 /// Strictly decode a UTF-16 unit sequence; reject unpaired surrogates.
 #[allow(clippy::manual_range_contains)] // range `contains` is not in the extracted subset
-fn decode_utf16_strict(units: &[u16]) -> Result<String, ParseError> {
+fn decode_utf16_strict(units: &[u16]) -> Result<String, ErrorKind> {
     let mut out: Vec<u8> = Vec::with_capacity(units.len());
-    let mut fault = ParseError::InvalidScalar;
+    let mut fault = ErrorKind::InvalidScalar;
     let mut ok = true;
     let mut i = 0;
     while ok && i < units.len() {
@@ -1147,12 +1196,12 @@ fn decode_utf16_strict(units: &[u16]) -> Result<String, ParseError> {
         if u >= 0xD800 && u <= 0xDBFF {
             // high surrogate; need a following low surrogate
             if i + 1 >= units.len() {
-                fault = ParseError::UnpairedHigh;
+                fault = ErrorKind::UnpairedHigh;
                 ok = false;
             } else {
                 let lo = units[i + 1] as u32;
                 if lo < 0xDC00 || lo > 0xDFFF {
-                    fault = ParseError::HighNotLow;
+                    fault = ErrorKind::HighNotLow;
                     ok = false;
                 } else {
                     push_utf8(&mut out, 0x10000 + (u - 0xD800) * 0x400 + (lo - 0xDC00));
@@ -1160,7 +1209,7 @@ fn decode_utf16_strict(units: &[u16]) -> Result<String, ParseError> {
                 }
             }
         } else if u >= 0xDC00 && u <= 0xDFFF {
-            fault = ParseError::UnpairedLow;
+            fault = ErrorKind::UnpairedLow;
             ok = false;
         } else {
             push_utf8(&mut out, u);
@@ -1173,7 +1222,207 @@ fn decode_utf16_strict(units: &[u16]) -> Result<String, ParseError> {
     // Always valid: every scalar was encoded above (the original `String::push` could not fail either).
     match String::from_utf8(out) {
         Ok(t) => Ok(t),
-        Err(_) => Err(ParseError::InvalidScalar),
+        Err(_) => Err(ErrorKind::InvalidScalar),
+    }
+}
+
+/// Number of strings in the `string_escape_roundtrip` proof domain: the empty string, the 130
+/// one-scalar strings and the 130 * 130 two-scalar strings over `string_proof_scalar`.
+#[cfg(any(kani, test))]
+const STRING_PROOF_CASES: usize = 1 + 130 + 130 * 130;
+
+/// The scalar alphabet of that domain: every ASCII scalar, U+00E9 (two bytes, with a canonical
+/// decomposition) and U+1F600 (astral, written as a surrogate pair by `\u` escapes).
+#[cfg(any(kani, test))]
+fn string_proof_scalar(i: usize) -> char {
+    if i < 128 {
+        i as u8 as char
+    } else if i == 128 {
+        '\u{E9}'
+    } else {
+        assert!(i == 129, "string proof scalar index out of range");
+        '\u{1F600}'
+    }
+}
+
+/// Case `k` of the domain: 0 is the empty string, 1..=130 the single scalars, then every ordered
+/// pair, first scalar major.
+#[cfg(any(kani, test))]
+fn string_proof_case(k: usize) -> String {
+    assert!(k < STRING_PROOF_CASES, "string proof case out of range");
+    let mut s = String::new();
+    if k == 0 {
+    } else if k <= 130 {
+        s.push(string_proof_scalar(k - 1));
+    } else {
+        let j = k - 131;
+        s.push(string_proof_scalar(j / 130));
+        s.push(string_proof_scalar(j % 130));
+    }
+    s
+}
+
+#[cfg(test)]
+mod error_compat_tests {
+    use super::*;
+
+    // Keep a copy of the prior top-level dispatch as an independent regression oracle for
+    // the numeric-first fast path. Both routes call the same production parser methods.
+    fn general_top_level_parse(input: &str) -> Result<CanonValue, CanonError> {
+        // The general route for every input, numeric-first included (bypassing the numeric route).
+        let s = input.as_bytes();
+        let mut p = Parser { s, i: 0 };
+        let typed = match parse_top_level_general(&mut p) {
+            Ok(v) => finish_top_level(s, v, p.i),
+            Err(e) => Err(e),
+        };
+        typed.map_err(ParseError::into_public)
+    }
+
+    #[test]
+    fn numeric_first_dispatch_matches_general_parser() {
+        let check = |input: &str| {
+            assert_eq!(
+                CanonValue::parse(input),
+                general_top_level_parse(input),
+                "{input:?}"
+            );
+        };
+        for line in include_str!("../../formal/fuzz/regressions.tsv")
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+        {
+            let input_hex = line.split('\t').nth(1).expect("fuzz corpus input");
+            let bytes = input_hex
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect();
+            check(&String::from_utf8(bytes).unwrap());
+        }
+        for input in [
+            "",
+            "0",
+            "-0",
+            "00",
+            "01",
+            "-01",
+            "-",
+            "-x",
+            "1.0",
+            "1e0",
+            "1E",
+            "1!",
+            "1 2",
+            "1\n",
+            " 1",
+            "\t-2\r",
+            "+1",
+            "9223372036854775807",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "-9223372036854775809",
+            "true",
+            "[1]",
+            "\"é\"",
+            "{\"a\":1}",
+        ] {
+            check(input);
+        }
+        for n in [-99_999, -10_000, -100, -1, 0, 1, 9, 10, 100, 99_999] {
+            check(&n.to_string());
+        }
+    }
+
+    #[test]
+    fn public_parser_errors_keep_their_text_and_position() {
+        let cases = [
+            ("tru", "invalid literal, expected 'true'", 0),
+            ("[1", "expected ',' or ']' in array", 2),
+            ("{\"x\" 1}", "expected ':'", 5),
+            (
+                "{\"é\":0,\"e\\u0301\":1}",
+                "duplicate object key after NFC normalization: \"é\"",
+                8,
+            ),
+            ("\"\\uD800\"", "unpaired high surrogate", 8),
+        ];
+        for (input, msg, pos) in cases {
+            let err = CanonValue::parse(input).unwrap_err();
+            assert_eq!((err.msg.as_str(), err.pos), (msg, pos), "{input}");
+        }
+    }
+
+    #[test]
+    fn real_nfc_normalizes_combining_sequence() {
+        assert_eq!(
+            CanonValue::parse("\"e\\u0301\"").unwrap(),
+            CanonValue::Str("é".into())
+        );
+    }
+
+    // The string round-trip proof checks one concrete case id per harness; these ids must
+    // enumerate exactly its domain: every string of at most two scalars over the 130-scalar
+    // alphabet (all ASCII, U+00E9, U+1F600), each exactly once.
+    #[test]
+    fn string_proof_cases_are_exactly_the_domain() {
+        let alphabet = |c: char| c.is_ascii() || c == '\u{E9}' || c == '\u{1F600}';
+        let mut seen = BTreeSet::new();
+        for k in 0..STRING_PROOF_CASES {
+            let s = string_proof_case(k);
+            assert!(
+                s.chars().count() <= 2 && s.chars().all(alphabet),
+                "{k}: {s:?}"
+            );
+            assert!(seen.insert(s), "case {k} repeats a string");
+        }
+        // 130 alphabet scalars (128 ASCII + 2), so the domain has 1 + 130 + 130^2 strings.
+        assert_eq!(
+            (0..=0x10FFFFu32)
+                .filter_map(char::from_u32)
+                .filter(|c| alphabet(*c))
+                .count(),
+            130
+        );
+        assert_eq!(seen.len(), 1 + 130 + 130 * 130);
+    }
+
+    // Native complement to the key-order proofs' fail-closed growth guard (G1): utf16_units never
+    // needs more than its `with_capacity(s.len())` preallocation, and yields std's UTF-16 units.
+    #[test]
+    fn utf16_units_fit_their_preallocation() {
+        let check = |s: &str| {
+            let units = utf16_units(s.as_bytes());
+            assert!(units.len() <= s.len(), "{s:?}");
+            assert_eq!(units, s.encode_utf16().collect::<Vec<u16>>(), "{s:?}");
+        };
+        let scalars: Vec<char> = (0..=0x10FFFFu32).filter_map(char::from_u32).collect();
+        for c in &scalars {
+            check(c.encode_utf8(&mut [0; 4]));
+        }
+        // Pairs over a spread of every width and the BMP/astral boundaries.
+        let sample: Vec<char> = scalars
+            .iter()
+            .copied()
+            .step_by(4099)
+            .chain([
+                '\0',
+                '\u{7F}',
+                '\u{80}',
+                '\u{7FF}',
+                '\u{800}',
+                '\u{D7FF}',
+                '\u{E000}',
+                '\u{FFFF}',
+                '\u{10000}',
+                '\u{10FFFF}',
+            ])
+            .collect();
+        for a in &sample {
+            for b in &sample {
+                check(&format!("{a}{b}"));
+            }
+        }
     }
 }
 
@@ -1184,77 +1433,296 @@ fn decode_utf16_strict(units: &[u16]) -> Result<String, ParseError> {
 mod kani_proofs {
     use super::*;
 
-    fn nfc_identity(s: &str) -> String {
-        s.to_string()
+    // This guard replaces only the top-level general route in integer harnesses. A proof
+    // fails if the real numeric-first dispatcher ever takes it; no successful behavior is
+    // supplied. The parser's number scanner and final trailing-data check remain real.
+    fn reject_general_in_integer_proof(_: &mut Parser<'_>) -> Result<CanonValue, ParseError> {
+        panic!("numeric spelling reached general top-level parser")
+    }
+
+    // ---- Fail-closed std-path guards and std-permitted behavior selections ----
+    //
+    // Each item below replaces a Rust std function only in the named harnesses that attach it
+    // with `#[kani::stub]`; `formal/check-kani-success.py` holds the exact per-harness allowlist
+    // and `formal/check-kani-shards.py` pins these bodies. See formal/README.md.
+
+    /// A1, a std-permitted behavior selection. `<*const T>::align_offset` documents (Rust
+    /// nightly-2026-08-21, the Kani 0.68 toolchain, library/core/src/ptr/const_ptr.rs): "It is
+    /// permissible for the implementation to always return `usize::MAX`. Only your algorithm's
+    /// performance can depend on getting a usable offset here, not its correctness." Selecting that
+    /// answer keeps std's UTF-8 validator on its byte-at-a-time path; its word-at-a-time fast path
+    /// (whose result std documents as identical) stays inside the trusted std boundary.
+    fn align_offset_usize_max<T>(_: *const T, _: usize) -> usize {
+        usize::MAX
+    }
+
+    /// G1, a fail-closed std-path guard. std's `Vec::push` (same toolchain,
+    /// library/alloc/src/vec/mod.rs) is `if len == self.buf.capacity() { self.buf.grow_one() }`
+    /// followed by writing `value` at `len` and setting the length to `len + 1`. This body asserts
+    /// (never assumes) that the growth branch is not taken, then runs exactly the non-growth branch,
+    /// so a proof passes only if no push on its whole domain would reallocate.
+    fn push_without_growth<T, A: std::alloc::Allocator>(v: &mut Vec<T, A>, value: T) {
+        let len = v.len();
+        assert!(
+            len < v.capacity(),
+            "Vec::push reached reallocation in a no-growth proof"
+        );
+        // SAFETY: len < capacity, so slot `len` is allocated and unused; std's non-growth branch.
+        unsafe {
+            v.as_mut_ptr().add(len).write(value);
+            v.set_len(len + 1);
+        }
+    }
+
+    /// The exact assertion body shared by the original full-domain proof and every exhaustive
+    /// decimal-width shard below. Only the input domain changes between harnesses.
+    fn integer_roundtrip_case(n: i64) {
+        let text = n.to_string();
+        // Prove the formatter's first byte before using it to prune impossible parser paths.
+        // The parse result and both round-trip equalities remain unconstrained.
+        let numeric_prefix = text
+            .as_bytes()
+            .first()
+            .is_some_and(|b| *b == b'-' || b.is_ascii_digit());
+        assert!(numeric_prefix, "decimal spelling needs sign or digit");
+        kani::assume(numeric_prefix);
+        let parsed = CanonValue::parse_typed(&text);
+        // The whole typed parse result must be exactly Int(n): an error, another variant or
+        // another integer all fail here.
+        assert!(matches!(&parsed, Ok(CanonValue::Int(parsed_n)) if *parsed_n == n));
+        // Destruction of the harness-owned parse result is outside the property: the assertion
+        // above has already read it, and production code never drops it.
+        core::mem::forget(parsed);
+        // Given that equality, Int(n) is the parsed value; its serialization must restore the
+        // exact spelling that was parsed.
+        assert!(CanonValue::Int(n).serialize() == text);
     }
 
     /// `parse(n.to_string()) == Int(n)` and serialization writes that same spelling back, for every
-    /// |n| < 10^5 (the i64 extremes are pinned by the golden vectors).
+    /// |n| < 10^5 (the i64 extremes are pinned by the golden vectors). This original full-domain
+    /// harness remains available for direct verification; CI can instead prove the exact union of
+    /// the disjoint shards below, checked by `formal/check-kani-domains.py`.
     #[kani::proof]
+    #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
+    #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
     #[kani::unwind(8)]
     fn integer_roundtrip() {
         let n: i64 = kani::any_where(|n: &i64| *n > -100_000 && *n < 100_000);
-        let text = n.to_string();
-        let v = CanonValue::parse(&text).unwrap();
-        assert_eq!(v, CanonValue::Int(n));
-        assert_eq!(v.serialize(), text);
+        integer_roundtrip_case(n);
     }
 
-    /// No second spelling: every ≤ 4-byte numeric literal the parser accepts is in canonical form
-    /// `-?(0|[1-9][0-9]*)` with no `-0` (so `00`, `01`, `-0`, `+1`, fractions and exponents are rejected).
+    macro_rules! integer_roundtrip_shard {
+        // The singleton shard is the same n == 0 domain without a symbolic i64 whose
+        // formatting path would otherwise remain symbolic to CBMC.
+        ($name:ident, u8, zero, 0, 0) => {
+            #[kani::proof]
+            #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
+            #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
+            #[kani::unwind(8)]
+            fn $name() {
+                integer_roundtrip_case(0);
+            }
+        };
+        ($name:ident, $ty:ty, positive, $lo:expr, $hi:expr) => {
+            #[kani::proof]
+            #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
+            #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
+            #[kani::unwind(8)]
+            fn $name() {
+                let magnitude: $ty = kani::any_where(|m: &$ty| *m >= $lo && *m <= $hi);
+                integer_roundtrip_case(magnitude as i64);
+            }
+        };
+        ($name:ident, $ty:ty, negative, $lo:expr, $hi:expr) => {
+            #[kani::proof]
+            #[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]
+            #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
+            #[kani::unwind(8)]
+            fn $name() {
+                let magnitude: $ty = kani::any_where(|m: &$ty| *m >= $lo && *m <= $hi);
+                integer_roundtrip_case(-(magnitude as i64));
+            }
+        };
+    }
+
+    // These eleven lines are the proof-domain table parsed by formal/check-kani-domains.py.
+    integer_roundtrip_shard!(integer_roundtrip_zero, u8, zero, 0, 0);
+    integer_roundtrip_shard!(integer_roundtrip_positive_1, u8, positive, 1, 9);
+    integer_roundtrip_shard!(integer_roundtrip_positive_2, u8, positive, 10, 99);
+    integer_roundtrip_shard!(integer_roundtrip_positive_3, u16, positive, 100, 999);
+    integer_roundtrip_shard!(integer_roundtrip_positive_4, u16, positive, 1000, 9999);
+    integer_roundtrip_shard!(integer_roundtrip_positive_5, u32, positive, 10000, 99999);
+    integer_roundtrip_shard!(integer_roundtrip_negative_1, u8, negative, 1, 9);
+    integer_roundtrip_shard!(integer_roundtrip_negative_2, u8, negative, 10, 99);
+    integer_roundtrip_shard!(integer_roundtrip_negative_3, u16, negative, 100, 999);
+    integer_roundtrip_shard!(integer_roundtrip_negative_4, u16, negative, 1000, 9999);
+    integer_roundtrip_shard!(integer_roundtrip_negative_5, u32, negative, 10000, 99999);
+
+    /// The bytes a numeric spelling harness draws from: digits, sign characters, the fraction
+    /// point and both exponent markers.
+    fn spelling_byte(b: u8) -> bool {
+        b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.' | b'e' | b'E')
+    }
+
+    /// Exactly the bytes accepted by `spelling_byte`, each once.
+    const SPELLING_BYTES: [u8; 15] = *b"0123456789-+.eE";
+
+    /// `SPELLING_BYTES` is exactly the `spelling_byte` alphabet, so the per-first-byte shards
+    /// below enumerate every first byte of the original domain.
     #[kani::proof]
-    #[kani::unwind(6)]
-    fn accepted_integer_spelling_is_canonical() {
-        let raw: [u8; 4] = kani::any();
-        let len: usize = kani::any_where(|l: &usize| *l >= 1 && *l <= 4);
-        for b in &raw[..len] {
-            kani::assume(b.is_ascii_digit() || matches!(*b, b'-' | b'+' | b'.' | b'e' | b'E'));
+    fn spelling_alphabet_is_exact() {
+        let any_byte: u8 = kani::any();
+        assert_eq!(spelling_byte(any_byte), SPELLING_BYTES.contains(&any_byte));
+    }
+
+    /// The assertion body shared by every spelling shard: a `len`-byte literal whose first byte is
+    /// `first` and whose other bytes range symbolically over the whole spelling alphabet.
+    fn accepted_integer_spelling_case(len: usize, first: u8) {
+        let mut raw: [u8; 4] = kani::any();
+        for b in &raw[1..] {
+            kani::assume(spelling_byte(*b));
         }
-        let text = core::str::from_utf8(&raw[..len]).unwrap();
-        if let Ok(CanonValue::Int(_)) = CanonValue::parse(text) {
+        raw[0] = first;
+        let bytes = &raw[..len];
+        assert!(bytes.iter().all(|b| b.is_ascii()));
+        // SAFETY: every byte was just checked to be ASCII, hence valid UTF-8
+        // (skipping `from_utf8` keeps its validation loop out of the model).
+        let text = unsafe { core::str::from_utf8_unchecked(bytes) };
+        let parsed = CanonValue::parse_typed(text);
+        if matches!(parsed, Ok(CanonValue::Int(_))) {
             let digits = text.strip_prefix('-').unwrap_or(text).as_bytes();
             assert!(!digits.is_empty() && digits.iter().all(|b| b.is_ascii_digit()));
             assert!(digits[0] != b'0' || digits.len() == 1, "no leading zero");
             assert!(text != "-0", "no negative zero");
         }
+        // Destruction of the harness-owned result is outside the property.
+        core::mem::forget(parsed);
     }
 
-    /// `write_string` is inverted by the parser for every string of ≤ 2 characters drawn from quotes,
-    /// backslashes, every C0 control, DEL, and non-ASCII scalars (NFC stubbed to the identity; the
-    /// escaper and the escape decoder are what is checked).
-    #[kani::proof]
-    #[kani::stub(nfc, nfc_identity)]
-    #[kani::unwind(16)]
-    fn string_escape_roundtrip() {
-        let len: usize = kani::any_where(|l: &usize| *l <= 2);
-        let mut s = String::new();
-        for _ in 0..len {
-            let c: char = kani::any();
-            kani::assume((c as u32) < 0x80 || c == 'é' || c == '\u{1F600}');
-            s.push(c);
-        }
+    /// No second spelling: every ≤ 4-byte numeric literal the parser accepts is in canonical form
+    /// `-?(0|[1-9][0-9]*)` with no `-0` (so `00`, `01`, `-0`, `+1`, fractions and exponents are
+    /// rejected). The original domain (length 1..=4, every byte in the spelling alphabet) is proved
+    /// as the 60 disjoint shards below, one per concrete (length, first byte), so the top-level
+    /// dispatch is concrete; `check-kani-shards.py` checks the table covers every pair exactly once.
+    macro_rules! spelling_shard {
+        ($name:ident, $len:literal, $first:literal) => {
+            #[kani::proof]
+            #[kani::unwind(16)]
+            fn $name() {
+                accepted_integer_spelling_case($len, $first);
+            }
+        };
+    }
+
+    // These sixty lines are the proof-domain table parsed by formal/check-kani-shards.py.
+    spelling_shard!(accepted_integer_spelling_1_digit_0, 1, b'0');
+    spelling_shard!(accepted_integer_spelling_1_digit_1, 1, b'1');
+    spelling_shard!(accepted_integer_spelling_1_digit_2, 1, b'2');
+    spelling_shard!(accepted_integer_spelling_1_digit_3, 1, b'3');
+    spelling_shard!(accepted_integer_spelling_1_digit_4, 1, b'4');
+    spelling_shard!(accepted_integer_spelling_1_digit_5, 1, b'5');
+    spelling_shard!(accepted_integer_spelling_1_digit_6, 1, b'6');
+    spelling_shard!(accepted_integer_spelling_1_digit_7, 1, b'7');
+    spelling_shard!(accepted_integer_spelling_1_digit_8, 1, b'8');
+    spelling_shard!(accepted_integer_spelling_1_digit_9, 1, b'9');
+    spelling_shard!(accepted_integer_spelling_1_minus, 1, b'-');
+    spelling_shard!(accepted_integer_spelling_1_plus, 1, b'+');
+    spelling_shard!(accepted_integer_spelling_1_dot, 1, b'.');
+    spelling_shard!(accepted_integer_spelling_1_e, 1, b'e');
+    spelling_shard!(accepted_integer_spelling_1_upper_e, 1, b'E');
+    spelling_shard!(accepted_integer_spelling_2_digit_0, 2, b'0');
+    spelling_shard!(accepted_integer_spelling_2_digit_1, 2, b'1');
+    spelling_shard!(accepted_integer_spelling_2_digit_2, 2, b'2');
+    spelling_shard!(accepted_integer_spelling_2_digit_3, 2, b'3');
+    spelling_shard!(accepted_integer_spelling_2_digit_4, 2, b'4');
+    spelling_shard!(accepted_integer_spelling_2_digit_5, 2, b'5');
+    spelling_shard!(accepted_integer_spelling_2_digit_6, 2, b'6');
+    spelling_shard!(accepted_integer_spelling_2_digit_7, 2, b'7');
+    spelling_shard!(accepted_integer_spelling_2_digit_8, 2, b'8');
+    spelling_shard!(accepted_integer_spelling_2_digit_9, 2, b'9');
+    spelling_shard!(accepted_integer_spelling_2_minus, 2, b'-');
+    spelling_shard!(accepted_integer_spelling_2_plus, 2, b'+');
+    spelling_shard!(accepted_integer_spelling_2_dot, 2, b'.');
+    spelling_shard!(accepted_integer_spelling_2_e, 2, b'e');
+    spelling_shard!(accepted_integer_spelling_2_upper_e, 2, b'E');
+    spelling_shard!(accepted_integer_spelling_3_digit_0, 3, b'0');
+    spelling_shard!(accepted_integer_spelling_3_digit_1, 3, b'1');
+    spelling_shard!(accepted_integer_spelling_3_digit_2, 3, b'2');
+    spelling_shard!(accepted_integer_spelling_3_digit_3, 3, b'3');
+    spelling_shard!(accepted_integer_spelling_3_digit_4, 3, b'4');
+    spelling_shard!(accepted_integer_spelling_3_digit_5, 3, b'5');
+    spelling_shard!(accepted_integer_spelling_3_digit_6, 3, b'6');
+    spelling_shard!(accepted_integer_spelling_3_digit_7, 3, b'7');
+    spelling_shard!(accepted_integer_spelling_3_digit_8, 3, b'8');
+    spelling_shard!(accepted_integer_spelling_3_digit_9, 3, b'9');
+    spelling_shard!(accepted_integer_spelling_3_minus, 3, b'-');
+    spelling_shard!(accepted_integer_spelling_3_plus, 3, b'+');
+    spelling_shard!(accepted_integer_spelling_3_dot, 3, b'.');
+    spelling_shard!(accepted_integer_spelling_3_e, 3, b'e');
+    spelling_shard!(accepted_integer_spelling_3_upper_e, 3, b'E');
+    spelling_shard!(accepted_integer_spelling_4_digit_0, 4, b'0');
+    spelling_shard!(accepted_integer_spelling_4_digit_1, 4, b'1');
+    spelling_shard!(accepted_integer_spelling_4_digit_2, 4, b'2');
+    spelling_shard!(accepted_integer_spelling_4_digit_3, 4, b'3');
+    spelling_shard!(accepted_integer_spelling_4_digit_4, 4, b'4');
+    spelling_shard!(accepted_integer_spelling_4_digit_5, 4, b'5');
+    spelling_shard!(accepted_integer_spelling_4_digit_6, 4, b'6');
+    spelling_shard!(accepted_integer_spelling_4_digit_7, 4, b'7');
+    spelling_shard!(accepted_integer_spelling_4_digit_8, 4, b'8');
+    spelling_shard!(accepted_integer_spelling_4_digit_9, 4, b'9');
+    spelling_shard!(accepted_integer_spelling_4_minus, 4, b'-');
+    spelling_shard!(accepted_integer_spelling_4_plus, 4, b'+');
+    spelling_shard!(accepted_integer_spelling_4_dot, 4, b'.');
+    spelling_shard!(accepted_integer_spelling_4_e, 4, b'e');
+    spelling_shard!(accepted_integer_spelling_4_upper_e, 4, b'E');
+
+    /// Case `k` of `string_escape_roundtrip`: `write_string` output contains no raw control byte
+    /// and the real parser (real NFC included) returns exactly `Str(s)` for the case's string.
+    fn string_escape_case(k: usize) {
+        let s = string_proof_case(k);
         let mut text = String::new();
         write_string(&s, &mut text);
         assert!(
             text.bytes().all(|b| b >= 0x20),
             "no raw control byte may be emitted"
         );
-        assert_eq!(CanonValue::parse(&text).unwrap(), CanonValue::Str(s));
+        let parsed = CanonValue::parse_typed(&text);
+        assert!(matches!(&parsed, Ok(CanonValue::Str(parsed_s)) if *parsed_s == s));
+        // Destruction of the harness-owned result is outside the property.
+        core::mem::forget(parsed);
     }
+
+    /// `write_string` is inverted by the real parser (including real NFC) for every string of at
+    /// most two scalars, each any ASCII scalar (quotes, backslash, every C0 control, DEL, ...),
+    /// U+00E9 or U+1F600: exactly the `STRING_PROOF_CASES` strings of `string_proof_case`, one
+    /// concrete case per harness (a symbolic byte leaves CBMC unable to fix the parser's cursor).
+    /// The generated table `kani_string_cases.rs` names every case id once; `check-kani-shards.py`
+    /// regenerates it, and the native test `string_proof_cases_are_exactly_the_domain` proves the
+    /// case ids enumerate the domain exactly.
+    macro_rules! string_case {
+        ($name:ident, $k:literal) => {
+            #[kani::proof]
+            #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
+            #[kani::unwind(16)]
+            fn $name() {
+                string_escape_case($k);
+            }
+        };
+    }
+
+    include!("kani_string_cases.rs");
 
     fn utf16_agrees<const N: usize>() {
         let units: [u16; N] = kani::any();
-        let std_ok = char::decode_utf16(units.iter().copied()).all(|r| r.is_ok());
+        let mut reference = char::decode_utf16(units.iter().copied());
         match decode_utf16_strict(&units) {
             Ok(s) => {
-                assert!(std_ok);
-                let mut theirs = char::decode_utf16(units.iter().copied());
                 for c in s.chars() {
-                    assert_eq!(theirs.next().map(|r| r.ok()), Some(Some(c)));
+                    assert_eq!(reference.next().map(|r| r.ok()), Some(Some(c)));
                 }
-                assert!(theirs.next().is_none());
+                assert!(reference.next().is_none());
             }
-            Err(_) => assert!(!std_ok),
+            Err(_) => assert!(reference.any(|r| r.is_err())),
         }
     }
 
@@ -1262,50 +1730,73 @@ mod kani_proofs {
     /// a lone surrogate, else yields the same scalars) for every 1- and 2-unit sequence — every
     /// surrogate-pair / lone-surrogate / BMP combination the decoder distinguishes.
     #[kani::proof]
+    #[kani::solver(kissat)]
     #[kani::unwind(4)]
     fn utf16_strict_matches_std() {
         utf16_agrees::<1>();
         utf16_agrees::<2>();
     }
 
-    /// A key of one or two symbolic scalars, spelled into a caller buffer (no heap), together with the
-    /// reference order key: its UTF-16 code units computed independently of `utf16_cmp`, per scalar, by
-    /// `char::encode_utf16`.
-    fn key<'a>(buf: &'a mut [u8; 8], units: &mut [u16; 4]) -> (&'a str, usize) {
+    /// A key of exactly `count` (1 or 2) symbolic scalars, spelled into a caller buffer, together with
+    /// the reference order key: its UTF-16 code units computed independently of `utf16_cmp`, per
+    /// scalar, by `char::encode_utf16`.
+    fn key<'a>(count: usize, buf: &'a mut [u8; 8], units: &mut [u16; 4]) -> (&'a str, usize) {
         let c1: char = kani::any();
-        let c2: char = kani::any();
-        let two: bool = kani::any();
         let n1 = c1.len_utf8();
         c1.encode_utf8(&mut buf[..4]);
         let mut u = c1.encode_utf16(&mut units[..2]).len();
         let mut n = n1;
-        if two {
+        if count == 2 {
+            let c2: char = kani::any();
             let n2 = c2.len_utf8();
             c2.encode_utf8(&mut buf[n1..n1 + 4]);
             u += c2.encode_utf16(&mut units[u..u + 2]).len();
             n += n2;
         }
-        // SAFETY: `buf[..n]` is exactly the UTF-8 encoding of one or two scalars written just above
+        // SAFETY: `buf[..n]` is exactly the UTF-8 encoding of the scalars written just above
         // (skipping `from_utf8` keeps its validation loop out of the model).
         (unsafe { core::str::from_utf8_unchecked(&buf[..n]) }, u)
     }
 
-    /// Key order is exactly RFC 8785 / RCP §2 order: for every pair of keys of one or two scalars,
-    /// `utf16_cmp` equals the lexicographic order of their UTF-16 code units. The order is checked against
-    /// that reference (not merely for antisymmetry), and one case is pinned to the BMP-above-surrogates vs
-    /// astral region, where UTF-8 byte order and UTF-16 order disagree (U+E000..U+FFFF sorts AFTER every
-    /// astral scalar in UTF-16, before it in UTF-8), so a byte-order `utf16_cmp` fails here with a
-    /// counterexample rather than an unwinding assertion.
-    #[kani::proof]
-    #[kani::unwind(10)]
-    fn utf16_key_order_is_exact() {
+    /// The assertion body shared by the four scalar-count shards of `utf16_key_order_is_exact`.
+    fn utf16_key_order_exact_case(count_a: usize, count_b: usize) {
         let (mut ba, mut bb) = ([0u8; 8], [0u8; 8]);
         let (mut ua, mut ub) = ([0u16; 4], [0u16; 4]);
-        let (sa, na) = key(&mut ba, &mut ua);
-        let (sb, nb) = key(&mut bb, &mut ub);
+        let (sa, na) = key(count_a, &mut ba, &mut ua);
+        let (sb, nb) = key(count_b, &mut bb, &mut ub);
         assert_eq!(utf16_cmp(sa, sb), ua[..na].cmp(&ub[..nb]));
+    }
 
-        // Steered case: a single BMP scalar at or above U+E000 against a single astral scalar.
+    /// Key order is exactly RFC 8785 / RCP §2 order: for every pair of keys of one or two scalars,
+    /// `utf16_cmp` equals the lexicographic order of their UTF-16 code units. The order is checked
+    /// against that reference (not merely for antisymmetry). The original domain (each key one or two
+    /// arbitrary scalars) is proved as four disjoint shards, one per concrete pair of scalar counts,
+    /// plus the steered harness below; `check-kani-shards.py` checks that exact partition.
+    macro_rules! key_order_shard {
+        ($name:ident, $count_a:literal, $count_b:literal) => {
+            #[kani::proof]
+            #[kani::stub(std::vec::Vec::push, push_without_growth)]
+            #[kani::unwind(6)]
+            fn $name() {
+                utf16_key_order_exact_case($count_a, $count_b);
+            }
+        };
+    }
+
+    // These four lines are the proof-domain table parsed by formal/check-kani-shards.py.
+    key_order_shard!(utf16_key_order_is_exact_1_1, 1, 1);
+    key_order_shard!(utf16_key_order_is_exact_1_2, 1, 2);
+    key_order_shard!(utf16_key_order_is_exact_2_1, 2, 1);
+    key_order_shard!(utf16_key_order_is_exact_2_2, 2, 2);
+
+    /// The steered conjunct of `utf16_key_order_is_exact`: a single BMP scalar at or above U+E000
+    /// against a single astral scalar, where UTF-8 byte order and UTF-16 order disagree (U+E000..U+FFFF
+    /// sorts AFTER every astral scalar in UTF-16, before it in UTF-8), so a byte-order `utf16_cmp`
+    /// fails here with a counterexample rather than an unwinding assertion.
+    #[kani::proof]
+    #[kani::stub(std::vec::Vec::push, push_without_growth)]
+    #[kani::unwind(6)]
+    fn utf16_key_order_is_exact_steered() {
         let hi: char = kani::any();
         let astral: char = kani::any();
         kani::assume(('\u{E000}'..='\u{FFFF}').contains(&hi) && astral as u32 >= 0x10000);
@@ -1318,6 +1809,7 @@ mod kani_proofs {
     /// Key order is transitive (so sorting members is well defined): for any three single-scalar keys,
     /// `a ≤ b` and `b ≤ c` imply `a ≤ c`, and `Equal` holds only between identical keys.
     #[kani::proof]
+    #[kani::stub(std::vec::Vec::push, push_without_growth)]
     #[kani::unwind(6)]
     fn utf16_key_order_is_transitive() {
         let (a, b, c): (char, char, char) = (kani::any(), kani::any(), kani::any());
@@ -1334,15 +1826,17 @@ mod kani_proofs {
         assert_eq!(ab == Ordering::Equal, a == b);
     }
 
-    /// The parser never panics on any input of ≤ 5 bytes (NFC stubbed): every rejection is a `CanonError`.
+    /// The production parser core never panics on any valid UTF-8 input of ≤ 5 bytes, including
+    /// real NFC. Public error text is materialized after this typed result is returned.
     #[kani::proof]
-    #[kani::stub(nfc, nfc_identity)]
     #[kani::unwind(8)]
     fn parse_never_panics() {
         let raw: [u8; 5] = kani::any();
         let len: usize = kani::any_where(|l: &usize| *l <= 5);
         if let Ok(text) = core::str::from_utf8(&raw[..len]) {
-            let _ = CanonValue::parse(text);
+            let parsed = CanonValue::parse_typed(text);
+            // Destruction of the harness-owned result is outside the property.
+            core::mem::forget(parsed);
         }
     }
 }

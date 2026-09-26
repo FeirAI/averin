@@ -14,16 +14,20 @@
 #   production-proof  formal/run-production-refinement.sh --write  (regenerate the extraction from the
 #              mutated source and rebuild every production proof; only for mutants that name it, and
 #              skipped with SKIP_PRODUCTION_PROOF=1 when the pinned Charon/Aeneas/Lean toolchain is absent)
-#   kani       the named bounded proof, only for m3 / m4       (see kani_harness below); for those two
-#              mutants the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
+#   kani       the named bounded proof for every property-bearing mutant (see kani_harness below);
+#              the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
 #
 # The suite passes only if every mutant is killed by a completed test failure; m15–m21 and the plan
-# 009 temporal mutants m40–m47 additionally require their named detector to fail. It first checks that every gate runs at least one passing test
+# 009 temporal mutants m40–m47 additionally require their named detector to fail, and every mutant with a named Kani harness (m3, m4, m9–m13, m22+)
+# must also be refuted by that harness's own completed failed verification (m24 exists only for
+# that: it under-allocates utf16_units, which only the fail-closed Vec::push guard G1 can see). m2 and m14 have no
+# verified Kani harness (string_escape_roundtrip / parse_never_panics are unverified) and die to
+# the native gates only. It first checks that every gate runs at least one passing test
 # on the unmutated tree, so an empty or broken gate cannot count as a kill.
 #
 #   bash formal/check-mutants.sh            # all gates for every mutant
 #   bash formal/check-mutants.sh --first    # stop at the first killing gate per mutant (faster)
-#   SKIP_KANI=1 bash formal/check-mutants.sh  # without cargo-kani (m3/m4 must then die to another gate)
+#   SKIP_KANI=1 bash formal/check-mutants.sh  # diagnostic only; Kani-only mutants may survive
 #   MUTANTS_ONLY=m16-verdict-omits-pop-capstone,m17-verdict-missing-revocation-is-absent \
 #     bash formal/check-mutants.sh --first  # scoped local run; unmutated baseline still required
 set -uo pipefail
@@ -41,16 +45,36 @@ export CARGO_TARGET_DIR="$work/target"
 
 kani_harness() {
   case "$1" in
-    m3-*) echo utf16_key_order_is_exact ;;
+    m3-*) echo utf16_key_order_is_exact_steered ;;
     m4-*) echo lp_into_frames_exactly ;;
+    m9-*) echo one_byte_tail_is_canonical ;;
+    m10-*) echo two_byte_tail_is_canonical ;;
+    m11-*) echo full_chunk_is_canonical ;;
+    m12-*) echo utf16_strict_matches_std ;;
+    m13-*) echo accepted_integer_spelling_2_minus ;;
+    m22-*) echo integer_roundtrip_zero ;;
+    m23-*) echo integer_roundtrip_zero ;;
+    m24-*) echo utf16_key_order_is_transitive ;;
   esac
+}
+
+kani_qualified() {
+  local module
+  case "$1" in
+    one_byte_tail_is_canonical|two_byte_tail_is_canonical|full_chunk_is_canonical) module=b64 ;;
+    lp_into_frames_exactly) module=hashx ;;
+    *) module=canon ;;
+  esac
+  printf '%s::kani_proofs::%s\n' "$module" "$1"
 }
 
 kani_expectation() {
   case "$1" in
     m4-*) echo 'core/src/hashx.rs|assertion failed' ;;
     m9-*|m10-*|m11-*) echo 'core/src/b64.rs|assertion failed' ;;
-    m14-*) echo 'core/src/canon.rs|index out of bounds' ;;
+    m13-*) echo 'core/src/canon.rs|no negative zero' ;;
+    m24-*) echo 'core/src/canon.rs|Vec::push reached reallocation in a no-growth proof' ;;
+    m23-*) echo 'core/src/canon.rs|numeric spelling reached general top-level parser' ;;
     *) echo 'core/src/canon.rs|assertion failed' ;;
   esac
 }
@@ -133,7 +157,15 @@ run_gate() {
       production-proof)
         AVERIN_LAKE_PACKAGES="$production_packages" AVERIN_CHARON_TARGET_DIR="$work/charon-target" \
           bash formal/run-production-refinement.sh --write ;;
-      kani) "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" cargo kani -p averin-decision-core --lib --no-default-features -Z stubbing --harness "$3" ;;
+      kani)
+        if [[ "$label" == m23-* ]]; then
+          # This mutant deliberately changes the production route pinned by check-kani-domains.py.
+          # Run its exact proof directly so the named fail-closed guard, not the textual check,
+          # must refute the route drift.
+          "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" cargo kani -Z stubbing -p averin-decision-core --lib --no-default-features --exact --harness "$(kani_qualified "$3")"
+        else
+          "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" bash formal/run-kani.sh --harness "$3"
+        fi ;;
     esac
   ) >"$log" 2>&1
 }
@@ -183,7 +215,7 @@ for g in "${baseline_gates[@]}"; do
   fi
 done
 if [ "$use_kani" = 1 ]; then
-  for h in utf16_key_order_is_exact lp_into_frames_exactly; do
+  for h in utf16_key_order_is_exact_steered utf16_key_order_is_transitive lp_into_frames_exactly one_byte_tail_is_canonical two_byte_tail_is_canonical full_chunk_is_canonical utf16_strict_matches_std accepted_integer_spelling_2_minus integer_roundtrip_zero; do
     if ! run_gate "baseline-$h" kani "$h" || ! grep -q 'VERIFICATION:- SUCCESSFUL' "$logs/baseline-$h-kani.log"; then
       echo "check-mutants: FAIL: Kani harness $h fails on the unmutated tree" >&2
       exit 1
@@ -227,7 +259,9 @@ for patch in formal/mutants/*.patch; do
     proof_exit=0
     run_gate "$name" kani "$h" || proof_exit=$?
     IFS='|' read -r source description <<<"$(kani_expectation "$name")"
-    if python3 formal/check-kani-mutant.py "$logs/$name-kani.log" "$proof_exit" "$source" "$description"; then
+    guard_flag=()
+    [[ "$name" == m22-* || "$name" == m23-* ]] && guard_flag=(--expect-guard)
+    if python3 formal/check-kani-mutant.py ${guard_flag[@]+"${guard_flag[@]}"} "$logs/$name-kani.log" "$proof_exit" "$(kani_qualified "$h")" "$source" "$description"; then
       killed+=("kani:$h")
     else
       echo "check-mutants: FAIL: Kani harness $h did not refute $name (see $logs/$name-kani.log)" >&2
