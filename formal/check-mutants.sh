@@ -13,11 +13,11 @@
 #              the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
 #
 # The suite passes only if every mutant is killed by a completed test failure; m15–m21 additionally
-# require their named detector to fail, and every mutant with a named Kani harness (m3, m4, m9–m13, m22+)
-# must also be refuted by that harness's own completed failed verification (m24 exists only for
-# that: it under-allocates utf16_units, which only the fail-closed Vec::push guard G1 can see). m2 and m14 have no
-# verified Kani harness (string_escape_roundtrip / parse_never_panics are unverified) and die to
-# the native gates only. It first checks that every gate runs at least one passing test
+# require their named detector to fail, and every mutant with a named Kani harness (m2–m4, m9–m13,
+# m22+) must also be refuted by that harness's own completed failed verification (m24 exists only
+# for that: it under-allocates utf16_units, which only the fail-closed Vec::push guard G1 can see).
+# m2 (DEL dropped) dies to the concrete string case "\x7f" (id 128). m14 has no verified Kani
+# harness (parse_never_panics is not verified) and dies to the native gates. It first checks that every gate runs at least one passing test
 # on the unmutated tree, so an empty or broken gate cannot count as a kill.
 #
 #   bash formal/check-mutants.sh            # all gates for every mutant
@@ -40,6 +40,7 @@ export CARGO_TARGET_DIR="$work/target"
 
 kani_harness() {
   case "$1" in
+    m2-*) echo string_escape_roundtrip_00128 ;;
     m3-*) echo utf16_key_order_is_exact_steered ;;
     m4-*) echo lp_into_frames_exactly ;;
     m9-*) echo one_byte_tail_is_canonical ;;
@@ -171,7 +172,7 @@ for g in inventory oracle golden verdict adversarial; do
   fi
 done
 if [ "$use_kani" = 1 ]; then
-  for h in utf16_key_order_is_exact_steered utf16_key_order_is_transitive lp_into_frames_exactly one_byte_tail_is_canonical two_byte_tail_is_canonical full_chunk_is_canonical utf16_strict_matches_std accepted_integer_spelling_2_minus integer_roundtrip_zero; do
+  for h in utf16_key_order_is_exact_steered utf16_key_order_is_transitive lp_into_frames_exactly one_byte_tail_is_canonical two_byte_tail_is_canonical full_chunk_is_canonical utf16_strict_matches_std accepted_integer_spelling_2_minus integer_roundtrip_zero string_escape_roundtrip_00128; do
     if ! run_gate "baseline-$h" kani "$h" || ! grep -q 'VERIFICATION:- SUCCESSFUL' "$logs/baseline-$h-kani.log"; then
       echo "check-mutants: FAIL: Kani harness $h fails on the unmutated tree" >&2
       exit 1

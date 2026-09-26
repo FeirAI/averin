@@ -214,8 +214,8 @@ Three checks, each doing what it is good at:
 `formal/` and the directories the tag inventory sweeps), runs the gates, and passes only if every mutant is killed. It first checks that every
 gate passes on the unmutated tree, so a broken gate cannot count as a kill. For m3 and m4 the named
 Kani harness must itself report `VERIFICATION:- FAILED`. The same named-counterexample rule
-applies to m9–m13 and m22–m24 (m2 and m14 have no verified Kani harness and die to native gates);
-an unwind failure, tool error, or timeout does not count.
+applies to m2, m9–m13 and m22–m24 (m14 dies to native gates only); an unwind failure, tool error,
+or timeout does not count.
 For m15–m21 the designated native test must complete and fail; an unrelated failure does not
 kill the mutant. The optional `MUTANTS_ONLY` selection still runs the full unmutated baseline and
 accepts only exact patch basenames.
@@ -223,7 +223,7 @@ accepts only exact patch basenames.
 | Mutant | Drift | Killed by (local run) |
 |---|---|---|
 | m1 | authority preimage: `LP(project_id)` and `LP(record_id)` swapped | oracle |
-| m2 | `write_string` drops DEL (`ser` no longer injective) | oracle (native only: `string_escape_roundtrip` is not verified) |
+| m2 | `write_string` drops DEL (`ser` no longer injective) | Kani string case `string_escape_roundtrip_00128` (`"\x7f"`, confirmed on the current source), oracle |
 | m3 | UTF-16 sort key of astral scalars broken (byte-order-like key) | Kani `utf16_key_order_is_exact_steered` (confirmed on final source), oracle, golden |
 | m4 | `lp_into` writes a 2-byte length | Kani `lp_into_frames_exactly`, oracle, golden |
 | m5 | commitment preimage drops `LP(field_domain)` | oracle |
@@ -235,7 +235,7 @@ accepts only exact patch basenames.
 | m11 | full base64url chunk writes wrong fourth symbol | Kani `full_chunk_is_canonical` (pending full suite) |
 | m12 | strict UTF-16 decoder rejects one valid low surrogate | Kani `utf16_strict_matches_std` (pending full suite) |
 | m13 | parser accepts negative zero | Kani shard `accepted_integer_spelling_2_minus` (confirmed on final source) |
-| m14 | truncated `\u` escape indexes beyond input | native gates only (`parse_never_panics` is not verified) |
+| m14 | truncated `\u` escape check inverted | oracle, golden (native only: `parse_never_panics` is not verified; the Kani string case for `"\u0001"` under this mutant did not finish symbolic execution in 50 minutes) |
 | m15 | v3 authority signature preimage drops the semantic subject digest | oracle, golden |
 | m16 | capstone omits offline PoP verification | verdict differential (`capstone_4`) |
 | m17 | missing pinned revocation evidence treated as clean | verdict differential (missing-freshness cases) |
@@ -275,13 +275,14 @@ each harness to report exactly its allowlisted stub lines:
   never reaches, is replaced by an unconditional panic. The numeric entry, number scanner,
   trailing-data check and serializer stay production code. Mutant m23 (numeric input forced onto
   the general route) must hit the guard.
-- *A1, a std-permitted behavior selection* (integer harnesses): `<*const u8>::align_offset`
+- *A1, a std-permitted behavior selection* (integer harnesses and string cases): `<*const u8>::align_offset`
   returns `usize::MAX`. std documents that "it is permissible for the implementation to always
   return `usize::MAX`. Only your algorithm's performance can depend on getting a usable offset
   here, not its correctness." The proofs therefore cover std's UTF-8 validator on its
   byte-at-a-time path; the word-at-a-time fast path (documented to give the same result) and its
   internal panic-freedom stay inside the trusted Rust std boundary. Without A1, CBMC treats the
-  heap alignment as symbolic and `String::from_utf8` in `serialize()` does not finish.
+  heap alignment as symbolic and `String::from_utf8` in `serialize()` (and the string
+  adapter's `from_utf8`) does not finish, even on concrete data.
 - *G1, a fail-closed std-path guard* (key-order harnesses): `Vec::push` asserts
   `len < capacity` and then runs exactly std's non-growth branch (write at `len`, set the length to
   `len + 1`). It supplies no behavior std would not; a push that would reallocate is a
@@ -329,10 +330,46 @@ harness or family):
   `+`, fraction or exponent). 60 shards, one per concrete (length, first byte), with the other
   bytes symbolic over the whole alphabet, plus the lemma `spelling_alphabet_is_exact`. 757 s wall
   for all 61 on an idle host (834 s on the final-source rerun), peak under 1 GB. Mutant m13 (`-0` accepted) fails `accepted_integer_spelling_2_minus`.
-- `string_escape_roundtrip` and `parse_never_panics` are **not verified**. With symbolic bytes
-  CBMC's symbolic execution cannot fix the parser's cursor or the escaper's output length, so it
-  explores infeasible parser routes and does not finish (see the plan 011 execution notes for
-  measurements). They are not claimed.
+- `string_escape_roundtrip` (family, A1): `write_string` never emits a raw control byte and the
+  real parser (real NFC included) returns exactly `Str(s)` for every string `s` of at most two
+  scalars, each any ASCII scalar, U+00E9 or U+1F600: 1 + 130 + 130² = 17,031 strings. With a
+  symbolic byte, CBMC's symbolic execution cannot fix the escaper's output length or the
+  parser's cursor and does not finish (a single symbolic printable-ASCII byte times out after
+  400-500 s even with A1 and growth guards), so the domain is checked exhaustively: one harness
+  per concrete case id of `string_proof_case`. `gen-kani-string-cases.py` generates the table
+  `core/src/kani_string_cases.rs`; `check-kani-shards.py` regenerates and compares it, pins the
+  mapping and case body, and re-derives the domain to prove each string occurs exactly once; the
+  native test `string_proof_cases_are_exactly_the_domain` checks the Rust mapping itself.
+  Measured per case: about 6 s of CBMC for ASCII strings (125 s for 10 cases in one invocation
+  including the build), about 30 s for strings mixing U+00E9 or U+1F600 with other scalars;
+  the pair U+1F600 U+1F600 (case 17030) was still in symbolic execution of NFC's
+  decomposition sort after a 60-minute wall limit (3,265 s CPU, 2.4 GB peak). A 20-case smoke
+  run across every class passed 19 cases; case 17030 did not finish. **The full 17,031-case run has not been performed yet**; it is
+  scheduled once, on the final parser, and is not claimed until every case reports success.
+  `run-kani-shards.sh string_escape_roundtrip` runs it with resume; `KANI_SHARD_GROUP=64` batches
+  cases per Kani invocation and `KANI_SHARD_SLICE=I/26` selects a CI matrix slice.
+- `parse_never_panics` is **not verified and not run by any gate**. Its original domain is every
+  valid UTF-8 string of 0 to 5 bytes (`raw: [u8; 5]`, any `len <= 5`, parsed only when
+  `from_utf8` succeeds), with real NFC. Concrete enumeration is impossible (at least 128^5,
+  about 3.4 × 10^10, strings), and symbolic bytes defeat CBMC's symbolic execution: once a byte
+  is symbolic the parser cursor becomes symbolic and every route is explored. Measured with A1:
+  three symbolic ASCII bytes did not finish symbolic execution in 580 s (1.7 GB), nor did five;
+  `Parser::parse_string` alone on a symbolic 5-byte state timed out after 900 s (1.4 GB), while
+  the leaf `Parser::next_utf8_char` is panic-free for every state (8 s). Function contracts cannot
+  split `parse_string` (its byte loop, escapes, UTF-16 decoding and NFC share one function), and
+  a hand-written `kani::Arbitrary` for `CanonValue` would be unsound. The harness stays in the
+  tree unchanged; unbounded parser panic-freedom is being pursued through the Aeneas/Lean
+  toolchain instead. Mutant m14 (a truncated `\u` escape check inverted) dies to native gates only.
+
+**Resources and timeouts.** On a shared workstation run proofs under `kani-watchdog.sh`, which
+kills the whole process group (cargo, CBMC and CBMC's external SAT solver, whose process is
+named after its CNF file) on an RSS limit (default 12 GiB), low host free memory (default 20%)
+or a wall limit. A kill is a resource failure, never a proof or a counterexample. A plain
+`timeout` around `run-kani.sh` is not enough: it can leave CBMC running. Solver time varies
+several-fold with host load: `utf16_strict_matches_std` took 1,641 s on an idle host and
+5,796 s at load average 15-23, and its mutation-suite baseline exceeded a 7,200 s limit under
+heavier load before passing with 21,600 s. CI jobs therefore keep generous explicit timeouts
+(the job limit is the backstop), and a timeout is always a failure.
 
 The Lean model, golden vectors, adversarial tests and the deterministic fuzz campaign complement
 these bounded claims; none makes an unverified Kani harness verified.
