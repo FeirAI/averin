@@ -30,46 +30,52 @@ inductive canon.CanonValue where
 | Array : alloc.vec.Vec canon.CanonValue → canon.CanonValue
 | Object : alloc.vec.Vec (String × canon.CanonValue) → canon.CanonValue
 
+/-- [averin_decision_core::canon::ErrorKind]
+    Source: 'core/src/canon.rs', lines 500:0-529:1 -/
+@[discriminant isize]
+inductive canon.ErrorKind where
+| TrailingData : canon.ErrorKind
+| UnexpectedChar : canon.ErrorKind
+| UnexpectedEnd : canon.ErrorKind
+| LiteralTrue : canon.ErrorKind
+| LiteralFalse : canon.ErrorKind
+| LiteralNull : canon.ErrorKind
+| MissingDigits : canon.ErrorKind
+| Fraction : canon.ErrorKind
+| Exponent : canon.ErrorKind
+| NegativeZero : canon.ErrorKind
+| OutOfRange : canon.ErrorKind
+| DepthLimit : canon.ErrorKind
+| ArrayDelimiter : canon.ErrorKind
+| ExpectedKey : canon.ErrorKind
+| ObjectDelimiter : canon.ErrorKind
+| UnterminatedString : canon.ErrorKind
+| UnterminatedEscape : canon.ErrorKind
+| InvalidEscape : canon.ErrorKind
+| RawControl : canon.ErrorKind
+| TruncatedUnicodeEscape : canon.ErrorKind
+| InvalidHexDigit : canon.ErrorKind
+| Utf8Lead : canon.ErrorKind
+| Utf8Truncated : canon.ErrorKind
+| Utf8Invalid : canon.ErrorKind
+| UnpairedHigh : canon.ErrorKind
+| HighNotLow : canon.ErrorKind
+| InvalidScalar : canon.ErrorKind
+| UnpairedLow : canon.ErrorKind
+
 /-- [averin_decision_core::canon::ParseError]
-    Source: 'core/src/canon.rs', lines 488:0-517:1 -/
+    Source: 'core/src/canon.rs', lines 567:0-573:1 -/
 @[discriminant isize]
 inductive canon.ParseError where
-| TrailingData : canon.ParseError
-| UnexpectedChar : canon.ParseError
-| UnexpectedEnd : canon.ParseError
-| LiteralTrue : canon.ParseError
-| LiteralFalse : canon.ParseError
-| LiteralNull : canon.ParseError
-| MissingDigits : canon.ParseError
-| Fraction : canon.ParseError
-| Exponent : canon.ParseError
-| NegativeZero : canon.ParseError
-| OutOfRange : canon.ParseError
-| DepthLimit : canon.ParseError
-| ArrayDelimiter : canon.ParseError
-| ExpectedKey : canon.ParseError
-| ObjectDelimiter : canon.ParseError
-| UnterminatedString : canon.ParseError
-| UnterminatedEscape : canon.ParseError
-| InvalidEscape : canon.ParseError
-| RawControl : canon.ParseError
-| TruncatedUnicodeEscape : canon.ParseError
-| InvalidHexDigit : canon.ParseError
-| Utf8Lead : canon.ParseError
-| Utf8Truncated : canon.ParseError
-| Utf8Invalid : canon.ParseError
-| UnpairedHigh : canon.ParseError
-| HighNotLow : canon.ParseError
-| InvalidScalar : canon.ParseError
-| UnpairedLow : canon.ParseError
+| At : canon.ErrorKind → Std.Usize → canon.ParseError
+| Expected : Std.U8 → Std.Usize → canon.ParseError
+| DuplicateKey : String → Std.Usize → canon.ParseError
 
-/-- [averin_decision_core::canon::ParseFault]
-    Source: 'core/src/canon.rs', lines 555:0-561:1 -/
-@[discriminant isize]
-inductive canon.ParseFault where
-| At : canon.ParseError → Std.Usize → canon.ParseFault
-| Expected : Std.U8 → Std.Usize → canon.ParseFault
-| DuplicateKey : String → Std.Usize → canon.ParseFault
+/-- [averin_decision_core::canon::Parser]
+    Source: 'core/src/canon.rs', lines 615:0-618:1 -/
+structure canon.Parser where
+  s : Slice Std.U8
+  i : Std.Usize
 
 /-- [averin_decision_core::record::PreimageFault]
     Source: 'core/src/record.rs', lines 162:0-170:1 -/

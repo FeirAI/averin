@@ -38,7 +38,7 @@ theorem expect_spec (s : Slice Std.U8) (i : Std.Usize) (b : Std.U8) :
 
 /-- What every parse function guarantees: an `Ok` result ends strictly after `i`, within `s`. -/
 def Adv {α} (s : Slice Std.U8) (i : Std.Usize) :
-    core.result.Result (α × Std.Usize) canon.ParseFault → Prop
+    core.result.Result (α × Std.Usize) canon.ParseError → Prop
   | .Ok (_, j) => i.val < j.val ∧ j.val ≤ s.length
   | .Err _ => True
 
@@ -56,7 +56,7 @@ decreasing_by scalar_decr_tac
 
 @[step]
 theorem parse_literal_spec (s : Slice Std.U8) (i : Std.Usize) (kw : Slice Std.U8)
-    (err : canon.ParseError) (v : canon.CanonValue) (hi : i.val ≤ s.length) (hkw : 0 < kw.length) :
+    (err : canon.ErrorKind) (v : canon.CanonValue) (hi : i.val ≤ s.length) (hkw : 0 < kw.length) :
     canon.parse_literal s i kw err v ⦃ r => Adv s i r ⦄ := by
   unfold canon.parse_literal
   step* <;> adv
@@ -249,7 +249,7 @@ theorem cast32_of16 (x : Std.U16) : (UScalar.cast UScalarTy.U32 x).val = x.val :
 
 @[step]
 theorem decode_loop_spec (units : Slice Std.U16) (out : alloc.vec.Vec Std.U8)
-    (fault : canon.ParseError) (ok1 : Bool) (i : Std.Usize) (Wt : Nat)
+    (fault : canon.ErrorKind) (ok1 : Bool) (i : Std.Usize) (Wt : Nat)
     (hi : i.val ≤ units.length) (hinv : out.length + W (units.val.drop i.val) ≤ Wt)
     (hWt : Wt ≤ Usize.max) :
     canon.decode_utf16_strict_loop units out fault ok1 i ⦃ (o, _, _) => o.length ≤ Wt ⦄ := by
@@ -307,7 +307,7 @@ theorem w_le3 (u : Nat) : w u ≤ 3 := by unfold w; split_ifs <;> omega
 
 @[step]
 theorem parse_string_loop_spec (s : Slice Std.U8) (i : Std.Usize) (units : alloc.vec.Vec Std.U16)
-    (fault : Option canon.ParseFault) (op : Bool) (hi : i.val ≤ s.length)
+    (fault : Option canon.ParseError) (op : Bool) (hi : i.val ≤ s.length)
     (hW : W units.val ≤ i.val) :
     canon.parse_string_loop s i units fault op ⦃ (j, u', _) =>
       i.val ≤ j.val ∧ j.val ≤ s.length ∧ W u'.val ≤ j.val ⦄ := by
@@ -337,7 +337,7 @@ theorem nfc_spec (x : Str) : canon.nfc x ⦃ r => r = AverinTrusted.nfc x ⦄ :=
 
 /-- What `parse_string` returns: an NFC output (a value of the trusted primitive) ending after `i`. -/
 def StrOk (s : Slice Std.U8) (i : Std.Usize) :
-    core.result.Result (String × Std.Usize) canon.ParseFault → Prop
+    core.result.Result (String × Std.Usize) canon.ParseError → Prop
   | .Ok (t, j) => i.val < j.val ∧ j.val ≤ s.length ∧ ∃ x, t = AverinTrusted.nfc x
   | .Err _ => True
 
