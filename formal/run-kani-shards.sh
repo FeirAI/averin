@@ -16,8 +16,11 @@
 # KANI_SHARD_GROUP=N verifies N pending shards per Kani invocation (`run-kani.sh --group`, one
 # build, each shard still checked for its own complete success); KANI_JOBS=N lets Kani verify
 # them N at a time. KANI_SHARD_SLICE=I/N restricts this run to the I-th of N contiguous slices
-# of the shard list (CI matrix jobs); the family passes only when every slice passes. All three
-# change scheduling only, never the obligations.
+# of the shard list (CI matrix jobs); the family passes only when every slice passes.
+# KANI_SHARD_ONLY=FILE restricts this run to the listed shards (one name per line; each must be in
+# the checked list), e.g. to run cheap cases in parallel and slow ones later with longer limits.
+# All of these change scheduling only, never the obligations: the family is verified only when a
+# run over the whole list finds every shard recorded as PASS on the same source digest.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -37,6 +40,15 @@ shards="$(python3 formal/check-kani-shards.py --list "$family")" || {
 }
 count="$(printf '%s\n' "$shards" | grep -c .)"
 [ "$count" -gt 0 ] || { echo "run-kani-shards: $family has no shards" >&2; exit 2; }
+if [ -n "${KANI_SHARD_ONLY:-}" ]; then
+  [ -f "$KANI_SHARD_ONLY" ] || { echo "run-kani-shards: KANI_SHARD_ONLY file not found" >&2; exit 2; }
+  unknown="$(printf '%s\n' "$shards" | awk 'NR == FNR { known[$0] = 1; next } NF && !($0 in known)' - "$KANI_SHARD_ONLY")"
+  [ -z "$unknown" ] || { echo "run-kani-shards: KANI_SHARD_ONLY names unknown shards: $unknown" >&2; exit 2; }
+  shards="$(printf '%s\n' "$shards" | awk 'NR == FNR { if (NF) want[$0] = 1; next } ($0 in want)' "$KANI_SHARD_ONLY" -)"
+  count="$(printf '%s\n' "$shards" | grep -c . || true)"
+  [ "$count" -gt 0 ] || { echo "run-kani-shards: KANI_SHARD_ONLY selects no shard" >&2; exit 2; }
+  family_label="$family (subset $KANI_SHARD_ONLY)"
+fi
 if [ -n "${KANI_SHARD_SLICE:-}" ]; then
   slice_i="${KANI_SHARD_SLICE%/*}" slice_n="${KANI_SHARD_SLICE#*/}"
   case "$slice_i/$slice_n" in
