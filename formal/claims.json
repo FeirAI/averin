@@ -4,11 +4,11 @@
   "claims": [
     {
       "id": "seal-and-closure-model",
-      "claim": "The Lean model gives seal binding and closed DAG/checkpoint history under its cryptographic and honest-signer assumptions.",
+      "claim": "The Lean model gives seal binding and closed DAG/checkpoint history under its honest-signer assumption; every hash-dependent conclusion is in explicit-witness form (equal bodies, or a SHA-256 collision on the two specific framed preimages), the standard reduction to SHA-256 collision resistance.",
       "class": "unbounded-model-proof",
       "targets": ["Lean model"],
       "assumptions": ["SHA-256 collision resistance", "Ed25519 signatures", "honest signer", "model inputs are post-NFC"],
-      "sources": [{"file": "formal/lean/Averin/Seal.lean", "symbol": "recordHashOf_binding"}, {"file": "formal/lean/Averin/Dag.lean", "symbol": "bundle_eq_closure"}, {"file": "formal/lean/Averin/Chain.lean", "symbol": "unique_history"}],
+      "sources": [{"file": "formal/lean/Averin/Seal.lean", "symbol": "recordHashOf_binding"}, {"file": "formal/lean/Averin/Seal.lean", "symbol": "record_seal_sound"}, {"file": "formal/lean/Averin/Dag.lean", "symbol": "bundle_eq_closure"}, {"file": "formal/lean/Averin/Chain.lean", "symbol": "unique_history"}],
       "proofs": [{"file": "formal/lean/check-axioms.sh", "symbol": "check"}],
       "gates": ["formal-lean"]
     },
@@ -21,6 +21,26 @@
       "sources": [{"file": "core/src/canon.rs", "symbol": "pub fn serialize"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "Family.msg"}],
       "proofs": [{"file": "core/tests/oracle.rs", "symbol": "every_preimage_family_matches_model"}, {"file": "formal/check-refinement.py", "symbol": "main"}],
       "gates": ["formal-refinement", "formal-mutants"]
+    },
+    {
+      "id": "production-seal-refinement",
+      "claim": "The production seal core (canonical serializer, LP framing, sha256 digest string, record/checkpoint preimages and hashes, signature message) is extracted from core/src by Charon/Aeneas and proved to compute the Lean model's definitions; the model's explicit-witness seal theorems are applied to it (equal hashes give the same body or a SHA-256 collision on the two specific production preimages). Partial correctness only (results when the extracted function returns Ok; a panic or error yields no hash). serialize()'s final from_utf8 and the PreimageFault-to-RecordError mapping are unextracted glue pinned by call-path checks; base64 (core/src/b64.rs) is excluded as off the hashed/signed path and covered by plan 011's Kani proofs; the verifier's decision logic is refined only in its claim kernel (see verdict-kernel-refinement).",
+      "class": "extracted-refinement-proof",
+      "targets": ["native Rust", "WASM Rust (same source)"],
+      "assumptions": ["Charon/Aeneas/Lean toolchain and Aeneas std models", "rustc", "NFC and SHA-256 as arbitrary functions", "String/str UTF-8 model"],
+      "sources": [{"file": "core/src/record.rs", "symbol": "pub(crate) fn record_hash"}, {"file": "core/src/canon.rs", "symbol": "pub(crate) fn write_canonical"}, {"file": "core/src/sign.rs", "symbol": "pub fn preimage"}],
+      "proofs": [{"file": "formal/production/Refinement/Seal.lean", "symbol": "record_hash_binding"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_seal_sound"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_ne_checkpoint"}, {"file": "formal/run-production-refinement.sh", "symbol": "production refinement: OK"}],
+      "gates": ["formal-production", "formal-mutants"]
+    },
+    {
+      "id": "verdict-kernel-refinement",
+      "claim": "The verifier's claim kernel verify::verdict::decide_claims (every function it calls, including the seal-key and anchor searches, the revocation-mode, capstone and plan 009 historical conditions) is extracted from core/src by Charon/Aeneas and proved to return, for every claim and the requested one, exactly the Lean verdict model's decideClaim on any evidence state its checked facts correspond to (Refinement.Corresponds). The model's support-erasure and claim-order theorems (deleting supporting attachments never adds a satisfied claim and never changes a refutation, with fixed signed records, pins, policy and authenticated adverse evidence), Supports inversion, capstone prerequisites, committed-contradiction refutation and the historical results hold for the production results. Total correctness, standard axioms only. Not proved: that verify.rs computes facts satisfying the correspondence (signature, pin, join, Merkle-path and snapshot passes, counter-to-fact joins); that boundary is pinned by call-path checks and tested by the verdict oracle differential and the adversarial suite.",
+      "class": "extracted-refinement-proof",
+      "targets": ["native Rust", "WASM Rust (same source)", "Go cgo (same source)"],
+      "assumptions": ["Charon/Aeneas/Lean toolchain and Aeneas std models", "rustc", "String::is_empty model", "verify.rs computes facts satisfying Refinement.Corresponds"],
+      "sources": [{"file": "core/src/verify/verdict.rs", "symbol": "pub(super) fn decide_claims"}, {"file": "core/src/verify.rs", "symbol": "report.claims = verdict::decide_claims(&facts);"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "def decideClaim"}],
+      "proofs": [{"file": "formal/production/Refinement/Verdict.lean", "symbol": "theorem decide_claims_refines"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_support_erasure"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_satisfied_supports"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_capstone_prerequisites"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_historical_requires_policy"}, {"file": "formal/mutants/m54-verdict-unanchored-capstone-skips-temporal.patch", "symbol": "deletion strengthens the capstone"}, {"file": "formal/mutants/m55-verdict-both-mode-list-deletion-skips-paths.patch", "symbol": "deletion strengthens a required trust claim"}],
+      "gates": ["formal-production", "formal-mutants"]
     },
     {
       "id": "bounded-real-encoders",
@@ -58,7 +78,7 @@
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "Postgres mode"],
       "assumptions": ["revocation enabled", "shared Postgres project Store", "all use and revoke paths obey WithProjectWrite"],
-      "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "revokeGrantIDTotalCtx"}, {"file": "server/internal/store/operational_postgres.go", "symbol": "IsRevoked"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
+      "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "revokeGrantEvent"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "IsRevoked"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
       "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoRevokedUse"}],
       "gates": ["store-postgres", "formal-tla"]
     },
@@ -121,6 +141,16 @@
       "sources": [{"file": "core/src/verify.rs", "symbol": "assumed_truthful"}, {"file": "server/internal/store/postgres.go", "symbol": "lockProject"}, {"file": "server/internal/api/server.go", "symbol": "createCheckpointTx"}],
       "proofs": [{"file": "server/internal/store/project_tx_test.go", "symbol": "TestPostgresProjectWriteTwoPools"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionProcessCuts"}, {"file": "formal/tla/ProjectTx_safe.cfg", "symbol": "NoFrontierFork"}, {"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
       "gates": ["core", "server", "store-postgres", "formal-tla"]
+    },
+    {
+      "id": "historical-revocation-ordering",
+      "claim": "Under the caller-selected db_serialized_v1 policy, historical_authorized_as_of_snapshot is satisfied only when every validated receipt carries a body-bound resource-signed authorization ordinal below its grant's authenticated prospective cutoff and at or below the watermark of an authenticated, fresh v2 revocation snapshot for the project. Current revocation still blocks ok, revoked_uses_blocked, authorized and the capstone under every policy; strict, total, legacy v1, stripped, stale or malformed evidence never yields a historical positive. The model theorem covers the claim kernel and support erasure, not the verifier's extraction passes; the order is Averin's database order, not physical action time.",
+      "class": "model-and-tested-implementation",
+      "targets": ["native Rust verifier", "WASM", "Go cgo", "Go server producer", "Postgres mode"],
+      "assumptions": ["honest resource signer signs one ordinal per receipt in its committing transaction", "honest revocation signer signs the boundary time and watermark it read", "PostgreSQL serializes the project guard row", "caller supplies a trustworthy evaluation time and freshness bound"],
+      "sources": [{"file": "core/src/verify/temporal.rs", "symbol": "pub(super) fn classify"}, {"file": "core/src/verify/verdict.rs", "symbol": "historical_authorized_as_of_snapshot"}, {"file": "core/src/verify.rs", "symbol": "fn check_use"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "AllocateAuthorizationOrder"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "SnapshotBoundary"}, {"file": "server/migrations/0007_temporal_revocation.sql", "symbol": "revocation_events"}],
+      "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "temporal_revocation_decision_table"}, {"file": "core/tests/adversarial.rs", "symbol": "temporal_blocked_use_runs_every_later_check_before_a_historical_positive"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "earlier_snapshot_cannot_flip"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "historical_requires_policy"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalCausalRevokeUseSchedulesPostgres"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalSnapshotExportConsistencyPostgres"}, {"file": "server/internal/api/temporal_revocation_test.go", "symbol": "TestTemporalProducerToVerifierHistoricalClaim"}],
+      "gates": ["core", "server", "store-postgres", "formal-lean", "formal-refinement", "formal-mutants"]
     }
   ]
 }

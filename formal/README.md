@@ -19,6 +19,7 @@ fixed corpus. The TLA+ recovery liveness result depends on its retry and fairnes
 | Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every message a key signs and every tagged or verifier-recomputed preimage (catalogue includes JSON challenges, capability tokens, raw keys, Merkle nodes, the RFC 3161 imprint string and server id derivations; untagged server-local digests are listed as out of scope), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
 | Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order and transitive (parser-level and base64 chunk harnesses in an extended set) | `bash formal/run-kani.sh` |
 | Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log, consume-before-act ledger, and two-replica project transactions with checkpoints, ambiguous commits, crash/restart, pending grants and revocations | `bash formal/tla/run-tlc.sh` |
+| Production refinement (plan 012) | Charon + Aeneas + Lean 4.31 (`production/`, `run-production-refinement.sh`) | the production seal core (serializer, LP framing, `sha256:` digest string, record/checkpoint preimages and hashes, signature message) is extracted from `core/src` and proved to be the model's `ser`/`lp`/`Family.msg`/`recordHashOf`; the model's seal theorems are applied to it. The verifier's claim kernel (`verify::verdict::decide_claims`) is extracted and proved to return the model's `decideClaim` for every claim, for every evidence state its checked facts correspond to; the verdict model's support-erasure, claim-order, capstone and historical theorems are transported to it. Axioms: standard + NFC + SHA-256 as arbitrary functions (the verdict theorems use only the standard axioms) | `bash formal/run-production-refinement.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
 | Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | known Rust drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
 | Deterministic differential fuzz | `run-fuzz.sh`, `fuzz/regressions.tsv`, `core/tests/rcp_fuzz.rs` | sampled RCP lexical acceptance/rejection and canonical bytes, native C ABI parity, browser WASM parity, base64url round trips | `bash formal/run-fuzz.sh pr` |
@@ -58,7 +59,11 @@ for specific record types are outside this campaign.
 
 > A signature cannot be replayed across contexts even if roles share a key: if a record body's
 > signature verifies under the pinned key, the body is **exactly** one the key holder sealed,
-> unless SHA-256 has a collision.
+> unless SHA-256 collides on this body's preimage and a sealed body's preimage.
+
+Formally the conclusion is `body ∈ records ∨ ∃ B ∈ records, recordPre body ≠ recordPre B ∧
+H (recordPre body) = H (recordPre B)`: the counterexample is an explicit collision on two specific,
+named preimages, which is the standard reduction to SHA-256 collision resistance.
 
 The signer model (`Seal.HonestSigner`) lets the same key also sign checkpoints, every other
 signed family with *arbitrary* field values, raw 32-byte challenge digests, and **any** message whose
@@ -100,12 +105,15 @@ Everything between "signature verifies" and "same body" is proved, not assumed:
    arbitrary nesting, and members in serialization order. Rust sorts members by UTF-16 key, and
    `ser` is injective on the sorted form.
 4. **UTF-8 is injective** (`utf8_inj`), derived from Lean core's verified encoder.
-5. **Hash binding** (`recordHashOf_binding`). Equal content hashes mean equal bodies, or an
-   explicit collision `x ≠ y ∧ H x = H y`. `record_ne_checkpoint_hash` rules out
-   record/checkpoint type confusion.
+5. **Hash binding** (`recordHashOf_binding`). Equal content hashes of `a` and `b` mean `a = b`, or
+   `recordPre a ≠ recordPre b ∧ H (recordPre a) = H (recordPre b)` (`Seal.CollidesOn`): a collision
+   on those two specific framed preimages. `record_ne_checkpoint_hash` rules out record/checkpoint
+   type confusion the same way: equal hashes give `CollidesOn H (recordPre a) (checkpointPre b)`.
 
 Cryptography is never axiomatised as injective. SHA-256 compresses, so that axiom would be false
-and every theorem vacuous. Hash results carry an explicit collision disjunct. Ed25519
+and every theorem vacuous. Hash results carry an explicit collision disjunct naming the two
+colliding inputs. A bare `∃ x y, x ≠ y ∧ H x = H y` is deliberately not used: it holds for every
+compressing `H`, so a theorem ending in it would be trivially true. Ed25519
 unforgeability is a hypothesis about which messages were signed. `check-axioms.sh` audits **every**
 declaration in the `Averin` namespace (the script prints the count), not a hand-picked list. That
 includes the oracle glue in `Averin.Oracle` (`utf8c_eq`, `recordPre_spec`, `checkpointPre_spec`),
@@ -118,14 +126,14 @@ decoder is fuel-bounded rather than `partial` for this reason).
 Other results:
 
 * `Seal.commitment_binding`: a hiding commitment opens to exactly one
-  `(field_domain, nonce, value)`.
+  `(field_domain, nonce, value)`, or SHA-256 collides on the two commitment preimages.
 * `Dag.bundle_eq_closure`: under the checks `dag.rs` and `validate_chain` perform (parents
   resolve, acyclic, latest frontier equals the heads), a bundle's records are **exactly** the
   ancestor-closure, in the *signed* history, of the latest checkpoint's frontier. No omission,
   no injection. `earlier_checkpoint_closed` gives the same guarantee for every earlier frontier.
 * `Chain.unique_history`: two chains that pass the checks and end in the same checkpoint hash
-  are identical, or the hash has a collision. The latest signed checkpoint commits the whole
-  history.
+  are identical, or the hash collides on a pair of distinct checkpoints drawn from the two chains
+  (`Chain.CollidesIn`). The latest signed checkpoint commits the whole history.
 
 ### What the model does **not** cover (trust boundary)
 
@@ -133,34 +141,78 @@ Other results:
 * **NFC.** The model starts from post-NFC scalar values. NFC-equivalent inputs are
   *intentionally* the same record (RCP §4). Anything that deduplicates or authorizes on raw,
   un-normalized bytes will disagree with `content_hash`.
-* **The link from each Lean definition to its Rust function.** This is checked by running the
-  model: the executable oracle evaluates the Lean definitions over a fixed corpus and the Rust must
-  reproduce the bytes (see "Refinement gate" below). Kani adds symbolic checks on small inputs, and
-  the golden vectors pin cross-implementation bytes. This is differential testing over a corpus, not
-  a mechanised refinement proof: a drift the corpus does not exercise can pass. To get a proof,
-  translate `canon.rs`/`hashx.rs` into Lean with Aeneas or prove them in place with Verus (see
-  below).
+* **The link from each Lean definition to its Rust function.** For the seal core this is now a
+  mechanised refinement proof (plan 012 phase A, [`production/`](production/README.md)): the production
+  serializer, LP framing, digest string, record/checkpoint preimages and hashes, and the signature
+  message are extracted from `core/src` with Charon/Aeneas and proved to compute the model's
+  `ser`/`lp`/`Family.msg`/`recordHashOf`, so `recordHashOf_binding` and `record_seal_sound` apply to the
+  production hashes (`Refinement.record_hash_is_model`, `production_record_seal_sound`), and an explicit
+  binding theorem (`Refinement.record_hash_binding`) holds for them directly. These are partial
+  correctness results (they describe the output when the extracted function returns `Ok`; a panic or
+  error produces no hash). `serialize()`'s final `from_utf8` and the `PreimageFault`→`RecordError`
+  mapping are unextracted glue pinned by call-path checks, and base64 (`core/src/b64.rs`) is excluded
+  because it is not on the hashed or signed preimage path (plan 011's Kani proofs cover it). The trusted base is the
+  extraction toolchain, NFC and SHA-256 as arbitrary functions, and a small `String`/`str` model; see
+  that README. The executable oracle, golden vectors and Kani harnesses below remain as independent
+  regression evidence. The verifier's claim kernel is refined too (phase B, next item); the passes
+  that compute its input facts are not.
 * **Offline-verifier verdict logic** (`verify.rs` Tier-B joins, capstone, key status). `Verdict.lean`
   proves inclusion of supported claims when supporting attachments are removed while signed
   records/checkpoints, pins, policy and authenticated adverse evidence remain fixed. The Lean
   executable decider agrees with its inductive evidence rules and refutes immutable committed
   grant-ID equivocation between actual grant records for every attachment set. The production
   immutable-fact projection also includes duplicate record IDs and checkpoint project conflicts;
-  those have direct bundle tests but are not encoded by `CommittedContradiction`. This is a model proof plus differential Rust oracle,
-  not a mechanised refinement of the verifier's extraction passes. Independently signed adverse
+  those have direct bundle tests but are not encoded by `CommittedContradiction`. Other checked
+  Tier-B contradictions (unmatched-use violations, bounded-reuse overspend, cosignature, delegation or
+  broker-log failures) are the fixed `checkedContradiction`: they refute current authorization,
+  `temporal` and the capstones, while the historical claim uses its own count
+  (`historicalContradiction`). **Production kernel refinement (plan 012 phase B).** The pure claim
+  kernel `verify::verdict::decide_claims` is extracted from `core/src/verify/verdict.rs` by
+  Charon/Aeneas and proved (`production/Refinement/Verdict.lean`, `decide_claims_refines`) to return,
+  for every claim and the requested one, exactly `decideClaim` on any model evidence state that its
+  checked facts correspond to (`Refinement.Corresponds`: each fact is the model predicate it names).
+  The model's theorems therefore hold for the production results
+  (`production/Refinement/VerdictClaims.lean`): support erasure and refutation invariance under
+  deleted attachments (`production_support_erasure`), a satisfied claim has a `Supports` derivation
+  (`production_satisfied_supports`, the capstone and historical inversions), committed
+  contradictions refute. That `verify.rs` computes facts satisfying the correspondence (signatures,
+  pins, joins, Merkle paths, snapshot checks, the counter-to-fact joins) is **not** proved: it is the
+  remaining boundary, covered by call-path checks, the differential oracle and the adversarial
+  suite. Independently signed adverse
   revocations, validated contradictory commitment openings and conflicting verified TSA anchors
   must be enforced while present; removing one changes the fixed adverse evidence and can
   improve a decision, so a blanket deletion theorem would be false.
+* **Historical ordering against revocation (plan 009, ADR 0007).** `Verdict.lean` adds
+  `historicalAuthorized` (`historical_authorized_as_of_snapshot`). Receipt ordinals and authenticated
+  cutoffs are fixed evidence; the signed revocation snapshot (boundary time, watermark) is a removable
+  attachment. The model proves support erasure including the snapshot, that the strict policy never
+  decides the claim (`historical_requires_policy`), that a receipt without an ordinal or a bundle
+  without a snapshot cannot support it (`historical_requires_order`,
+  `historical_requires_snapshot`), that an ordinal at or after a cutoff and a total revocation refute
+  it (`at_or_after_refutes`, `total_revocation_refutes`), that an earlier honest snapshot cannot turn
+  an at/after receipt into one ordered before the cutoff (`earlier_snapshot_cannot_flip`), and that
+  the caller's revocation mode (pinned issuer; disclosed list, Merkle root with paths, or both)
+  gates the claim (`SnapshotReady`, `historical_requires_pinned_issuer`). Self-reported record times
+  are simply not model inputs; no theorem is claimed about them. The model is weaker than the
+  implementation in one place: it does not require all present v2 artifacts to sign the identical
+  snapshot (not a monotone attachment condition; covered by Rust tests). The order is
+  averin's database order under honest resource and revocation signers and PostgreSQL
+  serialization; it is not physical action time, and no TSA-based ordering is claimed. A snapshot
+  that predates a later total revocation is bounded only by the caller's freshness and watermark
+  requirements.
 * **Historical v2 authority evidence is not bound to the semantic record body.** It remains
   readable as `legacy_unbound` and retains its historical signature and join checks. The v3
   authority proof binds the structured semantic subject and is reported as `verified`; only
   that body-bound state can satisfy the stronger authorization and completeness claims.
 
-`spec/fixtures/verdict-generated.json` is the shared end-to-end verdict corpus. Its 92 rows
+`spec/fixtures/verdict-generated.json` is the shared end-to-end verdict corpus. Its 96 rows
 store exact `bundle_json` and caller `opts_json` strings, then native Rust, cgo, and browser WASM
 compare the bundle digest, all typed claims, legacy `ok`, completeness label, and violation count.
 The positive inputs come from a v3 signed grant/use/PoP Rust test, a real Go two-phase capstone
-export, and a real Go native grant/introspection capstone export; each generator asserts its
+export, a real Go native grant/introspection capstone export, and a real Go plan 009 export (a
+two-phase use, a prospective revocation after the intent, the outcome recorded after it) verified
+under a caller-selected `db_serialized_v1` policy passed through the same options JSON the cgo and
+WASM targets use; each generator asserts its
 positive claim before emitting a fixture. The Rust `write_generated_verdict_corpus` test expands
 every anchor subset in these small histories and combinations of removable attachments, including
 nested Merkle paths. It also keeps the cp0-only failed-PoP intent and independently signed adverse
@@ -246,6 +298,24 @@ accepts only exact patch basenames.
 | m22 | `Int(0)` serializes as `1` | Kani `integer_roundtrip_zero` (confirmed on final source) |
 | m23 | numeric input takes the general parser route | Kani fail-closed route guard in `integer_roundtrip_zero` (confirmed on final source) |
 | m24 | `utf16_units` preallocates half its input length | Kani fail-closed growth guard G1 in `utf16_key_order_is_transitive` (confirmed on final source) |
+| m40 | a receipt at the cutoff ordinal reads as before it | adversarial `temporal_revocation_decision_table` |
+| m41 | the strict policy decides the historical claim | verdict differential (`hist_*` rows with the policy unselected) |
+| m42 | a revocation-blocked receipt is relabeled without the remaining checks | adversarial `temporal_blocked_use_runs_every_later_check_before_a_historical_positive` |
+| m43 | a legacy v1 revocation-list membership is not total | adversarial `temporal_revocation_decision_table` |
+| m44 | an ordinal above the snapshot watermark counts | adversarial `temporal_revocation_decision_table` |
+| m45 | the caller's maximum snapshot age is ignored | adversarial `temporal_revocation_decision_table` |
+| m46 | a v2 Merkle membership proof no longer re-derives the committed cutoff | adversarial `temporal_merkle_v2_commits_mode_and_cutoff` |
+| m47 | a v2 Merkle membership proof accepts a cutoff above the signed watermark | adversarial `temporal_merkle_v2_rejects_cutoff_beyond_watermark` |
+| m50 | LP writes the length little-endian | regenerated production proof (`production-proof`, reason `proof`) |
+| m51 | an extracted source edited without regeneration | `check-production.py` (`stale`) |
+| m52 | `verify.rs` bypasses `sign::preimage` | `check-production.py` (`call-path`) |
+| m53 | a feature-selected alternative hash | `check-production.py` (`cfg`) |
+| m54 | the capstone skips `temporal` when the latest checkpoint is unanchored (deleting the anchor strengthens the capstone) | regenerated production proof (`complete_claim_ok`); also verdict differential |
+| m55 | dual revocation mode needs Merkle paths only alongside a fresh list (deleting the list strengthens `authorized`) | regenerated production proof (`revocation_ready_ok`); also adversarial |
+| m56 | the historical claim drops the verified-snapshot gate | regenerated production proof (`historical_ready_ok`); also verdict differential |
+| m57 | Merkle mode drops the per-receipt path gate of the historical claim | regenerated production proof (`historical_ready_ok`) only: no test detects it |
+| m58 | a seal with a record hash counts with an unpinned key | regenerated production proof (`seal_pinned_ok`) |
+| m59 | `verify.rs` overwrites a claim after the kernel | `check-production.py` (`call-path`); also adversarial |
 
 A new drift class gets a new patch here before the gate that catches it is called done.
 
@@ -477,12 +547,14 @@ pinned to the immutable `v1.7.4` release and verified by sha256.
   induction proofs, which SMT does not do well. A Z3 model would be a third, unconnected copy of
   the semantics.
 * **What *would* add value next:**
-  1. **Aeneas** (Rust → Lean) or **Verus** for `canon.rs`, `hashx.rs`, `b64.rs` and
-     `record.rs`. This replaces the corpus-based oracle gate with a mechanised proof that the Rust
-     *is* the Lean model. It is the one real gap left in the seal argument.
-  2. Prove the production verifier's evidence-pass-to-fact projection refines `Verdict.lean`;
-     the current executable corpus is differential, not a universal source-level proof. The
-     capstone intentionally requires externally pinned signer and role provenance while legacy
-     `ok` remains a separate integrity/diagnostic Boolean.
+  1. ~~Aeneas for the seal core~~ — done for `canon.rs` (serializer), `hashx.rs`, `record.rs`,
+     `checkpoint.rs` and `sign::preimage` (`production/`, plan 012 phase A). `b64.rs` is not on the
+     hashed or signed path and is not extracted.
+  2. ~~Refine the production claim kernel against `Verdict.lean`~~ — done (`decide_claims`, plan 012
+     phase B). What remains is the verifier's evidence-pass-to-fact projection (the
+     `Refinement.Corresponds` obligation for `verify.rs`); the executable corpus is differential,
+     not a universal source-level proof of it. The capstone intentionally requires externally
+     pinned signer and role provenance while legacy `ok` remains a separate integrity/diagnostic
+     Boolean.
   3. Apalache or TLC on the checkpoint/anchor pipeline across replicas, if multi-instance
      deployment becomes supported.

@@ -1,0 +1,15 @@
+Mutant: in the caller's dual (both) revocation mode the Merkle non-membership paths are only required alongside a fresh disclosed list. Deleting the disclosed list then turns an insufficient authorized into satisfied (deletion strengthens a required trust claim). Named detector: the regenerated production refinement proof (Refinement.revocation_ready_ok), not a test.
+
+--- a/core/src/verify/verdict.rs
++++ b/core/src/verify/verdict.rs
+@@ -382,9 +382,8 @@
+         }
+         RevocationRequirement::Both => {
+             f.revocation_issuer_pinned
+-                && f.disclosed_revocation_fresh
+                 && f.merkle_revocation_fresh
+-                && f.merkle_nonmembership_complete
++                && (!f.disclosed_revocation_fresh || f.merkle_nonmembership_complete)
+         }
+     }
+ }

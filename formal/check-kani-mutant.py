@@ -76,6 +76,25 @@ def completed_simple_gate(
     gate: str, output: str, exit_code: int, expect_success: bool,
     required_test: str | None = None,
 ) -> tuple[bool, str]:
+    if gate in ("production", "production-proof"):
+        # formal/production/check-production.py and formal/run-production-refinement.sh print
+        # `production refinement: ... OK` or `production refinement: FAIL (<reason>): ...`.
+        if expect_success:
+            if required_test is not None:
+                return False, "named detector is only valid for failed checks"
+            ok_marker = ("production refinement: OK" if gate == "production-proof"
+                         else "production refinement: checks OK")
+            if exit_code == 0 and ok_marker in output:
+                return True, "completed production refinement check"
+            return False, "production refinement check did not complete OK"
+        failure = re.search(r"(?m)^production refinement: FAIL \(([a-z-]+)\):", output)
+        if exit_code != 1 or failure is None:
+            return False, "missing completed production refinement failure"
+        if failure.group(1) == "toolchain":
+            return False, "toolchain failure is not a mutant kill"
+        if required_test is not None and failure.group(1) != required_test:
+            return False, f"production refinement failed for {failure.group(1)!r}, not {required_test!r}"
+        return True, "completed gate failure from intended detector"
     if gate == "inventory":
         if required_test is not None:
             return False, "inventory has no named test detector"
@@ -166,6 +185,17 @@ def self_test() -> None:
     assert not completed_simple_gate("verdict", named_failure, 101, False, "other_test")[0]
     assert not completed_simple_gate("verdict", "test result: FAILED. 0 passed; 1 failed;", 101, False, "verdict_differential")[0]
     assert completed_simple_gate("adversarial", "test result: ok. 284 passed;", 0, True)[0]
+    prod_fail = "production refinement: FAIL (stale): core/src/canon.rs changed"
+    assert completed_simple_gate("production", prod_fail, 1, False, "stale")[0]
+    assert not completed_simple_gate("production", prod_fail, 1, False, "call-path")[0]
+    assert not completed_simple_gate("production", prod_fail, 2, False, "stale")[0]
+    assert not completed_simple_gate("production-proof",
+        "production refinement: FAIL (toolchain): missing", 1, False)[0]
+    assert completed_simple_gate("production-proof",
+        "production refinement: FAIL (proof): lake build failed", 1, False, "proof")[0]
+    assert completed_simple_gate("production", "production refinement: checks OK (stale)", 0, True)[0]
+    assert completed_simple_gate("production-proof", "production refinement: OK", 0, True)[0]
+    assert not completed_simple_gate("production-proof", "production refinement: checks OK", 0, True)[0]
     assert not completed_simple_gate("oracle", "test result: ok. 8 passed;", 1, True)[0]
     print("check-kani-mutant: self-test passed")
 
@@ -178,7 +208,8 @@ def main() -> int:
     parser.add_argument("source", nargs="?")
     parser.add_argument("description", nargs="?")
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--gate", choices=("inventory", "oracle", "golden", "verdict", "adversarial"))
+    parser.add_argument("--gate", choices=("inventory", "oracle", "golden", "verdict", "adversarial",
+                                           "production", "production-proof"))
     parser.add_argument("--expect-success", action="store_true")
     parser.add_argument("--required-test")
     parser.add_argument("--expect-guard", action="store_true")

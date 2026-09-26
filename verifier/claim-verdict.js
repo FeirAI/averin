@@ -1,10 +1,13 @@
-const CLAIMS = new Set(["integrity", "authenticated", "authorized", "complete_brokered", "complete_introspected"]);
+const CLAIMS = new Set([
+  "integrity", "authenticated", "authorized", "historical_authorized_as_of_snapshot",
+  "complete_brokered", "complete_introspected",
+]);
 const DECISIONS = new Set(["satisfied", "insufficient", "refuted"]);
 
 // A missing or unknown claims contract cannot accept a caller's required claim.
 export function claimVerdict(report) {
   const claims = report?.claims;
-  const valid = report?.claims_version === "1"
+  const valid = report?.claims_version === "2"
     && CLAIMS.has(claims?.requested)
     && DECISIONS.has(claims?.requested_decision)
     && claims?.[claims.requested] === claims.requested_decision;

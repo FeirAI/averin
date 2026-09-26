@@ -246,3 +246,70 @@ fn unicode17_combining_mark_has_pinned_nfc_result() {
     );
     assert_eq!(CanonValue::string(raw).as_str(), Some(canonical));
 }
+
+// Plan 009: the v2 revocation tree preimages, root and proofs are the shared Go/Rust contract
+// (server/internal/broker TestRevocationV2GoldenVector writes and checks the same file).
+#[test]
+fn revocation_v2_golden_vector() {
+    use averin_decision_core::verify::{
+        revocation_entry_v2, revocation_entry_v2_preimage, revocation_key_v2,
+        revocation_key_v2_preimage, revocation_merkle_root_v2, revocation_state_digest_v2,
+        revocation_state_v2_preimage, RevState,
+    };
+    let v = read_manifest("revocation-v2.json");
+    let s = |c: &CanonValue, k: &str| c.get(k).unwrap().as_str().unwrap().to_string();
+    let keys = v.get("key_cases").unwrap().as_array().unwrap();
+    assert_eq!(keys.len(), 3);
+    for c in keys {
+        let g = s(c, "grant_id");
+        assert_eq!(
+            hex_lower(&revocation_key_v2_preimage(&g)),
+            s(c, "preimage_hex"),
+            "{g}"
+        );
+        assert_eq!(hex_lower(&revocation_key_v2(&g)), s(c, "key_hex"), "{g}");
+    }
+    for c in v.get("state_cases").unwrap().as_array().unwrap() {
+        let (mode, cutoff) = (s(c, "mode"), c.get("cutoff").unwrap().as_int().unwrap());
+        assert_eq!(
+            hex_lower(&revocation_state_v2_preimage(&mode, cutoff)),
+            s(c, "preimage_hex")
+        );
+        assert_eq!(
+            hex_lower(&revocation_state_digest_v2(&mode, cutoff)),
+            s(c, "digest_hex")
+        );
+    }
+    let e = v.get("entry_case").unwrap();
+    let arr32 = |h: String| -> [u8; 32] { decode_hex(&h).try_into().unwrap() };
+    let (key, state) = (arr32(s(e, "key_hex")), arr32(s(e, "state_hex")));
+    assert_eq!(
+        hex_lower(&revocation_entry_v2_preimage(&key, &state)),
+        s(e, "preimage_hex")
+    );
+    assert_eq!(
+        hex_lower(&revocation_entry_v2(&key, &state)),
+        s(e, "entry_hex")
+    );
+    let tree = v.get("tree").unwrap();
+    let entries: Vec<(String, RevState)> = tree
+        .get("entries")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| {
+            let st = match s(x, "mode").as_str() {
+                "total" => RevState::Total,
+                _ => RevState::Prospective(x.get("cutoff_order").unwrap().as_int().unwrap()),
+            };
+            (s(x, "grant_id"), st)
+        })
+        .collect();
+    let refs: Vec<(&str, RevState)> = entries.iter().map(|(g, st)| (g.as_str(), *st)).collect();
+    assert_eq!(revocation_merkle_root_v2(&refs), s(tree, "root"));
+    assert_eq!(
+        tree.get("leaf_count").unwrap().as_int().unwrap() as usize,
+        entries.len() + 2
+    );
+}

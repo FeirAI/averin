@@ -56,6 +56,11 @@ def revocationSig : Family := ⟨"revocation statement", "averin.revocation.v1",
 /-- `verify.rs` Merkle revocation root, via `sign::verify`. -/
 def merkleRootSig : Family :=
   ⟨"revocation merkle root", "averin.broker.revocation.merkleroot.v1", [], true⟩
+/-- `verify.rs::evaluate_revocation` v2 list (plan 009), via `sign::verify`. -/
+def revocationSigV2 : Family := ⟨"revocation statement v2", "averin.revocation.v2", [], true⟩
+/-- `verify.rs::evaluate_merkle_revocation` v2 root (plan 009), via `sign::verify`. -/
+def merkleRootSigV2 : Family :=
+  ⟨"revocation merkle root v2", "averin.broker.revocation.merkleroot.v2", [], true⟩
 /-- `verify.rs` deployment attestation, via `sign::verify`. -/
 def attestationSig : Family := ⟨"attestation", "averin.attestation.v1", [], true⟩
 /-- `authority.rs::preimage`: `LP(tag) ‖ LP(source) ‖ LP(project_id) ‖ LP(record_id) ‖ utf8(evidence_hash)`. -/
@@ -70,7 +75,7 @@ def testAnchorSig : Family := ⟨"test anchor", "averin.anchor.v1", [.framed, .f
 
 def signedFamilies : List Family :=
   [recordSig, checkpointSig, taxonomySig, revocationSig, merkleRootSig, attestationSig,
-   authoritySig, authoritySigV3, testAnchorSig]
+   authoritySig, authoritySigV3, testAnchorSig, revocationSigV2, merkleRootSigV2]
 
 /-! ## Challenge families (SHA-256 of the preimage; the raw 32-byte digest is what is signed) -/
 
@@ -123,13 +128,21 @@ def grantHeadStep : Family :=
   ⟨"grant head step", "averin.broker.grant_head.v1", [.fixed 32, .fixed 8, .framed], false⟩
 /-- `verify.rs::revocation_leaf`. -/
 def revocationLeaf : Family := ⟨"revocation leaf", "averin.broker.revocation.leaf.v1", [.framed], false⟩
+/-- `temporal.rs::revocation_key_v2` (plan 009): `LP(tag) ‖ LP(grant_id)`. -/
+def revocationKeyV2 : Family := ⟨"revocation key v2", "averin.broker.revocation.key.v2", [.framed], false⟩
+/-- `temporal.rs::revocation_state_digest_v2`: `LP(tag) ‖ LP(mode) ‖ BE8(cutoff)`. -/
+def revocationStateV2 : Family :=
+  ⟨"revocation state v2", "averin.broker.revocation.state.v2", [.framed, .fixed 8], false⟩
+/-- `temporal.rs::revocation_entry_v2`: `LP(tag) ‖ key(32) ‖ state_digest(32)`. -/
+def revocationEntryV2 : Family :=
+  ⟨"revocation entry v2", "averin.broker.revocation.entry.v2", [.fixed 32, .fixed 32], false⟩
 
 /-- Every LP-framed SHA-256 input family whose leading tag is unique. (`grantHeadSeed` shares its
 tag with `grantHeadStep` and is separated by length in `grant_head_seed_ne_step`.) -/
 def hashFamilies : List Family :=
   [grantPopV2, usePop, cosig, delegationHop, introspection, federation, recordHash, checkpointHash, commitment,
    authoritySubjectDigest,
-   ledger, grantHeadStep, revocationLeaf]
+   ledger, grantHeadStep, revocationLeaf, revocationKeyV2, revocationStateV2, revocationEntryV2]
 
 /-! ## Within-family injectivity -/
 
@@ -244,9 +257,9 @@ theorem signed_message_long (F : Family) (hF : F ∈ signedFamilies) (vs : List 
     subst hvs
     have hs : F.schema ≠ [] := by
       simp only [signedFamilies, List.mem_cons, List.not_mem_nil, or_false] at hF
-      rcases hF with h | h | h | h | h | h | h | h | h <;> subst h <;> simp_all [recordSig,
+      rcases hF with h | h | h | h | h | h | h | h | h | h | h <;> subst h <;> simp_all [recordSig,
         checkpointSig, taxonomySig, revocationSig, merkleRootSig, attestationSig, authoritySig,
-        authoritySigV3, testAnchorSig]
+        authoritySigV3, testAnchorSig, revocationSigV2, merkleRootSigV2]
     match hsch : F.schema, hs with
     | f :: fs, _ =>
       simp only [encodeFields, Field.encode, lp, List.length_append, be32_length]

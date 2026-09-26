@@ -1,0 +1,13 @@
+Mutant: m47-temporal-merkle-cutoff-beyond-watermark. Named detector: temporal_merkle_v2_rejects_cutoff_beyond_watermark.
+
+--- a/core/src/verify/temporal.rs
++++ b/core/src/verify/temporal.rs
+@@ -513,7 +513,7 @@
+     match proof.get("mode").and_then(|v| v.as_str())? {
+         "total" if proof.get("cutoff_order").is_none() => Some(RevState::Total),
+         "prospective" => match proof.get("cutoff_order") {
+-            Some(CanonValue::Int(c)) if *c >= 1 && *c <= watermark => {
++            Some(CanonValue::Int(c)) if *c >= 1 => { // BUG: an unauthenticated cutoff above the watermark
+                 Some(RevState::Prospective(*c))
+             }
+             _ => None,

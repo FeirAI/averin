@@ -9,11 +9,16 @@
 #   golden     cargo test --test golden                        (committed golden vectors)
 #   verdict    cargo test --lib verdict_differential          (Lean model vs pure verdict kernel)
 #   adversarial cargo test --test adversarial                   (bundle evidence-to-fact regressions)
+#   production python3 formal/production/check-production.py   (plan 012: extraction freshness, call paths
+#                                                                into the proved code, no cfg-selected code)
+#   production-proof  formal/run-production-refinement.sh --write  (regenerate the extraction from the
+#              mutated source and rebuild every production proof; only for mutants that name it, and
+#              skipped with SKIP_PRODUCTION_PROOF=1 when the pinned Charon/Aeneas/Lean toolchain is absent)
 #   kani       the named bounded proof for every property-bearing mutant (see kani_harness below);
 #              the harness itself must report VERIFICATION:- FAILED, in addition to any other kill
 #
-# The suite passes only if every mutant is killed by a completed test failure; m15–m21 additionally
-# require their named detector to fail, and every mutant with a named Kani harness (m2–m4, m9–m13,
+# The suite passes only if every mutant is killed by a completed test failure; m15–m21 and the plan
+# 009 temporal mutants m40–m47 additionally require their named detector to fail, and every mutant with a named Kani harness (m2–m4, m9–m13,
 # m22+) must also be refuted by that harness's own completed failed verification (m24 exists only
 # for that: it under-allocates utf16_units, which only the fail-closed Vec::push guard G1 can see).
 # m2 (DEL dropped) dies to the concrete string case "\x7f" (id 128). m14 has no verified Kani
@@ -82,6 +87,23 @@ named_detector() {
     m18-*) echo 'adversarial|tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation' ;;
     m19-*) echo 'adversarial|tier_b_two_phase_failed_pop_intent_does_not_consume_outcome' ;;
     m21-*) echo 'adversarial|required_disclosure_covers_every_committed_broker_grant' ;;
+    # Plan 009 temporal revocation (m40-m47).
+    m40-*|m43-*|m44-*|m45-*) echo 'adversarial|temporal_revocation_decision_table' ;;
+    m41-*) echo 'verdict|verdict_differential' ;;
+    m42-*) echo 'adversarial|temporal_blocked_use_runs_every_later_check_before_a_historical_positive' ;;
+    m46-*) echo 'adversarial|temporal_merkle_v2_commits_mode_and_cutoff' ;;
+    m47-*) echo 'adversarial|temporal_merkle_v2_rejects_cutoff_beyond_watermark' ;;
+    # Plan 012 production refinement (m50-m53).
+    m50-*) [ "${SKIP_PRODUCTION_PROOF:-0}" = 1 ] || echo 'production-proof|proof' ;;
+    m51-*) echo 'production|stale' ;;
+    m52-*) echo 'production|call-path' ;;
+    m53-*) echo 'production|cfg' ;;
+    # Plan 012 phase B, verdict kernel refinement (m54-m59): a production verdict change that makes
+    # deletion strengthen a claim (m54 capstone, m55 authorized), drops a plan 009 historical gate
+    # (m56 snapshot verified, m57 Merkle-mode paths) or lets an unpinned key authenticate (m58) must
+    # fail the regenerated proof; a call site overriding the kernel's claims fails call-path (m59).
+    m54-*|m55-*|m56-*|m57-*|m58-*) [ "${SKIP_PRODUCTION_PROOF:-0}" = 1 ] || echo 'production-proof|proof' ;;
+    m59-*) echo 'production|call-path' ;;
   esac
 }
 
@@ -115,7 +137,7 @@ fresh_tree() {
   cp -R core spec server sdk verifier Cargo.toml Cargo.lock rust-toolchain.toml "$tree/"
   mkdir -p "$tree/web" && cp -R web/src "$tree/web/"  # swept by the tag inventory
   # formal/ minus build outputs (the Lean .lake dir is large and irrelevant here).
-  (cd formal && find . -path ./lean/.lake -prune -o -type f -print) | while read -r f; do
+  (cd formal && find . \( -path ./lean/.lake -o -path ./production/.lake \) -prune -o -type f -print) | while read -r f; do
     mkdir -p "$tree/formal/$(dirname "$f")"
     cp "formal/$f" "$tree/formal/$f"
   done
@@ -132,6 +154,10 @@ run_gate() {
       golden) cargo test -q -p averin-decision-core --test golden ;;
       verdict) cargo test -q -p averin-decision-core --lib verdict_differential ;;
       adversarial) cargo test -q -p averin-decision-core --test adversarial ;;
+      production) python3 formal/production/check-production.py ;;
+      production-proof)
+        AVERIN_LAKE_PACKAGES="$production_packages" AVERIN_CHARON_TARGET_DIR="$work/charon-target" \
+          bash formal/run-production-refinement.sh --write ;;
       kani)
         if [[ "$label" == m23-* ]]; then
           # This mutant deliberately changes the production route pinned by check-kani-domains.py.
@@ -147,6 +173,22 @@ run_gate() {
 
 use_kani=1
 python3 formal/check-kani-mutant.py --self-test || exit 2
+# The production proofs reuse this checkout's Lake packages (mathlib is never rebuilt per mutant).
+production_packages=""
+if [ -e formal/production/.lake/packages ]; then
+  production_packages="$(cd formal/production/.lake/packages && pwd -P)"
+fi
+# The scratch tree is outside this checkout, so resolve the pinned toolchain here (same search as
+# formal/run-production-refinement.sh).
+if [ -z "${AVERIN_AENEAS_TOOLS:-}" ]; then
+  d="$(pwd)"
+  while [ "$d" != "/" ]; do
+    if [ -f "$d/.verification-tools/aeneas-557f7a/with-aeneas.sh" ]; then
+      export AVERIN_AENEAS_TOOLS="$d/.verification-tools/aeneas-557f7a"; break
+    fi
+    d="$(dirname "$d")"
+  done
+fi
 if [ "${SKIP_KANI:-0}" = 1 ]; then
   use_kani=0
 elif ! command -v cargo-kani >/dev/null 2>&1; then
@@ -163,7 +205,9 @@ fi
 
 echo "== baseline (unmutated): every gate must pass"
 fresh_tree
-for g in inventory oracle golden verdict adversarial; do
+baseline_gates=(inventory oracle golden verdict adversarial production)
+[ "${SKIP_PRODUCTION_PROOF:-0}" = 1 ] || baseline_gates+=(production-proof)
+for g in "${baseline_gates[@]}"; do
   gate_exit=0
   run_gate baseline "$g" || gate_exit=$?
   if ! python3 formal/check-kani-mutant.py --gate "$g" --expect-success "$logs/baseline-$g.log" "$gate_exit"; then
@@ -200,11 +244,11 @@ for patch in formal/mutants/*.patch; do
     exit 1
   fi
   detector="$(named_detector "$name")"
-  gates=(inventory oracle golden verdict adversarial)
+  gates=(inventory oracle golden verdict adversarial production)
   if [ -n "$detector" ]; then
     IFS='|' read -r detector_gate detector_test <<<"$detector"
     gates=("$detector_gate")
-    for g in inventory oracle golden verdict adversarial; do
+    for g in inventory oracle golden verdict adversarial production; do
       [ "$g" = "$detector_gate" ] || gates+=("$g")
     done
   fi

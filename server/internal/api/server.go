@@ -96,6 +96,7 @@ type Server struct {
 	revokeCapWarnAt    time.Time // throttles the at-capacity WARNING (guarded by revokeLocks, keyed by project_id)
 	revocationValidity time.Duration
 	revocationCap      int
+	revocationExportV2 bool // plan 009: export averin.revocation.list.v2 and accept prospective revokes
 	denyLog            bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
 	// inflate stored records without bound (the prerequisite for default-on). nil = unbounded (prior behavior).
@@ -2576,7 +2577,16 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			return nil
 		}
 		grantID = ev.GrantID
-		rec, disclosures, e := s.buildUseRecord(useID, ur, ev, paramsAddr.Digest, paramsCommitment, brokerKind)
+		// Plan 009: the next authorization ordinal, allocated under this transaction's project guard
+		// and bound into the resource-signed use_evidence before the body-bound v3 signature. It
+		// commits or rolls back with the receipt; an exact retry returns the stored receipt above and
+		// never allocates again.
+		ordinal, e := st.AllocateAuthorizationOrder(ur.ProjectID)
+		if e != nil {
+			shim.RollbackUse(ev)
+			return e
+		}
+		rec, disclosures, e := s.buildUseRecord(useID, ur, ev, paramsAddr.Digest, paramsCommitment, brokerKind, ordinal)
 		if e != nil {
 			// Receipt construction failed BEFORE any record was written and the caller never acted (it gets a
 			// 500). ValidateUse already consumed the single-use nonce/jti, so RELEASE them — otherwise a
@@ -2593,30 +2603,37 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			// is this exact operation; otherwise it is another record's receipt — returning it as ours would report
 			// an action that has no receipt of its own. Nothing of ours persisted and the caller has not acted, so
 			// release the consumed credential and 409.
+			// Either way this transaction persisted nothing of its own; roll it back so the
+			// allocated ordinal is not burned (plan 009).
 			if _, same := s.priorUseMatchesRequest(sealed, useID, ur, brokerKind, paramsCommitment); same {
 				idempotent = true
-				return nil
+				return errRollbackDecided
 			}
 			shim.RollbackUse(ev)
 			sealed, grantID = "", ""
 			conflictErr = fmt.Errorf("idempotency_key is already bound to a different record in this project (a key cannot be reused across operations, phases, or sessions)")
-			return nil
+			return errRollbackDecided
 		}
 		if e != nil {
 			if errors.Is(e, store.ErrRecordIDConflict) {
 				// A different record already holds this deterministic use id (persisted nothing): a conflict, not
-				// an infra failure — release the credential (the caller has not acted) and 409.
+				// an infra failure — release the credential (the caller has not acted), roll back the
+				// ordinal allocation, and 409.
 				shim.RollbackUse(ev)
 				conflictErr = e
-				return nil
+				return errRollbackDecided
 			}
 			// The transaction owns both ledger claims and the receipt. Returning
 			// an error rolls all three back; a COMMIT error is classified only
 			// by withProjectWrite after this callback returns successfully.
 			return e
 		}
-		return nil
+		// The ordinal backstop row commits atomically with the receipt.
+		return st.PutAuthorizationReceipt(ur.ProjectID, store.AuthorizationReceipt{
+			Ordinal: ordinal, RecordID: useID, GrantID: ev.GrantID, Kind: brokerKind,
+		})
 	})
+	storeErr = decidedRollback(storeErr)
 	if conflictErr != nil {
 		writeErr(w, http.StatusConflict, "use rejected: "+conflictErr.Error())
 		return
@@ -2818,14 +2835,26 @@ func (s *Server) intentAndOutcome(st store.Store, projectID, sessionID, intentRe
 // buildUseRecord assembles the unsealed use-receipt Decision Record: a tool_gateway-role authority
 // with a RESOURCE-signed evidence_sig over the re-derivable use_evidence (R1/R2), a hiding commitment
 // over the operation params, and the use lifecycle under extensions.broker (kind=use → resource role).
-func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.UseEvidence, paramsDigest, commitment, brokerKind string) (map[string]any, []store.DisclosureSecret, error) {
+func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.UseEvidence, paramsDigest, commitment, brokerKind string, ordinal int64) (map[string]any, []store.DisclosureSecret, error) {
 	// D5 (ADR 0004): brokerKind is "use" (one-phase ADR-0003) or "use_intent" (two-phase, recorded BEFORE
 	// the side effect). use_evidence.kind MUST equal the extensions.broker.kind discriminator (the verifier
 	// rejects divergence), so stamp it onto the evidence before hashing.
 	ev.Kind = brokerKind
+	// use_evidence is carried verbatim (the verifier re-derives evidence_hash from it). Round-trip the
+	// typed struct through JSON into a generic map so it embeds as a JSON object in the record body,
+	// then add the plan 009 authorization order so the resource signature covers it.
+	typedJSON, err := json.Marshal(ev)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal use evidence: %w", err)
+	}
+	var useEvidence map[string]any
+	if err := json.Unmarshal(typedJSON, &useEvidence); err != nil {
+		return nil, nil, fmt.Errorf("use evidence to map: %w", err)
+	}
+	useEvidence["authorization_order"] = authorizationOrder(ur.ProjectID, ordinal)
 	// evidence_hash = sha256(RCP-canonicalize(use_evidence)) via the core (R1), signed by the RESOURCE
 	// key (R2) and record_id-bound to this receipt.
-	evidenceJSON, err := json.Marshal(ev)
+	evidenceJSON, err := json.Marshal(useEvidence)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal use evidence: %w", err)
 	}
@@ -2837,13 +2866,6 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 	// PoP-bound hiding commitment (over (params, params_nonce)) — the SAME value the offline verifier
 	// reconstructs the PoP challenge from. The disclosure opens it with the agent's params_nonce.
 	nonce := ur.ParamsNonce
-
-	// use_evidence is carried verbatim (the verifier re-derives evidence_hash from it). Round-trip the
-	// typed struct through JSON into a generic map so it embeds as a JSON object in the record body.
-	var useEvidence map[string]any
-	if err := json.Unmarshal(evidenceJSON, &useEvidence); err != nil {
-		return nil, nil, fmt.Errorf("use evidence to map: %w", err)
-	}
 
 	rec := map[string]any{
 		"record_id":     useID,
@@ -2885,6 +2907,14 @@ func (s *Server) buildUseRecord(useID string, ur useRequest, ev resourceshim.Use
 		return nil, nil, err
 	}
 	return rec, disclosures, nil
+}
+
+// authorizationOrderFormat versions the ordinal object inside resource-signed receipts (plan 009).
+const authorizationOrderFormat = "averin.authorization_order.v1"
+
+// authorizationOrder is the signed receipt field binding the ordinal to its project's order domain.
+func authorizationOrder(projectID string, ordinal int64) map[string]any {
+	return map[string]any{"format": authorizationOrderFormat, "project_id": projectID, "ordinal": ordinal}
 }
 
 func deterministicOutcomeID(projectID, idem string) string {
@@ -2992,6 +3022,9 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 					// resource signed into the intent.
 					UseEvidence struct {
 						GrantID string `json:"grant_id"`
+						// Plan 009: the intent's resource-signed ordinal. The outcome is completion
+						// evidence, not a new authorization: it inherits this ordinal verbatim.
+						AuthorizationOrder json.RawMessage `json:"authorization_order"`
 					} `json:"use_evidence"`
 				} `json:"broker"`
 			} `json:"extensions"`
@@ -3011,7 +3044,15 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 			conflictErr = fmt.Errorf("intent %q already has a recorded use_outcome (%s); an intent is completed exactly once", or.IntentRecordID, priorOutcome)
 			return nil
 		}
-		rec, be := s.buildUseOutcomeRecord(outcomeID, or.ProjectID, or.SessionID, probe.Extensions.Broker.UseEvidence.GrantID, or.IntentRecordID, probe.ContentHash, status)
+		var inherited map[string]any
+		if raw := probe.Extensions.Broker.UseEvidence.AuthorizationOrder; len(raw) > 0 && string(raw) != "null" {
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.UseNumber()
+			if e := dec.Decode(&inherited); e != nil {
+				return fmt.Errorf("parse intent authorization order: %w", e)
+			}
+		}
+		rec, be := s.buildUseOutcomeRecord(outcomeID, or.ProjectID, or.SessionID, probe.Extensions.Broker.UseEvidence.GrantID, or.IntentRecordID, probe.ContentHash, status, inherited)
 		if be != nil {
 			return be // 500: never seal an outcome whose evidence could not be hashed/signed
 		}
@@ -3061,13 +3102,16 @@ func (s *Server) handleUseOutcome(w http.ResponseWriter, r *http.Request) {
 // (grant_id, intent_ref) AND the before-act ordering (intent_hash = the intent's content_hash) to the
 // RESOURCE evidence signature — the verifier reads these from the signed payload, never the unsigned
 // extensions.broker siblings, so a relay holding only the record-signing key cannot redirect or backfill.
-func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID, intentRef, intentHash, status string) (map[string]any, error) {
+func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID, intentRef, intentHash, status string, inheritedOrder map[string]any) (map[string]any, error) {
 	payload := map[string]any{
 		"grant_id":    grantID,
 		"intent_hash": intentHash,
 		"intent_ref":  intentRef,
 		"kind":        "use_outcome",
 		"status":      status,
+	}
+	if inheritedOrder != nil {
+		payload["authorization_order"] = inheritedOrder
 	}
 	payloadJSON, _ := json.Marshal(payload)
 	evidenceHash, err := s.core.RcpEvidenceHash(string(payloadJSON))
@@ -4316,10 +4360,18 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 	var checks []store.Checkpoint
 	var anchors map[int64]string
 	var recs []store.Record
-	var revokedIDs []string
+	var revocationEvents []store.RevocationEvent
+	var boundary time.Time
+	var watermark int64
 	var secrets []store.DisclosureSecret
 	err := s.st.WithProjectRead(ctx, projectID, func(st store.Store) error {
 		var err error
+		// Plan 009: the boundary time and authorization high watermark are captured inside this
+		// same repeatable-read snapshot as the records and revocation events, first, and signed
+		// as captured (no later wall clock substitutes for the boundary).
+		if boundary, watermark, err = st.SnapshotBoundary(projectID); err != nil {
+			return err
+		}
 		if checks, err = st.Checkpoints(projectID); err != nil {
 			return err
 		}
@@ -4330,7 +4382,7 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 			return err
 		}
 		if s.revocationKey != nil {
-			revokedIDs, err = st.RevokedGrantIDs(projectID)
+			revocationEvents, err = st.RevocationEvents(projectID)
 			if err != nil {
 				return err
 			}
@@ -4387,7 +4439,7 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 	// attestation can bind its digest (#3 strip-downgrade defense).
 	revocationDigest := ""
 	if s.revocationKey != nil {
-		rl, e := s.buildRevocationListForExportIDs(revokedIDs, checks)
+		rl, e := s.buildRevocationListForExportEvents(projectID, revocationEvents, boundary, watermark, checks)
 		if e != nil {
 			return "", nil, e
 		}

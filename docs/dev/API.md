@@ -37,7 +37,7 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | POST | `/v2/use` | Resource gateway: one-phase use receipt (Tier-B). | `AVERIN_RESOURCE_SEED` |
 | POST | `/v2/use-intent` | Two-phase use, phase 1 (before the side effect). | resource gateway |
 | POST | `/v2/use-outcome` | Two-phase use, phase 2 (after the side effect). | resource gateway |
-| POST | `/v2/revoke` | Mark a `grant_id` revoked. | `AVERIN_REVOCATION_SEED` |
+| POST | `/v2/revoke` | Record a total or prospective revocation of a `grant_id`. | `AVERIN_REVOCATION_SEED` |
 | GET | `/v2/broker-seq/void` | Recovery-authenticated, read-only reservation and fence preflight. | broker |
 | POST | `/v2/broker-seq/void` | Fence a stranded `broker_seq`, then reconcile a landed grant or signed `grant_void`. | broker |
 
@@ -302,29 +302,76 @@ effect, outcome *after*, linked by a forced causal edge). An intent is completed
 second `/v2/use-outcome` for an intent that already has one (under a different `idempotency_key`) is a
 `409`; a retry of the original outcome under its own key returns it with `"idempotent": true`.
 
+**Authorization order (plan 009, schema v7).** Every admitted `/v2/use` and `/v2/use-intent` receipt
+carries `use_evidence.authorization_order =
+{"format":"averin.authorization_order.v1","project_id":…,"ordinal":n}`, allocated from the project's
+monotonic order inside the transaction that stores the receipt and covered by the resource's
+body-bound signature. An exact retry returns the stored receipt and its original ordinal. A
+`/v2/use-outcome` allocates nothing: it copies its intent's signed ordinal into the `use_outcome`
+payload, so an outcome recorded after a revocation still describes an intent admitted before it.
+Ordinals are unique and increasing per project, not gapless.
+
+---
+
+## POST `/v2/introspection`
+
+Records a resource-signed introspection transcript for a native (`token_exchange`) grant. Request:
+`{project_id, session_id, idempotency_key, grant_id, credential_ref, effective_scope, effective_exp,
+introspected_at?, transcript_hash?}`; `introspected_at` 0 or absent means the server's time.
+
+Inside one project transaction the server first returns an exact committed retry (`201`,
+`"created":false`), even after the grant later expired or was revoked. Every immutable field must
+match the stored receipt; an omitted time reuses the committed time, and a different explicit time or
+any other different field is `409`. Otherwise it validates the actual committed grant: a native grant
+for this resource, `credential_ref` equal to its `lease_id`, `effective_scope` within its scope,
+`effective_exp` not after its expiry, `issued_at ≤ introspected_at < exp`, `introspected_at` not in
+the future beyond the accepted clock skew, the grant not expired now, not revoked (either mode) and
+not voided. A failure is `400` and nothing is signed or stored. Only then does it allocate an
+authorization ordinal (carried in `introspection_evidence.authorization_order`) and sign the
+transcript. `record_id` and `grant_id` in the response come from the stored receipt.
+
 ---
 
 ## POST `/v2/revoke`
 
-Marks a `grant_id` revoked (permissive by id — the id need not already exist locally, so a
-compromised/federated id can be revoked preemptively). From the moment it returns `201`, `/v2/use` and
-`/v2/use-intent` reject (`400`, before consuming the credential) any capability of that grant. The next
-`/v2/export` carries a signed, time-bounded `revocation_list`; the offline verifier then blocks any use
-of a revoked grant. Whenever revocation is enabled, every export carries a signed `revocation_list`, an
-**empty** one (`"revoked_grant_ids": []`) when nothing is revoked. A verifier that pins `revocation_keys`
-reads a bundle with no list as `revocation_status: missing` (which blocks the capstone), so "nothing is
-revoked" is an affirmative, signed statement rather than an absent field. (Known limit: the verifier evaluates a use against the list *as of the export*, so a
-use recorded **before** the revoke is also reported blocked; distinguishing pre-revocation uses needs a
-verifier-side change.)
+Records an immutable revocation event for a `grant_id` (permissive by id — the id need not already
+exist locally, so a compromised/federated id can be revoked preemptively). `mode` is `total` (the
+default: compromise, every use invalid) or `prospective` (cancellation: effective from the next
+authorization ordinal). From the moment it returns `201`, `/v2/use`, `/v2/use-intent` and
+`/v2/introspection` reject (`400`, before consuming the credential) any use of that grant, in either
+mode. The next `/v2/export` carries a signed, time-bounded `revocation_list`; the offline verifier then
+blocks any use of a revoked grant, including one ordered before a prospective cutoff (the separate
+historical result is described under the verification report). Whenever revocation is enabled, every
+export carries a signed `revocation_list`, an **empty** one when nothing is revoked. A verifier that
+pins `revocation_keys` reads a bundle with no list as `revocation_status: missing` (which blocks the
+capstone), so "nothing is revoked" is an affirmative, signed statement rather than an absent field.
+
+A prospective cutoff is allocated in the same serialization domain as receipt ordinals, so a receipt
+admitted before the revoke has a smaller ordinal. A retried prospective revoke returns the original
+event and cutoff (`"created":false`); the cutoff never moves later. A later `total` revoke of the same
+grant is always recorded and makes it total. `prospective` is refused (`400`) unless the server
+exports v2 lists (`AVERIN_REVOCATION_EXPORT_FORMAT=v2`), because a v1 list can state only total
+revocations. With v1, an export over a project that already has a prospective event fails rather
+than emitting it as total or omitting it.
+
+**Export formats.** v1 (default): `{issuer_kid, issued_at, not_after, revoked_grant_ids, sig}` in
+domain `averin.revocation.v1`; every listed grant is total. v2 (`AVERIN_REVOCATION_EXPORT_FORMAT=v2`):
+`{format:"averin.revocation.list.v2", issuer_kid, issued_at, not_after, project_id,
+snapshot:{boundary_time, authorization_high_watermark}, revocations:[{grant_id, mode,
+cutoff_order?}], sig}` in domain `averin.revocation.v2`. The boundary time and watermark are read
+inside the same repeatable-read snapshot as the records and revocation state and signed as read.
+Legacy verifiers reject a v2 list (fail closed), so upgrade verifiers first. See ADR 0007.
 
 In Postgres mode, the revoke is durable before `201`. Later use transactions on
 any live replica check the same durable project state. An already admitted use
 may complete; a failed revocation lookup rejects rather than trusting a cache.
 
-Request: `{ "project_id": "...", "grant_id": "..." }` (both required).
+Request: `{ "project_id": "...", "grant_id": "...", "mode": "total"|"prospective", "reason": "..." }`
+(`project_id`, `grant_id` required; `reason` is stored with the event, at most 512 bytes).
 
 **Response `201`:**
-`{ "revoked": "<grant_id>", "project_id": "...", "revoked_total": <n>, "note": "..." }`.
+`{ "revoked": "<grant_id>", "project_id": "...", "mode": "<effective mode>", "cutoff_order": <n>
+(prospective only), "created": <bool>, "revoked_total": <n>, "note": "..." }`.
 Errors: `400`, `403`, `429` (the per-project revoked-set cap is reached — explicit, never a silent
 fail-open), `501` (revocation not enabled).
 
@@ -490,7 +537,8 @@ Key fields:
 | `ok` | bool | The integrity verdict: every record sealed + linked + checkpoint-consistent, no hard violation. **Not** the accountability capstone. |
 | `keys_externally_pinned` | bool | `true` only when record `signing_keys` were pinned out of band; merely passing other options does not authenticate record provenance. |
 | `body_bound_role_evidence` | bool | Every contributing committed broker/resource/void role record has a verified body-bound authority proof; historical v2 role signatures remain useful for forensic joins but cannot satisfy this stronger prerequisite. |
-| `claims_version`, `claims` | string/object | Version `1` typed decisions for `integrity`, `authenticated`, `authorized`, `temporal`, `complete_brokered`, and `complete_introspected`. Each is `satisfied`, `insufficient`, or `refuted`; `requested` and `requested_decision` identify the caller's required claim. Only `satisfied` accepts a required claim. |
+| `claims_version`, `claims` | string/object | Version `2` typed decisions for `integrity`, `authenticated`, `authorized`, `historical_authorized_as_of_snapshot`, `temporal`, `complete_brokered`, and `complete_introspected`. Each is `satisfied`, `insufficient`, or `refuted`; `requested` and `requested_decision` identify the caller's required claim. Only `satisfied` accepts a required claim. Version 2 added the historical claim; consumers of version `1` must reject version `2` rather than guess. |
+| `revocation_temporal` | object | Plan 009. `policy` (`strict`/`db_serialized_v1`) and, for the latter, the caller's `evaluation_time`, `max_snapshot_age_seconds`, `min_authorization_watermark` and the named `trust_basis`; `snapshot` (`status`, `reason`, signed `project_id`, `boundary_time`, `authorization_high_watermark`); `grant_revocations[]` (`grant_id`, `current_revocation`, `cutoff_order`); `receipt_ordering[]` (`record_id`, `kind`, `grant_id`, `authorization_order`, `historical_ordering`); counts `proven_before`, `at_or_after`, `indeterminate`. |
 | `records_total`, `records_proven` | int | |
 | `dag_ok`, `dag_heads`, `collapsed_duplicates` | bool/int | DAG validity, head count, deduped retries (#8). |
 | `checkpoints_total`, `checkpoints_verified`, `chain_ok` | int/bool | |
@@ -524,3 +572,20 @@ paths for every brokered use and indexed native credential. Root freshness alone
 non-revocation. Present malformed policy fields are fatal configuration errors. Missing required
 evidence gives `insufficient`; a committed contradiction or authenticated revocation gives
 `refuted`. Neither accepts the claim.
+
+**Historical ordering (plan 009, ADR 0007).** `requested` may also be
+`historical_authorized_as_of_snapshot`. It is decided only when the caller also sets
+`revocation_temporal`, for example
+`{"policy":"db_serialized_v1","evaluation_time":"2026-09-24T12:00:00.000Z","max_snapshot_age_seconds":3600,"min_authorization_watermark":0}`.
+Absent (or `{"policy":"strict"}`) the claim is always `insufficient`. Any malformed, unknown or
+partial value is a fatal configuration error. The claim is `satisfied` only if an authenticated,
+fresh v2 revocation snapshot for this project shows every receipt ordered strictly before any
+prospective cutoff of its grant (or its grant not revoked) and at or below the snapshot watermark,
+with every other obligation of `authorized`, and only if the `claim_policy.revocation` mode holds
+for the v2 evidence (a pinned issuer; `disclosed` needs a usable v2 list, `merkle` a usable v2 root
+with a valid proof for every receipt's grant, `both` all of these). A use of a totally revoked grant, a receipt at or after
+its cutoff, or an outcome signing another ordinal than its intent refutes it. Current revocation is
+reported separately and still blocks `ok`, `revoked_uses_blocked`, `authorized` and the capstone, so
+a bundle can be `ok:false` with the historical claim satisfied; the CLI and viewers show both. The
+claim proves order within Averin's database under an honest resource signer, revocation signer and
+database serialization; it does not prove physical action time.

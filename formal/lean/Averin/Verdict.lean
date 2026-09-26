@@ -12,8 +12,19 @@ Cryptographic validity is represented by the fixed `sealed` and `roleSigned` set
 oracle and Rust property corpus check the production extraction against this model.
 
 Removing independently authenticated adverse evidence is outside `support_erasure`: it changes
-`Fixed.revoked`, `adverseOpening` or `adverseAnchor` and can remove a real contradiction.
+`Fixed.revoked`, `checkedContradiction`, `adverseOpening` or `adverseAnchor` and can remove a real
+contradiction.
 Production must still honor every such item while present.
+
+Plan 009 adds `historicalAuthorized` (`historical_authorized_as_of_snapshot`). Its positive
+basis is `db_serialized_v1`: resource-signed receipt ordinals (fixed, inside signed records) and
+authenticated revocation cutoffs (fixed adverse statements, like `revoked`) share one ordinal
+domain; the signed snapshot (boundary time, high watermark) is a removable attachment. The caller
+fixes the policy, evaluation time, maximum age and minimum watermark, and the revocation mode
+(`Policy.revocation`) also selects which snapshot kinds (disclosed list, Merkle root) must be
+present. The model is weaker than the implementation in one respect: the implementation also
+requires every present v2 artifact to sign the identical snapshot, which is not a monotone
+attachment condition and is therefore not modelled here; it is covered by Rust tests.
 -/
 
 namespace Averin.Verdict
@@ -38,6 +49,15 @@ structure Record where
   grantId : Nat
   contributesRole : Bool
   grantRecord : Bool
+  deriving DecidableEq, BEq, ReflBEq, LawfulBEq, Repr
+
+/-- A resource-signed authorization receipt. `order` is its authenticated ordinal; `validated`
+means every grant/PoP/outcome check passed (for a revoked grant, on the shadow ledger). -/
+structure Receipt where
+  id : Nat
+  grantId : Nat
+  order : Option Nat
+  validated : Bool
   deriving DecidableEq, BEq, ReflBEq, LawfulBEq, Repr
 
 structure CapstoneChecks where
@@ -69,10 +89,14 @@ inductive Attachment where
   | disclosure (record : Nat)
   | path (grant : Nat)
   | attestation (checkpoint : Nat)
+  -- A signed revocation snapshot: database boundary time and authorization high watermark.
+  -- `merkle` snapshots certify a grant's state only through a per-grant `path`.
+  | snapshot (boundary : Nat) (watermark : Nat) (merkle : Bool)
   deriving DecidableEq, BEq, ReflBEq, LawfulBEq, Repr
 
 inductive Claim where
-  | integrity | authenticated | authorized | temporal | completeBrokered | completeIntrospected
+  | integrity | authenticated | authorized | historicalAuthorized | temporal
+  | completeBrokered | completeIntrospected
   deriving DecidableEq, BEq, Repr
 
 inductive RevocationMode where
@@ -100,6 +124,11 @@ structure Fixed where
   adverseOpening : Bool
   -- Verified TSA anchors with reversed or noncanonical time also contradict temporal authority.
   adverseAnchor : Bool
+  -- Other checked Tier-B contradictions (an unmatched-use violation, a rejected committed grant,
+  -- bounded-reuse overspend or replay, a cosignature, delegation or broker-log failure). Like
+  -- `revoked`, authenticated adverse evidence against current authorization and the capstones;
+  -- the historical claim uses its own count, `historicalContradiction`, instead.
+  checkedContradiction : Bool
   revocationIssuerPinned : Bool
   disclosedFresh : Bool
   merkleFresh : Bool
@@ -108,6 +137,19 @@ structure Fixed where
   brokeredUseValid : Bool
   introspectedUseValid : Bool
   capstone : CapstoneChecks
+  -- Plan 009. The caller selected `db_serialized_v1`, with its clock and bounds.
+  temporalPolicy : Bool
+  evalTime : Nat
+  maxAge : Nat
+  minWatermark : Nat
+  receipts : List Receipt
+  -- Authenticated prospective revocations `(grant, cutoff)`; total ones are `revoked`.
+  cutoffs : List (Nat × Nat)
+  -- The non-ordering use obligations of the historical view (joins, PoP, taxonomy, pending).
+  histUseValid : Bool
+  -- A checked contradiction among revocation-blocked receipts, or an outcome signing another
+  -- ordinal than its intent.
+  historicalContradiction : Bool
   deriving Repr
 
 def CommittedContradiction (f : Fixed) : Prop :=
@@ -265,6 +307,80 @@ instance (f : Fixed) : Decidable (IntrospectedCapstone f) := by
   unfold IntrospectedCapstone
   infer_instance
 
+/-- The authenticated ordinal is at or below the snapshot watermark and strictly below every
+authenticated cutoff of its grant. Equality with a cutoff is not before it. -/
+def OrderedBefore (f : Fixed) (w : Nat) (r : Receipt) : Prop :=
+  match r.order with
+  | none => False
+  | some o => o ≤ w ∧ ∀ p ∈ f.cutoffs, p.1 = r.grantId → o < p.2
+
+instance (f : Fixed) (w : Nat) (r : Receipt) : Decidable (OrderedBefore f w r) := by
+  unfold OrderedBefore
+  cases r.order <;> infer_instance
+
+def ProvenBefore (f : Fixed) (w : Nat) (r : Receipt) : Prop :=
+  r.validated = true ∧ r.grantId ∉ f.revoked ∧ OrderedBefore f w r
+
+instance (f : Fixed) (w : Nat) (r : Receipt) : Decidable (ProvenBefore f w r) := by
+  unfold ProvenBefore
+  infer_instance
+
+/-- An authenticated ordinal at or after an authenticated cutoff of the same grant. -/
+def AtOrAfter (f : Fixed) (r : Receipt) : Prop :=
+  match r.order with
+  | none => False
+  | some o => ∃ p ∈ f.cutoffs, p.1 = r.grantId ∧ p.2 ≤ o
+
+instance (f : Fixed) (r : Receipt) : Decidable (AtOrAfter f r) := by
+  unfold AtOrAfter
+  cases r.order <;> infer_instance
+
+def HistoricalAdverse (f : Fixed) : Prop :=
+  f.historicalContradiction = true ∨
+    ∃ r ∈ f.receipts, r.validated = true ∧ (r.grantId ∈ f.revoked ∨ AtOrAfter f r)
+
+instance (f : Fixed) : Decidable (HistoricalAdverse f) := by
+  unfold HistoricalAdverse
+  infer_instance
+
+def SnapshotOk (f : Fixed) (a : List Attachment) (b w : Nat) (merkle : Bool) : Prop :=
+  b ≤ f.evalTime ∧ f.evalTime ≤ b + f.maxAge ∧ f.minWatermark ≤ w ∧
+  (merkle = true → ∀ r ∈ f.receipts, .path r.grantId ∈ a) ∧
+  ∀ r ∈ f.receipts, ProvenBefore f w r
+
+instance (f : Fixed) (a : List Attachment) (b w : Nat) (m : Bool) :
+    Decidable (SnapshotOk f a b w m) := by
+  unfold SnapshotOk
+  infer_instance
+
+/-- A fresh signed snapshot of kind `m` (disclosed list `false`, Merkle root `true`) under which
+every receipt is proven before any revocation. -/
+def SnapshotKindReady (f : Fixed) (a : List Attachment) (m : Bool) : Prop :=
+  ∃ x ∈ a, match x with
+    | .snapshot b w m' => m' = m ∧ SnapshotOk f a b w m'
+    | _ => False
+
+instance (f : Fixed) (a : List Attachment) (m : Bool) : Decidable (SnapshotKindReady f a m) := by
+  unfold SnapshotKindReady
+  letI : DecidablePred (fun x : Attachment => match x with
+      | .snapshot b w m' => m' = m ∧ SnapshotOk f a b w m'
+      | _ => False) := fun x => by cases x <;> infer_instance
+  exact listDecidableExistsMem a _
+
+/-- The caller's revocation mode applied to the historical claim: a pinned issuer and the
+snapshot kinds it requires (the v2 analogue of `RevocationReady`). -/
+def SnapshotReady (f : Fixed) (a : List Attachment) : Prop :=
+  f.revocationIssuerPinned = true ∧
+  match f.policy.revocation with
+  | .pinned => SnapshotKindReady f a false ∨ SnapshotKindReady f a true
+  | .disclosed => SnapshotKindReady f a false
+  | .merkle => SnapshotKindReady f a true
+  | .both => SnapshotKindReady f a false ∧ SnapshotKindReady f a true
+
+instance (f : Fixed) (a : List Attachment) : Decidable (SnapshotReady f a) := by
+  unfold SnapshotReady
+  cases f.policy.revocation <;> infer_instance
+
 -- A validated fact has an evidence derivation. In particular, an embedded key cannot build
 -- `authenticated`: `RecordProven` requires membership in the fixed external pin set.
 inductive Supports (f : Fixed) (a : List Attachment) : Claim → Prop where
@@ -275,12 +391,20 @@ inductive Supports (f : Fixed) (a : List Attachment) : Claim → Prop where
       (hr : RoleContributorsProven f a)
       (hu : UseSurfaceValid f)
       (hc : ¬ CommittedContradiction f) (hn : NoAuthenticatedRevocation f)
-      (ho : NoAdverseOpening f)
+      (hk : f.checkedContradiction = false) (ho : NoAdverseOpening f)
       (hv : RevocationReady f a) (hd : DisclosureReady f a)
       (hat : f.policy.requireAttestation = false ∨ AttestationReady f a) :
       Supports f a .authorized
+  | historicalAuthorized (ha : Supports f a .authenticated)
+      (hsel : f.temporalPolicy = true)
+      (hr : RoleContributorsProven f a) (hu : f.histUseValid = true)
+      (hc : ¬ CommittedContradiction f) (ho : NoAdverseOpening f)
+      (hh : ¬ HistoricalAdverse f) (hs : SnapshotReady f a) (hd : DisclosureReady f a)
+      (hat : f.policy.requireAttestation = false ∨ AttestationReady f a) :
+      Supports f a .historicalAuthorized
   | temporal (hc : ¬ CommittedContradiction f)
-      (hn : NoAuthenticatedRevocation f) (ho : NoAdverseOpening f)
+      (hn : NoAuthenticatedRevocation f) (hk : f.checkedContradiction = false)
+      (ho : NoAdverseOpening f)
       (hv : RevocationReady f a) (hat : AttestationReady f a) : Supports f a .temporal
   | completeBrokered (ha : Supports f a .authorized)
       (ht : Supports f a .temporal) (hc : BrokeredCapstone f) : Supports f a .completeBrokered
@@ -308,7 +432,8 @@ instance (f : Fixed) (a : List Attachment) : Decidable (AuthenticatedP f a) := b
 
 def AuthorizedP (f : Fixed) (a : List Attachment) : Prop :=
   AuthenticatedP f a ∧ RoleContributorsProven f a ∧ UseSurfaceValid f ∧
-  ¬ CommittedContradiction f ∧ NoAuthenticatedRevocation f ∧ NoAdverseOpening f ∧
+  ¬ CommittedContradiction f ∧ NoAuthenticatedRevocation f ∧
+  f.checkedContradiction = false ∧ NoAdverseOpening f ∧
   RevocationReady f a ∧ DisclosureReady f a ∧
   (f.policy.requireAttestation = false ∨ AttestationReady f a)
 
@@ -316,9 +441,20 @@ instance (f : Fixed) (a : List Attachment) : Decidable (AuthorizedP f a) := by
   unfold AuthorizedP
   infer_instance
 
+def HistoricalP (f : Fixed) (a : List Attachment) : Prop :=
+  AuthenticatedP f a ∧ f.temporalPolicy = true ∧ RoleContributorsProven f a ∧
+  f.histUseValid = true ∧ ¬ CommittedContradiction f ∧ NoAdverseOpening f ∧
+  ¬ HistoricalAdverse f ∧ SnapshotReady f a ∧ DisclosureReady f a ∧
+  (f.policy.requireAttestation = false ∨ AttestationReady f a)
+
+instance (f : Fixed) (a : List Attachment) : Decidable (HistoricalP f a) := by
+  unfold HistoricalP
+  infer_instance
+
 def TemporalP (f : Fixed) (a : List Attachment) : Prop :=
   ¬ CommittedContradiction f ∧ NoAuthenticatedRevocation f ∧
-  NoAdverseOpening f ∧ RevocationReady f a ∧ AttestationReady f a
+  f.checkedContradiction = false ∧ NoAdverseOpening f ∧ RevocationReady f a ∧
+  AttestationReady f a
 
 instance (f : Fixed) (a : List Attachment) : Decidable (TemporalP f a) := by
   unfold TemporalP
@@ -330,6 +466,7 @@ def SupportP (f : Fixed) (a : List Attachment) : Claim → Prop
   | .integrity => IntegrityP f
   | .authenticated => AuthenticatedP f a
   | .authorized => AuthorizedP f a
+  | .historicalAuthorized => HistoricalP f a
   | .temporal => TemporalP f a
   | .completeBrokered => AuthorizedP f a ∧ TemporalP f a ∧ BrokeredCapstone f
   | .completeIntrospected => AuthorizedP f a ∧ TemporalP f a ∧ IntrospectedCapstone f
@@ -338,6 +475,7 @@ def supportB (f : Fixed) (a : List Attachment) : Claim → Bool
   | .integrity => decide (IntegrityP f)
   | .authenticated => decide (AuthenticatedP f a)
   | .authorized => decide (AuthorizedP f a)
+  | .historicalAuthorized => decide (HistoricalP f a)
   | .temporal => decide (TemporalP f a)
   | .completeBrokered => decide (AuthorizedP f a ∧ TemporalP f a ∧ BrokeredCapstone f)
   | .completeIntrospected => decide (AuthorizedP f a ∧ TemporalP f a ∧ IntrospectedCapstone f)
@@ -345,16 +483,32 @@ def supportB (f : Fixed) (a : List Attachment) : Claim → Bool
 theorem authorizedP_iff (f : Fixed) (a : List Attachment) :
     AuthorizedP f a ↔ Supports f a .authorized := by
   constructor
-  · rintro ⟨ha, hr, hu, hc, hn, ho, hv, hd, hp⟩
+  · rintro ⟨ha, hr, hu, hc, hn, hk, ho, hv, hd, hp⟩
     exact .authorized (.authenticated (.integrity ha.1.1 ha.1.2) ha.2)
-      hr hu hc hn ho hv hd hp
+      hr hu hc hn hk ho hv hd hp
   · intro h
     cases h with
-    | authorized ha hr hu hc hn ho hv hd hp =>
+    | authorized ha hr hu hc hn hk ho hv hd hp =>
         cases ha with
         | authenticated hi hrec =>
             cases hi with
-            | integrity hne hs => exact ⟨⟨⟨hne, hs⟩, hrec⟩, hr, hu, hc, hn, ho, hv, hd, hp⟩
+            | integrity hne hs =>
+                exact ⟨⟨⟨hne, hs⟩, hrec⟩, hr, hu, hc, hn, hk, ho, hv, hd, hp⟩
+
+theorem historicalP_iff (f : Fixed) (a : List Attachment) :
+    HistoricalP f a ↔ Supports f a .historicalAuthorized := by
+  constructor
+  · rintro ⟨ha, hsel, hr, hu, hc, ho, hh, hs, hd, hat⟩
+    exact .historicalAuthorized (.authenticated (.integrity ha.1.1 ha.1.2) ha.2)
+      hsel hr hu hc ho hh hs hd hat
+  · intro h
+    cases h with
+    | historicalAuthorized ha hsel hr hu hc ho hh hs hd hat =>
+        cases ha with
+        | authenticated hi hrec =>
+            cases hi with
+            | integrity hne hs' =>
+                exact ⟨⟨⟨hne, hs'⟩, hrec⟩, hsel, hr, hu, hc, ho, hh, hs, hd, hat⟩
 
 /-- The executable finite-evidence predicate and the inductive proof claims agree. -/
 theorem supportP_iff (f : Fixed) (a : List Attachment) (c : Claim) :
@@ -366,32 +520,35 @@ theorem supportP_iff (f : Fixed) (a : List Attachment) (c : Claim) :
     | authenticated => exact .authenticated (.integrity h.1.1 h.1.2) h.2
     | authorized =>
         exact (authorizedP_iff f a).mp h
-    | temporal => exact .temporal h.1 h.2.1 h.2.2.1 h.2.2.2.1 h.2.2.2.2
+    | historicalAuthorized => exact (historicalP_iff f a).mp h
+    | temporal => exact .temporal h.1 h.2.1 h.2.2.1 h.2.2.2.1 h.2.2.2.2.1 h.2.2.2.2.2
     | completeBrokered =>
         rcases h with ⟨ha, ht, hb⟩
         exact .completeBrokered ((authorizedP_iff f a).mp ha)
-          (.temporal ht.1 ht.2.1 ht.2.2.1 ht.2.2.2.1 ht.2.2.2.2) hb
+          (.temporal ht.1 ht.2.1 ht.2.2.1 ht.2.2.2.1 ht.2.2.2.2.1 ht.2.2.2.2.2) hb
     | completeIntrospected =>
         rcases h with ⟨ha, ht, hb⟩
         exact .completeIntrospected ((authorizedP_iff f a).mp ha)
-          (.temporal ht.1 ht.2.1 ht.2.2.1 ht.2.2.2.1 ht.2.2.2.2) hb
+          (.temporal ht.1 ht.2.1 ht.2.2.1 ht.2.2.2.1 ht.2.2.2.2.1 ht.2.2.2.2.2) hb
   · intro h
     cases h with
     | integrity hn hs => exact ⟨hn, hs⟩
     | authenticated hi hp =>
         cases hi with
         | integrity hn hs => exact ⟨⟨hn, hs⟩, hp⟩
-    | authorized ha hr hu hc hn ho hv hd hp =>
-        exact (authorizedP_iff f a).mpr (.authorized ha hr hu hc hn ho hv hd hp)
-    | temporal hc hn ho hv hat => exact ⟨hc, hn, ho, hv, hat⟩
+    | authorized ha hr hu hc hn hk ho hv hd hp =>
+        exact (authorizedP_iff f a).mpr (.authorized ha hr hu hc hn hk ho hv hd hp)
+    | historicalAuthorized ha hsel hr hu hc ho hh hs hd hat =>
+        exact (historicalP_iff f a).mpr (.historicalAuthorized ha hsel hr hu hc ho hh hs hd hat)
+    | temporal hc hn hk ho hv hat => exact ⟨hc, hn, hk, ho, hv, hat⟩
     | completeBrokered ha ht hb =>
         cases ht with
-        | temporal hc hn ho hv hat =>
-            exact ⟨(authorizedP_iff f a).mpr ha, ⟨hc, hn, ho, hv, hat⟩, hb⟩
+        | temporal hc hn hk ho hv hat =>
+            exact ⟨(authorizedP_iff f a).mpr ha, ⟨hc, hn, hk, ho, hv, hat⟩, hb⟩
     | completeIntrospected ha ht hb =>
         cases ht with
-        | temporal hc hn ho hv hat =>
-            exact ⟨(authorizedP_iff f a).mpr ha, ⟨hc, hn, ho, hv, hat⟩, hb⟩
+        | temporal hc hn hk ho hv hat =>
+            exact ⟨(authorizedP_iff f a).mpr ha, ⟨hc, hn, hk, ho, hv, hat⟩, hb⟩
 
 theorem supportB_iff (f : Fixed) (a : List Attachment) (c : Claim) :
     supportB f a c = true ↔ Supports f a c := by
@@ -402,6 +559,8 @@ theorem supportB_iff (f : Fixed) (a : List Attachment) (c : Claim) :
       (supportP_iff f a .authenticated)
   | authorized => simpa only [supportB, SupportP, decide_eq_true_eq] using
       (supportP_iff f a .authorized)
+  | historicalAuthorized => simpa only [supportB, SupportP, decide_eq_true_eq] using
+      (supportP_iff f a .historicalAuthorized)
   | temporal => simpa only [supportB, SupportP, decide_eq_true_eq] using
       (supportP_iff f a .temporal)
   | completeBrokered => simpa only [supportB, SupportP, decide_eq_true_eq] using
@@ -413,11 +572,24 @@ inductive Decision where
   | satisfied | insufficient | refuted
   deriving DecidableEq, Repr
 
+/-- The historical claim is never positive under the strict policy. When selected, its adverse
+evidence is the per-receipt ordering (and total revocations of validated receipts), not bare
+revocation membership: a use of a prospectively revoked grant proven before its cutoff is not a
+contradiction of this claim, although current revocation still refutes `authorized`. -/
+def decideHistorical (f : Fixed) (a : List Attachment) : Decision :=
+  if f.temporalPolicy = false then .insufficient
+  else if CommittedContradiction f ∨ HistoricalAdverse f ∨
+      f.adverseOpening = true ∨ f.adverseAnchor = true then .refuted
+  else if !supportB f a .integrity then .refuted
+  else if supportB f a .historicalAuthorized then .satisfied else .insufficient
+
 def decideClaim (f : Fixed) (a : List Attachment) (c : Claim) : Decision :=
-  if (c = .authorized ∨ c = .temporal ∨ c = .completeBrokered ∨
+  if c = .historicalAuthorized then decideHistorical f a
+  else if (c = .authorized ∨ c = .temporal ∨ c = .completeBrokered ∨
       c = .completeIntrospected) ∧
       (CommittedContradiction f ∨ ¬ NoAuthenticatedRevocation f ∨
-        f.adverseOpening = true ∨ f.adverseAnchor = true) then .refuted
+        f.checkedContradiction = true ∨ f.adverseOpening = true ∨
+        f.adverseAnchor = true) then .refuted
   else if c != .temporal && !supportB f a .integrity then .refuted
   else if supportB f a c then .satisfied else .insufficient
 
@@ -425,6 +597,18 @@ def decideClaim (f : Fixed) (a : List Attachment) (c : Claim) : Decision :=
 theorem decideClaim_satisfied_only (f : Fixed) (a : List Attachment) (c : Claim)
     (h : decideClaim f a c = .satisfied) : Supports f a c := by
   unfold decideClaim at h
+  split at h
+  · subst c
+    unfold decideHistorical at h
+    split at h
+    · contradiction
+    split at h
+    · contradiction
+    split at h
+    · contradiction
+    split at h
+    · exact (supportB_iff f a .historicalAuthorized).mp (by assumption)
+    · contradiction
   split at h
   · contradiction
   split at h
@@ -496,6 +680,28 @@ theorem roleContributors_mono {f : Fixed} {small large : List Attachment}
     RoleContributorsProven f large :=
   ⟨hr.1, fun r hm hrole => roleProven_mono h (hr.2 r hm hrole)⟩
 
+theorem snapshotKindReady_mono {f : Fixed} {small large : List Attachment} {m : Bool}
+    (h : Erased small large) (hr : SnapshotKindReady f small m) :
+    SnapshotKindReady f large m := by
+  obtain ⟨x, hx, hs⟩ := hr
+  refine ⟨x, h _ hx, ?_⟩
+  cases x with
+  | snapshot b w m' =>
+      exact ⟨hs.1, hs.2.1, hs.2.2.1, hs.2.2.2.1,
+        fun hm r hr => h _ (hs.2.2.2.2.1 hm r hr), hs.2.2.2.2.2⟩
+  | _ => exact hs
+
+theorem snapshotReady_mono {f : Fixed} {small large : List Attachment}
+    (h : Erased small large) (hr : SnapshotReady f small) : SnapshotReady f large := by
+  refine ⟨hr.1, ?_⟩
+  have hk := hr.2
+  cases hm : f.policy.revocation <;> simp only [hm] at hk ⊢
+  · exact hk.elim (fun k => Or.inl (snapshotKindReady_mono h k))
+      (fun k => Or.inr (snapshotKindReady_mono h k))
+  · exact snapshotKindReady_mono h hk
+  · exact snapshotKindReady_mono h hk
+  · exact ⟨snapshotKindReady_mono h hk.1, snapshotKindReady_mono h hk.2⟩
+
 /-- Deleting unsigned support cannot add any claim, while authenticated authority statements
 remain fixed. This is an inclusion theorem on supported claims, not a textual status order. -/
 theorem support_erasure {f : Fixed} {small large : List Attachment}
@@ -504,12 +710,16 @@ theorem support_erasure {f : Fixed} {small large : List Attachment}
   | integrity hn hs => exact .integrity hn hs
   | authenticated hi hp ih =>
       exact .authenticated ih (fun r hr => recordProven_mono h (hp r hr))
-  | authorized ha hr hu hc hn ho hv hd hat ih =>
-      exact .authorized ih (roleContributors_mono h hr) hu hc hn ho
+  | authorized ha hr hu hc hn hk ho hv hd hat ih =>
+      exact .authorized ih (roleContributors_mono h hr) hu hc hn hk ho
         (revocationReady_mono h hv) (disclosureReady_mono h hd)
         (hat.elim Or.inl (fun ha => Or.inr (attestationReady_mono h ha)))
-  | temporal hc hn ho hv hat =>
-      exact .temporal hc hn ho (revocationReady_mono h hv) (attestationReady_mono h hat)
+  | historicalAuthorized ha hsel hr hu hc ho hh hs hd hat ih =>
+      exact .historicalAuthorized ih hsel (roleContributors_mono h hr) hu hc ho hh
+        (snapshotReady_mono h hs) (disclosureReady_mono h hd)
+        (hat.elim Or.inl (fun ha => Or.inr (attestationReady_mono h ha)))
+  | temporal hc hn hk ho hv hat =>
+      exact .temporal hc hn hk ho (revocationReady_mono h hv) (attestationReady_mono h hat)
   | completeBrokered ha ht hc iha iht => exact .completeBrokered iha iht hc
   | completeIntrospected ha ht hc iha iht => exact .completeIntrospected iha iht hc
 
@@ -532,7 +742,7 @@ theorem committed_contradiction_refutes_authorization (f : Fixed) (a : List Atta
     (h : CommittedContradiction f) : ¬ Supports f a .authorized := by
   intro hs
   cases hs with
-  | authorized _ _ _ hc _ _ _ _ _ => exact hc h
+  | authorized _ _ _ hc _ _ _ _ _ _ => exact hc h
 
 theorem committed_contradiction_refutes_capstones (f : Fixed) (a : List Attachment)
     (h : CommittedContradiction f) :
@@ -557,11 +767,11 @@ theorem capstone_prerequisites {f : Fixed} {a : List Attachment}
   cases hc with
   | completeBrokered ha ht hcap =>
       cases ha with
-      | authorized hAuth hr _ hcontra _ _ _ _ _ =>
+      | authorized hAuth hr _ hcontra _ _ _ _ _ _ =>
           cases hAuth with
           | authenticated _ hp =>
               cases ht with
-              | temporal _ _ _ hv hat =>
+              | temporal _ _ _ _ hv hat =>
                   exact ⟨(fun r hm => (hp r hm).2.2.1),
                     (fun r hm hrole => (hr.2 r hm hrole).2.2), hv, hat, hcontra, hcap⟩
 
@@ -575,11 +785,11 @@ theorem introspected_capstone_prerequisites {f : Fixed} {a : List Attachment}
   cases hc with
   | completeIntrospected ha ht hcap =>
       cases ha with
-      | authorized hAuth hr _ hcontra _ _ _ _ _ =>
+      | authorized hAuth hr _ hcontra _ _ _ _ _ _ =>
           cases hAuth with
           | authenticated _ hp =>
               cases ht with
-              | temporal _ _ _ hv hat =>
+              | temporal _ _ _ _ hv hat =>
                   exact ⟨(fun r hm => (hp r hm).2.2.1),
                     (fun r hm hrole => (hr.2 r hm hrole).2.2), hv, hat, hcontra, hcap⟩
 
@@ -615,5 +825,83 @@ compromised key. -/
 theorem key_status_conservative {f : Fixed} {small large : List Attachment}
     (h : Erased small large) (hk : KeyHonored f small) : KeyHonored f large :=
   keyHonored_mono h hk
+
+/-! ## Plan 009: historical ordering -/
+
+/-- The strict (default) policy never yields a positive historical claim. -/
+theorem historical_requires_policy (f : Fixed) (a : List Attachment)
+    (h : f.temporalPolicy = false) : decideClaim f a .historicalAuthorized ≠ .satisfied := by
+  simp [decideClaim, decideHistorical, h]
+
+theorem snapshotReady_some {f : Fixed} {a : List Attachment} (h : SnapshotReady f a) :
+    ∃ m, SnapshotKindReady f a m := by
+  have hk := h.2
+  cases hm : f.policy.revocation <;> simp only [hm] at hk
+  · exact hk.elim (fun k => ⟨_, k⟩) (fun k => ⟨_, k⟩)
+  · exact ⟨_, hk⟩
+  · exact ⟨_, hk⟩
+  · exact ⟨_, hk.1⟩
+
+/-- A receipt with no authenticated ordinal (stripped order evidence) blocks the claim. -/
+theorem historical_requires_order {f : Fixed} {a : List Attachment} {r : Receipt}
+    (hr : r ∈ f.receipts) (hn : r.order = none) : ¬ Supports f a .historicalAuthorized := by
+  intro hs
+  cases hs with
+  | historicalAuthorized _ _ _ _ _ _ _ hsnap _ _ =>
+      obtain ⟨m, x, _, hx⟩ := snapshotReady_some hsnap
+      cases x with
+      | snapshot b w m' =>
+          have hp := (hx.2.2.2.2.2 r hr).2.2
+          simp [OrderedBefore, hn] at hp
+      | _ => exact hx
+
+/-- Without a snapshot attachment (stripped or never exported) the claim is not supported. -/
+theorem historical_requires_snapshot {f : Fixed} {a : List Attachment}
+    (hn : ∀ x ∈ a, ∀ b w m, x ≠ .snapshot b w m) : ¬ Supports f a .historicalAuthorized := by
+  intro hs
+  cases hs with
+  | historicalAuthorized _ _ _ _ _ _ _ hsnap _ _ =>
+      obtain ⟨m, x, hx, hok⟩ := snapshotReady_some hsnap
+      cases x with
+      | snapshot b w m' => exact hn _ hx b w m' rfl
+      | _ => exact hok
+
+/-- An authenticated ordinal equal to or above an authenticated cutoff refutes the claim. -/
+theorem at_or_after_refutes {f : Fixed} {a : List Attachment} {r : Receipt}
+    (hr : r ∈ f.receipts) (hv : r.validated = true) (hat : AtOrAfter f r)
+    (hsel : f.temporalPolicy = true) : decideClaim f a .historicalAuthorized = .refuted := by
+  have hadv : HistoricalAdverse f := Or.inr ⟨r, hr, hv, Or.inr hat⟩
+  simp [decideClaim, decideHistorical, hsel, hadv]
+
+/-- A total (compromise or legacy) revocation of a validated receipt's grant refutes the claim,
+whatever ordering evidence exists: legacy total revocations stay total. -/
+theorem total_revocation_refutes {f : Fixed} {a : List Attachment} {r : Receipt}
+    (hr : r ∈ f.receipts) (hv : r.validated = true) (ht : r.grantId ∈ f.revoked)
+    (hsel : f.temporalPolicy = true) : decideClaim f a .historicalAuthorized = .refuted := by
+  have hadv : HistoricalAdverse f := Or.inr ⟨r, hr, hv, Or.inl ht⟩
+  simp [decideClaim, decideHistorical, hsel, hadv]
+
+/-- Cutoffs and receipts share one ordinal domain. An honest snapshot at watermark `w` discloses
+exactly the cutoffs allocated at or below `w`. Substituting an earlier honest snapshot cannot turn
+a receipt ordered at/after a cutoff into one proven before: either the earlier snapshot contains
+the cutoff, or the receipt's ordinal exceeds its watermark. -/
+theorem earlier_snapshot_cannot_flip (history : List (Nat × Nat)) (w g o c : Nat)
+    (hc : (g, c) ∈ history) (hco : c ≤ o) :
+    ¬ (o ≤ w ∧ ∀ p ∈ history.filter (fun p => decide (p.2 ≤ w)), p.1 = g → o < p.2) := by
+  rintro ⟨how, hall⟩
+  have hmem : (g, c) ∈ history.filter (fun p => decide (p.2 ≤ w)) := by
+    simp only [List.mem_filter, decide_eq_true_eq]
+    exact ⟨hc, Nat.le_trans hco how⟩
+  exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le (hall _ hmem rfl) hco)
+
+/-- The revocation mode is a caller requirement on the historical claim too: without a pinned
+revocation issuer no historical positive is supported. -/
+theorem historical_requires_pinned_issuer {f : Fixed} {a : List Attachment}
+    (h : f.revocationIssuerPinned = false) : ¬ Supports f a .historicalAuthorized := by
+  intro hs
+  cases hs with
+  | historicalAuthorized _ _ _ _ _ _ _ hsnap _ _ =>
+      have hp := hsnap.1
+      simp [h] at hp
 
 end Averin.Verdict

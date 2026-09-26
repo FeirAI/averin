@@ -111,13 +111,16 @@ func TestMigrateFreshAdoptsCurrentAndIsIdempotent(t *testing.T) {
 		t.Fatalf("version after migrate = %d, want %d", got, CurrentSchemaVersion)
 	}
 	// Every baseline table from all three folded stores must exist under the single version.
-	for _, tbl := range []string{"records", "checkpoints", "anchors", "disclosures", "display_seq", "broker_seq", "legacy_consume_exclusions", "consumed_nonces", "consumed_jtis", "nonce_ledger_cutover", "revocations", "pending_grants", "broker_seq_recovery_fence", "broker_seq_recovery_result"} {
+	for _, tbl := range []string{"records", "checkpoints", "anchors", "disclosures", "display_seq", "broker_seq", "legacy_consume_exclusions", "consumed_nonces", "consumed_jtis", "nonce_ledger_cutover", "legacy_boolean_revocations", "revocation_events", "authorization_receipts", "pending_grants", "broker_seq_recovery_fence", "broker_seq_recovery_result"} {
 		if !regExists(t, admin, tbl) {
 			t.Fatalf("baseline table %q missing after migrate", tbl)
 		}
 	}
 	if regExists(t, admin, "consume_ledger") {
 		t.Fatal("old writable ledger relation survives v6")
+	}
+	if regExists(t, admin, "revocations") {
+		t.Fatal("old boolean revocation relation survives v7")
 	}
 
 	// Capture the steady-state fingerprint: one stamp per version, and v1's applied_at.
@@ -491,7 +494,7 @@ func TestTenantNonceCutoverInterruptedBeforeCommitRetriesOnce(t *testing.T) {
 	if err := Cutover(ctx, scoped, []string{old}, next); err != nil {
 		t.Fatalf("retry cutover: %v", err)
 	}
-	if got := maxVersion(t, admin); got != 6 || regExists(t, admin, "consume_ledger") {
+	if got := maxVersion(t, admin); got != CurrentSchemaVersion || regExists(t, admin, "consume_ledger") {
 		t.Fatalf("retry left version %d or old writable relation", got)
 	}
 	if err := admin.QueryRow(ctx, `SELECT consumed_at FROM legacy_consume_exclusions WHERE kind='nonce' AND consume_key='unknown-owner'`).Scan(&preserved); err != nil || !preserved.Equal(original) {
@@ -615,6 +618,7 @@ func TestTenantNonceRuntimeReadinessRequiresLeastPrivilege(t *testing.T) {
 		"GRANT SELECT,INSERT,DELETE ON consumed_nonces,consumed_jtis TO " + role,
 		"GRANT SELECT,INSERT ON records,broker_seq TO " + role,
 		"GRANT SELECT,INSERT,UPDATE ON project_write_guard TO " + role,
+		"GRANT SELECT,INSERT ON authorization_receipts,revocation_events TO " + role,
 	} {
 		if _, err := admin.Exec(ctx, sql); err != nil {
 			t.Fatal(err)

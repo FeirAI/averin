@@ -74,6 +74,20 @@ func (p *pauseBoundStore) PutRecoveryResult(r store.RecoveryResult) (store.Recov
 	}
 	return stored, created, err
 }
+func (p *pauseBoundStore) PutRevocationEvent(ev store.RevocationEvent) (store.RevocationEvent, bool, error) {
+	stored, created, err := p.Store.PutRevocationEvent(ev)
+	if err == nil && created {
+		switch p.root.stage {
+		case "after_revocation_event":
+			p.root.pause()
+		case "after_revocation_commit":
+			p.root.mu.Lock()
+			p.root.matched = true
+			p.root.mu.Unlock()
+		}
+	}
+	return stored, created, err
+}
 func (p *pauseProjectStore) pause() {
 	if err := os.WriteFile(p.marker, []byte(p.stage), 0600); err != nil {
 		panic(err)
@@ -82,7 +96,7 @@ func (p *pauseProjectStore) pause() {
 }
 func (p *pauseProjectStore) WithProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
 	err := p.Store.WithProjectWrite(ctx, projectID, func(bound store.Store) error { return fn(&pauseBoundStore{Store: bound, root: p}) })
-	if err == nil && (p.stage == "after_commit" || p.stage == "after_recovery_fence" || p.stage == "after_recovery_terminal") {
+	if err == nil && (p.stage == "after_commit" || p.stage == "after_recovery_fence" || p.stage == "after_recovery_terminal" || p.stage == "after_revocation_commit") {
 		p.mu.Lock()
 		matched := p.matched
 		p.mu.Unlock()
@@ -123,7 +137,11 @@ func TestProjectTxChildProcess(t *testing.T) {
 	if stage := os.Getenv("AVERIN_PROJECT_TX_PAUSE_STAGE"); stage != "" {
 		projectStore = &pauseProjectStore{Store: st, stage: stage, idem: os.Getenv("AVERIN_PROJECT_TX_PAUSE_IDEM"), marker: os.Getenv("AVERIN_PROJECT_TX_PAUSE_MARKER")}
 	}
-	handler := api.New(recordingCore, projectStore, "k0").WithContent(fs).WithBroker(brokerIssuingKey()).WithCosigPolicy(1, []ed25519.PublicKey{approver.Public().(ed25519.PublicKey)}).WithResource(resourceCore, "orders-db").WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+	srv := api.New(recordingCore, projectStore, "k0").WithContent(fs).WithBroker(brokerIssuingKey()).WithCosigPolicy(1, []ed25519.PublicKey{approver.Public().(ed25519.PublicKey)}).WithResource(resourceCore, "orders-db").WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore())
+	if os.Getenv("AVERIN_PROJECT_TX_REVOCATION_V2") == "1" {
+		srv = srv.WithRevocationExportV2()
+	}
+	handler := srv.Routes()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

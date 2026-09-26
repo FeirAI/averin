@@ -1,0 +1,15 @@
+Mutant: m46-temporal-merkle-cutoff-not-committed. Named detector: temporal_merkle_v2_commits_mode_and_cutoff.
+
+diff --git a/core/src/verify/temporal.rs b/core/src/verify/temporal.rs
+index c03e15d..04c8d8b 100644
+--- a/core/src/verify/temporal.rs
++++ b/core/src/verify/temporal.rs
+@@ -464,7 +464,7 @@ pub(super) fn check_revocation_proof_v2(
+             };
+             let leaf = revocation_entry_v2(
+                 &q,
+-                &revocation_state_digest_v2(state.mode(), state.cutoff()),
++                &revocation_state_digest_v2(state.mode(), 0), // BUG: cutoff not re-derived
+             );
+             if super::merkle_root_from_proof(&leaf, i as usize, leaf_count, &p) == Some(*root) {
+                 ProofV2::Revoked(state)

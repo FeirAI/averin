@@ -2,12 +2,12 @@ Mutant: The parser accepts the noncanonical integer spelling negative zero.
 
 --- a/core/src/canon.rs
 +++ b/core/src/canon.rs
-@@ -411,7 +411,7 @@
-         // advance elsewhere is ASCII or a whole scalar, so both indices are char boundaries.
-         let lexeme = &self.source[start..self.i];
-         // RCP §3: `-0` is not a canonical integer spelling (consistent with rejecting `00`/`01`).
--        if lexeme == "-0" {
-+        if lexeme == "-00" {
-             return Err(ParseError {
-                 message: ParseMessage::Static("negative zero is not a canonical integer"),
-                 pos: start,
+@@ -765,7 +765,7 @@
+         return Err(ParseError::At(ErrorKind::Exponent, i));
+     }
+     // RCP §3: `-0` is not a canonical integer spelling (consistent with rejecting `00`/`01`).
+-    if negative && i - digits == 1 && s[digits] == b'0' {
++    if negative && i - digits == 2 && s[digits] == b'0' {
+         return Err(ParseError::At(ErrorKind::NegativeZero, start));
+     }
+     match decimal_i64(s, digits, i, negative) {

@@ -48,8 +48,11 @@ AVERIN_TEST_DATABASE_URL='postgres://test-user:test-password@localhost:55432/tes
 ```
 
 The target rebuilds and freshness-checks the native RFC 3161 cgo library, runs the Go suite, and
-checks the JSON event stream for explicit pass events from the three named broker-sequence void
-Postgres tests. Missing tests and skipped children fail the gate. CI runs this against Postgres 16;
+checks the JSON event stream for explicit pass events from every test named in
+`scripts/check-go-test-events.py` (broker-sequence void and recovery, nonce cutover, and the
+plan 009 temporal revocation races, causal schedules, repeated revokes, snapshot consistency,
+child-process crash cuts, store contract and v7 cutover tests). Missing tests and skipped
+children fail the gate. CI runs this against Postgres 16;
 the append-only test also uses a freshly created non-owner least-privilege role to prove that
 `REVOKE` actually bites. The DSN needs sufficient privilege to create that test role and private
 schemas. Run `make check-claims` for textual validation of the claim inventory and CI job IDs.

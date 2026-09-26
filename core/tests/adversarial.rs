@@ -87,7 +87,7 @@ fn shared_attachment_corpus_native_claim_support_erasure() {
         .unwrap();
         assert_eq!(
             report.get("claims_version").and_then(CanonValue::as_str),
-            Some("1")
+            Some("2")
         );
         let claims = report.get("claims").unwrap();
         let requested = claims
@@ -103,6 +103,7 @@ fn shared_attachment_corpus_native_claim_support_erasure() {
             "integrity",
             "authenticated",
             "authorized",
+            "historical_authorized_as_of_snapshot",
             "temporal",
             "complete_brokered",
             "complete_introspected",
@@ -14148,6 +14149,36 @@ fn write_generated_verdict_corpus() {
         Some("satisfied"),
         "v3 real-producer native base must make the complete introspected claim reachable"
     );
+    // Plan 009: a real Go producer export with a two-phase use, a prospective revocation after the
+    // intent and the outcome recorded after it, verified under the caller's db_serialized_v1
+    // policy. Current revocation blocks; the historical claim is satisfied.
+    let historical_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/claim-historical-v3.json");
+    let historical_fixture =
+        CanonValue::parse(&std::fs::read_to_string(historical_path).unwrap()).unwrap();
+    let historical_bundle = historical_fixture.get("bundle").unwrap().clone();
+    let historical_opts = historical_fixture.get("opts").unwrap().clone();
+    let historical_report = CanonValue::parse(&verify_bundle_with_json(
+        &historical_bundle.serialize(),
+        &historical_opts.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(
+        historical_report
+            .get("claims")
+            .unwrap()
+            .get("historical_authorized_as_of_snapshot")
+            .and_then(CanonValue::as_str),
+        Some("satisfied"),
+        "v3 real-producer historical base must make the historical claim reachable"
+    );
+    assert_eq!(
+        historical_report.get("ok"),
+        Some(&CanonValue::Bool(false)),
+        "current revocation still blocks ok"
+    );
     let (rec, res, tsa, rev) = rev_keys();
     let opts = |rec: &SigningKey, res: &SigningKey, tsa: &SigningKey| {
         CanonValue::object(vec![
@@ -14191,6 +14222,7 @@ fn write_generated_verdict_corpus() {
             native_capstone_bundle,
             native_capstone_opts,
         ),
+        ("v3_historical".into(), historical_bundle, historical_opts),
     ];
     let (two_checkpoint, _) = claim_two_checkpoint_bundle(false, 3);
     bases.push((
@@ -14561,6 +14593,8 @@ fn generated_verdict_corpus_matches_native() {
     let mut saw_capstone = false;
     let mut saw_native_capstone = false;
     let mut saw_partial_anchor_pop = false;
+    let mut saw_historical = false;
+    let mut saw_historical_stripped = false;
     let mut families = BTreeSet::new();
     for row in rows {
         let name = row.get("name").and_then(CanonValue::as_str).unwrap();
@@ -14613,6 +14647,19 @@ fn generated_verdict_corpus_matches_native() {
                 .and_then(CanonValue::as_str)
                 == Some("satisfied");
         }
+        let historical = report
+            .get("claims")
+            .unwrap()
+            .get("historical_authorized_as_of_snapshot")
+            .and_then(CanonValue::as_str);
+        if name == "v3_historical/anchors_1/base" {
+            saw_historical = historical == Some("satisfied")
+                && report.get("ok") == Some(&CanonValue::Bool(false));
+        }
+        if name.starts_with("v3_historical/") && name.contains("drop_revocation_list") {
+            assert_ne!(historical, Some("satisfied"), "{name}: stripped snapshot");
+            saw_historical_stripped = true;
+        }
         if name == "failed_pop_partial_anchor/anchors_1/base" {
             saw_partial_anchor_pop = report.get("ok") == Some(&CanonValue::Bool(false))
                 && report
@@ -14637,6 +14684,10 @@ fn generated_verdict_corpus_matches_native() {
         saw_partial_anchor_pop,
         "corpus must preserve the cp0-only failed-PoP intent violation"
     );
+    assert!(
+        saw_historical && saw_historical_stripped,
+        "corpus must have a real-producer historical positive (with current revocation still blocking) and its stripped-snapshot variants"
+    );
     for family in [
         "two_checkpoint",
         "two_phase",
@@ -14650,6 +14701,7 @@ fn generated_verdict_corpus_matches_native() {
         "signed_adverse_merkle",
         "compromised_signer",
         "mixed_valid_invalid",
+        "v3_historical",
     ] {
         assert!(
             families.contains(family),
@@ -14745,4 +14797,1422 @@ fn grant_void_with_grant_of_the_voided_grant_id_fails() {
         "issues: {:?}",
         r.issues
     );
+}
+
+// ============================================================================================
+// Plan 009 — temporal revocation. Current revocation stays total-blocking under every policy;
+// `historical_authorized_as_of_snapshot` and the per-receipt `historical_ordering` are separate
+// typed results under the caller-selected `db_serialized_v1` policy. Every row of the decision
+// table below states integrity (`ok`), current validity, historical status and capstone
+// eligibility (`complete_brokered`), and the legacy counters the plan requires to stay unchanged.
+// See docs/decisions/0007-temporal-revocation.md.
+// ============================================================================================
+use averin_decision_core::verify::{
+    revocation_entry_v2, revocation_key_v2, revocation_merkle_root_v2, revocation_state_digest_v2,
+    DbSerializedPolicy, RevState, TemporalPolicy, AUTHORIZATION_ORDER_FORMAT,
+    MERKLE_ROOT_V2_DOMAIN, MERKLE_ROOT_V2_FORMAT, REVOCATION_LIST_V2_DOMAIN,
+    REVOCATION_LIST_V2_FORMAT,
+};
+
+const T_PROJECT: &str = "proj-001";
+const T_BOUNDARY: &str = "2026-06-15T10:10:30.000Z";
+const T_EVAL: &str = "2026-06-15T10:20:00.000Z";
+const T_WATERMARK: i64 = 20;
+const T_ORD: i64 = 7;
+
+struct TKeys {
+    rec: SigningKey,
+    res: SigningKey,
+    cnf: SigningKey,
+    tsa: SigningKey,
+    tax: SigningKey,
+    rev: SigningKey,
+}
+
+fn t_keys() -> TKeys {
+    TKeys {
+        rec: signing_key_from_seed(&[0u8; 32]),
+        res: signing_key_from_seed(&[3u8; 32]),
+        cnf: signing_key_from_seed(&[5u8; 32]),
+        tsa: test_tsa_key(&[200u8; 32]),
+        tax: signing_key_from_seed(&[11u8; 32]),
+        rev: signing_key_from_seed(&[77u8; 32]),
+    }
+}
+
+fn t_order_in(project: &str, ordinal: i64) -> CanonValue {
+    CanonValue::object(vec![
+        (
+            "format".into(),
+            CanonValue::string(AUTHORIZATION_ORDER_FORMAT),
+        ),
+        ("ordinal".into(), CanonValue::Int(ordinal)),
+        ("project_id".into(), CanonValue::string(project)),
+    ])
+    .unwrap()
+}
+
+fn t_order(ordinal: i64) -> CanonValue {
+    t_order_in(T_PROJECT, ordinal)
+}
+
+fn t_grant(k: &TKeys) -> CanonValue {
+    body_bind_role_record(&d2_grant(&k.rec, &k.cnf.verifying_key()), &k.rec, &k.rec)
+}
+
+/// A resource-signed D2 use (`use`) or intent (`use_intent`) of GID whose signed `use_evidence`
+/// carries `order` as `authorization_order`. `body_bound` upgrades it to a v3 authority.
+#[allow(clippy::too_many_arguments)]
+fn t_use_full(
+    k: &TKeys,
+    kind: &str,
+    record_id: &str,
+    prev: &[String],
+    used_at: i64,
+    order: Option<CanonValue>,
+    body_bound: bool,
+    pop_with: &SigningKey,
+) -> CanonValue {
+    let pc = sha256_prefixed(b"params-commit");
+    let nonce = format!("nonce-{used_at}");
+    let challenge = use_pop_challenge(
+        GID,
+        RESOURCE,
+        ACTION,
+        &pc,
+        &test_credential_binding(),
+        &nonce,
+    );
+    let use_sig = b64enc(&pop_with.sign(&challenge).to_bytes());
+    let mut fields = vec![
+        ("kind".to_string(), CanonValue::string(kind)),
+        ("grant_id".into(), CanonValue::string(GID)),
+        ("action".into(), CanonValue::string(ACTION)),
+        ("resource_id".into(), CanonValue::string(RESOURCE)),
+        ("jti".into(), CanonValue::string(GID)),
+        ("nonce".into(), CanonValue::string(&nonce)),
+        (
+            "pop_challenge_hash".into(),
+            CanonValue::string(format!("sha256:{}", hex_lower(&challenge))),
+        ),
+        (
+            "cnf_kid".into(),
+            CanonValue::string(vk_cnf_kid(&k.cnf.verifying_key())),
+        ),
+        (
+            "ledger_commitment".into(),
+            CanonValue::string(averin_decision_core::verify::ledger_commitment(
+                GID, &nonce, used_at,
+            )),
+        ),
+        ("used_at".into(), CanonValue::Int(used_at)),
+        (
+            "cnf_pub".into(),
+            CanonValue::string(b64enc(k.cnf.verifying_key().as_bytes())),
+        ),
+        ("use_sig".into(), CanonValue::string(use_sig)),
+    ];
+    if let Some(o) = order {
+        fields.push(("authorization_order".into(), o));
+    }
+    let ue = CanonValue::object(fields).unwrap();
+    let eh = sha256_prefixed(ue.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", T_PROJECT, record_id, &eh, &k.res);
+    let prev_json =
+        CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"{T_PROJECT}","agent_id":"averin-resource","agent_version":"averin-resource",
+        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
+        "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
+        "event_type":"tool_call","action":"{ACTION}","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"tool_gateway","grant_id":"{GID}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "input_commit":{{"alg":"sha256","commitment":"{pc}","low_entropy":true}},
+        "extensions":{{"broker":{{"kind":"{kind}","grant_id":"{GID}","resource_id":"{RESOURCE}","use_evidence":{ue}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ue = ue.serialize(),
+    );
+    let sealed = seal(&CanonValue::parse(&body).unwrap(), &k.rec).unwrap();
+    if body_bound {
+        body_bind_role_record(&sealed, &k.res, &k.rec)
+    } else {
+        sealed
+    }
+}
+
+fn t_use(k: &TKeys, prev: &[String], order: Option<CanonValue>) -> CanonValue {
+    t_use_full(k, "use", "use-1", prev, USED, order, true, &k.cnf)
+}
+
+/// A v3 resource-signed `use_outcome` whose signed payload carries `order`.
+fn t_outcome(k: &TKeys, intent_hash: &str, order: Option<CanonValue>) -> CanonValue {
+    let mut fields = vec![
+        ("grant_id".to_string(), CanonValue::string(GID)),
+        ("intent_hash".into(), CanonValue::string(intent_hash)),
+        ("intent_ref".into(), CanonValue::string("intent-1")),
+        ("kind".into(), CanonValue::string("use_outcome")),
+        ("status".into(), CanonValue::string("ok")),
+    ];
+    if let Some(o) = order {
+        fields.push(("authorization_order".into(), o));
+    }
+    let outcome = CanonValue::object(fields).unwrap();
+    let eh = sha256_prefixed(outcome.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", T_PROJECT, "outcome-1", &eh, &k.res);
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"outcome-1","project_id":"{T_PROJECT}","agent_id":"averin-resource","agent_version":"averin-resource",
+        "session_id":"s","span_id":"sp-outcome-1","parent_span_id":null,"causal_prev_hashes":["{intent_hash}"],"display_seq":2,
+        "agent_ts":"2026-06-15T10:00:06.000Z","received_ts":"2026-06-15T10:00:06.000Z",
+        "event_type":"tool_call","action":"use_outcome","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"tool_gateway","grant_id":"{GID}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "extensions":{{"broker":{{"kind":"use_outcome","grant_id":"{GID}","intent_ref":"intent-1","use_outcome":{outcome}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        outcome = outcome.serialize(),
+    );
+    body_bind_role_record(
+        &seal(&CanonValue::parse(&body).unwrap(), &k.rec).unwrap(),
+        &k.res,
+        &k.rec,
+    )
+}
+
+fn t_entries(entries: &[(&str, RevState)]) -> CanonValue {
+    CanonValue::Array(
+        entries
+            .iter()
+            .map(|(g, st)| {
+                let mut f = vec![("grant_id".to_string(), CanonValue::string(*g))];
+                match st {
+                    RevState::Total => f.push(("mode".into(), CanonValue::string("total"))),
+                    RevState::Prospective(c) => {
+                        f.push(("mode".into(), CanonValue::string("prospective")));
+                        f.push(("cutoff_order".into(), CanonValue::Int(*c)));
+                    }
+                }
+                CanonValue::object(f).unwrap()
+            })
+            .collect(),
+    )
+}
+
+fn t_snapshot(boundary: &str, watermark: i64) -> CanonValue {
+    CanonValue::object(vec![
+        ("boundary_time".into(), CanonValue::string(boundary)),
+        (
+            "authorization_high_watermark".into(),
+            CanonValue::Int(watermark),
+        ),
+    ])
+    .unwrap()
+}
+
+/// An unsigned v2 list body; `t_sign` adds the v2-domain signature.
+fn t_list_body(
+    k: &TKeys,
+    project: &str,
+    boundary: &str,
+    watermark: i64,
+    revocations: CanonValue,
+) -> CanonValue {
+    CanonValue::object(vec![
+        (
+            "format".into(),
+            CanonValue::string(REVOCATION_LIST_V2_FORMAT),
+        ),
+        (
+            "issuer_kid".into(),
+            CanonValue::string(vk_cnf_kid(&k.rev.verifying_key())),
+        ),
+        ("issued_at".into(), CanonValue::string(REV_FRESH_FROM)),
+        ("not_after".into(), CanonValue::string(REV_FRESH_TO)),
+        ("project_id".into(), CanonValue::string(project)),
+        ("snapshot".into(), t_snapshot(boundary, watermark)),
+        ("revocations".into(), revocations),
+    ])
+    .unwrap()
+}
+
+fn t_sign(body: &CanonValue, domain: &str, k: &SigningKey) -> CanonValue {
+    let digest = sha256_prefixed(body.serialize().as_bytes());
+    change_field(
+        body,
+        "sig",
+        CanonValue::string(averin_decision_core::sign::sign(domain, &digest, k)),
+    )
+}
+
+fn t_list(k: &TKeys, entries: &[(&str, RevState)]) -> CanonValue {
+    t_sign(
+        &t_list_body(k, T_PROJECT, T_BOUNDARY, T_WATERMARK, t_entries(entries)),
+        REVOCATION_LIST_V2_DOMAIN,
+        &k.rev,
+    )
+}
+
+/// The sorted, sentinel-bracketed v2 Merkle entries: `(key, state_digest)` pairs and leaf values.
+fn t_merkle_pairs(entries: &[(&str, RevState)]) -> Vec<([u8; 32], [u8; 32])> {
+    let state = |st: &RevState| match st {
+        RevState::Total => revocation_state_digest_v2("total", 0),
+        RevState::Prospective(c) => revocation_state_digest_v2("prospective", *c),
+    };
+    let mut pairs: Vec<([u8; 32], [u8; 32])> = entries
+        .iter()
+        .map(|(g, st)| (revocation_key_v2(g), state(st)))
+        .collect();
+    pairs.sort();
+    let sentinel = revocation_state_digest_v2("sentinel", 0);
+    let mut out = vec![([0u8; 32], sentinel)];
+    out.extend(pairs);
+    out.push(([0xffu8; 32], sentinel));
+    out
+}
+
+fn t_merkle_root(k: &TKeys, entries: &[(&str, RevState)], boundary: &str) -> CanonValue {
+    let pairs = t_merkle_pairs(entries);
+    let leaves: Vec<[u8; 32]> = pairs
+        .iter()
+        .map(|(key, st)| revocation_entry_v2(key, st))
+        .collect();
+    let root = merkle_root_hex(&leaves);
+    assert_eq!(
+        root,
+        revocation_merkle_root_v2(entries),
+        "test tree == producer reference"
+    );
+    let body = CanonValue::object(vec![
+        ("format".into(), CanonValue::string(MERKLE_ROOT_V2_FORMAT)),
+        (
+            "issuer_kid".into(),
+            CanonValue::string(vk_cnf_kid(&k.rev.verifying_key())),
+        ),
+        ("issued_at".into(), CanonValue::string(REV_FRESH_FROM)),
+        ("not_after".into(), CanonValue::string(REV_FRESH_TO)),
+        ("project_id".into(), CanonValue::string(T_PROJECT)),
+        ("snapshot".into(), t_snapshot(boundary, T_WATERMARK)),
+        ("leaf_count".into(), CanonValue::Int(leaves.len() as i64)),
+        ("root".into(), CanonValue::string(root)),
+    ])
+    .unwrap();
+    t_sign(&body, MERKLE_ROOT_V2_DOMAIN, &k.rev)
+}
+
+/// A v2 Merkle proof for `gid`: membership (with the clear mode/cutoff) or non-membership.
+fn t_merkle_proof(entries: &[(&str, RevState)], gid: &str) -> CanonValue {
+    let pairs = t_merkle_pairs(entries);
+    let leaves: Vec<[u8; 32]> = pairs
+        .iter()
+        .map(|(key, st)| revocation_entry_v2(key, st))
+        .collect();
+    let q = revocation_key_v2(gid);
+    if let Some((i, (_, st))) = entries.iter().find(|(g, _)| *g == gid).map(|(_, st)| {
+        (
+            pairs.iter().position(|(key, _)| *key == q).unwrap(),
+            ((), st),
+        )
+    }) {
+        let mut f = vec![
+            ("type".to_string(), CanonValue::string("membership")),
+            ("index".into(), CanonValue::Int(i as i64)),
+            ("path".into(), path_cv(&merkle_path(&leaves, i))),
+        ];
+        match st {
+            RevState::Total => f.push(("mode".into(), CanonValue::string("total"))),
+            RevState::Prospective(c) => {
+                f.push(("mode".into(), CanonValue::string("prospective")));
+                f.push(("cutoff_order".into(), CanonValue::Int(*c)));
+            }
+        }
+        return CanonValue::object(f).unwrap();
+    }
+    let i = pairs
+        .windows(2)
+        .position(|w| w[0].0 < q && q < w[1].0)
+        .unwrap();
+    let side = |j: usize| {
+        CanonValue::object(vec![
+            ("key".into(), hx(&pairs[j].0)),
+            ("state_digest".into(), hx(&pairs[j].1)),
+        ])
+        .unwrap()
+    };
+    CanonValue::object(vec![
+        ("type".into(), CanonValue::string("nonmembership")),
+        ("lo".into(), side(i)),
+        ("hi".into(), side(i + 1)),
+        ("lo_index".into(), CanonValue::Int(i as i64)),
+        ("hi_index".into(), CanonValue::Int((i + 1) as i64)),
+        ("lo_path".into(), path_cv(&merkle_path(&leaves, i))),
+        ("hi_path".into(), path_cv(&merkle_path(&leaves, i + 1))),
+    ])
+    .unwrap()
+}
+
+fn t_bundle(k: &TKeys, records: Vec<CanonValue>, extra: Vec<(&str, CanonValue)>) -> CanonValue {
+    let frontier = vec![content_hash_of(records.last().unwrap())];
+    let cp = checkpoint_over(&k.rec, &frontier, records.len() as i64, Some(&k.tsa));
+    let mut bundle = tier_b_bundle(&k.rec.verifying_key(), records, vec![cp]);
+    for (name, value) in extra {
+        bundle = change_field(&bundle, name, value);
+    }
+    bundle
+}
+
+/// The standard grant + one-phase use bundle carrying the use's `order`.
+fn t_use_bundle(
+    k: &TKeys,
+    order: Option<CanonValue>,
+    extra: Vec<(&str, CanonValue)>,
+) -> CanonValue {
+    let grant = t_grant(k);
+    let use_rec = t_use(k, &[content_hash_of(&grant)], order);
+    t_bundle(k, vec![grant, use_rec], extra)
+}
+
+fn t_db_policy(max_age: i64, min_watermark: i64) -> TemporalPolicy {
+    TemporalPolicy::DbSerializedV1(DbSerializedPolicy::new(T_EVAL, max_age, min_watermark).unwrap())
+}
+
+fn t_opts(k: &TKeys, policy: TemporalPolicy) -> VerifyOptions {
+    let mut opts = pinned_roles_tax(
+        k.rec.verifying_key(),
+        k.res.verifying_key(),
+        k.tsa.verifying_key(),
+        taxonomy(&k.tax, &[ACTION], ISSUED - 100, EXP + 100),
+        k.tax.verifying_key(),
+    );
+    opts.trusted_keys = Some(vec![TrustedKey::from(k.rec.verifying_key())]);
+    opts.revocation_keys = vec![k.rev.verifying_key()];
+    opts.claim_policy = ClaimPolicy {
+        requested: RequestedClaim::HistoricalAuthorizedAsOfSnapshot,
+        ..Default::default()
+    };
+    opts.revocation_temporal = policy;
+    opts
+}
+
+/// One decision-table row's observed values.
+#[derive(Debug, PartialEq)]
+struct TRow {
+    ok: bool,
+    revoked_uses_blocked: usize,
+    current: &'static str,
+    ordering: &'static str,
+    authorized: ClaimDecision,
+    historical: ClaimDecision,
+    complete_brokered: ClaimDecision,
+}
+
+fn t_observe(r: &VerifyReport) -> TRow {
+    let current = r
+        .temporal
+        .grant_revocations
+        .iter()
+        .find(|(g, _)| g == GID)
+        .map_or("absent", |(_, st)| st.current_str());
+    let ordering = r
+        .temporal
+        .receipt_ordering
+        .iter()
+        .find(|o| o.kind != "introspection_transcript")
+        .map_or("none", |o| o.historical_ordering.as_str());
+    TRow {
+        ok: r.ok,
+        revoked_uses_blocked: r.revoked_uses_blocked,
+        current,
+        ordering,
+        authorized: r.claims().authorized,
+        historical: r.claims().historical_authorized_as_of_snapshot,
+        complete_brokered: r.claims().complete_brokered,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn t_expect(
+    ok: bool,
+    revoked_uses_blocked: usize,
+    current: &'static str,
+    ordering: &'static str,
+    authorized: ClaimDecision,
+    historical: ClaimDecision,
+    complete_brokered: ClaimDecision,
+) -> TRow {
+    TRow {
+        ok,
+        revoked_uses_blocked,
+        current,
+        ordering,
+        authorized,
+        historical,
+        complete_brokered,
+    }
+}
+
+#[test]
+fn temporal_revocation_decision_table() {
+    use ClaimDecision::{Insufficient as I, Refuted as R, Satisfied as S};
+    let k = t_keys();
+    let db = || t_db_policy(3600, 0);
+    let list = |e: &[(&str, RevState)]| vec![("revocation_list", t_list(&k, e))];
+    let ord = || Some(t_order(T_ORD));
+    let rows: Vec<(&str, CanonValue, VerifyOptions, TRow)> = vec![
+        (
+            "empty v2 snapshot: not revoked, proven before any revocation",
+            t_use_bundle(&k, ord(), list(&[])),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_revoked", "proven_before", S, S, I),
+        ),
+        (
+            "prospective cancellation after the receipt: current use still blocked, history proven",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Prospective(T_ORD + 1))])),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_prospective", "proven_before", R, S, R),
+        ),
+        (
+            "equality at the cutoff is at/after",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Prospective(T_ORD))])),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_prospective", "at_or_after", R, R, R),
+        ),
+        (
+            "cutoff before the receipt",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Prospective(3))])),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_prospective", "at_or_after", R, R, R),
+        ),
+        (
+            "compromise (total) revocation refutes history whatever the ordinal",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Total)])),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_total", "indeterminate", R, R, R),
+        ),
+        (
+            "legacy v1 total list under a temporal verifier stays total",
+            t_use_bundle(
+                &k,
+                ord(),
+                vec![(
+                    "revocation_list",
+                    revocation_list(&k.rev, REV_FRESH_FROM, REV_FRESH_TO, &[GID]),
+                )],
+            ),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_total", "indeterminate", R, R, R),
+        ),
+        (
+            "legacy v1 empty list authenticates no snapshot: history indeterminate",
+            t_use_bundle(
+                &k,
+                ord(),
+                vec![(
+                    "revocation_list",
+                    revocation_list(&k.rev, REV_FRESH_FROM, REV_FRESH_TO, &[]),
+                )],
+            ),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_revoked", "indeterminate", S, I, I),
+        ),
+        (
+            "strict policy never produces a historical positive",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Prospective(T_ORD + 1))])),
+            t_opts(&k, TemporalPolicy::Strict),
+            t_expect(false, 1, "revoked_prospective", "indeterminate", R, I, R),
+        ),
+        (
+            "stripped revocation list: missing, never proven",
+            t_use_bundle(&k, ord(), vec![]),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_evaluated", "indeterminate", I, I, I),
+        ),
+        (
+            "stripped ordinal: indeterminate",
+            t_use_bundle(&k, None, list(&[(GID, RevState::Prospective(T_ORD + 1))])),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_prospective", "indeterminate", R, I, R),
+        ),
+        (
+            "ordinal above the snapshot watermark: indeterminate",
+            t_use_bundle(&k, Some(t_order(T_WATERMARK + 1)), list(&[])),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_revoked", "indeterminate", S, I, I),
+        ),
+        (
+            "ordinal signed for another project: indeterminate",
+            t_use_bundle(&k, Some(t_order_in("proj-other", T_ORD)), list(&[])),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_revoked", "indeterminate", S, I, I),
+        ),
+        (
+            "malformed ordinal: indeterminate",
+            t_use_bundle(&k, Some(CanonValue::Int(T_ORD)), list(&[])),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_revoked", "indeterminate", S, I, I),
+        ),
+        (
+            "snapshot older than the caller's maximum age",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Prospective(T_ORD + 1))])),
+            t_opts(&k, t_db_policy(60, 0)),
+            t_expect(false, 1, "revoked_prospective", "indeterminate", R, I, R),
+        ),
+        (
+            "snapshot watermark below the caller's minimum",
+            t_use_bundle(&k, ord(), list(&[])),
+            t_opts(&k, t_db_policy(3600, T_WATERMARK + 1)),
+            t_expect(true, 0, "not_revoked", "indeterminate", S, I, I),
+        ),
+    ];
+    for (name, bundle, opts, expected) in rows {
+        let r = verify_bundle_with(&bundle, &opts);
+        assert_eq!(t_observe(&r), expected, "{name}: issues {:?}", r.issues);
+        // Legacy compatibility: under every policy a revoked grant blocks `ok`, the counter and
+        // the capstone exactly as a strict verifier would.
+        let strict = verify_bundle_with(&bundle, &t_opts(&k, TemporalPolicy::Strict));
+        assert_eq!(strict.ok, r.ok, "{name}: ok is policy independent");
+        assert_eq!(
+            strict.revoked_uses_blocked, r.revoked_uses_blocked,
+            "{name}"
+        );
+        assert_eq!(strict.revocation_status, r.revocation_status, "{name}");
+        assert_eq!(strict.issues, r.issues, "{name}: identical legacy issues");
+        assert_eq!(strict.claims().authorized, r.claims().authorized, "{name}");
+        assert_eq!(
+            strict.claims().complete_brokered,
+            r.claims().complete_brokered,
+            "{name}"
+        );
+        assert_eq!(
+            strict.claims().historical_authorized_as_of_snapshot,
+            ClaimDecision::Insufficient,
+            "{name}: strict never decides history"
+        );
+    }
+}
+
+#[test]
+fn temporal_snapshot_identity_and_clock_rows() {
+    use ClaimDecision::{Insufficient as I, Satisfied as S};
+    let k = t_keys();
+    let signed = |project: &str, boundary: &str, wm: i64| {
+        t_sign(
+            &t_list_body(&k, project, boundary, wm, t_entries(&[])),
+            REVOCATION_LIST_V2_DOMAIN,
+            &k.rev,
+        )
+    };
+    let cases = [
+        (
+            "future boundary",
+            signed(T_PROJECT, "2026-06-15T10:30:00.000Z", T_WATERMARK),
+            "unverified",
+        ),
+        (
+            "other project",
+            signed("proj-other", T_BOUNDARY, T_WATERMARK),
+            "unverified",
+        ),
+        (
+            "impossible date",
+            signed(T_PROJECT, "2026-02-30T10:00:00.000Z", T_WATERMARK),
+            "unverified",
+        ),
+        (
+            "verified",
+            signed(T_PROJECT, T_BOUNDARY, T_WATERMARK),
+            "verified",
+        ),
+    ];
+    for (name, list, status) in cases {
+        let bundle = t_use_bundle(&k, Some(t_order(T_ORD)), vec![("revocation_list", list)]);
+        let r = verify_bundle_with(&bundle, &t_opts(&k, t_db_policy(3600, 0)));
+        assert_eq!(r.temporal.snapshot_status, status, "{name}");
+        let want = if status == "verified" { S } else { I };
+        assert_eq!(
+            r.claims().historical_authorized_as_of_snapshot,
+            want,
+            "{name}"
+        );
+        assert_eq!(
+            r.claims().authorized,
+            ClaimDecision::Satisfied,
+            "{name}: legacy unaffected"
+        );
+    }
+    // The report binds the historical judgment to the signed snapshot identity.
+    let bundle = t_use_bundle(
+        &k,
+        Some(t_order(T_ORD)),
+        vec![("revocation_list", t_list(&k, &[]))],
+    );
+    let json = report_to_json(&verify_bundle_with(
+        &bundle,
+        &t_opts(&k, t_db_policy(3600, 0)),
+    ));
+    for needle in [
+        r#""boundary_time":"2026-06-15T10:10:30.000Z""#,
+        r#""authorization_high_watermark":20"#,
+        r#""policy":"db_serialized_v1""#,
+        r#""historical_ordering":"proven_before""#,
+        r#""claims_version":"2""#,
+        "does not prove physical action time",
+    ] {
+        assert!(json.contains(needle), "report lacks {needle}: {json}");
+    }
+}
+
+#[test]
+fn temporal_malformed_mixed_and_downgraded_revocation_evidence_never_proves_history() {
+    use ClaimDecision::{Insufficient as I, Refuted as R};
+    let k = t_keys();
+    let ord = || Some(t_order(T_ORD));
+    let db = t_opts(&k, t_db_policy(3600, 0));
+    // A prospective entry whose cutoff exceeds the signed watermark, or which omits its cutoff, is
+    // malformed. The named grant stays revoked for current use; the unusable artifact is not
+    // authenticated evidence for history, so the claim is insufficient (never proven, never refuted).
+    for bad in [
+        CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"prospective","cutoff_order":99}]"#)
+            .unwrap(),
+        CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"prospective"}]"#).unwrap(),
+        CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"total","cutoff_order":3}]"#).unwrap(),
+        CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"sometimes"}]"#).unwrap(),
+    ] {
+        let list = t_sign(
+            &t_list_body(&k, T_PROJECT, T_BOUNDARY, T_WATERMARK, bad.clone()),
+            REVOCATION_LIST_V2_DOMAIN,
+            &k.rev,
+        );
+        let r = verify_bundle_with(
+            &t_use_bundle(&k, ord(), vec![("revocation_list", list)]),
+            &db,
+        );
+        let row = t_observe(&r);
+        assert!(!row.ok && row.revoked_uses_blocked == 1, "{bad:?}");
+        assert_eq!(row.current, "revoked_unverified", "{bad:?}");
+        assert_eq!(row.historical, I, "{bad:?}");
+        assert_eq!(r.temporal.snapshot_status, "unverified", "{bad:?}");
+    }
+    // Unknown format and a v2 list re-labelled as v1 both fail signature/format checks (issue, stale).
+    let good = t_list(&k, &[(GID, RevState::Prospective(T_ORD + 1))]);
+    let unknown = t_sign(
+        &change_field(
+            &t_list_body(&k, T_PROJECT, T_BOUNDARY, T_WATERMARK, t_entries(&[])),
+            "format",
+            CanonValue::string("averin.revocation.list.v3"),
+        ),
+        REVOCATION_LIST_V2_DOMAIN,
+        &k.rev,
+    );
+    for (name, list) in [
+        ("unknown format", unknown),
+        ("format stripped", good.without_keys(&["format"])),
+        ("cutoff stripped", {
+            let entries =
+                CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"prospective"}]"#).unwrap();
+            change_field(&good, "revocations", entries)
+        }),
+        ("snapshot stripped", good.without_keys(&["snapshot"])),
+    ] {
+        let r = verify_bundle_with(
+            &t_use_bundle(&k, ord(), vec![("revocation_list", list)]),
+            &db,
+        );
+        assert!(!r.ok, "{name}");
+        assert_ne!(
+            r.claims().historical_authorized_as_of_snapshot,
+            ClaimDecision::Satisfied,
+            "{name}"
+        );
+        assert_ne!(t_observe(&r).ordering, "proven_before", "{name}");
+    }
+    // Mixed evidence combines conservatively: a v1 Merkle membership (total) overrides a v2
+    // prospective entry for the same grant.
+    let leaves = rev_leaves(&[GID]);
+    let v1_root = merkle_root_obj(&k.rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let bundle = t_use_bundle(
+        &k,
+        ord(),
+        vec![
+            ("revocation_list", good.clone()),
+            ("revocation_merkle_root", v1_root),
+            (
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), membership_proof(&leaves, GID))]).unwrap(),
+            ),
+        ],
+    );
+    let row = t_observe(&verify_bundle_with(&bundle, &db));
+    assert_eq!((row.current, row.historical), ("revoked_total", R));
+    // A v2 list and v2 Merkle root with different snapshots cannot authenticate one snapshot.
+    let entries = [(GID, RevState::Prospective(T_ORD + 1))];
+    let bundle = t_use_bundle(
+        &k,
+        ord(),
+        vec![
+            ("revocation_list", good),
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &entries, "2026-06-15T10:10:40.000Z"),
+            ),
+            (
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), t_merkle_proof(&entries, GID))]).unwrap(),
+            ),
+        ],
+    );
+    let r = verify_bundle_with(&bundle, &db);
+    assert_eq!(r.temporal.snapshot_status, "unverified");
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, I);
+    // A self-reported `used_at` far before the cutoff's wall-clock time cannot move an ordinal:
+    // the receipt at the cutoff ordinal stays at/after (row "equality at the cutoff").
+    let early = {
+        let grant = t_grant(&k);
+        let u = t_use_full(
+            &k,
+            "use",
+            "use-1",
+            &[content_hash_of(&grant)],
+            ISSUED,
+            Some(t_order(T_ORD)),
+            true,
+            &k.cnf,
+        );
+        t_bundle(
+            &k,
+            vec![grant, u],
+            vec![(
+                "revocation_list",
+                t_list(&k, &[(GID, RevState::Prospective(T_ORD))]),
+            )],
+        )
+    };
+    assert_eq!(
+        t_observe(&verify_bundle_with(&early, &db)).ordering,
+        "at_or_after"
+    );
+}
+
+#[test]
+fn temporal_merkle_v2_commits_mode_and_cutoff() {
+    use ClaimDecision::{Insufficient as I, Refuted as R, Satisfied as S};
+    let k = t_keys();
+    let db = t_opts(&k, t_db_policy(3600, 0));
+    let merkle = |entries: &[(&str, RevState)], proof: Option<CanonValue>| {
+        let mut extra = vec![(
+            "revocation_merkle_root",
+            t_merkle_root(&k, entries, T_BOUNDARY),
+        )];
+        if let Some(p) = proof {
+            extra.push((
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), p)]).unwrap(),
+            ));
+        }
+        t_use_bundle(&k, Some(t_order(T_ORD)), extra)
+    };
+    let others = [
+        ("other-1", RevState::Total),
+        ("other-2", RevState::Prospective(2)),
+    ];
+    let row = |b: &CanonValue| t_observe(&verify_bundle_with(b, &db));
+    // Non-membership: not revoked as of the snapshot, proven before.
+    let r = row(&merkle(&others, Some(t_merkle_proof(&others, GID))));
+    assert_eq!(
+        (r.ok, r.current, r.ordering, r.historical),
+        (true, "not_revoked", "proven_before", S)
+    );
+    // Prospective membership after the receipt: blocked for current use, proven historically.
+    let pro = [
+        ("other-1", RevState::Total),
+        (GID, RevState::Prospective(T_ORD + 1)),
+    ];
+    let r = row(&merkle(&pro, Some(t_merkle_proof(&pro, GID))));
+    assert_eq!(
+        (
+            r.ok,
+            r.revoked_uses_blocked,
+            r.current,
+            r.ordering,
+            r.historical
+        ),
+        (false, 1, "revoked_prospective", "proven_before", S)
+    );
+    // Stripped or altered cutoff: the committed state digest no longer re-derives (fail-closed).
+    let proof = t_merkle_proof(&pro, GID);
+    for tampered in [
+        proof.without_keys(&["cutoff_order"]),
+        change_field(&proof, "cutoff_order", CanonValue::Int(T_ORD + 5)),
+        change_field(
+            &proof.without_keys(&["cutoff_order"]),
+            "mode",
+            CanonValue::string("total"),
+        ),
+    ] {
+        let r = row(&merkle(&pro, Some(tampered)));
+        assert_eq!((r.ok, r.revoked_uses_blocked), (false, 1));
+        assert_ne!(r.ordering, "proven_before");
+        assert_ne!(r.historical, S);
+    }
+    // Missing proof: fail-closed for current use, indeterminate history.
+    let r = row(&merkle(&pro, None));
+    assert_eq!(
+        (r.current, r.ordering, r.historical),
+        ("unproven", "indeterminate", I)
+    );
+    // Total membership refutes.
+    let tot = [(GID, RevState::Total)];
+    let r = row(&merkle(&tot, Some(t_merkle_proof(&tot, GID))));
+    assert_eq!((r.current, r.historical), ("revoked_total", R));
+    // A v1 membership proof cannot authenticate against a v2 root.
+    let r = row(&merkle(
+        &pro,
+        Some(membership_proof(&rev_leaves(&[GID]), GID)),
+    ));
+    assert_ne!(r.historical, S);
+}
+
+#[test]
+fn temporal_blocked_use_runs_every_later_check_before_a_historical_positive() {
+    use ClaimDecision::{Refuted as R, Satisfied as S};
+    let k = t_keys();
+    let db = t_opts(&k, t_db_policy(3600, 0));
+    let pro = |c: i64| {
+        vec![(
+            "revocation_list",
+            t_list(&k, &[(GID, RevState::Prospective(c))]),
+        )]
+    };
+    // A forged PoP on a revoked (pre-cutoff) receipt: the legacy branch only reports the revocation,
+    // but the shadow validation rejects the PoP, so the history is refuted, not relabeled.
+    let grant = t_grant(&k);
+    let wrong = signing_key_from_seed(&[99u8; 32]);
+    let bad = t_use_full(
+        &k,
+        "use",
+        "use-1",
+        &[content_hash_of(&grant)],
+        USED,
+        Some(t_order(T_ORD)),
+        true,
+        &wrong,
+    );
+    let r = verify_bundle_with(&t_bundle(&k, vec![grant, bad], pro(T_ORD + 1)), &db);
+    assert_eq!(
+        (r.revoked_uses_blocked, r.unmatched_violation),
+        (1, 0),
+        "legacy branch unchanged"
+    );
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, R);
+    assert_eq!(t_observe(&r).ordering, "indeterminate");
+    // A second spend of a revoked single-use grant, both before the cutoff: legacy counts two
+    // blocked uses; the shadow ledger sees the double spend.
+    let grant = t_grant(&k);
+    let gh = content_hash_of(&grant);
+    let u1 = t_use_full(
+        &k,
+        "use",
+        "use-1",
+        std::slice::from_ref(&gh),
+        USED,
+        Some(t_order(3)),
+        true,
+        &k.cnf,
+    );
+    let u2 = t_use_full(
+        &k,
+        "use",
+        "use-2",
+        &[content_hash_of(&u1)],
+        USED + 1,
+        Some(t_order(4)),
+        true,
+        &k.cnf,
+    );
+    let r = verify_bundle_with(&t_bundle(&k, vec![grant, u1, u2], pro(T_ORD)), &db);
+    assert_eq!((r.revoked_uses_blocked, r.unmatched_violation), (2, 0));
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, R);
+    // Two-phase: the outcome inherits the intent's ordinal. A matching outcome proves the pair; a
+    // legacy verifier still reports the blocked intent and its orphan outcome exactly as before.
+    let two_phase = |outcome_order: Option<CanonValue>| {
+        let grant = t_grant(&k);
+        let intent = t_use_full(
+            &k,
+            "use_intent",
+            "intent-1",
+            &[content_hash_of(&grant)],
+            USED,
+            Some(t_order(T_ORD)),
+            true,
+            &k.cnf,
+        );
+        let outcome = t_outcome(&k, &content_hash_of(&intent), outcome_order);
+        t_bundle(&k, vec![grant, intent, outcome], pro(T_ORD + 1))
+    };
+    let r = verify_bundle_with(&two_phase(Some(t_order(T_ORD))), &db);
+    assert_eq!(
+        (
+            r.revoked_uses_blocked,
+            r.unmatched_violation,
+            r.intent_without_outcome
+        ),
+        (1, 1, 0)
+    );
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, S);
+    assert_eq!(t_observe(&r).ordering, "proven_before");
+    let r = verify_bundle_with(&two_phase(Some(t_order(T_ORD + 3))), &db);
+    assert_eq!(
+        r.claims().historical_authorized_as_of_snapshot,
+        R,
+        "outcome signs another ordinal"
+    );
+    let r = verify_bundle_with(&two_phase(None), &db);
+    assert_eq!(
+        t_observe(&r).ordering,
+        "indeterminate",
+        "outcome without an ordinal"
+    );
+    assert_ne!(r.claims().historical_authorized_as_of_snapshot, S);
+}
+
+#[test]
+fn temporal_role_key_rotation_rows() {
+    use ClaimDecision::{Insufficient as I, Satisfied as S};
+    let k = t_keys();
+    let bundle = t_use_bundle(
+        &k,
+        Some(t_order(T_ORD)),
+        vec![(
+            "revocation_list",
+            t_list(&k, &[(GID, RevState::Prospective(T_ORD + 1))]),
+        )],
+    );
+    let with_status = |key: &SigningKey, status: &str, at: &str| {
+        let mut o = t_opts(&k, t_db_policy(3600, 0));
+        o.role_key_status.insert(
+            key.verifying_key().to_bytes(),
+            RoleKeyStatus {
+                status: status.into(),
+                status_changed_at: Some(at.into()),
+            },
+        );
+        verify_bundle_with(&bundle, &o)
+            .claims()
+            .historical_authorized_as_of_snapshot
+    };
+    // A revocation key cleanly rotated after the snapshot still certifies it; a rotation before the
+    // snapshot, or any compromise, does not. The signed revocation still blocks current use, but an
+    // unusable artifact is not authenticated adverse evidence: the history is insufficient.
+    assert_eq!(
+        with_status(&k.rev, "rotated", "2026-06-15T10:15:00.000Z"),
+        S
+    );
+    assert_eq!(
+        with_status(&k.rev, "rotated", "2026-06-15T10:10:00.000Z"),
+        I
+    );
+    assert_eq!(
+        with_status(&k.rev, "compromised", "2026-06-15T10:15:00.000Z"),
+        I
+    );
+    // A resource key compromised before the receipt was anchored cannot sign an ordinal.
+    assert_ne!(
+        with_status(&k.res, "compromised", "2026-06-15T09:00:00.000Z"),
+        S
+    );
+    // A legacy (v2, not body-bound) receipt never carries a trusted ordinal.
+    let grant = t_grant(&k);
+    let legacy = t_use_full(
+        &k,
+        "use",
+        "use-1",
+        &[content_hash_of(&grant)],
+        USED,
+        Some(t_order(T_ORD)),
+        false,
+        &k.cnf,
+    );
+    let r = verify_bundle_with(
+        &t_bundle(
+            &k,
+            vec![grant, legacy],
+            vec![("revocation_list", t_list(&k, &[]))],
+        ),
+        &t_opts(&k, t_db_policy(3600, 0)),
+    );
+    assert_eq!(t_observe(&r).ordering, "indeterminate");
+    assert_ne!(r.claims().historical_authorized_as_of_snapshot, S);
+}
+
+#[test]
+fn temporal_policy_is_caller_supplied_and_fails_closed_through_the_json_path() {
+    let k = t_keys();
+    let bundle = t_use_bundle(
+        &k,
+        Some(t_order(T_ORD)),
+        vec![(
+            "revocation_list",
+            t_list(&k, &[(GID, RevState::Prospective(T_ORD + 1))]),
+        )],
+    );
+    let pubkey = |sk: &SigningKey| CanonValue::string(encode_pubkey(&sk.verifying_key()));
+    let o = t_opts(&k, TemporalPolicy::Strict);
+    let base = CanonValue::object(vec![
+        (
+            "signing_keys".into(),
+            CanonValue::Array(vec![pubkey(&k.rec)]),
+        ),
+        (
+            "broker_authority_keys".into(),
+            CanonValue::Array(vec![pubkey(&k.rec)]),
+        ),
+        (
+            "resource_authority_keys".into(),
+            CanonValue::Array(vec![pubkey(&k.res)]),
+        ),
+        ("tsa_keys".into(), CanonValue::Array(vec![pubkey(&k.tsa)])),
+        (
+            "taxonomy_keys".into(),
+            CanonValue::Array(vec![pubkey(&k.tax)]),
+        ),
+        ("taxonomy".into(), o.taxonomy.clone().unwrap()),
+        (
+            "taxonomy_digest".into(),
+            CanonValue::string(o.taxonomy_digest.clone().unwrap()),
+        ),
+        (
+            "taxonomy_version".into(),
+            CanonValue::Int(o.taxonomy_version.unwrap()),
+        ),
+        (
+            "revocation_keys".into(),
+            CanonValue::Array(vec![pubkey(&k.rev)]),
+        ),
+        (
+            "claim_policy".into(),
+            CanonValue::parse(r#"{"requested":"historical_authorized_as_of_snapshot"}"#).unwrap(),
+        ),
+    ])
+    .unwrap();
+    let run = |temporal: Option<&str>| {
+        let opts = match temporal {
+            Some(t) => change_field(&base, "revocation_temporal", CanonValue::parse(t).unwrap()),
+            None => base.clone(),
+        };
+        CanonValue::parse(&verify_bundle_with_json(
+            &bundle.serialize(),
+            &opts.serialize(),
+        ))
+        .unwrap()
+    };
+    let decision = |r: &CanonValue| {
+        r.get("claims")
+            .and_then(|c| c.get("requested_decision"))
+            .and_then(CanonValue::as_str)
+            .map(String::from)
+    };
+    let good = r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":3600}"#;
+    assert_eq!(decision(&run(Some(good))).as_deref(), Some("satisfied"));
+    assert_eq!(
+        decision(&run(None)).as_deref(),
+        Some("insufficient"),
+        "absent = strict"
+    );
+    assert_eq!(
+        decision(&run(Some(r#"{"policy":"strict"}"#))).as_deref(),
+        Some("insufficient")
+    );
+    // A bundle cannot select the policy: a bundle-level field is ignored.
+    let smuggled = change_field(
+        &bundle,
+        "revocation_temporal",
+        CanonValue::parse(good).unwrap(),
+    );
+    let r = CanonValue::parse(&verify_bundle_with_json(
+        &smuggled.serialize(),
+        &base.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(decision(&r).as_deref(), Some("insufficient"));
+    for bad in [
+        r#"{"policy":"external_tsa_v1","evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":3600}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-02-30T10:20:00.000Z","max_snapshot_age_seconds":3600}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00Z","max_snapshot_age_seconds":3600}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00.000Z"}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":0}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":3600,"min_authorization_watermark":-1}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":3600,"trust":"tsa"}"#,
+        r#"{"policy":"strict","evaluation_time":"2026-06-15T10:20:00.000Z"}"#,
+        r#"{"evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":3600}"#,
+        r#""db_serialized_v1""#,
+    ] {
+        let r = run(Some(bad));
+        assert_eq!(r.get("ok"), Some(&CanonValue::Bool(false)), "{bad}");
+        assert!(
+            r.get("error").is_some() && r.get("claims").is_none(),
+            "{bad} must be a policy error"
+        );
+    }
+}
+
+#[test]
+fn temporal_native_introspection_orders_transcripts_against_the_grant_cutoff() {
+    use ClaimDecision::{Insufficient as I, Refuted as R, Satisfied as S};
+    let k = t_keys();
+    let grant = body_bind_role_record(
+        &seal_grant(
+            &k.rec,
+            &k.rec,
+            GID,
+            &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP),
+        ),
+        &k.rec,
+        &k.rec,
+    );
+    let transcript = |order: Option<CanonValue>| {
+        let mut ie = introspection_evidence(&k.res, GID, LEASE, NSCOPE, RESOURCE, USED, EXP);
+        if let Some(o) = order {
+            ie = change_field(&ie, "authorization_order", o);
+        }
+        let t = seal_introspection(&k.rec, &k.res, "intro-1", &[content_hash_of(&grant)], &ie);
+        body_bind_role_record(&t, &k.res, &k.rec)
+    };
+    let db = t_opts(&k, t_db_policy(3600, 0));
+    let run = |order: Option<CanonValue>, entries: &[(&str, RevState)]| {
+        let b = t_bundle(
+            &k,
+            vec![grant.clone(), transcript(order)],
+            vec![("revocation_list", t_list(&k, entries))],
+        );
+        verify_bundle_with(&b, &db)
+    };
+    let ordering = |r: &VerifyReport| r.temporal.receipt_ordering[0].historical_ordering.as_str();
+    let r = run(Some(t_order(T_ORD)), &[]);
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(
+        (r.introspection_status.as_str(), ordering(&r)),
+        ("attested", "proven_before")
+    );
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, S);
+    // Prospective cancellation after the transcript: current revocation removes coverage (legacy),
+    // while the transcript is proven before the cutoff.
+    let r = run(
+        Some(t_order(T_ORD)),
+        &[(GID, RevState::Prospective(T_ORD + 1))],
+    );
+    assert_eq!(
+        (
+            r.ok,
+            r.revoked_uses_blocked,
+            r.introspection_status.as_str()
+        ),
+        (false, 1, "unattested")
+    );
+    assert_eq!(ordering(&r), "proven_before");
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, S);
+    assert_eq!(
+        r.claims().complete_introspected,
+        R,
+        "capstone stays blocked"
+    );
+    let r = run(Some(t_order(T_ORD)), &[(GID, RevState::Prospective(T_ORD))]);
+    assert_eq!(
+        (
+            ordering(&r),
+            r.claims().historical_authorized_as_of_snapshot
+        ),
+        ("at_or_after", R)
+    );
+    let r = run(Some(t_order(T_ORD)), &[(GID, RevState::Total)]);
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, R);
+    let r = run(None, &[(GID, RevState::Prospective(T_ORD + 1))]);
+    assert_eq!(
+        (
+            ordering(&r),
+            r.claims().historical_authorized_as_of_snapshot
+        ),
+        ("indeterminate", I)
+    );
+}
+
+#[test]
+fn temporal_mixed_surfaces_require_every_receipt_proven() {
+    use ClaimDecision::Satisfied as S;
+    let k = t_keys();
+    let grant = t_grant(&k);
+    let use_rec = t_use(&k, &[content_hash_of(&grant)], Some(t_order(T_ORD)));
+    let native = body_bind_role_record(
+        &seal_grant(
+            &k.rec,
+            &k.rec,
+            "native-1",
+            &native_grant_evidence("native-1", NSCOPE, RESOURCE, LEASE, ISSUED, EXP),
+        ),
+        &k.rec,
+        &k.rec,
+    );
+    let transcript = |order: Option<CanonValue>| {
+        let mut ie = introspection_evidence(&k.res, "native-1", LEASE, NSCOPE, RESOURCE, USED, EXP);
+        if let Some(o) = order {
+            ie = change_field(&ie, "authorization_order", o);
+        }
+        body_bind_role_record(
+            &seal_introspection(&k.rec, &k.res, "intro-1", &[content_hash_of(&native)], &ie),
+            &k.res,
+            &k.rec,
+        )
+    };
+    let run = |t: CanonValue| {
+        let frontier = [content_hash_of(&use_rec), content_hash_of(&t)];
+        let cp = checkpoint_over(&k.rec, &frontier, 4, Some(&k.tsa));
+        let b = tier_b_bundle(
+            &k.rec.verifying_key(),
+            vec![grant.clone(), use_rec.clone(), native.clone(), t],
+            vec![cp],
+        );
+        let b = change_field(&b, "revocation_list", t_list(&k, &[]));
+        verify_bundle_with(&b, &t_opts(&k, t_db_policy(3600, 0)))
+    };
+    // The brokered use alone is proven before, but the native transcript carries no ordinal: the
+    // claim speaks for every receipt, so it is not satisfied.
+    let r = run(transcript(None));
+    assert_eq!(r.temporal.receipt_ordering.len(), 2, "{:?}", r.issues);
+    assert_ne!(r.claims().historical_authorized_as_of_snapshot, S);
+    // With both receipts ordered and proven, the mixed bundle can satisfy it.
+    let r = run(transcript(Some(t_order(T_ORD + 1))));
+    assert!(r
+        .temporal
+        .receipt_ordering
+        .iter()
+        .all(|o| o.historical_ordering
+            == averin_decision_core::verify::HistoricalOrdering::ProvenBefore));
+    assert_eq!(
+        r.claims().historical_authorized_as_of_snapshot,
+        S,
+        "{:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn temporal_review_followups_modes_cutoffs_and_malformed_v2() {
+    use ClaimDecision::{Insufficient as I, Refuted as R, Satisfied as S};
+    use RevocationRequirement::{Both, Disclosed, Merkle, Pinned};
+    let k = t_keys();
+    let ord = || Some(t_order(T_ORD));
+    let with_mode = |mode: RevocationRequirement| {
+        let mut o = t_opts(&k, t_db_policy(3600, 0));
+        o.claim_policy.revocation = mode;
+        o
+    };
+    let none: [(&str, RevState); 0] = [];
+    let list_bundle = t_use_bundle(&k, ord(), vec![("revocation_list", t_list(&k, &[]))]);
+    let merkle_bundle = t_use_bundle(
+        &k,
+        ord(),
+        vec![
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &none, T_BOUNDARY),
+            ),
+            (
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), t_merkle_proof(&none, GID))]).unwrap(),
+            ),
+        ],
+    );
+    let both_bundle = change_field(&merkle_bundle, "revocation_list", t_list(&k, &[]));
+    let hist = |b: &CanonValue, m| {
+        verify_bundle_with(b, &with_mode(m))
+            .claims()
+            .historical_authorized_as_of_snapshot
+    };
+    // M1: the caller's revocation mode selects which v2 artifacts the historical claim needs.
+    for (name, bundle, mode, want) in [
+        ("pinned/list", &list_bundle, Pinned, S),
+        ("pinned/merkle", &merkle_bundle, Pinned, S),
+        ("disclosed/list", &list_bundle, Disclosed, S),
+        ("disclosed/merkle only", &merkle_bundle, Disclosed, I),
+        ("merkle/list only", &list_bundle, Merkle, I),
+        ("merkle/merkle", &merkle_bundle, Merkle, S),
+        ("both/list only", &list_bundle, Both, I),
+        ("both/merkle only", &merkle_bundle, Both, I),
+        ("both/both", &both_bundle, Both, S),
+    ] {
+        assert_eq!(hist(bundle, mode), want, "{name}");
+    }
+    // Merkle mode needs a valid v2 proof for every receipt's grant.
+    let stripped = merkle_bundle.without_keys(&["revocation_proofs"]);
+    assert_eq!(hist(&stripped, Merkle), I);
+    // L1: an authenticated v2 list cutoff at/before the ordinal refutes even when the grant's
+    // Merkle path is missing.
+    let at_cutoff = t_use_bundle(
+        &k,
+        ord(),
+        vec![
+            (
+                "revocation_list",
+                t_list(&k, &[(GID, RevState::Prospective(T_ORD))]),
+            ),
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &[(GID, RevState::Prospective(T_ORD))], T_BOUNDARY),
+            ),
+        ],
+    );
+    let r = verify_bundle_with(&at_cutoff, &t_opts(&k, t_db_policy(3600, 0)));
+    assert_eq!(t_observe(&r).current, "unproven");
+    assert_eq!(t_observe(&r).ordering, "at_or_after");
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, R);
+    // L5: a signed v2 list that also carries legacy `revoked_grant_ids` is unusable, but the
+    // grants it names under the signature still block current use.
+    let odd = t_sign(
+        &change_field(
+            &t_list_body(&k, T_PROJECT, T_BOUNDARY, T_WATERMARK, t_entries(&[])),
+            "revoked_grant_ids",
+            CanonValue::Array(vec![CanonValue::string(GID)]),
+        ),
+        REVOCATION_LIST_V2_DOMAIN,
+        &k.rev,
+    );
+    let r = verify_bundle_with(
+        &t_use_bundle(&k, ord(), vec![("revocation_list", odd)]),
+        &t_opts(&k, t_db_policy(3600, 0)),
+    );
+    let row = t_observe(&r);
+    assert_eq!(
+        (row.ok, row.revoked_uses_blocked, row.current),
+        (false, 1, "revoked_unverified")
+    );
+    assert_eq!(row.historical, I);
+    assert_eq!(r.temporal.snapshot_status, "unverified");
+}
+
+// L7: a signed v2 Merkle leaf whose prospective cutoff exceeds the snapshot watermark is malformed
+// (no honest producer allocates a cutoff above the watermark it signs). Its membership proof must
+// not authenticate, so the receipt is never proven before it.
+#[test]
+fn temporal_merkle_v2_rejects_cutoff_beyond_watermark() {
+    let k = t_keys();
+    let beyond = [(GID, RevState::Prospective(T_WATERMARK + 5))];
+    let bundle = t_use_bundle(
+        &k,
+        Some(t_order(T_ORD)),
+        vec![
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &beyond, T_BOUNDARY),
+            ),
+            (
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), t_merkle_proof(&beyond, GID))]).unwrap(),
+            ),
+        ],
+    );
+    let r = verify_bundle_with(&bundle, &t_opts(&k, t_db_policy(3600, 0)));
+    let row = t_observe(&r);
+    assert_eq!(
+        (row.ok, row.revoked_uses_blocked),
+        (false, 1),
+        "blocked fail-closed"
+    );
+    assert_ne!(row.ordering, "proven_before");
+    assert_ne!(row.historical, ClaimDecision::Satisfied);
 }

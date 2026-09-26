@@ -1,0 +1,107 @@
+{
+  "description": "Plan 009 v2 revocation tree: key, committed state and entry preimages, root and proofs. Checked by server/internal/broker and core/tests/golden.rs.",
+  "entry_case": {
+    "entry_hex": "f25657d028d2e70d8eba4123d383fd9b81de3f93b06ce6633df66af0a9cdd652",
+    "key_hex": "7f6f07a2bb8eccd195273b91b84f39604e8bfaf5f941525c8a0bff6529b5cf8a",
+    "preimage_hex": "0000002161766572696e2e62726f6b65722e7265766f636174696f6e2e656e7472792e76327f6f07a2bb8eccd195273b91b84f39604e8bfaf5f941525c8a0bff6529b5cf8a5985c96da2d55acee243cc976826270b4cd1c63d824248babd26864b29f9ea74",
+    "state_hex": "5985c96da2d55acee243cc976826270b4cd1c63d824248babd26864b29f9ea74"
+  },
+  "key_cases": [
+    {
+      "grant_id": "grant-1",
+      "key_hex": "7f6f07a2bb8eccd195273b91b84f39604e8bfaf5f941525c8a0bff6529b5cf8a",
+      "preimage_hex": "0000001f61766572696e2e62726f6b65722e7265766f636174696f6e2e6b65792e7632000000076772616e742d31"
+    },
+    {
+      "grant_id": "é-grant",
+      "key_hex": "a28336d9a35d4b5ab84de2e90d5eabc4fa7b36e5eeade8ba11e9ea036717ebf2",
+      "preimage_hex": "0000001f61766572696e2e62726f6b65722e7265766f636174696f6e2e6b65792e763200000008c3a92d6772616e74"
+    },
+    {
+      "grant_id": "Ω-grant-🔑",
+      "key_hex": "28725a58fb7a15b43f5418302a5ad2c733d6d4b6728c66ac384d467b164f2de0",
+      "preimage_hex": "0000001f61766572696e2e62726f6b65722e7265766f636174696f6e2e6b65792e76320000000dcea92d6772616e742df09f9491"
+    }
+  ],
+  "state_cases": [
+    {
+      "cutoff": 0,
+      "digest_hex": "66ded2b3d481f5878f7432303b6691e7e1ce3a4c1f4199b3a5c64f6f83729220",
+      "mode": "total",
+      "preimage_hex": "0000002161766572696e2e62726f6b65722e7265766f636174696f6e2e73746174652e763200000005746f74616c0000000000000000"
+    },
+    {
+      "cutoff": 7,
+      "digest_hex": "5985c96da2d55acee243cc976826270b4cd1c63d824248babd26864b29f9ea74",
+      "mode": "prospective",
+      "preimage_hex": "0000002161766572696e2e62726f6b65722e7265766f636174696f6e2e73746174652e76320000000b70726f73706563746976650000000000000007"
+    },
+    {
+      "cutoff": 1099511627776,
+      "digest_hex": "7b738889c7e8d29f20edde11331e312a50f6c8880dcabf26ac4ace7ba077a7cd",
+      "mode": "prospective",
+      "preimage_hex": "0000002161766572696e2e62726f6b65722e7265766f636174696f6e2e73746174652e76320000000b70726f73706563746976650000010000000000"
+    },
+    {
+      "cutoff": 0,
+      "digest_hex": "6bd56d83cbd2e862376235dc4f33a8489c9934b6c241bd2d2f1beda396ebfc36",
+      "mode": "sentinel",
+      "preimage_hex": "0000002161766572696e2e62726f6b65722e7265766f636174696f6e2e73746174652e76320000000873656e74696e656c0000000000000000"
+    }
+  ],
+  "tree": {
+    "entries": [
+      {
+        "cutoff_order": 7,
+        "grant_id": "grant-1",
+        "mode": "prospective"
+      },
+      {
+        "grant_id": "grant-2",
+        "mode": "total"
+      },
+      {
+        "cutoff_order": 3,
+        "grant_id": "é-grant",
+        "mode": "prospective"
+      }
+    ],
+    "leaf_count": 5,
+    "membership": {
+      "cutoff_order": 7,
+      "index": 1,
+      "mode": "prospective",
+      "path": [
+        "f8d3018dffed7d6b27b3f40d0d72f46a5bffb9eaa75ad4dc321b452d77bc92c0",
+        "a28466f01cad54c2371a72761c7b624341e6fad1a7d452eeee94d898c755f275",
+        "ca8481405aa8bdc699415c4688a20f0a175bbce3e0b756b943fc27e14fd462fc"
+      ],
+      "type": "membership"
+    },
+    "nonmember_grant": "grant-3",
+    "nonmembership": {
+      "hi": {
+        "key": "a28336d9a35d4b5ab84de2e90d5eabc4fa7b36e5eeade8ba11e9ea036717ebf2",
+        "state_digest": "ea8db401a5be8b1fecea37af34f620d0d4ced546f805f7308271a5e14bc60df6"
+      },
+      "hi_index": 2,
+      "hi_path": [
+        "6f76e35f56351765dfc6cff41cb3fcd311e4fe995612c073de19e4574cd3468c",
+        "a3874c9f9090f8f524d15ecfea3dfa5020b191f71a38bbec55eeaaa01f23e9d6",
+        "ca8481405aa8bdc699415c4688a20f0a175bbce3e0b756b943fc27e14fd462fc"
+      ],
+      "lo": {
+        "key": "7f6f07a2bb8eccd195273b91b84f39604e8bfaf5f941525c8a0bff6529b5cf8a",
+        "state_digest": "5985c96da2d55acee243cc976826270b4cd1c63d824248babd26864b29f9ea74"
+      },
+      "lo_index": 1,
+      "lo_path": [
+        "f8d3018dffed7d6b27b3f40d0d72f46a5bffb9eaa75ad4dc321b452d77bc92c0",
+        "a28466f01cad54c2371a72761c7b624341e6fad1a7d452eeee94d898c755f275",
+        "ca8481405aa8bdc699415c4688a20f0a175bbce3e0b756b943fc27e14fd462fc"
+      ],
+      "type": "nonmembership"
+    },
+    "root": "sha256:db98fd5440bf0188299abc66f32cfa97aec45670217c6cad9150c9815695d688"
+  }
+}

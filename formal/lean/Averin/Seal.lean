@@ -11,8 +11,11 @@ SHA-256 has a collision or Ed25519 has a forgery."
 Cryptography is not axiomatised as injective (SHA-256 is compressing, so an injectivity axiom
 would be *false* and make every theorem vacuous). Instead:
 
-* SHA-256 is an arbitrary function `H`; every conclusion is a disjunction whose second arm is an
-  explicit collision `x ≠ y ∧ H x = H y`.
+* SHA-256 is an arbitrary function `H`; every conclusion is a disjunction whose second arm is a
+  collision **between the two specific preimages the theorem is about** (`recordPre a ≠ recordPre b ∧
+  H (recordPre a) = H (recordPre b)`), the standard reduction to SHA-256 collision resistance. A bare
+  `∃ x y, x ≠ y ∧ H x = H y` is deliberately not used: it holds for every compressing `H` (pigeonhole),
+  so a theorem ending in it would be trivially true for SHA-256.
 * Ed25519 unforgeability is the hypothesis that every message whose signature verifies under the
   pinned key is in `Signed`, the set of messages the key holder actually signed. The honest
   signer (`HonestSigner`) signs only through `record::seal` and `checkpoint::seal_checkpoint`.
@@ -39,7 +42,8 @@ noncomputable def recordHashOf (body : CV) : Bytes :=
 noncomputable def checkpointHashOf (body : CV) : Bytes :=
   fmt (H (checkpointHash.msg [ascii "rcp-1"] (utf8 (ser body))))
 
-def Collision : Prop := ∃ x y, x ≠ y ∧ H x = H y
+/-- `x` and `y` are an explicit SHA-256 collision: different inputs, equal digests. -/
+def CollidesOn (x y : Bytes) : Prop := x ≠ y ∧ H x = H y
 
 /--
 Everything the key may ever sign. The key signs record and checkpoint seals, and — because roles
@@ -60,6 +64,13 @@ def HonestSigner (Signed : Bytes → Prop) (records checkpoints : List CV) : Pro
     m.length = 32 ∨
     m.head? ≠ some 0
 end
+
+/-- The SHA-256 input of a pinned record body. -/
+noncomputable def recordPre (body : CV) : Bytes := recordHash.msg [ascii "rcp-1"] (utf8 (ser body))
+
+/-- The SHA-256 input of a pinned checkpoint body. -/
+noncomputable def checkpointPre (body : CV) : Bytes :=
+  checkpointHash.msg [ascii "rcp-1"] (utf8 (ser body))
 
 theorem ascii_short (s : String) (h : (ascii s).length < 256) : (ascii s).length < lpLimit := by
   unfold lpLimit; omega
@@ -85,30 +96,31 @@ theorem checkpointHash_pre_inj {a b : CV}
   have := (checkpointHash.msg_inj (by decide) cp_admits cp_admits h).2 rfl
   exact ser_injective (utf8_inj this)
 
-/-- Two record content hashes agree only for the same body, or via a SHA-256 collision. -/
+/-- Two record content hashes agree only for the same body, or because SHA-256 collides on these
+two bodies' preimages. -/
 theorem recordHashOf_binding (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x = fmt y → x = y)
-    {a b : CV} (h : recordHashOf H fmt a = recordHashOf H fmt b) : a = b ∨ Collision H := by
+    {a b : CV} (h : recordHashOf H fmt a = recordHashOf H fmt b) :
+    a = b ∨ CollidesOn H (recordPre a) (recordPre b) := by
   have hH := hfmt _ _ h
-  by_cases hp : recordHash.msg [ascii "rcp-1"] (utf8 (ser a)) =
-      recordHash.msg [ascii "rcp-1"] (utf8 (ser b))
+  by_cases hp : recordPre a = recordPre b
   · exact Or.inl (recordHash_pre_inj hp)
-  · exact Or.inr ⟨_, _, hp, hH⟩
+  · exact Or.inr ⟨hp, hH⟩
 
 theorem checkpointHashOf_binding (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x = fmt y → x = y)
-    {a b : CV} (h : checkpointHashOf H fmt a = checkpointHashOf H fmt b) : a = b ∨ Collision H := by
+    {a b : CV} (h : checkpointHashOf H fmt a = checkpointHashOf H fmt b) :
+    a = b ∨ CollidesOn H (checkpointPre a) (checkpointPre b) := by
   have hH := hfmt _ _ h
-  by_cases hp : checkpointHash.msg [ascii "rcp-1"] (utf8 (ser a)) =
-      checkpointHash.msg [ascii "rcp-1"] (utf8 (ser b))
+  by_cases hp : checkpointPre a = checkpointPre b
   · exact Or.inl (checkpointHash_pre_inj hp)
-  · exact Or.inr ⟨_, _, hp, hH⟩
+  · exact Or.inr ⟨hp, hH⟩
 
-/-- A record hash never equals a checkpoint hash (no record/checkpoint type confusion), except via
-a SHA-256 collision: their preimages carry different pinned domains. -/
+/-- A record hash equals a checkpoint hash only through a SHA-256 collision on the two preimages
+(no record/checkpoint type confusion): the preimages carry different pinned domains. -/
 theorem record_ne_checkpoint_hash (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x = fmt y → x = y)
-    (a b : CV) (h : recordHashOf H fmt a = checkpointHashOf H fmt b) : Collision H := by
-  have hH := hfmt _ _ h
-  refine ⟨_, _, ?_, hH⟩
-  exact Family.msg_disjoint recordHash checkpointHash _ _ _ _ (by decide) (by decide) (by decide)
+    (a b : CV) (h : recordHashOf H fmt a = checkpointHashOf H fmt b) :
+    CollidesOn H (recordPre a) (checkpointPre b) :=
+  ⟨Family.msg_disjoint recordHash checkpointHash _ _ _ _ (by decide) (by decide) (by decide),
+    hfmt _ _ h⟩
 
 theorem recordSig_ne_checkpointSig (x y : Bytes) :
     recordSig.msg [] x ≠ checkpointSig.msg [] y :=
@@ -142,7 +154,7 @@ theorem seal_excludes_others (F : Family) (i0 : Nat) (hi0 : i0 < signedFamilies.
 **Record seal theorem.** A signature cannot be replayed across contexts even if roles share a key:
 if a record body's signature verifies under the pinned key — which, absent an Ed25519 forgery, means
 the key holder signed its message — then the body is *exactly* one the key holder sealed, or SHA-256
-has a collision. This holds even though the same key may also sign checkpoints, every other signed
+collides on this body's preimage and the preimage of a body the key holder sealed. This holds even though the same key may also sign checkpoints, every other signed
 family with arbitrary fields, raw 32-byte challenge digests, and any message not starting with
 `0x00` — JSON PoP challenges, capability tokens, the denial salt (`HonestSigner`).
 -/
@@ -151,14 +163,14 @@ theorem record_seal_sound (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x = fmt
     (Signed : Bytes → Prop) (records checkpoints : List CV)
     (honest : HonestSigner H fmt Signed records checkpoints)
     (body : CV) (verified : Signed (recordSig.msg [] (recordHashOf H fmt body))) :
-    body ∈ records ∨ Collision H := by
+    body ∈ records ∨ ∃ B ∈ records, CollidesOn H (recordPre body) (recordPre B) := by
   have ex := seal_excludes_others recordSig 0 (by decide) rfl rfl rfl (recordHashOf H fmt body)
     (hlen _) _ rfl
   rcases honest _ verified with ⟨B, hB, hm⟩ | ⟨C, _, hm⟩ | ⟨i, hi, vs, t, h2, hm⟩ | hm | hm
   · have := (recordSig.msg_inj (by decide) nil_admits_rs nil_admits_rs hm).2 rfl
     rcases recordHashOf_binding H fmt hfmt this with h | h
     · exact Or.inl (h ▸ hB)
-    · exact Or.inr h
+    · exact Or.inr ⟨B, hB, h⟩
   · exact absurd hm (recordSig_ne_checkpointSig _ _)
   · exact absurd hm (ex.1 i hi vs t (by omega))
   · exact absurd hm ex.2.1
@@ -170,7 +182,7 @@ theorem checkpoint_seal_sound (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x =
     (Signed : Bytes → Prop) (records checkpoints : List CV)
     (honest : HonestSigner H fmt Signed records checkpoints)
     (body : CV) (verified : Signed (checkpointSig.msg [] (checkpointHashOf H fmt body))) :
-    body ∈ checkpoints ∨ Collision H := by
+    body ∈ checkpoints ∨ ∃ C ∈ checkpoints, CollidesOn H (checkpointPre body) (checkpointPre C) := by
   have ex := seal_excludes_others checkpointSig 1 (by decide) rfl rfl rfl
     (checkpointHashOf H fmt body) (hlen _) _ rfl
   rcases honest _ verified with ⟨B, _, hm⟩ | ⟨C, hC, hm⟩ | ⟨i, hi, vs, t, h2, hm⟩ | hm | hm
@@ -178,7 +190,7 @@ theorem checkpoint_seal_sound (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x =
   · have := (checkpointSig.msg_inj (by decide) nil_admits_cs nil_admits_cs hm).2 rfl
     rcases checkpointHashOf_binding H fmt hfmt this with h | h
     · exact Or.inl (h ▸ hC)
-    · exact Or.inr h
+    · exact Or.inr ⟨C, hC, h⟩
   · exact absurd hm (ex.1 i hi vs t (by omega))
   · exact absurd hm ex.2.1
   · exact absurd ex.2.2 hm
@@ -189,18 +201,19 @@ theorem checkpoint_seal_sound (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x =
 def commitPre (dom nonce value : Bytes) : Bytes := commitment.msg [dom, nonce, value] []
 
 /-- **Commitment binding.** Equal commitments open to the same `(field_domain, nonce, value)`, or
-SHA-256 has a collision. (A disclosure can never open one commitment to two different values.) -/
+SHA-256 collides on the two commitment preimages. (A disclosure can never open one commitment to two
+different values.) -/
 theorem commitment_binding (H : Bytes → Bytes) {d n v d' n' v' : Bytes}
     (hd : d.length < lpLimit) (hn : n.length < lpLimit) (hv : v.length < lpLimit)
     (hd' : d'.length < lpLimit) (hn' : n'.length < lpLimit) (hv' : v'.length < lpLimit)
     (h : H (commitPre d n v) = H (commitPre d' n' v')) :
-    (d = d' ∧ n = n' ∧ v = v') ∨ Collision H := by
+    (d = d' ∧ n = n' ∧ v = v') ∨ CollidesOn H (commitPre d n v) (commitPre d' n' v') := by
   by_cases hp : commitPre d n v = commitPre d' n' v'
   · have := (commitment.msg_inj (vs := [d, n, v]) (ws := [d', n', v']) (by decide)
       (show _ ∧ _ ∧ _ ∧ True from ⟨hd, hn, hv, trivial⟩)
       (show _ ∧ _ ∧ _ ∧ True from ⟨hd', hn', hv', trivial⟩) hp).1
     simp only [List.cons.injEq, and_true] at this
     exact Or.inl this
-  · exact Or.inr ⟨_, _, hp, h⟩
+  · exact Or.inr ⟨hp, h⟩
 
 end Averin.Seal

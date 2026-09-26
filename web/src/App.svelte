@@ -9,6 +9,7 @@
   } from "./lib/api";
   import { buildWaterfall, recLabel, type Rec } from "./lib/trace";
   import { claimVerdict } from "./lib/claimVerdict";
+  import { revocationView } from "./lib/revocationView";
 
   let project = $state("proj-001");
   // API token for AVERIN_API_KEYS-authenticated servers. Empty = authless dev server (averin#19).
@@ -18,6 +19,7 @@
   let rows = $state<ReturnType<typeof buildWaterfall>>([]);
   let report = $state<any>(null);
   let verdict = $derived(claimVerdict(report));
+  let revocation = $derived(revocationView(report));
   let error = $state<string>("");
 
   function applyToken() {
@@ -117,6 +119,22 @@
       {/if}
       <div class="lvl">Proves integrity/provenance (Level 1), not completeness (Level 3).</div>
     </section>
+    {#if revocation && (revocation.current.length || revocation.historical)}
+      <section class="panel">
+        <h2>Current revocation</h2>
+        {#if !revocation.evaluated}
+          <div class="lvl">Revocation was not evaluated (no pinned revocation issuer or no signed revocation artifact): a revoked grant would not show here.</div>
+        {:else}
+          {#each revocation.current as line}<div class="broken">{line}</div>{:else}<div class="lvl">No listed grant is revoked.</div>{/each}
+        {/if}
+        {#if revocation.historical}
+          <h2>Historical ordering (separate from current revocation)</h2>
+          <div class="lvl">Historical authorization as of the snapshot: {revocation.historical.decision} · {revocation.historical.snapshot}</div>
+          {#each revocation.historical.receipts as line}<div class="lvl">{line}</div>{/each}
+          <div class="lvl">{revocation.historical.basis}</div>
+        {/if}
+      </section>
+    {/if}
   {/if}
 
   <div class="cols">
@@ -165,7 +183,8 @@
   .broken { color: #f87171; font-family: ui-monospace, monospace; font-size: 13px; margin-top: 6px; }
   .lvl { color: #9aa4b2; font-size: 12px; margin-top: 6px; }
   .cols { display: grid; grid-template-columns: 220px 1fr; gap: 18px; margin-top: 12px; }
-  aside h2, .trace h2 { font-size: 15px; color: #9aa4b2; }
+  aside h2, .trace h2, .panel h2 { font-size: 15px; color: #9aa4b2; }
+  .panel h2 { margin: 8px 0 4px; }
   .sess { display: block; width: 100%; text-align: left; background: #171a21; color: #e6e9ef;
     border: 1px solid #262b35; margin-bottom: 6px; font-weight: 400; }
   .sess.on { border-color: #7c9cff; }

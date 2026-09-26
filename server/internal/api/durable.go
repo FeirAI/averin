@@ -13,7 +13,6 @@ import (
 // durableWriter is the subset of *pgdurable.Store the request paths call (the boot-time rehydrate in WithDurable
 // uses the concrete store). An interface so a test can inject a slow/blocking durable store.
 type durableWriter interface {
-	Revoke(projectID, grantID string) error
 	PutPending(projectID, idemKey, grantID string, payload []byte, created time.Time) ([]byte, time.Time, error)
 	DeletePending(projectID, idemKey string) error
 }

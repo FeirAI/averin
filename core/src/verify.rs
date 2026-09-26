@@ -25,8 +25,20 @@ use crate::sign::decode_pubkey;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod temporal;
 mod verdict;
-use verdict::{AnchoredCheckpoint, CapstoneFacts, PinnedRecordSeal, ValidatedFacts};
+pub use temporal::{
+    canonical_ts_millis, revocation_entry_v2, revocation_entry_v2_preimage, revocation_key_v2,
+    revocation_key_v2_preimage, revocation_leaves_v2, revocation_merkle_root_v2,
+    revocation_state_digest_v2, revocation_state_v2_preimage, DbSerializedPolicy, GrantRevocation,
+    HistoricalOrdering, RevState, Snapshot, TemporalPolicy, AUTHORIZATION_ORDER_FORMAT,
+    DB_SERIALIZED_V1_TRUST_BASIS, MERKLE_ROOT_V2_DOMAIN, MERKLE_ROOT_V2_FORMAT,
+    REVOCATION_LIST_V2_DOMAIN, REVOCATION_LIST_V2_FORMAT,
+};
+use temporal::{GrantRevocationAcc, OrderEv, ProofV2};
+use verdict::{
+    AnchoredCheckpoint, CapstoneFacts, HistoricalFacts, PinnedRecordSeal, ValidatedFacts,
+};
 pub use verdict::{
     ClaimDecision, ClaimPolicy, ClaimResults, RequestedClaim, RevocationRequirement,
 };
@@ -429,8 +441,40 @@ pub struct VerifyReport {
     /// DECLARES a complete closure over the observed surface — NOT runtime obedience (the resource TCB, D9).
     pub unclosed_side_effects: usize,
     pub side_effect_closure_status: String,
+    /// Plan 009: current revocation per grant and the separate historical ordering per receipt,
+    /// under the caller's temporal policy. Additive: no legacy field above depends on it.
+    pub temporal: TemporalReport,
     pub issues: Vec<String>,
     pub first_broken_link: Option<String>,
+}
+
+/// Plan 009 report section. `grant_revocations` is current validity: a revoked grant stays revoked
+/// whatever a receipt's historical ordering is. `receipt_ordering` is the historical judgment for
+/// each committed use/intent and introspection transcript: `proven_before` only under the caller's
+/// `db_serialized_v1` policy with a verified snapshot and a fully validated receipt.
+#[derive(Debug, Clone, Default)]
+pub struct TemporalReport {
+    pub policy: TemporalPolicy,
+    /// `absent` | `not_evaluated` (strict policy) | `verified` | `stale` | `unverified`.
+    pub snapshot_status: String,
+    pub snapshot_reason: Option<String>,
+    /// The signed snapshot identity the historical judgment is bound to, when one was parsed.
+    pub snapshot: Option<Snapshot>,
+    pub grant_revocations: Vec<(String, GrantRevocation)>,
+    pub receipt_ordering: Vec<ReceiptOrdering>,
+    pub proven_before: usize,
+    pub at_or_after: usize,
+    pub indeterminate: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReceiptOrdering {
+    pub record_id: String,
+    pub kind: String,
+    pub grant_id: Option<String>,
+    /// The resource-signed ordinal (body-bound v3 signatures only), when present and well formed.
+    pub authorization_order: Option<i64>,
+    pub historical_ordering: HistoricalOrdering,
 }
 
 impl VerifyReport {
@@ -527,6 +571,10 @@ fn honored_clean_rotation(rks: &RoleKeyStatus, artifact_time: &str) -> bool {
 pub struct VerifyOptions {
     /// Requested claim and evidence requirements fixed by the caller, never read from the bundle.
     pub claim_policy: ClaimPolicy,
+    /// Plan 009: the caller-selected historical ordering policy, with the caller's evaluation time,
+    /// maximum snapshot age and minimum authorization watermark. `Strict` (the default) never
+    /// produces a historical positive. Never read from the bundle.
+    pub revocation_temporal: TemporalPolicy,
     /// ADR 0006 §1 — out-of-band lifecycle for the authority-elevation ROLE keys, keyed by raw 32-byte public
     /// key. A key absent from this map is `active`. Consulted ONLY for the keys that elevate authority via
     /// `verify_authority` (broker/resource/federated/generic `authority_keys`); the freshness-dated roles
@@ -615,6 +663,384 @@ struct KeyEntry {
     vk: VerifyingKey,
     status: String,
     status_changed_at: Option<String>,
+}
+
+// Index closed, fully-verified grants by grant_id, reading match fields ONLY from the proven
+// grant_evidence (R1). `used` tracks matched uses (single-use ≤1 per grant_id, and grants_unused).
+struct GrantInfo {
+    action: String,
+    resource_id: String,
+    scope_class: String,
+    credential_binding: String,
+    issued_at: i64,
+    used: usize,
+    /// M1 (bounded_reuse): the declared cap N (0 for other scope classes). `used <= use_limit`.
+    use_limit: i64,
+    /// M1 (bounded_reuse): the `use_sequence_number`s already CONSUMED by accepted uses, for
+    /// `(grant_id, usn)` replay dedup. A usn is inserted only when a use is fully accepted (mirrors
+    /// `used`), so a use that fails PoP/outcome does not burn its sequence number.
+    used_seqs: BTreeSet<i64>,
+    /// M2 (delegation): the cnf_kid a USE must present, and the temporal window the use must fall in —
+    /// the LEAF of a verified delegation chain (narrowed window `min(grant exp, hop exps)`), or the root
+    /// cnf_kid / grant exp for an undelegated grant. The use predicate keys on these so a sub-agent's PoP
+    /// matches a re-delegated grant. (For an undelegated grant these equal the root cnf_kid / grant exp.)
+    effective_cnf_kid: String,
+    effective_exp: i64,
+    /// R3: the grant record is anchored-CLOSED (not merely committed) — required for a positive match.
+    closed: bool,
+    /// Plan 009: the shadow consumption ledger for a grant whose uses are blocked by revocation. The
+    /// legacy branch never consumes a blocked use; the historical classification still runs every
+    /// later check, and must see a second spend of the same revoked grant as a double spend.
+    hist_used: usize,
+    hist_used_seqs: BTreeSet<i64>,
+}
+
+/// A validated `use_outcome`, read from its resource-signed payload (D5).
+struct OutcomeRef {
+    intent_ref: String,
+    grant_id: String,
+    record_id: String,
+    index: usize,
+    /// The signed `intent_hash` (the before-act ordering binding).
+    intent_hash: String,
+    /// Anchored-CLOSED.
+    closed: bool,
+    /// Plan 009: the ordinal the outcome inherited from its intent (body-bound signatures only).
+    order: OrderEv,
+}
+
+/// Plan 009: one committed use/intent or introspection transcript, for the separate historical
+/// fields. `validated` is set only after the complete validation path accepted the receipt.
+struct ReceiptHist {
+    record_id: String,
+    kind: String,
+    grant_id: Option<String>,
+    order: OrderEv,
+    validated: bool,
+    /// The outcome of this intent signs a different ordinal: an authenticated contradiction.
+    outcome_conflict: bool,
+    native: bool,
+}
+
+impl ReceiptHist {
+    fn new(record_id: &str, kind: &str) -> Self {
+        ReceiptHist {
+            record_id: record_id.to_string(),
+            kind: kind.to_string(),
+            grant_id: None,
+            order: OrderEv::Absent,
+            validated: false,
+            outcome_conflict: false,
+            native: false,
+        }
+    }
+
+    /// An intent inherits no weaker ordering than its outcome proves: the outcome must sign the
+    /// same ordinal. A missing or malformed outcome ordinal leaves the pair indeterminate; a
+    /// different signed ordinal is an authenticated contradiction.
+    fn mark_validated(&mut self, outcome: Option<usize>, outcomes: &[OutcomeRef]) {
+        self.validated = true;
+        let Some(i) = outcome else {
+            return;
+        };
+        match (&self.order, &outcomes[i].order) {
+            (OrderEv::Present { .. }, o @ OrderEv::Present { .. }) if *o != self.order => {
+                self.outcome_conflict = true;
+                self.order = OrderEv::Malformed;
+            }
+            (OrderEv::Present { .. }, OrderEv::Present { .. }) => {}
+            _ => self.order = OrderEv::Malformed,
+        }
+    }
+}
+
+/// Plan 009: counters from the shadow validation of uses blocked by revocation. They never touch
+/// the legacy counters; they only let the historical claim account for the blocked receipts.
+#[derive(Default)]
+struct ShadowCounts {
+    matched: usize,
+    pop_reverified: usize,
+    action_unverified: usize,
+    violations: usize,
+    pending: usize,
+    intent_without_outcome: usize,
+    /// Outcomes consumed by neither the legacy nor the shadow validation.
+    orphans: usize,
+}
+
+impl ShadowCounts {
+    fn apply(&mut self, checked: &UseCheck, receipt: &mut ReceiptHist, outcomes: &[OutcomeRef]) {
+        match checked {
+            UseCheck::Violation { .. } => self.violations += 1,
+            UseCheck::IntentWithoutOutcome => self.intent_without_outcome += 1,
+            UseCheck::Pending => self.pending += 1,
+            UseCheck::Matched {
+                pop_reverified,
+                action_verified,
+                outcome,
+                ..
+            } => {
+                self.matched += 1;
+                if *pop_reverified {
+                    self.pop_reverified += 1;
+                }
+                if !action_verified {
+                    self.action_unverified += 1;
+                }
+                receipt.mark_validated(*outcome, outcomes);
+            }
+        }
+    }
+}
+
+struct UseCtx<'a> {
+    records: &'a [CanonValue],
+    outcomes: &'a [OutcomeRef],
+    outcomes_by: &'a BTreeMap<(String, String), Vec<usize>>,
+    taxonomy: Option<&'a TaxonomyInfo>,
+}
+
+/// The proven match inputs of one committed use/intent, read from its re-derived `use_evidence`.
+struct UseInput<'a> {
+    rec: &'a CanonValue,
+    record_id: &'a str,
+    content_hash: &'a str,
+    bkind: &'a str,
+    gid: &'a str,
+    action: &'a str,
+    resource_id: &'a str,
+    cnf_kid: &'a str,
+    jti: &'a str,
+    used_at: i64,
+    use_closed: bool,
+}
+
+enum UseCheck {
+    Violation {
+        msg: String,
+        overspent: bool,
+        seq_replay: bool,
+    },
+    IntentWithoutOutcome,
+    Pending,
+    Matched {
+        pop_reverified: bool,
+        action_verified: bool,
+        taxonomy_window_failed: bool,
+        outcome: Option<usize>,
+    },
+}
+
+/// Every check after the revocation gate: grant predicate, single-use and bounded-reuse
+/// consumption, two-phase completion, offline PoP and closure. The legacy path runs it on the
+/// grant's legacy ledger and `consumed_outcomes`; a revocation-blocked use runs the identical code
+/// on the shadow ledger (`shadow == true`) so a historical judgment is never a relabeled,
+/// unvalidated candidate. Consumption follows the legacy rules exactly: a violation consumes
+/// nothing, a pending or matched use consumes the grant (and its sequence number and outcome).
+fn check_use(
+    ctx: &UseCtx,
+    u: &UseInput,
+    g: &mut GrantInfo,
+    shadow: bool,
+    consumed_outcomes: &mut BTreeSet<String>,
+) -> UseCheck {
+    let violation = |msg: String| UseCheck::Violation {
+        msg,
+        overspent: false,
+        seq_replay: false,
+    };
+    let gid = u.gid;
+    // Full predicate: action / resource / temporal-window / cnf_kid equality, read from the proven
+    // payloads on both sides.
+    // The temporal window is [issued_at, exp) — used_at >= exp is expired, matching the resource
+    // shim's `now >= exp` rejection (so the verifier is not more lenient than the gateway).
+    // M2 (delegation): match the use's cnf_kid against the EFFECTIVE (leaf) cnf and the NARROWED window,
+    // not the root — so a sub-agent's PoP matches a re-delegated grant, and a use by the original root
+    // (root cnf != leaf cnf) correctly fails to match a delegated-away credential. For an undelegated
+    // grant effective_cnf_kid==cnf_kid and effective_exp==exp, so this is unchanged (additive).
+    if u.action != g.action
+        || u.resource_id != g.resource_id
+        || u.cnf_kid != g.effective_cnf_kid
+        || u.used_at < g.issued_at
+        || u.used_at >= g.effective_exp
+    {
+        return violation(format!(
+            "action/resource/cnf/window does not match grant '{gid}' — violation"
+        ));
+    }
+    // Single-use (R5 rev 4): per-grant_id at most once, regardless of jti; jti must equal grant_id.
+    // M1 (bounded_reuse, ADR 0005): a 4th scope class allowing N uses of the IDENTICAL
+    // (action, resource_id); replay is bounded by a per-grant `use_sequence_number in [1, use_limit]`,
+    // deduped per (grant_id, usn). jti still equals grant_id for both classes (the resource sources
+    // use_evidence.jti from the descriptor jti, so the D6.4 descriptor cross-check is UNCHANGED); the
+    // per-exercise identity is the SEPARATE use_sequence_number.
+    let single = g.scope_class == "single_operation";
+    let bounded = g.scope_class == "bounded_reuse";
+    if (single || bounded) && u.jti != gid {
+        return violation(format!(
+            "{} grant '{gid}' requires use_evidence.jti == grant_id (R5) — violation",
+            g.scope_class
+        ));
+    }
+    let used = if shadow { g.hist_used } else { g.used };
+    if single && used >= 1 {
+        return violation(format!(
+            "single-use grant '{gid}' exercised more than once — double-spend (R5)"
+        ));
+    }
+    // M1: validate the bounded_reuse sequence number BEFORE counting; the usn is CONSUMED only when the
+    // use is fully accepted (alongside g.used), so a use that later fails PoP/outcome does not burn it.
+    let use_seq: Option<i64> = if bounded {
+        let usn = ev_int(u.rec, "use_evidence", "use_sequence_number").unwrap_or(0);
+        if usn < 1 || usn > g.use_limit {
+            return UseCheck::Violation {
+                msg: format!(
+                    "bounded_reuse grant '{gid}' use_sequence_number {usn} outside [1, {}] — overspend (M1)",
+                    g.use_limit
+                ),
+                overspent: true,
+                seq_replay: false,
+            };
+        }
+        let seqs = if shadow {
+            &g.hist_used_seqs
+        } else {
+            &g.used_seqs
+        };
+        if seqs.contains(&usn) {
+            return UseCheck::Violation {
+                msg: format!("bounded_reuse grant '{gid}' use_sequence_number {usn} replayed across receipts — seq-replay (M1)"),
+                overspent: false,
+                seq_replay: true,
+            };
+        }
+        // Compare in i64, NOT `use_limit as usize` (same wasm32 `usize==u32` truncation concern as the
+        // cosig gate above). Here truncation would shrink the cap (fail-CLOSED, over-restrictive) rather
+        // than open, but the verdict must still be platform-independent; `g.used` is a small count.
+        if used as i64 >= g.use_limit {
+            return UseCheck::Violation {
+                msg: format!(
+                    "bounded_reuse grant '{gid}' exercised more than use_limit {} times — overspend (M1)",
+                    g.use_limit
+                ),
+                overspent: true,
+                seq_replay: false,
+            };
+        }
+        Some(usn)
+    } else {
+        None
+    };
+    // D5 (ADR 0004 F4): a `use_intent` is a COMPLETE two-phase use only if a valid `use_outcome` whose
+    // SIGNED payload references THIS intent's record_id AND attests THIS grant_id completes it. An intent
+    // that passed every predicate above but has no such outcome is an `intent_without_outcome` anomaly —
+    // recorded-but-incomplete (the crash-after-act case). Surface it and stop BEFORE it counts as matched
+    // / PoP-reverified or consumes a single-use grant.
+    // D5 (ADR 0004 F4): pick a SPECIFIC un-consumed validated outcome that references THIS intent's
+    // record_id, attests THIS grant, and proves the BEFORE-ACT ordering: the outcome's RESOURCE-SIGNED
+    // `intent_hash` must equal this intent's content_hash (the resource attests it observed THIS intent
+    // before signing the outcome — unforgeable by the relay), AND the top-level `causal_prev_hashes`
+    // include it (a DAG consistency check; the signed binding is the security boundary, since the
+    // record-signing key could backfill the top-level edge). An unordered/backfilled pair does NOT
+    // complete. The pick is held and only CONSUMED after every acceptance check (incl. PoP) passes — a
+    // later-rejected intent must not consume (and thereby mask from orphan accounting) its outcome.
+    let mut pending_consume: Option<usize> = None;
+    if u.bkind == "use_intent" {
+        let key = (u.record_id.to_string(), gid.to_string());
+        pending_consume = ctx.outcomes_by.get(&key).and_then(|idxs| {
+            idxs.iter().copied().find(|&i| {
+                let o = &ctx.outcomes[i];
+                !consumed_outcomes.contains(&o.record_id)
+                    && o.intent_hash.as_str() == u.content_hash
+                    && ctx.records[o.index]
+                        .get("causal_prev_hashes")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|p| p.iter().any(|h| h.as_str() == Some(u.content_hash)))
+            })
+        });
+    }
+    // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
+    // reconstructing the challenge from the proven fields + this grant's credential_binding + the
+    // record's input_commit. A claimed re-verification that FAILS is a violation; a receipt that
+    // carries neither stays `shim_asserted` (legacy ADR-0003 path). This NEGATIVE check runs on every
+    // committed use/intent BEFORE any completion (closure) branch below: a two-phase intent whose
+    // outcome is missing or only committed must still fail on a bad PoP, or deleting one checkpoint's
+    // unsigned `anchor` would turn a violation into a pass (monotonicity). A failed intent never
+    // consumes its outcome, so the outcome is still reported as an orphan.
+    let pop_reverified = match pop_reverify(u.rec, &g.credential_binding) {
+        Ok(r) => r,
+        Err(msg) => return violation(format!("offline PoP re-verification: {msg}")),
+    };
+    if u.bkind == "use_intent" {
+        match pending_consume {
+            // no outcome at all: a CLOSED intent is the D5 anomaly; a committed-only one is still in flight.
+            None => {
+                return if u.use_closed {
+                    UseCheck::IntentWithoutOutcome
+                } else {
+                    UseCheck::Pending
+                };
+            }
+            // a CLOSED intent whose outcome is only committed (not anchored): completion is not yet
+            // established over the closed set — the D5 anomaly, as before (when the outcome was invisible).
+            // The (validated) intent consumes the outcome so it is not ALSO reported as an orphan.
+            Some(i) if u.use_closed && !ctx.outcomes[i].closed => {
+                consumed_outcomes.insert(ctx.outcomes[i].record_id.clone());
+                return UseCheck::IntentWithoutOutcome;
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(i) = pending_consume {
+        consumed_outcomes.insert(ctx.outcomes[i].record_id.clone()); // accepted intent → consume its outcome now
+    }
+    let (used, used_seqs) = if shadow {
+        (&mut g.hist_used, &mut g.hist_used_seqs)
+    } else {
+        (&mut g.used, &mut g.used_seqs)
+    };
+    // R3: a use that passed every check but is not anchored-CLOSED (nor, for a two-phase pair, its outcome —
+    // handled above, nor its grant — `!g.closed` implies `!use_closed` here) is in-flight: pending, not
+    // matched. It still CONSUMES the grant (and its sequence number / outcome), so a second committed spend
+    // of a single-use grant is a double-spend violation rather than a second pending use.
+    *used += 1;
+    if let Some(usn) = use_seq {
+        used_seqs.insert(usn); // M1: consume the sequence number only once the use is accepted
+    }
+    if !u.use_closed || !g.closed {
+        return UseCheck::Pending;
+    }
+    // R6/D4: a matched use is action-VERIFIED only when a pinned, in-window taxonomy lists the
+    // grant's action FOR THIS RESOURCE — otherwise it stays a demonstrator artifact
+    // (uses_action_unverified) that can never reach the attested_complete upgrade. The listing is
+    // resource-BOUND so a taxonomy vetted for one resource cannot validate a colliding action name on
+    // another (adversarial review AREA 2). M1: bounded_reuse is action-verifiable too — it fixes one
+    // (action, resource_id) exactly like single_operation (action↔grant tightness preserved).
+    let mut taxonomy_window_failed = false;
+    let action_verified = (single || bounded)
+        && ctx.taxonomy.is_some_and(|ti| {
+            if !ti
+                .actions
+                .contains(&(u.resource_id.to_string(), u.action.to_string()))
+            {
+                return false;
+            }
+            let in_window = g.issued_at >= ti.effective_from
+                && g.issued_at <= ti.effective_until
+                && u.used_at >= ti.effective_from
+                && u.used_at <= ti.effective_until;
+            if !in_window {
+                // a listed action rejected ONLY by the effective window → the taxonomy is stale (MF5)
+                taxonomy_window_failed = true;
+            }
+            in_window
+        });
+    UseCheck::Matched {
+        pop_reverified,
+        action_verified,
+        taxonomy_window_failed,
+        outcome: pending_consume,
+    }
 }
 
 /// Provisional per-record state from pass 1, finalized in pass 2 after anchors are known.
@@ -1007,7 +1433,7 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         .collect();
     CanonValue::object(vec![
         ("ok".into(), CanonValue::Bool(r.ok)),
-        ("claims_version".into(), CanonValue::string("1")),
+        ("claims_version".into(), CanonValue::string("2")),
         ("claims".into(), r.claims.to_canon()),
         ("project_id".into(), opt_str(&r.project_id)),
         (
@@ -1237,11 +1663,107 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             "side_effect_closure_status".into(),
             CanonValue::string(r.side_effect_closure_status.clone()),
         ),
+        ("revocation_temporal".into(), temporal_to_canon(&r.temporal)),
         ("issues".into(), str_array(&r.issues)),
         ("first_broken_link".into(), opt_str(&r.first_broken_link)),
         ("record_trust".into(), CanonValue::Array(records)),
     ])
     .unwrap()
+}
+
+/// Plan 009 report section: the caller's policy and its named trust basis, the snapshot the
+/// judgment is bound to, current revocation per grant and historical ordering per receipt.
+fn temporal_to_canon(t: &TemporalReport) -> CanonValue {
+    let int_or_null = |v: Option<i64>| v.map_or(CanonValue::Null, CanonValue::Int);
+    let mut policy = vec![("policy".to_string(), CanonValue::string(t.policy.as_str()))];
+    if let TemporalPolicy::DbSerializedV1(p) = &t.policy {
+        policy.push((
+            "trust_basis".into(),
+            CanonValue::string(DB_SERIALIZED_V1_TRUST_BASIS),
+        ));
+        policy.push((
+            "evaluation_time".into(),
+            CanonValue::string(p.evaluation_time()),
+        ));
+        policy.push((
+            "max_snapshot_age_seconds".into(),
+            CanonValue::Int(p.max_snapshot_age_seconds()),
+        ));
+        policy.push((
+            "min_authorization_watermark".into(),
+            CanonValue::Int(p.min_authorization_watermark()),
+        ));
+    }
+    let snapshot = CanonValue::object(vec![
+        (
+            "status".into(),
+            CanonValue::string(t.snapshot_status.clone()),
+        ),
+        ("reason".into(), opt_str(&t.snapshot_reason)),
+        (
+            "project_id".into(),
+            opt_str(&t.snapshot.as_ref().map(|s| s.project_id.clone())),
+        ),
+        (
+            "boundary_time".into(),
+            opt_str(&t.snapshot.as_ref().map(|s| s.boundary_time.clone())),
+        ),
+        (
+            "authorization_high_watermark".into(),
+            int_or_null(t.snapshot.as_ref().map(|s| s.watermark)),
+        ),
+    ])
+    .unwrap();
+    let grants = t
+        .grant_revocations
+        .iter()
+        .map(|(gid, st)| {
+            CanonValue::object(vec![
+                ("grant_id".into(), CanonValue::string(gid.clone())),
+                (
+                    "current_revocation".into(),
+                    CanonValue::string(st.current_str()),
+                ),
+                (
+                    "cutoff_order".into(),
+                    int_or_null(match st {
+                        GrantRevocation::Prospective(c) => Some(*c),
+                        _ => None,
+                    }),
+                ),
+            ])
+            .unwrap()
+        })
+        .collect();
+    let receipts = t
+        .receipt_ordering
+        .iter()
+        .map(|o| {
+            CanonValue::object(vec![
+                ("record_id".into(), CanonValue::string(o.record_id.clone())),
+                ("kind".into(), CanonValue::string(o.kind.clone())),
+                ("grant_id".into(), opt_str(&o.grant_id)),
+                (
+                    "authorization_order".into(),
+                    int_or_null(o.authorization_order),
+                ),
+                (
+                    "historical_ordering".into(),
+                    CanonValue::string(o.historical_ordering.as_str()),
+                ),
+            ])
+            .unwrap()
+        })
+        .collect();
+    policy.extend([
+        ("snapshot".into(), snapshot),
+        ("grant_revocations".into(), CanonValue::Array(grants)),
+        ("receipt_ordering".into(), CanonValue::Array(receipts)),
+        ("proven_before".into(), count(t.proven_before)),
+        ("at_or_after".into(), count(t.at_or_after)),
+        ("indeterminate".into(), count(t.indeterminate)),
+    ]);
+    CanonValue::object(policy).unwrap()
 }
 
 pub fn report_to_json(r: &VerifyReport) -> String {
@@ -1411,6 +1933,10 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         };
     let opts = VerifyOptions {
         claim_policy: match ClaimPolicy::parse(&opts_val) {
+            Ok(p) => p,
+            Err(e) => return error_report(&e),
+        },
+        revocation_temporal: match TemporalPolicy::parse(&opts_val) {
             Ok(p) => p,
             Err(e) => return error_report(&e),
         },
@@ -1745,6 +2271,10 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         coverage_manifest: None,
         unclosed_side_effects: 0,
         side_effect_closure_status: "not_declared".to_string(),
+        temporal: TemporalReport {
+            snapshot_status: "absent".to_string(),
+            ..Default::default()
+        },
         issues: vec![msg.to_string()],
         first_broken_link: Some(msg.to_string()),
     }
@@ -3495,6 +4025,22 @@ struct AttestationEval {
 struct RevocationEval {
     status: String, // absent | fresh | stale (revoked_present is set by the use loop)
     revoked: BTreeSet<String>, // disclosed revoked grant_ids (covered by the sig); empty unless validly signed
+    /// Plan 009: `Some` iff the list is a validly signed `averin.revocation.list.v2`.
+    v2: Option<V2Artifact>,
+    /// The list's signature and issuer verified (so non-membership is an authenticated statement).
+    signed: bool,
+}
+
+/// A validly signed v2 revocation artifact (list or Merkle root). Every grant it names remains
+/// revoked for current use. `usable` additionally requires a well-formed body, a parseable signed
+/// snapshot and an issuer key honored at the snapshot boundary time; only a usable artifact can
+/// support a historical positive.
+#[derive(Clone)]
+struct V2Artifact {
+    states: BTreeMap<String, RevState>,
+    snapshot: Option<Snapshot>,
+    usable: bool,
+    reason: Option<String>,
 }
 
 /// M5 (ADR 0005): evaluate a bundle's top-level `revocation_list` — a signed, time-bounded list of revoked
@@ -3506,6 +4052,11 @@ struct RevocationEval {
 /// issuer_kid matches the signer + in-window; `stale` iff validly signed but out of window (or malformed →
 /// issue pushed → !ok); `absent` iff no list or no pinned issuer. The returned `revoked` set is enforced
 /// (blocks in-window uses) by the caller ONLY when `status == "fresh"`.
+///
+/// Plan 009: a list carrying `format: "averin.revocation.list.v2"` is signed in the separate
+/// `averin.revocation.v2` domain and commits each grant's mode (`total` or `prospective` with a
+/// `cutoff_order`) plus the signed project and database snapshot. Every listed grant, whatever its
+/// mode, is in `revoked`, so current blocking is identical to v1. An unknown `format` fails closed.
 fn evaluate_revocation(
     bundle: &CanonValue,
     opts: &VerifyOptions,
@@ -3516,6 +4067,8 @@ fn evaluate_revocation(
     let absent = RevocationEval {
         status: "absent".to_string(),
         revoked: BTreeSet::new(),
+        v2: None,
+        signed: false,
     };
     if opts.revocation_keys.is_empty() {
         return absent; // no pinned issuer -> not evaluated (a present list's revocations are not honored)
@@ -3534,12 +4087,29 @@ fn evaluate_revocation(
             return RevocationEval {
                 status: if has_merkle_root { "absent" } else { "missing" }.to_string(),
                 revoked: BTreeSet::new(),
+                v2: None,
+                signed: false,
             };
         }
     };
     let stale_empty = || RevocationEval {
         status: "stale".to_string(),
         revoked: BTreeSet::new(),
+        v2: None,
+        signed: false,
+    };
+    let v2_format = match rl.get("format") {
+        None => false,
+        Some(CanonValue::Str(f)) if f == REVOCATION_LIST_V2_FORMAT => true,
+        Some(_) => {
+            issues.push("revocation_list: unsupported format (plan 009 fail-closed)".into());
+            return stale_empty();
+        }
+    };
+    let domain = if v2_format {
+        REVOCATION_LIST_V2_DOMAIN
+    } else {
+        "averin.revocation.v1"
     };
 
     // 1. signature over the canonical list minus `sig`, under a pinned issuer (mirrors evaluate_attestation).
@@ -3562,7 +4132,7 @@ fn evaluate_revocation(
     let signer = match opts
         .revocation_keys
         .iter()
-        .find(|vk| crate::sign::verify("averin.revocation.v1", &digest, sig, vk).is_ok())
+        .find(|vk| crate::sign::verify(domain, &digest, sig, vk).is_ok())
     {
         Some(vk) => vk,
         None => {
@@ -3579,16 +4149,39 @@ fn evaluate_revocation(
         return stale_empty();
     }
 
-    // 2. the disclosed revoked grant_ids — covered by the verified sig above.
-    let revoked: BTreeSet<String> = rl
-        .get("revoked_grant_ids")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    // 2. the disclosed revoked grant_ids — covered by the verified sig above. A v2 list names every
+    // revoked grant exactly once in `revocations`; all of them block current use.
+    let (revoked, v2): (BTreeSet<String>, Option<V2Artifact>) = if v2_format {
+        let snapshot = temporal::parse_snapshot(rl);
+        let entries = temporal::parse_v2_entries(rl, snapshot.as_ref().ok().map(|s| s.watermark));
+        let artifact = v2_artifact(
+            signer,
+            opts,
+            entries.states,
+            snapshot,
+            entries.well_formed && rl.get("revoked_grant_ids").is_none(),
+            "revocation_list",
+            issues,
+        );
+        // A malformed v2 list that also carries legacy `revoked_grant_ids` is unusable for
+        // history, but every grant it names under the signature still blocks current use.
+        let mut ids = entries.ids;
+        if let Some(extra) = rl.get("revoked_grant_ids").and_then(|v| v.as_array()) {
+            ids.extend(extra.iter().filter_map(|x| x.as_str().map(String::from)));
+        }
+        (ids, Some(artifact))
+    } else {
+        let ids = rl
+            .get("revoked_grant_ids")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (ids, None)
+    };
 
     // 3. freshness window (canonical ISO, compared lexicographically against the anchored TSA time).
     let issued_at = rl
@@ -3602,6 +4195,8 @@ fn evaluate_revocation(
     let stale_with_list = || RevocationEval {
         status: "stale".to_string(),
         revoked: revoked.clone(),
+        v2: v2.clone(),
+        signed: true,
     };
     if issued_at.is_empty()
         || not_after.is_empty()
@@ -3644,6 +4239,132 @@ fn evaluate_revocation(
     RevocationEval {
         status: if fresh { "fresh" } else { "stale" }.to_string(),
         revoked,
+        v2,
+        signed: true,
+    }
+}
+
+/// Plan 009: build the v2 artifact summary. A body/snapshot defect is reported as an issue (the
+/// artifact is signed, so it is producer malfunction) and makes the artifact unusable for a
+/// historical positive; its named revocations still block current use.
+fn v2_artifact(
+    signer: &VerifyingKey,
+    opts: &VerifyOptions,
+    states: BTreeMap<String, RevState>,
+    snapshot: Result<Snapshot, String>,
+    well_formed: bool,
+    label: &str,
+    issues: &mut Vec<String>,
+) -> V2Artifact {
+    let mut reason = None;
+    let snapshot = match snapshot {
+        Ok(s) => Some(s),
+        Err(e) => {
+            reason = Some(format!("snapshot: {e}"));
+            None
+        }
+    };
+    if !well_formed && reason.is_none() {
+        reason = Some("malformed revocation entries".into());
+    }
+    if let Some(s) = &snapshot {
+        if !role_key_honored(signer, &opts.role_key_status, |rks| {
+            honored_clean_rotation(rks, &s.boundary_time)
+        }) && reason.is_none()
+        {
+            reason = Some("issuer key is rotated/compromised and the snapshot is not provably before that status change".into());
+        }
+    }
+    if let Some(r) = &reason {
+        issues.push(format!(
+            "{label}: v2 artifact is unusable for historical ordering — {r} (plan 009)"
+        ));
+    }
+    V2Artifact {
+        usable: reason.is_none(),
+        states,
+        snapshot,
+        reason,
+    }
+}
+
+/// Plan 009: the snapshot identity the historical judgment is bound to, and whether it met the
+/// caller's policy. `verified` is `Some` only under `db_serialized_v1` with every check passed.
+struct SnapshotEval {
+    status: &'static str,
+    reason: Option<String>,
+    identity: Option<Snapshot>,
+    verified: Option<Snapshot>,
+}
+
+/// Evaluate the signed v2 snapshot against the caller's policy: exactly one snapshot identity
+/// (a v2 list and a v2 Merkle root must agree), a usable signed artifact, the bundle's project,
+/// `boundary_time <= evaluation_time`, age within the caller's maximum and a watermark at least
+/// the caller's minimum. No bundle field can select or relax any of these.
+fn evaluate_snapshot(
+    policy: &TemporalPolicy,
+    revocation: &RevocationEval,
+    merkle: &MerkleRevEval,
+    project_id: Option<&str>,
+) -> SnapshotEval {
+    let artifacts: Vec<&V2Artifact> = [revocation.v2.as_ref(), merkle.v2.as_ref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let identity = artifacts.iter().find_map(|a| a.snapshot.clone());
+    let result = |status: &'static str, reason: Option<String>| SnapshotEval {
+        status,
+        reason,
+        identity: identity.clone(),
+        verified: None,
+    };
+    if artifacts.is_empty() {
+        return result("absent", None);
+    }
+    if let Some(a) = artifacts.iter().find(|a| !a.usable) {
+        return result("unverified", a.reason.clone());
+    }
+    let Some(snap) = identity.clone() else {
+        return result("unverified", Some("no signed snapshot".into()));
+    };
+    if artifacts.iter().any(|a| a.snapshot.as_ref() != Some(&snap)) {
+        return result(
+            "unverified",
+            Some("the v2 list and v2 Merkle root sign different snapshots".into()),
+        );
+    }
+    let TemporalPolicy::DbSerializedV1(p) = policy else {
+        return result("not_evaluated", None);
+    };
+    if project_id != Some(snap.project_id.as_str()) {
+        return result(
+            "unverified",
+            Some("snapshot project does not match the bundle".into()),
+        );
+    }
+    if snap.boundary_ms > p.evaluation_ms() {
+        return result(
+            "unverified",
+            Some("snapshot boundary_time is after the caller's evaluation_time".into()),
+        );
+    }
+    if p.evaluation_ms() - snap.boundary_ms > p.max_snapshot_age_seconds() * 1000 {
+        return result(
+            "stale",
+            Some("snapshot is older than the caller's max_snapshot_age_seconds".into()),
+        );
+    }
+    if snap.watermark < p.min_authorization_watermark() {
+        return result(
+            "unverified",
+            Some("snapshot watermark is below the caller's min_authorization_watermark".into()),
+        );
+    }
+    SnapshotEval {
+        status: "verified",
+        reason: None,
+        identity: Some(snap.clone()),
+        verified: Some(snap),
     }
 }
 
@@ -3661,6 +4382,46 @@ struct MerkleRevEval {
     status: String,         // absent | fresh | stale
     root: Option<[u8; 32]>, // the signed Merkle root (raw 32 bytes); Some iff validly signed
     leaf_count: usize,      // the tree's leaf count (incl. the 2 sentinels), covered by the sig
+    /// Plan 009: `Some` iff the root is a validly signed `averin.revocation.merkleroot.v2`, whose
+    /// leaves commit each grant's mode and cutoff. Its `states` map is empty (non-disclosure).
+    v2: Option<V2Artifact>,
+}
+
+impl MerkleRevEval {
+    /// The per-grant proof verdict under this root's version. `None` when no root is present.
+    fn proof(&self, proofs: Option<&CanonValue>, gid: &str) -> Option<ProofV2> {
+        let root = self.root.as_ref()?;
+        let proof = proofs.and_then(|m| m.get(gid));
+        Some(match (&self.v2, proof) {
+            (_, None) => ProofV2::Unproven,
+            (None, Some(p)) => match check_revocation_proof(p, gid, root, self.leaf_count) {
+                ProofVerdict::NotRevoked => ProofV2::NotRevoked,
+                ProofVerdict::Revoked => ProofV2::Revoked(RevState::Total),
+                ProofVerdict::Unproven => ProofV2::Unproven,
+            },
+            (Some(v2), Some(p)) => match &v2.snapshot {
+                Some(snap) => temporal::check_revocation_proof_v2(
+                    p,
+                    gid,
+                    root,
+                    self.leaf_count,
+                    snap.watermark,
+                ),
+                // Without a signed watermark a cutoff cannot be bounded; a membership proof
+                // still blocks as total, and nothing proves non-membership.
+                None => match temporal::check_revocation_proof_v2(
+                    p,
+                    gid,
+                    root,
+                    self.leaf_count,
+                    i64::MAX,
+                ) {
+                    ProofV2::Revoked(_) => ProofV2::Revoked(RevState::Total),
+                    _ => ProofV2::Unproven,
+                },
+            },
+        })
+    }
 }
 
 /// M5 Merkle-non-disclosure revocation (ADR 0005): evaluate a bundle's top-level `revocation_merkle_root` — a
@@ -3682,6 +4443,7 @@ fn evaluate_merkle_revocation(
         status: "absent".to_string(),
         root: None,
         leaf_count: 0,
+        v2: None,
     };
     let rr = match bundle.get("revocation_merkle_root") {
         Some(a) if !a.is_null() => a,
@@ -3694,6 +4456,21 @@ fn evaluate_merkle_revocation(
         status: "stale".to_string(),
         root: None,
         leaf_count: 0,
+        v2: None,
+    };
+    // Plan 009: the v2 root is signed in its own domain; an unknown format fails closed.
+    let v2_format = match rr.get("format") {
+        None => false,
+        Some(CanonValue::Str(f)) if f == MERKLE_ROOT_V2_FORMAT => true,
+        Some(_) => {
+            issues.push("revocation_merkle_root: unsupported format (plan 009 fail-closed)".into());
+            return stale();
+        }
+    };
+    let domain = if v2_format {
+        MERKLE_ROOT_V2_DOMAIN
+    } else {
+        "averin.broker.revocation.merkleroot.v1"
     };
 
     let sig = match rr.get("sig").and_then(|v| v.as_str()) {
@@ -3712,9 +4489,11 @@ fn evaluate_merkle_revocation(
     };
     obj.retain(|(k, _)| k != "sig");
     let digest = crate::hashx::sha256_prefixed(CanonValue::Object(obj).serialize().as_bytes());
-    let signer = match opts.revocation_keys.iter().find(|vk| {
-        crate::sign::verify("averin.broker.revocation.merkleroot.v1", &digest, sig, vk).is_ok()
-    }) {
+    let signer = match opts
+        .revocation_keys
+        .iter()
+        .find(|vk| crate::sign::verify(domain, &digest, sig, vk).is_ok())
+    {
         Some(vk) => vk,
         None => {
             issues.push("revocation_merkle_root: sig does not verify under any pinned revocation_keys issuer (M5)".into());
@@ -3750,6 +4529,17 @@ fn evaluate_merkle_revocation(
             return stale();
         }
     };
+    let v2 = v2_format.then(|| {
+        v2_artifact(
+            signer,
+            opts,
+            BTreeMap::new(),
+            temporal::parse_snapshot(rr),
+            true,
+            "revocation_merkle_root",
+            issues,
+        )
+    });
 
     let issued_at = rr
         .get("issued_at")
@@ -3763,6 +4553,7 @@ fn evaluate_merkle_revocation(
         status: "stale".to_string(),
         root: Some(root),
         leaf_count,
+        v2: v2.clone(),
     };
     if issued_at.is_empty()
         || not_after.is_empty()
@@ -3801,6 +4592,7 @@ fn evaluate_merkle_revocation(
         status: if fresh { "fresh" } else { "stale" }.to_string(),
         root: Some(root),
         leaf_count,
+        v2,
     }
 }
 
@@ -5177,29 +5969,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     };
 
     // Index closed, fully-verified grants by grant_id, reading match fields ONLY from the proven
-    // grant_evidence (R1). `used` tracks matched uses (single-use ≤1 per grant_id, and grants_unused).
-    struct GrantInfo {
-        action: String,
-        resource_id: String,
-        scope_class: String,
-        credential_binding: String,
-        issued_at: i64,
-        used: usize,
-        /// M1 (bounded_reuse): the declared cap N (0 for other scope classes). `used <= use_limit`.
-        use_limit: i64,
-        /// M1 (bounded_reuse): the `use_sequence_number`s already CONSUMED by accepted uses, for
-        /// `(grant_id, usn)` replay dedup. A usn is inserted only when a use is fully accepted (mirrors
-        /// `used`), so a use that fails PoP/outcome does not burn its sequence number.
-        used_seqs: BTreeSet<i64>,
-        /// M2 (delegation): the cnf_kid a USE must present, and the temporal window the use must fall in —
-        /// the LEAF of a verified delegation chain (narrowed window `min(grant exp, hop exps)`), or the root
-        /// cnf_kid / grant exp for an undelegated grant. The use predicate keys on these so a sub-agent's PoP
-        /// matches a re-delegated grant. (For an undelegated grant these equal the root cnf_kid / grant exp.)
-        effective_cnf_kid: String,
-        effective_exp: i64,
-        /// R3: the grant record is anchored-CLOSED (not merely committed) — required for a positive match.
-        closed: bool,
-    }
+    // grant_evidence (R1). See `GrantInfo`.
     let mut grants_by_id: BTreeMap<String, GrantInfo> = BTreeMap::new();
     // A required credential disclosure applies to every accepted committed broker grant,
     // including an unused grant. Counting only disclosures the exporter chose to provide would
@@ -5527,6 +6297,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     effective_cnf_kid,
                     effective_exp,
                     closed: grant_closed,
+                    hist_used: 0,
+                    hist_used_seqs: BTreeSet::new(),
                 });
             }
             // A verified, closed broker grant whose grant_evidence is missing a required match field is
@@ -5772,9 +6544,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // validated outcome is tracked as a DISTINCT record (intent_ref, grant_id, record_id, index) — NOT a
     // map keyed by intent_ref, which would let a second outcome for the same intent_ref overwrite the first
     // (hiding an extra unauthorized outcome, or dropping the legitimate one — order-dependent).
-    // (intent_ref, grant_id, record_id, index, signed intent_hash, anchored-CLOSED)
-    #[allow(clippy::type_complexity)]
-    let mut outcomes: Vec<(String, String, String, usize, String, bool)> = Vec::new();
+    let mut outcomes: Vec<OutcomeRef> = Vec::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str()
@@ -5807,8 +6577,21 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_str(rec, "use_outcome", "intent_hash"),
         ) {
             (Some(k), Some(iref), Some(ogid), Some(ihash)) if k == "use_outcome" => {
-                let oclosed = closed.contains(rt.content_hash.as_str());
-                outcomes.push((iref, ogid, rt.record_id.clone(), rt.index, ihash, oclosed));
+                outcomes.push(OutcomeRef {
+                    intent_ref: iref,
+                    grant_id: ogid,
+                    record_id: rt.record_id.clone(),
+                    index: rt.index,
+                    intent_hash: ihash,
+                    closed: closed.contains(rt.content_hash.as_str()),
+                    // Plan 009: an outcome inherits its intent's ordinal. Only a body-bound
+                    // resource signature can carry one into a historical judgment.
+                    order: if rt.authority == AuthorityTrust::Verified {
+                        temporal::authorization_order(rec, "use_outcome")
+                    } else {
+                        OrderEv::Malformed
+                    },
+                });
             }
             _ => {
                 unmatched_violation += 1;
@@ -5819,13 +6602,24 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // index outcomes by (intent_ref, grant_id) -> positions, so each intent pops at most one candidate
     // instead of scanning every outcome (O(intents·outcomes) — a verifier DoS on adversarial bundles).
     let mut outcomes_by: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-    for (i, (iref, ogid, _, _, _, _)) in outcomes.iter().enumerate() {
+    for (i, o) in outcomes.iter().enumerate() {
         outcomes_by
-            .entry((iref.clone(), ogid.clone()))
+            .entry((o.intent_ref.clone(), o.grant_id.clone()))
             .or_default()
             .push(i);
     }
     let mut consumed_outcomes: BTreeSet<String> = BTreeSet::new();
+    // Plan 009: outcomes consumed by the shadow validation of a revoked grant's intents. Disjoint
+    // from `consumed_outcomes` (an outcome is keyed by its grant, and a grant is either revoked or not).
+    let mut hist_consumed_outcomes: BTreeSet<String> = BTreeSet::new();
+    let mut receipts: Vec<ReceiptHist> = Vec::new();
+    let mut shadow = ShadowCounts::default();
+    let use_ctx = UseCtx {
+        records,
+        outcomes: &outcomes,
+        outcomes_by: &outcomes_by,
+        taxonomy: taxonomy_info.as_ref(),
+    };
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str() {
@@ -5845,6 +6639,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             continue; // verbatim-duplicate use deduped (not double-counted)
         }
         uses_total += 1;
+        let hist_idx = receipts.len();
+        receipts.push(ReceiptHist::new(&rt.record_id, &bkind));
         if !committed.contains(&rt.content_hash) {
             unmatched_pending += 1; // in-flight: not yet committed by any verified checkpoint
             continue;
@@ -5966,19 +6762,36 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 continue;
             }
         };
+        // Plan 009: the ordinal is trusted only from a body-bound (v3) resource signature over a
+        // payload that re-derives its evidence hash (checked above).
+        receipts[hist_idx].grant_id = Some(gid.clone());
+        receipts[hist_idx].order = if rt.authority == AuthorityTrust::Verified {
+            temporal::authorization_order(rec, "use_evidence")
+        } else {
+            OrderEv::Absent
+        };
+        let input = UseInput {
+            rec,
+            record_id: &rt.record_id,
+            content_hash: &rt.content_hash,
+            bkind: &bkind,
+            gid: &gid,
+            action: &action,
+            resource_id: &resource_id,
+            cnf_kid: &cnf_kid,
+            jti: &jti,
+            used_at,
+            use_closed,
+        };
         // M5 (ADR 0005): a use of a grant the revocation_list EXPLICITLY marks revoked is blocked — whether the
         // list is `fresh` OR `stale`. `revoked` is populated ONLY for a validly-signed list (a forged/malformed
         // list yields an empty set + an issue), and a signed "this grant is revoked" is a MONOTONE fact: staleness
         // (the window no longer brackets the anchored time) means the list may not be the LATEST snapshot, NOT
         // that a named grant became valid again. Blocking only on `fresh` was a fail-open (a relying party gating
         // on `ok` accepted a provably-revoked credential). A hard violation (→ !ok); the grant is NOT consumed.
-        // `absent` (no list / unpinned issuer) leaves `revoked` empty, so this is a no-op there.
-        if revocation.revoked.contains(&gid) {
-            revoked_uses_blocked += 1;
-            revoked_membership_found = true;
-            violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_list ({}) marks REVOKED — blocked (M5)", revocation.status));
-            continue;
-        }
+        // `absent` (no list / unpinned issuer) leaves `revoked` empty, so this is a no-op there. A v2 list names
+        // prospective revocations too, and they block current use exactly like total ones (plan 009).
+        //
         // M5 Merkle-non-disclosure (ADR 0005): when a signed root is present (fresh OR stale), this use's grant
         // must PROVE its non-revocation against the (undisclosed) revoked set. A valid non-membership proof lets
         // it proceed; a valid membership proof blocks it (revoked); a missing/malformed/forged proof is
@@ -5986,238 +6799,88 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // demand a proof, else an attacker presents an old root + omits the proof for a revoked grant). The stale
         // status separately blocks the capstone; here we only enforce per-use non-revocation. `absent` (no
         // root / unpinned issuer) leaves `root: None`, so this gate is skipped.
-        if merkle_rev.root.is_some() {
-            let proof = revocation_proofs.and_then(|m| m.get(gid.as_str()));
-            let verdict = merkle_rev
-                .root
-                .as_ref()
-                .map(|root| {
-                    proof.map_or(ProofVerdict::Unproven, |p| {
-                        check_revocation_proof(p, &gid, root, merkle_rev.leaf_count)
-                    })
-                })
-                .unwrap_or(ProofVerdict::Unproven);
+        let mut blocked: Option<(bool, String)> = None;
+        if revocation.revoked.contains(&gid) {
+            blocked = Some((true, format!("use of grant '{gid}' which a signed revocation_list ({}) marks REVOKED — blocked (M5)", revocation.status)));
+        } else if let Some(verdict) = merkle_rev.proof(revocation_proofs, &gid) {
             match verdict {
-                ProofVerdict::NotRevoked => {
+                ProofV2::NotRevoked => {
                     revocation_nonmembership_verified += 1; // proven not-revoked; fall through to matching
                 }
-                ProofVerdict::Revoked => {
-                    revoked_uses_blocked += 1;
-                    revoked_membership_found = true;
-                    violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_merkle_root ({}) proves REVOKED — blocked (M5)", merkle_rev.status));
-                    continue;
+                ProofV2::Revoked(_) => {
+                    blocked = Some((true, format!("use of grant '{gid}' which a signed revocation_merkle_root ({}) proves REVOKED — blocked (M5)", merkle_rev.status)));
                 }
-                ProofVerdict::Unproven => {
-                    revoked_uses_blocked += 1;
-                    violation(&mut issues, format!("use of grant '{gid}': a signed revocation_merkle_root ({}) is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)", merkle_rev.status));
-                    continue;
+                ProofV2::Unproven => {
+                    blocked = Some((false, format!("use of grant '{gid}': a signed revocation_merkle_root ({}) is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)", merkle_rev.status)));
                 }
             }
         }
-        // Full predicate: action / resource / temporal-window / cnf_kid equality, read from the proven
-        // payloads on both sides.
-        // The temporal window is [issued_at, exp) — used_at >= exp is expired, matching the resource
-        // shim's `now >= exp` rejection (so the verifier is not more lenient than the gateway).
-        // M2 (delegation): match the use's cnf_kid against the EFFECTIVE (leaf) cnf and the NARROWED window,
-        // not the root — so a sub-agent's PoP matches a re-delegated grant, and a use by the original root
-        // (root cnf != leaf cnf) correctly fails to match a delegated-away credential. For an undelegated
-        // grant effective_cnf_kid==cnf_kid and effective_exp==exp, so this is unchanged (additive).
-        if action != g.action
-            || resource_id != g.resource_id
-            || cnf_kid != g.effective_cnf_kid
-            || used_at < g.issued_at
-            || used_at >= g.effective_exp
-        {
-            unmatched_violation += 1;
-            violation(
-                &mut issues,
-                format!("action/resource/cnf/window does not match grant '{gid}' — violation"),
-            );
+        if let Some((membership, msg)) = blocked {
+            revoked_uses_blocked += 1;
+            if membership {
+                revoked_membership_found = true;
+            }
+            violation(&mut issues, msg);
+            // Plan 009: the legacy decision above is final and consumes nothing. A historical
+            // classification must not relabel an unvalidated candidate, so the SAME remaining
+            // checks run here on the grant's shadow ledger; the result feeds only the separate
+            // historical fields.
+            let checked = check_use(&use_ctx, &input, g, true, &mut hist_consumed_outcomes);
+            shadow.apply(&checked, &mut receipts[hist_idx], &outcomes);
             continue;
         }
-        // Single-use (R5 rev 4): per-grant_id at most once, regardless of jti; jti must equal grant_id.
-        // M1 (bounded_reuse, ADR 0005): a 4th scope class allowing N uses of the IDENTICAL
-        // (action, resource_id); replay is bounded by a per-grant `use_sequence_number in [1, use_limit]`,
-        // deduped per (grant_id, usn). jti still equals grant_id for both classes (the resource sources
-        // use_evidence.jti from the descriptor jti, so the D6.4 descriptor cross-check is UNCHANGED); the
-        // per-exercise identity is the SEPARATE use_sequence_number.
-        let single = g.scope_class == "single_operation";
-        let bounded = g.scope_class == "bounded_reuse";
-        if (single || bounded) && jti != gid {
-            unmatched_violation += 1;
-            violation(
-                &mut issues,
-                format!(
-                    "{} grant '{gid}' requires use_evidence.jti == grant_id (R5) — violation",
-                    g.scope_class
-                ),
-            );
-            continue;
-        }
-        if single && g.used >= 1 {
-            unmatched_violation += 1;
-            violation(
-                &mut issues,
-                format!("single-use grant '{gid}' exercised more than once — double-spend (R5)"),
-            );
-            continue;
-        }
-        // M1: validate the bounded_reuse sequence number BEFORE counting; the usn is CONSUMED only when the
-        // use is fully accepted (alongside g.used), so a use that later fails PoP/outcome does not burn it.
-        let use_seq: Option<i64> = if bounded {
-            let usn = ev_int(rec, "use_evidence", "use_sequence_number").unwrap_or(0);
-            if usn < 1 || usn > g.use_limit {
-                bounded_reuse_overspent += 1;
-                unmatched_violation += 1;
-                violation(&mut issues, format!("bounded_reuse grant '{gid}' use_sequence_number {usn} outside [1, {}] — overspend (M1)", g.use_limit));
-                continue;
-            }
-            if g.used_seqs.contains(&usn) {
-                bounded_reuse_seq_replays += 1;
-                unmatched_violation += 1;
-                violation(&mut issues, format!("bounded_reuse grant '{gid}' use_sequence_number {usn} replayed across receipts — seq-replay (M1)"));
-                continue;
-            }
-            // Compare in i64, NOT `use_limit as usize` (same wasm32 `usize==u32` truncation concern as the
-            // cosig gate above). Here truncation would shrink the cap (fail-CLOSED, over-restrictive) rather
-            // than open, but the verdict must still be platform-independent; `g.used` is a small count.
-            if g.used as i64 >= g.use_limit {
-                bounded_reuse_overspent += 1;
-                unmatched_violation += 1;
-                violation(&mut issues, format!("bounded_reuse grant '{gid}' exercised more than use_limit {} times — overspend (M1)", g.use_limit));
-                continue;
-            }
-            Some(usn)
-        } else {
-            None
-        };
-        // D5 (ADR 0004 F4): a `use_intent` is a COMPLETE two-phase use only if a valid `use_outcome` whose
-        // SIGNED payload references THIS intent's record_id AND attests THIS grant_id completes it. An intent
-        // that passed every predicate above but has no such outcome is an `intent_without_outcome` anomaly —
-        // recorded-but-incomplete (the crash-after-act case). Surface it and stop BEFORE it counts as matched
-        // / PoP-reverified or consumes a single-use grant.
-        // D5 (ADR 0004 F4): pick a SPECIFIC un-consumed validated outcome that references THIS intent's
-        // record_id, attests THIS grant, and proves the BEFORE-ACT ordering: the outcome's RESOURCE-SIGNED
-        // `intent_hash` must equal this intent's content_hash (the resource attests it observed THIS intent
-        // before signing the outcome — unforgeable by the relay), AND the top-level `causal_prev_hashes`
-        // include it (a DAG consistency check; the signed binding is the security boundary, since the
-        // record-signing key could backfill the top-level edge). An unordered/backfilled pair does NOT
-        // complete. The pick is held and only CONSUMED after every acceptance check (incl. PoP) passes — a
-        // later-rejected intent must not consume (and thereby mask from orphan accounting) its outcome.
-        let mut pending_consume: Option<usize> = None;
-        if bkind == "use_intent" {
-            let key = (rt.record_id.clone(), gid.clone());
-            pending_consume = outcomes_by.get(&key).and_then(|idxs| {
-                idxs.iter().copied().find(|&i| {
-                    let (_, _, orec, oidx, ihash, _) = &outcomes[i];
-                    !consumed_outcomes.contains(orec)
-                        && ihash.as_str() == rt.content_hash.as_str()
-                        && records[*oidx]
-                            .get("causal_prev_hashes")
-                            .and_then(|v| v.as_array())
-                            .is_some_and(|p| {
-                                p.iter()
-                                    .any(|h| h.as_str() == Some(rt.content_hash.as_str()))
-                            })
-                })
-            });
-        }
-        // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
-        // reconstructing the challenge from the proven fields + this grant's credential_binding + the
-        // record's input_commit. A claimed re-verification that FAILS is a violation; a receipt that
-        // carries neither stays `shim_asserted` (legacy ADR-0003 path). This NEGATIVE check runs on every
-        // committed use/intent BEFORE any completion (closure) branch below: a two-phase intent whose
-        // outcome is missing or only committed must still fail on a bad PoP, or deleting one checkpoint's
-        // unsigned `anchor` would turn a violation into a pass (monotonicity). A failed intent never
-        // consumes its outcome, so the outcome is still reported as an orphan.
-        let pop_reverified = match pop_reverify(rec, &g.credential_binding) {
-            Ok(r) => r,
-            Err(msg) => {
-                unmatched_violation += 1;
-                violation(&mut issues, format!("offline PoP re-verification: {msg}"));
-                continue;
-            }
-        };
-        if bkind == "use_intent" {
-            match pending_consume {
-                // no outcome at all: a CLOSED intent is the D5 anomaly; a committed-only one is still in flight.
-                None => {
-                    if use_closed {
-                        intent_without_outcome += 1;
-                    } else {
-                        unmatched_pending += 1;
-                    }
-                    continue;
+        match check_use(&use_ctx, &input, g, false, &mut consumed_outcomes) {
+            UseCheck::Violation {
+                msg,
+                overspent,
+                seq_replay,
+            } => {
+                if overspent {
+                    bounded_reuse_overspent += 1;
                 }
-                // a CLOSED intent whose outcome is only committed (not anchored): completion is not yet
-                // established over the closed set — the D5 anomaly, as before (when the outcome was invisible).
-                // The (validated) intent consumes the outcome so it is not ALSO reported as an orphan.
-                Some(i) if use_closed && !outcomes[i].5 => {
-                    consumed_outcomes.insert(outcomes[i].2.clone());
-                    intent_without_outcome += 1;
-                    continue;
+                if seq_replay {
+                    bounded_reuse_seq_replays += 1;
                 }
-                Some(_) => {}
+                unmatched_violation += 1;
+                violation(&mut issues, msg);
             }
-        }
-        if let Some(i) = pending_consume {
-            consumed_outcomes.insert(outcomes[i].2.clone()); // accepted intent → consume its outcome now
-        }
-        // R3: a use that passed every check but is not anchored-CLOSED (nor, for a two-phase pair, its outcome —
-        // handled above, nor its grant — `!g.closed` implies `!use_closed` here) is in-flight: pending, not
-        // matched. It still CONSUMES the grant (and its sequence number / outcome), so a second committed spend
-        // of a single-use grant is a double-spend violation rather than a second pending use.
-        if !use_closed || !g.closed {
-            g.used += 1;
-            if let Some(usn) = use_seq {
-                g.used_seqs.insert(usn);
-            }
-            unmatched_pending += 1;
-            continue;
-        }
-        if pop_reverified {
-            uses_pop_reverified += 1;
-        }
-        if bkind == "use" {
-            one_phase_use_present = true; // D8/MF3: a matched one-phase receipt blocks the capstone
-        }
-        g.used += 1;
-        if let Some(usn) = use_seq {
-            g.used_seqs.insert(usn); // M1: consume the sequence number only now (use fully accepted)
-        }
-        uses_matched += 1;
-        // R6/D4: a matched use is action-VERIFIED only when a pinned, in-window taxonomy lists the
-        // grant's action FOR THIS RESOURCE — otherwise it stays a demonstrator artifact
-        // (uses_action_unverified) that can never reach the attested_complete upgrade. The listing is
-        // resource-BOUND so a taxonomy vetted for one resource cannot validate a colliding action name on
-        // another (adversarial review AREA 2). M1: bounded_reuse is action-verifiable too — it fixes one
-        // (action, resource_id) exactly like single_operation (action↔grant tightness preserved).
-        let action_verified = (single || bounded)
-            && taxonomy_info.as_ref().is_some_and(|ti| {
-                if !ti.actions.contains(&(resource_id.clone(), action.clone())) {
-                    return false;
+            UseCheck::IntentWithoutOutcome => intent_without_outcome += 1,
+            UseCheck::Pending => unmatched_pending += 1,
+            UseCheck::Matched {
+                pop_reverified,
+                action_verified,
+                taxonomy_window_failed: window_failed,
+                outcome,
+            } => {
+                if pop_reverified {
+                    uses_pop_reverified += 1;
                 }
-                let in_window = g.issued_at >= ti.effective_from
-                    && g.issued_at <= ti.effective_until
-                    && used_at >= ti.effective_from
-                    && used_at <= ti.effective_until;
-                if !in_window {
-                    // a listed action rejected ONLY by the effective window → the taxonomy is stale (MF5)
+                if bkind == "use" {
+                    one_phase_use_present = true; // D8/MF3: a matched one-phase receipt blocks the capstone
+                }
+                uses_matched += 1;
+                if window_failed {
                     taxonomy_window_failed = true;
                 }
-                in_window
-            });
-        if !action_verified {
-            uses_action_unverified += 1;
+                if !action_verified {
+                    uses_action_unverified += 1;
+                }
+                receipts[hist_idx].mark_validated(outcome, &outcomes);
+            }
         }
     }
     // D5: a validated `use_outcome` that NO closed matching `use_intent` consumed is an ORPHAN — a recorded
     // completion with no anchored pre-action intent (the resource skipped the before-act recording that two-
     // phase exists to require). Flag it; otherwise an outcome-only bundle would read clean (false-clean).
-    for (iref, ogid, orec, _, _, _) in &outcomes {
-        if !consumed_outcomes.contains(orec) {
+    let mut legacy_orphans = 0usize;
+    for o in &outcomes {
+        if !consumed_outcomes.contains(&o.record_id) {
             unmatched_violation += 1;
-            issues.push(format!("use_outcome {orec}: references intent '{iref}' (grant {ogid}) but no closed matching use_intent consumed it — completion without a recorded intent (D5)"));
+            legacy_orphans += 1;
+            if !hist_consumed_outcomes.contains(&o.record_id) {
+                shadow.orphans += 1;
+            }
+            issues.push(format!("use_outcome {}: references intent '{}' (grant {}) but no closed matching use_intent consumed it — completion without a recorded intent (D5)", o.record_id, o.intent_ref, o.grant_id));
         }
     }
     // D4: a mis-scoped grant is rejected, not "unused" — exclude it so an exercised-but-mis-scoped grant
@@ -6271,26 +6934,16 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             revoked_membership_found = true;
             revoked_native.insert(gid.clone());
             issues.push(format!("native credential for grant '{gid}': a signed revocation_list ({}) marks it REVOKED — its introspected surface is blocked (M5)", revocation.status));
-        } else if merkle_rev.root.is_some() {
-            let proof = revocation_proofs.and_then(|m| m.get(gid.as_str()));
-            let verdict = merkle_rev
-                .root
-                .as_ref()
-                .map(|root| {
-                    proof.map_or(ProofVerdict::Unproven, |p| {
-                        check_revocation_proof(p, gid, root, merkle_rev.leaf_count)
-                    })
-                })
-                .unwrap_or(ProofVerdict::Unproven);
+        } else if let Some(verdict) = merkle_rev.proof(revocation_proofs, gid) {
             match verdict {
-                ProofVerdict::NotRevoked => revocation_nonmembership_verified += 1,
-                ProofVerdict::Revoked => {
+                ProofV2::NotRevoked => revocation_nonmembership_verified += 1,
+                ProofV2::Revoked(_) => {
                     revoked_uses_blocked += 1;
                     revoked_membership_found = true;
                     revoked_native.insert(gid.clone());
                     issues.push(format!("native credential for grant '{gid}': a signed revocation_merkle_root ({}) proves it REVOKED — blocked (M5)", merkle_rev.status));
                 }
-                ProofVerdict::Unproven => {
+                ProofV2::Unproven => {
                     revoked_uses_blocked += 1;
                     revoked_native.insert(gid.clone());
                     issues.push(format!("native credential for grant '{gid}': a signed revocation_merkle_root ({}) is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)", merkle_rev.status));
@@ -6354,6 +7007,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             continue; // verbatim-duplicate transcript deduped (not double-counted)
         }
         introspection_transcripts_total += 1;
+        let hist_idx = receipts.len();
+        let mut receipt = ReceiptHist::new(&rt.record_id, "introspection_transcript");
+        receipt.native = true;
+        receipts.push(receipt);
         let violation = |issues: &mut Vec<String>, msg: String| {
             issues.push(format!(
                 "introspection_transcript {} ({}): {msg}",
@@ -6469,12 +7126,24 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if sub != sup {
             introspection_scope_narrowed += 1; // a proper subset: the resource attested a real narrowing
         }
+        // Plan 009: a native transcript is authorized by this pass; revocation acts on the grant
+        // afterwards. The ordinal is trusted only from a body-bound resource signature.
+        let receipt = &mut receipts[hist_idx];
+        receipt.grant_id = Some(gid.clone());
+        receipt.order = if rt.authority == AuthorityTrust::Verified {
+            temporal::authorization_order(rec, "introspection_evidence")
+        } else {
+            OrderEv::Absent
+        };
         // R3: COVERAGE is a positive claim — only an anchored-CLOSED transcript of a CLOSED grant covers it (a
         // committed-only one was still fully checked above, so its violations are never hidden).
         if g.closed && closed.contains(rt.content_hash.as_str()) {
+            receipt.validated = true;
             covered_native.insert(gid);
         }
     }
+    // Plan 009: coverage before revocation removal, for the separate historical judgment.
+    let covered_native_hist = covered_native.clone();
     // M5 (ADR 0005): a REVOKED native grant (computed above) is forced OUT of coverage — so even a fully-verified
     // transcript cannot make a revoked credential's surface `attested` (it counts as uncovered → `unattested`).
     for gid in &revoked_native {
@@ -6499,6 +7168,132 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         "unattested"
     }
     .to_string();
+
+    // Plan 009: current revocation per grant, the authenticated snapshot, and each receipt's
+    // historical ordering. None of this changes a legacy field; it feeds the separate typed fields
+    // and the `historical_authorized_as_of_snapshot` claim.
+    let merkle_v2_usable = merkle_rev.v2.as_ref().is_some_and(|v| v.usable);
+    let grant_revocation = |gid: &str| -> GrantRevocation {
+        let mut acc = GrantRevocationAcc::default();
+        if revocation.signed {
+            match &revocation.v2 {
+                Some(v2) if v2.usable => acc.v2(v2.states.get(gid).copied()),
+                // An unusable v2 list still blocks current use of every grant it names, but it is
+                // not authenticated evidence for history and cannot certify absence.
+                Some(_) if revocation.revoked.contains(gid) => acc.unusable_member(),
+                Some(_) => acc.legacy_nonmember(),
+                None if revocation.revoked.contains(gid) => acc.legacy_member(),
+                None => acc.legacy_nonmember(),
+            }
+        }
+        match merkle_rev.proof(revocation_proofs, gid) {
+            None => {}
+            Some(ProofV2::Unproven) => acc.unproven(),
+            Some(ProofV2::Revoked(st)) if merkle_v2_usable => acc.v2(Some(st)),
+            Some(ProofV2::Revoked(_)) if merkle_rev.v2.is_some() => acc.unusable_member(),
+            Some(ProofV2::Revoked(_)) => acc.legacy_member(),
+            Some(ProofV2::NotRevoked) if merkle_v2_usable => acc.v2(None),
+            Some(ProofV2::NotRevoked) => acc.legacy_nonmember(),
+        }
+        acc.finish()
+    };
+    let snapshot_eval = evaluate_snapshot(
+        &opts.revocation_temporal,
+        &revocation,
+        &merkle_rev,
+        project_id.as_deref(),
+    );
+    let mut grant_states: BTreeMap<String, GrantRevocation> = BTreeMap::new();
+    for gid in grants_by_id.keys().chain(native_grants_by_id.keys()) {
+        grant_states.insert(gid.clone(), grant_revocation(gid));
+    }
+    for r in &receipts {
+        if let Some(gid) = &r.grant_id {
+            if !grant_states.contains_key(gid) {
+                grant_states.insert(gid.clone(), grant_revocation(gid));
+            }
+        }
+    }
+    let state_of = |r: &ReceiptHist| {
+        r.grant_id
+            .as_ref()
+            .and_then(|g| grant_states.get(g).copied())
+            .unwrap_or(GrantRevocation::NotEvaluated)
+    };
+    let receipt_ordering: Vec<ReceiptOrdering> = receipts
+        .iter()
+        .map(|r| ReceiptOrdering {
+            record_id: r.record_id.clone(),
+            kind: r.kind.clone(),
+            grant_id: r.grant_id.clone(),
+            authorization_order: r.order.ordinal(),
+            historical_ordering: temporal::classify(
+                snapshot_eval.verified.as_ref(),
+                r.validated,
+                &r.order,
+                state_of(r),
+            ),
+        })
+        .collect();
+    // Authenticated adverse history: a receipt ordered at/after its grant's cutoff, a use of a
+    // totally revoked (compromised or legacy) grant, or an outcome signing a different ordinal
+    // than its intent.
+    let historical_adverse = receipts.iter().zip(&receipt_ordering).any(|(r, o)| {
+        o.historical_ordering == HistoricalOrdering::AtOrAfter
+            || r.outcome_conflict
+            || (r.validated && state_of(r) == GrantRevocation::Total)
+    });
+    // The claim speaks for every receipt in the bundle: a mixed brokered/native bundle is
+    // historically authorized only if the receipts of both surfaces are proven before.
+    let every_receipt_proven = receipt_ordering
+        .iter()
+        .all(|o| o.historical_ordering == HistoricalOrdering::ProvenBefore);
+    // The legacy orphan-outcome count includes outcomes whose intent was blocked by revocation;
+    // the historical view replaces it with the outcomes neither validation consumed, and adds the
+    // violations the shadow validation found among the blocked uses.
+    let hist_unmatched_violation =
+        unmatched_violation - legacy_orphans + shadow.orphans + shadow.violations;
+    let hist_matched = uses_matched + shadow.matched;
+    let hist_brokered_valid = uses_total > 0
+        && every_receipt_proven
+        && hist_matched == uses_total
+        && uses_pop_reverified + shadow.pop_reverified == hist_matched
+        && hist_unmatched_violation == 0
+        && unmatched_pending + shadow.pending == 0
+        && taxonomy_info.is_some()
+        && !taxonomy_window_failed
+        && uses_action_unverified + shadow.action_unverified == 0;
+    let hist_introspected_valid = native_credential_present
+        && introspection_transcripts_total > 0
+        && introspection_transcripts_verified == introspection_transcripts_total
+        && native_grants_by_id
+            .keys()
+            .all(|gid| covered_native_hist.contains(gid))
+        && every_receipt_proven;
+    // The caller's revocation mode applies to the historical claim too (v2 analogue of the
+    // `authorized` requirement): which usable v2 artifacts must be present, and for Merkle mode
+    // a valid v2 proof for every receipt's grant.
+    let hist_v2_list_usable = revocation.v2.as_ref().is_some_and(|v| v.usable);
+    let hist_merkle_paths_complete = merkle_v2_usable
+        && receipts.iter().all(|r| {
+            r.grant_id.as_deref().is_some_and(|g| {
+                matches!(
+                    merkle_rev.proof(revocation_proofs, g),
+                    Some(ProofV2::NotRevoked | ProofV2::Revoked(_))
+                )
+            })
+        });
+    let historical_counts = [
+        HistoricalOrdering::ProvenBefore,
+        HistoricalOrdering::AtOrAfter,
+        HistoricalOrdering::Indeterminate,
+    ]
+    .map(|h| {
+        receipt_ordering
+            .iter()
+            .filter(|o| o.historical_ordering == h)
+            .count()
+    });
 
     // D4/MF5 taxonomy_status: absent (none pinned) | untrusted (bad sig/issuer/pin) | stale (signed +
     // pinned but a listed action was out of its effective window) | validated (signed, pinned, in-window).
@@ -6756,6 +7551,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         coverage_manifest,
         unclosed_side_effects,
         side_effect_closure_status,
+        temporal: TemporalReport {
+            policy: opts.revocation_temporal.clone(),
+            snapshot_status: snapshot_eval.status.to_string(),
+            snapshot_reason: snapshot_eval.reason.clone(),
+            snapshot: snapshot_eval.identity.clone(),
+            grant_revocations: grant_states.into_iter().collect(),
+            receipt_ordering,
+            proven_before: historical_counts[0],
+            at_or_after: historical_counts[1],
+            indeterminate: historical_counts[2],
+        },
         issues,
         first_broken_link,
     };
@@ -6821,7 +7627,30 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             },
         )
         .collect();
+    // Checked Tier-B contradictions other than the unmatched-use count, shared by the legacy and
+    // historical views (the historical view substitutes its own unmatched count).
+    let checked_other = semantic_record_conflict
+        || committed_grant_rejected
+        || void_contradiction
+        || grant_contradiction
+        || broker_log_contradiction
+        || report.bounded_reuse_overspent > 0
+        || report.bounded_reuse_seq_replays > 0
+        || report.cosig_threshold_failures > 0
+        || report.delegation_monotonicity_violations > 0
+        || report.cross_broker_suppression > 0;
     let facts = ValidatedFacts {
+        historical: HistoricalFacts {
+            selected: matches!(opts.revocation_temporal, TemporalPolicy::DbSerializedV1(_)),
+            snapshot_verified: snapshot_eval.verified.is_some(),
+            brokered_use_valid: hist_brokered_valid,
+            introspected_use_valid: hist_introspected_valid,
+            adverse: historical_adverse,
+            checked_contradiction: hist_unmatched_violation > 0 || checked_other,
+            v2_list_usable: hist_v2_list_usable,
+            v2_merkle_usable: merkle_v2_usable,
+            merkle_paths_complete: hist_merkle_paths_complete,
+        },
         structural_integrity,
         record_count: report.records_total,
         pinned_record_seals,
@@ -6870,17 +7699,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         immutable_record_contradiction: duplicate_record_id
             || checkpoint_project_conflict
             || !grant_equivocations.is_empty(),
-        checked_contradiction: report.unmatched_violation > 0
-            || semantic_record_conflict
-            || committed_grant_rejected
-            || void_contradiction
-            || grant_contradiction
-            || broker_log_contradiction
-            || report.bounded_reuse_overspent > 0
-            || report.bounded_reuse_seq_replays > 0
-            || report.cosig_threshold_failures > 0
-            || report.delegation_monotonicity_violations > 0
-            || report.cross_broker_suppression > 0,
+        checked_contradiction: report.unmatched_violation > 0 || checked_other,
         adverse_disclosure: report.cred_label_checks > report.cred_label_matched,
         adverse_anchor: !anchor_order_valid,
         revoked_membership: revoked_membership_found,
@@ -6895,6 +7714,6 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             && required_descriptor_record_ids.is_subset(&matched_descriptor_record_ids),
         policy: opts.claim_policy,
     };
-    report.claims = facts.decide();
+    report.claims = verdict::decide_claims(&facts);
     report
 }

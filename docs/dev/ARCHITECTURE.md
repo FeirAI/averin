@@ -160,10 +160,19 @@ Algorithms 1–6 have a Lean 4 counterpart in [`formal/lean/Averin/`](../../form
 | 5 | `Dag.lean` | `bundle_eq_closure` |
 | 6 | `Chain.lean` | `unique_history` |
 
+Every hash-dependent conclusion is in explicit-witness form: equal hashes give equal bodies, or a
+SHA-256 collision on the two specific framed preimages involved (`Seal.CollidesOn`,
+`Chain.CollidesIn`), i.e. the standard reduction to SHA-256 collision resistance. For the seal core,
+plan 012 ([`formal/production/`](../../formal/production/README.md)) proves the production Rust
+computes these model definitions (partial correctness: when the extracted function returns `Ok`).
+
 The executable Lean oracle (`formal/lean/Oracle`, checked by `core/tests/oracle.rs`) and the tag
 inventory in `formal/check-refinement.py` keep the models in step with this code; `formal/check-mutants.sh`
-checks that those gates catch known drifts. Algorithm 7's verdict logic
-is covered by the adversarial suite; it is not formally modelled yet.
+checks that those gates catch known drifts. Algorithm 7's claim kernel (`verify/verdict.rs`
+`decide_claims`, from checked facts to claim decisions) is modelled in `Verdict.lean` and, plan 012
+phase B, the production kernel is extracted and proved equal to that model; the evidence passes
+that compute its input facts are covered by the adversarial suite and the verdict oracle, not by a
+proof.
 
 ## Domain model
 
@@ -206,8 +215,16 @@ leaving history readable. A lost COMMIT acknowledgment is typed as ambiguous;
 callers reconcile only the exact operation identity before reporting success.
 Known server-side rejection is a definite abort.
 
+The guard row also carries the project's authorization order (schema v7, plan 009). A use,
+use-intent or native introspection transaction allocates the next ordinal from it and binds
+the ordinal into the resource-signed receipt before sealing; a prospective revocation
+allocates its cutoff from the same order. Revocations are immutable `revocation_events`
+rows (total or prospective). See ADR 0007.
+
 Exports read records, checkpoints, anchors, revocations and selected disclosure
-metadata from one repeatable-read snapshot. An RFC 3161 anchor is attached only
+metadata from one repeatable-read snapshot. Its first read captures the database
+boundary time (transaction start) and the authorization high watermark, which the v2
+revocation list signs as captured. An RFC 3161 anchor is attached only
 after its checkpoint commits and can be backfilled idempotently. Live replicas
 read pending grants and revocations from the project Store, not from boot
 caches. Keep the single-writer deployment policy until authenticated

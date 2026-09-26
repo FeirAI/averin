@@ -93,7 +93,7 @@ theorem msg_length_min (F : Family) (vs : List Bytes) (t : Bytes) (h : F.Admits 
 /-- Every fixed-schema framed hash family (all but the body hashes, the commitment and the
 grant-head seed, which are handled separately) is at least 34 bytes. -/
 theorem framed_long : ∀ F ∈ [grantPopV2, usePop, cosig, delegationHop, introspection, federation,
-    ledger, grantHeadStep, revocationLeaf],
+    ledger, grantHeadStep, revocationLeaf, revocationKeyV2, revocationStateV2, revocationEntryV2],
     34 ≤ 4 + (ascii F.tag).length + minLen F.schema := by
   decide
 
@@ -126,7 +126,8 @@ theorem grantHeadSeed_length (t : Bytes) : (grantHeadSeed.msg [] t).length = 31 
 /-- A framed hash-family preimage, with the verifier's own shape constraints. -/
 def FramedHashInput (m : Bytes) : Prop :=
   (∃ F ∈ [grantPopV2, usePop, cosig, delegationHop, introspection, federation, ledger, grantHeadStep,
-      revocationLeaf], ∃ vs t, F.Admits vs ∧ m = F.msg vs t) ∨
+      revocationLeaf, revocationKeyV2, revocationStateV2, revocationEntryV2],
+      ∃ vs t, F.Admits vs ∧ m = F.msg vs t) ∨
   (∃ F ∈ [recordHash, checkpointHash], ∃ t, 2 ≤ t.length ∧ m = F.msg [ascii "rcp-1"] t) ∨
   (∃ vs t, commitment.Admits vs ∧ (∃ d n v, vs = [d, n, v] ∧ n.length = 32) ∧
       m = commitment.msg vs t) ∨
@@ -150,7 +151,8 @@ theorem merkle_leaf_ne_framed (v : Bytes) (hv : v.length = 32) (m : Bytes)
 
 theorem framed_head (m : Bytes) (hm : FramedHashInput m) : m.head? = some 0 := by
   have hs : ∀ F ∈ [grantPopV2, usePop, cosig, delegationHop, introspection, federation, ledger,
-      grantHeadStep, revocationLeaf], (ascii F.tag).length < 256 := by
+      grantHeadStep, revocationLeaf, revocationKeyV2, revocationStateV2, revocationEntryV2],
+      (ascii F.tag).length < 256 := by
     decide
   have hs' : ∀ F ∈ [recordHash, checkpointHash], (ascii F.tag).length < 256 := by decide
   rcases hm with ⟨F, hF, vs, t, _, rfl⟩ | ⟨F, hF, t, _, rfl⟩ | ⟨vs, t, _, _, rfl⟩ | ⟨t, rfl⟩
@@ -376,12 +378,16 @@ theorem namespaces_distinct : (serverIdNamespaces.map ascii).Pairwise (· ≠ ·
 `catalogueTags` lists every domain string that is not the leading `LP` tag of a `Preimage.Family`:
 the grant PoP challenge's `"tag"` field (inside its JSON), the grant-void tombstone's evidence
 `domain` (inside a canonical-JSON evidence payload, first byte `{`, so `json_disjoint_from_framed`
-separates it from every framed family), the denial-salt message, and the server id namespaces.
+separates it from every framed family), the denial-salt message, the server id namespaces, and
+the plan 009 `format` identifiers of the authorization-order receipt field, the v2 revocation
+list and Merkle root objects and the stored revocation event. Those identifiers are JSON field
+values inside signed canonical objects or database rows, never a leading preimage tag.
 `formal/check-refinement.py` fails unless every `averin.*.vN` literal in `core/src` and
 `server/internal` is a `Family` tag or appears here. -/
 def catalogueTags : List String :=
   ["averin.broker.pop.v1", "averin.broker.grant_void.v1", "averin.denial.salt.v1",
-   "averin.authority.subject.v1"] ++
+   "averin.authority.subject.v1", "averin.authorization_order.v1", "averin.revocation.list.v2",
+   "averin.revocation.merkleroot.v2", "averin.revocation.event.v1"] ++
     serverIdNamespaces
 
 /-- No catalogue domain string reuses a framed-family tag, and they are pairwise distinct. -/

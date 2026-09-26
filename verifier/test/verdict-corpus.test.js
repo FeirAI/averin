@@ -18,7 +18,7 @@ function input(c) {
 }
 
 function support(r) {
-  expect(r.claims_version).toBe("1");
+  expect(r.claims_version).toBe("2");
   expect(fields).toContain(r.claims.requested);
   expect(r.claims.requested_decision).toBe(r.claims[r.claims.requested]);
   return new Set(fields.filter(k => r.claims[k] === "satisfied"));

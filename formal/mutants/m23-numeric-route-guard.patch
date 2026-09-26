@@ -2,12 +2,12 @@ Mutant: Force a numeric top-level input onto the general parser branch; the fail
 
 --- a/core/src/canon.rs
 +++ b/core/src/canon.rs
-@@ -84,7 +84,7 @@
-         // A number at byte zero cannot start with insignificant whitespace. Route that
-         // common top-level case straight to the same number parser used by parse_value.
-         // Nested and all other top-level values retain the general dispatcher.
--        if input
-+        if false && input
-             .as_bytes()
-             .first()
-             .is_some_and(|b| *b == b'-' || b.is_ascii_digit())
+@@ -597,7 +597,7 @@
+     // A number at byte zero cannot start with insignificant whitespace. Route that common top-level
+     // case straight to the same number parser `parse_value` selects; every other top-level value
+     // takes the general route (which the Kani integer proofs replace with a fail-closed guard).
+-    if at(s, 0, b'-') || digit_at(s, 0) {
++    if false && (at(s, 0, b'-') || digit_at(s, 0)) {
+         match parse_number(s, 0) {
+             Ok((v, j)) => finish_top_level(s, v, j),
+             Err(e) => Err(e),
