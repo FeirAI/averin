@@ -318,16 +318,17 @@ harness or family):
   tails reject non-zero trailing bits, and every accepted 4-symbol spelling is `encode` of the 3
   bytes it decodes to, over the full 2-, 3- and 4-symbol domains (about 5 s each).
 - `utf16_strict_matches_std` (kissat): `decode_utf16_strict` agrees with std's strict decoder on
-  every 1- and 2-unit sequence. 1,641 s wall, peak 7.9 GB.
+  every 1- and 2-unit sequence. 1,641 s wall and 7.9 GB peak on an idle host; 5,796 s wall and
+  6.6 GB peak for the final-source rerun on a loaded host (load average 15-23).
 - `integer_roundtrip` (numeric guard, A1): for every `n` in [-99,999, 99,999] the typed parser
   returns exactly `Int(n)` for `n.to_string()` and `serialize()` restores that spelling. The
-  original unsplit harness runs in 142 s, peak 3.9 GB. Its eleven checked sign/decimal-width
+  original unsplit harness runs in 118-142 s, peak under 6.3 GB (process-group maximum). Its eleven checked sign/decimal-width
   shards remain available through `--harness` (the zero shard is the m22/m23 detector).
 - `accepted_integer_spelling` (family): every numeric literal of 1..=4 bytes over
   `0-9 - + . e E` that the parser accepts is in canonical form (no leading zero, no `-0`, no sign
   `+`, fraction or exponent). 60 shards, one per concrete (length, first byte), with the other
   bytes symbolic over the whole alphabet, plus the lemma `spelling_alphabet_is_exact`. 757 s wall
-  for all 61, peak 577 MB. Mutant m13 (`-0` accepted) fails `accepted_integer_spelling_2_minus`.
+  for all 61 on an idle host (834 s on the final-source rerun), peak under 1 GB. Mutant m13 (`-0` accepted) fails `accepted_integer_spelling_2_minus`.
 - `string_escape_roundtrip` and `parse_never_panics` are **not verified**. With symbolic bytes
   CBMC's symbolic execution cannot fix the parser's cursor or the escaper's output length, so it
   explores infeasible parser routes and does not finish (see the plan 011 execution notes for
