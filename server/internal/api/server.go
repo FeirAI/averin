@@ -166,18 +166,13 @@ type Server struct {
 	// M6/M2 (ADR 0005) — the ONLINE two-phase grant flow (/v2/grants/prepare + /v2/grants/finalize). A
 	// cosigned/delegated grant is inherently two-phase: the cosig/delegation challenge binds the broker-MINTED
 	// credential_binding/exp, so an approver/delegator can only sign AFTER the broker prepares + reveals it.
-	// `pending` holds the minted-but-uncommitted broker.Prepared between the two phases, keyed by project:idem,
-	// WITHOUT a broker_seq (the seq is allocated at FINALIZE, inside the project transaction, so the seq
-	// order matches the grant commit order). `pending` is a legacy diagnostic cache; request paths use the
-	// project Store's durable pending row for admission and retry decisions across replicas.
+	// The minted-but-uncommitted broker.Prepared between the two phases lives only in the project Store's
+	// durable pending row (keyed by project + idempotency key), WITHOUT a broker_seq (the seq is allocated
+	// at FINALIZE, inside the project transaction, so the seq order matches the grant commit order).
 	// cosigApprovers/cosigThreshold are the SERVER-pinned M-of-N policy a finalize's cosignatures are
 	// validated against (never client-supplied).
-	pending map[string]*pendingGrant
-	// pendingMu guards only diagnostic cache publication, after a durable project transaction commits.
-	pendingMu       sync.Mutex
-	pendingKeyLocks keyedMutex
-	cosigThreshold  int
-	cosigApprovers  []ed25519.PublicKey
+	cosigThreshold int
+	cosigApprovers []ed25519.PublicKey
 	// durable retains the auxiliary connection for startup diagnostics/readiness; the project Store owns
 	// authoritative pending and revocation decisions on every request.
 	durable durableWriter
@@ -253,7 +248,6 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		keyValidFrom:  "2026-01-01T00:00:00.000Z",
 		now:           time.Now,
 		revocationCap: maxRevokedPerProject,
-		pending:       make(map[string]*pendingGrant), // M6/M2 online two-phase grant flow
 		bundleSem:     make(chan struct{}, maxConcurrentBundleReads),
 		// F3: fail-CLOSED authority posture by default. A record CLAIMING an elevated source that averin
 		// cannot verify under a pinned key is REJECTED, never silently sealed at the forgeable
@@ -2569,8 +2563,8 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			return st.IsRevoked(trustedProject, id)
 		})
 		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, op, ur.Nonce, s.now())
-		if errors.Is(e, resourceshim.ErrRevocationCheck) {
-			return e
+		if errors.Is(e, resourceshim.ErrRevocationCheck) || errors.Is(e, resourceshim.ErrLedgerUnavailable) {
+			return e // an infrastructure failure, not a deny: surfaced as 5xx below
 		}
 		if e != nil {
 			validateErr = e // a forged/expired/replayed/wrong-scope use — the caller's fault
@@ -2647,6 +2641,12 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 		return
 	}
 	if storeErr != nil {
+		if errors.Is(storeErr, resourceshim.ErrLedgerUnavailable) {
+			// The replay ledger could not answer (timeout, cancel, lost connection): nothing was consumed
+			// and no decision was made. Retryable; never reported or counted as a replay deny.
+			writeErr(w, http.StatusServiceUnavailable, "use ledger unavailable: "+storeErr.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "store use receipt: "+storeErr.Error())
 		return
 	}

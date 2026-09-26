@@ -70,7 +70,7 @@ func TestTemporalRevocationCutoverFromV6(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer oldConn.Close(context.Background())
+	defer oldConn.Close(context.Background()) //nolint:errcheck // closed explicitly before the cutover
 	if _, err := oldConn.Prepare(ctx, "old-revoke", `INSERT INTO revocations(project_id, grant_id) VALUES ('p1','late-boolean')`); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestTemporalRevocationCutoverFromV6(t *testing.T) {
 		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+live)
 		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+next)
 	}()
-	if err := Cutover(ctx, scoped, []string{live}, next); err == nil || !strings.Contains(err.Error(), "NOLOGIN") {
+	if err := cutover(t, scoped, []string{live}, next); err == nil || !strings.Contains(err.Error(), "NOLOGIN") {
 		t.Fatalf("v7 cutover accepted a LOGIN old runtime: %v", err)
 	}
 	cfg, err := pgx.ParseConfig(scoped)
@@ -108,7 +108,7 @@ func TestTemporalRevocationCutoverFromV6(t *testing.T) {
 	if _, err := admin.Exec(ctx, "ALTER ROLE "+live+" NOLOGIN PASSWORD 'rotated-unusable'"); err != nil {
 		t.Fatal(err)
 	}
-	if err := Cutover(ctx, scoped, []string{live}, next); err == nil || !strings.Contains(err.Error(), "sessions") {
+	if err := cutover(t, scoped, []string{live}, next); err == nil || !strings.Contains(err.Error(), "sessions") {
 		t.Fatalf("an established v6 session did not block the v7 cutover: %v", err)
 	}
 	if maxVersion(t, admin) != 6 || regExists(t, admin, "revocation_events") {
@@ -117,7 +117,14 @@ func TestTemporalRevocationCutoverFromV6(t *testing.T) {
 	if err := liveConn.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := Cutover(ctx, scoped, []string{live}, next); err != nil {
+	// The unnamed session holding an old prepared boolean revocation still blocks the step (S-M4).
+	if err := cutover(t, scoped, []string{live}, next); err == nil || !strings.Contains(err.Error(), "client backend") {
+		t.Fatalf("v7 cutover proceeded while an old writer session was connected: %v", err)
+	}
+	if err := oldConn.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := cutover(t, scoped, []string{live}, next); err != nil {
 		t.Fatalf("authorized v7 cutover: %v", err)
 	}
 	if maxVersion(t, admin) != 7 || regExists(t, admin, "revocations") {
@@ -173,9 +180,6 @@ func TestTemporalRevocationCutoverFromV6(t *testing.T) {
 			t.Fatalf("v7 accepted: %s", sql)
 		}
 	}
-	if _, err := oldConn.Exec(ctx, `EXECUTE "old-revoke"`); err == nil {
-		t.Fatal("an old prepared boolean revocation still lands after v7")
-	}
 	var ordinal int64
 	if err := admin.QueryRow(ctx, `UPDATE project_write_guard SET authorization_order = authorization_order + 1 WHERE project_id='p1' RETURNING authorization_order`).Scan(&ordinal); err != nil || ordinal != 1 {
 		t.Fatalf("authorization order does not advance: %d %v", ordinal, err)
@@ -200,7 +204,7 @@ func TestTemporalRevocationCutoverInterruptedRollsBackAndRetries(t *testing.T) {
 	}
 	old, next, drop := retiredRoles(t, admin)
 	defer drop()
-	if err := Cutover(ctx, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), "apply step v7") {
+	if err := cutover(t, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), "apply step v7") {
 		t.Fatalf("conflicting function did not abort the real v7 cutover: %v", err)
 	}
 	var column int
@@ -218,7 +222,7 @@ func TestTemporalRevocationCutoverInterruptedRollsBackAndRetries(t *testing.T) {
 	if _, err := admin.Exec(ctx, `DROP FUNCTION temporal_revocation_reject_mutation()`); err != nil {
 		t.Fatal(err)
 	}
-	if err := Cutover(ctx, scoped, []string{old}, next); err != nil {
+	if err := cutover(t, scoped, []string{old}, next); err != nil {
 		t.Fatalf("retry cutover: %v", err)
 	}
 	var stamped, events int
@@ -263,7 +267,7 @@ func TestTemporalRevocationCutoverRefusesLiveNewRuntimeSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Cutover(ctx, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), "sessions") {
+	if err := cutover(t, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), "sessions") {
 		t.Fatalf("v7 cutover accepted a live session of the new runtime identity: %v", err)
 	}
 	if maxVersion(t, admin) != 6 || regExists(t, admin, "revocation_events") {
@@ -272,7 +276,7 @@ func TestTemporalRevocationCutoverRefusesLiveNewRuntimeSession(t *testing.T) {
 	if err := live.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := Cutover(ctx, scoped, []string{old}, next); err != nil {
+	if err := cutover(t, scoped, []string{old}, next); err != nil {
 		t.Fatalf("cutover after the new runtime's session closed: %v", err)
 	}
 }

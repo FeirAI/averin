@@ -101,7 +101,14 @@ var steps = []string{
 // store then runs against an already-migrated DB and applies no DDL of its own. Opening a short-lived
 // pool here keeps the runner self-contained. Callers MUST treat a returned error as fatal (fail-closed):
 // a newer-than-binary DB, or a DB that cannot be migrated, must never be served against.
-func Migrate(ctx context.Context, dsn string) error { return migrate(ctx, dsn, nil) }
+func Migrate(ctx context.Context, dsn string) error { return migrate(ctx, dsn, nil, false) }
+
+// MigrateForRuntime is the ordinary server-startup entry point. It behaves like Migrate on an existing
+// database (steady-state no-op, fail-closed on a newer or older version) but REFUSES to bootstrap a truly
+// empty one: the server's runtime credential would then own every table it creates, and CheckRuntime
+// refuses an owning runtime forever. A fresh database is initialized once with `averin-migrate --init`
+// under the migration credential; the operator then grants the runtime role its least privileges.
+func MigrateForRuntime(ctx context.Context, dsn string) error { return migrate(ctx, dsn, nil, true) }
 
 // Cutover applies an existing database's forward transitions (v6 nonce ledger,
 // v7 temporal revocation) only after the operator has retired every explicitly
@@ -112,7 +119,7 @@ func Cutover(ctx context.Context, dsn string, oldRoles []string, newRole string)
 	if len(oldRoles) == 0 || newRole == "" {
 		return fmt.Errorf("pgschema: cutover requires old runtime roles and a new runtime role")
 	}
-	return migrate(ctx, dsn, &cutoverRoles{old: oldRoles, next: newRole})
+	return migrate(ctx, dsn, &cutoverRoles{old: oldRoles, next: newRole}, false)
 }
 
 type cutoverRoles struct {
@@ -120,7 +127,7 @@ type cutoverRoles struct {
 	next string
 }
 
-func migrate(ctx context.Context, dsn string, roles *cutoverRoles) error {
+func migrate(ctx context.Context, dsn string, roles *cutoverRoles, refuseFresh bool) error {
 	if broker.MaxTTL+broker.RequestClockSkew > LegacyExclusionFloor {
 		return fmt.Errorf("pgschema: accepted capability lifetime and skew exceed v6 legacy exclusion hold")
 	}
@@ -158,6 +165,9 @@ func migrate(ctx context.Context, dsn string, roles *cutoverRoles) error {
 		return fmt.Errorf("pgschema: probe existing tables: %w", err)
 	}
 	fresh := reg == nil && !hasTables
+	if refuseFresh && fresh {
+		return fmt.Errorf("pgschema: empty database: ordinary server startup does not bootstrap the schema (its runtime credential would own every table and fail the least-privilege check); run `averin-migrate --init` with AVERIN_MIGRATION_DATABASE_URL, grant the runtime role (docs/dev/CONFIGURATION.md), then start the server")
+	}
 	if roles == nil && reg == nil && hasTables {
 		return fmt.Errorf("pgschema: existing unstamped database requires explicit averin-migrate cutover; ordinary startup refuses legacy writers")
 	}
@@ -204,6 +214,9 @@ func migrate(ctx context.Context, dsn string, roles *cutoverRoles) error {
 	// Only an advancing cutover needs the new runtime idle; a re-run at the current version is a no-op.
 	if roles != nil {
 		if err := validateNewRuntimeIdle(ctx, tx, roles.next); err != nil {
+			return err
+		}
+		if err := validateNoOtherWriters(ctx, tx, roles.next); err != nil {
 			return err
 		}
 	}
@@ -295,6 +308,56 @@ func validateNewRuntimeIdle(ctx context.Context, tx pgx.Tx, next string) error {
 	return nil
 }
 
+// validateNoOtherWriters closes the gap the named-role checks leave (review S-M4): a LOGIN role that is a
+// member of a retired role (GRANT old TO app_login, then SET ROLE old) is not itself named, so it passes
+// validateCutoverRoles. An advancing cutover therefore also refuses while
+//
+//   - any other client backend is connected to this database, whatever its role; and
+//   - any LOGIN, non-superuser role other than the migration identity, the new runtime and the table
+//     owner holds effective INSERT/UPDATE/DELETE on a table in this schema, directly, by inheritance, or
+//     through any role it is a member of (so SET ROLE membership counts).
+//
+// Superusers are exempt from the privilege check because no privilege can be revoked from them; they are
+// covered only by the session check at this instant, and must be controlled operationally.
+func validateNoOtherWriters(ctx context.Context, tx pgx.Tx, next string) error {
+	var others int
+	var users *string
+	if err := tx.QueryRow(ctx, `SELECT count(*), string_agg(DISTINCT usename, ', ' ORDER BY usename)
+		FROM pg_stat_activity
+		WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend'`).Scan(&others, &users); err != nil {
+		return fmt.Errorf("pgschema: inspect client sessions: %w", err)
+	}
+	if others != 0 {
+		names := ""
+		if users != nil {
+			names = *users
+		}
+		return fmt.Errorf("pgschema: %d other client backend(s) are connected to this database (roles: %s); disconnect every client before an advancing cutover", others, names)
+	}
+	var role, table string
+	err := tx.QueryRow(ctx, `SELECT r.rolname, c.relname
+		FROM pg_roles r
+		CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+		WHERE n.nspname=current_schema() AND c.relkind IN ('r','p')
+		  AND r.rolcanlogin AND NOT r.rolsuper
+		  AND r.rolname <> current_user AND r.rolname <> $1 AND r.oid <> c.relowner
+		  AND EXISTS (
+			SELECT 1 FROM pg_roles g
+			WHERE pg_has_role(r.oid, g.oid, 'MEMBER')
+			  AND (has_table_privilege(g.oid, c.oid, 'INSERT') OR has_table_privilege(g.oid, c.oid, 'UPDATE')
+			       OR has_table_privilege(g.oid, c.oid, 'DELETE'))
+		  )
+		ORDER BY r.rolname, c.relname
+		LIMIT 1`, next).Scan(&role, &table)
+	if err == nil {
+		return fmt.Errorf("pgschema: LOGIN role %q can write %s (directly or through role membership); revoke it or its membership before an advancing cutover", role, table)
+	}
+	if err != pgx.ErrNoRows {
+		return fmt.Errorf("pgschema: inspect other writers: %w", err)
+	}
+	return nil
+}
+
 // PurgeLegacy is a separate, controlled maintenance operation. It is never
 // called by startup or the ordinary sweep. The table and immutable triggers
 // remain after rows are removed so old prepared SQL still fails closed.
@@ -368,12 +431,13 @@ func CheckRuntime(ctx context.Context, dsn string) error {
 	if super {
 		return fmt.Errorf("pgschema: runtime role %q must not be superuser", name)
 	}
+	// Every table in the schema, not a fixed list: owning any Averin table lets the runtime ALTER it,
+	// disable its immutability triggers or grant itself back what the migration revoked.
 	var owned string
 	err = pool.QueryRow(ctx, `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
 		WHERE n.nspname=current_schema() AND c.relkind IN ('r','p')
-		AND c.relname = ANY($1) AND pg_has_role(current_user,c.relowner,'MEMBER')
-		LIMIT 1`, []string{"records", "broker_seq", "legacy_consume_exclusions", "consumed_nonces", "consumed_jtis", "nonce_ledger_cutover",
-		"project_write_guard", "authorization_receipts", "revocation_events"}).Scan(&owned)
+		AND pg_has_role(current_user,c.relowner,'MEMBER')
+		ORDER BY c.relname LIMIT 1`).Scan(&owned)
 	if err == nil {
 		return fmt.Errorf("pgschema: runtime role %q owns or inherits owner membership for %s; use a distinct least-privilege identity", name, owned)
 	}
@@ -388,6 +452,49 @@ func CheckRuntime(ctx context.Context, dsn string) error {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM nonce_ledger_cutover
 		WHERE singleton AND legacy_exclusion_until>cutover_at`).Scan(&cutoverRows); err != nil || cutoverRows != 1 {
 		return fmt.Errorf("pgschema: runtime cutover metadata is missing or invalid: rows=%d err=%v", cutoverRows, err)
+	}
+	// Append-only and immutable tables: the runtime must hold NO mutation privilege, effective through any
+	// inherited role (has_table_privilege), even though triggers also guard some of them. This mirrors the
+	// migrations' REVOKEs: broker_seq keeps DELETE (ReleaseBrokerSeq frees an unrecorded max allocation),
+	// display_seq and project_write_guard keep UPDATE (counter / authorization order).
+	appendOnly := []struct {
+		table     string
+		forbidden []string
+	}{
+		{"records", []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"checkpoints", []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"anchors", []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"disclosures", []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"broker_seq", []string{"UPDATE", "TRUNCATE"}},
+		{"broker_seq_void", []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"broker_seq_recovery_fence", []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"broker_seq_recovery_result", []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"display_seq", []string{"DELETE", "TRUNCATE"}},
+		{"project_write_guard", []string{"DELETE", "TRUNCATE"}},
+		{"authorization_receipts", []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"revocation_events", []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"legacy_boolean_revocations", []string{"INSERT", "UPDATE", "DELETE", "TRUNCATE"}},
+		{"legacy_consume_exclusions", []string{"INSERT", "UPDATE", "DELETE", "TRUNCATE"}},
+		{"nonce_ledger_cutover", []string{"INSERT", "UPDATE", "DELETE", "TRUNCATE"}},
+		{"schema_migrations", []string{"INSERT", "UPDATE", "DELETE", "TRUNCATE"}},
+	}
+	for _, t := range appendOnly {
+		var present bool
+		if err := pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, t.table).Scan(&present); err != nil {
+			return fmt.Errorf("pgschema: runtime append-only probe %s: %w", t.table, err)
+		}
+		if !present {
+			return fmt.Errorf("pgschema: append-only table %s is missing at schema version %d", t.table, version)
+		}
+		for _, privilege := range t.forbidden {
+			var held bool
+			if err := pool.QueryRow(ctx, `SELECT has_table_privilege(current_user,to_regclass($1),$2)`, t.table, privilege).Scan(&held); err != nil {
+				return fmt.Errorf("pgschema: runtime privilege %s on %s: %w", privilege, t.table, err)
+			}
+			if held {
+				return fmt.Errorf("pgschema: runtime role %q holds %s on append-only table %s (directly or through a role); revoke it before serving", name, privilege, t.table)
+			}
+		}
 	}
 	for table, privileges := range map[string][]string{
 		"schema_migrations":         {"SELECT"},

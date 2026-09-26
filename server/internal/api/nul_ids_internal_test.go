@@ -13,7 +13,7 @@ import (
 	"github.com/feirai/averin/server/internal/store"
 )
 
-// TestNULInIDsRejected: project_id / idempotency_key feed NUL-delimited derivations (uuidV5Shaped, pendingKey, the
+// TestNULInIDsRejected: project_id / idempotency_key feed NUL-delimited derivations (uuidV5Shaped, the
 // batch dedup keys, the verify cache key), so a U+0000 inside one (the RCP parser accepts an escaped \u0000) lets
 // (project "a", idem "b\0c") and (project "a\0b", idem "c") derive the SAME grant/use/outcome/introspection id and
 // pending key across projects. Every entry point must refuse a NUL in project_id, idempotency_key and record_id
@@ -22,9 +22,6 @@ func TestNULInIDsRejected(t *testing.T) {
 	// The collision this guards against is real: both pairs derive one id.
 	if deterministicGrantID("a", "b\x00c") != deterministicGrantID("a\x00b", "c") {
 		t.Fatal("expected the NUL-delimited derivation to collide (the premise of this test)")
-	}
-	if pendingKey("a", "b\x00c") != pendingKey("a\x00b", "c") {
-		t.Fatal("expected the NUL-delimited pending key to collide (the premise of this test)")
 	}
 
 	c, err := core.New("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")

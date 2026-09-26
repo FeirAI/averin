@@ -92,12 +92,14 @@ func main() {
 	// pool — they all share this one DSN and now run against an already-migrated DB, applying no DDL of
 	// their own. A stored version NEWER than this binary is a loud, fail-CLOSED refusal (averin's
 	// immutable evidence is never re-migrated backward across a downgrade); a steady-state boot issues
-	// zero DDL. No-op when storage is in-memory (no AVERIN_DATABASE_URL).
+	// zero DDL. An EMPTY database is refused here: bootstrap it once with `averin-migrate --init` under the
+	// migration credential and grant the runtime role (a runtime-created schema would be runtime-owned and
+	// fail CheckRuntime forever). No-op when storage is in-memory (no AVERIN_DATABASE_URL).
 	// Use the SAME raw DSN the stores connect with (selectStore/pgledger/pgdurable read os.Getenv
 	// untrimmed) so migrate and connect operate on a byte-identical string.
 	if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
 		mctx, mcancel := context.WithTimeout(context.Background(), 60*time.Second)
-		err := pgschema.Migrate(mctx, dsn)
+		err := pgschema.MigrateForRuntime(mctx, dsn)
 		if err != nil {
 			mcancel()
 			log.Fatalf("storage: schema migration: %v", err)
@@ -117,6 +119,10 @@ func main() {
 	// to be unready about, nothing to gauge.
 	if pg, ok := st.(*store.Postgres); ok {
 		srv.WithReadiness("store", pg)
+		// Abandoned two-phase prepares leave pending_grants rows; prune expired ones every 5 minutes.
+		if srv.StartPendingSweeper(context.Background(), 5*time.Minute) {
+			log.Printf("pending grant sweep enabled (expired two-phase prepares pruned every 5m)")
+		}
 		srv.WithGauge("averin_store_pool_total_conns", "Store Postgres pool: total connections.",
 			func() float64 { return float64(pg.PoolStat().TotalConns) })
 		srv.WithGauge("averin_store_pool_acquired_conns", "Store Postgres pool: connections currently acquired.",

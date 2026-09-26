@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,6 +28,66 @@ type Postgres struct {
 	ctx       context.Context
 	active    *atomic.Bool
 	claims    map[ledgerKey]string // claims acquired by this exact bound transaction
+
+	// gateMu/gates admit at most one in-flight project writer per project in THIS process, before a pool
+	// connection is taken (see acquireProjectGate). Only the root store uses them; bound views never do.
+	gateMu sync.Mutex
+	gates  map[string]*projectGate
+}
+
+// projectGate is a one-slot, context-cancellable semaphore for one project. refs counts holders plus
+// waiters so the entry is removed exactly when nobody references it (no per-project leak).
+type projectGate struct {
+	slot chan struct{}
+	refs int
+}
+
+// acquireProjectGate waits, cancellably, for this process's single write slot for projectID. Without it,
+// N concurrent writers to one hot project would each take a pool connection and then block on the project
+// guard's FOR UPDATE, exhausting the pool and starving writes and reads of every other project. Queued
+// writers of the same project now wait here holding no connection. Cross-replica contention for the same
+// project still waits in Postgres, bounded by lock_timeout. The returned release must be called once.
+func (p *Postgres) acquireProjectGate(ctx context.Context, projectID string) (func(), error) {
+	p.gateMu.Lock()
+	if p.gates == nil {
+		p.gates = make(map[string]*projectGate)
+	}
+	g := p.gates[projectID]
+	if g == nil {
+		g = &projectGate{slot: make(chan struct{}, 1)}
+		p.gates[projectID] = g
+	}
+	g.refs++
+	p.gateMu.Unlock()
+	select {
+	case g.slot <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				<-g.slot
+				p.dropProjectGate(projectID, g)
+			})
+		}, nil
+	case <-ctx.Done():
+		p.dropProjectGate(projectID, g)
+		return nil, fmt.Errorf("store: wait for project write slot: %w", ctx.Err())
+	}
+}
+
+func (p *Postgres) dropProjectGate(projectID string, g *projectGate) {
+	p.gateMu.Lock()
+	defer p.gateMu.Unlock()
+	g.refs--
+	if g.refs == 0 && p.gates[projectID] == g {
+		delete(p.gates, projectID)
+	}
+}
+
+// projectGateCount reports how many projects currently have a gate entry (tests: leak check).
+func (p *Postgres) projectGateCount() int {
+	p.gateMu.Lock()
+	defer p.gateMu.Unlock()
+	return len(p.gates)
 }
 
 func (p *Postgres) callContext() context.Context {
@@ -102,6 +163,12 @@ func (p *Postgres) WithProjectWrite(ctx context.Context, projectID string, fn fu
 	}
 	ctx, cancelSession := context.WithTimeout(ctx, 45*time.Second)
 	defer cancelSession()
+	// In-process admission first, so a queued same-project writer never holds a pool connection.
+	releaseGate, err := p.acquireProjectGate(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	defer releaseGate()
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("store: begin project write: %w", err)

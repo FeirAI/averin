@@ -598,3 +598,69 @@ func TestUsePoPChallengeAndKeyIDGoldenVectors(t *testing.T) {
 		}
 	}
 }
+
+// flakyLedger fails the chosen consume with an infrastructure error (not a replay), and otherwise delegates.
+type flakyLedger struct {
+	Ledger
+	failNonce, failJTI error
+	releasedNonce      bool
+}
+
+func (f *flakyLedger) ConsumeNonce(c NonceClaim) error {
+	if f.failNonce != nil {
+		return f.failNonce
+	}
+	return f.Ledger.ConsumeNonce(c)
+}
+
+func (f *flakyLedger) ConsumeJTI(c JTIClaim) error {
+	if f.failJTI != nil {
+		return f.failJTI
+	}
+	return f.Ledger.ConsumeJTI(c)
+}
+
+func (f *flakyLedger) ReleaseNonce(c NonceClaim) {
+	f.releasedNonce = true
+	f.Ledger.ReleaseNonce(c)
+}
+
+// TestLedgerStoreErrorIsNotAReplay (S-L1): a ledger timeout, cancellation or lost connection must surface as
+// ErrLedgerUnavailable (a 5xx), never as a replay/double-spend deny; a genuine replay stays ErrConsumed.
+func TestLedgerStoreErrorIsNotAReplay(t *testing.T) {
+	issuing, agent := keyFromByte(1), keyFromByte(2)
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	token := defaultCap(t, issuing, agent, time.Hour, now)
+	op := Op{Action: testAction, ParamsCommitment: testParams}
+	outage := errors.New("store: consume nonce: timeout: context deadline exceeded")
+
+	nonceFail := &flakyLedger{Ledger: NewMemLedger(), failNonce: outage}
+	sh := New(issuing.Public().(ed25519.PublicKey), testResource, nonceFail).WithProject("p1")
+	_, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n1"), op, "n1", now)
+	if !errors.Is(err, ErrLedgerUnavailable) || errors.Is(err, ErrConsumed) {
+		t.Fatalf("nonce store error = %v, want ErrLedgerUnavailable and not ErrConsumed", err)
+	}
+
+	jtiFail := &flakyLedger{Ledger: NewMemLedger(), failJTI: outage}
+	sh = New(issuing.Public().(ed25519.PublicKey), testResource, jtiFail).WithProject("p1")
+	_, err = sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n1"), op, "n1", now)
+	if !errors.Is(err, ErrLedgerUnavailable) || errors.Is(err, ErrConsumed) {
+		t.Fatalf("jti store error = %v, want ErrLedgerUnavailable and not ErrConsumed", err)
+	}
+	if !jtiFail.releasedNonce {
+		t.Fatal("jti store error did not release the just-consumed nonce")
+	}
+
+	// Genuine replay and double-spend keep their deny classification.
+	mem := NewMemLedger()
+	sh = New(issuing.Public().(ed25519.PublicKey), testResource, mem).WithProject("p1")
+	if _, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n1"), op, "n1", now); err != nil {
+		t.Fatal(err)
+	}
+	for _, nonce := range []string{"n1", "n2"} {
+		_, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, nonce), op, nonce, now)
+		if !errors.Is(err, ErrConsumed) || errors.Is(err, ErrLedgerUnavailable) {
+			t.Fatalf("replay with nonce %s = %v, want ErrConsumed", nonce, err)
+		}
+	}
+}
