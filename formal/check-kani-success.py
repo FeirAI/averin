@@ -26,6 +26,8 @@ def expected_stubs(qualified: str) -> list[str]:
         return sorted([NUMERIC_GUARD, ALIGN_A1])
     if name == "utf16_key_order_is_transitive" or name.startswith("utf16_key_order_is_exact_"):
         return [PUSH_G1]
+    if re.fullmatch(r"string_escape_roundtrip_\d{5}", name):
+        return [ALIGN_A1]
     return []
 
 
@@ -61,6 +63,39 @@ def successful(output: str, exit_code: int, harness: str, expect_guard: bool = F
     ):
         return False, "missing exact one-harness completion summary"
     return True, "one exact harness completed successfully"
+
+
+def successful_many(output: str, exit_code: int, harnesses: list[str]) -> tuple[bool, str]:
+    """One Kani invocation over several harnesses: every one must be selected exactly once and
+    its own section must satisfy exactly the single-harness conditions."""
+    if exit_code != 0:
+        return False, "Kani exited nonzero"
+    starts = [m.start() for m in re.finditer(r"^Checking harness .+\.\.\.$", output, re.MULTILINE)]
+    tail = output.find("\nManual Harness Summary:")
+    if tail == -1 or not starts or tail < starts[-1]:
+        return False, "missing harness sections or final summary"
+    sections = [output[a:b] for a, b in zip(starts, starts[1:] + [tail])]
+    names = [re.match(r"Checking harness (.+)\.\.\.", sec).group(1) for sec in sections]
+    if sorted(names) != sorted(harnesses) or len(set(names)) != len(names):
+        return False, f"selected harnesses {names!r} differ from {harnesses!r}"
+    for name, sec in zip(names, sections):
+        okay, why = stubs_match(sec, name, NUMERIC_GUARD in expected_stubs(name))
+        if not okay:
+            return False, f"{name}: {why}"
+        if sec.count("VERIFICATION:- SUCCESSFUL") != 1 or "VERIFICATION:- FAILED" in sec:
+            return False, f"{name}: missing or repeated successful verification marker"
+        if not re.search(r"^\s*\*\* 0 of [1-9]\d* failed(?: \([^)]*\))?$", sec, re.MULTILINE):
+            return False, f"{name}: missing completed zero-failure property summary"
+        if " - Status: FAILURE" in sec:
+            return False, f"{name}: a Kani property failed"
+    total = len(harnesses)
+    if not re.search(
+        rf"^Complete - {total} successfully verified harnesses, 0 failures, {total} total\.$",
+        output[tail:],
+        re.MULTILINE,
+    ):
+        return False, "missing exact all-harness completion summary"
+    return True, f"{total} exact harnesses completed successfully"
 
 
 def self_test() -> None:
@@ -104,6 +139,25 @@ def self_test() -> None:
         (good.replace("1 total", "2 total"), 0),
     ):
         assert not successful(bad, code, harness)[0]
+    a, b = "canon::kani_proofs::string_escape_roundtrip_00000", "canon::kani_proofs::string_escape_roundtrip_00001"
+    def sec(name: str) -> str:
+        return (f"Checking harness {name}...\n  {ALIGN_A1}\nCheck 1: x\n\t - Status: SUCCESSFUL\n"
+                "SUMMARY:\n ** 0 of 3 failed\nVERIFICATION:- SUCCESSFUL\n")
+    summary = "\nManual Harness Summary:\nComplete - 2 successfully verified harnesses, 0 failures, 2 total.\n"
+    many = sec(a) + sec(b) + summary
+    assert successful_many(many, 0, [a, b])[0]
+    assert successful_many(sec(b) + sec(a) + summary, 0, [a, b])[0]
+    for bad, code, want in (
+        (many, 1, [a, b]),
+        (many, 0, [a]),
+        (sec(a) + sec(a) + summary, 0, [a, b]),
+        (sec(a) + sec(b).replace(f"  {ALIGN_A1}\n", "") + summary, 0, [a, b]),
+        (sec(a) + sec(b).replace("0 of 3 failed", "1 of 3 failed") + summary, 0, [a, b]),
+        (sec(a) + sec(b).replace("VERIFICATION:- SUCCESSFUL", "VERIFICATION:- FAILED") + summary, 0, [a, b]),
+        (sec(a) + sec(b) + summary.replace("2 successfully", "1 successfully"), 0, [a, b]),
+        (sec(a) + sec(b), 0, [a, b]),
+    ):
+        assert not successful_many(bad, code, want)[0]
     print("check-kani-success: self-test passed")
 
 
@@ -114,10 +168,18 @@ def main() -> int:
     parser.add_argument("harness", nargs="?")
     parser.add_argument("--expect-guard", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--many", nargs="+", metavar="HARNESS",
+                        help="log and exit code of one invocation over these fully qualified harnesses")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
+    if args.many:
+        if args.log is None or args.exit_code is None or args.harness is not None:
+            parser.error("--many takes only LOG EXIT_CODE positionally")
+        okay, why = successful_many(args.log.read_text(errors="replace"), args.exit_code, args.many)
+        print(f"check-kani-success: {why}")
+        return 0 if okay else 1
     if None in (args.log, args.exit_code, args.harness):
         parser.error("log, exit_code and fully qualified harness are required")
     okay, why = successful(args.log.read_text(errors="replace"), args.exit_code, args.harness, args.expect_guard)

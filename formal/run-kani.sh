@@ -5,6 +5,8 @@
 #   bash formal/run-kani.sh              # default set: verified on a 4-core / 16 GB runner (each < 2 min)
 #   bash formal/run-kani.sh --extended   # also all eight extended property families
 #   bash formal/run-kani.sh --harness NAME  # one named harness (or checked shard) for profiling and CI sharding
+#   bash formal/run-kani.sh --group NAME...  # several checked family shards in one Kani invocation
+#                                            # (KANI_JOBS=N verifies them N at a time); used by run-kani-shards.sh
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -24,9 +26,10 @@ run_harness() {
     python3 formal/check-kani-domains.py >/dev/null || return 2
     kani_flags=(-Z stubbing)
     guard_flag=(--expect-guard)
-  elif [[ "$1" == utf16_key_order_is_* ]]; then
-    # The key-order proofs carry the fail-closed Vec::push growth guard (G1); its body and
-    # attachment sites are pinned by check-kani-shards.py, its stub line by check-kani-success.py.
+  elif [[ "$1" == utf16_key_order_is_* || "$1" == string_escape_roundtrip_* ]]; then
+    # The key-order proofs carry the fail-closed Vec::push growth guard (G1) and the string cases
+    # the align_offset selection (A1); bodies and attachment sites are pinned by
+    # check-kani-shards.py, stub lines by check-kani-success.py.
     python3 formal/check-kani-shards.py >/dev/null || return 2
     kani_flags=(-Z stubbing)
   fi
@@ -48,10 +51,36 @@ run_harness() {
   rm "$log"
 }
 
+if [ "${1:-}" = "--group" ]; then
+  shift
+  [ "$#" -ge 1 ] || { echo "usage: $0 --group NAME..." >&2; exit 2; }
+  # Only shards of checked families; the checker also re-proves their exact partitions first.
+  python3 formal/check-kani-shards.py --has-all "$@" || { echo "run-kani: --group takes checked family shards only" >&2; exit 2; }
+  qualified=() harness_args=() job_args=()
+  for h in "$@"; do
+    qualified+=("canon::kani_proofs::$h")
+    harness_args+=(--harness "canon::kani_proofs::$h")
+  done
+  [ -n "${KANI_JOBS:-}" ] && job_args=(-j "$KANI_JOBS")
+  log="$(mktemp)"
+  set +e
+  cargo kani -Z stubbing ${job_args[@]+"${job_args[@]}"} -p averin-decision-core --lib --no-default-features --exact "${harness_args[@]}" 2>&1 | tee "$log"
+  proof_exit=${PIPESTATUS[0]}
+  set -e
+  # Every selected harness needs its own complete successful section (check-kani-success.py).
+  if ! python3 formal/check-kani-success.py "$log" "$proof_exit" --many "${qualified[@]}"; then
+    echo "run-kani: proof log retained at $log" >&2
+    [ "$proof_exit" -ne 0 ] && exit "$proof_exit"
+    exit 1
+  fi
+  rm "$log"
+  exit 0
+fi
+
 if [ "${1:-}" = "--harness" ]; then
   [ "$#" -eq 2 ] || { echo "usage: $0 --harness NAME" >&2; exit 2; }
   case "$2" in
-    alphabet_is_a_bijection|hex_byte_roundtrip|hex_digit_is_canonical|lp_into_frames_exactly|utf16_key_order_is_transitive|one_byte_tail_is_canonical|two_byte_tail_is_canonical|full_chunk_is_canonical|utf16_strict_matches_std|integer_roundtrip|string_escape_roundtrip|parse_never_panics)
+    alphabet_is_a_bijection|hex_byte_roundtrip|hex_digit_is_canonical|lp_into_frames_exactly|utf16_key_order_is_transitive|one_byte_tail_is_canonical|two_byte_tail_is_canonical|full_chunk_is_canonical|utf16_strict_matches_std|integer_roundtrip|parse_never_panics)
       run_harness "$2" ;;
     integer_roundtrip_*)
       python3 formal/check-kani-domains.py --has-integer "$2" || { echo "unknown integer shard: $2" >&2; exit 2; }
@@ -65,7 +94,7 @@ if [ "${1:-}" = "--harness" ]; then
 fi
 
 if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--extended" ]; }; then
-  echo "usage: $0 [--extended | --harness NAME]" >&2
+  echo "usage: $0 [--extended | --harness NAME | --group NAME...]" >&2
   exit 2
 fi
 
@@ -92,6 +121,7 @@ if [ "${1:-}" = "--extended" ]; then
   run_harness integer_roundtrip
   # Sixty checked (length, first byte) shards plus the alphabet lemma; every shard must pass.
   bash formal/run-kani-shards.sh accepted_integer_spelling
-  run_harness string_escape_roundtrip
-  run_harness parse_never_panics
+  # 17,031 checked concrete cases, one harness each (see formal/README.md for resources).
+  KANI_SHARD_GROUP="${KANI_SHARD_GROUP:-64}" bash formal/run-kani-shards.sh string_escape_roundtrip
+  # parse_never_panics is NOT verified on its original domain (formal/README.md) and is not run here.
 fi

@@ -999,6 +999,32 @@ mod error_compat_tests {
         );
     }
 
+    // The string round-trip proof checks one concrete case id per harness; these ids must
+    // enumerate exactly its domain: every string of at most two scalars over the 130-scalar
+    // alphabet (all ASCII, U+00E9, U+1F600), each exactly once.
+    #[test]
+    fn string_proof_cases_are_exactly_the_domain() {
+        let alphabet = |c: char| c.is_ascii() || c == '\u{E9}' || c == '\u{1F600}';
+        let mut seen = BTreeSet::new();
+        for k in 0..STRING_PROOF_CASES {
+            let s = string_proof_case(k);
+            assert!(
+                s.chars().count() <= 2 && s.chars().all(alphabet),
+                "{k}: {s:?}"
+            );
+            assert!(seen.insert(s), "case {k} repeats a string");
+        }
+        // 130 alphabet scalars (128 ASCII + 2), so the domain has 1 + 130 + 130^2 strings.
+        assert_eq!(
+            (0..=0x10FFFFu32)
+                .filter_map(char::from_u32)
+                .filter(|c| alphabet(*c))
+                .count(),
+            130
+        );
+        assert_eq!(seen.len(), 1 + 130 + 130 * 130);
+    }
+
     // Native complement to the key-order proofs' fail-closed growth guard (G1): utf16_units never
     // needs more than its `with_capacity(s.len())` preallocation, and yields std's UTF-16 units.
     #[test]
@@ -1036,6 +1062,42 @@ mod error_compat_tests {
             }
         }
     }
+}
+
+/// Number of strings in the `string_escape_roundtrip` proof domain: the empty string, the 130
+/// one-scalar strings and the 130 * 130 two-scalar strings over `string_proof_scalar`.
+#[cfg(any(kani, test))]
+const STRING_PROOF_CASES: usize = 1 + 130 + 130 * 130;
+
+/// The scalar alphabet of that domain: every ASCII scalar, U+00E9 (two bytes, with a canonical
+/// decomposition) and U+1F600 (astral, written as a surrogate pair by `\u` escapes).
+#[cfg(any(kani, test))]
+fn string_proof_scalar(i: usize) -> char {
+    if i < 128 {
+        i as u8 as char
+    } else if i == 128 {
+        '\u{E9}'
+    } else {
+        assert!(i == 129, "string proof scalar index out of range");
+        '\u{1F600}'
+    }
+}
+
+/// Case `k` of the domain: 0 is the empty string, 1..=130 the single scalars, then every ordered
+/// pair, first scalar major.
+#[cfg(any(kani, test))]
+fn string_proof_case(k: usize) -> String {
+    assert!(k < STRING_PROOF_CASES, "string proof case out of range");
+    let mut s = String::new();
+    if k == 0 {
+    } else if k <= 130 {
+        s.push(string_proof_scalar(k - 1));
+    } else {
+        let j = k - 131;
+        s.push(string_proof_scalar(j / 130));
+        s.push(string_proof_scalar(j % 130));
+    }
+    s
 }
 
 /// Bounded proofs over this exact code (run by `formal/run-kani.sh`), complementing the unbounded Lean
@@ -1288,20 +1350,10 @@ mod kani_proofs {
     spelling_shard!(accepted_integer_spelling_4_e, 4, b'e');
     spelling_shard!(accepted_integer_spelling_4_upper_e, 4, b'E');
 
-    /// Character classes of the string domain: any ASCII scalar (the symbolic byte), U+00E9 (a
-    /// two-byte NFC-stable scalar with a canonical decomposition) and U+1F600 (a four-byte
-    /// astral scalar encoded as a surrogate pair by `\u` escapes).
-    const STRING_CLASSES: [u8; 3] = [0, 1, 2];
-
-    fn string_escape_case(classes: &[u8], ascii: &[u8; 2]) {
-        let mut s = String::new();
-        for (class, a) in classes.iter().zip(ascii) {
-            match class {
-                0 => s.push(*a as char),
-                1 => s.push('é'),
-                _ => s.push('\u{1F600}'),
-            }
-        }
+    /// Case `k` of `string_escape_roundtrip`: `write_string` output contains no raw control byte
+    /// and the real parser (real NFC included) returns exactly `Str(s)` for the case's string.
+    fn string_escape_case(k: usize) {
+        let s = string_proof_case(k);
         let mut text = String::new();
         write_string(&s, &mut text);
         assert!(
@@ -1316,21 +1368,23 @@ mod kani_proofs {
 
     /// `write_string` is inverted by the real parser (including real NFC) for every string of at
     /// most two scalars, each any ASCII scalar (quotes, backslash, every C0 control, DEL, ...),
-    /// U+00E9 or U+1F600. Length and class pattern range over all 13 cases one concrete case at a
-    /// time; the ASCII scalars stay symbolic.
-    #[kani::proof]
-    #[kani::unwind(16)]
-    fn string_escape_roundtrip() {
-        let ascii: [u8; 2] = kani::any();
-        kani::assume(ascii.iter().all(|a| *a < 0x80));
-        string_escape_case(&[], &ascii);
-        for first in STRING_CLASSES {
-            string_escape_case(&[first], &ascii);
-            for second in STRING_CLASSES {
-                string_escape_case(&[first, second], &ascii);
+    /// U+00E9 or U+1F600: exactly the `STRING_PROOF_CASES` strings of `string_proof_case`, one
+    /// concrete case per harness (a symbolic byte leaves CBMC unable to fix the parser's cursor).
+    /// The generated table `kani_string_cases.rs` names every case id once; `check-kani-shards.py`
+    /// regenerates it, and the native test `string_proof_cases_are_exactly_the_domain` proves the
+    /// case ids enumerate the domain exactly.
+    macro_rules! string_case {
+        ($name:ident, $k:literal) => {
+            #[kani::proof]
+            #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
+            #[kani::unwind(16)]
+            fn $name() {
+                string_escape_case($k);
             }
-        }
+        };
     }
+
+    include!("kani_string_cases.rs");
 
     fn utf16_agrees<const N: usize>() {
         let units: [u16; N] = kani::any();

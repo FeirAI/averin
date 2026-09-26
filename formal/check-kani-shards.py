@@ -9,12 +9,18 @@ and enumerates the original domain to prove that every input lies in exactly one
 """
 
 import argparse
+import importlib.util
 import re
 import sys
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[1] / "core/src/canon.rs"
 RUNNER = Path(__file__).resolve().parent / "run-kani.sh"
+_gen_spec = importlib.util.spec_from_file_location(
+    "gen_kani_string_cases", Path(__file__).resolve().parent / "gen-kani-string-cases.py"
+)
+GEN = importlib.util.module_from_spec(_gen_spec)
+_gen_spec.loader.exec_module(GEN)
 
 
 def compact(text: str) -> str:
@@ -177,6 +183,69 @@ def validate_key_order(rows: list[tuple[str, int, int]]) -> list[str]:
     return ["utf16_key_order_is_exact_steered"] + names
 
 
+# ---- string_escape_roundtrip: every string of at most two scalars over ASCII + U+00E9 + U+1F600 ----
+
+STRING_CASE = re.compile(r"^string_case!\((string_escape_roundtrip_\d{5}), (\d+)\);$", re.MULTILINE)
+
+
+def string_rows(_source: str) -> list[tuple[str, int]]:
+    table = GEN.TABLE.read_text() if GEN.TABLE.exists() else ""
+    if table != GEN.render():
+        raise ValueError("kani_string_cases.rs differs from formal/gen-kani-string-cases.py output")
+    return [(name, int(k)) for name, k in STRING_CASE.findall(table)]
+
+
+def validate_string_wiring(source: str) -> None:
+    c = compact(source)
+    for required in (
+        "constSTRING_PROOF_CASES:usize=1+130+130*130;",
+        "fnstring_proof_scalar(i:usize)->char{ifi<128{iasu8aschar}elseifi==128{'\\u{E9}'}"
+        'else{assert!(i==129,"stringproofscalarindexoutofrange");\'\\u{1F600}\'}}',
+        'fnstring_proof_case(k:usize)->String{assert!(k<STRING_PROOF_CASES,"stringproofcaseoutofrange");'
+        "letmuts=String::new();ifk==0{}elseifk<=130{s.push(string_proof_scalar(k-1));}"
+        "else{letj=k-131;s.push(string_proof_scalar(j/130));s.push(string_proof_scalar(j%130));}s}",
+        "fnstring_escape_case(k:usize){lets=string_proof_case(k);letmuttext=String::new();"
+        "write_string(&s,&muttext);"
+        'assert!(text.bytes().all(|b|b>=0x20),"norawcontrolbytemaybeemitted");'
+        "letparsed=CanonValue::parse_typed(&text);"
+        "assert!(matches!(&parsed,Ok(CanonValue::Str(parsed_s))if*parsed_s==s));"
+        "core::mem::forget(parsed);}",
+        "macro_rules!string_case{($name:ident,$k:literal)=>{#[kani::proof]"
+        "#[kani::stub(<*constu8>::align_offset,align_offset_usize_max)]#[kani::unwind(16)]"
+        "fn$name(){string_escape_case($k);}};}",
+        "fnwrite_string(s:&str,out:&mutString){letmutbytes=Vec::new();escape_into(s.as_bytes(),&mutbytes);"
+        "out.push_str(core::str::from_utf8(&bytes).unwrap());}",
+    ):
+        if required not in c:
+            raise ValueError(f"string proof wiring changed: {required[:60]}...")
+    if source.count('include!("kani_string_cases.rs");') != 1:
+        raise ValueError("string case table must be included exactly once")
+
+
+def python_case(k: int) -> str:
+    # Mirrors the pinned Rust `string_proof_case` / `string_proof_scalar` above.
+    scalar = lambda i: chr(i) if i < 128 else ("\u00e9" if i == 128 else "\U0001F600")
+    if k == 0:
+        return ""
+    if k <= 130:
+        return scalar(k - 1)
+    j = k - 131
+    return scalar(j // 130) + scalar(j % 130)
+
+
+def validate_strings(rows: list[tuple[str, int]]) -> list[str]:
+    if [k for _, k in rows] != list(range(GEN.CASES)):
+        raise ValueError("string case ids are not exactly 0..STRING_PROOF_CASES in order")
+    if any(name != GEN.harness_name(k) for name, k in rows):
+        raise ValueError("string case harness names drifted")
+    alphabet = [chr(i) for i in range(128)] + ["\u00e9", "\U0001F600"]
+    domain = {""} | set(alphabet) | {a + b for a in alphabet for b in alphabet}
+    cases = [python_case(k) for _, k in rows]
+    if len(set(cases)) != len(cases) or set(cases) != domain:
+        raise ValueError("string case ids do not enumerate the domain exactly once")
+    return [name for name, _ in rows]
+
+
 # ---- every std or production replacement: exact bodies and exact attachment sites ----
 
 GUARD_BODIES = {
@@ -190,7 +259,9 @@ GUARD_BODIES = {
 
 ALLOWED_STUBS = {
     "parse_top_level_general, reject_general_in_integer_proof": {"integer_roundtrip", "integer_roundtrip_shard"},
-    "<*const u8>::align_offset, align_offset_usize_max": {"integer_roundtrip", "integer_roundtrip_shard"},
+    "<*const u8>::align_offset, align_offset_usize_max": {
+        "integer_roundtrip", "integer_roundtrip_shard", "string_case",
+    },
     "std::vec::Vec::push, push_without_growth": {
         "utf16_key_order_is_transitive", "key_order_shard", "utf16_key_order_is_exact_steered",
     },
@@ -230,6 +301,7 @@ def validate_stub_sites(source: str) -> None:
 FAMILIES = {
     "accepted_integer_spelling": (spelling_rows, validate_spelling_wiring, validate_spelling),
     "utf16_key_order_is_exact": (key_order_rows, validate_key_order_wiring, validate_key_order),
+    "string_escape_roundtrip": (string_rows, validate_string_wiring, validate_strings),
 }
 
 
@@ -302,6 +374,30 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError("guard or stub-site drift escaped the checker")
+    strings = family_harnesses("string_escape_roundtrip", source)
+    assert len(strings) == 17031 and strings[0] == "string_escape_roundtrip_00000"
+    for changed in (
+        source.replace("const STRING_PROOF_CASES: usize = 1 + 130 + 130 * 130;", "const STRING_PROOF_CASES: usize = 1 + 130 + 130 * 129;"),
+        source.replace("s.push(string_proof_scalar(j % 130));", "s.push(string_proof_scalar(j % 129));"),
+        source.replace("        '\\u{E9}'\n    } else {", "        '\\u{E8}'\n    } else {"),
+        source.replace("string_escape_case($k);", "string_escape_case(0);"),
+        source.replace('include!("kani_string_cases.rs");', ""),
+        source.replace("core::mem::forget(parsed);\n    }\n\n    /// `write_string` is inverted", "kani::assume(false);\n        core::mem::forget(parsed);\n    }\n\n    /// `write_string` is inverted"),
+    ):
+        try:
+            family_harnesses("string_escape_roundtrip", changed)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("string case drift escaped the checker")
+    rows = string_rows(source)
+    for bad in (rows[:-1], rows[:5] + rows[6:] + [rows[5]], [(n, k) if k != 7 else (n, 8) for n, k in rows]):
+        try:
+            validate_strings(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("string case table drift escaped the checker")
     print("check-kani-shards: self-test passed")
 
 
@@ -309,6 +405,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", metavar="FAMILY", help="print every harness of FAMILY, lemmas first")
     parser.add_argument("--has", metavar="HARNESS", help="accept only a harness of some checked family")
+    parser.add_argument("--has-all", nargs="+", metavar="HARNESS", help="accept only checked family harnesses")
     parser.add_argument("--families", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -330,8 +427,11 @@ def main() -> int:
             return 2
         print("\n".join(checked[args.list]))
         return 0
+    known = {name for names in checked.values() for name in names}
     if args.has:
-        return 0 if any(args.has in names for names in checked.values()) else 1
+        return 0 if args.has in known else 1
+    if args.has_all:
+        return 0 if all(name in known for name in args.has_all) else 1
     for family, names in checked.items():
         print(f"check-kani-shards: OK {family} ({len(names)} harnesses, exact partition)")
     return 0
