@@ -1,7 +1,7 @@
 import Refinement.ParseLeaf
 open Aeneas Aeneas.Std Result Aeneas.Std.WP averin_decision_core
 
-namespace Refinement.ParseTest
+namespace Refinement.Parse
 
 /-- Close list-length/membership side goals left by `step*`. -/
 macro "vfin" : tactic => `(tactic| first
@@ -177,4 +177,4 @@ theorem first_repeat_spec (units : alloc.vec.Vec (alloc.vec.Vec Std.U16)) :
   · intro x hx; rw [vec_deref_val] at hx; have := v_post1 x hx; simp only [vec_deref_val, Slice.length] at *; scalar_tac
   · intro x hx; have := order_post1 x hx; simp only [vec_deref_val, Slice.length] at *; scalar_tac
 
-end Refinement.ParseTest
+end Refinement.Parse

@@ -2,7 +2,7 @@ import Refinement.Sort
 import Refinement.VerdictLists
 open Aeneas Aeneas.Std Result Aeneas.Std.WP averin_decision_core
 
-namespace Refinement.ParseTest
+namespace Refinement.Parse
 
 @[step]
 theorem is_ws_spec (b : Std.U8) : canon.is_ws b ⦃ _ => True ⦄ := by
@@ -363,4 +363,4 @@ theorem parse_string_spec (s : Slice Std.U8) (i : Std.Usize) :
       | (simp only [StrOk]; done)
       | (simp only [StrOk]; exact ⟨by scalar_tac, by scalar_tac, _, by assumption⟩)
 
-end Refinement.ParseTest
+end Refinement.Parse

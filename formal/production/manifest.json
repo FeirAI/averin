@@ -263,6 +263,34 @@
       "Refinement.production_historical_requires_snapshot",
       "Refinement.production_at_or_after_refutes",
       "Refinement.production_total_revocation_refutes"
+    ],
+    "canon::parse_document": [
+      "Refinement.Parse.parse_document_total",
+      "Refinement.Parse.parse_document_spec"
+    ],
+    "canon::parse_value": [
+      "Refinement.Parse.parse_value_spec"
+    ],
+    "canon::parse_array": [
+      "Refinement.Parse.parse_array_spec"
+    ],
+    "canon::parse_object": [
+      "Refinement.Parse.parse_object_spec"
+    ],
+    "canon::parse_string": [
+      "Refinement.Parse.parse_string_spec"
+    ],
+    "canon::parse_number": [
+      "Refinement.Parse.parse_number_spec"
+    ],
+    "canon::decode_utf16_strict": [
+      "Refinement.Parse.decode_spec"
+    ],
+    "canon::first_repeat": [
+      "Refinement.Parse.first_repeat_spec"
+    ],
+    "canon::parse_top_level_general": [
+      "Refinement.Parse.parse_top_level_general_spec"
     ]
   },
   "callers": [
