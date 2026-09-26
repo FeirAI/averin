@@ -8,6 +8,6 @@ Mutant: Force a numeric top-level input onto the general parser branch; the fail
      // takes the general route (which the Kani integer proofs replace with a fail-closed guard).
 -    if at(s, 0, b'-') || digit_at(s, 0) {
 +    if false && (at(s, 0, b'-') || digit_at(s, 0)) {
+         // The value is built only after the trailing check, so a rejected number never holds (or
+         // drops) a `CanonValue`.
          match parse_number(s, 0) {
-             Ok((v, j)) => finish_top_level(s, v, j),
-             Err(e) => Err(e),
