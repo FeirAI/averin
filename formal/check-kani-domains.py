@@ -112,23 +112,24 @@ def validate_fail_closed_guard(source: str, runner: str) -> None:
     # trailing-data check.
     route = (
         "ifat(s,0,b'-')||digit_at(s,0){matchparse_number(s,0){"
-        "Ok((v,j))=>finish_top_level(s,v,j),Err(e)=>Err(e),}}"
+        "Ok((n,j))=>matchfinish_top_level(s,j){Ok(())=>Ok(CanonValue::Int(n)),Err(e)=>Err(e),},"
+        "Err(e)=>Err(e),}}"
         "else{letmutp=Parser{s,i:0};matchparse_top_level_general(&mutp){"
-        "Ok(v)=>finish_top_level(s,v,p.i),Err(e)=>Err(e),}}"
+        "Ok(v)=>matchfinish_top_level(s,p.i){Ok(())=>Ok(v),Err(e)=>Err(e),},Err(e)=>Err(e),}}"
     )
     if route not in compact or "fnparse_typed(input:&str)->Result<CanonValue,ParseError>{parse_document(input)}" not in compact:
         raise ValueError("numeric-first production dispatch or trailing check changed")
     finish = (
-        "fnfinish_top_level(s:&[u8],v:CanonValue,i:usize)->Result<CanonValue,ParseError>{"
+        "fnfinish_top_level(s:&[u8],i:usize)->Result<(),ParseError>{"
         "letk=skip_ws(s,i);ifk!=s.len(){Err(ParseError::At(ErrorKind::TrailingData,k))}"
-        "else{Ok(v)}}"
+        "else{Ok(())}}"
     )
     if finish not in compact:
         raise ValueError("shared top-level trailing check changed")
     for required in (
-        "}elseifb==b'-'||is_digit(b){parse_number(s,i)}",
-        "fnparse_number(s:&[u8],start:usize)->Result<(CanonValue,usize),ParseError>{",
-        "Some(n)=>Ok((CanonValue::Int(n),i)),",
+        "}elseifb==b'-'||is_digit(b){matchparse_number(s,i){Ok((n,j))=>Ok((CanonValue::Int(n),j)),",
+        "fnparse_number(s:&[u8],start:usize)->Result<(i64,usize),ParseError>{",
+        "Some(n)=>Ok((n,i)),",
     ):
         if required not in compact:
             raise ValueError(f"numeric parser type boundary changed: {required}")
@@ -283,10 +284,11 @@ def self_test() -> None:
         real_source.replace('#[kani::stub(parse_top_level_general, reject_general_in_integer_proof)]', '', 1),
         real_source.replace('match parse_top_level_general(&mut p) {', 'match parse_value(s, 0, 0).map(|(v, _)| v) {'),
         real_source.replace('let i = skip_ws(p.s, p.i);', 'let i = p.i;'),
-        real_source.replace('Ok((v, j)) => finish_top_level(s, v, j),', 'Ok((_, j)) => finish_top_level(s, CanonValue::Int(0), j),'),
-        real_source.replace('Ok((v, j)) => finish_top_level(s, v, j),', 'Ok((v, _)) => Ok(v),'),
-        real_source.replace('Err(ParseError::At(ErrorKind::TrailingData, k))', 'Ok(v)'),
-        real_source.replace('Some(n) => Ok((CanonValue::Int(n), i)),', 'Some(n) => Ok((CanonValue::Int(n + 1), i)),'),
+        real_source.replace('Ok(()) => Ok(CanonValue::Int(n)),', 'Ok(()) => Ok(CanonValue::Int(0)),'),
+        real_source.replace('Ok((n, j)) => match finish_top_level(s, j) {', 'Ok((n, _j)) => match Ok::<(), ParseError>(()) {'),
+        real_source.replace('Err(ParseError::At(ErrorKind::TrailingData, k))', 'Ok(())'),
+        real_source.replace('Some(n) => Ok((n, i)),', 'Some(n) => Ok((n + 1, i)),'),
+        real_source.replace('Ok((n, j)) => Ok((CanonValue::Int(n), j)),', 'Ok((n, j)) => Ok((CanonValue::Int(-n), j)),'),
         real_source.replace("} else if b == b'-' || is_digit(b) {", "} else if b == b'-' {"),
         real_source.replace('if at(s, 0, b\'-\') || digit_at(s, 0) {', 'if false && (at(s, 0, b\'-\') || digit_at(s, 0)) {'),
         real_source.replace('        parse_document(input)\n', '        parse_top_level_general(&mut Parser { s: input.as_bytes(), i: 0 })\n'),

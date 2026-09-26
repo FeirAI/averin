@@ -598,14 +598,22 @@ pub(crate) fn parse_document(input: &str) -> Result<CanonValue, ParseError> {
     // case straight to the same number parser `parse_value` selects; every other top-level value
     // takes the general route (which the Kani integer proofs replace with a fail-closed guard).
     if at(s, 0, b'-') || digit_at(s, 0) {
+        // The value is built only after the trailing check, so a rejected number never holds (or
+        // drops) a `CanonValue`.
         match parse_number(s, 0) {
-            Ok((v, j)) => finish_top_level(s, v, j),
+            Ok((n, j)) => match finish_top_level(s, j) {
+                Ok(()) => Ok(CanonValue::Int(n)),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         }
     } else {
         let mut p = Parser { s, i: 0 };
         match parse_top_level_general(&mut p) {
-            Ok(v) => finish_top_level(s, v, p.i),
+            Ok(v) => match finish_top_level(s, p.i) {
+                Ok(()) => Ok(v),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         }
     }
@@ -631,13 +639,13 @@ fn parse_top_level_general(p: &mut Parser<'_>) -> Result<CanonValue, ParseError>
     }
 }
 
-/// The value `v` ending at `i` is the whole document: only whitespace may follow it.
-fn finish_top_level(s: &[u8], v: CanonValue, i: usize) -> Result<CanonValue, ParseError> {
+/// The top-level value ends at `i`: only whitespace may follow it.
+fn finish_top_level(s: &[u8], i: usize) -> Result<(), ParseError> {
     let k = skip_ws(s, i);
     if k != s.len() {
         Err(ParseError::At(ErrorKind::TrailingData, k))
     } else {
-        Ok(v)
+        Ok(())
     }
 }
 
@@ -712,7 +720,10 @@ fn parse_value(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize), 
     } else if b == b'n' {
         parse_literal(s, i, b"null", ErrorKind::LiteralNull, CanonValue::Null)
     } else if b == b'-' || is_digit(b) {
-        parse_number(s, i)
+        match parse_number(s, i) {
+            Ok((n, j)) => Ok((CanonValue::Int(n), j)),
+            Err(e) => Err(e),
+        }
     } else {
         Err(ParseError::At(ErrorKind::UnexpectedChar, i))
     }
@@ -739,7 +750,7 @@ fn parse_literal(
     }
 }
 
-fn parse_number(s: &[u8], start: usize) -> Result<(CanonValue, usize), ParseError> {
+fn parse_number(s: &[u8], start: usize) -> Result<(i64, usize), ParseError> {
     let mut i = start;
     let negative = at(s, i, b'-');
     if negative {
@@ -769,7 +780,7 @@ fn parse_number(s: &[u8], start: usize) -> Result<(CanonValue, usize), ParseErro
         return Err(ParseError::At(ErrorKind::NegativeZero, start));
     }
     match decimal_i64(s, digits, i, negative) {
-        Some(n) => Ok((CanonValue::Int(n), i)),
+        Some(n) => Ok((n, i)),
         None => Err(ParseError::At(ErrorKind::OutOfRange, start)),
     }
 }
@@ -1273,7 +1284,7 @@ mod error_compat_tests {
         let s = input.as_bytes();
         let mut p = Parser { s, i: 0 };
         let typed = match parse_top_level_general(&mut p) {
-            Ok(v) => finish_top_level(s, v, p.i),
+            Ok(v) => finish_top_level(s, p.i).map(|()| v),
             Err(e) => Err(e),
         };
         typed.map_err(ParseError::into_public)
