@@ -1198,7 +1198,16 @@ fn push_utf8(out: &mut Vec<u8>, c: u32) {
 /// Strictly decode a UTF-16 unit sequence; reject unpaired surrogates.
 #[allow(clippy::manual_range_contains)] // range `contains` is not in the extracted subset
 fn decode_utf16_strict(units: &[u16]) -> Result<String, ErrorKind> {
-    let mut out: Vec<u8> = Vec::with_capacity(units.len());
+    // Room for the whole output up front, so no push below reallocates: a unit decodes to at most 3
+    // UTF-8 bytes (a BMP scalar), a surrogate pair (2 units) to 4. `3 * len` cannot overflow for
+    // any real input (`units` is a `Vec<u16>`, at most `isize::MAX` bytes, so `len <= usize::MAX / 4`);
+    // the guard states that bound where the Lean totality proof can see it.
+    let cap = if units.len() <= usize::MAX / 3 {
+        3 * units.len()
+    } else {
+        units.len()
+    };
+    let mut out: Vec<u8> = Vec::with_capacity(cap);
     let mut fault = ErrorKind::InvalidScalar;
     let mut ok = true;
     let mut i = 0;
