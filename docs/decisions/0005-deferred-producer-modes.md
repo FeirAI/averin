@@ -172,8 +172,8 @@ Capstone → Signature domain → Residual*.
 > native-use artifact; the M3 pre-pass verifies each closed transcript — the structured
 > `averin.resource.introspection.v1` sig under a pinned, role-separated `resource_authority_keys` issuer +
 > grant-bind + `credential_ref == grant.lease_id` + resource match + `effective_scope ⊆ grant.scope`
-> (space-delimited OAuth token subset, no broadening) + `effective_exp <= grant.exp` + `introspected_at >=
-> issued_at` — every failure a hard `unmatched_violation` → `!ok`. **The native-use-matching question is
+> (space-delimited OAuth token subset, no broadening) + `effective_exp <= grant.exp` + `issued_at <=
+> introspected_at < min(effective_exp, grant.exp)` (the same half-open window as a brokered use) — every failure a hard `unmatched_violation` → `!ok`. **The native-use-matching question is
 > RESOLVED: the transcript is the sole action-accountability artifact (no brokered use receipt).** Report fields
 > `native_credential_present`, `introspection_transcripts_total/_verified`, `introspection_scope_narrowed`,
 > `introspection_status`. **Capstone:** the standard `attested_complete_over_brokered_surface` gains

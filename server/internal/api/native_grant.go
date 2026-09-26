@@ -378,6 +378,9 @@ func (s *Server) validateNativeIntrospection(st store.Store, ir introspectionReq
 		return fmt.Errorf("effective_exp outlives native grant %q", ir.GrantID), nil
 	case introspectedAt < ge.IssuedAt || introspectedAt >= ge.Exp:
 		return fmt.Errorf("introspected_at is outside native grant %q's validity window", ir.GrantID), nil
+	case introspectedAt >= ir.EffectiveExp:
+		// The verifier's window is [issued_at, min(effective_exp, exp)): never record a transcript it rejects.
+		return errors.New("introspected_at is not before effective_exp"), nil
 	case introspectedAt > now.Add(broker.RequestClockSkew).Unix():
 		return errors.New("introspected_at is in the future"), nil
 	case now.Unix() >= ge.Exp:

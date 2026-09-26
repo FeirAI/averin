@@ -10842,6 +10842,72 @@ fn tier_b_native_transcript_time_broadening_is_a_violation() {
 }
 
 #[test]
+fn tier_b_native_transcript_after_expiry_is_a_violation() {
+    // V-L2: the introspection window is [issued_at, min(effective_exp, grant exp)), matching a brokered
+    // use (`used_at >= exp` is expired) and the server contract. At or after either bound is a violation;
+    // just before the effective expiry verifies.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let run = |introspected_at: i64, effective_exp: i64| {
+        let grant = seal_grant(
+            &rec,
+            &rec,
+            GID,
+            &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP),
+        );
+        let gh = content_hash_of(&grant);
+        let ie = introspection_evidence(
+            &res,
+            GID,
+            LEASE,
+            NSCOPE,
+            RESOURCE,
+            introspected_at,
+            effective_exp,
+        );
+        let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+        native_bundle_verify(&rec, &res, &tsa, grant, Some(t), None)
+    };
+    let narrowed = USED + 60; // the effective credential expires before the grant
+    for (name, at, eff) in [
+        ("at the grant exp", EXP, EXP),
+        ("after the grant exp", EXP + 1, EXP),
+        ("at the effective exp", narrowed, narrowed),
+        ("after the effective exp", narrowed + 1, narrowed),
+    ] {
+        let r = run(at, eff);
+        assert!(
+            !r.ok,
+            "{name}: an introspection after expiry must fail the bundle"
+        );
+        assert_eq!(r.introspection_transcripts_verified, 0, "{name}");
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.contains("introspection after expiry")),
+            "{name}: issues: {:?}",
+            r.issues
+        );
+    }
+    let r = run(narrowed - 1, narrowed);
+    assert_eq!(
+        r.introspection_transcripts_verified, 1,
+        "issues: {:?}",
+        r.issues
+    );
+    assert!(
+        !r.issues
+            .iter()
+            .any(|i| i.contains("introspection after expiry")),
+        "issues: {:?}",
+        r.issues
+    );
+}
+
+#[test]
 fn tier_b_native_transcript_forged_sig_is_a_violation() {
     // the structured introspection sig is by an IMPOSTER, not a pinned resource key -> it must not verify (even
     // though the RECORD evidence_sig is still by the resource, so it routes here as a resource record).
@@ -16183,6 +16249,64 @@ fn temporal_review_followups_modes_cutoffs_and_malformed_v2() {
     );
     assert_eq!(row.historical, I);
     assert_eq!(r.temporal.snapshot_status, "unverified");
+}
+
+// V-L1: an unusable signed v2 artifact naming a grant must not hide the authenticated prospective
+// cutoff of a usable v2 source for the same grant. The receipt at or after that cutoff stays
+// `at_or_after` (the historical claim is refuted, not merely insufficient); one below the cutoff is
+// never proven, because the unusable artifact is not authenticated history either way.
+#[test]
+fn temporal_unusable_artifact_does_not_hide_usable_cutoff() {
+    use ClaimDecision::{Insufficient as I, Refuted as R};
+    let k = t_keys();
+    let unusable_list = t_sign(
+        &change_field(
+            &t_list_body(&k, T_PROJECT, T_BOUNDARY, T_WATERMARK, t_entries(&[])),
+            "revoked_grant_ids",
+            CanonValue::Array(vec![CanonValue::string(GID)]),
+        ),
+        REVOCATION_LIST_V2_DOMAIN,
+        &k.rev,
+    );
+    let bundle_with_cutoff = |cutoff: i64| {
+        let entries = [(GID, RevState::Prospective(cutoff))];
+        t_use_bundle(
+            &k,
+            Some(t_order(T_ORD)),
+            vec![
+                ("revocation_list", unusable_list.clone()),
+                (
+                    "revocation_merkle_root",
+                    t_merkle_root(&k, &entries, T_BOUNDARY),
+                ),
+                (
+                    "revocation_proofs",
+                    CanonValue::object(vec![(GID.into(), t_merkle_proof(&entries, GID))]).unwrap(),
+                ),
+            ],
+        )
+    };
+    let db = t_opts(&k, t_db_policy(3600, 0));
+    for (cutoff, ordering, historical) in [
+        (T_ORD, "at_or_after", R),
+        (T_ORD - 1, "at_or_after", R),
+        (T_ORD + 1, "indeterminate", I),
+    ] {
+        let r = verify_bundle_with(&bundle_with_cutoff(cutoff), &db);
+        let row = t_observe(&r);
+        assert_eq!(
+            (row.ok, row.revoked_uses_blocked, row.current),
+            (false, 1, "revoked_unverified"),
+            "cutoff {cutoff}"
+        );
+        assert_eq!(row.ordering, ordering, "cutoff {cutoff}");
+        assert_eq!(row.historical, historical, "cutoff {cutoff}");
+        assert_eq!(
+            r.claims().historical_authorized_as_of_snapshot,
+            historical,
+            "cutoff {cutoff}"
+        );
+    }
 }
 
 // L7: a signed v2 Merkle leaf whose prospective cutoff exceeds the snapshot watermark is malformed

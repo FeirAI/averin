@@ -576,9 +576,10 @@ pub enum GrantRevocation {
     /// Authenticated total revocation: a usable v2 total entry, or any v1 membership.
     Total,
     /// Named by a signed v2 artifact that is unusable (malformed body or snapshot, or an issuer
-    /// key not honored at the snapshot). Current use is blocked; for history it is not
-    /// authenticated adverse evidence, so it never refutes and never proves.
-    RevokedUnverified,
+    /// key not honored at the snapshot). Current use is blocked; the unusable artifact itself is
+    /// not authenticated history, so it never refutes and never proves. The cutoff of a usable v2
+    /// source for the same grant, if any, still decides an adverse `at_or_after`.
+    RevokedUnverified(Option<i64>),
     /// A Merkle root is present but this grant has no valid proof. The cutoff of a usable v2
     /// source, if any, still decides an adverse `at_or_after`.
     Unproven(Option<i64>),
@@ -593,14 +594,16 @@ impl GrantRevocation {
             }
             GrantRevocation::Prospective(_) => "revoked_prospective",
             GrantRevocation::Total => "revoked_total",
-            GrantRevocation::RevokedUnverified => "revoked_unverified",
+            GrantRevocation::RevokedUnverified(_) => "revoked_unverified",
             GrantRevocation::Unproven(_) => "unproven",
         }
     }
     /// The authenticated prospective cutoff that decides an adverse ordering, if any.
     pub fn adverse_cutoff(self) -> Option<i64> {
         match self {
-            GrantRevocation::Prospective(c) | GrantRevocation::Unproven(Some(c)) => Some(c),
+            GrantRevocation::Prospective(c)
+            | GrantRevocation::Unproven(Some(c))
+            | GrantRevocation::RevokedUnverified(Some(c)) => Some(c),
             _ => None,
         }
     }
@@ -654,7 +657,9 @@ impl GrantRevocationAcc {
         } else if self.unproven {
             GrantRevocation::Unproven(self.cutoff)
         } else if self.unverified {
-            GrantRevocation::RevokedUnverified
+            // Carry an authenticated cutoff from a usable source: an unusable artifact must not
+            // hide it (it would turn an adverse `at_or_after` into `indeterminate`).
+            GrantRevocation::RevokedUnverified(self.cutoff)
         } else if let Some(c) = self.cutoff {
             GrantRevocation::Prospective(c)
         } else if self.v2_sources > 0 && self.v2_nonmember == self.v2_sources {
@@ -758,6 +763,31 @@ mod tests {
     }
 
     #[test]
+    fn revocation_merkle_path_length_is_capped() {
+        let sibling = CanonValue::string("ab".repeat(32));
+        let path = |n| CanonValue::Array(vec![sibling.clone(); n]);
+        let parse = |n| super::super::parse_hex32_path(Some(&path(n)));
+        assert_eq!(parse(64).map(|p| p.len()), Some(64));
+        assert_eq!(parse(65), None, "a path longer than 64 entries is rejected");
+        assert_eq!(parse(10_000), None);
+    }
+
+    #[test]
+    fn unusable_artifact_keeps_a_usable_cutoff() {
+        let mut acc = GrantRevocationAcc::default();
+        acc.unusable_member();
+        assert_eq!(acc.finish(), GrantRevocation::RevokedUnverified(None));
+        acc.v2(Some(RevState::Prospective(9)));
+        acc.v2(Some(RevState::Prospective(4)));
+        let g = acc.finish();
+        assert_eq!(g, GrantRevocation::RevokedUnverified(Some(4)));
+        assert_eq!(g.current_str(), "revoked_unverified");
+        assert_eq!(g.adverse_cutoff(), Some(4));
+        acc.v2(Some(RevState::Total));
+        assert_eq!(acc.finish(), GrantRevocation::Total);
+    }
+
+    #[test]
     fn combine_is_conservative() {
         use RevState::*;
         assert_eq!(Prospective(9).combine(Prospective(4)), Prospective(4));
@@ -817,8 +847,14 @@ mod tests {
             aa,
             "cutoff beats unproven"
         );
-        let unverified = GrantRevocation::RevokedUnverified;
+        let unverified = GrantRevocation::RevokedUnverified(None);
         assert_eq!(classify(Some(&snap), true, &at(9), unverified), ind);
+        // A usable source's cutoff survives an unusable artifact naming the same grant: adverse
+        // ordering is still decided, and nothing below the cutoff is ever proven.
+        let unverified_cut = GrantRevocation::RevokedUnverified(Some(5));
+        assert_eq!(classify(None, true, &at(5), unverified_cut), aa);
+        assert_eq!(classify(Some(&snap), true, &at(9), unverified_cut), aa);
+        assert_eq!(classify(Some(&snap), true, &at(4), unverified_cut), ind);
         assert_eq!(
             classify(
                 Some(&snap),
