@@ -163,6 +163,15 @@ The object form works for **every** role key (`signing_keys` uses the RCP §10.2
   order under honest resource and revocation signers, not the physical time of the action; TSA
   anchors never establish it. A bundle can therefore be `ok: false` (a revoked grant was used) while
   `historical_authorized_as_of_snapshot` is `satisfied` (that use preceded the cancellation).
+  Consumers of this claim must read `claims.historical_authorized_as_of_snapshot` (and
+  `claims.requested_decision`), not the legacy `ok`, since `ok` stays false while any revoked
+  grant was used regardless of this claim's decision. Both the offline CLI and the two viewers
+  print the claim's own decision as a prominent line next to the legacy verdict whenever it was
+  the requested claim, so it is never left to be inferred from a FAIL line. The viewers' receipt
+  labels are conservative about the grant behind a `proven_before` receipt: the label reads
+  "proven before revocation" only when that grant's `current_revocation` is `revoked_prospective`;
+  a `not_revoked` grant's receipt reads "authorized as of snapshot (grant not revoked)" instead,
+  and any other or unknown grant state reads "indeterminate" rather than asserting either outcome.
 
 For a decision beyond legacy `ok`, supply a fixed `claim_policy` in the verifier options and
 read `claims_version: "2"` with `claims.requested_decision`. Only `satisfied` accepts the
@@ -224,9 +233,19 @@ barrier before starting any new writer or enabling recovery:
    existing cutoff unchanged). The v7 step retires the boolean `revocations` table: grant the new
    runtime `SELECT, INSERT` on `authorization_receipts` and `revocation_events` before starting it.
    An advancing cutover refuses while the new runtime identity has any session or the database has
-   any prepared transaction, so do not start new runtimes before the command commits. A fresh, truly empty DB instead
-   uses `AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate --init`.
-   Do not use ordinary server startup to migrate an existing or unstamped database.
+   any prepared transaction, so do not start new runtimes before the command commits. It also
+   refuses while **any other client backend** (any role, including an unnamed LOGIN member of a
+   retired role that did `SET ROLE old_role`, or another session of the migration identity) is
+   connected to the database, and while any LOGIN, non-superuser role other than the migration
+   identity, the new runtime and the table owner can `INSERT`/`UPDATE`/`DELETE` any table in the
+   schema, directly, by inheritance, or through a role it can `SET ROLE` to. Revoke such grants and
+   memberships (`REVOKE old_role FROM app_login`), close every session (including your own `psql`),
+   then rerun. Superusers are exempt from the privilege check (nothing can be revoked from them) and
+   are covered only by the session check at that instant. The command's deadline is `--timeout`
+   (default 90 s, or `AVERIN_MIGRATE_TIMEOUT`); raise it for large histories. `--purge-legacy`
+   keeps its named-role barrier only (it runs with new runtimes live). A fresh, truly empty DB instead
+   uses `AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate --init`;
+   ordinary server startup refuses an empty database, and never migrates an existing or unstamped one.
 3. Prove the cutoff: `pg_stat_activity` has no old backends, `pg_prepared_xacts` has no old
    prepared transactions, a previously connected old session cannot perform a rollback-only
    `project_write_guard` insert, and the old credential cannot reconnect. Verify a new
@@ -239,7 +258,12 @@ barrier before starting any new writer or enabling recovery:
    producers and traffic. Never run a
    pre-fence binary with a still-valid writer credential alongside the recovery protocol.
    The command cannot infer binary identity or discover an omitted retired credential. Its
-   role list must be complete. New runtime startup checks non-ownership and the v6 marker.
+   role list must be complete. New runtime startup checks the v6 marker, that the runtime owns
+   no table in the schema, and that it holds no mutation privilege (effective, including inherited)
+   on any append-only table (`records`, `checkpoints`, `anchors`, `disclosures`, `broker_seq_void`,
+   the recovery fence/result tables, `authorization_receipts`, `revocation_events`, and no write at
+   all on `schema_migrations` and the legacy tables; `broker_seq` keeps only `DELETE`, `display_seq`
+   and `project_write_guard` keep `UPDATE`). A `GRANT ALL` refuses startup.
 
 Legacy nonce/JTI rows have unknown owners and remain global replay exclusions. Ordinary ledger
 sweeps leave them intact. Only after the recorded DB-time cutoff plus the 24-hour hold can an

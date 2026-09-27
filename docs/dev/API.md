@@ -297,6 +297,11 @@ no receipt or committed ledger claim.
 **Response `201`:**
 `{ "use_id": "use-<uuid>", "grant_id": "<uuid>", "record": { /* sealed receipt */ }, "idempotent": false }`
 
+**Errors.** A forged, expired, revoked, replayed (nonce already consumed) or double-spent use is a `400`
+deny (`averin_use_requests_total{outcome="deny"}`). A consume-ledger store failure (timeout,
+cancellation, lost connection) is `503`: the transaction rolls back, nothing is consumed, and it is not
+counted as a deny; retry the same request. A failed revocation lookup or receipt write is `500`.
+
 `/v2/use-intent` and `/v2/use-outcome` are the two-phase variant (intent recorded *before* the side
 effect, outcome *after*, linked by a forced causal edge). An intent is completed **exactly once**: a
 second `/v2/use-outcome` for an intent that already has one (under a different `idempotency_key`) is a
@@ -324,7 +329,7 @@ Inside one project transaction the server first returns an exact committed retry
 match the stored receipt; an omitted time reuses the committed time, and a different explicit time or
 any other different field is `409`. Otherwise it validates the actual committed grant: a native grant
 for this resource, `credential_ref` equal to its `lease_id`, `effective_scope` within its scope,
-`effective_exp` not after its expiry, `issued_at ≤ introspected_at < exp`, `introspected_at` not in
+`effective_exp` not after its expiry, `issued_at ≤ introspected_at < min(effective_exp, exp)`, `introspected_at` not in
 the future beyond the accepted clock skew, the grant not expired now, not revoked (either mode) and
 not voided. A failure is `400` and nothing is signed or stored. Only then does it allocate an
 authorization ordinal (carried in `introspection_evidence.authorization_order`) and sign the
@@ -589,3 +594,16 @@ reported separately and still blocks `ok`, `revoked_uses_blocked`, `authorized` 
 a bundle can be `ok:false` with the historical claim satisfied; the CLI and viewers show both. The
 claim proves order within Averin's database under an honest resource signer, revocation signer and
 database serialization; it does not prove physical action time.
+
+A consumer that requests `historical_authorized_as_of_snapshot` must read
+`claims.historical_authorized_as_of_snapshot` (and `claims.requested_decision`), never the legacy
+`ok`: `ok` stays false while any revoked grant was used, including a use proven before that
+grant's own prospective cutoff, so it can never stand in for the historical claim. The offline CLI
+(`averin-verify bundle`) and both viewers (the static HTML verifier and the Svelte app) print this
+claim's own decision as a prominent line next to the legacy verdict whenever it was the requested
+claim, so the historical decision is never left to be inferred from a FAIL line. In the receipt
+detail, a `proven_before` receipt is only labeled "proven before revocation" when its grant's
+`current_revocation` is `revoked_prospective`; a receipt proven before the snapshot against a
+grant that is `not_revoked` is labeled "authorized as of snapshot (grant not revoked)" instead
+(that grant was never headed toward a cutoff), and any other or unknown grant state is shown as
+"indeterminate" rather than claiming either outcome.
