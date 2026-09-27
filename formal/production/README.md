@@ -22,6 +22,14 @@ overflow, an abort (for example on allocation failure) or a `RecordError` produc
 signature message, so no claim is needed about it. The two `sign_preimage_*` theorems also prove
 termination with `Some` for the production tags.
 
+This matches the shipped binaries because arithmetic overflow is a panic in every profile that
+builds the core: the dev profile by default, and `[profile.release]` / `[profile.server]` with
+`overflow-checks = true` (Cargo.toml). In the extracted model overflow is a failure, so a build that
+wrapped silently could produce a hash the theorems say nothing about; with the checks a would-be
+overflow ends the computation instead (the CLI exits with a failure, the WASM call traps and the
+browser wrapper throws, and the server's `server` profile unwinds into `ffi.rs`'s `catch_unwind`,
+which returns a failing report).
+
 | Production function (`core/src`) | Theorem (`Refinement/`) | Statement |
 |---|---|---|
 | `canon::escape_into` | `Escape.escape_into_model` | appends exactly `utf8 (Canon.serStr cs)` for the UTF-8 bytes of any scalar list `cs` |
@@ -234,9 +242,23 @@ Mutants `m60`–`m64` change a parser bound or add a reachable panic and fail th
   `FromUtf8Error` is `Unit` (never inspected); `String::is_empty` is true exactly when the string has
   no UTF-8 bytes (verdict kernel); `String::clone` returns an equal string (parser key bookkeeping). `averin_decision_core.toStr` is Aeneas' literal
   conversion with a kernel-checked instead of `decide +native` bound.
-* **Toolchain**: rustc (the pinned nightly for extraction; production builds use 1.92.0), Charon
+* **Toolchain**: rustc (for extraction exactly `rustc 1.100.0-nightly (923c95cdf 2026-09-16)`,
+  toolchain `nightly-2026-09-17`, checked by the run script; production builds use 1.92.0), Charon
   `6258597`, Aeneas `557f7a1` and its Lean standard library (the semantics of `Vec`, slices, scalars,
-  `Result`, `partial_fixpoint`), Lean 4.31.0 and mathlib `fabf563`. See `manifest.json`.
+  `Result`, `partial_fixpoint`), Lean 4.31.0 and mathlib `fabf563`. See `manifest.json`;
+  `setup-toolchain.sh` pins the source tarballs and the Lean release by sha256 and the opam
+  packages by version (their transitive dependencies resolve from the opam repository at install
+  time and are not pinned).
+* **Axiom scope per theorem family**: the seal and parser theorems may use the two primitives; the
+  verdict refinement (`Refinement.VerdictLists`, `Refinement.Verdict`, `Refinement.VerdictClaims`,
+  the extracted `verify.verdict.*`) uses only `propext`, `Classical.choice` and `Quot.sound`, which
+  `ProductionAudit.lean` enforces for every declaration of those modules and for the headline
+  verdict theorems.
+* **The `Corresponds` boundary** (verdict kernel): the kernel's theorems hold for fact vectors that
+  correspond to a model evidence state; that `verify.rs` builds such vectors is not proved (see
+  "Not covered" in the verdict section).
+* **Partial correctness** (seal core), with overflow checks enabled in every shipped profile (see
+  "What is proved").
 * **Ed25519** is outside this project: the seal theorems take the model's `Signed` predicate as the
   statement of what verifies.
 
@@ -264,11 +286,24 @@ Mutants `m60`–`m64` change a parser bound or add a reachable panic and fail th
 bash formal/run-production-refinement.sh           # regenerate, require equality, build, audit
 bash formal/run-production-refinement.sh --write   # after an intended change to the extracted Rust
 python3 formal/production/check-production.py      # toolchain-free: freshness, call paths, cfg, glue
+python3 formal/production/check-production.py --self-test  # the cfg and glue scanners' accepted/rejected forms
 ```
 
 The pinned toolchain is described in `plans/preflight/PROVENANCE.md`; `setup-toolchain.sh` builds it
 from the pinned sources. The first build compiles the Aeneas library and needs mathlib at the
 manifest revision (use `lake exe cache get`, or point `AVERIN_LAKE_PACKAGES` at an existing build).
+
+`check-production.py` hashes the extracted Rust files, the generated Lean and the hand-written glue
+(`Extracted/{Types,Funs}External.lean`). Its cfg check lexes the Rust (comments and literals
+ignored) and rejects any cfg attribute other than the test/proof-only forms, wherever on a line it
+sits, any `cfg_attr`, inner `#![cfg..]` or `cfg!(..)`, in every file the extraction came from
+(read from Aeneas' `Source:` headers, which must all be listed). The files that declare modules on
+that path (`core/src/lib.rs`, `core/src/verify.rs`) must declare each of them once without a
+cfg, cfg_attr or path attribute. The only feature-gated module, `rfc3161`, is declared in lib.rs
+under `#[cfg(feature = "rfc3161")]`; the check requires that no extracted production code names
+it, so enabling the feature cannot change an extracted item (the extraction itself uses default
+features). The glue may define only the listed externals and helpers (every declaration form is
+read) and may not use notation, macro, attribute or elaboration commands.
 
 Mutants `m50`–`m53` in `formal/mutants` keep these gates load-bearing: a changed preimage byte order
 fails the regenerated proof (`proof`), an edited but unregenerated source fails as `stale`, a call site

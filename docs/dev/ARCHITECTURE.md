@@ -172,7 +172,9 @@ checks that those gates catch known drifts. Algorithm 7's claim kernel (`verify/
 `decide_claims`, from checked facts to claim decisions) is modelled in `Verdict.lean` and, plan 012
 phase B, the production kernel is extracted and proved equal to that model; the evidence passes
 that compute its input facts are covered by the adversarial suite and the verdict oracle, not by a
-proof.
+proof. The RCP parser (`CanonValue::parse`) is extracted too and proved to return for every
+input (`Refinement.Parse.parse_document_total`: no panic, overflow or out-of-bounds read), given
+that NFC returns representable strings; which documents it accepts is tested, not proved.
 
 ## Domain model
 

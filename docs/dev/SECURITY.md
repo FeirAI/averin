@@ -107,11 +107,21 @@ what truly happened in the world.
   frontier;
 - checkpoint-chain uniqueness.
 
-Kani checks the real encoders in CI (base64url alphabet, `sha256:<hex>` digests, LP framing,
-UTF-16 key order). The parser-level harnesses exist in an extended set that does not fit a CI
-runner and is not claimed as verified. TLA+ covers the gapless grant log and the
-consume-before-act ledger. The same README lists what is *not* yet proved, including the verifier
-verdict logic and authority-evidence binding.
+The production code is connected to those proofs (plan 012, Charon/Aeneas): the seal core
+(serializer, framing, digest string, record/checkpoint preimages and hashes, signature message)
+is proved to compute the model's definitions, so the seal theorems apply to the production hashes
+(partial correctness); the verifier's claim kernel `decide_claims` is proved to return the verdict
+model's decision for every claim, for any evidence state its checked facts correspond to (standard
+axioms only); and the RCP parser is proved to return for every input, without panic or overflow.
+
+Kani checks the real code in CI within stated bounds: base64url alphabet and per-chunk
+canonicality, `sha256:<hex>` digests, LP framing, UTF-16 key order and transitivity, the strict
+UTF-16 decoder, the integer round trip and canonical numeric spelling. The string round-trip
+family is still running and not claimed. TLA+ covers the grant log (historical and current
+recovery protocols), the consume-before-act ledger and two-replica project transactions. The same
+README lists what is *not* proved: above all, that the verifier's evidence passes (signatures,
+pins, joins, Merkle paths, snapshots) compute facts meaning what the kernel's theorems assume, the
+parser's functional correctness, and the trusted base (SHA-256, Ed25519, NFC, std, toolchains).
 
 ## Authentication & authorization
 

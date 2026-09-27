@@ -10,6 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "formal/claims.json"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
+# A symbol is matched as a substring, so a short one ("main", "check") matches almost any file and
+# says nothing about the claim. Require something specific.
+MIN_SYMBOL = 8
 
 
 def job_ids(workflow_text):
@@ -40,7 +43,9 @@ def check_manifest(data, root, workflow_text):
             symbol = ref.get("symbol", "")
             if not path.is_relative_to(root) or not path.is_file():
                 errors.append(f"{cid}: missing/invalid file {ref.get('file')}")
-            elif not symbol or symbol not in path.read_text():
+            elif len(symbol) < MIN_SYMBOL:
+                errors.append(f"{cid}: symbol {symbol!r} in {ref.get('file')} is too short to identify a definition")
+            elif symbol not in path.read_text():
                 errors.append(f"{cid}: missing symbol {symbol!r} in {ref.get('file')}")
     return errors
 

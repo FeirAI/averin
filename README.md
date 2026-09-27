@@ -146,29 +146,41 @@ properties. These are checked by machine in [`formal/`](formal/README.md), not o
   - **no omission, no injection.** A verified bundle is exactly the signed ancestor-closure of the
     latest checkpoint;
   - the checkpoint history is unique.
-- **TLA+** models the grant-transparency log and the consume-before-act ledger. Every
-  counterexample for a pre-fix design is kept as an expected failure. The shipped design has no
-  anchored gap and no duplicate sequence number, including when an operator `grant_void` races
-  an in-flight retry. With that remediation it has no permanent checkpoint outage, as long as a
-  client that retries forever eventually commits (checked for 2 grants under strong fairness; a
-  client that gives up is covered by the void, and one that retries forever with every attempt
-  failing starves it, which the model also shows).
-- **Kani** checks the real Rust encoders (base64url, `sha256:<hex>`, LP framing, key order).
+- **TLA+** models the grant-transparency log, the consume-before-act ledger and two-replica
+  project transactions (finite configurations checked by TLC). Every counterexample for a pre-fix
+  design is kept as an expected failure. `GrantLog` is the historical single-process, age-based
+  recovery design: no anchored gap and no duplicate sequence number, including when an operator
+  `grant_void` races an in-flight retry, but a client that retries forever with every attempt
+  failing starves the void, which the model shows. The current durable protocol is modeled
+  separately (`GrantRecovery`): an authorized recovery fences the project guard, after which a
+  failing retry cannot refresh it; it checks no duplicate sequence, no late grant after a void and
+  eventual resolution, assuming open database transactions eventually resolve and the authorized
+  operator is eventually scheduled. A still-running pre-fence writer breaks it (a kept
+  counterexample), so the deployment credential cutoff is part of the protocol.
+- **Kani** checks the real Rust (bounded, on the final source): base64url alphabet and per-chunk
+  tail/chunk canonicality, `sha256:<hex>`, LP framing, member-key order and its transitivity, the
+  strict UTF-16 decoder, the integer round trip over [-99,999, 99,999] and canonical numeric
+  spelling. The string round-trip family (17,031 cases) is still running and not claimed.
 - **An executable Lean oracle** runs the model over a corpus (every C0 control, DEL, U+2028,
   BMP-vs-astral key order, i64 extremes, one sample per preimage family), and CI fails when the
-  Rust's bytes differ from the model's. A tag inventory ties every Rust domain tag to a Lean family,
-  and a mutation suite (`formal/check-mutants.sh`) checks that these gates catch eight known drifts.
-  This is differential testing over a corpus, not a mechanised refinement proof.
+  Rust's bytes differ from the model's. A tag inventory ties every Rust domain tag to a Lean family.
+  This is differential testing over a corpus, complementing the refinement proofs below.
+- **A mutation suite** (`formal/check-mutants.sh`) applies 48 known drifts and requires each to be
+  caught by a named gate (oracle, golden vectors, Kani, the production proofs, the production
+  checks or a named test).
 
-A mechanised Rust↔Lean refinement (plan 012, Charon/Aeneas) covers the seal core and the
-verifier's claim kernel. What is *not* proved yet (among it the verifier evidence passes that
-compute the kernel's input facts, and authority-evidence body binding) is listed in
-[`formal/README.md`](formal/README.md).
+A mechanised Rust↔Lean refinement (plan 012, Charon/Aeneas) covers the seal core (partial
+correctness), the verifier's claim kernel (standard axioms only) and the parser's totality: the
+production parser returns, without panic or overflow, for every input of any length, given that
+NFC returns representable strings. What is *not* proved (among it the verifier evidence passes
+that compute the kernel's input facts, and the parser's functional correctness) and the full
+trusted base are listed in [`formal/README.md`](formal/README.md).
 
 ```
 cd formal/lean && lake build --wfail && ./check-axioms.sh   # Lean proofs
+bash formal/run-production-refinement.sh                    # Charon/Aeneas extraction + production proofs
 bash formal/tla/run-tlc.sh                                  # TLA+ models (expected outcomes)
-bash formal/run-kani.sh                                     # Kani bounded proofs
+bash formal/run-kani.sh [--extended]                        # Kani bounded proofs
 python3 formal/check-refinement.py                          # tag inventory
 cargo test -p averin-decision-core --test oracle            # Rust bytes == Lean oracle output
 bash formal/check-mutants.sh                                # the gates catch known drifts

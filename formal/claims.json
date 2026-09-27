@@ -7,9 +7,9 @@
       "claim": "The Lean model gives seal binding and closed DAG/checkpoint history under its honest-signer assumption; every hash-dependent conclusion is in explicit-witness form (equal bodies, or a SHA-256 collision on the two specific framed preimages), the standard reduction to SHA-256 collision resistance.",
       "class": "unbounded-model-proof",
       "targets": ["Lean model"],
-      "assumptions": ["SHA-256 collision resistance", "Ed25519 signatures", "honest signer", "model inputs are post-NFC"],
+      "assumptions": ["SHA-256 collision resistance (never assumed as injectivity; explicit collision witnesses)", "Ed25519 unforgeability, stated as a hypothesis about which messages were signed", "honest signer", "model inputs are post-NFC (Unicode NFC is trusted)", "Lean 4.30.0 kernel"],
       "sources": [{"file": "formal/lean/Averin/Seal.lean", "symbol": "recordHashOf_binding"}, {"file": "formal/lean/Averin/Seal.lean", "symbol": "record_seal_sound"}, {"file": "formal/lean/Averin/Dag.lean", "symbol": "bundle_eq_closure"}, {"file": "formal/lean/Averin/Chain.lean", "symbol": "unique_history"}],
-      "proofs": [{"file": "formal/lean/check-axioms.sh", "symbol": "check"}],
+      "proofs": [{"file": "formal/lean/check-axioms.sh", "symbol": "lake env lean scripts/AxiomAudit.lean"}, {"file": "formal/lean/scripts/AxiomAudit.lean", "symbol": "escapeHatches env ourModule"}],
       "gates": ["formal-lean"]
     },
     {
@@ -19,38 +19,48 @@
       "targets": ["native Rust"],
       "assumptions": ["corpus covers the relevant drift", "Lean model expresses the intended format"],
       "sources": [{"file": "core/src/canon.rs", "symbol": "pub fn serialize"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "Family.msg"}],
-      "proofs": [{"file": "core/tests/oracle.rs", "symbol": "every_preimage_family_matches_model"}, {"file": "formal/check-refinement.py", "symbol": "main"}],
+      "proofs": [{"file": "core/tests/oracle.rs", "symbol": "every_preimage_family_matches_model"}, {"file": "formal/check-refinement.py", "symbol": "tag inventory: OK"}],
       "gates": ["formal-refinement", "formal-mutants"]
     },
     {
       "id": "production-seal-refinement",
-      "claim": "The production seal core (canonical serializer, LP framing, sha256 digest string, record/checkpoint preimages and hashes, signature message) is extracted from core/src by Charon/Aeneas and proved to compute the Lean model's definitions; the model's explicit-witness seal theorems are applied to it (equal hashes give the same body or a SHA-256 collision on the two specific production preimages). Partial correctness only (results when the extracted function returns Ok; a panic or error yields no hash). serialize()'s final from_utf8 and the PreimageFault-to-RecordError mapping are unextracted glue pinned by call-path checks; base64 (core/src/b64.rs) is excluded as off the hashed/signed path and covered by plan 011's Kani proofs; the verifier's decision logic is refined only in its claim kernel (see verdict-kernel-refinement).",
+      "claim": "The production seal core (canonical serializer, LP framing, sha256 digest string, record/checkpoint preimages and hashes, signature message) is extracted from core/src by Charon/Aeneas and proved to compute the Lean model's definitions; the model's explicit-witness seal theorems are applied to it (equal hashes give the same body or a SHA-256 collision on the two specific production preimages). Partial correctness only (results when the extracted function returns Ok; a panic or error yields no hash); arithmetic overflow panics in every shipped profile (overflow-checks in release and server, default in dev), matching the model's failure on overflow. serialize()'s final from_utf8 and the PreimageFault-to-RecordError mapping are unextracted glue pinned by call-path checks; base64 (core/src/b64.rs) is excluded as off the hashed/signed path and covered by plan 011's Kani proofs; the verifier's decision logic is refined only in its claim kernel (see verdict-kernel-refinement).",
       "class": "extracted-refinement-proof",
       "targets": ["native Rust", "WASM Rust (same source)"],
-      "assumptions": ["Charon/Aeneas/Lean toolchain and Aeneas std models", "rustc", "NFC and SHA-256 as arbitrary functions", "String/str UTF-8 model"],
+      "assumptions": ["Charon/Aeneas/Lean 4.31 toolchain, mathlib and the Aeneas std models (pinned in manifest.json)", "rustc (exact pinned nightly for extraction; 1.92.0 for builds)", "NFC and SHA-256 as arbitrary functions (unicode-normalization incl. its ASCII fast path; sha2)", "String/str UTF-8 model", "overflow-checks enabled in the shipped profiles", "Ed25519 as the model's Signed hypothesis"],
       "sources": [{"file": "core/src/record.rs", "symbol": "pub(crate) fn record_hash"}, {"file": "core/src/canon.rs", "symbol": "pub(crate) fn write_canonical"}, {"file": "core/src/sign.rs", "symbol": "pub fn preimage"}],
-      "proofs": [{"file": "formal/production/Refinement/Seal.lean", "symbol": "record_hash_binding"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_seal_sound"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_ne_checkpoint"}, {"file": "formal/run-production-refinement.sh", "symbol": "production refinement: OK"}],
+      "proofs": [{"file": "formal/production/Refinement/Seal.lean", "symbol": "record_hash_binding"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_seal_sound"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_ne_checkpoint"}, {"file": "formal/run-production-refinement.sh", "symbol": "production refinement: OK"}, {"file": "formal/production/ProductionAudit.lean", "symbol": "def runAudit"}],
       "gates": ["formal-production", "formal-mutants"]
     },
     {
       "id": "verdict-kernel-refinement",
-      "claim": "The verifier's claim kernel verify::verdict::decide_claims (every function it calls, including the seal-key and anchor searches, the revocation-mode, capstone and plan 009 historical conditions) is extracted from core/src by Charon/Aeneas and proved to return, for every claim and the requested one, exactly the Lean verdict model's decideClaim on any evidence state its checked facts correspond to (Refinement.Corresponds). The model's support-erasure and claim-order theorems (deleting supporting attachments never adds a satisfied claim and never changes a refutation, with fixed signed records, pins, policy and authenticated adverse evidence), Supports inversion, capstone prerequisites, committed-contradiction refutation and the historical results hold for the production results. Total correctness, standard axioms only. Not proved: that verify.rs computes facts satisfying the correspondence (signature, pin, join, Merkle-path and snapshot passes, counter-to-fact joins); that boundary is pinned by call-path checks and tested by the verdict oracle differential and the adversarial suite.",
+      "claim": "The verifier's claim kernel verify::verdict::decide_claims (every function it calls, including the seal-key and anchor searches, the revocation-mode, capstone and plan 009 historical conditions) is extracted from core/src by Charon/Aeneas and proved to return, for every claim and the requested one, exactly the Lean verdict model's decideClaim on any evidence state its checked facts correspond to (Refinement.Corresponds). The model's support-erasure and claim-order theorems (deleting supporting attachments never adds a satisfied claim and never changes a refutation, with fixed signed records, pins, policy and authenticated adverse evidence), Supports inversion, capstone prerequisites, committed-contradiction refutation and the historical results hold for the production results. Total correctness, standard axioms only (enforced per declaration of the verdict modules and the extracted kernel by ProductionAudit.lean). Not proved: that verify.rs computes facts satisfying the correspondence (signature, pin, join, Merkle-path and snapshot passes, counter-to-fact joins); that boundary is pinned by call-path checks and tested by the verdict oracle differential and the adversarial suite.",
       "class": "extracted-refinement-proof",
       "targets": ["native Rust", "WASM Rust (same source)", "Go cgo (same source)"],
       "assumptions": ["Charon/Aeneas/Lean toolchain and Aeneas std models", "rustc", "String::is_empty model", "verify.rs computes facts satisfying Refinement.Corresponds"],
       "sources": [{"file": "core/src/verify/verdict.rs", "symbol": "pub(super) fn decide_claims"}, {"file": "core/src/verify.rs", "symbol": "report.claims = verdict::decide_claims(&facts);"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "def decideClaim"}],
-      "proofs": [{"file": "formal/production/Refinement/Verdict.lean", "symbol": "theorem decide_claims_refines"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_support_erasure"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_satisfied_supports"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_capstone_prerequisites"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_historical_requires_policy"}, {"file": "formal/mutants/m54-verdict-unanchored-capstone-skips-temporal.patch", "symbol": "deletion strengthens the capstone"}, {"file": "formal/mutants/m55-verdict-both-mode-list-deletion-skips-paths.patch", "symbol": "deletion strengthens a required trust claim"}],
+      "proofs": [{"file": "formal/production/Refinement/Verdict.lean", "symbol": "theorem decide_claims_refines"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_support_erasure"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_satisfied_supports"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_capstone_prerequisites"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_historical_requires_policy"}, {"file": "formal/mutants/m54-verdict-unanchored-capstone-skips-temporal.patch", "symbol": "deletion strengthens the capstone"}, {"file": "formal/mutants/m55-verdict-both-mode-list-deletion-skips-paths.patch", "symbol": "deletion strengthens a required trust claim"}, {"file": "formal/production/ProductionAudit.lean", "symbol": "def standardOnlyModules"}],
       "gates": ["formal-production", "formal-mutants"]
     },
     {
+      "id": "parser-totality",
+      "claim": "The production RCP parser (CanonValue::parse via parse_typed/parse_document and every function it calls) is extracted from core/src by Charon/Aeneas and proved to return for every byte string of any length (Refinement.Parse.parse_document_total): no panic, arithmetic overflow, out-of-bounds index or divergence. Hypothesis NfcFits (the trusted NFC primitive returns representable Rust strings), never an axiom. Not proved: which documents it accepts or what they parse to (tests, fuzzing, the parser differential and plan 011's Kani families cover that), the error rendering into_public, and NFC's own panic-freedom. Supersedes the unverified Kani harness parse_never_panics as panic-freedom evidence.",
+      "class": "extracted-refinement-proof",
+      "targets": ["native Rust", "WASM Rust (same source)", "Go cgo (same source)"],
+      "assumptions": ["Charon/Aeneas/Lean 4.31 toolchain and the Aeneas std models", "NFC as an arbitrary function whose outputs fit in usize::MAX bytes (NfcFits hypothesis)", "SHA-256 as an arbitrary function"],
+      "sources": [{"file": "core/src/canon.rs", "symbol": "fn parse_document("}, {"file": "formal/production/manifest.json", "symbol": "crate::canon::parse_document"}],
+      "proofs": [{"file": "formal/production/Refinement/Parse.lean", "symbol": "theorem parse_document_total"}, {"file": "formal/mutants/m62-parser-decimal-overflow.patch", "symbol": "decimal_i64 drops its overflow guard"}, {"file": "core/tests/parser_differential.rs", "symbol": "fn rewrite_matches_reference_on_generated_corpus"}],
+      "gates": ["formal-production", "formal-mutants", "core"]
+    },
+    {
       "id": "bounded-real-encoders",
-      "claim": "Kani proves selected parser and encoder properties of the real Rust implementation only within harness bounds.",
+      "claim": "Kani proves, on the final source and only within each harness's stated bounds, properties of the real Rust: base64url alphabet bijection; base64url tail and 4-symbol chunk canonicality over the full per-chunk domains (whole-string uniqueness is argued in prose from the chunking, not proved); sha256:<hex> digest-string injectivity and canonicality per byte; exact LP framing; member-key order equal to UTF-16 code-unit order for keys of one or two scalars (5 of 5 harnesses) and transitive for single-scalar keys; the strict UTF-16 decoder equal to std's on every 1- and 2-unit sequence; the typed integer round trip for every n in [-99,999, 99,999]; canonical spelling of every accepted numeric literal of 1 to 4 bytes (61 of 61 shards). Not claimed: the string_escape_roundtrip family (17,031 cases, run in progress) and parse_never_panics (not verified; parser panic-freedom is the parser-totality claim). The final Kani mutation gate is pending.",
       "class": "bounded-implementation-proof",
       "targets": ["native Rust harnesses"],
-      "assumptions": ["harness bounds and feature selections in run-kani.sh"],
-      "sources": [{"file": "core/src/canon.rs", "symbol": "pub fn serialize"}],
-      "proofs": [{"file": "formal/run-kani.sh", "symbol": "cargo kani"}],
-      "gates": ["formal-kani", "formal-mutants"]
+      "assumptions": ["harness bounds and feature selections in run-kani.sh (no default features)", "std semantics, with two proof-only selections: A1 align_offset returning usize::MAX (documented as permitted) and G1 Vec::push restricted to its non-growth branch (fails closed)", "numeric route guard stub in the integer harnesses (fail-closed, checked unreachable for numeric input)", "Kani 0.68.0 / CBMC 6.11 and the bundled kissat 4.0.1", "real unicode-normalization NFC inside the harnesses that parse strings"],
+      "sources": [{"file": "core/src/b64.rs", "symbol": "fn full_chunk_is_canonical"}, {"file": "core/src/hashx.rs", "symbol": "fn lp_into_frames_exactly"}, {"file": "core/src/canon.rs", "symbol": "fn utf16_strict_matches_std"}, {"file": "core/src/canon.rs", "symbol": "fn integer_roundtrip()"}, {"file": "core/src/canon.rs", "symbol": "fn accepted_integer_spelling_case"}],
+      "proofs": [{"file": "formal/run-kani.sh", "symbol": "run_harness utf16_key_order_is_transitive"}, {"file": "formal/run-kani.sh", "symbol": "run_harness utf16_strict_matches_std"}, {"file": "formal/check-kani-shards.py", "symbol": "accepted_integer_spelling"}, {"file": "formal/check-kani-domains.py", "symbol": "integer_roundtrip"}, {"file": "formal/check-kani-success.py", "symbol": "VERIFICATION:- SUCCESSFUL"}],
+      "gates": ["formal-kani", "formal-kani-extended", "formal-mutants"]
     },
     {
       "id": "grant-log-model",
@@ -69,7 +79,7 @@
       "targets": ["Go server", "Postgres 16"],
       "assumptions": ["private test schema", "unique record_id index present where void succeeds", "database is reachable"],
       "sources": [{"file": "server/internal/store/postgres.go", "symbol": "VoidBrokerSeq"}],
-      "proofs": [{"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidPostgres"}, {"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidGrantLandsFirstPostgres"}, {"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidMarkerFailsPostgres"}, {"file": "scripts/check-go-test-events.py", "symbol": "REQUIRED"}],
+      "proofs": [{"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidPostgres"}, {"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidGrantLandsFirstPostgres"}, {"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidMarkerFailsPostgres"}, {"file": "scripts/check-go-test-events.py", "symbol": "TestBrokerSeqVoidMarkerFailsPostgres"}],
       "gates": ["store-postgres"]
     },
     {
@@ -99,7 +109,7 @@
       "targets": ["native Rust with rfc3161", "Go cgo with rfc3161", "WASM without rfc3161"],
       "assumptions": ["TSA SPKI pinned out of band", "no production TSA round trip has been validated"],
       "sources": [{"file": "core/src/rfc3161.rs", "symbol": "verify_token"}, {"file": "core/src/anchor.rs", "symbol": "AnchorError::Unsupported"}],
-      "proofs": [{"file": "core/src/anchor.rs", "symbol": "rfc3161_no_trusted_tsa_is_an_error_not_a_pass"}, {"file": "scripts/check-staticlib-fresh.sh", "symbol": "staticlib"}],
+      "proofs": [{"file": "core/src/anchor.rs", "symbol": "rfc3161_no_trusted_tsa_is_an_error_not_a_pass"}, {"file": "scripts/check-staticlib-fresh.sh", "symbol": "the cgo staticlib is OLDER than core source"}],
       "gates": ["core", "store-postgres", "wasm"]
     },
     {

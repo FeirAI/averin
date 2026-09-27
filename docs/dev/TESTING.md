@@ -117,16 +117,24 @@ Encoded capabilities, public keys, signatures and digest strings retain their fo
 decoders; they are never normalized as human text. Existing stored identifiers are never rewritten;
 an ambiguous historical spelling requires explicit reconciliation.
 
-The proofs are CI gates (`formal-lean`, `formal-refinement`, `formal-mutants`, `formal-kani` and
-`formal-tla` in `.github/workflows/ci.yml`). Run them locally with `make formal`, or one at a time:
+The proofs are CI gates in `.github/workflows/ci.yml`: `formal-lean`, `formal-refinement`,
+`formal-production` (Charon/Aeneas extraction of the seal core, the verdict kernel and the parser,
+their refinement proofs including the parser totality theorem `parse_document_total`, and the axiom
+audit), `formal-mutants`, `formal-kani`, `formal-kani-extended` (one job per extended harness),
+`formal-kani-strings-ascii`/`-mixed`/`-pure` (the 17,031-case string round trip, split by cost;
+not yet claimed), `formal-tla`, and the `fuzz` campaign. Run them locally with `make formal`, or
+one at a time:
 
 ```bash
 cd formal/lean && lake build --wfail && ./check-axioms.sh   # Lean 4.30.0 (pinned in lean-toolchain)
 python3 formal/check-refinement.py                          # tag inventory: Rust tags <-> Lean families
 (cd formal/lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json)
 cargo test -p averin-decision-core --test oracle            # Rust bytes == executable Lean model
+bash formal/run-production-refinement.sh                    # plan 012: needs the pinned Charon/Aeneas/Lean 4.31
 bash formal/check-mutants.sh                                # every known drift is caught by some gate
 bash formal/run-kani.sh                                     # Kani 0.68 bounded proofs (default set)
+bash formal/run-kani.sh --extended                          # also the extended families (hours)
+bash formal/run-fuzz.sh pr                                  # deterministic RCP fuzz, native + WASM
 bash formal/tla/run-tlc.sh                                  # TLC; downloads a pinned tla2tools.jar, needs Java
 ```
 

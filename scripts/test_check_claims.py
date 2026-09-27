@@ -30,6 +30,12 @@ class ClaimCheckerTest(unittest.TestCase):
         self.assertTrue(any("missing symbol" in error for error in
                             checker.check_manifest(data, ROOT, self.workflow)))
 
+    def test_trivial_symbol_rejected(self):
+        data = copy.deepcopy(self.data)
+        data["claims"][0]["sources"][0]["symbol"] = "main"
+        self.assertTrue(any("too short" in error for error in
+                            checker.check_manifest(data, ROOT, self.workflow)))
+
     def test_path_traversal_rejected(self):
         data = copy.deepcopy(self.data)
         data["claims"][0]["sources"][0]["file"] = "../outside.lean"
