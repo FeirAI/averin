@@ -7,15 +7,15 @@
 # rustc is governed by rust-toolchain.toml, and the published digest is pinned per verifier/SUPPLY-CHAIN.md.
 FROM rust:1-bookworm AS wasmbuild
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY core ./core
 RUN rustup target add wasm32-unknown-unknown \
- && cargo build -p averin-decision-core --release --target wasm32-unknown-unknown --no-default-features
+ && cargo build --locked -p averin-decision-core --release --target wasm32-unknown-unknown --no-default-features
 
 FROM oven/bun:1 AS webbuild
 WORKDIR /src/web
 COPY web/package.json web/bun.lock* ./
-RUN bun install --frozen-lockfile || bun install
+RUN bun install --frozen-lockfile
 COPY web .
 RUN bun run build
 

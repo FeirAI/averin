@@ -9,7 +9,9 @@
 # container regardless of the rust: image's default), so the staticlib is reproducible independent of this tag.
 FROM rust:1-bookworm AS rustbuild
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+# rust-toolchain.toml pins rustc 1.92.0 (rustup inside the image honors it); --locked refuses any
+# Cargo.lock drift.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY core ./core
 # PROD: build the integrity core with the `server` profile (Cargo.toml: release optimizations,
 # overflow checks, panic=unwind) and the rfc3161 feature the server's verifier needs (as `make core`).
@@ -18,16 +20,17 @@ COPY core ./core
 # the staticlib into the target/debug path the cgo LDFLAGS (${SRCDIR}/../../../target/debug)
 # expect, so the image links it WITHOUT changing the source #cgo directive (local dev still builds
 # debug unchanged).
-RUN cargo build --profile server -p averin-decision-core --features rfc3161
+RUN cargo build --locked --profile server -p averin-decision-core --features rfc3161
 
 FROM golang:1.25.13-bookworm AS gobuild
 WORKDIR /src
 COPY . .
 COPY --from=rustbuild /src/target/server/libaverin_decision_core.a ./target/debug/libaverin_decision_core.a
 WORKDIR /src/server
-RUN CGO_ENABLED=1 go build -o /out/averin-server ./cmd/averin-server \
- && CGO_ENABLED=1 go build -o /out/averin-proxy  ./cmd/averin-proxy \
- && CGO_ENABLED=1 go build -o /out/averin-migrate ./cmd/averin-migrate
+# -mod=readonly: go.mod/go.sum must already describe every module (no implicit updates).
+RUN CGO_ENABLED=1 go build -mod=readonly -o /out/averin-server ./cmd/averin-server \
+ && CGO_ENABLED=1 go build -mod=readonly -o /out/averin-proxy  ./cmd/averin-proxy \
+ && CGO_ENABLED=1 go build -mod=readonly -o /out/averin-migrate ./cmd/averin-migrate
 
 FROM debian:bookworm-slim
 # Pin a NUMERIC uid/gid so k8s `runAsNonRoot` + `runAsUser: 65532` can verify non-root (the
