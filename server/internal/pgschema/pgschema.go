@@ -502,12 +502,19 @@ func CheckRuntime(ctx context.Context, dsn string) error {
 			return fmt.Errorf("pgschema: append-only table %s is missing at schema version %d", t.table, version)
 		}
 		for _, privilege := range t.forbidden {
-			var held bool
-			if err := pool.QueryRow(ctx, `SELECT has_table_privilege(current_user,to_regclass($1),$2)`, t.table, privilege).Scan(&held); err != nil {
+			// Held by the runtime or by ANY role it is a member of, inherited or not (a NOINHERIT /
+			// INHERIT FALSE membership is still usable through SET ROLE), at table or column level
+			// (a column grant of INSERT/UPDATE is enough to write rows).
+			var via *string
+			if err := pool.QueryRow(ctx, `SELECT g.rolname FROM pg_roles g
+				WHERE pg_has_role(current_user, g.oid, 'MEMBER')
+				  AND (has_table_privilege(g.oid, to_regclass($1), $2)
+				       OR ($2 IN ('INSERT','UPDATE') AND has_any_column_privilege(g.oid, to_regclass($1), $2)))
+				ORDER BY g.rolname LIMIT 1`, t.table, privilege).Scan(&via); err != nil && err != pgx.ErrNoRows {
 				return fmt.Errorf("pgschema: runtime privilege %s on %s: %w", privilege, t.table, err)
 			}
-			if held {
-				return fmt.Errorf("pgschema: runtime role %q holds %s on append-only table %s (directly or through a role); revoke it before serving", name, privilege, t.table)
+			if via != nil {
+				return fmt.Errorf("pgschema: runtime role %q holds %s on append-only table %s (through role %q, directly, inherited, reachable by SET ROLE or on a column); revoke it before serving", name, privilege, t.table, *via)
 			}
 		}
 	}

@@ -736,6 +736,10 @@ func TestTenantNonceRuntimeReadinessRequiresLeastPrivilege(t *testing.T) {
 		{"GRANT UPDATE ON revocation_events TO " + group + "; GRANT " + group + " TO " + role, "REVOKE " + group + " FROM " + role, "UPDATE on append-only table revocation_events"},
 		{"GRANT TRUNCATE ON broker_seq_void TO " + role, "REVOKE TRUNCATE ON broker_seq_void FROM " + role, "TRUNCATE on append-only table broker_seq_void"},
 		{"GRANT INSERT ON schema_migrations TO " + role, "REVOKE INSERT ON schema_migrations FROM " + role, "INSERT on append-only table schema_migrations"},
+		// Review M1: a column-level grant writes rows too, and a non-inherited membership is usable by SET ROLE.
+		{"GRANT UPDATE (json) ON records TO " + role, "REVOKE UPDATE (json) ON records FROM " + role, "UPDATE on append-only table records"},
+		{"GRANT INSERT (version) ON schema_migrations TO " + role, "REVOKE INSERT (version) ON schema_migrations FROM " + role, "INSERT on append-only table schema_migrations"},
+		{"GRANT DELETE ON anchors TO " + group + "; GRANT " + group + " TO " + role + " WITH INHERIT FALSE", "REVOKE " + group + " FROM " + role, "DELETE on append-only table anchors (through role \"" + group + "\""},
 		// Owning ANY table (not just the originally listed nine) is refused.
 		{"ALTER TABLE anchors OWNER TO " + role, "ALTER TABLE anchors OWNER TO " + owner, "owns or inherits owner membership for anchors"},
 		{"ALTER TABLE pending_grants OWNER TO " + group + "; GRANT " + group + " TO " + role, "REVOKE " + group + " FROM " + role + "; ALTER TABLE pending_grants OWNER TO " + owner, "pending_grants"},
