@@ -133,7 +133,7 @@
     </div>
 
     <script type="module">
-      import { claimVerdict } from "./claim-verdict.js";
+      import { claimVerdict, historicalClaimNote } from "./claim-verdict.js";
       import { revocationView } from "./revocation-view.js";
       import { initAverin } from "./averin.js";
 
@@ -341,6 +341,17 @@
             ? `<div class="vsub ok">Trust roots externally pinned: record <b>authenticity</b> is proven against keys you supplied out of band.</div>`
             : `<div class="vsub">Structure valid &amp; internally consistent, but trust roots were <b>NOT externally pinned</b> (the only trust root is the bundle's own embedded keys, so a fully self-signed bundle reaches this same state). <b>Authenticity is unverified.</b> Pin <code>signing_keys</code> below to earn a green PASS.</div>`;
 
+        // ---- V-L3: name the requested historical claim's own decision next to the legacy verdict, even
+        // when !r.ok (verdictCaveat above is "" in that case). The legacy ok stays false while any revoked
+        // grant was used, even when this claim is satisfied, so a caller who requested it must read claims.*
+        // here rather than infer it from ok. ----
+        const historicalDecision = claim.valid && r.claims.requested === "historical_authorized_as_of_snapshot"
+          ? historicalClaimNote(r)
+          : null;
+        const historicalNote = historicalDecision
+          ? `<div class="vsub">Requested historical_authorized_as_of_snapshot claim: <b>${esc(historicalDecision)}</b>. The legacy verdict above stays FAIL while any revoked grant was used; read this claim, not ok.</div>`
+          : "";
+
         // ---- Revocation present but never evaluated (averin-verifier#2). ----
         // When a top-level revocation structure is in the bundle but revocation_keys was NOT pinned, the core
         // returns status "absent", indistinguishable from a bundle with no revocation at all. Surface it so an
@@ -374,6 +385,7 @@
         $("out").innerHTML = `<div class="panel">
           <div class="verdict ${verdictClass}">${verdictWord}</div>
           ${verdictCaveat}
+          ${historicalNote}
           ${r.first_broken_link ? `<div class="vsub">First broken link: <code>${esc(r.first_broken_link)}</code></div>` : ""}
           ${revWarn}
           ${rootWarn}

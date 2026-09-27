@@ -2,10 +2,23 @@
 // revocation always blocks; the historical section appears only under the caller-selected
 // db_serialized_v1 policy and never claims physical action time.
 const ORDERING = {
-  proven_before: "proven before revocation",
   at_or_after: "at or after the cutoff",
   indeterminate: "indeterminate",
 };
+
+// V-L4: "proven before revocation" is only true of a grant that IS a revoked_prospective grant
+// (the receipt precedes that grant's own cutoff). A proven_before receipt against a grant that is
+// not_revoked was never headed for a cutoff at all, so label it as authorized-as-of-snapshot
+// instead of implying a revocation the grant never had. Any other or unknown grant state is
+// conservative: never say "proven before revocation" unless the grant is revoked_prospective, and
+// never say "grant not revoked" unless current_revocation is exactly not_revoked.
+function provenBeforeLabel(grantRevocations, grantId) {
+  const g = (grantRevocations || []).find((g) => g?.grant_id === grantId);
+  const state = g?.current_revocation;
+  if (state === "revoked_prospective") return "proven before revocation";
+  if (state === "not_revoked") return "authorized as of snapshot (grant not revoked)";
+  return "indeterminate";
+}
 
 export function revocationView(report) {
   const t = report?.revocation_temporal;
@@ -25,7 +38,10 @@ export function revocationView(report) {
   const decision = report?.claims_version === "2" ? (report?.claims?.historical_authorized_as_of_snapshot ?? "insufficient") : "unavailable";
   const receipts = (Array.isArray(t.receipt_ordering) ? t.receipt_ordering : []).map((r) => {
     const order = r.authorization_order == null ? "no ordinal" : `ordinal ${r.authorization_order}`;
-    return `${r.record_id} (${r.kind}, ${order}): ${ORDERING[r.historical_ordering] ?? "indeterminate"}`;
+    const label = r.historical_ordering === "proven_before"
+      ? provenBeforeLabel(t.grant_revocations, r.grant_id)
+      : (ORDERING[r.historical_ordering] ?? "indeterminate");
+    return `${r.record_id} (${r.kind}, ${order}): ${label}`;
   });
   return {
     current,

@@ -33,6 +33,29 @@ test("an unknown claims contract never shows a historical decision", () => {
   expect(revocationView({})).toBeNull();
 });
 
+test("proven_before for a not_revoked grant reads as authorized as of snapshot, not a revocation", () => {
+  const r = report("db_serialized_v1");
+  r.revocation_temporal.receipt_ordering = [
+    { record_id: "use-2", kind: "use", grant_id: "g2", authorization_order: 3, historical_ordering: "proven_before" },
+  ];
+  const v = revocationView(r);
+  expect(v.historical.receipts).toEqual(["use-2 (use, ordinal 3): authorized as of snapshot (grant not revoked)"]);
+});
+
+test("proven_before for an unknown or unverified-revocation grant is indeterminate, never a claim either way", () => {
+  const r = report("db_serialized_v1");
+  r.revocation_temporal.grant_revocations.push({ grant_id: "g3", current_revocation: "revoked_unverified", cutoff_order: null });
+  r.revocation_temporal.receipt_ordering = [
+    { record_id: "use-3", kind: "use", grant_id: "g3", authorization_order: 1, historical_ordering: "proven_before" },
+    { record_id: "use-4", kind: "use", grant_id: "no-such-grant", authorization_order: 1, historical_ordering: "proven_before" },
+  ];
+  const v = revocationView(r);
+  expect(v.historical.receipts).toEqual([
+    "use-3 (use, ordinal 1): indeterminate",
+    "use-4 (use, ordinal 1): indeterminate",
+  ]);
+});
+
 test("unevaluated revocation is never presented as clean", () => {
   const r = {claims_version: "2", revocation_temporal: {policy: "strict", grant_revocations: [
     {grant_id: "g1", current_revocation: "not_evaluated", cutoff_order: null}]}};

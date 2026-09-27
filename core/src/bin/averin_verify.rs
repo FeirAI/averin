@@ -259,6 +259,9 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         println!(
             "RESULT: PASS ({requested}) — requested claim satisfied; integrity diagnostics clean."
         );
+        if let Some(note) = historical_claim_note(&report) {
+            println!("{note}");
+        }
         println!(
             "        capstone: action_completeness={} · grant_accountability={} · broker_trust={}",
             gs("action_completeness"),
@@ -271,8 +274,35 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         println!(
             "RESULT: FAIL — integrity diagnostics or requested claim are not satisfied; see above."
         );
+        if let Some(note) = historical_claim_note(&report) {
+            println!("{note}");
+        }
         ExitCode::from(1)
     }
+}
+
+// V-L3: the legacy `ok` field stays false while any revoked grant was used, even when the
+// caller's requested historical_authorized_as_of_snapshot claim is satisfied (the use happened
+// before a prospective cutoff). A consumer of that claim must read claims.* directly, never infer
+// it from `ok`, so print the claim's own decision as a prominent line next to the legacy verdict
+// whenever it was the requested claim and the claims contract is valid (claims_version "2").
+fn historical_claim_note(report: &CanonValue) -> Option<String> {
+    if report.get("claims_version").and_then(CanonValue::as_str) != Some("2") {
+        return None;
+    }
+    let claims = report.get("claims")?;
+    if claims.get("requested").and_then(CanonValue::as_str)
+        != Some("historical_authorized_as_of_snapshot")
+    {
+        return None;
+    }
+    let decision = claims
+        .get("historical_authorized_as_of_snapshot")
+        .and_then(CanonValue::as_str)
+        .unwrap_or("insufficient");
+    Some(format!(
+        "        historical_authorized_as_of_snapshot: {decision} (read claims.*; the legacy ok stays false while any revoked grant was used)"
+    ))
 }
 
 fn claim_contract_satisfied(report: &CanonValue) -> bool {
@@ -395,5 +425,47 @@ mod claim_contract_tests {
             }
         }
         assert!(!claim_contract_satisfied(&mismatched));
+    }
+
+    fn historical_report(version: &str, decision: &str) -> CanonValue {
+        CanonValue::object(vec![
+            ("claims_version".into(), CanonValue::string(version)),
+            ("ok".into(), CanonValue::Bool(false)),
+            (
+                "claims".into(),
+                CanonValue::object(vec![
+                    (
+                        "requested".into(),
+                        CanonValue::string("historical_authorized_as_of_snapshot"),
+                    ),
+                    (
+                        "historical_authorized_as_of_snapshot".into(),
+                        CanonValue::string(decision),
+                    ),
+                    ("requested_decision".into(), CanonValue::string(decision)),
+                ])
+                .unwrap(),
+            ),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn historical_claim_note_names_the_decision_even_while_ok_is_false() {
+        let note = historical_claim_note(&historical_report("2", "satisfied"))
+            .expect("requested historical claim under a valid v2 contract yields a note");
+        assert!(note.contains("satisfied"));
+        assert!(note.contains("historical_authorized_as_of_snapshot"));
+    }
+
+    #[test]
+    fn historical_claim_note_is_none_for_a_different_requested_claim() {
+        assert!(historical_claim_note(&report("2", "satisfied")).is_none());
+    }
+
+    #[test]
+    fn historical_claim_note_is_none_for_an_unsupported_claims_version() {
+        assert!(historical_claim_note(&historical_report("1", "satisfied")).is_none());
+        assert!(historical_claim_note(&CanonValue::object(vec![]).unwrap()).is_none());
     }
 }
