@@ -81,25 +81,33 @@ func (p *Postgres) PendingGrantLive(projectID, grantID string, _ time.Time, ttl 
 	return live, nil
 }
 
+// ProjectTxMaxLifetime bounds how long a project write transaction can stay open: WithProjectWrite's
+// 45 s session bound, plus the 10 s it allows COMMIT after that (the commit runs on a context detached
+// from the session deadline).
+const ProjectTxMaxLifetime = 55 * time.Second
+
 // PruneExpiredPendingGrants deletes pending_grants rows that no prepare or finalize can still use, one
 // project at a time under that project's write transaction (guard row held), and returns the number
-// removed. maxProjects bounds one sweep; later sweeps pick up the rest.
+// removed. maxProjects bounds one sweep; later sweeps pick up the rest. Candidates are taken in random
+// order and one project's failure does not stop the sweep (the errors are joined), so a project that
+// keeps failing cannot starve the others.
 //
 // A row is live for a guarded prepare/finalize while created_at >= now() - ttl, where now() is that
-// transaction's start. Every project write transaction ends within its 45 s session bound, so any
-// transaction that could still judge a row live started no earlier than clock_timestamp() - grace when
-// grace exceeds that bound. Deleting only rows older than clock_timestamp() - ttl - grace (database clock,
-// read after the guard is held) therefore never removes a row a finalize could legitimately use.
+// transaction's start. Every project write transaction ends within ProjectTxMaxLifetime (55 s,
+// including its commit window), so any transaction that could still judge a row live started no
+// earlier than clock_timestamp() - grace when grace is at least that bound. Deleting only rows older
+// than clock_timestamp() - ttl - grace (database clock, read after the guard is held) therefore never
+// removes a row a finalize could legitimately use.
 func (p *Postgres) PruneExpiredPendingGrants(ctx context.Context, ttl, grace time.Duration, maxProjects int) (int64, error) {
 	if p.tx != nil {
 		return 0, errors.New("store: pending sweep must run on the root store")
 	}
-	if ttl <= 0 || grace < 45*time.Second || maxProjects < 1 {
-		return 0, errors.New("store: pending sweep needs positive ttl, grace >= the 45s transaction bound, and a project budget")
+	if ttl <= 0 || grace < ProjectTxMaxLifetime || maxProjects < 1 {
+		return 0, fmt.Errorf("store: pending sweep needs positive ttl, grace >= the %s project transaction lifetime, and a project budget", ProjectTxMaxLifetime)
 	}
 	horizon := (ttl + grace).Seconds()
-	rows, err := p.pool.Query(ctx, `SELECT DISTINCT project_id FROM pending_grants
-		WHERE created_at < clock_timestamp() - make_interval(secs => $1) ORDER BY project_id LIMIT $2`, horizon, maxProjects)
+	rows, err := p.pool.Query(ctx, `SELECT project_id FROM (SELECT DISTINCT project_id FROM pending_grants
+		WHERE created_at < clock_timestamp() - make_interval(secs => $1)) candidates ORDER BY random() LIMIT $2`, horizon, maxProjects)
 	if err != nil {
 		return 0, fmt.Errorf("store: pending sweep candidates: %w", err)
 	}
@@ -117,6 +125,7 @@ func (p *Postgres) PruneExpiredPendingGrants(ctx context.Context, ttl, grace tim
 		return 0, fmt.Errorf("store: pending sweep candidates: %w", err)
 	}
 	var removed int64
+	var errs []error
 	for _, project := range projects {
 		var n int64
 		err := p.WithProjectWrite(ctx, project, func(st Store) error {
@@ -133,9 +142,10 @@ func (p *Postgres) PruneExpiredPendingGrants(ctx context.Context, ttl, grace tim
 			return nil
 		})
 		if err != nil {
-			return removed, err
+			errs = append(errs, fmt.Errorf("project %q: %w", project, err))
+			continue
 		}
 		removed += n
 	}
-	return removed, nil
+	return removed, errors.Join(errs...)
 }

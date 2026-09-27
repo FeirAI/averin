@@ -66,6 +66,8 @@ REQUIRED = (
     f"{STORE_PACKAGE}:TestPostgresProjectWriteTwoPools",
     f"{STORE_PACKAGE}:TestPostgresAppendOnlyRejectsMutation",
     f"{STORE_PACKAGE}:TestPostgresProjectGuardWorksForNonOwnerRuntime",
+    f"{STORE_PACKAGE}:TestPostgresPendingSweepPrunesOnlyUnusableRows",
+    f"{STORE_PACKAGE}:TestPostgresPendingSweepContinuesPastAFailingProject",
     f"{RESOURCESHIM_PACKAGE}:TestTokenTheftFailsPoP",
     # Hardening review: pool starvation, pending sweep, runtime privilege and cutover barriers.
     f"{STORE_PACKAGE}:TestPostgresHotProjectDoesNotStarvePool",

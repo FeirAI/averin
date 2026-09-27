@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -151,8 +152,8 @@ func TestPostgresPendingSweepPrunesOnlyUnusableRows(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := p.PruneExpiredPendingGrants(ctx, ttl, 10*time.Second, 10); err == nil {
-		t.Fatal("sweep accepted a grace shorter than the transaction bound")
+	if _, err := p.PruneExpiredPendingGrants(ctx, ttl, 50*time.Second, 10); err == nil {
+		t.Fatal("sweep accepted a grace shorter than the transaction lifetime (45 s session + 10 s commit)")
 	}
 
 	// While project a's guard is held, the sweep must not delete a's rows.
@@ -168,7 +169,8 @@ func TestPostgresPendingSweepPrunesOnlyUnusableRows(t *testing.T) {
 	}()
 	<-holding
 	blocked, bcancel := context.WithTimeout(ctx, 300*time.Millisecond)
-	if _, err := p.PruneExpiredPendingGrants(blocked, ttl, grace, 10); err == nil {
+	nBlocked, err := p.PruneExpiredPendingGrants(blocked, ttl, grace, 10)
+	if err == nil {
 		bcancel()
 		t.Fatal("sweep completed while project a's guard was held")
 	}
@@ -183,8 +185,8 @@ func TestPostgresPendingSweepPrunesOnlyUnusableRows(t *testing.T) {
 	}
 
 	n, err := p.PruneExpiredPendingGrants(ctx, ttl, grace, 10)
-	if err != nil || n != 2 {
-		t.Fatalf("sweep removed %d rows, err=%v; want the two expired rows", n, err)
+	if err != nil || nBlocked+n != 2 {
+		t.Fatalf("sweeps removed %d+%d rows, err=%v; want the two expired rows", nBlocked, n, err)
 	}
 	var left []string
 	rows, err := p.pool.Query(ctx, `SELECT project_id||'/'||idem_key FROM pending_grants ORDER BY 1`)
@@ -208,5 +210,48 @@ func TestPostgresPendingSweepPrunesOnlyUnusableRows(t *testing.T) {
 	}
 	if n, err := p.PruneExpiredPendingGrants(ctx, ttl, grace, 10); err != nil || n != 0 {
 		t.Fatalf("second sweep removed %d, err=%v", n, err)
+	}
+}
+
+// TestPostgresPendingSweepContinuesPastAFailingProject: a project whose guard cannot be taken (held by
+// another store's transaction until lock_timeout) fails alone; the sweep still prunes the other
+// projects and reports the failure, and a later sweep prunes the blocked project.
+func TestPostgresPendingSweepContinuesPastAFailingProject(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	const ttl, grace = 15 * time.Minute, time.Minute
+	for _, project := range []string{"a", "b", "c"} {
+		if _, err := p.pool.Exec(ctx, `INSERT INTO pending_grants(project_id,idem_key,grant_id,payload,created_at)
+			VALUES ($1,'expired',$1||':expired','{}',clock_timestamp() - interval '2 hours')`, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := &Postgres{pool: p.pool} // a separate store: its in-process gates do not queue the sweep
+	holding := make(chan struct{})
+	release := make(chan struct{})
+	holder := make(chan error, 1)
+	go func() {
+		holder <- other.WithProjectWrite(ctx, "a", func(Store) error {
+			close(holding)
+			<-release
+			return nil
+		})
+	}()
+	<-holding
+	n, err := p.PruneExpiredPendingGrants(ctx, ttl, grace, 10)
+	if err == nil || !strings.Contains(err.Error(), `project "a"`) {
+		t.Fatalf("sweep with a's guard held elsewhere: err=%v", err)
+	}
+	if n != 2 {
+		t.Fatalf("sweep removed %d rows past the failing project; want b and c", n)
+	}
+	close(release)
+	if err := <-holder; err != nil {
+		t.Fatal(err)
+	}
+	if n, err := p.PruneExpiredPendingGrants(ctx, ttl, grace, 10); err != nil || n != 1 {
+		t.Fatalf("later sweep removed %d, err=%v; want a's row", n, err)
 	}
 }

@@ -89,7 +89,8 @@ func repairEvidenceInts(ev map[string]any, keys ...string) {
 }
 
 // pendingSweepGrace keeps a pruned row beyond pendingTTL for longer than any project write transaction
-// can run (45 s), so the sweep never removes a row that an in-flight prepare/finalize still judges live.
+// can run (store.ProjectTxMaxLifetime: the 45 s session plus its 10 s commit window), so the sweep never
+// removes a row that an in-flight prepare/finalize still judges live.
 const pendingSweepGrace = time.Minute
 
 // pendingPruner is implemented by stores whose pending grants outlive the process (Postgres).
@@ -119,7 +120,7 @@ func (s *Server) StartPendingSweeper(ctx context.Context, interval time.Duration
 				n, err := pr.PruneExpiredPendingGrants(sctx, pendingTTL, pendingSweepGrace, 256)
 				cancel()
 				if err != nil {
-					log.Printf("WARNING: pending grant sweep failed (expired rows retained until the next sweep): %v", err)
+					log.Printf("WARNING: pending grant sweep failed for some projects (removed %d; their expired rows are retained until the next sweep): %v", n, err)
 				} else if n > 0 {
 					log.Printf("pending grant sweep removed %d expired pending grant(s)", n)
 				}
