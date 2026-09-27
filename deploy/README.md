@@ -6,8 +6,13 @@ No Docker image is supplied with this first alpha. `Dockerfile.server`,
 `Dockerfile.web` and `docker-compose.yml` remain as source recipes, but their
 image build, runtime dependencies and deployment behaviour have not been
 validated for this alpha. This page is recipe documentation, not a turnkey
-or production-readiness claim. The open Docker feature/linkage and real-TSA
-validation limits are not closed by choosing source-only.
+or production-readiness claim. `Dockerfile.server` now builds the linked core
+with the `rfc3161` feature (as `make core` does) and the `server` Cargo
+profile (panic=unwind, so the FFI boundary catches a verifier panic and fails
+closed instead of aborting the server; overflow checks on), but that image
+build has not been run; the database role layout was validated as described
+under "Database roles". The real-TSA validation limit is not closed by
+choosing source-only.
 
 For native-build instructions, see [Quickstart](../docs/dev/QUICKSTART.md).
 Toolchain and dependency prerequisites still apply; source-only does not mean
@@ -20,8 +25,38 @@ From the repo root, the existing recipe command is:
 ```bash
 export AVERIN_SIGNING_SEED=$(openssl rand -hex 32)          # local seed example; no KMS integration validated
 export AVERIN_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24)   # shared secret; agents send it as X-Averin-Proxy-Token / Bearer
+export AVERIN_DB_SUPERUSER_PASSWORD=$(openssl rand -hex 24) # Postgres bootstrap superuser (first boot only)
+export AVERIN_DB_OWNER_PASSWORD=$(openssl rand -hex 24)     # averin_owner: migration identity, owns the schema
+export AVERIN_DB_RUNTIME_PASSWORD=$(openssl rand -hex 24)   # averin_app: the server's least-privilege identity
 docker compose -f deploy/docker-compose.yml up --build
 ```
+
+The passwords are placed in connection URLs, so keep them URL-safe (hex, as above).
+
+### Database roles
+
+`averin-server` refuses to start as a superuser, as the owner of any schema table, with mutation
+privilege on an append-only table, or against an empty database (it never creates its own schema).
+The compose file therefore separates the identities:
+
+| Step | Service | Identity | What it does |
+|------|---------|----------|--------------|
+| 1 | `db` (first boot of an empty volume) | bootstrap superuser `postgres` | `postgres/01-roles.sh` creates `averin_owner` (non-superuser, owns the `averin` database) and `averin_app` (non-superuser, no memberships, `CONNECT` and schema `USAGE` only) |
+| 2 | `migrate` (one-shot) | `averin_owner` | `averin-migrate --init`: creates the schema in an empty database; a no-op at the current schema version; **fails** on an older schema, which needs the explicit operator cutover ([operator verification](../docs/operator-verification.md#required-deployment-cutoff)), so nothing else starts |
+| 3 | `grants` (one-shot) | `averin_owner` | `postgres/runtime-grants.sql`: DML on the averin tables for `averin_app`, then revokes every privilege the append-only contract forbids (the same lists `pgschema.CheckRuntime` enforces) |
+| 4 | `server` | `averin_app` | starts only after `grants` succeeded; its startup re-checks the role before serving |
+
+The runtime role keeps full DML on operational tables (nonce/JTI claims, pending grants and the like);
+the append-only and immutable tables get only what the server needs. Role creation runs only on an
+empty data volume: to change a role password later, use `ALTER ROLE` and update the environment.
+
+What was validated (2026-09-27, not a turnkey claim): this compose file's `db` service on a fresh
+volume (first-boot role script), `averin-migrate --init` as `averin_owner` (twice: the second run is a
+no-op), the compose `grants` service, and `averin-server` as `averin_app`, using binaries linked
+against the `server`-profile core built on the host rather than the image. The server refused the
+empty database, the missing grants, the owner and the superuser credentials; as `averin_app` it
+answered `/healthz` and `/readyz`, recorded, checkpointed and verified a record (`ok: true`), and
+`averin_app` could not `DELETE` from `records`. The images themselves were not built in that run.
 
 | Service | Port | What |
 |---------|------|------|
@@ -89,7 +124,9 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 | `AVERIN_BROKER_SEQ_VOID_MIN_AGE` | server | `1h` | Safety age before `POST /v2/broker-seq/void` may fill a reserved, never-recorded `broker_seq` with a signed `grant_void` tombstone (floor `20m`). **Upgrade:** a project whose checkpoints are refused over a broker_seq gap after deploying this build is unwedged this way — see [operator verification](../docs/operator-verification.md#unwedging-a-refused-checkpoint-grant_void-tombstones-d6). |
 | `AVERIN_BROKER_ID` | server | (none) | M4 federation identity. Grants are tagged with this `broker_id` and checkpoints carry a per-broker_id `broker_grant_heads` map — verify with `federated_broker_keys[<id>]`. Requires the broker. Unset = single-broker. |
 | `AVERIN_REVOCATION_SEED` | server | (none) | 64 hex chars. Enables M5 revocation (`POST /v2/revoke`); exports carry a signed `revocation_list`. MUST be role-separated from the signing/broker/resource/attestation/cosig keys. Unset = off. |
-| `AVERIN_DATABASE_URL` | server | (none) | Postgres DSN for the database-backed store and ledger, as a least-privilege runtime role distinct from the table owner. The server refuses to start as the table owner or against an empty database: initialize with `averin-migrate --init` under the owner/migration credential and grant the runtime role first (see `docs/dev/CONFIGURATION.md`). The single-credential compose default therefore needs that split before it can use Postgres. One synthetic configuration was tested at `8ac16313`; production durability/isolation are not established. Unset = in-memory (dev, NOT durable). |
+| `AVERIN_DATABASE_URL` | server | compose: `averin_app` | Postgres DSN for the database-backed store and ledger, as a least-privilege runtime role distinct from the table owner. The server refuses to start as the table owner, as a superuser or against an empty database: initialize with `averin-migrate --init` under the owner/migration credential and grant the runtime role first (compose does both, see "Database roles"; `docs/dev/CONFIGURATION.md`). Production durability/isolation are not established. Unset = in-memory (dev, NOT durable). |
+| `AVERIN_DB_SUPERUSER_PASSWORD` / `AVERIN_DB_OWNER_PASSWORD` / `AVERIN_DB_RUNTIME_PASSWORD` | db, migrate, grants, server | **required** (compose sets `:?`) | passwords of the Postgres bootstrap superuser, `averin_owner` and `averin_app` (URL-safe) |
+| `AVERIN_MIGRATION_DATABASE_URL` | migrate | compose: `averin_owner` | the migration credential `averin-migrate` uses; never given to the server |
 | `AVERIN_API_KEYS` | server | (none) | `proj-a:tok1,tok2;proj-b:tok3` — per-project API-key auth. **Unset = unauthenticated** (dev/single-tenant only). |
 | `AVERIN_TSA_URL` | server | (none) | RFC 3161 TSA URL — anchors every checkpoint (threat #3 backdating). The verifier pins the TSA out-of-band (`tsa_keys`/`tsa_spki_b64`). |
 | `AVERIN_CONTENT_DIR` / `AVERIN_WITNESS_DIR` | server | (none) | durable content-store / append-only checkpoint-witness directories. |
