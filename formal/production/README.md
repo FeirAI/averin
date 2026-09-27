@@ -158,6 +158,22 @@ duplicate-key check `first_repeat` through the production merge sort). A vector'
 bounded by the input bytes consumed. For decoded strings this uses a byte-weight invariant: each
 UTF-16 unit counts the UTF-8 bytes it decodes to, and the total never exceeds the input consumed.
 
+**What "returns" means, precisely.** The theorem is about the extracted program in Aeneas' model
+of `std`, in which a `Vec` grows up to `usize::MAX` elements, allocation always succeeds and the
+call stack is unbounded. Three runtime limits of real Rust are not modelled:
+- `Vec`/`String` capacity overflow: Rust panics ("capacity overflow") when a requested capacity
+  exceeds `isize::MAX` bytes. On wasm32 (`usize` = 32 bits) this is reachable by a single string of
+  more than about 2^29 UTF-16 units, which the key sort and the strict UTF-16 decoder preallocate
+  for; the pre-rewrite parser had the same limit.
+- Allocation failure (out of memory): an abort, not a panic.
+- Stack depth: recursion is bounded by `MAX_DEPTH` = 256 nesting levels, but stack exhaustion is
+  not modelled.
+In the verifier these inputs are cut off before parsing: `verify_bundle_to_json` and
+`verify_bundle_with_json` reject a bundle over `MAX_BUNDLE_BYTES` (256 MiB, `core/src/verify.rs`)
+without parsing it, and 256 MiB of input cannot produce 2^29 UTF-16 units. The caller-supplied
+options JSON and the standalone canonicalize export (`averin_rcp_canonicalize`) have no such cap;
+their callers must bound input size.
+
 **Hypothesis `NfcFits`**: every string the trusted NFC primitive returns has at most `usize::MAX`
 UTF-8 bytes. This is Rust's `String` invariant (a returned `String` fits in memory, at most
 `isize::MAX` bytes). It is needed because the glue maps a Rust `String` to an unbounded Lean `String`,
