@@ -266,7 +266,7 @@ Three checks, each doing what it is good at:
 `formal/` and the directories the tag inventory sweeps), runs the gates, and passes only if every mutant is killed. It first checks that every
 gate passes on the unmutated tree, so a broken gate cannot count as a kill. For m3 and m4 the named
 Kani harness must itself report `VERIFICATION:- FAILED`. The same named-counterexample rule
-applies to m2, m9–m13 and m22–m24 (m14 dies to native gates only); an unwind failure, tool error,
+applies to m2, m9–m13 and m22–m25 (m14 dies to native gates only); an unwind failure, tool error,
 or timeout does not count.
 For m15–m21 the designated native test must complete and fail; an unrelated failure does not
 kill the mutant. The optional `MUTANTS_ONLY` selection still runs the full unmutated baseline and
@@ -298,6 +298,7 @@ accepts only exact patch basenames.
 | m22 | `Int(0)` serializes as `1` | Kani `integer_roundtrip_zero` (confirmed on final source) |
 | m23 | numeric input takes the general parser route | Kani fail-closed route guard in `integer_roundtrip_zero` (confirmed on final source) |
 | m24 | `utf16_units` preallocates half its input length | Kani fail-closed growth guard G1 in `utf16_key_order_is_transitive` (confirmed on final source) |
+| m25 | `decode_utf16_strict` preallocates one byte per unit | Kani fail-closed growth guard G1 in `utf16_strict_matches_std` (confirmed on final source) |
 | m60 | `next_utf8_char` stops checking that the announced UTF-8 sequence fits the input | regenerated production proof (`Refinement.Parse`, reason `proof`) only: reachable with invalid UTF-8 bytes, which no `&str` caller can supply |
 | m61 | `parse_literal` compares without checking the remaining length (`tru` reads past the end) | regenerated production proof (`proof`); also native gates |
 | m62 | `decimal_i64` drops its overflow guard (u64 magnitude overflows) | regenerated production proof (`proof`) |
@@ -350,7 +351,8 @@ each harness to report exactly its allowlisted stub lines:
   never reaches, is replaced by an unconditional panic. The numeric entry, number scanner,
   trailing-data check and serializer stay production code. Mutant m23 (numeric input forced onto
   the general route) must hit the guard.
-- *A1, a std-permitted behavior selection* (integer harnesses and string cases): `<*const u8>::align_offset`
+- *A1, a std-permitted behavior selection* (integer harnesses, string cases and
+  `utf16_strict_matches_std`): `<*const u8>::align_offset`
   returns `usize::MAX`. std documents that "it is permissible for the implementation to always
   return `usize::MAX`. Only your algorithm's performance can depend on getting a usable offset
   here, not its correctness." The proofs therefore cover std's UTF-8 validator on its
@@ -358,12 +360,14 @@ each harness to report exactly its allowlisted stub lines:
   internal panic-freedom stay inside the trusted Rust std boundary. Without A1, CBMC treats the
   heap alignment as symbolic and `String::from_utf8` in `serialize()` (and the string
   adapter's `from_utf8`) does not finish, even on concrete data.
-- *G1, a fail-closed std-path guard* (key-order harnesses): `Vec::push` asserts
+- *G1, a fail-closed std-path guard* (key-order harnesses and `utf16_strict_matches_std`): `Vec::push` asserts
   `len < capacity` and then runs exactly std's non-growth branch (write at `len`, set the length to
   `len + 1`). It supplies no behavior std would not; a push that would reallocate is a
   counterexample. `utf16_units` preallocates `with_capacity(s.len())` and never needs more (native
   test `utf16_units_fit_their_preallocation`); mutant m24 halves that capacity and must hit the
-  guard. The proofs rely on std's semantics for the non-growth path.
+  guard. `decode_utf16_strict` preallocates `3 * units.len()` bytes (a unit decodes to at most 3 UTF-8
+  bytes, a surrogate pair to 4); mutant m25 preallocates one byte per unit and must hit the guard in
+  `utf16_strict_matches_std`. The proofs rely on std's semantics for the non-growth path.
 
 `#![cfg_attr(kani, feature(allocator_api))]` in `core/src/lib.rs` exists only so G1 can name
 `Vec<T, A>`; production builds are unchanged.

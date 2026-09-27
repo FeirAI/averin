@@ -11,6 +11,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Kani builds the crate into a fresh target/kani/.../build/averin-decision-core/<hash> directory for
+# every distinct harness selection (about 90 MB each), so thousands of shard runs fill a disk.
+# KANI_PRUNE_BUILD=1 deletes the directory this invocation used once Kani has finished with it.
+prune_build() {
+  [ "${KANI_PRUNE_BUILD:-0}" = 1 ] || return 0
+  local dir
+  for dir in $(grep -o 'target/kani/[^ ]*/build/averin-decision-core/[0-9a-f]\{16\}' "$1" | sort -u); do
+    rm -rf "$dir"
+  done
+}
+
 run_harness() {
   local module qualified log proof_exit
   local -a kani_flags=() guard_flag=()
@@ -26,9 +37,10 @@ run_harness() {
     python3 formal/check-kani-domains.py >/dev/null || return 2
     kani_flags=(-Z stubbing)
     guard_flag=(--expect-guard)
-  elif [[ "$1" == utf16_key_order_is_* || "$1" == string_escape_roundtrip_* ]]; then
-    # The key-order proofs carry the fail-closed Vec::push growth guard (G1) and the string cases
-    # the align_offset selection (A1); bodies and attachment sites are pinned by
+  elif [[ "$1" == utf16_key_order_is_* || "$1" == string_escape_roundtrip_* || "$1" == utf16_strict_matches_std ]]; then
+    # The key-order proofs carry the fail-closed Vec::push growth guard (G1), the string cases the
+    # align_offset selection (A1), and the strict UTF-16 decoder both (it preallocates its output
+    # and validates it with String::from_utf8); bodies and attachment sites are pinned by
     # check-kani-shards.py, stub lines by check-kani-success.py.
     python3 formal/check-kani-shards.py >/dev/null || return 2
     kani_flags=(-Z stubbing)
@@ -39,6 +51,7 @@ run_harness() {
   cargo kani ${kani_flags[@]+"${kani_flags[@]}"} -p averin-decision-core --lib --no-default-features --exact --harness "$qualified" 2>&1 | tee "$log"
   proof_exit=${PIPESTATUS[0]}
   set -e
+  prune_build "$log"
   if ! python3 formal/check-kani-success.py "$log" "$proof_exit" "$qualified" ${guard_flag[@]+"${guard_flag[@]}"}; then
     echo "run-kani: proof log retained at $log" >&2
     # Preserve Kani's actual exit for the mutant checker: exit 1 is a completed
@@ -67,6 +80,7 @@ if [ "${1:-}" = "--group" ]; then
   cargo kani -Z stubbing ${job_args[@]+"${job_args[@]}"} -p averin-decision-core --lib --no-default-features --exact "${harness_args[@]}" 2>&1 | tee "$log"
   proof_exit=${PIPESTATUS[0]}
   set -e
+  prune_build "$log"
   # Every selected harness needs its own complete successful section (check-kani-success.py).
   if ! python3 formal/check-kani-success.py "$log" "$proof_exit" --many "${qualified[@]}"; then
     echo "run-kani: proof log retained at $log" >&2

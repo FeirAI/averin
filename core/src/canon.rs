@@ -1750,6 +1750,8 @@ mod kani_proofs {
     /// a lone surrogate, else yields the same scalars) for every 1- and 2-unit sequence — every
     /// surrogate-pair / lone-surrogate / BMP combination the decoder distinguishes.
     #[kani::proof]
+    #[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]
+    #[kani::stub(std::vec::Vec::push, push_without_growth)]
     #[kani::solver(kissat)]
     #[kani::unwind(4)]
     fn utf16_strict_matches_std() {

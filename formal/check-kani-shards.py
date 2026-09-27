@@ -260,10 +260,11 @@ GUARD_BODIES = {
 ALLOWED_STUBS = {
     "parse_top_level_general, reject_general_in_integer_proof": {"integer_roundtrip", "integer_roundtrip_shard"},
     "<*const u8>::align_offset, align_offset_usize_max": {
-        "integer_roundtrip", "integer_roundtrip_shard", "string_case",
+        "integer_roundtrip", "integer_roundtrip_shard", "string_case", "utf16_strict_matches_std",
     },
     "std::vec::Vec::push, push_without_growth": {
         "utf16_key_order_is_transitive", "key_order_shard", "utf16_key_order_is_exact_steered",
+        "utf16_strict_matches_std",
     },
 }
 
