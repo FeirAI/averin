@@ -14,12 +14,39 @@ import (
 	"github.com/feirai/averin/server/internal/pgschema"
 )
 
+// defaultTimeout bounds one migration run. Cutover steps rewrite every historical row they migrate in one
+// transaction (e.g. v7 backfills revocation events from records), so large histories may need more.
+const defaultTimeout = 90 * time.Second
+
+func flagSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
 func main() {
 	old := flag.String("old-runtime", "", "comma-separated retired old runtime database roles")
 	next := flag.String("new-runtime", "", "distinct new runtime database role")
 	purge := flag.Bool("purge-legacy", false, "remove aged legacy exclusions after the database-time hold")
 	init := flag.Bool("init", false, "bootstrap only a truly empty database with the migration credential")
+	timeout := flag.Duration("timeout", defaultTimeout, "overall deadline for the selected operation; raise it for large histories (env AVERIN_MIGRATE_TIMEOUT)")
 	flag.Parse()
+	if !flagSet("timeout") {
+		if raw := strings.TrimSpace(os.Getenv("AVERIN_MIGRATE_TIMEOUT")); raw != "" {
+			d, err := time.ParseDuration(raw)
+			if err != nil {
+				log.Fatalf("averin-migrate: AVERIN_MIGRATE_TIMEOUT: %v", err)
+			}
+			*timeout = d
+		}
+	}
+	if *timeout <= 0 {
+		log.Fatal("averin-migrate: timeout must be positive")
+	}
 	if flag.NArg() != 0 {
 		log.Fatal("averin-migrate: unexpected positional arguments")
 	}
@@ -34,7 +61,7 @@ func main() {
 		}
 		oldRoles = append(oldRoles, strings.TrimSpace(role))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	if *init {
 		if *purge || *old != "" || *next != "" {

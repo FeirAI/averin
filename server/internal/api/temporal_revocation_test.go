@@ -332,6 +332,8 @@ func TestTemporalIntrospectionValidatesGrantAndRetriesExactly(t *testing.T) {
 		"exp outlives":    introspectBody("bad-4", g2, "lease-n2", "read:orders", exp2+1, 0),
 		"before issuance": introspectBody("bad-5", g2, "lease-n2", "read:orders", exp2, exp2-7200),
 		"future":          introspectBody("bad-6", g2, "lease-n2", "read:orders", exp2, time.Now().Add(10*time.Minute).Unix()),
+		// V-L2: the verifier's window is [issued_at, min(effective_exp, exp)).
+		"at effective exp": introspectBody("bad-7", g2, "lease-n2", "read:orders", time.Now().Unix(), time.Now().Unix()),
 	} {
 		if code, body := do(t, h, "POST", "/v2/introspection", bad); code != http.StatusBadRequest {
 			t.Fatalf("%s accepted: %d %s", name, code, body)

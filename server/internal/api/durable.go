@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"time"
 
@@ -18,9 +17,10 @@ type durableWriter interface {
 }
 
 // WithDurable validates the auxiliary Postgres durable-state connection and
-// rehydrates legacy in-process diagnostic caches at boot. Authoritative pending
-// and revocation checks on request paths now use the project Store transaction;
-// these caches never grant permission. Main wires this to the same database as
+// rehydrates the legacy in-process revocation cache at boot. Authoritative pending
+// and revocation checks on request paths use the project Store transaction; the
+// cache never grants permission. Pending grants have no process-local copy: expired
+// pending_grants rows are pruned by the store's periodic sweep (StartPendingSweeper). Main wires this to the same database as
 // the Store and retains its readiness probe. Call after WithRevocation so the
 // optional cache is not reset after loading.
 func (s *Server) WithDurable(pd *pgdurable.Store) *Server {
@@ -43,36 +43,6 @@ func (s *Server) WithDurable(pd *pgdurable.Store) *Server {
 		log.Printf("revocation: rehydrated %d project(s) worth of revoked-grant set(s) from Postgres", n)
 	}
 
-	rows, err := pd.LoadPending(ctx)
-	if err != nil {
-		log.Fatalf("durable two-phase grants: rehydrate: %v", err)
-	}
-	now := s.now()
-	loaded := 0
-	s.pendingMu.Lock()
-	for _, row := range rows {
-		if now.Sub(row.Created) > pendingTTL {
-			// Expired — best-effort prune from Postgres too so it does not linger forever; harmless if this
-			// fails (LoadPending would just re-see it and re-skip it next boot).
-			if derr := pd.DeletePending(row.ProjectID, row.IdemKey); derr != nil {
-				log.Printf("WARNING: durable two-phase grants: prune expired pending row (project=%q idem=%q): %v", row.ProjectID, row.IdemKey, derr)
-			}
-			continue
-		}
-		var dto pendingGrantDTO
-		if uerr := json.Unmarshal(row.Payload, &dto); uerr != nil {
-			// A row we cannot parse is not safe to serve (a caller relying on the fields would misbehave), but
-			// it is also not a reason to refuse to boot — log it loudly and skip; a re-prepare from the client
-			// mints a fresh one. This should not happen outside a schema/format mismatch.
-			log.Printf("WARNING: durable two-phase grants: skipping unparseable pending row (project=%q idem=%q): %v", row.ProjectID, row.IdemKey, uerr)
-			continue
-		}
-		s.pending[pendingKey(row.ProjectID, row.IdemKey)] = dto.toPendingGrant(row.IdemKey)
-		loaded++
-	}
-	s.pendingMu.Unlock()
-	log.Printf("two-phase grants: rehydrated %d pending grant(s) from Postgres", loaded)
-
 	return s
 }
 
@@ -93,7 +63,7 @@ func dtoFromPending(p *pendingGrant) pendingGrantDTO {
 }
 
 // toPendingGrant converts a rehydrated DTO back to a pendingGrant. idemKey comes from the row (not the
-// payload) since pendingGrant does not itself carry it — the pendingKey(projectID, idemKey) map key does.
+// payload), which keys the durable pending_grants row.
 //
 // evidenceIntKeys repairs a JSON round-trip footgun: broker.Prepared.Evidence is a map[string]any, and
 // encoding/json decodes every JSON number in a map[string]any as float64 — never int64 — regardless of
@@ -116,4 +86,45 @@ func repairEvidenceInts(ev map[string]any, keys ...string) {
 			ev[k] = int64(f)
 		}
 	}
+}
+
+// pendingSweepGrace keeps a pruned row beyond pendingTTL for longer than any project write transaction
+// can run (45 s), so the sweep never removes a row that an in-flight prepare/finalize still judges live.
+const pendingSweepGrace = time.Minute
+
+// pendingPruner is implemented by stores whose pending grants outlive the process (Postgres).
+type pendingPruner interface {
+	PruneExpiredPendingGrants(ctx context.Context, ttl, grace time.Duration, maxProjects int) (int64, error)
+}
+
+// StartPendingSweeper periodically deletes expired two-phase pending grants (abandoned prepares) from the
+// durable store, so pending_grants does not grow without bound. Each project is pruned under its own
+// project write transaction by database time; see store.(*Postgres).PruneExpiredPendingGrants. Failures are
+// logged and retried next interval: a deferred prune never authorizes anything, since finalize requires a
+// live row. A no-op for stores without durable pending state (the dev in-memory store).
+func (s *Server) StartPendingSweeper(ctx context.Context, interval time.Duration) bool {
+	pr, ok := s.st.(pendingPruner)
+	if !ok {
+		return false
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				n, err := pr.PruneExpiredPendingGrants(sctx, pendingTTL, pendingSweepGrace, 256)
+				cancel()
+				if err != nil {
+					log.Printf("WARNING: pending grant sweep failed (expired rows retained until the next sweep): %v", err)
+				} else if n > 0 {
+					log.Printf("pending grant sweep removed %d expired pending grant(s)", n)
+				}
+			}
+		}
+	}()
+	return true
 }

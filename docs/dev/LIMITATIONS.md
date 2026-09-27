@@ -76,6 +76,15 @@ request may leave a COMMIT result unknown. Retry only the same idempotency or
 operation identity and reconcile the durable result. A database outage fails
 closed; it does not promise write availability.
 
+Within one process, at most one writer per project is in flight: queued writers
+of the same project wait in-process (context-cancellable, bounded by the 45 s
+project session) before taking a pool connection, so one hot project cannot
+exhaust the pool and starve other projects' writes or any reads. Across
+replicas there is no such gate: each replica's writer for the same project
+holds its own connection while it waits in Postgres on the guard row, bounded
+by the 10 s `lock_timeout`. Size each replica's pool for its concurrent
+distinct-project writers plus reads.
+
 Recovery of older stranded broker sequences uses a permanent project fence. It
 requires a coordinated rollout that removes all pre-fence writer credentials,
 sessions, and prepared transactions before new writers or recovery run. A
@@ -85,7 +94,10 @@ database resolves in-flight transactions and an authorized operator is
 eventually scheduled; permanent database failure has no liveness promise.
 
 The in-memory implementation mirrors transactional rollback and project
-isolation but is volatile across process restart. Online capability use now
+isolation but is volatile across process restart. It is a development store:
+every project write copies that project's entire state (O(n) in its records,
+disclosures and index maps) to make the transaction private, and it never prunes
+expired pending grants. Online capability use now
 checks its signed project against the authenticated project. A multi-replica
 deployment claim still needs scoped nonce claims and bounded sequence recovery
 tested together. Until then, keep the
@@ -160,11 +172,58 @@ prospective (cancellation) revocations exported in the v2 list format. Its limit
   schema v7 or later) can be `proven_before`; older receipts stay `indeterminate`.
 - The server exports only the disclosed list (v1, or v2 with the v2 export). Merkle roots,
   v1 and v2, are builder-only: the Go builders exist but the server does not export them.
-- An unusable signed v2 artifact still blocks current use of the grants it names, but gives
-  no historical judgment (the claim stays `insufficient`, never `refuted` or `satisfied`).
+- An unusable signed v2 artifact still blocks current use of the grants it names, but is not
+  historical evidence: it never proves or refutes on its own, and a grant it names is never
+  `proven_before`. An authenticated prospective cutoff from a usable v2 source for the same grant
+  still decides `at_or_after` (and so a `refuted` claim); without one the claim is `insufficient`.
 - There is no external (TSA-based) temporal mode.
 
 Two-phase prepare/finalize and void read the same durable pending row on every
 replica. A restart or route to another live replica does not lose the challenge
 in Postgres mode; a missing or expired row fails closed. In-memory mode loses
 pending and revocation state on process restart.
+
+An abandoned prepare leaves its pending row behind. Each server with a Postgres
+store sweeps `pending_grants` every 5 minutes, deleting rows older than the
+15-minute pending TTL plus a 1-minute grace by database time, one project at a
+time under that project's write transaction. The grace exceeds the 45 s bound of
+any project transaction, so the sweep never removes a row an in-flight prepare
+or finalize still judges live. A failed sweep is logged and retried; it never
+authorizes anything, because finalize requires a live row.
+
+## Use proof of possession does not bind the slot or phase
+
+The use-time PoP signs `(grant_id, resource_id, action, params_commitment,
+credential_binding, nonce)`. It does not sign `use_sequence_number` or the phase
+(`use` or `use_intent`). Whoever relays a captured request that has not yet been
+submitted can choose which unused bounded-reuse slot it consumes (any
+`use_sequence_number` in `[1, use_limit]` not yet spent) or record it as a
+`use_intent` instead of a `use`. It cannot change the grant, resource, action,
+parameters or nonce, and the scoped nonce claim prevents the same signed request
+from being used a second time. Binding the slot and phase needs a new PoP
+version; it is not changed on the wire now.
+
+## Consume-ledger failures are not denies
+
+A consume-ledger store error (timeout, cancellation, lost connection) on
+`POST /v2/use` rolls the use transaction back, consumes nothing and answers
+`503`; it is not reported as a replay and is not counted as a deny in
+`averin_use_requests_total`. Only an already-consumed nonce or double-spend key is
+a `400` deny.
+
+## Maintenance operations
+
+- `averin-migrate --purge-legacy` briefly takes an `ACCESS EXCLUSIVE` lock on
+  `legacy_consume_exclusions` (it disables the immutability trigger, deletes the
+  aged rows, re-enables it, all in one transaction). Every online nonce/JTI claim
+  reads that table, so uses wait for the purge to commit. Run it in a quiet window.
+- Migration `0007` backfills every stored `grant_void` tombstone record as a total
+  revocation event, without the runtime's binding check (at runtime a tombstone
+  retires a grant only when it is bound to that grant's reserved `broker_seq`,
+  see `terminalGrantVoided`). This is deliberately
+  broader: it only affects history written before the v7 cutover (pre-reservation
+  history), and a total revocation is the conservative outcome (it blocks current
+  use and never yields a historical positive).
+- `averin-migrate` bounds each run by `--timeout` (or `AVERIN_MIGRATE_TIMEOUT`),
+  default 90 s. A cutover rewrites migrated history in one transaction; raise the
+  timeout for large histories rather than retrying a run that times out.

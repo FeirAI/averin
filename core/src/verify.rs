@@ -375,8 +375,9 @@ pub struct VerifyReport {
     /// `introspection_transcript` records; `introspection_transcripts_verified` = those whose structured
     /// `averin.resource.introspection.v1` signature verifies under a pinned `resource_authority_keys` issuer, bind to
     /// a present native grant, and whose `effective_scope ⊆ grant.scope` (space-delimited OAuth token subset) with
-    /// no time-broadening (`effective_exp <= grant.exp`) and `issued_at <= introspected_at`. A failing transcript
-    /// (bad sig / dangling / scope- or time-broadening) is a hard `unmatched_violation` (→ `!ok`).
+    /// no time-broadening (`effective_exp <= grant.exp`) and `issued_at <= introspected_at < min(effective_exp,
+    /// grant.exp)`. A failing transcript (bad sig / dangling / scope- or time-broadening / after expiry) is a
+    /// hard `unmatched_violation` (→ `!ok`).
     /// `introspection_scope_narrowed` = verified transcripts whose effective scope is a PROPER subset of the grant
     /// scope (the resource attested a narrowing — informational). `introspection_status` ∈ {`absent` (no native
     /// credential), `attested` (a native credential is present, every closed transcript verified, every native
@@ -575,11 +576,14 @@ pub struct VerifyOptions {
     /// maximum snapshot age and minimum authorization watermark. `Strict` (the default) never
     /// produces a historical positive. Never read from the bundle.
     pub revocation_temporal: TemporalPolicy,
-    /// ADR 0006 §1 — out-of-band lifecycle for the authority-elevation ROLE keys, keyed by raw 32-byte public
-    /// key. A key absent from this map is `active`. Consulted ONLY for the keys that elevate authority via
-    /// `verify_authority` (broker/resource/federated/generic `authority_keys`); the freshness-dated roles
-    /// (tsa/attestation/cosig/revocation/taxonomy) are not yet rotation-gated, so the JSON parser REJECTS a
-    /// rotation directive on them rather than silently ignoring it.
+    /// ADR 0006 §1 — out-of-band lifecycle for every pinned ROLE key, keyed by raw 32-byte public key. A key
+    /// absent from this map is `active`. Every role is rotation-gated (see [`role_key_honored`]):
+    /// anchor-committed artifacts (grant/use authority via `verify_authority` for broker/resource/federated/
+    /// generic `authority_keys`, and cosig approvals) are honored when anchored before `status_changed_at`;
+    /// self-dated artifacts (TSA tokens, attestations, v1/v2 revocation lists and Merkle roots) are honored
+    /// only for a cleanly `rotated` key at or before its rotation; a taxonomy issuer is honored only while
+    /// `active` or `rotated`. A `compromised`/`revoked` key never honors a self-dated artifact; an un-honored
+    /// revocation list is not certified fresh, but its listed revocations still block (fail-closed).
     pub role_key_status: BTreeMap<[u8; 32], RoleKeyStatus>,
     /// If `Some`, a record is only `IntegrityProven` when its resolved key is in this set. When a
     /// pinned key carries `status`/`status_changed_at`, those authoritative values override the
@@ -4605,8 +4609,16 @@ enum ProofVerdict {
 }
 
 /// Parse an audit path: an array of 64-char-hex node hashes. Fail-closed on any malformed entry.
+/// Longest accepted revocation Merkle proof path. A path of 64 siblings already covers 2^64 leaves, more
+/// than any tree a `usize` leaf count can index, so a longer path can never re-derive a real root; it is
+/// rejected before any hashing so an oversized bundle costs nothing.
+const MAX_REVOCATION_PATH: usize = 64;
+
 fn parse_hex32_path(v: Option<&CanonValue>) -> Option<Vec<[u8; 32]>> {
     let arr = v?.as_array()?;
+    if arr.len() > MAX_REVOCATION_PATH {
+        return None;
+    }
     let mut out = Vec::with_capacity(arr.len());
     for e in arr {
         out.push(parse_hex32(e.as_str()?)?);
@@ -6977,9 +6989,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // (grant_id, credential_ref, effective_scope, resource_id, introspected_at, effective_exp) tuple; name the
     // grant's own resource_id; and prove `effective_scope ⊆ grant.scope` (space-delimited OAuth token subset — no
     // scope-broadening) with no time-broadening (`effective_exp <= grant.exp`) and `grant.issued_at <=
-    // introspected_at`. ANY failure is a hard `unmatched_violation` (→ !ok): a resource broadening past the grant
-    // it was handed is an escalation, not a quiet non-match. Every native grant must be covered by ≥1 verified
-    // transcript for the introspected surface to be COMPLETE.
+    // introspected_at < min(effective_exp, grant.exp)`. ANY failure is a hard `unmatched_violation` (→ !ok): a
+    // resource broadening past the grant it was handed is an escalation, not a quiet non-match. Every native
+    // grant must be covered by ≥1 verified transcript for the introspected surface to be COMPLETE.
     let mut introspection_transcripts_total = 0usize;
     let mut introspection_transcripts_verified = 0usize;
     let mut introspection_scope_narrowed = 0usize;
@@ -7120,6 +7132,15 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if introspected_at < g.issued_at {
             unmatched_violation += 1;
             violation(&mut issues, format!("introspected_at {introspected_at} precedes native grant issued_at {} — non-causal (violation)", g.issued_at));
+            continue;
+        }
+        // The window is [issued_at, min(effective_exp, exp)), as for a brokered use (`used_at >= exp` is
+        // expired): an introspection at or after the attested credential's own expiry, or the grant's,
+        // is a use outside its validity window.
+        let window_end = eff_exp.min(g.exp);
+        if introspected_at >= window_end {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("introspected_at {introspected_at} is not before min(effective_exp, native grant exp) = {window_end} — introspection after expiry (violation)"));
             continue;
         }
         introspection_transcripts_verified += 1;

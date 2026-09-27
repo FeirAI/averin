@@ -21,3 +21,14 @@ export function claimVerdict(report) {
     ? {word: "PASS", className: "pass", valid}
     : {word: "CONSISTENT", className: "qual", valid};
 }
+
+// V-L3: the legacy `ok` stays false while any revoked grant was used, even when the caller's
+// requested historical_authorized_as_of_snapshot claim is satisfied (the use happened before a
+// prospective cutoff). A consumer of that claim must read claims.* directly, never infer it from
+// ok, so name the claim's own decision here for callers to show next to the legacy verdict.
+export function historicalClaimNote(report) {
+  if (report?.claims_version !== "2") return null;
+  const claims = report?.claims;
+  if (claims?.requested !== "historical_authorized_as_of_snapshot") return null;
+  return claims?.historical_authorized_as_of_snapshot ?? claims?.requested_decision ?? "insufficient";
+}

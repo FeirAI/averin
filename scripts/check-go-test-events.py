@@ -53,6 +53,27 @@ REQUIRED = (
     f"{STORE_PACKAGE}:TestPostgresTemporalRevocationContract",
     f"{PGSCHEMA_PACKAGE}:TestTemporalRevocationCutoverFromV6",
     f"{PGSCHEMA_PACKAGE}:TestTemporalRevocationCutoverInterruptedRollsBackAndRetries",
+    # Plan 007 project transactions and every other Go test cited as evidence by formal/claims.json or
+    # the docs: a skipped or absent one must fail the real-Postgres gate, not pass silently.
+    f"{API_PACKAGE}:TestProjectTransactionsAcrossReplicas",
+    f"{API_PACKAGE}:TestProjectTransactionProcessCuts",
+    f"{API_PACKAGE}:TestProjectTransactionsProcessRestartBoundaries",
+    f"{API_PACKAGE}:TestExportSnapshotNotTornPostgres",
+    f"{API_PACKAGE}:TestTemporalProducerToVerifierHistoricalClaim",
+    f"{API_PACKAGE}:TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal",
+    f"{API_PACKAGE}:TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite",
+    f"{STORE_PACKAGE}:TestPostgresProjectWriteTwoPools",
+    f"{STORE_PACKAGE}:TestPostgresAppendOnlyRejectsMutation",
+    f"{STORE_PACKAGE}:TestPostgresProjectGuardWorksForNonOwnerRuntime",
+    f"{RESOURCESHIM_PACKAGE}:TestTokenTheftFailsPoP",
+    # Hardening review: pool starvation, pending sweep, runtime privilege and cutover barriers.
+    f"{STORE_PACKAGE}:TestPostgresHotProjectDoesNotStarvePool",
+    f"{STORE_PACKAGE}:TestPostgresProjectGateCancellation",
+    f"{STORE_PACKAGE}:TestPostgresPendingSweepPrunesOnlyUnusableRows",
+    f"{PGSCHEMA_PACKAGE}:TestOrdinaryStartupRefusesFreshBootstrap",
+    f"{PGSCHEMA_PACKAGE}:TestCutoverRefusesUnnamedMemberWriter",
+    f"{API_PACKAGE}:TestUseLedgerOutageIsNotADeny",
+    f"{RESOURCESHIM_PACKAGE}:TestLedgerStoreErrorIsNotAReplay",
 )
 
 

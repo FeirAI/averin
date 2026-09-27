@@ -48,6 +48,11 @@ var ErrRevoked = errors.New("resourceshim: the capability's grant is revoked")
 // Callers must surface it as a server failure rather than a rejected credential.
 var ErrRevocationCheck = errors.New("resourceshim: revocation check failed")
 
+// ErrLedgerUnavailable marks a consume-ledger failure that is NOT a replay: a store timeout, cancellation or
+// lost connection. Nothing was consumed (the claim's transaction rolls back), so callers must surface it as
+// a server failure (5xx) and must not count it as an authorization deny. Only ErrConsumed is a replay.
+var ErrLedgerUnavailable = errors.New("resourceshim: consume ledger unavailable")
+
 // Ledger is the durable consume-before-act store. Consumption is marked BEFORE the resource performs
 // the side effect, so a crash after consumption cannot leave a live credential.
 type Ledger interface {
@@ -431,6 +436,9 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 		return UseEvidence{}, err
 	}
 	if err := s.ledger.ConsumeNonce(nonceClaim); err != nil {
+		if !errors.Is(err, ErrConsumed) {
+			return UseEvidence{}, fmt.Errorf("%w: consume nonce: %v", ErrLedgerUnavailable, err)
+		}
 		return UseEvidence{}, fmt.Errorf("resourceshim: nonce replay: %w", err)
 	}
 	var jtiClaim JTIClaim
@@ -445,6 +453,9 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 			// release it so a definitively-pre-persistence failure leaves the consume-before-act ledger
 			// consistent (mirror the handler's RollbackUse on later failures; adversarial review). The key stays consumed.
 			s.ledger.ReleaseNonce(nonceClaim)
+			if !errors.Is(err, ErrConsumed) {
+				return UseEvidence{}, fmt.Errorf("%w: consume jti: %v", ErrLedgerUnavailable, err)
+			}
 			return UseEvidence{}, fmt.Errorf("resourceshim: double-spend (R5): %w", err)
 		}
 	}

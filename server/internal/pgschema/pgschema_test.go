@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,19 +16,29 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// These tests require a real Postgres. They are hermetic: each creates a private, randomly named schema
-// (via search_path so the migration's unqualified table names resolve there), runs against it, and drops
-// it. Set AVERIN_TEST_DATABASE_URL (e.g. postgres://postgres:postgres@localhost:5432/postgres) to enable.
+// These tests require a real Postgres. They are hermetic: each creates a private, randomly named
+// DATABASE holding a private schema (via search_path so the migration's unqualified table names resolve
+// there), runs against it, and drops it. A database per test is needed because an advancing cutover
+// refuses while ANY other client is connected to its database (review S-M4); other packages' tests share
+// the base database. Set AVERIN_TEST_DATABASE_URL (a role with CREATEDB and CREATEROLE) to enable.
 
-// newTestSchema creates an isolated schema and returns a DSN scoped to it (for Migrate), a pool also
-// scoped to it (for assertions), and a cleanup that closes the pool and drops the schema.
+const adminAppName = "averin_pgschema_admin"
+
+// quiesce records, per scoped DSN, how to close the test's own admin connections before an advancing
+// cutover (whose barrier refuses any other client backend in the database).
+var quiesce sync.Map // scoped DSN -> func(t *testing.T)
+
+// newTestSchema creates an isolated database + schema and returns a DSN scoped to it (for Migrate), a pool
+// also scoped to it (for assertions), and a cleanup that closes the pool and drops the database.
 func newTestSchema(t *testing.T) (scopedDSN string, admin *pgxpool.Pool, cleanup func()) {
 	t.Helper()
 	base := os.Getenv("AVERIN_TEST_DATABASE_URL")
 	if base == "" {
 		t.Skip("set AVERIN_TEST_DATABASE_URL to run Postgres-backed pgschema tests")
 	}
-	schema := fmt.Sprintf("averin_pgschema_test_%d", time.Now().UnixNano())
+	suffix := time.Now().UnixNano()
+	dbName := fmt.Sprintf("averin_pgschema_db_%d", suffix)
+	schema := fmt.Sprintf("averin_pgschema_test_%d", suffix)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -35,27 +46,72 @@ func newTestSchema(t *testing.T) (scopedDSN string, admin *pgxpool.Pool, cleanup
 	if err != nil {
 		t.Fatalf("connect (root): %v", err)
 	}
-	if _, err := root.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+schema); err != nil {
+	if _, err := root.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
 		root.Close()
-		t.Fatalf("create schema: %v", err)
+		t.Fatalf("create database: %v", err)
 	}
-
-	scopedDSN = base + "&search_path=" + schema
-	admin, err = pgxpool.New(ctx, scopedDSN)
+	u, err := url.Parse(base)
+	if err != nil {
+		root.Close()
+		t.Fatalf("parse base dsn: %v", err)
+	}
+	u.Path = "/" + dbName
+	q := u.Query()
+	q.Set("search_path", schema)
+	u.RawQuery = q.Encode()
+	scopedDSN = u.String()
+	q.Set("application_name", adminAppName)
+	u.RawQuery = q.Encode()
+	admin, err = pgxpool.New(ctx, u.String())
 	if err != nil {
 		root.Close()
 		t.Fatalf("connect (scoped): %v", err)
 	}
-	cleanup = func() {
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
 		admin.Close()
-		dctx, dcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		root.Close()
+		t.Fatalf("create schema: %v", err)
+	}
+	quiesce.Store(scopedDSN, func(t *testing.T) {
+		t.Helper()
+		admin.Reset()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			var n int
+			if err := root.QueryRow(context.Background(), `SELECT count(*) FROM pg_stat_activity
+				WHERE datname=$1 AND application_name=$2`, dbName, adminAppName).Scan(&n); err != nil {
+				t.Fatalf("inspect admin sessions: %v", err)
+			}
+			if n == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d admin session(s) still connected", n)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	cleanup = func() {
+		quiesce.Delete(scopedDSN)
+		admin.Close()
+		dctx, dcancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer dcancel()
-		if _, err := root.Exec(dctx, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
-			t.Logf("cleanup: drop schema %s: %v", schema, err)
+		if _, err := root.Exec(dctx, "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)"); err != nil {
+			t.Logf("cleanup: drop database %s: %v", dbName, err)
 		}
 		root.Close()
 	}
 	return scopedDSN, admin, cleanup
+}
+
+// cutover runs an advancing (or no-op) maintenance cutover after closing this test's own admin
+// connections; the admin pool reconnects on its next use.
+func cutover(t *testing.T, dsn string, oldRoles []string, next string) error {
+	t.Helper()
+	if q, ok := quiesce.Load(dsn); ok {
+		q.(func(*testing.T))(t)
+	}
+	return Cutover(context.Background(), dsn, oldRoles, next)
 }
 
 func maxVersion(t *testing.T, admin *pgxpool.Pool) int {
@@ -90,7 +146,7 @@ func migrateExisting(t *testing.T, dsn string, admin *pgxpool.Pool) {
 		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+old)
 		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+next)
 	}()
-	if err := Cutover(ctx, dsn, []string{old}, next); err != nil {
+	if err := cutover(t, dsn, []string{old}, next); err != nil {
 		t.Fatalf("maintenance cutover: %v", err)
 	}
 }
@@ -389,6 +445,27 @@ func TestTenantNonceCutoverV3V4V5PreservesUnknownOwners(t *testing.T) {
 			if _, err := admin.Exec(ctx, `INSERT INTO consume_ledger(kind,consume_key) VALUES ('nonce','old-prepared-delete')`); err != nil {
 				t.Fatal(err)
 			}
+			// A still-connected old writer session blocks the advancing cutover outright (review S-M4), so
+			// its prepared statements can never run across the schema step.
+			oldRole, nextRole := fmt.Sprintf("averin_blocked_old_%d", time.Now().UnixNano()), fmt.Sprintf("averin_blocked_new_%d", time.Now().UnixNano())
+			for _, sql := range []string{"CREATE ROLE " + oldRole + " NOLOGIN", "CREATE ROLE " + nextRole + " LOGIN"} {
+				if _, err := admin.Exec(ctx, sql); err != nil {
+					t.Fatal(err)
+				}
+			}
+			defer func() {
+				_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+oldRole)
+				_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+nextRole)
+			}()
+			if err := cutover(t, scoped, []string{oldRole}, nextRole); err == nil || !strings.Contains(err.Error(), "client backend") {
+				t.Fatalf("cutover proceeded while an old writer session was connected: %v", err)
+			}
+			if maxVersion(t, admin) != version {
+				t.Fatal("refused cutover changed schema version")
+			}
+			if err := oldConn.Close(ctx); err != nil {
+				t.Fatal(err)
+			}
 			migrateExisting(t, scoped, admin)
 			if maxVersion(t, admin) != CurrentSchemaVersion || regExists(t, admin, "consume_ledger") {
 				t.Fatal("cutover did not remove old writable relation")
@@ -406,11 +483,6 @@ func TestTenantNonceCutoverV3V4V5PreservesUnknownOwners(t *testing.T) {
 			} {
 				if _, err := admin.Exec(ctx, sql); err == nil {
 					t.Fatalf("old writer SQL accepted after cutover: %s", sql)
-				}
-			}
-			for _, prepared := range []string{"old-insert", "old-delete"} {
-				if _, err := oldConn.Exec(ctx, `EXECUTE "`+prepared+`"`); err == nil {
-					t.Fatalf("old prepared %s accepted after cutover", prepared)
 				}
 			}
 			var retained int
@@ -471,7 +543,7 @@ func TestTenantNonceCutoverInterruptedBeforeCommitRetriesOnce(t *testing.T) {
 		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+old)
 		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+next)
 	}()
-	if err := Cutover(ctx, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), "apply step v6") {
+	if err := cutover(t, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), "apply step v6") {
 		t.Fatalf("conflicting function did not abort real v6 cutover: %v", err)
 	}
 	if got := maxVersion(t, admin); got != 5 {
@@ -491,7 +563,7 @@ func TestTenantNonceCutoverInterruptedBeforeCommitRetriesOnce(t *testing.T) {
 	}
 	// A real authorized retry migrates once; its DB clock marker and the old
 	// exclusion remain unchanged on a later steady-state startup.
-	if err := Cutover(ctx, scoped, []string{old}, next); err != nil {
+	if err := cutover(t, scoped, []string{old}, next); err != nil {
 		t.Fatalf("retry cutover: %v", err)
 	}
 	if got := maxVersion(t, admin); got != CurrentSchemaVersion || regExists(t, admin, "consume_ledger") {
@@ -549,7 +621,7 @@ func TestTenantNonceCutoverRejectsLiveAndInheritedOldWriter(t *testing.T) {
 		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+next)
 		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+inherited)
 	}()
-	cutover := func() error { return Cutover(ctx, scoped, []string{old}, next) }
+	cutover := func() error { return cutover(t, scoped, []string{old}, next) }
 	if err := cutover(); err == nil {
 		t.Fatal("LOGIN old runtime accepted")
 	}
@@ -639,6 +711,148 @@ func TestTenantNonceRuntimeReadinessRequiresLeastPrivilege(t *testing.T) {
 	}
 	if _, err := admin.Exec(ctx, "REVOKE "+owner+" FROM "+role); err != nil {
 		t.Fatal(err)
+	}
+	if err := CheckRuntime(ctx, u.String()); err != nil {
+		t.Fatalf("restored least-privilege runtime not ready: %v", err)
+	}
+
+	// Review S-M3: no effective mutation privilege on any append-only table, however it is held.
+	group := role + "_grp"
+	if _, err := admin.Exec(ctx, "CREATE ROLE "+group+" NOLOGIN"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+group)
+		_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+group)
+	}()
+	for _, tc := range []struct{ grant, revoke, want string }{
+		{"GRANT ALL ON records TO " + role, "REVOKE ALL ON records FROM " + role + "; GRANT SELECT,INSERT ON records TO " + role, "append-only table records"},
+		{"GRANT ALL ON ALL TABLES IN SCHEMA " + schema + " TO " + role, "REVOKE ALL ON ALL TABLES IN SCHEMA " + schema + " FROM " + role +
+			"; GRANT SELECT ON schema_migrations,legacy_consume_exclusions,nonce_ledger_cutover TO " + role +
+			"; GRANT SELECT,INSERT,DELETE ON consumed_nonces,consumed_jtis TO " + role +
+			"; GRANT SELECT,INSERT ON records,broker_seq TO " + role +
+			"; GRANT SELECT,INSERT,UPDATE ON project_write_guard TO " + role +
+			"; GRANT SELECT,INSERT ON authorization_receipts,revocation_events TO " + role, "append-only table"},
+		{"GRANT UPDATE ON revocation_events TO " + group + "; GRANT " + group + " TO " + role, "REVOKE " + group + " FROM " + role, "UPDATE on append-only table revocation_events"},
+		{"GRANT TRUNCATE ON broker_seq_void TO " + role, "REVOKE TRUNCATE ON broker_seq_void FROM " + role, "TRUNCATE on append-only table broker_seq_void"},
+		{"GRANT INSERT ON schema_migrations TO " + role, "REVOKE INSERT ON schema_migrations FROM " + role, "INSERT on append-only table schema_migrations"},
+		// Owning ANY table (not just the originally listed nine) is refused.
+		{"ALTER TABLE anchors OWNER TO " + role, "ALTER TABLE anchors OWNER TO " + owner, "owns or inherits owner membership for anchors"},
+		{"ALTER TABLE pending_grants OWNER TO " + group + "; GRANT " + group + " TO " + role, "REVOKE " + group + " FROM " + role + "; ALTER TABLE pending_grants OWNER TO " + owner, "pending_grants"},
+	} {
+		if _, err := admin.Exec(ctx, tc.grant); err != nil {
+			t.Fatalf("%s: %v", tc.grant, err)
+		}
+		if err := CheckRuntime(ctx, u.String()); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("after %q CheckRuntime = %v, want refusal naming %q", tc.grant, err, tc.want)
+		}
+		if _, err := admin.Exec(ctx, tc.revoke); err != nil {
+			t.Fatalf("%s: %v", tc.revoke, err)
+		}
+		if err := CheckRuntime(ctx, u.String()); err != nil {
+			t.Fatalf("after %q the runtime is not ready again: %v", tc.revoke, err)
+		}
+	}
+}
+
+// Review S-L2: ordinary startup never bootstraps an empty database (the runtime would own the schema and
+// fail CheckRuntime forever); `averin-migrate --init` (Migrate) does, and startup then proceeds.
+func TestOrdinaryStartupRefusesFreshBootstrap(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := MigrateForRuntime(ctx, scoped); err == nil || !strings.Contains(err.Error(), "averin-migrate --init") {
+		t.Fatalf("ordinary startup on an empty database = %v, want refusal naming averin-migrate --init", err)
+	}
+	if regExists(t, admin, "schema_migrations") || regExists(t, admin, "records") {
+		t.Fatal("refused startup created schema objects")
+	}
+	if err := Migrate(ctx, scoped); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if err := MigrateForRuntime(ctx, scoped); err != nil {
+		t.Fatalf("ordinary startup after init: %v", err)
+	}
+}
+
+// Review S-M4: a LOGIN member of a retired role is not named in the barrier. An advancing cutover still
+// refuses while it (or any client) is connected, and while it can write through its own grants or any
+// role membership, including a non-inherited one reachable only by SET ROLE.
+func TestCutoverRefusesUnnamedMemberWriter(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedV6(t, admin)
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	old, next, member, writers := "averin_v6_group_"+suffix, "averin_v7_rt_"+suffix, "averin_app_login_"+suffix, "averin_writers_"+suffix
+	var schema string
+	if err := admin.QueryRow(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		"CREATE ROLE " + old + " NOLOGIN",
+		"CREATE ROLE " + next + " LOGIN",
+		"CREATE ROLE " + writers + " NOLOGIN",
+		"CREATE ROLE " + member + " LOGIN PASSWORD 'temporary-test-only'",
+		"GRANT USAGE ON SCHEMA " + schema + " TO " + member,
+		"GRANT " + old + " TO " + member,
+		"GRANT SELECT, INSERT ON records TO " + member,
+	} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	defer func() {
+		for _, r := range []string{member, writers, next, old} {
+			_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+r)
+			_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+r)
+		}
+	}()
+	cfg, err := pgx.ParseConfig(scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.User, cfg.Password = member, "temporary-test-only"
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, "SET ROLE "+old); err != nil {
+		t.Fatal(err)
+	}
+	if err := cutover(t, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), "client backend") || !strings.Contains(err.Error(), member) {
+		t.Fatalf("cutover with a connected member of the retired role = %v", err)
+	}
+	if err := conn.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := cutover(t, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), member) || !strings.Contains(err.Error(), "records") {
+		t.Fatalf("cutover with a disconnected but still-writable member login = %v", err)
+	}
+	// Only a non-inherited membership remains: has_table_privilege(member) is false, but SET ROLE writes.
+	for _, sql := range []string{
+		"REVOKE INSERT ON records FROM " + member,
+		"GRANT INSERT ON broker_seq TO " + writers,
+		"GRANT " + writers + " TO " + member + " WITH INHERIT FALSE",
+	} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	if err := cutover(t, scoped, []string{old}, next); err == nil || !strings.Contains(err.Error(), member) || !strings.Contains(err.Error(), "broker_seq") {
+		t.Fatalf("cutover with a SET ROLE-reachable writer = %v", err)
+	}
+	if maxVersion(t, admin) != 6 {
+		t.Fatal("refused cutovers changed the schema version")
+	}
+	if _, err := admin.Exec(ctx, "REVOKE "+writers+" FROM "+member); err != nil {
+		t.Fatal(err)
+	}
+	if err := cutover(t, scoped, []string{old}, next); err != nil {
+		t.Fatalf("cutover after retiring every writer: %v", err)
+	}
+	if maxVersion(t, admin) != CurrentSchemaVersion {
+		t.Fatal("authorized cutover did not advance")
 	}
 }
 

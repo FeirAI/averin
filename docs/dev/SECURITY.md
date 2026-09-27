@@ -32,11 +32,14 @@ what truly happened in the world.
   detectable; this cryptographic guarantee is the **primary** tamper-evidence and holds regardless of
   the storage backend. Editing a record breaks its hash; removing one from a session breaks the
   DAG/checkpoint frontier. The Postgres store *also* `REVOKE`s mutation on the history tables as
-  defense-in-depth — but that `REVOKE` only bites under a non-owner, non-superuser role, and the
-  default `docker compose` self-host connects as the **table-owning** role, where it is a no-op
-  (owner bypass; see `deploy/docker-compose.yml` and `server/migrations/0001_init.sql`). For
-  DB-enforced append-only, run the server under a dedicated least-privilege role granted only
-  INSERT/SELECT (+ UPDATE on `display_seq`).
+  defense-in-depth. That `REVOKE` only bites under a non-owner, non-superuser role, so the server's
+  startup readiness check (`pgschema.CheckRuntime`) refuses a runtime role that is a superuser, owns
+  (or inherits ownership of) **any** table in the schema, or holds effective `UPDATE`/`DELETE`/`TRUNCATE`
+  (and, where the migration forbids it, `INSERT`) on any append-only table, directly or through a role
+  it inherits. Ordinary startup also refuses to bootstrap an empty database (the runtime would own it):
+  initialize once with `averin-migrate --init` under the migration credential. A single-credential
+  self-host that connects as the table owner (the `deploy/docker-compose.yml` default) therefore does
+  not start against Postgres; see [CONFIGURATION.md](CONFIGURATION.md) for the role split.
 - **No DAG fork / no checkpoint fork.** The checkpoint chain rejects seq gaps, two checkpoints
   sharing a seq or prev (threat #2), a decreasing record_count, and a latest frontier that doesn't
   equal the actual heads.
@@ -183,8 +186,14 @@ verdict logic and authority-evidence binding.
   window on restart (warned about) — use the Postgres-backed ledger in production.
 - **Revocation and two-phase pending state are read from the project transaction.** In Postgres mode
   an acknowledged revoke is durable and every replica's later use transaction rejects the grant; the
-  in-process revoked set is a diagnostic cache only. In-memory mode loses this state on restart; see
-  [LIMITATIONS.md](LIMITATIONS.md).
+  in-process revoked set is a diagnostic cache only; pending grants have no in-process copy. In-memory
+  mode loses this state on restart; see [LIMITATIONS.md](LIMITATIONS.md).
+- **The use PoP binds the operation, not the bounded-reuse slot or the phase.** The use-time proof of
+  possession signs `(grant_id, resource_id, action, params_commitment, credential_binding, nonce)`. It
+  does not sign `use_sequence_number` or whether the request is recorded as `use` or `use_intent`. A
+  relayer holding a captured, not-yet-submitted request can therefore choose which unused bounded-reuse
+  slot it consumes, or submit it as an intent; it cannot change the operation, and the single-use nonce
+  prevents a second use of the same signed request. See [LIMITATIONS.md](LIMITATIONS.md).
 
 ## Data retention & erasure (append-only — no in-store deletion)
 

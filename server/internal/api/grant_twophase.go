@@ -14,9 +14,8 @@ import (
 )
 
 // pendingGrant is a minted-but-uncommitted grant held between /v2/grants/prepare and /v2/grants/finalize.
-// It carries NO committed broker_seq — that is allocated at finalize (see handleGrantFinalize). idemKey is
-// carried alongside (not just implied by the `pending` map key) so a durable-store delete/prune can name
-// the row without re-splitting pendingKey's project:idem encoding.
+// It carries NO committed broker_seq — that is allocated at finalize (see handleGrantFinalize). It is decoded
+// from the durable pending_grants row on every request; no process-local copy is kept.
 type pendingGrant struct {
 	prepared broker.Prepared
 	req      broker.Request
@@ -36,9 +35,6 @@ func (s *Server) WithCosigPolicy(threshold int, approvers []ed25519.PublicKey) *
 }
 
 const pendingTTL = 15 * time.Minute
-
-// pendingKey namespaces a pending grant by project + idempotency key.
-func pendingKey(projectID, idem string) string { return projectID + "\x00" + idem }
 
 // grantRequestToBroker maps the wire grantRequest to a broker.Request (the same mapping handleGrant uses).
 func grantRequestToBroker(gr grantRequest) broker.Request {
@@ -169,7 +165,7 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The durable project transaction arbitrates both committed and pending
-	// idempotency across replicas. Local pending entries are only a cache.
+	// idempotency across replicas; there is no process-local pending state.
 	var p *pendingGrant
 	var finalized string
 	var conflict string
@@ -271,10 +267,6 @@ func (s *Server) handleGrantPrepare(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "prepare grant: no pending result")
 		return
 	}
-	pk := pendingKey(gr.ProjectID, idem)
-	s.pendingMu.Lock()
-	s.pending[pk] = p
-	s.pendingMu.Unlock()
 	resp := map[string]any{
 		"grant_id":           p.prepared.GrantID,
 		"credential_binding": p.prepared.CredentialBinding,
@@ -560,12 +552,6 @@ func (s *Server) handleGrantFinalize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "finalize grant: "+commitErr.Error())
 		return
 	}
-	// Invalidate the local cache after the transaction commits. It has no
-	// authority over finalize, so a stale entry cannot authorize another grant.
-	s.pendingMu.Lock()
-	delete(s.pending, pendingKey(fr.ProjectID, idem))
-	s.pendingMu.Unlock()
-
 	s.respondFinalized(w, fr.ProjectID, grantID, sealed, created)
 }
 
