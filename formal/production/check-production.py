@@ -16,7 +16,7 @@
 3. cfg: every crate file the extraction came from (Aeneas `Source:` headers) is listed and hashed;
    those files contain no cfg-selected code other than `#[cfg(test)]`, `#[cfg(kani)]` and
    `#[cfg(any(kani, test))]` items, wherever on a line an attribute sits (comments and string
-   literals are ignored; any `cfg_attr`, inner `#![cfg..]` or `cfg!(..)` fails); every file that
+   literals are ignored; any `cfg_attr`, inner `#![cfg..]` or `cfg!` invocation (any delimiter) fails); every file that
    declares a module on the extracted path (core/src/lib.rs, core/src/verify.rs) declares it once,
    with no cfg/cfg_attr/path attribute, and carries no inner cfg other than the Kani-only
    `#![cfg_attr(kani, feature(allocator_api))]`; and a feature-gated module (rfc3161) is not named
@@ -226,7 +226,7 @@ def cfg_violations(src: str, declaring: bool = False) -> list[tuple[int, str, st
             bad.append((line, text, "cfg_attr can attach cfg/path selections"))
         elif norm not in _ALLOWED_CFG_NORM:
             bad.append((line, text, "only " + ", ".join(ALLOWED_CFG) + " items are allowed"))
-    for m in re.finditer(r"\bcfg\s*!\s*\(", code):
+    for m in re.finditer(r"\bcfg\s*!\s*[(\[{]", code):
         bad.append((code.count("\n", 0, m.start()) + 1, "cfg!(..)", "cfg-selected code in an extracted file"))
     return bad
 
@@ -355,7 +355,7 @@ def self_test() -> None:
            "#[cfg_attr(test, derive(Debug))]", "if cfg!(debug_assertions) {", "#[ cfg ( feature = \"x\" ) ]",
            "fn f() {} #[cfg(feature = \"x\")] fn g() {}", "struct S { #[cfg(feature = \"x\")] a: u8 }",
            "#![cfg(feature = \"x\")]", "#![cfg(test)]", "# ! [cfg_attr(kani, feature(allocator_api))]",
-           "let x = 1; if cfg ! (unix) {}", "#[cfg_attr(feature = \"x\", path = \"alt.rs\")] mod m;",
+           "let x = 1; if cfg ! (unix) {}", "if cfg![unix] {}", "let b = cfg!{feature = \"x\"};", "#[cfg_attr(feature = \"x\", path = \"alt.rs\")] mod m;",
            "#[cfg(feature =\n \"x\")]"]
     for s in ok:
         if cfg_violation(s):

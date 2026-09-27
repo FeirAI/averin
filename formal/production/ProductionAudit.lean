@@ -12,7 +12,7 @@ the refinement proofs (`Refinement.*`) and the Averin model compiled here (`Aver
   covers every Aeneas/mathlib lemma the proofs use). `sorry` (`sorryAx`) and `native_decide` /
   `decide +native` (`Lean.ofReduceBool` and its auxiliary axioms) are axioms and fail here.
 * The only `axiom` declarations in these modules are those two primitives.
-* No declaration is `opaque`, `@[extern]` or `@[implemented_by]`.
+* No declaration is `opaque`, `unsafe`, `@[extern]` or `@[implemented_by]`.
 * The Averin model part uses only the three standard axioms (as in `formal/lean/check-axioms.sh`).
 * The verdict-kernel refinement (every declaration of `Refinement.VerdictLists`,
   `Refinement.Verdict` and `Refinement.VerdictClaims`, and the extracted kernel `verify.verdict.*`)
@@ -90,6 +90,7 @@ def runAudit : CommandElabM Unit := do
     let isOpaque : Bool := match info with | .opaqueInfo _ => true | _ => false
     if isAx then declaredAxioms := declaredAxioms.push name
     if isOpaque then badDecl := badDecl.push (name, "opaque")
+    if info.isUnsafe then badDecl := badDecl.push (name, "unsafe")
     if isExtern env name then badDecl := badDecl.push (name, "extern")
     if (Compiler.implementedByAttr.getParam? env name).isSome then
       badDecl := badDecl.push (name, "implemented_by")
