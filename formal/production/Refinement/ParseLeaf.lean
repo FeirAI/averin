@@ -311,6 +311,17 @@ theorem decode_spec (units : Slice Std.U16) (hW : W units.val ≤ Usize.max) :
       (AverinGlue.stringBytes t).length ≤ Usize.max ⦄ := by
   unfold canon.decode_utf16_strict
   step*
+  -- the capacity (`3 * len` under the `len <= usize::MAX / 3` guard) is computed without overflow
+  have hcap : ∃ c : Std.Usize,
+      (if units.len ≤ i1 then 3#usize * units.len else ok units.len) = ok c := by
+    split_ifs with h
+    · obtain ⟨c, hc, _⟩ := spec_imp_exists (Usize.mul_spec (x := 3#usize) (y := units.len)
+        (by simp only [Usize.max] at *; scalar_tac))
+      exact ⟨c, hc⟩
+    · exact ⟨_, rfl⟩
+  obtain ⟨c, hc⟩ := hcap
+  rw [hc, bind_tc_ok]
+  step*
   simp [alloc.vec.Vec.with_capacity]
 
 

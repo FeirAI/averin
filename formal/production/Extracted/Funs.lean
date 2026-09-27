@@ -1098,7 +1098,7 @@ def canon.push_utf8
         alloc.vec.Vec.push out3 i13
 
 /-- [averin_decision_core::canon::decode_utf16_strict]: loop 0:
-    Source: 'core/src/canon.rs', lines 1205:4-1229:5 -/
+    Source: 'core/src/canon.rs', lines 1214:4-1238:5 -/
 @[rust_loop]
 def canon.decode_utf16_strict_loop
   (units : Slice Std.U16) (out : alloc.vec.Vec Std.U8)
@@ -1178,13 +1178,19 @@ def canon.decode_utf16_strict_loop
 partial_fixpoint
 
 /-- [averin_decision_core::canon::decode_utf16_strict]:
-    Source: 'core/src/canon.rs', lines 1200:0-1238:1 -/
+    Source: 'core/src/canon.rs', lines 1200:0-1247:1 -/
 def canon.decode_utf16_strict
   (units : Slice Std.U16) :
   Result (core.result.Result String canon.ErrorKind)
   := do
   let i := Slice.len units
-  let out := alloc.vec.Vec.with_capacity Std.U8 i
+  let i1 ← core.num.Usize.MAX / 3#usize
+  let cap ←
+    if i <= i1
+    then let i2 := Slice.len units
+         3#usize * i2
+    else ok (Slice.len units)
+  let out := alloc.vec.Vec.with_capacity Std.U8 cap
   let (out1, fault, ok1) ←
     canon.decode_utf16_strict_loop units out canon.ErrorKind.InvalidScalar true
       0#usize
