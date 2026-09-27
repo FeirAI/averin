@@ -1,0 +1,14 @@
+Mutant: decode_utf16_strict preallocates one byte per UTF-16 unit, so multi-byte scalars reallocate;
+the fail-closed Vec::push growth guard (G1) must refute it in utf16_strict_matches_std.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -1203,7 +1203,7 @@
+     // any real input (`units` is a `Vec<u16>`, at most `isize::MAX` bytes, so `len <= usize::MAX / 4`);
+     // the guard states that bound where the Lean totality proof can see it.
+     let cap = if units.len() <= usize::MAX / 3 {
+-        3 * units.len()
++        units.len()
+     } else {
+         units.len()
+     };

@@ -56,6 +56,7 @@ kani_harness() {
     m22-*) echo integer_roundtrip_zero ;;
     m23-*) echo integer_roundtrip_zero ;;
     m24-*) echo utf16_key_order_is_transitive ;;
+    m25-*) echo utf16_strict_matches_std ;;
   esac
 }
 
@@ -74,7 +75,7 @@ kani_expectation() {
     m4-*) echo 'core/src/hashx.rs|assertion failed' ;;
     m9-*|m10-*|m11-*) echo 'core/src/b64.rs|assertion failed' ;;
     m13-*) echo 'core/src/canon.rs|no negative zero' ;;
-    m24-*) echo 'core/src/canon.rs|Vec::push reached reallocation in a no-growth proof' ;;
+    m24-*|m25-*) echo 'core/src/canon.rs|Vec::push reached reallocation in a no-growth proof' ;;
     m23-*) echo 'core/src/canon.rs|numeric spelling reached general top-level parser' ;;
     *) echo 'core/src/canon.rs|assertion failed' ;;
   esac
