@@ -3,7 +3,10 @@
 import { readFileSync } from "node:fs";
 import { initAverin, sha256Hex } from "../../verifier/averin.js";
 
-if (process.argv.length !== 4) throw new Error("usage: bun check-wasm.js WASM CORPUS");
+if (process.argv.length !== 5 || !/^[1-9][0-9]*$/.test(process.argv[4])) {
+  throw new Error("usage: bun check-wasm.js WASM CORPUS EXPECTED_CASES");
+}
+const expectedCases = Number(process.argv[4]);
 const wasm = new Uint8Array(readFileSync(process.argv[2]));
 const pin = await sha256Hex(wasm);
 const verifier = await initAverin(wasm, { expectedSha256: pin });
@@ -27,4 +30,7 @@ for (const line of readFileSync(process.argv[3], "utf8").trimEnd().split("\n")) 
   }
   count++;
 }
+// The corpus must be exactly the generated cases plus the fixed cases (run-fuzz.sh computes the
+// number), so a truncated or empty corpus cannot pass.
+if (count !== expectedCases) throw new Error(`WASM replay saw ${count} cases, expected exactly ${expectedCases}`);
 console.log(`WASM RCP differential passed: ${count} cases, pinned build sha256:${pin}`);

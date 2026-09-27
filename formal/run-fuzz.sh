@@ -21,8 +21,14 @@ for run in 1 2; do
     cargo test --locked -p averin-decision-core --test rcp_fuzz -- --nocapture
 done
 cmp "$tmp/corpus-1.tsv" "$tmp/corpus-2.tsv"
-shasum -a 256 "$tmp/corpus-1.tsv"
+# Exact corpus size: the generated cases, every saved regression, and the four fixed boundary cases
+# core/tests/rcp_fuzz.rs emits (nesting 256/257, a 16,384-byte string, an 8,192-byte key).
+regressions="$(grep -cvE '^(#|$)' formal/fuzz/regressions.tsv)"
+expected=$((cases + regressions + 4))
+lines="$(grep -c '' "$tmp/corpus-1.tsv")"
+[ "$lines" -eq "$expected" ] || { echo "run-fuzz: corpus has $lines cases, expected $expected" >&2; exit 1; }
+shasum -a 256 "$tmp/corpus-1.tsv" "$expected"
 
 # Build the same C ABI core for WASM without touching the verifier's tracked supply-chain pin.
 cargo build --locked --release -p averin-decision-core --target wasm32-unknown-unknown --no-default-features --lib
-bun formal/fuzz/check-wasm.js "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/averin_decision_core.wasm" "$tmp/corpus-1.tsv"
+bun formal/fuzz/check-wasm.js "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/averin_decision_core.wasm" "$tmp/corpus-1.tsv" "$expected"

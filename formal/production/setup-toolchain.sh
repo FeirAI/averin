@@ -5,8 +5,11 @@
 #   bash formal/production/setup-toolchain.sh DIR
 #
 # Pins: formal/production/manifest.json; source tarball digests: plans/preflight/PROVENANCE.md.
-# Needs curl, git-free tar, make, a C toolchain, rustup, opam (OCaml 5.3.0) and elan or network access
-# to fetch them. On developer machines run every network fetch through Socket Firewall
+# Needs curl, tar with zstd, make, a C toolchain, rustup and opam 2.x, or network access to fetch
+# them. Every download is checked against a pinned sha256; opam packages are pinned to the versions
+# the committed extraction was produced with (their transitive dependencies are resolved from the
+# opam repository at install time, which is not pinned); Lean comes from the pinned release tarball
+# (no elan, no install script). On developer machines run every network fetch through Socket Firewall
 # (`sfw bash formal/production/setup-toolchain.sh DIR`), per the workspace supply-chain policy.
 set -euo pipefail
 
@@ -35,6 +38,8 @@ grep -q "$CHARON" "$DIR/sources/aeneas/charon-pin" || { echo "aeneas charon-pin 
 
 # Charon (Rust, pinned nightly from its rust-toolchain file).
 rustup toolchain install "$NIGHTLY" --profile minimal --component rustc-dev,llvm-tools,rust-src,miri
+[ "$(RUSTUP_TOOLCHAIN="$NIGHTLY" rustc --version)" = "$(pin charon_rustc_version)" ] ||
+  { echo "$NIGHTLY is not $(pin charon_rustc_version)" >&2; exit 1; }
 (cd "$DIR/sources/charon/charon" && RUSTUP_TOOLCHAIN="$NIGHTLY" cargo build --release --locked)
 mkdir -p "$DIR/sources/charon/bin"
 cp "$DIR/sources/charon/charon/target/release/charon" "$DIR/sources/charon/charon/target/release/charon-driver" \
@@ -46,15 +51,29 @@ export OPAMROOT="$DIR/opam-root"
 [ -d "$OPAMROOT" ] || opam init --bare --disable-sandboxing -n
 opam switch list 2>/dev/null | grep -q 5.3.0 || opam switch create 5.3.0 -y
 eval "$(opam env --switch 5.3.0 --set-switch)"
-opam install -y calendar core_unix domainslib easy_logging menhir ocamlformat.0.27.0 ocamlgraph odoc \
-  ppx_deriving ppx_deriving_yojson progress unionFind visitors yojson zarith
+# Exact versions of the packages Aeneas' README lists, as installed for the committed extraction
+# (plans/preflight/PROVENANCE.md; ocamlformat is not used by the build).
+opam install -y calendar.3.0.0 core_unix.v0.17.1 domainslib.0.5.2 easy_logging.0.8.2 menhir.20260209 \
+  ocamlformat.0.29.0 ocamlgraph.2.2.0 odoc.3.2.1 ppx_deriving.6.2.0 ppx_deriving_yojson.3.10.0 \
+  progress.0.5.0 unionFind.20250818 visitors.20260520 yojson.3.0.0 zarith.1.14
 (cd "$DIR/sources/aeneas" && make build-dev)
 
-# Lean (the backend's lean-toolchain, v4.31.0) through elan.
-command -v elan >/dev/null || { curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none; }
+# Lean (the backend's lean-toolchain, v4.31.0) from the release tarball, sha256-checked (the GitHub
+# release asset digests).
 LEAN_TC="$(cat "$DIR/sources/aeneas/backends/lean/lean-toolchain")"
-"${HOME}/.elan/bin/elan" toolchain install "$LEAN_TC"
-LEAN_BIN="$("${HOME}/.elan/bin/elan" which --toolchain "$LEAN_TC" lean | xargs dirname)"
+[ "$LEAN_TC" = "leanprover/lean4:v4.31.0" ] || { echo "aeneas lean-toolchain is $LEAN_TC, pinned v4.31.0" >&2; exit 1; }
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) LEAN_ASSET=lean-4.31.0-linux; LEAN_SHA=07a633cc8d9151cbc08825ea4cdda50d4b02a2c9cb852c0131b13046f49cad7f ;;
+  Linux-aarch64) LEAN_ASSET=lean-4.31.0-linux_aarch64; LEAN_SHA=b1bf1d3c586b76cf4a86212a595d8b9edd99f438a41cce85d5780fa9347c811b ;;
+  Darwin-arm64) LEAN_ASSET=lean-4.31.0-darwin_aarch64; LEAN_SHA=264105500c8abdf37b68ffe03390a783ed259807807222698da8dd92d6ce0a27 ;;
+  *) echo "no pinned Lean 4.31.0 release digest for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
+fetch "https://github.com/leanprover/lean4/releases/download/v4.31.0/$LEAN_ASSET.tar.zst" "$LEAN_SHA" \
+  "$DIR/sources/$LEAN_ASSET.tar.zst"
+rm -rf "$DIR/lean-4.31.0" && mkdir -p "$DIR/lean-4.31.0"
+tar --use-compress-program=unzstd -xf "$DIR/sources/$LEAN_ASSET.tar.zst" -C "$DIR/lean-4.31.0" --strip-components=1
+LEAN_BIN="$DIR/lean-4.31.0/bin"
+"$LEAN_BIN/lean" --version | grep -q "version 4.31.0," || { echo "unexpected Lean version" >&2; exit 1; }
 
 cat >"$DIR/with-aeneas.sh" <<EOF
 #!/usr/bin/env bash

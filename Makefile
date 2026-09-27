@@ -51,12 +51,13 @@ vuln:
 
 supply-chain: deny vuln
 
-# Formal verification gates (see formal/README.md). Needs elan/Lean 4.30.0, cargo-kani 0.68, Java.
+# Formal verification gates (see formal/README.md). Needs elan/Lean 4.30.0, cargo-kani 0.68, Java;
+# formal-production needs the pinned Charon/Aeneas/Lean 4.31 toolchain (formal/production/README.md).
 .PHONY: formal formal-lean formal-refinement formal-production formal-mutants formal-kani formal-tla
 formal: formal-lean formal-refinement formal-production formal-mutants formal-kani formal-tla
 
 formal-lean:
-	cd formal/lean && lake build --wfail && ./check-axioms.sh
+	cd formal/lean && lake build --wfail && ./check-axioms.sh --self-test && ./check-axioms.sh
 
 formal-refinement:
 	python3 formal/check-refinement.py
@@ -65,7 +66,8 @@ formal-refinement:
 	git diff --exit-code -- formal/oracle/expected.json
 	git diff --exit-code -- formal/oracle/verdict-expected.json
 	cargo test -p averin-decision-core --test oracle
-	cargo test -p averin-decision-core --lib verdict_differential
+	python3 scripts/check-test-count.py --self-test
+	bash -o pipefail -c 'cargo test -p averin-decision-core --lib verdict_differential 2>&1 | python3 scripts/check-test-count.py --min 1'
 
 # Plan 012: the production seal core, extracted from core/src with Charon/Aeneas and proved in
 # formal/production (needs the pinned toolchain; see formal/production/README.md).

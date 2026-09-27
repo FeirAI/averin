@@ -4,6 +4,7 @@
     "aeneas_commit": "557f7a15f3b75e18ddae224fc65db0807b70acdf",
     "charon_commit": "62585970fc75f61d83c7898ff8dfdd7edaa3c073",
     "charon_rust_toolchain": "nightly-2026-09-17",
+    "charon_rustc_version": "rustc 1.100.0-nightly (923c95cdf 2026-09-16)",
     "lean": "leanprover/lean4:v4.31.0",
     "mathlib_rev": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
   },

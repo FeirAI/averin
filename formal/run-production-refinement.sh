@@ -45,7 +45,8 @@ aeneas_v="$(bash "$W" aeneas -version 2>/dev/null | tr -d '[:space:]')"
 case "$aeneas_v" in *"$(pin aeneas_commit)"*) ;; *) fail toolchain "aeneas -version is '$aeneas_v', pinned $(pin aeneas_commit)";; esac
 lean_v="$(bash "$W" lean --version 2>/dev/null)"
 case "$lean_v" in *"version 4.31.0,"*) ;; *) fail toolchain "Lean is '$lean_v', pinned 4.31.0";; esac
-case "$(bash "$W" rustc --version 2>/dev/null)" in *"2026-09-1"*) ;; *) fail toolchain "Charon's rustc is not the pinned nightly";; esac
+rustc_v="$(bash "$W" rustc --version 2>/dev/null)"
+[ "$rustc_v" = "$(pin charon_rustc_version)" ] || fail toolchain "Charon's rustc is '$rustc_v', pinned '$(pin charon_rustc_version)'"
 grep -q "$(pin mathlib_rev)" "$PROD/lake-manifest.json" || fail toolchain "lake-manifest.json does not pin mathlib $(pin mathlib_rev)"
 
 # Aeneas Lean backend and (optionally shared) Lake packages.
@@ -83,8 +84,11 @@ done
 python3 "$PROD/check-production.py" --glue "$SCRATCH/lean/Extracted" --no-stale || exit 1
 
 if [ "$WRITE" = 1 ]; then
-  cp "$SCRATCH/lean/Extracted/Types.lean" "$SCRATCH/lean/Extracted/Funs.lean" "$PROD/Extracted/"
-  python3 "$PROD/check-production.py" --update-hashes
+  # Each step must succeed: a partial copy followed by a hash update would record hashes of a
+  # half-written extraction.
+  cp "$SCRATCH/lean/Extracted/Types.lean" "$SCRATCH/lean/Extracted/Funs.lean" "$PROD/Extracted/" ||
+    fail extract "could not write the regenerated Types.lean/Funs.lean"
+  python3 "$PROD/check-production.py" --update-hashes || fail stale "could not update the source hashes"
 else
   for f in Types.lean Funs.lean; do
     diff -u "$PROD/Extracted/$f" "$SCRATCH/lean/Extracted/$f" >"$SCRATCH/$f.diff" ||

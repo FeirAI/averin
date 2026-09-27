@@ -13,7 +13,9 @@ if [ ! -f "$JAR" ]; then
   curl -sSfL -o "$JAR.tmp" "https://github.com/tlaplus/tlaplus/releases/download/${TLA_VERSION}/tla2tools.jar"
   mv "$JAR.tmp" "$JAR"
 fi
-echo "${TLA_SHA256}  ${JAR}" | sha256sum -c --quiet - || { echo "tla2tools.jar checksum mismatch" >&2; exit 1; }
+# sha256sum (GNU coreutils) where present, else macOS/BSD `shasum -a 256`.
+if command -v sha256sum >/dev/null 2>&1; then sha256=(sha256sum); else sha256=(shasum -a 256); fi
+echo "${TLA_SHA256}  ${JAR}" | "${sha256[@]}" -c --quiet - || { echo "tla2tools.jar checksum mismatch" >&2; exit 1; }
 
 check() { # spec config expected: pass | <invariant or temporal property that must be violated>
   local out
