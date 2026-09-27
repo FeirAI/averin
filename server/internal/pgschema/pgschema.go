@@ -320,11 +320,26 @@ func validateNewRuntimeIdle(ctx context.Context, tx pgx.Tx, next string) error {
 // Superusers are exempt from the privilege check because no privilege can be revoked from them; they are
 // covered only by the session check at this instant, and must be controlled operationally.
 func validateNoOtherWriters(ctx context.Context, tx pgx.Tx, next string) error {
+	// pg_stat_activity hides backend_type (and most columns) of other roles' sessions from a role
+	// that is neither a superuser nor has the privileges of pg_read_all_stats, so the count below
+	// would silently miss them. Fail closed unless the migrator can see every session. USAGE, not
+	// MEMBER: the visibility check uses the role's privileges, which a NOINHERIT membership does
+	// not confer without SET ROLE.
+	var canSee bool
+	if err := tx.QueryRow(ctx, `SELECT r.rolsuper OR pg_has_role(current_user, 'pg_read_all_stats', 'USAGE')
+		FROM pg_roles r WHERE r.rolname=current_user`).Scan(&canSee); err != nil {
+		return fmt.Errorf("pgschema: inspect migration identity: %w", err)
+	}
+	if !canSee {
+		return fmt.Errorf("pgschema: the migration identity must be a superuser or have the privileges of pg_read_all_stats (GRANT pg_read_all_stats TO <migration role>) so the cutover barrier can see every other session; without it other roles' sessions are invisible and the barrier would pass unsafely")
+	}
 	var others int
 	var users *string
-	if err := tx.QueryRow(ctx, `SELECT count(*), string_agg(DISTINCT usename, ', ' ORDER BY usename)
+	// Conservative: a row counts unless it is positively identified as a non-client backend.
+	if err := tx.QueryRow(ctx, `SELECT count(*), string_agg(DISTINCT COALESCE(usename, '<unknown>'), ', ' ORDER BY COALESCE(usename, '<unknown>'))
 		FROM pg_stat_activity
-		WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend'`).Scan(&others, &users); err != nil {
+		WHERE datname=current_database() AND pid<>pg_backend_pid()
+		  AND (backend_type IS NULL OR backend_type='client backend')`).Scan(&others, &users); err != nil {
 		return fmt.Errorf("pgschema: inspect client sessions: %w", err)
 	}
 	if others != 0 {

@@ -17,6 +17,9 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
 CREATE ROLE averin_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'owner_pw';
 CREATE ROLE averin_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD :'runtime_pw';
 CREATE DATABASE averin OWNER averin_owner;
+-- An advancing averin-migrate cutover must see every other session to refuse while one is
+-- connected; PostgreSQL hides other roles' sessions from pg_stat_activity without this.
+GRANT pg_read_all_stats TO averin_owner;
 SQL
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname averin <<'SQL'
 REVOKE ALL ON DATABASE averin FROM PUBLIC;

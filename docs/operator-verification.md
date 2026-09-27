@@ -221,7 +221,8 @@ barrier before starting any new writer or enabling recovery:
    privileges it needs. Rotate every old runtime password, set each old role `NOLOGIN`, revoke
    direct and inherited table writes, and terminate remaining backends. A role that owns tables
    or is a superuser cannot be made safe by `REVOKE` alone; replace that topology. Run from
-   `server/` with a separate migration credential:
+   `server/` with a separate migration credential (a superuser, or a role with the privileges of
+   `pg_read_all_stats`, so the barrier can see every other session; otherwise it refuses):
 
    ```sh
    AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate \

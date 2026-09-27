@@ -3,6 +3,7 @@ package pgschema
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -278,5 +279,91 @@ func TestTemporalRevocationCutoverRefusesLiveNewRuntimeSession(t *testing.T) {
 	}
 	if err := cutover(t, scoped, []string{old}, next); err != nil {
 		t.Fatalf("cutover after the new runtime's session closed: %v", err)
+	}
+}
+
+// TestCutoverBarrierRequiresSessionVisibility runs an advancing cutover as a NON-superuser migration
+// owner. pg_stat_activity hides other roles' backend_type from such a role, so without
+// pg_read_all_stats the barrier would count zero sessions: it must refuse instead. With the grant it
+// sees another role's open session and refuses; after that session ends it advances.
+func TestCutoverBarrierRequiresSessionVisibility(t *testing.T) {
+	scoped, admin, cleanup := newTestSchema(t)
+	defer cleanup()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	migr, other := "averin_migr_"+suffix, "averin_other_"+suffix
+	var schema string
+	if err := admin.QueryRow(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		"CREATE ROLE " + migr + " LOGIN NOSUPERUSER PASSWORD 'temporary-test-only'",
+		"CREATE ROLE " + other + " LOGIN NOSUPERUSER PASSWORD 'temporary-test-only'",
+		"GRANT USAGE, CREATE ON SCHEMA " + schema + " TO " + migr,
+	} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	old, next, dropRoles := retiredRoles(t, admin)
+	defer dropRoles()
+	defer func() {
+		for _, r := range []string{migr, other} {
+			_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+r)
+			_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+r)
+		}
+	}()
+	u, err := url.Parse(scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.UserPassword(migr, "temporary-test-only")
+	migrDSN := u.String()
+	// The migration identity owns the schema's tables, as in a real deployment.
+	migrPool, err := pgxpool.New(ctx, migrDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedV6(t, migrPool)
+	migrPool.Close()
+	run := func() error {
+		t.Helper()
+		if q, ok := quiesce.Load(scoped); ok {
+			q.(func(*testing.T))(t)
+		}
+		return Cutover(ctx, migrDSN, []string{old}, next)
+	}
+	// (a) without pg_read_all_stats: refused, whatever is connected.
+	if err := run(); err == nil || !strings.Contains(err.Error(), "pg_read_all_stats") {
+		t.Fatalf("cutover by a migrator that cannot see other sessions = %v", err)
+	}
+	if _, err := admin.Exec(ctx, "GRANT pg_read_all_stats TO "+migr); err != nil {
+		t.Fatal(err)
+	}
+	// (b) with it, another role's open session blocks the cutover.
+	cfg, err := pgx.ParseConfig(scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.User, cfg.Password = other, "temporary-test-only"
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run(); err == nil || !strings.Contains(err.Error(), "client backend") || !strings.Contains(err.Error(), other) {
+		t.Fatalf("cutover with another role's open session = %v", err)
+	}
+	if maxVersion(t, admin) != 6 {
+		t.Fatal("refused cutovers changed the schema version")
+	}
+	// (c) after it disconnects, the cutover advances.
+	if err := conn.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(); err != nil {
+		t.Fatalf("cutover after the other session ended: %v", err)
+	}
+	if maxVersion(t, admin) != CurrentSchemaVersion {
+		t.Fatal("authorized cutover did not advance")
 	}
 }

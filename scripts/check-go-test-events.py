@@ -34,6 +34,7 @@ REQUIRED = (
     f"{PGSCHEMA_PACKAGE}:TestTenantNonceCutoverRejectsLiveAndInheritedOldWriter",
     f"{PGSCHEMA_PACKAGE}:TestTenantNonceRuntimeReadinessRequiresLeastPrivilege",
     f"{PGSCHEMA_PACKAGE}:TestTenantNonceLegacyPurgeRequiresDBTimeHold",
+    f"{PGSCHEMA_PACKAGE}:TestCutoverBarrierRequiresSessionVisibility",
     f"{PGSCHEMA_PACKAGE}:TestTenantNonceOrdinaryStartupRefusesEmptyLegacyVersionTable",
     f"{STORE_PACKAGE}:TestPostgresScopedNonceClaimsAndOwnedRollback",
     f"{STORE_PACKAGE}:TestPostgresIndependentPoolsNonceRace",

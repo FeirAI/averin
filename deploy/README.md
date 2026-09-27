@@ -41,7 +41,7 @@ The compose file therefore separates the identities:
 
 | Step | Service | Identity | What it does |
 |------|---------|----------|--------------|
-| 1 | `db` (first boot of an empty volume) | bootstrap superuser `postgres` | `postgres/01-roles.sh` creates `averin_owner` (non-superuser, owns the `averin` database) and `averin_app` (non-superuser, no memberships, `CONNECT` and schema `USAGE` only) |
+| 1 | `db` (first boot of an empty volume) | bootstrap superuser `postgres` | `postgres/01-roles.sh` creates `averin_owner` (non-superuser, owns the `averin` database, member of `pg_read_all_stats` so a later `averin-migrate` cutover can see every other session) and `averin_app` (non-superuser, no memberships, `CONNECT` and schema `USAGE` only) |
 | 2 | `migrate` (one-shot) | `averin_owner` | `averin-migrate --init`: creates the schema in an empty database; a no-op at the current schema version; **fails** on an older schema, which needs the explicit operator cutover ([operator verification](../docs/operator-verification.md#required-deployment-cutoff)), so nothing else starts |
 | 3 | `grants` (one-shot) | `averin_owner` | `postgres/runtime-grants.sql`: DML on the averin tables for `averin_app`, then revokes every privilege the append-only contract forbids (the same lists `pgschema.CheckRuntime` enforces) |
 | 4 | `server` | `averin_app` | starts only after `grants` succeeded; its startup re-checks the role before serving |
