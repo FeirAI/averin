@@ -27,7 +27,7 @@ regressions="$(grep -cvE '^(#|$)' formal/fuzz/regressions.tsv)"
 expected=$((cases + regressions + 4))
 lines="$(grep -c '' "$tmp/corpus-1.tsv")"
 [ "$lines" -eq "$expected" ] || { echo "run-fuzz: corpus has $lines cases, expected $expected" >&2; exit 1; }
-shasum -a 256 "$tmp/corpus-1.tsv" "$expected"
+shasum -a 256 "$tmp/corpus-1.tsv"
 
 # Build the same C ABI core for WASM without touching the verifier's tracked supply-chain pin.
 cargo build --locked --release -p averin-decision-core --target wasm32-unknown-unknown --no-default-features --lib
