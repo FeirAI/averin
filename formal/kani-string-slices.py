@@ -2,7 +2,8 @@
 """Scheduling classes of the string_escape_roundtrip Kani family, for CI slicing.
 
     python3 formal/kani-string-slices.py --list ascii|mixed|pure   # harness names, one per line
-    python3 formal/kani-string-slices.py --check                   # partition and class sizes
+    python3 formal/kani-string-slices.py --list smoke               # the committed PR smoke subset
+    python3 formal/kani-string-slices.py --check                   # partition, class sizes, smoke list
 
 The obligation list is the one check-kani-shards.py proves equal to the original domain
 (`--list string_escape_roundtrip`); this script only splits it by cost, for KANI_SHARD_ONLY:
@@ -28,6 +29,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FAMILY = "string_escape_roundtrip"
 SIZES = {"ascii": 16513, "mixed": 514, "pure": 4}
+SMOKE = ROOT / "formal/kani-string-smoke.txt"
+
+
+def smoke(c: dict) -> list:
+    """The committed smoke subset: sorted, distinct cases of the checked list, from every class."""
+    names = [l.strip() for l in SMOKE.read_text().splitlines() if l.strip() and not l.startswith("#")]
+    if names != sorted(set(names)):
+        raise SystemExit("kani-string-slices: the smoke list must be sorted and distinct")
+    for cls, members in c.items():
+        if not set(names) & set(members):
+            raise SystemExit(f"kani-string-slices: the smoke list has no {cls} case")
+    unknown = set(names) - set(sum(c.values(), []))
+    if unknown:
+        raise SystemExit(f"kani-string-slices: smoke cases not in the checked list: {sorted(unknown)}")
+    return names
 
 
 def scalars(k: int) -> list[int]:
@@ -61,7 +77,7 @@ def classes() -> dict[str, list[str]]:
 
 def main() -> int:
     args = sys.argv[1:]
-    if args == ["--check"] or (len(args) == 2 and args[0] == "--list" and args[1] in SIZES):
+    if args == ["--check"] or (len(args) == 2 and args[0] == "--list" and args[1] in (*SIZES, "smoke")):
         c = classes()
         sizes = {k: len(v) for k, v in c.items()}
         if sizes != SIZES:
@@ -70,8 +86,12 @@ def main() -> int:
         if len(set(sum(c.values(), []))) != sum(SIZES.values()):
             print("kani-string-slices: classes overlap", file=sys.stderr)
             return 1
+        names = smoke(c)
         if args[0] == "--check":
-            print(f"kani-string-slices: {sizes} partition the {sum(SIZES.values())} checked cases")
+            print(f"kani-string-slices: {sizes} partition the {sum(SIZES.values())} checked cases; "
+                  f"smoke list of {len(names)} OK")
+        elif args[1] == "smoke":
+            print("\n".join(names))
         else:
             print("\n".join(c[args[1]]))
         return 0

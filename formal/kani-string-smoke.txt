@@ -1,0 +1,26 @@
+# PR smoke subset of string_escape_roundtrip (formal/kani-string-slices.py --check verifies each line is
+# a case of the checked list and that ascii, mixed and pure cases are all present). Scheduling only:
+# the family is verified only by the full run. Chosen: the empty string; NUL, space, quote,
+# backslash, 'a', DEL; ASCII pairs mixing controls, quotes and escapes; U+00E9 and U+1F600 alone and
+# next to ASCII (quote, backslash, NUL, 'a'); and U+00E9 U+00E9. U+1F600 U+1F600 (case 17030) is
+# left out: it did not finish in 60 minutes.
+string_escape_roundtrip_00000
+string_escape_roundtrip_00001
+string_escape_roundtrip_00033
+string_escape_roundtrip_00035
+string_escape_roundtrip_00093
+string_escape_roundtrip_00098
+string_escape_roundtrip_00128
+string_escape_roundtrip_00129
+string_escape_roundtrip_00130
+string_escape_roundtrip_00258
+string_escape_roundtrip_00259
+string_escape_roundtrip_01528
+string_escape_roundtrip_04643
+string_escape_roundtrip_04680
+string_escape_roundtrip_12839
+string_escape_roundtrip_12869
+string_escape_roundtrip_16641
+string_escape_roundtrip_16868
+string_escape_roundtrip_16899
+string_escape_roundtrip_16993

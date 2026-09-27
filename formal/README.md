@@ -487,14 +487,18 @@ harness or family):
   run across every class passed 19 cases; case 17030 did not finish. **The full 17,031-case run on
   the final source is in progress and not yet claimed**; the family is claimed only when every
   case reports success. `run-kani-shards.sh string_escape_roundtrip` runs it with resume;
-  `KANI_SHARD_GROUP=64` batches cases per Kani invocation. In CI, `kani-string-slices.py` splits
+  `KANI_SHARD_GROUP=64` batches cases per Kani invocation. Pull requests and pushes run only a fixed
+  20-case smoke subset from every cost class (`kani-string-smoke.txt`, checked against the case
+  list; job `formal-kani-strings-smoke`), a drift check and not the family's proof. The full family
+  runs on the weekly schedule and on manual dispatch. There, `kani-string-slices.py` splits
   the checked case list by cost (it proves the split is a partition): 16,513 ASCII cases in 48
   slices (`formal-kani-strings-ascii`), 514 cases with one non-ASCII scalar in 16 slices
   (`formal-kani-strings-mixed`), and the 4 cases with two non-ASCII scalars one per job
-  (`formal-kani-strings-pure`, 6-hour hosted limit). A case that needs longer than a hosted
-  runner allows (case 17030 did not finish in 60 minutes locally) needs a larger or self-hosted
-  runner, selected with the repository variables `AVERIN_KANI_LARGE_RUNNER` and
-  `AVERIN_KANI_PURE_TIMEOUT_MINUTES`; until then the family stays unclaimed.
+  (`formal-kani-strings-pure`). The pure jobs run only when the repository variable
+  `AVERIN_KANI_LARGE_RUNNER` names a larger or self-hosted runner (with
+  `AVERIN_KANI_PURE_TIMEOUT_MINUTES` for its limit): case 17030 did not finish in 60 minutes
+  locally and is not expected to fit a 6-hour hosted runner. Until every case has passed
+  somewhere, the family stays unclaimed.
 - `parse_never_panics` is **not verified and not run by any gate**. Its original domain is every
   valid UTF-8 string of 0 to 5 bytes (`raw: [u8; 5]`, any `len <= 5`, parsed only when
   `from_utf8` succeeds), with real NFC. Concrete enumeration is impossible (at least 128^5,
@@ -520,7 +524,7 @@ or a wall limit. A kill is a resource failure, never a proof or a counterexample
 several-fold with host load (the earlier `utf16_strict_matches_std` took 1,641 s idle and 5,796 s
 at load average 15-23). CI job limits are set per job at several times the measured final-source
 runtimes (`formal-kani` 60 min; `formal-kani-extended` 30-120 min per harness;
-`formal-mutants` 240 min with 30 minutes per Kani run; the string jobs the 6-hour maximum), and
+`formal-mutants` 30 minutes per Kani run under an unmeasured 240-minute job backstop; the string jobs the 6-hour maximum), and
 a timeout is always a failure.
 
 The Lean model, golden vectors, adversarial tests and the deterministic fuzz campaign complement
