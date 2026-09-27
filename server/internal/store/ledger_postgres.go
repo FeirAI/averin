@@ -8,12 +8,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// invalidClaim marks a claim the ledger refuses as a server invariant violation (500), as opposed to a
+// database failure (the shim reports those as a retryable ledger outage).
+func invalidClaim(err error) error {
+	return fmt.Errorf("%w: %v", resourceshim.ErrInvalidLedgerClaim, err)
+}
+
 func (p *Postgres) ledgerWrite() error {
 	if err := p.checkProject(p.projectID); err != nil {
-		return err
+		return invalidClaim(err)
 	}
 	if p.tx == nil {
-		return errors.New("store: ledger claim requires project write transaction")
+		return invalidClaim(errors.New("store: ledger claim requires project write transaction"))
 	}
 	return nil
 }
@@ -23,10 +29,10 @@ func (p *Postgres) ConsumeNonce(c resourceshim.NonceClaim) error {
 		return err
 	}
 	if err := p.checkProject(c.ProjectID); err != nil {
-		return err
+		return invalidClaim(err)
 	}
 	if c.ResourceID == "" || c.Nonce == "" || c.OwnerID() == "" {
-		return errors.New("store: incomplete nonce claim")
+		return invalidClaim(errors.New("store: incomplete nonce claim"))
 	}
 	// Legacy rows have unknown project ownership. Until the DB-time exclusion
 	// boundary, conservatively reject every matching nonce in all projects.
@@ -59,7 +65,7 @@ func (p *Postgres) ConsumeJTI(c resourceshim.JTIClaim) error {
 		return err
 	}
 	if c.Key == "" || c.OwnerID() == "" {
-		return errors.New("store: incomplete JTI claim")
+		return invalidClaim(errors.New("store: incomplete JTI claim"))
 	}
 	var claimed bool
 	err := p.tx.QueryRow(p.callContext(), `

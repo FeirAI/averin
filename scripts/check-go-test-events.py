@@ -68,6 +68,7 @@ REQUIRED = (
     f"{STORE_PACKAGE}:TestPostgresProjectGuardWorksForNonOwnerRuntime",
     f"{STORE_PACKAGE}:TestPostgresPendingSweepPrunesOnlyUnusableRows",
     f"{STORE_PACKAGE}:TestPostgresPendingSweepContinuesPastAFailingProject",
+    f"{STORE_PACKAGE}:TestLedgerInvalidClaimsAreInvariantErrors/postgres",
     f"{RESOURCESHIM_PACKAGE}:TestTokenTheftFailsPoP",
     # Hardening review: pool starvation, pending sweep, runtime privilege and cutover barriers.
     f"{STORE_PACKAGE}:TestPostgresHotProjectDoesNotStarvePool",
@@ -77,6 +78,8 @@ REQUIRED = (
     f"{PGSCHEMA_PACKAGE}:TestCutoverRefusesUnnamedMemberWriter",
     f"{API_PACKAGE}:TestUseLedgerOutageIsNotADeny",
     f"{RESOURCESHIM_PACKAGE}:TestLedgerStoreErrorIsNotAReplay",
+    f"{RESOURCESHIM_PACKAGE}:TestLedgerInvalidClaimIsNotAnOutage",
+    f"{API_PACKAGE}:TestUseLedgerInvariantIs500",
 )
 
 

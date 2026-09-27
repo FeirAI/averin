@@ -53,6 +53,12 @@ var ErrRevocationCheck = errors.New("resourceshim: revocation check failed")
 // a server failure (5xx) and must not count it as an authorization deny. Only ErrConsumed is a replay.
 var ErrLedgerUnavailable = errors.New("resourceshim: consume ledger unavailable")
 
+// ErrInvalidLedgerClaim marks a claim the consume ledger refused as malformed or out of place (an
+// incomplete claim, a claim for another project than the open project transaction, a claim outside a
+// write transaction). That is a server invariant violation, not an outage and not a replay: callers
+// must surface it as 500 and log it. Ledger implementations wrap such errors with it.
+var ErrInvalidLedgerClaim = errors.New("resourceshim: consume ledger refused an invalid claim")
+
 // Ledger is the durable consume-before-act store. Consumption is marked BEFORE the resource performs
 // the side effect, so a crash after consumption cannot leave a live credential.
 type Ledger interface {
@@ -436,6 +442,9 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 		return UseEvidence{}, err
 	}
 	if err := s.ledger.ConsumeNonce(nonceClaim); err != nil {
+		if errors.Is(err, ErrInvalidLedgerClaim) {
+			return UseEvidence{}, fmt.Errorf("resourceshim: consume nonce: %w", err)
+		}
 		if !errors.Is(err, ErrConsumed) {
 			return UseEvidence{}, fmt.Errorf("%w: consume nonce: %v", ErrLedgerUnavailable, err)
 		}
@@ -453,6 +462,9 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 			// release it so a definitively-pre-persistence failure leaves the consume-before-act ledger
 			// consistent (mirror the handler's RollbackUse on later failures; adversarial review). The key stays consumed.
 			s.ledger.ReleaseNonce(nonceClaim)
+			if errors.Is(err, ErrInvalidLedgerClaim) {
+				return UseEvidence{}, fmt.Errorf("resourceshim: consume jti: %w", err)
+			}
 			if !errors.Is(err, ErrConsumed) {
 				return UseEvidence{}, fmt.Errorf("%w: consume jti: %v", ErrLedgerUnavailable, err)
 			}

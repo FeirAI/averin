@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -661,6 +662,27 @@ func TestLedgerStoreErrorIsNotAReplay(t *testing.T) {
 		_, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, nonce), op, nonce, now)
 		if !errors.Is(err, ErrConsumed) || errors.Is(err, ErrLedgerUnavailable) {
 			t.Fatalf("replay with nonce %s = %v, want ErrConsumed", nonce, err)
+		}
+	}
+}
+
+// TestLedgerInvalidClaimIsNotAnOutage (review L3): a claim the ledger refuses as invalid (incomplete,
+// wrong project transaction) is a server invariant violation: ErrInvalidLedgerClaim, never the
+// retryable ErrLedgerUnavailable and never a replay.
+func TestLedgerInvalidClaimIsNotAnOutage(t *testing.T) {
+	issuing, agent := keyFromByte(1), keyFromByte(2)
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	token := defaultCap(t, issuing, agent, time.Hour, now)
+	op := Op{Action: testAction, ParamsCommitment: testParams}
+	invalid := fmt.Errorf("%w: store: incomplete nonce claim", ErrInvalidLedgerClaim)
+	for _, l := range []*flakyLedger{
+		{Ledger: NewMemLedger(), failNonce: invalid},
+		{Ledger: NewMemLedger(), failJTI: invalid},
+	} {
+		sh := New(issuing.Public().(ed25519.PublicKey), testResource, l).WithProject("p1")
+		_, err := sh.ValidateUse(token, signDefault(t, agent, token, testParams, "n1"), op, "n1", now)
+		if !errors.Is(err, ErrInvalidLedgerClaim) || errors.Is(err, ErrLedgerUnavailable) || errors.Is(err, ErrConsumed) {
+			t.Fatalf("invalid ledger claim = %v; want ErrInvalidLedgerClaim only", err)
 		}
 	}
 }

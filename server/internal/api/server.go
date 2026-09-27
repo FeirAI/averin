@@ -2563,8 +2563,9 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			return st.IsRevoked(trustedProject, id)
 		})
 		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, op, ur.Nonce, s.now())
-		if errors.Is(e, resourceshim.ErrRevocationCheck) || errors.Is(e, resourceshim.ErrLedgerUnavailable) {
-			return e // an infrastructure failure, not a deny: surfaced as 5xx below
+		if errors.Is(e, resourceshim.ErrRevocationCheck) || errors.Is(e, resourceshim.ErrLedgerUnavailable) ||
+			errors.Is(e, resourceshim.ErrInvalidLedgerClaim) {
+			return e // an infrastructure failure or server invariant violation, not a deny: 5xx below
 		}
 		if e != nil {
 			validateErr = e // a forged/expired/replayed/wrong-scope use — the caller's fault
@@ -2646,6 +2647,11 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
 			// and no decision was made. Retryable; never reported or counted as a replay deny.
 			writeErr(w, http.StatusServiceUnavailable, "use ledger unavailable: "+storeErr.Error())
 			return
+		}
+		if errors.Is(storeErr, resourceshim.ErrInvalidLedgerClaim) {
+			// The ledger refused the claim itself (incomplete, or for another project's transaction):
+			// a server bug, never a replay or an outage.
+			log.Printf("ERROR: use %s: consume ledger invariant violated: %v", useID, storeErr)
 		}
 		writeErr(w, http.StatusInternalServerError, "store use receipt: "+storeErr.Error())
 		return

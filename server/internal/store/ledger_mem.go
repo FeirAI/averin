@@ -26,10 +26,10 @@ func (m *Mem) ledgerRoot() (*Mem, error) {
 func (m *Mem) consume(key ledgerKey, owner string) error {
 	root, err := m.ledgerRoot()
 	if err != nil {
-		return err
+		return invalidClaim(err)
 	}
 	if key.value == "" || owner == "" {
-		return errors.New("store: incomplete ledger claim")
+		return invalidClaim(errors.New("store: incomplete ledger claim"))
 	}
 	root.ledgerMu.Lock()
 	defer root.ledgerMu.Unlock()
@@ -46,10 +46,10 @@ func (m *Mem) consume(key ledgerKey, owner string) error {
 
 func (m *Mem) ConsumeNonce(c resourceshim.NonceClaim) error {
 	if err := m.checkProject(c.ProjectID); err != nil {
-		return err
+		return invalidClaim(err)
 	}
 	if c.ResourceID == "" || c.Nonce == "" {
-		return errors.New("store: incomplete nonce scope")
+		return invalidClaim(errors.New("store: incomplete nonce scope"))
 	}
 	return m.consume(ledgerKey{kind: "nonce", project: c.ProjectID, resource: c.ResourceID, value: c.Nonce}, c.OwnerID())
 }
