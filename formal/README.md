@@ -357,9 +357,11 @@ accepts only exact patch basenames.
 
 A new drift class gets a new patch here before the gate that catches it is called done.
 
-`SKIP_KANI=1 bash formal/check-mutants.sh` is a diagnostic run without the solver: mutants whose
-only detector is a Kani harness (m9-m13, m22-m25; m2-m4 also die to the oracle) then survive by
-design. The full mutation gate, with Kani, on the final source is pending.
+`SKIP_KANI=1 bash formal/check-mutants.sh` is a diagnostic run without the solver. On the final
+source it kills 46 of 48 mutants; m9 and m10 (base64 tail bits, whose only detector is a Kani
+harness) survive by design. Several Kani-designated mutants (m12, m23, m24, m25) die there only
+to the production `stale` check, because they edit an extracted source; that is not a semantic
+detection. The full mutation gate, with Kani, on the final source is pending.
 
 ## Kani (bounded, real code)
 
