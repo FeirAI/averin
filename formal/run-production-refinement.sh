@@ -75,6 +75,10 @@ import json; m = json.load(open('$PROD/manifest.json'))['charon']
 for o in m['options']: print(o)
 for s in m['start_from']: print('--start-from'); print(s)
 for s in m['opaque']: print('--opaque'); print(s)")
+# The crate also builds a cdylib whose exported FFI symbols do not exist under Charon's driver. GNU
+# toolchains (lld/ld with --no-undefined-version) then reject the version script at link time; the
+# link output is discarded and never affects the extracted MIR, so allow it on Linux only.
+[ "$(uname -s)" = Linux ] && CHARON_ARGS+=(--rustc-arg=-Clink-arg=-Wl,--undefined-version)
 AENEAS_ARGS=()
 while IFS= read -r a; do AENEAS_ARGS+=("$a"); done < <(python3 -c "
 import json; [print(o) for o in json.load(open('$PROD/manifest.json'))['aeneas']['options']]")
