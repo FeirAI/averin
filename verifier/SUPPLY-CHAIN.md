@@ -47,7 +47,11 @@ bytes are actually compared. A newly self-generated pin alone is not that check.
 
 1. **Load-time tamper detection (the fail-closed pin).** By design, `build.sh`
    writes a binary and a matching pin in `index.html`; `Dockerfile.web` is also
-   retained as a deployment recipe, not a certified build path. The loader's
+   retained as a deployment recipe, not a certified build path. It does not
+   self-pin: it serves the reference-environment binary from the build context
+   and fails the image build unless that binary's sha256 equals the committed
+   pin and `index.html` pins the same digest (a WASM compiled inside the image
+   would not reproduce the dev-host reference digest). The loader's
    pin check is intended to reject a later binary-only substitution when the
    genuine page and loader are retained. Self-pinning is not independent
    source-to-binary verification and makes no all-machines guarantee.
