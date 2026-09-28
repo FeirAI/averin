@@ -17,7 +17,7 @@ fixed corpus. The TLA+ recovery liveness result depends on its retry and fairnes
 | Layer | Tool | What it covers | Run |
 |---|---|---|---|
 | Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every message a key signs and every tagged or verifier-recomputed preimage (catalogue includes JSON challenges, capability tokens, raw keys, Merkle nodes, the RFC 3161 imprint string and server id derivations; untagged server-local digests are listed as out of scope), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
-| Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | verified on the final source: base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order (5 of 5 harnesses) and transitive; extended set: base64url tail and chunk canonicality (per chunk), the strict UTF-16 decoder against std, the integer round trip over [-99,999, 99,999], canonical numeric spelling (61 of 61 shards). The string round trip (17,031 cases) is a run in progress and not claimed; `parse_never_panics` is not verified (superseded by the Lean parser totality theorem). See "Kani" below | `bash formal/run-kani.sh [--extended]` |
+| Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | verified on the final source: base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order (5 of 5 harnesses) and transitive; extended set: base64url tail and chunk canonicality (per chunk), the strict UTF-16 decoder against std, the integer round trip over [-99,999, 99,999], canonical numeric spelling (61 of 61 shards), and the string escape round trip exhaustively over its exact 17,031-case domain (17,031 of 17,031). `parse_never_panics` is not verified (superseded by the Lean parser totality theorem). See "Kani" below | `bash formal/run-kani.sh [--extended]` |
 | Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log, consume-before-act ledger, and two-replica project transactions with checkpoints, ambiguous commits, crash/restart, pending grants and revocations | `bash formal/tla/run-tlc.sh` |
 | Production refinement (plan 012) | Charon + Aeneas + Lean 4.31 (`production/`, `run-production-refinement.sh`) | the production seal core (serializer, LP framing, `sha256:` digest string, record/checkpoint preimages and hashes, signature message) is extracted from `core/src` and proved to be the model's `ser`/`lp`/`Family.msg`/`recordHashOf`; the model's seal theorems are applied to it. The verifier's claim kernel (`verify::verdict::decide_claims`) is extracted and proved to return the model's `decideClaim` for every claim, for every evidence state its checked facts correspond to; the verdict model's support-erasure, claim-order, capstone and historical theorems are transported to it. The production RCP parser (`CanonValue::parse`, via `parse_typed`/`parse_document`) is extracted and proved to return for every input of any length (`Refinement.Parse.parse_document_total`: no panic, overflow or out-of-bounds index, and termination), under the hypothesis that NFC's outputs are representable Rust strings, in Aeneas' `std` model (capacity overflow, allocation failure and stack depth not modelled). Axioms: standard + NFC + SHA-256 as arbitrary functions for the seal and parser theorems; the verdict refinement uses only the standard axioms (enforced per declaration by `ProductionAudit.lean`). Seal theorems are partial correctness | `bash formal/run-production-refinement.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
@@ -380,10 +380,12 @@ to prove every input lies in exactly one shard. `run-kani-shards.sh FAMILY` runs
 records `PASS`/`FAIL` per shard against a digest of the proof sources (so an interrupted batch
 resumes without trusting stale results), and fails unless every shard passes.
 
-The resume digest covers the proof sources and runners, not `Cargo.lock`, `rust-toolchain.toml` or
-the Kani version. Clear local resume state (`target/kani-shards/`, or the file named by
-`KANI_SHARD_STATE`) whenever any of those change; a recorded `PASS` from an older dependency set or
-toolchain must not be reused. CI jobs always start without resume state.
+The resume digest covers the proof sources and runners, then `Cargo.lock`, both `Cargo.toml`
+files, `rust-toolchain.toml`, the `cargo kani --version` output and every Rust file of the crate,
+so a recorded `PASS` is never reused across a dependency, toolchain, Kani or crate change. The
+extended digest was introduced after the string run; that run's digest, `fd4b0e77...`, covered only
+the proof sources and runners (the definition as of `9539e8c`). CI jobs always start without resume
+state.
 
 **Solver.** The base64 tail/chunk harnesses and `utf16_strict_matches_std` request
 `#[kani::solver(kissat)]`. The Kani 0.68.0 release bundle ships the binary (`bin/kissat`, version
@@ -423,9 +425,9 @@ each harness to report exactly its allowlisted stub lines:
 **Status on the final source.** Verified with every harness reporting `VERIFICATION:-
 SUCCESSFUL`: the default set (below); `utf16_key_order_is_exact` (5 of 5) and
 `utf16_key_order_is_transitive`; `integer_roundtrip`; `accepted_integer_spelling` (61 of 61); the
-three base64 tail/chunk harnesses; `utf16_strict_matches_std`. The `string_escape_roundtrip` family
-is a run in progress and is **not claimed** until all 17,031 cases pass. `parse_never_panics` is
-not verified (see its entry). The final Kani mutation gate is pending.
+three base64 tail/chunk harnesses; `utf16_strict_matches_std`; and `string_escape_roundtrip`, all
+17,031 of 17,031 cases (see its entry for the run). `parse_never_panics` is not verified (see its
+entry). The final Kani mutation gate is pending.
 
 **Default set** (CI job `formal-kani`, `bash formal/run-kani.sh`; measured with Kani 0.68.0 /
 CBMC 6.11 on a 10-core, 24 GB host, one solver at a time):
@@ -480,25 +482,31 @@ harness or family):
   `core/src/kani_string_cases.rs`; `check-kani-shards.py` regenerates and compares it, pins the
   mapping and case body, and re-derives the domain to prove each string occurs exactly once; the
   native test `string_proof_cases_are_exactly_the_domain` checks the Rust mapping itself.
-  Measured per case: about 6 s of CBMC for ASCII strings (125 s for 10 cases in one invocation
-  including the build), about 30 s for strings mixing U+00E9 or U+1F600 with other scalars;
-  the pair U+1F600 U+1F600 (case 17030) was still in symbolic execution of NFC's
-  decomposition sort after a 60-minute wall limit (3,265 s CPU, 2.4 GB peak). A 20-case smoke
-  run across every class passed 19 cases; case 17030 did not finish. **The full 17,031-case run on
-  the final source is in progress and not yet claimed**; the family is claimed only when every
-  case reports success. `run-kani-shards.sh string_escape_roundtrip` runs it with resume;
-  `KANI_SHARD_GROUP=64` batches cases per Kani invocation. Pull requests and pushes run only a fixed
-  20-case smoke subset from every cost class (`kani-string-smoke.txt`, checked against the case
-  list; job `formal-kani-strings-smoke`), a drift check and not the family's proof. The full family
-  runs on the weekly schedule and on manual dispatch. There, `kani-string-slices.py` splits
-  the checked case list by cost (it proves the split is a partition): 16,513 ASCII cases in 48
-  slices (`formal-kani-strings-ascii`), 514 cases with one non-ASCII scalar in 16 slices
-  (`formal-kani-strings-mixed`), and the 4 cases with two non-ASCII scalars one per job
-  (`formal-kani-strings-pure`). The pure jobs run only when the repository variable
-  `AVERIN_KANI_LARGE_RUNNER` names a larger or self-hosted runner (with
-  `AVERIN_KANI_PURE_TIMEOUT_MINUTES` for its limit): case 17030 did not finish in 60 minutes
-  locally and is not expected to fit a 6-hour hosted runner. Until every case has passed
-  somewhere, the family stays unclaimed.
+  **Verified: 17,031 of 17,031 cases report `VERIFICATION:- SUCCESSFUL`** with Kani 0.68.0 /
+  CBMC 6.11 (the only replacement attached is A1; `check-kani-success.py` checked every case's
+  own section and its exact stub list). The run recorded every case against resume digest
+  `fd4b0e77073fd38abc0a798f9bd091a0d7c1562099488f16326ec3b1d26dc5f8`, the digest definition as of
+  `9539e8c` (the proof sources `canon.rs`, `kani_string_cases.rs`, `b64.rs`, `hashx.rs`, `lib.rs`
+  and the runners/checkers); on this branch the proof sources are byte-identical to that run, and
+  the runners/checkers changed afterwards only in their checking and digest code. Resources, on a
+  loaded 10-core host:
+  - the 16,513 ASCII cases in four parallel jobs, 64 cases per Kani invocation: about 25.5 h wall
+    per job, 57 CPU-hours in total (process-group CPU), up to 134 s of CBMC per case under that
+    load, peak 3.0 GB per job;
+  - the 518 cases with a non-ASCII scalar, sequentially in groups of 16: 2.2 h wall, 1.9
+    CPU-hours, at most 19 s of CBMC per case (the pair U+1F600 U+1F600, case 17030, took 15.9 s),
+    peak 2.7 GB. (An earlier version of the source did not finish case 17030 in 60 minutes; the
+    final source's preallocating decoder and the A1/G1 selections changed that.)
+  `run-kani-shards.sh string_escape_roundtrip` reruns it with resume; `KANI_SHARD_GROUP=64` batches
+  cases per Kani invocation. In CI, pull requests and pushes run only a fixed 20-case smoke subset
+  from every cost class (`kani-string-smoke.txt`, checked against the case list; job
+  `formal-kani-strings-smoke`), a drift check, not the family's proof. The whole family runs on
+  the weekly schedule and on manual dispatch: `kani-string-slices.py` splits the checked case list
+  by cost (it proves the split is a partition) into 16,513 ASCII cases in 48 slices
+  (`formal-kani-strings-ascii`), 514 cases with one non-ASCII scalar in 16 slices
+  (`formal-kani-strings-mixed`) and the 4 cases with two non-ASCII scalars one per job
+  (`formal-kani-strings-pure`). The repository variables `AVERIN_KANI_LARGE_RUNNER` and
+  `AVERIN_KANI_PURE_TIMEOUT_MINUTES` can move the pure jobs to a larger runner.
 - `parse_never_panics` is **not verified and not run by any gate**. Its original domain is every
   valid UTF-8 string of 0 to 5 bytes (`raw: [u8; 5]`, any `len <= 5`, parsed only when
   `from_utf8` succeeds), with real NFC. Concrete enumeration is impossible (at least 128^5,
@@ -528,7 +536,7 @@ or a wall limit. A kill is a resource failure, never a proof or a counterexample
 several-fold with host load (the earlier `utf16_strict_matches_std` took 1,641 s idle and 5,796 s
 at load average 15-23). CI job limits are set per job at several times the measured final-source
 runtimes (`formal-kani` 60 min; `formal-kani-extended` 30-120 min per harness;
-`formal-mutants` 30 minutes per Kani run under an unmeasured 240-minute job backstop; the string jobs the 6-hour maximum), and
+`formal-mutants` 30 minutes per Kani run under an unmeasured 240-minute job backstop; the ASCII and one-non-ASCII string slices 6 hours, the smoke subset and the pure string cases 60 minutes), and
 a timeout is always a failure.
 
 The Lean model, golden vectors, adversarial tests and the deterministic fuzz campaign complement

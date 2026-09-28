@@ -428,9 +428,9 @@ jobs:
   formal-kani-strings-smoke:
     name: formal — Kani string round trip smoke subset (20 cases)
     runs-on: ubuntu-latest
-    # Measured: ASCII cases about 6 s, one-non-ASCII cases about 30 s of CBMC; U+00E9 U+00E9 alone is
-    # unmeasured on the final source, so the limit is a backstop, not a measurement.
-    timeout-minutes: 120
+    # Measured on the final source: every non-ASCII case (U+00E9 U+00E9 included) took at most 19 s
+    # of CBMC, ASCII cases up to 134 s on a loaded host; 60 minutes leaves room for setup and build.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
@@ -442,16 +442,16 @@ jobs:
           python3 formal/kani-string-slices.py --check
           python3 formal/kani-string-slices.py --list smoke > "$RUNNER_TEMP/cases.txt"
           KANI_SHARD_ONLY="$RUNNER_TEMP/cases.txt" KANI_SHARD_GROUP=4 \
-            timeout 6900 bash formal/run-kani-shards.sh string_escape_roundtrip
+            timeout 3300 bash formal/run-kani-shards.sh string_escape_roundtrip
 
   # string_escape_roundtrip: 17,031 concrete cases (check-kani-shards.py proves the case list is
   # exactly the original domain). formal/kani-string-slices.py splits that checked list by cost into
   # three classes (it proves they partition it), and each job below runs one contiguous slice of one
   # class through KANI_SHARD_ONLY + KANI_SHARD_SLICE; every case must report VERIFICATION SUCCESSFUL,
   # and the family is verified only when every job of all three passes. CI always starts from fresh
-  # resume state. Measured locally: ASCII cases about 6 s of CBMC each idle (about 35 s each with
-  # four runs in parallel on a loaded host), one-non-ASCII cases about 30 s idle, and the case
-  # U+1F600 U+1F600 was still in NFC's symbolic execution after 60 minutes. The full family is too
+  # resume state. Measured on the final source (all 17,031 cases verified locally): ASCII cases
+  # about 6 s of CBMC idle, up to 134 s with four runs in parallel on a loaded host; every case
+  # with a non-ASCII scalar at most 19 s (U+1F600 U+1F600 15.9 s). The full family is too
   # costly for every push (about 70 jobs): these jobs run only on the weekly schedule and on manual
   # dispatch; pull requests run formal-kani-strings-smoke.
   formal-kani-strings-ascii:
@@ -501,18 +501,14 @@ jobs:
             timeout 21000 bash formal/run-kani-shards.sh string_escape_roundtrip
 
   formal-kani-strings-pure:
-    # The four cases whose two scalars are both non-ASCII, one per job with the maximum limit. The
-    # astral pair (case 17030) did not finish within 60 minutes locally; if a case needs more than
-    # the 6-hour limit of a GitHub-hosted runner, set the repository variables
-    # AVERIN_KANI_LARGE_RUNNER (a larger or self-hosted runner label) and
-    # AVERIN_KANI_PURE_TIMEOUT_MINUTES (self-hosted jobs may run longer); until such a run passes,
-    # the string family is not verified. Scheduled/dispatched only, and only once
-    # AVERIN_KANI_LARGE_RUNNER is set: on a hosted runner case 17030 is expected to exceed 6 hours,
-    # so without a larger runner the job would only ever time out.
-    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && vars.AVERIN_KANI_LARGE_RUNNER != ''
+    # The four cases whose two scalars are both non-ASCII, one per job. On the final source each took
+    # at most 19 s of CBMC locally (U+1F600 U+1F600 15.9 s; an earlier source did not finish it in 60
+    # minutes, which is why these jobs used to require a larger runner). They now run on a hosted
+    # runner; AVERIN_KANI_LARGE_RUNNER / AVERIN_KANI_PURE_TIMEOUT_MINUTES can still move them.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: formal — Kani string round trip, two non-ASCII scalars (case ${{ matrix.slice }}/4)
     runs-on: ${{ vars.AVERIN_KANI_LARGE_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: ${{ fromJSON(vars.AVERIN_KANI_PURE_TIMEOUT_MINUTES || '360') }}
+    timeout-minutes: ${{ fromJSON(vars.AVERIN_KANI_PURE_TIMEOUT_MINUTES || '60') }}
     strategy:
       fail-fast: false
       matrix:
@@ -526,7 +522,7 @@ jobs:
           args: --version
       - run: |
           python3 formal/kani-string-slices.py --list pure > "$RUNNER_TEMP/cases.txt"
-          limit=$(( (${{ fromJSON(vars.AVERIN_KANI_PURE_TIMEOUT_MINUTES || '360') }} - 10) * 60 ))
+          limit=$(( (${{ fromJSON(vars.AVERIN_KANI_PURE_TIMEOUT_MINUTES || '60') }} - 10) * 60 ))
           KANI_SHARD_ONLY="$RUNNER_TEMP/cases.txt" KANI_SHARD_SLICE=${{ matrix.slice }}/4 \
             timeout "$limit" bash formal/run-kani-shards.sh string_escape_roundtrip
 

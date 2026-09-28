@@ -11,9 +11,10 @@ The obligation list is the one check-kani-shards.py proves equal to the original
   ascii  every scalar ASCII (the empty string, 128 singles, 128^2 pairs): 16,513 cases, a few
          seconds of CBMC each;
   mixed  exactly one of U+00E9 / U+1F600 (the 2 singles and the 512 pairs with one ASCII scalar):
-         514 cases, about 30 s each and more under load;
+         514 cases, at most 19 s of CBMC each on the final source;
   pure   both scalars non-ASCII (U+00E9 U+00E9, U+00E9 U+1F600, U+1F600 U+00E9, U+1F600 U+1F600):
-         4 cases, the NFC-heavy ones (U+1F600 U+1F600 did not finish in a 60-minute local run).
+         4 cases (on the final source at most 19 s of CBMC each; an earlier source did not finish
+         U+1F600 U+1F600 in 60 minutes).
 
 The case-id mapping mirrors `string_proof_case` in core/src/canon.rs (0 empty, 1..=130 singles,
 then ordered pairs, first scalar major; scalar indices 128 and 129 are the two non-ASCII ones). A

@@ -2,8 +2,8 @@
 # a case of the checked list and that ascii, mixed and pure cases are all present). Scheduling only:
 # the family is verified only by the full run. Chosen: the empty string; NUL, space, quote,
 # backslash, 'a', DEL; ASCII pairs mixing controls, quotes and escapes; U+00E9 and U+1F600 alone and
-# next to ASCII (quote, backslash, NUL, 'a'); and U+00E9 U+00E9. U+1F600 U+1F600 (case 17030) is
-# left out: it did not finish in 60 minutes.
+# next to ASCII (quote, backslash, NUL, 'a'); and U+00E9 U+00E9. The other two-non-ASCII cases,
+# U+1F600 U+1F600 (case 17030) among them, are left to the scheduled full run.
 string_escape_roundtrip_00000
 string_escape_roundtrip_00001
 string_escape_roundtrip_00033

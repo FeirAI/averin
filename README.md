@@ -160,7 +160,8 @@ properties. These are checked by machine in [`formal/`](formal/README.md), not o
 - **Kani** checks the real Rust (bounded, on the final source): base64url alphabet and per-chunk
   tail/chunk canonicality, `sha256:<hex>`, LP framing, member-key order and its transitivity, the
   strict UTF-16 decoder, the integer round trip over [-99,999, 99,999] and canonical numeric
-  spelling. The string round-trip family (17,031 cases) is still running and not claimed.
+  spelling, and the string escape round trip exhaustively over its exact 17,031-case domain
+  (17,031 of 17,031 verified).
 - **An executable Lean oracle** runs the model over a corpus (every C0 control, DEL, U+2028,
   BMP-vs-astral key order, i64 extremes, one sample per preimage family), and CI fails when the
   Rust's bytes differ from the model's. A tag inventory ties every Rust domain tag to a Lean family.
