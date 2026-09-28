@@ -6,7 +6,7 @@
 #
 # Pins: formal/production/manifest.json; source tarball digests: plans/preflight/PROVENANCE.md.
 # Needs curl, tar with zstd, make, a C toolchain, rustup and opam 2.x, or network access to fetch
-# them. Every download is checked against a pinned sha256; opam packages are pinned to the versions
+# them. Aeneas and Charon sources are pinned by full git commit id; other downloads by sha256; opam packages are pinned to the versions
 # the committed extraction was produced with (their transitive dependencies are resolved from the
 # opam repository at install time, which is not pinned); Lean comes from the pinned release tarball
 # (no elan, no install script). On developer machines run every network fetch through Socket Firewall
@@ -21,19 +21,21 @@ pin() { python3 -c "import json,sys;print(json.load(open('$HERE/manifest.json'))
 AENEAS="$(pin aeneas_commit)"
 CHARON="$(pin charon_commit)"
 NIGHTLY="$(pin charon_rust_toolchain)"
-AENEAS_SHA=ad60d0d20eefd46773924a3f5fe96e60174c3b14bae7118f1192dc1a9b78b418
-CHARON_SHA=76b6c982c00c34d9d1b7c1ba6a9f7ce5a7af5006320aec40d1e9ae3db0796ed7
 
-fetch() { # url sha256 dest
-  [ -f "$3" ] || curl -fsSL "$1" -o "$3"
-  echo "$2  $3" | shasum -a 256 -c -
+# Sources are pinned by full git commit id, which is content-addressed over the whole tree. GitHub's
+# generated archive tarballs are not byte-stable, so their sha256 (the local preflight digests in
+# plans/preflight/PROVENANCE.md) cannot be a reproducible pin.
+fetch_commit() { # repo-url commit dest
+  rm -rf "$3"
+  git init -q "$3"
+  git -C "$3" fetch -q --depth 1 "$1" "$2"
+  git -C "$3" checkout -q --detach FETCH_HEAD
+  [ "$(git -C "$3" rev-parse HEAD)" = "$2" ] || { echo "$1 is not at $2" >&2; exit 1; }
 }
-fetch "https://github.com/AeneasVerif/aeneas/archive/$AENEAS.tar.gz" "$AENEAS_SHA" "$DIR/sources/aeneas.tar.gz"
-fetch "https://github.com/AeneasVerif/charon/archive/$CHARON.tar.gz" "$CHARON_SHA" "$DIR/sources/charon.tar.gz"
-rm -rf "$DIR/sources/aeneas" "$DIR/sources/charon"
-mkdir -p "$DIR/sources/aeneas" "$DIR/sources/charon"
-tar -xzf "$DIR/sources/aeneas.tar.gz" -C "$DIR/sources/aeneas" --strip-components=1
-tar -xzf "$DIR/sources/charon.tar.gz" -C "$DIR/sources/charon" --strip-components=1
+case "$AENEAS$CHARON" in *[!0-9a-f]*) echo "manifest commits must be full hex ids" >&2; exit 1 ;; esac
+[ "${#AENEAS}" -eq 40 ] && [ "${#CHARON}" -eq 40 ] || { echo "manifest commits must be 40-hex ids" >&2; exit 1; }
+fetch_commit https://github.com/AeneasVerif/aeneas.git "$AENEAS" "$DIR/sources/aeneas"
+fetch_commit https://github.com/AeneasVerif/charon.git "$CHARON" "$DIR/sources/charon"
 grep -q "$CHARON" "$DIR/sources/aeneas/charon-pin" || { echo "aeneas charon-pin is not $CHARON" >&2; exit 1; }
 
 # Charon (Rust, pinned nightly from its rust-toolchain file).
