@@ -42,7 +42,15 @@ fi
 W="$TOOLS/with-aeneas.sh"
 pin() { python3 -c "import json,sys;print(json.load(open('$PROD/manifest.json'))['toolchain'][sys.argv[1]])" "$1"; }
 aeneas_v="$(bash "$W" aeneas -version 2>/dev/null | tr -d '[:space:]')"
-case "$aeneas_v" in *"$(pin aeneas_commit)"*) ;; *) fail toolchain "aeneas -version is '$aeneas_v', pinned $(pin aeneas_commit)";; esac
+# A tarball build reports the full commit; a git-checkout build (CI: setup-toolchain.sh verifies the
+# checked-out HEAD equals the full pin) reports git's abbreviated id. Accept either, never a mismatch.
+aeneas_pin="$(pin aeneas_commit)"
+aeneas_hex="$(printf '%s' "$aeneas_v" | sed -n 's/^aeneas\([0-9a-f]\{7,40\}\)$/\1/p')"
+case "$aeneas_v" in
+  *"$aeneas_pin"*) ;;
+  *) [ -n "$aeneas_hex" ] && [ "${aeneas_pin#"$aeneas_hex"}" != "$aeneas_pin" ] ||
+       fail toolchain "aeneas -version is '$aeneas_v', pinned $aeneas_pin" ;;
+esac
 lean_v="$(bash "$W" lean --version 2>/dev/null)"
 case "$lean_v" in *"version 4.31.0,"*) ;; *) fail toolchain "Lean is '$lean_v', pinned 4.31.0";; esac
 rustc_v="$(bash "$W" rustc --version 2>/dev/null)"
