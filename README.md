@@ -31,6 +31,10 @@ Accountability, not just observability. Apache-2.0, self-hostable.
 > [Integration](docs/dev/INTEGRATION.md) · [Testing](docs/dev/TESTING.md). averin is usable
 > **standalone** — a single Go binary plus an offline verifier; the four-plane composition is optional.
 
+The [claim inventory](formal/claims.json) maps trust claims to source symbols, assumptions, targets
+and recurring gates. Its checker validates references; model proofs, sampled conformance and
+production behavior retain the separate bounds described in [formal verification](formal/README.md).
+
 ## The claim we actually make (and its limits)
 
 A signed, hash-chained record proves **provenance and integrity**, not **reality**. We prove:
@@ -59,6 +63,7 @@ Three honest trust levels (used verbatim in product copy):
 | `spec/` | **schema v2, RCP v1, golden vectors, adversarial fixtures** |
 | `deploy/` | Docker Compose source recipes; not validated for the source-only alpha |
 | `docs/` | coverage limits, deployment readiness, vultrino integration, ADRs (0001–0006) |
+| `formal/` | **Formal verification**: Lean 4 proofs of the seal, TLA+ models of the server protocols, Kani bounded proofs of the core, and a Rust↔Lean refinement gate ([`formal/README.md`](formal/README.md)) |
 
 ## Status
 
@@ -119,6 +124,67 @@ are not covered by this offline-verification statement.
 ```
 cargo build --workspace          # Rust core + CLI
 cargo test  --workspace          # golden vectors + adversarial fixtures (the acceptance gates)
+```
+
+## Formal verification
+
+The Level-1 claim, *"sealed by this key, unchanged since, in a verifiable history"*, rests on a few
+properties. These are checked by machine in [`formal/`](formal/README.md), not only by tests:
+
+- **Lean 4** (no `sorry`; every declaration audited to depend only on Lean's three standard axioms):
+  - **the seal theorem.** If a record or checkpoint verifies under the pinned key, its body is
+    *exactly* one the key holder sealed, unless SHA-256 has a collision. This holds even when the
+    same key also signs every other framed family, raw 32-byte challenge digests, and any
+    unframed text (JSON challenges, capability tokens, the denial salt), so a signature cannot be
+    replayed across contexts even if roles share a key;
+  - canonical JSON (RCP v1) is injective;
+  - every message a signing key signs and every tagged or verifier-recomputed preimage is in a
+    proved-disjoint catalogue: framed families, JSON challenges, capability tokens, raw keys,
+    Merkle nodes, the RFC 3161 imprint string and server id derivations (untagged, unsigned server-local digests such as
+    content addresses and idempotency keys are listed as out of scope);
+  - hiding commitments are binding;
+  - **no omission, no injection.** A verified bundle is exactly the signed ancestor-closure of the
+    latest checkpoint;
+  - the checkpoint history is unique.
+- **TLA+** models the grant-transparency log, the consume-before-act ledger and two-replica
+  project transactions (finite configurations checked by TLC). Every counterexample for a pre-fix
+  design is kept as an expected failure. `GrantLog` is the historical single-process, age-based
+  recovery design: no anchored gap and no duplicate sequence number, including when an operator
+  `grant_void` races an in-flight retry, but a client that retries forever with every attempt
+  failing starves the void, which the model shows. The current durable protocol is modeled
+  separately (`GrantRecovery`): an authorized recovery fences the project guard, after which a
+  failing retry cannot refresh it; it checks no duplicate sequence, no late grant after a void and
+  eventual resolution, assuming open database transactions eventually resolve and the authorized
+  operator is eventually scheduled. A still-running pre-fence writer breaks it (a kept
+  counterexample), so the deployment credential cutoff is part of the protocol.
+- **Kani** checks the real Rust (bounded, on the final source): base64url alphabet and per-chunk
+  tail/chunk canonicality, `sha256:<hex>`, LP framing, member-key order and its transitivity, the
+  strict UTF-16 decoder, the integer round trip over [-99,999, 99,999] and canonical numeric
+  spelling, and the string escape round trip exhaustively over its exact 17,031-case domain
+  (17,031 of 17,031 verified).
+- **An executable Lean oracle** runs the model over a corpus (every C0 control, DEL, U+2028,
+  BMP-vs-astral key order, i64 extremes, one sample per preimage family), and CI fails when the
+  Rust's bytes differ from the model's. A tag inventory ties every Rust domain tag to a Lean family.
+  This is differential testing over a corpus, complementing the refinement proofs below.
+- **A mutation suite** (`formal/check-mutants.sh`) applies 48 known drifts and requires each to be
+  caught by a named gate (oracle, golden vectors, Kani, the production proofs, the production
+  checks or a named test).
+
+A mechanised Rust↔Lean refinement (plan 012, Charon/Aeneas) covers the seal core (partial
+correctness), the verifier's claim kernel (standard axioms only) and the parser's totality: the
+production parser returns, without panic or overflow, for every input of any length, given that
+NFC returns representable strings. What is *not* proved (among it the verifier evidence passes
+that compute the kernel's input facts, and the parser's functional correctness) and the full
+trusted base are listed in [`formal/README.md`](formal/README.md).
+
+```
+cd formal/lean && lake build --wfail && ./check-axioms.sh   # Lean proofs
+bash formal/run-production-refinement.sh                    # Charon/Aeneas extraction + production proofs
+bash formal/tla/run-tlc.sh                                  # TLA+ models (expected outcomes)
+bash formal/run-kani.sh [--extended]                        # Kani bounded proofs
+python3 formal/check-refinement.py                          # tag inventory
+cargo test -p averin-decision-core --test oracle            # Rust bytes == Lean oracle output
+bash formal/check-mutants.sh                                # the gates catch known drifts
 ```
 
 ## Security model

@@ -112,6 +112,17 @@ The credential broker (`POST /v2/grants`) + resource gateway (`POST /v2/use`) ar
 standalone if you want Tier-A grant accountability and Tier-B use receipts for your own resources —
 they don't require any sibling plane.
 
+**Grant PoP v2 cutover.** This release makes the online cutoff explicit: new brokered grants require
+`pop_version: 2`, and the resource refuses historical capabilities without a signed project claim.
+For a coordinated upgrade, quiesce grant and use writers, let old queued/pending v1 work drain or
+expire, install readers that understand v2 descriptors and grant evidence, upgrade actual producers
+(including Vultrino's direct and durable Averin grant paths), then reopen traffic. Durable queue
+entries may be re-signed only from their original complete semantic request; do not infer a missing
+tenant, TTL, or authorization field from routing text or upgrade a v1 signature. An old worker gets
+a `400` on new grant issuance after cutoff; keep it out of service until upgraded. Previously sealed
+v1 records retain their original offline verification rules, while old live capabilities stop working
+online at the cutoff. Native `token_exchange` has its separate contract and is unchanged.
+
 ---
 
 ## Optional: composition with the sibling planes
@@ -171,3 +182,22 @@ plane) would seal an offline-verifiable proof of every gated action into averin 
 `POST /v2/records` + broker/resource contracts above. It is explicitly a **design note**: no code in
 the averin tree depends on it. Treat it as the map a future wiring commit follows, not a shipped
 feature.
+# Body-bound authority proofs (v3)
+
+An external policy, human, or delegate authority signs the **final semantic
+record**, not an evidence hash supplied by the caller. Its `authority` block
+carries `proof_version: "v3"`, `subject_projection:
+"averin.authority.subject.v1"`, `subject_digest`, and `evidence_sig`. The exact
+projection, excluded recorder envelope and bytes are specified in
+[`spec/authority-subject-v1.md`](../../spec/authority-subject-v1.md). Supply
+`record_id`, `span_id`, `parent_span_id` (null is valid) and `agent_ts` before
+signing. Supply hiding commitments directly: a v3 request cannot carry raw
+`input`, `output`, or `rationale` for the server to commit after approval.
+
+The server verifies v3 after applying fixed semantic defaults and again before
+sealing, after stamping receipt, display sequence, DAG parents and recording
+key. A malformed or incomplete v3 claim is rejected without falling back to
+v2. Valid historical v2 proofs remain visible as `legacy_unbound` and retain
+their old key and embedded-evidence checks, but cannot satisfy a body-bound
+authorization claim. Enable `AVERIN_REQUIRE_BODY_BOUND_AUTHORITY=1` after
+external producers are updated to reject new v2 elevated ingest.

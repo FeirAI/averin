@@ -32,11 +32,14 @@ what truly happened in the world.
   detectable; this cryptographic guarantee is the **primary** tamper-evidence and holds regardless of
   the storage backend. Editing a record breaks its hash; removing one from a session breaks the
   DAG/checkpoint frontier. The Postgres store *also* `REVOKE`s mutation on the history tables as
-  defense-in-depth — but that `REVOKE` only bites under a non-owner, non-superuser role, and the
-  default `docker compose` self-host connects as the **table-owning** role, where it is a no-op
-  (owner bypass; see `deploy/docker-compose.yml` and `server/migrations/0001_init.sql`). For
-  DB-enforced append-only, run the server under a dedicated least-privilege role granted only
-  INSERT/SELECT (+ UPDATE on `display_seq`).
+  defense-in-depth. That `REVOKE` only bites under a non-owner, non-superuser role, so the server's
+  startup readiness check (`pgschema.CheckRuntime`) refuses a runtime role that is a superuser, owns
+  (or inherits ownership of) **any** table in the schema, or holds effective `UPDATE`/`DELETE`/`TRUNCATE`
+  (and, where the migration forbids it, `INSERT`) on any append-only table, directly or through a role
+  it inherits. Ordinary startup also refuses to bootstrap an empty database (the runtime would own it):
+  initialize once with `averin-migrate --init` under the migration credential. A single-credential
+  self-host that connects as the table owner (the `deploy/docker-compose.yml` default) therefore does
+  not start against Postgres; see [CONFIGURATION.md](CONFIGURATION.md) for the role split.
 - **No DAG fork / no checkpoint fork.** The checkpoint chain rejects seq gaps, two checkpoints
   sharing a seq or prev (threat #2), a decreasing record_count, and a latest frontier that doesn't
   equal the actual heads.
@@ -77,21 +80,66 @@ what truly happened in the world.
   overlap at startup; the offline verifier rejects an overlapping `opts.json` as a fatal config
   error. This prevents one authority signing across a role boundary (a broker self-attesting, a
   resource self-validating).
+- **Brokered grant requests bind the tenant and full effective request.** New online issuance uses
+  the [v2 grant PoP](../../spec/grant-pop-v2.md): the agent signs the authenticated project, resolved
+  idempotency key, session, scope and authorization context, TTL, and a bounded issue/expiry window.
+  A committed exact retry may read the original grant after that window, but cannot mint again.
+  The signed capability carries `project_id`; the resource compares it to its authenticated route
+  project before revocation or replay-ledger access. Historical capabilities without that signed
+  claim are denied online at the coordinated cutoff.
 - **Consume-before-act.** A Tier-B use is recorded and its single-use/bounded capability is consumed
   in the ledger *before* the resource acts. (Durable only with the Postgres ledger — see below.)
+  New uses verify the broker signature, signed project and sender PoP before raw
+  params reach the content store. The same checks run again in the project
+  transaction. Revocation, replay or expiry detected after preflight can leave
+  only an unreferenced content blob subject to the configured retention purge.
+
+## Machine-checked evidence for these invariants
+
+[`formal/`](../../formal/README.md) proves the load-bearing parts of the list above. Lean covers:
+
+- the seal: a body that verifies is exactly a sealed body, unless SHA-256 has a collision;
+- canonical-JSON injectivity;
+- domain separation of every message a signing key signs and every tagged or verifier-recomputed
+  preimage (untagged server-local digests are listed as out of scope in `Catalogue.lean`);
+- commitment binding;
+- no omission and no injection: a verified bundle is exactly the signed closure of the latest
+  frontier;
+- checkpoint-chain uniqueness.
+
+The production code is connected to those proofs (plan 012, Charon/Aeneas): the seal core
+(serializer, framing, digest string, record/checkpoint preimages and hashes, signature message)
+is proved to compute the model's definitions, so the seal theorems apply to the production hashes
+(partial correctness); the verifier's claim kernel `decide_claims` is proved to return the verdict
+model's decision for every claim, for any evidence state its checked facts correspond to (standard
+axioms only); and the RCP parser is proved to return for every input, without panic or overflow.
+
+Kani checks the real code in CI within stated bounds: base64url alphabet and per-chunk
+canonicality, `sha256:<hex>` digests, LP framing, UTF-16 key order and transitivity, the strict
+UTF-16 decoder, the integer round trip and canonical numeric spelling. The string round-trip
+family is still running and not claimed. TLA+ covers the grant log (historical and current
+recovery protocols), the consume-before-act ledger and two-replica project transactions. The same
+README lists what is *not* proved: above all, that the verifier's evidence passes (signatures,
+pins, joins, Merkle paths, snapshots) compute facts meaning what the kernel's theorems assume, the
+parser's functional correctness, and the trusted base (SHA-256, Ed25519, NFC, std, toolchains).
 
 ## Authentication & authorization
 
 - **Record authenticity** is cryptographic and offline: pin the signer's `ed25519pub:` key (logged
   at startup, or carried in the bundle's `keys`) and verify — no server trust needed.
 - **API authn** (`server/internal/auth`): optional project-scoped API keys (`AVERIN_API_KEYS`). When
-  configured, every `/v2/*` route requires a valid token for the `?project=`; comparison is
+  configured, ordinary `/v2/*` routes require a valid token for the `?project=`; comparison is
   constant-time over SHA-256 digests; it **fails closed** (unknown project / empty token ⇒ deny); a
   zero-key config refuses to start (no silent deny-all); tokens are never logged. The dev-only
   open-store mode is explicit and warned about.
-- **API authz is Phase-1 limited.** This answers only "is this token valid for this project?" Full
-  RBAC/SSO/scoped-and-expiring tokens/per-route permissions are Phase 2. With `AVERIN_API_KEYS` unset
-  the app API is fully unauthenticated.
+- **Recovery authz:** `GET` preflight and `POST /v2/broker-seq/void` require separate `AVERIN_RECOVERY_KEYS`
+  credential for the exact project. Ordinary writer possession, absent recovery config, and dev-open
+  ordinary auth do not grant recovery. The credential identifies an actor signed into the tombstone
+  with the required reason and operation ID for a new void. A permanent operational fence binds
+  the same action before reconciliation; a legacy tombstone without original actor/operation metadata
+  is never retroactively attributed. This is one narrow permission, not general RBAC.
+- **Ordinary API authz is Phase-1 limited.** Full RBAC/SSO/scoped-and-expiring tokens are outside
+  this implementation. With `AVERIN_API_KEYS` unset, ordinary app API routes are unauthenticated.
 - Without `AVERIN_API_KEYS` set, the API is unauthenticated, so keep it on loopback.
 
 ## Trust boundaries
@@ -107,6 +155,16 @@ what truly happened in the world.
 - **External authorities hold their own private keys off-box.** averin only *verifies* their
   `evidence_sig` under the pinned public key; the policy engine / human-approval service stays out of
   averin's TCB.
+- **Historical ordering against revocation trusts averin's own serialization (plan 009, ADR 0007).**
+  The optional `historical_authorized_as_of_snapshot` claim (caller-selected `db_serialized_v1`
+  policy) proves that a receipt's authorization ordinal precedes a prospective revocation cutoff
+  in averin's project database, as of a signed snapshot. It assumes an honest resource signer (one
+  ordinal per receipt, signed in its committing transaction), an honest revocation signer (signs the
+  boundary time and watermark it read) and correct PostgreSQL serialization of the project guard row.
+  It does not prove physical action time or independent database membership, and it gives nothing
+  against a party holding the resource and revocation keys and the database. Current revocation is
+  unaffected: a revoked grant still blocks `ok`, `authorized` and the capstone. A TSA anchor never
+  establishes this order: two anchors are only upper bounds on existence.
 
 ## What averin deliberately does NOT do (honest non-goals / limits)
 
@@ -136,6 +194,16 @@ what truly happened in the world.
 - **In-memory deployments lose evidence on restart** and are not serializable; use Postgres for any
   durability/integrity guarantee. The in-memory consume-before-act ledger reopens a single-use replay
   window on restart (warned about) — use the Postgres-backed ledger in production.
+- **Revocation and two-phase pending state are read from the project transaction.** In Postgres mode
+  an acknowledged revoke is durable and every replica's later use transaction rejects the grant; the
+  in-process revoked set is a diagnostic cache only; pending grants have no in-process copy. In-memory
+  mode loses this state on restart; see [LIMITATIONS.md](LIMITATIONS.md).
+- **The use PoP binds the operation, not the bounded-reuse slot or the phase.** The use-time proof of
+  possession signs `(grant_id, resource_id, action, params_commitment, credential_binding, nonce)`. It
+  does not sign `use_sequence_number` or whether the request is recorded as `use` or `use_intent`. A
+  relayer holding a captured, not-yet-submitted request can therefore choose which unused bounded-reuse
+  slot it consumes, or submit it as an intent; it cannot change the operation, and the single-use nonce
+  prevents a second use of the same signed request. See [LIMITATIONS.md](LIMITATIONS.md).
 
 ## Data retention & erasure (append-only — no in-store deletion)
 

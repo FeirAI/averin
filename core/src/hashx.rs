@@ -27,19 +27,37 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-pub fn hex_lower(b: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(b.len() * 2);
-    for &byte in b {
-        s.push(HEX[(byte >> 4) as usize] as char);
-        s.push(HEX[(byte & 0xF) as usize] as char);
+const HEX: [u8; 16] = *b"0123456789abcdef";
+
+/// Append the two lowercase hex digits of every byte of `b` to `out`.
+fn hex_lower_into(b: &[u8], out: &mut Vec<u8>) {
+    let mut i = 0;
+    while i < b.len() {
+        out.push(HEX[(b[i] >> 4) as usize]);
+        out.push(HEX[(b[i] & 0xF) as usize]);
+        i += 1;
     }
-    s
+}
+
+fn ascii_string(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => panic!("hex digest text is ASCII"),
+    }
+}
+
+pub fn hex_lower(b: &[u8]) -> String {
+    let mut s = Vec::with_capacity(b.len() * 2);
+    hex_lower_into(b, &mut s);
+    ascii_string(s)
 }
 
 /// `"sha256:" ‖ lowerhex(SHA-256(data))`.
 pub fn sha256_prefixed(data: &[u8]) -> String {
-    format!("sha256:{}", hex_lower(&sha256(data)))
+    let mut s = Vec::with_capacity(71);
+    s.extend_from_slice(b"sha256:");
+    hex_lower_into(&sha256(data), &mut s);
+    ascii_string(s)
 }
 
 /// Parse a `sha256:<64-hex>` string into 32 raw bytes (None if malformed).
@@ -77,5 +95,50 @@ fn hex_val(c: u8) -> Option<u8> {
         b'0'..=b'9' => Some(c - b'0'),
         b'a'..=b'f' => Some(c - b'a' + 10),
         _ => None, // RCP requires lowercase hex
+    }
+}
+
+/// Bounded proofs over this exact code (run by `formal/run-kani.sh`). The Lean seal theorem assumes
+/// `"sha256:" ‖ lowerhex(·)` is injective and that `LP` emits `uint32_be(len) ‖ b`; these discharge both
+/// against the implementation.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Every byte round-trips through its two lowercase hex digits. `hex_lower` writes exactly two digits
+    /// per byte and `parse_sha256`/`hex32` read exactly two per byte at fixed offsets, so with
+    /// `hex_digit_is_canonical` this makes `"sha256:" ‖ hex_lower(d)` injective in `d` for every length.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn hex_byte_roundtrip() {
+        let b: u8 = kani::any();
+        let s = hex_lower(&[b]);
+        let d = s.as_bytes();
+        assert_eq!(d.len(), 2);
+        assert_eq!((hex_val(d[0]).unwrap() << 4) | hex_val(d[1]).unwrap(), b);
+    }
+
+    /// `hex_val` accepts exactly the 16 lowercase digits, each as the unique spelling of its value, so
+    /// no uppercase or other alternative spelling of a digest is ever accepted.
+    #[kani::proof]
+    fn hex_digit_is_canonical() {
+        let c: u8 = kani::any();
+        if let Some(v) = hex_val(c) {
+            assert!(v < 16);
+            assert_eq!(b"0123456789abcdef"[v as usize], c);
+        }
+    }
+
+    /// `lp_into` appends exactly `uint32_be(len) ‖ b` (checked for every `b` of length ≤ 4).
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn lp_into_frames_exactly() {
+        let bytes: [u8; 4] = kani::any();
+        let len: usize = kani::any_where(|l: &usize| *l <= 4);
+        let mut out = Vec::new();
+        assert!(lp_into(&mut out, &bytes[..len]));
+        assert_eq!(out.len(), 4 + len);
+        assert_eq!(&out[..4], &(len as u32).to_be_bytes());
+        assert_eq!(&out[4..], &bytes[..len]);
     }
 }

@@ -23,10 +23,28 @@ fn main() -> ExitCode {
             eprintln!("  averin-verify record <record.json> [ed25519pub:<key>]");
             eprintln!();
             eprintln!("opts.json keys (each a role-disjoint set; omit a set to leave that mode unevaluated):");
+            eprintln!("  signing_keys — the RECORD-SIGNING keys; pin them for AUTHENTIC verification (omitted =>");
+            eprintln!("    internal consistency only; an empty [] is an error). Each is an ed25519pub: string or a");
+            eprintln!("    {{key, status: active|retired|revoked|compromised, status_changed_at}} object (the");
+            eprintln!("    authoritative RCP §10.2 compromise time). Disjoint from every role below but the broker.");
             eprintln!("  broker_authority_keys, resource_authority_keys, tsa_keys, taxonomy/taxonomy_keys/");
             eprintln!("  taxonomy_digest/taxonomy_version, attestation_keys, cosig_approver_keys, revocation_keys,");
             eprintln!("  federated_broker_keys (a {{broker_id: [keys]}} map), authority_keys — all base64url");
             eprintln!("  ed25519pub: strings (see docs/operator-verification.md).");
+            eprintln!("  claim_policy: {{requested: integrity|authenticated|authorized|");
+            eprintln!(
+                "    historical_authorized_as_of_snapshot|complete_brokered|complete_introspected,"
+            );
+            eprintln!("    revocation: pinned|disclosed|merkle|both, require_disclosure: bool,");
+            eprintln!("    require_attestation: bool}}.");
+            eprintln!("  revocation_temporal: {{policy: strict}} (default) or {{policy: db_serialized_v1,");
+            eprintln!(
+                "    evaluation_time: YYYY-MM-DDTHH:MM:SS.mmmZ, max_snapshot_age_seconds: N,"
+            );
+            eprintln!(
+                "    min_authorization_watermark: N}}. Historical ordering against revocation is"
+            );
+            eprintln!("    database order under honest signers, never physical action time.");
             ExitCode::from(2)
         }
     }
@@ -107,11 +125,14 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         if gb("dag_ok") { "valid" } else { "INVALID" },
         gi("dag_heads")
     );
+    // `checkpoints_anchored` counts anchors that VERIFIED under a pinned TSA; `checkpoints_anchors_attached` is
+    // mere presence (an unverified token anyone can attach) — never print presence as "anchored".
     println!(
-        "  checkpoints:  {}/{} verified, {} anchored, chain {}",
+        "  checkpoints:  {}/{} verified, {} anchored (verified; {} attached), chain {}",
         gi("checkpoints_verified"),
         gi("checkpoints_total"),
         gi("checkpoints_anchored"),
+        gi("checkpoints_anchors_attached"),
         if gb("chain_ok") { "ok" } else { "BROKEN" }
     );
     // Tier-B / ADR-0005 mode gates (only meaningful when the relevant key set was pinned via opts.json).
@@ -170,10 +191,55 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
             gi("revocation_nonmembership_verified")
         );
     }
+    // Plan 009: current revocation above stays authoritative; historical ordering is separate.
+    if let Some(t) = report.get("revocation_temporal") {
+        let ts = |k: &str| t.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let ti = |k: &str| t.get(k).and_then(|v| v.as_int()).unwrap_or(0);
+        let snap = t.get("snapshot");
+        let ss = |k: &str| {
+            snap.and_then(|s| s.get(k))
+                .and_then(|v| v.as_str())
+                .unwrap_or("-")
+                .to_string()
+        };
+        if ts("policy") == "db_serialized_v1" || ss("status") != "absent" {
+            println!(
+                "  revocation temporal:  policy {} · snapshot {} (boundary {}, watermark {})",
+                ts("policy"),
+                ss("status"),
+                ss("boundary_time"),
+                snap.and_then(|s| s.get("authorization_high_watermark"))
+                    .and_then(|v| v.as_int())
+                    .map_or("-".to_string(), |w| w.to_string())
+            );
+            println!(
+                "  historical ordering:  {} proven_before / {} at_or_after / {} indeterminate",
+                ti("proven_before"),
+                ti("at_or_after"),
+                ti("indeterminate")
+            );
+            if ts("policy") == "db_serialized_v1" {
+                println!("                        (database order only; not physical action time)");
+            }
+        }
+    }
     println!(
         "  action_completeness:  {}  (resource_trust: {})",
         gs("action_completeness"),
         gs("resource_trust")
+    );
+    let claims = report.get("claims");
+    let requested = claims
+        .and_then(|c| c.get("requested"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("integrity");
+    let requested_decision = claims
+        .and_then(|c| c.get("requested_decision"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("insufficient");
+    println!(
+        "  requested claim: {requested} — {requested_decision} (claims v{})",
+        gs("claims_version")
     );
     if let Some(issues) = report.get("issues").and_then(|v| v.as_array()) {
         for (i, iss) in issues.iter().enumerate() {
@@ -187,27 +253,91 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         }
     }
     println!();
-    if gb("ok") {
-        // PASS is the INTEGRITY verdict (records sealed/linked, checkpoint chain consistent, no hard violation).
-        // It is NOT the accountability capstone — echo that level on the same line so a reader never mistakes a
-        // PASS for "fully accountable" when no role keys were pinned and the capstone is `not_claimed`.
+    if gb("ok") && claim_contract_satisfied(&report) {
+        // PASS requires both clean legacy diagnostics and the caller's versioned claim.
+        // Echo the bounded capstone level separately so the requested claim stays explicit.
         println!(
-            "RESULT: PASS (integrity) — every record sealed, linked, and checkpoint-consistent."
+            "RESULT: PASS ({requested}) — requested claim satisfied; integrity diagnostics clean."
         );
+        if let Some(note) = historical_claim_note(&report) {
+            println!("{note}");
+        }
         println!(
             "        capstone: action_completeness={} · grant_accountability={} · broker_trust={}",
             gs("action_completeness"),
             gs("grant_accountability"),
             gs("broker_trust")
         );
-        println!("NOTE: PASS is integrity-level; the capstone above is the higher claim. `not_claimed`/`incomplete`");
-        println!("      are normal when role keys were not pinned (pass an opts.json to elevate). A `*_complete`");
-        println!("      capstone is itself bounded by resource_trust:assumed_truthful (MF1).");
+        println!("NOTE: The capstone remains bounded by resource_trust:assumed_truthful (MF1).");
         ExitCode::SUCCESS
     } else {
-        println!("RESULT: FAIL — see issues above.");
+        println!(
+            "RESULT: FAIL — integrity diagnostics or requested claim are not satisfied; see above."
+        );
+        if let Some(note) = historical_claim_note(&report) {
+            println!("{note}");
+        }
         ExitCode::from(1)
     }
+}
+
+// V-L3: the legacy `ok` is a separate integrity result and can be false while the caller's
+// requested historical_authorized_as_of_snapshot claim is satisfied. A consumer of that claim must
+// read claims.* directly, never infer it from `ok`, so print the claim's own decision next to the
+// legacy verdict whenever it was the requested claim (claims_version "2"). Same rule as the browser
+// verifier and the web app: the requested decision under a valid claims contract (a known decision
+// equal to the claim's own field), else "insufficient".
+fn historical_claim_note(report: &CanonValue) -> Option<String> {
+    if report.get("claims_version").and_then(CanonValue::as_str) != Some("2") {
+        return None;
+    }
+    let claims = report.get("claims")?;
+    if claims.get("requested").and_then(CanonValue::as_str)
+        != Some("historical_authorized_as_of_snapshot")
+    {
+        return None;
+    }
+    let requested = claims
+        .get("requested_decision")
+        .and_then(CanonValue::as_str);
+    let own = claims
+        .get("historical_authorized_as_of_snapshot")
+        .and_then(CanonValue::as_str);
+    let decision = match requested {
+        Some(d @ ("satisfied" | "insufficient" | "refuted")) if own == Some(d) => d,
+        _ => "insufficient",
+    };
+    Some(format!(
+        "        historical_authorized_as_of_snapshot: {decision} (read claims.*; the legacy ok is a separate integrity result and can differ)"
+    ))
+}
+
+fn claim_contract_satisfied(report: &CanonValue) -> bool {
+    if report.get("claims_version").and_then(CanonValue::as_str) != Some("2") {
+        return false;
+    }
+    let Some(claims) = report.get("claims") else {
+        return false;
+    };
+    let Some(requested) = claims.get("requested").and_then(CanonValue::as_str) else {
+        return false;
+    };
+    if !matches!(
+        requested,
+        "integrity"
+            | "authenticated"
+            | "authorized"
+            | "historical_authorized_as_of_snapshot"
+            | "complete_brokered"
+            | "complete_introspected"
+    ) {
+        return false;
+    }
+    claims
+        .get("requested_decision")
+        .and_then(CanonValue::as_str)
+        == Some("satisfied")
+        && claims.get(requested).and_then(CanonValue::as_str) == Some("satisfied")
 }
 
 fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
@@ -258,5 +388,121 @@ fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod claim_contract_tests {
+    use super::*;
+
+    fn report(version: &str, decision: &str) -> CanonValue {
+        CanonValue::object(vec![
+            ("claims_version".into(), CanonValue::string(version)),
+            (
+                "claims".into(),
+                CanonValue::object(vec![
+                    ("requested".into(), CanonValue::string("authorized")),
+                    ("authorized".into(), CanonValue::string(decision)),
+                    ("requested_decision".into(), CanonValue::string(decision)),
+                ])
+                .unwrap(),
+            ),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn unsupported_or_malformed_claims_never_pass() {
+        assert!(claim_contract_satisfied(&report("2", "satisfied")));
+        assert!(!claim_contract_satisfied(&report("1", "satisfied")));
+        assert!(!claim_contract_satisfied(&report("3", "satisfied")));
+        assert!(!claim_contract_satisfied(&report("2", "insufficient")));
+        assert!(!claim_contract_satisfied(&report("2", "refuted")));
+        assert!(!claim_contract_satisfied(
+            &CanonValue::object(vec![]).unwrap()
+        ));
+        let mut mismatched = report("2", "satisfied");
+        if let CanonValue::Object(ref mut fields) = mismatched {
+            if let Some((_, CanonValue::Object(claims))) =
+                fields.iter_mut().find(|(k, _)| k == "claims")
+            {
+                if let Some((_, value)) = claims.iter_mut().find(|(k, _)| k == "authorized") {
+                    *value = CanonValue::string("insufficient");
+                }
+            }
+        }
+        assert!(!claim_contract_satisfied(&mismatched));
+    }
+
+    fn historical_report(version: &str, decision: &str) -> CanonValue {
+        CanonValue::object(vec![
+            ("claims_version".into(), CanonValue::string(version)),
+            ("ok".into(), CanonValue::Bool(false)),
+            (
+                "claims".into(),
+                CanonValue::object(vec![
+                    (
+                        "requested".into(),
+                        CanonValue::string("historical_authorized_as_of_snapshot"),
+                    ),
+                    (
+                        "historical_authorized_as_of_snapshot".into(),
+                        CanonValue::string(decision),
+                    ),
+                    ("requested_decision".into(), CanonValue::string(decision)),
+                ])
+                .unwrap(),
+            ),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn historical_claim_note_names_the_decision_even_while_ok_is_false() {
+        let note = historical_claim_note(&historical_report("2", "satisfied"))
+            .expect("requested historical claim under a valid v2 contract yields a note");
+        assert!(note.contains("satisfied"));
+        assert!(note.contains("historical_authorized_as_of_snapshot"));
+    }
+
+    #[test]
+    fn historical_claim_note_falls_back_to_insufficient_under_an_invalid_contract() {
+        let mismatched = CanonValue::object(vec![
+            ("claims_version".into(), CanonValue::string("2")),
+            (
+                "claims".into(),
+                CanonValue::object(vec![
+                    (
+                        "requested".into(),
+                        CanonValue::string("historical_authorized_as_of_snapshot"),
+                    ),
+                    (
+                        "historical_authorized_as_of_snapshot".into(),
+                        CanonValue::string("satisfied"),
+                    ),
+                    ("requested_decision".into(), CanonValue::string("refuted")),
+                ])
+                .unwrap(),
+            ),
+        ])
+        .unwrap();
+        let note = historical_claim_note(&mismatched).expect("requested historical claim");
+        assert!(note.contains(": insufficient"), "{note}");
+        let unknown = historical_claim_note(&historical_report("2", "maybe")).unwrap();
+        assert!(unknown.contains(": insufficient"), "{unknown}");
+        let refuted = historical_claim_note(&historical_report("2", "refuted")).unwrap();
+        assert!(refuted.contains(": refuted"), "{refuted}");
+        assert!(!refuted.contains("revoked"), "neutral wording: {refuted}");
+    }
+
+    #[test]
+    fn historical_claim_note_is_none_for_a_different_requested_claim() {
+        assert!(historical_claim_note(&report("2", "satisfied")).is_none());
+    }
+
+    #[test]
+    fn historical_claim_note_is_none_for_an_unsupported_claims_version() {
+        assert!(historical_claim_note(&historical_report("1", "satisfied")).is_none());
+        assert!(historical_claim_note(&CanonValue::object(vec![]).unwrap()).is_none());
     }
 }

@@ -1,0 +1,13 @@
+Mutant: under the caller's Merkle revocation mode the historical claim no longer requires a v2 path for every receipt's grant, so deleting the paths (with a disclosed list attached) strengthens the historical claim (plan 009 revocation-mode gating). Named detector: the regenerated production refinement proof (Refinement.historical_ready_ok), not a test.
+
+--- a/core/src/verify/verdict.rs
++++ b/core/src/verify/verdict.rs
+@@ -439,7 +439,7 @@
+         && match f.policy.revocation {
+             RevocationRequirement::Pinned => true,
+             RevocationRequirement::Disclosed => h.v2_list_usable,
+-            RevocationRequirement::Merkle => h.v2_merkle_usable && h.merkle_paths_complete,
++            RevocationRequirement::Merkle => h.v2_merkle_usable,
+             RevocationRequirement::Both => {
+                 h.v2_list_usable && h.v2_merkle_usable && h.merkle_paths_complete
+             }

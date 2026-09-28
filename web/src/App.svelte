@@ -8,6 +8,8 @@
     setToken,
   } from "./lib/api";
   import { buildWaterfall, recLabel, type Rec } from "./lib/trace";
+  import { claimVerdict, historicalClaimNote } from "./lib/claimVerdict";
+  import { revocationView } from "./lib/revocationView";
 
   let project = $state("proj-001");
   // API token for AVERIN_API_KEYS-authenticated servers. Empty = authless dev server (averin#19).
@@ -16,6 +18,12 @@
   let selected = $state<string | null>(null);
   let rows = $state<ReturnType<typeof buildWaterfall>>([]);
   let report = $state<any>(null);
+  let verdict = $derived(claimVerdict(report));
+  // V-L3: the legacy ok is a separate integrity result and can be false while this requested claim
+  // is satisfied, so name the claim's own decision next to the legacy verdict rather than let it be
+  // inferred from ok (historicalClaimNote: same rule as the CLI and the browser verifier).
+  let historicalDecision = $derived(historicalClaimNote(report));
+  let revocation = $derived(revocationView(report));
   let error = $state<string>("");
 
   function applyToken() {
@@ -91,14 +99,26 @@
   {#if error}<p class="err">{error}</p>{/if}
 
   {#if report}
-    <section class="panel verdict {report.ok ? 'pass' : 'fail'}">
-      <strong>{report.ok ? "PASS" : "FAIL"}</strong>
+    <section class="panel verdict {verdict.className}">
+      <strong>{verdict.word}</strong>
       {report.records_proven}/{report.records_total} records proven ·
       DAG {report.dag_ok ? "ok" : "INVALID"} ·
       checkpoints {report.checkpoints_verified}/{report.checkpoints_total}
-      ({report.checkpoints_anchored} anchored) ·
+      ({report.checkpoints_anchors_attached ?? report.checkpoints_anchored} anchors attached,
+      {report.checkpoints_anchored} verified-anchored) ·
       chain {report.chain_ok ? "ok" : "BROKEN"}
+      {#if report.record_trust?.some((r: any) => r.authority === "legacy_unbound")}
+        <div class="lvl">Historical authority signatures verify, but do not bind their record bodies.</div>
+      {/if}
       {#if report.first_broken_link}<div class="broken">{report.first_broken_link}</div>{/if}
+      {#if verdict.valid}
+        <div class="lvl">Required {report.claims.requested} claim: {report.claims.requested_decision}. Only satisfied accepts the claim.</div>
+      {:else}
+        <div class="lvl">The claims contract is missing or unsupported. Required-claim acceptance is unavailable.</div>
+      {/if}
+      {#if historicalDecision}
+        <div class="lvl">Requested historical_authorized_as_of_snapshot claim: <b>{historicalDecision}</b>. The legacy verdict above is a separate integrity result and can differ; read this claim from claims.*, not from ok.</div>
+      {/if}
       {#if !report.keys_externally_pinned}
         <div class="lvl">Keys are bundle-supplied (not externally pinned): this proves internal
           consistency under the bundle's own key claims, not authenticity against an out-of-band
@@ -106,6 +126,22 @@
       {/if}
       <div class="lvl">Proves integrity/provenance (Level 1), not completeness (Level 3).</div>
     </section>
+    {#if revocation && (revocation.current.length || revocation.historical)}
+      <section class="panel">
+        <h2>Current revocation</h2>
+        {#if !revocation.evaluated}
+          <div class="lvl">Revocation was not evaluated (no pinned revocation issuer or no signed revocation artifact): a revoked grant would not show here.</div>
+        {:else}
+          {#each revocation.current as line}<div class="broken">{line}</div>{:else}<div class="lvl">No listed grant is revoked.</div>{/each}
+        {/if}
+        {#if revocation.historical}
+          <h2>Historical ordering (separate from current revocation)</h2>
+          <div class="lvl">Historical authorization as of the snapshot: {revocation.historical.decision} · {revocation.historical.snapshot}</div>
+          {#each revocation.historical.receipts as line}<div class="lvl">{line}</div>{/each}
+          <div class="lvl">{revocation.historical.basis}</div>
+        {/if}
+      </section>
+    {/if}
   {/if}
 
   <div class="cols">
@@ -150,11 +186,12 @@
   .err { color: #f87171; font-family: ui-monospace, monospace; }
   .panel { background: #171a21; border: 1px solid #262b35; border-radius: 12px; padding: 14px; margin: 18px 0; }
   .verdict strong { font-size: 18px; margin-right: 8px; }
-  .pass strong { color: #34d399; } .fail strong { color: #f87171; }
+  .pass strong { color: #34d399; } .qual strong { color: #fbbf24; } .fail strong { color: #f87171; }
   .broken { color: #f87171; font-family: ui-monospace, monospace; font-size: 13px; margin-top: 6px; }
   .lvl { color: #9aa4b2; font-size: 12px; margin-top: 6px; }
   .cols { display: grid; grid-template-columns: 220px 1fr; gap: 18px; margin-top: 12px; }
-  aside h2, .trace h2 { font-size: 15px; color: #9aa4b2; }
+  aside h2, .trace h2, .panel h2 { font-size: 15px; color: #9aa4b2; }
+  .panel h2 { margin: 8px 0 4px; }
   .sess { display: block; width: 100%; text-align: left; background: #171a21; color: #e6e9ef;
     border: 1px solid #262b35; margin-bottom: 6px; font-weight: 400; }
   .sess.on { border-color: #7c9cff; }

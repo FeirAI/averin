@@ -24,6 +24,14 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
 
 ```jsonc
 {
+  // AUTHENTICITY: the record-signing key(s). Omitted => internal consistency only (keys from the bundle);
+  // an EMPTY [] is a config error. Each entry is a string or an RCP §10.2 object carrying the authoritative
+  // compromise time: {"key": "ed25519pub:…", "status": "compromised", "status_changed_at": "…"}
+  // (status: active | retired | revoked | compromised). A record OR checkpoint signed by a revoked/compromised
+  // key is trusted only if a verified anchor at or before status_changed_at commits it. MAY equal the
+  // broker/authority keys (ADR 0002); must be disjoint from every other role.
+  "signing_keys": ["ed25519pub:<record-signing-key>"],
+
   // Tier-A grant accountability (ADR 0002/0003): the credential broker's recording key(s).
   "broker_authority_keys": ["ed25519pub:<broker-recording-key>"],
 
@@ -53,6 +61,12 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
   // `revocation_merkle_root` (each verified under this same role). For the Merkle variant the bundle ALSO
   // carries `revocation_merkle_root` + a `revocation_proofs` map (see "Producing the optional artifacts").
   "revocation_keys": ["ed25519pub:<revocation-issuer-key>"],
+
+  // Plan 009 (ADR 0007), optional: decide historical_authorized_as_of_snapshot against a v2
+  // revocation snapshot. YOU supply the evaluation time and freshness bounds; absent = strict
+  // (history never decided). Any malformed value is a configuration error, never a fallback.
+  "revocation_temporal": {"policy": "db_serialized_v1", "evaluation_time": "2026-09-24T12:00:00.000Z",
+                          "max_snapshot_age_seconds": 3600, "min_authorization_watermark": 0},
 
   // M4 Federation (per-broker_id authority): a MAP of broker_id -> its authority key set. When set,
   // a grant carrying that broker_id elevates ONLY under its own broker's keys. Every set above must be
@@ -93,8 +107,8 @@ comes from *your* opts, never the bundle, so a forger cannot self-assert it. A n
 `status_changed_at` (or an unanchored record) withdraws **unconditionally** (fail-closed — an undatable
 compromise cannot be proven to predate anything).
 
-The object form works for **every** role key (`signing_keys` excepted — its lifecycle is the richer Rust
-`TrustedKey` API). The exact rule differs by what the role signs:
+The object form works for **every** role key (`signing_keys` uses the RCP §10.2 `key_status` vocabulary —
+`active|retired|revoked|compromised` — see the options block above). The exact rule differs by what the role signs:
 
 - **Authority-elevation** (`broker_authority_keys`, `resource_authority_keys`, `authority_keys`, each
   `federated_broker_keys` set) and **`cosig_approver_keys`** — the signed artifact is committed by an anchor, so
@@ -112,7 +126,7 @@ The object form works for **every** role key (`signing_keys` excepted — its li
   defense-in-depth: `compromised`/`revoked` → the taxonomy is `untrusted`; `rotated` keeps the digest-pinned
   taxonomy valid.
 
-> **Fail-closed, not silent.** An UNKNOWN status, a misspelled field name, or the object form on `signing_keys`
+> **Fail-closed, not silent.** An UNKNOWN status, a misspelled field name, or an empty `signing_keys` array
 > is a **parse error** (never silently read as `active`) — you can never get false comfort that a rotation took
 > effect when it didn't.
 
@@ -120,14 +134,234 @@ The object form works for **every** role key (`signing_keys` excepted — its li
 
 - `grant_accountability` — every credential grant verified under `broker_authority_keys` (Tier-A).
 - `broker_trust: sequence_verified` — the grant-transparency log is a gapless, anchored prefix (D6); no suppression.
+  A `grant_void` tombstone (see below) fills its seq in that prefix but is never counted as a grant; a malformed,
+  unbound or (under pinned `broker_authority_keys`) unsigned tombstone, or a grant claiming a voided seq, is a hard
+  failure.
 - `cosig_status: satisfied` — every cosigned grant met its M-of-N (M6).
 - `delegation_status: verified` — every per-hop delegation chain re-walked + monotone (M2).
-- `revocation_status` — disclosed-list mode (M5): `fresh`/`absent` pass; `stale`/`revoked_present` block the capstone.
+- `revocation_status` — disclosed-list mode (M5): `fresh`/`absent` pass; `stale`/`revoked_present` block the capstone, as does `missing` (revocation_keys pinned but the bundle carries neither a `revocation_list` nor a `revocation_merkle_root`).
+- `attestation_status` with `revocation_keys` pinned (behaviour change) — the deployment attestation's signed
+  subject must carry a `revocation_digest` equal to the digest of the bundle's `revocation_list` (`""` when the
+  bundle has none), so stripping or swapping the list cannot keep the attestation valid. An attestation signed
+  before its producer bound that field has none, so on a bundle that **carries** a `revocation_list` it now fails
+  as `deployment_attestation: subject does not match the bundle under review — substitution/replay (D7):
+  revocation_digest`, which is a hard failure (`ok: false`), not merely `attestation_status` short of
+  `attested_claims`. Without `revocation_keys` pinned, a subject with no `revocation_digest` is still accepted.
+  Remedy: re-export from a current server (it signs a fresh attestation per export, binding the list it emits), or
+  verify an archived pre-upgrade bundle without `revocation_keys` and record why.
 - `revocation_merkle_status` — Merkle-non-disclosure mode (M5): when `fresh`, EVERY Tier-B use **and** every native credential must carry a per-grant proof in the bundle's `revocation_proofs` map — a non-membership proof to proceed, a membership/missing/forged proof blocks it (fail-closed; the revoked set is never disclosed). `stale` blocks the capstone; `absent` is the baseline. `revocation_nonmembership_verified` counts grants proven NOT revoked.
 - `introspection_status: attested` — every native (token_exchange) credential's resource-signed transcript verified (M3); the native surface reaches `attested_complete_over_introspected_surface`. A native credential that a fresh revocation list/root marks revoked is blocked here too (it can never be `attested`).
 - `federation_status: sequence_verified` — every broker's per-`broker_id` log verified, no `cross_broker_suppression` (M4).
 - `transitive_grants` — grants from an UNPINNED subject broker that elevated to `transitive` trust via a `cross_broker_cert` signed by a PINNED issuer broker (M4 optional). The cert binds the subject's KEY (not just its id), and the subject key is rejected if it collides with any non-broker role.
 - `action_completeness` — the D8 capstone (`attested_complete_over_brokered_surface` / `..._introspected_surface` / `claimed_over_manifest` / `not_claimed`), **always** bounded by `resource_trust: assumed_truthful` (MF1 — the irreducible resource TCB).
+
+- `revocation_temporal` (plan 009) — `grant_revocations[].current_revocation` is current validity
+  and always blocks as above. Under `db_serialized_v1`, `receipt_ordering[].historical_ordering` is
+  `proven_before` only for a validated, body-bound receipt whose authorization ordinal is below its
+  grant's prospective cutoff (or whose grant is not revoked) in a verified, fresh v2 snapshot, and
+  `snapshot` names the signed boundary time and watermark it is bound to. This is averin's database
+  order under honest resource and revocation signers, not the physical time of the action; TSA
+  anchors never establish it. A bundle can therefore be `ok: false` (a revoked grant was used) while
+  `historical_authorized_as_of_snapshot` is `satisfied` (that use preceded the cancellation).
+  Consumers of this claim must read `claims.historical_authorized_as_of_snapshot` (and
+  `claims.requested_decision`), not the legacy `ok`, since `ok` stays false while any revoked
+  grant was used regardless of this claim's decision. Both the offline CLI and the two viewers
+  print the claim's own decision as a prominent line next to the legacy verdict whenever it was
+  the requested claim, so it is never left to be inferred from a FAIL line. The viewers' receipt
+  labels are conservative about the grant behind a `proven_before` receipt: the label reads
+  "proven before revocation" only when that grant's `current_revocation` is `revoked_prospective`;
+  a `not_revoked` grant's receipt reads "authorized as of snapshot (grant not revoked)" instead,
+  and any other or unknown grant state reads "indeterminate" rather than asserting either outcome.
+
+For a decision beyond legacy `ok`, supply a fixed `claim_policy` in the verifier options and
+read `claims_version: "2"` with `claims.requested_decision`. Only `satisfied` accepts the
+requested claim; `insufficient` means the required evidence is unavailable or stale, while
+`refuted` means validated contrary evidence exists. `ok` remains a bundle diagnostic and may
+change when a malformed optional attachment is deleted. The default policy requests
+`integrity`. Set `requested: "authorized"`, `"complete_brokered"`, or
+`"complete_introspected"` for stronger decisions (or `"historical_authorized_as_of_snapshot"` with
+`revocation_temporal`), and pin record `signing_keys` separately
+from role keys. The completeness label now also requires those external record-signing pins.
+
+With pinned `revocation_keys`, the default `revocation: "pinned"` policy requires a fresh
+disclosed list. A Merkle-only deployment must request `"merkle"`; a deployment requiring both
+signed modes must request `"both"`. The bundle cannot choose its own requirement. Every
+brokered use and indexed native credential needs a valid non-membership path when Merkle mode
+is required; a fresh root without those paths yields `insufficient` temporal/authorization
+claims. With `require_disclosure: true`, every accepted committed broker grant must have a
+valid matching credential opening, including grants that were never used. Every present
+authenticated statement that revokes a used grant blocks authorization, even if a
+different mode supplies a fresh nonrevoking statement. Deleting a separately signed adverse
+statement changes the authority evidence itself, so the support-deletion theorem does not
+claim monotonicity for that operation. The same boundary applies to a validated contradictory
+credential opening or conflicting verified TSA timestamps. All three are enforced while present.
+Committed-record contradictions remain contradictions under any attachment deletion.
+
+## Recovering an abandoned broker sequence
+
+A checkpoint refuses a grant log with a reserved `broker_seq` but no recorded grant or
+`grant_void` (`allocated broker_seq max M != N recorded grants`). The current grant path
+stages content before one project transaction allocates, seals, and inserts the grant, so
+new failed grants do not leave reservations. Older deployments and residual failures can
+still leave gaps. Preserve the original bundle and investigate the reservation before an
+operator action.
+
+### Required deployment cutoff
+
+Migrations `0004`–`0006` and the recovery handler require a coordinated cutoff. An
+already-running old writer does **not** check the new fence or nonce scope, and a schema-version
+check at its startup cannot stop it later. Complete this
+barrier before starting any new writer or enabling recovery:
+
+1. Stop external traffic, producers, old servers, and background workers. Drain ordinary
+   transactions, then identify any remaining runtime backends and terminate them. Inspect
+   `pg_prepared_xacts`; explicitly commit or roll back each prepared transaction after
+   investigation. A prepared transaction can finish after a session is terminated.
+2. Provision a **new, non-owner, non-superuser** runtime role with only the application table
+   privileges it needs. Rotate every old runtime password, set each old role `NOLOGIN`, revoke
+   direct and inherited table writes, and terminate remaining backends. A role that owns tables
+   or is a superuser cannot be made safe by `REVOKE` alone; replace that topology. Run from
+   `server/` with a separate migration credential (a superuser, or a role with the privileges of
+   `pg_read_all_stats`, so the barrier can see every other session; otherwise it refuses):
+
+   ```sh
+   AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate \
+     --old-runtime old_role[,other_old_role] --new-runtime new_role
+   ```
+
+   This single transaction validates the retired-role barrier, applies pending steps through
+   `0007`, and records the DB-time legacy nonce-exclusion cutoff (the `0007` step leaves an
+   existing cutoff unchanged). The v7 step retires the boolean `revocations` table: grant the new
+   runtime `SELECT, INSERT` on `authorization_receipts` and `revocation_events` before starting it.
+   An advancing cutover refuses while the new runtime identity has any session or the database has
+   any prepared transaction, so do not start new runtimes before the command commits. It also
+   refuses while **any other client backend** (any role, including an unnamed LOGIN member of a
+   retired role that did `SET ROLE old_role`, or another session of the migration identity) is
+   connected to the database, and while any LOGIN, non-superuser role other than the migration
+   identity, the new runtime and the table owner can `INSERT`/`UPDATE`/`DELETE` any table in the
+   schema, directly, by inheritance, or through a role it can `SET ROLE` to. Revoke such grants and
+   memberships (`REVOKE old_role FROM app_login`), close every session (including your own `psql`),
+   then rerun. Superusers are exempt from the privilege check (nothing can be revoked from them) and
+   are covered only by the session check at that instant. The command's deadline is `--timeout`
+   (default 90 s, or `AVERIN_MIGRATE_TIMEOUT`); raise it for large histories. `--purge-legacy`
+   keeps its named-role barrier only (it runs with new runtimes live). A fresh, truly empty DB instead
+   uses `AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate --init`;
+   ordinary server startup refuses an empty database, and never migrates an existing or unstamped one.
+3. Prove the cutoff: `pg_stat_activity` has no old backends, `pg_prepared_xacts` has no old
+   prepared transactions, a previously connected old session cannot perform a rollback-only
+   `project_write_guard` insert, and the old credential cannot reconnect. Verify a new
+   runtime connection can perform a guarded application write and cannot update/delete
+   recovery fence or result rows. The real-Postgres regression
+   `TestBrokerSeqRecoveryOldRuntimeCredentialCutoff` executes this sequence against the
+   migrated Averin tables, including the fact that `NOLOGIN` alone leaves an existing
+   connection able to write.
+4. Give the new runtime secret only to new binaries; then start new servers/workers and reopen
+   producers and traffic. Never run a
+   pre-fence binary with a still-valid writer credential alongside the recovery protocol.
+   The command cannot infer binary identity or discover an omitted retired credential. Its
+   role list must be complete. New runtime startup checks the v6 marker, that the runtime owns
+   no table in the schema, and that it holds no mutation privilege (effective, including inherited)
+   on any append-only table (`records`, `checkpoints`, `anchors`, `disclosures`, `broker_seq_void`,
+   the recovery fence/result tables, `authorization_receipts`, `revocation_events`, and no write at
+   all on `schema_migrations` and the legacy tables; `broker_seq` keeps only `DELETE`, `display_seq`
+   and `project_write_guard` keep `UPDATE`). A `GRANT ALL` refuses startup.
+
+Legacy nonce/JTI rows have unknown owners and remain global replay exclusions. Ordinary ledger
+sweeps leave them intact. Only after the recorded DB-time cutoff plus the 24-hour hold can an
+operator invoke `averin-migrate --purge-legacy` with the same role flags and migration credential.
+Do not reset that clock during later schema cutovers. If a later migration requires retiring
+writers, repeat its maintenance barrier; the v6 marker cannot authorize a new rollout. Migration
+`0007` is such a step: a database already at v6 needs the same retired-role barrier again.
+
+For a dedicated old role, the administrative checks include:
+
+```sql
+SELECT gid, owner, prepared FROM pg_prepared_xacts WHERE owner = 'averin_old_runtime';
+SELECT pid, state, xact_start FROM pg_stat_activity WHERE usename = 'averin_old_runtime';
+ALTER ROLE averin_old_runtime NOLOGIN PASSWORD 'rotated-unusable-secret';
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM averin_old_runtime;
+REVOKE ALL ON SCHEMA public FROM averin_old_runtime;
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+  WHERE usename = 'averin_old_runtime' AND pid <> pg_backend_pid();
+```
+
+Resolve the first query's rows before the `ALTER ROLE`; rerun both queries afterward.
+Adapt the schema and role names. On the *previously established* old connection, attempt
+`BEGIN; INSERT INTO project_write_guard(project_id) VALUES ('cutover-probe'); ROLLBACK;`
+with a fresh probe ID; the insert must fail (the connection will normally be terminated).
+Attempt a fresh connection with the old password; it must fail. Check both outcomes, not
+just `NOLOGIN` or the new server's migration check.
+
+### Inspect, fence, and reconcile
+
+Configure a project-scoped `AVERIN_RECOVERY_KEYS` token with stable `actor_id`. Ordinary
+writer keys cannot call recovery, even in dev-open ordinary API mode. First inspect the
+read-only authenticated preflight:
+
+```sh
+curl -H "Authorization: Bearer ${AVERIN_RECOVERY_TOKEN}" \
+  'https://<averin-host>/v2/broker-seq/void?project=<project>&broker_seq=<k>'
+```
+
+It reports the reservation, pending grant and whether it is live, winning record, void
+marker, immutable fence/terminal result, and whether the exact required per-project
+`record_id` UNIQUE index is enforced. It is diagnostic only; POST rechecks every condition
+inside guarded transactions. Use a fresh stable incident ID and a specific reason:
+
+```sh
+curl -X POST 'https://<averin-host>/v2/broker-seq/void?project=<project>' \
+  -H "Authorization: Bearer ${AVERIN_RECOVERY_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  --data '{"project_id":"<project>","broker_seq":1,"operation_id":"<incident-id>","reason":"<specific cause>"}'
+```
+
+The first guarded transaction waits for earlier supported project writes, then commits an
+immutable fence binding project, sequence, reserved grant ID, actor, operation ID, session,
+NFC-normalized reason, request digest, generation 1, and database time. New supported
+attempts for that grant cannot allocate or seal a record after the fence. A second guarded
+transaction either records that the grant already landed (`409`, `outcome: recorded`,
+`winning_record_hash`; no tombstone or revocation) or commits the broker-signed tombstone,
+void marker, optional durable revocation, and `outcome: voided` terminal result together.
+The sequence and grant ID are never reissued. A continuously failing retry cannot extend
+the fence or postpone this authorized action; a restart or different replica can finish it.
+There is no wall-clock minimum age and no process-global ingest lock. A blocked project
+transaction has a bounded wait; other projects remain writable.
+
+A `503` with `retryable: true` means the fence or reconciliation outcome may be unknown,
+including after cancellation or an ambiguous commit. Query preflight and repeat **the
+same** operation ID, actor credential, session, and reason; never infer rollback from a
+timeout. A different actor or action receives `409` `action_conflict`. A completed void
+returns `201` when first sealed or `200` on replay with `outcome: voided`,
+`operation_id`, and `winning_record_hash`. A landed grant returns `409` with
+`outcome: recorded` and its winning hash; exact previous issuance readback remains
+available. A signed tombstone makes `/v2/use` reject the grant ID even when revocation is
+disabled. When enabled, durable revocation commits with the tombstone; the next signed
+revocation list publishes it. Check the export's list before claiming offline publication.
+
+A tombstone from before authenticated recovery attribution whose signed `void_evidence` has **both** actor and operation fields
+absent can be reconciled without modifying its original JSON or hash. The response and
+preflight distinguish `original_void_actor_unattributed` from the new
+`reconciliation_actor_id`; the new operational fence is local diagnostic state, not
+retroactive signed attribution or an offline proof. If either field is present, empty,
+null, malformed, or names another action, recovery fails closed. A lone legacy void
+marker does not prove revocation or make a grant disappear.
+
+The exact `records_project_record_id_uniq` index from migration `0002` is a required
+backstop. The server validates its shape, predicate, readiness, validity, and uniqueness
+before every project write; a historical non-unique fallback or invalid index makes the
+project degraded and POST returns `503` without mutation. Preflight remains readable.
+Inspect with `SELECT indexdef FROM pg_indexes WHERE indexname =
+'records_project_record_id_uniq';` and the original migration warning. Preserve the
+original bundle and duplicate signed records: do **not** delete or rewrite evidence to
+manufacture uniqueness. Repair only if the original signed history can remain intact and
+the exact unique index can be built. Otherwise migrate to a new project with an explicit
+link to the preserved historical project, document the degraded old project, and do not
+claim its old checkpoints have been repaired. An operator override must never bypass the
+unique backstop.
+
+A `grant_void` is a signed statement that the broker did not issue that sequence. An
+auditor who holds a credential with the same sequence, or finds a grant record claiming
+it, has evidence of equivocation; the verifier reports a duplicate sequence.
 
 ## Producing the optional M4/M5 artifacts
 
@@ -137,8 +371,11 @@ time from a role-separated key:
 
 - **Disclosed revocation (M5) — server-native.** Set `AVERIN_REVOCATION_SEED` (a key disjoint from the broker,
   resource, attestation, and cosig keys). `POST /v2/revoke {project_id, grant_id}` marks a grant revoked; every
-  `/v2/export` then carries a signed, time-bounded `revocation_list` (its freshness window anchored to the latest
-  checkpoint). Verify with `revocation_keys` pinned → a revoked grant's use (brokered OR native) is blocked.
+  `/v2/export` carries a signed, time-bounded `revocation_list` (its freshness window anchored to the latest
+  checkpoint) — an empty one while nothing is revoked, so a verifier pinning `revocation_keys` reads `fresh`
+  rather than `missing`. Verify with `revocation_keys` pinned → a revoked grant's use (brokered OR native) is blocked.
+  A successful revoke also blocks later uses on the serving process. Postgres mode restores the revoked set
+  after restart, but does not synchronize other live replicas; route each project's uses and revokes together.
 - **Federation (M4) — server-native.** Set `AVERIN_BROKER_ID`; the server tags its grants with `broker_id` and
   emits a per-broker_id `broker_grant_heads` map in each checkpoint. Verify with `federated_broker_keys[<id>]`
   pinned → `federation_status: sequence_verified`. (One server = one broker_id; combine bundles from multiple

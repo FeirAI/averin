@@ -1,36 +1,37 @@
-# averin web app + standalone verifier, served statically. Builds the Svelte SPA and the WASM for the
-# offline verifier, then serves both via nginx.
+# averin web app + standalone verifier, served statically. Builds the Svelte SPA, takes the offline
+# verifier's reference WASM from the build context (below), and serves both via nginx.
 #
 # SUPPLY CHAIN — pin base images by digest for production (tags below float). Resolve with:
 #   docker buildx imagetools inspect <image:tag> --format '{{.Manifest.Digest}}'
-# then write `FROM <image:tag>@sha256:<digest>`. The .wasm built here is the verifier TRUST ROOT; its exact
-# rustc is governed by rust-toolchain.toml, and the published digest is pinned per verifier/SUPPLY-CHAIN.md.
-FROM rust:1-bookworm AS wasmbuild
-WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-COPY core ./core
-RUN rustup target add wasm32-unknown-unknown \
- && cargo build -p averin-decision-core --release --target wasm32-unknown-unknown --no-default-features
-
+# then write `FROM <image:tag>@sha256:<digest>`.
+#
+# VERIFIER TRUST ROOT: the committed pin (verifier/averin_decision_core.wasm.sha256, the same digest as
+# index.html's WASM_SHA256) is the trust root, and this image never re-pins. wasm32 codegen is not
+# bit-identical across build hosts (verifier/SUPPLY-CHAIN.md; CI self-pins its own build for that reason),
+# so a WASM compiled inside this image would not reproduce the reference digest. The image therefore
+# serves the reference-environment build instead: run `./verifier/build.sh` (or `make wasm`) in the
+# reference environment that produced the committed pin, leave the resulting (git-ignored)
+# verifier/averin_decision_core.wasm in the build context, and the build below fails unless its sha256
+# equals the committed pin and index.html pins the same digest. build.sh rewrites the pin files to what
+# it built, so first confirm the environment reproduced the reference:
+#   git diff --exit-code -- verifier/averin_decision_core.wasm.sha256 verifier/index.html
+# A diff means this environment is not the reference one; do not build the image from it.
 FROM oven/bun:1 AS webbuild
 WORKDIR /src/web
 COPY web/package.json web/bun.lock* ./
-RUN bun install --frozen-lockfile || bun install
+RUN bun install --frozen-lockfile
 COPY web .
 RUN bun run build
 
 FROM nginx:1-alpine
 COPY --from=webbuild /src/web/dist /usr/share/nginx/html
 COPY verifier /usr/share/nginx/html/verifier
-COPY --from=wasmbuild /src/target/wasm32-unknown-unknown/release/averin_decision_core.wasm /usr/share/nginx/html/verifier/averin_decision_core.wasm
-# SELF-PIN: rewrite the served index.html's WASM_SHA256 (and the sidecar) to the digest of the wasm ACTUALLY
-# built+served HERE. The committed pin was generated on a dev host; wasm32 codegen is NOT bit-identical across
-# build hosts, so a static pin would not match this freshly-built binary and the fail-closed loader would
-# refuse to start the deployed verifier. Pinning what we serve makes served==pinned by construction. (Source
-# reproduction/transparency is a separate property — see verifier/SUPPLY-CHAIN.md.)
-RUN d="$(sha256sum /usr/share/nginx/html/verifier/averin_decision_core.wasm | cut -d' ' -f1)" \
- && sed -i "s|const WASM_SHA256 = \"sha256:[0-9a-f]*\"|const WASM_SHA256 = \"sha256:$d\"|" /usr/share/nginx/html/verifier/index.html \
- && printf 'sha256:%s  averin_decision_core.wasm\n' "$d" > /usr/share/nginx/html/verifier/averin_decision_core.wasm.sha256 \
- && grep -q "sha256:$d" /usr/share/nginx/html/verifier/index.html  # fail the build if the pin didn't take
+# Fail the image build unless the served binary is exactly the committed pin (no self-pinning).
+RUN set -eu; cd /usr/share/nginx/html/verifier; \
+    test -f averin_decision_core.wasm || { echo "verifier/averin_decision_core.wasm missing from the build context: run ./verifier/build.sh in the reference environment" >&2; exit 1; }; \
+    want="$(sed -n 's/^sha256:\([0-9a-f]\{64\}\)  averin_decision_core.wasm$/\1/p' averin_decision_core.wasm.sha256)"; \
+    got="$(sha256sum averin_decision_core.wasm | cut -d' ' -f1)"; \
+    [ -n "$want" ] && [ "$got" = "$want" ] || { echo "averin_decision_core.wasm sha256:$got does not match the committed pin sha256:$want" >&2; exit 1; }; \
+    grep -q "const WASM_SHA256 = \"sha256:$want\"" index.html || { echo "index.html does not pin sha256:$want" >&2; exit 1; }
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80

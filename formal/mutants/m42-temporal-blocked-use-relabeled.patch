@@ -1,0 +1,21 @@
+Mutant: m42-temporal-blocked-use-relabeled. Named detector: temporal_blocked_use_runs_every_later_check_before_a_historical_positive.
+
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 48b57cf..0bcd57f 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -6819,7 +6819,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+             // classification must not relabel an unvalidated candidate, so the SAME remaining
+             // checks run here on the grant's shadow ledger; the result feeds only the separate
+             // historical fields.
+-            let checked = check_use(&use_ctx, &input, g, true, &mut hist_consumed_outcomes);
++            // BUG: a revocation-blocked candidate is relabeled without the remaining checks
++            let checked = UseCheck::Matched {
++                pop_reverified: true,
++                action_verified: true,
++                taxonomy_window_failed: false,
++                outcome: None,
++            };
+             shadow.apply(&checked, &mut receipts[hist_idx], &outcomes);
+             continue;
+         }

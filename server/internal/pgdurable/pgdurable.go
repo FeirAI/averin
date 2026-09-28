@@ -110,24 +110,12 @@ func (s *Store) PoolStat() PoolStat {
 	}
 }
 
-// Revoke durably records grant_id revoked for a project. Idempotent (ON CONFLICT DO NOTHING) —
-// revocation is monotone-add, so a re-revoke of an already-revoked id is a safe no-op.
-func (s *Store) Revoke(projectID, grantID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
-	defer cancel()
-	if _, err := s.pool.Exec(ctx, `
-		INSERT INTO revocations (project_id, grant_id) VALUES ($1, $2)
-		ON CONFLICT (project_id, grant_id) DO NOTHING
-	`, projectID, grantID); err != nil {
-		return fmt.Errorf("pgdurable: revoke: %w", err)
-	}
-	return nil
-}
-
 // LoadRevocations returns every durably-revoked grant, projectID -> set of revoked grant_ids, for
-// rehydrating the in-memory revoked set at boot. Never nil.
+// rehydrating the in-memory diagnostic cache at boot. Since schema v7 every revocation is an
+// immutable revocation_events row (total or prospective); writes go only through the project
+// Store transaction, never this package. Never nil.
 func (s *Store) LoadRevocations(ctx context.Context) (map[string]map[string]struct{}, error) {
-	rows, err := s.pool.Query(ctx, `SELECT project_id, grant_id FROM revocations`)
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT project_id, grant_id FROM revocation_events`)
 	if err != nil {
 		return nil, fmt.Errorf("pgdurable: load revocations: %w", err)
 	}

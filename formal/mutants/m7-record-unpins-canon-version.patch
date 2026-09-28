@@ -1,0 +1,13 @@
+Mutant: verify_content_hash accepts any canon_version (the seal theorem models rcp-1 only).
+
+--- a/core/src/record.rs
++++ b/core/src/record.rs
+@@ -209,7 +209,7 @@
+         });
+     }
+     let cv = str_field(record, "canon_version")?;
+-    if cv != CANON_VERSION {
++    if false && cv != CANON_VERSION {
+         return Err(RecordError::CanonVersionMismatch {
+             expected: CANON_VERSION.to_string(),
+             found: cv.to_string(),

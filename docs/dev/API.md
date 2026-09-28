@@ -8,9 +8,9 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 
 ## Authentication
 
-- When `AVERIN_API_KEYS` is **unset**, the API is **unauthenticated** (`/v2/*` is open). Dev /
-  single-tenant only.
-- When `AVERIN_API_KEYS` is set, every `/v2/*` route is gated by project-scoped API-key middleware;
+- When `AVERIN_API_KEYS` is **unset**, ordinary `/v2/*` routes are unauthenticated. Dev /
+  single-tenant only. The recovery route always requires `AVERIN_RECOVERY_KEYS`.
+- When `AVERIN_API_KEYS` is set, ordinary `/v2/*` routes are gated by project-scoped API-key middleware;
   `/healthz` stays open. Credentials are read from `Authorization: Bearer <token>` (scheme is
   case-insensitive) **or** `X-Api-Key: <token>`; the project comes from the `?project=` query
   parameter. A token not valid for that project gets a generic `401` (`{"error":"unauthorized"}`,
@@ -37,7 +37,9 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | POST | `/v2/use` | Resource gateway: one-phase use receipt (Tier-B). | `AVERIN_RESOURCE_SEED` |
 | POST | `/v2/use-intent` | Two-phase use, phase 1 (before the side effect). | resource gateway |
 | POST | `/v2/use-outcome` | Two-phase use, phase 2 (after the side effect). | resource gateway |
-| POST | `/v2/revoke` | Mark a `grant_id` revoked. | `AVERIN_REVOCATION_SEED` |
+| POST | `/v2/revoke` | Record a total or prospective revocation of a `grant_id`. | `AVERIN_REVOCATION_SEED` |
+| GET | `/v2/broker-seq/void` | Recovery-authenticated, read-only reservation and fence preflight. | broker |
+| POST | `/v2/broker-seq/void` | Fence a stranded `broker_seq`, then reconcile a landed grant or signed `grant_void`. | broker |
 
 Routes whose feature is not enabled return **`501 Not Implemented`** with an `{"error":...}` telling
 you which env var to set.
@@ -56,7 +58,10 @@ or the `Idempotency-Key` header. The caller may also supply any of the allowed t
 
 Batch semantics: the **whole batch** is validated up front (decodability, project binding,
 idempotency, reserved-field checks, and an RCP-canonicalization dry-run). A malformed item rejects
-the entire batch with a deterministic `400` before any item is sealed.
+the entire batch with a deterministic `400` before any item is sealed. The pinned-authority decision
+(`AVERIN_REQUIRE_PINNED_AUTHORITY`, below) and `record_id` uniqueness are also dry-run up front: an
+item whose authority elevation would be rejected fails the whole batch with the documented `500`, and a
+`record_id` collision with the `409`, in both cases with nothing sealed.
 
 **Every item in a multi-item batch needs its OWN `idempotency_key`.** Two items resolving to the same
 `(project_id, idempotency_key)` would collapse in the append-only store — the second would return the
@@ -73,15 +78,36 @@ record. The same key under two different `project_id`s does not collide and is a
 
 `created` is `false` for an idempotent collapse (a retry under the same key). Errors: `400`
 (invalid body, missing required field, reserved field/prefix, non-canonical field), `403`
-(project_id mismatch with auth).
+(project_id mismatch with auth), `409` (the `record_id` is already held by a different record in the
+project — see below).
+
+**`record_id` is unique per project.** A caller may choose its own `record_id`, but a second, different
+record under an id the project already holds is rejected with `409` and nothing is stored (a duplicate
+would fail offline verification forever and lose its disclosure secret). An exact idempotent replay (same
+`idempotency_key`) still collapses onto the stored record. In a batch, a collision — with a stored record
+or between two items — rejects the whole batch before any item is sealed.
+
+**`record_id` is at most 256 bytes** (UTF-8). A longer caller-supplied id is a `400` (the whole batch,
+before anything is sealed), identically on the in-memory and Postgres stores. Server-derived ids are well
+under the cap. The Postgres uniqueness backstop indexes `md5(record_id)` rather than the raw id, so a
+longer id stored before the cap existed never exceeds the index row limit (migration `0002` cannot fail
+on it).
 
 ### Reserved fields (rejected on a generic record)
 
 - `idempotency_key` prefix `denial:` — reserved for the broker denied-grant log.
-- `record_id` prefix `use-`, `outcome-`, or `denial-` — reserved for the broker/resource endpoints.
+- `record_id` prefix `use-`, `outcome-`, `denial-`, `introspection-`, or `revocation-`, and any
+  lowercase UUIDv5-shaped `record_id` (the form of the broker's deterministic grant and introspection
+  ids) — reserved for the broker/resource endpoints.
 - `event_type == "credential_grant_denied"` — reserved for the broker denied-grant log.
 - `extensions.broker` and `extensions.broker_denial` — reserved for the broker/resource lifecycle.
 - `record_kind` (optional) must be one of `budget-exhausted`, `chargeback-posted`.
+
+**No NUL in identifiers (every route).** A `project_id`, `idempotency_key`, `record_id` (and the
+`/v2/revoke` `grant_id`) containing U+0000 (for example an escaped `\u0000` in the JSON body), a `?project=`
+query parameter containing `%00`, or an `Idempotency-Key` header containing NUL is a `400`. The server
+derives deterministic ids and keys by joining these values with a NUL separator, so a NUL inside one would
+let two different `(project_id, idempotency_key)` pairs derive the same grant, use or outcome id.
 
 ---
 
@@ -112,6 +138,13 @@ chain, and best-effort appends it to the configured witness. Empty JSON body.
 **Response `201`:** `{ "checkpoint": { /* sealed checkpoint */ } }`, with an optional
 `"warning"` if the checkpoint stored but witnessing is pending. Requires `?project=` (`400`
 otherwise).
+
+A checkpoint is **refused** (`500`, `checkpoint refused: ...`) while the project's grant log is not a
+gapless `[1..N]` prefix: a `broker_seq` is reserved but no grant (or tombstone) records it. This happens
+when a grant's commit was ambiguous (or its seq release failed) and its client never retried. Inspect the reservation with the authenticated
+[`GET /v2/broker-seq/void`](#get-v2broker-seqvoidprojectidbroker_seqn), then retry the
+original grant if it can still finish or run the bounded operator
+[`POST /v2/broker-seq/void`](#post-v2broker-seqvoidprojectid) action.
 
 ---
 
@@ -176,6 +209,8 @@ Request (`grantRequest`):
 | Field | Type | Notes |
 |-------|------|-------|
 | `idempotency_key` | string | Required (or `Idempotency-Key` header). Deterministically fixes `grant_id`. |
+| `pop_version` | int | `2` for new brokered issuance; native `token_exchange` has its separate proof contract. |
+| `issued_at`, `request_expires_at` | int64 Unix seconds | Agent-signed freshness window. Maximum 15 minutes; 30 seconds of clock skew accepted. |
 | `project_id`, `session_id` | string | Required. |
 | `agent_id`, `action`, `resource`, `scope` | string | The operation being authorized. |
 | `scope_class` | string | Scope classification input (see broker `ScopeClass`). |
@@ -194,13 +229,43 @@ Request (`grantRequest`):
   "grant_id": "<uuid>",
   "capability": "<minted sender-constrained token>",
   "expires_at": "2026-...Z",
-  "scope_class": "single_use"
+  "scope_class": "single_operation"
 }
 ```
 
 Errors: `400` (validation, failed PoP, forbidden scope, malformed), `409` (idempotency key reused
-for a *different* grant request), `500` (store/seal failure), `501` (broker not enabled). When an
+for a *different* grant request, or the grant's reserved `broker_seq` was voided by the operator —
+re-issue under a new `idempotency_key`), `500` (store/seal failure), `501` (broker not enabled). When an
 M-of-N cosig policy is pinned, single-phase issuance is refused (`400`) — use prepare/finalize.
+An invalid signature, stale proof, or conflicting project/idempotency representation is rejected
+without allocating a grant sequence or sealing authorization or denial evidence. An authenticated
+fresh request that fails broker policy may produce a signed denied-grant record when denial logging
+is enabled.
+
+**What `agent_sig` binds.** For `pop_version: 2`, the agent signs a SHA-256 digest of the
+length-prefixed effective request, including authenticated `project_id`, resolved `idempotency_key`,
+`session_id`, operation and sender key, effective scope class/use limit, TTL, authorizing principal,
+delegation chain, justification, and the signed issue/expiry envelope. The exact field order and
+encoding are specified in [grant-pop-v2.md](../../spec/grant-pop-v2.md). A captured proof cannot be
+moved to another project or idempotency key, and it cannot mint after the signed freshness window.
+An exact v2 committed retry can return the original capability after that window; it does not re-mint or
+extend the capability. Historical v1 signatures remain inspectable under their original format but
+are not accepted by online brokered grant routes after the cutoff, including committed retries.
+
+### POST `/v2/grants/prepare` and `/v2/grants/finalize` (two-phase)
+
+`prepare` takes the same `grantRequest` body (PoP-validated first), mints the credential without
+committing, and returns the challenge inputs (`grant_id`, `credential_binding`, `cnf_kid`, `exp`,
+`cosig_threshold`). `finalize` takes **the same `grantRequest` body again** (including `agent_pubkey` /
+`agent_sig`) plus `cosignatures` and/or `delegation_hops`, re-validates the proof-of-possession, and
+commits. Both phases answer only the request that prepared the grant: an already-pending or committed
+grant under the same `idempotency_key` is returned only when the request matches it (the same rule as a
+`/v2/grants` retry), else `409`; a body without a valid `agent_sig` is a `400`. `finalize` with no
+prior `prepare` is a `409`.
+
+With `AVERIN_DATABASE_URL`, pending challenges persist and rehydrate after restart. They are still
+served from a local cache: a different live replica may answer `409` until it is restarted or the
+request is routed to the original issuer. Route both phases to the same writer.
 
 ---
 
@@ -212,28 +277,190 @@ receipt the offline verifier joins back to its grant.
 
 Request (`useRequest`): `idempotency_key`, `project_id`, `session_id`, `capability`, `use_sig`
 (base64url Ed25519 PoP), `action`, `params`, `nonce`, `params_nonce`, and `use_sequence_number`
-(bounded_reuse only).
+(bounded_reuse only). For other capability classes, the server currently ignores a supplied
+`use_sequence_number` and records the effective value `0`; committed retry matching uses that
+effective value as well.
+
+A bounded project read returns an exact committed retry, including after capability
+expiry, without another content write or ledger claim; a changed request under
+the same key is `409`. That retry still verifies the presented capability under
+the configured broker issuer key; an issuer key rotation without a compatible
+keyring cannot recover the old receipt through this endpoint. For a new use,
+the resource verifies the capability,
+signed project, and use PoP before storing raw params. It repeats that preflight
+inside the project transaction, then checks revocation and consumes the ledger
+with receipt insertion. A request that passes the first preflight but later
+fails revocation, replay, or time revalidation can leave an immutable,
+unreferenced content blob until normal content retention purges it; it leaves
+no receipt or committed ledger claim.
 
 **Response `201`:**
 `{ "use_id": "use-<uuid>", "grant_id": "<uuid>", "record": { /* sealed receipt */ }, "idempotent": false }`
 
+**Errors.** A forged, expired, revoked, replayed (nonce already consumed) or double-spent use is a `400`
+deny (`averin_use_requests_total{outcome="deny"}`). A consume-ledger store failure (timeout,
+cancellation, lost connection) is `503`: the transaction rolls back, nothing is consumed, and it is not
+counted as a deny; retry the same request. A failed revocation lookup or receipt write is `500`.
+
 `/v2/use-intent` and `/v2/use-outcome` are the two-phase variant (intent recorded *before* the side
-effect, outcome *after*, linked by a forced causal edge).
+effect, outcome *after*, linked by a forced causal edge). An intent is completed **exactly once**: a
+second `/v2/use-outcome` for an intent that already has one (under a different `idempotency_key`) is a
+`409`; a retry of the original outcome under its own key returns it with `"idempotent": true`.
+
+**Authorization order (plan 009, schema v7).** Every admitted `/v2/use` and `/v2/use-intent` receipt
+carries `use_evidence.authorization_order =
+{"format":"averin.authorization_order.v1","project_id":…,"ordinal":n}`, allocated from the project's
+monotonic order inside the transaction that stores the receipt and covered by the resource's
+body-bound signature. An exact retry returns the stored receipt and its original ordinal. A
+`/v2/use-outcome` allocates nothing: it copies its intent's signed ordinal into the `use_outcome`
+payload, so an outcome recorded after a revocation still describes an intent admitted before it.
+Ordinals are unique and increasing per project, not gapless.
+
+---
+
+## POST `/v2/introspection`
+
+Records a resource-signed introspection transcript for a native (`token_exchange`) grant. Request:
+`{project_id, session_id, idempotency_key, grant_id, credential_ref, effective_scope, effective_exp,
+introspected_at?, transcript_hash?}`; `introspected_at` 0 or absent means the server's time.
+
+Inside one project transaction the server first returns an exact committed retry (`201`,
+`"created":false`), even after the grant later expired or was revoked. Every immutable field must
+match the stored receipt; an omitted time reuses the committed time, and a different explicit time or
+any other different field is `409`. Otherwise it validates the actual committed grant: a native grant
+for this resource, `credential_ref` equal to its `lease_id`, `effective_scope` within its scope,
+`effective_exp` not after its expiry, `issued_at ≤ introspected_at < min(effective_exp, exp)`, `introspected_at` not in
+the future beyond the accepted clock skew, the grant not expired now, not revoked (either mode) and
+not voided. A failure is `400` and nothing is signed or stored. Only then does it allocate an
+authorization ordinal (carried in `introspection_evidence.authorization_order`) and sign the
+transcript. `record_id` and `grant_id` in the response come from the stored receipt.
 
 ---
 
 ## POST `/v2/revoke`
 
-Marks a `grant_id` revoked (permissive by id — the id need not already exist locally, so a
-compromised/federated id can be revoked preemptively). The next `/v2/export` carries a signed,
-time-bounded `revocation_list`; the offline verifier then blocks any use of a revoked grant.
+Records an immutable revocation event for a `grant_id` (permissive by id — the id need not already
+exist locally, so a compromised/federated id can be revoked preemptively). `mode` is `total` (the
+default: compromise, every use invalid) or `prospective` (cancellation: effective from the next
+authorization ordinal). From the moment it returns `201`, `/v2/use`, `/v2/use-intent` and
+`/v2/introspection` reject (`400`, before consuming the credential) any use of that grant, in either
+mode. The next `/v2/export` carries a signed, time-bounded `revocation_list`; the offline verifier then
+blocks any use of a revoked grant, including one ordered before a prospective cutoff (the separate
+historical result is described under the verification report). Whenever revocation is enabled, every
+export carries a signed `revocation_list`, an **empty** one when nothing is revoked. A verifier that
+pins `revocation_keys` reads a bundle with no list as `revocation_status: missing` (which blocks the
+capstone), so "nothing is revoked" is an affirmative, signed statement rather than an absent field.
 
-Request: `{ "project_id": "...", "grant_id": "..." }` (both required).
+A prospective cutoff is allocated in the same serialization domain as receipt ordinals, so a receipt
+admitted before the revoke has a smaller ordinal. A retried prospective revoke returns the original
+event and cutoff (`"created":false`); the cutoff never moves later. A later `total` revoke of the same
+grant is always recorded and makes it total. `prospective` is refused (`400`) unless the server
+exports v2 lists (`AVERIN_REVOCATION_EXPORT_FORMAT=v2`), because a v1 list can state only total
+revocations. With v1, an export over a project that already has a prospective event fails rather
+than emitting it as total or omitting it.
+
+**Export formats.** v1 (default): `{issuer_kid, issued_at, not_after, revoked_grant_ids, sig}` in
+domain `averin.revocation.v1`; every listed grant is total. v2 (`AVERIN_REVOCATION_EXPORT_FORMAT=v2`):
+`{format:"averin.revocation.list.v2", issuer_kid, issued_at, not_after, project_id,
+snapshot:{boundary_time, authorization_high_watermark}, revocations:[{grant_id, mode,
+cutoff_order?}], sig}` in domain `averin.revocation.v2`. The boundary time and watermark are read
+inside the same repeatable-read snapshot as the records and revocation state and signed as read.
+Legacy verifiers reject a v2 list (fail closed), so upgrade verifiers first. See ADR 0007.
+
+In Postgres mode, the revoke is durable before `201`. Later use transactions on
+any live replica check the same durable project state. An already admitted use
+may complete; a failed revocation lookup rejects rather than trusting a cache.
+
+Request: `{ "project_id": "...", "grant_id": "...", "mode": "total"|"prospective", "reason": "..." }`
+(`project_id`, `grant_id` required; `reason` is stored with the event, at most 512 bytes).
 
 **Response `201`:**
-`{ "revoked": "<grant_id>", "project_id": "...", "revoked_total": <n>, "note": "..." }`.
+`{ "revoked": "<grant_id>", "project_id": "...", "mode": "<effective mode>", "cutoff_order": <n>
+(prospective only), "created": <bool>, "revoked_total": <n>, "note": "..." }`.
 Errors: `400`, `403`, `429` (the per-project revoked-set cap is reached — explicit, never a silent
 fail-open), `501` (revocation not enabled).
+
+---
+
+## GET `/v2/broker-seq/void?project=<id>&broker_seq=<n>`
+
+Recovery-authenticated, read-only preflight for an allocated sequence. It reports the
+reservation and database allocation time, pending grant and liveness, winning record and
+hash, void marker, immutable fence, terminal result, and actual required `record_id`
+uniqueness status. `diagnostic_only: true` means it cannot reserve or promise an outcome;
+POST revalidates under the project guard. Unlike a write, it remains available when the
+historical non-unique index fallback blocks mutations. Requires the separate exact-project
+`broker_seq:recover` credential; ordinary writer keys receive `403`.
+
+## POST `/v2/broker-seq/void?project=<id>`
+
+Authenticated operator recovery for a legacy or residual reserved sequence without a
+recorded grant. Request:
+
+```json
+{"project_id":"p1","broker_seq":1,"session_id":"broker-seq-void","operation_id":"incident-123","reason":"abandoned grant transaction"}
+```
+
+`session_id` defaults to `broker-seq-void`; `operation_id` is 1–128 printable
+non-whitespace ASCII bytes and `reason` is nonblank, at most 512 bytes, and normalized to
+NFC by the Rust RCP canonicalizer. The authenticated actor comes from
+`AVERIN_RECOVERY_KEYS`, never the request body. The same actor, operation ID, session and
+normalized reason must be used for every retry. The token grants only recovery for its
+configured project.
+
+The first exact project transaction drains earlier supported writes and commits a
+permanent immutable fence for the reserved grant ID and sequence, bound to actor, action,
+reason, request digest, generation 1, and database time. Every supported grant path checks
+that fence; allocation and record insertion enforce it inside their final project
+transaction. A second guarded transaction observes the winner. If the grant landed first,
+it commits a `recorded` terminal result, leaves the grant and its revocation state
+unchanged, and returns `409` with `outcome: recorded` and `winning_record_hash`. Exact
+readback of that prior issuance remains available. Otherwise, it commits the signed
+`grant_void` tombstone, reservation void marker, optional durable revocation, and
+`voided` terminal result atomically. No sequence or grant ID is reissued. A live pending
+grant is not a landed grant; the fence prevents it finalizing. Existing pre-protocol
+partial tombstones are reconciled without resealing.
+
+The `grant_void` binds project, sequence, and grant ID in signed
+`extensions.broker.void_evidence` (domain `averin.broker.grant_void.v1`), with the actor,
+operation ID, and reason. Its `record_id` equals the grant ID. It fills the gap in
+`broker_grant_head` for the next checkpoint but is never counted as a grant or matched to
+a use. `/v2/use` rejects that ID because of the terminal void even without a revocation
+signing key. With revocation enabled, the durable revoke commits in the same transaction;
+offline publication requires the next signed revocation list.
+
+A completed new void returns `201` with `operation_id`, `outcome: voided`,
+`winning_record_hash`, `grant_id`, `broker_seq`, `created: true`, and the sealed `record`.
+Exact replay returns `200` and `created: false`. A different operation or actor returns
+`409` `action_conflict`. A missing reservation returns `404`; broker disabled returns
+`501`. A `503` `retryable: true` may follow a bounded lock wait, failed reconciliation,
+cancellation, or ambiguous commit. Query preflight and repeat the **same** operation;
+never treat a timeout as proof of rollback. Other projects do not wait on this project's
+guard. A client retrying a failing grant cannot extend the fence, and process restarts do
+not reset it. There is no minimum reservation age.
+
+For a tombstone from before authenticated attribution, repair is allowed only when both
+`actor_id` and `operation_id` fields are absent and the complete project, grant ID,
+sequence, domain, and broker role match. Its original signed JSON and hash remain
+unchanged. `legacy_tombstone: true` and `original_void_actor_unattributed: true` explicitly
+distinguish original void evidence from the current `reconciliation_actor_id` on the
+operational fence. These rows are local diagnostics, not new offline proof. A present
+empty, null, partial, mismatched, or malformed attribution fails closed; a legacy marker
+alone is not evidence of revocation.
+
+The project write guard and the exact valid per-project `record_id` UNIQUE index decide
+grant-versus-void races across replicas. Every project write is refused when the index is
+absent, non-unique, invalid, partial, or has the wrong expression. Preflight reports the
+condition; preserve duplicate signed history and follow the
+[operator runbook](../operator-verification.md) rather than deleting evidence. Existing
+sessions of pre-fence writer binaries can ignore the fence. Deploy only after the runbook's
+traffic drain, prepared-transaction resolution, old runtime credential revocation and
+session termination, and explicit old-credential write refusal test.
+
+Verifier builds from before `grant_void` existed do not recognize its role and fail the
+bundle; auditors need a verifier with ADR 0004 amendment A1. The historical
+`GrantLog_void_starved.cfg` models the replaced age-based protocol; current liveness also
+assumes database transactions resolve and authorized recovery is eventually scheduled.
 
 ---
 
@@ -313,10 +540,15 @@ Key fields:
 | Field | Type | Meaning |
 |-------|------|---------|
 | `ok` | bool | The integrity verdict: every record sealed + linked + checkpoint-consistent, no hard violation. **Not** the accountability capstone. |
-| `keys_externally_pinned` | bool | `true` only when you passed an `opts.json` — i.e. authentic vs internal-consistency. |
+| `keys_externally_pinned` | bool | `true` only when record `signing_keys` were pinned out of band; merely passing other options does not authenticate record provenance. |
+| `body_bound_role_evidence` | bool | Every contributing committed broker/resource/void role record has a verified body-bound authority proof; historical v2 role signatures remain useful for forensic joins but cannot satisfy this stronger prerequisite. |
+| `claims_version`, `claims` | string/object | Version `2` typed decisions for `integrity`, `authenticated`, `authorized`, `historical_authorized_as_of_snapshot`, `temporal`, `complete_brokered`, and `complete_introspected`. Each is `satisfied`, `insufficient`, or `refuted`; `requested` and `requested_decision` identify the caller's required claim. Only `satisfied` accepts a required claim. Version 2 added the historical claim; consumers of version `1` must reject version `2` rather than guess. |
+| `revocation_temporal` | object | Plan 009. `policy` (`strict`/`db_serialized_v1`) and, for the latter, the caller's `evaluation_time`, `max_snapshot_age_seconds`, `min_authorization_watermark` and the named `trust_basis`; `snapshot` (`status`, `reason`, signed `project_id`, `boundary_time`, `authorization_high_watermark`); `grant_revocations[]` (`grant_id`, `current_revocation`, `cutoff_order`); `receipt_ordering[]` (`record_id`, `kind`, `grant_id`, `authorization_order`, `historical_ordering`); counts `proven_before`, `at_or_after`, `indeterminate`. |
 | `records_total`, `records_proven` | int | |
 | `dag_ok`, `dag_heads`, `collapsed_duplicates` | bool/int | DAG validity, head count, deduped retries (#8). |
-| `checkpoints_total`, `checkpoints_verified`, `checkpoints_anchored`, `chain_ok` | int/bool | |
+| `checkpoints_total`, `checkpoints_verified`, `chain_ok` | int/bool | |
+| `checkpoints_anchored` | int | Checkpoints whose anchor **verified** under a pinned TSA (`tsa_keys` / `tsa_spki_b64`) on a verified checkpoint. `0` whenever no TSA trust is pinned. (Changed: it used to count every checkpoint carrying an `anchor` field, verified or not.) |
+| `checkpoints_anchors_attached` | int | Checkpoints that merely **carry** an `anchor` field. Unverified: anyone can attach one, so never read it as timestamp evidence. |
 | `grant_accountability` | string | `not_applicable` / `incomplete` / `complete` (Tier-A). |
 | `broker_trust` | string | `assumed` / `sequence_verified`. |
 | `uses_matched`, `uses_pop_reverified`, `unmatched_violation`, `unmatched_pending`, `grants_unused` | int | Tier-B join. |
@@ -325,7 +557,54 @@ Key fields:
 | `cosig_status`, `delegation_status`, `taxonomy_status`, `attestation_status`, `revocation_status`, `revocation_merkle_status`, `introspection_status`, `federation_status` | string | Mode gates: `absent` / `unevaluated` (no key pinned) → an evaluated verdict when the role's key set is pinned. |
 | `issues` | []string | Human-readable violations (omission/fork/tamper/role-overlap/…). |
 
-The CLI prints a digest of this and a `RESULT: PASS (integrity)` / `RESULT: FAIL` line. PASS is the
-**integrity** verdict; the `action_completeness` / `grant_accountability` / `broker_trust` capstone
-on the same line is the higher claim, and `not_claimed` / `incomplete` are normal when no role keys
-were pinned. Even a `*_complete` capstone is bounded by `resource_trust: assumed_truthful`.
+`ok` retains the legacy bundle diagnostic meaning. It is not an authorization acceptance
+predicate. An optional malformed disclosure can make `ok` false; removing it may remove that
+parsing issue without proving any stronger claim. The CLI exits successfully only when `ok` is
+true **and** the explicitly requested claim is `satisfied`. The default request is `integrity`.
+Even a complete claim remains bounded by `resource_trust: assumed_truthful`.
+
+Set `claim_policy` in verifier options, for example
+`{"requested":"authorized","revocation":"disclosed","require_disclosure":true}`.
+`requested` is `integrity`, `authenticated`, `authorized`, `complete_brokered`, or
+`complete_introspected`. `revocation` is `pinned` (default: a disclosed list required whenever
+`revocation_keys` are pinned), `disclosed`, `merkle`, or `both`; Merkle mode must be selected by
+the caller, not by the bundle. A pinned revocation issuer always requires current evidence for
+authorization and completeness. `require_disclosure` and `require_attestation` are optional
+booleans. `require_disclosure` demands a valid matching credential opening for every accepted
+committed broker grant, including unused grants; counting only supplied openings is insufficient.
+Explicit `merkle` and `both` modes require both a fresh signed root and valid non-membership
+paths for every brokered use and indexed native credential. Root freshness alone does not prove
+non-revocation. Present malformed policy fields are fatal configuration errors. Missing required
+evidence gives `insufficient`; a committed contradiction or authenticated revocation gives
+`refuted`. Neither accepts the claim.
+
+**Historical ordering (plan 009, ADR 0007).** `requested` may also be
+`historical_authorized_as_of_snapshot`. It is decided only when the caller also sets
+`revocation_temporal`, for example
+`{"policy":"db_serialized_v1","evaluation_time":"2026-09-24T12:00:00.000Z","max_snapshot_age_seconds":3600,"min_authorization_watermark":0}`.
+Absent (or `{"policy":"strict"}`) the claim is always `insufficient`. Any malformed, unknown or
+partial value is a fatal configuration error. The claim is `satisfied` only if an authenticated,
+fresh v2 revocation snapshot for this project shows every receipt ordered strictly before any
+prospective cutoff of its grant (or its grant not revoked) and at or below the snapshot watermark,
+with every other obligation of `authorized`, and only if the `claim_policy.revocation` mode holds
+for the v2 evidence (a pinned issuer; `disclosed` needs a usable v2 list, `merkle` a usable v2 root
+with a valid proof for every receipt's grant, `both` all of these). A use of a totally revoked grant, a receipt at or after
+its cutoff, or an outcome signing another ordinal than its intent refutes it. Current revocation is
+reported separately and still blocks `ok`, `revoked_uses_blocked`, `authorized` and the capstone, so
+a bundle can be `ok:false` with the historical claim satisfied; the CLI and viewers show both. The
+claim proves order within Averin's database under an honest resource signer, revocation signer and
+database serialization; it does not prove physical action time.
+
+A consumer that requests `historical_authorized_as_of_snapshot` must read
+`claims.historical_authorized_as_of_snapshot` (and `claims.requested_decision`), never the legacy
+`ok`: `ok` stays false while any revoked grant was used, including a use proven before that
+grant's own prospective cutoff, so it can never stand in for the historical claim. The offline CLI
+(`averin-verify bundle`) and both viewers (the static HTML verifier and the Svelte app) print this
+claim's own decision as a prominent line next to the legacy verdict whenever it was the requested
+claim (the requested decision under a valid claims contract, else `insufficient`; the same rule in
+all three), so the historical decision is never left to be inferred from a FAIL line. In the receipt
+detail, a `proven_before` receipt is only labeled "proven before revocation" when its grant's
+`current_revocation` is `revoked_prospective`; a receipt proven before the snapshot against a
+grant that is `not_revoked` is labeled "authorized as of snapshot (grant not revoked)" instead
+(that grant was never headed toward a cutoff), and any other or unknown grant state is shown as
+"indeterminate" rather than claiming either outcome.

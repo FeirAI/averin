@@ -45,3 +45,7 @@ p384 = { version = "0.13", features = ["ecdsa", "pkcs8"], optional = true }
 
 [dev-dependencies]
 ed25519-dalek = "2"
+
+# `cfg(kani)` gates the bounded-proof harnesses driven by formal/run-kani.sh.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

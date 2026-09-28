@@ -148,6 +148,34 @@ from the bundle alone. **Two postures:**
 The verdict is a typed report (see [API.md → Verification report](API.md#verification-report)). PASS
 is integrity-level; the capstone is the higher, separately-stated claim.
 
+### Formal model
+
+Algorithms 1–6 have a Lean 4 counterpart in [`formal/lean/Averin/`](../../formal/lean/Averin):
+
+| Algorithm | Model | Proof |
+|---|---|---|
+| 1 | `Canon.lean` | `ser_injective` |
+| 2, 3 | `Preimage.lean`, `Seal.lean` | `record_seal_sound`, `checkpoint_seal_sound`, `signed_families_disjoint` |
+| 4 | `Seal.lean` | `commitment_binding` |
+| 5 | `Dag.lean` | `bundle_eq_closure` |
+| 6 | `Chain.lean` | `unique_history` |
+
+Every hash-dependent conclusion is in explicit-witness form: equal hashes give equal bodies, or a
+SHA-256 collision on the two specific framed preimages involved (`Seal.CollidesOn`,
+`Chain.CollidesIn`), i.e. the standard reduction to SHA-256 collision resistance. For the seal core,
+plan 012 ([`formal/production/`](../../formal/production/README.md)) proves the production Rust
+computes these model definitions (partial correctness: when the extracted function returns `Ok`).
+
+The executable Lean oracle (`formal/lean/Oracle`, checked by `core/tests/oracle.rs`) and the tag
+inventory in `formal/check-refinement.py` keep the models in step with this code; `formal/check-mutants.sh`
+checks that those gates catch known drifts. Algorithm 7's claim kernel (`verify/verdict.rs`
+`decide_claims`, from checked facts to claim decisions) is modelled in `Verdict.lean` and, plan 012
+phase B, the production kernel is extracted and proved equal to that model; the evidence passes
+that compute its input facts are covered by the adversarial suite and the verdict oracle, not by a
+proof. The RCP parser (`CanonValue::parse`) is extracted too and proved to return for every
+input (`Refinement.Parse.parse_document_total`: no panic, overflow or out-of-bounds read), given
+that NFC returns representable strings; which documents it accepts is tested, not proved.
+
 ## Domain model
 
 - **Record** — one observed event (schema v2, closed top-level key set). Carries identity
@@ -171,30 +199,39 @@ is integrity-level; the capstone is the higher, separately-stated claim.
 
 ## Storage model
 
-The `store.Store` interface (`server/internal/store/store.go`) has two implementations:
+The `store.Store` interface (`server/internal/store/store.go`) has in-memory and
+Postgres implementations. The in-memory store is volatile but uses the same
+project-session contract for tests and standalone development. Postgres is
+append-only for signed evidence: the runtime role has no UPDATE/DELETE on
+history tables. Versioned migrations run at startup; steady-state boot issues
+no DDL.
 
-- **In-memory** (`store.NewMem`) — default. Correct within one process but **NOT durable** (lost on
-  restart) and the `heads → seal → put` ingest path is not a single atomic transaction. Dev /
-  single-process only.
-- **Postgres** (`store.NewPostgres`, selected when `AVERIN_DATABASE_URL` is set) — **append-only at the
-  database** (the migration `REVOKE`s UPDATE/DELETE/TRUNCATE, verified under a least-privilege role),
-  with idempotency + content-hash collapse + a DAG-derived frontier computed in SQL. A single versioned
-  migration (`server/internal/pgschema`, advisory-lock-guarded, folding the store + ledger + durable
-  schemas under one `schema_migrations` version) auto-applies on first startup (`docker compose up` is
-  turnkey); a steady-state boot issues zero DDL, and a DB newer than the binary is a fail-closed refusal
-  to start. See CONFIGURATION.md → "Schema versioning & upgrades".
+Every authoritative project write enters `WithProjectWrite`. A persisted
+`project_write_guard` row is locked before reading the frontier, allocation,
+revocation, pending state or ledger claims. The callback uses one transaction
+and one connection through COMMIT, including insert and checkpoint frontier or
+history reads. Projects have distinct guards, so a wait on project A does not
+block project B. The same contract applies to all route writers, and a missing
+or malformed per-project `record_id` UNIQUE index refuses unsafe writes while
+leaving history readable. A lost COMMIT acknowledgment is typed as ambiguous;
+callers reconcile only the exact operation identity before reporting success.
+Known server-side rejection is a definite abort.
 
-  **Single-writer-per-project, in-process only (NOT a DB serializable transaction).** The `heads → seal
-  → put` ingest critical section is serialized by a **process-local mutex** (`ingestMu` in
-  `server/internal/api/server.go`), so concurrent ingests within ONE server process cannot read a stale
-  frontier and fork the DAG. `PutRecord` itself runs at Postgres's default (read-committed) isolation —
-  it is NOT a `SERIALIZABLE` transaction. The only DB-level advisory lock (`pg_advisory_xact_lock`,
-  `store/postgres.go` `AllocateBrokerSeq`) covers **broker_seq allocation**, not the record frontier.
-  **Consequence (deploy-critical):** running **two averin replicas against the same
-  `AVERIN_DATABASE_URL` can silently fork a project's DAG** — the in-process mutex does not span
-  processes. Run averin as a **single writer per project** (one replica, or shard projects across
-  replicas so no project is written by more than one). A real cross-replica frontier lock is a DEFERRED
-  item; see `docs/dev/LIMITATIONS.md`.
+The guard row also carries the project's authorization order (schema v7, plan 009). A use,
+use-intent or native introspection transaction allocates the next ordinal from it and binds
+the ordinal into the resource-signed receipt before sealing; a prospective revocation
+allocates its cutoff from the same order. Revocations are immutable `revocation_events`
+rows (total or prospective). See ADR 0007.
+
+Exports read records, checkpoints, anchors, revocations and selected disclosure
+metadata from one repeatable-read snapshot. Its first read captures the database
+boundary time (transaction start) and the authorization high watermark, which the v2
+revocation list signs as captured. An RFC 3161 anchor is attached only
+after its checkpoint commits and can be backfilled idempotently. Live replicas
+read pending grants and revocations from the project Store, not from boot
+caches. Keep the single-writer deployment policy until authenticated
+capability-project binding, scoped nonce claims and bounded sequence recovery
+are integrated and tested together.
 
 Append-only is the integrity invariant: records are written once, keyed by `(project, idempotency
 key)`; a retry collapses onto the existing row rather than duplicating. Disclosure secrets are

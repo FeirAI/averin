@@ -44,8 +44,11 @@ export async function sha256Hex(bytes) {
 }
 
 function normalizeDigest(d) {
-  if (!d) return null;
-  return String(d).trim().toLowerCase().replace(/^sha256:/, "");
+  if (d === undefined || d === null) return null;
+  const hex = String(d).trim().toLowerCase().replace(/^sha256:/, "");
+  // A pin that is present but empty/malformed (e.g. "sha256:") must not silently disable the check.
+  if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error(`invalid wasm pin (expected 64 hex chars): ${String(d)}`);
+  return hex;
 }
 
 const NUL = String.fromCharCode(0);
@@ -60,10 +63,21 @@ class AverinVerifier {
     return new Uint8Array(this.x.memory.buffer);
   }
 
-  _writeBytes(str) {
+  _writeBytes(input) {
     // Length-aware write: no NUL terminator. The callee is told the exact byte length and reads all of
     // it, so an interior 0x00 cannot truncate the input into a verified-only prefix. Used by verifyBundle.
-    const bytes = new TextEncoder().encode(str);
+    // A Uint8Array is passed through UNCHANGED, so the core verifies (and `bundle_digest` binds) the exact
+    // bytes of the file — no BOM stripping, no U+FFFD substitution of invalid UTF-8, no trimming.
+    if (input instanceof Uint8Array) {
+      const ptr = this.x.averin_alloc(input.length);
+      this._mem().set(input, ptr);
+      return { ptr, len: input.length };
+    }
+    // A JS string with a lone surrogate would be silently re-encoded as U+FFFD by TextEncoder; refuse it.
+    if (typeof input.isWellFormed === "function" && !input.isWellFormed()) {
+      throw new Error("input contains a lone UTF-16 surrogate (not valid RCP)");
+    }
+    const bytes = new TextEncoder().encode(input);
     const ptr = this.x.averin_alloc(bytes.length);
     this._mem().set(bytes, ptr);
     return { ptr, len: bytes.length };
@@ -102,7 +116,7 @@ class AverinVerifier {
     }
   }
 
-  /** Verify an export bundle (JSON string) entirely offline. Returns the parsed report object. */
+  /** Verify an export bundle (JSON string, or its raw bytes as a Uint8Array) entirely offline. Returns the parsed report object. */
   verifyBundle(bundleJson) {
     // Length-aware call: the verifier reads exactly `len` bytes, so an interior NUL (never present in
     // valid RCP) cannot truncate the artifact into a prefix-only "ok" — it is verified in full and
@@ -131,7 +145,9 @@ class AverinVerifier {
     // exact byte lengths, so an interior 0x00 in either (never present in valid RCP / an ed25519pub: or base64url
     // value) cannot truncate the bundle to a verified prefix NOR silently drop the pinned trust roots — the full
     // input is verified and fails closed. The NUL-truncatable C-string entrypoints are not compiled into the wasm.
-    const a = this._writeBytes(typeof bundleJson === "string" ? bundleJson : JSON.stringify(bundleJson));
+    const a = this._writeBytes(
+      typeof bundleJson === "string" || bundleJson instanceof Uint8Array ? bundleJson : JSON.stringify(bundleJson),
+    );
     const o = this._writeBytes(typeof opts === "string" ? opts : JSON.stringify(opts ?? {}));
     let resultPtr = 0;
     try {

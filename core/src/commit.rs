@@ -64,6 +64,18 @@ impl std::error::Error for CommitError {}
 
 /// Compute a hiding commitment over `value` under `domain`, hidden by `nonce` (32 bytes).
 pub fn commit(domain: FieldDomain, value: &[u8], nonce: &[u8]) -> Result<String, CommitError> {
+    Ok(sha256_prefixed(&commit_preimage(domain, value, nonce)?))
+}
+
+/// The exact bytes [`commit`] feeds SHA-256:
+/// `LP("averin.commit.v1") ‖ LP(field_domain) ‖ LB(nonce) ‖ LB(value)`. Hidden `pub` for the
+/// Lean-oracle differential test (`core/tests/oracle.rs`).
+#[doc(hidden)]
+pub fn commit_preimage(
+    domain: FieldDomain,
+    value: &[u8],
+    nonce: &[u8],
+) -> Result<Vec<u8>, CommitError> {
     if nonce.len() != NONCE_LEN {
         return Err(CommitError::BadNonceLen(nonce.len()));
     }
@@ -75,7 +87,7 @@ pub fn commit(domain: FieldDomain, value: &[u8], nonce: &[u8]) -> Result<String,
     {
         return Err(CommitError::TooLong);
     }
-    Ok(sha256_prefixed(&pre))
+    Ok(pre)
 }
 
 /// Verify a disclosed `(value, nonce)` against a commitment. Recomputes the commitment and

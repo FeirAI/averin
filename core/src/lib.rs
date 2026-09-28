@@ -5,6 +5,9 @@
 //! (`--features wasm`). The golden vectors in `/spec/golden-vectors` are the cross-target
 //! byte-for-byte contract (threat #10).
 
+// Kani only: the fail-closed `Vec::push` guard in canon's proofs names `Vec<T, A>`.
+#![cfg_attr(kani, feature(allocator_api))]
+
 pub mod anchor;
 pub mod authority;
 pub mod b64;

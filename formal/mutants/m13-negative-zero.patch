@@ -1,0 +1,13 @@
+Mutant: The parser accepts the noncanonical integer spelling negative zero.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -765,7 +765,7 @@
+         return Err(ParseError::At(ErrorKind::Exponent, i));
+     }
+     // RCP §3: `-0` is not a canonical integer spelling (consistent with rejecting `00`/`01`).
+-    if negative && i - digits == 1 && s[digits] == b'0' {
++    if negative && i - digits == 2 && s[digits] == b'0' {
+         return Err(ParseError::At(ErrorKind::NegativeZero, start));
+     }
+     match decimal_i64(s, digits, i, negative) {

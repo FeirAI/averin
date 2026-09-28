@@ -1,0 +1,12 @@
+Mutant: The hiding-commitment preimage no longer binds LP(field_domain).
+
+--- a/core/src/commit.rs
++++ b/core/src/commit.rs
+@@ -81,7 +81,6 @@
+     }
+     let mut pre = Vec::with_capacity(32 + value.len());
+     if !lp_str_into(&mut pre, COMMIT_TAG)
+-        || !lp_str_into(&mut pre, domain.as_str())
+         || !lp_into(&mut pre, nonce)
+         || !lp_into(&mut pre, value)
+     {

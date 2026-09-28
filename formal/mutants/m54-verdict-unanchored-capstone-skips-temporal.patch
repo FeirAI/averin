@@ -1,0 +1,13 @@
+Mutant: an unanchored bundle is not held to the temporal claim in the capstone. Deleting the latest checkpoint's anchor then turns an insufficient complete_brokered/complete_introspected into satisfied (deletion strengthens the capstone, plan 002 claim order). Named detector: the regenerated production refinement proof (Refinement.complete_claim_ok), not a test.
+
+--- a/core/src/verify/verdict.rs
++++ b/core/src/verify/verdict.rs
+@@ -519,7 +519,7 @@
+     let refuted = authorization_refuted(f);
+     let authorized = authorized(f, pinned_record_keys, revocation);
+     let temporal = temporal(f, anchored_latest, revocation);
+-    decision(refuted, authorized && temporal && surface)
++    decision(refuted, authorized && (!anchored_latest | temporal) && surface)
+ }
+ 
+ /// The claim decision kernel: a pure function of the checked facts and the caller's policy.

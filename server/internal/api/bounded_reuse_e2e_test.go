@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feirai/averin/server/internal/broker"
 	"github.com/feirai/averin/server/internal/core"
@@ -15,13 +16,17 @@ import (
 )
 
 // boundedGrantBody is grantBody for a bounded_reuse grant capped at useLimit (ADR 0005 M1). The PoP
-// challenge is over agent_id/action/resource/scope/agent_pubkey only, so scope_class/use_limit do not
-// affect the signature.
+// challenge commits to the effective bounded class and use limit.
 func boundedGrantBody(idem string, useLimit int, ak ed25519.PrivateKey) string {
 	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
-	req := broker.Request{AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "read:orders", AgentPubKey: pub}
+	now := time.Now()
+	req := broker.Request{PoPVersion: 2, ProjectID: "p1", IdempotencyKey: idem, SessionID: "s1",
+		IssuedAt: now.Unix(), RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
+		AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "read:orders", ScopeClass: broker.ScopeBoundedReuse,
+		UseLimit: useLimit, AgentPubKey: pub, TTL: time.Minute}
 	sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
 	b, _ := json.Marshal(map[string]any{
+		"pop_version": 2, "issued_at": req.IssuedAt, "request_expires_at": req.RequestExpiresAt,
 		"idempotency_key": idem, "project_id": "p1", "session_id": "s1",
 		"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",
 		"scope": "read:orders", "scope_class": "bounded_reuse", "use_limit": useLimit,

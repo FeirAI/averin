@@ -1,0 +1,15 @@
+Mutant: m45-temporal-snapshot-age-ignored. Named detector: temporal_revocation_decision_table.
+
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 48b57cf..189703f 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -4342,7 +4342,7 @@ fn evaluate_snapshot(
+             Some("snapshot boundary_time is after the caller's evaluation_time".into()),
+         );
+     }
+-    if p.evaluation_ms() - snap.boundary_ms > p.max_snapshot_age_seconds() * 1000 {
++    if false { // BUG: the caller's maximum snapshot age is ignored
+         return result(
+             "stale",
+             Some("snapshot is older than the caller's max_snapshot_age_seconds".into()),

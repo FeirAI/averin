@@ -1,0 +1,13 @@
+Mutant: Object members sorted by code point (= UTF-8 byte) order instead of UTF-16 code units (RCP section 2).
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -383,7 +383,7 @@
+         if cp < 0x10000 {
+             units.push(cp as u16);
+         } else {
+-            units.push((0xD800 + (cp - 0x10000) / 0x400) as u16);
++            units.push(0xFFFF);
+             units.push((0xDC00 + (cp - 0x10000) % 0x400) as u16);
+         }
+         i += width;

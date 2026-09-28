@@ -81,6 +81,14 @@ char *averin_verify_commitment(const char *commitment, const char *domain, const
 char *averin_sign_evidence(const char *source, const char *project_id, const char *record_id,
                          const char *evidence_hash, const char *seed_hex);
 
+/* V3 signs the complete structured semantic record after canonical projection.
+ * Returns {"subject_digest":"sha256:...","evidence_sig":"ed25519:..."} or {"error":...}. */
+char *averin_sign_authority_record_v3(const char *record_json, const char *seed_hex);
+
+/* Verify the complete record's authority under one pinned public key. Returns a
+ * status string (verified, legacy_unbound, failed, ...) or {"error":...}. */
+char *averin_verify_authority_record(const char *record_json, const char *public_key);
+
 /* Free a string returned by this library. */
 void averin_string_free(char *ptr);
 

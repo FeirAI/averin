@@ -1,0 +1,3 @@
+/.lake
+# The pinned Aeneas Lean backend, provided by run-production-refinement.sh (symlink or pinned checkout).
+/.aeneas

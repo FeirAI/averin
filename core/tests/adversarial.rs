@@ -4,8 +4,9 @@
 //! #9 key compromise, plus integrity tamper.
 
 use averin_decision_core::anchor::{make_test_anchor, test_tsa_key};
-use averin_decision_core::authority::sign_evidence;
-use averin_decision_core::authority::AuthorityTrust;
+use averin_decision_core::authority::{
+    sign_evidence, sign_evidence_v3, AuthorityTrust, SUBJECT_PROJECTION,
+};
 use averin_decision_core::canon::CanonValue;
 use averin_decision_core::checkpoint::{attach_anchor, checkpoint_body, seal_checkpoint};
 use averin_decision_core::hashx::sha256_prefixed;
@@ -14,11 +15,12 @@ use averin_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use averin_decision_core::verify::{
     cnf_kid, cosig_approval_challenge, delegation_hop_challenge, federation_cert_challenge,
     introspection_transcript_challenge, report_to_json, verify_bundle, verify_bundle_with,
-    verify_bundle_with_json, ActionCompleteness, RoleKeyStatus, TrustLevel, TrustedKey,
-    VerifyOptions, VerifyReport,
+    verify_bundle_with_json, ActionCompleteness, ClaimDecision, ClaimPolicy, RequestedClaim,
+    RevocationRequirement, RoleKeyStatus, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 fn fixture() -> CanonValue {
@@ -36,6 +38,100 @@ fn arr(b: &CanonValue, k: &str) -> Vec<CanonValue> {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default()
+}
+
+#[test]
+fn shared_attachment_corpus_native_claim_support_erasure() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures");
+    let source = CanonValue::parse(
+        &std::fs::read_to_string(fixture_dir.join("bundle-broker-valid.json")).unwrap(),
+    )
+    .unwrap();
+    let cases = CanonValue::parse(
+        &std::fs::read_to_string(fixture_dir.join("verdict-attachment-cases.json")).unwrap(),
+    )
+    .unwrap();
+    let mut support = BTreeMap::<String, BTreeSet<String>>::new();
+    for case in cases.as_array().unwrap() {
+        let name = case.get("name").and_then(CanonValue::as_str).unwrap();
+        let mut bundle = source.get("bundle").unwrap().clone();
+        let mut opts = source.get("opts").unwrap().clone();
+        if case.get("strip_anchor") == Some(&CanonValue::Bool(true)) {
+            let checkpoints = arr(&bundle, "checkpoints")
+                .into_iter()
+                .map(|cp| cp.without_keys(&["anchor"]))
+                .collect();
+            bundle = change_field(&bundle, "checkpoints", CanonValue::Array(checkpoints));
+        }
+        if case.get("malformed_disclosures") == Some(&CanonValue::Bool(true)) {
+            bundle = change_field(
+                &bundle,
+                "disclosures",
+                CanonValue::string("bad optional disclosure"),
+            );
+        }
+        if case.get("pin_signer") == Some(&CanonValue::Bool(true)) {
+            let keys = arr(&bundle, "keys")
+                .iter()
+                .map(|key| key.get("public_key").unwrap().clone())
+                .collect();
+            opts = change_field(&opts, "signing_keys", CanonValue::Array(keys));
+        }
+        let report = CanonValue::parse(&verify_bundle_with_json(
+            &bundle.serialize(),
+            &opts.serialize(),
+        ))
+        .unwrap();
+        assert_eq!(
+            report.get("claims_version").and_then(CanonValue::as_str),
+            Some("2")
+        );
+        let claims = report.get("claims").unwrap();
+        let requested = claims
+            .get("requested")
+            .and_then(CanonValue::as_str)
+            .unwrap();
+        assert_eq!(
+            claims.get("requested_decision"),
+            claims.get(requested),
+            "{name} requested decision"
+        );
+        let satisfied = [
+            "integrity",
+            "authenticated",
+            "authorized",
+            "historical_authorized_as_of_snapshot",
+            "temporal",
+            "complete_brokered",
+            "complete_introspected",
+        ]
+        .into_iter()
+        .filter(|field| claims.get(field).and_then(CanonValue::as_str) == Some("satisfied"))
+        .map(str::to_owned)
+        .collect();
+        support.insert(name.to_owned(), satisfied);
+    }
+    let subset = |small: &str, large: &str| {
+        assert!(
+            support[small].is_subset(&support[large]),
+            "support gained after erasure {large} -> {small}: {:?} vs {:?}",
+            support[small],
+            support[large]
+        );
+    };
+    subset("anchor_removed", "full");
+    subset("self_signed_anchor_removed", "self_signed");
+    subset("anchor_removed_malformed", "malformed_optional");
+    subset(
+        "self_signed_anchor_removed_malformed",
+        "self_signed_malformed",
+    );
+    subset("full", "malformed_optional");
+    subset("malformed_optional", "full");
+    subset("self_signed", "full");
 }
 
 fn rebuild(
@@ -442,21 +538,20 @@ fn govder_record_evidence_binding_r1() {
     assert_eq!(r_good.record_trust.len(), 1);
     assert_eq!(
         r_good.record_trust[0].authority,
-        AuthorityTrust::Verified,
-        "the real signature must classify Verified"
+        AuthorityTrust::LegacyUnbound,
+        "the historical v2 signature remains valid but cannot bind the record body"
     );
 
     // R1: extensions.govder.outcome changed AFTER signing (the signature was computed over
     // "ok"). The signature still verifies (govder's real key, unchanged bytes) — authority stays
-    // Verified — but the re-derivation must catch that the VISIBLE decision no longer matches
+    // LegacyUnbound — but the re-derivation must catch that the VISIBLE decision no longer matches
     // what was signed.
     let tampered = seal(&CanonValue::parse(&mk_body("error")).unwrap(), &seal_key).unwrap();
     let r_bad = verify_bundle_with(&bundle_of(tampered), &pinned());
     assert_eq!(
         r_bad.record_trust[0].authority,
-        AuthorityTrust::Verified,
-        "the signature is untouched and must still classify Verified — this is the whole finding: \
-         a valid signature over the WRONG evidence still reads 'verified'"
+        AuthorityTrust::LegacyUnbound,
+        "the historical signature is untouched and valid; re-derivation must catch the wrong evidence"
     );
     assert!(
         r_bad
@@ -533,8 +628,8 @@ fn govder_record_with_no_agent_id_evidence_binding() {
     assert_eq!(r.record_trust.len(), 1);
     assert_eq!(
         r.record_trust[0].authority,
-        AuthorityTrust::Verified,
-        "a real govder signature over a no-agent_id record must still classify Verified"
+        AuthorityTrust::LegacyUnbound,
+        "a historical v2 govder signature remains valid without claiming body binding"
     );
     assert!(
         !r.issues
@@ -2725,9 +2820,44 @@ fn seal_d2_use(
     cnf_pub_carried: &VerifyingKey,
     sign_with: &SigningKey,
 ) -> CanonValue {
+    seal_d2_use_with_binding(
+        rec_sk,
+        res_sk,
+        record_id,
+        prev,
+        used_at,
+        bound_commitment,
+        record_commitment,
+        cnf_kid_str,
+        cnf_pub_carried,
+        sign_with,
+        &test_credential_binding(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seal_d2_use_with_binding(
+    rec_sk: &SigningKey,
+    res_sk: &SigningKey,
+    record_id: &str,
+    prev: &[String],
+    used_at: i64,
+    bound_commitment: &str,
+    record_commitment: &str,
+    cnf_kid_str: &str,
+    cnf_pub_carried: &VerifyingKey,
+    sign_with: &SigningKey,
+    credential_binding: &str,
+) -> CanonValue {
     let nonce = format!("nonce-{used_at}");
-    let cb = test_credential_binding();
-    let challenge = use_pop_challenge(GID, RESOURCE, ACTION, bound_commitment, &cb, &nonce);
+    let challenge = use_pop_challenge(
+        GID,
+        RESOURCE,
+        ACTION,
+        bound_commitment,
+        credential_binding,
+        &nonce,
+    );
     let use_sig = b64enc(&sign_with.sign(&challenge).to_bytes());
     let pch = format!("sha256:{}", hex_lower(&challenge));
     let ue = CanonValue::object(vec![
@@ -2828,6 +2958,521 @@ fn tier_b_pop_reverified_under_carried_cnf() {
         "the PoP should be independently re-run offline"
     );
     assert!(averin_decision_core::verify::report_to_json(&r).contains(r#""uses_pop_reverified":1"#));
+}
+
+// Upgrade an actual structured role record to v3, then have the recorder reseal it.
+// The proof sees the finalized semantic body and has no caller-supplied digest seam.
+fn body_bind_role_record(
+    record: &CanonValue,
+    authority: &SigningKey,
+    recorder: &SigningKey,
+) -> CanonValue {
+    let auth = record.get("authority").unwrap();
+    let auth = change_field(auth, "proof_version", CanonValue::string("v3"));
+    let auth = change_field(
+        &auth,
+        "subject_projection",
+        CanonValue::string(SUBJECT_PROJECTION),
+    );
+    let body = change_field(record, "authority", auth);
+    let (digest, signature) = sign_evidence_v3(&body, authority).unwrap();
+    let auth = body.get("authority").unwrap();
+    let auth = change_field(auth, "subject_digest", CanonValue::string(digest));
+    let auth = change_field(&auth, "evidence_sig", CanonValue::string(signature));
+    seal(&change_field(&body, "authority", auth), recorder).unwrap()
+}
+
+// A real signed grant and resource use with offline PoP, taxonomy, record-key and role pins.
+// Claim properties below vary only unsigned attachments and the fixed caller policy.
+fn claim_ready_bundle_with_version(body_bound: bool) -> (CanonValue, VerifyOptions) {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let tax = signing_key_from_seed(&[11u8; 32]);
+    let pc = sha256_prefixed(b"params-commit");
+    let mut grant = d2_grant(&rec, &cnf.verifying_key());
+    if body_bound {
+        grant = body_bind_role_record(&grant, &rec, &rec);
+    }
+    let mut use_rec = seal_d2_use(
+        &rec,
+        &res,
+        "use-1",
+        &[content_hash_of(&grant)],
+        USED,
+        &pc,
+        &pc,
+        &vk_cnf_kid(&cnf.verifying_key()),
+        &cnf.verifying_key(),
+        &cnf,
+    );
+    if body_bound {
+        use_rec = body_bind_role_record(&use_rec, &res, &rec);
+    }
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let t = taxonomy(&tax, &[ACTION], ISSUED - 100, EXP + 100);
+    let mut opts = pinned_roles_tax(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+        t,
+        tax.verifying_key(),
+    );
+    opts.trusted_keys = Some(vec![TrustedKey::from(rec.verifying_key())]);
+    opts.claim_policy = ClaimPolicy {
+        requested: RequestedClaim::Authorized,
+        ..Default::default()
+    };
+    (bundle, opts)
+}
+
+fn claim_ready_bundle() -> (CanonValue, VerifyOptions) {
+    claim_ready_bundle_with_version(true)
+}
+
+#[test]
+fn v3_signed_grant_and_pop_use_satisfy_body_bound_authorization() {
+    let (bundle, opts) = claim_ready_bundle();
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(r.ok, "v3 grant/use bundle failed: {:?}", r.issues);
+    assert_eq!(r.grant_verified, 1);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.uses_pop_reverified, 1);
+    assert!(r.body_bound_role_evidence);
+    assert!(r
+        .record_trust
+        .iter()
+        .all(|entry| entry.authority == AuthorityTrust::Verified));
+    assert_eq!(r.claims().authorized, ClaimDecision::Satisfied);
+
+    // Exercise the public JSON options path over exactly these signed bytes,
+    // then optionally emit them for native, cgo and WASM differential tests.
+    let pubkey = |seed: u8| {
+        CanonValue::string(encode_pubkey(
+            &signing_key_from_seed(&[seed; 32]).verifying_key(),
+        ))
+    };
+    let opts_json = CanonValue::object(vec![
+        ("signing_keys".into(), CanonValue::Array(vec![pubkey(0)])),
+        (
+            "broker_authority_keys".into(),
+            CanonValue::Array(vec![pubkey(0)]),
+        ),
+        (
+            "resource_authority_keys".into(),
+            CanonValue::Array(vec![pubkey(3)]),
+        ),
+        ("tsa_keys".into(), CanonValue::Array(vec![pubkey(200)])),
+        ("taxonomy_keys".into(), CanonValue::Array(vec![pubkey(11)])),
+        ("taxonomy".into(), opts.taxonomy.clone().unwrap()),
+        (
+            "taxonomy_digest".into(),
+            CanonValue::string(opts.taxonomy_digest.as_ref().unwrap()),
+        ),
+        (
+            "taxonomy_version".into(),
+            CanonValue::Int(opts.taxonomy_version.unwrap()),
+        ),
+        (
+            "claim_policy".into(),
+            CanonValue::object(vec![("requested".into(), CanonValue::string("authorized"))])
+                .unwrap(),
+        ),
+    ])
+    .unwrap();
+    let public = verify_bundle_with_json(&bundle.serialize(), &opts_json.serialize());
+    let public = CanonValue::parse(&public).unwrap();
+    assert_eq!(
+        public
+            .get("claims")
+            .and_then(|claims| claims.get("authorized"))
+            .and_then(CanonValue::as_str),
+        Some("satisfied")
+    );
+    if let Ok(path) = std::env::var("AVERIN_WRITE_V3_CLAIM_FIXTURE") {
+        let fixture =
+            CanonValue::object(vec![("bundle".into(), bundle), ("opts".into(), opts_json)])
+                .unwrap();
+        std::fs::write(path, fixture.serialize()).unwrap();
+    }
+}
+
+#[test]
+fn mixed_committed_v3_grant_rejects_malformed_pop_version_as_adverse_evidence() {
+    let (base, opts) = claim_ready_bundle();
+    assert_eq!(
+        verify_bundle_with(&base, &opts).claims().authorized,
+        ClaimDecision::Satisfied
+    );
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let ge = grant_evidence(
+        "grant-2",
+        ACTION,
+        RESOURCE,
+        "single_operation",
+        &vk_cnf_kid(&cnf.verifying_key()),
+        ISSUED,
+        EXP,
+    );
+    let ge = change_field(&ge, "project_id", CanonValue::string("proj-001"));
+    let ge = change_field(
+        &ge,
+        "request_hash",
+        CanonValue::string(format!("sha256:{}", "0".repeat(64))),
+    );
+    let valid_ge = change_field(&ge, "pop_version", CanonValue::Int(2));
+    let with_extra = |extra_ge: &CanonValue| {
+        let mut records = arr(&base, "records");
+        let parent = content_hash_of(records.last().unwrap());
+        let extra = seal_grant_prev(&rec, &rec, "grant-2", extra_ge, &[parent]);
+        let extra = body_bind_role_record(&extra, &rec, &rec);
+        let cp = checkpoint_over(&rec, &[content_hash_of(&extra)], 3, Some(&tsa));
+        records.push(extra);
+        let bundle = change_field(&base, "records", CanonValue::Array(records));
+        change_field(&bundle, "checkpoints", CanonValue::Array(vec![cp]))
+    };
+    let control = verify_bundle_with(&with_extra(&valid_ge), &opts);
+    assert_eq!(
+        control.claims().authorized,
+        ClaimDecision::Satisfied,
+        "control issues: {:?}",
+        control.issues
+    );
+
+    let cases = [
+        (
+            "integer-one",
+            change_field(&ge, "pop_version", CanonValue::Int(1)),
+        ),
+        (
+            "string-two",
+            change_field(&ge, "pop_version", CanonValue::string("2")),
+        ),
+        ("null", change_field(&ge, "pop_version", CanonValue::Null)),
+        ("missing-with-v2-fields", ge.clone()),
+        (
+            "wrong-project",
+            change_field(&valid_ge, "project_id", CanonValue::string("other")),
+        ),
+    ];
+    for (name, bad_ge) in cases {
+        let adverse = verify_bundle_with(&with_extra(&bad_ge), &opts);
+        assert_eq!(
+            adverse.claims().authorized,
+            ClaimDecision::Refuted,
+            "{name}: {:?}",
+            adverse.issues
+        );
+        assert!(
+            adverse
+                .issues
+                .iter()
+                .any(|i| i.contains("v2 signed project/request identity")),
+            "{name}: {:?}",
+            adverse.issues
+        );
+    }
+}
+
+#[test]
+fn v2_role_evidence_retains_tier_b_joins_but_cannot_satisfy_body_bound_claim() {
+    let (bundle, opts) = claim_ready_bundle_with_version(false);
+    let r = verify_bundle_with(&bundle, &opts);
+    assert!(
+        r.ok,
+        "historical v2 bundle should remain valid: {:?}",
+        r.issues
+    );
+    assert_eq!(r.grant_verified, 1);
+    assert_eq!(r.uses_matched, 1);
+    assert_eq!(r.uses_pop_reverified, 1);
+    assert!(r
+        .record_trust
+        .iter()
+        .all(|entry| entry.authority == AuthorityTrust::LegacyUnbound));
+    assert!(!r.body_bound_role_evidence);
+    assert_eq!(r.claims().authorized, ClaimDecision::Insufficient);
+}
+
+#[test]
+fn claim_results_require_pinned_record_and_revocation_evidence() {
+    let (bundle, mut opts) = claim_ready_bundle();
+    let base = verify_bundle_with(&bundle, &opts);
+    assert!(base.ok, "{:?}", base.issues);
+    assert_eq!(base.claims().authorized, ClaimDecision::Satisfied);
+    assert_eq!(base.claims().requested_decision, ClaimDecision::Satisfied);
+    opts.trusted_keys = None;
+    let unpinned = verify_bundle_with(&bundle, &opts);
+    assert!(unpinned.ok);
+    assert_eq!(unpinned.claims().integrity, ClaimDecision::Satisfied);
+    assert_eq!(unpinned.claims().authenticated, ClaimDecision::Insufficient);
+    assert_eq!(unpinned.claims().authorized, ClaimDecision::Insufficient);
+    opts.trusted_keys = Some(vec![TrustedKey::from(
+        signing_key_from_seed(&[0u8; 32]).verifying_key(),
+    )]);
+    let rev = signing_key_from_seed(&[77u8; 32]);
+    opts.revocation_keys = vec![rev.verifying_key()];
+    let missing = verify_bundle_with(&bundle, &opts);
+    assert!(
+        missing.ok,
+        "legacy integrity remains compatible: {:?}",
+        missing.issues
+    );
+    assert_eq!(missing.revocation_status, "missing");
+    assert_eq!(missing.claims().authorized, ClaimDecision::Insufficient);
+    let list = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[]);
+    let disclosed = change_field(&bundle, "revocation_list", list);
+    let fresh = verify_bundle_with(&disclosed, &opts);
+    assert!(fresh.ok, "{:?}", fresh.issues);
+    assert_eq!(fresh.claims().authorized, ClaimDecision::Satisfied);
+    assert_eq!(
+        verify_bundle_with(&bundle, &opts).claims().authorized,
+        ClaimDecision::Insufficient
+    );
+}
+
+#[test]
+fn claim_results_anchor_and_malformed_optional_erasure_never_add_authority() {
+    let (bundle, opts) = claim_ready_bundle();
+    let full = verify_bundle_with(&bundle, &opts);
+    assert_eq!(
+        full.claims().authorized,
+        ClaimDecision::Satisfied,
+        "{:?}",
+        full.issues
+    );
+    let no_anchor = verify_bundle_with(&strip_anchors(&bundle), &opts);
+    assert_eq!(no_anchor.claims().authorized, ClaimDecision::Insufficient);
+    let malformed = change_field(
+        &bundle,
+        "disclosures",
+        CanonValue::string("bad optional disclosure"),
+    );
+    let malformed_report = verify_bundle_with(&malformed, &opts);
+    assert!(!malformed_report.ok);
+    assert_eq!(
+        malformed_report.claims().authorized,
+        ClaimDecision::Satisfied
+    );
+    assert_eq!(full.claims().authorized, ClaimDecision::Satisfied);
+}
+
+#[test]
+fn independently_signed_adverse_revocation_is_enforced_and_bounds_erasure_theorem() {
+    // The signed root is an authority statement, not unsigned support. Removing it changes
+    // authenticated authority evidence. The formal support-erasure theorem fixes that evidence.
+    let (bundle, mut opts) = claim_ready_bundle();
+    let rev = signing_key_from_seed(&[77u8; 32]);
+    opts.revocation_keys = vec![rev.verifying_key()];
+    let nonrevoking_list = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[]);
+    let listed = change_field(&bundle, "revocation_list", nonrevoking_list);
+    assert_eq!(
+        verify_bundle_with(&listed, &opts).claims().authorized,
+        ClaimDecision::Satisfied
+    );
+    let leaves = rev_leaves(&[GID]);
+    let root = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let both = change_field(&listed, "revocation_merkle_root", root);
+    let both = change_field(
+        &both,
+        "revocation_proofs",
+        CanonValue::object(vec![(GID.into(), membership_proof(&leaves, GID))]).unwrap(),
+    );
+    let adverse = verify_bundle_with(&both, &opts);
+    assert_eq!(
+        adverse.claims().authorized,
+        ClaimDecision::Refuted,
+        "every present authenticated adverse statement blocks: {:?}",
+        adverse.issues
+    );
+    // With explicit dual mode, stripping either signed artifact loses required proof.
+    opts.claim_policy.revocation = RevocationRequirement::Both;
+    let stripped = verify_bundle_with(&listed, &opts);
+    assert_eq!(stripped.claims().authorized, ClaimDecision::Insufficient);
+    // Default disclosed mode has a narrower, honest theorem: removal of an independently
+    // signed adverse authority statement is not support erasure.
+    opts.claim_policy.revocation = RevocationRequirement::Pinned;
+    assert_eq!(
+        verify_bundle_with(&listed, &opts).claims().authorized,
+        ClaimDecision::Satisfied
+    );
+}
+
+#[test]
+fn malformed_claim_policy_is_a_fatal_configuration_error() {
+    let (bundle, _) = claim_ready_bundle();
+    for raw in [
+        r#"{"claim_policy":{"requested":null}}"#,
+        r#"{"claim_policy":{"requested":42}}"#,
+        r#"{"claim_policy":{"revocation":false}}"#,
+        r#"{"claim_policy":{"require_disclosure":"false"}}"#,
+        r#"{"claim_policy":{"unexpected":true}}"#,
+    ] {
+        let out = verify_bundle_with_json(&bundle.serialize(), raw);
+        assert!(
+            out.contains("\"ok\":false") && out.contains("\"error\":"),
+            "{out}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_signed_record_id_refutes_structural_claim_even_with_a_valid_chain() {
+    let (bundle, opts) = claim_ready_bundle();
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let mut records = arr(&bundle, "records");
+    let mut use_rec = change_field(&records[1], "record_id", CanonValue::string(GID));
+    let auth = use_rec.get("authority").unwrap();
+    let eh = auth.get("evidence_hash").unwrap().as_str().unwrap();
+    let auth = change_field(
+        auth,
+        "evidence_sig",
+        CanonValue::string(sign_evidence("gateway_enforced", "proj-001", GID, eh, &res)),
+    );
+    use_rec = seal(&change_field(&use_rec, "authority", auth), &rec).unwrap();
+    records[1] = use_rec;
+    let cp = checkpoint_over(&rec, &[content_hash_of(&records[1])], 2, Some(&tsa));
+    let conflict = change_field(
+        &change_field(&bundle, "records", CanonValue::Array(records)),
+        "checkpoints",
+        CanonValue::Array(vec![cp]),
+    );
+    let stripped = strip_anchors(&conflict);
+    for candidate in [&conflict, &stripped] {
+        let r = verify_bundle_with(candidate, &opts);
+        assert_eq!(r.records_proven, r.records_total, "{:?}", r.issues);
+        assert!(r.dag_ok && r.chain_ok, "{:?}", r.issues);
+        assert_eq!(r.claims().integrity, ClaimDecision::Refuted);
+        assert_eq!(r.claims().authorized, ClaimDecision::Refuted);
+    }
+}
+
+fn claim_two_checkpoint_bundle(backdated: bool, mask: u8) -> (CanonValue, VerifyOptions) {
+    let (bundle, opts) = claim_ready_bundle();
+    let records = arr(&bundle, "records");
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let key = CanonValue::parse(r#"{"signing_key_id":"k0","key_epoch":0,"key_status":"active"}"#)
+        .unwrap();
+    let mut cp0 = seal_checkpoint(
+        &checkpoint_body(
+            "cp0",
+            "proj-001",
+            0,
+            None,
+            &[content_hash_of(&records[0])],
+            1,
+            "2026-06-15T10:05:00.000Z",
+            key.clone(),
+        )
+        .unwrap(),
+        &rec,
+    )
+    .unwrap();
+    let cp0_hash = checkpoint_hash(&cp0);
+    let mut cp1 = seal_checkpoint(
+        &checkpoint_body(
+            "cp1",
+            "proj-001",
+            1,
+            Some(&cp0_hash),
+            &[content_hash_of(&records[1])],
+            2,
+            "2026-06-15T10:10:00.000Z",
+            key,
+        )
+        .unwrap(),
+        &rec,
+    )
+    .unwrap();
+    if mask & 1 != 0 {
+        let ts = if backdated {
+            "2026-06-15T10:11:00.000Z"
+        } else {
+            "2026-06-15T10:05:01.000Z"
+        };
+        cp0 = attach_anchor(&cp0, make_test_anchor(&cp0_hash, ts, &tsa, "tsa-1"));
+    }
+    if mask & 2 != 0 {
+        cp1 = attach_anchor(
+            &cp1,
+            make_test_anchor(
+                &checkpoint_hash(&cp1),
+                "2026-06-15T10:10:01.000Z",
+                &tsa,
+                "tsa-1",
+            ),
+        );
+    }
+    (
+        change_field(&bundle, "checkpoints", CanonValue::Array(vec![cp0, cp1])),
+        opts,
+    )
+}
+
+#[test]
+fn all_two_checkpoint_anchor_subsets_only_remove_positive_claims() {
+    let (full_bundle, opts) = claim_two_checkpoint_bundle(false, 3);
+    let full = verify_bundle_with(&full_bundle, &opts);
+    assert_eq!(
+        full.claims().authorized,
+        ClaimDecision::Satisfied,
+        "{:?}",
+        full.issues
+    );
+    for mask in 0..4 {
+        let (bundle, opts) = claim_two_checkpoint_bundle(false, mask);
+        let r = verify_bundle_with(&bundle, &opts);
+        for (name, reduced, original) in [
+            (
+                "authenticated",
+                r.claims().authenticated,
+                full.claims().authenticated,
+            ),
+            (
+                "authorized",
+                r.claims().authorized,
+                full.claims().authorized,
+            ),
+            (
+                "complete_brokered",
+                r.claims().complete_brokered,
+                full.claims().complete_brokered,
+            ),
+        ] {
+            assert!(
+                reduced != ClaimDecision::Satisfied || original == ClaimDecision::Satisfied,
+                "mask {mask}: {name} gained support"
+            );
+        }
+    }
+}
+
+#[test]
+fn verified_adverse_anchor_refutes_and_is_outside_support_erasure() {
+    let (good_bundle, opts) = claim_two_checkpoint_bundle(false, 3);
+    assert_eq!(
+        verify_bundle_with(&good_bundle, &opts).claims().authorized,
+        ClaimDecision::Satisfied
+    );
+    let (bad_bundle, opts) = claim_two_checkpoint_bundle(true, 3);
+    let bad = verify_bundle_with(&bad_bundle, &opts);
+    assert!(
+        bad.issues.iter().any(|i| i.contains("backdating")),
+        "{:?}",
+        bad.issues
+    );
+    assert_eq!(bad.claims().authorized, ClaimDecision::Refuted);
+    assert_eq!(bad.claims().temporal, ClaimDecision::Refuted);
+    let (removed_adverse_anchor, opts) = claim_two_checkpoint_bundle(true, 2);
+    let less = verify_bundle_with(&removed_adverse_anchor, &opts);
+    assert_ne!(less.claims().authorized, ClaimDecision::Refuted);
 }
 
 #[test]
@@ -4570,11 +5215,11 @@ fn role_key_rotation_json_parser_is_fail_closed() {
         "a valid rotation object must PARSE and verify"
     );
 
-    // signing_keys stays STRING-ONLY (its rotation is the richer Rust TrustedKey API, not the opts object), so
-    // the object form is still rejected there — whereas the deferred freshness-dated roles (tsa/attestation/
-    // cosig/revocation/taxonomy) now ACCEPT it (ADR 0006 §1 deferred roles).
-    let signing = format!(r#"{{"signing_keys":[{{"key":"{key}","status":"compromised"}}]}}"#);
-    assert!(verify_bundle_with_json(bundle_json, &signing).contains("must be a string"));
+    // signing_keys takes its OWN object form — the RCP §10.2 key_status vocabulary (see
+    // signing_keys_json_object_form_carries_compromise), so a role-key `rotated` status is rejected there.
+    let signing = format!(r#"{{"signing_keys":[{{"key":"{key}","status":"rotated"}}]}}"#);
+    assert!(verify_bundle_with_json(bundle_json, &signing)
+        .contains("is not one of active|retired|revoked|compromised"));
 
     // A misspelled/UNKNOWN field is rejected (fail-closed): silently dropping it would lose the auditor's
     // compromise pin (read as active) — exactly the silent fail-open the 5-lens review caught.
@@ -5568,6 +6213,47 @@ fn tier_b_cred_descriptor_match() {
 }
 
 #[test]
+fn present_invalid_descriptor_version_never_falls_back_to_legacy() {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let kid = vk_cnf_kid(&cnf.verifying_key());
+    let legacy = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true);
+    for (name, version) in [
+        ("integer-one", CanonValue::Int(1)),
+        ("string-two", CanonValue::string("2")),
+        ("null", CanonValue::Null),
+    ] {
+        let descriptor = change_field(&legacy, "version", version);
+        let binding = sha256_prefixed(descriptor.serialize().as_bytes());
+        let bundle = cred_bundle(&rec, &tsa, &descriptor, &cred_ge(&kid, &binding));
+        let report = verify_bundle_with(
+            &bundle,
+            &pinned_roles(
+                rec.verifying_key(),
+                res.verifying_key(),
+                tsa.verifying_key(),
+            ),
+        );
+        assert_eq!(
+            (report.cred_label_checks, report.cred_label_matched),
+            (1, 0),
+            "{name}: {:?}",
+            report.issues
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.contains("descriptor.version is missing or wrong")),
+            "{name}: {:?}",
+            report.issues
+        );
+    }
+}
+
+#[test]
 fn tier_b_cred_descriptor_action_mismatch_is_violation() {
     // the broker discloses a descriptor whose `act` is BROADER than the benign single-op the grant LABELS —
     // binding still matches (it is the real descriptor) but the label contradicts it: broker mislabel (D6.4).
@@ -5608,6 +6294,176 @@ fn tier_b_cred_descriptor_action_mismatch_is_violation() {
         r.issues
     );
     assert_eq!((r.cred_label_checks, r.cred_label_matched), (1, 0));
+}
+
+#[test]
+fn validated_adverse_opening_is_enforced_and_bounds_support_erasure() {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let descriptor = cred_descriptor(
+        &cnf.verifying_key(),
+        "db.admin:orders-rw",
+        RESOURCE,
+        GID,
+        EXP,
+        true,
+    );
+    let binding = sha256_prefixed(descriptor.serialize().as_bytes());
+    let ge = cred_ge(&vk_cnf_kid(&cnf.verifying_key()), &binding);
+    let disclosed_grant = cred_bundle(&rec, &tsa, &descriptor, &ge);
+    let grant = body_bind_role_record(&arr(&disclosed_grant, "records").remove(0), &rec, &rec);
+    let pc = sha256_prefixed(b"params-commit");
+    let use_rec = seal_d2_use_with_binding(
+        &rec,
+        &res,
+        "use-1",
+        &[content_hash_of(&grant)],
+        USED,
+        &pc,
+        &pc,
+        &vk_cnf_kid(&cnf.verifying_key()),
+        &cnf.verifying_key(),
+        &cnf,
+        &binding,
+    );
+    let use_rec = body_bind_role_record(&use_rec, &res, &rec);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let base = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let opened = change_field(
+        &base,
+        "disclosures",
+        disclosed_grant.get("disclosures").unwrap().clone(),
+    );
+    let (_, opts) = claim_ready_bundle();
+    let adverse = verify_bundle_with(&opened, &opts);
+    assert_eq!(
+        (adverse.cred_label_checks, adverse.cred_label_matched),
+        (1, 0),
+        "{:?}",
+        adverse.issues
+    );
+    assert_eq!(adverse.claims().authorized, ClaimDecision::Refuted);
+    let stripped = verify_bundle_with(&base, &opts);
+    assert_eq!(
+        stripped.claims().authorized,
+        ClaimDecision::Satisfied,
+        "removing a valid contradictory opening changes adverse evidence: {:?}",
+        stripped.issues
+    );
+}
+
+#[test]
+fn required_disclosure_covers_every_committed_broker_grant() {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let descriptor1 = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, GID, EXP, true);
+    let binding1 = sha256_prefixed(descriptor1.serialize().as_bytes());
+    let grant1_bundle = cred_bundle(
+        &rec,
+        &tsa,
+        &descriptor1,
+        &cred_ge(&vk_cnf_kid(&cnf.verifying_key()), &binding1),
+    );
+    let grant1 = body_bind_role_record(&arr(&grant1_bundle, "records").remove(0), &rec, &rec);
+    let disclosure1 = arr(&grant1_bundle, "disclosures").remove(0);
+    let second_id = "grant-2";
+    let descriptor2 = cred_descriptor(&cnf.verifying_key(), ACTION, RESOURCE, second_id, EXP, true);
+    let binding2 = sha256_prefixed(descriptor2.serialize().as_bytes());
+    let ge2 = change_field(
+        &cred_ge(&vk_cnf_kid(&cnf.verifying_key()), &binding2),
+        "grant_id",
+        CanonValue::string(second_id),
+    );
+    let nonce = [0x22u8; 32];
+    let commitment2 = averin_decision_core::commit(
+        averin_decision_core::FieldDomain::parse("credential").unwrap(),
+        descriptor2.serialize().as_bytes(),
+        &nonce,
+    )
+    .unwrap();
+    let grant2 = body_bind_role_record(
+        &seal_grant_cred(&rec, &rec, second_id, &ge2, &commitment2),
+        &rec,
+        &rec,
+    );
+    let disclosure2 = CanonValue::object(vec![
+        ("record_id".into(), CanonValue::string(second_id)),
+        ("field".into(), CanonValue::string("credential")),
+        (
+            "value_b64".into(),
+            CanonValue::string(averin_decision_core::b64::encode(
+                descriptor2.serialize().as_bytes(),
+            )),
+        ),
+        (
+            "nonce_hex".into(),
+            CanonValue::string(averin_decision_core::hashx::hex_lower(&nonce)),
+        ),
+    ])
+    .unwrap();
+    let pc = sha256_prefixed(b"params-commit");
+    let use_rec = seal_d2_use_with_binding(
+        &rec,
+        &res,
+        "use-1",
+        &[content_hash_of(&grant1)],
+        USED,
+        &pc,
+        &pc,
+        &vk_cnf_kid(&cnf.verifying_key()),
+        &cnf.verifying_key(),
+        &cnf,
+        &binding1,
+    );
+    let use_rec = body_bind_role_record(&use_rec, &res, &rec);
+    let cp = checkpoint_over(
+        &rec,
+        &[content_hash_of(&use_rec), content_hash_of(&grant2)],
+        3,
+        Some(&tsa),
+    );
+    let base = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant1, grant2, use_rec],
+        vec![cp],
+    );
+    let (_, mut opts) = claim_ready_bundle();
+    opts.claim_policy.require_disclosure = true;
+    let partial = change_field(
+        &base,
+        "disclosures",
+        CanonValue::Array(vec![disclosure1.clone()]),
+    );
+    let partial_report = verify_bundle_with(&partial, &opts);
+    assert_eq!(partial_report.cred_label_checks, 1);
+    assert_eq!(partial_report.cred_label_matched, 1);
+    assert_eq!(
+        partial_report.claims().authorized,
+        ClaimDecision::Insufficient,
+        "one opened grant cannot prove disclosure over both: {:?}",
+        partial_report.issues
+    );
+    let full = change_field(
+        &base,
+        "disclosures",
+        CanonValue::Array(vec![disclosure1, disclosure2]),
+    );
+    let full_report = verify_bundle_with(&full, &opts);
+    assert_eq!(
+        full_report.cred_label_matched, 2,
+        "{:?}",
+        full_report.issues
+    );
+    assert_eq!(
+        full_report.claims().authorized,
+        ClaimDecision::Satisfied,
+        "all contributing grants are opened: {:?}",
+        full_report.issues
+    );
 }
 
 #[test]
@@ -7092,6 +7948,113 @@ fn tier_b_two_phase_failed_pop_intent_does_not_consume_outcome() {
         "the failed-PoP intent's outcome must be flagged orphan, not masked: {:?}",
         r.issues
     );
+}
+
+#[test]
+fn tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation() {
+    // PR review (round 4, P1): a grant + an intent with an INVALID PoP committed by anchored cp0, and the
+    // intent's outcome committed by anchored cp1. With both anchors the bundle fails on the PoP. Deleting ONLY
+    // cp1's unsigned `anchor` made the outcome committed-but-not-closed; the partial-closure branch then
+    // consumed it and skipped pop_reverify, reading ok:true. Negative checks must run before closure.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let grant = seal_grant(
+        &rec,
+        &rec,
+        GID,
+        &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP),
+    );
+    let gh = content_hash_of(&grant);
+    let ue = change_field(
+        &change_field(
+            &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED),
+            "cnf_pub",
+            CanonValue::string(b64enc(cnf.verifying_key().as_bytes())),
+        ),
+        "use_sig",
+        CanonValue::string(b64enc(&[7u8; 64])),
+    );
+    let intent = seal_intent(
+        &rec,
+        &res,
+        "intent-1",
+        std::slice::from_ref(&gh),
+        ACTION,
+        &ue,
+    );
+    let ih = content_hash_of(&intent);
+    let outcome = seal_outcome(
+        &rec,
+        &res,
+        "outcome-1",
+        std::slice::from_ref(&ih),
+        "intent-1",
+        "intent-1",
+        GID,
+    );
+    let oh = content_hash_of(&outcome);
+    let cp0 = checkpoint_seqd(
+        &rec,
+        "cp0",
+        0,
+        None,
+        std::slice::from_ref(&ih),
+        2,
+        None,
+        Some(&tsa),
+    );
+    let cp0h = checkpoint_hash(&cp0);
+    let cp1 = checkpoint_seqd(
+        &rec,
+        "cp1",
+        1,
+        Some(&cp0h),
+        std::slice::from_ref(&oh),
+        3,
+        None,
+        Some(&tsa),
+    );
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let both = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant.clone(), intent.clone(), outcome.clone()],
+        vec![cp0.clone(), cp1.clone()],
+    );
+    let r = verify_bundle_with(&both, &opts);
+    assert!(!r.ok, "baseline must fail on the PoP: {:?}", r.issues);
+    // strip ONLY cp1's anchor (cp0 keeps its anchor, so the intent stays closed)
+    let mut cp1_bare = cp1.as_object().unwrap().clone();
+    cp1_bare.retain(|(k, _)| k != "anchor");
+    let partial = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant, intent, outcome],
+        vec![cp0, CanonValue::Object(cp1_bare)],
+    );
+    let r = verify_bundle_with(&partial, &opts);
+    assert!(
+        !r.ok,
+        "stripping one anchor must not turn a violation into a pass: {:?}",
+        r.issues
+    );
+    assert!(
+        r.issues.iter().any(|i| i.contains("PoP re-verification"))
+            && r.issues
+                .iter()
+                .any(|i| i.contains("completion without a recorded intent")),
+        "the failed intent must be a violation and its outcome still an orphan: {:?}",
+        r.issues
+    );
+    assert_eq!((r.uses_matched, r.intent_without_outcome), (0, 0));
+    // and every anchor stripped: still a failure
+    assert!(!verify_bundle_with(&strip_anchors(&both), &opts).ok);
 }
 
 #[test]
@@ -8702,6 +9665,26 @@ fn merkle_rev_bundle_verify(
     root_obj: CanonValue,
     proofs: Vec<(String, CanonValue)>,
 ) -> VerifyReport {
+    merkle_rev_bundle_verify_with_policy(
+        rec,
+        res,
+        tsa,
+        rev,
+        root_obj,
+        proofs,
+        RevocationRequirement::Pinned,
+    )
+}
+
+fn merkle_rev_bundle_verify_with_policy(
+    rec: &SigningKey,
+    res: &SigningKey,
+    tsa: &SigningKey,
+    rev: &SigningKey,
+    root_obj: CanonValue,
+    proofs: Vec<(String, CanonValue)>,
+    requirement: RevocationRequirement,
+) -> VerifyReport {
     let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
     let grant = seal_grant(rec, rec, GID, &ge);
     let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
@@ -8723,6 +9706,7 @@ fn merkle_rev_bundle_verify(
         tsa.verifying_key(),
     );
     opts.revocation_keys = vec![rev.verifying_key()];
+    opts.claim_policy.revocation = requirement;
     verify_bundle_with(&bundle, &opts)
 }
 
@@ -8859,6 +9843,92 @@ fn tier_b_merkle_revocation_missing_proof_is_fail_closed() {
         "issues: {:?}",
         r.issues
     );
+}
+
+#[test]
+fn fresh_merkle_root_without_nonmembership_path_cannot_satisfy_temporal_claim() {
+    let (rec, res, tsa, rev) = rev_keys();
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let attest = signing_key_from_seed(&[12u8; 32]);
+    let ge = change_field(
+        &grant_evidence_d6(GID, 1),
+        "cnf_kid",
+        CanonValue::string(vk_cnf_kid(&cnf.verifying_key())),
+    );
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let gh = content_hash_of(&grant);
+    let pc = sha256_prefixed(b"params-commit");
+    let use_rec = seal_d2_use(
+        &rec,
+        &res,
+        "use-1",
+        std::slice::from_ref(&gh),
+        USED,
+        &pc,
+        &pc,
+        &vk_cnf_kid(&cnf.verifying_key()),
+        &cnf.verifying_key(),
+        &cnf,
+    );
+    let head_root = ghr(&[(1, &gh)]);
+    let head = grant_head_cv(1, &ghr(&[]), &head_root);
+    let cp = checkpoint_with_head(&rec, &[content_hash_of(&use_rec)], 2, head, Some(&tsa));
+    let mut bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp.clone()]);
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let mut subject = honest_subject(&rec, &res, &checkpoint_hash(&cp), &head_root);
+    subject = change_field(&subject, "revocation_digest", CanonValue::string(""));
+    subject = change_field(
+        &subject,
+        "revocation_merkle_digest",
+        CanonValue::string(sha256_prefixed(root.serialize().as_bytes())),
+    );
+    let att = attestation(
+        &cnf_kid(&attest.verifying_key()),
+        ATT_ISSUED,
+        ATT_NOT_AFTER,
+        subject,
+        &attest,
+    );
+    bundle = change_field(&bundle, "deployment_attestation", att);
+    bundle = change_field(&bundle, "revocation_merkle_root", root);
+    let mut opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    opts.trusted_keys = Some(vec![TrustedKey::from(rec.verifying_key())]);
+    opts.revocation_keys = vec![rev.verifying_key()];
+    opts.attestation_keys = vec![attest.verifying_key()];
+    opts.claim_policy.revocation = RevocationRequirement::Merkle;
+    let missing = verify_bundle_with(&bundle, &opts);
+    assert_eq!(missing.revocation_merkle_status, "fresh");
+    assert_eq!(
+        missing.attestation_status, "attested_claims",
+        "{:?}",
+        missing.issues
+    );
+    assert_eq!(missing.claims().temporal, ClaimDecision::Insufficient);
+    assert_eq!(missing.claims().authorized, ClaimDecision::Insufficient);
+    let present_bundle = change_field(
+        &bundle,
+        "revocation_proofs",
+        CanonValue::object(vec![(GID.into(), nonmembership_proof(&leaves, GID))]).unwrap(),
+    );
+    let present = verify_bundle_with(&present_bundle, &opts);
+    assert_eq!(present.revocation_merkle_status, "fresh");
+    assert_eq!(
+        present.attestation_status, "attested_claims",
+        "{:?}",
+        present.issues
+    );
+    assert_eq!(
+        present.claims().temporal,
+        ClaimDecision::Satisfied,
+        "fresh root plus validated path and attestation establish temporal evidence: {:?}",
+        present.issues
+    );
+    assert_eq!(present.revocation_nonmembership_verified, 1);
 }
 
 #[test]
@@ -9065,6 +10135,10 @@ fn capstone_report() -> VerifyReport {
         ),
     );
     assert!(r.ok, "baseline must verify: {:?}", r.issues);
+    // This helper intentionally synthesizes the remaining capstone predicates below; model
+    // externally pinned record provenance explicitly as another required predicate.
+    r.keys_externally_pinned = true;
+    r.body_bound_role_evidence = true;
     assert_eq!(
         r.side_effect_closure_status, "closed",
         "the real manifest must compute closed (T6 e2e): {:?}",
@@ -9768,6 +10842,72 @@ fn tier_b_native_transcript_time_broadening_is_a_violation() {
 }
 
 #[test]
+fn tier_b_native_transcript_after_expiry_is_a_violation() {
+    // V-L2: the introspection window is [issued_at, min(effective_exp, grant exp)), matching a brokered
+    // use (`used_at >= exp` is expired) and the server contract. At or after either bound is a violation;
+    // just before the effective expiry verifies.
+    let (rec, res, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let run = |introspected_at: i64, effective_exp: i64| {
+        let grant = seal_grant(
+            &rec,
+            &rec,
+            GID,
+            &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP),
+        );
+        let gh = content_hash_of(&grant);
+        let ie = introspection_evidence(
+            &res,
+            GID,
+            LEASE,
+            NSCOPE,
+            RESOURCE,
+            introspected_at,
+            effective_exp,
+        );
+        let t = seal_introspection(&rec, &res, "intro-1", std::slice::from_ref(&gh), &ie);
+        native_bundle_verify(&rec, &res, &tsa, grant, Some(t), None)
+    };
+    let narrowed = USED + 60; // the effective credential expires before the grant
+    for (name, at, eff) in [
+        ("at the grant exp", EXP, EXP),
+        ("after the grant exp", EXP + 1, EXP),
+        ("at the effective exp", narrowed, narrowed),
+        ("after the effective exp", narrowed + 1, narrowed),
+    ] {
+        let r = run(at, eff);
+        assert!(
+            !r.ok,
+            "{name}: an introspection after expiry must fail the bundle"
+        );
+        assert_eq!(r.introspection_transcripts_verified, 0, "{name}");
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.contains("introspection after expiry")),
+            "{name}: issues: {:?}",
+            r.issues
+        );
+    }
+    let r = run(narrowed - 1, narrowed);
+    assert_eq!(
+        r.introspection_transcripts_verified, 1,
+        "issues: {:?}",
+        r.issues
+    );
+    assert!(
+        !r.issues
+            .iter()
+            .any(|i| i.contains("introspection after expiry")),
+        "issues: {:?}",
+        r.issues
+    );
+}
+
+#[test]
 fn tier_b_native_transcript_forged_sig_is_a_violation() {
     // the structured introspection sig is by an IMPOSTER, not a pinned resource key -> it must not verify (even
     // though the RECORD evidence_sig is still by the resource, so it routes here as a resource record).
@@ -10083,6 +11223,8 @@ fn introspected_capstone_report() -> VerifyReport {
         Some(closure_manifest(&[(RESOURCE, ACTION, &[])])),
     );
     assert!(r.ok, "native baseline must verify: {:?}", r.issues);
+    r.keys_externally_pinned = true;
+    r.body_bound_role_evidence = true;
     assert!(r.native_credential_present);
     assert_eq!(r.introspection_status, "attested", "issues: {:?}", r.issues);
     assert_eq!(r.uses_matched, 0);
@@ -11919,6 +13061,8 @@ fn federation_capstone_report() -> VerifyReport {
         ),
     );
     assert!(r.ok, "federation baseline must verify: {:?}", r.issues);
+    r.keys_externally_pinned = true;
+    r.body_bound_role_evidence = true;
     assert_eq!(r.federation_status, "sequence_verified");
     assert_eq!(r.brokers_total, 2);
     assert_eq!(r.brokers_seq_verified, 2);
@@ -11962,4 +13106,3253 @@ fn tier_b_federation_capstone_blocked_by_suppression() {
         out.contains(r#""action_completeness":"claimed_over_manifest""#),
         "{out}"
     );
+}
+
+// ---- F: canonical-JSON duplicate-key detection must be sub-quadratic ----
+
+#[test]
+fn canon_wide_object_parses_in_subquadratic_time() {
+    // RCP §5 duplicate-key detection used to scan every prior member per key (O(n^2)): a single 80k-key object
+    // took ~10s, a verifier DoS from one attacker-supplied bundle field. 100k keys must now parse promptly (the
+    // dev profile is opt-level 3), and a post-NFC duplicate at the tail must still be rejected with the SAME
+    // message and byte position as before.
+    const N: usize = 100_000;
+    let mut s = String::with_capacity(N * 16);
+    s.push('{');
+    for i in 0..N {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("\"k{i}\":{i}"));
+    }
+    s.push('}');
+    let t = std::time::Instant::now();
+    let v = CanonValue::parse(&s).expect("a wide unique-key object parses");
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "100k-key parse took {:?} (quadratic duplicate detection?)",
+        t.elapsed()
+    );
+    assert_eq!(v.as_object().unwrap().len(), N);
+
+    // the checked constructor must scale the same way.
+    let pairs: Vec<(String, CanonValue)> = (0..N)
+        .map(|i| (format!("k{i}"), CanonValue::Int(i as i64)))
+        .collect();
+    let t = std::time::Instant::now();
+    assert!(CanonValue::object(pairs).is_ok());
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "100k-key CanonValue::object took {:?}",
+        t.elapsed()
+    );
+
+    // behavior unchanged: a duplicate (here after NFC: "e\u{301}" == "é") is still rejected at the key's position.
+    let mut dup = s[..s.len() - 1].to_string();
+    dup.push_str(",\"\u{e9}\":1,");
+    let pos = dup.len();
+    dup.push_str("\"e\u{301}\":2}");
+    let err = CanonValue::parse(&dup).unwrap_err();
+    assert_eq!(err.pos, pos);
+    assert_eq!(
+        err.msg,
+        format!(
+            "duplicate object key after NFC normalization: {:?}",
+            "\u{e9}"
+        )
+    );
+}
+
+#[test]
+fn tier_b_merkle_revocation_multibyte_or_signed_hex_does_not_panic() {
+    // SAFETY (DoS): the proof's `lo`/`hi`/path nodes ride the UNSIGNED revocation_proofs map. A 64-BYTE string whose
+    // first char is multibyte ("€" = 3 bytes + 61 ASCII) passed the byte-length check and then sliced mid-char —
+    // a panic (and UB across cgo). A "+a" pair was accepted by from_str_radix. Both are just an invalid proof
+    // (Unproven → fail-closed), never a panic and never a parsed node.
+    let (rec, res, tsa, rev) = rev_keys();
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let good = nonmembership_proof(&leaves, GID);
+    let multibyte = format!("€{}", "a".repeat(61));
+    assert_eq!(multibyte.len(), 64);
+    let lo = good.get("lo").unwrap().as_str().unwrap().to_string();
+    // non-canonical encodings of the SAME bytes, which the old from_str_radix decode accepted: uppercase hex, and
+    // (when the first byte's high nibble is 0) a "+X" sign-prefixed pair.
+    let mut bads = vec![multibyte, lo.to_uppercase()];
+    if let Some(rest) = lo.strip_prefix('0') {
+        bads.push(format!("+{rest}"));
+    }
+    for bad_lo in bads {
+        let proof = change_field(&good, "lo", CanonValue::string(bad_lo.clone()));
+        let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+        let r = merkle_rev_bundle_verify(
+            &rec,
+            &res,
+            &tsa,
+            &rev,
+            root_obj,
+            vec![(GID.to_string(), proof)],
+        );
+        assert!(!r.ok, "malformed hex {bad_lo:?} must fail closed");
+        assert_eq!(r.revoked_uses_blocked, 1, "{bad_lo:?}");
+        assert_eq!(r.uses_matched, 0);
+    }
+}
+
+#[test]
+fn garbage_anchor_tokens_are_not_counted_as_anchored() {
+    // H: `checkpoints_anchored` counted anchor PRESENCE before verifying it, so two garbage `anchor` blobs read as
+    // "2 anchored" (the CLI printed it as such). Only a VERIFIED anchor counts; presence is reported separately.
+    let b = fixture();
+    let garbage = CanonValue::parse(r#"{"scheme":"test-anchor","token":"not-a-token"}"#).unwrap();
+    let checkpoints: Vec<CanonValue> = arr(&b, "checkpoints")
+        .iter()
+        .map(|cp| attach_anchor(cp, garbage.clone()))
+        .collect();
+    let bundle = rebuild(arr(&b, "keys"), arr(&b, "records"), checkpoints);
+    for tsa_pinned in [false, true] {
+        let tsa = test_tsa_key(&[200u8; 32]);
+        let r = verify_bundle_with(
+            &bundle,
+            &VerifyOptions {
+                trusted_tsa_keys: if tsa_pinned {
+                    vec![tsa.verifying_key()]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.checkpoints_anchored, 0, "tsa_pinned={tsa_pinned}");
+        assert_eq!(r.checkpoints_anchors_attached, 2, "tsa_pinned={tsa_pinned}");
+        let json = report_to_json(&r);
+        assert!(json.contains(r#""checkpoints_anchored":0"#), "{json}");
+        assert!(
+            json.contains(r#""checkpoints_anchors_attached":2"#),
+            "{json}"
+        );
+    }
+
+    // control: a REAL anchor on the latest checkpoint counts as anchored once pinned.
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let mut checkpoints = arr(&b, "checkpoints");
+    let a = make_test_anchor(
+        &checkpoint_hash(&checkpoints[1]),
+        "2026-06-15T10:05:00.000Z",
+        &tsa,
+        "t",
+    );
+    checkpoints[1] = attach_anchor(&checkpoints[1], a);
+    let r = verify_bundle_with(
+        &rebuild(arr(&b, "keys"), arr(&b, "records"), checkpoints),
+        &VerifyOptions {
+            trusted_tsa_keys: vec![tsa.verifying_key()],
+            ..Default::default()
+        },
+    );
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.checkpoints_anchored, 1);
+    assert_eq!(r.checkpoints_anchors_attached, 1);
+}
+
+#[test]
+fn bundle_without_project_id_still_binds_one_project() {
+    // I: with no top-level `project_id`, every project-binding check was skipped, so records (and checkpoints)
+    // from DIFFERENT projects could be spliced into one bundle and verify clean. The verifier now derives the
+    // binding project from the bundle's own records/checkpoints and requires them all to share it.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let g1 = seal_grant(&rec, &rec, "g-1", &ge);
+    let g2 = {
+        let other = seal_grant(&rec, &rec, "g-2", &ge);
+        let moved = change_field(&other, "project_id", CanonValue::string("proj-OTHER"));
+        seal(&moved, &rec).unwrap()
+    };
+    let cp = checkpoint_over(&rec, &[content_hash_of(&g1), content_hash_of(&g2)], 2, None);
+    let without_pid = |b: CanonValue| {
+        let mut m = b.as_object().unwrap().clone();
+        m.retain(|(k, _)| k != "project_id");
+        CanonValue::Object(m)
+    };
+    let spliced = without_pid(tier_b_bundle(
+        &rec.verifying_key(),
+        vec![g1.clone(), g2],
+        vec![cp],
+    ));
+    let r = verify_bundle(&spliced);
+    assert!(
+        !r.ok,
+        "a cross-project splice must not verify just because the bundle omits project_id"
+    );
+    assert!(
+        r.record_trust.iter().any(|t| t
+            .notes
+            .iter()
+            .any(|n| n.contains("project_id does not match"))),
+        "{:?}",
+        r.issues
+    );
+
+    // control: a single-project bundle that merely omits the top-level project_id still verifies.
+    let cp = checkpoint_over(&rec, &[content_hash_of(&g1)], 1, None);
+    let clean = without_pid(tier_b_bundle(&rec.verifying_key(), vec![g1], vec![cp]));
+    let r = verify_bundle(&clean);
+    assert!(r.ok, "{:?}", r.issues);
+}
+
+#[test]
+fn signing_key_overlapping_tsa_key_is_fatal() {
+    // C: the record-signing keys were missing from the role-disjointness matrix. With the SAME key pinned as a
+    // (compromised) signing key and as a TSA key, a thief holding it self-anchors every checkpoint "before" the
+    // compromise and the whole bundle PASSES. Signing keys must be disjoint from every non-broker role.
+    let k0 = signing_key_from_seed(&[0u8; 32]);
+    let b = fixture();
+    let mut checkpoints = arr(&b, "checkpoints");
+    let a = make_test_anchor(
+        &checkpoint_hash(&checkpoints[1]),
+        "2026-06-15T10:02:00.000Z", // backdated by the thief, who holds k0
+        &k0,
+        "self",
+    );
+    checkpoints[1] = attach_anchor(&checkpoints[1], a);
+    let bundle = rebuild(arr(&b, "keys"), arr(&b, "records"), checkpoints);
+    let r = verify_bundle_with(
+        &bundle,
+        &VerifyOptions {
+            trusted_keys: Some(vec![pinned_compromised("2026-06-15T10:10:00.000Z")]),
+            trusted_tsa_keys: vec![k0.verifying_key()],
+            ..Default::default()
+        },
+    );
+    assert!(
+        !r.ok,
+        "a signing key doubling as the TSA must not self-anchor"
+    );
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("signing_keys") && i.contains("disjoint")),
+        "{:?}",
+        r.issues
+    );
+
+    // every other non-broker role is likewise disjoint from the signing keys...
+    let vk = k0.verifying_key();
+    let pin = || Some(vec![TrustedKey::from(vk)]);
+    for (name, opts) in [
+        (
+            "resource_authority_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                resource_authority_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "taxonomy_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                taxonomy_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "attestation_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                attestation_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "cosig_approver_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                cosig_approver_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+        (
+            "revocation_keys",
+            VerifyOptions {
+                trusted_keys: pin(),
+                revocation_keys: vec![vk],
+                ..Default::default()
+            },
+        ),
+    ] {
+        let r = verify_bundle_with(&fixture(), &opts);
+        assert!(!r.ok, "{name}");
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.contains("signing_keys") && i.contains(name)),
+            "{name}: {:?}",
+            r.issues
+        );
+    }
+
+    // ...but the broker recording key IS the record-signing key by design (ADR 0002), as is the generic
+    // authority set in self-host: that overlap stays allowed.
+    let r = verify_bundle_with(
+        &fixture(),
+        &VerifyOptions {
+            trusted_keys: pin(),
+            broker_authority_keys: vec![vk],
+            trusted_authority_keys: vec![vk],
+            ..Default::default()
+        },
+    );
+    assert!(r.ok, "{:?}", r.issues);
+}
+
+#[test]
+fn signing_keys_json_object_form_carries_compromise() {
+    // E: the JSON/CLI/FFI path built `TrustedKey::from(vk)` with NO status, and rejected the object form, so an
+    // auditor could not express "this signing key was compromised at T" outside the Rust API. The object form now
+    // carries the authoritative RCP §10.2 status + compromise time exactly like `TrustedKey`.
+    let (b, tsa_vk) = compromised_bundle("2026-06-15T10:02:00.000Z");
+    let bundle_json = b.serialize();
+    let key = encode_pubkey(&signing_key_from_seed(&[0u8; 32]).verifying_key());
+    let tsa = encode_pubkey(&tsa_vk);
+    let opts = |changed_at: &str| {
+        format!(
+            r#"{{"signing_keys":[{{"key":"{key}","status":"compromised","status_changed_at":"{changed_at}"}}],"tsa_keys":["{tsa}"]}}"#
+        )
+    };
+    // compromise AFTER the 10:02 anchor: every record predates it -> trusted (mirrors the Rust API test).
+    let after = verify_bundle_with_json(&bundle_json, &opts("2026-06-15T10:10:00.000Z"));
+    assert!(after.contains(r#""ok":true"#), "{after}");
+    assert!(
+        after.contains(r#""keys_externally_pinned":true"#),
+        "{after}"
+    );
+    // compromise BEFORE the anchor: nothing is anchored before it -> untrusted (threat #9).
+    let before = verify_bundle_with_json(&bundle_json, &opts("2026-06-15T10:01:00.000Z"));
+    assert!(before.contains(r#""ok":false"#), "{before}");
+    assert!(before.contains("threat #9"), "{before}");
+
+    // an EXPLICITLY empty signing_keys used to fall back SILENTLY to unpinned verification — now a config error.
+    let empty = verify_bundle_with_json(&bundle_json, r#"{"signing_keys":[]}"#);
+    assert!(
+        empty.contains(r#""ok":false"#) && empty.contains("signing_keys is present but empty"),
+        "{empty}"
+    );
+    // plain strings still work, and malformed objects fail closed.
+    let plain = verify_bundle_with_json(&bundle_json, &format!(r#"{{"signing_keys":["{key}"]}}"#));
+    assert!(
+        plain.contains(r#""keys_externally_pinned":true"#),
+        "{plain}"
+    );
+    let typo = verify_bundle_with_json(
+        &bundle_json,
+        &format!(r#"{{"signing_keys":[{{"key":"{key}","statuss":"compromised"}}]}}"#),
+    );
+    assert!(typo.contains("unknown field"), "{typo}");
+}
+
+// ---- B: RCP §10.2 applies to CHECKPOINT keys, not only record keys ----
+
+// A two-checkpoint chain over two records (g1 <- g2), both checkpoints signed by `cp_sk` under key id "kc"; cp1
+// optionally carries a test anchor at `anchor_ts`. Records are signed by `rec` ("k0").
+fn kc_chain_bundle(
+    rec: &SigningKey,
+    cp_sk: &SigningKey,
+    anchor: Option<(&SigningKey, &str)>,
+) -> CanonValue {
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let g1 = seal_grant(rec, rec, "g-1", &ge);
+    let g2 = seal_grant_prev(rec, rec, "g-2", &ge, &[content_hash_of(&g1)]);
+    let key_block =
+        CanonValue::parse(r#"{"signing_key_id":"kc","key_epoch":0,"key_status":"active"}"#)
+            .unwrap();
+    let cp0 = seal_checkpoint(
+        &checkpoint_body(
+            "cp0",
+            "proj-001",
+            0,
+            None,
+            &[content_hash_of(&g1)],
+            1,
+            "2026-06-15T10:05:00.000Z",
+            key_block.clone(),
+        )
+        .unwrap(),
+        cp_sk,
+    )
+    .unwrap();
+    let cp0_hash = checkpoint_hash(&cp0);
+    let mut cp1 = seal_checkpoint(
+        &checkpoint_body(
+            "cp1",
+            "proj-001",
+            1,
+            Some(&cp0_hash),
+            &[content_hash_of(&g2)],
+            2,
+            "2026-06-15T10:10:00.000Z",
+            key_block,
+        )
+        .unwrap(),
+        cp_sk,
+    )
+    .unwrap();
+    if let Some((tsa, ts)) = anchor {
+        let a = make_test_anchor(&checkpoint_hash(&cp1), ts, tsa, "tsa-1");
+        cp1 = attach_anchor(&cp1, a);
+    }
+    let key_entry = |id: &str, vk: &VerifyingKey| {
+        CanonValue::object(vec![
+            ("signing_key_id".into(), CanonValue::string(id)),
+            ("key_epoch".into(), CanonValue::Int(0)),
+            ("public_key".into(), CanonValue::string(encode_pubkey(vk))),
+            ("key_status".into(), CanonValue::string("active")), // the bundle's (attacker's) claim
+        ])
+        .unwrap()
+    };
+    rebuild(
+        vec![
+            key_entry("k0", &rec.verifying_key()),
+            key_entry("kc", &cp_sk.verifying_key()),
+        ],
+        vec![g1, g2],
+        vec![cp0, cp1],
+    )
+}
+
+#[test]
+fn checkpoint_signed_by_compromised_pinned_key_is_untrusted() {
+    // B: the auditor pins K0 (active — it signs the records) and Kc (a checkpoint key, compromised in 2020). An
+    // attacker holding ONLY Kc drops a session and re-signs a fresh, internally consistent checkpoint chain. The
+    // checkpoint key was filtered only by `is_trusted`, so the forged chain verified (omission, threat #1/#9).
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let kc = signing_key_from_seed(&[42u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let opts = |changed_at: &str| VerifyOptions {
+        trusted_keys: Some(vec![
+            rec.verifying_key().into(),
+            TrustedKey {
+                vk: kc.verifying_key(),
+                status: Some("compromised".into()),
+                status_changed_at: Some(changed_at.into()),
+            },
+        ]),
+        trusted_tsa_keys: vec![tsa.verifying_key()],
+        ..Default::default()
+    };
+
+    let forged = kc_chain_bundle(&rec, &kc, None);
+    let r = verify_bundle_with(&forged, &opts("2020-01-01T00:00:00.000Z"));
+    assert!(!r.ok, "a chain signed by a compromised key must not verify");
+    assert_eq!(r.checkpoints_verified, 0);
+    assert!(
+        r.issues.iter().any(|i| i.contains("RCP §10.2")),
+        "{:?}",
+        r.issues
+    );
+    // anchored, but AFTER the compromise: still untrusted.
+    let late = kc_chain_bundle(&rec, &kc, Some((&tsa, "2026-06-15T10:10:01.000Z")));
+    assert!(!verify_bundle_with(&late, &opts("2020-01-01T00:00:00.000Z")).ok);
+
+    // control: an anchor at/before the status change commits cp1 AND (via prev_checkpoint_hash) cp0 -> trusted.
+    let r = verify_bundle_with(&late, &opts("2026-06-15T10:20:00.000Z"));
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.checkpoints_verified, 2);
+    // control: no status pinned for Kc -> active -> the unanchored chain verifies as before.
+    let r = verify_bundle_with(
+        &forged,
+        &VerifyOptions {
+            trusted_keys: Some(vec![rec.verifying_key().into(), kc.verifying_key().into()]),
+            ..Default::default()
+        },
+    );
+    assert!(r.ok, "{:?}", r.issues);
+}
+
+// ---- D: stripping the revocation artifacts must not read as the benign `absent` when revocation keys are pinned ----
+
+#[test]
+fn tier_b_revocation_artifacts_stripped_under_pinned_keys_is_missing() {
+    // D: with `revocation_keys` pinned, a bundle whose `revocation_list` / `revocation_merkle_root` was DELETED read
+    // `absent` — the "not evaluated" baseline — and the capstone stayed reachable, so stripping the (bundle-level)
+    // revocation evidence un-blocked every revoked use for free. It is now `missing`, which blocks the capstone.
+    let (rec, res, tsa, rev) = rev_keys();
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let stripped = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let mut opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    opts.revocation_keys = vec![rev.verifying_key()];
+    let r = verify_bundle_with(&stripped, &opts);
+    assert_eq!(r.revocation_status, "missing");
+    assert!(report_to_json(&r).contains(r#""revocation_status":"missing""#));
+
+    // unpinned revocation authority: still the legitimate `absent` baseline.
+    opts.revocation_keys = vec![];
+    assert_eq!(
+        verify_bundle_with(&stripped, &opts).revocation_status,
+        "absent"
+    );
+
+    // a Merkle-mode bundle carries only the root: the disclosed list is legitimately absent there.
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root_obj = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let proofs = vec![(GID.to_string(), nonmembership_proof(&leaves, GID))];
+    let r = merkle_rev_bundle_verify(&rec, &res, &tsa, &rev, root_obj, proofs);
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(r.revocation_status, "absent");
+    assert_eq!(r.revocation_merkle_status, "fresh");
+
+    // capstone: `missing` blocks it (a fully-clean capstone report otherwise).
+    let mut c = capstone_report();
+    assert_eq!(
+        c.action_completeness(),
+        ActionCompleteness::AttestedCompleteOverBrokeredSurface
+    );
+    c.revocation_status = "missing".to_string();
+    assert_eq!(
+        c.action_completeness(),
+        ActionCompleteness::ClaimedOverManifest
+    );
+}
+
+#[test]
+fn tier_b_attestation_binds_revocation_evidence_when_revocation_keys_pinned() {
+    // D (attestation half): under pinned revocation keys the signed subject MUST carry `revocation_digest` (else
+    // it never committed to the revocation evidence and cannot vouch nothing was stripped), and an optional
+    // `revocation_merkle_digest` binds the Merkle-mode root the same way.
+    let (rec, res, tsa, attest, rev) = (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+        signing_key_from_seed(&[11u8; 32]),
+        signing_key_from_seed(&[77u8; 32]),
+    );
+    let (base, cph, head_root) = d6_anchored(&rec, &tsa);
+    let revlist = revocation_list(&rev, ATT_ISSUED, ATT_NOT_AFTER, &["some-other-grant"]);
+    let with_list = change_field(&base, "revocation_list", revlist.clone());
+    let att_over = |subj: CanonValue| {
+        attestation(
+            &averin_decision_core::verify::cnf_kid(&attest.verifying_key()),
+            ATT_ISSUED,
+            ATT_NOT_AFTER,
+            subj,
+            &attest,
+        )
+    };
+    let mut opts = attest_opts(&rec, &res, &tsa, &attest);
+    opts.revocation_keys = vec![rev.verifying_key()];
+
+    // an attestation that never bound revocation_digest no longer attests a revocation-pinned bundle.
+    let unbound = att_over(honest_subject(&rec, &res, &cph, &head_root));
+    let r = verify_bundle_with(
+        &change_field(&with_list, "deployment_attestation", unbound),
+        &opts,
+    );
+    assert_ne!(r.attestation_status, "attested_claims");
+    assert!(
+        r.issues.iter().any(|i| i.contains("revocation_digest")),
+        "{:?}",
+        r.issues
+    );
+
+    // bound revocation_digest + a bound revocation_merkle_digest: stripping the root breaks the subject match.
+    let leaves = rev_leaves(&["other-1"]);
+    let root_obj = merkle_root_obj(&rev, ATT_ISSUED, ATT_NOT_AFTER, &leaves);
+    let subj = change_field(
+        &change_field(
+            &honest_subject(&rec, &res, &cph, &head_root),
+            "revocation_digest",
+            CanonValue::string(sha256_prefixed(revlist.serialize().as_bytes())),
+        ),
+        "revocation_merkle_digest",
+        CanonValue::string(sha256_prefixed(root_obj.serialize().as_bytes())),
+    );
+    let att = att_over(subj);
+    let full = change_field(
+        &change_field(&with_list, "revocation_merkle_root", root_obj),
+        "deployment_attestation",
+        att.clone(),
+    );
+    assert_eq!(
+        verify_bundle_with(&full, &opts).attestation_status,
+        "attested_claims"
+    );
+    let r = verify_bundle_with(
+        &change_field(&with_list, "deployment_attestation", att),
+        &opts,
+    );
+    assert_ne!(r.attestation_status, "attested_claims");
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("revocation_merkle_digest")),
+        "{:?}",
+        r.issues
+    );
+}
+
+// ---- A: deleting the (unsigned) `anchor` must never improve the Tier-B verdict (monotonicity) ----
+
+// Drop every checkpoint's `anchor` — it is outside the checkpoint hash (checkpoint.rs STRIP), so the stripped
+// checkpoints still verify: exactly what an attacker holding no key at all can do to a bundle.
+fn strip_anchors(bundle: &CanonValue) -> CanonValue {
+    let cps: Vec<CanonValue> = arr(bundle, "checkpoints")
+        .iter()
+        .map(|cp| {
+            let mut m = cp.as_object().unwrap().clone();
+            m.retain(|(k, _)| k != "anchor");
+            CanonValue::Object(m)
+        })
+        .collect();
+    change_field(bundle, "checkpoints", CanonValue::Array(cps))
+}
+
+#[test]
+fn tier_b_stripping_anchors_does_not_hide_violations() {
+    // A: the Tier-B join ran over the ANCHORED-closed set only, so deleting `anchor` turned every closed use into
+    // `unmatched_pending` (never a violation): an action without a credential, a double-spend, a revoked use and a
+    // cosig failure all flipped to ok:true with no key. Negative findings now run over every record committed by a
+    // SIGNED checkpoint; only positive claims still need anchoring.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let rev = signing_key_from_seed(&[77u8; 32]);
+    // revocation keys are pinned only for the revoked-use case (a pinned issuer with no list would itself block).
+    let opts = |revocation: bool| {
+        let mut o = pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        );
+        if revocation {
+            o.revocation_keys = vec![rev.verifying_key()];
+        }
+        o
+    };
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let use_of = |id: &str, prev: &[String], used_at: i64| {
+        seal_use(
+            &rec,
+            &res,
+            id,
+            prev,
+            ACTION,
+            &use_evidence(GID, ACTION, RESOURCE, GID, CNF, used_at),
+        )
+    };
+    // 1. action without a credential (the auditor's repro).
+    let lone = use_of("use-1", &[], USED);
+    let b1 = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![lone.clone()],
+        vec![checkpoint_over(
+            &rec,
+            &[content_hash_of(&lone)],
+            1,
+            Some(&tsa),
+        )],
+    );
+    // 2. single-use double-spend.
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let gch = content_hash_of(&grant);
+    let (u1, u2) = (
+        use_of("use-1", std::slice::from_ref(&gch), USED),
+        use_of("use-2", std::slice::from_ref(&gch), USED + 1),
+    );
+    let b2 = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![grant.clone(), u1.clone(), u2.clone()],
+        vec![checkpoint_over(
+            &rec,
+            &[content_hash_of(&u1), content_hash_of(&u2)],
+            3,
+            Some(&tsa),
+        )],
+    );
+    // 3. a use of a grant the signed revocation_list revokes (already caught pre-fix via the undatable list,
+    //    kept here so the revoked-use block itself is shown to survive the strip).
+    let b3 = change_field(
+        &tier_b_bundle(
+            &rec.verifying_key(),
+            vec![grant.clone(), u1.clone()],
+            vec![checkpoint_over(
+                &rec,
+                &[content_hash_of(&u1)],
+                2,
+                Some(&tsa),
+            )],
+        ),
+        "revocation_list",
+        revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[GID]),
+    );
+    // 4. a grant declaring cosig_threshold 1 with no approvals (M6), and a use of it.
+    let cosig_grant = seal_grant(
+        &rec,
+        &rec,
+        GID,
+        &change_field(&ge, "cosig_threshold", CanonValue::Int(1)),
+    );
+    let cu = use_of("use-1", &[content_hash_of(&cosig_grant)], USED);
+    let b4 = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![cosig_grant, cu.clone()],
+        vec![checkpoint_over(
+            &rec,
+            &[content_hash_of(&cu)],
+            2,
+            Some(&tsa),
+        )],
+    );
+
+    for (name, b, revocation, needle) in [
+        ("no credential", b1, false, "action without a credential"),
+        ("double-spend", b2, false, "double-spend"),
+        ("revoked use", b3, true, "marks REVOKED"),
+        ("cosig failure", b4, false, "cosig threshold not met"),
+    ] {
+        let anchored = verify_bundle_with(&b, &opts(revocation));
+        assert!(!anchored.ok, "{name}: anchored baseline must fail");
+        let stripped = verify_bundle_with(&strip_anchors(&b), &opts(revocation));
+        assert!(
+            !stripped.ok,
+            "{name}: deleting the anchors must not turn a violation into a PASS; issues: {:?}",
+            stripped.issues
+        );
+        assert!(
+            stripped.issues.iter().any(|i| i.contains(needle)),
+            "{name}: {:?}",
+            stripped.issues
+        );
+        assert_eq!(stripped.uses_matched, 0, "{name}");
+    }
+}
+
+#[test]
+fn tier_b_stripping_anchors_only_demotes_positive_claims() {
+    // A (the other half): a CLEAN anchored bundle stays ok when its anchors are stripped, but its positive claim
+    // falls back to pending — the verdict can only get weaker, never stronger.
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let grant = seal_grant(&rec, &rec, GID, &ge);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let use_rec = seal_use(&rec, &res, "use-1", &[content_hash_of(&grant)], ACTION, &ue);
+    let cp = checkpoint_over(&rec, &[content_hash_of(&use_rec)], 2, Some(&tsa));
+    let bundle = tier_b_bundle(&rec.verifying_key(), vec![grant, use_rec], vec![cp]);
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let a = verify_bundle_with(&bundle, &opts);
+    assert!(a.ok, "{:?}", a.issues);
+    assert_eq!(
+        (a.uses_matched, a.unmatched_pending, a.grants_unused),
+        (1, 0, 0)
+    );
+    let s = verify_bundle_with(&strip_anchors(&bundle), &opts);
+    assert!(s.ok, "{:?}", s.issues);
+    assert_eq!(s.uses_matched, 0);
+    assert_eq!(s.unmatched_pending, 1);
+    assert_eq!(s.unmatched_violation, 0);
+    assert_eq!(
+        s.grants_unused, 0,
+        "an unanchored grant is not a clean unused grant"
+    );
+    // With NO Tier-B authority pinned (the default, pin-nothing integrity flow) no receipt can validate, so the
+    // committed extension does not apply: the bundle stays ok with its use pending, as before.
+    let d = verify_bundle(&bundle);
+    assert!(d.ok, "{:?}", d.issues);
+    assert_eq!((d.uses_matched, d.unmatched_pending), (0, 1));
+}
+
+// ---- D6 amendment A1: operator-voided broker_seq (`grant_void` tombstones) ----
+
+// a well-formed void_evidence for a voided reservation (gid at broker_seq), optionally tagged with a broker_id (M4).
+fn void_evidence(gid: &str, broker_seq: i64, broker_id: Option<&str>) -> CanonValue {
+    let ve = CanonValue::object(vec![
+        (
+            "domain".into(),
+            CanonValue::string("averin.broker.grant_void.v1"),
+        ),
+        ("project_id".into(), CanonValue::string("proj-001")),
+        ("broker_seq".into(), CanonValue::Int(broker_seq)),
+        ("grant_id".into(), CanonValue::string(gid)),
+        (
+            "voided_at".into(),
+            CanonValue::string("2026-06-15T10:05:00.000Z"),
+        ),
+        ("reason".into(), CanonValue::string("orphaned reservation")),
+    ])
+    .unwrap();
+    match broker_id {
+        Some(b) => change_field(&ve, "broker_id", CanonValue::string(b)),
+        None => ve,
+    }
+}
+
+// seal a grant_void tombstone exactly as the server's buildGrantVoidRecord shapes it: role tuple
+// (grant_void, credential_broker), record_id == the voided grant_id, event_type credential_grant_void, and the
+// authority's evidence_sig over sha256(RCP(void_evidence)) by `broker_sk` — or NO evidence_sig when `broker_sk` is None.
+fn seal_void(
+    rec_sk: &SigningKey,
+    broker_sk: Option<&SigningKey>,
+    record_id: &str,
+    ve: &CanonValue,
+) -> CanonValue {
+    let eh = sha256_prefixed(ve.serialize().as_bytes());
+    let sig_field = match broker_sk {
+        Some(sk) => format!(
+            r#","evidence_sig":"{}""#,
+            sign_evidence("gateway_enforced", "proj-001", record_id, &eh, sk)
+        ),
+        None => String::new(),
+    };
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"proj-001","agent_id":"averin-broker","agent_version":"averin-broker",
+        "session_id":"broker-seq-void","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":[],"display_seq":0,
+        "agent_ts":"2026-06-15T10:05:00.000Z","received_ts":"2026-06-15T10:05:00.000Z",
+        "event_type":"credential_grant_void","action":"broker_seq.void","observed_via":"broker","status":"void",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"credential_broker","grant_id":"{record_id}","evidence_hash":"{eh}"{sig_field}}},
+        "extensions":{{"broker":{{"kind":"grant_void","void_evidence":{ve}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ve = ve.serialize(),
+    );
+    seal(&CanonValue::parse(&body).unwrap(), rec_sk).unwrap()
+}
+
+// the D6 single-broker bundle over `records`, whose ONE anchored checkpoint commits all of them and carries a head
+// folding `log` (seq, content_hash) with the given max_seq.
+fn void_bundle(
+    rec: &SigningKey,
+    tsa: &SigningKey,
+    records: Vec<CanonValue>,
+    log: &[(i64, &str)],
+    max_seq: i64,
+) -> CanonValue {
+    let frontier: Vec<String> = records.iter().map(content_hash_of).collect();
+    let head = grant_head_cv(max_seq, &ghr(&[]), &ghr(log));
+    let cp = checkpoint_with_head(rec, &frontier, records.len() as i64, head, Some(tsa));
+    tier_b_bundle(&rec.verifying_key(), records, vec![cp])
+}
+
+fn void_keys() -> (SigningKey, SigningKey, SigningKey) {
+    (
+        signing_key_from_seed(&[0u8; 32]),
+        signing_key_from_seed(&[3u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    )
+}
+
+fn has_issue(r: &VerifyReport, needle: &str) -> bool {
+    r.issues.iter().any(|i| i.contains(needle))
+}
+
+#[test]
+fn grant_void_tombstone_filling_a_gap_verifies() {
+    // POSITIVE: seq 1 was reserved by grant-1 and never recorded; grant-2 recorded seq 2. A broker-signed tombstone
+    // for grant-1 at seq 1 fills the gap: the log is a gapless [1..2], broker_trust reaches sequence_verified, and
+    // the tombstone is NEVER counted as a grant.
+    let (rec, res, tsa) = void_keys();
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let g = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g.clone()], &[(1, &th), (2, &gh)], 2),
+        &opts,
+    );
+    assert!(
+        r.ok,
+        "a valid tombstone filling a gap must verify; issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.broker_trust, "sequence_verified");
+    assert_eq!(r.grant_total, 1, "a tombstone is never a grant");
+    assert_eq!(r.grant_verified, 1);
+
+    // CONTROL: the same bundle without the tombstone is the wedge (a gap at seq 1).
+    let r = verify_bundle_with(&void_bundle(&rec, &tsa, vec![g], &[(2, &gh)], 2), &opts);
+    assert!(!r.ok && has_issue(&r, "gapless"), "issues: {:?}", r.issues);
+}
+
+#[test]
+fn grant_void_relabelled_grant_evidence_fails_domain_check() {
+    // (1) a real grant's signed payload relabelled as a tombstone: grant_evidence (augmented to bind the project, so
+    // ONLY the domain tag is missing) moved under void_evidence and signed by the pinned broker key. The domain tag
+    // is what keeps a grant_evidence payload from ever doubling as a void statement, so it must not fill seq 1.
+    let (rec, res, tsa) = void_keys();
+    let ge = change_field(
+        &grant_evidence_d6(GID, 1),
+        "project_id",
+        CanonValue::string("proj-001"),
+    );
+    let t = seal_void(&rec, Some(&rec), GID, &ge);
+    let g = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (2, &gh)], 2),
+        &pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        ),
+    );
+    assert!(
+        !r.ok,
+        "a grant_evidence payload relabelled as void_evidence must fail"
+    );
+    assert!(
+        has_issue(&r, "grant_void tombstone")
+            && has_issue(
+                &r,
+                "void_evidence.domain is not averin.broker.grant_void.v1"
+            ),
+        "issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.grant_total, 1, "the relabelled payload is not a grant");
+}
+
+#[test]
+fn grant_void_unsigned_or_foreign_signed_under_pinned_broker_keys_fails() {
+    // (2) under pinned broker_authority_keys a tombstone must verify under them to fill its seq: one with NO
+    // evidence_sig, or one signed by a key that is not a pinned broker key, is a hard failure (not a silent filler).
+    let (rec, res, tsa) = void_keys();
+    let rogue = signing_key_from_seed(&[77u8; 32]);
+    for (label, signer) in [("unsigned", None), ("rogue-signed", Some(&rogue))] {
+        let t = seal_void(&rec, signer, GID, &void_evidence(GID, 1, None));
+        let g = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+        let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+        let r = verify_bundle_with(
+            &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (2, &gh)], 2),
+            &pinned_roles(
+                rec.verifying_key(),
+                res.verifying_key(),
+                tsa.verifying_key(),
+            ),
+        );
+        assert!(
+            !r.ok,
+            "{label} tombstone under pinned broker keys must fail"
+        );
+        assert!(
+            has_issue(&r, "does not verify under a pinned broker key"),
+            "{label}: issues: {:?}",
+            r.issues
+        );
+    }
+}
+
+#[test]
+fn grant_void_without_broker_id_under_federation_fails() {
+    // (3) under an active federation a tombstone fills a seq only in ITS broker's partition (void_evidence.broker_id).
+    // One carrying no broker_id fills nothing and is flagged; the SAME tombstone tagged with the broker verifies.
+    let (rec, res, tsa) = void_keys();
+    let mk = |bid: Option<&str>| {
+        let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, bid));
+        let g = seal_grant(
+            &rec,
+            &rec,
+            "grant-2",
+            &grant_evidence_fed("grant-2", BID_A, 2),
+        );
+        let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+        let heads = fed_heads(&[(
+            BID_A,
+            grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &th), (2, &gh)])),
+        )]);
+        let cp = checkpoint_with_fed_heads(
+            &rec,
+            "cp0",
+            0,
+            None,
+            &[th.clone(), gh.clone()],
+            2,
+            heads,
+            Some(&tsa),
+        );
+        let mut fed = std::collections::BTreeMap::new();
+        fed.insert(BID_A.to_string(), vec![rec.verifying_key()]);
+        let opts = VerifyOptions {
+            federated_broker_keys: fed,
+            resource_authority_keys: vec![res.verifying_key()],
+            trusted_tsa_keys: vec![tsa.verifying_key()],
+            ..Default::default()
+        };
+        verify_bundle_with(
+            &tier_b_bundle(&rec.verifying_key(), vec![t, g], vec![cp]),
+            &opts,
+        )
+    };
+    let r = mk(None);
+    assert!(
+        !r.ok,
+        "a tombstone without broker_id under federation must fail"
+    );
+    assert!(
+        has_issue(&r, "carries no broker_id while federation is active"),
+        "issues: {:?}",
+        r.issues
+    );
+    let r = mk(Some(BID_A));
+    assert!(
+        r.ok,
+        "the same tombstone tagged with its broker_id fills that partition's seq; issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.federation_status, "sequence_verified");
+}
+
+#[test]
+fn grant_void_use_of_voided_grant_id_never_joins() {
+    // (4) a tombstone is never a grant: a resource-signed use referencing the voided grant_id finds no grant to join
+    // and is an anchored unmatched use — a violation, never a match against the tombstone.
+    let (rec, res, tsa) = void_keys();
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let th = content_hash_of(&t);
+    let ue = use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED);
+    let u = seal_use(&rec, &res, "use-1", std::slice::from_ref(&th), ACTION, &ue);
+    let uh = content_hash_of(&u);
+    let head = grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &th)]));
+    let cp = checkpoint_with_head(&rec, std::slice::from_ref(&uh), 2, head, Some(&tsa));
+    let r = verify_bundle_with(
+        &tier_b_bundle(&rec.verifying_key(), vec![t, u], vec![cp]),
+        &pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        ),
+    );
+    assert!(!r.ok, "a use of a voided grant_id must fail the bundle");
+    assert_eq!(r.uses_matched, 0, "a use must never join a tombstone");
+    assert_eq!(r.unmatched_violation, 1, "issues: {:?}", r.issues);
+    assert_eq!(r.grant_total, 0);
+}
+
+// Opt-in deterministic corpus emitter. The committed JSON is replayed byte-for-byte by native,
+// browser WASM and cgo tests; it is generated only when the v3 positive fixture is available.
+// `AVERIN_WRITE_VERDICT_CORPUS=spec/fixtures/verdict-generated.json cargo test ... --ignored`
+#[test]
+#[ignore]
+fn write_generated_verdict_corpus() {
+    let output = std::env::var("AVERIN_WRITE_VERDICT_CORPUS")
+        .expect("set AVERIN_WRITE_VERDICT_CORPUS to an output path");
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/claim-authorized-v3.json");
+    let v3 = CanonValue::parse(&std::fs::read_to_string(fixture_path).unwrap()).unwrap();
+    let v3_bundle = v3.get("bundle").unwrap().clone();
+    let v3_opts = v3.get("opts").unwrap().clone();
+    let v3_report = CanonValue::parse(&verify_bundle_with_json(
+        &v3_bundle.serialize(),
+        &v3_opts.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(
+        v3_report
+            .get("claims")
+            .unwrap()
+            .get("authorized")
+            .and_then(CanonValue::as_str),
+        Some("satisfied"),
+        "v3 base must make authorization reachable"
+    );
+    let capstone_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/claim-complete-v3.json");
+    let capstone_fixture =
+        CanonValue::parse(&std::fs::read_to_string(capstone_path).unwrap()).unwrap();
+    let capstone_bundle = capstone_fixture.get("bundle").unwrap().clone();
+    let capstone_opts = capstone_fixture.get("opts").unwrap().clone();
+    let capstone_report = CanonValue::parse(&verify_bundle_with_json(
+        &capstone_bundle.serialize(),
+        &capstone_opts.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(
+        capstone_report
+            .get("claims")
+            .unwrap()
+            .get("complete_brokered")
+            .and_then(CanonValue::as_str),
+        Some("satisfied"),
+        "v3 real-producer base must make the complete brokered claim reachable"
+    );
+    let native_capstone_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/claim-native-capstone-v3.json");
+    let native_capstone_fixture =
+        CanonValue::parse(&std::fs::read_to_string(native_capstone_path).unwrap()).unwrap();
+    let native_capstone_bundle = native_capstone_fixture.get("bundle").unwrap().clone();
+    let native_capstone_opts = native_capstone_fixture.get("opts").unwrap().clone();
+    let native_capstone_report = CanonValue::parse(&verify_bundle_with_json(
+        &native_capstone_bundle.serialize(),
+        &native_capstone_opts.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(
+        native_capstone_report
+            .get("claims")
+            .unwrap()
+            .get("complete_introspected")
+            .and_then(CanonValue::as_str),
+        Some("satisfied"),
+        "v3 real-producer native base must make the complete introspected claim reachable"
+    );
+    // Plan 009: a real Go producer export with a two-phase use, a prospective revocation after the
+    // intent and the outcome recorded after it, verified under the caller's db_serialized_v1
+    // policy. Current revocation blocks; the historical claim is satisfied.
+    let historical_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/claim-historical-v3.json");
+    let historical_fixture =
+        CanonValue::parse(&std::fs::read_to_string(historical_path).unwrap()).unwrap();
+    let historical_bundle = historical_fixture.get("bundle").unwrap().clone();
+    let historical_opts = historical_fixture.get("opts").unwrap().clone();
+    let historical_report = CanonValue::parse(&verify_bundle_with_json(
+        &historical_bundle.serialize(),
+        &historical_opts.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(
+        historical_report
+            .get("claims")
+            .unwrap()
+            .get("historical_authorized_as_of_snapshot")
+            .and_then(CanonValue::as_str),
+        Some("satisfied"),
+        "v3 real-producer historical base must make the historical claim reachable"
+    );
+    assert_eq!(
+        historical_report.get("ok"),
+        Some(&CanonValue::Bool(false)),
+        "current revocation still blocks ok"
+    );
+    let (rec, res, tsa, rev) = rev_keys();
+    let opts = |rec: &SigningKey, res: &SigningKey, tsa: &SigningKey| {
+        CanonValue::object(vec![
+            (
+                "signing_keys".into(),
+                CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+                    &rec.verifying_key(),
+                ))]),
+            ),
+            (
+                "broker_authority_keys".into(),
+                CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+                    &rec.verifying_key(),
+                ))]),
+            ),
+            (
+                "resource_authority_keys".into(),
+                CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+                    &res.verifying_key(),
+                ))]),
+            ),
+            (
+                "tsa_keys".into(),
+                CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+                    &tsa.verifying_key(),
+                ))]),
+            ),
+            (
+                "claim_policy".into(),
+                CanonValue::object(vec![("requested".into(), CanonValue::string("authorized"))])
+                    .unwrap(),
+            ),
+        ])
+        .unwrap()
+    };
+    let mut bases: Vec<(String, CanonValue, CanonValue)> = vec![
+        ("v3_authorized".into(), v3_bundle.clone(), v3_opts.clone()),
+        ("v3_capstone".into(), capstone_bundle, capstone_opts),
+        (
+            "v3_native_capstone".into(),
+            native_capstone_bundle,
+            native_capstone_opts,
+        ),
+        ("v3_historical".into(), historical_bundle, historical_opts),
+    ];
+    let (two_checkpoint, _) = claim_two_checkpoint_bundle(false, 3);
+    bases.push((
+        "two_checkpoint".into(),
+        two_checkpoint,
+        opts(&rec, &res, &tsa),
+    ));
+
+    // A fully recorded two-phase intent/outcome and its failed-PoP counterpart. These exercise
+    // closure and orphan accounting independently of the newer body-bound claim level.
+    let ih = intent_hash(&rec, &res);
+    let outcome = seal_outcome(&rec, &res, "outcome-1", &[ih], "intent-1", "intent-1", GID);
+    bases.push((
+        "two_phase".into(),
+        two_phase_bundle(&rec, &res, &tsa, Some(outcome)),
+        opts(&rec, &res, &tsa),
+    ));
+    bases.push((
+        "missing_outcome".into(),
+        two_phase_bundle(&rec, &res, &tsa, None),
+        opts(&rec, &res, &tsa),
+    ));
+
+    // Recreate the latest partial-anchor regression as an exact-byte cross-target family:
+    // cp0 closes a failed-PoP intent, cp1 closes its outcome, and every anchor subset is
+    // generated below. In particular cp0-only must retain the violation and orphan outcome.
+    let cnf = signing_key_from_seed(&[9u8; 32]);
+    let grant = seal_grant(
+        &rec,
+        &rec,
+        GID,
+        &grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP),
+    );
+    let gh = content_hash_of(&grant);
+    let ue = change_field(
+        &change_field(
+            &use_evidence(GID, ACTION, RESOURCE, GID, CNF, USED),
+            "cnf_pub",
+            CanonValue::string(b64enc(cnf.verifying_key().as_bytes())),
+        ),
+        "use_sig",
+        CanonValue::string(b64enc(&[7u8; 64])),
+    );
+    let intent = seal_intent(&rec, &res, "intent-1", &[gh], ACTION, &ue);
+    let ih = content_hash_of(&intent);
+    let outcome = seal_outcome(
+        &rec,
+        &res,
+        "outcome-1",
+        std::slice::from_ref(&ih),
+        "intent-1",
+        "intent-1",
+        GID,
+    );
+    let oh = content_hash_of(&outcome);
+    let cp0 = checkpoint_seqd(&rec, "cp0", 0, None, &[ih], 2, None, Some(&tsa));
+    let cp1 = checkpoint_seqd(
+        &rec,
+        "cp1",
+        1,
+        Some(&checkpoint_hash(&cp0)),
+        &[oh],
+        3,
+        None,
+        Some(&tsa),
+    );
+    bases.push((
+        "failed_pop_partial_anchor".into(),
+        tier_b_bundle(
+            &rec.verifying_key(),
+            vec![grant, intent, outcome],
+            vec![cp0, cp1],
+        ),
+        opts(&rec, &res, &tsa),
+    ));
+
+    // A valid signed void fills a grant-log gap. Dropping its anchor must not make a gap sound.
+    let tombstone = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let grant2 = seal_grant(&rec, &rec, "grant-2", &grant_evidence_d6("grant-2", 2));
+    let (th, gh) = (content_hash_of(&tombstone), content_hash_of(&grant2));
+    bases.push((
+        "void_gap".into(),
+        void_bundle(
+            &rec,
+            &tsa,
+            vec![tombstone, grant2],
+            &[(1, &th), (2, &gh)],
+            2,
+        ),
+        opts(&rec, &res, &tsa),
+    ));
+
+    // Native credential introspection and two federated broker partitions are distinct surfaces.
+    let (native_bundle, _) = native_attested_bundle(&rec, &res, &tsa, &rev);
+    bases.push(("native".into(), native_bundle, opts(&rec, &res, &tsa)));
+    let ga = seal_grant(
+        &rec,
+        &rec,
+        "rec-a1",
+        &grant_evidence_fed("grant-a1", BID_A, 1),
+    );
+    let gb = seal_grant(
+        &rec,
+        &rec,
+        "rec-b1",
+        &grant_evidence_fed("grant-b1", BID_B, 1),
+    );
+    let (ha, hb) = (content_hash_of(&ga), content_hash_of(&gb));
+    let heads = fed_heads(&[
+        (BID_A, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &ha)]))),
+        (BID_B, grant_head_cv(1, &ghr(&[]), &ghr(&[(1, &hb)]))),
+    ]);
+    let cp = checkpoint_with_fed_heads(
+        &rec,
+        "cp0",
+        0,
+        None,
+        &[ha.clone(), hb.clone()],
+        2,
+        heads,
+        Some(&tsa),
+    );
+    bases.push((
+        "federated".into(),
+        tier_b_bundle(&rec.verifying_key(), vec![ga, gb], vec![cp]),
+        opts(&rec, &res, &tsa),
+    ));
+
+    // Independently signed disclosed and Merkle revocation modes over the v3 action. Both
+    // statements are fixed adverse evidence when valid membership is present.
+    let list = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[]);
+    let leaves = rev_leaves(&["other-1", "other-2"]);
+    let root = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let both_bundle = change_field(&v3_bundle, "revocation_list", list);
+    let both_bundle = change_field(&both_bundle, "revocation_merkle_root", root);
+    let both_bundle = change_field(
+        &both_bundle,
+        "revocation_proofs",
+        CanonValue::object(vec![(GID.into(), nonmembership_proof(&leaves, GID))]).unwrap(),
+    );
+    let both_opts = change_field(
+        &v3_opts,
+        "revocation_keys",
+        CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+            &rev.verifying_key(),
+        ))]),
+    );
+    let both_opts = change_field(
+        &both_opts,
+        "claim_policy",
+        CanonValue::object(vec![
+            ("requested".into(), CanonValue::string("authorized")),
+            ("revocation".into(), CanonValue::string("both")),
+        ])
+        .unwrap(),
+    );
+    bases.push(("disclosed_merkle".into(), both_bundle, both_opts));
+    let adverse_list = change_field(
+        &v3_bundle,
+        "revocation_list",
+        revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[GID]),
+    );
+    let adverse_opts = change_field(
+        &v3_opts,
+        "revocation_keys",
+        CanonValue::Array(vec![CanonValue::string(encode_pubkey(
+            &rev.verifying_key(),
+        ))]),
+    );
+    bases.push((
+        "signed_adverse_list".into(),
+        adverse_list,
+        adverse_opts.clone(),
+    ));
+    let adverse_leaves = rev_leaves(&[GID]);
+    let adverse_root = merkle_root_obj(&rev, REV_FRESH_FROM, REV_FRESH_TO, &adverse_leaves);
+    let nonrevoking_list = revocation_list(&rev, REV_FRESH_FROM, REV_FRESH_TO, &[]);
+    let adverse_merkle = change_field(&v3_bundle, "revocation_list", nonrevoking_list);
+    let adverse_merkle = change_field(&adverse_merkle, "revocation_merkle_root", adverse_root);
+    let adverse_merkle = change_field(
+        &adverse_merkle,
+        "revocation_proofs",
+        CanonValue::object(vec![(GID.into(), membership_proof(&adverse_leaves, GID))]).unwrap(),
+    );
+    bases.push(("signed_adverse_merkle".into(), adverse_merkle, adverse_opts));
+
+    // Signed key status is fixed caller policy, not a removable bundle attachment.
+    let changed = CanonValue::object(vec![
+        (
+            "key".into(),
+            CanonValue::string(encode_pubkey(&rec.verifying_key())),
+        ),
+        ("status".into(), CanonValue::string("compromised")),
+        (
+            "status_changed_at".into(),
+            CanonValue::string("2026-06-15T10:05:00.000Z"),
+        ),
+    ])
+    .unwrap();
+    let rotated_opts = change_field(&v3_opts, "signing_keys", CanonValue::Array(vec![changed]));
+    bases.push(("compromised_signer".into(), v3_bundle.clone(), rotated_opts));
+
+    let mut corrupted_records = arr(&v3_bundle, "records");
+    corrupted_records[0] = change_field(
+        &corrupted_records[0],
+        "action",
+        CanonValue::string("tampered-grant"),
+    );
+    bases.push((
+        "mixed_valid_invalid".into(),
+        change_field(&v3_bundle, "records", CanonValue::Array(corrupted_records)),
+        v3_opts,
+    ));
+
+    let mut rows = Vec::new();
+    for (base_name, original, opts) in bases {
+        let checkpoints = arr(&original, "checkpoints");
+        assert!(checkpoints.len() <= 3, "small histories only");
+        let removable: Vec<&str> = [
+            "disclosures",
+            "revocation_proofs",
+            "revocation_list",
+            "revocation_merkle_root",
+            "deployment_attestation",
+            "coverage_manifest",
+        ]
+        .into_iter()
+        .filter(|name| original.get(name).is_some())
+        .collect();
+        // Every anchor subset and every combination of top-level attachments. Expand the
+        // proof-map entries separately, including combinations with the other attachments.
+        // Independently signed adverse artifacts are compared exactly, not subjected to the
+        // positive-support erasure theorem.
+        for mask in 0..(1usize << checkpoints.len()) {
+            let cps = checkpoints
+                .iter()
+                .enumerate()
+                .map(|(i, cp)| {
+                    if mask & (1 << i) == 0 {
+                        cp.without_keys(&["anchor"])
+                    } else {
+                        cp.clone()
+                    }
+                })
+                .collect();
+            let anchored = change_field(&original, "checkpoints", CanonValue::Array(cps));
+            let mut variants = Vec::new();
+            for removal_mask in 0..(1usize << removable.len()) {
+                let dropped: Vec<&str> = removable
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, name)| (removal_mask & (1 << i) != 0).then_some(*name))
+                    .collect();
+                let stripped = anchored.without_keys(&dropped);
+                let variant_name = if dropped.is_empty() {
+                    "base".to_string()
+                } else {
+                    format!("drop_{}", dropped.join("+"))
+                };
+                variants.push((variant_name.clone(), stripped.clone()));
+                if let Some(proofs) = stripped
+                    .get("revocation_proofs")
+                    .and_then(CanonValue::as_object)
+                {
+                    for proof_mask in 0..((1usize << proofs.len()) - 1) {
+                        let retained: Vec<(String, CanonValue)> = proofs
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| proof_mask & (1 << i) != 0)
+                            .map(|(_, pair)| pair.clone())
+                            .collect();
+                        variants.push((
+                            format!("{variant_name}/proof_subset_{proof_mask}"),
+                            change_field(
+                                &stripped,
+                                "revocation_proofs",
+                                CanonValue::object(retained).unwrap(),
+                            ),
+                        ));
+                    }
+                }
+            }
+            for (variant_name, bundle) in variants {
+                let bundle_json = bundle.serialize();
+                let opts_json = opts.serialize();
+                let report =
+                    CanonValue::parse(&verify_bundle_with_json(&bundle_json, &opts_json)).unwrap();
+                let name = format!("{base_name}/anchors_{mask}/{variant_name}");
+                if name == "failed_pop_partial_anchor/anchors_1/base" {
+                    assert_eq!(report.get("ok"), Some(&CanonValue::Bool(false)));
+                    assert!(
+                        report
+                            .get("unmatched_violation")
+                            .and_then(CanonValue::as_int)
+                            .unwrap()
+                            > 0,
+                        "the partial-anchor PoP failure must remain a violation"
+                    );
+                }
+                if name == "signed_adverse_merkle/anchors_1/base"
+                    || name == "signed_adverse_list/anchors_1/base"
+                {
+                    assert_eq!(
+                        report
+                            .get("claims")
+                            .unwrap()
+                            .get("authorized")
+                            .and_then(CanonValue::as_str),
+                        Some("refuted"),
+                        "authenticated adverse authority evidence must refute {name}"
+                    );
+                }
+                if name == "signed_adverse_merkle/anchors_1/drop_revocation_merkle_root" {
+                    assert_eq!(
+                        report
+                            .get("claims")
+                            .unwrap()
+                            .get("authorized")
+                            .and_then(CanonValue::as_str),
+                        Some("satisfied"),
+                        "removing an independent signed adverse root changes the evidence set"
+                    );
+                }
+                rows.push(
+                    CanonValue::object(vec![
+                        ("name".into(), CanonValue::string(name)),
+                        ("bundle_json".into(), CanonValue::string(bundle_json)),
+                        ("opts_json".into(), CanonValue::string(opts_json)),
+                        (
+                            "expected_bundle_digest".into(),
+                            report.get("bundle_digest").unwrap().clone(),
+                        ),
+                        (
+                            "expected_claims".into(),
+                            report.get("claims").unwrap().clone(),
+                        ),
+                        ("expected_ok".into(), report.get("ok").unwrap().clone()),
+                        (
+                            "expected_action_completeness".into(),
+                            report.get("action_completeness").unwrap().clone(),
+                        ),
+                        (
+                            "expected_unmatched_violation".into(),
+                            report.get("unmatched_violation").unwrap().clone(),
+                        ),
+                    ])
+                    .unwrap(),
+                );
+            }
+        }
+    }
+    std::fs::write(output, CanonValue::Array(rows).serialize()).unwrap();
+}
+
+#[test]
+fn generated_verdict_corpus_matches_native() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("spec/fixtures/verdict-generated.json");
+    let rows = CanonValue::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert!(
+        rows.len() >= 30,
+        "exercise every small-history anchor and artifact subset"
+    );
+    let mut saw_authorized = false;
+    let mut saw_capstone = false;
+    let mut saw_native_capstone = false;
+    let mut saw_partial_anchor_pop = false;
+    let mut saw_historical = false;
+    let mut saw_historical_stripped = false;
+    let mut families = BTreeSet::new();
+    for row in rows {
+        let name = row.get("name").and_then(CanonValue::as_str).unwrap();
+        families.insert(name.split('/').next().unwrap().to_string());
+        let bundle_json = row.get("bundle_json").and_then(CanonValue::as_str).unwrap();
+        let opts_json = row.get("opts_json").and_then(CanonValue::as_str).unwrap();
+        let report = CanonValue::parse(&verify_bundle_with_json(bundle_json, opts_json)).unwrap();
+        assert_eq!(
+            report.get("bundle_digest"),
+            row.get("expected_bundle_digest"),
+            "{name}.input_bytes"
+        );
+        assert_eq!(
+            report.get("claims"),
+            row.get("expected_claims"),
+            "{name}.claims"
+        );
+        assert_eq!(report.get("ok"), row.get("expected_ok"), "{name}.ok");
+        assert_eq!(
+            report.get("action_completeness"),
+            row.get("expected_action_completeness"),
+            "{name}.capstone"
+        );
+        assert_eq!(
+            report.get("unmatched_violation"),
+            row.get("expected_unmatched_violation"),
+            "{name}.unmatched_violation"
+        );
+        if name == "v3_authorized/anchors_1/base" {
+            saw_authorized = report
+                .get("claims")
+                .unwrap()
+                .get("authorized")
+                .and_then(CanonValue::as_str)
+                == Some("satisfied");
+        }
+        if name.starts_with("v3_capstone/") && name.ends_with("/base") {
+            saw_capstone |= report
+                .get("claims")
+                .unwrap()
+                .get("complete_brokered")
+                .and_then(CanonValue::as_str)
+                == Some("satisfied");
+        }
+        if name.starts_with("v3_native_capstone/") && name.ends_with("/base") {
+            saw_native_capstone |= report
+                .get("claims")
+                .unwrap()
+                .get("complete_introspected")
+                .and_then(CanonValue::as_str)
+                == Some("satisfied");
+        }
+        let historical = report
+            .get("claims")
+            .unwrap()
+            .get("historical_authorized_as_of_snapshot")
+            .and_then(CanonValue::as_str);
+        if name == "v3_historical/anchors_1/base" {
+            saw_historical = historical == Some("satisfied")
+                && report.get("ok") == Some(&CanonValue::Bool(false));
+        }
+        if name.starts_with("v3_historical/") && name.contains("drop_revocation_list") {
+            assert_ne!(historical, Some("satisfied"), "{name}: stripped snapshot");
+            saw_historical_stripped = true;
+        }
+        if name == "failed_pop_partial_anchor/anchors_1/base" {
+            saw_partial_anchor_pop = report.get("ok") == Some(&CanonValue::Bool(false))
+                && report
+                    .get("unmatched_violation")
+                    .and_then(CanonValue::as_int)
+                    .is_some_and(|n| n > 0);
+        }
+    }
+    assert!(
+        saw_authorized,
+        "corpus must have a genuinely authorized v3 baseline"
+    );
+    assert!(
+        saw_capstone,
+        "corpus must have a genuinely complete v3 producer baseline"
+    );
+    assert!(
+        saw_native_capstone,
+        "corpus must have a genuinely complete v3 native producer baseline"
+    );
+    assert!(
+        saw_partial_anchor_pop,
+        "corpus must preserve the cp0-only failed-PoP intent violation"
+    );
+    assert!(
+        saw_historical && saw_historical_stripped,
+        "corpus must have a real-producer historical positive (with current revocation still blocking) and its stripped-snapshot variants"
+    );
+    for family in [
+        "two_checkpoint",
+        "two_phase",
+        "missing_outcome",
+        "failed_pop_partial_anchor",
+        "void_gap",
+        "native",
+        "federated",
+        "disclosed_merkle",
+        "signed_adverse_list",
+        "signed_adverse_merkle",
+        "compromised_signer",
+        "mixed_valid_invalid",
+        "v3_historical",
+    ] {
+        assert!(
+            families.contains(family),
+            "missing generated family {family}"
+        );
+    }
+}
+
+#[test]
+fn grant_void_above_max_seq_is_flagged() {
+    // (5) a tombstone at a seq ABOVE the recorded max: grant-1 at seq 1, a tombstone at seq 3 (nothing at 2).
+    // (a) a head that honestly folds both (max_seq 3) is not a gapless prefix; (b) a head that stops at max_seq 1
+    // omits a committed log entry (tail omission / root mismatch). Both fail.
+    let (rec, res, tsa) = void_keys();
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let g = seal_grant(&rec, &rec, GID, &grant_evidence_d6(GID, 1));
+    let t = seal_void(
+        &rec,
+        Some(&rec),
+        "grant-3",
+        &void_evidence("grant-3", 3, None),
+    );
+    let (gh, th) = (content_hash_of(&g), content_hash_of(&t));
+    let r = verify_bundle_with(
+        &void_bundle(
+            &rec,
+            &tsa,
+            vec![g.clone(), t.clone()],
+            &[(1, &gh), (3, &th)],
+            3,
+        ),
+        &opts,
+    );
+    assert!(
+        !r.ok && has_issue(&r, "gapless"),
+        "(a) a tombstone past a hole must fail the gapless check; issues: {:?}",
+        r.issues
+    );
+    let r = verify_bundle_with(&void_bundle(&rec, &tsa, vec![g, t], &[(1, &gh)], 1), &opts);
+    assert!(
+        !r.ok,
+        "(b) a committed tombstone above the head's max_seq must fail; issues: {:?}",
+        r.issues
+    );
+    assert_ne!(r.broker_trust, "sequence_verified");
+}
+
+#[test]
+fn grant_void_with_grant_of_the_voided_grant_id_fails() {
+    // (6) a bundle carrying BOTH a tombstone for grant-1 AND a grant whose grant_evidence.grant_id is grant-1 (under a
+    // different record_id, dodging the duplicate-record_id check, and at a different seq, dodging the duplicate-seq
+    // check): the voided reservation was nonetheless issued — the tombstone must not fill its seq.
+    let (rec, res, tsa) = void_keys();
+    let opts = pinned_roles(
+        rec.verifying_key(),
+        res.verifying_key(),
+        tsa.verifying_key(),
+    );
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let g = seal_grant(&rec, &rec, "rec-issued", &grant_evidence_d6(GID, 2));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (2, &gh)], 2),
+        &opts,
+    );
+    assert!(
+        !r.ok,
+        "a tombstone alongside a grant of the voided grant_id must fail"
+    );
+    assert!(
+        has_issue(
+            &r,
+            "a grant with the voided grant_id is also present (a voided reservation was issued)"
+        ),
+        "issues: {:?}",
+        r.issues
+    );
+
+    // and a different grant claiming the tombstone's OWN seq is a duplicate-seq violation.
+    let t = seal_void(&rec, Some(&rec), GID, &void_evidence(GID, 1, None));
+    let g = seal_grant(&rec, &rec, "grant-dup", &grant_evidence_d6("grant-dup", 1));
+    let (th, gh) = (content_hash_of(&t), content_hash_of(&g));
+    let r = verify_bundle_with(
+        &void_bundle(&rec, &tsa, vec![t, g], &[(1, &th), (1, &gh)], 1),
+        &opts,
+    );
+    assert!(
+        !r.ok && has_issue(&r, "claimed by more than one committed record"),
+        "issues: {:?}",
+        r.issues
+    );
+}
+
+// ============================================================================================
+// Plan 009 — temporal revocation. Current revocation stays total-blocking under every policy;
+// `historical_authorized_as_of_snapshot` and the per-receipt `historical_ordering` are separate
+// typed results under the caller-selected `db_serialized_v1` policy. Every row of the decision
+// table below states integrity (`ok`), current validity, historical status and capstone
+// eligibility (`complete_brokered`), and the legacy counters the plan requires to stay unchanged.
+// See docs/decisions/0007-temporal-revocation.md.
+// ============================================================================================
+use averin_decision_core::verify::{
+    revocation_entry_v2, revocation_key_v2, revocation_merkle_root_v2, revocation_state_digest_v2,
+    DbSerializedPolicy, RevState, TemporalPolicy, AUTHORIZATION_ORDER_FORMAT,
+    MERKLE_ROOT_V2_DOMAIN, MERKLE_ROOT_V2_FORMAT, REVOCATION_LIST_V2_DOMAIN,
+    REVOCATION_LIST_V2_FORMAT,
+};
+
+const T_PROJECT: &str = "proj-001";
+const T_BOUNDARY: &str = "2026-06-15T10:10:30.000Z";
+const T_EVAL: &str = "2026-06-15T10:20:00.000Z";
+const T_WATERMARK: i64 = 20;
+const T_ORD: i64 = 7;
+
+struct TKeys {
+    rec: SigningKey,
+    res: SigningKey,
+    cnf: SigningKey,
+    tsa: SigningKey,
+    tax: SigningKey,
+    rev: SigningKey,
+}
+
+fn t_keys() -> TKeys {
+    TKeys {
+        rec: signing_key_from_seed(&[0u8; 32]),
+        res: signing_key_from_seed(&[3u8; 32]),
+        cnf: signing_key_from_seed(&[5u8; 32]),
+        tsa: test_tsa_key(&[200u8; 32]),
+        tax: signing_key_from_seed(&[11u8; 32]),
+        rev: signing_key_from_seed(&[77u8; 32]),
+    }
+}
+
+fn t_order_in(project: &str, ordinal: i64) -> CanonValue {
+    CanonValue::object(vec![
+        (
+            "format".into(),
+            CanonValue::string(AUTHORIZATION_ORDER_FORMAT),
+        ),
+        ("ordinal".into(), CanonValue::Int(ordinal)),
+        ("project_id".into(), CanonValue::string(project)),
+    ])
+    .unwrap()
+}
+
+fn t_order(ordinal: i64) -> CanonValue {
+    t_order_in(T_PROJECT, ordinal)
+}
+
+fn t_grant(k: &TKeys) -> CanonValue {
+    body_bind_role_record(&d2_grant(&k.rec, &k.cnf.verifying_key()), &k.rec, &k.rec)
+}
+
+/// A resource-signed D2 use (`use`) or intent (`use_intent`) of GID whose signed `use_evidence`
+/// carries `order` as `authorization_order`. `body_bound` upgrades it to a v3 authority.
+#[allow(clippy::too_many_arguments)]
+fn t_use_full(
+    k: &TKeys,
+    kind: &str,
+    record_id: &str,
+    prev: &[String],
+    used_at: i64,
+    order: Option<CanonValue>,
+    body_bound: bool,
+    pop_with: &SigningKey,
+) -> CanonValue {
+    let pc = sha256_prefixed(b"params-commit");
+    let nonce = format!("nonce-{used_at}");
+    let challenge = use_pop_challenge(
+        GID,
+        RESOURCE,
+        ACTION,
+        &pc,
+        &test_credential_binding(),
+        &nonce,
+    );
+    let use_sig = b64enc(&pop_with.sign(&challenge).to_bytes());
+    let mut fields = vec![
+        ("kind".to_string(), CanonValue::string(kind)),
+        ("grant_id".into(), CanonValue::string(GID)),
+        ("action".into(), CanonValue::string(ACTION)),
+        ("resource_id".into(), CanonValue::string(RESOURCE)),
+        ("jti".into(), CanonValue::string(GID)),
+        ("nonce".into(), CanonValue::string(&nonce)),
+        (
+            "pop_challenge_hash".into(),
+            CanonValue::string(format!("sha256:{}", hex_lower(&challenge))),
+        ),
+        (
+            "cnf_kid".into(),
+            CanonValue::string(vk_cnf_kid(&k.cnf.verifying_key())),
+        ),
+        (
+            "ledger_commitment".into(),
+            CanonValue::string(averin_decision_core::verify::ledger_commitment(
+                GID, &nonce, used_at,
+            )),
+        ),
+        ("used_at".into(), CanonValue::Int(used_at)),
+        (
+            "cnf_pub".into(),
+            CanonValue::string(b64enc(k.cnf.verifying_key().as_bytes())),
+        ),
+        ("use_sig".into(), CanonValue::string(use_sig)),
+    ];
+    if let Some(o) = order {
+        fields.push(("authorization_order".into(), o));
+    }
+    let ue = CanonValue::object(fields).unwrap();
+    let eh = sha256_prefixed(ue.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", T_PROJECT, record_id, &eh, &k.res);
+    let prev_json =
+        CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{record_id}","project_id":"{T_PROJECT}","agent_id":"averin-resource","agent_version":"averin-resource",
+        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":1,
+        "agent_ts":"2026-06-15T10:00:05.000Z","received_ts":"2026-06-15T10:00:05.000Z",
+        "event_type":"tool_call","action":"{ACTION}","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"tool_gateway","grant_id":"{GID}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "input_commit":{{"alg":"sha256","commitment":"{pc}","low_entropy":true}},
+        "extensions":{{"broker":{{"kind":"{kind}","grant_id":"{GID}","resource_id":"{RESOURCE}","use_evidence":{ue}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ue = ue.serialize(),
+    );
+    let sealed = seal(&CanonValue::parse(&body).unwrap(), &k.rec).unwrap();
+    if body_bound {
+        body_bind_role_record(&sealed, &k.res, &k.rec)
+    } else {
+        sealed
+    }
+}
+
+fn t_use(k: &TKeys, prev: &[String], order: Option<CanonValue>) -> CanonValue {
+    t_use_full(k, "use", "use-1", prev, USED, order, true, &k.cnf)
+}
+
+/// A v3 resource-signed `use_outcome` whose signed payload carries `order`.
+fn t_outcome(k: &TKeys, intent_hash: &str, order: Option<CanonValue>) -> CanonValue {
+    let mut fields = vec![
+        ("grant_id".to_string(), CanonValue::string(GID)),
+        ("intent_hash".into(), CanonValue::string(intent_hash)),
+        ("intent_ref".into(), CanonValue::string("intent-1")),
+        ("kind".into(), CanonValue::string("use_outcome")),
+        ("status".into(), CanonValue::string("ok")),
+    ];
+    if let Some(o) = order {
+        fields.push(("authorization_order".into(), o));
+    }
+    let outcome = CanonValue::object(fields).unwrap();
+    let eh = sha256_prefixed(outcome.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", T_PROJECT, "outcome-1", &eh, &k.res);
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"outcome-1","project_id":"{T_PROJECT}","agent_id":"averin-resource","agent_version":"averin-resource",
+        "session_id":"s","span_id":"sp-outcome-1","parent_span_id":null,"causal_prev_hashes":["{intent_hash}"],"display_seq":2,
+        "agent_ts":"2026-06-15T10:00:06.000Z","received_ts":"2026-06-15T10:00:06.000Z",
+        "event_type":"tool_call","action":"use_outcome","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"tool_gateway","grant_id":"{GID}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "extensions":{{"broker":{{"kind":"use_outcome","grant_id":"{GID}","intent_ref":"intent-1","use_outcome":{outcome}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        outcome = outcome.serialize(),
+    );
+    body_bind_role_record(
+        &seal(&CanonValue::parse(&body).unwrap(), &k.rec).unwrap(),
+        &k.res,
+        &k.rec,
+    )
+}
+
+fn t_entries(entries: &[(&str, RevState)]) -> CanonValue {
+    CanonValue::Array(
+        entries
+            .iter()
+            .map(|(g, st)| {
+                let mut f = vec![("grant_id".to_string(), CanonValue::string(*g))];
+                match st {
+                    RevState::Total => f.push(("mode".into(), CanonValue::string("total"))),
+                    RevState::Prospective(c) => {
+                        f.push(("mode".into(), CanonValue::string("prospective")));
+                        f.push(("cutoff_order".into(), CanonValue::Int(*c)));
+                    }
+                }
+                CanonValue::object(f).unwrap()
+            })
+            .collect(),
+    )
+}
+
+fn t_snapshot(boundary: &str, watermark: i64) -> CanonValue {
+    CanonValue::object(vec![
+        ("boundary_time".into(), CanonValue::string(boundary)),
+        (
+            "authorization_high_watermark".into(),
+            CanonValue::Int(watermark),
+        ),
+    ])
+    .unwrap()
+}
+
+/// An unsigned v2 list body; `t_sign` adds the v2-domain signature.
+fn t_list_body(
+    k: &TKeys,
+    project: &str,
+    boundary: &str,
+    watermark: i64,
+    revocations: CanonValue,
+) -> CanonValue {
+    CanonValue::object(vec![
+        (
+            "format".into(),
+            CanonValue::string(REVOCATION_LIST_V2_FORMAT),
+        ),
+        (
+            "issuer_kid".into(),
+            CanonValue::string(vk_cnf_kid(&k.rev.verifying_key())),
+        ),
+        ("issued_at".into(), CanonValue::string(REV_FRESH_FROM)),
+        ("not_after".into(), CanonValue::string(REV_FRESH_TO)),
+        ("project_id".into(), CanonValue::string(project)),
+        ("snapshot".into(), t_snapshot(boundary, watermark)),
+        ("revocations".into(), revocations),
+    ])
+    .unwrap()
+}
+
+fn t_sign(body: &CanonValue, domain: &str, k: &SigningKey) -> CanonValue {
+    let digest = sha256_prefixed(body.serialize().as_bytes());
+    change_field(
+        body,
+        "sig",
+        CanonValue::string(averin_decision_core::sign::sign(domain, &digest, k)),
+    )
+}
+
+fn t_list(k: &TKeys, entries: &[(&str, RevState)]) -> CanonValue {
+    t_sign(
+        &t_list_body(k, T_PROJECT, T_BOUNDARY, T_WATERMARK, t_entries(entries)),
+        REVOCATION_LIST_V2_DOMAIN,
+        &k.rev,
+    )
+}
+
+/// The sorted, sentinel-bracketed v2 Merkle entries: `(key, state_digest)` pairs and leaf values.
+fn t_merkle_pairs(entries: &[(&str, RevState)]) -> Vec<([u8; 32], [u8; 32])> {
+    let state = |st: &RevState| match st {
+        RevState::Total => revocation_state_digest_v2("total", 0),
+        RevState::Prospective(c) => revocation_state_digest_v2("prospective", *c),
+    };
+    let mut pairs: Vec<([u8; 32], [u8; 32])> = entries
+        .iter()
+        .map(|(g, st)| (revocation_key_v2(g), state(st)))
+        .collect();
+    pairs.sort();
+    let sentinel = revocation_state_digest_v2("sentinel", 0);
+    let mut out = vec![([0u8; 32], sentinel)];
+    out.extend(pairs);
+    out.push(([0xffu8; 32], sentinel));
+    out
+}
+
+fn t_merkle_root(k: &TKeys, entries: &[(&str, RevState)], boundary: &str) -> CanonValue {
+    let pairs = t_merkle_pairs(entries);
+    let leaves: Vec<[u8; 32]> = pairs
+        .iter()
+        .map(|(key, st)| revocation_entry_v2(key, st))
+        .collect();
+    let root = merkle_root_hex(&leaves);
+    assert_eq!(
+        root,
+        revocation_merkle_root_v2(entries),
+        "test tree == producer reference"
+    );
+    let body = CanonValue::object(vec![
+        ("format".into(), CanonValue::string(MERKLE_ROOT_V2_FORMAT)),
+        (
+            "issuer_kid".into(),
+            CanonValue::string(vk_cnf_kid(&k.rev.verifying_key())),
+        ),
+        ("issued_at".into(), CanonValue::string(REV_FRESH_FROM)),
+        ("not_after".into(), CanonValue::string(REV_FRESH_TO)),
+        ("project_id".into(), CanonValue::string(T_PROJECT)),
+        ("snapshot".into(), t_snapshot(boundary, T_WATERMARK)),
+        ("leaf_count".into(), CanonValue::Int(leaves.len() as i64)),
+        ("root".into(), CanonValue::string(root)),
+    ])
+    .unwrap();
+    t_sign(&body, MERKLE_ROOT_V2_DOMAIN, &k.rev)
+}
+
+/// A v2 Merkle proof for `gid`: membership (with the clear mode/cutoff) or non-membership.
+fn t_merkle_proof(entries: &[(&str, RevState)], gid: &str) -> CanonValue {
+    let pairs = t_merkle_pairs(entries);
+    let leaves: Vec<[u8; 32]> = pairs
+        .iter()
+        .map(|(key, st)| revocation_entry_v2(key, st))
+        .collect();
+    let q = revocation_key_v2(gid);
+    if let Some((i, (_, st))) = entries.iter().find(|(g, _)| *g == gid).map(|(_, st)| {
+        (
+            pairs.iter().position(|(key, _)| *key == q).unwrap(),
+            ((), st),
+        )
+    }) {
+        let mut f = vec![
+            ("type".to_string(), CanonValue::string("membership")),
+            ("index".into(), CanonValue::Int(i as i64)),
+            ("path".into(), path_cv(&merkle_path(&leaves, i))),
+        ];
+        match st {
+            RevState::Total => f.push(("mode".into(), CanonValue::string("total"))),
+            RevState::Prospective(c) => {
+                f.push(("mode".into(), CanonValue::string("prospective")));
+                f.push(("cutoff_order".into(), CanonValue::Int(*c)));
+            }
+        }
+        return CanonValue::object(f).unwrap();
+    }
+    let i = pairs
+        .windows(2)
+        .position(|w| w[0].0 < q && q < w[1].0)
+        .unwrap();
+    let side = |j: usize| {
+        CanonValue::object(vec![
+            ("key".into(), hx(&pairs[j].0)),
+            ("state_digest".into(), hx(&pairs[j].1)),
+        ])
+        .unwrap()
+    };
+    CanonValue::object(vec![
+        ("type".into(), CanonValue::string("nonmembership")),
+        ("lo".into(), side(i)),
+        ("hi".into(), side(i + 1)),
+        ("lo_index".into(), CanonValue::Int(i as i64)),
+        ("hi_index".into(), CanonValue::Int((i + 1) as i64)),
+        ("lo_path".into(), path_cv(&merkle_path(&leaves, i))),
+        ("hi_path".into(), path_cv(&merkle_path(&leaves, i + 1))),
+    ])
+    .unwrap()
+}
+
+fn t_bundle(k: &TKeys, records: Vec<CanonValue>, extra: Vec<(&str, CanonValue)>) -> CanonValue {
+    let frontier = vec![content_hash_of(records.last().unwrap())];
+    let cp = checkpoint_over(&k.rec, &frontier, records.len() as i64, Some(&k.tsa));
+    let mut bundle = tier_b_bundle(&k.rec.verifying_key(), records, vec![cp]);
+    for (name, value) in extra {
+        bundle = change_field(&bundle, name, value);
+    }
+    bundle
+}
+
+/// The standard grant + one-phase use bundle carrying the use's `order`.
+fn t_use_bundle(
+    k: &TKeys,
+    order: Option<CanonValue>,
+    extra: Vec<(&str, CanonValue)>,
+) -> CanonValue {
+    let grant = t_grant(k);
+    let use_rec = t_use(k, &[content_hash_of(&grant)], order);
+    t_bundle(k, vec![grant, use_rec], extra)
+}
+
+fn t_db_policy(max_age: i64, min_watermark: i64) -> TemporalPolicy {
+    TemporalPolicy::DbSerializedV1(DbSerializedPolicy::new(T_EVAL, max_age, min_watermark).unwrap())
+}
+
+fn t_opts(k: &TKeys, policy: TemporalPolicy) -> VerifyOptions {
+    let mut opts = pinned_roles_tax(
+        k.rec.verifying_key(),
+        k.res.verifying_key(),
+        k.tsa.verifying_key(),
+        taxonomy(&k.tax, &[ACTION], ISSUED - 100, EXP + 100),
+        k.tax.verifying_key(),
+    );
+    opts.trusted_keys = Some(vec![TrustedKey::from(k.rec.verifying_key())]);
+    opts.revocation_keys = vec![k.rev.verifying_key()];
+    opts.claim_policy = ClaimPolicy {
+        requested: RequestedClaim::HistoricalAuthorizedAsOfSnapshot,
+        ..Default::default()
+    };
+    opts.revocation_temporal = policy;
+    opts
+}
+
+/// One decision-table row's observed values.
+#[derive(Debug, PartialEq)]
+struct TRow {
+    ok: bool,
+    revoked_uses_blocked: usize,
+    current: &'static str,
+    ordering: &'static str,
+    authorized: ClaimDecision,
+    historical: ClaimDecision,
+    complete_brokered: ClaimDecision,
+}
+
+fn t_observe(r: &VerifyReport) -> TRow {
+    let current = r
+        .temporal
+        .grant_revocations
+        .iter()
+        .find(|(g, _)| g == GID)
+        .map_or("absent", |(_, st)| st.current_str());
+    let ordering = r
+        .temporal
+        .receipt_ordering
+        .iter()
+        .find(|o| o.kind != "introspection_transcript")
+        .map_or("none", |o| o.historical_ordering.as_str());
+    TRow {
+        ok: r.ok,
+        revoked_uses_blocked: r.revoked_uses_blocked,
+        current,
+        ordering,
+        authorized: r.claims().authorized,
+        historical: r.claims().historical_authorized_as_of_snapshot,
+        complete_brokered: r.claims().complete_brokered,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn t_expect(
+    ok: bool,
+    revoked_uses_blocked: usize,
+    current: &'static str,
+    ordering: &'static str,
+    authorized: ClaimDecision,
+    historical: ClaimDecision,
+    complete_brokered: ClaimDecision,
+) -> TRow {
+    TRow {
+        ok,
+        revoked_uses_blocked,
+        current,
+        ordering,
+        authorized,
+        historical,
+        complete_brokered,
+    }
+}
+
+#[test]
+fn temporal_revocation_decision_table() {
+    use ClaimDecision::{Insufficient as I, Refuted as R, Satisfied as S};
+    let k = t_keys();
+    let db = || t_db_policy(3600, 0);
+    let list = |e: &[(&str, RevState)]| vec![("revocation_list", t_list(&k, e))];
+    let ord = || Some(t_order(T_ORD));
+    let rows: Vec<(&str, CanonValue, VerifyOptions, TRow)> = vec![
+        (
+            "empty v2 snapshot: not revoked, proven before any revocation",
+            t_use_bundle(&k, ord(), list(&[])),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_revoked", "proven_before", S, S, I),
+        ),
+        (
+            "prospective cancellation after the receipt: current use still blocked, history proven",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Prospective(T_ORD + 1))])),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_prospective", "proven_before", R, S, R),
+        ),
+        (
+            "equality at the cutoff is at/after",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Prospective(T_ORD))])),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_prospective", "at_or_after", R, R, R),
+        ),
+        (
+            "cutoff before the receipt",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Prospective(3))])),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_prospective", "at_or_after", R, R, R),
+        ),
+        (
+            "compromise (total) revocation refutes history whatever the ordinal",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Total)])),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_total", "indeterminate", R, R, R),
+        ),
+        (
+            "legacy v1 total list under a temporal verifier stays total",
+            t_use_bundle(
+                &k,
+                ord(),
+                vec![(
+                    "revocation_list",
+                    revocation_list(&k.rev, REV_FRESH_FROM, REV_FRESH_TO, &[GID]),
+                )],
+            ),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_total", "indeterminate", R, R, R),
+        ),
+        (
+            "legacy v1 empty list authenticates no snapshot: history indeterminate",
+            t_use_bundle(
+                &k,
+                ord(),
+                vec![(
+                    "revocation_list",
+                    revocation_list(&k.rev, REV_FRESH_FROM, REV_FRESH_TO, &[]),
+                )],
+            ),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_revoked", "indeterminate", S, I, I),
+        ),
+        (
+            "strict policy never produces a historical positive",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Prospective(T_ORD + 1))])),
+            t_opts(&k, TemporalPolicy::Strict),
+            t_expect(false, 1, "revoked_prospective", "indeterminate", R, I, R),
+        ),
+        (
+            "stripped revocation list: missing, never proven",
+            t_use_bundle(&k, ord(), vec![]),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_evaluated", "indeterminate", I, I, I),
+        ),
+        (
+            "stripped ordinal: indeterminate",
+            t_use_bundle(&k, None, list(&[(GID, RevState::Prospective(T_ORD + 1))])),
+            t_opts(&k, db()),
+            t_expect(false, 1, "revoked_prospective", "indeterminate", R, I, R),
+        ),
+        (
+            "ordinal above the snapshot watermark: indeterminate",
+            t_use_bundle(&k, Some(t_order(T_WATERMARK + 1)), list(&[])),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_revoked", "indeterminate", S, I, I),
+        ),
+        (
+            "ordinal signed for another project: indeterminate",
+            t_use_bundle(&k, Some(t_order_in("proj-other", T_ORD)), list(&[])),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_revoked", "indeterminate", S, I, I),
+        ),
+        (
+            "malformed ordinal: indeterminate",
+            t_use_bundle(&k, Some(CanonValue::Int(T_ORD)), list(&[])),
+            t_opts(&k, db()),
+            t_expect(true, 0, "not_revoked", "indeterminate", S, I, I),
+        ),
+        (
+            "snapshot older than the caller's maximum age",
+            t_use_bundle(&k, ord(), list(&[(GID, RevState::Prospective(T_ORD + 1))])),
+            t_opts(&k, t_db_policy(60, 0)),
+            t_expect(false, 1, "revoked_prospective", "indeterminate", R, I, R),
+        ),
+        (
+            "snapshot watermark below the caller's minimum",
+            t_use_bundle(&k, ord(), list(&[])),
+            t_opts(&k, t_db_policy(3600, T_WATERMARK + 1)),
+            t_expect(true, 0, "not_revoked", "indeterminate", S, I, I),
+        ),
+    ];
+    for (name, bundle, opts, expected) in rows {
+        let r = verify_bundle_with(&bundle, &opts);
+        assert_eq!(t_observe(&r), expected, "{name}: issues {:?}", r.issues);
+        // Legacy compatibility: under every policy a revoked grant blocks `ok`, the counter and
+        // the capstone exactly as a strict verifier would.
+        let strict = verify_bundle_with(&bundle, &t_opts(&k, TemporalPolicy::Strict));
+        assert_eq!(strict.ok, r.ok, "{name}: ok is policy independent");
+        assert_eq!(
+            strict.revoked_uses_blocked, r.revoked_uses_blocked,
+            "{name}"
+        );
+        assert_eq!(strict.revocation_status, r.revocation_status, "{name}");
+        assert_eq!(strict.issues, r.issues, "{name}: identical legacy issues");
+        assert_eq!(strict.claims().authorized, r.claims().authorized, "{name}");
+        assert_eq!(
+            strict.claims().complete_brokered,
+            r.claims().complete_brokered,
+            "{name}"
+        );
+        assert_eq!(
+            strict.claims().historical_authorized_as_of_snapshot,
+            ClaimDecision::Insufficient,
+            "{name}: strict never decides history"
+        );
+    }
+}
+
+#[test]
+fn temporal_snapshot_identity_and_clock_rows() {
+    use ClaimDecision::{Insufficient as I, Satisfied as S};
+    let k = t_keys();
+    let signed = |project: &str, boundary: &str, wm: i64| {
+        t_sign(
+            &t_list_body(&k, project, boundary, wm, t_entries(&[])),
+            REVOCATION_LIST_V2_DOMAIN,
+            &k.rev,
+        )
+    };
+    let cases = [
+        (
+            "future boundary",
+            signed(T_PROJECT, "2026-06-15T10:30:00.000Z", T_WATERMARK),
+            "unverified",
+        ),
+        (
+            "other project",
+            signed("proj-other", T_BOUNDARY, T_WATERMARK),
+            "unverified",
+        ),
+        (
+            "impossible date",
+            signed(T_PROJECT, "2026-02-30T10:00:00.000Z", T_WATERMARK),
+            "unverified",
+        ),
+        (
+            "verified",
+            signed(T_PROJECT, T_BOUNDARY, T_WATERMARK),
+            "verified",
+        ),
+    ];
+    for (name, list, status) in cases {
+        let bundle = t_use_bundle(&k, Some(t_order(T_ORD)), vec![("revocation_list", list)]);
+        let r = verify_bundle_with(&bundle, &t_opts(&k, t_db_policy(3600, 0)));
+        assert_eq!(r.temporal.snapshot_status, status, "{name}");
+        let want = if status == "verified" { S } else { I };
+        assert_eq!(
+            r.claims().historical_authorized_as_of_snapshot,
+            want,
+            "{name}"
+        );
+        assert_eq!(
+            r.claims().authorized,
+            ClaimDecision::Satisfied,
+            "{name}: legacy unaffected"
+        );
+    }
+    // The report binds the historical judgment to the signed snapshot identity.
+    let bundle = t_use_bundle(
+        &k,
+        Some(t_order(T_ORD)),
+        vec![("revocation_list", t_list(&k, &[]))],
+    );
+    let json = report_to_json(&verify_bundle_with(
+        &bundle,
+        &t_opts(&k, t_db_policy(3600, 0)),
+    ));
+    for needle in [
+        r#""boundary_time":"2026-06-15T10:10:30.000Z""#,
+        r#""authorization_high_watermark":20"#,
+        r#""policy":"db_serialized_v1""#,
+        r#""historical_ordering":"proven_before""#,
+        r#""claims_version":"2""#,
+        "does not prove physical action time",
+    ] {
+        assert!(json.contains(needle), "report lacks {needle}: {json}");
+    }
+}
+
+#[test]
+fn temporal_malformed_mixed_and_downgraded_revocation_evidence_never_proves_history() {
+    use ClaimDecision::{Insufficient as I, Refuted as R};
+    let k = t_keys();
+    let ord = || Some(t_order(T_ORD));
+    let db = t_opts(&k, t_db_policy(3600, 0));
+    // A prospective entry whose cutoff exceeds the signed watermark, or which omits its cutoff, is
+    // malformed. The named grant stays revoked for current use; the unusable artifact is not
+    // authenticated evidence for history, so the claim is insufficient (never proven, never refuted).
+    for bad in [
+        CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"prospective","cutoff_order":99}]"#)
+            .unwrap(),
+        CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"prospective"}]"#).unwrap(),
+        CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"total","cutoff_order":3}]"#).unwrap(),
+        CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"sometimes"}]"#).unwrap(),
+    ] {
+        let list = t_sign(
+            &t_list_body(&k, T_PROJECT, T_BOUNDARY, T_WATERMARK, bad.clone()),
+            REVOCATION_LIST_V2_DOMAIN,
+            &k.rev,
+        );
+        let r = verify_bundle_with(
+            &t_use_bundle(&k, ord(), vec![("revocation_list", list)]),
+            &db,
+        );
+        let row = t_observe(&r);
+        assert!(!row.ok && row.revoked_uses_blocked == 1, "{bad:?}");
+        assert_eq!(row.current, "revoked_unverified", "{bad:?}");
+        assert_eq!(row.historical, I, "{bad:?}");
+        assert_eq!(r.temporal.snapshot_status, "unverified", "{bad:?}");
+    }
+    // Unknown format and a v2 list re-labelled as v1 both fail signature/format checks (issue, stale).
+    let good = t_list(&k, &[(GID, RevState::Prospective(T_ORD + 1))]);
+    let unknown = t_sign(
+        &change_field(
+            &t_list_body(&k, T_PROJECT, T_BOUNDARY, T_WATERMARK, t_entries(&[])),
+            "format",
+            CanonValue::string("averin.revocation.list.v3"),
+        ),
+        REVOCATION_LIST_V2_DOMAIN,
+        &k.rev,
+    );
+    for (name, list) in [
+        ("unknown format", unknown),
+        ("format stripped", good.without_keys(&["format"])),
+        ("cutoff stripped", {
+            let entries =
+                CanonValue::parse(r#"[{"grant_id":"grant-1","mode":"prospective"}]"#).unwrap();
+            change_field(&good, "revocations", entries)
+        }),
+        ("snapshot stripped", good.without_keys(&["snapshot"])),
+    ] {
+        let r = verify_bundle_with(
+            &t_use_bundle(&k, ord(), vec![("revocation_list", list)]),
+            &db,
+        );
+        assert!(!r.ok, "{name}");
+        assert_ne!(
+            r.claims().historical_authorized_as_of_snapshot,
+            ClaimDecision::Satisfied,
+            "{name}"
+        );
+        assert_ne!(t_observe(&r).ordering, "proven_before", "{name}");
+    }
+    // Mixed evidence combines conservatively: a v1 Merkle membership (total) overrides a v2
+    // prospective entry for the same grant.
+    let leaves = rev_leaves(&[GID]);
+    let v1_root = merkle_root_obj(&k.rev, REV_FRESH_FROM, REV_FRESH_TO, &leaves);
+    let bundle = t_use_bundle(
+        &k,
+        ord(),
+        vec![
+            ("revocation_list", good.clone()),
+            ("revocation_merkle_root", v1_root),
+            (
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), membership_proof(&leaves, GID))]).unwrap(),
+            ),
+        ],
+    );
+    let row = t_observe(&verify_bundle_with(&bundle, &db));
+    assert_eq!((row.current, row.historical), ("revoked_total", R));
+    // A v2 list and v2 Merkle root with different snapshots cannot authenticate one snapshot.
+    let entries = [(GID, RevState::Prospective(T_ORD + 1))];
+    let bundle = t_use_bundle(
+        &k,
+        ord(),
+        vec![
+            ("revocation_list", good),
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &entries, "2026-06-15T10:10:40.000Z"),
+            ),
+            (
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), t_merkle_proof(&entries, GID))]).unwrap(),
+            ),
+        ],
+    );
+    let r = verify_bundle_with(&bundle, &db);
+    assert_eq!(r.temporal.snapshot_status, "unverified");
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, I);
+    // A self-reported `used_at` far before the cutoff's wall-clock time cannot move an ordinal:
+    // the receipt at the cutoff ordinal stays at/after (row "equality at the cutoff").
+    let early = {
+        let grant = t_grant(&k);
+        let u = t_use_full(
+            &k,
+            "use",
+            "use-1",
+            &[content_hash_of(&grant)],
+            ISSUED,
+            Some(t_order(T_ORD)),
+            true,
+            &k.cnf,
+        );
+        t_bundle(
+            &k,
+            vec![grant, u],
+            vec![(
+                "revocation_list",
+                t_list(&k, &[(GID, RevState::Prospective(T_ORD))]),
+            )],
+        )
+    };
+    assert_eq!(
+        t_observe(&verify_bundle_with(&early, &db)).ordering,
+        "at_or_after"
+    );
+}
+
+#[test]
+fn temporal_merkle_v2_commits_mode_and_cutoff() {
+    use ClaimDecision::{Insufficient as I, Refuted as R, Satisfied as S};
+    let k = t_keys();
+    let db = t_opts(&k, t_db_policy(3600, 0));
+    let merkle = |entries: &[(&str, RevState)], proof: Option<CanonValue>| {
+        let mut extra = vec![(
+            "revocation_merkle_root",
+            t_merkle_root(&k, entries, T_BOUNDARY),
+        )];
+        if let Some(p) = proof {
+            extra.push((
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), p)]).unwrap(),
+            ));
+        }
+        t_use_bundle(&k, Some(t_order(T_ORD)), extra)
+    };
+    let others = [
+        ("other-1", RevState::Total),
+        ("other-2", RevState::Prospective(2)),
+    ];
+    let row = |b: &CanonValue| t_observe(&verify_bundle_with(b, &db));
+    // Non-membership: not revoked as of the snapshot, proven before.
+    let r = row(&merkle(&others, Some(t_merkle_proof(&others, GID))));
+    assert_eq!(
+        (r.ok, r.current, r.ordering, r.historical),
+        (true, "not_revoked", "proven_before", S)
+    );
+    // Prospective membership after the receipt: blocked for current use, proven historically.
+    let pro = [
+        ("other-1", RevState::Total),
+        (GID, RevState::Prospective(T_ORD + 1)),
+    ];
+    let r = row(&merkle(&pro, Some(t_merkle_proof(&pro, GID))));
+    assert_eq!(
+        (
+            r.ok,
+            r.revoked_uses_blocked,
+            r.current,
+            r.ordering,
+            r.historical
+        ),
+        (false, 1, "revoked_prospective", "proven_before", S)
+    );
+    // Stripped or altered cutoff: the committed state digest no longer re-derives (fail-closed).
+    let proof = t_merkle_proof(&pro, GID);
+    for tampered in [
+        proof.without_keys(&["cutoff_order"]),
+        change_field(&proof, "cutoff_order", CanonValue::Int(T_ORD + 5)),
+        change_field(
+            &proof.without_keys(&["cutoff_order"]),
+            "mode",
+            CanonValue::string("total"),
+        ),
+    ] {
+        let r = row(&merkle(&pro, Some(tampered)));
+        assert_eq!((r.ok, r.revoked_uses_blocked), (false, 1));
+        assert_ne!(r.ordering, "proven_before");
+        assert_ne!(r.historical, S);
+    }
+    // Missing proof: fail-closed for current use, indeterminate history.
+    let r = row(&merkle(&pro, None));
+    assert_eq!(
+        (r.current, r.ordering, r.historical),
+        ("unproven", "indeterminate", I)
+    );
+    // Total membership refutes.
+    let tot = [(GID, RevState::Total)];
+    let r = row(&merkle(&tot, Some(t_merkle_proof(&tot, GID))));
+    assert_eq!((r.current, r.historical), ("revoked_total", R));
+    // A v1 membership proof cannot authenticate against a v2 root.
+    let r = row(&merkle(
+        &pro,
+        Some(membership_proof(&rev_leaves(&[GID]), GID)),
+    ));
+    assert_ne!(r.historical, S);
+}
+
+#[test]
+fn temporal_blocked_use_runs_every_later_check_before_a_historical_positive() {
+    use ClaimDecision::{Refuted as R, Satisfied as S};
+    let k = t_keys();
+    let db = t_opts(&k, t_db_policy(3600, 0));
+    let pro = |c: i64| {
+        vec![(
+            "revocation_list",
+            t_list(&k, &[(GID, RevState::Prospective(c))]),
+        )]
+    };
+    // A forged PoP on a revoked (pre-cutoff) receipt: the legacy branch only reports the revocation,
+    // but the shadow validation rejects the PoP, so the history is refuted, not relabeled.
+    let grant = t_grant(&k);
+    let wrong = signing_key_from_seed(&[99u8; 32]);
+    let bad = t_use_full(
+        &k,
+        "use",
+        "use-1",
+        &[content_hash_of(&grant)],
+        USED,
+        Some(t_order(T_ORD)),
+        true,
+        &wrong,
+    );
+    let r = verify_bundle_with(&t_bundle(&k, vec![grant, bad], pro(T_ORD + 1)), &db);
+    assert_eq!(
+        (r.revoked_uses_blocked, r.unmatched_violation),
+        (1, 0),
+        "legacy branch unchanged"
+    );
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, R);
+    assert_eq!(t_observe(&r).ordering, "indeterminate");
+    // A second spend of a revoked single-use grant, both before the cutoff: legacy counts two
+    // blocked uses; the shadow ledger sees the double spend.
+    let grant = t_grant(&k);
+    let gh = content_hash_of(&grant);
+    let u1 = t_use_full(
+        &k,
+        "use",
+        "use-1",
+        std::slice::from_ref(&gh),
+        USED,
+        Some(t_order(3)),
+        true,
+        &k.cnf,
+    );
+    let u2 = t_use_full(
+        &k,
+        "use",
+        "use-2",
+        &[content_hash_of(&u1)],
+        USED + 1,
+        Some(t_order(4)),
+        true,
+        &k.cnf,
+    );
+    let r = verify_bundle_with(&t_bundle(&k, vec![grant, u1, u2], pro(T_ORD)), &db);
+    assert_eq!((r.revoked_uses_blocked, r.unmatched_violation), (2, 0));
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, R);
+    // Two-phase: the outcome inherits the intent's ordinal. A matching outcome proves the pair; a
+    // legacy verifier still reports the blocked intent and its orphan outcome exactly as before.
+    let two_phase = |outcome_order: Option<CanonValue>| {
+        let grant = t_grant(&k);
+        let intent = t_use_full(
+            &k,
+            "use_intent",
+            "intent-1",
+            &[content_hash_of(&grant)],
+            USED,
+            Some(t_order(T_ORD)),
+            true,
+            &k.cnf,
+        );
+        let outcome = t_outcome(&k, &content_hash_of(&intent), outcome_order);
+        t_bundle(&k, vec![grant, intent, outcome], pro(T_ORD + 1))
+    };
+    let r = verify_bundle_with(&two_phase(Some(t_order(T_ORD))), &db);
+    assert_eq!(
+        (
+            r.revoked_uses_blocked,
+            r.unmatched_violation,
+            r.intent_without_outcome
+        ),
+        (1, 1, 0)
+    );
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, S);
+    assert_eq!(t_observe(&r).ordering, "proven_before");
+    let r = verify_bundle_with(&two_phase(Some(t_order(T_ORD + 3))), &db);
+    assert_eq!(
+        r.claims().historical_authorized_as_of_snapshot,
+        R,
+        "outcome signs another ordinal"
+    );
+    let r = verify_bundle_with(&two_phase(None), &db);
+    assert_eq!(
+        t_observe(&r).ordering,
+        "indeterminate",
+        "outcome without an ordinal"
+    );
+    assert_ne!(r.claims().historical_authorized_as_of_snapshot, S);
+}
+
+#[test]
+fn temporal_role_key_rotation_rows() {
+    use ClaimDecision::{Insufficient as I, Satisfied as S};
+    let k = t_keys();
+    let bundle = t_use_bundle(
+        &k,
+        Some(t_order(T_ORD)),
+        vec![(
+            "revocation_list",
+            t_list(&k, &[(GID, RevState::Prospective(T_ORD + 1))]),
+        )],
+    );
+    let with_status = |key: &SigningKey, status: &str, at: &str| {
+        let mut o = t_opts(&k, t_db_policy(3600, 0));
+        o.role_key_status.insert(
+            key.verifying_key().to_bytes(),
+            RoleKeyStatus {
+                status: status.into(),
+                status_changed_at: Some(at.into()),
+            },
+        );
+        verify_bundle_with(&bundle, &o)
+            .claims()
+            .historical_authorized_as_of_snapshot
+    };
+    // A revocation key cleanly rotated after the snapshot still certifies it; a rotation before the
+    // snapshot, or any compromise, does not. The signed revocation still blocks current use, but an
+    // unusable artifact is not authenticated adverse evidence: the history is insufficient.
+    assert_eq!(
+        with_status(&k.rev, "rotated", "2026-06-15T10:15:00.000Z"),
+        S
+    );
+    assert_eq!(
+        with_status(&k.rev, "rotated", "2026-06-15T10:10:00.000Z"),
+        I
+    );
+    assert_eq!(
+        with_status(&k.rev, "compromised", "2026-06-15T10:15:00.000Z"),
+        I
+    );
+    // A resource key compromised before the receipt was anchored cannot sign an ordinal.
+    assert_ne!(
+        with_status(&k.res, "compromised", "2026-06-15T09:00:00.000Z"),
+        S
+    );
+    // A legacy (v2, not body-bound) receipt never carries a trusted ordinal.
+    let grant = t_grant(&k);
+    let legacy = t_use_full(
+        &k,
+        "use",
+        "use-1",
+        &[content_hash_of(&grant)],
+        USED,
+        Some(t_order(T_ORD)),
+        false,
+        &k.cnf,
+    );
+    let r = verify_bundle_with(
+        &t_bundle(
+            &k,
+            vec![grant, legacy],
+            vec![("revocation_list", t_list(&k, &[]))],
+        ),
+        &t_opts(&k, t_db_policy(3600, 0)),
+    );
+    assert_eq!(t_observe(&r).ordering, "indeterminate");
+    assert_ne!(r.claims().historical_authorized_as_of_snapshot, S);
+}
+
+#[test]
+fn temporal_policy_is_caller_supplied_and_fails_closed_through_the_json_path() {
+    let k = t_keys();
+    let bundle = t_use_bundle(
+        &k,
+        Some(t_order(T_ORD)),
+        vec![(
+            "revocation_list",
+            t_list(&k, &[(GID, RevState::Prospective(T_ORD + 1))]),
+        )],
+    );
+    let pubkey = |sk: &SigningKey| CanonValue::string(encode_pubkey(&sk.verifying_key()));
+    let o = t_opts(&k, TemporalPolicy::Strict);
+    let base = CanonValue::object(vec![
+        (
+            "signing_keys".into(),
+            CanonValue::Array(vec![pubkey(&k.rec)]),
+        ),
+        (
+            "broker_authority_keys".into(),
+            CanonValue::Array(vec![pubkey(&k.rec)]),
+        ),
+        (
+            "resource_authority_keys".into(),
+            CanonValue::Array(vec![pubkey(&k.res)]),
+        ),
+        ("tsa_keys".into(), CanonValue::Array(vec![pubkey(&k.tsa)])),
+        (
+            "taxonomy_keys".into(),
+            CanonValue::Array(vec![pubkey(&k.tax)]),
+        ),
+        ("taxonomy".into(), o.taxonomy.clone().unwrap()),
+        (
+            "taxonomy_digest".into(),
+            CanonValue::string(o.taxonomy_digest.clone().unwrap()),
+        ),
+        (
+            "taxonomy_version".into(),
+            CanonValue::Int(o.taxonomy_version.unwrap()),
+        ),
+        (
+            "revocation_keys".into(),
+            CanonValue::Array(vec![pubkey(&k.rev)]),
+        ),
+        (
+            "claim_policy".into(),
+            CanonValue::parse(r#"{"requested":"historical_authorized_as_of_snapshot"}"#).unwrap(),
+        ),
+    ])
+    .unwrap();
+    let run = |temporal: Option<&str>| {
+        let opts = match temporal {
+            Some(t) => change_field(&base, "revocation_temporal", CanonValue::parse(t).unwrap()),
+            None => base.clone(),
+        };
+        CanonValue::parse(&verify_bundle_with_json(
+            &bundle.serialize(),
+            &opts.serialize(),
+        ))
+        .unwrap()
+    };
+    let decision = |r: &CanonValue| {
+        r.get("claims")
+            .and_then(|c| c.get("requested_decision"))
+            .and_then(CanonValue::as_str)
+            .map(String::from)
+    };
+    let good = r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":3600}"#;
+    assert_eq!(decision(&run(Some(good))).as_deref(), Some("satisfied"));
+    assert_eq!(
+        decision(&run(None)).as_deref(),
+        Some("insufficient"),
+        "absent = strict"
+    );
+    assert_eq!(
+        decision(&run(Some(r#"{"policy":"strict"}"#))).as_deref(),
+        Some("insufficient")
+    );
+    // A bundle cannot select the policy: a bundle-level field is ignored.
+    let smuggled = change_field(
+        &bundle,
+        "revocation_temporal",
+        CanonValue::parse(good).unwrap(),
+    );
+    let r = CanonValue::parse(&verify_bundle_with_json(
+        &smuggled.serialize(),
+        &base.serialize(),
+    ))
+    .unwrap();
+    assert_eq!(decision(&r).as_deref(), Some("insufficient"));
+    for bad in [
+        r#"{"policy":"external_tsa_v1","evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":3600}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-02-30T10:20:00.000Z","max_snapshot_age_seconds":3600}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00Z","max_snapshot_age_seconds":3600}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00.000Z"}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":0}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":3600,"min_authorization_watermark":-1}"#,
+        r#"{"policy":"db_serialized_v1","evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":3600,"trust":"tsa"}"#,
+        r#"{"policy":"strict","evaluation_time":"2026-06-15T10:20:00.000Z"}"#,
+        r#"{"evaluation_time":"2026-06-15T10:20:00.000Z","max_snapshot_age_seconds":3600}"#,
+        r#""db_serialized_v1""#,
+    ] {
+        let r = run(Some(bad));
+        assert_eq!(r.get("ok"), Some(&CanonValue::Bool(false)), "{bad}");
+        assert!(
+            r.get("error").is_some() && r.get("claims").is_none(),
+            "{bad} must be a policy error"
+        );
+    }
+}
+
+#[test]
+fn temporal_native_introspection_orders_transcripts_against_the_grant_cutoff() {
+    use ClaimDecision::{Insufficient as I, Refuted as R, Satisfied as S};
+    let k = t_keys();
+    let grant = body_bind_role_record(
+        &seal_grant(
+            &k.rec,
+            &k.rec,
+            GID,
+            &native_grant_evidence(GID, NSCOPE, RESOURCE, LEASE, ISSUED, EXP),
+        ),
+        &k.rec,
+        &k.rec,
+    );
+    let transcript = |order: Option<CanonValue>| {
+        let mut ie = introspection_evidence(&k.res, GID, LEASE, NSCOPE, RESOURCE, USED, EXP);
+        if let Some(o) = order {
+            ie = change_field(&ie, "authorization_order", o);
+        }
+        let t = seal_introspection(&k.rec, &k.res, "intro-1", &[content_hash_of(&grant)], &ie);
+        body_bind_role_record(&t, &k.res, &k.rec)
+    };
+    let db = t_opts(&k, t_db_policy(3600, 0));
+    let run = |order: Option<CanonValue>, entries: &[(&str, RevState)]| {
+        let b = t_bundle(
+            &k,
+            vec![grant.clone(), transcript(order)],
+            vec![("revocation_list", t_list(&k, entries))],
+        );
+        verify_bundle_with(&b, &db)
+    };
+    let ordering = |r: &VerifyReport| r.temporal.receipt_ordering[0].historical_ordering.as_str();
+    let r = run(Some(t_order(T_ORD)), &[]);
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(
+        (r.introspection_status.as_str(), ordering(&r)),
+        ("attested", "proven_before")
+    );
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, S);
+    // Prospective cancellation after the transcript: current revocation removes coverage (legacy),
+    // while the transcript is proven before the cutoff.
+    let r = run(
+        Some(t_order(T_ORD)),
+        &[(GID, RevState::Prospective(T_ORD + 1))],
+    );
+    assert_eq!(
+        (
+            r.ok,
+            r.revoked_uses_blocked,
+            r.introspection_status.as_str()
+        ),
+        (false, 1, "unattested")
+    );
+    assert_eq!(ordering(&r), "proven_before");
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, S);
+    assert_eq!(
+        r.claims().complete_introspected,
+        R,
+        "capstone stays blocked"
+    );
+    let r = run(Some(t_order(T_ORD)), &[(GID, RevState::Prospective(T_ORD))]);
+    assert_eq!(
+        (
+            ordering(&r),
+            r.claims().historical_authorized_as_of_snapshot
+        ),
+        ("at_or_after", R)
+    );
+    let r = run(Some(t_order(T_ORD)), &[(GID, RevState::Total)]);
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, R);
+    let r = run(None, &[(GID, RevState::Prospective(T_ORD + 1))]);
+    assert_eq!(
+        (
+            ordering(&r),
+            r.claims().historical_authorized_as_of_snapshot
+        ),
+        ("indeterminate", I)
+    );
+}
+
+#[test]
+fn temporal_mixed_surfaces_require_every_receipt_proven() {
+    use ClaimDecision::Satisfied as S;
+    let k = t_keys();
+    let grant = t_grant(&k);
+    let use_rec = t_use(&k, &[content_hash_of(&grant)], Some(t_order(T_ORD)));
+    let native = body_bind_role_record(
+        &seal_grant(
+            &k.rec,
+            &k.rec,
+            "native-1",
+            &native_grant_evidence("native-1", NSCOPE, RESOURCE, LEASE, ISSUED, EXP),
+        ),
+        &k.rec,
+        &k.rec,
+    );
+    let transcript = |order: Option<CanonValue>| {
+        let mut ie = introspection_evidence(&k.res, "native-1", LEASE, NSCOPE, RESOURCE, USED, EXP);
+        if let Some(o) = order {
+            ie = change_field(&ie, "authorization_order", o);
+        }
+        body_bind_role_record(
+            &seal_introspection(&k.rec, &k.res, "intro-1", &[content_hash_of(&native)], &ie),
+            &k.res,
+            &k.rec,
+        )
+    };
+    let run = |t: CanonValue| {
+        let frontier = [content_hash_of(&use_rec), content_hash_of(&t)];
+        let cp = checkpoint_over(&k.rec, &frontier, 4, Some(&k.tsa));
+        let b = tier_b_bundle(
+            &k.rec.verifying_key(),
+            vec![grant.clone(), use_rec.clone(), native.clone(), t],
+            vec![cp],
+        );
+        let b = change_field(&b, "revocation_list", t_list(&k, &[]));
+        verify_bundle_with(&b, &t_opts(&k, t_db_policy(3600, 0)))
+    };
+    // The brokered use alone is proven before, but the native transcript carries no ordinal: the
+    // claim speaks for every receipt, so it is not satisfied.
+    let r = run(transcript(None));
+    assert_eq!(r.temporal.receipt_ordering.len(), 2, "{:?}", r.issues);
+    assert_ne!(r.claims().historical_authorized_as_of_snapshot, S);
+    // With both receipts ordered and proven, the mixed bundle can satisfy it.
+    let r = run(transcript(Some(t_order(T_ORD + 1))));
+    assert!(r
+        .temporal
+        .receipt_ordering
+        .iter()
+        .all(|o| o.historical_ordering
+            == averin_decision_core::verify::HistoricalOrdering::ProvenBefore));
+    assert_eq!(
+        r.claims().historical_authorized_as_of_snapshot,
+        S,
+        "{:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn temporal_review_followups_modes_cutoffs_and_malformed_v2() {
+    use ClaimDecision::{Insufficient as I, Refuted as R, Satisfied as S};
+    use RevocationRequirement::{Both, Disclosed, Merkle, Pinned};
+    let k = t_keys();
+    let ord = || Some(t_order(T_ORD));
+    let with_mode = |mode: RevocationRequirement| {
+        let mut o = t_opts(&k, t_db_policy(3600, 0));
+        o.claim_policy.revocation = mode;
+        o
+    };
+    let none: [(&str, RevState); 0] = [];
+    let list_bundle = t_use_bundle(&k, ord(), vec![("revocation_list", t_list(&k, &[]))]);
+    let merkle_bundle = t_use_bundle(
+        &k,
+        ord(),
+        vec![
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &none, T_BOUNDARY),
+            ),
+            (
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), t_merkle_proof(&none, GID))]).unwrap(),
+            ),
+        ],
+    );
+    let both_bundle = change_field(&merkle_bundle, "revocation_list", t_list(&k, &[]));
+    let hist = |b: &CanonValue, m| {
+        verify_bundle_with(b, &with_mode(m))
+            .claims()
+            .historical_authorized_as_of_snapshot
+    };
+    // M1: the caller's revocation mode selects which v2 artifacts the historical claim needs.
+    for (name, bundle, mode, want) in [
+        ("pinned/list", &list_bundle, Pinned, S),
+        ("pinned/merkle", &merkle_bundle, Pinned, S),
+        ("disclosed/list", &list_bundle, Disclosed, S),
+        ("disclosed/merkle only", &merkle_bundle, Disclosed, I),
+        ("merkle/list only", &list_bundle, Merkle, I),
+        ("merkle/merkle", &merkle_bundle, Merkle, S),
+        ("both/list only", &list_bundle, Both, I),
+        ("both/merkle only", &merkle_bundle, Both, I),
+        ("both/both", &both_bundle, Both, S),
+    ] {
+        assert_eq!(hist(bundle, mode), want, "{name}");
+    }
+    // Merkle mode needs a valid v2 proof for every receipt's grant.
+    let stripped = merkle_bundle.without_keys(&["revocation_proofs"]);
+    assert_eq!(hist(&stripped, Merkle), I);
+    // L1: an authenticated v2 list cutoff at/before the ordinal refutes even when the grant's
+    // Merkle path is missing.
+    let at_cutoff = t_use_bundle(
+        &k,
+        ord(),
+        vec![
+            (
+                "revocation_list",
+                t_list(&k, &[(GID, RevState::Prospective(T_ORD))]),
+            ),
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &[(GID, RevState::Prospective(T_ORD))], T_BOUNDARY),
+            ),
+        ],
+    );
+    let r = verify_bundle_with(&at_cutoff, &t_opts(&k, t_db_policy(3600, 0)));
+    assert_eq!(t_observe(&r).current, "unproven");
+    assert_eq!(t_observe(&r).ordering, "at_or_after");
+    assert_eq!(r.claims().historical_authorized_as_of_snapshot, R);
+    // L5: a signed v2 list that also carries legacy `revoked_grant_ids` is unusable, but the
+    // grants it names under the signature still block current use.
+    let odd = t_sign(
+        &change_field(
+            &t_list_body(&k, T_PROJECT, T_BOUNDARY, T_WATERMARK, t_entries(&[])),
+            "revoked_grant_ids",
+            CanonValue::Array(vec![CanonValue::string(GID)]),
+        ),
+        REVOCATION_LIST_V2_DOMAIN,
+        &k.rev,
+    );
+    let r = verify_bundle_with(
+        &t_use_bundle(&k, ord(), vec![("revocation_list", odd)]),
+        &t_opts(&k, t_db_policy(3600, 0)),
+    );
+    let row = t_observe(&r);
+    assert_eq!(
+        (row.ok, row.revoked_uses_blocked, row.current),
+        (false, 1, "revoked_unverified")
+    );
+    assert_eq!(row.historical, I);
+    assert_eq!(r.temporal.snapshot_status, "unverified");
+}
+
+// V-L1: an unusable signed v2 artifact naming a grant must not hide the authenticated prospective
+// cutoff of a usable v2 source for the same grant. The receipt at or after that cutoff stays
+// `at_or_after` (the historical claim is refuted, not merely insufficient); one below the cutoff is
+// never proven, because the unusable artifact is not authenticated history either way.
+#[test]
+fn temporal_unusable_artifact_does_not_hide_usable_cutoff() {
+    use ClaimDecision::{Insufficient as I, Refuted as R};
+    let k = t_keys();
+    let unusable_list = t_sign(
+        &change_field(
+            &t_list_body(&k, T_PROJECT, T_BOUNDARY, T_WATERMARK, t_entries(&[])),
+            "revoked_grant_ids",
+            CanonValue::Array(vec![CanonValue::string(GID)]),
+        ),
+        REVOCATION_LIST_V2_DOMAIN,
+        &k.rev,
+    );
+    let bundle_with_cutoff = |cutoff: i64| {
+        let entries = [(GID, RevState::Prospective(cutoff))];
+        t_use_bundle(
+            &k,
+            Some(t_order(T_ORD)),
+            vec![
+                ("revocation_list", unusable_list.clone()),
+                (
+                    "revocation_merkle_root",
+                    t_merkle_root(&k, &entries, T_BOUNDARY),
+                ),
+                (
+                    "revocation_proofs",
+                    CanonValue::object(vec![(GID.into(), t_merkle_proof(&entries, GID))]).unwrap(),
+                ),
+            ],
+        )
+    };
+    let db = t_opts(&k, t_db_policy(3600, 0));
+    for (cutoff, ordering, historical) in [
+        (T_ORD, "at_or_after", R),
+        (T_ORD - 1, "at_or_after", R),
+        (T_ORD + 1, "indeterminate", I),
+    ] {
+        let r = verify_bundle_with(&bundle_with_cutoff(cutoff), &db);
+        let row = t_observe(&r);
+        assert_eq!(
+            (row.ok, row.revoked_uses_blocked, row.current),
+            (false, 1, "revoked_unverified"),
+            "cutoff {cutoff}"
+        );
+        assert_eq!(row.ordering, ordering, "cutoff {cutoff}");
+        assert_eq!(row.historical, historical, "cutoff {cutoff}");
+        assert_eq!(
+            r.claims().historical_authorized_as_of_snapshot,
+            historical,
+            "cutoff {cutoff}"
+        );
+        // The report shows the cutoff that decided the ordering, next to revoked_unverified.
+        let json = CanonValue::parse(&averin_decision_core::verify::report_to_json(&r)).unwrap();
+        let grants = json
+            .get("revocation_temporal")
+            .and_then(|t| t.get("grant_revocations"))
+            .and_then(|g| g.as_array())
+            .expect("revocation_temporal.grant_revocations");
+        let row = grants
+            .iter()
+            .find(|g| g.get("grant_id").and_then(|v| v.as_str()) == Some(GID))
+            .expect("grant row");
+        assert_eq!(
+            row.get("cutoff_order").and_then(|v| v.as_int()),
+            Some(cutoff),
+            "cutoff {cutoff}"
+        );
+    }
+}
+
+// L7: a signed v2 Merkle leaf whose prospective cutoff exceeds the snapshot watermark is malformed
+// (no honest producer allocates a cutoff above the watermark it signs). Its membership proof must
+// not authenticate, so the receipt is never proven before it.
+#[test]
+fn temporal_merkle_v2_rejects_cutoff_beyond_watermark() {
+    let k = t_keys();
+    let beyond = [(GID, RevState::Prospective(T_WATERMARK + 5))];
+    let bundle = t_use_bundle(
+        &k,
+        Some(t_order(T_ORD)),
+        vec![
+            (
+                "revocation_merkle_root",
+                t_merkle_root(&k, &beyond, T_BOUNDARY),
+            ),
+            (
+                "revocation_proofs",
+                CanonValue::object(vec![(GID.into(), t_merkle_proof(&beyond, GID))]).unwrap(),
+            ),
+        ],
+    );
+    let r = verify_bundle_with(&bundle, &t_opts(&k, t_db_policy(3600, 0)));
+    let row = t_observe(&r);
+    assert_eq!(
+        (row.ok, row.revoked_uses_blocked),
+        (false, 1),
+        "blocked fail-closed"
+    );
+    assert_ne!(row.ordering, "proven_before");
+    assert_ne!(row.historical, ClaimDecision::Satisfied);
 }

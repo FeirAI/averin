@@ -1,0 +1,14 @@
+Mutant: parse_literal compares the keyword without first checking that enough input remains, so a
+truncated literal such as `tru` indexes past the end of the input.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -727,7 +727,7 @@
+ ) -> Result<(CanonValue, usize), ParseError> {
+     // `s[i..].starts_with(kw)`, for `i <= s.len()`.
+     let mut k = 0;
+-    if s.len() - i >= kw.len() {
++    if true {
+         while k < kw.len() && s[i + k] == kw[k] {
+             k += 1;
+         }

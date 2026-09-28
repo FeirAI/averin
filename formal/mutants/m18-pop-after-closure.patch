@@ -1,0 +1,18 @@
+Mutant: partial closure bypasses failed PoP. Named detector: tier_b_partial_anchor_strip_keeps_failed_pop_intent_a_violation.
+
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 48b57cf..f5b8c95 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -969,7 +969,10 @@ fn check_use(
+     // consumes its outcome, so the outcome is still reported as an orphan.
+     let pop_reverified = match pop_reverify(u.rec, &g.credential_binding) {
+         Ok(r) => r,
+-        Err(msg) => return violation(format!("offline PoP re-verification: {msg}")),
++        Err(msg) => {
++            if pending_consume.is_some_and(|i| !ctx.outcomes[i].closed) { return UseCheck::IntentWithoutOutcome; } // BUG: partial closure skips PoP
++            return violation(format!("offline PoP re-verification: {msg}"));
++        }
+     };
+     if u.bkind == "use_intent" {
+         match pending_consume {

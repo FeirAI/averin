@@ -1,0 +1,15 @@
+Mutant: m44-temporal-watermark-ignored. Named detector: temporal_revocation_decision_table.
+
+diff --git a/core/src/verify/temporal.rs b/core/src/verify/temporal.rs
+index c03e15d..a4e6f44 100644
+--- a/core/src/verify/temporal.rs
++++ b/core/src/verify/temporal.rs
+@@ -694,7 +694,7 @@ pub(super) fn classify(
+     let Some(snap) = snapshot else {
+         return HistoricalOrdering::Indeterminate;
+     };
+-    if *project_id != snap.project_id || *ordinal > snap.watermark {
++    if *project_id != snap.project_id { // BUG: an ordinal beyond the snapshot counts
+         return HistoricalOrdering::Indeterminate;
+     }
+     match grant {

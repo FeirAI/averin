@@ -2,6 +2,7 @@
 //! are the cross-implementation contract; this asserts the Rust core reproduces them
 //! byte-for-byte, and that RCP rejection rules hold.
 
+use averin_decision_core::authority::{preimage_v3, subject_digest};
 use averin_decision_core::canon::CanonValue;
 use averin_decision_core::hashx::hex_lower;
 use averin_decision_core::record::compute_content_hash;
@@ -71,6 +72,41 @@ fn record_content_hash_golden() {
     let rec = CanonValue::parse(&input).expect("record parses");
     assert_eq!(hex_lower(rec.serialize().as_bytes()), expected_canon_hex);
     assert_eq!(compute_content_hash(&rec).unwrap(), expected_ch);
+}
+
+#[test]
+fn authority_subject_v3_matches_govder_vector() {
+    let vector = read_manifest("authority-subject-v3.json");
+    let record = vector.get("record").unwrap();
+    let digest = vector.get("subject_digest").unwrap().as_str().unwrap();
+    assert_eq!(subject_digest(record).unwrap(), digest);
+    let actual = preimage_v3(
+        "human_signed",
+        "p1",
+        "r1",
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        digest,
+    )
+    .unwrap();
+    assert_eq!(
+        hex_lower(&actual),
+        vector.get("preimage_hex").unwrap().as_str().unwrap()
+    );
+}
+
+#[test]
+fn sdk_prepared_v3_record_matches_govder_subject_bytes() {
+    let vector = read_manifest("authority-sdk-v3.json");
+    let record = vector.get("prepared_record").unwrap();
+    assert_eq!(
+        subject_digest(record).unwrap(),
+        vector.get("subject_digest").unwrap().as_str().unwrap()
+    );
+    let draft = vector.get("draft_record").unwrap();
+    assert!(
+        subject_digest(draft).is_err(),
+        "draft is not signable before preparation"
+    );
 }
 
 // ---- RCP rejection rules (negative vectors) ----
@@ -193,5 +229,87 @@ fn nfc_equivalent_inputs_have_equal_content_hash() {
     assert_eq!(
         compute_content_hash(&a).unwrap(),
         compute_content_hash(&b).unwrap()
+    );
+}
+
+#[test]
+fn unicode17_combining_mark_has_pinned_nfc_result() {
+    // U+1ADD acquired combining class 220 after Unicode 15. Go 1.25's x/text
+    // tables treat it as class 0, so Go-only NFC checks would accept this
+    // spelling even though the shipped Rust RCP core composes a + acute.
+    let raw = "a\u{1add}\u{301}";
+    let canonical = "\u{e1}\u{1add}";
+    assert_ne!(raw, canonical);
+    assert_eq!(
+        CanonValue::parse(r#""a\u1add\u0301""#).unwrap().as_str(),
+        Some(canonical)
+    );
+    assert_eq!(CanonValue::string(raw).as_str(), Some(canonical));
+}
+
+// Plan 009: the v2 revocation tree preimages, root and proofs are the shared Go/Rust contract
+// (server/internal/broker TestRevocationV2GoldenVector writes and checks the same file).
+#[test]
+fn revocation_v2_golden_vector() {
+    use averin_decision_core::verify::{
+        revocation_entry_v2, revocation_entry_v2_preimage, revocation_key_v2,
+        revocation_key_v2_preimage, revocation_merkle_root_v2, revocation_state_digest_v2,
+        revocation_state_v2_preimage, RevState,
+    };
+    let v = read_manifest("revocation-v2.json");
+    let s = |c: &CanonValue, k: &str| c.get(k).unwrap().as_str().unwrap().to_string();
+    let keys = v.get("key_cases").unwrap().as_array().unwrap();
+    assert_eq!(keys.len(), 3);
+    for c in keys {
+        let g = s(c, "grant_id");
+        assert_eq!(
+            hex_lower(&revocation_key_v2_preimage(&g)),
+            s(c, "preimage_hex"),
+            "{g}"
+        );
+        assert_eq!(hex_lower(&revocation_key_v2(&g)), s(c, "key_hex"), "{g}");
+    }
+    for c in v.get("state_cases").unwrap().as_array().unwrap() {
+        let (mode, cutoff) = (s(c, "mode"), c.get("cutoff").unwrap().as_int().unwrap());
+        assert_eq!(
+            hex_lower(&revocation_state_v2_preimage(&mode, cutoff)),
+            s(c, "preimage_hex")
+        );
+        assert_eq!(
+            hex_lower(&revocation_state_digest_v2(&mode, cutoff)),
+            s(c, "digest_hex")
+        );
+    }
+    let e = v.get("entry_case").unwrap();
+    let arr32 = |h: String| -> [u8; 32] { decode_hex(&h).try_into().unwrap() };
+    let (key, state) = (arr32(s(e, "key_hex")), arr32(s(e, "state_hex")));
+    assert_eq!(
+        hex_lower(&revocation_entry_v2_preimage(&key, &state)),
+        s(e, "preimage_hex")
+    );
+    assert_eq!(
+        hex_lower(&revocation_entry_v2(&key, &state)),
+        s(e, "entry_hex")
+    );
+    let tree = v.get("tree").unwrap();
+    let entries: Vec<(String, RevState)> = tree
+        .get("entries")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| {
+            let st = match s(x, "mode").as_str() {
+                "total" => RevState::Total,
+                _ => RevState::Prospective(x.get("cutoff_order").unwrap().as_int().unwrap()),
+            };
+            (s(x, "grant_id"), st)
+        })
+        .collect();
+    let refs: Vec<(&str, RevState)> = entries.iter().map(|(g, st)| (g.as_str(), *st)).collect();
+    assert_eq!(revocation_merkle_root_v2(&refs), s(tree, "root"));
+    assert_eq!(
+        tree.get("leaf_count").unwrap().as_int().unwrap() as usize,
+        entries.len() + 2
     );
 }

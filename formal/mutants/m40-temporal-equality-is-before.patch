@@ -1,0 +1,13 @@
+Mutant: m40-temporal-equality-is-before. Named detector: temporal_revocation_decision_table.
+
+--- a/core/src/verify/temporal.rs
++++ b/core/src/verify/temporal.rs
+@@ -711,7 +711,7 @@
+     }
+     // An authenticated cutoff decides the adverse case even when another source is unproven.
+     if let Some(c) = grant.adverse_cutoff() {
+-        if *ordinal >= c {
++        if *ordinal > c { // BUG: a receipt at the cutoff ordinal reads as before it
+             return HistoricalOrdering::AtOrAfter;
+         }
+     }

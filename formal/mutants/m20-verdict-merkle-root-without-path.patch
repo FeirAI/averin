@@ -1,0 +1,18 @@
+Mutant: m20-verdict-merkle-root-without-path. Named detector: verdict_differential missing_path.
+
+--- a/core/src/verify/verdict.rs
++++ b/core/src/verify/verdict.rs
+@@ -378,13 +378,11 @@
+         RevocationRequirement::Merkle => {
+             f.revocation_issuer_pinned
+                 && f.merkle_revocation_fresh
+-                && f.merkle_nonmembership_complete
+         }
+         RevocationRequirement::Both => {
+             f.revocation_issuer_pinned
+                 && f.disclosed_revocation_fresh
+                 && f.merkle_revocation_fresh
+-                && f.merkle_nonmembership_complete
+         }
+     }
+ }

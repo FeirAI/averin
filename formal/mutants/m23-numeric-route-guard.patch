@@ -1,0 +1,13 @@
+Mutant: Force a numeric top-level input onto the general parser branch; the fail-closed integer guard must fire.
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -597,7 +597,7 @@
+     // A number at byte zero cannot start with insignificant whitespace. Route that common top-level
+     // case straight to the same number parser `parse_value` selects; every other top-level value
+     // takes the general route (which the Kani integer proofs replace with a fail-closed guard).
+-    if at(s, 0, b'-') || digit_at(s, 0) {
++    if false && (at(s, 0, b'-') || digit_at(s, 0)) {
+         // The value is built only after the trailing check, so a rejected number never holds (or
+         // drops) a `CanonValue`.
+         match parse_number(s, 0) {

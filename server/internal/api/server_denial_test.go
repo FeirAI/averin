@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feirai/averin/server/internal/api"
 	"github.com/feirai/averin/server/internal/broker"
@@ -21,6 +22,25 @@ func denyLogServer(t *testing.T) http.Handler {
 		t.Fatalf("core: %v", err)
 	}
 	return api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithDeniedGrantLog().Routes()
+}
+
+func signedDenialBody(ak ed25519.PrivateKey, idem, session, action, resource, scope string, ttl int, pub string) string {
+	now := time.Now().UTC()
+	if pub == "" {
+		pub = base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
+	}
+	req := broker.Request{PoPVersion: 2, ProjectID: "p1", IdempotencyKey: idem, SessionID: session,
+		IssuedAt: now.Unix(), RequestExpiresAt: now.Add(broker.MaxRequestAge).Unix(),
+		AgentID: "agent-1", Action: action, Resource: resource, Scope: scope, AgentPubKey: pub,
+		TTL: time.Duration(ttl) * time.Second}
+	sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
+	body, _ := json.Marshal(map[string]any{
+		"pop_version": 2, "issued_at": req.IssuedAt, "request_expires_at": req.RequestExpiresAt,
+		"idempotency_key": idem, "project_id": "p1", "session_id": session,
+		"agent_id": "agent-1", "action": action, "resource": resource,
+		"scope": scope, "agent_pubkey": pub, "agent_sig": sig, "ttl_seconds": ttl,
+	})
+	return string(body)
 }
 
 // TestForbiddenScopeSealsDenialRecord (B11): with the denied-grant log enabled, a forbidden single_operation
@@ -63,10 +83,9 @@ func TestForbiddenScopeSealsDenialRecord(t *testing.T) {
 	}
 }
 
-// TestPoPFailureSealsDenialButMalformedDoesNot (B11): a well-formed request that fails proof-of-possession is
-// a policy denial (sealed, reason pop_failed, only the CLAIMED pubkey — never a verified cnf); a malformed
-// request (missing required field) is NOT a policy denial and seals nothing.
-func TestPoPFailureSealsDenialButMalformedDoesNot(t *testing.T) {
+// A failed PoP is unauthenticated claimed context and must not become signed
+// authorization or denial evidence. Malformed requests obey the same rule.
+func TestPoPFailureAndMalformedRequestSealNothing(t *testing.T) {
 	h := denyLogServer(t)
 	ak, thief := grantAgentKey(), ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	// a thief signs the PoP challenge with the WRONG key -> agent_sig does not prove possession.
@@ -74,11 +93,8 @@ func TestPoPFailureSealsDenialButMalformedDoesNot(t *testing.T) {
 		t.Fatalf("bad PoP should be 400, got %d", code)
 	}
 	_, exp := do(t, h, "GET", "/v2/export?project=p1", "")
-	if !strings.Contains(exp, `"denial_reason":"pop_failed"`) {
-		t.Fatalf("a PoP-failure denial should be sealed: %s", exp)
-	}
-	if !strings.Contains(exp, "claimed_agent_pubkey") || strings.Contains(exp, `"cnf_kid"`) {
-		t.Fatalf("a PoP-failure denial must record only the CLAIMED pubkey, never a verified cnf_kid: %s", exp)
+	if strings.Contains(exp, `"credential_grant_denied"`) || strings.Contains(exp, `"credential_grant"`) {
+		t.Fatalf("failed PoP persisted a grant or denial: %s", exp)
 	}
 
 	// a MALFORMED request (missing action) carries no policy signal -> nothing is sealed.
@@ -100,15 +116,8 @@ func TestPoPFailureSealsDenialButMalformedDoesNot(t *testing.T) {
 func TestTTLExceededDenialRecordsProvenCnf(t *testing.T) {
 	h := denyLogServer(t)
 	ak := grantAgentKey()
-	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
-	req := broker.Request{AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "read:orders", AgentPubKey: pub}
-	sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
-	body, _ := json.Marshal(map[string]any{
-		"idempotency_key": "idem-ttl", "project_id": "p1", "session_id": "s1",
-		"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",
-		"scope": "read:orders", "agent_pubkey": pub, "agent_sig": sig, "ttl_seconds": 99999, // over MaxTTL (1h)
-	})
-	if code, r := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusBadRequest {
+	body := signedDenialBody(ak, "idem-ttl", "s1", "db.query:orders-ro", "orders-db", "read:orders", 99999, "")
+	if code, r := do(t, h, "POST", "/v2/grants", body); code != http.StatusBadRequest {
 		t.Fatalf("over-cap ttl should be 400, got %d: %s", code, r)
 	}
 	_, exp := do(t, h, "GET", "/v2/export?project=p1", "")
@@ -117,6 +126,38 @@ func TestTTLExceededDenialRecordsProvenCnf(t *testing.T) {
 	}
 	if !strings.Contains(exp, `"cnf_kid"`) || strings.Contains(exp, "claimed_agent_pubkey") {
 		t.Fatalf("a ttl_exceeded denial must record the PROVEN cnf_kid (PoP passes before the TTL check now): %s", exp)
+	}
+}
+
+func TestAuthenticatedPolicyChangeOnCommittedIdemIsConflictWithoutDenial(t *testing.T) {
+	h := denyLogServer(t)
+	ak := grantAgentKey()
+	if code, response := do(t, h, "POST", "/v2/grants", grantBody("idem-occupied", "read:orders", ak, ak)); code != http.StatusCreated {
+		t.Fatalf("seed grant: %d %s", code, response)
+	}
+	for _, body := range []string{
+		signedDenialBody(ak, "idem-occupied", "s1", "db.query:orders-ro", "orders-db", "iam:reset", 60, ""),
+		signedDenialBody(ak, "idem-occupied", "s1", "db.query:orders-ro", "orders-db", "read:orders", 99999, ""),
+	} {
+		if code, response := do(t, h, "POST", "/v2/grants", body); code != http.StatusConflict {
+			t.Fatalf("policy-changed retry should conflict without evidence: %d %s", code, response)
+		}
+	}
+	_, exported := do(t, h, "GET", "/v2/export?project=p1", "")
+	if strings.Contains(exported, `"credential_grant_denied"`) {
+		t.Fatalf("conflicting retry persisted denial evidence: %s", exported)
+	}
+	var bundle struct {
+		Records []json.RawMessage `json:"records"`
+	}
+	if err := json.Unmarshal([]byte(exported), &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Records) != 1 {
+		t.Fatalf("conflicting retries persisted extra records: %d", len(bundle.Records))
+	}
+	if code, response := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
+		t.Fatalf("conflicting retries left a broker sequence gap: %d %s", code, response)
 	}
 }
 
@@ -175,14 +216,8 @@ func TestDenialIdResistsDelimiterInjection(t *testing.T) {
 	ak := grantAgentKey()
 	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
 	post := func(action, resource string) {
-		req := broker.Request{AgentID: "agent-1", Action: action, Resource: resource, Scope: "iam:reset", AgentPubKey: pub}
-		sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
-		body, _ := json.Marshal(map[string]any{
-			"idempotency_key": "idem-x", "project_id": "p1", "session_id": "s1",
-			"agent_id": "agent-1", "action": action, "resource": resource,
-			"scope": "iam:reset", "agent_pubkey": pub, "agent_sig": sig, "ttl_seconds": 60,
-		})
-		if code, r := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusBadRequest {
+		body := signedDenialBody(ak, "idem-x", "s1", action, resource, "iam:reset", 60, pub)
+		if code, r := do(t, h, "POST", "/v2/grants", body); code != http.StatusBadRequest {
 			t.Fatalf("forbidden scope should be 400, got %d: %s", code, r)
 		}
 	}
@@ -197,20 +232,12 @@ func TestDenialIdResistsDelimiterInjection(t *testing.T) {
 	}
 }
 
-// customGrant posts a grant with explicit session/scope/ttl and a valid PoP (the PoP challenge covers
-// agent_id/action/resource/scope/agent_pubkey, NOT session_id or ttl, so those vary freely under one sig).
+// customGrant posts a grant with explicit session/scope/ttl and a valid v2 PoP.
 // It asserts the request is rejected (400) — i.e. it produces a denial.
 func customGrant(t *testing.T, h http.Handler, ak ed25519.PrivateKey, idem, session, scope string, ttl int) {
 	t.Helper()
-	pub := base64.RawURLEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
-	req := broker.Request{AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: scope, AgentPubKey: pub}
-	sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
-	body, _ := json.Marshal(map[string]any{
-		"idempotency_key": idem, "project_id": "p1", "session_id": session,
-		"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",
-		"scope": scope, "agent_pubkey": pub, "agent_sig": sig, "ttl_seconds": ttl,
-	})
-	if code, r := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusBadRequest {
+	body := signedDenialBody(ak, idem, session, "db.query:orders-ro", "orders-db", scope, ttl, "")
+	if code, r := do(t, h, "POST", "/v2/grants", body); code != http.StatusBadRequest {
 		t.Fatalf("denied grant should be 400, got %d: %s", code, r)
 	}
 }
@@ -378,11 +405,8 @@ func TestDenialIdIsServerSecret(t *testing.T) {
 	}
 }
 
-// TestPoPFailureDistinctSignaturesLogDistinctDenials (adversarial review C2f): agent_sig stays in the denial identity, so
-// two pop_failure attempts for the SAME operation but with DISTINCT failing signatures are logged as two
-// distinct denials (each a distinct failed proof) — a PoP brute-force leaves one record per attempt, not one
-// collapsed record. (forbidden_scope retries still dedup: their valid sig is deterministic.)
-func TestPoPFailureDistinctSignaturesLogDistinctDenials(t *testing.T) {
+// Failed proofs cannot manufacture signed denials, even when signatures differ.
+func TestPoPFailureDistinctSignaturesSealNothing(t *testing.T) {
 	h := denyLogServer(t)
 	ak := grantAgentKey()
 	thief1 := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)) // all-zero seed
@@ -400,16 +424,14 @@ func TestPoPFailureDistinctSignaturesLogDistinctDenials(t *testing.T) {
 		t.Fatalf("checkpoint: %d %s", code, r)
 	}
 	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
-	if !strings.Contains(report, `"denied_grants":2`) {
-		t.Fatalf("two pop_failure attempts with distinct signatures must log 2 distinct denials: %s", report)
+	if !strings.Contains(report, `"denied_grants":0`) || !strings.Contains(report, `"grant_total":0`) {
+		t.Fatalf("failed PoP must not create signed grant/denial evidence: %s", report)
 	}
 }
 
-// TestDenialIdCanonicalizesBase64 (adversarial review pass-8 medium): the broker's base64 decode is non-strict, so the
-// SAME agent_pubkey bytes under canonical vs non-canonical spellings must collapse to ONE denial — else a
-// caller inflates denied_grants without a distinct key. Two forbidden-scope probes, same key bytes, differing
-// only in the pubkey's base64 padding bit, must log a single denial.
-func TestDenialIdCanonicalizesBase64(t *testing.T) {
+// V2 requires canonical public-key encoding; non-canonical spellings are
+// rejected before denial evidence and cannot inflate denied_grants.
+func TestDenialRejectsNonCanonicalBase64(t *testing.T) {
 	h := denyLogServer(t)
 	ak := grantAgentKey()
 	pub := ak.Public().(ed25519.PublicKey)
@@ -421,14 +443,8 @@ func TestDenialIdCanonicalizesBase64(t *testing.T) {
 		t.Fatal("failed to construct a non-canonical encoding")
 	}
 	post := func(pubB64 string) {
-		req := broker.Request{AgentID: "agent-1", Action: "db.query:orders-ro", Resource: "orders-db", Scope: "iam:reset", AgentPubKey: pubB64}
-		sig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(ak, req.Challenge()))
-		body, _ := json.Marshal(map[string]any{
-			"idempotency_key": "idem-x", "project_id": "p1", "session_id": "s1",
-			"agent_id": "agent-1", "action": "db.query:orders-ro", "resource": "orders-db",
-			"scope": "iam:reset", "agent_pubkey": pubB64, "agent_sig": sig, "ttl_seconds": 60,
-		})
-		if code, r := do(t, h, "POST", "/v2/grants", string(body)); code != http.StatusBadRequest {
+		body := signedDenialBody(ak, "idem-x", "s1", "db.query:orders-ro", "orders-db", "iam:reset", 60, pubB64)
+		if code, r := do(t, h, "POST", "/v2/grants", body); code != http.StatusBadRequest {
 			t.Fatalf("forbidden scope should be 400, got %d: %s", code, r)
 		}
 	}
@@ -439,7 +455,7 @@ func TestDenialIdCanonicalizesBase64(t *testing.T) {
 	}
 	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
 	if !strings.Contains(report, `"denied_grants":1`) {
-		t.Fatalf("the same pubkey under canonical + non-canonical base64 must collapse to ONE denial: %s", report)
+		t.Fatalf("only the canonical verified proof may produce a denial: %s", report)
 	}
 }
 

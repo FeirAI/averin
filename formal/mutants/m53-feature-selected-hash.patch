@@ -1,0 +1,19 @@
+Mutant: a feature selection swaps in an unproved compute_content_hash (the extraction uses default features).
+
+--- a/core/src/record.rs
++++ b/core/src/record.rs
+@@ -236,8 +236,14 @@
+ /// The `domain` / `canon_version` are read from the body and re-bound into the preimage; callers
+ /// verifying a record should additionally confirm they equal the expected constants (see
+ /// [`verify_content_hash`]).
++#[cfg(not(feature = "rfc3161"))]
+ pub fn compute_content_hash(record: &CanonValue) -> Result<String, RecordError> {
+     record_hash(record).map_err(PreimageFault::into_record_error)
++}
++
++#[cfg(feature = "rfc3161")]
++pub fn compute_content_hash(record: &CanonValue) -> Result<String, RecordError> {
++    Ok(sha256_prefixed(record.serialize().as_bytes()))
+ }
+ 
+ // `body`, not `record`: a parameter named like the module would shadow it in the extracted model.

@@ -1,0 +1,14 @@
+Mutant: decimal_i64 drops its overflow guard, so a long digit string overflows the u64 magnitude
+(mag * 10 + d).
+
+--- a/core/src/canon.rs
++++ b/core/src/canon.rs
+@@ -788,7 +788,7 @@
+     let mut k = from;
+     while k < to {
+         let d = (s[k] - b'0') as u64;
+-        if mag > (limit - d) / 10 {
++        if mag > limit {
+             in_range = false;
+         } else {
+             mag = mag * 10 + d;

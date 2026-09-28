@@ -11,7 +11,9 @@
 //! report sets `keys_externally_pinned = false` and proves only *internal consistency under the
 //! bundle's own key claims*. A `revoked`/`compromised` status (worst of record-asserted and bundle-
 //! asserted) downgrades a record to `Untrusted` **unless** an anchored checkpoint with anchor-time
-//! `≤ status_changed_at` transitively commits it (RCP §10.2, threat #9).
+//! `≤ status_changed_at` transitively commits it (RCP §10.2, threat #9). The same rule applies to a
+//! CHECKPOINT's signing key: a checkpoint signed by a revoked/compromised key is trusted only when a
+//! verified anchor at or before the status change commits it (itself, or a later checkpoint chaining to it).
 
 use crate::anchor::verify_anchor_keyed;
 use crate::authority::{verify_authority_with_key, AuthorityTrust};
@@ -22,6 +24,24 @@ use crate::record::{validate_record_shape, verify_content_hash, verify_sealed};
 use crate::sign::decode_pubkey;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod temporal;
+mod verdict;
+pub use temporal::{
+    canonical_ts_millis, revocation_entry_v2, revocation_entry_v2_preimage, revocation_key_v2,
+    revocation_key_v2_preimage, revocation_leaves_v2, revocation_merkle_root_v2,
+    revocation_state_digest_v2, revocation_state_v2_preimage, DbSerializedPolicy, GrantRevocation,
+    HistoricalOrdering, RevState, Snapshot, TemporalPolicy, AUTHORIZATION_ORDER_FORMAT,
+    DB_SERIALIZED_V1_TRUST_BASIS, MERKLE_ROOT_V2_DOMAIN, MERKLE_ROOT_V2_FORMAT,
+    REVOCATION_LIST_V2_DOMAIN, REVOCATION_LIST_V2_FORMAT,
+};
+use temporal::{GrantRevocationAcc, OrderEv, ProofV2};
+use verdict::{
+    AnchoredCheckpoint, CapstoneFacts, HistoricalFacts, PinnedRecordSeal, ValidatedFacts,
+};
+pub use verdict::{
+    ClaimDecision, ClaimPolicy, ClaimResults, RequestedClaim, RevocationRequirement,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustLevel {
@@ -43,9 +63,9 @@ pub struct RecordTrust {
     pub key_status: String,
     pub observed_via: String,
     pub trust: TrustLevel,
-    /// Authority gradient (threat #4): none|declared|verified|failed. `verified` = an evidence_sig
-    /// checked out under a pinned authority key (for a broker/resource record, the ROLE-specific key
-    /// set — ADR 0003 R2), not just the agent's claim.
+    /// Authority gradient: `verified` binds the complete semantic body under v3;
+    /// `legacy_unbound` is a valid historical v2 signature over evidence identity
+    /// only and cannot satisfy an authorized-action claim.
     pub authority: AuthorityTrust,
     /// Broker/resource role (ADR 0003 R2): broker|resource|none. Surfaces which role's key set the
     /// authority was checked under, so an auditor sees broker-signed vs resource-signed provenance.
@@ -101,20 +121,33 @@ impl ActionCompleteness {
     /// native+PoP bundle reaches NEITHER label (it is `claimed_over_manifest`), keeping each label's MF1
     /// meaning crisp.
     pub fn of(r: &VerifyReport) -> Self {
+        Self::of_with_integrity(r, r.ok, r.broker_trust == "sequence_verified")
+    }
+
+    // The new claims use structural integrity plus typed committed contradictions. Legacy `ok`
+    // also includes diagnostics for malformed optional attachments; deleting such an attachment
+    // may change `ok` but cannot create proof of a stronger claim.
+    fn of_with_integrity(
+        r: &VerifyReport,
+        integrity: bool,
+        broker_sequence_verified: bool,
+    ) -> Self {
         // a JSON `"coverage_manifest": null` deserializes to `Some(Null)`, which is NOT a real manifest
         // (D7 already treats null as the empty digest) — the capstone must be asserted OVER a real scope
         // claim, so require a NON-NULL manifest.
         let has_manifest = r.coverage_manifest.as_ref().is_some_and(|m| !m.is_null());
         // `base` is the conjunction SHARED by both capstone labels — every reduction EXCEPT the surface-shape
         // conjuncts (`uses_matched`, native-vs-brokered) that distinguish the two labels.
-        let base = r.ok
+        let base = integrity
+            && r.keys_externally_pinned
+            && r.body_bound_role_evidence
             && has_manifest
             && !r.one_phase_use_present
             && r.intent_without_outcome == 0
             && r.taxonomy_status == "validated"
             && r.uses_action_unverified == 0
             && r.uses_pop_reverified == r.uses_matched
-            && r.broker_trust == "sequence_verified"
+            && broker_sequence_verified
             && r.attestation_status == "attested_claims"
             && r.unmatched_violation == 0
             && r.unmatched_pending == 0
@@ -131,6 +164,8 @@ impl ActionCompleteness {
             // M5 (ADR 0005): no fresh revocation list flagged a revoked use, and the list is not stale.
             && r.revocation_status != "stale"
             && r.revocation_status != "revoked_present"
+            // M5: revocation keys were pinned but the bundle carries no revocation artifact at all (stripped).
+            && r.revocation_status != "missing"
             && r.revoked_uses_blocked == 0
             // M5 Merkle-non-disclosure: a present-but-stale signed root is too old to certify currency.
             && r.revocation_merkle_status != "stale"
@@ -164,8 +199,13 @@ impl ActionCompleteness {
 #[derive(Debug, Clone)]
 pub struct VerifyReport {
     pub ok: bool,
+    /// Versioned, typed claim decisions under the caller's fixed verification policy.
+    claims: ClaimResults,
     pub project_id: Option<String>,
     pub keys_externally_pinned: bool,
+    /// Every committed broker/resource/void contributor used by the strong claim has a
+    /// body-bound v3 authority signature. Historical v2 evidence remains a legacy join only.
+    pub body_bound_role_evidence: bool,
     pub records_total: usize,
     pub records_proven: usize,
     pub record_trust: Vec<RecordTrust>,
@@ -174,7 +214,11 @@ pub struct VerifyReport {
     pub collapsed_duplicates: usize,
     pub checkpoints_total: usize,
     pub checkpoints_verified: usize,
+    /// Checkpoints whose external anchor VERIFIED under a pinned TSA (on a verified checkpoint, TSA key honored)
+    /// — the anchors that actually contribute trust. `checkpoints_anchors_attached` counts mere PRESENCE of an
+    /// `anchor` field (unverified: anyone can attach garbage), so the two are never conflated.
     pub checkpoints_anchored: usize,
+    pub checkpoints_anchors_attached: usize,
     pub chain_ok: bool,
     /// Selective-disclosure entries in the bundle, and how many matched their record's commitment.
     pub disclosures_total: usize,
@@ -187,14 +231,16 @@ pub struct VerifyReport {
     /// request that was refused AND recorded as evidence, opt-in producer side). NOT a grant (never folded
     /// into `grant_total`/`grant_accountability`); a generic BrokerRole::None record.
     pub denied_grants: usize,
-    /// Tier-B use↔grant join (ADR 0003 step 5), computed over the CLOSED set (records committed by a
-    /// verified, anchored checkpoint, R3). `uses_total` = resource-role use receipts; `uses_matched` =
-    /// closed uses bound to a closed grant under the full predicate; `uses_action_unverified` = matched
+    /// Tier-B use↔grant join (ADR 0003 step 5, R3). Violations are evaluated over the COMMITTED set (records
+    /// committed by ANY verified checkpoint), positive claims over the CLOSED set (committed by a verified,
+    /// ANCHORED checkpoint) — so deleting the unsigned `anchor` can only weaken the verdict. `uses_total` =
+    /// resource-role use receipts; `uses_matched` = closed uses bound to a closed grant under the full
+    /// predicate; `uses_action_unverified` = matched
     /// uses NOT action-verified — i.e. a non-`single_operation` grant, or no `validated`, in-window
     /// taxonomy listing the grant's `(resource_id, action)` (ADR 0004 D4; `0` ⇔ every matched use is
-    /// action-verified); `unmatched_violation` = a closed use with no/again a matching grant, or one
-    /// honoring a mis-scoped grant (hard fail); `unmatched_pending` = a use not yet closed (in-flight);
-    /// `grants_unused` = closed grants with no matching use.
+    /// action-verified); `unmatched_violation` = a committed use with no/again a matching grant, or one
+    /// honoring a mis-scoped grant (hard fail); `unmatched_pending` = a use that passed every check but is not
+    /// yet closed (in-flight); `grants_unused` = closed grants with no matching use.
     pub uses_total: usize,
     pub uses_matched: usize,
     pub uses_action_unverified: usize,
@@ -295,8 +341,10 @@ pub struct VerifyReport {
     pub attestation_not_after: Option<String>,
     pub attestation_claim_types: Vec<String>,
     pub attestation_subject_digest: Option<String>,
-    /// M5 / ADR 0005 (Revocation — tiered). `revocation_status` ∈ {`absent` (no signed `revocation_list` in the
-    /// bundle, or no `revocation_keys` pinned — not evaluated, the legitimate baseline), `fresh` (a list signed
+    /// M5 / ADR 0005 (Revocation — tiered). `revocation_status` ∈ {`absent` (no `revocation_keys` pinned — not
+    /// evaluated, the legitimate baseline — or a Merkle-mode bundle carrying only a `revocation_merkle_root`),
+    /// `missing` (`revocation_keys` ARE pinned but the bundle carries neither a `revocation_list` nor a
+    /// `revocation_merkle_root` — e.g. stripped; blocks the capstone), `fresh` (a list signed
     /// under a pinned role-separated `revocation_keys` issuer whose disclosed `revoked_grant_ids` re-derive its
     /// signed `merkle_root`, with the latest anchored checkpoint timestamp inside `[issued_at, not_after]`),
     /// `stale` (validly signed but the anchored time is outside the window — too old to trust for currency, OR
@@ -304,7 +352,7 @@ pub struct VerifyReport {
     /// against a revoked grant_id — a use of a revoked credential)}. `revoked_grants_matched` = closed grants in
     /// this bundle whose grant_id is in the (valid) list; `revoked_uses_blocked` = matched-candidate uses
     /// rejected because their grant was revoked inside the window (each also a hard violation → `!ok`). `absent`
-    /// and `fresh` do NOT block the capstone; `stale` and `revoked_present` do (the offline freshness limit).
+    /// and `fresh` do NOT block the capstone; `stale`, `revoked_present` and `missing` do.
     pub revocation_status: String,
     pub revoked_grants_matched: usize,
     pub revoked_uses_blocked: usize,
@@ -327,8 +375,9 @@ pub struct VerifyReport {
     /// `introspection_transcript` records; `introspection_transcripts_verified` = those whose structured
     /// `averin.resource.introspection.v1` signature verifies under a pinned `resource_authority_keys` issuer, bind to
     /// a present native grant, and whose `effective_scope ⊆ grant.scope` (space-delimited OAuth token subset) with
-    /// no time-broadening (`effective_exp <= grant.exp`) and `issued_at <= introspected_at`. A failing transcript
-    /// (bad sig / dangling / scope- or time-broadening) is a hard `unmatched_violation` (→ `!ok`).
+    /// no time-broadening (`effective_exp <= grant.exp`) and `issued_at <= introspected_at < min(effective_exp,
+    /// grant.exp)`. A failing transcript (bad sig / dangling / scope- or time-broadening / after expiry) is a
+    /// hard `unmatched_violation` (→ `!ok`).
     /// `introspection_scope_narrowed` = verified transcripts whose effective scope is a PROPER subset of the grant
     /// scope (the resource attested a narrowing — informational). `introspection_status` ∈ {`absent` (no native
     /// credential), `attested` (a native credential is present, every closed transcript verified, every native
@@ -393,8 +442,40 @@ pub struct VerifyReport {
     /// DECLARES a complete closure over the observed surface — NOT runtime obedience (the resource TCB, D9).
     pub unclosed_side_effects: usize,
     pub side_effect_closure_status: String,
+    /// Plan 009: current revocation per grant and the separate historical ordering per receipt,
+    /// under the caller's temporal policy. Additive: no legacy field above depends on it.
+    pub temporal: TemporalReport,
     pub issues: Vec<String>,
     pub first_broken_link: Option<String>,
+}
+
+/// Plan 009 report section. `grant_revocations` is current validity: a revoked grant stays revoked
+/// whatever a receipt's historical ordering is. `receipt_ordering` is the historical judgment for
+/// each committed use/intent and introspection transcript: `proven_before` only under the caller's
+/// `db_serialized_v1` policy with a verified snapshot and a fully validated receipt.
+#[derive(Debug, Clone, Default)]
+pub struct TemporalReport {
+    pub policy: TemporalPolicy,
+    /// `absent` | `not_evaluated` (strict policy) | `verified` | `stale` | `unverified`.
+    pub snapshot_status: String,
+    pub snapshot_reason: Option<String>,
+    /// The signed snapshot identity the historical judgment is bound to, when one was parsed.
+    pub snapshot: Option<Snapshot>,
+    pub grant_revocations: Vec<(String, GrantRevocation)>,
+    pub receipt_ordering: Vec<ReceiptOrdering>,
+    pub proven_before: usize,
+    pub at_or_after: usize,
+    pub indeterminate: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReceiptOrdering {
+    pub record_id: String,
+    pub kind: String,
+    pub grant_id: Option<String>,
+    /// The resource-signed ordinal (body-bound v3 signatures only), when present and well formed.
+    pub authorization_order: Option<i64>,
+    pub historical_ordering: HistoricalOrdering,
 }
 
 impl VerifyReport {
@@ -403,6 +484,10 @@ impl VerifyReport {
     /// `action_completeness` JSON key serializes this; see [`ActionCompleteness::of`] for the conjunction.
     pub fn action_completeness(&self) -> ActionCompleteness {
         ActionCompleteness::of(self)
+    }
+
+    pub fn claims(&self) -> ClaimResults {
+        self.claims
     }
 }
 
@@ -485,11 +570,20 @@ fn honored_clean_rotation(rks: &RoleKeyStatus, artifact_time: &str) -> bool {
 
 #[derive(Default)]
 pub struct VerifyOptions {
-    /// ADR 0006 §1 — out-of-band lifecycle for the authority-elevation ROLE keys, keyed by raw 32-byte public
-    /// key. A key absent from this map is `active`. Consulted ONLY for the keys that elevate authority via
-    /// `verify_authority` (broker/resource/federated/generic `authority_keys`); the freshness-dated roles
-    /// (tsa/attestation/cosig/revocation/taxonomy) are not yet rotation-gated, so the JSON parser REJECTS a
-    /// rotation directive on them rather than silently ignoring it.
+    /// Requested claim and evidence requirements fixed by the caller, never read from the bundle.
+    pub claim_policy: ClaimPolicy,
+    /// Plan 009: the caller-selected historical ordering policy, with the caller's evaluation time,
+    /// maximum snapshot age and minimum authorization watermark. `Strict` (the default) never
+    /// produces a historical positive. Never read from the bundle.
+    pub revocation_temporal: TemporalPolicy,
+    /// ADR 0006 §1 — out-of-band lifecycle for every pinned ROLE key, keyed by raw 32-byte public key. A key
+    /// absent from this map is `active`. Every role is rotation-gated (see [`role_key_honored`]):
+    /// anchor-committed artifacts (grant/use authority via `verify_authority` for broker/resource/federated/
+    /// generic `authority_keys`, and cosig approvals) are honored when anchored before `status_changed_at`;
+    /// self-dated artifacts (TSA tokens, attestations, v1/v2 revocation lists and Merkle roots) are honored
+    /// only for a cleanly `rotated` key at or before its rotation; a taxonomy issuer is honored only while
+    /// `active` or `rotated`. A `compromised`/`revoked` key never honors a self-dated artifact; an un-honored
+    /// revocation list is not certified fresh, but its listed revocations still block (fail-closed).
     pub role_key_status: BTreeMap<[u8; 32], RoleKeyStatus>,
     /// If `Some`, a record is only `IntegrityProven` when its resolved key is in this set. When a
     /// pinned key carries `status`/`status_changed_at`, those authoritative values override the
@@ -575,6 +669,384 @@ struct KeyEntry {
     status_changed_at: Option<String>,
 }
 
+// Index closed, fully-verified grants by grant_id, reading match fields ONLY from the proven
+// grant_evidence (R1). `used` tracks matched uses (single-use ≤1 per grant_id, and grants_unused).
+struct GrantInfo {
+    action: String,
+    resource_id: String,
+    scope_class: String,
+    credential_binding: String,
+    issued_at: i64,
+    used: usize,
+    /// M1 (bounded_reuse): the declared cap N (0 for other scope classes). `used <= use_limit`.
+    use_limit: i64,
+    /// M1 (bounded_reuse): the `use_sequence_number`s already CONSUMED by accepted uses, for
+    /// `(grant_id, usn)` replay dedup. A usn is inserted only when a use is fully accepted (mirrors
+    /// `used`), so a use that fails PoP/outcome does not burn its sequence number.
+    used_seqs: BTreeSet<i64>,
+    /// M2 (delegation): the cnf_kid a USE must present, and the temporal window the use must fall in —
+    /// the LEAF of a verified delegation chain (narrowed window `min(grant exp, hop exps)`), or the root
+    /// cnf_kid / grant exp for an undelegated grant. The use predicate keys on these so a sub-agent's PoP
+    /// matches a re-delegated grant. (For an undelegated grant these equal the root cnf_kid / grant exp.)
+    effective_cnf_kid: String,
+    effective_exp: i64,
+    /// R3: the grant record is anchored-CLOSED (not merely committed) — required for a positive match.
+    closed: bool,
+    /// Plan 009: the shadow consumption ledger for a grant whose uses are blocked by revocation. The
+    /// legacy branch never consumes a blocked use; the historical classification still runs every
+    /// later check, and must see a second spend of the same revoked grant as a double spend.
+    hist_used: usize,
+    hist_used_seqs: BTreeSet<i64>,
+}
+
+/// A validated `use_outcome`, read from its resource-signed payload (D5).
+struct OutcomeRef {
+    intent_ref: String,
+    grant_id: String,
+    record_id: String,
+    index: usize,
+    /// The signed `intent_hash` (the before-act ordering binding).
+    intent_hash: String,
+    /// Anchored-CLOSED.
+    closed: bool,
+    /// Plan 009: the ordinal the outcome inherited from its intent (body-bound signatures only).
+    order: OrderEv,
+}
+
+/// Plan 009: one committed use/intent or introspection transcript, for the separate historical
+/// fields. `validated` is set only after the complete validation path accepted the receipt.
+struct ReceiptHist {
+    record_id: String,
+    kind: String,
+    grant_id: Option<String>,
+    order: OrderEv,
+    validated: bool,
+    /// The outcome of this intent signs a different ordinal: an authenticated contradiction.
+    outcome_conflict: bool,
+    native: bool,
+}
+
+impl ReceiptHist {
+    fn new(record_id: &str, kind: &str) -> Self {
+        ReceiptHist {
+            record_id: record_id.to_string(),
+            kind: kind.to_string(),
+            grant_id: None,
+            order: OrderEv::Absent,
+            validated: false,
+            outcome_conflict: false,
+            native: false,
+        }
+    }
+
+    /// An intent inherits no weaker ordering than its outcome proves: the outcome must sign the
+    /// same ordinal. A missing or malformed outcome ordinal leaves the pair indeterminate; a
+    /// different signed ordinal is an authenticated contradiction.
+    fn mark_validated(&mut self, outcome: Option<usize>, outcomes: &[OutcomeRef]) {
+        self.validated = true;
+        let Some(i) = outcome else {
+            return;
+        };
+        match (&self.order, &outcomes[i].order) {
+            (OrderEv::Present { .. }, o @ OrderEv::Present { .. }) if *o != self.order => {
+                self.outcome_conflict = true;
+                self.order = OrderEv::Malformed;
+            }
+            (OrderEv::Present { .. }, OrderEv::Present { .. }) => {}
+            _ => self.order = OrderEv::Malformed,
+        }
+    }
+}
+
+/// Plan 009: counters from the shadow validation of uses blocked by revocation. They never touch
+/// the legacy counters; they only let the historical claim account for the blocked receipts.
+#[derive(Default)]
+struct ShadowCounts {
+    matched: usize,
+    pop_reverified: usize,
+    action_unverified: usize,
+    violations: usize,
+    pending: usize,
+    intent_without_outcome: usize,
+    /// Outcomes consumed by neither the legacy nor the shadow validation.
+    orphans: usize,
+}
+
+impl ShadowCounts {
+    fn apply(&mut self, checked: &UseCheck, receipt: &mut ReceiptHist, outcomes: &[OutcomeRef]) {
+        match checked {
+            UseCheck::Violation { .. } => self.violations += 1,
+            UseCheck::IntentWithoutOutcome => self.intent_without_outcome += 1,
+            UseCheck::Pending => self.pending += 1,
+            UseCheck::Matched {
+                pop_reverified,
+                action_verified,
+                outcome,
+                ..
+            } => {
+                self.matched += 1;
+                if *pop_reverified {
+                    self.pop_reverified += 1;
+                }
+                if !action_verified {
+                    self.action_unverified += 1;
+                }
+                receipt.mark_validated(*outcome, outcomes);
+            }
+        }
+    }
+}
+
+struct UseCtx<'a> {
+    records: &'a [CanonValue],
+    outcomes: &'a [OutcomeRef],
+    outcomes_by: &'a BTreeMap<(String, String), Vec<usize>>,
+    taxonomy: Option<&'a TaxonomyInfo>,
+}
+
+/// The proven match inputs of one committed use/intent, read from its re-derived `use_evidence`.
+struct UseInput<'a> {
+    rec: &'a CanonValue,
+    record_id: &'a str,
+    content_hash: &'a str,
+    bkind: &'a str,
+    gid: &'a str,
+    action: &'a str,
+    resource_id: &'a str,
+    cnf_kid: &'a str,
+    jti: &'a str,
+    used_at: i64,
+    use_closed: bool,
+}
+
+enum UseCheck {
+    Violation {
+        msg: String,
+        overspent: bool,
+        seq_replay: bool,
+    },
+    IntentWithoutOutcome,
+    Pending,
+    Matched {
+        pop_reverified: bool,
+        action_verified: bool,
+        taxonomy_window_failed: bool,
+        outcome: Option<usize>,
+    },
+}
+
+/// Every check after the revocation gate: grant predicate, single-use and bounded-reuse
+/// consumption, two-phase completion, offline PoP and closure. The legacy path runs it on the
+/// grant's legacy ledger and `consumed_outcomes`; a revocation-blocked use runs the identical code
+/// on the shadow ledger (`shadow == true`) so a historical judgment is never a relabeled,
+/// unvalidated candidate. Consumption follows the legacy rules exactly: a violation consumes
+/// nothing, a pending or matched use consumes the grant (and its sequence number and outcome).
+fn check_use(
+    ctx: &UseCtx,
+    u: &UseInput,
+    g: &mut GrantInfo,
+    shadow: bool,
+    consumed_outcomes: &mut BTreeSet<String>,
+) -> UseCheck {
+    let violation = |msg: String| UseCheck::Violation {
+        msg,
+        overspent: false,
+        seq_replay: false,
+    };
+    let gid = u.gid;
+    // Full predicate: action / resource / temporal-window / cnf_kid equality, read from the proven
+    // payloads on both sides.
+    // The temporal window is [issued_at, exp) — used_at >= exp is expired, matching the resource
+    // shim's `now >= exp` rejection (so the verifier is not more lenient than the gateway).
+    // M2 (delegation): match the use's cnf_kid against the EFFECTIVE (leaf) cnf and the NARROWED window,
+    // not the root — so a sub-agent's PoP matches a re-delegated grant, and a use by the original root
+    // (root cnf != leaf cnf) correctly fails to match a delegated-away credential. For an undelegated
+    // grant effective_cnf_kid==cnf_kid and effective_exp==exp, so this is unchanged (additive).
+    if u.action != g.action
+        || u.resource_id != g.resource_id
+        || u.cnf_kid != g.effective_cnf_kid
+        || u.used_at < g.issued_at
+        || u.used_at >= g.effective_exp
+    {
+        return violation(format!(
+            "action/resource/cnf/window does not match grant '{gid}' — violation"
+        ));
+    }
+    // Single-use (R5 rev 4): per-grant_id at most once, regardless of jti; jti must equal grant_id.
+    // M1 (bounded_reuse, ADR 0005): a 4th scope class allowing N uses of the IDENTICAL
+    // (action, resource_id); replay is bounded by a per-grant `use_sequence_number in [1, use_limit]`,
+    // deduped per (grant_id, usn). jti still equals grant_id for both classes (the resource sources
+    // use_evidence.jti from the descriptor jti, so the D6.4 descriptor cross-check is UNCHANGED); the
+    // per-exercise identity is the SEPARATE use_sequence_number.
+    let single = g.scope_class == "single_operation";
+    let bounded = g.scope_class == "bounded_reuse";
+    if (single || bounded) && u.jti != gid {
+        return violation(format!(
+            "{} grant '{gid}' requires use_evidence.jti == grant_id (R5) — violation",
+            g.scope_class
+        ));
+    }
+    let used = if shadow { g.hist_used } else { g.used };
+    if single && used >= 1 {
+        return violation(format!(
+            "single-use grant '{gid}' exercised more than once — double-spend (R5)"
+        ));
+    }
+    // M1: validate the bounded_reuse sequence number BEFORE counting; the usn is CONSUMED only when the
+    // use is fully accepted (alongside g.used), so a use that later fails PoP/outcome does not burn it.
+    let use_seq: Option<i64> = if bounded {
+        let usn = ev_int(u.rec, "use_evidence", "use_sequence_number").unwrap_or(0);
+        if usn < 1 || usn > g.use_limit {
+            return UseCheck::Violation {
+                msg: format!(
+                    "bounded_reuse grant '{gid}' use_sequence_number {usn} outside [1, {}] — overspend (M1)",
+                    g.use_limit
+                ),
+                overspent: true,
+                seq_replay: false,
+            };
+        }
+        let seqs = if shadow {
+            &g.hist_used_seqs
+        } else {
+            &g.used_seqs
+        };
+        if seqs.contains(&usn) {
+            return UseCheck::Violation {
+                msg: format!("bounded_reuse grant '{gid}' use_sequence_number {usn} replayed across receipts — seq-replay (M1)"),
+                overspent: false,
+                seq_replay: true,
+            };
+        }
+        // Compare in i64, NOT `use_limit as usize` (same wasm32 `usize==u32` truncation concern as the
+        // cosig gate above). Here truncation would shrink the cap (fail-CLOSED, over-restrictive) rather
+        // than open, but the verdict must still be platform-independent; `g.used` is a small count.
+        if used as i64 >= g.use_limit {
+            return UseCheck::Violation {
+                msg: format!(
+                    "bounded_reuse grant '{gid}' exercised more than use_limit {} times — overspend (M1)",
+                    g.use_limit
+                ),
+                overspent: true,
+                seq_replay: false,
+            };
+        }
+        Some(usn)
+    } else {
+        None
+    };
+    // D5 (ADR 0004 F4): a `use_intent` is a COMPLETE two-phase use only if a valid `use_outcome` whose
+    // SIGNED payload references THIS intent's record_id AND attests THIS grant_id completes it. An intent
+    // that passed every predicate above but has no such outcome is an `intent_without_outcome` anomaly —
+    // recorded-but-incomplete (the crash-after-act case). Surface it and stop BEFORE it counts as matched
+    // / PoP-reverified or consumes a single-use grant.
+    // D5 (ADR 0004 F4): pick a SPECIFIC un-consumed validated outcome that references THIS intent's
+    // record_id, attests THIS grant, and proves the BEFORE-ACT ordering: the outcome's RESOURCE-SIGNED
+    // `intent_hash` must equal this intent's content_hash (the resource attests it observed THIS intent
+    // before signing the outcome — unforgeable by the relay), AND the top-level `causal_prev_hashes`
+    // include it (a DAG consistency check; the signed binding is the security boundary, since the
+    // record-signing key could backfill the top-level edge). An unordered/backfilled pair does NOT
+    // complete. The pick is held and only CONSUMED after every acceptance check (incl. PoP) passes — a
+    // later-rejected intent must not consume (and thereby mask from orphan accounting) its outcome.
+    let mut pending_consume: Option<usize> = None;
+    if u.bkind == "use_intent" {
+        let key = (u.record_id.to_string(), gid.to_string());
+        pending_consume = ctx.outcomes_by.get(&key).and_then(|idxs| {
+            idxs.iter().copied().find(|&i| {
+                let o = &ctx.outcomes[i];
+                !consumed_outcomes.contains(&o.record_id)
+                    && o.intent_hash.as_str() == u.content_hash
+                    && ctx.records[o.index]
+                        .get("causal_prev_hashes")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|p| p.iter().any(|h| h.as_str() == Some(u.content_hash)))
+            })
+        });
+    }
+    // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
+    // reconstructing the challenge from the proven fields + this grant's credential_binding + the
+    // record's input_commit. A claimed re-verification that FAILS is a violation; a receipt that
+    // carries neither stays `shim_asserted` (legacy ADR-0003 path). This NEGATIVE check runs on every
+    // committed use/intent BEFORE any completion (closure) branch below: a two-phase intent whose
+    // outcome is missing or only committed must still fail on a bad PoP, or deleting one checkpoint's
+    // unsigned `anchor` would turn a violation into a pass (monotonicity). A failed intent never
+    // consumes its outcome, so the outcome is still reported as an orphan.
+    let pop_reverified = match pop_reverify(u.rec, &g.credential_binding) {
+        Ok(r) => r,
+        Err(msg) => return violation(format!("offline PoP re-verification: {msg}")),
+    };
+    if u.bkind == "use_intent" {
+        match pending_consume {
+            // no outcome at all: a CLOSED intent is the D5 anomaly; a committed-only one is still in flight.
+            None => {
+                return if u.use_closed {
+                    UseCheck::IntentWithoutOutcome
+                } else {
+                    UseCheck::Pending
+                };
+            }
+            // a CLOSED intent whose outcome is only committed (not anchored): completion is not yet
+            // established over the closed set — the D5 anomaly, as before (when the outcome was invisible).
+            // The (validated) intent consumes the outcome so it is not ALSO reported as an orphan.
+            Some(i) if u.use_closed && !ctx.outcomes[i].closed => {
+                consumed_outcomes.insert(ctx.outcomes[i].record_id.clone());
+                return UseCheck::IntentWithoutOutcome;
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(i) = pending_consume {
+        consumed_outcomes.insert(ctx.outcomes[i].record_id.clone()); // accepted intent → consume its outcome now
+    }
+    let (used, used_seqs) = if shadow {
+        (&mut g.hist_used, &mut g.hist_used_seqs)
+    } else {
+        (&mut g.used, &mut g.used_seqs)
+    };
+    // R3: a use that passed every check but is not anchored-CLOSED (nor, for a two-phase pair, its outcome —
+    // handled above, nor its grant — `!g.closed` implies `!use_closed` here) is in-flight: pending, not
+    // matched. It still CONSUMES the grant (and its sequence number / outcome), so a second committed spend
+    // of a single-use grant is a double-spend violation rather than a second pending use.
+    *used += 1;
+    if let Some(usn) = use_seq {
+        used_seqs.insert(usn); // M1: consume the sequence number only once the use is accepted
+    }
+    if !u.use_closed || !g.closed {
+        return UseCheck::Pending;
+    }
+    // R6/D4: a matched use is action-VERIFIED only when a pinned, in-window taxonomy lists the
+    // grant's action FOR THIS RESOURCE — otherwise it stays a demonstrator artifact
+    // (uses_action_unverified) that can never reach the attested_complete upgrade. The listing is
+    // resource-BOUND so a taxonomy vetted for one resource cannot validate a colliding action name on
+    // another (adversarial review AREA 2). M1: bounded_reuse is action-verifiable too — it fixes one
+    // (action, resource_id) exactly like single_operation (action↔grant tightness preserved).
+    let mut taxonomy_window_failed = false;
+    let action_verified = (single || bounded)
+        && ctx.taxonomy.is_some_and(|ti| {
+            if !ti
+                .actions
+                .contains(&(u.resource_id.to_string(), u.action.to_string()))
+            {
+                return false;
+            }
+            let in_window = g.issued_at >= ti.effective_from
+                && g.issued_at <= ti.effective_until
+                && u.used_at >= ti.effective_from
+                && u.used_at <= ti.effective_until;
+            if !in_window {
+                // a listed action rejected ONLY by the effective window → the taxonomy is stale (MF5)
+                taxonomy_window_failed = true;
+            }
+            in_window
+        });
+    UseCheck::Matched {
+        pop_reverified,
+        action_verified,
+        taxonomy_window_failed,
+        outcome: pending_consume,
+    }
+}
+
 /// Provisional per-record state from pass 1, finalized in pass 2 after anchors are known.
 struct Pending {
     index: usize,
@@ -600,6 +1072,16 @@ struct Pending {
     notes: Vec<String>,
 }
 
+/// Per-checkpoint pre-pass result (see the checkpoint loop in `verify_bundle_with`): the seal check under the
+/// resolved (and, under pinning, trusted) key (`None` = no usable key), the RCP §10.2 gate for a non-active
+/// signing key (`(effective status, authoritative status_changed_at)`, `None` = active/retired), and — only on a
+/// sealed checkpoint with TSA trust pinned — the anchor check (`(genTime, test-anchor TSA key)`).
+struct CpPre {
+    seal: Option<Result<(), crate::checkpoint::CheckpointError>>,
+    gate: Option<(String, Option<String>)>,
+    anchor: Option<Result<(String, Option<VerifyingKey>), String>>,
+}
+
 /// A record's broker/resource role (ADR 0003 R2), classified fail-closed from the
 /// `(extensions.broker.kind, authority.enforcement_point)` discriminator. `None` means the record
 /// does not claim a recognized Tier-B role (a plain record, or a fail-closed misclassification).
@@ -607,6 +1089,10 @@ struct Pending {
 enum BrokerRole {
     Broker,
     Resource,
+    /// An operator-voided broker_seq (a signed `grant_void` tombstone, `(grant_void, credential_broker)`): it fills
+    /// its seq in the D6/M4 transparency log so a reserved-but-never-recorded seq stops wedging the gapless prefix,
+    /// but it is NEVER a grant — not counted, not joinable by a use, never Tier-B eligible (see `check_grant_voids`).
+    Void,
     None,
 }
 
@@ -615,6 +1101,7 @@ impl BrokerRole {
         match self {
             BrokerRole::Broker => "broker",
             BrokerRole::Resource => "resource",
+            BrokerRole::Void => "grant_void",
             BrokerRole::None => "none",
         }
     }
@@ -638,6 +1125,7 @@ fn classify_role(rec: &CanonValue) -> (BrokerRole, bool) {
         .and_then(|v| v.as_str());
     let role = match (kind, ep) {
         (Some("grant"), Some("credential_broker")) => BrokerRole::Broker,
+        (Some("grant_void"), Some("credential_broker")) => BrokerRole::Void,
         // D5 (ADR 0004): a two-phase use is a `use_intent` (recorded BEFORE the side effect) + a
         // `use_outcome` (AFTER); both are resource-signed records under the tool gateway, alongside the
         // one-phase `use` (ADR 0003, still accepted for back-compat).
@@ -949,10 +1437,16 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         .collect();
     CanonValue::object(vec![
         ("ok".into(), CanonValue::Bool(r.ok)),
+        ("claims_version".into(), CanonValue::string("2")),
+        ("claims".into(), r.claims.to_canon()),
         ("project_id".into(), opt_str(&r.project_id)),
         (
             "keys_externally_pinned".into(),
             CanonValue::Bool(r.keys_externally_pinned),
+        ),
+        (
+            "body_bound_role_evidence".into(),
+            CanonValue::Bool(r.body_bound_role_evidence),
         ),
         ("records_total".into(), count(r.records_total)),
         ("records_proven".into(), count(r.records_proven)),
@@ -962,6 +1456,10 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("checkpoints_total".into(), count(r.checkpoints_total)),
         ("checkpoints_verified".into(), count(r.checkpoints_verified)),
         ("checkpoints_anchored".into(), count(r.checkpoints_anchored)),
+        (
+            "checkpoints_anchors_attached".into(),
+            count(r.checkpoints_anchors_attached),
+        ),
         ("chain_ok".into(), CanonValue::Bool(r.chain_ok)),
         ("disclosures_total".into(), count(r.disclosures_total)),
         ("disclosures_verified".into(), count(r.disclosures_verified)),
@@ -1169,11 +1667,106 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             "side_effect_closure_status".into(),
             CanonValue::string(r.side_effect_closure_status.clone()),
         ),
+        ("revocation_temporal".into(), temporal_to_canon(&r.temporal)),
         ("issues".into(), str_array(&r.issues)),
         ("first_broken_link".into(), opt_str(&r.first_broken_link)),
         ("record_trust".into(), CanonValue::Array(records)),
     ])
     .unwrap()
+}
+
+/// Plan 009 report section: the caller's policy and its named trust basis, the snapshot the
+/// judgment is bound to, current revocation per grant and historical ordering per receipt.
+fn temporal_to_canon(t: &TemporalReport) -> CanonValue {
+    let int_or_null = |v: Option<i64>| v.map_or(CanonValue::Null, CanonValue::Int);
+    let mut policy = vec![("policy".to_string(), CanonValue::string(t.policy.as_str()))];
+    if let TemporalPolicy::DbSerializedV1(p) = &t.policy {
+        policy.push((
+            "trust_basis".into(),
+            CanonValue::string(DB_SERIALIZED_V1_TRUST_BASIS),
+        ));
+        policy.push((
+            "evaluation_time".into(),
+            CanonValue::string(p.evaluation_time()),
+        ));
+        policy.push((
+            "max_snapshot_age_seconds".into(),
+            CanonValue::Int(p.max_snapshot_age_seconds()),
+        ));
+        policy.push((
+            "min_authorization_watermark".into(),
+            CanonValue::Int(p.min_authorization_watermark()),
+        ));
+    }
+    let snapshot = CanonValue::object(vec![
+        (
+            "status".into(),
+            CanonValue::string(t.snapshot_status.clone()),
+        ),
+        ("reason".into(), opt_str(&t.snapshot_reason)),
+        (
+            "project_id".into(),
+            opt_str(&t.snapshot.as_ref().map(|s| s.project_id.clone())),
+        ),
+        (
+            "boundary_time".into(),
+            opt_str(&t.snapshot.as_ref().map(|s| s.boundary_time.clone())),
+        ),
+        (
+            "authorization_high_watermark".into(),
+            int_or_null(t.snapshot.as_ref().map(|s| s.watermark)),
+        ),
+    ])
+    .unwrap();
+    let grants = t
+        .grant_revocations
+        .iter()
+        .map(|(gid, st)| {
+            CanonValue::object(vec![
+                ("grant_id".into(), CanonValue::string(gid.clone())),
+                (
+                    "current_revocation".into(),
+                    CanonValue::string(st.current_str()),
+                ),
+                (
+                    "cutoff_order".into(),
+                    // Every authenticated cutoff that decides an adverse at_or_after, including the
+                    // one kept next to an unusable artifact or a missing Merkle path.
+                    int_or_null(st.adverse_cutoff()),
+                ),
+            ])
+            .unwrap()
+        })
+        .collect();
+    let receipts = t
+        .receipt_ordering
+        .iter()
+        .map(|o| {
+            CanonValue::object(vec![
+                ("record_id".into(), CanonValue::string(o.record_id.clone())),
+                ("kind".into(), CanonValue::string(o.kind.clone())),
+                ("grant_id".into(), opt_str(&o.grant_id)),
+                (
+                    "authorization_order".into(),
+                    int_or_null(o.authorization_order),
+                ),
+                (
+                    "historical_ordering".into(),
+                    CanonValue::string(o.historical_ordering.as_str()),
+                ),
+            ])
+            .unwrap()
+        })
+        .collect();
+    policy.extend([
+        ("snapshot".into(), snapshot),
+        ("grant_revocations".into(), CanonValue::Array(grants)),
+        ("receipt_ordering".into(), CanonValue::Array(receipts)),
+        ("proven_before".into(), count(t.proven_before)),
+        ("at_or_after".into(), count(t.at_or_after)),
+        ("indeterminate".into(), count(t.indeterminate)),
+    ]);
+    CanonValue::object(policy).unwrap()
 }
 
 pub fn report_to_json(r: &VerifyReport) -> String {
@@ -1237,8 +1830,9 @@ pub fn verify_bundle(bundle: &CanonValue) -> VerifyReport {
 /// Verify a bundle (JSON) with out-of-band pinned trust roots supplied as a JSON options object, and
 /// return the report JSON — the shape the FFI/CLI use to pass pinned keys for authority elevation
 /// (the broker recording key for `gateway_enforced` grants) and key/TSA pinning. All option keys are
-/// optional arrays: `authority_keys`/`signing_keys`/`tsa_keys` are `ed25519pub:` strings;
-/// `tsa_spki_b64` are base64url-no-pad DER SubjectPublicKeyInfos.
+/// optional arrays: `authority_keys`/`tsa_keys` are `ed25519pub:` strings (or rotation objects, ADR 0006);
+/// `signing_keys` are `ed25519pub:` strings or `{key,status,status_changed_at}` objects (see
+/// `parse_signing_keys`); `tsa_spki_b64` are base64url-no-pad DER SubjectPublicKeyInfos.
 pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
     if bundle_text.len() > MAX_BUNDLE_BYTES {
         return over_cap_report(bundle_text.len());
@@ -1255,8 +1849,8 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
     // who supplied keys must not be downgraded to unpinned verification (signing keys) or get a
     // confusing grant_verified:0 (authority keys) because a key was pasted in the wrong encoding.
     // ADR 0006 §1: the authority-elevation roles accept a string-OR-object rotation form; their lifecycle is
-    // collected here (keyed by raw key bytes) and consulted at the pass-2 elevation gate. The freshness-dated
-    // roles below stay string-only via parse_pubkeys, so a rotation directive on them is a clear parse error.
+    // collected here (keyed by raw key bytes) and consulted at the pass-2 elevation gate. The record-signing
+    // keys take their own RCP §10.2 object form (`parse_signing_keys` — key_status vocabulary, not `rotated`).
     let mut role_key_status: BTreeMap<[u8; 32], RoleKeyStatus> = BTreeMap::new();
     let authority = match parse_role_pubkeys(&opts_val, "authority_keys", &mut role_key_status) {
         Ok(k) => k,
@@ -1304,7 +1898,7 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
-    let signing = match parse_pubkeys(&opts_val, "signing_keys") {
+    let signing = match parse_signing_keys(&opts_val) {
         Ok(k) => k,
         Err(e) => return error_report(&e),
     };
@@ -1340,7 +1934,15 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
             Ok(m) => m,
             Err(e) => return error_report(&e),
         };
-    let mut opts = VerifyOptions {
+    let opts = VerifyOptions {
+        claim_policy: match ClaimPolicy::parse(&opts_val) {
+            Ok(p) => p,
+            Err(e) => return error_report(&e),
+        },
+        revocation_temporal: match TemporalPolicy::parse(&opts_val) {
+            Ok(p) => p,
+            Err(e) => return error_report(&e),
+        },
         trusted_authority_keys: authority,
         broker_authority_keys: broker_authority,
         resource_authority_keys: resource_authority,
@@ -1355,34 +1957,88 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         attestation_keys,
         cosig_approver_keys,
         revocation_keys,
-        ..Default::default()
+        trusted_keys: signing,
     };
-    if !signing.is_empty() {
-        // No out-of-band status/compromise override here — that is the richer Rust API's job.
-        opts.trusted_keys = Some(signing.into_iter().map(TrustedKey::from).collect());
-    }
     report_json_with_digest(&verify_bundle_with(&bundle, &opts), bundle_text.as_bytes())
 }
 
-/// Parse an optional array of `ed25519pub:` strings. Absent ⇒ empty; present-but-malformed ⇒ Err
-/// (fail-closed, with the offending index + reason — never a silent drop).
-fn parse_pubkeys(opts: &CanonValue, key: &str) -> Result<Vec<VerifyingKey>, String> {
-    let arr = match opts.get(key) {
-        None | Some(CanonValue::Null) => return Ok(Vec::new()),
-        Some(v) => v
-            .as_array()
-            .ok_or_else(|| format!("{key} must be an array of ed25519pub: strings"))?,
+/// Parse the pinned RECORD-SIGNING keys (`signing_keys`) into [`TrustedKey`]s. Each element is an `ed25519pub:`
+/// string (no out-of-band status) OR an object `{"key":"ed25519pub:…","status":"active"|"retired"|"revoked"|
+/// "compromised","status_changed_at":"…"}` carrying the AUTHORITATIVE RCP §10.2 key status + compromise time
+/// (the same override the Rust [`TrustedKey`] API has — previously unreachable from JSON/CLI/FFI). Absent/null ⇒
+/// `None` (unpinned: internal consistency only). Fail-closed: an EMPTY array is a config error (it used to fall
+/// back silently to UNPINNED verification — the opposite of what a caller who supplied the field asked for), as
+/// is a malformed key, an unknown field or status (never silently active), or a non-string field.
+fn parse_signing_keys(opts: &CanonValue) -> Result<Option<Vec<TrustedKey>>, String> {
+    const KEY: &str = "signing_keys";
+    let arr = match opts.get(KEY) {
+        None | Some(CanonValue::Null) => return Ok(None),
+        Some(v) => v.as_array().ok_or_else(|| {
+            format!("{KEY} must be an array of ed25519pub: strings or {{key,status,status_changed_at}} objects")
+        })?,
     };
+    if arr.is_empty() {
+        return Err(format!(
+            "{KEY} is present but empty — pinning no signing key would silently verify UNPINNED; omit the field for internal-consistency-only verification"
+        ));
+    }
     let mut out = Vec::with_capacity(arr.len());
     for (i, v) in arr.iter().enumerate() {
-        let s = v
-            .as_str()
-            .ok_or_else(|| format!("{key}[{i}] must be a string"))?;
-        let vk = decode_pubkey(s)
-            .map_err(|e| format!("{key}[{i}] is not a valid ed25519pub key: {e}"))?;
-        out.push(vk);
+        let ctx = format!("{KEY}[{i}]");
+        if let Some(s) = v.as_str() {
+            let vk = decode_pubkey(s)
+                .map_err(|e| format!("{ctx} is not a valid ed25519pub key: {e}"))?;
+            out.push(TrustedKey::from(vk));
+            continue;
+        }
+        let obj = v.as_object().ok_or_else(|| {
+            format!(
+                "{ctx} must be an ed25519pub: string or a {{key,status,status_changed_at}} object"
+            )
+        })?;
+        for (k, _) in obj {
+            if !matches!(k.as_str(), "key" | "status" | "status_changed_at") {
+                return Err(format!(
+                    "{ctx} has unknown field {k:?} (allowed: key, status, status_changed_at)"
+                ));
+            }
+        }
+        let ks = v
+            .get("key")
+            .and_then(|k| k.as_str())
+            .ok_or_else(|| format!("{ctx}.key must be an ed25519pub: string"))?;
+        let vk = decode_pubkey(ks)
+            .map_err(|e| format!("{ctx}.key is not a valid ed25519pub key: {e}"))?;
+        let status = match v.get("status") {
+            None | Some(CanonValue::Null) => None,
+            Some(sv) => {
+                let st = sv
+                    .as_str()
+                    .ok_or_else(|| format!("{ctx}.status must be a string"))?;
+                // The RCP §10.2 key_status vocabulary (NOT the role-key `rotated`).
+                if !matches!(st, "active" | "retired" | "revoked" | "compromised") {
+                    return Err(format!(
+                        "{ctx}.status {st:?} is not one of active|retired|revoked|compromised"
+                    ));
+                }
+                Some(st.to_string())
+            }
+        };
+        let status_changed_at = match v.get("status_changed_at") {
+            None | Some(CanonValue::Null) => None,
+            Some(cv) => Some(
+                cv.as_str()
+                    .map(String::from)
+                    .ok_or_else(|| format!("{ctx}.status_changed_at must be a string"))?,
+            ),
+        };
+        out.push(TrustedKey {
+            vk,
+            status,
+            status_changed_at,
+        });
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// Parse ONE authority-elevation role-key element (ADR 0006 §1 rotation): an `ed25519pub:` string (status
@@ -1548,8 +2204,10 @@ fn error_report(msg: &str) -> String {
 fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
     VerifyReport {
         ok: false,
+        claims: ClaimResults::fatal(),
         project_id,
         keys_externally_pinned: false,
+        body_bound_role_evidence: false,
         records_total: 0,
         records_proven: 0,
         record_trust: Vec::new(),
@@ -1559,6 +2217,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         checkpoints_total: 0,
         checkpoints_verified: 0,
         checkpoints_anchored: 0,
+        checkpoints_anchors_attached: 0,
         chain_ok: false,
         disclosures_total: 0,
         disclosures_verified: 0,
@@ -1615,6 +2274,10 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         coverage_manifest: None,
         unclosed_side_effects: 0,
         side_effect_closure_status: "not_declared".to_string(),
+        temporal: TemporalReport {
+            snapshot_status: "absent".to_string(),
+            ..Default::default()
+        },
         issues: vec![msg.to_string()],
         first_broken_link: Some(msg.to_string()),
     }
@@ -1783,12 +2446,18 @@ fn be8(pre: &mut Vec<u8>, n: u64) {
 /// `TestLedgerCommitmentGoldenVector` and Rust `ledger_commitment_golden_vector`, so a drift in either
 /// implementation breaks both suites against the one file (not two independently-hardcoded copies).
 pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
+    crate::hashx::sha256_prefixed(&ledger_commitment_preimage(jti, nonce, used_at))
+}
+
+/// Exact bytes hashed by the production ledger commitment builder.
+#[doc(hidden)]
+pub fn ledger_commitment_preimage(jti: &str, nonce: &str, used_at: i64) -> Vec<u8> {
     let mut pre = Vec::new();
     for part in ["averin.broker.use.ledger.v1", jti, nonce] {
         lp4(&mut pre, part.as_bytes());
     }
     be8(&mut pre, used_at as u64);
-    crate::hashx::sha256_prefixed(&pre)
+    pre
 }
 
 /// Cumulative grant-transparency root (ADR 0004 D6 / MF2): a hash-CHAIN over a broker's grant log,
@@ -1801,20 +2470,29 @@ pub fn ledger_commitment(jti: &str, nonce: &str, used_at: i64) -> String {
 /// sorted by `broker_seq` (the verifier sorts the closed grant set; the producer folds in issue order).
 /// Returns `sha256:<hex>` of the final accumulator. The empty log has a well-defined non-zero root.
 pub fn grant_head_root(grants: &[(i64, String)]) -> String {
-    const TAG: &str = "averin.broker.grant_head.v1";
-    // acc_0 = sha256(LP4(tag)) — a fixed non-zero seed so an empty log is distinguishable from a forged one.
-    let mut seed = Vec::new();
-    lp4(&mut seed, TAG.as_bytes());
-    let mut acc = crate::hashx::sha256(&seed);
+    let mut acc = crate::hashx::sha256(&grant_head_seed_preimage());
     for (seq, content_hash) in grants {
-        let mut pre = Vec::new();
-        lp4(&mut pre, TAG.as_bytes());
-        pre.extend_from_slice(&acc); // raw 32-byte accumulator, NOT length-prefixed
-        be8(&mut pre, *seq as u64);
-        lp4(&mut pre, content_hash.as_bytes());
-        acc = crate::hashx::sha256(&pre);
+        acc = crate::hashx::sha256(&grant_head_step_preimage(&acc, *seq, content_hash));
     }
     format!("sha256:{}", crate::hashx::hex_lower(&acc))
+}
+
+/// Exact seed bytes hashed by the production grant-head chain.
+#[doc(hidden)]
+pub fn grant_head_seed_preimage() -> Vec<u8> {
+    let mut seed = Vec::new();
+    lp4(&mut seed, b"averin.broker.grant_head.v1");
+    seed
+}
+
+/// Exact per-step bytes hashed by the production grant-head chain.
+#[doc(hidden)]
+pub fn grant_head_step_preimage(acc: &[u8; 32], seq: i64, content_hash: &str) -> Vec<u8> {
+    let mut pre = grant_head_seed_preimage();
+    pre.extend_from_slice(acc); // raw 32-byte accumulator, NOT length-prefixed
+    be8(&mut pre, seq as u64);
+    lp4(&mut pre, content_hash.as_bytes());
+    pre
 }
 
 /// M5 Merkle-non-disclosure revocation (ADR 0005): the domain-separated leaf VALUE for a (possibly) revoked
@@ -1824,10 +2502,16 @@ pub fn grant_head_root(grants: &[(i64, String)]) -> String {
 /// non-membership proof reveals only the two adjacent leaf VALUES (hashes), never the full revoked list — the
 /// non-disclosure win. Kept in sync with the Go producer via the shared golden vector.
 pub fn revocation_leaf(grant_id: &str) -> [u8; 32] {
+    crate::hashx::sha256(&revocation_leaf_preimage(grant_id))
+}
+
+/// Exact bytes hashed by the production revocation-leaf builder.
+#[doc(hidden)]
+pub fn revocation_leaf_preimage(grant_id: &str) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.broker.revocation.leaf.v1");
     lp4(&mut pre, grant_id.as_bytes());
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// M5 Merkle-non-disclosure (ADR 0005): the canonical Merkle ROOT (`sha256:<hex>`) the revocation authority
@@ -1865,19 +2549,31 @@ pub fn revocation_merkle_root(revoked: &[&str]) -> String {
 /// leaves from internal nodes so a leaf hash can never be reinterpreted as an interior node (a second-preimage
 /// guard standard to transparency logs).
 fn merkle_leaf_hash(v: &[u8; 32]) -> [u8; 32] {
+    crate::hashx::sha256(&merkle_leaf_preimage(v))
+}
+
+/// Exact bytes hashed for an RFC6962 revocation-tree leaf.
+#[doc(hidden)]
+pub fn merkle_leaf_preimage(v: &[u8; 32]) -> Vec<u8> {
     let mut pre = Vec::with_capacity(33);
     pre.push(0x00);
     pre.extend_from_slice(v);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// RFC6962-style internal Merkle NODE: `sha256( 0x01 ‖ left ‖ right )`.
 fn merkle_node_hash(l: &[u8; 32], r: &[u8; 32]) -> [u8; 32] {
+    crate::hashx::sha256(&merkle_node_preimage(l, r))
+}
+
+/// Exact bytes hashed for an RFC6962 revocation-tree node.
+#[doc(hidden)]
+pub fn merkle_node_preimage(l: &[u8; 32], r: &[u8; 32]) -> Vec<u8> {
     let mut pre = Vec::with_capacity(65);
     pre.push(0x01);
     pre.extend_from_slice(l);
     pre.extend_from_slice(r);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Recompute the Merkle root from an inclusion proof (RFC6962 audit path; an odd level PROMOTES its last node,
@@ -1929,6 +2625,26 @@ pub fn use_pop_challenge(
     credential_binding: &str,
     nonce: &str,
 ) -> [u8; 32] {
+    crate::hashx::sha256(&use_pop_preimage(
+        grant_id,
+        resource_id,
+        action,
+        params_commitment,
+        credential_binding,
+        nonce,
+    ))
+}
+
+/// Exact bytes hashed by the production use-time PoP challenge builder.
+#[doc(hidden)]
+pub fn use_pop_preimage(
+    grant_id: &str,
+    resource_id: &str,
+    action: &str,
+    params_commitment: &str,
+    credential_binding: &str,
+    nonce: &str,
+) -> Vec<u8> {
     let mut pre = Vec::new();
     for part in [
         "averin.broker.use.pop.v1",
@@ -1941,7 +2657,7 @@ pub fn use_pop_challenge(
     ] {
         lp4(&mut pre, part.as_bytes());
     }
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Re-derive the cosignature-approval challenge an approver signs (ADR 0005 M6), byte-identically to the
@@ -1958,6 +2674,24 @@ pub fn cosig_approval_challenge(
     threshold_m: i64,
     exp: i64,
 ) -> [u8; 32] {
+    crate::hashx::sha256(&cosig_approval_preimage(
+        grant_id,
+        approver_kid,
+        credential_binding,
+        threshold_m,
+        exp,
+    ))
+}
+
+/// Exact bytes hashed by the production cosignature challenge builder.
+#[doc(hidden)]
+pub fn cosig_approval_preimage(
+    grant_id: &str,
+    approver_kid: &str,
+    credential_binding: &str,
+    threshold_m: i64,
+    exp: i64,
+) -> Vec<u8> {
     let mut pre = Vec::new();
     for part in [
         "averin.broker.cosig.approval.v1",
@@ -1969,7 +2703,7 @@ pub fn cosig_approval_challenge(
     }
     be8(&mut pre, threshold_m as u64);
     be8(&mut pre, exp as u64);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// The `grant_evidence.cosignatures[]` array of a broker record, if present (ADR 0005 M6). Borrowed from the
@@ -2076,6 +2810,31 @@ pub fn delegation_hop_challenge(
     resource_id: &str,
     exp: i64,
 ) -> [u8; 32] {
+    crate::hashx::sha256(&delegation_hop_preimage(
+        grant_id,
+        hop_index,
+        delegator_kid,
+        delegate_kid,
+        scope,
+        action,
+        resource_id,
+        exp,
+    ))
+}
+
+/// Exact bytes hashed by the production delegation-hop challenge builder.
+#[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
+pub fn delegation_hop_preimage(
+    grant_id: &str,
+    hop_index: i64,
+    delegator_kid: &str,
+    delegate_kid: &str,
+    scope: &str,
+    action: &str,
+    resource_id: &str,
+    exp: i64,
+) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.broker.delegation.hop.v1");
     lp4(&mut pre, grant_id.as_bytes());
@@ -2086,7 +2845,7 @@ pub fn delegation_hop_challenge(
     lp4(&mut pre, action.as_bytes());
     lp4(&mut pre, resource_id.as_bytes());
     be8(&mut pre, exp as u64);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Re-derive the resource's introspection-transcript challenge (ADR 0005 M3), byte-identically to the Go
@@ -2107,6 +2866,27 @@ pub fn introspection_transcript_challenge(
     introspected_at: i64,
     effective_exp: i64,
 ) -> [u8; 32] {
+    crate::hashx::sha256(&introspection_transcript_preimage(
+        grant_id,
+        credential_ref,
+        effective_scope,
+        resource_id,
+        introspected_at,
+        effective_exp,
+    ))
+}
+
+/// Exact bytes hashed by the production introspection transcript builder.
+#[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
+pub fn introspection_transcript_preimage(
+    grant_id: &str,
+    credential_ref: &str,
+    effective_scope: &str,
+    resource_id: &str,
+    introspected_at: i64,
+    effective_exp: i64,
+) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.resource.introspection.v1");
     lp4(&mut pre, grant_id.as_bytes());
@@ -2115,7 +2895,7 @@ pub fn introspection_transcript_challenge(
     lp4(&mut pre, resource_id.as_bytes());
     be8(&mut pre, introspected_at as u64);
     be8(&mut pre, effective_exp as u64);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Re-derive the cross-broker certificate challenge (ADR 0005 M4, OPTIONAL transitive-trust tier),
@@ -2134,6 +2914,27 @@ pub fn federation_cert_challenge(
     resource_id: &str,
     not_after: i64,
 ) -> [u8; 32] {
+    crate::hashx::sha256(&federation_cert_preimage(
+        issuer_broker_id,
+        subject_broker_id,
+        subject_kid,
+        scope,
+        resource_id,
+        not_after,
+    ))
+}
+
+/// Exact bytes hashed by the production federation certificate builder.
+#[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
+pub fn federation_cert_preimage(
+    issuer_broker_id: &str,
+    subject_broker_id: &str,
+    subject_kid: &str,
+    scope: &str,
+    resource_id: &str,
+    not_after: i64,
+) -> Vec<u8> {
     let mut pre = Vec::new();
     lp4(&mut pre, b"averin.broker.federation.cert.v1");
     lp4(&mut pre, issuer_broker_id.as_bytes());
@@ -2142,7 +2943,7 @@ pub fn federation_cert_challenge(
     lp4(&mut pre, scope.as_bytes());
     lp4(&mut pre, resource_id.as_bytes());
     be8(&mut pre, not_after as u64);
-    crate::hashx::sha256(&pre)
+    pre
 }
 
 /// Outcome of re-walking a grant's `delegation_assertions[]` chain (ADR 0005 M2).
@@ -2405,13 +3206,18 @@ fn pop_reverify(rec: &CanonValue, credential_binding: &str) -> Result<bool, Stri
     Ok(true)
 }
 
-/// Read an integer field from a record's canonical evidence payload (used for issued_at/exp/used_at).
-fn ev_int(rec: &CanonValue, payload_key: &str, field: &str) -> Option<i64> {
+/// Read a field from a record's canonical evidence payload. Callers that
+/// negotiate a protocol version must distinguish absent from present-but-bad.
+fn ev_value<'a>(rec: &'a CanonValue, payload_key: &str, field: &str) -> Option<&'a CanonValue> {
     rec.get("extensions")
         .and_then(|e| e.get("broker"))
         .and_then(|b| b.get(payload_key))
         .and_then(|p| p.get(field))
-        .and_then(|v| v.as_int())
+}
+
+/// Read an integer field from a record's canonical evidence payload (used for issued_at/exp/used_at).
+fn ev_int(rec: &CanonValue, payload_key: &str, field: &str) -> Option<i64> {
+    ev_value(rec, payload_key, field).and_then(CanonValue::as_int)
 }
 
 /// A checkpoint's `broker_grant_head` (ADR 0004 D6 / MF2), parsed fail-closed.
@@ -2579,6 +3385,8 @@ fn validate_taxonomy(
 /// single-broker transparency log); `Some(bid)` restricts to one broker's partition (the M4 federation
 /// per-broker log) — federation is the per-broker generalization of D6, so both derive the log identically
 /// here (one place to keep byte-aligned with the producer's grantLog) and diverge only in their head folding.
+/// A `grant_void` tombstone (`BrokerRole::Void`) is a log entry too: it fills its seq exactly as a grant would
+/// (the producer folds it identically), so an operator-voided reservation keeps the prefix gapless.
 fn committed_broker_log(
     record_trust: &[RecordTrust],
     records: &[CanonValue],
@@ -2589,29 +3397,132 @@ fn committed_broker_log(
     let committed = committed_set(records, by_hash, frontier);
     let mut log: Vec<(i64, String)> = record_trust
         .iter()
-        .filter(|rt| {
-            rt.broker_role == BrokerRole::Broker.as_str()
-                && committed.contains(&rt.content_hash)
+        .filter_map(|rt| log_payload_key(&rt.broker_role).map(|key| (rt, key)))
+        .filter(|(rt, key)| {
+            committed.contains(&rt.content_hash)
                 && match broker_id {
                     None => true,
                     // empty broker_id never matches a (non-empty) partition id — it is a smuggling signal the
                     // caller flags separately, exactly as the prior broker_id_of(rt) filter did.
                     Some(bid) => {
-                        ev_str(&records[rt.index], "grant_evidence", "broker_id")
+                        ev_str(&records[rt.index], key, "broker_id")
                             .filter(|b| !b.is_empty())
                             .as_deref()
                             == Some(bid)
                     }
                 }
         })
-        .filter_map(|rt| {
-            ev_int(&records[rt.index], "grant_evidence", "broker_seq")
+        .filter_map(|(rt, key)| {
+            ev_int(&records[rt.index], key, "broker_seq")
                 .filter(|seq| *seq >= 1)
                 .map(|seq| (seq, rt.content_hash.clone()))
         })
         .collect();
     log.sort_by_key(|(seq, _)| *seq);
     log
+}
+
+/// The evidence payload carrying a transparency-log entry's `broker_seq`/`broker_id`: `grant_evidence` for a grant,
+/// `void_evidence` for a `grant_void` tombstone, `None` for every other role (not a log entry).
+fn log_payload_key(role: &str) -> Option<&'static str> {
+    if role == BrokerRole::Broker.as_str() {
+        Some("grant_evidence")
+    } else if role == BrokerRole::Void.as_str() {
+        Some("void_evidence")
+    } else {
+        None
+    }
+}
+
+/// Report every `broker_seq` held by more than one DISTINCT committed log entry — a grant and a `grant_void`
+/// tombstone (a real grant claiming a voided seq), or two of either. `log` is seq-sorted. Returns true when clean.
+fn check_duplicate_seqs(log: &[(i64, String)], scope: &str, issues: &mut Vec<String>) -> bool {
+    let mut ok = true;
+    for w in log.windows(2) {
+        if w[0].0 == w[1].0 && w[0].1 != w[1].1 {
+            issues.push(format!(
+                "{scope}broker_seq {} is claimed by more than one committed record (a grant and a grant_void tombstone, or two of either) — duplicate seq (D6)",
+                w[0].0
+            ));
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// The domain tag every `grant_void` tombstone's `void_evidence` carries, so its canonical bytes (and therefore its
+/// signed `evidence_hash`) can never coincide with a `grant_evidence` payload's.
+const GRANT_VOID_DOMAIN: &str = "averin.broker.grant_void.v1";
+
+/// Validate every `grant_void` tombstone (ADR 0004 D6 operator remediation). A tombstone fills its `broker_seq` in the
+/// gapless log, so a malformed or unsigned one must never be accepted as doing so: its `void_evidence` must carry the
+/// domain tag, a `broker_seq >= 1`, and bind the record's own `project_id` and `record_id` (== the voided grant_id);
+/// its signed `evidence_hash` must re-derive from that payload; under a pinned broker key set it must verify; and no
+/// Broker grant anywhere in the bundle may carry the voided grant_id (a voided reservation that was nonetheless
+/// issued). Each failure is a hard issue. Returns the number of valid tombstones.
+fn check_grant_voids(
+    record_trust: &[RecordTrust],
+    records: &[CanonValue],
+    opts: &VerifyOptions,
+    issues: &mut Vec<String>,
+) -> usize {
+    let granted: BTreeSet<String> = record_trust
+        .iter()
+        .filter(|rt| rt.broker_role == BrokerRole::Broker.as_str())
+        .filter_map(|rt| ev_str(&records[rt.index], "grant_evidence", "grant_id"))
+        .collect();
+    let broker_keys_pinned =
+        !opts.broker_authority_keys.is_empty() || !opts.federated_broker_keys.is_empty();
+    let mut valid = 0usize;
+    for rt in record_trust
+        .iter()
+        .filter(|rt| rt.broker_role == BrokerRole::Void.as_str())
+    {
+        let rec = &records[rt.index];
+        let mut bad: Vec<&str> = Vec::new();
+        if ev_str(rec, "void_evidence", "domain").as_deref() != Some(GRANT_VOID_DOMAIN) {
+            bad.push("void_evidence.domain is not averin.broker.grant_void.v1");
+        }
+        if ev_int(rec, "void_evidence", "broker_seq").is_none_or(|seq| seq < 1) {
+            bad.push("void_evidence carries no broker_seq >= 1");
+        }
+        let gid = ev_str(rec, "void_evidence", "grant_id");
+        if gid.is_none() || gid.as_deref() != s(rec, "record_id").as_deref() {
+            bad.push("void_evidence.grant_id does not equal the tombstone's record_id");
+        }
+        if ev_str(rec, "void_evidence", "project_id") != s(rec, "project_id") {
+            bad.push("void_evidence.project_id does not equal the tombstone's project_id");
+        }
+        if !evidence_rederivable(rec, "void_evidence") {
+            bad.push(
+                "authority.evidence_hash is not re-derivable from extensions.broker.void_evidence",
+            );
+        }
+        if broker_keys_pinned
+            && !matches!(
+                rt.authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            )
+        {
+            bad.push("its authority does not verify under a pinned broker key");
+        }
+        if gid.as_ref().is_some_and(|g| granted.contains(g)) {
+            bad.push(
+                "a grant with the voided grant_id is also present (a voided reservation was issued)",
+            );
+        }
+        if bad.is_empty() {
+            valid += 1;
+        } else {
+            issues.push(format!(
+                "grant_void tombstone {} ({}): {} — it cannot fill its broker_seq (D6)",
+                rt.index,
+                rt.record_id,
+                bad.join("; ")
+            ));
+        }
+    }
+    valid
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2641,7 +3552,9 @@ fn compute_broker_trust(
     if cp_heads.is_empty() && full_log.is_empty() && !malformed_head {
         return "assumed".to_string();
     }
-    let mut ok = true;
+    // a grant claiming a voided seq (or any two distinct entries sharing one seq) is a hard violation of its own,
+    // named as such rather than only as the gap it also causes.
+    let mut ok = check_duplicate_seqs(&full_log, "", issues);
 
     // A verified checkpoint carrying a present-but-malformed broker_grant_head is a tampered/garbled D6 head:
     // a hard violation (and the activation signal above), never silently demoted to a benign headless cp.
@@ -2893,6 +3806,27 @@ fn compute_federation_trust(
         }
     }
 
+    // A committed grant_void tombstone fills a seq in ITS broker's partition (its signed void_evidence.broker_id).
+    // One without a broker_id fills no partition while federation is active — fail closed, like a grant.
+    for rt in record_trust {
+        if rt.broker_role != BrokerRole::Void.as_str() || !full_committed.contains(&rt.content_hash)
+        {
+            continue;
+        }
+        match ev_str(&records[rt.index], "void_evidence", "broker_id").filter(|b| !b.is_empty()) {
+            Some(b) => {
+                brokers.insert(b);
+            }
+            None => {
+                issues.push(format!(
+                    "committed grant_void tombstone {} carries no broker_id while federation is active — it fills no per-broker partition (M4)",
+                    rt.content_hash
+                ));
+                smuggled = true;
+            }
+        }
+    }
+
     // grant_id INJECTIVITY across the whole committed log: broker_id is part of the credential identity, so a
     // grant_id bound to >1 distinct (broker_id, broker_seq, content_hash) tuple is equivocated (one credential
     // identity double-bound, incl. the same grant_id reused under two brokers). Locally decidable (co-committed).
@@ -2982,6 +3916,9 @@ fn compute_federation_trust(
     // whose map lacks its head binds them without a head (suppression).
     let empty_root = grant_head_root(&[]);
     for b in &brokers {
+        if !check_duplicate_seqs(&log_for(dag_heads, b), &format!("broker '{b}': "), issues) {
+            suppressed.insert(b.clone());
+        }
         let mut entries: Vec<(i64, &GrantHead, &Vec<String>)> = Vec::new();
         for (cseq, _, map, frontier) in cp_fed_heads {
             match map.get(b) {
@@ -3091,6 +4028,22 @@ struct AttestationEval {
 struct RevocationEval {
     status: String, // absent | fresh | stale (revoked_present is set by the use loop)
     revoked: BTreeSet<String>, // disclosed revoked grant_ids (covered by the sig); empty unless validly signed
+    /// Plan 009: `Some` iff the list is a validly signed `averin.revocation.list.v2`.
+    v2: Option<V2Artifact>,
+    /// The list's signature and issuer verified (so non-membership is an authenticated statement).
+    signed: bool,
+}
+
+/// A validly signed v2 revocation artifact (list or Merkle root). Every grant it names remains
+/// revoked for current use. `usable` additionally requires a well-formed body, a parseable signed
+/// snapshot and an issuer key honored at the snapshot boundary time; only a usable artifact can
+/// support a historical positive.
+#[derive(Clone)]
+struct V2Artifact {
+    states: BTreeMap<String, RevState>,
+    snapshot: Option<Snapshot>,
+    usable: bool,
+    reason: Option<String>,
 }
 
 /// M5 (ADR 0005): evaluate a bundle's top-level `revocation_list` — a signed, time-bounded list of revoked
@@ -3102,6 +4055,11 @@ struct RevocationEval {
 /// issuer_kid matches the signer + in-window; `stale` iff validly signed but out of window (or malformed →
 /// issue pushed → !ok); `absent` iff no list or no pinned issuer. The returned `revoked` set is enforced
 /// (blocks in-window uses) by the caller ONLY when `status == "fresh"`.
+///
+/// Plan 009: a list carrying `format: "averin.revocation.list.v2"` is signed in the separate
+/// `averin.revocation.v2` domain and commits each grant's mode (`total` or `prospective` with a
+/// `cutoff_order`) plus the signed project and database snapshot. Every listed grant, whatever its
+/// mode, is in `revoked`, so current blocking is identical to v1. An unknown `format` fails closed.
 fn evaluate_revocation(
     bundle: &CanonValue,
     opts: &VerifyOptions,
@@ -3112,17 +4070,49 @@ fn evaluate_revocation(
     let absent = RevocationEval {
         status: "absent".to_string(),
         revoked: BTreeSet::new(),
-    };
-    let rl = match bundle.get("revocation_list") {
-        Some(a) if !a.is_null() => a,
-        _ => return absent,
+        v2: None,
+        signed: false,
     };
     if opts.revocation_keys.is_empty() {
-        return absent; // present but the verifier pinned no issuer -> not evaluated (revocations not honored)
+        return absent; // no pinned issuer -> not evaluated (a present list's revocations are not honored)
     }
+    let rl = match bundle.get("revocation_list") {
+        Some(a) if !a.is_null() => a,
+        // The operator PINNED a revocation authority, so revocation evidence is EXPECTED: a bundle carrying
+        // neither a `revocation_list` nor a `revocation_merkle_root` is `missing`, not the benign `absent` —
+        // otherwise deleting the (unsigned-at-bundle-level) revocation artifacts would be a free downgrade that
+        // un-blocks every revoked use while the capstone stays reachable. `missing` blocks the capstone. (A
+        // Merkle-mode bundle carries only the root, so the disclosed list is legitimately absent there.)
+        _ => {
+            let has_merkle_root = bundle
+                .get("revocation_merkle_root")
+                .is_some_and(|r| !r.is_null());
+            return RevocationEval {
+                status: if has_merkle_root { "absent" } else { "missing" }.to_string(),
+                revoked: BTreeSet::new(),
+                v2: None,
+                signed: false,
+            };
+        }
+    };
     let stale_empty = || RevocationEval {
         status: "stale".to_string(),
         revoked: BTreeSet::new(),
+        v2: None,
+        signed: false,
+    };
+    let v2_format = match rl.get("format") {
+        None => false,
+        Some(CanonValue::Str(f)) if f == REVOCATION_LIST_V2_FORMAT => true,
+        Some(_) => {
+            issues.push("revocation_list: unsupported format (plan 009 fail-closed)".into());
+            return stale_empty();
+        }
+    };
+    let domain = if v2_format {
+        REVOCATION_LIST_V2_DOMAIN
+    } else {
+        "averin.revocation.v1"
     };
 
     // 1. signature over the canonical list minus `sig`, under a pinned issuer (mirrors evaluate_attestation).
@@ -3145,7 +4135,7 @@ fn evaluate_revocation(
     let signer = match opts
         .revocation_keys
         .iter()
-        .find(|vk| crate::sign::verify("averin.revocation.v1", &digest, sig, vk).is_ok())
+        .find(|vk| crate::sign::verify(domain, &digest, sig, vk).is_ok())
     {
         Some(vk) => vk,
         None => {
@@ -3162,16 +4152,39 @@ fn evaluate_revocation(
         return stale_empty();
     }
 
-    // 2. the disclosed revoked grant_ids — covered by the verified sig above.
-    let revoked: BTreeSet<String> = rl
-        .get("revoked_grant_ids")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    // 2. the disclosed revoked grant_ids — covered by the verified sig above. A v2 list names every
+    // revoked grant exactly once in `revocations`; all of them block current use.
+    let (revoked, v2): (BTreeSet<String>, Option<V2Artifact>) = if v2_format {
+        let snapshot = temporal::parse_snapshot(rl);
+        let entries = temporal::parse_v2_entries(rl, snapshot.as_ref().ok().map(|s| s.watermark));
+        let artifact = v2_artifact(
+            signer,
+            opts,
+            entries.states,
+            snapshot,
+            entries.well_formed && rl.get("revoked_grant_ids").is_none(),
+            "revocation_list",
+            issues,
+        );
+        // A malformed v2 list that also carries legacy `revoked_grant_ids` is unusable for
+        // history, but every grant it names under the signature still blocks current use.
+        let mut ids = entries.ids;
+        if let Some(extra) = rl.get("revoked_grant_ids").and_then(|v| v.as_array()) {
+            ids.extend(extra.iter().filter_map(|x| x.as_str().map(String::from)));
+        }
+        (ids, Some(artifact))
+    } else {
+        let ids = rl
+            .get("revoked_grant_ids")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (ids, None)
+    };
 
     // 3. freshness window (canonical ISO, compared lexicographically against the anchored TSA time).
     let issued_at = rl
@@ -3185,6 +4198,8 @@ fn evaluate_revocation(
     let stale_with_list = || RevocationEval {
         status: "stale".to_string(),
         revoked: revoked.clone(),
+        v2: v2.clone(),
+        signed: true,
     };
     if issued_at.is_empty()
         || not_after.is_empty()
@@ -3227,20 +4242,142 @@ fn evaluate_revocation(
     RevocationEval {
         status: if fresh { "fresh" } else { "stale" }.to_string(),
         revoked,
+        v2,
+        signed: true,
+    }
+}
+
+/// Plan 009: build the v2 artifact summary. A body/snapshot defect is reported as an issue (the
+/// artifact is signed, so it is producer malfunction) and makes the artifact unusable for a
+/// historical positive; its named revocations still block current use.
+fn v2_artifact(
+    signer: &VerifyingKey,
+    opts: &VerifyOptions,
+    states: BTreeMap<String, RevState>,
+    snapshot: Result<Snapshot, String>,
+    well_formed: bool,
+    label: &str,
+    issues: &mut Vec<String>,
+) -> V2Artifact {
+    let mut reason = None;
+    let snapshot = match snapshot {
+        Ok(s) => Some(s),
+        Err(e) => {
+            reason = Some(format!("snapshot: {e}"));
+            None
+        }
+    };
+    if !well_formed && reason.is_none() {
+        reason = Some("malformed revocation entries".into());
+    }
+    if let Some(s) = &snapshot {
+        if !role_key_honored(signer, &opts.role_key_status, |rks| {
+            honored_clean_rotation(rks, &s.boundary_time)
+        }) && reason.is_none()
+        {
+            reason = Some("issuer key is rotated/compromised and the snapshot is not provably before that status change".into());
+        }
+    }
+    if let Some(r) = &reason {
+        issues.push(format!(
+            "{label}: v2 artifact is unusable for historical ordering — {r} (plan 009)"
+        ));
+    }
+    V2Artifact {
+        usable: reason.is_none(),
+        states,
+        snapshot,
+        reason,
+    }
+}
+
+/// Plan 009: the snapshot identity the historical judgment is bound to, and whether it met the
+/// caller's policy. `verified` is `Some` only under `db_serialized_v1` with every check passed.
+struct SnapshotEval {
+    status: &'static str,
+    reason: Option<String>,
+    identity: Option<Snapshot>,
+    verified: Option<Snapshot>,
+}
+
+/// Evaluate the signed v2 snapshot against the caller's policy: exactly one snapshot identity
+/// (a v2 list and a v2 Merkle root must agree), a usable signed artifact, the bundle's project,
+/// `boundary_time <= evaluation_time`, age within the caller's maximum and a watermark at least
+/// the caller's minimum. No bundle field can select or relax any of these.
+fn evaluate_snapshot(
+    policy: &TemporalPolicy,
+    revocation: &RevocationEval,
+    merkle: &MerkleRevEval,
+    project_id: Option<&str>,
+) -> SnapshotEval {
+    let artifacts: Vec<&V2Artifact> = [revocation.v2.as_ref(), merkle.v2.as_ref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let identity = artifacts.iter().find_map(|a| a.snapshot.clone());
+    let result = |status: &'static str, reason: Option<String>| SnapshotEval {
+        status,
+        reason,
+        identity: identity.clone(),
+        verified: None,
+    };
+    if artifacts.is_empty() {
+        return result("absent", None);
+    }
+    if let Some(a) = artifacts.iter().find(|a| !a.usable) {
+        return result("unverified", a.reason.clone());
+    }
+    let Some(snap) = identity.clone() else {
+        return result("unverified", Some("no signed snapshot".into()));
+    };
+    if artifacts.iter().any(|a| a.snapshot.as_ref() != Some(&snap)) {
+        return result(
+            "unverified",
+            Some("the v2 list and v2 Merkle root sign different snapshots".into()),
+        );
+    }
+    let TemporalPolicy::DbSerializedV1(p) = policy else {
+        return result("not_evaluated", None);
+    };
+    if project_id != Some(snap.project_id.as_str()) {
+        return result(
+            "unverified",
+            Some("snapshot project does not match the bundle".into()),
+        );
+    }
+    if snap.boundary_ms > p.evaluation_ms() {
+        return result(
+            "unverified",
+            Some("snapshot boundary_time is after the caller's evaluation_time".into()),
+        );
+    }
+    if p.evaluation_ms() - snap.boundary_ms > p.max_snapshot_age_seconds() * 1000 {
+        return result(
+            "stale",
+            Some("snapshot is older than the caller's max_snapshot_age_seconds".into()),
+        );
+    }
+    if snap.watermark < p.min_authorization_watermark() {
+        return result(
+            "unverified",
+            Some("snapshot watermark is below the caller's min_authorization_watermark".into()),
+        );
+    }
+    SnapshotEval {
+        status: "verified",
+        reason: None,
+        identity: Some(snap.clone()),
+        verified: Some(snap),
     }
 }
 
 /// Parse a 64-char lowercase-hex string into 32 raw bytes (the Merkle leaf VALUES / audit-path nodes are raw
 /// hashes, not the `sha256:` content-hash form). Fail-closed (`None`) on wrong length or a non-hex digit.
+/// Decodes BYTE-wise over ASCII lowercase hex only: these strings ride the UNSIGNED `revocation_proofs` map, and
+/// the former `from_str_radix(&s[2i..2i+2])` both PANICKED on a multibyte char straddling a slice boundary (a
+/// 64-byte "€aaa…") and accepted non-canonical pairs like "+a" / uppercase.
 fn parse_hex32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
-    }
-    Some(out)
+    crate::hashx::hex32(s)
 }
 
 /// Outcome of evaluating a top-level `revocation_merkle_root` (M5 Merkle-non-disclosure mode).
@@ -3248,6 +4385,46 @@ struct MerkleRevEval {
     status: String,         // absent | fresh | stale
     root: Option<[u8; 32]>, // the signed Merkle root (raw 32 bytes); Some iff validly signed
     leaf_count: usize,      // the tree's leaf count (incl. the 2 sentinels), covered by the sig
+    /// Plan 009: `Some` iff the root is a validly signed `averin.revocation.merkleroot.v2`, whose
+    /// leaves commit each grant's mode and cutoff. Its `states` map is empty (non-disclosure).
+    v2: Option<V2Artifact>,
+}
+
+impl MerkleRevEval {
+    /// The per-grant proof verdict under this root's version. `None` when no root is present.
+    fn proof(&self, proofs: Option<&CanonValue>, gid: &str) -> Option<ProofV2> {
+        let root = self.root.as_ref()?;
+        let proof = proofs.and_then(|m| m.get(gid));
+        Some(match (&self.v2, proof) {
+            (_, None) => ProofV2::Unproven,
+            (None, Some(p)) => match check_revocation_proof(p, gid, root, self.leaf_count) {
+                ProofVerdict::NotRevoked => ProofV2::NotRevoked,
+                ProofVerdict::Revoked => ProofV2::Revoked(RevState::Total),
+                ProofVerdict::Unproven => ProofV2::Unproven,
+            },
+            (Some(v2), Some(p)) => match &v2.snapshot {
+                Some(snap) => temporal::check_revocation_proof_v2(
+                    p,
+                    gid,
+                    root,
+                    self.leaf_count,
+                    snap.watermark,
+                ),
+                // Without a signed watermark a cutoff cannot be bounded; a membership proof
+                // still blocks as total, and nothing proves non-membership.
+                None => match temporal::check_revocation_proof_v2(
+                    p,
+                    gid,
+                    root,
+                    self.leaf_count,
+                    i64::MAX,
+                ) {
+                    ProofV2::Revoked(_) => ProofV2::Revoked(RevState::Total),
+                    _ => ProofV2::Unproven,
+                },
+            },
+        })
+    }
 }
 
 /// M5 Merkle-non-disclosure revocation (ADR 0005): evaluate a bundle's top-level `revocation_merkle_root` — a
@@ -3269,6 +4446,7 @@ fn evaluate_merkle_revocation(
         status: "absent".to_string(),
         root: None,
         leaf_count: 0,
+        v2: None,
     };
     let rr = match bundle.get("revocation_merkle_root") {
         Some(a) if !a.is_null() => a,
@@ -3281,6 +4459,21 @@ fn evaluate_merkle_revocation(
         status: "stale".to_string(),
         root: None,
         leaf_count: 0,
+        v2: None,
+    };
+    // Plan 009: the v2 root is signed in its own domain; an unknown format fails closed.
+    let v2_format = match rr.get("format") {
+        None => false,
+        Some(CanonValue::Str(f)) if f == MERKLE_ROOT_V2_FORMAT => true,
+        Some(_) => {
+            issues.push("revocation_merkle_root: unsupported format (plan 009 fail-closed)".into());
+            return stale();
+        }
+    };
+    let domain = if v2_format {
+        MERKLE_ROOT_V2_DOMAIN
+    } else {
+        "averin.broker.revocation.merkleroot.v1"
     };
 
     let sig = match rr.get("sig").and_then(|v| v.as_str()) {
@@ -3299,9 +4492,11 @@ fn evaluate_merkle_revocation(
     };
     obj.retain(|(k, _)| k != "sig");
     let digest = crate::hashx::sha256_prefixed(CanonValue::Object(obj).serialize().as_bytes());
-    let signer = match opts.revocation_keys.iter().find(|vk| {
-        crate::sign::verify("averin.broker.revocation.merkleroot.v1", &digest, sig, vk).is_ok()
-    }) {
+    let signer = match opts
+        .revocation_keys
+        .iter()
+        .find(|vk| crate::sign::verify(domain, &digest, sig, vk).is_ok())
+    {
         Some(vk) => vk,
         None => {
             issues.push("revocation_merkle_root: sig does not verify under any pinned revocation_keys issuer (M5)".into());
@@ -3337,6 +4532,17 @@ fn evaluate_merkle_revocation(
             return stale();
         }
     };
+    let v2 = v2_format.then(|| {
+        v2_artifact(
+            signer,
+            opts,
+            BTreeMap::new(),
+            temporal::parse_snapshot(rr),
+            true,
+            "revocation_merkle_root",
+            issues,
+        )
+    });
 
     let issued_at = rr
         .get("issued_at")
@@ -3350,6 +4556,7 @@ fn evaluate_merkle_revocation(
         status: "stale".to_string(),
         root: Some(root),
         leaf_count,
+        v2: v2.clone(),
     };
     if issued_at.is_empty()
         || not_after.is_empty()
@@ -3388,6 +4595,7 @@ fn evaluate_merkle_revocation(
         status: if fresh { "fresh" } else { "stale" }.to_string(),
         root: Some(root),
         leaf_count,
+        v2,
     }
 }
 
@@ -3400,8 +4608,16 @@ enum ProofVerdict {
 }
 
 /// Parse an audit path: an array of 64-char-hex node hashes. Fail-closed on any malformed entry.
+/// Longest accepted revocation Merkle proof path. A path of 64 siblings already covers 2^64 leaves, more
+/// than any tree a `usize` leaf count can index, so a longer path can never re-derive a real root; it is
+/// rejected before any hashing so an oversized bundle costs nothing.
+const MAX_REVOCATION_PATH: usize = 64;
+
 fn parse_hex32_path(v: Option<&CanonValue>) -> Option<Vec<[u8; 32]>> {
     let arr = v?.as_array()?;
+    if arr.len() > MAX_REVOCATION_PATH {
+        return None;
+    }
     let mut out = Vec::with_capacity(arr.len());
     for e in arr {
         out.push(parse_hex32(e.as_str()?)?);
@@ -3673,6 +4889,12 @@ fn evaluate_attestation(
         .filter(|m| !m.is_null())
         .map(|m| crate::hashx::sha256_prefixed(m.serialize().as_bytes()))
         .unwrap_or_default();
+    // M5 Merkle mode: the same strip-downgrade defense for the signed `revocation_merkle_root` ("" when absent).
+    let revocation_merkle_digest = bundle
+        .get("revocation_merkle_root")
+        .filter(|m| !m.is_null())
+        .map(|m| crate::hashx::sha256_prefixed(m.serialize().as_bytes()))
+        .unwrap_or_default();
     let head_root = latest.3.clone().unwrap_or_else(|| grant_head_root(&[]));
     // `authority_kids` binds the deployment's GRANT/USE authorities — the broker and resource roles ONLY.
     // taxonomy_keys is deliberately NOT folded in: the operation taxonomy is a separate verifier-pinned
@@ -3719,10 +4941,20 @@ fn evaluate_attestation(
     // #3: enforce the bound revocation_list digest ONLY when the (signed) subject carries the field — so a
     // pre-this-change attestation (no field) stays compatible, while a new attestation that committed a list
     // mismatches if the list is later stripped. The attacker cannot drop the subject field (it is sig-covered).
-    if sub.get("revocation_digest").is_some()
+    // When the auditor PINS revocation keys, the field is REQUIRED (an attestation that never committed to the
+    // revocation evidence cannot vouch that none was stripped).
+    if (sub.get("revocation_digest").is_some() || !opts.revocation_keys.is_empty())
         && s_str(sub, "revocation_digest") != revocation_digest
     {
         mism.push("revocation_digest");
+    }
+    // The Merkle-mode root is bound the same way when the (signed) subject carries `revocation_merkle_digest`.
+    // It stays optional even under pinned revocation keys, since existing producers do not emit it; the
+    // `missing` revocation status covers stripping BOTH artifacts regardless.
+    if sub.get("revocation_merkle_digest").is_some()
+        && s_str(sub, "revocation_merkle_digest") != revocation_merkle_digest
+    {
+        mism.push("revocation_merkle_digest");
     }
     if !mism.is_empty() {
         issues.push(format!("deployment_attestation: subject does not match the bundle under review — substitution/replay (D7): {}", mism.join(", ")));
@@ -3740,7 +4972,8 @@ fn evaluate_attestation(
 /// authority self-minting a freshness timestamp inside its own window; an approver that is also the broker
 /// self-approving a grant; a broker signing its own revocation list). Separately, `authority_keys` MAY equal
 /// `broker_authority_keys` (the self-host model — Go pins them equal) but MUST be disjoint from every
-/// NON-broker role (T7). Any overlap is a FATAL configuration error: abort before evaluating any record over an
+/// NON-broker role (T7); the pinned record-signing keys (`trusted_keys`) follow the same rule (broker overlap
+/// allowed, every non-broker role disjoint). Any overlap is a FATAL configuration error: abort before evaluating any record over an
 /// ambiguous key universe. Returns `Some(report)` — the fatal report to abort with — on any overlap, or `None`
 /// to proceed. (VerifyingKey equality is raw-bytes, which also settles the derived key id.)
 fn check_role_disjointness(
@@ -3796,6 +5029,29 @@ fn check_role_disjointness(
             ));
         }
     }
+    // The pinned RECORD-SIGNING keys (`trusted_keys` / opts `signing_keys`) must be disjoint from every
+    // NON-broker role too (docs/dev/SECURITY.md "Role separation"). The sharpest case is TSA: a thief holding a
+    // compromised signing key that is ALSO a pinned TSA key self-anchors every checkpoint "before" the
+    // compromise, salvaging all its forgeries (RCP §10.2). As with `authority_keys`, the broker overlap stays
+    // allowed — the broker recording key IS the record-signing key by design (ADR 0002), and self-host pins the
+    // generic `authority_keys` equal to it.
+    if let Some(signing) = &opts.trusted_keys {
+        for (name, set) in [
+            ("resource_authority_keys", &opts.resource_authority_keys),
+            ("taxonomy_keys", &opts.taxonomy_keys),
+            ("attestation_keys", &opts.attestation_keys),
+            ("trusted_tsa_keys", &opts.trusted_tsa_keys),
+            ("cosig_approver_keys", &opts.cosig_approver_keys),
+            ("revocation_keys", &opts.revocation_keys),
+        ] {
+            if signing.iter().any(|t| set.contains(&t.vk)) {
+                return Some(fatal_config_report(
+                    project_id,
+                    &format!("signing_keys and {name} must be disjoint (a record-signing key must not also act in a non-broker role) — fatal configuration error"),
+                ));
+            }
+        }
+    }
     None
 }
 
@@ -3838,11 +5094,16 @@ fn build_key_store(
 /// bounds the existence time of all its causal ancestors, and `agent_ts` is untrusted regardless). A
 /// non-canonical `anchored_ts` breaks the lexical==chronological assumption (RFC3339 fixed-ms UTC sorts
 /// lexically iff canonical), so it is rejected rather than silently mis-ordered.
-fn check_anchor_backdating(anchored: &[(i64, String, Vec<String>)], issues: &mut Vec<String>) {
+fn check_anchor_backdating(
+    anchored: &[(i64, String, Vec<String>)],
+    issues: &mut Vec<String>,
+) -> bool {
     let mut sorted_anchored = anchored.to_vec();
     sorted_anchored.sort_by_key(|(seq, _, _)| *seq);
+    let mut valid = true;
     for (seq, ts, _) in &sorted_anchored {
         if !is_canonical_ts(ts) {
+            valid = false;
             issues.push(format!(
                 "checkpoint {seq}: anchor time {ts:?} is not a canonical RCP timestamp — the backdating ordering check requires canonical times (threat #3)"
             ));
@@ -3850,16 +5111,20 @@ fn check_anchor_backdating(anchored: &[(i64, String, Vec<String>)], issues: &mut
     }
     for w in sorted_anchored.windows(2) {
         if is_canonical_ts(&w[0].1) && is_canonical_ts(&w[1].1) && w[1].1 < w[0].1 {
+            valid = false;
             issues.push(format!(
                 "anchor time decreased across checkpoints {} -> {} (backdating, threat #3)",
                 w[0].0, w[1].0
             ));
         }
     }
+    valid
 }
 
 pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyReport {
     let mut issues: Vec<String> = Vec::new();
+    let mut semantic_record_conflict = false;
+    let mut checkpoint_project_conflict = false;
     let project_id = s(bundle, "project_id");
 
     // Seam 1 — role-key disjointness (R2/D4/D7/M5/M6). A FATAL config error aborts here before any record is
@@ -3895,6 +5160,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     if bundle.get("records").is_none() {
         issues.push("bundle has no records".into());
     }
+    // The project every record and checkpoint must be bound to. A bundle that OMITS the top-level `project_id`
+    // must not skip the binding (records/checkpoints from different projects could then be spliced into one
+    // bundle and verify clean): derive it from the first record (else checkpoint) carrying one, so the per-record
+    // and per-checkpoint checks below still require ONE shared project. The report and the D7 attestation
+    // subject keep using the bundle's STATED `project_id` (an absent one never satisfies the attestation).
+    let binding_project_id: Option<String> = project_id.clone().or_else(|| {
+        records
+            .iter()
+            .chain(checkpoints.iter())
+            .find_map(|v| s(v, "project_id"))
+    });
 
     // Seam 2 — the bundle's signing-key store ((signing_key_id, key_epoch) -> KeyEntry).
     let keys = build_key_store(key_entries, &mut issues);
@@ -3912,7 +5188,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut pending: Vec<Pending> = Vec::with_capacity(records.len());
     for (i, rec) in records.iter().enumerate() {
         let mut notes = Vec::new();
-        let project_ok = match &project_id {
+        let project_ok = match &binding_project_id {
             Some(pid) => {
                 let m = s(rec, "project_id").as_deref() == Some(pid.as_str());
                 if !m {
@@ -4023,6 +5299,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 }
             }
             BrokerRole::Broker => &opts.broker_authority_keys,
+            // A grant_void tombstone is the broker's statement, so it elevates only under the broker key set of
+            // its partition (never a cross_broker_cert: voiding is not delegable).
+            BrokerRole::Void if !opts.federated_broker_keys.is_empty() => {
+                match ev_str(rec, "void_evidence", "broker_id").filter(|b| !b.is_empty()) {
+                    Some(bid) => opts
+                        .federated_broker_keys
+                        .get(&bid)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]),
+                    None => &opts.broker_authority_keys,
+                }
+            }
+            BrokerRole::Void => &opts.broker_authority_keys,
             BrokerRole::Resource => &opts.resource_authority_keys,
             BrokerRole::None => &opts.trusted_authority_keys,
         };
@@ -4040,18 +5329,25 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             .filter_map(|vk| opts.role_key_status.get(&vk.to_bytes()).cloned())
             .collect();
         // A grant verified ONLY because a cross_broker_cert vouched for its (unpinned) subject key is `transitive`.
-        let transitive_authority =
-            cross_cert_pair.is_some() && authority == AuthorityTrust::Verified;
+        let transitive_authority = cross_cert_pair.is_some()
+            && matches!(
+                authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            );
         if authority == AuthorityTrust::Failed {
             notes.push(format!(
                 "authority claims a verified source but its evidence_sig did not verify under a trusted {} authority key",
                 broker_role.as_str()
             ));
         }
+        if authority == AuthorityTrust::LegacyUnbound {
+            notes.push("historical v2 authority signature verifies, but does not bind the semantic record body".into());
+        }
         // R2 rule 4: a record that CLAIMS a Tier-B role (carries extensions.broker.kind) but does not
         // classify to a recognized (kind, enforcement_point) role is a fail-closed verification
         // failure — surfaced as an issue, never a silent drop that could let a mislabeled use escape.
         if claims_role && broker_role == BrokerRole::None {
+            semantic_record_conflict = true;
             let msg = format!(
                 "record {i}: extensions.broker.kind set but (kind, enforcement_point) is not a recognized broker/resource role (R2 fail-closed)"
             );
@@ -4067,13 +5363,16 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // which has no govder equivalent) so an already-Failed/Declared/Unverifiable record does
         // not double-report; gated on extensions.govder present so no non-govder record is
         // affected.
-        if authority == AuthorityTrust::Verified
-            && rec
-                .get("extensions")
-                .and_then(|e| e.get("govder"))
-                .is_some()
+        if matches!(
+            authority,
+            AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+        ) && rec
+            .get("extensions")
+            .and_then(|e| e.get("govder"))
+            .is_some()
             && !govder_evidence_rederivable(rec)
         {
+            semantic_record_conflict = true;
             let msg = format!(
                 "record {i}: authority.evidence_hash is not re-derivable from the govder record's own fields (payload absent or divergent — R1, threat #4)"
             );
@@ -4103,12 +5402,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // record_ids must be unique (two distinct records may not share a record_id). This keeps
     // `record_id` a sound binding handle for authority evidence (a verified evidence triple bound to
     // a record_id cannot be copied onto a different record without colliding here).
+    let mut duplicate_record_id = false;
     {
         let mut by_id: BTreeMap<String, String> = BTreeMap::new();
         for rec in records.iter() {
             if let (Some(id), Some(ch)) = (s(rec, "record_id"), s(rec, "content_hash")) {
                 if let Some(prev) = by_id.insert(id.clone(), ch.clone()) {
                     if prev != ch {
+                        duplicate_record_id = true;
                         issues.push(format!("duplicate record_id '{id}' on distinct records"));
                     }
                 }
@@ -4132,6 +5433,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // ---- 4. checkpoints + anchors ----
     let mut checkpoints_verified = 0usize;
     let mut checkpoints_anchored = 0usize;
+    let mut checkpoints_anchors_attached = 0usize;
     // (seq, anchored_ts, frontier) for each checkpoint with a verified anchor
     let mut anchored: Vec<(i64, String, Vec<String>)> = Vec::new();
     // D7: (seq, checkpoint_hash, anchored_ts, head cumulative_root) of each verified+anchored checkpoint,
@@ -4152,9 +5454,119 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // head — pre-D6 checkpoints never carry the field, so it is a D6 activation signal (and a violation),
     // distinct from a checkpoint with no head field at all. Tracked so D6 cannot be dodged by garbling it.
     let mut verified_malformed_head = false;
+    // The frontiers of EVERY verified (signature-checked, key-honored) checkpoint, anchored or not — the
+    // `committed` set the Tier-B join evaluates its NEGATIVE findings over (see the R3 note at the join).
+    let mut verified_frontiers: Vec<String> = Vec::new();
+    // Pre-pass: each checkpoint's seal check and (on a sealed checkpoint) anchor check, done ONCE up front so the
+    // RCP §10.2 key-status gate below can see anchors on LATER checkpoints before any checkpoint is accepted.
+    let any_tsa_trust = !opts.trusted_tsa_keys.is_empty() || !opts.trusted_tsa_spki.is_empty();
+    let anchor_trust = crate::anchor::AnchorTrust {
+        test_anchor_keys: opts.trusted_tsa_keys.clone(),
+        rfc3161_tsa_spki: opts.trusted_tsa_spki.clone(),
+    };
+    let cp_pre: Vec<CpPre> = checkpoints
+        .iter()
+        .map(|cp| {
+            let entry = cp
+                .get("key")
+                .and_then(|k| s(k, "signing_key_id"))
+                .zip(
+                    cp.get("key")
+                        .and_then(|k| k.get("key_epoch"))
+                        .and_then(|v| v.as_int()),
+                )
+                .and_then(|(id, ep)| keys.get(&(id, ep)))
+                .filter(|e| !keys_externally_pinned || is_trusted(&e.vk));
+            let seal = entry.map(|e| verify_checkpoint_sealed(cp, &e.vk));
+            let sealed = matches!(seal, Some(Ok(())));
+            // RCP §10.2 applied to the CHECKPOINT key exactly as to a record key: the worst of the checkpoint's
+            // own asserted key_status (when present), the bundle key entry's, and the authoritative pinned status;
+            // under pinning ONLY the pinned compromise time counts (a bundle cannot future-date it).
+            let gate = entry.and_then(|e| {
+                let pin = pinned_for(&e.vk);
+                let mut eff = e.status.clone();
+                if let Some(cs) = cp.get("key").and_then(|k| s(k, "key_status")) {
+                    eff = worst_status(&eff, &cs);
+                }
+                if let Some(ps) = pin.and_then(|t| t.status.as_deref()) {
+                    eff = worst_status(&eff, ps);
+                }
+                if matches!(eff.as_str(), "active" | "retired") {
+                    return None;
+                }
+                let changed_at = if keys_externally_pinned {
+                    pin.and_then(|t| t.status_changed_at.clone())
+                } else {
+                    e.status_changed_at.clone()
+                };
+                Some((eff, changed_at))
+            });
+            // Only an anchor on a SEALED checkpoint can contribute (else an attacker pairs an unsigned
+            // checkpoint — arbitrary frontier — with a valid TSA token).
+            let anchor = match cp.get("anchor") {
+                Some(a) if sealed && any_tsa_trust => Some(
+                    verify_anchor_keyed(
+                        &s(cp, "checkpoint_hash").unwrap_or_default(),
+                        a,
+                        &anchor_trust,
+                    )
+                    .map_err(|e| e.to_string()),
+                ),
+                _ => None,
+            };
+            CpPre { seal, gate, anchor }
+        })
+        .collect();
+    // An anchor honored under the TSA-key rotation rule (ADR 0006 §1 — see the main loop) — its genTime.
+    let honored_anchor_ts = |pre: &CpPre| -> Option<String> {
+        match &pre.anchor {
+            Some(Ok((ts, tsa_vk))) => tsa_vk
+                .is_none_or(|vk| {
+                    role_key_honored(&vk, &opts.role_key_status, |rks| {
+                        honored_clean_rotation(rks, ts)
+                    })
+                })
+                .then(|| ts.clone()),
+            _ => None,
+        }
+    };
+    // Earliest honored anchor time that COMMITS each checkpoint: its own anchor, or one on a LATER sealed
+    // checkpoint whose `prev_checkpoint_hash` chain reaches it (an anchor over a checkpoint hash commits every
+    // earlier checkpoint hash it chains to — the anchor proves those bytes existed at genTime, whoever signed the
+    // later checkpoint). Anchors are visited in ascending time and each walk stops at a checkpoint already dated,
+    // so every checkpoint is dated at most once (linear, cycle-safe).
+    let mut cp_committed_at: Vec<Option<String>> = vec![None; checkpoints.len()];
+    {
+        let mut by_hash: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, cp) in checkpoints.iter().enumerate() {
+            if matches!(cp_pre[i].seal, Some(Ok(()))) {
+                if let Some(h) = s(cp, "checkpoint_hash") {
+                    by_hash.entry(h).or_insert(i);
+                }
+            }
+        }
+        let mut dated: Vec<(String, usize)> = cp_pre
+            .iter()
+            .enumerate()
+            .filter_map(|(i, pre)| honored_anchor_ts(pre).map(|ts| (ts, i)))
+            .filter(|(ts, _)| is_canonical_ts(ts))
+            .collect();
+        dated.sort();
+        for (ts, j) in dated {
+            let mut k = j;
+            while cp_committed_at[k].is_none() {
+                cp_committed_at[k] = Some(ts.clone());
+                match s(&checkpoints[k], "prev_checkpoint_hash").and_then(|h| by_hash.get(&h)) {
+                    Some(&prev) => k = prev,
+                    None => break,
+                }
+            }
+        }
+    }
     for (i, cp) in checkpoints.iter().enumerate() {
-        if let Some(pid) = &project_id {
+        if let Some(pid) = &binding_project_id {
             if s(cp, "project_id").as_deref() != Some(pid.as_str()) {
+                checkpoint_project_conflict = true;
                 issues.push(format!("checkpoint {i} project_id does not match bundle"));
             }
         }
@@ -4177,47 +5589,46 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         let fed_head_field_present = cp.get("broker_grant_heads").is_some();
         let cp_fed_head = parse_grant_heads_map(cp);
         let mut this_anchored = false;
-        let vk = cp
-            .get("key")
-            .and_then(|k| s(k, "signing_key_id"))
-            .zip(
-                cp.get("key")
-                    .and_then(|k| k.get("key_epoch"))
-                    .and_then(|v| v.as_int()),
-            )
-            .and_then(|(id, ep)| keys.get(&(id, ep)))
-            .filter(|e| !keys_externally_pinned || is_trusted(&e.vk))
-            .map(|e| e.vk);
-        let cp_verified = match vk {
-            Some(vk) => match verify_checkpoint_sealed(cp, &vk) {
-                Ok(()) => {
-                    checkpoints_verified += 1;
-                    true
+        let pre = &cp_pre[i];
+        let cp_verified = match (&pre.seal, &pre.gate) {
+            (Some(Ok(())), None) => true,
+            // RCP §10.2 for CHECKPOINTS (threat #9 omission): a checkpoint signed by a revoked/compromised key is
+            // trusted ONLY if a verified anchor at/before the key's status change commits it. Otherwise a thief
+            // holding the key could drop a session and re-sign a fresh, internally-consistent chain — the record
+            // rule alone never saw it, since the surviving records may be signed by a different, active key.
+            (Some(Ok(())), Some((status, changed_at))) => {
+                let predates = changed_at.as_deref().is_some_and(|c| {
+                    is_canonical_ts(c) && cp_committed_at[i].as_deref().is_some_and(|t| t <= c)
+                });
+                if !predates {
+                    issues.push(format!(
+                        "checkpoint {i}: signed by a {status} key and NOT anchored before its status change — untrusted (RCP §10.2, threat #9)"
+                    ));
                 }
-                Err(e) => {
-                    issues.push(format!("checkpoint {i} invalid: {e}"));
-                    false
-                }
-            },
-            None => {
+                predates
+            }
+            (Some(Err(e)), _) => {
+                issues.push(format!("checkpoint {i} invalid: {e}"));
+                false
+            }
+            (None, _) => {
                 issues.push(format!("checkpoint {i}: no trusted public key to verify"));
                 false
             }
         };
-        if let Some(anchor) = cp.get("anchor") {
-            checkpoints_anchored += 1;
-            let any_tsa_trust =
-                !opts.trusted_tsa_keys.is_empty() || !opts.trusted_tsa_spki.is_empty();
+        if cp_verified {
+            checkpoints_verified += 1;
+            verified_frontiers.extend(cp_frontier.iter().cloned());
+        }
+        if cp.get("anchor").is_some() {
+            // PRESENCE only — `checkpoints_anchored` is incremented below solely for an anchor that verified.
+            checkpoints_anchors_attached += 1;
             // Only an anchor on a *verified* checkpoint can contribute to trust — otherwise an
             // attacker pairs an unsigned checkpoint (arbitrary frontier) with a valid TSA token.
-            if cp_verified && any_tsa_trust {
-                let anchor_trust = crate::anchor::AnchorTrust {
-                    test_anchor_keys: opts.trusted_tsa_keys.clone(),
-                    rfc3161_tsa_spki: opts.trusted_tsa_spki.clone(),
-                };
+            if cp_verified {
                 let cph = s(cp, "checkpoint_hash").unwrap_or_default();
-                match verify_anchor_keyed(&cph, anchor, &anchor_trust) {
-                    Ok((ts, tsa_vk)) => {
+                match &pre.anchor {
+                    Some(Ok((ts, _))) => {
                         // ADR 0006 §1 — TSA-key rotation (the foundational case). The TSA MINTS the genTime, so a
                         // STOLEN key can forge a token with ANY genTime (backdating) — "genTime <= T" cannot be
                         // trusted. So a `compromised`/`revoked` TSA key's anchors are NEVER honored (the
@@ -4226,27 +5637,24 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         // would otherwise bypass every other rotation gate). A cleanly `rotated` TSA key's
                         // anchors are honored only for genTime at/before the rotation. (RFC 3161 SPKIs are not
                         // ed25519 role keys — tsa_vk is None there — so they pass; their rotation is out of scope.)
-                        let tsa_honored = tsa_vk.is_none_or(|vk| {
-                            role_key_honored(&vk, &opts.role_key_status, |rks| {
-                                honored_clean_rotation(rks, &ts)
-                            })
-                        });
-                        if !tsa_honored {
+                        if honored_anchor_ts(pre).is_none() {
                             issues.push(format!(
                                 "checkpoint {i} anchor: TSA key is rotated/compromised and the anchor genTime {ts} is not provably before that status change — anchor NOT trusted (ADR 0006 role-key rotation)"
                             ));
                         } else {
                             this_anchored = true;
+                            checkpoints_anchored += 1;
                             anchored_cp_ids.push((
                                 cp_seq,
                                 cph.clone(),
                                 ts.clone(),
                                 cp_head.as_ref().map(|h| h.cumulative_root.clone()),
                             ));
-                            anchored.push((cp_seq, ts, cp_frontier.clone()));
+                            anchored.push((cp_seq, ts.clone(), cp_frontier.clone()));
                         }
                     }
-                    Err(e) => issues.push(format!("checkpoint {i} anchor invalid: {e}")),
+                    Some(Err(e)) => issues.push(format!("checkpoint {i} anchor invalid: {e}")),
+                    None => {}
                 }
             }
         }
@@ -4292,7 +5700,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
 
     // Seam 3 — anchored times must be non-decreasing with seq (backdating, threat #3).
-    check_anchor_backdating(&anchored, &mut issues);
+    let anchor_order_valid = check_anchor_backdating(&anchored, &mut issues);
 
     let mut chain_ok = true;
     match &dag_opt {
@@ -4369,7 +5777,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // UNCONDITIONALLY (fail-closed: an undatable compromise cannot be proven to predate any record). The
         // record's own integrity/signature trust (above) is independent — a real record signed by a good
         // signing key stays integrity-proven; only its authority ELEVATION is withdrawn.
-        if p.authority == AuthorityTrust::Verified {
+        if matches!(
+            p.authority,
+            AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+        ) {
             // Withdraw if ANY involved pinned key (direct authority/subject OR transitive cert issuer) is
             // non-active and this record does NOT predate that key's status change. The list holds only
             // non-active statuses, so each entry is a real gate.
@@ -4419,6 +5830,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         });
     }
 
+    // D6 operator remediation: every grant_void tombstone must be well-formed, bound and (under pinned broker keys)
+    // broker-signed before it may fill its seq; a bad one is a hard issue (it never counts as a grant either way).
+    let void_issues_before = issues.len();
+    check_grant_voids(&record_trust, records, opts, &mut issues);
+    let void_contradiction = issues.len() > void_issues_before;
+
     // Level 3 Tier-A: count credential-broker grants and how many are fully accountable. A grant only
     // counts as VERIFIED when ALL of: the record is integrity-proven (its own seal is valid —
     // event_type and action are part of the signed body); it classifies to the BROKER role and its
@@ -4440,6 +5857,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // through as ok:true / grant_verified=2.
     let mut grant_content_seen: BTreeMap<String, String> = BTreeMap::new();
     let mut grant_equivocations: BTreeSet<String> = BTreeSet::new();
+    let grant_issues_before = issues.len();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if s(rec, "event_type").as_deref() == Some("credential_grant")
@@ -4474,7 +5892,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 ));
                 continue;
             }
-            if rt.trust == TrustLevel::IntegrityProven && rt.authority == AuthorityTrust::Verified {
+            if rt.trust == TrustLevel::IntegrityProven
+                && matches!(
+                    rt.authority,
+                    AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+                )
+            {
                 if evidence_rederivable(rec, "grant_evidence") {
                     grant_verified += 1;
                     // F8: a second DISTINCT content_hash under one grant_id is equivocation (flag once per
@@ -4515,40 +5938,54 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
     }
 
-    // ---- Tier-B (ADR 0003 step 5): use↔grant join over the CLOSED set (R3) ----
-    // CLOSED = a record's content_hash is transitively committed by a verified, ANCHORED checkpoint
-    // (the union of the anchored committed sets). Tier-B outcomes are computed over closed records
-    // only; a use not yet closed is `unmatched_pending` (in-flight), never a violation. Replacing an
-    // exporter watermark with this cryptographic boundary closes the watermark-specific suppression
-    // path (MUST-FIX 2); never-anchored use suppression remains an accepted residual.
+    let grant_contradiction = issues.len() > grant_issues_before;
+    // ---- Tier-B (ADR 0003 step 5): use↔grant join (R3) ----
+    // CLOSED = a record's content_hash is transitively committed by a verified, ANCHORED checkpoint (the union of
+    // the anchored committed sets). COMMITTED = transitively committed by ANY verified (signed, key-honored)
+    // checkpoint, anchored or not; CLOSED ⊆ COMMITTED.
+    //
+    // MONOTONICITY (the reason for the split): `anchor` is outside the checkpoint hash (checkpoint.rs `checkpoint_preimage`), so
+    // it is UNSIGNED, optional data — anyone can delete it and the checkpoints still verify. When the join ran
+    // over CLOSED alone, deleting every anchor turned every closed use into `unmatched_pending` (never a
+    // violation), so an action-without-credential, a double-spend, a revoked use, a cosig/delegation failure or a
+    // mis-scoped grant all read `ok:true` with no key at all. Removing unsigned data must never IMPROVE the
+    // verdict. So:
+    //   * NEGATIVE findings (violations, blocked uses, grant-issuance rejections) are evaluated over COMMITTED
+    //     records — this is ADR 0003 R3's own wording ("a use NOT yet committed by a verified checkpoint ⇒
+    //     pending"). The checkpoint signer can only ADD evidence against itself this way: every grant/use it
+    //     commits is independently broker-/resource-signed, and dropping the anchor no longer hides it.
+    //   * POSITIVE claims (`uses_matched`, PoP re-verification, action verification, `grants_unused`, native
+    //     coverage) still require CLOSURE: a committed use that passes every check but whose use/grant/outcome
+    //     is not anchored-closed is `unmatched_pending` (in-flight), exactly as before. It still CONSUMES its
+    //     single-use/bounded grant and its outcome, so a second committed spend is a violation, never pending.
+    //   * A CLOSED use whose grant is committed but NOT closed stays a violation ("no matching closed grant"),
+    //     unchanged — closure is never inherited from an unanchored peer.
+    // Replacing an exporter watermark with this cryptographic boundary closes the watermark-specific
+    // suppression path (MUST-FIX 2); never-committed use suppression remains an accepted residual.
     let closed: BTreeSet<&str> = anchored_committed
         .iter()
         .flat_map(|(_, set)| set.iter().map(String::as_str))
         .collect();
+    // The COMMITTED extension applies once the auditor pins a Tier-B authority (broker, per-broker, or resource
+    // keys) — i.e. asks for Tier-B evaluation at all. With NONE pinned no grant/use can ever validate, so every
+    // committed receipt would read "not validatable" and fail the default, pin-nothing integrity flow (the web
+    // verifier's) on every broker bundle; there the join stays over CLOSED exactly as before. This gate reads
+    // only the auditor's opts, never attacker-removable bundle data, so monotonicity is preserved.
+    let tier_b_pinned = !opts.broker_authority_keys.is_empty()
+        || !opts.resource_authority_keys.is_empty()
+        || !opts.federated_broker_keys.is_empty();
+    let committed: BTreeSet<String> = match dag_opt.as_ref() {
+        Some(d) if tier_b_pinned => committed_set(records, &d.by_hash, &verified_frontiers),
+        _ => closed.iter().map(|h| h.to_string()).collect(),
+    };
 
     // Index closed, fully-verified grants by grant_id, reading match fields ONLY from the proven
-    // grant_evidence (R1). `used` tracks matched uses (single-use ≤1 per grant_id, and grants_unused).
-    struct GrantInfo {
-        action: String,
-        resource_id: String,
-        scope_class: String,
-        credential_binding: String,
-        issued_at: i64,
-        used: usize,
-        /// M1 (bounded_reuse): the declared cap N (0 for other scope classes). `used <= use_limit`.
-        use_limit: i64,
-        /// M1 (bounded_reuse): the `use_sequence_number`s already CONSUMED by accepted uses, for
-        /// `(grant_id, usn)` replay dedup. A usn is inserted only when a use is fully accepted (mirrors
-        /// `used`), so a use that fails PoP/outcome does not burn its sequence number.
-        used_seqs: BTreeSet<i64>,
-        /// M2 (delegation): the cnf_kid a USE must present, and the temporal window the use must fall in —
-        /// the LEAF of a verified delegation chain (narrowed window `min(grant exp, hop exps)`), or the root
-        /// cnf_kid / grant exp for an undelegated grant. The use predicate keys on these so a sub-agent's PoP
-        /// matches a re-delegated grant. (For an undelegated grant these equal the root cnf_kid / grant exp.)
-        effective_cnf_kid: String,
-        effective_exp: i64,
-    }
+    // grant_evidence (R1). See `GrantInfo`.
     let mut grants_by_id: BTreeMap<String, GrantInfo> = BTreeMap::new();
+    // A required credential disclosure applies to every accepted committed broker grant,
+    // including an unused grant. Counting only disclosures the exporter chose to provide would
+    // let one opened grant mask a second grant's missing descriptor.
+    let mut required_descriptor_record_ids: BTreeSet<String> = BTreeSet::new();
     // D4 (ADR 0004): grant_ids flagged mis-scoped at issuance (a single_operation grant for an action a
     // signed+pinned taxonomy marks ESCALATING). Rejected here, NOT only when exercised, so a dangerous
     // capability is visible even with no use receipt; a use against one is then skipped (single violation).
@@ -4581,19 +6018,28 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         lease_id: String,
         issued_at: i64,
         exp: i64,
+        /// R3: anchored-CLOSED (required for the positive `covered_native` claim).
+        closed: bool,
     }
     let mut native_grants_by_id: BTreeMap<String, NativeGrant> = BTreeMap::new();
     let mut native_credential_present = false;
+    // A rejected, already committed grant is a fixed semantic contradiction even when no
+    // receipt exercises that grant. Keep it separate from optional attachment diagnostics.
+    let mut committed_grant_rejected = false;
     for rt in &record_trust {
         let rec = &records[rt.index];
         let qualifies = rt.broker_role == BrokerRole::Broker.as_str()
             && rt.trust == TrustLevel::IntegrityProven
-            && rt.authority == AuthorityTrust::Verified
+            && matches!(
+                rt.authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            )
             && evidence_rederivable(rec, "grant_evidence")
-            && closed.contains(rt.content_hash.as_str());
+            && committed.contains(&rt.content_hash);
         if !qualifies {
             continue;
         }
+        let grant_closed = closed.contains(rt.content_hash.as_str());
         // M3 (ADR 0005): native/STS early branch. Detected from the SIGNED grant_evidence (riding the evidence
         // hash, so it cannot be stripped without breaking `evidence_rederivable` above). A native grant is
         // accounted on the separate `native_grants_by_id` channel and NEVER falls through to the brokered 8-tuple
@@ -4607,6 +6053,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             if cosignatures_of(rec).is_some_and(|a| !a.is_empty())
                 || delegation_assertions_present(rec)
             {
+                committed_grant_rejected = true;
                 issues.push(format!(
                     "grant {} ({}): native (token_exchange) grant also carries cosignatures/delegation_assertions — unsupported composition in M3 (fail-closed)",
                     rt.index, rt.record_id
@@ -4625,6 +6072,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     ti.escalating
                         .contains(&(n_resource.clone(), n_action.clone()))
                 }) {
+                    committed_grant_rejected = true;
                     issues.push(format!(
                         "grant {} ({}): native (token_exchange) grant for action '{n_action}' on '{n_resource}' which the taxonomy marks escalating — mis-scoped (D4)",
                         rt.index, rt.record_id
@@ -4640,19 +6088,30 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 ev_int(rec, "grant_evidence", "issued_at"),
                 ev_int(rec, "grant_evidence", "exp"),
             ) {
-                (Some(gid), Some(scope), Some(resource_id), Some(lease_id), Some(issued_at), Some(exp)) => {
+                (
+                    Some(gid),
+                    Some(scope),
+                    Some(resource_id),
+                    Some(lease_id),
+                    Some(issued_at),
+                    Some(exp),
+                ) => {
                     native_grants_by_id.entry(gid).or_insert(NativeGrant {
                         scope,
                         resource_id,
                         lease_id,
                         issued_at,
                         exp,
+                        closed: grant_closed,
                     });
                 }
-                _ => issues.push(format!(
-                    "grant {} ({}): native (token_exchange) grant_evidence is missing a required field (grant_id/scope/resource_id/lease_id/issued_at/exp) — fail-closed",
-                    rt.index, rt.record_id
-                )),
+                _ => {
+                    committed_grant_rejected = true;
+                    issues.push(format!(
+                        "grant {} ({}): native (token_exchange) grant_evidence is missing a required field (grant_id/scope/resource_id/lease_id/issued_at/exp) — fail-closed",
+                        rt.index, rt.record_id
+                    ));
+                }
             }
             continue;
         }
@@ -4666,13 +6125,45 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_int(rec, "grant_evidence", "issued_at"),
             ev_int(rec, "grant_evidence", "exp"),
         ) {
-            (Some(gid), Some(action), Some(resource_id), Some(scope_class), Some(cnf_kid), Some(credential_binding), Some(issued_at), Some(exp)) => {
+            (
+                Some(gid),
+                Some(action),
+                Some(resource_id),
+                Some(scope_class),
+                Some(cnf_kid),
+                Some(credential_binding),
+                Some(issued_at),
+                Some(exp),
+            ) => {
+                // v2 brokered grants carry the authorized project inside the
+                // broker-signed evidence as well as the sealed record. This gate
+                // applies even when the credential descriptor is not disclosed.
+                let pop_version = ev_value(rec, "grant_evidence", "pop_version");
+                let v2_fields_present = pop_version.is_some()
+                    || ev_value(rec, "grant_evidence", "project_id").is_some()
+                    || ev_value(rec, "grant_evidence", "request_hash").is_some();
+                if v2_fields_present
+                    && (pop_version.and_then(CanonValue::as_int) != Some(2)
+                        || ev_str(rec, "grant_evidence", "project_id") != s(rec, "project_id")
+                        || ev_str(rec, "grant_evidence", "request_hash").is_none_or(|h| {
+                            !h.starts_with("sha256:")
+                                || h.len() != 71
+                                || !h[7..]
+                                    .bytes()
+                                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                        }))
+                {
+                    committed_grant_rejected = true;
+                    issues.push(format!("grant {} ({}): v2 signed project/request identity does not match sealed grant", rt.index, rt.record_id));
+                    continue;
+                }
                 // M1 (bounded_reuse): the cap rides inside the signed grant_evidence (0/absent for other
                 // classes). A bounded_reuse grant MUST declare a positive use_limit; an "unbounded bounded"
                 // grant is fail-closed (NOT indexed), so a use against it reads as action-without-credential
                 // rather than silently honoring an uncapped reuse.
                 let use_limit = ev_int(rec, "grant_evidence", "use_limit").unwrap_or(0);
                 if scope_class == "bounded_reuse" && use_limit < 1 {
+                    committed_grant_rejected = true;
                     issues.push(format!(
                         "grant {} ({}): bounded_reuse grant_evidence.use_limit must be >= 1 — fail-closed",
                         rt.index, rt.record_id
@@ -4685,11 +6176,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 // is the LAST condition so the issue is pushed exactly once per grant_id (a second closed
                 // record reusing the same grant_id does not double-count).
                 if (scope_class == "single_operation" || scope_class == "bounded_reuse")
-                    && taxonomy_info
-                        .as_ref()
-                        .is_some_and(|ti| ti.escalating.contains(&(resource_id.clone(), action.clone())))
+                    && taxonomy_info.as_ref().is_some_and(|ti| {
+                        ti.escalating
+                            .contains(&(resource_id.clone(), action.clone()))
+                    })
                     && misscoped.insert(gid.clone())
                 {
+                    committed_grant_rejected = true;
                     issues.push(format!(
                         "grant {} ({}): claims {scope_class} for action '{action}' on '{resource_id}' which the taxonomy marks escalating — mis-scoped (D4)",
                         rt.index, rt.record_id
@@ -4710,6 +6203,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 // on a stripped field (stripping breaks evidence_rederivable). Threshold absent AND no
                 // cosignatures => an ordinary grant, unaffected (additive).
                 if cosig_threshold < 1 && cosignatures_of(rec).is_some_and(|a| !a.is_empty()) {
+                    committed_grant_rejected = true;
                     issues.push(format!(
                         "grant {} ({}): carries cosignatures but no positive cosig_threshold — malformed cosig declaration (M6 fail-closed)",
                         rt.index, rt.record_id
@@ -4747,6 +6241,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         }
                     }
                     if !satisfied {
+                        committed_grant_rejected = true;
                         continue; // fail-closed: do not index a grant that did not meet its approval threshold
                     }
                 }
@@ -4757,10 +6252,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 // are deduped per grant_id (delegation_seen); the `continue` gate always applies.
                 let grant_scope = ev_str(rec, "grant_evidence", "scope").unwrap_or_default();
                 let (effective_cnf_kid, effective_exp) = match verify_delegation_chain(
-                    rec, &gid, &cnf_kid, &grant_scope, &action, &resource_id, exp,
+                    rec,
+                    &gid,
+                    &cnf_kid,
+                    &grant_scope,
+                    &action,
+                    &resource_id,
+                    exp,
                 ) {
                     ChainResult::Absent => (cnf_kid.clone(), exp),
-                    ChainResult::Verified { eff_cnf_kid, eff_exp } => {
+                    ChainResult::Verified {
+                        eff_cnf_kid,
+                        eff_exp,
+                    } => {
                         if delegation_seen.insert(gid.clone()) {
                             delegation_chains_total += 1;
                             delegation_chains_verified += 1;
@@ -4768,6 +6272,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         (eff_cnf_kid, eff_exp)
                     }
                     ChainResult::Monotonicity => {
+                        committed_grant_rejected = true;
                         if delegation_seen.insert(gid.clone()) {
                             delegation_chains_total += 1;
                             delegation_monotonicity_violations += 1;
@@ -4779,6 +6284,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         continue; // fail-closed: not Tier-B-eligible
                     }
                     ChainResult::Invalid => {
+                        committed_grant_rejected = true;
                         if delegation_seen.insert(gid.clone()) {
                             delegation_chains_total += 1;
                             issues.push(format!(
@@ -4789,6 +6295,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         continue; // fail-closed: not Tier-B-eligible
                     }
                 };
+                required_descriptor_record_ids.insert(rt.record_id.clone());
                 grants_by_id.entry(gid).or_insert(GrantInfo {
                     action,
                     resource_id,
@@ -4800,15 +6307,21 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     used_seqs: BTreeSet::new(),
                     effective_cnf_kid,
                     effective_exp,
+                    closed: grant_closed,
+                    hist_used: 0,
+                    hist_used_seqs: BTreeSet::new(),
                 });
             }
             // A verified, closed broker grant whose grant_evidence is missing a required match field is
             // a fail-closed failure surfaced as an issue — NOT a silent skip (which would let a use
             // against it read as "action without a credential" and mask the real cause).
-            _ => issues.push(format!(
-                "grant {} ({}): closed broker grant has incomplete grant_evidence (missing a required match field) — fail-closed",
-                rt.index, rt.record_id
-            )),
+            _ => {
+                committed_grant_rejected = true;
+                issues.push(format!(
+                    "grant {} ({}): closed broker grant has incomplete grant_evidence (missing a required match field) — fail-closed",
+                    rt.index, rt.record_id
+                ));
+            }
         }
     }
 
@@ -4834,6 +6347,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
     let mut cred_label_checks = 0usize;
     let mut cred_label_matched = 0usize;
+    let mut matched_descriptor_record_ids: BTreeSet<String> = BTreeSet::new();
     for (rid, descriptor_bytes) in &cred_descriptors {
         let rec = match grant_labels.get(rid.as_str()) {
             Some(r) => *r,
@@ -4892,6 +6406,27 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if jti != gid.as_str() {
             mism.push(format!("jti '{jti}' != grant_id '{gid}'"));
         }
+        if ev_value(rec, "grant_evidence", "pop_version").is_some()
+            || ev_value(rec, "grant_evidence", "project_id").is_some()
+            || ev_value(rec, "grant_evidence", "request_hash").is_some()
+            || descriptor.get("version").is_some()
+            || descriptor.get("project_id").is_some()
+        {
+            if descriptor.get("version").and_then(|v| v.as_int()) != Some(2) {
+                mism.push("v2 descriptor.version is missing or wrong".to_string());
+            }
+            if ev_int(rec, "grant_evidence", "pop_version") != Some(2) {
+                mism.push("v2 grant_evidence.pop_version is missing or wrong".to_string());
+            }
+            if ds("project_id") != s(rec, "project_id").unwrap_or_default() {
+                mism.push("v2 descriptor.project_id != sealed record.project_id".to_string());
+            }
+            if ds("project_id") != label("project_id") {
+                mism.push(
+                    "v2 descriptor.project_id != signed grant_evidence.project_id".to_string(),
+                );
+            }
+        }
         if descriptor.get("exp").and_then(|v| v.as_int()) != ev_int(rec, "grant_evidence", "exp") {
             mism.push("exp != grant_evidence.exp".to_string());
         }
@@ -4946,6 +6481,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
         if mism.is_empty() {
             cred_label_matched += 1;
+            matched_descriptor_record_ids.insert(rid.clone());
         } else {
             issues.push(format!("grant {rid}: disclosed credential descriptor contradicts signed grant labels — broker mislabel/equivocation (D6.4): {}", mism.join("; ")));
         }
@@ -4989,6 +6525,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     );
     let revocation_proofs = bundle.get("revocation_proofs");
     let mut revoked_uses_blocked = 0usize;
+    let mut revoked_membership_found = false;
     let mut revocation_nonmembership_verified = 0usize;
     let mut seen_uses: BTreeSet<&str> = BTreeSet::new();
     // D3 (ADR 0004): a (resource_id, PoP nonce) pair seen on two CLOSED receipts is a replay/duplicate
@@ -5018,7 +6555,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // validated outcome is tracked as a DISTINCT record (intent_ref, grant_id, record_id, index) — NOT a
     // map keyed by intent_ref, which would let a second outcome for the same intent_ref overwrite the first
     // (hiding an extra unauthorized outcome, or dropping the legitimate one — order-dependent).
-    let mut outcomes: Vec<(String, String, String, usize, String)> = Vec::new();
+    let mut outcomes: Vec<OutcomeRef> = Vec::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str()
@@ -5026,11 +6563,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         {
             continue;
         }
-        if !closed.contains(rt.content_hash.as_str()) {
-            continue; // in-flight outcome: not yet anchored, completes nothing
+        if !committed.contains(&rt.content_hash) {
+            continue; // in-flight outcome: not yet committed by a verified checkpoint, completes nothing
         }
         if rt.trust != TrustLevel::IntegrityProven
-            || rt.authority != AuthorityTrust::Verified
+            || !matches!(
+                rt.authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            )
             || !evidence_rederivable(rec, "use_outcome")
         {
             unmatched_violation += 1;
@@ -5048,7 +6588,21 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ev_str(rec, "use_outcome", "intent_hash"),
         ) {
             (Some(k), Some(iref), Some(ogid), Some(ihash)) if k == "use_outcome" => {
-                outcomes.push((iref, ogid, rt.record_id.clone(), rt.index, ihash));
+                outcomes.push(OutcomeRef {
+                    intent_ref: iref,
+                    grant_id: ogid,
+                    record_id: rt.record_id.clone(),
+                    index: rt.index,
+                    intent_hash: ihash,
+                    closed: closed.contains(rt.content_hash.as_str()),
+                    // Plan 009: an outcome inherits its intent's ordinal. Only a body-bound
+                    // resource signature can carry one into a historical judgment.
+                    order: if rt.authority == AuthorityTrust::Verified {
+                        temporal::authorization_order(rec, "use_outcome")
+                    } else {
+                        OrderEv::Malformed
+                    },
+                });
             }
             _ => {
                 unmatched_violation += 1;
@@ -5059,13 +6613,24 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // index outcomes by (intent_ref, grant_id) -> positions, so each intent pops at most one candidate
     // instead of scanning every outcome (O(intents·outcomes) — a verifier DoS on adversarial bundles).
     let mut outcomes_by: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-    for (i, (iref, ogid, _, _, _)) in outcomes.iter().enumerate() {
+    for (i, o) in outcomes.iter().enumerate() {
         outcomes_by
-            .entry((iref.clone(), ogid.clone()))
+            .entry((o.intent_ref.clone(), o.grant_id.clone()))
             .or_default()
             .push(i);
     }
     let mut consumed_outcomes: BTreeSet<String> = BTreeSet::new();
+    // Plan 009: outcomes consumed by the shadow validation of a revoked grant's intents. Disjoint
+    // from `consumed_outcomes` (an outcome is keyed by its grant, and a grant is either revoked or not).
+    let mut hist_consumed_outcomes: BTreeSet<String> = BTreeSet::new();
+    let mut receipts: Vec<ReceiptHist> = Vec::new();
+    let mut shadow = ShadowCounts::default();
+    let use_ctx = UseCtx {
+        records,
+        outcomes: &outcomes,
+        outcomes_by: &outcomes_by,
+        taxonomy: taxonomy_info.as_ref(),
+    };
     for rt in &record_trust {
         let rec = &records[rt.index];
         if rt.broker_role != BrokerRole::Resource.as_str() {
@@ -5085,17 +6650,25 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             continue; // verbatim-duplicate use deduped (not double-counted)
         }
         uses_total += 1;
-        if !closed.contains(rt.content_hash.as_str()) {
-            unmatched_pending += 1; // in-flight: not yet committed by a verified anchored checkpoint
+        let hist_idx = receipts.len();
+        receipts.push(ReceiptHist::new(&rt.record_id, &bkind));
+        if !committed.contains(&rt.content_hash) {
+            unmatched_pending += 1; // in-flight: not yet committed by any verified checkpoint
             continue;
         }
-        // A CLOSED use must be cryptographically validatable (integrity + resource-role authority +
+        // R3 split (see the CLOSED/COMMITTED note above): every check below runs for a COMMITTED use, but it can
+        // only count as MATCHED when it (and its grant/outcome) is anchored-CLOSED; otherwise it ends as pending.
+        let use_closed = closed.contains(rt.content_hash.as_str());
+        // A COMMITTED use must be cryptographically validatable (integrity + resource-role authority +
         // re-derivable use_evidence) before its match fields can be trusted — otherwise fail closed.
         let violation = |issues: &mut Vec<String>, msg: String| {
             issues.push(format!("use {} ({}): {msg}", rt.index, rt.record_id));
         };
         if rt.trust != TrustLevel::IntegrityProven
-            || rt.authority != AuthorityTrust::Verified
+            || !matches!(
+                rt.authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            )
             || !evidence_rederivable(rec, "use_evidence")
         {
             unmatched_violation += 1;
@@ -5191,12 +6764,35 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             continue;
         }
         let g = match grants_by_id.get_mut(&gid) {
-            Some(g) => g,
-            None => {
+            // a CLOSED use needs a CLOSED grant (unchanged R3 semantics); a committed-only use may pair with a
+            // committed-only grant, but can then only end as pending.
+            Some(g) if g.closed || !use_closed => g,
+            _ => {
                 unmatched_violation += 1;
-                violation(&mut issues, format!("no matching closed grant '{gid}' — action without a credential (Tier-B violation)"));
+                violation(&mut issues, format!("no matching {} grant '{gid}' — action without a credential (Tier-B violation)", if use_closed { "closed" } else { "committed" }));
                 continue;
             }
+        };
+        // Plan 009: the ordinal is trusted only from a body-bound (v3) resource signature over a
+        // payload that re-derives its evidence hash (checked above).
+        receipts[hist_idx].grant_id = Some(gid.clone());
+        receipts[hist_idx].order = if rt.authority == AuthorityTrust::Verified {
+            temporal::authorization_order(rec, "use_evidence")
+        } else {
+            OrderEv::Absent
+        };
+        let input = UseInput {
+            rec,
+            record_id: &rt.record_id,
+            content_hash: &rt.content_hash,
+            bkind: &bkind,
+            gid: &gid,
+            action: &action,
+            resource_id: &resource_id,
+            cnf_kid: &cnf_kid,
+            jti: &jti,
+            used_at,
+            use_closed,
         };
         // M5 (ADR 0005): a use of a grant the revocation_list EXPLICITLY marks revoked is blocked — whether the
         // list is `fresh` OR `stale`. `revoked` is populated ONLY for a validly-signed list (a forged/malformed
@@ -5204,12 +6800,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // (the window no longer brackets the anchored time) means the list may not be the LATEST snapshot, NOT
         // that a named grant became valid again. Blocking only on `fresh` was a fail-open (a relying party gating
         // on `ok` accepted a provably-revoked credential). A hard violation (→ !ok); the grant is NOT consumed.
-        // `absent` (no list / unpinned issuer) leaves `revoked` empty, so this is a no-op there.
-        if revocation.revoked.contains(&gid) {
-            revoked_uses_blocked += 1;
-            violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_list ({}) marks REVOKED — blocked (M5)", revocation.status));
-            continue;
-        }
+        // `absent` (no list / unpinned issuer) leaves `revoked` empty, so this is a no-op there. A v2 list names
+        // prospective revocations too, and they block current use exactly like total ones (plan 009).
+        //
         // M5 Merkle-non-disclosure (ADR 0005): when a signed root is present (fresh OR stale), this use's grant
         // must PROVE its non-revocation against the (undisclosed) revoked set. A valid non-membership proof lets
         // it proceed; a valid membership proof blocks it (revoked); a missing/malformed/forged proof is
@@ -5217,213 +6810,100 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // demand a proof, else an attacker presents an old root + omits the proof for a revoked grant). The stale
         // status separately blocks the capstone; here we only enforce per-use non-revocation. `absent` (no
         // root / unpinned issuer) leaves `root: None`, so this gate is skipped.
-        if merkle_rev.root.is_some() {
-            let proof = revocation_proofs.and_then(|m| m.get(gid.as_str()));
-            let verdict = merkle_rev
-                .root
-                .as_ref()
-                .map(|root| {
-                    proof.map_or(ProofVerdict::Unproven, |p| {
-                        check_revocation_proof(p, &gid, root, merkle_rev.leaf_count)
-                    })
-                })
-                .unwrap_or(ProofVerdict::Unproven);
+        let mut blocked: Option<(bool, String)> = None;
+        if revocation.revoked.contains(&gid) {
+            blocked = Some((true, format!("use of grant '{gid}' which a signed revocation_list ({}) marks REVOKED — blocked (M5)", revocation.status)));
+        } else if let Some(verdict) = merkle_rev.proof(revocation_proofs, &gid) {
             match verdict {
-                ProofVerdict::NotRevoked => {
+                ProofV2::NotRevoked => {
                     revocation_nonmembership_verified += 1; // proven not-revoked; fall through to matching
                 }
-                ProofVerdict::Revoked => {
-                    revoked_uses_blocked += 1;
-                    violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_merkle_root ({}) proves REVOKED — blocked (M5)", merkle_rev.status));
-                    continue;
+                ProofV2::Revoked(_) => {
+                    blocked = Some((true, format!("use of grant '{gid}' which a signed revocation_merkle_root ({}) proves REVOKED — blocked (M5)", merkle_rev.status)));
                 }
-                ProofVerdict::Unproven => {
-                    revoked_uses_blocked += 1;
-                    violation(&mut issues, format!("use of grant '{gid}': a signed revocation_merkle_root ({}) is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)", merkle_rev.status));
-                    continue;
+                ProofV2::Unproven => {
+                    blocked = Some((false, format!("use of grant '{gid}': a signed revocation_merkle_root ({}) is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)", merkle_rev.status)));
                 }
             }
         }
-        // Full predicate: action / resource / temporal-window / cnf_kid equality, read from the proven
-        // payloads on both sides.
-        // The temporal window is [issued_at, exp) — used_at >= exp is expired, matching the resource
-        // shim's `now >= exp` rejection (so the verifier is not more lenient than the gateway).
-        // M2 (delegation): match the use's cnf_kid against the EFFECTIVE (leaf) cnf and the NARROWED window,
-        // not the root — so a sub-agent's PoP matches a re-delegated grant, and a use by the original root
-        // (root cnf != leaf cnf) correctly fails to match a delegated-away credential. For an undelegated
-        // grant effective_cnf_kid==cnf_kid and effective_exp==exp, so this is unchanged (additive).
-        if action != g.action
-            || resource_id != g.resource_id
-            || cnf_kid != g.effective_cnf_kid
-            || used_at < g.issued_at
-            || used_at >= g.effective_exp
-        {
-            unmatched_violation += 1;
-            violation(
-                &mut issues,
-                format!("action/resource/cnf/window does not match grant '{gid}' — violation"),
-            );
+        if let Some((membership, msg)) = blocked {
+            revoked_uses_blocked += 1;
+            if membership {
+                revoked_membership_found = true;
+            }
+            violation(&mut issues, msg);
+            // Plan 009: the legacy decision above is final and consumes nothing. A historical
+            // classification must not relabel an unvalidated candidate, so the SAME remaining
+            // checks run here on the grant's shadow ledger; the result feeds only the separate
+            // historical fields.
+            let checked = check_use(&use_ctx, &input, g, true, &mut hist_consumed_outcomes);
+            shadow.apply(&checked, &mut receipts[hist_idx], &outcomes);
             continue;
         }
-        // Single-use (R5 rev 4): per-grant_id at most once, regardless of jti; jti must equal grant_id.
-        // M1 (bounded_reuse, ADR 0005): a 4th scope class allowing N uses of the IDENTICAL
-        // (action, resource_id); replay is bounded by a per-grant `use_sequence_number in [1, use_limit]`,
-        // deduped per (grant_id, usn). jti still equals grant_id for both classes (the resource sources
-        // use_evidence.jti from the descriptor jti, so the D6.4 descriptor cross-check is UNCHANGED); the
-        // per-exercise identity is the SEPARATE use_sequence_number.
-        let single = g.scope_class == "single_operation";
-        let bounded = g.scope_class == "bounded_reuse";
-        if (single || bounded) && jti != gid {
-            unmatched_violation += 1;
-            violation(
-                &mut issues,
-                format!(
-                    "{} grant '{gid}' requires use_evidence.jti == grant_id (R5) — violation",
-                    g.scope_class
-                ),
-            );
-            continue;
-        }
-        if single && g.used >= 1 {
-            unmatched_violation += 1;
-            violation(
-                &mut issues,
-                format!("single-use grant '{gid}' exercised more than once — double-spend (R5)"),
-            );
-            continue;
-        }
-        // M1: validate the bounded_reuse sequence number BEFORE counting; the usn is CONSUMED only when the
-        // use is fully accepted (alongside g.used), so a use that later fails PoP/outcome does not burn it.
-        let use_seq: Option<i64> = if bounded {
-            let usn = ev_int(rec, "use_evidence", "use_sequence_number").unwrap_or(0);
-            if usn < 1 || usn > g.use_limit {
-                bounded_reuse_overspent += 1;
-                unmatched_violation += 1;
-                violation(&mut issues, format!("bounded_reuse grant '{gid}' use_sequence_number {usn} outside [1, {}] — overspend (M1)", g.use_limit));
-                continue;
-            }
-            if g.used_seqs.contains(&usn) {
-                bounded_reuse_seq_replays += 1;
-                unmatched_violation += 1;
-                violation(&mut issues, format!("bounded_reuse grant '{gid}' use_sequence_number {usn} replayed across receipts — seq-replay (M1)"));
-                continue;
-            }
-            // Compare in i64, NOT `use_limit as usize` (same wasm32 `usize==u32` truncation concern as the
-            // cosig gate above). Here truncation would shrink the cap (fail-CLOSED, over-restrictive) rather
-            // than open, but the verdict must still be platform-independent; `g.used` is a small count.
-            if g.used as i64 >= g.use_limit {
-                bounded_reuse_overspent += 1;
-                unmatched_violation += 1;
-                violation(&mut issues, format!("bounded_reuse grant '{gid}' exercised more than use_limit {} times — overspend (M1)", g.use_limit));
-                continue;
-            }
-            Some(usn)
-        } else {
-            None
-        };
-        // D5 (ADR 0004 F4): a `use_intent` is a COMPLETE two-phase use only if a valid `use_outcome` whose
-        // SIGNED payload references THIS intent's record_id AND attests THIS grant_id completes it. An intent
-        // that passed every predicate above but has no such outcome is an `intent_without_outcome` anomaly —
-        // recorded-but-incomplete (the crash-after-act case). Surface it and stop BEFORE it counts as matched
-        // / PoP-reverified or consumes a single-use grant.
-        // D5 (ADR 0004 F4): pick a SPECIFIC un-consumed validated outcome that references THIS intent's
-        // record_id, attests THIS grant, and proves the BEFORE-ACT ordering: the outcome's RESOURCE-SIGNED
-        // `intent_hash` must equal this intent's content_hash (the resource attests it observed THIS intent
-        // before signing the outcome — unforgeable by the relay), AND the top-level `causal_prev_hashes`
-        // include it (a DAG consistency check; the signed binding is the security boundary, since the
-        // record-signing key could backfill the top-level edge). An unordered/backfilled pair does NOT
-        // complete. The pick is held and only CONSUMED after every acceptance check (incl. PoP) passes — a
-        // later-rejected intent must not consume (and thereby mask from orphan accounting) its outcome.
-        let mut pending_consume: Option<usize> = None;
-        if bkind == "use_intent" {
-            let key = (rt.record_id.clone(), gid.clone());
-            pending_consume = outcomes_by.get(&key).and_then(|idxs| {
-                idxs.iter().copied().find(|&i| {
-                    let (_, _, orec, oidx, ihash) = &outcomes[i];
-                    !consumed_outcomes.contains(orec)
-                        && ihash.as_str() == rt.content_hash.as_str()
-                        && records[*oidx]
-                            .get("causal_prev_hashes")
-                            .and_then(|v| v.as_array())
-                            .is_some_and(|p| {
-                                p.iter()
-                                    .any(|h| h.as_str() == Some(rt.content_hash.as_str()))
-                            })
-                })
-            });
-            if pending_consume.is_none() {
-                intent_without_outcome += 1;
-                continue;
-            }
-        }
-        // D2 (ADR 0004): re-run the Ed25519 PoP offline if the receipt carries the cnf pubkey + use_sig —
-        // reconstructing the challenge from the proven fields + this grant's credential_binding + the
-        // record's input_commit. A claimed re-verification that FAILS is a violation; a receipt that
-        // carries neither stays `shim_asserted` (legacy ADR-0003 path).
-        match pop_reverify(rec, &g.credential_binding) {
-            Ok(true) => uses_pop_reverified += 1,
-            Ok(false) => {}
-            Err(msg) => {
-                unmatched_violation += 1;
-                violation(&mut issues, format!("offline PoP re-verification: {msg}"));
-                continue;
-            }
-        }
-        if let Some(i) = pending_consume {
-            consumed_outcomes.insert(outcomes[i].2.clone()); // accepted intent → consume its outcome now
-        }
-        if bkind == "use" {
-            one_phase_use_present = true; // D8/MF3: a matched one-phase receipt blocks the capstone
-        }
-        g.used += 1;
-        if let Some(usn) = use_seq {
-            g.used_seqs.insert(usn); // M1: consume the sequence number only now (use fully accepted)
-        }
-        uses_matched += 1;
-        // R6/D4: a matched use is action-VERIFIED only when a pinned, in-window taxonomy lists the
-        // grant's action FOR THIS RESOURCE — otherwise it stays a demonstrator artifact
-        // (uses_action_unverified) that can never reach the attested_complete upgrade. The listing is
-        // resource-BOUND so a taxonomy vetted for one resource cannot validate a colliding action name on
-        // another (adversarial review AREA 2). M1: bounded_reuse is action-verifiable too — it fixes one
-        // (action, resource_id) exactly like single_operation (action↔grant tightness preserved).
-        let action_verified = (single || bounded)
-            && taxonomy_info.as_ref().is_some_and(|ti| {
-                if !ti.actions.contains(&(resource_id.clone(), action.clone())) {
-                    return false;
+        match check_use(&use_ctx, &input, g, false, &mut consumed_outcomes) {
+            UseCheck::Violation {
+                msg,
+                overspent,
+                seq_replay,
+            } => {
+                if overspent {
+                    bounded_reuse_overspent += 1;
                 }
-                let in_window = g.issued_at >= ti.effective_from
-                    && g.issued_at <= ti.effective_until
-                    && used_at >= ti.effective_from
-                    && used_at <= ti.effective_until;
-                if !in_window {
-                    // a listed action rejected ONLY by the effective window → the taxonomy is stale (MF5)
+                if seq_replay {
+                    bounded_reuse_seq_replays += 1;
+                }
+                unmatched_violation += 1;
+                violation(&mut issues, msg);
+            }
+            UseCheck::IntentWithoutOutcome => intent_without_outcome += 1,
+            UseCheck::Pending => unmatched_pending += 1,
+            UseCheck::Matched {
+                pop_reverified,
+                action_verified,
+                taxonomy_window_failed: window_failed,
+                outcome,
+            } => {
+                if pop_reverified {
+                    uses_pop_reverified += 1;
+                }
+                if bkind == "use" {
+                    one_phase_use_present = true; // D8/MF3: a matched one-phase receipt blocks the capstone
+                }
+                uses_matched += 1;
+                if window_failed {
                     taxonomy_window_failed = true;
                 }
-                in_window
-            });
-        if !action_verified {
-            uses_action_unverified += 1;
+                if !action_verified {
+                    uses_action_unverified += 1;
+                }
+                receipts[hist_idx].mark_validated(outcome, &outcomes);
+            }
         }
     }
     // D5: a validated `use_outcome` that NO closed matching `use_intent` consumed is an ORPHAN — a recorded
     // completion with no anchored pre-action intent (the resource skipped the before-act recording that two-
     // phase exists to require). Flag it; otherwise an outcome-only bundle would read clean (false-clean).
-    for (iref, ogid, orec, _, _) in &outcomes {
-        if !consumed_outcomes.contains(orec) {
+    let mut legacy_orphans = 0usize;
+    for o in &outcomes {
+        if !consumed_outcomes.contains(&o.record_id) {
             unmatched_violation += 1;
-            issues.push(format!("use_outcome {orec}: references intent '{iref}' (grant {ogid}) but no closed matching use_intent consumed it — completion without a recorded intent (D5)"));
+            legacy_orphans += 1;
+            if !hist_consumed_outcomes.contains(&o.record_id) {
+                shadow.orphans += 1;
+            }
+            issues.push(format!("use_outcome {}: references intent '{}' (grant {}) but no closed matching use_intent consumed it — completion without a recorded intent (D5)", o.record_id, o.intent_ref, o.grant_id));
         }
     }
     // D4: a mis-scoped grant is rejected, not "unused" — exclude it so an exercised-but-mis-scoped grant
     // (whose use was skipped, leaving used==0) is not mis-reported as a clean unused grant.
     let grants_unused = grants_by_id
         .iter()
-        .filter(|(gid, g)| g.used == 0 && !misscoped.contains(*gid))
+        .filter(|(gid, g)| g.closed && g.used == 0 && !misscoped.contains(*gid))
         .count();
     // M1: closed grants bounded to N uses of one (action, resource_id).
     let bounded_reuse_grants = grants_by_id
         .values()
-        .filter(|g| g.scope_class == "bounded_reuse")
+        .filter(|g| g.closed && g.scope_class == "bounded_reuse")
         .count();
 
     // M6 (ADR 0005): cosig artifact status. `absent` (no grant declared a cosig requirement) | `satisfied`
@@ -5462,27 +6942,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     for gid in native_grants_by_id.keys() {
         if revocation.revoked.contains(gid.as_str()) {
             revoked_uses_blocked += 1;
+            revoked_membership_found = true;
             revoked_native.insert(gid.clone());
             issues.push(format!("native credential for grant '{gid}': a signed revocation_list ({}) marks it REVOKED — its introspected surface is blocked (M5)", revocation.status));
-        } else if merkle_rev.root.is_some() {
-            let proof = revocation_proofs.and_then(|m| m.get(gid.as_str()));
-            let verdict = merkle_rev
-                .root
-                .as_ref()
-                .map(|root| {
-                    proof.map_or(ProofVerdict::Unproven, |p| {
-                        check_revocation_proof(p, gid, root, merkle_rev.leaf_count)
-                    })
-                })
-                .unwrap_or(ProofVerdict::Unproven);
+        } else if let Some(verdict) = merkle_rev.proof(revocation_proofs, gid) {
             match verdict {
-                ProofVerdict::NotRevoked => revocation_nonmembership_verified += 1,
-                ProofVerdict::Revoked => {
+                ProofV2::NotRevoked => revocation_nonmembership_verified += 1,
+                ProofV2::Revoked(_) => {
                     revoked_uses_blocked += 1;
+                    revoked_membership_found = true;
                     revoked_native.insert(gid.clone());
                     issues.push(format!("native credential for grant '{gid}': a signed revocation_merkle_root ({}) proves it REVOKED — blocked (M5)", merkle_rev.status));
                 }
-                ProofVerdict::Unproven => {
+                ProofV2::Unproven => {
                     revoked_uses_blocked += 1;
                     revoked_native.insert(gid.clone());
                     issues.push(format!("native credential for grant '{gid}': a signed revocation_merkle_root ({}) is present but no valid non-membership proof — cannot prove the credential was not revoked (M5 fail-closed)", merkle_rev.status));
@@ -5495,13 +6967,13 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // (validly-signed) list; if a fresh list blocked any use OR native credential, the status becomes
     // `revoked_present`.
     let revoked_grants_matched = grants_by_id
-        .keys()
-        .filter(|gid| revocation.revoked.contains(*gid))
+        .iter()
+        .filter(|(gid, g)| g.closed && revocation.revoked.contains(*gid))
         .count();
     let revocation_status = if revoked_uses_blocked > 0 {
         "revoked_present".to_string()
     } else {
-        revocation.status
+        revocation.status.clone()
     };
     // The Merkle-mode status is reported as evaluated (absent|fresh|stale); blocked/unproven uses already raise a
     // hard violation (→ !ok) and are counted in revoked_uses_blocked, so no separate "revoked_present" recolor.
@@ -5516,9 +6988,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // (grant_id, credential_ref, effective_scope, resource_id, introspected_at, effective_exp) tuple; name the
     // grant's own resource_id; and prove `effective_scope ⊆ grant.scope` (space-delimited OAuth token subset — no
     // scope-broadening) with no time-broadening (`effective_exp <= grant.exp`) and `grant.issued_at <=
-    // introspected_at`. ANY failure is a hard `unmatched_violation` (→ !ok): a resource broadening past the grant
-    // it was handed is an escalation, not a quiet non-match. Every native grant must be covered by ≥1 verified
-    // transcript for the introspected surface to be COMPLETE.
+    // introspected_at < min(effective_exp, grant.exp)`. ANY failure is a hard `unmatched_violation` (→ !ok): a
+    // resource broadening past the grant it was handed is an escalation, not a quiet non-match. Every native
+    // grant must be covered by ≥1 verified transcript for the introspected surface to be COMPLETE.
     let mut introspection_transcripts_total = 0usize;
     let mut introspection_transcripts_verified = 0usize;
     let mut introspection_scope_narrowed = 0usize;
@@ -5539,13 +7011,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         {
             continue;
         }
-        if !closed.contains(rt.content_hash.as_str()) {
-            continue; // in-flight transcript: not yet anchored, attests nothing over the closed set
+        if !committed.contains(&rt.content_hash) {
+            continue; // in-flight transcript: not committed by a verified checkpoint, attests nothing
         }
         if !introspected_seen.insert(rt.content_hash.as_str()) {
             continue; // verbatim-duplicate transcript deduped (not double-counted)
         }
         introspection_transcripts_total += 1;
+        let hist_idx = receipts.len();
+        let mut receipt = ReceiptHist::new(&rt.record_id, "introspection_transcript");
+        receipt.native = true;
+        receipts.push(receipt);
         let violation = |issues: &mut Vec<String>, msg: String| {
             issues.push(format!(
                 "introspection_transcript {} ({}): {msg}",
@@ -5553,7 +7029,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ));
         };
         if rt.trust != TrustLevel::IntegrityProven
-            || rt.authority != AuthorityTrust::Verified
+            || !matches!(
+                rt.authority,
+                AuthorityTrust::Verified | AuthorityTrust::LegacyUnbound
+            )
             || !evidence_rederivable(rec, "introspection_evidence")
         {
             unmatched_violation += 1;
@@ -5654,12 +7133,37 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             violation(&mut issues, format!("introspected_at {introspected_at} precedes native grant issued_at {} — non-causal (violation)", g.issued_at));
             continue;
         }
+        // The window is [issued_at, min(effective_exp, exp)), as for a brokered use (`used_at >= exp` is
+        // expired): an introspection at or after the attested credential's own expiry, or the grant's,
+        // is a use outside its validity window.
+        let window_end = eff_exp.min(g.exp);
+        if introspected_at >= window_end {
+            unmatched_violation += 1;
+            violation(&mut issues, format!("introspected_at {introspected_at} is not before min(effective_exp, native grant exp) = {window_end} — introspection after expiry (violation)"));
+            continue;
+        }
         introspection_transcripts_verified += 1;
         if sub != sup {
             introspection_scope_narrowed += 1; // a proper subset: the resource attested a real narrowing
         }
-        covered_native.insert(gid);
+        // Plan 009: a native transcript is authorized by this pass; revocation acts on the grant
+        // afterwards. The ordinal is trusted only from a body-bound resource signature.
+        let receipt = &mut receipts[hist_idx];
+        receipt.grant_id = Some(gid.clone());
+        receipt.order = if rt.authority == AuthorityTrust::Verified {
+            temporal::authorization_order(rec, "introspection_evidence")
+        } else {
+            OrderEv::Absent
+        };
+        // R3: COVERAGE is a positive claim — only an anchored-CLOSED transcript of a CLOSED grant covers it (a
+        // committed-only one was still fully checked above, so its violations are never hidden).
+        if g.closed && closed.contains(rt.content_hash.as_str()) {
+            receipt.validated = true;
+            covered_native.insert(gid);
+        }
     }
+    // Plan 009: coverage before revocation removal, for the separate historical judgment.
+    let covered_native_hist = covered_native.clone();
     // M5 (ADR 0005): a REVOKED native grant (computed above) is forced OUT of coverage — so even a fully-verified
     // transcript cannot make a revoked credential's surface `attested` (it counts as uncovered → `unattested`).
     for gid in &revoked_native {
@@ -5685,6 +7189,132 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
     .to_string();
 
+    // Plan 009: current revocation per grant, the authenticated snapshot, and each receipt's
+    // historical ordering. None of this changes a legacy field; it feeds the separate typed fields
+    // and the `historical_authorized_as_of_snapshot` claim.
+    let merkle_v2_usable = merkle_rev.v2.as_ref().is_some_and(|v| v.usable);
+    let grant_revocation = |gid: &str| -> GrantRevocation {
+        let mut acc = GrantRevocationAcc::default();
+        if revocation.signed {
+            match &revocation.v2 {
+                Some(v2) if v2.usable => acc.v2(v2.states.get(gid).copied()),
+                // An unusable v2 list still blocks current use of every grant it names, but it is
+                // not authenticated evidence for history and cannot certify absence.
+                Some(_) if revocation.revoked.contains(gid) => acc.unusable_member(),
+                Some(_) => acc.legacy_nonmember(),
+                None if revocation.revoked.contains(gid) => acc.legacy_member(),
+                None => acc.legacy_nonmember(),
+            }
+        }
+        match merkle_rev.proof(revocation_proofs, gid) {
+            None => {}
+            Some(ProofV2::Unproven) => acc.unproven(),
+            Some(ProofV2::Revoked(st)) if merkle_v2_usable => acc.v2(Some(st)),
+            Some(ProofV2::Revoked(_)) if merkle_rev.v2.is_some() => acc.unusable_member(),
+            Some(ProofV2::Revoked(_)) => acc.legacy_member(),
+            Some(ProofV2::NotRevoked) if merkle_v2_usable => acc.v2(None),
+            Some(ProofV2::NotRevoked) => acc.legacy_nonmember(),
+        }
+        acc.finish()
+    };
+    let snapshot_eval = evaluate_snapshot(
+        &opts.revocation_temporal,
+        &revocation,
+        &merkle_rev,
+        project_id.as_deref(),
+    );
+    let mut grant_states: BTreeMap<String, GrantRevocation> = BTreeMap::new();
+    for gid in grants_by_id.keys().chain(native_grants_by_id.keys()) {
+        grant_states.insert(gid.clone(), grant_revocation(gid));
+    }
+    for r in &receipts {
+        if let Some(gid) = &r.grant_id {
+            if !grant_states.contains_key(gid) {
+                grant_states.insert(gid.clone(), grant_revocation(gid));
+            }
+        }
+    }
+    let state_of = |r: &ReceiptHist| {
+        r.grant_id
+            .as_ref()
+            .and_then(|g| grant_states.get(g).copied())
+            .unwrap_or(GrantRevocation::NotEvaluated)
+    };
+    let receipt_ordering: Vec<ReceiptOrdering> = receipts
+        .iter()
+        .map(|r| ReceiptOrdering {
+            record_id: r.record_id.clone(),
+            kind: r.kind.clone(),
+            grant_id: r.grant_id.clone(),
+            authorization_order: r.order.ordinal(),
+            historical_ordering: temporal::classify(
+                snapshot_eval.verified.as_ref(),
+                r.validated,
+                &r.order,
+                state_of(r),
+            ),
+        })
+        .collect();
+    // Authenticated adverse history: a receipt ordered at/after its grant's cutoff, a use of a
+    // totally revoked (compromised or legacy) grant, or an outcome signing a different ordinal
+    // than its intent.
+    let historical_adverse = receipts.iter().zip(&receipt_ordering).any(|(r, o)| {
+        o.historical_ordering == HistoricalOrdering::AtOrAfter
+            || r.outcome_conflict
+            || (r.validated && state_of(r) == GrantRevocation::Total)
+    });
+    // The claim speaks for every receipt in the bundle: a mixed brokered/native bundle is
+    // historically authorized only if the receipts of both surfaces are proven before.
+    let every_receipt_proven = receipt_ordering
+        .iter()
+        .all(|o| o.historical_ordering == HistoricalOrdering::ProvenBefore);
+    // The legacy orphan-outcome count includes outcomes whose intent was blocked by revocation;
+    // the historical view replaces it with the outcomes neither validation consumed, and adds the
+    // violations the shadow validation found among the blocked uses.
+    let hist_unmatched_violation =
+        unmatched_violation - legacy_orphans + shadow.orphans + shadow.violations;
+    let hist_matched = uses_matched + shadow.matched;
+    let hist_brokered_valid = uses_total > 0
+        && every_receipt_proven
+        && hist_matched == uses_total
+        && uses_pop_reverified + shadow.pop_reverified == hist_matched
+        && hist_unmatched_violation == 0
+        && unmatched_pending + shadow.pending == 0
+        && taxonomy_info.is_some()
+        && !taxonomy_window_failed
+        && uses_action_unverified + shadow.action_unverified == 0;
+    let hist_introspected_valid = native_credential_present
+        && introspection_transcripts_total > 0
+        && introspection_transcripts_verified == introspection_transcripts_total
+        && native_grants_by_id
+            .keys()
+            .all(|gid| covered_native_hist.contains(gid))
+        && every_receipt_proven;
+    // The caller's revocation mode applies to the historical claim too (v2 analogue of the
+    // `authorized` requirement): which usable v2 artifacts must be present, and for Merkle mode
+    // a valid v2 proof for every receipt's grant.
+    let hist_v2_list_usable = revocation.v2.as_ref().is_some_and(|v| v.usable);
+    let hist_merkle_paths_complete = merkle_v2_usable
+        && receipts.iter().all(|r| {
+            r.grant_id.as_deref().is_some_and(|g| {
+                matches!(
+                    merkle_rev.proof(revocation_proofs, g),
+                    Some(ProofV2::NotRevoked | ProofV2::Revoked(_))
+                )
+            })
+        });
+    let historical_counts = [
+        HistoricalOrdering::ProvenBefore,
+        HistoricalOrdering::AtOrAfter,
+        HistoricalOrdering::Indeterminate,
+    ]
+    .map(|h| {
+        receipt_ordering
+            .iter()
+            .filter(|o| o.historical_ordering == h)
+            .count()
+    });
+
     // D4/MF5 taxonomy_status: absent (none pinned) | untrusted (bad sig/issuer/pin) | stale (signed +
     // pinned but a listed action was out of its effective window) | validated (signed, pinned, in-window).
     let taxonomy_status = match (&opts.taxonomy, &taxonomy_info) {
@@ -5705,6 +7335,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut brokers_seq_verified = 0usize;
     let mut cross_broker_suppression = 0usize;
     let mut per_broker_trust: Vec<(String, String)> = Vec::new();
+    let broker_issues_before = issues.len();
     let broker_trust = match dag_opt.as_ref() {
         Some(d) => {
             let full_committed = committed_set(records, &d.by_hash, &d.heads);
@@ -5754,6 +7385,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         }
         None => "assumed".to_string(),
     };
+    let broker_log_contradiction = issues.len() > broker_issues_before;
 
     // D7: the resource_id set the deployment-attestation subject must bind — every resource named by a
     // grant_evidence or use_evidence in the bundle (so a substituted attestation for a different surface
@@ -5843,6 +7475,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         && checkpoints_verified == checkpoints.len()
         && !checkpoints.is_empty()
         && chain_ok;
+    let broker_sequence_verified = broker_trust == "sequence_verified";
 
     // The trust label must never outrank the verdict: if the bundle is not `ok` (e.g. a broken checkpoint
     // chain, an unverified checkpoint, or any other failure), `broker_trust` cannot claim a reduction.
@@ -5852,10 +7485,26 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         "assumed".to_string()
     };
 
-    VerifyReport {
+    let relevant_roles: Vec<&RecordTrust> = record_trust
+        .iter()
+        .filter(|rt| {
+            committed.contains(&rt.content_hash)
+                && matches!(
+                    rt.broker_role.as_str(),
+                    "broker" | "resource" | "grant_void"
+                )
+        })
+        .collect();
+    let body_bound_role_evidence = !relevant_roles.is_empty()
+        && relevant_roles
+            .iter()
+            .all(|rt| rt.authority == AuthorityTrust::Verified);
+    let mut report = VerifyReport {
         ok,
+        claims: ClaimResults::fatal(),
         project_id,
         keys_externally_pinned,
+        body_bound_role_evidence,
         records_total: records.len(),
         records_proven,
         record_trust,
@@ -5865,6 +7514,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         checkpoints_total: checkpoints.len(),
         checkpoints_verified,
         checkpoints_anchored,
+        checkpoints_anchors_attached,
         chain_ok,
         disclosures_total,
         disclosures_verified,
@@ -5921,7 +7571,169 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         coverage_manifest,
         unclosed_side_effects,
         side_effect_closure_status,
+        temporal: TemporalReport {
+            policy: opts.revocation_temporal.clone(),
+            snapshot_status: snapshot_eval.status.to_string(),
+            snapshot_reason: snapshot_eval.reason.clone(),
+            snapshot: snapshot_eval.identity.clone(),
+            grant_revocations: grant_states.into_iter().collect(),
+            receipt_ordering,
+            proven_before: historical_counts[0],
+            at_or_after: historical_counts[1],
+            indeterminate: historical_counts[2],
+        },
         issues,
         first_broken_link,
-    }
+    };
+    // Claims are decided from checked pass outputs once, before the mutable diagnostic report is
+    // handed to callers. A later edit to a public counter or string cannot mint a trusted fact.
+    let structural_integrity = report.records_total > 0
+        && report.records_proven == report.records_total
+        && report.dag_ok
+        && report.chain_ok
+        && !duplicate_record_id
+        && !checkpoint_project_conflict
+        && report.checkpoints_total > 0
+        && report.checkpoints_verified == report.checkpoints_total;
+    let pinned_role_authority = (!opts.broker_authority_keys.is_empty()
+        || !opts.federated_broker_keys.is_empty())
+        && !opts.resource_authority_keys.is_empty()
+        && report.grant_total > 0
+        && report.grant_verified == report.grant_total
+        && body_bound_role_evidence;
+    let brokered_use_valid = report.uses_total > 0
+        && report.uses_matched == report.uses_total
+        && report.uses_pop_reverified == report.uses_matched
+        && report.unmatched_violation == 0
+        && report.unmatched_pending == 0
+        && report.taxonomy_status == "validated"
+        && report.uses_action_unverified == 0;
+    let introspected_use_valid = report.native_credential_present
+        && report.introspection_status == "attested"
+        && report.introspection_transcripts_total > 0
+        && report.introspection_transcripts_verified == report.introspection_transcripts_total;
+    let pinned_signer_keys: Vec<[u8; 32]> = opts
+        .trusted_keys
+        .as_ref()
+        .map(|set| set.iter().map(|k| k.vk.to_bytes()).collect())
+        .unwrap_or_default();
+    let pinned_record_seals: Vec<PinnedRecordSeal> = report
+        .record_trust
+        .iter()
+        .filter_map(|rt| {
+            if rt.trust != TrustLevel::IntegrityProven {
+                return None;
+            }
+            let rec_key = records[rt.index].get("key")?;
+            let id = s(rec_key, "signing_key_id")?;
+            let epoch = rec_key.get("key_epoch")?.as_int()?;
+            let key_bytes = keys.get(&(id, epoch))?.vk.to_bytes();
+            if !pinned_signer_keys.contains(&key_bytes) {
+                return None;
+            }
+            Some(PinnedRecordSeal {
+                record_hash: rt.content_hash.clone(),
+                key_bytes,
+            })
+        })
+        .collect();
+    let anchors: Vec<AnchoredCheckpoint> = anchored_cp_ids
+        .iter()
+        .map(
+            |(sequence, checkpoint_hash, timestamp, _)| AnchoredCheckpoint {
+                sequence: *sequence,
+                checkpoint_hash: checkpoint_hash.clone(),
+                timestamp: timestamp.clone(),
+            },
+        )
+        .collect();
+    // Checked Tier-B contradictions other than the unmatched-use count, shared by the legacy and
+    // historical views (the historical view substitutes its own unmatched count).
+    let checked_other = semantic_record_conflict
+        || committed_grant_rejected
+        || void_contradiction
+        || grant_contradiction
+        || broker_log_contradiction
+        || report.bounded_reuse_overspent > 0
+        || report.bounded_reuse_seq_replays > 0
+        || report.cosig_threshold_failures > 0
+        || report.delegation_monotonicity_violations > 0
+        || report.cross_broker_suppression > 0;
+    let facts = ValidatedFacts {
+        historical: HistoricalFacts {
+            selected: matches!(opts.revocation_temporal, TemporalPolicy::DbSerializedV1(_)),
+            snapshot_verified: snapshot_eval.verified.is_some(),
+            brokered_use_valid: hist_brokered_valid,
+            introspected_use_valid: hist_introspected_valid,
+            adverse: historical_adverse,
+            checked_contradiction: hist_unmatched_violation > 0 || checked_other,
+            v2_list_usable: hist_v2_list_usable,
+            v2_merkle_usable: merkle_v2_usable,
+            merkle_paths_complete: hist_merkle_paths_complete,
+        },
+        structural_integrity,
+        record_count: report.records_total,
+        pinned_record_seals,
+        pinned_signer_keys,
+        pinned_role_authority,
+        latest_checkpoint_sequence: latest_cp_seq,
+        anchors,
+        attestation_valid: report.attestation_status == "attested_claims",
+        brokered_use_valid,
+        introspected_use_valid,
+        capstone: CapstoneFacts {
+            manifest: report
+                .coverage_manifest
+                .as_ref()
+                .is_some_and(|m| !m.is_null()),
+            two_phase: !report.one_phase_use_present,
+            no_incomplete_intent: report.intent_without_outcome == 0,
+            taxonomy: report.taxonomy_status == "validated",
+            every_action_verified: report.uses_action_unverified == 0,
+            every_pop_reverified: report.uses_pop_reverified == report.uses_matched,
+            grant_log: broker_sequence_verified,
+            attestation: report.attestation_status == "attested_claims",
+            no_violation: report.unmatched_violation == 0,
+            no_pending: report.unmatched_pending == 0,
+            bounded_reuse: report.bounded_reuse_overspent == 0
+                && report.bounded_reuse_seq_replays == 0,
+            cosignatures: report.cosig_threshold_failures == 0
+                && (report.cosigned_grants_total == 0
+                    || report.cosigned_grants_satisfied == report.cosigned_grants_total),
+            delegation: (report.delegation_chains_total == 0
+                || report.delegation_chains_verified == report.delegation_chains_total)
+                && report.delegation_monotonicity_violations == 0,
+            revocation: !matches!(
+                report.revocation_status.as_str(),
+                "stale" | "revoked_present" | "missing"
+            ) && report.revoked_uses_blocked == 0
+                && report.revocation_merkle_status != "stale",
+            federation: report.cross_broker_suppression == 0
+                && report.brokers_seq_verified == report.brokers_total,
+            coverage: report.side_effect_closure_status == "closed",
+            brokered_surface: report.uses_matched > 0 && !report.native_credential_present,
+            introspected_surface: report.uses_matched == 0
+                && report.native_credential_present
+                && report.introspection_status == "attested",
+        },
+        immutable_record_contradiction: duplicate_record_id
+            || checkpoint_project_conflict
+            || !grant_equivocations.is_empty(),
+        checked_contradiction: report.unmatched_violation > 0 || checked_other,
+        adverse_disclosure: report.cred_label_checks > report.cred_label_matched,
+        adverse_anchor: !anchor_order_valid,
+        revoked_membership: revoked_membership_found,
+        revocation_issuer_pinned: !opts.revocation_keys.is_empty(),
+        disclosed_revocation_fresh: revocation.status == "fresh",
+        merkle_revocation_fresh: merkle_rev.status == "fresh",
+        merkle_nonmembership_complete: merkle_rev.root.is_some()
+            && report.revoked_uses_blocked == 0
+            && report.revocation_nonmembership_verified
+                == report.uses_total + native_grants_by_id.len(),
+        disclosure_complete: !required_descriptor_record_ids.is_empty()
+            && required_descriptor_record_ids.is_subset(&matched_descriptor_record_ids),
+        policy: opts.claim_policy,
+    };
+    report.claims = verdict::decide_claims(&facts);
+    report
 }

@@ -1,0 +1,13 @@
+Mutant: m41-temporal-strict-decides-history. Named detector: verdict_differential.
+
+--- a/core/src/verify/verdict.rs
++++ b/core/src/verify/verdict.rs
+@@ -501,7 +501,7 @@
+ fn historical_claim(f: &ValidatedFacts, pinned_record_keys: bool) -> ClaimDecision {
+     let adverse = historical_adverse(f);
+     let ready = historical_ready(f);
+-    let selected = f.historical.selected;
++    let selected = true; // BUG: strict policy decides history
+     let integrity = f.structural_integrity;
+     let refuted = selected & (!integrity | adverse);
+     let satisfied = selected & integrity & pinned_record_keys & ready;

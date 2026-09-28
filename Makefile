@@ -2,7 +2,7 @@
 # staticlib (server/internal/core: #cgo LDFLAGS .../target/debug/libaverin_decision_core.a). Edit core/ but
 # forget to rebuild it and the Go tests pass against a STALE trust root. `make test-server` always rebuilds
 # the staticlib first; `make check-staticlib` fails if it is older than core source.
-.PHONY: all core wasm check-staticlib test-core test-server test-verifier test deny vuln supply-chain
+.PHONY: all core wasm check-staticlib test-core test-server test-server-postgres test-verifier test deny vuln supply-chain check-claims
 
 all: test
 
@@ -26,6 +26,17 @@ test-core:
 test-server: core
 	cd server && go vet ./... && go test -a ./...
 
+# Real-Postgres API/store gate; requires a disposable Postgres 16 DSN. The JSON gate
+# rejects absent/skipped named race tests, including skipped children of a passing parent.
+test-server-postgres: core check-staticlib
+	@test -n "$(AVERIN_TEST_DATABASE_URL)" || (echo 'AVERIN_TEST_DATABASE_URL is required' >&2; exit 1)
+	python3 -m unittest discover -s scripts -p test_check_go_test_events.py
+	cd server && bash -o pipefail -c 'go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... ./internal/pgschema/... ./internal/resourceshim/... | python3 ../scripts/check-go-test-events.py'
+
+check-claims:
+	python3 -m unittest discover -s scripts -p test_check_claims.py
+	python3 scripts/check-claims.py
+
 test-verifier: wasm
 	cd verifier && bun test
 
@@ -39,3 +50,35 @@ vuln:
 	cd server && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 supply-chain: deny vuln
+
+# Formal verification gates (see formal/README.md). Needs elan/Lean 4.30.0, cargo-kani 0.68, Java;
+# formal-production needs the pinned Charon/Aeneas/Lean 4.31 toolchain (formal/production/README.md).
+.PHONY: formal formal-lean formal-refinement formal-production formal-mutants formal-kani formal-tla
+formal: formal-lean formal-refinement formal-production formal-mutants formal-kani formal-tla
+
+formal-lean:
+	cd formal/lean && lake build --wfail && ./check-axioms.sh --self-test && ./check-axioms.sh
+
+formal-refinement:
+	python3 formal/check-refinement.py
+	cd formal/lean && lake build --wfail oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json
+	cd formal/lean && lake build --wfail verdict_oracle && lake exe verdict_oracle ../oracle/verdict-expected.json
+	git diff --exit-code -- formal/oracle/expected.json
+	git diff --exit-code -- formal/oracle/verdict-expected.json
+	cargo test -p averin-decision-core --test oracle
+	python3 scripts/check-test-count.py --self-test
+	bash -o pipefail -c 'cargo test -p averin-decision-core --lib verdict_differential 2>&1 | python3 scripts/check-test-count.py --min 1'
+
+# Plan 012: the production seal core, extracted from core/src with Charon/Aeneas and proved in
+# formal/production (needs the pinned toolchain; see formal/production/README.md).
+formal-production:
+	bash formal/run-production-refinement.sh
+
+formal-mutants:
+	bash formal/check-mutants.sh
+
+formal-kani:
+	bash formal/run-kani.sh
+
+formal-tla:
+	bash formal/tla/run-tlc.sh

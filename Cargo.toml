@@ -17,9 +17,21 @@ rust-version = "1.85"
 opt-level = 3
 
 # Small, self-contained release artifacts (lean WASM verifier bundle + static FFI lib).
+# overflow-checks: an arithmetic overflow panics instead of wrapping, as in the dev profile and as in
+# the Aeneas model the production refinement proofs are about (formal/production), whose arithmetic
+# fails on overflow. With panic=abort that panic ends the CLI with a failure exit and traps the WASM
+# call (the browser wrapper throws; no report is returned), so it fails closed.
 [profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+overflow-checks = true
+
+# The staticlib the server image links (deploy/Dockerfile.server). panic=unwind so core/src/ffi.rs's
+# catch_unwind turns a verifier panic into a fail-closed report instead of aborting the server
+# process; otherwise release settings, overflow checks included.
+[profile.server]
+inherits = "release"
+panic = "unwind"

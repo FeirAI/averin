@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feirai/averin/server/internal/pgdurable"
+	"github.com/feirai/averin/server/internal/pgledger"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -60,6 +62,67 @@ func newTestStore(t *testing.T) (*Postgres, func()) {
 	if _, err := pool.Exec(ctx, string(migration)); err != nil {
 		pool.Close()
 		t.Fatalf("apply migration: %v", err)
+	}
+	// Apply every later versioned step too (0002: the record_id uniqueness index), so the tests exercise the
+	// full production schema.
+	migration2, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0002_record_id_unique.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0002: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration2)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0002: %v", err)
+	}
+	migration3, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0003_broker_seq_void.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0003: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration3)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0003: %v", err)
+	}
+	migration4, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0004_project_transactions.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0004: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration4)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0004: %v", err)
+	}
+	migration5, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0005_broker_seq_recovery.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0005: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration5)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0005: %v", err)
+	}
+	if _, err := pool.Exec(ctx, pgledger.SchemaSQL); err != nil {
+		pool.Close()
+		t.Fatalf("apply ledger schema: %v", err)
+	}
+	migration6, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0006_tenant_nonce_ledger.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0006: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration6)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0006: %v", err)
+	}
+	// Plan 009 (0007) retires the baseline boolean revocations table into immutable events.
+	migration7, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0007_temporal_revocation.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0007: %v", err)
+	}
+	if _, err := pool.Exec(ctx, pgdurable.SchemaSQL+"\n"+string(migration7)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0007: %v", err)
 	}
 
 	p := &Postgres{pool: pool}
@@ -288,6 +351,62 @@ func TestPostgresIdemBinding(t *testing.T) {
 	p, done := newTestStore(t)
 	defer done()
 	exerciseIdemBinding(t, p)
+}
+
+func TestPostgresReleaseKeepsNonMaxSeq(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseReleaseKeepsNonMaxSeq(t, p)
+}
+
+func TestPostgresReleaseKeepsRecordHeldSeq(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseReleaseKeepsRecordHeldSeq(t, p)
+}
+
+func TestPostgresBrokerSeqVoid(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseBrokerSeqVoid(t, p)
+}
+
+// TestPostgresRecordIDUniqueEnforced: with migration 0002's UNIQUE index present the store reports record_id
+// uniqueness as DB-enforced; on a DB where 0002 took the WARNING fallback (a plain, NON-unique index over historical
+// duplicates) it must report false, so the operator void (which relies on that backstop) refuses.
+func TestPostgresRecordIDUniqueEnforced(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	if ok, err := p.RecordIDUniqueEnforced(); err != nil || !ok {
+		t.Fatalf("with the UNIQUE index: RecordIDUniqueEnforced = %v, %v; want true", ok, err)
+	}
+	ctx := context.Background()
+	if _, err := p.pool.Exec(ctx, `DROP INDEX records_project_record_id_uniq`); err != nil {
+		t.Fatalf("drop unique index: %v", err)
+	}
+	if ok, err := p.RecordIDUniqueEnforced(); err != nil || ok {
+		t.Fatalf("with no index: RecordIDUniqueEnforced = %v, %v; want false", ok, err)
+	}
+	// the 0002 fallback: the same expression as a plain index.
+	if _, err := p.pool.Exec(ctx, `CREATE INDEX records_project_record_id_idx ON records (project_id, md5(json::jsonb ->> 'record_id'))`); err != nil {
+		t.Fatalf("create fallback index: %v", err)
+	}
+	if ok, err := p.RecordIDUniqueEnforced(); err != nil || ok {
+		t.Fatalf("with the NON-unique fallback index: RecordIDUniqueEnforced = %v, %v; want false", ok, err)
+	}
+	// a NON-unique index that happens to carry the unique index's name must not pass either.
+	if _, err := p.pool.Exec(ctx, `CREATE INDEX records_project_record_id_uniq ON records (project_id, md5(json::jsonb ->> 'record_id'))`); err != nil {
+		t.Fatalf("create misnamed plain index: %v", err)
+	}
+	if ok, err := p.RecordIDUniqueEnforced(); err != nil || ok {
+		t.Fatalf("with a non-unique index named records_project_record_id_uniq: RecordIDUniqueEnforced = %v, %v; want false", ok, err)
+	}
+}
+
+func TestPostgresRecordIDUnique(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	exerciseRecordIDUnique(t, p)
 }
 
 func TestPostgresDuplicateContentHashCollapse(t *testing.T) {

@@ -1,29 +1,74 @@
 # averin — full self-host stack. From the repo root:
 #
-#   AVERIN_SIGNING_SEED=$(openssl rand -hex 32) AVERIN_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24) \
-#     docker compose -f deploy/docker-compose.yml up --build
+#   export AVERIN_SIGNING_SEED=$(openssl rand -hex 32) AVERIN_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24)
+#   export AVERIN_DB_SUPERUSER_PASSWORD=$(openssl rand -hex 24) AVERIN_DB_OWNER_PASSWORD=$(openssl rand -hex 24) \
+#     AVERIN_DB_RUNTIME_PASSWORD=$(openssl rand -hex 24)
+#   docker compose -f deploy/docker-compose.yml up --build
 #
 # Then: web app at http://localhost:8088, offline verifier at /verifier/, ingestion API at :8080,
 # OpenAI-compatible proxy at :8081 (point your agent's base_url there). All three ports bind to
 # 127.0.0.1 only — put averin behind your own authenticated reverse proxy to expose it off-host.
+#
+# Database roles (averin-server refuses to own its schema, see deploy/postgres/01-roles.sh):
+#   db       first boot of an empty volume creates averin_owner (migration identity, owns the
+#            database) and averin_app (least-privilege runtime identity).
+#   migrate  one-shot `averin-migrate --init` as averin_owner: bootstraps an empty database, is a
+#            no-op at the current schema version, and FAILS (so nothing starts) on an older schema,
+#            which needs the explicit operator cutover (docs/operator-verification.md).
+#   grants   one-shot: averin_owner grants averin_app its runtime privileges (runtime-grants.sql).
+#   server   connects as averin_app; startup re-checks that it is not an owner or superuser and holds
+#            no mutation privilege on an append-only table.
 name: averin
 
 services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: averin
-      POSTGRES_PASSWORD: ${AVERIN_DB_PASSWORD:-averin}
-      POSTGRES_DB: averin
+      # Bootstrap superuser: used only by the first-boot init script, never by averin. Passwords are
+      # compose secrets (files under /run/secrets), not container environment variables.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/averin_db_superuser_password
+      POSTGRES_DB: postgres
+    secrets:
+      - averin_db_superuser_password
+      - averin_db_owner_password
+      - averin_db_runtime_password
     volumes:
       - averin-pgdata:/var/lib/postgresql/data
+      - ./postgres/01-roles.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U averin -d averin"]
+      # TCP, not the socket: the image's first-boot server listens on the socket only while the init
+      # script runs, so this turns healthy only after the roles and the database exist.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d averin"]
       interval: 3s
       timeout: 3s
       retries: 20
     # No published port by default — reachable only on the compose network. Uncomment to inspect:
     # ports: ["5432:5432"]
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    command: ["averin-migrate", "--init"]
+    # One-shot; averin-migrate reads its DSN from the environment. It exits after --init.
+    environment:
+      AVERIN_MIGRATION_DATABASE_URL: postgres://averin_owner:${AVERIN_DB_OWNER_PASSWORD:?set AVERIN_DB_OWNER_PASSWORD (migration identity)}@db:5432/averin?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+
+  grants:
+    image: postgres:16-alpine
+    # The owner password is read from the secret file into psql's own environment only.
+    entrypoint: ["sh", "-c", "PGPASSWORD=\"$$(cat /run/secrets/averin_db_owner_password)\" exec psql -h db -U averin_owner -d averin -v ON_ERROR_STOP=1 -f /grants/runtime-grants.sql"]
+    secrets:
+      - averin_db_owner_password
+    volumes:
+      - ./postgres/runtime-grants.sql:/grants/runtime-grants.sql:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   server:
     build:
@@ -38,19 +83,17 @@ services:
       AVERIN_SIGNING_SEED: ${AVERIN_SIGNING_SEED:?set a real 32-byte signing seed, e.g. export AVERIN_SIGNING_SEED=$(openssl rand -hex 32)}
       AVERIN_SIGNING_KEY_ID: k0
       AVERIN_ADDR: ":8080"
-      # Durable append-only store. On startup the server runs a single versioned migration (under an
-      # advisory lock) that brings the DB to its schema version; a steady-state boot issues zero DDL, and
-      # a DB newer than the binary is a fail-closed refusal to start. NOTE: it connects as the
-      # table-owning role here, so the append-only REVOKE is a no-op (owner bypass) — fine for self-host;
-      # DB-enforced append-only needs a separate least-privilege role (which can then drop CREATE/ALTER).
-      AVERIN_DATABASE_URL: postgres://averin:${AVERIN_DB_PASSWORD:-averin}@db:5432/averin?sslmode=disable
+      # Durable append-only store, as the least-privilege runtime role (the migrate and grants services
+      # prepared the schema and its privileges). A steady-state boot issues zero DDL; a database at
+      # another schema version is a fail-closed refusal to start.
+      AVERIN_DATABASE_URL: postgres://averin_app:${AVERIN_DB_RUNTIME_PASSWORD:?set AVERIN_DB_RUNTIME_PASSWORD (runtime identity)}@db:5432/averin?sslmode=disable
     # loopback only — the app API is unauthenticated by Phase-1 design (docs/coverage-limits.md);
     # expose via your own authenticated reverse proxy.
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
-      db:
-        condition: service_healthy
+      grants:
+        condition: service_completed_successfully
 
   proxy:
     build:
@@ -84,3 +127,11 @@ services:
 
 volumes:
   averin-pgdata:
+
+secrets:
+  averin_db_superuser_password:
+    environment: AVERIN_DB_SUPERUSER_PASSWORD
+  averin_db_owner_password:
+    environment: AVERIN_DB_OWNER_PASSWORD
+  averin_db_runtime_password:
+    environment: AVERIN_DB_RUNTIME_PASSWORD

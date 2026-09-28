@@ -13,12 +13,14 @@ package resourceshim
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -38,14 +40,33 @@ const ledgerTag = "averin.broker.use.ledger.v1"
 // double-spend or a replay. It is returned by the ledger and surfaced by ValidateUse.
 var ErrConsumed = errors.New("resourceshim: credential jti or nonce already consumed")
 
+// ErrRevoked reports that the presented capability's grant has been revoked (ADR 0005 M5). ValidateUse returns
+// it BEFORE consuming anything, so a revoked credential is never exercised and never burns a nonce.
+var ErrRevoked = errors.New("resourceshim: the capability's grant is revoked")
+
+// ErrRevocationCheck marks an unavailable authoritative revocation lookup.
+// Callers must surface it as a server failure rather than a rejected credential.
+var ErrRevocationCheck = errors.New("resourceshim: revocation check failed")
+
+// ErrLedgerUnavailable marks a consume-ledger failure that is NOT a replay: a store timeout, cancellation or
+// lost connection. Nothing was consumed (the claim's transaction rolls back), so callers must surface it as
+// a server failure (5xx) and must not count it as an authorization deny. Only ErrConsumed is a replay.
+var ErrLedgerUnavailable = errors.New("resourceshim: consume ledger unavailable")
+
+// ErrInvalidLedgerClaim marks a claim the consume ledger refused as malformed or out of place (an
+// incomplete claim, a claim for another project than the open project transaction, a claim outside a
+// write transaction). That is a server invariant violation, not an outage and not a replay: callers
+// must surface it as 500 and log it. Ledger implementations wrap such errors with it.
+var ErrInvalidLedgerClaim = errors.New("resourceshim: consume ledger refused an invalid claim")
+
 // Ledger is the durable consume-before-act store. Consumption is marked BEFORE the resource performs
 // the side effect, so a crash after consumption cannot leave a live credential.
 type Ledger interface {
-	// ConsumeNonce atomically marks a PoP nonce consumed (replay protection); ErrConsumed if seen.
-	ConsumeNonce(nonce string) error
+	// Claims carry a random request owner. A release can remove only the exact claim acquired here.
+	ConsumeNonce(claim NonceClaim) error
 	// ConsumeJTI atomically marks a single-use credential jti consumed (double-spend protection);
 	// ErrConsumed if already spent.
-	ConsumeJTI(jti string) error
+	ConsumeJTI(claim JTIClaim) error
 	// ReleaseNonce / ReleaseJTI ROLL BACK a consumption when receipt construction fails AFTER ValidateUse
 	// consumed the credential but BEFORE the caller acted (the caller acts only on a 2xx response). This
 	// un-burns a single-use credential on a transient build error so an honest retry can re-validate, without
@@ -53,63 +74,121 @@ type Ledger interface {
 	// failed one. Release is sound ONLY when the receipt definitively did not persist; a commit-ambiguous
 	// store error must NOT release (the api layer keeps the credential consumed there). Releasing an entry
 	// that was not consumed is a safe no-op.
-	ReleaseNonce(nonce string)
-	ReleaseJTI(jti string)
+	ReleaseNonce(claim NonceClaim)
+	ReleaseJTI(claim JTIClaim)
+}
+
+// NonceClaim scopes replay to the verified capability project and this shim's configured resource.
+// Owner is an unpredictable per-attempt value; copying the handle preserves its release authority.
+type NonceClaim struct {
+	ProjectID, ResourceID, Nonce string
+	owner                        string
+}
+
+// JTIClaim stays global across projects and resources for the same capability/use index.
+type JTIClaim struct {
+	Key   string
+	owner string
+}
+
+func (c NonceClaim) OwnerID() string { return c.owner }
+func (c JTIClaim) OwnerID() string   { return c.owner }
+
+func claimOwner() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("resourceshim: claim owner: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+func NewNonceClaim(projectID, resourceID, nonce string) (NonceClaim, error) {
+	if projectID == "" || resourceID == "" || nonce == "" {
+		return NonceClaim{}, errors.New("resourceshim: nonce claim requires project, resource, and nonce")
+	}
+	owner, err := claimOwner()
+	return NonceClaim{ProjectID: projectID, ResourceID: resourceID, Nonce: nonce, owner: owner}, err
+}
+
+func NewJTIClaim(key string) (JTIClaim, error) {
+	if key == "" {
+		return JTIClaim{}, errors.New("resourceshim: JTI claim requires a key")
+	}
+	owner, err := claimOwner()
+	return JTIClaim{Key: key, owner: owner}, err
 }
 
 // MemLedger is an in-memory Ledger for the demonstrator and tests. Production backs the ledger with a
 // durable, atomically-consistent store. Safe for concurrent use.
 type MemLedger struct {
 	mu     sync.Mutex
-	jti    map[string]struct{}
-	nonces map[string]struct{}
+	jti    map[string]string
+	nonces map[nonceScope]string
 }
+
+type nonceScope struct{ project, resource, nonce string }
 
 // NewMemLedger returns an empty in-memory ledger.
 func NewMemLedger() *MemLedger {
-	return &MemLedger{jti: map[string]struct{}{}, nonces: map[string]struct{}{}}
+	return &MemLedger{jti: map[string]string{}, nonces: map[nonceScope]string{}}
+}
+
+func nonceKey(c NonceClaim) nonceScope {
+	return nonceScope{c.ProjectID, c.ResourceID, c.Nonce}
 }
 
 // ConsumeNonce marks nonce consumed; ErrConsumed if it was already consumed.
-func (l *MemLedger) ConsumeNonce(nonce string) error {
+func (l *MemLedger) ConsumeNonce(c NonceClaim) error {
+	if c.ProjectID == "" || c.ResourceID == "" || c.Nonce == "" || c.owner == "" {
+		return errors.New("resourceshim: invalid nonce claim")
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.nonces == nil {
-		l.nonces = map[string]struct{}{} // tolerate a zero-value MemLedger{}
+		l.nonces = map[nonceScope]string{} // tolerate a zero-value MemLedger{}
 	}
-	if _, ok := l.nonces[nonce]; ok {
+	key := nonceKey(c)
+	if _, ok := l.nonces[key]; ok {
 		return ErrConsumed
 	}
-	l.nonces[nonce] = struct{}{}
+	l.nonces[key] = c.owner
 	return nil
 }
 
 // ConsumeJTI marks jti consumed; ErrConsumed if it was already consumed.
-func (l *MemLedger) ConsumeJTI(jti string) error {
+func (l *MemLedger) ConsumeJTI(c JTIClaim) error {
+	if c.Key == "" || c.owner == "" {
+		return errors.New("resourceshim: invalid JTI claim")
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.jti == nil {
-		l.jti = map[string]struct{}{} // tolerate a zero-value MemLedger{}
+		l.jti = map[string]string{} // tolerate a zero-value MemLedger{}
 	}
-	if _, ok := l.jti[jti]; ok {
+	if _, ok := l.jti[c.Key]; ok {
 		return ErrConsumed
 	}
-	l.jti[jti] = struct{}{}
+	l.jti[c.Key] = c.owner
 	return nil
 }
 
 // ReleaseNonce un-marks a consumed nonce (rollback when a receipt did not persist). No-op if not consumed.
-func (l *MemLedger) ReleaseNonce(nonce string) {
+func (l *MemLedger) ReleaseNonce(c NonceClaim) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.nonces, nonce)
+	key := nonceKey(c)
+	if c.owner != "" && l.nonces[key] == c.owner {
+		delete(l.nonces, key)
+	}
 }
 
 // ReleaseJTI un-marks a consumed jti (rollback when a receipt did not persist). No-op if not consumed.
-func (l *MemLedger) ReleaseJTI(jti string) {
+func (l *MemLedger) ReleaseJTI(c JTIClaim) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.jti, jti)
+	if c.owner != "" && l.jti[c.Key] == c.owner {
+		delete(l.jti, c.Key)
+	}
 }
 
 // Op is the operation a resource is about to perform under a presented capability. ResourceID comes
@@ -145,6 +224,8 @@ type UseEvidence struct {
 	UseSig string `json:"use_sig"` // base64url PoP signature over the use_pop_challenge digest
 	// ADR 0005 M1 (bounded_reuse): the 1-based exercise index; omitted for non-bounded uses.
 	UseSequenceNumber int `json:"use_sequence_number,omitempty"`
+	nonceClaim        NonceClaim
+	jtiClaim          JTIClaim
 }
 
 // consumeKey is the ledger double-spend key. For single_operation it is the bare jti (== grant_id). For
@@ -160,9 +241,12 @@ func consumeKey(jti string, useSeq int) string {
 // Shim is the resource-side gateway, configured once with the broker's capability-issuing public key,
 // this resource's id, and the durable ledger.
 type Shim struct {
-	issuingPub ed25519.PublicKey
-	resourceID string
-	ledger     Ledger
+	issuingPub   ed25519.PublicKey
+	resourceID   string
+	projectID    string // authenticated route context; never inferred from the request body
+	ledger       Ledger
+	isRevoked    func(grantID string) bool // nil = no use-time revocation check
+	isRevokedErr func(grantID string) (bool, error)
 }
 
 // New constructs a Shim. resourceID is this resource's audience id (capabilities whose aud differs are
@@ -171,64 +255,141 @@ func New(issuingPub ed25519.PublicKey, resourceID string, ledger Ledger) *Shim {
 	return &Shim{issuingPub: issuingPub, resourceID: resourceID, ledger: ledger}
 }
 
+// WithProject binds this shim to the project authenticated for the route.
+func (s *Shim) WithProject(projectID string) *Shim {
+	s.projectID = projectID
+	return s
+}
+
+// WithRevocationCheck makes ValidateUse consult the revoked set at use time: a capability whose grant_id (== the
+// verified jti) isRevoked reports as revoked is rejected with ErrRevoked BEFORE anything is consumed. Without it
+// a revoked grant stays usable at the resource until its expiry (the offline verifier only flags the use after
+// the fact).
+func (s *Shim) WithRevocationCheck(isRevoked func(grantID string) bool) *Shim {
+	s.isRevoked = isRevoked
+	return s
+}
+
+// WithRevocationCheckErr uses an authoritative lookup that can fail. A failed
+// read fails closed before any ledger access and retains its server-error type.
+func (s *Shim) WithRevocationCheckErr(isRevoked func(grantID string) (bool, error)) *Shim {
+	s.isRevokedErr = isRevoked
+	return s
+}
+
 // RollbackUse releases the nonce and (single-use) jti a prior ValidateUse consumed. Call it ONLY when the
 // caller has NOT acted — receipt construction failed before any record persisted, so the api layer returns
 // an error and the caller never received a 2xx — to un-burn the credential for an honest retry. MUST NOT be
 // called after a commit-AMBIGUOUS store error (the receipt may be durable; releasing would allow a replay
 // double-spend). Releasing a jti that was not consumed (a reusable credential) is a no-op.
 func (s *Shim) RollbackUse(ev UseEvidence) {
-	s.ledger.ReleaseNonce(ev.Nonce)
+	s.ledger.ReleaseNonce(ev.nonceClaim)
 	// Release the SAME key ValidateUse consumed: bare jti (single_operation) or (jti, usn) (bounded_reuse).
-	s.ledger.ReleaseJTI(consumeKey(ev.JTI, ev.UseSequenceNumber))
+	s.ledger.ReleaseJTI(ev.jtiClaim)
 }
 
-// ValidateUse validates a presented capability + proof-of-possession for op, consumes the credential
-// (consume-before-act), and returns the canonical use_evidence. The ordering is: validate everything
-// that can fail WITHOUT consuming (capability signature, validity window, audience/action coverage,
-// PoP-at-use), and only THEN consume the nonce (replay) and, for a single-use credential, the jti
-// (double-spend). This keeps a failed/forged request from burning a victim's credential, while still
-// consuming before the side effect (which the caller performs only after a successful return).
-func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now time.Time) (UseEvidence, error) {
+type preflightResult struct {
+	claims    broker.Claims
+	unix      int64
+	challenge []byte
+	cnfPub    ed25519.PublicKey
+	useSig    []byte
+	bounded   bool
+	useSeq    int
+}
+
+// PreflightUse checks the signed capability, tenant, validity, audience, action,
+// sender PoP, and sequence without reading revocation or touching the ledger.
+// The caller must call ValidateUse again inside its project transaction before
+// issuing a receipt: time, revocation, and replay state can change after this check.
+func (s *Shim) PreflightUse(token, useSigB64 string, op Op, nonce string, now time.Time) error {
+	_, err := s.preflightUse(token, useSigB64, op, nonce, now)
+	return err
+}
+
+// PreflightUseGrantID returns the signature-verified, project-bound grant ID
+// after the same pure checks. Callers can reject a terminal void before
+// staging content; ValidateUse must still repeat the check under the write
+// transaction before consuming the credential.
+func (s *Shim) PreflightUseGrantID(token, useSigB64 string, op Op, nonce string, now time.Time) (string, error) {
+	checked, err := s.preflightUse(token, useSigB64, op, nonce, now)
+	if err != nil {
+		return "", err
+	}
+	return checked.claims.Jti, nil
+}
+
+func (s *Shim) preflightUse(token, useSigB64 string, op Op, nonce string, now time.Time) (preflightResult, error) {
 	// 1. Capability signature + decode (the broker minted and signed this descriptor).
 	claims, err := broker.VerifyCapability(token, s.issuingPub)
 	if err != nil {
-		return UseEvidence{}, err
+		return preflightResult{}, err
+	}
+	// Tenant binding is an authorization gate, ahead of revocation and every
+	// nonce/JTI read or write. Legacy capabilities have no signed project claim
+	// and are refused by this explicit online cutoff.
+	if s.projectID == "" {
+		return preflightResult{}, errors.New("resourceshim: authenticated project is required")
+	}
+	switch claims.Version {
+	case 2:
+		if claims.ProjectID == "" || claims.ProjectID != s.projectID {
+			return preflightResult{}, errors.New("resourceshim: capability project does not match authenticated project")
+		}
+	case 0:
+		return preflightResult{}, errors.New("resourceshim: legacy capability project cannot be authenticated")
+	default:
+		return preflightResult{}, errors.New("resourceshim: unsupported capability version")
 	}
 	// 2. Validity window (threat B8: short-lived credentials).
 	unix := now.UTC().Unix()
+	// The issuer caps new grants at MaxTTL. Enforce the same bound at acceptance so an old
+	// global exclusion can eventually retire after a DB-time cutover. Compare without subtracting
+	// attacker-controlled signed int64 values (which could overflow).
+	maxTTL := int64(broker.MaxTTL / time.Second)
+	skew := int64(broker.RequestClockSkew / time.Second)
+	if claims.Iat <= 0 || claims.Iat > math.MaxInt64-maxTTL || claims.Exp <= claims.Iat || claims.Exp > claims.Iat+maxTTL {
+		return preflightResult{}, errors.New("resourceshim: capability lifetime exceeds accepted maximum")
+	}
+	if claims.Nbf < claims.Iat || claims.Nbf >= claims.Exp {
+		return preflightResult{}, errors.New("resourceshim: invalid capability issue/not-before window")
+	}
+	if unix < 0 || unix > math.MaxInt64-skew || claims.Iat > unix+skew {
+		return preflightResult{}, errors.New("resourceshim: capability issued too far in the future")
+	}
 	if unix < claims.Nbf {
-		return UseEvidence{}, fmt.Errorf("resourceshim: capability not yet valid (nbf %d > now %d)", claims.Nbf, unix)
+		return preflightResult{}, fmt.Errorf("resourceshim: capability not yet valid (nbf %d > now %d)", claims.Nbf, unix)
 	}
 	if unix >= claims.Exp {
-		return UseEvidence{}, fmt.Errorf("resourceshim: capability expired (exp %d <= now %d)", claims.Exp, unix)
+		return preflightResult{}, fmt.Errorf("resourceshim: capability expired (exp %d <= now %d)", claims.Exp, unix)
 	}
 	// 3. Audience + action coverage: the capability must authorize THIS resource and THIS action.
 	if claims.Aud != s.resourceID {
-		return UseEvidence{}, fmt.Errorf("resourceshim: capability audience %q does not match this resource %q", claims.Aud, s.resourceID)
+		return preflightResult{}, fmt.Errorf("resourceshim: capability audience %q does not match this resource %q", claims.Aud, s.resourceID)
 	}
 	if op.Action == "" || op.Action != claims.Act {
-		return UseEvidence{}, fmt.Errorf("resourceshim: operation %q is not the authorized action %q", op.Action, claims.Act)
+		return preflightResult{}, fmt.Errorf("resourceshim: operation %q is not the authorized action %q", op.Action, claims.Act)
 	}
 	if strings.TrimSpace(nonce) == "" {
-		return UseEvidence{}, errors.New("resourceshim: a one-time PoP nonce is required")
+		return preflightResult{}, errors.New("resourceshim: a one-time PoP nonce is required")
 	}
 	// 4. PoP-at-use (R4): the holder must sign the fully-bound challenge with the cnf private key, so a
 	// stolen token (without the cnf key) cannot be used.
 	cnfPub, err := base64.RawURLEncoding.DecodeString(claims.Cnf)
 	if err != nil || len(cnfPub) != ed25519.PublicKeySize {
-		return UseEvidence{}, errors.New("resourceshim: capability cnf is not a valid ed25519 public key")
+		return preflightResult{}, errors.New("resourceshim: capability cnf is not a valid ed25519 public key")
 	}
 	binding, err := credentialBinding(token)
 	if err != nil {
-		return UseEvidence{}, err
+		return preflightResult{}, err
 	}
 	challenge := usePoPChallenge(claims.Jti, s.resourceID, op.Action, op.ParamsCommitment, binding, nonce)
 	useSig, err := base64.RawURLEncoding.DecodeString(useSigB64)
 	if err != nil || len(useSig) != ed25519.SignatureSize {
-		return UseEvidence{}, errors.New("resourceshim: use_sig must be a base64url-no-pad ed25519 signature")
+		return preflightResult{}, errors.New("resourceshim: use_sig must be a base64url-no-pad ed25519 signature")
 	}
 	if !ed25519.Verify(ed25519.PublicKey(cnfPub), challenge, useSig) {
-		return UseEvidence{}, errors.New("resourceshim: use_sig does not prove possession of the cnf key (PoP failed)")
+		return preflightResult{}, errors.New("resourceshim: use_sig does not prove possession of the cnf key (PoP failed)")
 	}
 	// 4.5 M1 (bounded_reuse): the descriptor carries use_limit (>0) iff this is a bounded_reuse capability.
 	// Validate the sequence number BEFORE consuming anything, so a bad usn never burns the nonce/credential.
@@ -237,23 +398,76 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 	if bounded {
 		useSeq = op.UseSequenceNumber
 		if useSeq < 1 || useSeq > claims.UseLimit {
-			return UseEvidence{}, fmt.Errorf("resourceshim: use_sequence_number %d outside [1, %d] for bounded_reuse", useSeq, claims.UseLimit)
+			return preflightResult{}, fmt.Errorf("resourceshim: use_sequence_number %d outside [1, %d] for bounded_reuse", useSeq, claims.UseLimit)
 		}
+	}
+	return preflightResult{
+		claims: claims, unix: unix, challenge: challenge,
+		cnfPub: ed25519.PublicKey(cnfPub), useSig: useSig,
+		bounded: bounded, useSeq: useSeq,
+	}, nil
+}
+
+// ValidateUse repeats the pure preflight under the project transaction, then
+// checks authoritative revocation and atomically consumes nonce/JTI before the
+// caller records a receipt or performs the side effect.
+func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now time.Time) (UseEvidence, error) {
+	checked, err := s.preflightUse(token, useSigB64, op, nonce, now)
+	if err != nil {
+		return UseEvidence{}, err
+	}
+	claims, unix := checked.claims, checked.unix
+	challenge, cnfPub, useSig := checked.challenge, checked.cnfPub, checked.useSig
+	bounded, useSeq := checked.bounded, checked.useSeq
+	// 4.6 M5 revocation: a revoked grant must not be exercised. Checked on the SIGNATURE-VERIFIED jti (== the
+	// grant_id) and BEFORE consuming, so a revoked credential burns neither its nonce nor its jti.
+	if s.isRevokedErr != nil {
+		revoked, err := s.isRevokedErr(claims.Jti)
+		if err != nil {
+			return UseEvidence{}, fmt.Errorf("%w: %v", ErrRevocationCheck, err)
+		}
+		if revoked {
+			return UseEvidence{}, fmt.Errorf("%w: grant %s", ErrRevoked, claims.Jti)
+		}
+	} else if s.isRevoked != nil && s.isRevoked(claims.Jti) {
+		return UseEvidence{}, fmt.Errorf("%w: grant %s", ErrRevoked, claims.Jti)
 	}
 	// 5. Consume-before-act (R5): mark the nonce (replay) and the credential's double-spend key consumed
 	// BEFORE the caller performs the side effect. The key is the bare jti for single_operation and
 	// (jti, use_sequence_number) for bounded_reuse, so the same jti can be spent once per sequence number
 	// up to use_limit. session_grant/batch_grant are unbounded reusable (no jti consume). A replayed key
 	// or nonce fails here.
-	if err := s.ledger.ConsumeNonce(nonce); err != nil {
+	nonceClaim, err := NewNonceClaim(s.projectID, s.resourceID, nonce)
+	if err != nil {
+		return UseEvidence{}, err
+	}
+	if err := s.ledger.ConsumeNonce(nonceClaim); err != nil {
+		if errors.Is(err, ErrInvalidLedgerClaim) {
+			return UseEvidence{}, fmt.Errorf("resourceshim: consume nonce: %w", err)
+		}
+		if !errors.Is(err, ErrConsumed) {
+			return UseEvidence{}, fmt.Errorf("%w: consume nonce: %v", ErrLedgerUnavailable, err)
+		}
 		return UseEvidence{}, fmt.Errorf("resourceshim: nonce replay: %w", err)
 	}
+	var jtiClaim JTIClaim
 	if claims.SingleUse || bounded {
-		if err := s.ledger.ConsumeJTI(consumeKey(claims.Jti, useSeq)); err != nil {
+		jtiClaim, err = NewJTIClaim(consumeKey(claims.Jti, useSeq))
+		if err != nil {
+			s.ledger.ReleaseNonce(nonceClaim)
+			return UseEvidence{}, err
+		}
+		if err := s.ledger.ConsumeJTI(jtiClaim); err != nil {
 			// The nonce was just consumed but this use fails here (double-spend) and produces no receipt —
 			// release it so a definitively-pre-persistence failure leaves the consume-before-act ledger
 			// consistent (mirror the handler's RollbackUse on later failures; adversarial review). The key stays consumed.
-			s.ledger.ReleaseNonce(nonce)
+			s.ledger.ReleaseNonce(nonceClaim)
+			if errors.Is(err, ErrInvalidLedgerClaim) {
+				return UseEvidence{}, fmt.Errorf("resourceshim: consume jti: %w", err)
+			}
+			if !errors.Is(err, ErrConsumed) {
+				return UseEvidence{}, fmt.Errorf("%w: consume jti: %v", ErrLedgerUnavailable, err)
+			}
 			return UseEvidence{}, fmt.Errorf("resourceshim: double-spend (R5): %w", err)
 		}
 	}
@@ -262,6 +476,8 @@ func (s *Shim) ValidateUse(token, useSigB64 string, op Op, nonce string, now tim
 	// rule and the shim's per-jti ledger provably agree (R5 rev 4).
 	usedAt := unix
 	return UseEvidence{
+		nonceClaim:       nonceClaim,
+		jtiClaim:         jtiClaim,
 		Kind:             "use",
 		GrantID:          claims.Jti,
 		Action:           op.Action,

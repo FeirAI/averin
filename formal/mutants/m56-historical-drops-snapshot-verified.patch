@@ -1,0 +1,12 @@
+Mutant: the historical claim no longer requires a verified (fresh, watermark-sufficient) revocation snapshot (plan 009 gating). Named detector: the regenerated production refinement proof (Refinement.historical_ready_ok), not a test.
+
+--- a/core/src/verify/verdict.rs
++++ b/core/src/verify/verdict.rs
+@@ -460,7 +460,6 @@
+ /// adverse evidence.
+ fn historical_ready(f: &ValidatedFacts) -> bool {
+     f.pinned_role_authority
+-        && f.historical.snapshot_verified
+         && historical_revocation(f)
+         && policy_evidence_ready(f)
+         && (f.historical.brokered_use_valid || f.historical.introspected_use_valid)
