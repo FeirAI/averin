@@ -1,9 +1,9 @@
 # Implementation continuation checkpoint
 
 Updated 2026-09-28. All twelve plans and the parser totality track are implemented and integrated on
-the local branch `advisor/trust-final` (worktree `.worktrees/averin-final`). Plan 011 waits only for
-the final Kani mutation gate result. Nothing is pushed, merged, published or deployed. PR #1 stays
-open. Use [README.md](README.md) for status and [EXECUTION.md](EXECUTION.md) for the evidence trail.
+the local branch `advisor/trust-final` (worktree `.worktrees/averin-final`). All gates pass, including
+the full Kani mutation gate (48/48). The branch is published to PR #1's head branch; PR #1 stays open
+for review and is not merged; nothing is deployed. Use [README.md](README.md) for status and [EXECUTION.md](EXECUTION.md) for the evidence trail.
 
 ## Current state
 
@@ -16,12 +16,9 @@ open. Use [README.md](README.md) for status and [EXECUTION.md](EXECUTION.md) for
 - **Cross-plane producers:** Govder `advisor/003-authority-body-binding` `0a22220`, Vultrino
   `advisor/004-grant-pop-context` `85b386f`. Both are required by plans 003/004.
 - **Open:**
-  1. The final Kani mutation gate on `d87d48f` (`/tmp/averin-final-kani-mutants.log`), run by the
-     primary. The SKIP_KANI run kills 46 of 48; m9 and m10 need their Kani harnesses, and m12,
-     m23–m25 must die to their named Kani harnesses rather than only to the `stale` check.
-  2. Docker images were never built (in-container crate/module fetches would bypass Socket
+  1. Docker images were never built (in-container crate/module fetches would bypass Socket
      Firewall). Decide a screened build path (for example vendored sources) before building them.
-  3. feir-os (`deploy/compose/docker-compose.yml`, `deploy/k8s/overlays/dev/kustomization.yaml`)
+  2. feir-os (`deploy/compose/docker-compose.yml`, `deploy/k8s/overlays/dev/kustomization.yaml`)
      connects the Averin server as the `postgres` superuser to an empty database, which the server
      now refuses. It needs the owner/runtime split, `averin-migrate --init` and the runtime grants
      (see `deploy/postgres/` and `deploy/README.md`). Not edited here.

@@ -166,14 +166,29 @@ pushed, merged, published or deployed.
 
 ### Incidents
 
-- Docker Desktop hung (backend kept the socket); recovered by the user as in earlier sessions.
-  Details: TODO(primary).
+- Docker Desktop hung twice (2026-09-24 and 2026-09-27): the CLI timed out while the backend kept
+  running without a usable socket, which blocked the real-Postgres gates for about a day. The
+  primary killed the stale Docker processes, removed the socket and relaunched with the user's
+  approval. The first time, the task container `averin-trust-postgres` was gone (it had been
+  auto-removed with the VM); it was recreated as `postgres:16-alpine` on 127.0.0.1:55432 with
+  `max_prepared_transactions=10` and a restart policy, its password kept in a private scratch file
+  so the gates no longer depend on `docker inspect`. The 009 PG gates were then run by the primary.
 - Disk space: the host repeatedly ran at 9 to 17 GB free; Kani build directories were pruned per
-  invocation (`KANI_PRUNE_BUILD=1`) and stale CNF files of dead solvers removed. Details of the
-  disk-full event: TODO(primary).
+  invocation (`KANI_PRUNE_BUILD=1`) and stale CNF files of dead solvers removed. The volume hit 100% on
+  2026-09-24 (238 to 343 MiB free): a Charon extraction for mutant m50 failed with "No space left
+  on device" and was rerun rather than counted; the primary freed space by removing regenerable
+  task-owned targets (vultrino-004, averin-011-fuzz, accepted 002/005/008/009). A second event on
+  2026-09-26 came from Kani leaving about 90 MB of build directory per harness selection (14 GB);
+  the 011 executor cleaned 32 GB and added `KANI_PRUNE_BUILD=1`.
 - Usage limits and stalled executors interrupted runs; interrupted proofs were never counted, and
-  interrupted shard batches resumed only from `PASS` records on the same digest. Details:
-  TODO(primary).
+  interrupted shard batches resumed only from `PASS` records on the same digest. A session-limit
+  stop (2026-09-24), a user demo interruption (2026-09-25) and a weekly limit (2026-09-26) ended
+  executor sessions; two lost uncommitted work, after which every executor was told to commit each
+  passing milestone. The 011 executor finished the string family at 06:25 on 2026-09-28 but did not
+  report it for about 9.5 hours; since then the primary runs an hourly progress check (processes,
+  logs, commits) and drives remaining steps directly. A 64 GB CBMC blow-up that swapped the host led
+  to a 12 GB per-run watchdog; a system-wide `pkill cbmc` by one executor led to the rule that
+  executors kill only their own process groups.
 - The host slept between 20:20 and about 23:56 on 2026-09-27 during the final gates; a completion
   notification was lost and the final executor idled until the primary prompted it.
 - Two regressions introduced during integration were caught by the gates and fixed: the C-L5 edit
@@ -229,7 +244,9 @@ Server S-M1..S-L8 and verifier V-L1..V-I2 were fixed on `advisor/trust-combined`
   harnesses successful; key order 5/5, spelling 61/61 and strings 17,031/17,031 from recorded state
   on identical sources.
 - **Final Kani mutation gate** on `d87d48f`: `/tmp/averin-final-kani-mutants.log`, result:
-  TODO(primary).
+  `check-mutants: OK (all 48 mutants killed)`, each by its named detector including the Kani
+  harnesses (m9/m10 base64 tails, m12 strict UTF-16, m13 spelling, m22/m23 integer, m24/m25 G1,
+  m2 string case 00128); 2,333 s wall, 3,295 s CPU, peak 2.9 GB.
 - **Gates on `advisor/trust-final`** (logs `/tmp/averin-final-*.log`, `/tmp/averin-final-r2-*.log`,
   `/tmp/averin-final-r4-checks.log`): fmt, clippy `-D warnings`, `cargo test --workspace`, core
   `test-tsa`, release CLI with and without rfc3161, wasm32 build, 32-bit i686 tests (zig cross-link,
