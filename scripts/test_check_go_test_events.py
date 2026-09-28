@@ -20,6 +20,11 @@ def event(action, test, package=PKG):
 
 
 class GoTestEventGateTest(unittest.TestCase):
+    def test_live_required_list_is_unique_and_qualified(self):
+        # A duplicate would make the real gate refuse every run with a list error.
+        self.assertEqual(len(set(gate.REQUIRED)), len(gate.REQUIRED))
+        self.assertTrue(all(item.count(":") == 1 for item in gate.REQUIRED))
+
     def test_pass(self):
         lines = stream(event("run", "TestRequired"), event("pass", "TestRequired"),
                        event("skip", "TestUnrelatedFixture"))

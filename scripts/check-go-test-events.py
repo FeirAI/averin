@@ -73,7 +73,6 @@ REQUIRED = (
     # Hardening review: pool starvation, pending sweep, runtime privilege and cutover barriers.
     f"{STORE_PACKAGE}:TestPostgresHotProjectDoesNotStarvePool",
     f"{STORE_PACKAGE}:TestPostgresProjectGateCancellation",
-    f"{STORE_PACKAGE}:TestPostgresPendingSweepPrunesOnlyUnusableRows",
     f"{PGSCHEMA_PACKAGE}:TestOrdinaryStartupRefusesFreshBootstrap",
     f"{PGSCHEMA_PACKAGE}:TestCutoverRefusesUnnamedMemberWriter",
     f"{API_PACKAGE}:TestUseLedgerOutageIsNotADeny",
