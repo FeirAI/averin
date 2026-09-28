@@ -325,6 +325,14 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # Kani: every mutant with a named harness must also die to that bounded proof, not only to the oracle.
+      - name: add swap so a CBMC memory peak cannot kill the hosted runner
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/cbmc.swap
+          sudo chmod 600 /mnt/cbmc.swap
+          sudo mkswap /mnt/cbmc.swap
+          sudo swapon /mnt/cbmc.swap
+          free -h
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           kani-version: 0.68.0
@@ -380,6 +388,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Install only; formal/run-kani.sh drives the named harnesses (bare `cargo-kani` would try every
       # harness with default features).
+      - name: add swap so a CBMC memory peak cannot kill the hosted runner
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/cbmc.swap
+          sudo chmod 600 /mnt/cbmc.swap
+          sudo mkswap /mnt/cbmc.swap
+          sudo swapon /mnt/cbmc.swap
+          free -h
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           kani-version: 0.68.0
@@ -410,6 +426,14 @@ jobs:
           - { harness: accepted_integer_spelling, minutes: 120 }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: add swap so a CBMC memory peak cannot kill the hosted runner
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/cbmc.swap
+          sudo chmod 600 /mnt/cbmc.swap
+          sudo mkswap /mnt/cbmc.swap
+          sudo swapon /mnt/cbmc.swap
+          free -h
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           kani-version: 0.68.0
@@ -433,6 +457,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: add swap so a CBMC memory peak cannot kill the hosted runner
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/cbmc.swap
+          sudo chmod 600 /mnt/cbmc.swap
+          sudo mkswap /mnt/cbmc.swap
+          sudo swapon /mnt/cbmc.swap
+          free -h
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           kani-version: 0.68.0
@@ -467,6 +499,14 @@ jobs:
                 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: add swap so a CBMC memory peak cannot kill the hosted runner
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/cbmc.swap
+          sudo chmod 600 /mnt/cbmc.swap
+          sudo mkswap /mnt/cbmc.swap
+          sudo swapon /mnt/cbmc.swap
+          free -h
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           kani-version: 0.68.0
@@ -490,6 +530,14 @@ jobs:
         slice: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: add swap so a CBMC memory peak cannot kill the hosted runner
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/cbmc.swap
+          sudo chmod 600 /mnt/cbmc.swap
+          sudo mkswap /mnt/cbmc.swap
+          sudo swapon /mnt/cbmc.swap
+          free -h
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           kani-version: 0.68.0
@@ -515,6 +563,14 @@ jobs:
         slice: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: add swap so a CBMC memory peak cannot kill the hosted runner
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/cbmc.swap
+          sudo chmod 600 /mnt/cbmc.swap
+          sudo mkswap /mnt/cbmc.swap
+          sudo swapon /mnt/cbmc.swap
+          free -h
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           kani-version: 0.68.0

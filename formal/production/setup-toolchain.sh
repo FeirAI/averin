@@ -32,6 +32,10 @@ fetch_commit() { # repo-url commit dest
   git -C "$3" checkout -q --detach FETCH_HEAD
   [ "$(git -C "$3" rev-parse HEAD)" = "$2" ] || { echo "$1 is not at $2" >&2; exit 1; }
 }
+fetch() { # url sha256 dest (stable release assets only)
+  [ -f "$3" ] || curl -fsSL "$1" -o "$3"
+  echo "$2  $3" | shasum -a 256 -c -
+}
 case "$AENEAS$CHARON" in *[!0-9a-f]*) echo "manifest commits must be full hex ids" >&2; exit 1 ;; esac
 [ "${#AENEAS}" -eq 40 ] && [ "${#CHARON}" -eq 40 ] || { echo "manifest commits must be 40-hex ids" >&2; exit 1; }
 fetch_commit https://github.com/AeneasVerif/aeneas.git "$AENEAS" "$DIR/sources/aeneas"
