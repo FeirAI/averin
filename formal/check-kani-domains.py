@@ -53,10 +53,14 @@ def validate_wiring(source: str, runner: str) -> None:
         "core::mem::forget(parsed);"
         "assert!(CanonValue::Int(n).serialize()==text);}"
     )
-    # The whole body is pinned: the prefix lemma is asserted before its identical assumption,
-    # the entire typed parse result must equal Int(n), only the harness-owned result is
-    # forgotten (after it is read), and the serializer must restore the parsed spelling.
-    if not helper.endswith(checked_prefix) or helper.count("kani::assume(") != 1:
+    # The whole body is pinned, from the signature to the closing brace (comments and whitespace
+    # aside): the prefix lemma is asserted before its identical assumption, the entire typed parse
+    # result must equal Int(n), only the harness-owned result is forgotten (after it is read), and
+    # the serializer must restore the parsed spelling. Nothing may precede or follow it (an early
+    # return or an extra statement would narrow the proved domain).
+    if helper != "fninteger_roundtrip_case(n:i64){" + checked_prefix:
+        raise ValueError("integer_roundtrip_case body changed (the whole body is pinned)")
+    if helper.count("kani::assume(") != 1:
         raise ValueError("integer prefix must be asserted before the identical assumption and parse")
     if helper.count("forget(") != 1:
         raise ValueError("integer body may forget only the harness-owned parse result")
@@ -248,6 +252,12 @@ def self_test() -> None:
                          "assert!(CanonValue::Int(n).serialize() == text); core::mem::forget(parsed); kani::assume(false); "),
         original.replace("assert!(CanonValue::Int(n).serialize() == text); ", ""),
         original.replace("CanonValue::Int(n).serialize() == text", "CanonValue::Int(n).serialize() != text"),
+        # an inserted early return (before, or after the first statement) narrows the domain
+        original.replace("fn integer_roundtrip_case(n: i64) { ", "fn integer_roundtrip_case(n: i64) { if n == 7 { return; } "),
+        original.replace("let text = n.to_string(); ", "let text = n.to_string(); if n > 5 { return; } "),
+        original.replace("assert!(CanonValue::Int(n).serialize() == text); } ",
+                         "assert!(CanonValue::Int(n).serialize() == text); let _ = n; } "),
+        original.replace("fn integer_roundtrip_case(n: i64)", "fn integer_roundtrip_case(n: i32)"),
     ):
         try:
             validate_wiring(changed, runner)

@@ -66,11 +66,21 @@ if [ -n "${KANI_SHARD_SLICE:-}" ]; then
   family_label="$family (slice $KANI_SHARD_SLICE)"
 fi
 
-# Results are only reusable for byte-identical proof sources and runners.
-digest="$(cat core/src/canon.rs core/src/kani_string_cases.rs core/src/b64.rs core/src/hashx.rs core/src/lib.rs \
-  formal/run-kani.sh formal/run-kani-shards.sh formal/check-kani-success.py \
-  formal/check-kani-shards.py formal/check-kani-domains.py formal/gen-kani-string-cases.py \
-  | shasum -a 256 | cut -d' ' -f1)"
+# Results are only reusable for byte-identical proof sources, runners, dependencies and tools: the
+# original proof sources and runners first (the definition the 17,031-case string tally was recorded
+# against, as of 9539e8c), then Cargo.lock, both Cargo.toml files, rust-toolchain.toml, the Kani
+# version and every Rust file of the crate.
+kani_version="$(cargo kani --version 2>/dev/null)" || { echo "run-kani-shards: cargo kani --version failed" >&2; exit 2; }
+crate_sources=()
+while IFS= read -r f; do crate_sources+=("$f"); done < <(find core/src -name '*.rs' | LC_ALL=C sort)
+digest="$( {
+  cat core/src/canon.rs core/src/kani_string_cases.rs core/src/b64.rs core/src/hashx.rs core/src/lib.rs \
+    formal/run-kani.sh formal/run-kani-shards.sh formal/check-kani-success.py \
+    formal/check-kani-shards.py formal/check-kani-domains.py formal/gen-kani-string-cases.py
+  cat Cargo.lock Cargo.toml core/Cargo.toml rust-toolchain.toml
+  printf '%s\n' "$kani_version"
+  for f in "${crate_sources[@]}"; do printf '%s\n' "$f"; cat "$f"; done
+} | shasum -a 256 | cut -d' ' -f1)"
 state="${KANI_SHARD_STATE:-target/kani-shards/$family.state}"
 family_label="${family_label:-$family}"
 mkdir -p "$(dirname "$state")"

@@ -269,6 +269,29 @@ ALLOWED_STUBS = {
 }
 
 
+def stub_attributes(source: str):
+    """Every Kani replacement in `source`, in any attribute form: `#[kani::stub(...)]` on one or
+    several lines, inside `cfg_attr(kani, kani::stub(...))`, with spaces around `::`. Yields the
+    start and end offsets of the attribute's `kani::stub(...)` and its argument text. Line comments are ignored;
+    any other `kani::stub*` attribute (e.g. `stub_verified`) is rejected outright."""
+    code = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), source)
+    for m in re.finditer(r"\bkani\s*::\s*(stub\w*)\s*", code):
+        if m.group(1) != "stub":
+            raise ValueError(f"replacement attribute kani::{m.group(1)} is not allowed")
+        if m.end() >= len(code) or code[m.end()] != "(":
+            raise ValueError("kani::stub without an argument list")
+        depth, i = 0, m.end()
+        while i < len(code):
+            if code[i] == "(":
+                depth += 1
+            elif code[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        yield m.start(), i + 1, code[m.end() + 1 : i]
+
+
 def validate_stub_sites(source: str) -> None:
     for other in ("b64.rs", "hashx.rs"):
         if "kani::stub" in (SOURCE.parent / other).read_text():
@@ -281,15 +304,16 @@ def validate_stub_sites(source: str) -> None:
         if compact(source[i : j + 6]) != body:
             raise ValueError(f"guard body changed: {start}")
     seen = {key: set() for key in ALLOWED_STUBS}
-    for match in re.finditer(r"#\[kani::stub\((.*?)\)\]", source):
-        target = match.group(1)
-        if target not in ALLOWED_STUBS:
-            raise ValueError(f"stub not in the allowlist: {target}")
-        rest = source[match.end() :]
+    allowed = {re.sub(r"\s+", "", key): key for key in ALLOWED_STUBS}
+    for start, end, argument in stub_attributes(source):
+        target = allowed.get(re.sub(r"\s+", "", argument))
+        if target is None:
+            raise ValueError(f"stub not in the allowlist: {argument}")
+        rest = source[end:]
         fn = re.search(r"\bfn (\$name|\w+)\(", rest)
         site = fn.group(1) if fn else ""
         if site == "$name":
-            macro = re.findall(r"macro_rules! (\w+)", source[: match.start()])
+            macro = re.findall(r"macro_rules! (\w+)", source[:start])
             site = macro[-1] if macro else ""
         if site not in ALLOWED_STUBS[target]:
             raise ValueError(f"stub {target} attached to {site}, outside its allowlist")
@@ -368,6 +392,11 @@ def self_test() -> None:
         source.replace("    #[kani::stub(std::vec::Vec::push, push_without_growth)]\n    #[kani::unwind(6)]\n    fn utf16_key_order_is_transitive", "    #[kani::unwind(6)]\n    fn utf16_key_order_is_transitive"),
         source.replace("#[kani::stub(<*const u8>::align_offset, align_offset_usize_max)]", "#[kani::stub(<*const u8>::align_offset, other)]", 1),
         source.replace("    fn utf16_key_order_is_exact_steered() {", "    #[kani::stub(nfc, nfc_identity)]\n    fn utf16_key_order_is_exact_steered() {"),
+        # multi-line and cfg_attr forms, and other replacement attributes, are seen too
+        source.replace("    fn spelling_alphabet_is_exact() {", "    #[kani::stub(\n        nfc,\n        nfc_identity\n    )]\n    fn spelling_alphabet_is_exact() {"),
+        source.replace("    fn spelling_alphabet_is_exact() {", "    #[cfg_attr(kani, kani::stub(nfc, nfc_identity))]\n    fn spelling_alphabet_is_exact() {"),
+        source.replace("    fn spelling_alphabet_is_exact() {", "    #[cfg_attr(kani, kani :: stub(std::vec::Vec::push, push_without_growth))]\n    fn spelling_alphabet_is_exact() {"),
+        source.replace("    fn spelling_alphabet_is_exact() {", "    #[kani::stub_verified(nfc)]\n    fn spelling_alphabet_is_exact() {"),
     ):
         try:
             family_harnesses("accepted_integer_spelling", changed)
