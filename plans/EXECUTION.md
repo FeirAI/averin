@@ -118,3 +118,128 @@ Plan011 is checkpointed, NOT accepted, at clean `a8d1db0` (source/checkers `4f31
 User explicitly selected **checkpoint after nonce verification/integration**, preserving quota rather than starting009. Plan005 is accepted at clean `52518ab8cc6d39b354f88144207d2c6321fd40d8`. Primary reviewed all production changes and final test deltas; fresh RFC3161 full server/vet plus mandatory uncached PostgreSQL gate passed at production-equivalent `35394bb` (`/tmp/averin005-primary-final-server.log`). The final test-only commit adds a real Cutover failure after the table rename and proves schema/version/data rollback, then authorized retry and stable cutoff; primary final mandatory PostgreSQL gate passes at52518ab (`/tmp/averin005-primary-final-pg.log`). All30 required named tests pass without skipped children. Primary independently confirmed all six current ConsumeLedger TLC expectations, including premature-purge replay and two-tenant non-vacuity witnesses (`/tmp/averin005-primary-*.log`). Executor race checks passed resourceshim/pgledger/store/API. No new dependencies, source-main edits or publication. Integration fast-forward is the only remaining checkpoint action;009/011/012 remain incomplete.
 
 Checkpoint complete: isolated `advisor/averin-trust-implementation` fast-forwarded to exact52518ab; primary verified its HEAD and clean status, as well as clean005/011 worktrees. User main remainsc30bd2f. Nine plans are accepted, with009/011/012 explicitly incomplete. No new work starts until user resumes. `CONTINUATION.md` is the compact resumption entrypoint.
+
+## 2026-09-24..28: 009, 011, 012, parser totality, review rounds, final integration
+
+Work resumed after the 2026-09-24 checkpoint (`52518ab`) with Claude executors under a Claude
+primary. The primary reviewed every deliverable and re-ran gates; an executor report was never
+treated as acceptance. Everything below is on local branches of the Averin repository. Nothing was
+pushed, merged, published or deployed.
+
+### Executors and branches
+
+| Executor | Scope | Branch / result |
+|---|---|---|
+| 009 executor | temporal revocation | `f529fd0`..`274d25b` on the combined branch |
+| 012 executors (phase A, phase B `exec-012b`) | seal core and verdict kernel refinement | phase A merged `6cf5f17`; phase B `9efac52`, `61660dd`, `9513a97` |
+| `exec-parser` | extractable parser rewrite and totality proof | `advisor/parser-panic-freedom`, final `e62cb81` |
+| `exec-011b`, `exec-011c` | Kani families, string enumeration, runners | `advisor/011-bounded-parser-proofs`, final `9539e8c`; string run in `.worktrees/averin-011` |
+| `exec-harden` | review round 1 fixes | `advisor/trust-combined`, `cac1aeb`..`07aaa30` |
+| `exec-final` | final integration, review round 1 formal/CI/deploy findings, review round 2 | `advisor/trust-final`, `5d3e44e`..`d87d48f` |
+
+### Rulings
+
+- **G1 and A1 in Kani proofs.** Two proof-only std selections are allowed, each attached by
+  `#[kani::stub]` to named harnesses only and pinned by the checkers: A1, `<*const u8>::align_offset`
+  returns `usize::MAX` (std documents this as permitted; it keeps `from_utf8` on its byte-at-a-time
+  path), and G1, `Vec::push` restricted to its non-growth branch with an assertion (a push that would
+  reallocate is a counterexample, so it fails closed). No reachable parser, NFC or target function is
+  replaced. Mutants m24 and m25 (under-allocation) must hit G1.
+- **String round trip by enumeration.** A symbolic string does not finish in CBMC, so the family is
+  the exact 17,031-case domain (at most two scalars from ASCII, U+00E9, U+1F600), one generated
+  harness per case, with the case table and mapping checked against the domain.
+- **Parser rewrite.** The RCP parser was rewritten into the subset Charon/Aeneas extract (explicit
+  cursor, no early returns, manual UTF-8 and i64 accumulation, typed errors rendered at the boundary,
+  duplicate-key check through the production merge sort), with a differential test against the
+  pre-rewrite parser. Two later source fixes kept the Kani harnesses and the totality proof aligned:
+  (a) `78c1d9d`, the numeric top-level route builds `Int(n)` only after the trailing-data check
+  (`5222b83` regenerated the proofs); (b) `0ff618c`, `decode_utf16_strict` preallocates 3 bytes per
+  UTF-16 unit so its pushes never reallocate (`4a0c2fd` regenerated the proofs).
+- **`parse_never_panics`** stays unverified and is superseded as panic-freedom evidence by the
+  unbounded Lean theorem `Refinement.Parse.parse_document_total` (hypothesis `NfcFits`).
+- **Kani evidence freeze.** While the string run was in progress, the proof sources and the Kani
+  runners/checkers were frozen by digest (`fd4b0e77073fd38abc0a798f9bd091a0d7c1562099488f16326ec3b1d26dc5f8`);
+  the checker fixes waited until the run finished. The five proof sources stay byte-identical to
+  `9539e8c` on `advisor/trust-final`.
+- **Deploy image builds** were not run, because fetching crates and modules inside a container
+  bypasses Socket Firewall; deployment behaviour was validated with host-built binaries instead.
+
+### Incidents
+
+- Docker Desktop hung (backend kept the socket); recovered by the user as in earlier sessions.
+  Details: TODO(primary).
+- Disk space: the host repeatedly ran at 9 to 17 GB free; Kani build directories were pruned per
+  invocation (`KANI_PRUNE_BUILD=1`) and stale CNF files of dead solvers removed. Details of the
+  disk-full event: TODO(primary).
+- Usage limits and stalled executors interrupted runs; interrupted proofs were never counted, and
+  interrupted shard batches resumed only from `PASS` records on the same digest. Details:
+  TODO(primary).
+- The host slept between 20:20 and about 23:56 on 2026-09-27 during the final gates; a completion
+  notification was lost and the final executor idled until the primary prompted it.
+- Two regressions introduced during integration were caught by the gates and fixed: the C-L5 edit
+  broke a `shasum` line in `run-fuzz.sh` (fixed `a13bfdc`), and a duplicate required-test entry made
+  the Postgres gate refuse every run (fixed `7d9aed2`, with a unit test on the live list).
+
+### Review round 1 (2026-09-26)
+
+Server S-M1..S-L8 and verifier V-L1..V-I2 were fixed on `advisor/trust-combined` (`cac1aeb`,
+`0643a38`, `7ff2de1`, `abbf813`, `07aaa30`). Claims/CI/deploy findings were fixed on
+`advisor/trust-final`:
+
+| Finding | Fix |
+|---|---|
+| C-H2 claims honesty | final-state claims, one trusted-base list, `parser-totality` claim (`8cd2bf6`) |
+| C-M1 verdict axioms | standard axioms enforced per declaration in `ProductionAudit.lean` (`c30ea84`) |
+| C-M2 overflow | `overflow-checks = true` in release; server image links a `server` profile with `panic = "unwind"` so the FFI catch fails closed (`acc68d7`) |
+| C-M3 cfg/glue checks | lexer-based cfg scan over extracted and declaring files, glue hashed, wider declaration scan (`c30ea84`) |
+| C-M4 Lean escape hatches | environment-based audit of axiom/opaque/unsafe/extern/implemented_by (`18061f8`) |
+| C-M5 CI Kani limits | measured per-job limits, cost-classed string slices, kissat from the Kani bundle (`9b27516`) |
+| C-M6/C-L6/C-L7 toolchain | pinned opam versions, Lean tarball by sha256, exact nightly rustc, guarded `--write` (`9b27516`) |
+| C-M7 stale docs | README, SECURITY, TESTING, GrantLog vs GrantRecovery (`8cd2bf6`) |
+| C-L1, C-L3, C-L4, C-L5, C-L8, C-L9 | specific claim symbols, test-count gate, resume-state note, exact fuzz counts, NFC fast path, shasum fallback |
+| Deploy | owner/runtime Postgres split in compose, `averin-migrate --init` step, runtime grants (`acc68d7`) |
+
+### Review round 2 (2026-09-28)
+
+| Finding | Fix |
+|---|---|
+| H1 cutover barrier blind to other roles' sessions | fail closed unless the migrator is superuser or has `pg_read_all_stats`; NULL backend types count (`ca29f2f`) |
+| H2 CI cost | full string family on schedule/dispatch; 20-case PR smoke subset (`29bba41`, pure jobs relaxed in `d87d48f`) |
+| M1 CheckRuntime | column grants and non-inherited memberships detected (`3f44958`) |
+| M2 Dockerfiles | pinned toolchain, `--locked`, `-mod=readonly`, frozen bun lockfile (`3ba724c`) |
+| R2-M1 parser claim | holds in Aeneas' std model; capacity overflow, allocation failure, stack depth not modelled (`401c7c9`) |
+| L1/L6 | `cfg!` any delimiter; `unsafe` rejected in ProductionAudit (`19b1122`) |
+| L2 pending sweep | continues past a failing project, random order, 55 s bound (`f0efd30`) |
+| L3 ledger errors | invalid claims are 500 invariant errors, outages 503 (`4819ad2`) |
+| L4 report cutoff | `cutoff_order` shown for `revoked_unverified`/`unproven` (`7821b0c`) |
+| L5 historical note | one rule and neutral wording in CLI and both viewers (`c7ec10f`) |
+| L7 deploy/CI | passwords as compose secrets, no-op `--init` reported, Actions pinned by SHA (`b324cdf`) |
+| L10 | mutation job limit documented as an unmeasured backstop (`29bba41`) |
+| Leftovers | `Dockerfile.web` serves the reference WASM and asserts the committed pin (`009d61c`); gofmt (`009d61c`, `c2f35e5`) |
+| Post-string-run | whole integer case body pinned, robust stub scan, full resume digest (`636ef06`); string family claimed (`d87d48f`) |
+
+### Evidence
+
+- **String family:** 17,031 of 17,031 `VERIFICATION:- SUCCESSFUL` (Kani 0.68.0 / CBMC 6.11, A1 only),
+  recorded against digest `fd4b0e77…` in `.worktrees/averin-011/target/kani-shards/strings-*.state`.
+  ASCII 16,513 cases in four parallel jobs, about 25.5 h wall each, 57 CPU-hours; the 518 non-ASCII
+  cases sequentially, 2.2 h wall, 1.9 CPU-hours, at most 19 s per case (case 17030 15.9 s). Logs
+  `/tmp/averin-011-final4-strings-*.log`.
+- **Extended Kani suite on the final digest:** `/tmp/averin-011-final5-extended.log`: 10 fresh
+  harnesses successful; key order 5/5, spelling 61/61 and strings 17,031/17,031 from recorded state
+  on identical sources.
+- **Final Kani mutation gate** on `d87d48f`: `/tmp/averin-final-kani-mutants.log`, result:
+  TODO(primary).
+- **Gates on `advisor/trust-final`** (logs `/tmp/averin-final-*.log`, `/tmp/averin-final-r2-*.log`,
+  `/tmp/averin-final-r4-checks.log`): fmt, clippy `-D warnings`, `cargo test --workspace`, core
+  `test-tsa`, release CLI with and without rfc3161, wasm32 build, 32-bit i686 tests (zig cross-link,
+  run in a linux/386 container: 401 passed, 1 ignored), `make check-claims`, `make formal-lean`,
+  `make formal-refinement`, `run-production-refinement.sh`, `SKIP_KANI=1 check-mutants.sh` (46 of 48;
+  m9 and m10 have only Kani detectors), `make test-server`, `make test-server-postgres`, race tests
+  with Postgres, `make test-verifier` (43), web tests and build, `run-fuzz.sh pr` twice (identical
+  corpus, 521 cases), `run-tlc.sh` (28 configs, expected outcomes), the Kani checker self-tests and
+  exact partitions.
+- **Deploy validation:** compose `db` and `grants` services on a fresh volume with host-built
+  `server`-profile binaries: refusals for an empty database, missing grants, owner and superuser
+  credentials; as the runtime role healthz/readyz 200, record, checkpoint, verify `ok: true`,
+  `DELETE` denied. Image builds not run.

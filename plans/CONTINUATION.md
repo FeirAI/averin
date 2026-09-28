@@ -1,43 +1,73 @@
 # Implementation continuation checkpoint
 
-Updated 2026-09-24. User asked to implement all twelve selected trust plans with **gpt-6-sol, high** subagents. Work size is not a reason to drop a plan. User subsequently reported 13% usage remaining and explicitly selected **checkpoint after nonce verification/integration**, then authorized pushing the work and preparing a handover for a different agent. This turn publishes the checkpoint only; implementation remains stopped until resumed. Unresolved tasks remain selected and must not be relabeled complete. Publication is scoped to the four task branches listed below; no deployment or merge to main is included.
+Updated 2026-09-28. All twelve plans and the parser totality track are implemented and integrated on
+the local branch `advisor/trust-final` (worktree `.worktrees/averin-final`). Plan 011 waits only for
+the final Kani mutation gate result. Nothing is pushed, merged, published or deployed. PR #1 stays
+open. Use [README.md](README.md) for status and [EXECUTION.md](EXECUTION.md) for the evidence trail.
 
-## Published handoff layout
+## Current state
 
-- Averin accepted implementation and these plans: `FeirAI/averin`, branch `advisor/averin-trust-implementation`. The final checkpoint adds documentation to accepted source commit `52518ab`; inspect the branch HEAD for the documentation commit.
-- Averin unaccepted parser work: `FeirAI/averin`, branch `advisor/011-bounded-parser-proofs`, `a8d1db0f291aeeb7aae3680f022fa1cc0bcd83d7`. Keep it separate until proof gates and primary review pass.
-- Govder accepted producer changes: `FeirAI/govder`, branch `advisor/003-authority-body-binding`, `0a22220`.
-- Vultrino accepted producer changes: `FeirAI/vultrino`, branch `advisor/004-grant-pop-context`, `85b386f`.
+- **Integration branch:** `advisor/trust-final`, head `d87d48f` (docs commits may follow). Base
+  `e62cb81` (`advisor/parser-panic-freedom`: plans 001–010, 012 phases A/B, 011 through `92d615d`,
+  parser totality), then hardening round 1 `07aaa30` (merge `5d3e44e`), 011 `9539e8c` (merge
+  `ba70a48`), and the review fixes `ed8ca46`..`d87d48f`.
+- **Contained branches:** `advisor/trust-combined` (`07aaa30`), `advisor/011-bounded-parser-proofs`
+  (`9539e8c`), `advisor/parser-panic-freedom` (`e62cb81`).
+- **Cross-plane producers:** Govder `advisor/003-authority-body-binding` `0a22220`, Vultrino
+  `advisor/004-grant-pop-context` `85b386f`. Both are required by plans 003/004.
+- **Open:**
+  1. The final Kani mutation gate on `d87d48f` (`/tmp/averin-final-kani-mutants.log`), run by the
+     primary. The SKIP_KANI run kills 46 of 48; m9 and m10 need their Kani harnesses, and m12,
+     m23–m25 must die to their named Kani harnesses rather than only to the `stale` check.
+  2. Docker images were never built (in-container crate/module fetches would bypass Socket
+     Firewall). Decide a screened build path (for example vendored sources) before building them.
+  3. feir-os (`deploy/compose/docker-compose.yml`, `deploy/k8s/overlays/dev/kustomization.yaml`)
+     connects the Averin server as the `postgres` superuser to an empty database, which the server
+     now refuses. It needs the owner/runtime split, `averin-migrate --init` and the runtime grants
+     (see `deploy/postgres/` and `deploy/README.md`). Not edited here.
 
-Use [HANDOVER.md](HANDOVER.md) as the continuation prompt. [Preflight notes](preflight/README.md) preserve the production extraction results and tool pins; executables, caches and `/tmp` logs remain local and are not Git artifacts. The original Averin PR #1 branch is not updated by this publication.
+## Rerunning the gates
 
-## Accepted work
+Use `CARGO_BUILD_JOBS=1 GOMAXPROCS=2 GOFLAGS=-p=1` on the shared host.
 
-Plans **001, 002, 003, 004, 005, 006, 007, 008, 010** are accepted. Accepted source is `52518ab8cc6d39b354f88144207d2c6321fd40d8` on `advisor/averin-trust-implementation`, in `.worktrees/averin-trust-implementation` relative to the umbrella workspace. Primary independently verified the clean worktree after fast-forward. The subsequent publication commit contains only the plans and handoff documentation.
+| Gate | Command | Notes |
+|---|---|---|
+| Rust | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `(cd core && cargo test --features test-tsa)` | |
+| 32-bit | CI: `cargo test --target i686-unknown-linux-gnu` in `core/` | On this Mac: build with `--no-run` and a zig linker shim (`zig cc -target x86-linux-gnu.2.17`), then run the test binaries in `docker run --platform linux/386 debian:bookworm-slim` with the worktree mounted at the same path |
+| Server | `make test-server` | rebuilds the rfc3161 staticlib first |
+| Postgres | `make test-server-postgres`; `cd server && go test -race -count=1 ./internal/api/... ./internal/store/... ./internal/pgschema/... ./internal/resourceshim/...` | needs `AVERIN_TEST_DATABASE_URL` (task container `averin-trust-postgres`, 127.0.0.1:55432; `scratchpad/pg-env.sh` sets it without printing it) |
+| Verifier | `make test-verifier` | rebuilds the WASM and rewrites the pins; commit them only from the reference environment |
+| Web | `(cd web && bun run test && bun run build)` | install with `sfw bun install --frozen-lockfile` |
+| Claims | `make check-claims` | textual check only |
+| Lean model | `make formal-lean` | Lean 4.30.0 via elan |
+| Refinement gate | `make formal-refinement` | |
+| Production proofs | `bash formal/run-production-refinement.sh` | needs `.verification-tools/aeneas-557f7a` (found automatically) and `AVERIN_LAKE_PACKAGES=.verification-tools/aeneas-557f7a/smoke/proofs/.lake/packages` |
+| Mutants | `SKIP_KANI=1 bash formal/check-mutants.sh` (diagnostic); `bash formal/check-mutants.sh` (full, with Kani) | about 75–85 min without Kani locally |
+| Kani | `bash .verification-tools/kani-0.68/with-kani.sh bash formal/run-kani.sh [--extended]`; `run-kani-shards.sh FAMILY` | run under `formal/kani-watchdog.sh`; one solver at a time on this host |
+| Kani checkers | `python3 formal/check-kani-shards.py [--self-test]`; `check-kani-domains.py`; `check-kani-success.py --self-test`; `gen-kani-string-cases.py --check`; `kani-string-slices.py --check` | no solver needed |
+| Fuzz | `bash formal/run-fuzz.sh pr` | Bun 1.3.14 |
+| TLC | `TLA2TOOLS_JAR=.verification-tools/tla/tla2tools-v1.7.4.jar bash formal/tla/run-tlc.sh` | 28 configs, about 6 min |
 
-- PR baseline: `e81aa90adaf7ca90bb78f397839b51935e81c699`, Averin PR #1.
-- User Averin main remains `c30bd2f94be4f8181bb23815ebfb99140adfffd3`. Its local `plans/` copy remains untracked; the integration branch now carries the handoff documents. Preserve the local copy and the user's pre-existing untracked `feir-os/` directory.
-- Cross-plane producer branches: `.worktrees/govder-003` at `0a22220`; `.worktrees/vultrino-004` at `85b386f`. Both were reviewed and tested, including two real four-plane runs before the later server-only changes.
-- Primary verification for recovery at the accepted integration source: `/tmp/averin008-primary-final-server.log` records fresh RFC3161 staticlib, full Go vet/test, and required uncached PostgreSQL JSON gate. New recovery TLC safe config passes96 states; old-writer config produces its required counterexample. Source review includes real child-process crash cuts, durable revocation atomicity and signed legacy-tombstone use denial.
-- Earlier accepted combined core/WASM/Lean/refinement and cross-plane evidence is in `EXECUTION.md`. Do not infer that later source changes have passed these gates automatically. The integration WASM pins still require a rebuild before final delivery of the whole integrated task.
+## Tool pins
 
-## Latest accepted change and remaining work
-
-**005 nonce migration is DONE:** worktree `.worktrees/averin-005`, branch `advisor/005-tenant-nonce-ledger`, final `52518ab`. Primary reviewed scoped tuple keys, opaque claim ownership, global JTI uniqueness, immutable legacy exclusions, missing-metadata rejection, lifetime overflow, maintenance barrier and non-owner runtime checks. Prepared DELETE, seeded legacy sweep preservation, offline project composition, migration rollback/retry and TLC non-vacuity have real positive controls. Primary fresh full server/vet plus mandatory uncached PG passed on production-equivalent35394bb (`/tmp/averin005-primary-final-server.log`); the final test-only rollback commit and required-event union passed primary mandatory PG at52518ab (`/tmp/averin005-primary-final-pg.log`). All30 required tests passed without skipped children. Primary reran all six ConsumeLedger configs with expected outcomes; executor race checks passed resourceshim/pgledger/store/API. Final source is integrated and clean.
-
-**009 temporal revocation:** source implementation has not begun. Read-only preflight completed in `/root/temporal_preflight`. Its dependencies are now accepted. After the user resumes, dispatch the full reconciled `009-temporal-revocation.md` inlined on a descendant of52518ab. Use migration0007 and a fresh maintenance writer barrier. Keep existing revocation/capstone blocking; historical authorization is a separate caller-selected claim. Native introspection requires actual grant validation and exact retry matching. Outcomes inherit intent authorization order. Capture snapshot boundary time/high watermark inside the database read transaction. Existing revoked branches skip later validation and cannot be relabeled historical positives without fixing that control flow.
-
-**011 parser proofs:** clean checkpoint `a8d1db0` on `.worktrees/averin-011`; executor `/root/kani_contract` stopped its approved probe. NOT accepted or integrated. Three base64 extended families passed on unchanged relevant source. Integer, UTF16, spelling, string and panic families remain unverified. Latest integer positive1 probe spent5:05 CBMC CPU expanding recursive enum Drop and was interrupted; status15/FAILED is not a counterexample. Log `/tmp/averin-011-proof-integer-roundtrip-positive1-early-return.log`. Full ordinary core tests pass. Final-source numeric guard/mutants and full extended/mutation gate remain pending. Exact original-domain partitions and checked fail-closed unreachable-branch guard are documented; no reachable parser/NFC stubs, smaller replacement domains or timeout-as-pass.
-
-**012 production refinement:** no implementation/proof yet. Pinned isolated Charon/Aeneas toolchain and a toy identity theorem work. Actual production extraction preflight is `.verification-tools/aeneas-557f7a/production-preflight/RESULTS.md`. Rooting a free forwarding wrapper extracts the actual serializer call graph without parser functions. Aeneas produces partial Lean containing `sorry` for write/write_string and external assumptions for sorting, UTF16, NFC, strings and integer formatting. This is not a refinement proof. Close those reachable obligations, then the production checked-value/signing/verdict joins per plan012; do not accept a handwritten replacement model or partial extraction as completion.
+- Rust 1.92.0 (`rust-toolchain.toml`, targets wasm32 and i686).
+- Go 1.25.13, Bun 1.3.14, Postgres 16.
+- Lean 4.30.0 (`formal/lean/lean-toolchain`) for the model.
+- Production refinement (`formal/production/manifest.json`): Charon `6258597`, Aeneas `557f7a1`,
+  Lean 4.31.0, mathlib `fabf563`, extraction rustc exactly `rustc 1.100.0-nightly (923c95cdf 2026-09-16)`
+  (`nightly-2026-09-17`); `setup-toolchain.sh` pins source tarballs and the Lean release by sha256
+  and opam packages by version.
+- Kani 0.68.0 / CBMC 6.11 with bundled kissat 4.0.1 (`.verification-tools/kani-0.68`).
+- TLC v1.7.4, sha256 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`.
+- GitHub Actions pinned by commit SHA in `.github/workflows/ci.yml`.
 
 ## Operational notes
 
-- Primary follows the improve skill: review/plan only; source edits use isolated executors. Use **gpt-6-sol high**, `fork_turns: none`, and inline full plans at new implementation dispatch.
-- Max two ordinary Rust jobs, normally one CBMC solver and one Lean/OCaml worker. Use `CARGO_BUILD_JOBS=1`, `GOMAXPROCS=2`, `GOFLAGS=-p=1`. Coordinate feature-changing Rust builds with cgo tests.
-- Always rebuild RFC3161 Rust staticlib before Go tests via `make test-server`; mandatory PG gate uses `-count=1`. Never borrow local-crate build artifacts between worktrees. Some obsolete targets were intentionally cleaned; source/logs remain.
-- Task-owned PG16 container `averin-trust-postgres`, port55432. Set `AVERIN_TEST_DATABASE_URL` from its local test configuration, without printing credentials. Tests isolate schemas/roles. Do not disturb the user's port5432 instance.
-- Dependency fetches use Socket Firewall. Kani0.68 wrapper: `.verification-tools/kani-0.68/with-kani.sh`. Pinned TLC jar: `.verification-tools/tla/tla2tools-v1.7.4.jar`, SHA256 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`.
-- Disk last measured about14GiB free. Preserve reusable Aeneas/mathlib tool caches. All dispatched implementation, proof and verification workers have finished; no task build, solver or extraction should remain active. The task-owned PostgreSQL service remains available for resumption.
-
-Use `README.md` as the plan status index and `EXECUTION.md` for the detailed evidence trail. This checkpoint records incomplete work; it is not a completion report.
+- Dependency fetches go through Socket Firewall (`sfw ...`).
+- Kani resume state (`target/kani-shards/`) is keyed by a digest that now includes `Cargo.lock`, both
+  `Cargo.toml`, `rust-toolchain.toml`, the Kani version and every crate source. The recorded
+  string tally (digest `fd4b0e77…`, definition as of `9539e8c`) lives in
+  `.worktrees/averin-011/target/kani-shards/strings-*.state`.
+- Disk headroom on the host has been 9–17 GB; prune Kani build directories (`KANI_PRUNE_BUILD=1`)
+  and avoid pulling large images.
+- Never borrow Rust build artifacts between worktrees; rebuild the staticlib before Go tests.
