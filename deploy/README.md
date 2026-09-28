@@ -31,7 +31,11 @@ export AVERIN_DB_RUNTIME_PASSWORD=$(openssl rand -hex 24)   # averin_app: the se
 docker compose -f deploy/docker-compose.yml up --build
 ```
 
-The passwords are placed in connection URLs, so keep them URL-safe (hex, as above).
+The passwords are placed in connection URLs, so keep them URL-safe (hex, as above). Compose passes
+them to the database container and the `grants` job as secrets (files under `/run/secrets`, not
+container environment variables); the first-boot script hands them to `psql` through `\getenv`,
+never on a command line. `migrate` and `server` still receive their DSN in the environment, because
+the binaries read it from there.
 
 ### Database roles
 
@@ -50,13 +54,15 @@ The runtime role keeps full DML on operational tables (nonce/JTI claims, pending
 the append-only and immutable tables get only what the server needs. Role creation runs only on an
 empty data volume: to change a role password later, use `ALTER ROLE` and update the environment.
 
-What was validated (2026-09-27, not a turnkey claim): this compose file's `db` service on a fresh
-volume (first-boot role script), `averin-migrate --init` as `averin_owner` (twice: the second run is a
-no-op), the compose `grants` service, and `averin-server` as `averin_app`, using binaries linked
-against the `server`-profile core built on the host rather than the image. The server refused the
-empty database, the missing grants, the owner and the superuser credentials; as `averin_app` it
+What was validated (2026-09-28, not a turnkey claim): this compose file's `db` service on a fresh
+volume (first-boot role script from secrets; the container environment holds only
+`POSTGRES_PASSWORD_FILE`), `averin-migrate --init` as `averin_owner` (twice: the second run logs
+"already initialized ... no-op"), the compose `grants` service (twice, idempotent), and
+`averin-server` as `averin_app`, using binaries linked against the `server`-profile core built on
+the host rather than the image. In the first run (2026-09-27) the server refused the empty
+database, the missing grants, the owner and the superuser credentials. As `averin_app` it
 answered `/healthz` and `/readyz`, recorded, checkpointed and verified a record (`ok: true`), and
-`averin_app` could not `DELETE` from `records`. The images themselves were not built in that run.
+`averin_app` could not `DELETE` from `records`. The images themselves were not built.
 
 | Service | Port | What |
 |---------|------|------|

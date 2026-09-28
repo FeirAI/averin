@@ -771,8 +771,12 @@ func TestOrdinaryStartupRefusesFreshBootstrap(t *testing.T) {
 	if regExists(t, admin, "schema_migrations") || regExists(t, admin, "records") {
 		t.Fatal("refused startup created schema objects")
 	}
-	if err := Migrate(ctx, scoped); err != nil {
-		t.Fatalf("init: %v", err)
+	if initialized, err := Initialize(ctx, scoped); err != nil || !initialized {
+		t.Fatalf("init of an empty database: initialized=%v err=%v", initialized, err)
+	}
+	// A rerun at the current version is a reported no-op (averin-migrate logs "already initialized").
+	if initialized, err := Initialize(ctx, scoped); err != nil || initialized {
+		t.Fatalf("second init: initialized=%v err=%v, want a no-op", initialized, err)
 	}
 	if err := MigrateForRuntime(ctx, scoped); err != nil {
 		t.Fatalf("ordinary startup after init: %v", err)

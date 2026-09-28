@@ -9,11 +9,17 @@
 #
 # averin-server refuses to start as a superuser, as a table owner, or with mutation privilege on an
 # append-only table (pgschema.CheckRuntime), so this split is required, not optional.
+#
+# The passwords come from compose secrets (files under /run/secrets, not the container environment)
+# and reach psql through \getenv inside this process, never on a command line.
 set -eu
-: "${AVERIN_DB_OWNER_PASSWORD:?}"
-: "${AVERIN_DB_RUNTIME_PASSWORD:?}"
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
-  -v owner_pw="$AVERIN_DB_OWNER_PASSWORD" -v runtime_pw="$AVERIN_DB_RUNTIME_PASSWORD" <<'SQL'
+AVERIN_DB_OWNER_PASSWORD="$(cat /run/secrets/averin_db_owner_password)"
+AVERIN_DB_RUNTIME_PASSWORD="$(cat /run/secrets/averin_db_runtime_password)"
+[ -n "$AVERIN_DB_OWNER_PASSWORD" ] && [ -n "$AVERIN_DB_RUNTIME_PASSWORD" ] || { echo "01-roles.sh: empty role password secret" >&2; exit 1; }
+export AVERIN_DB_OWNER_PASSWORD AVERIN_DB_RUNTIME_PASSWORD
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<'SQL'
+\getenv owner_pw AVERIN_DB_OWNER_PASSWORD
+\getenv runtime_pw AVERIN_DB_RUNTIME_PASSWORD
 CREATE ROLE averin_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'owner_pw';
 CREATE ROLE averin_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD :'runtime_pw';
 CREATE DATABASE averin OWNER averin_owner;

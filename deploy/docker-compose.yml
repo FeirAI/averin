@@ -24,12 +24,15 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      # Bootstrap superuser: used only by the first-boot init script, never by averin.
+      # Bootstrap superuser: used only by the first-boot init script, never by averin. Passwords are
+      # compose secrets (files under /run/secrets), not container environment variables.
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${AVERIN_DB_SUPERUSER_PASSWORD:?set AVERIN_DB_SUPERUSER_PASSWORD (bootstrap superuser)}
+      POSTGRES_PASSWORD_FILE: /run/secrets/averin_db_superuser_password
       POSTGRES_DB: postgres
-      AVERIN_DB_OWNER_PASSWORD: ${AVERIN_DB_OWNER_PASSWORD:?set AVERIN_DB_OWNER_PASSWORD (migration identity)}
-      AVERIN_DB_RUNTIME_PASSWORD: ${AVERIN_DB_RUNTIME_PASSWORD:?set AVERIN_DB_RUNTIME_PASSWORD (runtime identity)}
+    secrets:
+      - averin_db_superuser_password
+      - averin_db_owner_password
+      - averin_db_runtime_password
     volumes:
       - averin-pgdata:/var/lib/postgresql/data
       - ./postgres/01-roles.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
@@ -48,17 +51,19 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.server
     command: ["averin-migrate", "--init"]
+    # One-shot; averin-migrate reads its DSN from the environment. It exits after --init.
     environment:
-      AVERIN_MIGRATION_DATABASE_URL: postgres://averin_owner:${AVERIN_DB_OWNER_PASSWORD}@db:5432/averin?sslmode=disable
+      AVERIN_MIGRATION_DATABASE_URL: postgres://averin_owner:${AVERIN_DB_OWNER_PASSWORD:?set AVERIN_DB_OWNER_PASSWORD (migration identity)}@db:5432/averin?sslmode=disable
     depends_on:
       db:
         condition: service_healthy
 
   grants:
     image: postgres:16-alpine
-    command: ["psql", "-h", "db", "-U", "averin_owner", "-d", "averin", "-v", "ON_ERROR_STOP=1", "-f", "/grants/runtime-grants.sql"]
-    environment:
-      PGPASSWORD: ${AVERIN_DB_OWNER_PASSWORD}
+    # The owner password is read from the secret file into psql's own environment only.
+    entrypoint: ["sh", "-c", "PGPASSWORD=\"$$(cat /run/secrets/averin_db_owner_password)\" exec psql -h db -U averin_owner -d averin -v ON_ERROR_STOP=1 -f /grants/runtime-grants.sql"]
+    secrets:
+      - averin_db_owner_password
     volumes:
       - ./postgres/runtime-grants.sql:/grants/runtime-grants.sql:ro
     depends_on:
@@ -81,7 +86,7 @@ services:
       # Durable append-only store, as the least-privilege runtime role (the migrate and grants services
       # prepared the schema and its privileges). A steady-state boot issues zero DDL; a database at
       # another schema version is a fail-closed refusal to start.
-      AVERIN_DATABASE_URL: postgres://averin_app:${AVERIN_DB_RUNTIME_PASSWORD}@db:5432/averin?sslmode=disable
+      AVERIN_DATABASE_URL: postgres://averin_app:${AVERIN_DB_RUNTIME_PASSWORD:?set AVERIN_DB_RUNTIME_PASSWORD (runtime identity)}@db:5432/averin?sslmode=disable
     # loopback only — the app API is unauthenticated by Phase-1 design (docs/coverage-limits.md);
     # expose via your own authenticated reverse proxy.
     ports:
@@ -122,3 +127,11 @@ services:
 
 volumes:
   averin-pgdata:
+
+secrets:
+  averin_db_superuser_password:
+    environment: AVERIN_DB_SUPERUSER_PASSWORD
+  averin_db_owner_password:
+    environment: AVERIN_DB_OWNER_PASSWORD
+  averin_db_runtime_password:
+    environment: AVERIN_DB_RUNTIME_PASSWORD

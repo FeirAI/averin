@@ -101,14 +101,21 @@ var steps = []string{
 // store then runs against an already-migrated DB and applies no DDL of its own. Opening a short-lived
 // pool here keeps the runner self-contained. Callers MUST treat a returned error as fatal (fail-closed):
 // a newer-than-binary DB, or a DB that cannot be migrated, must never be served against.
-func Migrate(ctx context.Context, dsn string) error { return migrate(ctx, dsn, nil, false) }
+func Migrate(ctx context.Context, dsn string) error { return migrate(ctx, dsn, nil, false, nil) }
+
+// Initialize is Migrate for `averin-migrate --init`, reporting whether it bootstrapped the schema
+// (false: the database was already at the current version, a no-op).
+func Initialize(ctx context.Context, dsn string) (initialized bool, err error) {
+	err = migrate(ctx, dsn, nil, false, &initialized)
+	return initialized, err
+}
 
 // MigrateForRuntime is the ordinary server-startup entry point. It behaves like Migrate on an existing
 // database (steady-state no-op, fail-closed on a newer or older version) but REFUSES to bootstrap a truly
 // empty one: the server's runtime credential would then own every table it creates, and CheckRuntime
 // refuses an owning runtime forever. A fresh database is initialized once with `averin-migrate --init`
 // under the migration credential; the operator then grants the runtime role its least privileges.
-func MigrateForRuntime(ctx context.Context, dsn string) error { return migrate(ctx, dsn, nil, true) }
+func MigrateForRuntime(ctx context.Context, dsn string) error { return migrate(ctx, dsn, nil, true, nil) }
 
 // Cutover applies an existing database's forward transitions (v6 nonce ledger,
 // v7 temporal revocation) only after the operator has retired every explicitly
@@ -119,7 +126,7 @@ func Cutover(ctx context.Context, dsn string, oldRoles []string, newRole string)
 	if len(oldRoles) == 0 || newRole == "" {
 		return fmt.Errorf("pgschema: cutover requires old runtime roles and a new runtime role")
 	}
-	return migrate(ctx, dsn, &cutoverRoles{old: oldRoles, next: newRole}, false)
+	return migrate(ctx, dsn, &cutoverRoles{old: oldRoles, next: newRole}, false, nil)
 }
 
 type cutoverRoles struct {
@@ -127,7 +134,8 @@ type cutoverRoles struct {
 	next string
 }
 
-func migrate(ctx context.Context, dsn string, roles *cutoverRoles, refuseFresh bool) error {
+// applied, when non-nil, is set once forward steps have been applied and committed.
+func migrate(ctx context.Context, dsn string, roles *cutoverRoles, refuseFresh bool, applied *bool) error {
 	if broker.MaxTTL+broker.RequestClockSkew > LegacyExclusionFloor {
 		return fmt.Errorf("pgschema: accepted capability lifetime and skew exceed v6 legacy exclusion hold")
 	}
@@ -233,6 +241,9 @@ func migrate(ctx context.Context, dsn string, roles *cutoverRoles, refuseFresh b
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("pgschema: commit: %w", err)
+	}
+	if applied != nil {
+		*applied = true
 	}
 	return nil
 }

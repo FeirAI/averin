@@ -67,8 +67,13 @@ func main() {
 		if *purge || *old != "" || *next != "" {
 			log.Fatal("averin-migrate: --init cannot combine with cutover or purge flags")
 		}
-		if err := pgschema.Migrate(ctx, dsn); err != nil {
+		initialized, err := pgschema.Initialize(ctx, dsn)
+		if err != nil {
 			log.Fatalf("averin-migrate: fresh initialization refused: %v", err)
+		}
+		if !initialized {
+			log.Printf("averin-migrate: already initialized at version %d; no-op", pgschema.CurrentSchemaVersion)
+			return
 		}
 		log.Printf("averin-migrate: fresh database initialized at version %d; grant new least-privilege runtime access before starting the server", pgschema.CurrentSchemaVersion)
 		return
