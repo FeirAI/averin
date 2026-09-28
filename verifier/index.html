@@ -133,7 +133,7 @@
     </div>
 
     <script type="module">
-      import { claimVerdict } from "./claim-verdict.js";
+      import { claimVerdict, historicalClaimNote } from "./claim-verdict.js";
       import { revocationView } from "./revocation-view.js";
       import { initAverin } from "./averin.js";
 
@@ -331,8 +331,11 @@
         const claimUnmet = claim.word === "INSUFFICIENT" || requestedDecision === "refuted";
         const verdictClass = claim.className;
         const verdictWord = claim.word;
+        const historicalDecision = historicalClaimNote(r);
         const verdictCaveat = !r.ok
-          ? ""
+          ? (historicalDecision
+            ? `<div class="vsub">Requested historical_authorized_as_of_snapshot claim: <b>${esc(historicalDecision)}</b>. The legacy verdict above is a separate integrity result and can differ; read this claim from claims.*, not from ok.</div>`
+            : "")
           : !claim.valid
             ? `<div class="vsub">The claims contract is missing or unsupported. Required-claim acceptance is unavailable.</div>`
           : claimUnmet

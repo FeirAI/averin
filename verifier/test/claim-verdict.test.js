@@ -49,3 +49,11 @@ test("historicalClaimNote is null for an unsupported claims contract version", (
   expect(historicalClaimNote({...historicalReport(), claims_version: "1"})).toBeNull();
   expect(historicalClaimNote({})).toBeNull();
 });
+
+test("historicalClaimNote falls back to insufficient under an invalid claims contract", () => {
+  const r = historicalReport("satisfied", false);
+  expect(historicalClaimNote({...r, claims: {...r.claims, requested_decision: "refuted"}})).toBe("insufficient");
+  expect(historicalClaimNote({...r, claims: {...r.claims, requested_decision: "maybe", historical_authorized_as_of_snapshot: "maybe"}})).toBe("insufficient");
+  expect(historicalClaimNote({...r, claims: {requested: "historical_authorized_as_of_snapshot"}})).toBe("insufficient");
+  expect(historicalClaimNote(historicalReport("refuted", false))).toBe("refuted");
+});

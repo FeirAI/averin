@@ -601,7 +601,8 @@ A consumer that requests `historical_authorized_as_of_snapshot` must read
 grant's own prospective cutoff, so it can never stand in for the historical claim. The offline CLI
 (`averin-verify bundle`) and both viewers (the static HTML verifier and the Svelte app) print this
 claim's own decision as a prominent line next to the legacy verdict whenever it was the requested
-claim, so the historical decision is never left to be inferred from a FAIL line. In the receipt
+claim (the requested decision under a valid claims contract, else `insufficient`; the same rule in
+all three), so the historical decision is never left to be inferred from a FAIL line. In the receipt
 detail, a `proven_before` receipt is only labeled "proven before revocation" when its grant's
 `current_revocation` is `revoked_prospective`; a receipt proven before the snapshot against a
 grant that is `not_revoked` is labeled "authorized as of snapshot (grant not revoked)" instead

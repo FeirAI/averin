@@ -19,14 +19,10 @@
   let rows = $state<ReturnType<typeof buildWaterfall>>([]);
   let report = $state<any>(null);
   let verdict = $derived(claimVerdict(report));
-  // V-L3: the legacy ok stays false while any revoked grant was used, even when this requested
-  // claim is satisfied (the use happened before a prospective cutoff), so name the claim's own
-  // decision next to the legacy verdict rather than let it be inferred from ok.
-  let historicalDecision = $derived(
-    verdict.valid && report?.claims?.requested === "historical_authorized_as_of_snapshot"
-      ? historicalClaimNote(report)
-      : null,
-  );
+  // V-L3: the legacy ok is a separate integrity result and can be false while this requested claim
+  // is satisfied, so name the claim's own decision next to the legacy verdict rather than let it be
+  // inferred from ok (historicalClaimNote: same rule as the CLI and the browser verifier).
+  let historicalDecision = $derived(historicalClaimNote(report));
   let revocation = $derived(revocationView(report));
   let error = $state<string>("");
 
@@ -121,7 +117,7 @@
         <div class="lvl">The claims contract is missing or unsupported. Required-claim acceptance is unavailable.</div>
       {/if}
       {#if historicalDecision}
-        <div class="lvl">Requested historical_authorized_as_of_snapshot claim: <b>{historicalDecision}</b>. The legacy verdict above stays FAIL while any revoked grant was used; read this claim, not ok.</div>
+        <div class="lvl">Requested historical_authorized_as_of_snapshot claim: <b>{historicalDecision}</b>. The legacy verdict above is a separate integrity result and can differ; read this claim from claims.*, not from ok.</div>
       {/if}
       {#if !report.keys_externally_pinned}
         <div class="lvl">Keys are bundle-supplied (not externally pinned): this proves internal

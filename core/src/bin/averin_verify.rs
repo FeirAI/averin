@@ -281,11 +281,12 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
     }
 }
 
-// V-L3: the legacy `ok` field stays false while any revoked grant was used, even when the
-// caller's requested historical_authorized_as_of_snapshot claim is satisfied (the use happened
-// before a prospective cutoff). A consumer of that claim must read claims.* directly, never infer
-// it from `ok`, so print the claim's own decision as a prominent line next to the legacy verdict
-// whenever it was the requested claim and the claims contract is valid (claims_version "2").
+// V-L3: the legacy `ok` is a separate integrity result and can be false while the caller's
+// requested historical_authorized_as_of_snapshot claim is satisfied. A consumer of that claim must
+// read claims.* directly, never infer it from `ok`, so print the claim's own decision next to the
+// legacy verdict whenever it was the requested claim (claims_version "2"). Same rule as the browser
+// verifier and the web app: the requested decision under a valid claims contract (a known decision
+// equal to the claim's own field), else "insufficient".
 fn historical_claim_note(report: &CanonValue) -> Option<String> {
     if report.get("claims_version").and_then(CanonValue::as_str) != Some("2") {
         return None;
@@ -296,12 +297,18 @@ fn historical_claim_note(report: &CanonValue) -> Option<String> {
     {
         return None;
     }
-    let decision = claims
+    let requested = claims
+        .get("requested_decision")
+        .and_then(CanonValue::as_str);
+    let own = claims
         .get("historical_authorized_as_of_snapshot")
-        .and_then(CanonValue::as_str)
-        .unwrap_or("insufficient");
+        .and_then(CanonValue::as_str);
+    let decision = match requested {
+        Some(d @ ("satisfied" | "insufficient" | "refuted")) if own == Some(d) => d,
+        _ => "insufficient",
+    };
     Some(format!(
-        "        historical_authorized_as_of_snapshot: {decision} (read claims.*; the legacy ok stays false while any revoked grant was used)"
+        "        historical_authorized_as_of_snapshot: {decision} (read claims.*; the legacy ok is a separate integrity result and can differ)"
     ))
 }
 
@@ -456,6 +463,36 @@ mod claim_contract_tests {
             .expect("requested historical claim under a valid v2 contract yields a note");
         assert!(note.contains("satisfied"));
         assert!(note.contains("historical_authorized_as_of_snapshot"));
+    }
+
+    #[test]
+    fn historical_claim_note_falls_back_to_insufficient_under_an_invalid_contract() {
+        let mismatched = CanonValue::object(vec![
+            ("claims_version".into(), CanonValue::string("2")),
+            (
+                "claims".into(),
+                CanonValue::object(vec![
+                    (
+                        "requested".into(),
+                        CanonValue::string("historical_authorized_as_of_snapshot"),
+                    ),
+                    (
+                        "historical_authorized_as_of_snapshot".into(),
+                        CanonValue::string("satisfied"),
+                    ),
+                    ("requested_decision".into(), CanonValue::string("refuted")),
+                ])
+                .unwrap(),
+            ),
+        ])
+        .unwrap();
+        let note = historical_claim_note(&mismatched).expect("requested historical claim");
+        assert!(note.contains(": insufficient"), "{note}");
+        let unknown = historical_claim_note(&historical_report("2", "maybe")).unwrap();
+        assert!(unknown.contains(": insufficient"), "{unknown}");
+        let refuted = historical_claim_note(&historical_report("2", "refuted")).unwrap();
+        assert!(refuted.contains(": refuted"), "{refuted}");
+        assert!(!refuted.contains("revoked"), "neutral wording: {refuted}");
     }
 
     #[test]

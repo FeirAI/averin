@@ -22,13 +22,16 @@ export function claimVerdict(report) {
     : {word: "CONSISTENT", className: "qual", valid};
 }
 
-// V-L3: the legacy `ok` stays false while any revoked grant was used, even when the caller's
-// requested historical_authorized_as_of_snapshot claim is satisfied (the use happened before a
-// prospective cutoff). A consumer of that claim must read claims.* directly, never infer it from
-// ok, so name the claim's own decision here for callers to show next to the legacy verdict.
+// V-L3: the legacy `ok` is a separate integrity result and can be false while the caller's requested
+// historical_authorized_as_of_snapshot claim is satisfied. A consumer of that claim must read claims.*
+// directly, never infer it from ok. Returns the decision to show next to the legacy verdict when that
+// claim was requested (claims_version "2"): the requested decision under a valid claims contract
+// (a known decision equal to the claim's own field), else "insufficient". The CLI
+// (core/src/bin/averin_verify.rs) and the web app apply the same rule.
 export function historicalClaimNote(report) {
-  if (report?.claims_version !== "2") return null;
   const claims = report?.claims;
-  if (claims?.requested !== "historical_authorized_as_of_snapshot") return null;
-  return claims?.historical_authorized_as_of_snapshot ?? claims?.requested_decision ?? "insufficient";
+  if (report?.claims_version !== "2" || claims?.requested !== "historical_authorized_as_of_snapshot") return null;
+  const valid = DECISIONS.has(claims.requested_decision)
+    && claims.historical_authorized_as_of_snapshot === claims.requested_decision;
+  return valid ? claims.requested_decision : "insufficient";
 }
