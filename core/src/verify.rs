@@ -1730,10 +1730,9 @@ fn temporal_to_canon(t: &TemporalReport) -> CanonValue {
                 ),
                 (
                     "cutoff_order".into(),
-                    int_or_null(match st {
-                        GrantRevocation::Prospective(c) => Some(*c),
-                        _ => None,
-                    }),
+                    // Every authenticated cutoff that decides an adverse at_or_after, including the
+                    // one kept next to an unusable artifact or a missing Merkle path.
+                    int_or_null(st.adverse_cutoff()),
                 ),
             ])
             .unwrap()

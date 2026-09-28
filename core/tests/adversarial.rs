@@ -16306,6 +16306,22 @@ fn temporal_unusable_artifact_does_not_hide_usable_cutoff() {
             historical,
             "cutoff {cutoff}"
         );
+        // The report shows the cutoff that decided the ordering, next to revoked_unverified.
+        let json = CanonValue::parse(&averin_decision_core::verify::report_to_json(&r)).unwrap();
+        let grants = json
+            .get("revocation_temporal")
+            .and_then(|t| t.get("grant_revocations"))
+            .and_then(|g| g.as_array())
+            .expect("revocation_temporal.grant_revocations");
+        let row = grants
+            .iter()
+            .find(|g| g.get("grant_id").and_then(|v| v.as_str()) == Some(GID))
+            .expect("grant row");
+        assert_eq!(
+            row.get("cutoff_order").and_then(|v| v.as_int()),
+            Some(cutoff),
+            "cutoff {cutoff}"
+        );
     }
 }
 
