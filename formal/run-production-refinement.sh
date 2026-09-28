@@ -110,8 +110,13 @@ fi
 python3 "$PROD/check-production.py" || exit 1
 
 # ---- 3. build every proof (warnings are errors) and audit ---------------------------------------
+# Dependencies first, without --wfail: on a cold cache a dependency may warn that it builds from source
+# instead of fetching a release, which is not a defect of these proofs. A real dependency failure still
+# fails here. Our own modules are then held to --wfail.
+(cd "$PROD" && bash "$W" lake build Aeneas Averin) >"$SCRATCH/lake-deps.log" 2>&1 ||
+  { tail -60 "$SCRATCH/lake-deps.log"; fail proof "lake build of the proof dependencies failed (log above)"; }
 (cd "$PROD" && bash "$W" lake build --wfail Extracted Refinement ProductionAudit) >"$SCRATCH/lake.log" 2>&1 ||
-  { grep -E "error|warning" "$SCRATCH/lake.log" | head -40; fail proof "lake build failed on the regenerated extraction (log above)"; }
+  { grep -E "error|warning" "$SCRATCH/lake.log" | head -40; tail -40 "$SCRATCH/lake.log"; fail proof "lake build failed on the regenerated extraction (log above)"; }
 (cd "$PROD" && bash "$W" lake env lean scripts/Audit.lean) >"$SCRATCH/audit.log" 2>&1 ||
   { tail -20 "$SCRATCH/audit.log"; fail audit "axiom/escape-hatch audit failed"; }
 grep -q "production axiom audit: OK" "$SCRATCH/audit.log" || fail audit "audit did not report OK"
