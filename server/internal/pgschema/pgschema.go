@@ -115,7 +115,9 @@ func Initialize(ctx context.Context, dsn string) (initialized bool, err error) {
 // empty one: the server's runtime credential would then own every table it creates, and CheckRuntime
 // refuses an owning runtime forever. A fresh database is initialized once with `averin-migrate --init`
 // under the migration credential; the operator then grants the runtime role its least privileges.
-func MigrateForRuntime(ctx context.Context, dsn string) error { return migrate(ctx, dsn, nil, true, nil) }
+func MigrateForRuntime(ctx context.Context, dsn string) error {
+	return migrate(ctx, dsn, nil, true, nil)
+}
 
 // Cutover applies an existing database's forward transitions (v6 nonce ledger,
 // v7 temporal revocation) only after the operator has retired every explicitly
