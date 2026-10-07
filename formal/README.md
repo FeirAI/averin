@@ -540,8 +540,8 @@ harness or family):
   **Evidence of record: the latest green weekly CI run of the three string jobs on main** (all
   68 jobs must pass; the only replacement attached is A1, and `check-kani-success.py` checks every
   case's own section and its exact stub list). The weekly run of 2026-10-04 on `62bcbe9` passed all
-  68 jobs; it predates the opt-level 0 build setting, so the next weekly run re-verifies the family
-  under it. A local run before that (informative only, logs lost) also reported 17,031 of 17,031
+  68 jobs; it predates the `-Zinline-mir=no` build setting, so the next weekly run re-verifies the
+  family under it. A local run before that (informative only, logs lost) also reported 17,031 of 17,031
   against resume digest `fd4b0e77073fd38abc0a798f9bd091a0d7c1562099488f16326ec3b1d26dc5f8` (the
   digest definition as of `9539e8c`). Its resources, on a loaded 10-core host:
   - the 16,513 ASCII cases in four parallel jobs, 64 cases per Kani invocation: about 25.5 h wall
