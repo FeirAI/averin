@@ -1,9 +1,11 @@
 # Implementation continuation checkpoint
 
-Updated 2026-09-28. All twelve plans and the parser totality track are implemented and integrated on
-the local branch `advisor/trust-final` (worktree `.worktrees/averin-final`). All gates pass, including
-the full Kani mutation gate (48/48). The branch is published to PR #1's head branch; PR #1 stays open
-for review and is not merged; nothing is deployed. Use [README.md](README.md) for status and [EXECUTION.md](EXECUTION.md) for the evidence trail.
+Updated 2026-09-28; evidence note corrected 2026-10-07. All twelve plans and the parser totality
+track are implemented and integrated on the local branch `advisor/trust-final` (worktree
+`.worktrees/averin-final`). Local runs reported every gate passing, including a full Kani mutation
+run (48/48); those logs were in `/tmp` and are lost. CI never confirmed it: PR #1 was merged on a red
+head, and every CI run on main stayed red (Kani and mutation jobs killed on the hosted runner) until
+PR #2. Only CI runs count as evidence (`formal/README.md`, "Evidence of record"). Nothing is deployed. Use [README.md](README.md) for status and [EXECUTION.md](EXECUTION.md) for the evidence trail.
 
 ## Current state
 
