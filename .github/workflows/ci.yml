@@ -483,7 +483,7 @@ jobs:
   # run the production-proof detector against its named mutants: a changed preimage byte (m50) and
   # verdict-kernel mutants (m54-m58), and the parser totality mutants (m60-m64, Refinement.Parse).
   formal-production:
-    name: formal — production seal core, verdict kernel and parser extracted by Charon/Aeneas and proved against the Lean model (${{ matrix.leg }})
+    name: formal — production refinement, Charon/Aeneas extraction proved against the Lean model (${{ matrix.leg }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
