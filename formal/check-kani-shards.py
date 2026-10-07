@@ -264,7 +264,7 @@ ALLOWED_STUBS = {
     },
     "std::vec::Vec::push, push_without_growth": {
         "utf16_key_order_is_transitive", "key_order_shard", "utf16_key_order_is_exact_steered",
-        "utf16_strict_matches_std",
+        "utf16_strict_matches_std", "push_guard_is_in_force",
     },
 }
 

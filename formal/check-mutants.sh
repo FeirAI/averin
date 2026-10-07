@@ -167,7 +167,8 @@ run_gate() {
           # This mutant deliberately changes the production route pinned by check-kani-domains.py.
           # Run its exact proof directly so the named fail-closed guard, not the textual check,
           # must refute the route drift.
-          "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" cargo kani -Z stubbing -p averin-decision-core --lib --no-default-features --exact --harness "$(kani_qualified "$3")"
+          # Same build setting as formal/run-kani.sh (opt-level 0: no MIR inlining past the stubs).
+          CARGO_PROFILE_DEV_OPT_LEVEL=0 "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" cargo kani -Z stubbing -p averin-decision-core --lib --no-default-features --exact --harness "$(kani_qualified "$3")"
         else
           "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" bash formal/run-kani.sh --harness "$3"
         fi ;;
@@ -220,7 +221,23 @@ for g in "${baseline_gates[@]}"; do
   fi
 done
 if [ "$use_kani" = 1 ]; then
-  for h in utf16_key_order_is_exact_steered utf16_key_order_is_transitive lp_into_frames_exactly one_byte_tail_is_canonical two_byte_tail_is_canonical full_chunk_is_canonical utf16_strict_matches_std accepted_integer_spelling_2_minus integer_roundtrip_zero string_escape_roundtrip_00128; do
+  # The unmutated baseline of exactly the named harnesses of the selected mutants, each once (a
+  # scoped run must not re-run every harness of the suite).
+  baseline_harnesses=()
+  for patch in formal/mutants/*.patch; do
+    name="$(basename "$patch" .patch)"
+    if [ "${MUTANTS_ONLY+x}" = x ]; then
+      selected=0
+      for candidate in "${selected_mutants[@]}"; do
+        [ "$candidate" = "$name" ] && selected=1
+      done
+      [ "$selected" = 1 ] || continue
+    fi
+    h="$(kani_harness "$name")"
+    [ -n "$h" ] || continue
+    case " ${baseline_harnesses[*]-} " in *" $h "*) ;; *) baseline_harnesses+=("$h") ;; esac
+  done
+  for h in ${baseline_harnesses[@]+"${baseline_harnesses[@]}"}; do
     if ! run_gate "baseline-$h" kani "$h" || ! grep -q 'VERIFICATION:- SUCCESSFUL' "$logs/baseline-$h-kani.log"; then
       echo "check-mutants: FAIL: Kani harness $h fails on the unmutated tree" >&2
       exit 1

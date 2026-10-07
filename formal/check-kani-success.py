@@ -12,7 +12,8 @@ from pathlib import Path
 #   the numeric-route guard: the general top-level parser panics if a numeric spelling reaches it;
 #   A1, a std-permitted behavior selection: `align_offset` returns `usize::MAX`;
 #   G1, a fail-closed std-path guard: `Vec::push` asserts it never reallocates
-#   (key-order proofs and the strict UTF-16 decoder, which also carries A1).
+#   (key-order proofs and the strict UTF-16 decoder, which also carries A1; the negative
+#   control push_guard_is_in_force must fail on it).
 NUMERIC_GUARD = "- Stub: parse_top_level_general -> reject_general_in_integer_proof"
 ALIGN_A1 = "- Stub: < * const u8 > :: align_offset -> align_offset_usize_max"
 PUSH_G1 = "- Stub: std :: vec :: Vec :: push -> push_without_growth"
@@ -25,7 +26,8 @@ def expected_stubs(qualified: str) -> list[str]:
         return []
     if name == "integer_roundtrip" or name.startswith("integer_roundtrip_"):
         return sorted([NUMERIC_GUARD, ALIGN_A1])
-    if name == "utf16_key_order_is_transitive" or name.startswith("utf16_key_order_is_exact_"):
+    if (name in ("utf16_key_order_is_transitive", "push_guard_is_in_force")
+            or name.startswith("utf16_key_order_is_exact_")):
         return [PUSH_G1]
     if name == "utf16_strict_matches_std":
         return sorted([ALIGN_A1, PUSH_G1])

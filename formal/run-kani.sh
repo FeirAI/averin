@@ -7,9 +7,22 @@
 #   bash formal/run-kani.sh --harness NAME  # one named harness (or checked shard) for profiling and CI sharding
 #   bash formal/run-kani.sh --group NAME...  # several checked family shards in one Kani invocation
 #                                            # (KANI_JOBS=N verifies them N at a time); used by run-kani-shards.sh
+#   bash formal/run-kani.sh --negative-controls  # only the negative controls (each must FAIL on its guard)
+#
+# KANI_LOG_DIR=DIR keeps every harness log there (CI uploads it as evidence); otherwise a log is
+# kept only when its check fails.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# Kani must see this crate's MIR with every call site intact, because `#[kani::stub]` replaces
+# calls. The workspace dev profile sets opt-level 3 (Cargo.toml, for the Go server's staticlib). In
+# a non-incremental build at opt-level 1 or above (CI sets CARGO_INCREMENTAL=0) rustc's MIR inliner
+# inlines `Vec::push` into `utf16_units` before Kani applies the stub: G1 is silently bypassed, the
+# key-order and strict UTF-16 formulas grow several-fold, and the hosted runner is killed. Kani
+# still prints the stub line, so only the negative control below shows it. opt-level 0 disables
+# the MIR inliner whatever the incremental setting.
+export CARGO_PROFILE_DEV_OPT_LEVEL=0
 
 # Kani builds the crate into a fresh target/kani/.../build/averin-decision-core/<hash> directory for
 # every distinct harness selection (about 90 MB each), so thousands of shard runs fill a disk.
@@ -54,6 +67,7 @@ run_harness() {
   prune_build "$log"
   if ! python3 formal/check-kani-success.py "$log" "$proof_exit" "$qualified" ${guard_flag[@]+"${guard_flag[@]}"}; then
     echo "run-kani: proof log retained at $log" >&2
+    keep_log "$log" "$1" copy
     # Preserve Kani's actual exit for the mutant checker: exit 1 is a completed
     # counterexample, while tool errors and signals must never count as kills.
     if [ "$proof_exit" -ne 0 ]; then
@@ -61,7 +75,42 @@ run_harness() {
     fi
     return 1
   fi
-  rm "$log"
+  keep_log "$log" "$1"
+}
+
+# keep_log LOG NAME [copy]: save LOG as $KANI_LOG_DIR/NAME.log when KANI_LOG_DIR is set; remove LOG
+# unless `copy` (a failed check keeps its log in place as well).
+keep_log() {
+  if [ -n "${KANI_LOG_DIR:-}" ]; then
+    mkdir -p "$KANI_LOG_DIR"
+    cp "$1" "$KANI_LOG_DIR/$2.log"
+  fi
+  [ "${3:-}" = copy ] || rm -f "$1"
+}
+
+# A negative control is a harness that must FAIL with a completed counterexample on exactly the
+# named guard assertion (check-kani-mutant.py, the same rule as a mutant kill). It proves that the
+# replacement it exercises is in force in this build; a success, timeout or tool error fails it.
+run_negative_control() {
+  local qualified="canon::kani_proofs::$1" log proof_exit
+  log="$(mktemp)"
+  set +e
+  cargo kani -Z stubbing -p averin-decision-core --lib --no-default-features --exact --harness "$qualified" 2>&1 | tee "$log"
+  proof_exit=${PIPESTATUS[0]}
+  set -e
+  prune_build "$log"
+  if ! python3 formal/check-kani-mutant.py "$log" "$proof_exit" "$qualified" core/src/canon.rs "$2"; then
+    echo "run-kani: negative control $1 did not fail on its guard, so a proof replacement is not in force (log $log)" >&2
+    keep_log "$log" "negative-control-$1" copy
+    return 1
+  fi
+  keep_log "$log" "negative-control-$1"
+  echo "run-kani: negative control $1 failed on its guard as required"
+}
+
+run_negative_controls() {
+  # G1 must be in force: a push into a full vector reaches the guard.
+  run_negative_control push_guard_is_in_force 'Vec::push reached reallocation in a no-growth proof'
 }
 
 if [ "${1:-}" = "--group" ]; then
@@ -84,11 +133,18 @@ if [ "${1:-}" = "--group" ]; then
   # Every selected harness needs its own complete successful section (check-kani-success.py).
   if ! python3 formal/check-kani-success.py "$log" "$proof_exit" --many "${qualified[@]}"; then
     echo "run-kani: proof log retained at $log" >&2
+    keep_log "$log" "group-$1" copy
     [ "$proof_exit" -ne 0 ] && exit "$proof_exit"
     exit 1
   fi
-  rm "$log"
+  keep_log "$log" "group-$1"
   exit 0
+fi
+
+if [ "${1:-}" = "--negative-controls" ]; then
+  [ "$#" -eq 1 ] || { echo "usage: $0 --negative-controls" >&2; exit 2; }
+  run_negative_controls
+  exit
 fi
 
 if [ "${1:-}" = "--harness" ]; then
@@ -108,10 +164,12 @@ if [ "${1:-}" = "--harness" ]; then
 fi
 
 if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--extended" ]; }; then
-  echo "usage: $0 [--extended | --harness NAME | --group NAME...]" >&2
+  echo "usage: $0 [--extended | --harness NAME | --group NAME... | --negative-controls]" >&2
   exit 2
 fi
 
+# First, the replacements the proofs below rely on must be in force in this build.
+run_negative_controls
 # b64.rs — base64url: the alphabet is a bijection.
 run_harness alphabet_is_a_bijection
 # hashx.rs — "sha256:<hex>" is injective and canonical (per byte, at fixed width); LP framing is exact.
