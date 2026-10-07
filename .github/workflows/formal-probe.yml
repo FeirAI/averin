@@ -42,8 +42,8 @@ jobs:
       - name: run the negative control
         run: |
           if [ "${{ matrix.build }}" = pre-fix ]; then
-            sed -i '/^export CARGO_PROFILE_DEV_OPT_LEVEL=0$/d' formal/run-kani.sh
-            ! grep -q CARGO_PROFILE_DEV_OPT_LEVEL=0 formal/run-kani.sh || { echo "pin still present" >&2; exit 2; }
+            sed -i '/^export RUSTFLAGS=.*-Zinline-mir=no"$/d' formal/run-kani.sh
+            ! grep -q 'inline-mir=no"$' formal/run-kani.sh || { echo "build setting still present" >&2; exit 2; }
           fi
           echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-unset}"
           set +e

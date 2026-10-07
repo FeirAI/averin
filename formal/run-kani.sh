@@ -16,13 +16,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Kani must see this crate's MIR with every call site intact, because `#[kani::stub]` replaces
-# calls. The workspace dev profile sets opt-level 3 (Cargo.toml, for the Go server's staticlib). In
-# a non-incremental build at opt-level 1 or above (CI sets CARGO_INCREMENTAL=0) rustc's MIR inliner
-# inlines `Vec::push` into `utf16_units` before Kani applies the stub: G1 is silently bypassed, the
+# calls. The workspace dev profile sets opt-level 3 (Cargo.toml, for the Go server's staticlib), and
+# in a non-incremental build (CI sets CARGO_INCREMENTAL=0) rustc's MIR inliner then inlines
+# `Vec::push` into `utf16_units` before Kani applies the stub: G1 is silently bypassed, the
 # key-order and strict UTF-16 formulas grow several-fold, and the hosted runner is killed. Kani
-# still prints the stub line, so only the negative control below shows it. opt-level 0 disables
-# the MIR inliner whatever the incremental setting.
-export CARGO_PROFILE_DEV_OPT_LEVEL=0
+# still prints the stub line, so only the negative control below shows it. `-Zinline-mir=no` turns
+# the MIR inliner off whatever the profile and incremental setting (Kani appends RUSTFLAGS to its
+# own rustc flags); the other MIR optimizations stay, which some formulas need (at opt-level 0,
+# integer_roundtrip runs the hosted runner out of memory).
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zinline-mir=no"
 
 # Kani builds the crate into a fresh target/kani/.../build/averin-decision-core/<hash> directory for
 # every distinct harness selection (about 90 MB each), so thousands of shard runs fill a disk.

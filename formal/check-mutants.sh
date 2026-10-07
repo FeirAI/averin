@@ -167,8 +167,8 @@ run_gate() {
           # This mutant deliberately changes the production route pinned by check-kani-domains.py.
           # Run its exact proof directly so the named fail-closed guard, not the textual check,
           # must refute the route drift.
-          # Same build setting as formal/run-kani.sh (opt-level 0: no MIR inlining past the stubs).
-          CARGO_PROFILE_DEV_OPT_LEVEL=0 "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" cargo kani -Z stubbing -p averin-decision-core --lib --no-default-features --exact --harness "$(kani_qualified "$3")"
+          # Same build setting as formal/run-kani.sh (no MIR inlining past the stubs).
+          RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zinline-mir=no" "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" cargo kani -Z stubbing -p averin-decision-core --lib --no-default-features --exact --harness "$(kani_qualified "$3")"
         else
           "$kani_timeout" "${KANI_TIMEOUT_SECONDS:-1800}" bash formal/run-kani.sh --harness "$3"
         fi ;;

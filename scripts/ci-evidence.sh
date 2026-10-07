@@ -10,8 +10,8 @@
 set -uo pipefail
 
 [ "$#" -eq 1 ] || { echo "usage: $0 DIR" >&2; exit 2; }
-dir="$1"
-mkdir -p "$dir"
+mkdir -p "$1"
+dir="$(cd "$1" && pwd)"
 cd "$(dirname "$0")/.."
 
 if compgen -G "target/kani-shards/*.state" >/dev/null; then

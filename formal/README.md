@@ -466,8 +466,10 @@ while Kani still prints the stub line: from PR #1's merge until 2026-10-07 the k
 UTF-16 formulas grew several-fold on CI (982,289 symbolic-execution steps for the steered harness
 against about 115,000 with the stub in force) and the hosted runner was killed. Local runs were
 incremental, so the inliner was off and they did not show it. `run-kani.sh` therefore builds every
-proof at `CARGO_PROFILE_DEV_OPT_LEVEL=0`, which disables the MIR inliner whatever the incremental
-setting, and first runs the negative control `push_guard_is_in_force`: a push into a full vector,
+proof with `RUSTFLAGS=-Zinline-mir=no` (Kani appends `RUSTFLAGS` to its own rustc flags), which
+turns the MIR inliner off whatever the profile and incremental setting while keeping the other MIR
+optimizations (at `opt-level` 0, `integer_roundtrip` ran the hosted runner out of memory), and
+first runs the negative control `push_guard_is_in_force`: a push into a full vector,
 which must FAIL on the G1 assertion (checked like a mutant kill by `check-kani-mutant.py`). If a
 build setting ever bypasses the stub again, that harness verifies and `formal-kani` fails.
 
