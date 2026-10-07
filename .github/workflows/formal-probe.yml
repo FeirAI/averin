@@ -8,8 +8,6 @@ name: formal-probe
 # runs one named Kani harness or checked shard (formal/run-kani.sh --harness), or every shard of a
 # checked family (formal/run-kani-shards.sh), and uploads the log with /usr/bin/time figures.
 on:
-  push:
-    branches: [ formal/ci-green-honest ]
   workflow_dispatch:
     inputs:
       harness:
@@ -21,45 +19,7 @@ permissions:
   contents: read
 
 jobs:
-  # Red-first record for the G1 bypass (temporary): the negative control fails with the pre-fix build
-  # setting (run-kani.sh without its opt-level pin) and passes with it.
-  negative-control:
-    if: github.event_name == 'push'
-    name: negative control push_guard_is_in_force (${{ matrix.build }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        build: [pre-fix, fixed]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
-        with:
-          kani-version: 0.68.0
-          command: cargo-kani
-          args: --version
-      - name: run the negative control
-        run: |
-          if [ "${{ matrix.build }}" = pre-fix ]; then
-            sed -i '/^export RUSTFLAGS=.*-Zinline-mir=no"$/d' formal/run-kani.sh
-            ! grep -q 'inline-mir=no"$' formal/run-kani.sh || { echo "build setting still present" >&2; exit 2; }
-          fi
-          echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-unset}"
-          set +e
-          bash formal/run-kani.sh --negative-controls > "$RUNNER_TEMP/nc.log" 2>&1
-          code=$?
-          set -e
-          grep -E "Checking harness|Stub:|VERIFICATION:|Vec::push reached|Status: FAILURE|run-kani:|check-kani-mutant:" "$RUNNER_TEMP/nc.log" | head -20
-          echo "negative-controls exit=$code"
-          if [ "${{ matrix.build }}" = pre-fix ]; then
-            [ "$code" -ne 0 ] || { echo "expected the negative control to fail with the pre-fix build" >&2; exit 1; }
-          else
-            [ "$code" -eq 0 ] || exit 1
-          fi
-
   probe:
-    if: github.event_name == 'workflow_dispatch'
     name: probe ${{ inputs.harness }}
     runs-on: ubuntu-latest
     timeout-minutes: 120

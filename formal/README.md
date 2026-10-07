@@ -480,8 +480,10 @@ and `utf16_key_order_is_transitive`) and the extended set (`formal-kani-extended
 `utf16_strict_matches_std`), and a 20-case smoke subset of `string_escape_roundtrip`; on the
 weekly schedule all 17,031 string cases. `parse_never_panics` is not verified (see its entry).
 
-**Default set** (CI job `formal-kani`, `bash formal/run-kani.sh`; measured with Kani 0.68.0 /
-CBMC 6.11 on a 10-core, 24 GB host, one solver at a time):
+**Default set** (CI job `formal-kani`, `bash formal/run-kani.sh`, after the G1 negative control).
+Times are CBMC verification times on the hosted runner (CI run 37655688024, Kani 0.68.0 / CBMC
+6.11, `-Zinline-mir=no`; the whole job took 11 minutes); local figures from a 10-core aarch64
+host are given for comparison only:
 
 - `alphabet_is_a_bijection`: base64url `val` and `ENC` are mutually inverse over the 64 symbols,
   and every other byte is rejected.
@@ -495,9 +497,10 @@ CBMC 6.11 on a 10-core, 24 GB host, one solver at a time):
   their UTF-16 code units computed independently by `char::encode_utf16`. Four shards, one per
   pair of scalar counts (1 or 2 per key), plus `utf16_key_order_is_exact_steered`, which pins
   U+E000..U+FFFF against astral scalars where byte order disagrees (mutant m3 fails there with a
-  counterexample). 279 s wall for all five, peak 3.6 GB.
+  counterexample). CI: 58 to 74 s per shard, about 6 minutes for all five with their builds
+  (locally 279 s).
 - `utf16_key_order_is_transitive` (G1): `a ≤ b ∧ b ≤ c ⇒ a ≤ c` for any three single-scalar keys,
-  and `Equal` only for equal keys. 142 s, peak 4.0 GB.
+  and `Equal` only for equal keys. CI: 167 s (locally 142 s).
 
 **Extended set** (`run-kani.sh --extended`; CI job `formal-kani-extended`, one matrix job per
 harness or family):
@@ -511,18 +514,19 @@ harness or family):
   and rejects padding and stray lengths), not proved by Kani; the fuzz campaign and tests exercise
   whole strings.
 - `utf16_strict_matches_std` (kissat, G1, A1): `decode_utf16_strict` agrees with std's strict
-  decoder on every 1- and 2-unit sequence. About 65 s on the final source (the preallocating
-  decoder with G1 and A1); the earlier decoder without them took 1,641 s idle and 5,796 s on a
-  loaded host.
+  decoder on every 1- and 2-unit sequence. CI: 88 s (locally about 65 s; the earlier decoder
+  without G1 and A1 took 1,641 s idle and 5,796 s on a loaded host, locally).
 - `integer_roundtrip` (numeric guard, A1): for every `n` in [-99,999, 99,999] the typed parser
   returns exactly `Int(n)` for `n.to_string()` and `serialize()` restores that spelling. The
-  original unsplit harness runs in 118-142 s, peak under 6.3 GB (process-group maximum). Its eleven checked sign/decimal-width
+  original unsplit harness: CI 151 s (locally 118-142 s, peak under 6.3 GB; at `opt-level` 0 it
+  ran the hosted runner out of memory). Its eleven checked sign/decimal-width
   shards remain available through `--harness` (the zero shard is the m22/m23 detector).
 - `accepted_integer_spelling` (family): every numeric literal of 1..=4 bytes over
   `0-9 - + . e E` that the parser accepts is in canonical form (no leading zero, no `-0`, no sign
   `+`, fraction or exponent). 60 shards, one per concrete (length, first byte), with the other
-  bytes symbolic over the whole alphabet, plus the lemma `spelling_alphabet_is_exact`. 757 s wall
-  for all 61 on an idle host (834 s on the final-source rerun), peak under 1 GB. Mutant m13 (`-0` accepted) fails `accepted_integer_spelling_2_minus`.
+  bytes symbolic over the whole alphabet, plus the lemma `spelling_alphabet_is_exact`. CI: the
+  family job takes about 23 minutes (locally 757-834 s wall, peak under 1 GB). Mutant m13 (`-0`
+  accepted) fails `accepted_integer_spelling_2_minus`.
 - `string_escape_roundtrip` (family, A1): `write_string` never emits a raw control byte and the
   real parser (real NFC included) returns exactly `Str(s)` for every string `s` of at most two
   scalars, each any ASCII scalar, U+00E9 or U+1F600: 1 + 130 + 130² = 17,031 strings. With a
@@ -584,10 +588,12 @@ named after its CNF file) on an RSS limit (default 12 GiB), low host free memory
 or a wall limit. A kill is a resource failure, never a proof or a counterexample. A plain
 `timeout` around `run-kani.sh` is not enough: it can leave CBMC running. Solver time varies
 several-fold with host load (the earlier `utf16_strict_matches_std` took 1,641 s idle and 5,796 s
-at load average 15-23). CI job limits are set per job at several times the measured final-source
-runtimes (`formal-kani` 60 min; `formal-kani-extended` 30-120 min per harness;
-`formal-mutants` 30 minutes per Kani run under an unmeasured 240-minute job backstop; the ASCII and one-non-ASCII string slices 6 hours, the smoke subset and the pure string cases 60 minutes), and
-a timeout is always a failure.
+at load average 15-23). CI job limits are several times the runtimes measured on the hosted
+runner (`formal-kani` 60 minutes; `formal-kani-extended` 30-120 minutes per harness;
+`formal-mutants-fast` 60 minutes per shard and `formal-mutants-full` 300 minutes, each Kani run
+inside them limited to 30 minutes; `formal-production` 120 minutes per leg; the ASCII and
+one-non-ASCII string slices 6 hours, the smoke subset and the pure string cases 60 minutes), and
+a timeout is always a failure, never a pass.
 
 The Lean model, golden vectors, adversarial tests and the deterministic fuzz campaign complement
 these bounded claims; none makes an unverified Kani harness verified.
