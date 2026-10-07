@@ -85,6 +85,7 @@ jobs:
   core-32bit:
     name: rust decision-core on 32-bit (usize=u32 — wasm32 truncation gate)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: core
@@ -105,8 +106,16 @@ jobs:
       # `i64 as usize` would deflate a signed threshold/limit and fail OPEN on a 32-bit verdict but pass on
       # 64-bit. wasm32-unknown-unknown can't run std `#[test]` without wasm-bindgen (which the core avoids),
       # so i686 is the practical native stand-in for the same usize width.
+      # An apt mirror can hang (2026-10-07: this step and the opam step below sat for over an hour).
+      # Bound each attempt and retry instead of waiting out the job limit.
       - name: install 32-bit linker (multilib)
-        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+        run: |
+          for attempt in 1 2 3; do
+            sudo timeout 300 apt-get update && sudo timeout 600 apt-get install -y gcc-multilib && exit 0
+            echo "apt attempt $attempt failed or timed out; retrying" >&2
+            sleep 20
+          done
+          exit 1
       - name: test on i686 (32-bit usize)
         run: cargo test --target i686-unknown-linux-gnu
 
@@ -517,8 +526,14 @@ jobs:
             ~/averin-aeneas
             ~/.rustup/toolchains
           key: averin-aeneas-${{ runner.os }}-${{ steps.pins.outputs.key }}-${{ hashFiles('formal/production/setup-toolchain.sh') }}
-      - name: system packages for opam
-        run: sudo apt-get update && sudo apt-get install -y opam libgmp-dev pkg-config zstd
+      - name: system packages for opam (bounded, retried; see core-32bit)
+        run: |
+          for attempt in 1 2 3; do
+            sudo timeout 300 apt-get update && sudo timeout 900 apt-get install -y opam libgmp-dev pkg-config zstd && exit 0
+            echo "apt attempt $attempt failed or timed out; retrying" >&2
+            sleep 20
+          done
+          exit 1
       - name: build pinned Charon, Aeneas and Lean
         run: bash formal/production/setup-toolchain.sh "$HOME/averin-aeneas"
       - name: mathlib build cache at the manifest revision
