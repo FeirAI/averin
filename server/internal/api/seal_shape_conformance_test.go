@@ -17,7 +17,7 @@ import (
 // domain or canon_version. This TestMain records every body the WHOLE api test suite seals through the
 // real cgo path (the suite drives each producer: generic ingest, grants, denials, use receipts,
 // two-phase use, introspection, void, delegation, ...), so TestMain can fail the run if any producer
-// was refused, and TestSealShapeProducerKinds can show which kinds were exercised.
+// was refused, and AVERIN_PRINT_SEALED_KINDS=1 prints which kinds were exercised.
 
 var (
 	sealObsMu   sync.Mutex

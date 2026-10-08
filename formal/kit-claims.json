@@ -566,7 +566,9 @@
         {"path": "core/src/record.rs", "symbol": "seal", "sha256": "9a80b6a0aea4894be9feedd5cf7cb3dcf0ad0a9c022c7b559abb9cf063439b99"},
         {"path": "core/src/record.rs", "symbol": "seal_with_mode", "sha256": "e7f27e92382d00114b686be2ffcceb7fda9729e0bdef2ab73118382ace759dc7"},
         {"path": "core/src/record.rs", "symbol": "check_sealed_shape", "sha256": "bd582b7ccd782721fbd570e1d08d2254d98672ed58b5a866c76a931741e513b7"},
-        {"path": "core/src/record.rs", "symbol": "validate_record_shape", "sha256": "28f0d30f2aea440d163fd6cedbbd4cc71e69e3277c93de07e8ccf52e529e8c44"}
+        {"path": "core/src/record.rs", "symbol": "validate_record_shape", "sha256": "28f0d30f2aea440d163fd6cedbbd4cc71e69e3277c93de07e8ccf52e529e8c44"},
+        {"path": "core/src/record.rs", "symbol": "verify_sealed", "sha256": "a2231e0aa30a7313b1719fb5344f6a3408ef1662f4fd6846abb01f9f8475bd27"},
+        {"path": "core/src/record.rs", "symbol": "verify_content_hash", "sha256": "003aa4d1e904632e5392d9ed3651b352cd26c1a0916e1d65d20b4f1bc3c91879"}
       ],
       "mutants": [
         "seal-skips-shape-check",

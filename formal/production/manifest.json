@@ -329,6 +329,18 @@
     },
     {
       "file": "core/src/record.rs",
+      "fn": "seal",
+      "body": "seal_with_mode(record, sk, SealShapeMode::Enforce)"
+    },
+    {
+      "file": "core/src/record.rs",
+      "fn": "seal_with_mode",
+      "contains": [
+        "let sealed = seal_unchecked(record, sk)?;"
+      ]
+    },
+    {
+      "file": "core/src/record.rs",
       "fn": "seal_unchecked",
       "contains": [
         "let content_hash = compute_content_hash(record)?;",

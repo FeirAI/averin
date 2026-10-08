@@ -190,7 +190,7 @@
     },
     {
       "id": "seal-implies-verify-shape",
-      "claim": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin (SB-29), checked by a deterministic property test and, for the Go server's producers, by running the real cgo seal in enforce mode across the whole server suite. Not a proof; does not cover nested object shape, hash or signature validity, or AVERIN_SEAL_SHAPE=shadow, which seals unverifiable records on purpose as a rollback switch.",
+      "claim": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin (SB-29), checked by a deterministic property test and, for the Go server producers that the server test suite reaches, by running the real cgo seal in enforce mode across that suite. Not a proof; does not cover nested object shape, hash or signature validity, or AVERIN_SEAL_SHAPE=shadow, which seals unverifiable records on purpose as a rollback switch.",
       "class": "property-test",
       "targets": ["native Rust", "Go cgo (same source)"],
       "assumptions": ["the finite deterministic generator builds the defect classes that matter", "the Go suite reaches every producer kind it lists"],
