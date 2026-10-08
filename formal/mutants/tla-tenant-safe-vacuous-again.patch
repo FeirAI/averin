@@ -1,0 +1,15 @@
+Mutant: ConsumeLedger_tenant_safe.cfg goes back to LegacyPresent = TRUE, where no consume is reachable and TenantIsolation holds trivially; the witness pairing must reject it.
+
+diff --git a/formal/tla/ConsumeLedger_tenant_safe.cfg b/formal/tla/ConsumeLedger_tenant_safe.cfg
+index 0fb84e5..c3421d7 100644
+--- a/formal/tla/ConsumeLedger_tenant_safe.cfg
++++ b/formal/tla/ConsumeLedger_tenant_safe.cfg
+@@ -11,7 +11,7 @@ CONSTANTS
+   Projects = {p1, p2}
+   P1 = p1
+   P2 = p2
+-  LegacyPresent = FALSE
++  LegacyPresent = TRUE
+   UnsafeMigration = FALSE
+ SPECIFICATION TenantSpec
+ INVARIANTS TenantTypeOK TenantAtMostOnce TenantIsolation

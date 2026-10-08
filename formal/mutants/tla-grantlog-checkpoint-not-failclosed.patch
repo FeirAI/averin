@@ -1,0 +1,14 @@
+Mutant: Checkpoint signs a gapped set, so the fail-closed pass configurations must find AnchoredGapless violated.
+
+diff --git a/formal/tla/GrantLog.tla b/formal/tla/GrantLog.tla
+index f24aaf2..d58720d 100644
+--- a/formal/tla/GrantLog.tla
++++ b/formal/tla/GrantLog.tla
+@@ -188,7 +188,6 @@ VoidSeq(g) ==
+ Checkpoint ==
+   /\ lock = Free
+   /\ nCheckpoints < MaxCheckpoints
+-  /\ FailClosedCheckpoint => IsPrefix(Recorded)
+   /\ anchored' = anchored \cup {Recorded}
+   /\ nCheckpoints' = nCheckpoints + 1
+   /\ UNCHANGED <<seqOf, fresh, rec, voided, retired, inflight, pc, lock>>

@@ -1,0 +1,15 @@
+Mutant: GuardedUseBegin can never fire, so ProjectTx_operational_safe.cfg still passes but vacuously; the W_GuardedUseDone witness and the unserialized configuration must kill it.
+
+diff --git a/formal/tla/ProjectTx.tla b/formal/tla/ProjectTx.tla
+index 2d2217f..bfc99a4 100644
+--- a/formal/tla/ProjectTx.tla
++++ b/formal/tla/ProjectTx.tla
+@@ -150,7 +150,7 @@ Restart(i) ==
+ \* and acts on that read before releasing the guard. Without the guard (Serialize = FALSE) a revoke
+ \* can land between the read and the act, which is the race the guard exists to close.
+ GuardedUseBegin(i) ==
+-  /\ alive[i] /\ usePhase[i] = "idle" /\ CanEnter
++  /\ alive[i] /\ usePhase[i] = "idle" /\ CanEnter /\ FALSE
+   /\ usePhase' = [usePhase EXCEPT ![i] = "open"]
+   /\ useSeen' = [useSeen EXCEPT ![i] = revoked]
+   /\ guard' = IF Serialize THEN i ELSE guard

@@ -1,0 +1,15 @@
+Mutant: Reconcile inserts the void even when the grant already landed, so one project holds two records for the reservation and GrantRecovery_safe.cfg must find NoDuplicateSeq violated.
+
+diff --git a/formal/tla/GrantRecovery.tla b/formal/tla/GrantRecovery.tla
+index 8209ef4..a266921 100644
+--- a/formal/tla/GrantRecovery.tla
++++ b/formal/tla/GrantRecovery.tla
+@@ -54,7 +54,7 @@ CompetingOperation(op) ==
+ Reconcile(op) ==
+   /\ op = fence /\ outcome = None /\ guard = "free"
+   /\ outcome' = IF "grant" \in records THEN "recorded" ELSE "voided"
+-  /\ records' = IF "grant" \in records THEN records ELSE {"void"}
++  /\ records' = records \cup {"void"}
+   /\ marker' = IF "grant" \in records THEN marker ELSE TRUE
+   /\ UNCHANGED <<fence,grantTxn,guard,rejected,crashes,anchored,oldCommitted>>
+ 

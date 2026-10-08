@@ -1,0 +1,14 @@
+Mutant: TenantCanConsume can never hold, so the tenant pass configurations still pass but vacuously; only the W_ witnesses can kill it.
+
+diff --git a/formal/tla/ConsumeLedger.tla b/formal/tla/ConsumeLedger.tla
+index 1adf734..e5e65c7 100644
+--- a/formal/tla/ConsumeLedger.tla
++++ b/formal/tla/ConsumeLedger.tla
+@@ -144,6 +144,7 @@ TenantCanConsume(p) ==
+   /\ tenantPhase = "new"
+   /\ tenantClock <= MaxTTL
+   /\ ~tenantLegacy
++  /\ tenantClock > MaxTime
+   /\ p \notin tenantLedger
+ TenantConsume(p) ==
+   /\ TenantCanConsume(p)
