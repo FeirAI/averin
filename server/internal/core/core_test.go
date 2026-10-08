@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -56,10 +57,32 @@ func TestVerifyBundleRejectsInteriorNUL(t *testing.T) {
 	}
 }
 
+// conformingBody is the smallest body that satisfies the schema-v2 top-level shape.
+func conformingBody(t *testing.T) map[string]any {
+	t.Helper()
+	b := map[string]any{
+		"schema_version": "2", "canon_version": "rcp-1", "domain": "flightrecorder.record.v2",
+		"record_id": "r1", "project_id": "p", "agent_id": "a", "agent_version": "1", "session_id": "s",
+		"span_id": "sp", "parent_span_id": nil, "causal_prev_hashes": []string{}, "display_seq": 0,
+		"agent_ts": "2026-01-01T00:00:00.000Z", "received_ts": "2026-01-01T00:00:00.000Z",
+		"event_type": "decision", "action": "x", "observed_via": "sdk", "status": "ok",
+		"key": map[string]any{"signing_key_id": "k0", "key_epoch": 0, "key_valid_from": "2026-01-01T00:00:00.000Z", "key_status": "active"},
+	}
+	return b
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 func TestSealRecordThroughFFI(t *testing.T) {
 	c, _ := New(seed)
-	body := `{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2","action":"x"}`
-	sealed, err := c.SealRecord(body)
+	sealed, err := c.SealRecord(mustJSON(t, conformingBody(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,6 +91,61 @@ func TestSealRecordThroughFFI(t *testing.T) {
 	}
 	if _, err := c.SealRecord("{not json"); err == nil {
 		t.Fatal("expected seal error on bad body")
+	}
+}
+
+// SB-29: seal refuses what verify_sealed would reject, through the real cgo path.
+func TestSealRecordRefusesBadShapeEnforce(t *testing.T) {
+	c, _ := New(seed)
+	cases := map[string]func(map[string]any){
+		"unknown key":    func(b map[string]any) { b["ui_status"] = "approved" },
+		"missing key":    func(b map[string]any) { delete(b, "record_id") },
+		"wrong domain":   func(b map[string]any) { b["domain"] = "flightrecorder.record.v1" },
+		"wrong canon":    func(b map[string]any) { b["canon_version"] = "rcp-2" },
+		"domain missing": func(b map[string]any) { delete(b, "domain") },
+	}
+	before := SealShapeViolations()
+	for name, mut := range cases {
+		b := conformingBody(t)
+		mut(b)
+		if _, err := c.SealRecord(mustJSON(t, b)); err == nil {
+			t.Fatalf("%s: enforce mode sealed a body verify_sealed rejects", name)
+		}
+	}
+	if SealShapeViolations() != before {
+		t.Fatal("enforce mode must not count violations")
+	}
+}
+
+func TestSealRecordShadowSealsAndCounts(t *testing.T) {
+	c, _ := New(seed)
+	c.SetSealShapeMode(SealShapeShadow)
+	b := conformingBody(t)
+	b["ui_status"] = "approved"
+	before := SealShapeViolations()
+	sealed, err := c.SealRecord(mustJSON(t, b))
+	if err != nil {
+		t.Fatalf("shadow mode must seal: %v", err)
+	}
+	if SealShapeViolations() != before+1 {
+		t.Fatalf("shadow mode must count the violation")
+	}
+	if !strings.Contains(sealed, `"sig":"ed25519:`) {
+		t.Fatalf("not sealed: %s", sealed)
+	}
+	if _, err := c.SealRecord(mustJSON(t, conformingBody(t))); err != nil || SealShapeViolations() != before+1 {
+		t.Fatal("a conforming body must seal without counting")
+	}
+}
+
+func TestParseSealShapeMode(t *testing.T) {
+	for raw, want := range map[string]SealShapeMode{"": SealShapeEnforce, "enforce": SealShapeEnforce, " Shadow ": SealShapeShadow} {
+		if got, err := ParseSealShapeMode(raw); err != nil || got != want {
+			t.Fatalf("%q: %v %v", raw, got, err)
+		}
+	}
+	if _, err := ParseSealShapeMode("off"); err == nil {
+		t.Fatal("an unknown value must be an error, not a silent downgrade")
 	}
 }
 

@@ -57,7 +57,7 @@ or the `Idempotency-Key` header. The caller may also supply any of the allowed t
 (see [Record object](#record-object)); server-controlled fields are overwritten.
 
 Batch semantics: the **whole batch** is validated up front (decodability, project binding,
-idempotency, reserved-field checks, and an RCP-canonicalization dry-run). A malformed item rejects
+idempotency, reserved-field checks, and an RCP-canonicalization dry-run). A malformed item (including, in the default `AVERIN_SEAL_SHAPE=enforce` mode, an unknown top-level key; only `extensions` may hold custom fields) rejects
 the entire batch with a deterministic `400` before any item is sealed. The pinned-authority decision
 (`AVERIN_REQUIRE_PINNED_AUTHORITY`, below) and `record_id` uniqueness are also dry-run up front: an
 item whose authority elevation would be rejected fails the whole batch with the documented `500`, and a

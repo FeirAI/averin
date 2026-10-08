@@ -100,7 +100,10 @@ fn verify_sealed_rejects_unknown_top_level_field() {
         CanonValue::Str("approved".to_string()),
     ));
     let smuggled = CanonValue::Object(members);
-    let sealed = seal(&smuggled, &sk).unwrap();
+    // `seal` itself now refuses the body (SB-29); build the record unchecked, as a hostile
+    // key holder could, to keep proving the verifier side.
+    assert!(seal(&smuggled, &sk).is_err());
+    let sealed = averin_decision_core::record::seal_unchecked_for_tests(&smuggled, &sk).unwrap();
     let vk = sk.verifying_key();
     // content_hash + signature alone would pass; verify_sealed rejects the unknown field.
     assert!(verify_signature(&sealed, &vk).is_ok());

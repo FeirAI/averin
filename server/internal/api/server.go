@@ -283,6 +283,16 @@ func (s *Server) WithContent(c content.Store) *Server {
 	return s
 }
 
+// WithSealShapeViolations exposes the count of record bodies sealed in AVERIN_SEAL_SHAPE=shadow mode
+// although verify_sealed would reject them (a nonzero value means records that no verifier accepts
+// are being written). Always zero in the default enforce mode.
+func (s *Server) WithSealShapeViolations(fn func() int64) *Server {
+	s.metrics.CounterFunc("averin_seal_shape_violations_total",
+		"Total records sealed in shadow mode that verify_sealed rejects on shape, domain or canon_version (always 0 in enforce mode).",
+		fn)
+	return s
+}
+
 // WithMeter swaps in a usage meter (e.g. a Stripe reporter). Returns the server for chaining. When m
 // is a *meter.StripeReporter, its best-effort async-queue drop count is also exposed on GET /metrics
 // (a nonzero, growing rate means billable events — and thus revenue — are being silently lost).
@@ -1365,6 +1375,21 @@ const maxRecordIDBytes = 256
 // must reject the WHOLE batch before any earlier item is sealed) so the two cannot diverge. It does NOT
 // mutate the record (the caller assigns record_id / normalizes authority after).
 func (s *Server) validateGenericRecordItem(rec map[string]any) error {
+	// SB-29: seal refuses an unknown top-level key, which would otherwise surface only at seal time,
+	// after earlier batch items are stored. Refuse it here so the batch stays all-or-nothing. The keys
+	// ingest removes or replaces before sealing are allowed. Skipped in shadow mode (rollback switch).
+	if sh, ok := s.core.(interface{ ShadowSealShape() bool }); !ok || !sh.ShadowSealShape() {
+		for k := range rec {
+			if _, ok := core.AllowedTopKeys[k]; ok {
+				continue
+			}
+			switch k {
+			case "idempotency_key", "input", "output", "rationale":
+				continue
+			}
+			return fmt.Errorf("unknown top-level field %q: a record carries only the closed schema key set (use extensions for custom fields)", k)
+		}
+	}
 	if stringField(rec, "project_id") == "" || stringField(rec, "session_id") == "" {
 		return fmt.Errorf("project_id and session_id are required")
 	}

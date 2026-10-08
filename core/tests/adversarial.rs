@@ -608,8 +608,13 @@ fn govder_record_with_no_agent_id_evidence_binding() {
         ),
         ("key_status".into(), CanonValue::string("active")),
     ])
+    // Deliberately non-conforming (no agent_id): `seal` now refuses it, so build it unchecked.
     .unwrap();
-    let rec = seal(&CanonValue::parse(&body).unwrap(), &seal_key).unwrap();
+    let rec = averin_decision_core::record::seal_unchecked_for_tests(
+        &CanonValue::parse(&body).unwrap(),
+        &seal_key,
+    )
+    .unwrap();
     let bundle = CanonValue::object(vec![
         ("bundle_version".into(), CanonValue::string("1")),
         ("project_id".into(), CanonValue::string("acme")),
