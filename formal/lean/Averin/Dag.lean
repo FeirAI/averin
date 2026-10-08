@@ -5,8 +5,9 @@ Models `core/src/dag.rs::build` (parents resolve, Kahn acyclicity, heads) and th
 of `core/src/checkpoint.rs::validate_chain` (RCP §10.1 steps 2 and 4).
 
 `Hash` is an abstract `content_hash`. The link to the signed history is `Consistent`: every
-record present in the bundle has the parents the key holder sealed under that hash (this is what
-`Averin.Seal.record_seal_sound` gives, absent a SHA-256 collision / Ed25519 forgery).
+record present in the bundle has the parents the key holder sealed under that hash. In this hand
+model `Consistent` is an assumption: no theorem here composes it from `Averin.Seal.record_seal_sound`
+(which gives the per-record statement, absent a SHA-256 collision / Ed25519 forgery).
 
 * `no_omission` — every causal ancestor (in the *signed* history) of anything present is itself
   present. Deleting a record from the middle of a run breaks verification.

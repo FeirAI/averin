@@ -51,7 +51,7 @@ check GrantLog.tla GrantLog_void_age_only.cfg pass             # ...either guard
 check GrantLog.tla GrantLog_void_index_only.cfg pass           # ...or the UNIQUE record_id index
 check GrantLog.tla GrantLog_void_backstop.cfg NoVoidDuringFlight # ...which really is exercised: the void races an in-flight retry
 check GrantLog.tla GrantLog_void_reachable.cfg NoVoid           # non-vacuity: the guarded void does happen
-check GrantLog.tla GrantLog_fixed.cfg pass                     # shipped design: no anchored gap, no duplicate seq
+check GrantLog.tla GrantLog_fixed.cfg pass                     # SUPERSEDED design (age-based recovery), not the shipped one: no anchored gap, no duplicate seq
 check GrantLog.tla GrantLog_wedge.cfg CheckpointRecovers       # without void, a client that never retries wedges checkpoints
 check GrantLog.tla GrantLog_fair_retry.cfg pass                # ...recovers only if every client retries until it commits
 check GrantLog.tla GrantLog_void_starved.cfg CheckpointRecovers # a client retrying forever, every attempt failing, starves the void
@@ -66,7 +66,7 @@ check GrantRecovery.tla GrantRecovery_safe.cfg pass
 check ConsumeLedger.tla ConsumeLedger_safe.cfg pass                               # Retention >= MaxTTL: at most once per key
 check ConsumeLedger.tla ConsumeLedger_short_retention_replay.cfg AtMostOncePerKey # Retention < MaxTTL: replay
 check ConsumeLedger.tla ConsumeLedger_short_retention.cfg InFlightRecorded       # ...and a live in-flight key is pruned
-check ConsumeLedger.tla ConsumeLedger_tenant_safe.cfg pass               # unknown-owner legacy rows block replays through expiry
+check ConsumeLedger.tla ConsumeLedger_tenant_safe.cfg pass               # VACUOUS: no consume is reachable, so TenantIsolation holds trivially
 check ConsumeLedger.tla ConsumeLedger_tenant_unsafe.cfg TenantAtMostOnce # premature legacy exclusion deletion reopens replay
 check ConsumeLedger.tla ConsumeLedger_tenant_isolation.cfg NoBothTenantsConsumed # witness: both projects can consume the equal nonce
 
@@ -76,5 +76,5 @@ check ProjectTx.tla ProjectTx_checkpoint_fork.cfg NoCheckpointFork   # concurren
 check ProjectTx.tla ProjectTx_stale_cache.cfg NoRevokedUse          # a stale replica admits a revoked capability
 check ProjectTx.tla ProjectTx_pending_cache.cfg NoGhostFinalize    # a cached expired challenge can finalize
 check ProjectTx.tla ProjectTx_safe.cfg pass                         # DB guard, ambiguity, crash and post-commit anchor
-check ProjectTx.tla ProjectTx_operational_safe.cfg pass             # durable pending/revocation reads
+check ProjectTx.tla ProjectTx_operational_safe.cfg pass             # HOLDS BY DEFINITION: Authoritative = TRUE leaves badUse/badFinalize unreachable
 rm -rf states

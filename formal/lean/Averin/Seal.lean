@@ -19,9 +19,10 @@ would be *false* and make every theorem vacuous). Instead:
 * Ed25519 unforgeability is the hypothesis that every message whose signature verifies under the
   pinned key is in `Signed`, the set of messages the key holder actually signed. The honest
   signer (`HonestSigner`) signs only through `record::seal` and `checkpoint::seal_checkpoint`.
-* `fmt` is `"sha256:" ‖ lowerhex(·)`; its injectivity is discharged against the real `hashx.rs`
-  code by the Kani harnesses `hex_byte_roundtrip` and `hex_digit_is_canonical` (per byte, at fixed
-  width).
+* `fmt` is `"sha256:" ‖ lowerhex(·)`; in this hand model its injectivity (`hfmt`) is a
+  hypothesis of the theorems, not discharged here. The Kani harnesses `hex_byte_roundtrip` and
+  `hex_digit_is_canonical` check the real `hashx.rs` per byte at fixed width, and the production
+  refinement (`formal/production`) proves `fmtM_inj` in Lean for the extracted code.
 
 Everything else — canonical JSON, UTF-8, LP framing, domain separation — is proved, not assumed.
 -/

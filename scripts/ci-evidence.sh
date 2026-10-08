@@ -24,7 +24,11 @@ sum() {
 }
 
 {
-  echo "commit: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  # On a pull request the checkout is a synthetic merge commit, so HEAD names a commit that exists
+  # nowhere else. Record the SHA the event ran on and the pull request head separately.
+  echo "checkout (git HEAD): $(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "github_sha: ${GITHUB_SHA:-local}"
+  echo "pr_head_sha: ${PR_HEAD_SHA:-none (not a pull request event)}"
   echo "ref: ${GITHUB_REF:-local}"
   echo "event: ${GITHUB_EVENT_NAME:-local}"
   echo "run: ${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-local} (attempt ${GITHUB_RUN_ATTEMPT:-0})"
@@ -36,6 +40,15 @@ sum() {
   fi
   if command -v lean >/dev/null 2>&1; then
     echo "lean: $(lean --version 2>/dev/null | head -n1)"
+  fi
+  # Production refinement toolchain pins (the versions the extraction and proofs are checked against).
+  if [ -f formal/production/manifest.json ] && command -v python3 >/dev/null 2>&1; then
+    python3 -I - formal/production/manifest.json <<'PY' || echo "production pins: unreadable"
+import json, sys
+t = json.load(open(sys.argv[1]))["toolchain"]
+for key in ("lean", "charon_commit", "charon_rust_toolchain", "aeneas_commit", "mathlib_rev"):
+    print(f"production {key}: {t.get(key, 'unknown')}")
+PY
   fi
   echo "files (sha256):"
   (cd "$dir" && find . -type f ! -name MANIFEST.txt -print | LC_ALL=C sort | while IFS= read -r f; do sum "$f"; done)
