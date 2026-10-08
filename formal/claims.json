@@ -205,6 +205,87 @@
         {"file": "formal/mutants/seal-skips-domain-pin.patch", "symbol": "RECORD_DOMAIN"}
       ],
       "gates": ["core", "server", "formal-fast"]
+    },
+    {
+      "id": "cli-headline-equals-claim-verdict",
+      "claim": "The averin-verify bundle headline word and exit code equal the report's claim verdict (PASS needs a satisfied requested claim and externally pinned keys; CONSISTENT is the same claim under the bundle's own keys; INSUFFICIENT and FAIL otherwise), the same rule as verifier/claim-verdict.js. A finite differential over the verdict oracle corpus plus an end-to-end test of the binary; not a proof, and it says nothing about whether the claims themselves are right.",
+      "class": "differential",
+      "targets": [
+        "native Rust CLI",
+        "JS verifier (same rule, run with node)"
+      ],
+      "assumptions": [
+        "the report's claims are produced by the claim kernel",
+        "node is on PATH where the differential runs"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify/verdict.rs",
+          "symbol": "pub fn claim_verdict"
+        },
+        {
+          "file": "core/src/bin/averin_verify.rs",
+          "symbol": "fn verify_bundle_cmd"
+        },
+        {
+          "file": "verifier/claim-verdict.js",
+          "symbol": "export function claimVerdict"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/verdict_word_differential.rs",
+          "symbol": "fn rust_and_js_headline_words_agree_over_the_corpus"
+        },
+        {
+          "file": "core/tests/cli_verdict.rs",
+          "symbol": "fn unpinned_self_keyed_bundle_is_consistent_not_pass"
+        },
+        {
+          "file": "formal/mutants/surface-cli-consistent-exits-zero.patch",
+          "symbol": "Self::Consistent => 0"
+        }
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ]
+    },
+    {
+      "id": "action-completeness-capped-by-kernel",
+      "claim": "The Level-3 action_completeness label is never stronger than the claim kernel: a capstone label also requires the kernel's matching complete claim to be satisfied, else it reads claimed_over_manifest. Checked over every case of the verdict oracle corpus (reports built from the checked facts) and by an adversarial downgrade test; not a proof, and the label still never says more than resource_trust:assumed_truthful allows.",
+      "class": "differential",
+      "targets": [
+        "native Rust",
+        "WASM verifier (same source)"
+      ],
+      "assumptions": [
+        "the corpus projection from checked facts to report fields matches verify.rs"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "fn of_with_integrity"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/src/verify/verdict.rs",
+          "symbol": "fn action_completeness_label_never_stronger_than_kernel"
+        },
+        {
+          "file": "core/tests/adversarial.rs",
+          "symbol": "fn action_completeness_label_is_capped_by_the_kernel"
+        },
+        {
+          "file": "formal/mutants/surface-label-drops-kernel-and.patch",
+          "symbol": "kernel_ok || true"
+        }
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ]
     }
   ]
 }

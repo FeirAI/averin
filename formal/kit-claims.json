@@ -161,15 +161,15 @@
       "claim": "kani-encoder-harnesses",
       "detector": "bash formal/run-kani.sh --harness one_byte_tail_is_canonical"
     },
-    "cli-consistent-exits-zero": {
+    "surface-cli-consistent-exits-zero": {
       "tier": "fast",
       "claim": "cli-headline-equals-claim-verdict"
     },
-    "verdict-word-ignores-pinning": {
+    "surface-word-ignores-pinning": {
       "tier": "full",
       "claim": "cli-headline-equals-claim-verdict"
     },
-    "action-label-drops-kernel-and": {
+    "surface-label-drops-kernel-and": {
       "tier": "fast",
       "claim": "action-completeness-capped-by-kernel"
     }
@@ -614,6 +614,7 @@
     },
     {
       "id": "cli-headline-equals-claim-verdict",
+      "$comment": "legacy register: cli-headline-equals-claim-verdict",
       "statement": "The averin-verify bundle headline word is the report's claim verdict: PASS only when the requested claim is satisfied and the signing keys are externally pinned, CONSISTENT when it is satisfied only under the bundle's own keys, INSUFFICIENT when it is not satisfied or the claims contract is missing or invalid, FAIL when ok is false or the claim is refuted. Exit codes are 0 PASS, 2 CONSISTENT, 1 FAIL or INSUFFICIENT. Held by an end-to-end test of the binary on the shipped fixture (unpinned, pinned, unsatisfied claim, tampered) and by a differential of the Rust verdict function against verifier/claim-verdict.js (run with node) over every case of the committed verdict oracle corpus crossed with every requested claim, ok and pinning, plus malformed contracts.",
       "method": "differential-vectors",
       "artifacts": [
@@ -645,13 +646,14 @@
         }
       ],
       "mutants": [
-        "cli-consistent-exits-zero",
-        "verdict-word-ignores-pinning"
+        "surface-cli-consistent-exits-zero",
+        "surface-word-ignores-pinning"
       ],
       "does_not_establish": "That the report's claims are right (that is the claim kernel's refinement and oracle differential). Only the words and exit codes derived from a finished report: the web app's TypeScript copy (web/src/lib/claimVerdict.ts) is covered by its own unit tests, not this differential. The corpus rows are claim decisions, not bundles, so the differential crosses them with synthetic ok and pinning flags rather than verifying real bundles. Usage and unreadable-file errors also exit 2, the same code as CONSISTENT, so a caller must read the RESULT line, not only the exit code. Needs node on PATH. A finite differential, not a proof."
     },
     {
       "id": "action-completeness-capped-by-kernel",
+      "$comment": "legacy register: action-completeness-capped-by-kernel",
       "statement": "The Level-3 action_completeness label is never stronger than the claim kernel: a brokered capstone label requires the kernel's complete_brokered claim to be satisfied and an introspected label requires complete_introspected, otherwise the label is claimed_over_manifest. Held by a test over every case of the committed verdict oracle corpus (a report is built from each case's checked facts and the shipped label function is applied), by an adversarial test that downgrades a clean capstone report when the kernel is insufficient or refuted, and by the unchanged real-flow capstone tests.",
       "method": "differential-vectors",
       "artifacts": [
@@ -671,7 +673,7 @@
         }
       ],
       "mutants": [
-        "action-label-drops-kernel-and"
+        "surface-label-drops-kernel-and"
       ],
       "does_not_establish": "That the kernel itself is right (see verdict-kernel-refinement). That a label is granted whenever the kernel is satisfied: the cap only removes labels, the legacy conjunction still decides whether one is granted. The corpus test builds each report from checked facts by an inverse projection written in the test, not from real bundles, so a field the projection sets differently from verify.rs could hide or invent a case. The introspected label was not stronger than the kernel on any corpus case, so its cap is exercised only by the adversarial test. Not a proof: a finite corpus."
     }
