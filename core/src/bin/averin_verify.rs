@@ -265,14 +265,14 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         }
     }
     println!();
-    // The headline word is `claimVerdict` (core/src/verify/verdict.rs, verifier/claim-verdict.js):
+    // The headline word is `claimVerdict` (core/src/verify/headline.rs, verifier/claim-verdict.js):
     // PASS needs the requested claim satisfied AND externally pinned keys; the same satisfied claim
     // under the bundle's own keys is CONSISTENT (internal consistency, not authenticity).
     let verdict = claim_verdict(&report);
     match verdict {
         ClaimVerdict::Pass | ClaimVerdict::Consistent => {
             println!(
-                "RESULT: {} ({requested}) — requested claim satisfied; integrity diagnostics clean.",
+                "RESULT: {} ({requested}): requested claim satisfied; integrity diagnostics clean.",
                 verdict.word()
             );
             if verdict == ClaimVerdict::Consistent {
@@ -295,7 +295,7 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         }
         ClaimVerdict::Insufficient | ClaimVerdict::Fail => {
             println!(
-                "RESULT: {} — integrity diagnostics or requested claim are not satisfied; see above.",
+                "RESULT: {}: integrity diagnostics or requested claim are not satisfied; see above.",
                 verdict.word()
             );
             if let Some(note) = historical_claim_note(&report) {

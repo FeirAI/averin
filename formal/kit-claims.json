@@ -636,20 +636,25 @@
         },
         {
           "path": "core/src/verify/headline.rs",
+          "symbol": "word",
+          "sha256": "bf3708c7a1b0183243c55f2a372df978f7aae7f729ae88bfcf80a5116a6ae1d6"
+        },
+        {
+          "path": "core/src/verify/headline.rs",
           "symbol": "exit_code",
           "sha256": "0670275482c8d33fad83a703f01e5141b03d0ac6282b4313bb9b3aa62050de01"
         },
         {
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "verify_bundle_cmd",
-          "sha256": "84022cd40bb956870a7e86e2bbbcf15cb6da0724ddb210bdaa7e2b4af8f7199f"
+          "sha256": "928fd2a76cd7ecf288eb7235873fa379d9c640fb2d7adb0081fb2f15a34864c2"
         }
       ],
       "mutants": [
         "surface-cli-consistent-exits-zero",
         "surface-word-ignores-pinning"
       ],
-      "does_not_establish": "That the report's claims are right (that is the claim kernel's refinement and oracle differential). Only the words and exit codes derived from a finished report: the web app's TypeScript copy (web/src/lib/claimVerdict.ts) is covered by its own unit tests, not this differential. The corpus rows are claim decisions, not bundles, so the differential crosses them with synthetic ok and pinning flags rather than verifying real bundles. Usage and unreadable-file errors also exit 2, the same code as CONSISTENT, so a caller must read the RESULT line, not only the exit code. Needs node on PATH. A finite differential, not a proof."
+      "does_not_establish": "That the report's claims are right (that is the claim kernel's refinement and oracle differential). Only the words and exit codes derived from a finished report: the web app's TypeScript copy (web/src/lib/claimVerdict.ts) is covered by its own unit tests, not this differential. The corpus rows are claim decisions, not bundles, so the differential crosses them with synthetic ok and pinning flags rather than verifying real bundles. Usage and unreadable-file errors also exit 2, the same code as CONSISTENT, so a caller must read the RESULT line, not only the exit code. Agreement holds for reports whose ok and keys_externally_pinned are booleans, as every shipped report producer emits: the JS rule tests truthiness, so on a non-boolean value (for example keys_externally_pinned set to the string false) it can say PASS where the Rust rule says CONSISTENT or FAIL, and the differential does not build such reports. The CLI headline is checked end to end only on the four fixture cases; over the corpus it is covered because the CLI prints claim_verdict(report).word(), not by running the binary per case. The record subcommand does not use this rule: it prints PASS (integrity only) and exits 0 for a record checked without any key. Needs node on PATH. A finite differential, not a proof."
     },
     {
       "id": "action-completeness-capped-by-kernel",
@@ -669,6 +674,11 @@
       "covers": [
         {
           "path": "core/src/verify.rs",
+          "symbol": "ActionCompleteness::of",
+          "sha256": "5056c3b38d3b2264cb18b7a7bcef94445b3b4a066a1e1278eb65a6f56d05c710"
+        },
+        {
+          "path": "core/src/verify.rs",
           "symbol": "of_with_integrity",
           "sha256": "a8409bc0f1f33f4aafc3ced6a0c88e259cdd96f2916167c30190fa53d012843c"
         }
@@ -676,7 +686,7 @@
       "mutants": [
         "surface-label-drops-kernel-and"
       ],
-      "does_not_establish": "That the kernel itself is right (see verdict-kernel-refinement). That a label is granted whenever the kernel is satisfied: the cap only removes labels, the legacy conjunction still decides whether one is granted. The corpus test builds each report from checked facts by an inverse projection written in the test, not from real bundles, so a field the projection sets differently from verify.rs could hide or invent a case. The introspected label was not stronger than the kernel on any corpus case, so its cap is exercised only by the downgrade unit test. Not a proof: a finite corpus."
+      "does_not_establish": "That the kernel itself is right (see verdict-kernel-refinement). That a label is granted whenever the kernel is satisfied: the cap only removes labels, the legacy conjunction still decides whether one is granted. The corpus test builds each report from checked facts by an inverse projection written in the test, not from real bundles, so a field the projection sets differently from verify.rs could hide or invent a case. The introspected label was not stronger than the kernel on any corpus case, so its cap is exercised only by the downgrade unit test. The real-flow server capstone tests show that a clean real bundle still reaches the brokered label; they do not test the cap. The 586 corpus cases where the bare conjunction was stronger are an upper bound set by the test projection: it does not carry adverse evidence or revoked membership into ok and revoked_uses_blocked as verify.rs does, and with those carried over 38 cases remain. ActionCompleteness::of_conjunction_uncapped is a public, doc-hidden function that returns the uncapped label for tests; nothing enforces that production code does not call it. Not a proof: a finite corpus."
     }
   ]
 }

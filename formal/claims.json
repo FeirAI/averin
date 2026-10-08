@@ -216,6 +216,7 @@
       ],
       "assumptions": [
         "the report's claims are produced by the claim kernel",
+        "the report's ok and keys_externally_pinned are booleans, as every shipped producer emits (the JS rule tests truthiness and can disagree on other values)",
         "node is on PATH where the differential runs"
       ],
       "sources": [
@@ -253,7 +254,7 @@
     },
     {
       "id": "action-completeness-capped-by-kernel",
-      "claim": "The Level-3 action_completeness label is never stronger than the claim kernel: a capstone label also requires the kernel's matching complete claim to be satisfied, else it reads claimed_over_manifest. Checked over every case of the verdict oracle corpus (reports built from the checked facts) and by an adversarial downgrade test; not a proof, and the label still never says more than resource_trust:assumed_truthful allows.",
+      "claim": "The Level-3 action_completeness label is never stronger than the claim kernel: a capstone label also requires the kernel's matching complete claim to be satisfied, else it reads claimed_over_manifest. Checked over every case of the verdict oracle corpus (reports built from the checked facts) and by a downgrade unit test; not a proof, and the label still never says more than resource_trust:assumed_truthful allows.",
       "class": "differential",
       "targets": [
         "native Rust",

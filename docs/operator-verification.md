@@ -9,7 +9,7 @@ There are two verification postures:
 
 | Posture | How | Proves |
 |---|---|---|
-| **Internal consistency** | `averin-verify bundle b.json` (no opts) | the bundle is self-consistent under **its own** key claims — integrity, DAG, checkpoint chain, omission/fork/tamper. It does **not** authenticate against an out-of-band trust root. The CLI prints `RESULT: CONSISTENT` (exit 2), never `PASS`, for this posture; `PASS` (exit 0) needs pinned keys. |
+| **Internal consistency** | `averin-verify bundle b.json` (no opts) | the bundle is self-consistent under **its own** key claims: integrity, DAG, checkpoint chain, omission/fork/tamper. It does **not** authenticate against an out-of-band trust root. A clean result prints `RESULT: CONSISTENT` (exit 2), never `PASS`, for this posture; `PASS` (exit 0) needs pinned keys. |
 | **Pinned (authentic)** | `averin-verify bundle b.json opts.json` | the above **plus** every role's evidence verifies under the keys **you** pinned out-of-band, which is what unlocks the Tier-B / mode gates (cosig, revocation, federation, native, attestation, taxonomy) and the `attested_complete_*` capstone. |
 
 Browser (`/verifier/`) and FFI (`core.VerifyBundleWith`) take the same `opts` object.
