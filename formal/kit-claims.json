@@ -702,6 +702,16 @@
           "path": "formal/tla/run-tlc.sh",
           "symbol": "*",
           "sha256": "d294e56678299f67c5e7ea520e59b1709f601ac985be8a0eb6ad0368df77b52c"
+        },
+        {
+          "path": "formal/tla/ProjectTx_safe.cfg",
+          "symbol": "*",
+          "sha256": "cf5b93b168b6cf37cfae54a2c8cf70f9151216eb0702c61b04870af244d44e8c"
+        },
+        {
+          "path": "formal/tla/ConsumeLedger_tenant_safe.cfg",
+          "symbol": "*",
+          "sha256": "2504cf1dd77a71a3d71d69589d6a53dc739b00d40de5fd9e8e63877a7e9533d2"
         }
       ],
       "mutants": [
