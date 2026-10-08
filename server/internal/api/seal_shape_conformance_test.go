@@ -114,7 +114,7 @@ func TestMain(m *testing.M) {
 
 // shapeRefusal says whether a seal error is one of the SB-29 shape, domain or canon_version refusals.
 func shapeRefusal(msg string) bool {
-	for _, p := range []string{"missing required field", "unknown top-level field", "domain mismatch", "canon_version mismatch", "is not a JSON object"} {
+	for _, p := range []string{"missing required field", "unknown top-level field", "domain mismatch", "canon_version mismatch", "is not a JSON object", "is not a string"} {
 		if strings.Contains(msg, p) {
 			return true
 		}

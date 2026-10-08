@@ -549,7 +549,7 @@
     {
       "id": "seal-implies-verify-shape",
       "$comment": "legacy register: seal-implies-verify-shape",
-      "statement": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin, so a record that every verifier rejects on those grounds cannot be sealed by this core (SB-29). Held as a deterministic property test over every single defect (unknown key, each dropped required key, wrong or non-string or missing domain, wrong canon_version) plus 600 seeded random defect combinations on the golden record body, and, on the Go side, by running the whole server test suite through the real cgo seal in enforce mode and failing the run if any producer kind is refused or no longer reached.",
+      "statement": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin, so a record that every verifier rejects on those grounds cannot be sealed through record::seal (SB-29). Held as a deterministic property test over every single defect (unknown key, each dropped required key, wrong or non-string or missing domain, wrong canon_version) plus 600 seeded random defect combinations on the golden record body, and, on the Go side, by running the whole server test suite through the real cgo seal in enforce mode and failing the run if any producer kind is refused or no longer reached.",
       "method": "property",
       "artifacts": [
         "core/tests/seal_shape.rs",
@@ -574,7 +574,7 @@
         "seal-skips-shape-check",
         "seal-skips-domain-pin"
       ],
-      "does_not_establish": "Nothing about nested object shape (validate_record_shape checks top-level keys only; the JSON Schema covers the rest), content_hash or signature validity of a body, or any record sealed before this change. Not a proof: the generator is deterministic and finite, so a defect class it does not build is untested. The Go conformance covers only the producers the existing server tests reach, and a body type no test builds is checked only by the seal refusing it at runtime. AVERIN_SEAL_SHAPE=shadow deliberately seals records no verifier accepts (rollback switch). seal_unchecked_for_tests is a public, doc-hidden bypass of the check that production code must not call; nothing enforces that."
+      "does_not_establish": "Nothing about nested object shape (validate_record_shape checks top-level keys only; the JSON Schema covers the rest), content_hash or signature validity of a body, or any record sealed before this change. Not a proof: the generator is deterministic and finite, so a defect class it does not build is untested. The Go conformance covers only the producers the existing server tests reach, and a body type no test builds is checked only by the seal refusing it at runtime. Nothing about checkpoints: checkpoint::seal_checkpoint still does not pin the checkpoint domain or canon_version (verify_checkpoint_sealed does). AVERIN_SEAL_SHAPE=shadow deliberately seals records no verifier accepts (rollback switch). seal_unchecked_for_tests is a public, doc-hidden bypass of the check that production code must not call; nothing enforces that."
     }
   ]
 }
