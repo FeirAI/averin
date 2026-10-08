@@ -187,6 +187,24 @@
       "evidence_run": "37712087870",
       "scheduled_gates": ["formal-mutants-full"],
       "scheduled_evidence_run": "37678805697"
+    },
+    {
+      "id": "seal-implies-verify-shape",
+      "claim": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin (SB-29), checked by a deterministic property test and, for the Go server's producers, by running the real cgo seal in enforce mode across the whole server suite. Not a proof; does not cover nested object shape, hash or signature validity, or AVERIN_SEAL_SHAPE=shadow, which seals unverifiable records on purpose as a rollback switch.",
+      "class": "property-test",
+      "targets": ["native Rust", "Go cgo (same source)"],
+      "assumptions": ["the finite deterministic generator builds the defect classes that matter", "the Go suite reaches every producer kind it lists"],
+      "sources": [
+        {"file": "core/src/record.rs", "symbol": "fn check_sealed_shape"},
+        {"file": "core/src/record.rs", "symbol": "pub fn seal_with_mode"}
+      ],
+      "proofs": [
+        {"file": "core/tests/seal_shape.rs", "symbol": "fn every_single_defect_keeps_the_implication"},
+        {"file": "server/internal/api/seal_shape_conformance_test.go", "symbol": "func TestMain"},
+        {"file": "formal/mutants/seal-skips-shape-check.patch", "symbol": "validate_record_shape"},
+        {"file": "formal/mutants/seal-skips-domain-pin.patch", "symbol": "RECORD_DOMAIN"}
+      ],
+      "gates": ["core", "server", "formal-fast"]
     }
   ]
 }

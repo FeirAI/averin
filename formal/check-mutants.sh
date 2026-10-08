@@ -225,7 +225,7 @@ if [ "$use_kani" = 1 ]; then
   # scoped run must not re-run every harness of the suite).
   baseline_harnesses=()
   for patch in formal/mutants/*.patch; do
-    case "$(basename "$patch")" in lean-*|tla-*) continue ;; esac  # Lean and TLA+ source mutants belong to the kit register
+    case "$(basename "$patch")" in lean-*|tla-*|seal-skips-*) continue ;; esac  # Lean, TLA+ and seal-shape (property test) mutants belong to the kit register
     name="$(basename "$patch" .patch)"
     if [ "${MUTANTS_ONLY+x}" = x ]; then
       selected=0
@@ -250,7 +250,7 @@ echo "   ok"
 survivors=0
 executed=0
 for patch in formal/mutants/*.patch; do
-  case "$(basename "$patch")" in lean-*|tla-*) continue ;; esac  # Lean and TLA+ source mutants belong to the kit register
+  case "$(basename "$patch")" in lean-*|tla-*|seal-skips-*) continue ;; esac  # Lean, TLA+ and seal-shape (property test) mutants belong to the kit register
   name="$(basename "$patch" .patch)"
   if [ "${MUTANTS_ONLY+x}" = x ]; then
     selected=0

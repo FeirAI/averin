@@ -95,7 +95,7 @@
     "core/Cargo.toml": "0d90d1e08d2d474dcec1648f76a36aab993b098e47ec34d60614e9c67811cc2e",
     "core/src/canon.rs": "717822b3628f20deb923ddfaba17f2499cf0775420b664f7b408e35d5caf483d",
     "core/src/hashx.rs": "3193a42763c19e681181c07bbb8e7ab6f37d0d27dd0bc6124d8f7067b7d043c7",
-    "core/src/record.rs": "52dac5bd61b1609803f82824291d270eefd8774065cb9a78b2988d9276e2e1f4",
+    "core/src/record.rs": "fef5d2a650eddc59448f457c4df686f95f23b9fc278f681d4639c9d211905293",
     "core/src/checkpoint.rs": "90ba12e80e5e89811f119840fe44b07a9e90a7d650b9f365b49f9feed3f455c4",
     "core/src/sign.rs": "cd3611f1ee9bfa13c9fa61353b6ea4412254bb539ae4a48ccfeb73babb3e80b3",
     "core/src/verify/verdict.rs": "3b1cb80cbadf608c51e3731191344e7ff9d0f39b83dd9832335b539fb27aee08",
@@ -329,7 +329,7 @@
     },
     {
       "file": "core/src/record.rs",
-      "fn": "seal",
+      "fn": "seal_unchecked",
       "contains": [
         "let content_hash = compute_content_hash(record)?;",
         "sign::sign(sign::RECORD_SIG_TAG, &content_hash, sk)"

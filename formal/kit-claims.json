@@ -548,6 +548,7 @@
     },
     {
       "id": "seal-implies-verify-shape",
+      "$comment": "legacy register: seal-implies-verify-shape",
       "statement": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin, so a record that every verifier rejects on those grounds cannot be sealed by this core (SB-29). Held as a deterministic property test over every single defect (unknown key, each dropped required key, wrong or non-string or missing domain, wrong canon_version) plus 600 seeded random defect combinations on the golden record body, and, on the Go side, by running the whole server test suite through the real cgo seal in enforce mode and failing the run if any producer kind is refused or no longer reached.",
       "method": "property",
       "artifacts": [
