@@ -297,15 +297,92 @@ fn with_field(obj: &CanonValue, key: &str, value: CanonValue) -> CanonValue {
     CanonValue::Object(members)
 }
 
-/// Seal a record body: compute `content_hash` (RCP §9.1), sign it (RCP §9.2), and return the
-/// record with both fields set. Any pre-existing `content_hash`/`sig` are ignored for hashing
-/// and overwritten.
-pub fn seal(record: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
+/// What [`seal_with_mode`] does with a body that [`verify_sealed`] would reject on shape,
+/// domain or canon_version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SealShapeMode {
+    /// Return the error and seal nothing (the default; what [`seal`] does).
+    Enforce,
+    /// Count the violation in [`seal_shape_violations`] and seal anyway. A rollback switch only:
+    /// a record sealed this way is rejected by every verifier.
+    Shadow,
+}
+
+static SEAL_SHAPE_VIOLATIONS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// How many bodies [`seal_with_mode`] sealed in [`SealShapeMode::Shadow`] although
+/// [`verify_sealed`] would reject their shape, domain or canon_version (process lifetime).
+pub fn seal_shape_violations() -> u64 {
+    SEAL_SHAPE_VIOLATIONS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The shape, domain and canon_version part of [`verify_sealed`], applied to an already sealed
+/// record: [`validate_record_shape`], then the domain pin, then the canon_version pin.
+fn check_sealed_shape(sealed: &CanonValue) -> Result<(), RecordError> {
+    validate_record_shape(sealed)?;
+    let domain = str_field(sealed, "domain")?;
+    if domain != RECORD_DOMAIN {
+        return Err(RecordError::DomainMismatch {
+            expected: RECORD_DOMAIN.to_string(),
+            found: domain.to_string(),
+        });
+    }
+    let cv = str_field(sealed, "canon_version")?;
+    if cv != CANON_VERSION {
+        return Err(RecordError::CanonVersionMismatch {
+            expected: CANON_VERSION.to_string(),
+            found: cv.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn seal_unchecked(record: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
     let content_hash = compute_content_hash(record)?;
     let sig = sign::sign(sign::RECORD_SIG_TAG, &content_hash, sk);
     let stripped = record.without_keys(&["content_hash", "sig"]);
     let with_hash = with_field(&stripped, "content_hash", CanonValue::Str(content_hash));
     Ok(with_field(&with_hash, "sig", CanonValue::Str(sig)))
+}
+
+/// Seal a record body: compute `content_hash` (RCP §9.1), sign it (RCP §9.2), and return the
+/// record with both fields set. Any pre-existing `content_hash`/`sig` are ignored for hashing
+/// and overwritten.
+///
+/// Rejects every body that [`verify_sealed`] would reject on shape (unknown or missing top-level
+/// key), `domain` or `canon_version`, so `seal(b)` being `Ok` implies `verify_sealed` accepts the
+/// result under the matching key. It does not check nested object shape (neither does
+/// [`validate_record_shape`]).
+pub fn seal(record: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
+    seal_with_mode(record, sk, SealShapeMode::Enforce)
+}
+
+/// [`seal`] with an explicit [`SealShapeMode`] (the cgo server maps `AVERIN_SEAL_SHAPE` to it).
+pub fn seal_with_mode(
+    record: &CanonValue,
+    sk: &SigningKey,
+    mode: SealShapeMode,
+) -> Result<CanonValue, RecordError> {
+    let sealed = seal_unchecked(record, sk)?;
+    if let Err(e) = check_sealed_shape(&sealed) {
+        match mode {
+            SealShapeMode::Enforce => return Err(e),
+            SealShapeMode::Shadow => {
+                SEAL_SHAPE_VIOLATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    Ok(sealed)
+}
+
+/// Seal with no shape check: the old behaviour, kept only so tests can build records that a
+/// verifier must reject. Never call from production code.
+#[doc(hidden)]
+pub fn seal_unchecked_for_tests(
+    record: &CanonValue,
+    sk: &SigningKey,
+) -> Result<CanonValue, RecordError> {
+    seal_unchecked(record, sk)
 }
 
 /// Verify a record's `sig` against the given verifying key (RCP §9.2). Does **not** re-check the
