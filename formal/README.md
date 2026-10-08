@@ -11,7 +11,10 @@ or model symbols, assumptions, proof or test, supported target and the CI jobs t
 (`gates`, which run on every pull request, and `scheduled_gates`, which run only on the schedule).
 `make check-claims` verifies that the referenced files, symbols and job IDs exist, that every
 `gates` entry is a job the required check `ci-required` needs, and that every `scheduled_gates`
-entry is a schedule-only job. This textual check
+entry is a schedule-only job. It also checks that `ci-required` needs exactly the jobs with no
+job-level `if:`, that any `evidence_run` or `scheduled_evidence_run` is shaped like a run id (not
+that the run exists or was green), and that a short list of known overclaim phrases does not
+appear in `docs/`, this file, `claims.json` or the top-level README. This textual check
 does not prove that a test covers the stated behavior or that a model refines the production code;
 those claims still require review. In particular, the Lean theorems are unbounded **for the model**,
 Kani proves bounded properties of selected real-code harnesses, and the Rust/Lean oracle samples a
