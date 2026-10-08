@@ -184,7 +184,11 @@ func TestTemporalSnapshotExportConsistencyPostgres(t *testing.T) {
 		cutoffs   map[int64]bool
 	}
 	var exports []exported
-	for i := 0; i < 12; i++ {
+	// At least 12 exports, and keep exporting (up to a deadline) until two of them have seen a
+	// nonzero watermark: the writer's first grant can take longer than 12 fast exports, which made
+	// the "not vacuous" check below flaky on a slow runner.
+	observed, deadline := 0, time.Now().Add(60*time.Second)
+	for i := 0; i < 12 || (observed < 2 && time.Now().Before(deadline)); i++ {
 		code, body := do(t, exporter, "GET", "/v2/export?project=p1", "")
 		if code != http.StatusOK {
 			t.Fatalf("export: %d %s", code, body)
@@ -218,6 +222,9 @@ func TestTemporalSnapshotExportConsistencyPostgres(t *testing.T) {
 			}
 		}
 		exports = append(exports, e)
+		if e.watermark > 0 {
+			observed++
+		}
 		time.Sleep(15 * time.Millisecond)
 	}
 	close(stop)
