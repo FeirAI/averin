@@ -1,0 +1,14 @@
+Mutant: record_binding states plain body equality and drops the SHA-256 collision alternative (the proof must break).
+diff --git a/formal/lean/Averin/Seal.lean b/formal/lean/Averin/Seal.lean
+index d2d81dc..da01e60 100644
+--- a/formal/lean/Averin/Seal.lean
++++ b/formal/lean/Averin/Seal.lean
+@@ -101,7 +101,7 @@ theorem checkpointHash_pre_inj {a b : CV}
+ two bodies' preimages. -/
+ theorem recordHashOf_binding (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x = fmt y → x = y)
+     {a b : CV} (h : recordHashOf H fmt a = recordHashOf H fmt b) :
+-    a = b ∨ CollidesOn H (recordPre a) (recordPre b) := by
++    a = b := by
+   have hH := hfmt _ _ h
+   by_cases hp : recordPre a = recordPre b
+   · exact Or.inl (recordHash_pre_inj hp)

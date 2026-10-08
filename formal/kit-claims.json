@@ -122,6 +122,38 @@
     "m64-parser-skip-ws-unbounded": {
       "tier": "full",
       "claim": "parser-differential-and-fuzz"
+    },
+    "m4-lp-two-byte-length": {
+      "tier": "full",
+      "claim": "kani-encoder-harnesses"
+    },
+    "m10-b64-two-byte-tail": {
+      "tier": "full",
+      "claim": "kani-encoder-harnesses",
+      "detector": "bash formal/run-kani.sh --harness two_byte_tail_is_canonical"
+    },
+    "m3-utf16-cmp-byte-order": {
+      "tier": "full",
+      "claim": "kani-encoder-harnesses",
+      "detector": "bash formal/run-kani.sh --harness utf16_key_order_is_exact_steered"
+    },
+    "m12-utf16-pair-end": {
+      "tier": "full",
+      "claim": "kani-encoder-harnesses",
+      "detector": "bash formal/run-kani.sh --harness utf16_strict_matches_std"
+    },
+    "m2-canon-drops-del": {
+      "tier": "full",
+      "claim": "kani-encoder-harnesses",
+      "detector": "bash formal/run-kani.sh --harness string_escape_roundtrip_00128"
+    },
+    "lean-seal-drops-fmt-injectivity": {
+      "tier": "full",
+      "claim": "lean-seal-model"
+    },
+    "lean-seal-binding-without-collision-case": {
+      "tier": "full",
+      "claim": "lean-seal-model"
     }
   },
   "claims": [
@@ -401,6 +433,84 @@
         "m64-parser-skip-ws-unbounded"
       ],
       "does_not_establish": "Totality for all inputs (the Lean parser-totality proof in formal/claims.json is the stronger evidence; this checks sampled inputs only). Not allocation failure, stack depth or the uncapped options JSON path."
+    },
+    {
+      "id": "kani-encoder-harnesses",
+      "$comment": "legacy register: bounded-real-encoders",
+      "statement": "Within each harness's stated bounds, Kani checks the real LP framing (4-byte big-endian length), base64url tail canonicality, UTF-16 member-key ordering, the strict UTF-16 decoder and the string escaper's injectivity case for DEL.",
+      "method": "kani",
+      "artifacts": [
+        "formal/run-kani.sh",
+        "formal/check-kani-success.py",
+        "formal/check-kani-shards.py"
+      ],
+      "gates": [
+        "formal-kani",
+        "formal-kani-extended"
+      ],
+      "detector": "bash formal/run-kani.sh --harness lp_into_frames_exactly",
+      "covers": [
+        {
+          "path": "core/src/hashx.rs",
+          "symbol": "lp_into",
+          "sha256": "1d8c79cbdf42387e49d3f9a2b44737caaad54a450436547371b54172e12322a2"
+        },
+        {
+          "path": "core/src/b64.rs",
+          "symbol": "decode_fixed",
+          "sha256": "76d059781cbff1fcdac4c8ec41d67402615585cc2f6334d7d2b3b55dab2f5988"
+        },
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "utf16_units",
+          "sha256": "ec30e2da9b562842632a985517e271dbc06665be84127bb2465b2d6244cfb7ae"
+        },
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "decode_utf16_strict",
+          "sha256": "80d889f0737bf7ceb1170f28ffe2ae65e26d95de00a7294f2f582d53c88ac0fe"
+        },
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "escape_into",
+          "sha256": "ac4f035690e3b242e2bfdd268b7d401cc7f5339cdabf611c68654bae56c15fde"
+        }
+      ],
+      "mutants": [
+        "m4-lp-two-byte-length",
+        "m10-b64-two-byte-tail",
+        "m3-utf16-cmp-byte-order",
+        "m12-utf16-pair-end",
+        "m2-canon-drops-del"
+      ],
+      "does_not_establish": "Anything outside the harness bounds (string cases cover at most two scalars from a three-character alphabet; whole-string base64url uniqueness is argued in prose). Kani 0.68.0 and CBMC are trusted. A failing detector here does not tell an unwinding failure from a real counterexample; formal/check-kani-mutant.py in the legacy mutation suite makes that distinction."
+    },
+    {
+      "id": "lean-seal-model",
+      "$comment": "legacy register: seal-and-closure-model",
+      "statement": "The Lean hand model builds with warnings as errors and every Averin declaration depends only on the standard axioms; the record seal theorems need the stated format-injectivity hypothesis and conclude equal bodies or an explicit SHA-256 collision.",
+      "method": "lean",
+      "artifacts": [
+        "formal/lean/Averin/Seal.lean",
+        "formal/lean/check-axioms.sh",
+        "formal/lean/lakefile.toml"
+      ],
+      "gates": [
+        "formal-lean"
+      ],
+      "detector": "cd formal/lean && lake build --wfail && bash ./check-axioms.sh",
+      "covers": [
+        {
+          "path": "formal/lean/Averin/Seal.lean",
+          "symbol": "*",
+          "sha256": "c5b10edd4ef7bd59944fb7bc36c3015f7f5a68f3a20b1b0a4acfe16219f215cc"
+        }
+      ],
+      "mutants": [
+        "lean-seal-drops-fmt-injectivity",
+        "lean-seal-binding-without-collision-case"
+      ],
+      "does_not_establish": "That the Lean model matches the Rust (see preimage-oracle-conformance and the extraction-based claims in formal/claims.json). Model-level only: SHA-256 collision resistance, Ed25519 unforgeability, an honest signer and post-NFC inputs are assumptions, and the Lean kernel is trusted."
     }
   ]
 }
