@@ -1,0 +1,15 @@
+Mutant: AttachAnchor can never fire, so the post-commit anchor path is dead. Every ProjectTx pass and counterexample configuration still gives its expected result; only the W_AnchorAttached reachability witness kills it.
+
+diff --git a/formal/tla/ProjectTx.tla b/formal/tla/ProjectTx.tla
+index 2d2217f..33effc8 100644
+--- a/formal/tla/ProjectTx.tla
++++ b/formal/tla/ProjectTx.tla
+@@ -80,7 +80,7 @@ CommitCP(i) ==
+                  useDone, badUse, pending, cachePending, prepared, finalized,
+                  badFinalize, alive, crashed, anchors>>
+ AttachAnchor(j) ==
+-  /\ j \in 1..Len(checkpoints) /\ j \notin anchors
++  /\ j \in 1..Len(checkpoints) /\ j \notin anchors /\ FALSE
+   /\ anchors' = anchors \cup {j}
+   /\ UNCHANGED <<usePhase, useSeen, records, phase, snap, checkpoints, cpPhase, cpSnap, cpSeq,
+                  guard, revoked, cacheRevoked, useDone, badUse, pending,

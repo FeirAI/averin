@@ -199,6 +199,9 @@ W_AllKeysSpent == ~(\A k \in Keys : acted[k] >= 1)
 W_IsolationAntecedent ==
   ~(tenantPhase = "new" /\ ~tenantLegacy /\ tenantClock <= MaxTTL /\
     P1 \in tenantLedger /\ P2 \notin tenantLedger)
-\* The legacy exclusion was removed after an old writer acted (the guarded purge fires).
-W_LegacyPurged == ~(tenantPhase = "new" /\ tenantActed[P1] >= 1 /\ ~tenantLegacy)
+\* The legacy exclusion was removed after an old writer acted (the guarded purge fires). P1 acted
+\* with no new-path claim only through TenantOldAct, which sets tenantLegacy, so only TenantPurge
+\* reaches this state. (A version without "P1 \notin tenantLedger" was also reached through
+\* TenantConsume and TenantAct alone, with the purge disabled, so it witnessed nothing.)
+W_LegacyPurged == ~(tenantActed[P1] >= 1 /\ P1 \notin tenantLedger /\ ~tenantLegacy)
 =============================================================================

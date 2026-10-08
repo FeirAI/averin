@@ -620,7 +620,7 @@ been replaced, and no model has a trace link to the Go code:
 
 - `GrantLog.tla` (14 configurations and 6 witnesses) models the single-process, age-based `broker_seq` recovery
   design. The current fence protocol is modelled separately in `GrantRecovery.tla`.
-- `ConsumeLedger.tla` (6 configurations and 4 witnesses) models the original `pgledger` consume. `pgledger` now
+- `ConsumeLedger.tla` (6 configurations and 3 witnesses) models the original `pgledger` consume. `pgledger` now
   only sweeps; the current consume (`server/internal/store/ledger_postgres.go`: transaction-bound
   nonce and jti keys, partial release, the ambiguous-commit rule for release) is not modelled.
 - `ConsumeLedger_tenant_safe.cfg` used to pass vacuously: with `LegacyPresent = TRUE` no consume

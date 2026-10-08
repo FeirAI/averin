@@ -200,6 +200,10 @@
     "tla-projecttx-guarded-use-unreachable": {
       "tier": "full",
       "claim": "tla-projecttx-model"
+    },
+    "tla-projecttx-anchor-unreachable": {
+      "tier": "full",
+      "claim": "tla-projecttx-model"
     }
   },
   "claims": [
@@ -581,11 +585,17 @@
           "path": "formal/tla/ProjectTx.tla",
           "symbol": "*",
           "sha256": "b5ab39e746f8bf136e5275cc86a41c00e5ae1ca6def3e209636bb0a3a462f906"
+        },
+        {
+          "path": "formal/tla/ProjectTx_operational_safe.cfg",
+          "symbol": "*",
+          "sha256": "27180ec9b68c698879e824e85652a3c10576b76885fa73d0db0d10cdfbfb9e78"
         }
       ],
       "mutants": [
         "tla-projecttx-drops-serialize-guard",
-        "tla-projecttx-guarded-use-unreachable"
+        "tla-projecttx-guarded-use-unreachable",
+        "tla-projecttx-anchor-unreachable"
       ],
       "does_not_establish": "Model-level only: it is not bound to the Go or Postgres code. The bounds are finite (two replicas, small constants), so it says nothing about larger configurations. NoGhostFinalize is not checked in any passing configuration: with Authoritative = TRUE it holds by definition, and the model has no guard-taking finalize. The guarded use models one design (read and act under the guard, revoke refused while the guard is held); it does not show the implementation does that. TLC and the Java runtime are trusted."
     },
@@ -612,14 +622,19 @@
         {
           "path": "formal/tla/ConsumeLedger.tla",
           "symbol": "*",
-          "sha256": "cd191d96e31fefdbefd0cb366a8f01f6de6be81e15a26bc10b805390a8ea44a4"
+          "sha256": "56014c722713a6c1a5e6535560c7231395a8fa13d7496f32060bc4fc743ac7e9"
+        },
+        {
+          "path": "formal/tla/ConsumeLedger_safe.cfg",
+          "symbol": "*",
+          "sha256": "926925adb6198f85ff7d13b4225de1e0c61a889f05d2f11ef34f2cfacb2d4152"
         }
       ],
       "mutants": [
         "tla-consume-tenant-consume-unreachable",
         "tla-consume-drops-ledger-check"
       ],
-      "does_not_establish": "This models the SUPERSEDED pgledger consume (pgledger now only sweeps). The current consume in server/internal/store/ledger_postgres.go (transaction-bound keys, partial release, the ambiguous-commit rule) is not modelled, and the model has no trace link to any Go code, so a passing result says nothing about current code. The bounds are finite (two instances, two projects, small clock). The earlier ConsumeLedger_tenant_safe.cfg passed vacuously (no consume was reachable); it was changed and now has witnesses. TLC and the Java runtime are trusted."
+      "does_not_establish": "This models the SUPERSEDED pgledger consume (pgledger now only sweeps). The current consume in server/internal/store/ledger_postgres.go (transaction-bound keys, partial release, the ambiguous-commit rule) is not modelled, and the model has no trace link to any Go code, so a passing result says nothing about current code. The bounds are finite (two instances, two projects, small clock). The earlier ConsumeLedger_tenant_safe.cfg passed vacuously (no consume was reachable); it was changed and now has witnesses. TenantIsolation checks the consume guard only: with the current guard it follows from the guard's definition, and it fails only if P2's consume guard comes to depend on P1's claim (now that its antecedent is reachable). The project isolation counterexample is ConsumeLedger_tenant_isolation.cfg. TLC and the Java runtime are trusted."
     },
     {
       "id": "tla-grantrecovery-model",
@@ -642,6 +657,11 @@
           "path": "formal/tla/GrantRecovery.tla",
           "symbol": "*",
           "sha256": "c99ccf9133cbbd962d52bc089a17a36dd4d6343e6ba005bf28d8701f66857200"
+        },
+        {
+          "path": "formal/tla/GrantRecovery_safe.cfg",
+          "symbol": "*",
+          "sha256": "f0ff3ec1066f45ab8e37e19793b10ff9c0206935516b0e0f0f808c08b8628683"
         }
       ],
       "mutants": [
@@ -673,6 +693,31 @@
           "path": "formal/tla/GrantLog.tla",
           "symbol": "*",
           "sha256": "dd398b9c988db362d9d56478eacfc5c1b2e39b33270246e6cda00a240b83e20c"
+        },
+        {
+          "path": "formal/tla/GrantLog_fixed.cfg",
+          "symbol": "*",
+          "sha256": "0e3f86703b0bd44dc604e93d5312ac75ddb498687100d1ee73c95299163bf1c2"
+        },
+        {
+          "path": "formal/tla/GrantLog_void_age_only.cfg",
+          "symbol": "*",
+          "sha256": "456d262b7d42fffbfe33d47f9cae1e056d28d4e6a2e1a9180b7b268552dbdadc"
+        },
+        {
+          "path": "formal/tla/GrantLog_void_index_only.cfg",
+          "symbol": "*",
+          "sha256": "3dbd1b8fa91ad553b16981a0851a8d2c703808d6eccb6d4c3a4638d6ed5ff908"
+        },
+        {
+          "path": "formal/tla/GrantLog_fair_retry.cfg",
+          "symbol": "*",
+          "sha256": "48bd26322e7f58adceffbcb9eaf0ea821d9b5bfb2d0fccb8d9ca83b131412a32"
+        },
+        {
+          "path": "formal/tla/GrantLog_fixed_live.cfg",
+          "symbol": "*",
+          "sha256": "b1b49db361a9308d8af524fc04e341b3d16800ae18533cc4e6289543cd70a48d"
         }
       ],
       "mutants": [
