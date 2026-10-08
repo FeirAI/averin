@@ -1,8 +1,8 @@
-diff --git a/core/src/verify/verdict.rs b/core/src/verify/verdict.rs
-index 3b30b32..a2e64bd 100644
---- a/core/src/verify/verdict.rs
-+++ b/core/src/verify/verdict.rs
-@@ -190,7 +190,7 @@ pub fn claim_verdict(report: &CanonValue) -> ClaimVerdict {
+diff --git a/core/src/verify/headline.rs b/core/src/verify/headline.rs
+index c69a680..b1834a0 100644
+--- a/core/src/verify/headline.rs
++++ b/core/src/verify/headline.rs
+@@ -73,7 +73,7 @@ pub fn claim_verdict(report: &CanonValue) -> ClaimVerdict {
          ClaimVerdict::Fail
      } else if !valid || decision == Some("insufficient") {
          ClaimVerdict::Insufficient

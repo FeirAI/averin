@@ -220,7 +220,7 @@
       ],
       "sources": [
         {
-          "file": "core/src/verify/verdict.rs",
+          "file": "core/src/verify/headline.rs",
           "symbol": "pub fn claim_verdict"
         },
         {
@@ -274,7 +274,7 @@
           "symbol": "fn action_completeness_label_never_stronger_than_kernel"
         },
         {
-          "file": "core/tests/adversarial.rs",
+          "file": "core/src/verify/verdict.rs",
           "symbol": "fn action_completeness_label_is_capped_by_the_kernel"
         },
         {
