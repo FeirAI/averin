@@ -1,12 +1,12 @@
 Mutant: m43-temporal-legacy-member-not-total. Named detector: temporal_revocation_decision_table.
 
 diff --git a/core/src/verify.rs b/core/src/verify.rs
-index 48b57cf..0ae5336 100644
+index 009591a..c7b9e2c 100644
 --- a/core/src/verify.rs
 +++ b/core/src/verify.rs
-@@ -7176,7 +7176,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
-                 // but cannot certify absence.
-                 Some(v2) if v2.states.contains_key(gid) => acc.legacy_member(),
+@@ -7202,7 +7202,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+                 // not authenticated evidence for history and cannot certify absence.
+                 Some(_) if revocation.revoked.contains(gid) => acc.unusable_member(),
                  Some(_) => acc.legacy_nonmember(),
 -                None if revocation.revoked.contains(gid) => acc.legacy_member(),
 +                None if revocation.revoked.contains(gid) => acc.legacy_nonmember(), // BUG

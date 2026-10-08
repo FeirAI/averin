@@ -143,6 +143,15 @@
     "lean-seal-binding-without-collision-case": {
       "tier": "full",
       "claim": "lean-seal-model"
+    },
+    "tla-projecttx-drops-serialize-guard": {
+      "tier": "full",
+      "claim": "tla-projecttx-model"
+    },
+    "m9-b64-one-byte-tail": {
+      "tier": "full",
+      "claim": "kani-encoder-harnesses",
+      "detector": "bash formal/run-kani.sh --harness one_byte_tail_is_canonical"
     }
   },
   "claims": [
@@ -452,7 +461,8 @@
       ],
       "mutants": [
         "m4-lp-two-byte-length",
-        "m10-b64-two-byte-tail"
+        "m10-b64-two-byte-tail",
+        "m9-b64-one-byte-tail"
       ],
       "does_not_establish": "Anything outside the harness bounds. It does not cover the other harnesses of bounded-real-encoders in formal/claims.json (UTF-16 key order, strict decoder, integer and string families), which need Kani proof stubs and are mutation-tested by the legacy suite only. Kani 0.68.0 and CBMC are trusted. A failing detector here does not tell an unwinding failure from a real counterexample; formal/check-kani-mutant.py in the legacy mutation suite makes that distinction."
     },
@@ -482,6 +492,36 @@
         "lean-seal-binding-without-collision-case"
       ],
       "does_not_establish": "That the Lean model matches the Rust (see preimage-oracle-conformance and the extraction-based claims in formal/claims.json). Model-level only: SHA-256 collision resistance, Ed25519 unforgeability, an honest signer and post-NFC inputs are assumptions, and the Lean kernel is trusted."
+    },
+    {
+      "id": "tla-projecttx-model",
+      "$comment": "legacy register: resource-truth-and-project-serialization",
+      "statement": "Within the finite constants of the configurations (two replicas), TLC finds no violation of NoFrontierFork, NoCheckpointFork and NoStaleCheckpoint in ProjectTx_safe.cfg, and the witness configurations (unserialized, checkpoint_fork, stale_cache, pending_cache) still produce their expected counterexamples, so the model keeps showing the bugs the serialization guard is there to prevent.",
+      "method": "tla",
+      "artifacts": [
+        "formal/tla/run-tlc.sh",
+        "formal/tla/ProjectTx_safe.cfg",
+        "formal/tla/ProjectTx_unserialized.cfg",
+        "formal/tla/ProjectTx_checkpoint_fork.cfg",
+        "formal/tla/ProjectTx_stale_cache.cfg",
+        "formal/tla/ProjectTx_pending_cache.cfg"
+      ],
+      "gates": [
+        "formal-tla",
+        "formal-nightly"
+      ],
+      "detector": "TLC_ONLY=ProjectTx.tla bash formal/tla/run-tlc.sh",
+      "covers": [
+        {
+          "path": "formal/tla/ProjectTx.tla",
+          "symbol": "*",
+          "sha256": "09a8e1a49f85c9a2aa9d1babef55a762cf3d706bffdad7b9bbe4f0c9f191155f"
+        }
+      ],
+      "mutants": [
+        "tla-projecttx-drops-serialize-guard"
+      ],
+      "does_not_establish": "Model-level only: it is not bound to the Go or Postgres code. The bounds are finite (two replicas, small constants), so it says nothing about larger configurations. ProjectTx_operational_safe.cfg holds by definition (Authoritative = TRUE makes badUse and badFinalize unreachable) and is not counted as evidence. GrantLog.tla and ConsumeLedger.tla model superseded designs and are not registered. TLC and the Java runtime are trusted."
     }
   ]
 }

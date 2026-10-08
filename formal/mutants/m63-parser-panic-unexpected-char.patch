@@ -1,10 +1,12 @@
 Mutant: parse_value panics on an unexpected character instead of returning a parse error.
 
+diff --git a/core/src/canon.rs b/core/src/canon.rs
+index 6a07a8c..d14caa2 100644
 --- a/core/src/canon.rs
 +++ b/core/src/canon.rs
-@@ -714,7 +714,7 @@
-     } else if b == b'-' || is_digit(b) {
-         parse_number(s, i)
+@@ -725,7 +725,7 @@ fn parse_value(s: &[u8], i: usize, depth: usize) -> Result<(CanonValue, usize),
+             Err(e) => Err(e),
+         }
      } else {
 -        Err(ParseError::At(ErrorKind::UnexpectedChar, i))
 +        panic!("unexpected character")

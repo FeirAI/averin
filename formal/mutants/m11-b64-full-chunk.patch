@@ -1,8 +1,10 @@
 Mutant: The full-chunk encoder writes a different fourth symbol.
 
+diff --git a/core/src/b64.rs b/core/src/b64.rs
+index 95eda2c..1c8d886 100644
 --- a/core/src/b64.rs
 +++ b/core/src/b64.rs
-@@ -27,7 +27,7 @@
+@@ -27,7 +27,7 @@ fn encode_chunk(chunk: &[u8]) -> ([u8; 4], usize) {
          symbols[2] = ENC[((n >> 6) & 63) as usize];
      }
      if chunk.len() > 2 {
@@ -10,3 +12,4 @@ Mutant: The full-chunk encoder writes a different fourth symbol.
 +        symbols[3] = ENC[((n + 1) & 63) as usize];
      }
      (symbols, chunk.len() + 1)
+ }
