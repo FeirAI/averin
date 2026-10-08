@@ -1,8 +1,11 @@
 Mutant: The decoder accepts nonzero unused bits in a two-symbol base64url tail.
 
+diff --git a/core/src/b64.rs b/core/src/b64.rs
+index 95eda2c..b3bb3e0 100644
 --- a/core/src/b64.rs
 +++ b/core/src/b64.rs
-@@ -105,7 +105,7 @@
+@@ -86,7 +86,7 @@ fn decode_chunk(chunk: &[u8]) -> Result<([u8; 3], usize), DecodeError> {
+                 | ((chunk[1] as u32) << 12)
                  | ((*chunk.get(2).unwrap_or(&0) as u32) << 6)
                  | (*chunk.get(3).unwrap_or(&0) as u32);
 -            if (chunk.len() == 2 && n & 0x0000_FFFF != 0)

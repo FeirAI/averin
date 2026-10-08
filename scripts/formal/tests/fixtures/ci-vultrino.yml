@@ -1,0 +1,113 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  schedule:
+    # Re-check main at least daily so main-health sees a fresh result even when
+    # nothing is pushed.
+    - cron: '41 5 * * *'
+
+jobs:
+  kani:
+    name: Kani pure-kernel proofs (with vacuity gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Install exactly the version pinned in formal/run-kani.sh. Do not run
+      # bare `cargo kani` on the whole crate: it would try to build wasmtime,
+      # which fails Kani 0.67's rustc-1.93 MSRV check; run-kani.sh passes
+      # `--no-default-features` per harness.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani
+            ~/.kani
+            ~/.rustup/toolchains/nightly-2025-11-21-*
+          key: kani-0.67.0-nightly-2025-11-21-${{ runner.os }}
+      - name: install pinned Kani
+        run: |
+          if ! cargo kani --version 2>/dev/null | grep -q ' 0.67.0$'; then
+            cargo install --locked kani-verifier@0.67.0
+          fi
+          # Always run setup: ~/.kani holds a toolchain link into ~/.rustup, so a
+          # restored cache with a missing toolchain directory must be repaired.
+          cargo kani setup
+      - run: bash formal/run-kani.sh
+
+  lean:
+    name: Lean critical-boundary proofs (no sorry)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
+        with:
+          lake-package-directory: formal/lean
+          auto-config: false
+          build: true
+          build-args: --wfail
+          test: false
+          lint: false
+          use-mathlib-cache: false
+          leanchecker: true
+      - name: independently check Lean declarations with pinned nanoda
+        working-directory: formal/lean
+        run: bash ./check-nanoda.sh
+
+  rust:
+    name: build + test + clippy (zero-warning gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The Rust version is pinned in rust-toolchain.toml (1.95.0 + clippy/rustfmt). cargo honors that file
+      # regardless of which toolchain this action installs, so local builds and CI share ONE source of truth.
+      # The zero-warning clippy gate below therefore always runs under 1.95.0. Bump it there, not here
+      # (mirrors averin/.github/workflows/ci.yml). components: is a belt-and-suspenders pre-install.
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked
+      - run: bash formal/check-refinement.sh
+      - run: cargo test --locked
+      # `delegate_approval_integration` (tenant-equality, D3 PEP floors,
+      # approver_kind outbox, signed webhook) requires `mock-govder` and is
+      # invisible to a plain `cargo test` (default features are empty, and the
+      # feature is deliberately NOT default — the src-side mock evaluator must
+      # stay out of production builds, see src/delegation/mod.rs). Both
+      # invocations are required; this is the only gate that runs the second one.
+      - run: cargo test --locked --features mock-govder
+      # Zero clippy warnings is a repo convention; -D warnings makes it a hard gate.
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      # ...and the same gate over the feature-gated targets, which the line above does NOT
+      # compile. `tests/delegate_approval_integration.rs` only exists under `mock-govder`, so
+      # a lint regression in it was invisible to the "zero-warning gate" — measured
+      # 2026-07-27: the default invocation was clean while --all-features still had a
+      # clippy::type_complexity error. A gate that skips a third of the test tree is the
+      # inert-gate class this repo keeps finding.
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies
+        run: cargo audit
+
+  ci-required:
+    name: ci-required
+    if: always()
+    needs: [kani, lean, rust, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: every required job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "$NEEDS" | jq -e 'to_entries | all(.value.result == "success")'

@@ -88,6 +88,16 @@ class ClaimCheckerTest(unittest.TestCase):
         data["claims"][0]["evidence_run"] = "37678805697"
         self.assertEqual([], checker.check_manifest(data, ROOT, self.workflow))
 
+    def test_kit_register_links_to_legacy_claims(self):
+        kit = json.loads((ROOT / "formal/kit-claims.json").read_text())
+        ids = {c["id"] for c in self.data["claims"]}
+        self.assertEqual([], checker.check_kit_register(kit, ids))
+        bad = copy.deepcopy(kit)
+        bad["claims"][0]["$comment"] = "legacy register: no-such-claim"
+        self.assertTrue(checker.check_kit_register(bad, ids))
+        bad["claims"][0]["$comment"] = "something else"
+        self.assertTrue(checker.check_kit_register(bad, ids))
+
 
 class OverclaimDenylistTest(unittest.TestCase):
     def test_live_copy_is_clean(self):

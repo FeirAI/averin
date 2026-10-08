@@ -11,7 +11,7 @@ on:
   schedule:
     # Weekly (Sunday): the whole Kani string family and the larger fuzz campaign.
     - cron: '17 3 * * 0'
-    # Nightly: the full 48-mutant legacy suite (formal-mutants-full) and every kit mutant (formal-nightly).
+    # Nightly: the full 48-mutant suite (formal-mutants-full).
     - cron: '41 2 * * *'
   workflow_dispatch:
 
@@ -20,7 +20,7 @@ on:
 #
 # Required on pull requests: the single aggregator check `ci-required` at the end of this file, which
 # needs every job that runs on a pull request. Jobs that run only on the schedule or on manual
-# dispatch (the Kani string family slices, formal-mutants-full, formal-nightly) are outside it; a failure there turns
+# dispatch (the Kani string family slices, formal-mutants-full) are outside it; a failure there turns
 # the scheduled run on main red, which main-health.yml reports as an issue.
 #
 # Evidence: every formal job writes its log (and any Kani shard state) to $RUNNER_TEMP/evidence,
@@ -866,95 +866,12 @@ jobs:
           path: ${{ runner.temp }}/evidence/
           retention-days: 90
 
-  # The shared formal kit (scripts/formal, vendored byte for byte from the kit): the claims register
-  # formal/kit-claims.json must match the repo (drift lock, CI gates, overclaim denylist) and every
-  # fast-tier mutant must be killed by its detector. Runs on every event, so ci-required needs it.
-  # The legacy register formal/claims.json is still checked by formal-refinement.
-  formal-fast:
-    name: "formal: kit register, drift lock, fast-tier mutants"
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: kit unit tests, register check, fast-tier mutants
-        run: |
-          set -o pipefail
-          mkdir -p "$RUNNER_TEMP/evidence"
-          {
-            python3 -m unittest discover -s scripts/formal/tests &&
-            python3 scripts/formal/check_claims.py --claims formal/kit-claims.json &&
-            python3 scripts/formal/check_mutants.py --claims formal/kit-claims.json --tier fast \
-              --scratch "$RUNNER_TEMP/kit-scratch" --json "$RUNNER_TEMP/evidence/formal-fast.json"
-          } 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
-      - name: evidence manifest
-        if: always()
-        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: evidence-formal-fast
-          path: ${{ runner.temp }}/evidence/
-          retention-days: 90
-
-  # Every kit mutant, including the Kani and Lean ones. Nightly and on manual dispatch only; never
-  # required on pull requests, a failure turns the scheduled run on main red (main-health.yml).
-  formal-nightly:
-    if: github.event.schedule == '41 2 * * *' || github.event_name == 'workflow_dispatch'
-    name: "formal: kit register, all mutants (nightly)"
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      KANI_TIMEOUT_SECONDS: "1800"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-        with:
-          distribution: temurin
-          java-version: "21"
-      - uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
-        with:
-          lake-package-directory: formal/lean
-          auto-config: false
-          build: false
-          test: false
-          lint: false
-          use-mathlib-cache: false
-      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
-        with:
-          kani-version: 0.68.0
-          command: cargo-kani
-          args: --version
-      - name: every kit mutant must be killed
-        run: |
-          set -o pipefail
-          mkdir -p "$RUNNER_TEMP/evidence"
-          python3 scripts/formal/check_mutants.py --claims formal/kit-claims.json --tier full \
-            --scratch "$RUNNER_TEMP/kit-scratch" --json "$RUNNER_TEMP/evidence/formal-nightly.json" \
-            2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
-      - name: evidence manifest
-        if: always()
-        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: evidence-formal-nightly
-          path: ${{ runner.temp }}/evidence/
-          retention-days: 90
-
   # The single required check (branch protection requires only this). It passes only when every job
   # that runs on a pull request passed; skipped, cancelled or failed counts as not passed.
   ci-required:
     name: ci-required
     if: always()
-    needs: [fuzz, core, core-32bit, server, store-postgres, web, sdk, verifier, wasm, supply-chain, formal-lean, formal-refinement, formal-mutants-fast, formal-production, formal-kani, formal-kani-extended, formal-kani-strings-smoke, formal-tla, formal-fast]
+    needs: [fuzz, core, core-32bit, server, store-postgres, web, sdk, verifier, wasm, supply-chain, formal-lean, formal-refinement, formal-mutants-fast, formal-production, formal-kani, formal-kani-extended, formal-kani-strings-smoke, formal-tla]
     runs-on: ubuntu-latest
     steps:
       - name: every required job passed

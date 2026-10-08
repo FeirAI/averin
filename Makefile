@@ -37,6 +37,12 @@ check-claims:
 	python3 -m unittest discover -s scripts -p test_check_claims.py
 	python3 scripts/check-claims.py
 
+# Shared formal kit (docs/dev/FORMAL.md): register check plus the fast-tier mutants (needs a committed tree).
+formal-kit:
+	python3 -m unittest discover -s scripts/formal/tests
+	python3 scripts/formal/check_claims.py --claims formal/kit-claims.json
+	python3 scripts/formal/check_mutants.py --claims formal/kit-claims.json --tier fast
+
 test-verifier: wasm
 	cd verifier && bun test
 
@@ -53,7 +59,7 @@ supply-chain: deny vuln
 
 # Formal verification gates (see formal/README.md). Needs elan/Lean 4.30.0, cargo-kani 0.68, Java;
 # formal-production needs the pinned Charon/Aeneas/Lean 4.31 toolchain (formal/production/README.md).
-.PHONY: formal formal-lean formal-refinement formal-production formal-mutants formal-kani formal-tla
+.PHONY: formal-kit formal formal-lean formal-refinement formal-production formal-mutants formal-kani formal-tla
 formal: formal-lean formal-refinement formal-production formal-mutants formal-kani formal-tla
 
 formal-lean:

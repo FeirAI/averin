@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "formal/claims.json"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
+KIT_REGISTER = ROOT / "formal/kit-claims.json"
 # A symbol is matched as a substring, so a short one ("main", "check") matches almost any file and
 # says nothing about the claim. Require something specific.
 MIN_SYMBOL = 8
@@ -158,9 +159,24 @@ def check_manifest(data, root, workflow_text):
     return errors
 
 
+def check_kit_register(kit, legacy_ids):
+    """Each kit claim must name the legacy claim it backs, so the two registers cannot drift apart."""
+    errors = []
+    for claim in kit.get("claims", []):
+        cid = claim.get("id", "<missing id>")
+        m = re.fullmatch(r"legacy register: ([a-z0-9-]+)", claim.get("$comment", ""))
+        if m is None:
+            errors.append(f"kit claim {cid}: $comment must read 'legacy register: <claim id>'")
+        elif m.group(1) not in legacy_ids:
+            errors.append(f"kit claim {cid}: legacy claim {m.group(1)!r} is not in formal/claims.json")
+    return errors
+
+
 def main():
     data = json.loads(MANIFEST.read_text())
     errors = check_manifest(data, ROOT, WORKFLOW.read_text()) + check_copy_tree(ROOT)
+    if KIT_REGISTER.is_file():
+        errors += check_kit_register(json.loads(KIT_REGISTER.read_text()), {c["id"] for c in data["claims"]})
     if errors:
         for error in errors:
             print(error, file=sys.stderr)

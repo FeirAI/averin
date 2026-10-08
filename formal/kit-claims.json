@@ -1,0 +1,542 @@
+{
+  "schema": 1,
+  "$comment": "Kit register (scripts/formal). Complements formal/claims.json, which stays the full inventory read by scripts/check-claims.py; each claim here names its legacy claim in $comment. See docs/dev/FORMAL.md.",
+  "overclaim_denylist": {
+    "phrases": [
+      "formally verified",
+      "fully verified",
+      "proven correct",
+      "provably secure",
+      "guaranteed secure",
+      "mathematically proven",
+      "complete proof",
+      "fully proven",
+      "fails closed in every case",
+      "verified on the final source",
+      "proven by decision-core",
+      "proven by the decision-core",
+      "100% verified",
+      "tamper-proof",
+      "tamperproof",
+      "complete and unaltered",
+      "proven by tests"
+    ],
+    "globs": [
+      "README.md",
+      "docs/**/*.md"
+    ]
+  },
+  "mutants": {
+    "m1-authority-lp-field-order": {
+      "tier": "fast",
+      "claim": "preimage-oracle-conformance"
+    },
+    "m5-commit-drops-field-domain": {
+      "tier": "full",
+      "claim": "preimage-oracle-conformance"
+    },
+    "m6-record-strips-extra-field": {
+      "tier": "full",
+      "claim": "preimage-oracle-conformance"
+    },
+    "m7-record-unpins-canon-version": {
+      "tier": "full",
+      "claim": "preimage-oracle-conformance"
+    },
+    "m8-rename-taxonomy-tag": {
+      "tier": "full",
+      "claim": "preimage-oracle-conformance"
+    },
+    "m15-authority-v3-subject-binding": {
+      "tier": "fast",
+      "claim": "authority-v3-subject-digest-bound"
+    },
+    "m16-verdict-omits-pop-capstone": {
+      "tier": "fast",
+      "claim": "verdict-differential-vs-model"
+    },
+    "m17-verdict-missing-revocation-is-absent": {
+      "tier": "full",
+      "claim": "verdict-differential-vs-model"
+    },
+    "m20-verdict-merkle-root-without-path": {
+      "tier": "full",
+      "claim": "verdict-differential-vs-model"
+    },
+    "m41-temporal-strict-decides-history": {
+      "tier": "full",
+      "claim": "verdict-differential-vs-model"
+    },
+    "m40-temporal-equality-is-before": {
+      "tier": "fast",
+      "claim": "temporal-revocation-ordering-tests"
+    },
+    "m44-temporal-watermark-ignored": {
+      "tier": "full",
+      "claim": "temporal-revocation-ordering-tests"
+    },
+    "m45-temporal-snapshot-age-ignored": {
+      "tier": "full",
+      "claim": "temporal-revocation-ordering-tests"
+    },
+    "m46-temporal-merkle-cutoff-not-committed": {
+      "tier": "full",
+      "claim": "temporal-revocation-ordering-tests"
+    },
+    "m47-temporal-merkle-cutoff-beyond-watermark": {
+      "tier": "full",
+      "claim": "temporal-revocation-ordering-tests"
+    },
+    "m18-pop-after-closure": {
+      "tier": "fast",
+      "claim": "pop-intent-and-disclosure-regressions"
+    },
+    "m19-failed-intent-consumes-outcome": {
+      "tier": "full",
+      "claim": "pop-intent-and-disclosure-regressions"
+    },
+    "m21-disclosure-only-counts-present-openings": {
+      "tier": "full",
+      "claim": "pop-intent-and-disclosure-regressions"
+    },
+    "m52-verify-bypasses-preimage": {
+      "tier": "fast",
+      "claim": "production-call-path-gate"
+    },
+    "m53-feature-selected-hash": {
+      "tier": "full",
+      "claim": "production-call-path-gate"
+    },
+    "m59-verify-overrides-kernel-claim": {
+      "tier": "full",
+      "claim": "production-call-path-gate"
+    },
+    "m14-truncated-escape-panic": {
+      "tier": "full",
+      "claim": "parser-differential-and-fuzz"
+    },
+    "m61-parser-literal-unguarded": {
+      "tier": "full",
+      "claim": "parser-differential-and-fuzz"
+    },
+    "m62-parser-decimal-overflow": {
+      "tier": "fast",
+      "claim": "parser-differential-and-fuzz"
+    },
+    "m64-parser-skip-ws-unbounded": {
+      "tier": "full",
+      "claim": "parser-differential-and-fuzz"
+    },
+    "m4-lp-two-byte-length": {
+      "tier": "full",
+      "claim": "kani-encoder-harnesses"
+    },
+    "m10-b64-two-byte-tail": {
+      "tier": "full",
+      "claim": "kani-encoder-harnesses",
+      "detector": "bash formal/run-kani.sh --harness two_byte_tail_is_canonical"
+    },
+    "lean-seal-drops-fmt-injectivity": {
+      "tier": "full",
+      "claim": "lean-seal-model"
+    },
+    "lean-seal-binding-without-collision-case": {
+      "tier": "full",
+      "claim": "lean-seal-model"
+    },
+    "tla-projecttx-drops-serialize-guard": {
+      "tier": "full",
+      "claim": "tla-projecttx-model"
+    },
+    "m9-b64-one-byte-tail": {
+      "tier": "full",
+      "claim": "kani-encoder-harnesses",
+      "detector": "bash formal/run-kani.sh --harness one_byte_tail_is_canonical"
+    }
+  },
+  "claims": [
+    {
+      "id": "preimage-oracle-conformance",
+      "$comment": "legacy register: rust-model-refinement",
+      "statement": "On the fixed corpus in formal/oracle, the Rust signing and hashing preimages (authority evidence, hiding commitment, record body, record content hash pin, taxonomy tag) equal the bytes of the executable Lean model, and every signed-tag literal in the Rust sources has a Lean preimage family.",
+      "method": "differential-vectors",
+      "artifacts": [
+        "core/tests/oracle.rs",
+        "formal/oracle/inputs.json",
+        "formal/oracle/expected.json",
+        "formal/check-refinement.py",
+        "formal/lean/Averin/Preimage.lean"
+      ],
+      "gates": [
+        "formal-refinement",
+        "core"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --test oracle && python3 formal/check-refinement.py",
+      "covers": [
+        {
+          "path": "core/src/authority.rs",
+          "symbol": "preimage",
+          "sha256": "6697fa1e20dbd8cf8f71540af1f88a93d62a6267eda293bda62e9f1514cf3b70"
+        },
+        {
+          "path": "core/src/commit.rs",
+          "symbol": "commit_preimage",
+          "sha256": "65606f7dd0ba4b0cb509e00651ea770cdd1c5de0bef9d1b621f7a3103eb2ce18"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "record_preimage",
+          "sha256": "3dcfac367b1bd56060c8d2b49e1a3953eef12b3b5999a6ed835345d7ad6b1b24"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "verify_content_hash",
+          "sha256": "003aa4d1e904632e5392d9ed3651b352cd26c1a0916e1d65d20b4f1bc3c91879"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "validate_taxonomy",
+          "sha256": "08e700d470006aa62d125aa209ee3decb707fb5cc8f2a954c3f46f5058a2e875"
+        }
+      ],
+      "mutants": [
+        "m1-authority-lp-field-order",
+        "m5-commit-drops-field-domain",
+        "m6-record-strips-extra-field",
+        "m7-record-unpins-canon-version",
+        "m8-rename-taxonomy-tag"
+      ],
+      "does_not_establish": "Agreement outside the committed corpus and tag inventory. It is sampled conformance, not a refinement proof (the proved seal path is production-seal-refinement in formal/claims.json). It does not show the Lean model expresses the intended format, and says nothing about signatures, keys or the verifier's decisions."
+    },
+    {
+      "id": "authority-v3-subject-digest-bound",
+      "$comment": "legacy register: authority-v3-semantic-body-binding",
+      "statement": "The v3 authority signature preimage includes the semantic subject digest, checked against the committed govder cross-plane vector.",
+      "method": "differential-vectors",
+      "artifacts": [
+        "core/tests/golden.rs"
+      ],
+      "gates": [
+        "core"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --test golden authority_subject_v3_matches_govder_vector",
+      "covers": [
+        {
+          "path": "core/src/authority.rs",
+          "symbol": "preimage_v3",
+          "sha256": "ac2994ee8f16d9f230aba2a4b1f22ee11f5eb506e03b6cfbeb3ff8e4ad82d24a"
+        },
+        {
+          "path": "core/src/authority.rs",
+          "symbol": "subject_digest",
+          "sha256": "f7d2305baa59355c255bd84d392c86686bec7b1080f282964afd37f247c1d420"
+        }
+      ],
+      "mutants": [
+        "m15-authority-v3-subject-binding"
+      ],
+      "does_not_establish": "That the subject projection covers every semantic field (reviewed by hand when the record schema changes), the recorder-authenticated exclusions, or that the authority approved the subject. One vector, not all records."
+    },
+    {
+      "id": "verdict-differential-vs-model",
+      "$comment": "legacy register: verdict-kernel-refinement",
+      "statement": "The Rust claim kernel (capstone, revocation readiness and historical claim conditions) returns the same decision as the Lean verdict model on the committed exhaustive and named evidence-state corpus.",
+      "method": "exhaustive",
+      "artifacts": [
+        "formal/oracle/verdict-expected.json",
+        "formal/lean/Averin/Verdict.lean"
+      ],
+      "gates": [
+        "core",
+        "formal-refinement"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --lib verdict_differential",
+      "covers": [
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "CapstoneFacts::base",
+          "sha256": "3cd91b2a0b83f607565081090bf6326d9d6824f3b6b94b00d5242ae0f667cd3a"
+        },
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "revocation_ready",
+          "sha256": "b32a8a62c171021578867af070d15bbd4dd4757daa8177aae7539a76ca6f7e11"
+        },
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "historical_claim",
+          "sha256": "c70e58425a5f00692d7f757e919adb4adda700f2086b502b012dc222fd51fb92"
+        },
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "historical_adverse",
+          "sha256": "81a48ecb5bd918d81ccc82bbc6125bc2bd5a33949d852aea6fde04d97f776cae"
+        },
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "historical_ready",
+          "sha256": "e9eb0c594d13b5582955d75b650b9be73f58f8d7d0f5ca8f95fb830d21ee17a0"
+        },
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "decide_claims",
+          "sha256": "8d9b61d4f70d39174448c1a4d9129f996d4c5b8378a35ffc2ce392df79fc9fd4"
+        }
+      ],
+      "mutants": [
+        "m16-verdict-omits-pop-capstone",
+        "m17-verdict-missing-revocation-is-absent",
+        "m20-verdict-merkle-root-without-path",
+        "m41-temporal-strict-decides-history"
+      ],
+      "does_not_establish": "Evidence states outside the corpus, or that verify.rs computes the facts the kernel consumes (the proved refinement in formal/claims.json covers the kernel only, and the fact computation is tested, not proved)."
+    },
+    {
+      "id": "temporal-revocation-ordering-tests",
+      "$comment": "legacy register: historical-revocation-ordering",
+      "statement": "The adversarial suite pins the temporal revocation decisions: a receipt at the cutoff ordinal is not before it, an ordinal beyond the snapshot watermark is indeterminate, an over-age snapshot is stale, a Merkle v2 leaf commits mode and cutoff, and a cutoff above the watermark is rejected.",
+      "method": "test",
+      "artifacts": [
+        "core/tests/adversarial.rs"
+      ],
+      "gates": [
+        "core"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --test adversarial temporal_",
+      "covers": [
+        {
+          "path": "core/src/verify/temporal.rs",
+          "symbol": "classify",
+          "sha256": "2d0bc538de02882f7858e8c668b1b22950330d7887198b6f07f03412b38991b2"
+        },
+        {
+          "path": "core/src/verify/temporal.rs",
+          "symbol": "check_revocation_proof_v2",
+          "sha256": "84556f48d7a69dd75f08d434a5c83cebf169d130df94eed0d368b2cf89cbc46f"
+        },
+        {
+          "path": "core/src/verify/temporal.rs",
+          "symbol": "parse_state_fields",
+          "sha256": "6e64cf72a247efaf112f6a5827d784c7a75fc9a8b416c9dc2422516b9ace0478"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "evaluate_snapshot",
+          "sha256": "a4e649351c67b70e4919a5ff1fe43642a4a3606a55a0483fb6a23023fee4088e"
+        }
+      ],
+      "mutants": [
+        "m40-temporal-equality-is-before",
+        "m44-temporal-watermark-ignored",
+        "m45-temporal-snapshot-age-ignored",
+        "m46-temporal-merkle-cutoff-not-committed",
+        "m47-temporal-merkle-cutoff-beyond-watermark"
+      ],
+      "does_not_establish": "Behaviour on inputs the tests do not construct. This is example-based testing, not a proof of temporal ordering, and it assumes the snapshot and revocation issuer are authentic (pinned out of band)."
+    },
+    {
+      "id": "pop-intent-and-disclosure-regressions",
+      "$comment": "legacy register: authority-v3-semantic-body-binding",
+      "statement": "A failed proof-of-possession on a two-phase intent stays a violation under checkpoint-anchor stripping and does not consume its outcome, and required disclosure must cover every committed broker grant.",
+      "method": "test",
+      "artifacts": [
+        "core/tests/adversarial.rs"
+      ],
+      "gates": [
+        "core"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --test adversarial",
+      "covers": [
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "check_use",
+          "sha256": "476981f2f95f2c73c8bdaafbf14098e2371e53c875df625949ea90eaf2738aea"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "verify_bundle_with",
+          "sha256": "4e0e288e7cc8a73c8228c31b29335053caba7c64546017c587ef009432c45fcf"
+        }
+      ],
+      "mutants": [
+        "m18-pop-after-closure",
+        "m19-failed-intent-consumes-outcome",
+        "m21-disclosure-only-counts-present-openings"
+      ],
+      "does_not_establish": "Any bundle shape the adversarial suite does not build. Example-based tests, not a proof of monotonicity under deletion (the Lean model states that; its production kernel refinement does not cover verify.rs fact computation)."
+    },
+    {
+      "id": "production-call-path-gate",
+      "$comment": "legacy register: production-seal-refinement",
+      "statement": "A textual gate fails when production code stops calling the extracted and proved seal and verdict functions, or when a feature flag or cfg could select different hashing code.",
+      "method": "test",
+      "artifacts": [
+        "formal/production/check-production.py",
+        "formal/production/manifest.json"
+      ],
+      "gates": [
+        "formal-production"
+      ],
+      "detector": "python3 formal/production/check-production.py",
+      "covers": [
+        {
+          "path": "core/src/sign.rs",
+          "symbol": "verify",
+          "sha256": "90491c72706bd85e68989dffe4942d88d958009b50a03e1b1d8e1579ee347766"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "compute_content_hash",
+          "sha256": "e389fdf2ce71fbb21ba8ddc30ba58b109b08ea991250d013919e14ed00267e54"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "verify_bundle_with",
+          "sha256": "4e0e288e7cc8a73c8228c31b29335053caba7c64546017c587ef009432c45fcf"
+        }
+      ],
+      "mutants": [
+        "m52-verify-bypasses-preimage",
+        "m53-feature-selected-hash",
+        "m59-verify-overrides-kernel-claim"
+      ],
+      "does_not_establish": "That the extracted code is correct (that is the Lean proof run in formal-production), or anything beyond the call sites and cfg forms the script scans. It is a textual check, not a semantic one."
+    },
+    {
+      "id": "parser-differential-and-fuzz",
+      "$comment": "legacy register: parser-totality",
+      "statement": "The RCP parser matches the reference parser on a generated corpus and survives a seeded deterministic fuzz campaign without panic, including truncated escapes, truncated literals, long digit strings and trailing whitespace.",
+      "method": "fuzz",
+      "artifacts": [
+        "core/tests/parser_differential.rs",
+        "core/tests/rcp_fuzz.rs",
+        "formal/fuzz/regressions.tsv"
+      ],
+      "gates": [
+        "core",
+        "fuzz"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --test parser_differential --test rcp_fuzz",
+      "covers": [
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "parse_hex4",
+          "sha256": "0874e80cc0e863a8878fc66247b035d36200407606d5194f382e92ae5c9273b7"
+        },
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "parse_literal",
+          "sha256": "dd2b3d54c73fab148870413fca9396a1c7a4d647b3c0682a6a5fb432ea50a7f3"
+        },
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "decimal_i64",
+          "sha256": "f964e679ea38fac2eac844523f90ac55ac6cd8aafbd71c6e138376097aa21e95"
+        },
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "skip_ws",
+          "sha256": "bedb7f3fa37c6b839c263c64c2927b92a6a387006b583694997eb86683ffbe69"
+        }
+      ],
+      "mutants": [
+        "m14-truncated-escape-panic",
+        "m61-parser-literal-unguarded",
+        "m62-parser-decimal-overflow",
+        "m64-parser-skip-ws-unbounded"
+      ],
+      "does_not_establish": "Totality for all inputs (the Lean parser-totality proof in formal/claims.json is the stronger evidence; this checks sampled inputs only). Not input that is not valid UTF-8: both tests pass Rust strings, so a truncated UTF-8 sequence never reaches the parser here (mutant m60 survives these tests; only the totality proof kills it). Not allocation failure, stack depth or the uncapped options JSON path."
+    },
+    {
+      "id": "kani-encoder-harnesses",
+      "$comment": "legacy register: bounded-real-encoders",
+      "statement": "Within each harness's stated bounds, Kani checks the real LP framing (4-byte big-endian length) and base64url tail canonicality for two- and three-symbol tails.",
+      "method": "kani",
+      "artifacts": [
+        "formal/run-kani.sh",
+        "formal/check-kani-success.py",
+        "formal/check-kani-shards.py"
+      ],
+      "gates": [
+        "formal-kani",
+        "formal-kani-extended"
+      ],
+      "detector": "bash formal/run-kani.sh --harness lp_into_frames_exactly",
+      "covers": [
+        {
+          "path": "core/src/hashx.rs",
+          "symbol": "lp_into",
+          "sha256": "1d8c79cbdf42387e49d3f9a2b44737caaad54a450436547371b54172e12322a2"
+        },
+        {
+          "path": "core/src/b64.rs",
+          "symbol": "decode_chunk",
+          "sha256": "b2df8d39658ff9dad496b4fadc21b0bd3ccfdc7115a350b5f77650310535b701"
+        }
+      ],
+      "mutants": [
+        "m4-lp-two-byte-length",
+        "m10-b64-two-byte-tail",
+        "m9-b64-one-byte-tail"
+      ],
+      "does_not_establish": "Anything outside the harness bounds. It does not cover the other harnesses of bounded-real-encoders in formal/claims.json (UTF-16 key order, strict decoder, integer and string families), which need Kani proof stubs and are mutation-tested by the legacy suite only. Kani 0.68.0 and CBMC are trusted. A failing detector here does not tell an unwinding failure from a real counterexample; formal/check-kani-mutant.py in the legacy mutation suite makes that distinction."
+    },
+    {
+      "id": "lean-seal-model",
+      "$comment": "legacy register: seal-and-closure-model",
+      "statement": "The Lean hand model builds with warnings as errors and every Averin declaration depends only on the standard axioms; the record seal theorems need the stated format-injectivity hypothesis and conclude equal bodies or an explicit SHA-256 collision.",
+      "method": "lean",
+      "artifacts": [
+        "formal/lean/Averin/Seal.lean",
+        "formal/lean/check-axioms.sh",
+        "formal/lean/lakefile.toml"
+      ],
+      "gates": [
+        "formal-lean"
+      ],
+      "detector": "cd formal/lean && lake build --wfail && bash ./check-axioms.sh",
+      "covers": [
+        {
+          "path": "formal/lean/Averin/Seal.lean",
+          "symbol": "*",
+          "sha256": "c5b10edd4ef7bd59944fb7bc36c3015f7f5a68f3a20b1b0a4acfe16219f215cc"
+        }
+      ],
+      "mutants": [
+        "lean-seal-drops-fmt-injectivity",
+        "lean-seal-binding-without-collision-case"
+      ],
+      "does_not_establish": "That the Lean model matches the Rust (see preimage-oracle-conformance and the extraction-based claims in formal/claims.json). Model-level only: SHA-256 collision resistance, Ed25519 unforgeability, an honest signer and post-NFC inputs are assumptions, and the Lean kernel is trusted."
+    },
+    {
+      "id": "tla-projecttx-model",
+      "$comment": "legacy register: resource-truth-and-project-serialization",
+      "statement": "Within the finite constants of the configurations (two replicas), TLC finds no violation of NoFrontierFork, NoCheckpointFork and NoStaleCheckpoint in ProjectTx_safe.cfg, and the witness configurations (unserialized, checkpoint_fork, stale_cache, pending_cache) still produce their expected counterexamples, so the model keeps showing the bugs the serialization guard is there to prevent.",
+      "method": "tla",
+      "artifacts": [
+        "formal/tla/run-tlc.sh",
+        "formal/tla/ProjectTx_safe.cfg",
+        "formal/tla/ProjectTx_unserialized.cfg",
+        "formal/tla/ProjectTx_checkpoint_fork.cfg",
+        "formal/tla/ProjectTx_stale_cache.cfg",
+        "formal/tla/ProjectTx_pending_cache.cfg"
+      ],
+      "gates": [
+        "formal-tla",
+        "formal-nightly"
+      ],
+      "detector": "TLC_ONLY=ProjectTx.tla bash formal/tla/run-tlc.sh",
+      "covers": [
+        {
+          "path": "formal/tla/ProjectTx.tla",
+          "symbol": "*",
+          "sha256": "09a8e1a49f85c9a2aa9d1babef55a762cf3d706bffdad7b9bbe4f0c9f191155f"
+        }
+      ],
+      "mutants": [
+        "tla-projecttx-drops-serialize-guard"
+      ],
+      "does_not_establish": "Model-level only: it is not bound to the Go or Postgres code. The bounds are finite (two replicas, small constants), so it says nothing about larger configurations. ProjectTx_operational_safe.cfg holds by definition (Authoritative = TRUE makes badUse and badFinalize unreachable) and is not counted as evidence. GrantLog.tla and ConsumeLedger.tla model superseded designs and are not registered. TLC and the Java runtime are trusted."
+    }
+  ]
+}
