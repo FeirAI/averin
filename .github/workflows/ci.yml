@@ -9,11 +9,23 @@ on:
     branches: [ main ]
   pull_request:
   schedule:
+    # Weekly (Sunday): the whole Kani string family and the larger fuzz campaign.
     - cron: '17 3 * * 0'
+    # Nightly: the full 48-mutant suite (formal-mutants-full).
+    - cron: '41 2 * * *'
   workflow_dispatch:
 
 # Every third-party action is pinned by full commit SHA (the tag it resolved to on 2026-09-28 in the
 # trailing comment). Bump by resolving the new tag's commit, never by writing a tag.
+#
+# Required on pull requests: the single aggregator check `ci-required` at the end of this file, which
+# needs every job that runs on a pull request. Jobs that run only on the schedule or on manual
+# dispatch (the Kani string family slices, formal-mutants-full) are outside it; a failure there turns
+# the scheduled run on main red, which main-health.yml reports as an issue.
+#
+# Evidence: every formal job writes its log (and any Kani shard state) to $RUNNER_TEMP/evidence,
+# closes it with scripts/ci-evidence.sh (MANIFEST.txt with commit, run, tool versions, SHA-256 of
+# every file) and uploads it as an artifact retained 90 days (formal/README.md, "Evidence of record").
 jobs:
   fuzz:
     name: deterministic RCP fuzz (native C ABI + WASM)
@@ -29,8 +41,20 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
-      - name: bounded pull-request or larger scheduled campaign
-        run: bash formal/run-fuzz.sh ${{ github.event_name == 'schedule' && 'scheduled' || 'pr' }}
+      - name: bounded pull-request or larger weekly campaign
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          bash formal/run-fuzz.sh ${{ github.event.schedule == '17 3 * * 0' && 'scheduled' || 'pr' }} 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-fuzz
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
   core:
     name: rust decision-core (golden vectors + adversarial fixtures)
@@ -61,6 +85,7 @@ jobs:
   core-32bit:
     name: rust decision-core on 32-bit (usize=u32 — wasm32 truncation gate)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: core
@@ -81,8 +106,16 @@ jobs:
       # `i64 as usize` would deflate a signed threshold/limit and fail OPEN on a 32-bit verdict but pass on
       # 64-bit. wasm32-unknown-unknown can't run std `#[test]` without wasm-bindgen (which the core avoids),
       # so i686 is the practical native stand-in for the same usize width.
+      # An apt mirror can hang (2026-10-07: this step and the opam step below sat for over an hour).
+      # Bound each attempt and retry instead of waiting out the job limit.
       - name: install 32-bit linker (multilib)
-        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+        run: |
+          for attempt in 1 2 3; do
+            sudo timeout 300 apt-get update && sudo timeout 600 apt-get install -y gcc-multilib && exit 0
+            echo "apt attempt $attempt failed or timed out; retrying" >&2
+            sleep 20
+          done
+          exit 1
       - name: test on i686 (32-bit usize)
         run: cargo test --target i686-unknown-linux-gnu
 
@@ -261,8 +294,18 @@ jobs:
       - name: headline theorems depend only on propext / Classical.choice / Quot.sound; no escape hatch
         working-directory: formal/lean
         run: |
-          bash ./check-axioms.sh --self-test
-          bash ./check-axioms.sh
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          { bash ./check-axioms.sh --self-test && bash ./check-axioms.sh; } 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-lean
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
   formal-refinement:
     name: formal — Rust ↔ Lean refinement gate (executable Lean oracle + tag inventory)
@@ -271,8 +314,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: validate claim references and required CI gates
         run: |
-          python3 -m unittest discover -s scripts -p test_check_claims.py
-          python3 scripts/check-claims.py
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          { python3 -m unittest discover -s scripts -p test_check_claims.py && python3 scripts/check-claims.py; } 2>&1 | tee "$RUNNER_TEMP/evidence/claims.log"
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: stable
@@ -286,7 +330,9 @@ jobs:
           lint: false
           use-mathlib-cache: false
       - name: tag inventory (every Rust domain tag is a Lean family, and vice versa)
-        run: python3 formal/check-refinement.py
+        run: |
+          set -o pipefail
+          python3 formal/check-refinement.py 2>&1 | tee "$RUNNER_TEMP/evidence/inventory.log"
       - name: build the executable Lean oracle
         working-directory: formal/lean
         run: lake build --wfail oracle verdict_oracle
@@ -298,24 +344,51 @@ jobs:
           lake exe verdict_oracle ../oracle/verdict-expected.json
           git diff --exit-code -- ../oracle/verdict-expected.json
       - name: Rust produces the model's bytes (canon, escapes, framing, every preimage family)
-        run: cargo test -p averin-decision-core --test oracle
+        run: |
+          set -o pipefail
+          cargo test -p averin-decision-core --test oracle 2>&1 | tee "$RUNNER_TEMP/evidence/oracle.log"
       - name: Rust verdict kernel matches the Lean evidence oracle
         # cargo passes a name filter that matches nothing, so require that the test actually ran.
         run: |
           set -o pipefail
           python3 scripts/check-test-count.py --self-test
-          cargo test -p averin-decision-core --lib verdict_differential 2>&1 | python3 scripts/check-test-count.py --min 1
+          cargo test -p averin-decision-core --lib verdict_differential 2>&1 | tee "$RUNNER_TEMP/evidence/verdict.log" | python3 scripts/check-test-count.py --min 1
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-refinement
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
-  formal-mutants:
-    name: formal — mutation suite (every known drift must be caught by a gate)
+  # Mutation suite, fast tier (required on every pull request). Every Kani-detected mutant (m2-m4,
+  # m9-m13, m22-m25) must be refuted by its named harness's own counterexample, and a native subset
+  # covers every other detector family (inventory, oracle, golden, verdict, adversarial, temporal,
+  # the toolchain-free production checks). The production-proof detector (m50, m54-m58 and the
+  # parser mutants m60-m64) runs in formal-production. Each shard runs the unmutated baseline of
+  # exactly its own gates and harnesses first. The full 48 run nightly in formal-mutants-full.
+  formal-mutants-fast:
+    name: formal — mutation suite, fast tier (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # The unmutated baseline reruns every mutant-bearing Kani harness before the mutants. Measured
-    # on the final source (formal/README.md): the slowest, utf16_strict_matches_std, now takes about
-    # 65 s with G1 and A1; the others are seconds to a few minutes. Each Kani run keeps a 30-minute
-    # limit (a timeout is never a kill). The job's 4-hour limit is an unmeasured backstop: the full
-    # mutation run with Kani has not been timed on the final source (the SKIP_KANI run took 85 min
-    # locally, most of it production-proof regenerations, which this job skips).
-    timeout-minutes: 240
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: native
+            skip_kani: '1'
+            mutants: m1-authority-lp-field-order,m8-rename-taxonomy-tag,m15-authority-v3-subject-binding,m16-verdict-omits-pop-capstone,m18-pop-after-closure,m21-disclosure-only-counts-present-openings,m40-temporal-equality-is-before,m51-stale-extraction,m52-verify-bypasses-preimage,m53-feature-selected-hash,m59-verify-overrides-kernel-claim
+          - shard: kani-1
+            skip_kani: '0'
+            mutants: m2-canon-drops-del,m3-utf16-cmp-byte-order,m4-lp-two-byte-length,m9-b64-one-byte-tail
+          - shard: kani-2
+            skip_kani: '0'
+            mutants: m10-b64-two-byte-tail,m11-b64-full-chunk,m12-utf16-pair-end,m13-negative-zero
+          - shard: kani-3
+            skip_kani: '0'
+            mutants: m22-integer-zero-serialization,m23-numeric-route-guard,m24-utf16-units-underallocates,m25-utf16-strict-underallocates
     env:
       KANI_TIMEOUT_SECONDS: "1800"
     steps:
@@ -324,7 +397,62 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      # Kani: every mutant with a named harness must also die to that bounded proof, not only to the oracle.
+      - name: add swap so a CBMC memory peak cannot kill the hosted runner
+        if: matrix.skip_kani == '0'
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/cbmc.swap
+          sudo chmod 600 /mnt/cbmc.swap
+          sudo mkswap /mnt/cbmc.swap
+          sudo swapon /mnt/cbmc.swap
+          free -h
+      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        if: matrix.skip_kani == '0'
+        with:
+          kani-version: 0.68.0
+          command: cargo-kani
+          args: --version
+      - name: named mutants must die to their named detectors (production-proof detector in formal-production)
+        env:
+          MUTANTS_ONLY: ${{ matrix.mutants }}
+          SKIP_KANI: ${{ matrix.skip_kani }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          MUTANTS_WORK="$RUNNER_TEMP/mutants" SKIP_PRODUCTION_PROOF=1 \
+            bash formal/check-mutants.sh --first 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: keep the per-gate mutant logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          if [ -d "$RUNNER_TEMP/mutants/logs" ]; then cp -R "$RUNNER_TEMP/mutants/logs" "$RUNNER_TEMP/evidence/mutant-logs"; fi
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-mutants-fast-${{ matrix.shard }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
+
+  # The full mutation suite: all 48 mutants, every Kani-detected one refuted by its named harness.
+  # Nightly and on manual dispatch only, never required on pull requests; a failure turns the
+  # scheduled run on main red (main-health.yml). The production-proof detector itself runs in
+  # formal-production (this job skips it, so m50, m54-m58 and m60-m64 must die to another gate here).
+  formal-mutants-full:
+    if: github.event.schedule == '41 2 * * *' || github.event_name == 'workflow_dispatch'
+    name: formal — mutation suite, all 48 mutants (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      KANI_TIMEOUT_SECONDS: "1800"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: add swap so a CBMC memory peak cannot kill the hosted runner
         run: |
           sudo swapoff -a || true
@@ -338,31 +466,74 @@ jobs:
           kani-version: 0.68.0
           command: cargo-kani
           args: --version
-      # The production-proof detector (m50, m54-m58) needs the pinned Charon/Aeneas/Lean toolchain; it
-      # runs in formal-production. Here those mutants must still die to another gate (an edited
-      # extracted source is at least stale), and the toolchain-free production checks (m51-m53, m59)
-      # run for every mutant.
-      - run: SKIP_PRODUCTION_PROOF=1 bash formal/check-mutants.sh
+      - name: every mutant must be killed (Kani-designated ones by their named harness)
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          MUTANTS_WORK="$RUNNER_TEMP/mutants" SKIP_PRODUCTION_PROOF=1 \
+            bash formal/check-mutants.sh --first 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: keep the per-gate mutant logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          if [ -d "$RUNNER_TEMP/mutants/logs" ]; then cp -R "$RUNNER_TEMP/mutants/logs" "$RUNNER_TEMP/evidence/mutant-logs"; fi
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-mutants-full
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
+  # Plan 012 production proofs, plus their mutation detector. `prove` regenerates the extraction from
+  # core/src, requires the committed one, builds every proof and audits axioms. The two mutant legs
+  # run the production-proof detector against its named mutants: a changed preimage byte (m50) and
+  # verdict-kernel mutants (m54-m58), and the parser totality mutants (m60-m64, Refinement.Parse).
   formal-production:
-    name: formal — production seal core and verdict kernel extracted by Charon/Aeneas and proved against the Lean model (plan 012)
+    name: formal — production refinement, Charon/Aeneas extraction proved against the Lean model (${{ matrix.leg }})
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: prove
+            mutants: ''
+          - leg: seal-verdict-mutants
+            mutants: m50-lp-little-endian,m54-verdict-unanchored-capstone-skips-temporal,m55-verdict-both-mode-list-deletion-skips-paths,m56-historical-drops-snapshot-verified,m57-historical-merkle-mode-drops-paths,m58-seal-accepts-unpinned-key
+          - leg: parser-mutants
+            mutants: m60-parser-utf8-truncation-unchecked,m61-parser-literal-unguarded,m62-parser-decimal-overflow,m63-parser-panic-unexpected-char,m64-parser-skip-ws-unbounded
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: toolchain-free checks (extraction freshness, call paths into the proved code, no cfg code, glue)
         run: |
-          python3 formal/production/check-production.py --self-test
-          python3 formal/production/check-production.py
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          { python3 formal/production/check-production.py --self-test && python3 formal/production/check-production.py; } 2>&1 | tee "$RUNNER_TEMP/evidence/checks.log"
+      # The cache holds only what setup-toolchain.sh builds from the manifest's toolchain pins, so
+      # its key hashes those pins, not the whole manifest (whose source hashes change with every
+      # edit to an extracted file and used to force a cold toolchain build).
+      - name: toolchain cache key (the pins only)
+        id: pins
+        run: |
+          echo "key=$(python3 -c 'import hashlib, json; m = json.load(open("formal/production/manifest.json")); print(hashlib.sha256(json.dumps(m["toolchain"], sort_keys=True).encode()).hexdigest()[:16])')" >> "$GITHUB_OUTPUT"
       - name: cache the pinned toolchain
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/averin-aeneas
             ~/.rustup/toolchains
-          key: averin-aeneas-${{ runner.os }}-${{ hashFiles('formal/production/manifest.json', 'formal/production/setup-toolchain.sh') }}
-      - name: system packages for opam
-        run: sudo apt-get update && sudo apt-get install -y opam libgmp-dev pkg-config zstd
+          key: averin-aeneas-${{ runner.os }}-${{ steps.pins.outputs.key }}-${{ hashFiles('formal/production/setup-toolchain.sh') }}
+      - name: system packages for opam (bounded, retried; see core-32bit)
+        run: |
+          for attempt in 1 2 3; do
+            sudo timeout 300 apt-get update && sudo timeout 900 apt-get install -y opam libgmp-dev pkg-config zstd && exit 0
+            echo "apt attempt $attempt failed or timed out; retrying" >&2
+            sleep 20
+          done
+          exit 1
       - name: build pinned Charon, Aeneas and Lean
         run: bash formal/production/setup-toolchain.sh "$HOME/averin-aeneas"
       - name: mathlib build cache at the manifest revision
@@ -371,18 +542,39 @@ jobs:
           ln -sfn "$HOME/averin-aeneas/sources/aeneas" .aeneas
           "$HOME/averin-aeneas/with-aeneas.sh" lake exe cache get
       - name: regenerate from core/src, require the committed extraction, build every proof, audit axioms
-        run: AVERIN_AENEAS_TOOLS="$HOME/averin-aeneas" bash formal/run-production-refinement.sh
-      - name: a changed preimage byte (m50) and verdict-kernel mutants (m54-m58) fail the regenerated proof
+        if: matrix.leg == 'prove'
         run: |
-          AVERIN_AENEAS_TOOLS="$HOME/averin-aeneas" SKIP_KANI=1 \
-            MUTANTS_ONLY=m50-lp-little-endian,m54-verdict-unanchored-capstone-skips-temporal,m55-verdict-both-mode-list-deletion-skips-paths,m56-historical-drops-snapshot-verified,m57-historical-merkle-mode-drops-paths,m58-seal-accepts-unpinned-key \
-            bash formal/check-mutants.sh --first
+          set -o pipefail
+          AVERIN_AENEAS_TOOLS="$HOME/averin-aeneas" bash formal/run-production-refinement.sh 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: each named mutant fails the regenerated proof (detector production-proof, reason proof)
+        if: matrix.leg != 'prove'
+        env:
+          MUTANTS_ONLY: ${{ matrix.mutants }}
+        run: |
+          set -o pipefail
+          AVERIN_AENEAS_TOOLS="$HOME/averin-aeneas" SKIP_KANI=1 MUTANTS_WORK="$RUNNER_TEMP/mutants" \
+            bash formal/check-mutants.sh --first 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: keep the per-gate mutant logs
+        if: always() && matrix.leg != 'prove'
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          if [ -d "$RUNNER_TEMP/mutants/logs" ]; then cp -R "$RUNNER_TEMP/mutants/logs" "$RUNNER_TEMP/evidence/mutant-logs"; fi
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-production-${{ matrix.leg }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
   formal-kani:
     name: formal — Kani bounded proofs over the real encoders
     runs-on: ubuntu-latest
-    # Measured on the final source: about 8 minutes of proofs (key order 279 s, transitivity 142 s,
-    # the rest seconds); the limit leaves room for the Kani setup, the build and a slow runner.
+    # Starts with the G1 negative control (push_guard_is_in_force must fail on its guard), then the
+    # default set. Measured runtimes are in formal/README.md ("Default set"); the limit leaves room
+    # for the Kani setup, the build and a slow runner. A timeout is a failure, never a pass.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -401,15 +593,26 @@ jobs:
           kani-version: 0.68.0
           command: cargo-kani
           args: --version
-      - run: bash formal/run-kani.sh
+      - name: negative control, then the default set
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          KANI_LOG_DIR="$RUNNER_TEMP/evidence/kani" bash formal/run-kani.sh 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-kani
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
   formal-kani-extended:
-    # One job per extended harness so CBMC memory is isolated, each with a limit derived from its
-    # measured runtime (Kani 0.68.0 / CBMC 6.11, formal/README.md): base64 harnesses about 5 s,
-    # utf16_strict_matches_std about 65 s, integer_roundtrip 118-142 s (peak 6.3 GB), the 61
-    # accepted_integer_spelling shards 757-834 s together. The limits are several times that for
-    # setup, build and a slower runner; a timeout is a failure, never a pass. Every harness that
-    # requests kissat gets it from the Kani 0.68.0 bundle the action installs (bin/kissat 4.0.1).
+    # One job per extended harness so CBMC memory is isolated, each with a limit several times its
+    # measured runtime on this runner (formal/README.md, "Extended set"); a timeout is a failure,
+    # never a pass. Every harness that requests kissat gets it from the Kani 0.68.0 bundle the
+    # action installs (bin/kissat 4.0.1).
     name: formal — Kani extended parser/encoding proofs (${{ matrix.harness }})
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.minutes }}
@@ -439,21 +642,32 @@ jobs:
           kani-version: 0.68.0
           command: cargo-kani
           args: --version
-      - run: |
+      - name: the harness, or every shard of the checked family
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
           limit=$(( (${{ matrix.minutes }} - 5) * 60 ))
-          if python3 formal/check-kani-shards.py --families | grep -qxF "${{ matrix.harness }}"; then
-            timeout "$limit" bash formal/run-kani-shards.sh "${{ matrix.harness }}"
+          if python3 formal/check-kani-shards.py --families | grep -xF "${{ matrix.harness }}" >/dev/null; then
+            cmd=(bash formal/run-kani-shards.sh "${{ matrix.harness }}")
           else
-            timeout "$limit" bash formal/run-kani.sh --harness "${{ matrix.harness }}"
+            cmd=(bash formal/run-kani.sh --harness "${{ matrix.harness }}")
           fi
+          KANI_LOG_DIR="$RUNNER_TEMP/evidence/kani" timeout "$limit" "${cmd[@]}" 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-kani-extended-${{ matrix.harness }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
   # PR/push drift check for the string family: a fixed 20-case smoke subset from every cost class
   # (formal/kani-string-smoke.txt, checked against the proved case list). Not the family's proof.
   formal-kani-strings-smoke:
     name: formal — Kani string round trip smoke subset (20 cases)
     runs-on: ubuntu-latest
-    # Measured on the final source: every non-ASCII case (U+00E9 U+00E9 included) took at most 19 s
-    # of CBMC, ASCII cases up to 134 s on a loaded host; 60 minutes leaves room for setup and build.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -470,27 +684,36 @@ jobs:
           kani-version: 0.68.0
           command: cargo-kani
           args: --version
-      - run: |
+      - name: the 20 smoke cases
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
           python3 formal/kani-string-slices.py --check
           python3 formal/kani-string-slices.py --list smoke > "$RUNNER_TEMP/cases.txt"
           KANI_SHARD_ONLY="$RUNNER_TEMP/cases.txt" KANI_SHARD_GROUP=4 \
-            timeout 3300 bash formal/run-kani-shards.sh string_escape_roundtrip
+            timeout 3300 bash formal/run-kani-shards.sh string_escape_roundtrip 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-kani-strings-smoke
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
   # string_escape_roundtrip: 17,031 concrete cases (check-kani-shards.py proves the case list is
   # exactly the original domain). formal/kani-string-slices.py splits that checked list by cost into
   # three classes (it proves they partition it), and each job below runs one contiguous slice of one
   # class through KANI_SHARD_ONLY + KANI_SHARD_SLICE; every case must report VERIFICATION SUCCESSFUL,
   # and the family is verified only when every job of all three passes. CI always starts from fresh
-  # resume state. Measured on the final source (all 17,031 cases verified locally): ASCII cases
-  # about 6 s of CBMC idle, up to 134 s with four runs in parallel on a loaded host; every case
-  # with a non-ASCII scalar at most 19 s (U+1F600 U+1F600 15.9 s). The full family is too
-  # costly for every push (about 70 jobs): these jobs run only on the weekly schedule and on manual
-  # dispatch; pull requests run formal-kani-strings-smoke.
+  # resume state. The full family is too costly for every push (about 70 jobs): these jobs run only
+  # on the weekly schedule and on manual dispatch; pull requests run formal-kani-strings-smoke.
   formal-kani-strings-ascii:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '17 3 * * 0' || github.event_name == 'workflow_dispatch'
     name: formal — Kani string round trip, ASCII (slice ${{ matrix.slice }}/48)
     runs-on: ubuntu-latest
-    # 345 cases per slice: about 35 minutes idle, about 3.4 hours at the loaded-host rate.
+    # 345 cases per slice.
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -512,17 +735,28 @@ jobs:
           kani-version: 0.68.0
           command: cargo-kani
           args: --version
-      - run: |
+      - name: one ASCII slice
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
           python3 formal/kani-string-slices.py --list ascii > "$RUNNER_TEMP/cases.txt"
           KANI_SHARD_ONLY="$RUNNER_TEMP/cases.txt" KANI_SHARD_GROUP=64 KANI_SHARD_SLICE=${{ matrix.slice }}/48 \
-            timeout 21000 bash formal/run-kani-shards.sh string_escape_roundtrip
+            timeout 21000 bash formal/run-kani-shards.sh string_escape_roundtrip 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-kani-strings-ascii-${{ matrix.slice }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
   formal-kani-strings-mixed:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '17 3 * * 0' || github.event_name == 'workflow_dispatch'
     name: formal — Kani string round trip, one non-ASCII scalar (slice ${{ matrix.slice }}/16)
     runs-on: ubuntu-latest
-    # 33 cases per slice (the last 19): about 17 minutes idle; the 6-hour hosted maximum allows a
-    # twenty-fold slowdown.
+    # 33 cases per slice (the last 19).
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -543,17 +777,27 @@ jobs:
           kani-version: 0.68.0
           command: cargo-kani
           args: --version
-      - run: |
+      - name: one mixed slice
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
           python3 formal/kani-string-slices.py --list mixed > "$RUNNER_TEMP/cases.txt"
           KANI_SHARD_ONLY="$RUNNER_TEMP/cases.txt" KANI_SHARD_GROUP=8 KANI_SHARD_SLICE=${{ matrix.slice }}/16 \
-            timeout 21000 bash formal/run-kani-shards.sh string_escape_roundtrip
+            timeout 21000 bash formal/run-kani-shards.sh string_escape_roundtrip 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-kani-strings-mixed-${{ matrix.slice }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
   formal-kani-strings-pure:
-    # The four cases whose two scalars are both non-ASCII, one per job. On the final source each took
-    # at most 19 s of CBMC locally (U+1F600 U+1F600 15.9 s; an earlier source did not finish it in 60
-    # minutes, which is why these jobs used to require a larger runner). They now run on a hosted
-    # runner; AVERIN_KANI_LARGE_RUNNER / AVERIN_KANI_PURE_TIMEOUT_MINUTES can still move them.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # The four cases whose two scalars are both non-ASCII, one per job. AVERIN_KANI_LARGE_RUNNER /
+    # AVERIN_KANI_PURE_TIMEOUT_MINUTES can move them to another runner or limit.
+    if: github.event.schedule == '17 3 * * 0' || github.event_name == 'workflow_dispatch'
     name: formal — Kani string round trip, two non-ASCII scalars (case ${{ matrix.slice }}/4)
     runs-on: ${{ vars.AVERIN_KANI_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ fromJSON(vars.AVERIN_KANI_PURE_TIMEOUT_MINUTES || '60') }}
@@ -576,14 +820,26 @@ jobs:
           kani-version: 0.68.0
           command: cargo-kani
           args: --version
-      - run: |
+      - name: one pure case
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
           python3 formal/kani-string-slices.py --list pure > "$RUNNER_TEMP/cases.txt"
           limit=$(( (${{ fromJSON(vars.AVERIN_KANI_PURE_TIMEOUT_MINUTES || '60') }} - 10) * 60 ))
           KANI_SHARD_ONLY="$RUNNER_TEMP/cases.txt" KANI_SHARD_SLICE=${{ matrix.slice }}/4 \
-            timeout "$limit" bash formal/run-kani-shards.sh string_escape_roundtrip
+            timeout "$limit" bash formal/run-kani-shards.sh string_escape_roundtrip 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-kani-strings-pure-${{ matrix.slice }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
 
   formal-tla:
-    name: formal — TLA+ grant-log and consume-ledger models (expected outcomes)
+    name: formal — TLA+ models (expected outcomes; GrantLog and ConsumeLedger model superseded designs)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -591,4 +847,30 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - run: bash formal/tla/run-tlc.sh
+      - name: every configuration's expected outcome
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          bash formal/tla/run-tlc.sh 2>&1 | tee "$RUNNER_TEMP/evidence/run.log"
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-formal-tla
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
+
+  # The single required check (branch protection requires only this). It passes only when every job
+  # that runs on a pull request passed; skipped, cancelled or failed counts as not passed.
+  ci-required:
+    name: ci-required
+    if: always()
+    needs: [fuzz, core, core-32bit, server, store-postgres, web, sdk, verifier, wasm, supply-chain, formal-lean, formal-refinement, formal-mutants-fast, formal-production, formal-kani, formal-kani-extended, formal-kani-strings-smoke, formal-tla]
+    runs-on: ubuntu-latest
+    steps:
+      - name: every required job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "$NEEDS" | jq -e 'to_entries | all(.value.result == "success")'

@@ -1,4 +1,9 @@
 --------------------------- MODULE ConsumeLedger ---------------------------
+\* STATUS: a model of a SUPERSEDED consume. server/internal/pgledger now only sweeps; the current
+\* consume (server/internal/store/ledger_postgres.go: transaction-bound nonce and jti keys, partial
+\* release, and the ambiguous-commit rule for release) is not modelled. A passing configuration
+\* here says nothing about current code. ConsumeLedger_tenant_safe.cfg is vacuous: no consume is
+\* reachable in any of its states, so TenantIsolation holds trivially.
 (***************************************************************************)
 (* Consume-before-act (ADR 0003 R5): the resource gateway atomically       *)
 (* consumes a capability's use key (INSERT .. ON CONFLICT DO NOTHING in    *)

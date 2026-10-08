@@ -235,6 +235,14 @@ Server S-M1..S-L8 and verifier V-L1..V-I2 were fixed on `advisor/trust-combined`
 
 ### Evidence
 
+> **Correction, 2026-10-07.** Everything in this list is a local run on an aarch64 workstation,
+> with logs in `/tmp` that no longer exist. None of it is evidence of record. CI never reproduced
+> the Kani mutation gate or the key-order family: from PR #1's merge on, the hosted runner was
+> killed in `utf16_key_order_is_exact_steered` and in the mutation baseline, because the
+> non-incremental CI build let rustc inline `Vec::push` past the G1 stub (fixed in PR #2; see
+> `formal/README.md`, "Build setting"). The CI jobs named in `formal/claims.json` are the evidence
+> of record.
+
 - **String family:** 17,031 of 17,031 `VERIFICATION:- SUCCESSFUL` (Kani 0.68.0 / CBMC 6.11, A1 only),
   recorded against digest `fd4b0e77…` in `.worktrees/averin-011/target/kani-shards/strings-*.state`.
   ASCII 16,513 cases in four parallel jobs, about 25.5 h wall each, 57 CPU-hours; the 518 non-ASCII

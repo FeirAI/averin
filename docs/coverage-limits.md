@@ -18,7 +18,7 @@ they're unchanged — not that the bytes describe what truly happened in the wor
 
 | Level | Claim | averin today |
 |-------|-------|------------|
-| **1 — Record integrity** | "This record was sealed by this key and hasn't changed since, and sits in a verifiable, externally-anchored history." | **Yes.** Proven by `decision-core` (canonicalize → commit → hash → sign → DAG-link → checkpoint → anchor → verify), offline, across CLI/WASM/FFI. |
+| **1 — Record integrity** | "This record was sealed by this key and hasn't changed since, and sits in a verifiable, externally-anchored history." | **Yes, checked offline by `decision-core`** (canonicalize → commit → hash → sign → DAG-link → checkpoint → anchor → verify) across CLI/WASM/FFI. Machine-checked proofs cover only part of that path: the seal core (hashing and the signed message) and the verifier's claim kernel, proved on code extracted from the Rust. The DAG and chain properties are proved on hand-written models, not on the Rust. Anchoring (RFC 3161) and the verifier passes that compute the kernel's inputs are tested, not formally covered. See `formal/README.md`. |
 | **2 — Event observation** | "This event was observed by us." | **Partial — and we say so per event.** Every record carries `observed_via` (`proxy`/`sdk`/`otel`/`broker` — the last stamped on credential-broker grant/use records). We see *only* what those paths capture. |
 | **3 — Complete action accountability** | "This is everything the agent did, and nothing else happened." | **Demonstrated over the brokered surface** (credential broker Tier-A + resource gateway Tier-B). Full coverage still needs deployment attestations + a reduced broker TCB. Never claimed as "everything." |
 

@@ -1,4 +1,8 @@
 ---------------------------- MODULE GrantLog ----------------------------
+\* STATUS: a model of a SUPERSEDED server design, the single-process, age-based broker_seq
+\* recovery. The current fence protocol is modelled separately in GrantRecovery.tla. A passing
+\* configuration here says nothing about current code; the counterexample configurations remain as
+\* the record of why the design changed.
 (***************************************************************************)
 (* The grant-transparency log (ADR 0004 D6 / MF2): every credential grant  *)
 (* carries a per-project broker_seq bound into its SIGNED evidence, and     *)

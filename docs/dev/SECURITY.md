@@ -22,7 +22,7 @@ what truly happened in the world.
 
 | Level | Claim | Today |
 |-------|-------|-------|
-| **1 — Record integrity** | sealed by this key, unchanged since, in a verifiable anchored history | **Yes.** Proven by `decision-core`, offline, across CLI/WASM/FFI. |
+| **1 — Record integrity** | sealed by this key, unchanged since, in a verifiable anchored history | **Yes, checked offline by `decision-core`** across CLI/WASM/FFI. Machine-checked proofs cover only part of it: the seal core (record and checkpoint hashing, the signed message; partial correctness, with SHA-256 and Ed25519 trusted) and the verifier's claim kernel, proved on code extracted from the Rust. The DAG and checkpoint-chain properties are proved on hand-written models, not on the Rust. Anchoring (RFC 3161) and the verifier passes that compute the kernel's input facts (signatures, pins, joins, Merkle paths, DAG and chain checks) are tested, not formally covered. |
 | **2 — Event observation** | this event was observed by us | **Partial — and stated per event** (each record carries `observed_via`). We see only what the proxy/SDK/OTel path captures. |
 | **3 — Complete accountability** | this is *everything* the agent did | **Demonstrated over the brokered surface** (credential broker Tier-A + resource gateway Tier-B); full coverage still needs deployment attestations + a reduced broker TCB. Never claimed as "everything." |
 
@@ -116,9 +116,10 @@ axioms only); and the RCP parser is proved to return for every input, without pa
 
 Kani checks the real code in CI within stated bounds: base64url alphabet and per-chunk
 canonicality, `sha256:<hex>` digests, LP framing, UTF-16 key order and transitivity, the strict
-UTF-16 decoder, the integer round trip and canonical numeric spelling. The string round-trip
-family is still running and not claimed. TLA+ covers the grant log (historical and current
-recovery protocols), the consume-before-act ledger and two-replica project transactions. The same
+UTF-16 decoder, the integer round trip and canonical numeric spelling on every pull request, and
+the string round trip over its 17,031-case domain weekly (pull requests run a 20-case subset).
+TLA+ models the current grant-recovery protocol and two-replica project transactions; its
+grant-log and consume-before-act models describe superseded designs (see `formal/README.md`). The same
 README lists what is *not* proved: above all, that the verifier's evidence passes (signatures,
 pins, joins, Merkle paths, snapshots) compute facts meaning what the kernel's theorems assume, the
 parser's functional correctness, and the trusted base (SHA-256, Ed25519, NFC, std, toolchains).

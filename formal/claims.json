@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "An inventory of bounded claims and required recurring gates. Reference validation is textual, not semantic proof.",
+  "note": "An inventory of bounded claims and the CI jobs that back them. `gates` are jobs the single required check ci-required needs, so they run on every pull request; `scheduled_gates` run only on the schedule or manual dispatch. Evidence of record is a CI run of those jobs on the pinned toolchain (each uploads its logs as an artifact retained 90 days); local runs are informative only. Reference validation is textual, not semantic proof.",
   "claims": [
     {
       "id": "seal-and-closure-model",
@@ -20,7 +20,8 @@
       "assumptions": ["corpus covers the relevant drift", "Lean model expresses the intended format"],
       "sources": [{"file": "core/src/canon.rs", "symbol": "pub fn serialize"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "Family.msg"}],
       "proofs": [{"file": "core/tests/oracle.rs", "symbol": "every_preimage_family_matches_model"}, {"file": "formal/check-refinement.py", "symbol": "tag inventory: OK"}],
-      "gates": ["formal-refinement", "formal-mutants"]
+      "gates": ["formal-refinement", "formal-mutants-fast"],
+      "scheduled_gates": ["formal-mutants-full"]
     },
     {
       "id": "production-seal-refinement",
@@ -30,7 +31,8 @@
       "assumptions": ["Charon/Aeneas/Lean 4.31 toolchain, mathlib and the Aeneas std models (pinned in manifest.json)", "rustc (exact pinned nightly for extraction; 1.92.0 for builds)", "NFC and SHA-256 as arbitrary functions (unicode-normalization incl. its ASCII fast path; sha2)", "String/str UTF-8 model", "overflow-checks enabled in the shipped profiles", "Ed25519 as the model's Signed hypothesis"],
       "sources": [{"file": "core/src/record.rs", "symbol": "pub(crate) fn record_hash"}, {"file": "core/src/canon.rs", "symbol": "pub(crate) fn write_canonical"}, {"file": "core/src/sign.rs", "symbol": "pub fn preimage"}],
       "proofs": [{"file": "formal/production/Refinement/Seal.lean", "symbol": "record_hash_binding"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_seal_sound"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_ne_checkpoint"}, {"file": "formal/run-production-refinement.sh", "symbol": "production refinement: OK"}, {"file": "formal/production/ProductionAudit.lean", "symbol": "def runAudit"}],
-      "gates": ["formal-production", "formal-mutants"]
+      "gates": ["formal-production", "formal-mutants-fast"],
+      "scheduled_gates": ["formal-mutants-full"]
     },
     {
       "id": "verdict-kernel-refinement",
@@ -40,31 +42,33 @@
       "assumptions": ["Charon/Aeneas/Lean toolchain and Aeneas std models", "rustc", "String::is_empty model", "verify.rs computes facts satisfying Refinement.Corresponds"],
       "sources": [{"file": "core/src/verify/verdict.rs", "symbol": "pub(super) fn decide_claims"}, {"file": "core/src/verify.rs", "symbol": "report.claims = verdict::decide_claims(&facts);"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "def decideClaim"}],
       "proofs": [{"file": "formal/production/Refinement/Verdict.lean", "symbol": "theorem decide_claims_refines"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_support_erasure"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_satisfied_supports"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_capstone_prerequisites"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_historical_requires_policy"}, {"file": "formal/mutants/m54-verdict-unanchored-capstone-skips-temporal.patch", "symbol": "deletion strengthens the capstone"}, {"file": "formal/mutants/m55-verdict-both-mode-list-deletion-skips-paths.patch", "symbol": "deletion strengthens a required trust claim"}, {"file": "formal/production/ProductionAudit.lean", "symbol": "def standardOnlyModules"}],
-      "gates": ["formal-production", "formal-mutants"]
+      "gates": ["formal-production", "formal-mutants-fast"],
+      "scheduled_gates": ["formal-mutants-full"]
     },
     {
       "id": "parser-totality",
-      "claim": "The production RCP parser (CanonValue::parse via parse_typed/parse_document and every function it calls) is extracted from core/src by Charon/Aeneas and proved to return for every byte string of any length (Refinement.Parse.parse_document_total): no panic, arithmetic overflow, out-of-bounds index or divergence. Hypothesis NfcFits (the trusted NFC primitive returns representable Rust strings), never an axiom. The theorem holds in Aeneas' std model: Rust Vec capacity overflow (a panic above isize::MAX bytes, reachable on wasm32 by one string of more than about 2^29 UTF-16 units), allocation failure and stack depth are not modelled; the verifier rejects bundles over MAX_BUNDLE_BYTES (256 MiB) before parsing, while the options JSON and the standalone canonicalize export are uncapped and rely on their callers. Not proved: which documents it accepts or what they parse to (tests, fuzzing, the parser differential and plan 011's Kani families cover that), the error rendering into_public, and NFC's own panic-freedom. Supersedes the unverified Kani harness parse_never_panics as panic-freedom evidence.",
+      "claim": "The production RCP parser (CanonValue::parse via parse_typed/parse_document and every function it calls) is extracted from core/src by Charon/Aeneas and proved to return for every byte string of any length (Refinement.Parse.parse_document_total): no panic, arithmetic overflow, out-of-bounds index or divergence. Hypothesis NfcFits (the trusted NFC primitive returns representable Rust strings), never an axiom. The theorem holds in Aeneas' std model: Rust Vec capacity overflow (a panic above isize::MAX bytes, reachable on wasm32 by one string of more than about 2^29 UTF-16 units), allocation failure and stack depth are not modelled; the verifier rejects bundles over MAX_BUNDLE_BYTES (256 MiB) before parsing, while the options JSON and the standalone canonicalize export are uncapped and rely on their callers. Not proved: which documents it accepts or what they parse to (tests, fuzzing, the parser differential and plan 011's Kani families cover that), the error rendering into_public, and NFC's own panic-freedom. Supersedes the unverified Kani harness parse_never_panics as panic-freedom evidence. The parser mutants m60-m64 are run against the regenerated proof (the CI job formal-production) on every pull request.",
       "class": "extracted-refinement-proof",
       "targets": ["native Rust", "WASM Rust (same source)", "Go cgo (same source)"],
       "assumptions": ["Charon/Aeneas/Lean 4.31 toolchain and the Aeneas std models (unbounded Vec capacity, infallible allocation, unbounded stack)", "input size bounded by the caller (MAX_BUNDLE_BYTES in the verify path)", "NFC as an arbitrary function whose outputs fit in usize::MAX bytes (NfcFits hypothesis)", "SHA-256 as an arbitrary function"],
       "sources": [{"file": "core/src/canon.rs", "symbol": "fn parse_document("}, {"file": "formal/production/manifest.json", "symbol": "crate::canon::parse_document"}],
       "proofs": [{"file": "formal/production/Refinement/Parse.lean", "symbol": "theorem parse_document_total"}, {"file": "formal/mutants/m62-parser-decimal-overflow.patch", "symbol": "decimal_i64 drops its overflow guard"}, {"file": "core/tests/parser_differential.rs", "symbol": "fn rewrite_matches_reference_on_generated_corpus"}],
-      "gates": ["formal-production", "formal-mutants", "core"]
+      "gates": ["formal-production", "core"]
     },
     {
       "id": "bounded-real-encoders",
-      "claim": "Kani proves, on the final source and only within each harness's stated bounds, properties of the real Rust: base64url alphabet bijection; base64url tail and 4-symbol chunk canonicality over the full per-chunk domains (whole-string uniqueness is argued in prose from the chunking, not proved); sha256:<hex> digest-string injectivity and canonicality per byte; exact LP framing; member-key order equal to UTF-16 code-unit order for keys of one or two scalars (5 of 5 harnesses) and transitive for single-scalar keys; the strict UTF-16 decoder equal to std's on every 1- and 2-unit sequence; the typed integer round trip for every n in [-99,999, 99,999]; canonical spelling of every accepted numeric literal of 1 to 4 bytes (61 of 61 shards); write_string then the real parser (real NFC) returns exactly Str(s) for every string of at most two scalars from ASCII, U+00E9 and U+1F600, exhaustively over the exact 17,031-case domain (17,031 of 17,031 VERIFICATION SUCCESSFUL with Kani 0.68.0, A1 only; about 59 CPU-hours on a loaded 10-core host; CI runs the family on schedule/dispatch and a 20-case smoke subset on pull requests). Not claimed: parse_never_panics (not verified; parser panic-freedom is the parser-totality claim). The final Kani mutation gate is pending.",
+      "claim": "Kani proves, only within each harness's stated bounds, properties of the real Rust: base64url alphabet bijection; base64url tail and 4-symbol chunk canonicality over the full per-chunk domains (whole-string uniqueness is argued in prose from the chunking, not proved); sha256:<hex> digest-string injectivity and canonicality per byte; exact LP framing; member-key order equal to UTF-16 code-unit order for keys of one or two scalars (5 of 5 harnesses) and transitive for single-scalar keys; the strict UTF-16 decoder equal to std's on every 1- and 2-unit sequence; the typed integer round trip for every n in [-99,999, 99,999]; canonical spelling of every accepted numeric literal of 1 to 4 bytes (61 of 61 shards); write_string then the real parser (real NFC) returns exactly Str(s) for every string of at most two scalars from ASCII, U+00E9 and U+1F600, exhaustively over the exact 17,031-case domain. CI runs every harness above on each pull request (formal-kani, formal-kani-extended) except the string family, of which pull requests run a 20-case smoke subset and the weekly schedule runs all 17,031 cases (formal-kani-strings-ascii, -mixed, -pure); the string claim rests on the latest green weekly run. Every Kani-detected mutant (m2-m4, m9-m13, m22-m25) must be refuted by its named harness on each pull request (formal-mutants-fast); all 48 mutants run nightly (formal-mutants-full). Not claimed: parse_never_panics (not verified; parser panic-freedom is the parser-totality claim).",
       "class": "bounded-implementation-proof",
       "targets": ["native Rust harnesses"],
-      "assumptions": ["harness bounds and feature selections in run-kani.sh (no default features)", "std semantics, with two proof-only selections: A1 align_offset returning usize::MAX (documented as permitted) and G1 Vec::push restricted to its non-growth branch (fails closed)", "numeric route guard stub in the integer harnesses (fail-closed, checked unreachable for numeric input)", "Kani 0.68.0 / CBMC 6.11 and the bundled kissat 4.0.1", "real unicode-normalization NFC inside the harnesses that parse strings"],
+      "assumptions": ["harness bounds and feature selections in run-kani.sh (no default features; built with -Zinline-mir=no, so rustc's MIR inliner cannot bypass a stub)", "std semantics, with two proof-only selections: A1 align_offset returning usize::MAX (documented as permitted) and G1 Vec::push restricted to its non-growth branch (fails closed; the negative control push_guard_is_in_force must fail on it before the default set runs)", "numeric route guard stub in the integer harnesses (fail-closed, checked unreachable for numeric input)", "Kani 0.68.0 / CBMC 6.11 and the bundled kissat 4.0.1", "real unicode-normalization NFC inside the harnesses that parse strings"],
       "sources": [{"file": "core/src/b64.rs", "symbol": "fn full_chunk_is_canonical"}, {"file": "core/src/hashx.rs", "symbol": "fn lp_into_frames_exactly"}, {"file": "core/src/canon.rs", "symbol": "fn utf16_strict_matches_std"}, {"file": "core/src/canon.rs", "symbol": "fn integer_roundtrip()"}, {"file": "core/src/canon.rs", "symbol": "fn accepted_integer_spelling_case"}],
-      "proofs": [{"file": "formal/run-kani.sh", "symbol": "run_harness utf16_key_order_is_transitive"}, {"file": "formal/run-kani.sh", "symbol": "run_harness utf16_strict_matches_std"}, {"file": "formal/check-kani-shards.py", "symbol": "accepted_integer_spelling"}, {"file": "formal/check-kani-domains.py", "symbol": "integer_roundtrip"}, {"file": "formal/check-kani-shards.py", "symbol": "string_escape_roundtrip"}, {"file": "formal/kani-string-slices.py", "symbol": "SIZES = {\"ascii\": 16513"}, {"file": "formal/check-kani-success.py", "symbol": "VERIFICATION:- SUCCESSFUL"}],
-      "gates": ["formal-kani", "formal-kani-extended", "formal-kani-strings-smoke", "formal-kani-strings-ascii", "formal-kani-strings-mixed", "formal-kani-strings-pure", "formal-mutants"]
+      "proofs": [{"file": "formal/run-kani.sh", "symbol": "run_harness utf16_key_order_is_transitive"}, {"file": "formal/run-kani.sh", "symbol": "run_harness utf16_strict_matches_std"}, {"file": "formal/check-kani-shards.py", "symbol": "accepted_integer_spelling"}, {"file": "formal/check-kani-domains.py", "symbol": "integer_roundtrip"}, {"file": "formal/check-kani-shards.py", "symbol": "string_escape_roundtrip"}, {"file": "formal/kani-string-slices.py", "symbol": "SIZES = {\"ascii\": 16513"}, {"file": "formal/check-kani-success.py", "symbol": "VERIFICATION:- SUCCESSFUL"}, {"file": "formal/run-kani.sh", "symbol": "run_negative_control push_guard_is_in_force"}],
+      "gates": ["formal-kani", "formal-kani-extended", "formal-kani-strings-smoke", "formal-mutants-fast"],
+      "scheduled_gates": ["formal-kani-strings-ascii", "formal-kani-strings-mixed", "formal-kani-strings-pure", "formal-mutants-full"]
     },
     {
       "id": "grant-log-model",
-      "claim": "TLC checks bounded grant-log safety and conditional liveness; recovery needs the stated retry and fairness assumptions.",
+      "claim": "TLC checks bounded safety and conditional liveness of GrantLog, a model of the historical single-process, age-based broker_seq recovery design that the current fence protocol superseded (the current protocol is modelled separately in GrantRecovery.tla, which this claim does not cover). The model binds to no current code; its value is the counterexamples it keeps. Recovery needs the stated retry and fairness assumptions.",
       "class": "bounded-model-check",
       "targets": ["TLA+ model"],
       "assumptions": ["finite configured grant count", "strong fairness of operator void", "weak fairness of open transaction resolution"],
@@ -84,23 +88,23 @@
     },
     {
       "id": "revocation-live-and-durable",
-      "claim": "With a shared Postgres project Store, an acknowledged revoke is committed before a later use checks revocation on any replica; restart does not restore an older admission view. This is tested behavior, while the bounded TLA+ model checks its operational abstraction.",
+      "claim": "With a shared Postgres project Store, an acknowledged revoke is committed before a later use checks revocation on any replica; restart does not restore an older admission view. This is tested behavior. The TLA+ configuration ProjectTx_operational_safe is not evidence for it: its invariants hold by definition (it also passes with the project guard turned off).",
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "Postgres mode"],
       "assumptions": ["revocation enabled", "shared Postgres project Store", "all use and revoke paths obey WithProjectWrite"],
       "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "revokeGrantEvent"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "IsRevoked"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
-      "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoRevokedUse"}],
-      "gates": ["store-postgres", "formal-tla"]
+      "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}],
+      "gates": ["store-postgres"]
     },
     {
       "id": "pending-grant-durability",
-      "claim": "With a shared Postgres project Store, a committed prepare is visible to finalize on another replica and after issuer restart; retries read the durable pending row. This is tested behavior, while the bounded TLA+ model checks its operational abstraction.",
+      "claim": "With a shared Postgres project Store, a committed prepare is visible to finalize on another replica and after issuer restart; retries read the durable pending row. This is tested behavior. The TLA+ configuration ProjectTx_operational_safe is not evidence for it: its invariants hold by definition (it also passes with the project guard turned off).",
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "Postgres mode"],
       "assumptions": ["shared Postgres project Store", "prepare and finalize use WithProjectWrite", "pending expiry is checked from the authoritative row"],
       "sources": [{"file": "server/internal/api/grant_twophase.go", "symbol": "PutPendingGrant"}, {"file": "server/internal/store/operational_postgres.go", "symbol": "PendingGrantLive"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
-      "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoGhostFinalize"}],
-      "gates": ["store-postgres", "formal-tla"]
+      "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}],
+      "gates": ["store-postgres"]
     },
     {
       "id": "native-rfc3161",
@@ -160,7 +164,8 @@
       "assumptions": ["honest resource signer signs one ordinal per receipt in its committing transaction", "honest revocation signer signs the boundary time and watermark it read", "PostgreSQL serializes the project guard row", "caller supplies a trustworthy evaluation time and freshness bound"],
       "sources": [{"file": "core/src/verify/temporal.rs", "symbol": "pub(super) fn classify"}, {"file": "core/src/verify/verdict.rs", "symbol": "historical_authorized_as_of_snapshot"}, {"file": "core/src/verify.rs", "symbol": "fn check_use"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "AllocateAuthorizationOrder"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "SnapshotBoundary"}, {"file": "server/migrations/0007_temporal_revocation.sql", "symbol": "revocation_events"}],
       "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "temporal_revocation_decision_table"}, {"file": "core/tests/adversarial.rs", "symbol": "temporal_blocked_use_runs_every_later_check_before_a_historical_positive"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "earlier_snapshot_cannot_flip"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "historical_requires_policy"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalCausalRevokeUseSchedulesPostgres"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalSnapshotExportConsistencyPostgres"}, {"file": "server/internal/api/temporal_revocation_test.go", "symbol": "TestTemporalProducerToVerifierHistoricalClaim"}],
-      "gates": ["core", "server", "store-postgres", "formal-lean", "formal-refinement", "formal-mutants"]
+      "gates": ["core", "server", "store-postgres", "formal-lean", "formal-refinement", "formal-mutants-fast"],
+      "scheduled_gates": ["formal-mutants-full"]
     }
   ]
 }

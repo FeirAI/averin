@@ -120,10 +120,14 @@ an ambiguous historical spelling requires explicit reconciliation.
 The proofs are CI gates in `.github/workflows/ci.yml`: `formal-lean`, `formal-refinement`,
 `formal-production` (Charon/Aeneas extraction of the seal core, the verdict kernel and the parser,
 their refinement proofs including the parser totality theorem `parse_document_total`, and the axiom
-audit), `formal-mutants`, `formal-kani`, `formal-kani-extended` (one job per extended harness),
-`formal-kani-strings-ascii`/`-mixed`/`-pure` (the 17,031-case string round trip, split by cost;
-not yet claimed), `formal-tla`, and the `fuzz` campaign. Run them locally with `make formal`, or
-one at a time:
+audit, plus the production-proof mutants m50, m54-m58 and m60-m64), `formal-mutants-fast` (every
+Kani-detected mutant and a native subset), `formal-kani` (the G1 negative control, then the default
+set), `formal-kani-extended` (one job per extended harness), `formal-kani-strings-smoke`, `formal-tla`
+and the `fuzz` campaign run on every pull request, and the single required check `ci-required`
+needs all of them. Weekly: `formal-kani-strings-ascii`/`-mixed`/`-pure` (the 17,031-case string
+round trip, split by cost). Nightly: `formal-mutants-full` (all 48 mutants). Each formal job uploads
+its logs as an artifact retained 90 days; only CI runs on the pinned toolchain count as evidence
+(`formal/README.md`, "Evidence of record"). Run them locally with `make formal`, or one at a time:
 
 ```bash
 cd formal/lean && lake build --wfail && ./check-axioms.sh   # Lean 4.30.0 (pinned in lean-toolchain)

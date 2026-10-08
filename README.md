@@ -148,7 +148,9 @@ properties. These are checked by machine in [`formal/`](formal/README.md), not o
   - the checkpoint history is unique.
 - **TLA+** models the grant-transparency log, the consume-before-act ledger and two-replica
   project transactions (finite configurations checked by TLC). Every counterexample for a pre-fix
-  design is kept as an expected failure. `GrantLog` is the historical single-process, age-based
+  design is kept as an expected failure. The grant-log (`GrantLog`) and consume-ledger models
+  describe superseded server designs, and two passing configurations check nothing (see
+  `formal/README.md`). `GrantLog` is the historical single-process, age-based
   recovery design: no anchored gap and no duplicate sequence number, including when an operator
   `grant_void` races an in-flight retry, but a client that retries forever with every attempt
   failing starves the void, which the model shows. The current durable protocol is modeled
@@ -157,18 +159,19 @@ properties. These are checked by machine in [`formal/`](formal/README.md), not o
   eventual resolution, assuming open database transactions eventually resolve and the authorized
   operator is eventually scheduled. A still-running pre-fence writer breaks it (a kept
   counterexample), so the deployment credential cutoff is part of the protocol.
-- **Kani** checks the real Rust (bounded, on the final source): base64url alphabet and per-chunk
-  tail/chunk canonicality, `sha256:<hex>`, LP framing, member-key order and its transitivity, the
-  strict UTF-16 decoder, the integer round trip over [-99,999, 99,999] and canonical numeric
-  spelling, and the string escape round trip exhaustively over its exact 17,031-case domain
-  (17,031 of 17,031 verified).
+- **Kani** checks the real Rust within stated bounds, in CI on every pull request: base64url
+  alphabet and per-chunk tail/chunk canonicality, `sha256:<hex>`, LP framing, member-key order and
+  its transitivity, the strict UTF-16 decoder, the integer round trip over [-99,999, 99,999] and
+  canonical numeric spelling; and weekly, the string escape round trip exhaustively over its exact
+  17,031-case domain.
 - **An executable Lean oracle** runs the model over a corpus (every C0 control, DEL, U+2028,
   BMP-vs-astral key order, i64 extremes, one sample per preimage family), and CI fails when the
   Rust's bytes differ from the model's. A tag inventory ties every Rust domain tag to a Lean family.
   This is differential testing over a corpus, complementing the refinement proofs below.
 - **A mutation suite** (`formal/check-mutants.sh`) applies 48 known drifts and requires each to be
   caught by a named gate (oracle, golden vectors, Kani, the production proofs, the production
-  checks or a named test).
+  checks or a named test). CI runs 34 of them on every pull request (every Kani-detected and
+  production-proof mutant, and a native subset) and all 48 nightly.
 
 A mechanised Rust↔Lean refinement (plan 012, Charon/Aeneas) covers the seal core (partial
 correctness), the verifier's claim kernel (standard axioms only) and the parser's totality: the

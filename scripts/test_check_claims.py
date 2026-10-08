@@ -24,6 +24,23 @@ class ClaimCheckerTest(unittest.TestCase):
         self.assertTrue(any("missing CI job" in error for error in
                             checker.check_manifest(data, ROOT, self.workflow)))
 
+    def test_non_required_gate_rejected(self):
+        data = copy.deepcopy(self.data)
+        data["claims"][0]["gates"] = ["formal-kani-strings-ascii"]
+        self.assertTrue(any("is not required by ci-required" in error for error in
+                            checker.check_manifest(data, ROOT, self.workflow)))
+
+    def test_required_job_is_not_a_scheduled_gate(self):
+        data = copy.deepcopy(self.data)
+        data["claims"][0]["scheduled_gates"] = ["formal-lean"]
+        self.assertTrue(any("is not a schedule-only job" in error for error in
+                            checker.check_manifest(data, ROOT, self.workflow)))
+
+    def test_missing_aggregator_rejected(self):
+        workflow = self.workflow.replace("\n  ci-required:\n", "\n  ci-optional:\n")
+        self.assertTrue(any("no ci-required job" in error for error in
+                            checker.check_manifest(self.data, ROOT, workflow)))
+
     def test_missing_symbol_rejected(self):
         data = copy.deepcopy(self.data)
         data["claims"][0]["sources"][0]["symbol"] = "no_such_symbol"

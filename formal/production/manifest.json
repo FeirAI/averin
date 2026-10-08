@@ -93,7 +93,7 @@
   },
   "sources": {
     "core/Cargo.toml": "0d90d1e08d2d474dcec1648f76a36aab993b098e47ec34d60614e9c67811cc2e",
-    "core/src/canon.rs": "e3aabcee9664f8fee3980904796bcc88629f4b08d37ce4c1191f24ee9adc7a72",
+    "core/src/canon.rs": "717822b3628f20deb923ddfaba17f2499cf0775420b664f7b408e35d5caf483d",
     "core/src/hashx.rs": "3193a42763c19e681181c07bbb8e7ab6f37d0d27dd0bc6124d8f7067b7d043c7",
     "core/src/record.rs": "52dac5bd61b1609803f82824291d270eefd8774065cb9a78b2988d9276e2e1f4",
     "core/src/checkpoint.rs": "90ba12e80e5e89811f119840fe44b07a9e90a7d650b9f365b49f9feed3f455c4",

@@ -1494,6 +1494,20 @@ mod kani_proofs {
         }
     }
 
+    /// Negative control for G1, never a proof: `formal/run-kani.sh` requires this harness to FAIL
+    /// on exactly the guard's assertion. A push into a full vector must reach the guard. If the
+    /// build lets rustc inline `Vec::push` before Kani applies `#[kani::stub]` (a non-incremental
+    /// build at opt-level 1 or above runs rustc's MIR inliner), the push grows silently, this
+    /// harness verifies, every G1 proof is unguarded, and the runner fails.
+    #[kani::proof]
+    #[kani::stub(std::vec::Vec::push, push_without_growth)]
+    fn push_guard_is_in_force() {
+        let mut v: Vec<u16> = Vec::with_capacity(1);
+        v.push(1);
+        v.push(2);
+        core::mem::forget(v);
+    }
+
     /// The exact assertion body shared by the original full-domain proof and every exhaustive
     /// decimal-width shard below. Only the input domain changes between harnesses.
     fn integer_roundtrip_case(n: i64) {

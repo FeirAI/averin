@@ -1,0 +1,64 @@
+name: formal-probe
+
+# Diagnostic runs on the hosted x86_64 runner. Informational only: a probe never backs a claim, is
+# never a required check, and its result is not evidence of record (formal/README.md).
+#
+#   gh workflow run formal-probe.yml -f harness=utf16_key_order_is_transitive
+#
+# runs one named Kani harness or checked shard (formal/run-kani.sh --harness), or every shard of a
+# checked family (formal/run-kani-shards.sh), and uploads the log with /usr/bin/time figures.
+on:
+  workflow_dispatch:
+    inputs:
+      harness:
+        description: Kani harness, checked shard, or checked family name
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe ${{ inputs.harness }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: add swap so a CBMC memory peak cannot kill the hosted runner
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/cbmc.swap
+          sudo chmod 600 /mnt/cbmc.swap
+          sudo mkswap /mnt/cbmc.swap
+          sudo swapon /mnt/cbmc.swap
+          free -h
+      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        with:
+          kani-version: 0.68.0
+          command: cargo-kani
+          args: --version
+      - name: run the harness or family
+        env:
+          HARNESS: ${{ inputs.harness }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/probe"
+          if python3 formal/check-kani-shards.py --families | grep -xF "$HARNESS" >/dev/null; then
+            cmd=(bash formal/run-kani-shards.sh "$HARNESS")
+          else
+            cmd=(bash formal/run-kani.sh --harness "$HARNESS")
+          fi
+          set +e
+          /usr/bin/time -v -o "$RUNNER_TEMP/probe/time.txt" timeout 6600 "${cmd[@]}" > "$RUNNER_TEMP/probe/kani.log" 2>&1
+          code=$?
+          set -e
+          grep -E "Checking harness|Stub:|Runtime Symex|size of program|VERIFICATION:|Verification Time|run-kani" "$RUNNER_TEMP/probe/kani.log" | tail -40
+          grep -E "Maximum resident|Elapsed" "$RUNNER_TEMP/probe/time.txt"
+          echo "exit=$code"
+          exit "$code"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: probe-${{ github.run_id }}
+          path: ${{ runner.temp }}/probe/
+          retention-days: 30
