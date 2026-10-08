@@ -18,6 +18,9 @@
 #
 # TLC_STATIC_ONLY=1 runs only the pin and witness-declaration checks (no Java, seconds).
 # TLC_ONLY=<Spec>.tla runs only that spec's configurations (witnesses live in the same spec).
+# TLC_CFG_RE=<extended regex> further restricts to configurations whose name (without .cfg) matches
+# it in full; a pass configuration still needs its witnesses to match too (used for a cheap detector
+# on the slow liveness-free GrantLog configurations).
 set -euo pipefail
 cd "$(dirname "$0")"
 STATIC="${TLC_STATIC_ONLY:-}"
@@ -142,6 +145,7 @@ verify_pin() { # config expected
 check() { # spec config expected: pass | <invariant or temporal property that must be violated>
   # TLC_ONLY=ProjectTx.tla runs only the configurations of that spec (used by the kit register).
   if [ -n "${TLC_ONLY:-}" ] && [ "$1" != "$TLC_ONLY" ]; then return 0; fi
+  if [ -n "${TLC_CFG_RE:-}" ] && ! echo "${2%.cfg}" | grep -qxE "$TLC_CFG_RE"; then return 0; fi
   checked=$((checked + 1))
   local stem="${2%.cfg}"
   seen_cfgs="${seen_cfgs}${stem} "
@@ -245,7 +249,7 @@ for p in $pass_cfgs; do
   done
 done
 # Every configuration file must be checked, so an orphan cannot sit unpinned and unrun.
-if [ -z "${TLC_ONLY:-}" ]; then
+if [ -z "${TLC_ONLY:-}" ] && [ -z "${TLC_CFG_RE:-}" ]; then
   for f in *.cfg; do
     case "$seen_cfgs" in *" ${f%.cfg} "*) ;; *) die "$f is not named by any check line" ;; esac
   done
