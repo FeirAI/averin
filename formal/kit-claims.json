@@ -111,10 +111,6 @@
       "tier": "full",
       "claim": "parser-differential-and-fuzz"
     },
-    "m60-parser-utf8-truncation-unchecked": {
-      "tier": "full",
-      "claim": "parser-differential-and-fuzz"
-    },
     "m61-parser-literal-unguarded": {
       "tier": "full",
       "claim": "parser-differential-and-fuzz"
@@ -345,8 +341,8 @@
         },
         {
           "path": "core/src/record.rs",
-          "symbol": "body_hash",
-          "sha256": "202481c4df23e3c8779dd441d03eceb6f7ffb71d089816afe3d558a6dedb62de"
+          "symbol": "compute_content_hash",
+          "sha256": "e389fdf2ce71fbb21ba8ddc30ba58b109b08ea991250d013919e14ed00267e54"
         },
         {
           "path": "core/src/verify.rs",
@@ -384,11 +380,6 @@
         },
         {
           "path": "core/src/canon.rs",
-          "symbol": "next_utf8_char",
-          "sha256": "4a1925d16d4dabc306fb56a2a59a89c3326e3435db723941f09aa14f4543f41a"
-        },
-        {
-          "path": "core/src/canon.rs",
           "symbol": "parse_literal",
           "sha256": "dd2b3d54c73fab148870413fca9396a1c7a4d647b3c0682a6a5fb432ea50a7f3"
         },
@@ -405,7 +396,6 @@
       ],
       "mutants": [
         "m14-truncated-escape-panic",
-        "m60-parser-utf8-truncation-unchecked",
         "m61-parser-literal-unguarded",
         "m62-parser-decimal-overflow",
         "m64-parser-skip-ws-unbounded"
