@@ -25,8 +25,10 @@ use crate::sign::decode_pubkey;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod headline;
 mod temporal;
 mod verdict;
+pub use headline::{claim_verdict, ClaimVerdict};
 pub use temporal::{
     canonical_ts_millis, revocation_entry_v2, revocation_entry_v2_preimage, revocation_key_v2,
     revocation_key_v2_preimage, revocation_leaves_v2, revocation_merkle_root_v2,
@@ -36,12 +38,11 @@ pub use temporal::{
     REVOCATION_LIST_V2_DOMAIN, REVOCATION_LIST_V2_FORMAT,
 };
 use temporal::{GrantRevocationAcc, OrderEv, ProofV2};
-pub use verdict::{
-    claim_verdict, ClaimDecision, ClaimPolicy, ClaimResults, ClaimVerdict, RequestedClaim,
-    RevocationRequirement,
-};
 use verdict::{
     AnchoredCheckpoint, CapstoneFacts, HistoricalFacts, PinnedRecordSeal, ValidatedFacts,
+};
+pub use verdict::{
+    ClaimDecision, ClaimPolicy, ClaimResults, RequestedClaim, RevocationRequirement,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +129,14 @@ impl ActionCompleteness {
     /// `claimed_over_manifest`. The label is never stronger than the kernel.
     pub fn of(r: &VerifyReport) -> Self {
         Self::of_with_integrity(r, r.ok, r.broker_trust == "sequence_verified")
+    }
+
+    /// The bare conjunction WITHOUT the kernel cap: what `of` returned before SB-28. Never a claim.
+    /// It exists so tests can show where the old label was stronger than the kernel and can exercise
+    /// the conjunction on synthesized reports. Do not use it to describe a bundle to a person.
+    #[doc(hidden)]
+    pub fn of_conjunction_uncapped(r: &VerifyReport) -> Self {
+        Self::of_conjunction_with_integrity(r, r.ok, r.broker_trust == "sequence_verified")
     }
 
     // The new claims use structural integrity plus typed committed contradictions. Legacy `ok`
@@ -518,14 +527,6 @@ impl VerifyReport {
     /// `action_completeness` JSON key serializes this; see [`ActionCompleteness::of`] for the conjunction.
     pub fn action_completeness(&self) -> ActionCompleteness {
         ActionCompleteness::of(self)
-    }
-
-    /// Test-only: replace the kernel's claims on a synthesized report (feature `test-claims`, enabled
-    /// by the crate's self dev-dependency, never in a shipped build).
-    #[cfg(feature = "test-claims")]
-    #[doc(hidden)]
-    pub fn set_claims_for_test(&mut self, claims: ClaimResults) {
-        self.claims = claims;
     }
 
     pub fn claims(&self) -> ClaimResults {

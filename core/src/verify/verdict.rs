@@ -120,83 +120,6 @@ impl ClaimPolicy {
     }
 }
 
-/// The headline a consumer may show for a verified report. Same rule as `claimVerdict` in
-/// `verifier/claim-verdict.js` (the browser verifier and web app); `averin-verify bundle` prints
-/// this word. It is a function of the report only: `ok`, `keys_externally_pinned` and the
-/// versioned `claims` contract. It never reads anything the bundle can name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaimVerdict {
-    /// The requested claim is satisfied and the signing keys were pinned externally.
-    Pass,
-    /// The requested claim is satisfied, but only under the bundle's own (unpinned) keys.
-    Consistent,
-    /// The requested claim is not satisfied, or the claims contract is missing or invalid.
-    Insufficient,
-    /// The legacy `ok` is false, or the requested claim is refuted.
-    Fail,
-}
-
-impl ClaimVerdict {
-    pub fn word(self) -> &'static str {
-        match self {
-            Self::Pass => "PASS",
-            Self::Consistent => "CONSISTENT",
-            Self::Insufficient => "INSUFFICIENT",
-            Self::Fail => "FAIL",
-        }
-    }
-
-    /// CLI exit code: 0 PASS, 2 CONSISTENT, 1 FAIL or INSUFFICIENT.
-    pub fn exit_code(self) -> u8 {
-        match self {
-            Self::Pass => 0,
-            Self::Consistent => 2,
-            Self::Insufficient | Self::Fail => 1,
-        }
-    }
-}
-
-/// Reads a serialized report (`report_to_canon` / `verify_bundle_with_json` output).
-pub fn claim_verdict(report: &CanonValue) -> ClaimVerdict {
-    let flag = |k: &str| matches!(report.get(k), Some(CanonValue::Bool(true)));
-    let claims = report.get("claims");
-    let requested = claims
-        .and_then(|c| c.get("requested"))
-        .and_then(CanonValue::as_str);
-    let decision = claims
-        .and_then(|c| c.get("requested_decision"))
-        .and_then(CanonValue::as_str);
-    let known_claim = matches!(
-        requested,
-        Some(
-            "integrity"
-                | "authenticated"
-                | "authorized"
-                | "historical_authorized_as_of_snapshot"
-                | "complete_brokered"
-                | "complete_introspected"
-        )
-    );
-    let known_decision = matches!(decision, Some("satisfied" | "insufficient" | "refuted"));
-    let own_field = match (claims, requested) {
-        (Some(c), Some(r)) => c.get(r).and_then(CanonValue::as_str),
-        _ => None,
-    };
-    let valid = report.get("claims_version").and_then(CanonValue::as_str) == Some("2")
-        && known_claim
-        && known_decision
-        && own_field == decision;
-    if !flag("ok") || (valid && decision == Some("refuted")) {
-        ClaimVerdict::Fail
-    } else if !valid || decision == Some("insufficient") {
-        ClaimVerdict::Insufficient
-    } else if flag("keys_externally_pinned") {
-        ClaimVerdict::Pass
-    } else {
-        ClaimVerdict::Consistent
-    }
-}
-
 /// Each `Satisfied` field is a positive claim. The information order is inclusion of the
 /// positive claim set; `Insufficient` and `Refuted` grant no claim and remain distinct reasons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1081,11 +1004,7 @@ mod differential {
                 _ => {}
             }
             {
-                let bare = A::of_conjunction_with_integrity(
-                    &r,
-                    r.ok,
-                    r.broker_trust == "sequence_verified",
-                );
+                let bare = A::of_conjunction_uncapped(&r);
                 if bare != label {
                     overclaims.push(format!("{name}:{}", bare.as_str()));
                 }
@@ -1093,5 +1012,28 @@ mod differential {
         }
         assert!(labelled > 0, "the corpus must exercise a granted label");
         eprintln!("OVERCLAIMS {}: {:?}", overclaims.len(), overclaims);
+    }
+
+    /// SB-28: with every conjunct of the legacy conjunction true, a kernel that does not satisfy the
+    /// matching capstone claim downgrades the label to `claimed_over_manifest`.
+    #[test]
+    fn action_completeness_label_is_capped_by_the_kernel() {
+        use crate::verify::ActionCompleteness as A;
+        for decision in [ClaimDecision::Insufficient, ClaimDecision::Refuted] {
+            let mut brokered = report_from_facts(&facts("bits_191"));
+            assert_eq!(A::of(&brokered), A::AttestedCompleteOverBrokeredSurface);
+            brokered.claims.complete_brokered = decision;
+            assert_eq!(A::of(&brokered), A::ClaimedOverManifest, "{decision:?}");
+            // the other surface's claim is irrelevant to the brokered label
+            let mut other = report_from_facts(&facts("bits_191"));
+            other.claims.complete_introspected = decision;
+            assert_eq!(A::of(&other), A::AttestedCompleteOverBrokeredSurface);
+
+            let mut native = report_from_facts(&facts("introspected"));
+            native.claims.complete_introspected = ClaimDecision::Satisfied;
+            assert_eq!(A::of(&native), A::AttestedCompleteOverIntrospectedSurface);
+            native.claims.complete_introspected = decision;
+            assert_eq!(A::of(&native), A::ClaimedOverManifest, "{decision:?}");
+        }
     }
 }
