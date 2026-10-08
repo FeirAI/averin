@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "An inventory of bounded claims and the CI jobs that back them. `gates` are jobs the single required check ci-required needs, so they run on every pull request; `scheduled_gates` run only on the schedule or manual dispatch. Evidence of record is a CI run of those jobs on the pinned toolchain (each uploads its logs as an artifact retained 90 days); local runs are informative only. `evidence_run` and `scheduled_evidence_run` name the latest green run of the gates on main when the entry was last updated (a push run, and a manual dispatch run for the scheduled gates). Reference validation is textual, not semantic proof.",
+  "note": "An inventory of bounded claims and the CI jobs that back them. `gates` are jobs the single required check ci-required needs, so they run on every pull request; `scheduled_gates` run only on the schedule or manual dispatch. Evidence of record is a CI run of those jobs on the pinned toolchain (each uploads its logs as an artifact retained 90 days); local runs are informative only. `evidence_run` and `scheduled_evidence_run` name the latest green run of the gates when the entry was last updated: a push run on main, and for the scheduled gates a manual dispatch run that may be on a branch whose tree equals main's (formal/README.md names the commit). Reference validation is textual, not semantic proof.",
   "claims": [
     {
       "id": "seal-and-closure-model",

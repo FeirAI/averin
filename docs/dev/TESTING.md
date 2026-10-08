@@ -148,8 +148,9 @@ computes, and `check-refinement.py` fails on a tag no `Family` models. Update th
 definition in `formal/lean/Averin/`, re-prove it, regenerate `formal/oracle/expected.json` with the
 oracle (CI rejects a hand-edited file), and add corpus rows to `formal/oracle/inputs.json` for any
 new family. The gate is doing its job when that happens: a proof about a format the code no
-longer uses is worthless. `run-tlc.sh` asserts *expected* outcomes. The fixed designs must pass,
-and each pre-fix variant must still produce its counterexample. See
+longer uses is worthless. `run-tlc.sh` asserts *expected* outcomes. Each configuration marked pass must pass (some
+model superseded designs and two check nothing, see `formal/README.md`), and each pre-fix variant
+must still produce its counterexample. See
 [`formal/README.md`](../../formal/README.md) for what each layer proves and what it does not.
 
 ## Lint & supply chain

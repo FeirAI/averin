@@ -228,7 +228,7 @@ NoDuplicateSeq == \A a, b \in rec : a[1] = b[1] => a = b
    grant whose retry will record it. *)
 HoleFree == \A n \in 1..MaxSeq : n \in Recorded \/ \E g \in Grants : seqOf[g] = n
 
-(* NON-VACUITY: expected VIOLATED in the shipped design. The guards still let the operator void a
+(* NON-VACUITY: expected VIOLATED with both void guards on (GrantLog_fixed). The guards still let the operator void a
    grant whose ambiguous commit has resolved, so the passing safety configs exercise the void. *)
 NoVoid == retired = {}
 

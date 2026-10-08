@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Model-check the server protocol specs. Each line asserts ONE claim with its EXPECTED outcome: the
-# shipped designs must pass, and each pre-fix / unsafe variant must still produce the counterexample
-# the README names (so the model keeps demonstrating the bug it guards against).
+# Model-check the server protocol specs. Each line asserts ONE claim with its EXPECTED outcome: each
+# configuration marked pass must pass, and each pre-fix / unsafe variant must still produce the
+# counterexample the README names (so the model keeps demonstrating the bug it guards against).
+# GrantLog.tla and ConsumeLedger.tla model superseded designs, and two passing configurations check
+# nothing (marked below); see formal/README.md for what each passing result is evidence for.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -41,7 +43,8 @@ check() { # spec config expected: pass | <invariant or temporal property that mu
   echo "ok  $2 (${3}; $(echo "$out" | grep -oE '[0-9]+ distinct states found' | tail -1))"
 }
 
-# Grant-transparency log (GrantLog.tla).
+# Grant-transparency log (GrantLog.tla): the SUPERSEDED age-based recovery design. The current fence
+# protocol is GrantRecovery.tla, below.
 check GrantLog.tla GrantLog_current.cfg AnchoredGapless        # pre-fix: a gap gets anchored
 check GrantLog.tla GrantLog_release_lost.cfg AnchoredGapless   # a lost release, no fail-closed checkpoint
 check GrantLog.tla GrantLog_failclosed.cfg HoleFree            # release of a non-max orphan leaves a hole
@@ -55,14 +58,15 @@ check GrantLog.tla GrantLog_fixed.cfg pass                     # SUPERSEDED desi
 check GrantLog.tla GrantLog_wedge.cfg CheckpointRecovers       # without void, a client that never retries wedges checkpoints
 check GrantLog.tla GrantLog_fair_retry.cfg pass                # ...recovers only if every client retries until it commits
 check GrantLog.tla GrantLog_void_starved.cfg CheckpointRecovers # a client retrying forever, every attempt failing, starves the void
-check GrantLog.tla GrantLog_fixed_live.cfg pass                # with operator void: no permanent checkpoint outage
+check GrantLog.tla GrantLog_fixed_live.cfg pass                # superseded design, with operator void: no permanent checkpoint outage
 
 # Permanent recovery fence over legacy/residual reservations. The unsafe
 # counterexample demonstrates why already-running old credentials must be cut off.
 check GrantRecovery.tla GrantRecovery_old_writer.cfg NoDuplicateSeq
 check GrantRecovery.tla GrantRecovery_safe.cfg pass
 
-# Consume-before-act ledger (ConsumeLedger.tla).
+# Consume-before-act ledger (ConsumeLedger.tla): the SUPERSEDED pgledger consume; the current consume
+# (server/internal/store/ledger_postgres.go) is not modelled.
 check ConsumeLedger.tla ConsumeLedger_safe.cfg pass                               # Retention >= MaxTTL: at most once per key
 check ConsumeLedger.tla ConsumeLedger_short_retention_replay.cfg AtMostOncePerKey # Retention < MaxTTL: replay
 check ConsumeLedger.tla ConsumeLedger_short_retention.cfg InFlightRecorded       # ...and a live in-flight key is pruned

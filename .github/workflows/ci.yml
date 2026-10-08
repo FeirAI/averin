@@ -15,8 +15,8 @@ on:
     - cron: '41 2 * * *'
   workflow_dispatch:
 
-# Every third-party action is pinned by full commit SHA (the tag it resolved to on 2026-09-28 in the
-# trailing comment). Bump by resolving the new tag's commit, never by writing a tag.
+# Every third-party action is pinned by full commit SHA (the tag it resolved to in the trailing
+# comment; last resolved 2026-10-08). Bump by resolving the new tag's commit, never by writing a tag.
 #
 # Required on pull requests: the single aggregator check `ci-required` at the end of this file, which
 # needs every job that runs on a pull request. Jobs that run only on the schedule or on manual
