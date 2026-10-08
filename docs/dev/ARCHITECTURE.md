@@ -146,7 +146,8 @@ from the bundle alone. **Two postures:**
   fatal config error). See [`../operator-verification.md`](../operator-verification.md).
 
 The verdict is a typed report (see [API.md → Verification report](API.md#verification-report)). PASS
-is integrity-level; the capstone is the higher, separately-stated claim.
+needs the requested claim satisfied and externally pinned keys; the same claim under the bundle's own
+keys is CONSISTENT (internal consistency only). The capstone is the higher, separately-stated claim.
 
 ### Formal model
 

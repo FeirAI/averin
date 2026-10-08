@@ -9,7 +9,7 @@ There are two verification postures:
 
 | Posture | How | Proves |
 |---|---|---|
-| **Internal consistency** | `averin-verify bundle b.json` (no opts) | the bundle is self-consistent under **its own** key claims — integrity, DAG, checkpoint chain, omission/fork/tamper. It does **not** authenticate against an out-of-band trust root. |
+| **Internal consistency** | `averin-verify bundle b.json` (no opts) | the bundle is self-consistent under **its own** key claims — integrity, DAG, checkpoint chain, omission/fork/tamper. It does **not** authenticate against an out-of-band trust root. The CLI prints `RESULT: CONSISTENT` (exit 2), never `PASS`, for this posture; `PASS` (exit 0) needs pinned keys. |
 | **Pinned (authentic)** | `averin-verify bundle b.json opts.json` | the above **plus** every role's evidence verifies under the keys **you** pinned out-of-band, which is what unlocks the Tier-B / mode gates (cosig, revocation, federation, native, attestation, taxonomy) and the `attested_complete_*` capstone. |
 
 Browser (`/verifier/`) and FFI (`core.VerifyBundleWith`) take the same `opts` object.
@@ -153,7 +153,7 @@ The object form works for **every** role key (`signing_keys` uses the RCP §10.2
 - `introspection_status: attested` — every native (token_exchange) credential's resource-signed transcript verified (M3); the native surface reaches `attested_complete_over_introspected_surface`. A native credential that a fresh revocation list/root marks revoked is blocked here too (it can never be `attested`).
 - `federation_status: sequence_verified` — every broker's per-`broker_id` log verified, no `cross_broker_suppression` (M4).
 - `transitive_grants` — grants from an UNPINNED subject broker that elevated to `transitive` trust via a `cross_broker_cert` signed by a PINNED issuer broker (M4 optional). The cert binds the subject's KEY (not just its id), and the subject key is rejected if it collides with any non-broker role.
-- `action_completeness` — the D8 capstone (`attested_complete_over_brokered_surface` / `..._introspected_surface` / `claimed_over_manifest` / `not_claimed`), **always** bounded by `resource_trust: assumed_truthful` (MF1 — the irreducible resource TCB).
+- `action_completeness` — the D8 capstone (`attested_complete_over_brokered_surface` / `..._introspected_surface` / `claimed_over_manifest` / `not_claimed`), **always** bounded by `resource_trust: assumed_truthful` (MF1 — the irreducible resource TCB). A capstone label is also capped by the claim kernel: it needs `claims.complete_brokered` (or `claims.complete_introspected`) `satisfied`, else it reads `claimed_over_manifest`; the label never says more than `claims.*`.
 
 - `revocation_temporal` (plan 009) — `grant_revocations[].current_revocation` is current validity
   and always blocks as above. Under `db_serialized_v1`, `receipt_ordering[].historical_ordering` is

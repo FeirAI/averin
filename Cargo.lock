@@ -6,6 +6,7 @@ version = 4
 name = "averin-decision-core"
 version = "0.1.0"
 dependencies = [
+ "averin-decision-core",
  "cms",
  "const-oid",
  "der",

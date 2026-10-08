@@ -15,8 +15,9 @@ use averin_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use averin_decision_core::verify::{
     cnf_kid, cosig_approval_challenge, delegation_hop_challenge, federation_cert_challenge,
     introspection_transcript_challenge, report_to_json, verify_bundle, verify_bundle_with,
-    verify_bundle_with_json, ActionCompleteness, ClaimDecision, ClaimPolicy, RequestedClaim,
-    RevocationRequirement, RoleKeyStatus, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
+    verify_bundle_with_json, ActionCompleteness, ClaimDecision, ClaimPolicy, ClaimResults,
+    RequestedClaim, RevocationRequirement, RoleKeyStatus, TrustLevel, TrustedKey, VerifyOptions,
+    VerifyReport,
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::collections::BTreeMap;
@@ -10164,6 +10165,11 @@ fn capstone_report() -> VerifyReport {
     r.attestation_status = "attested_claims".to_string();
     r.unmatched_violation = 0;
     r.unmatched_pending = 0;
+    // SB-28: the label is also capped by the claim kernel. This helper synthesizes predicates the kernel
+    // never saw, so model the kernel's matching capstone claim as one more required predicate.
+    r.set_claims_for_test(with_claims(&r, |c| {
+        c.complete_brokered = ClaimDecision::Satisfied
+    }));
     r
 }
 
@@ -10243,6 +10249,10 @@ fn tier_b_d8_typed_action_completeness_covers_all_variants_and_never_stale() {
     r_in.uses_pop_reverified = 0;
     r_in.native_credential_present = true;
     r_in.introspection_status = "attested".to_string();
+    // SB-28: the label is also capped by the kernel, so model its introspected capstone as satisfied.
+    r_in.set_claims_for_test(with_claims(&r_in, |k| {
+        k.complete_introspected = ClaimDecision::Satisfied
+    }));
     check(
         &r_in,
         ActionCompleteness::AttestedCompleteOverIntrospectedSurface,
@@ -11241,6 +11251,11 @@ fn introspected_capstone_report() -> VerifyReport {
     r.taxonomy_status = "validated".to_string();
     r.broker_trust = "sequence_verified".to_string();
     r.attestation_status = "attested_claims".to_string();
+    // SB-28: the label is also capped by the claim kernel. This helper synthesizes predicates the kernel
+    // never saw, so model the kernel's matching capstone claim as one more required predicate.
+    r.set_claims_for_test(with_claims(&r, |c| {
+        c.complete_introspected = ClaimDecision::Satisfied
+    }));
     r
 }
 
@@ -13086,6 +13101,11 @@ fn federation_capstone_report() -> VerifyReport {
     r.attestation_status = "attested_claims".to_string();
     r.unmatched_violation = 0;
     r.unmatched_pending = 0;
+    // SB-28: the label is also capped by the claim kernel. This helper synthesizes predicates the kernel
+    // never saw, so model the kernel's matching capstone claim as one more required predicate.
+    r.set_claims_for_test(with_claims(&r, |c| {
+        c.complete_brokered = ClaimDecision::Satisfied
+    }));
     r
 }
 
@@ -16360,4 +16380,48 @@ fn temporal_merkle_v2_rejects_cutoff_beyond_watermark() {
     );
     assert_ne!(row.ordering, "proven_before");
     assert_ne!(row.historical, ClaimDecision::Satisfied);
+}
+
+fn with_claims(r: &VerifyReport, f: impl FnOnce(&mut ClaimResults)) -> ClaimResults {
+    let mut c = r.claims();
+    f(&mut c);
+    c
+}
+
+// SB-28: a Level-3 label is never stronger than the claim kernel. With every conjunct of the legacy
+// conjunction true, a kernel that does not satisfy the matching capstone claim downgrades the label.
+#[test]
+fn action_completeness_label_is_capped_by_the_kernel() {
+    for decision in [ClaimDecision::Insufficient, ClaimDecision::Refuted] {
+        let mut c = capstone_report();
+        assert_eq!(
+            c.action_completeness(),
+            ActionCompleteness::AttestedCompleteOverBrokeredSurface
+        );
+        c.set_claims_for_test(with_claims(&c, |k| k.complete_brokered = decision));
+        assert_eq!(
+            c.action_completeness(),
+            ActionCompleteness::ClaimedOverManifest,
+            "brokered label with kernel {decision:?}"
+        );
+        // the other surface's claim is irrelevant to the brokered label
+        let mut c = capstone_report();
+        c.set_claims_for_test(with_claims(&c, |k| k.complete_introspected = decision));
+        assert_eq!(
+            c.action_completeness(),
+            ActionCompleteness::AttestedCompleteOverBrokeredSurface
+        );
+
+        let mut i = introspected_capstone_report();
+        assert_eq!(
+            i.action_completeness(),
+            ActionCompleteness::AttestedCompleteOverIntrospectedSurface
+        );
+        i.set_claims_for_test(with_claims(&i, |k| k.complete_introspected = decision));
+        assert_eq!(
+            i.action_completeness(),
+            ActionCompleteness::ClaimedOverManifest,
+            "introspected label with kernel {decision:?}"
+        );
+    }
 }

@@ -24,6 +24,9 @@ std = ["dep:getrandom"]
 rfc3161 = ["dep:cms", "dep:x509-cert", "dep:der", "dep:spki", "dep:const-oid", "dep:p256", "dep:p384", "dep:ecdsa", "dep:signature"]
 # Exposes the in-Rust mini-TSA token builder (rfc3161::make_test_token) for fixtures/tests.
 test-tsa = ["rfc3161"]
+# Exposes VerifyReport::set_claims_for_test so adversarial tests can model the claim kernel on a
+# synthesized report. Enabled only through the self dev-dependency below; never in a shipped build.
+test-claims = []
 
 [dependencies]
 sha2 = "0.10"
@@ -45,6 +48,8 @@ p384 = { version = "0.13", features = ["ecdsa", "pkcs8"], optional = true }
 
 [dev-dependencies]
 ed25519-dalek = "2"
+# Self dev-dependency: turns on `test-claims` for this crate's tests only.
+averin-decision-core = { path = ".", features = ["test-claims"] }
 
 # `cfg(kani)` gates the bounded-proof harnesses driven by formal/run-kani.sh.
 [lints.rust]

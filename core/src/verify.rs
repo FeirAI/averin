@@ -36,11 +36,12 @@ pub use temporal::{
     REVOCATION_LIST_V2_DOMAIN, REVOCATION_LIST_V2_FORMAT,
 };
 use temporal::{GrantRevocationAcc, OrderEv, ProofV2};
+pub use verdict::{
+    claim_verdict, ClaimDecision, ClaimPolicy, ClaimResults, ClaimVerdict, RequestedClaim,
+    RevocationRequirement,
+};
 use verdict::{
     AnchoredCheckpoint, CapstoneFacts, HistoricalFacts, PinnedRecordSeal, ValidatedFacts,
-};
-pub use verdict::{
-    ClaimDecision, ClaimPolicy, ClaimResults, RequestedClaim, RevocationRequirement,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +121,11 @@ impl ActionCompleteness {
     /// `attested_complete_over_introspected_surface` over a PURELY-INTROSPECTED native surface; a MIXED
     /// native+PoP bundle reaches NEITHER label (it is `claimed_over_manifest`), keeping each label's MF1
     /// meaning crisp.
+    ///
+    /// SB-28: the conjunction above is NOT the whole claim. It lacks the kernel's authorized and
+    /// temporal obligations, so the label is additionally capped by the kernel: a granted label needs
+    /// `claims.complete_brokered` (or `complete_introspected`) satisfied, else it is
+    /// `claimed_over_manifest`. The label is never stronger than the kernel.
     pub fn of(r: &VerifyReport) -> Self {
         Self::of_with_integrity(r, r.ok, r.broker_trust == "sequence_verified")
     }
@@ -128,6 +134,34 @@ impl ActionCompleteness {
     // also includes diagnostics for malformed optional attachments; deleting such an attachment
     // may change `ok` but cannot create proof of a stronger claim.
     fn of_with_integrity(
+        r: &VerifyReport,
+        integrity: bool,
+        broker_sequence_verified: bool,
+    ) -> Self {
+        let label = Self::of_conjunction_with_integrity(r, integrity, broker_sequence_verified);
+        // SB-28: a Level-3 label is never stronger than the claim kernel. The conjunction below
+        // lacks the kernel's authorized and temporal obligations (revocation readiness, anchored
+        // latest checkpoint, pinned record seals, valid uses), so a granted label also needs the
+        // kernel's matching capstone claim satisfied. A downgrade lands on `claimed_over_manifest`.
+        let kernel_ok = match label {
+            ActionCompleteness::AttestedCompleteOverBrokeredSurface => {
+                r.claims.complete_brokered == ClaimDecision::Satisfied
+            }
+            ActionCompleteness::AttestedCompleteOverIntrospectedSurface => {
+                r.claims.complete_introspected == ClaimDecision::Satisfied
+            }
+            _ => true,
+        };
+        if kernel_ok {
+            label
+        } else {
+            ActionCompleteness::ClaimedOverManifest
+        }
+    }
+
+    /// The bare conjunction, without the kernel cap. Kept separate so tests can report where the
+    /// old label was stronger than the kernel.
+    fn of_conjunction_with_integrity(
         r: &VerifyReport,
         integrity: bool,
         broker_sequence_verified: bool,
@@ -484,6 +518,14 @@ impl VerifyReport {
     /// `action_completeness` JSON key serializes this; see [`ActionCompleteness::of`] for the conjunction.
     pub fn action_completeness(&self) -> ActionCompleteness {
         ActionCompleteness::of(self)
+    }
+
+    /// Test-only: replace the kernel's claims on a synthesized report (feature `test-claims`, enabled
+    /// by the crate's self dev-dependency, never in a shipped build).
+    #[cfg(feature = "test-claims")]
+    #[doc(hidden)]
+    pub fn set_claims_for_test(&mut self, claims: ClaimResults) {
+        self.claims = claims;
     }
 
     pub fn claims(&self) -> ClaimResults {

@@ -552,7 +552,7 @@ Key fields:
 | `grant_accountability` | string | `not_applicable` / `incomplete` / `complete` (Tier-A). |
 | `broker_trust` | string | `assumed` / `sequence_verified`. |
 | `uses_matched`, `uses_pop_reverified`, `unmatched_violation`, `unmatched_pending`, `grants_unused` | int | Tier-B join. |
-| `action_completeness` | string | `not_claimed` / `claimed_over_manifest` / `attested_complete_over_brokered_surface` / `attested_complete_over_introspected_surface`. |
+| `action_completeness` | string | `not_claimed` / `claimed_over_manifest` / `attested_complete_over_brokered_surface` / `attested_complete_over_introspected_surface`. A capstone label is never stronger than the claim kernel: it additionally needs `claims.complete_brokered` (or `claims.complete_introspected`) to be `satisfied`, otherwise it is `claimed_over_manifest`. Read `claims.*` for the authoritative decision. |
 | `resource_trust` | string | Always `assumed_truthful` (the irreducible resource-TCB conditional, MF1). |
 | `cosig_status`, `delegation_status`, `taxonomy_status`, `attestation_status`, `revocation_status`, `revocation_merkle_status`, `introspection_status`, `federation_status` | string | Mode gates: `absent` / `unevaluated` (no key pinned) → an evaluated verdict when the role's key set is pinned. |
 | `issues` | []string | Human-readable violations (omission/fork/tamper/role-overlap/…). |
