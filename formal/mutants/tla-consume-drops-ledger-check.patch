@@ -1,0 +1,14 @@
+Mutant: Consume no longer refuses a key already in the ledger, so a live key can be consumed again and ConsumeLedger_safe.cfg must find an invariant violated.
+
+diff --git a/formal/tla/ConsumeLedger.tla b/formal/tla/ConsumeLedger.tla
+index 1adf734..9785fd4 100644
+--- a/formal/tla/ConsumeLedger.tla
++++ b/formal/tla/ConsumeLedger.tla
+@@ -53,7 +53,6 @@ InLedger(k) == \E e \in ledger : e[1] = k
+ Consume(i, k) ==
+   /\ pc[i] \in {"idle", "done"}
+   /\ clock <= MaxTTL
+-  /\ ~InLedger(k)
+   /\ ledger' = ledger \cup {<<k, clock>>}
+   /\ pc' = [pc EXCEPT ![i] = "consumed"]
+   /\ key' = [key EXCEPT ![i] = k]

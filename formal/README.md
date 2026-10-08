@@ -53,7 +53,7 @@ green run of the claim's `gates`) and `scheduled_evidence_run` (the same for `sc
 |---|---|---|---|
 | Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every message a key signs and every tagged or verifier-recomputed preimage (catalogue includes JSON challenges, capability tokens, raw keys, Merkle nodes, the RFC 3161 imprint string and server id derivations; untagged server-local digests are listed as out of scope), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
 | Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | run by CI (pull requests, except the string family, which runs weekly): base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order (5 of 5 harnesses) and transitive; extended set: base64url tail and chunk canonicality (per chunk), the strict UTF-16 decoder against std, the integer round trip over [-99,999, 99,999], canonical numeric spelling (61 of 61 shards), and the string escape round trip exhaustively over its exact 17,031-case domain (17,031 of 17,031). `parse_never_panics` is not verified (superseded by the Lean parser totality theorem). See "Kani" below | `bash formal/run-kani.sh [--extended]` |
-| Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log (`GrantLog.tla`, including `GrantLog_fixed`, models a superseded design, not the shipped one; the current fence protocol is `GrantRecovery.tla`), consume-before-act ledger (a superseded consume; `ConsumeLedger_tenant_safe` is vacuous: no consume is reachable), and two-replica project transactions with checkpoints, ambiguous commits, crash/restart, pending grants and revocations (`ProjectTx_operational_safe` holds by definition) | `bash formal/tla/run-tlc.sh` |
+| Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log (`GrantLog.tla`, including `GrantLog_fixed`, models a superseded design, not the shipped one; the current fence protocol is `GrantRecovery.tla`), consume-before-act ledger (a superseded consume), and two-replica project transactions with checkpoints, ambiguous commits, crash/restart, pending grants and revocations; models of designs with no trace link to the Go code. `run-tlc.sh` pins the checked names of every configuration and requires a reachability witness for every passing one | `bash formal/tla/run-tlc.sh` |
 | Production refinement (plan 012) | Charon + Aeneas + Lean 4.31 (`production/`, `run-production-refinement.sh`) | the production seal core (serializer, LP framing, `sha256:` digest string, record/checkpoint preimages and hashes, signature message) is extracted from `core/src` and proved to be the model's `ser`/`lp`/`Family.msg`/`recordHashOf`; the model's seal theorems are applied to it. The verifier's claim kernel (`verify::verdict::decide_claims`) is extracted and proved to return the model's `decideClaim` for every claim, for every evidence state its checked facts correspond to; the verdict model's support-erasure, claim-order, capstone and historical theorems are transported to it. The production RCP parser (`CanonValue::parse`, via `parse_typed`/`parse_document`) is extracted and proved to return for every input of any length (`Refinement.Parse.parse_document_total`: no panic, overflow or out-of-bounds index, and termination), under the hypothesis that NFC's outputs are representable Rust strings, in Aeneas' `std` model (capacity overflow, allocation failure and stack depth not modelled). Axioms: standard + NFC + SHA-256 as arbitrary functions for the seal and parser theorems; the verdict refinement uses only the standard axioms (enforced per declaration by `ProductionAudit.lean`). Seal theorems are partial correctness | `bash formal/run-production-refinement.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
 | Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | 48 known drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
@@ -616,18 +616,24 @@ these bounded claims; none makes an unverified Kani harness verified.
 ## TLA+ (server protocols)
 
 **What the models are evidence for.** Two of the four specs model server designs that have since
-been replaced, and two passing configurations check nothing:
+been replaced, and no model has a trace link to the Go code:
 
-- `GrantLog.tla` (14 configurations) models the single-process, age-based `broker_seq` recovery
+- `GrantLog.tla` (14 configurations and 6 witnesses) models the single-process, age-based `broker_seq` recovery
   design. The current fence protocol is modelled separately in `GrantRecovery.tla`.
-- `ConsumeLedger.tla` (6 configurations) models the original `pgledger` consume. `pgledger` now
+- `ConsumeLedger.tla` (6 configurations and 3 witnesses) models the original `pgledger` consume. `pgledger` now
   only sweeps; the current consume (`server/internal/store/ledger_postgres.go`: transaction-bound
   nonce and jti keys, partial release, the ambiguous-commit rule for release) is not modelled.
-- `ConsumeLedger_tenant_safe.cfg` is vacuous: no consume is reachable in any of its states, so
-  `TenantIsolation` holds trivially.
-- `ProjectTx_operational_safe.cfg` holds by definition: with `Authoritative = TRUE` the actions
-  cannot set `badUse` or `badFinalize`, so it passes whatever the project guard does (also with
-  `Serialize = FALSE`). It is not evidence for the revocation or pending-grant claims.
+- `ConsumeLedger_tenant_safe.cfg` used to pass vacuously: with `LegacyPresent = TRUE` no consume
+  is reachable inside the capability lifetime, so `TenantIsolation` held trivially. It now sets
+  `LegacyPresent = FALSE` (an old writer may still act once) and two witnesses show the consume
+  path, the isolation antecedent and the guarded legacy purge are reachable. The legacy-present
+  case is still covered by the `ConsumeLedger_tenant_unsafe.cfg` counterexample.
+- The old single-step `Use` and `Finalize` actions of `ProjectTx.tla` hold `NoRevokedUse` and
+  `NoGhostFinalize` by definition when `Authoritative = TRUE`. `ProjectTx_operational_safe.cfg` now
+  checks `NoRevokedUse` against `GuardedUseBegin`/`GuardedUseEnd` (read the authoritative state and
+  act while holding the project guard), and `ProjectTx_operational_unserialized.cfg` shows the
+  race when the guard is off. `NoGhostFinalize` is not checked in any passing configuration: it
+  is still definitional, because the model has no guard-taking finalize.
 
 A passing configuration of a superseded model says nothing about current code. The counterexample
 configurations stay useful as the record of why each design changed, and CI (`formal-tla`) still
@@ -713,14 +719,29 @@ TLC finds `NoFrontierFork` and `NoCheckpointFork` counterexamples. Its separate
 operational exploration treats revoke/use and pending/finalize as atomic project
 transactions, then shows that consulting a stale replica cache violates
 `NoRevokedUse` or `NoGhostFinalize`. The safe configurations check the named
-safety invariants; the operational safe configuration does so only by definition (see above). The split avoids a product-state explosion; it does not
+safety invariants; the operational safe configuration checks the guarded use only (see above). The split avoids a product-state explosion; it does not
 establish liveness, model SQL error handling, or prove code refinement. Tests
 with independent PostgreSQL pools exercise the corresponding transaction order.
 
 `tla/run-tlc.sh` runs every configuration and checks its **expected** outcome. Each configuration
-marked pass must pass (some model superseded designs and two check nothing, see "What the models
-are evidence for" above), and each unsafe variant must still produce the counterexample named above. TLC is
+marked pass must pass (some model superseded designs, see "What the models are evidence for"
+above), and each unsafe variant must still produce the counterexample named above. TLC is
 pinned to the immutable `v1.7.4` release and verified by sha256.
+
+Two guards stop a passing result from meaning less than it looks:
+
+- **Pins.** TLC prints "No error has been found" for a configuration that checks nothing, so
+  `run-tlc.sh` fixes, per configuration, the `SPECIFICATION` and the exact `INVARIANT` and
+  `PROPERTY` names it must declare (`pin_of`). Deleting an invariant from a configuration fails
+  the gate before TLC runs. A new configuration needs a pin, and a configuration file that no
+  check line names fails too.
+- **Reachability witnesses** (the TLA+ analogue of `kani::cover`). Every passing configuration
+  names, in `witnesses_of`, companion `*_witness_*.cfg` files with the same constants and
+  specification but a single `W_` invariant that asserts an interesting state is never reached
+  (a void is anchored, both replicas record, a guarded use completes, and so on). Each witness
+  must be violated, so a model whose guarded actions cannot fire fails the gate. A witness is a
+  human choice of "interesting": a weak witness leaves a weak check. The static part of both
+  guards runs without Java: `TLC_STATIC_ONLY=1 bash formal/tla/run-tlc.sh`.
 
 ## Tool choice: why not K, and why not a separate Z3 layer
 

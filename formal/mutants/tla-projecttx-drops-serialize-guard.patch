@@ -1,12 +1,12 @@
 Mutant: the project serialization guard is dropped (CanEnter always true), so ProjectTx_safe.cfg must find a frontier fork.
 
 diff --git a/formal/tla/ProjectTx.tla b/formal/tla/ProjectTx.tla
-index a7582e1..f7fd51c 100644
+index 2d2217f..eb0af38 100644
 --- a/formal/tla/ProjectTx.tla
 +++ b/formal/tla/ProjectTx.tla
-@@ -15,7 +15,7 @@ vars == <<records, phase, snap, checkpoints, cpPhase, cpSnap, cpSeq,
-           guard, revoked, cacheRevoked, useDone, badUse, pending,
-           cachePending, prepared, finalized, badFinalize, alive, crashed, anchors>>
+@@ -22,7 +22,7 @@ vars == <<records, phase, snap, checkpoints, cpPhase, cpSnap, cpSeq,
+           cachePending, prepared, finalized, badFinalize, alive, crashed, anchors,
+           usePhase, useSeen>>
  Free == 0
 -CanEnter == ~Serialize \/ guard = Free
 +CanEnter == TRUE

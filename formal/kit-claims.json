@@ -172,6 +172,38 @@
     "surface-label-drops-kernel-and": {
       "tier": "fast",
       "claim": "action-completeness-capped-by-kernel"
+    },
+    "tla-pass-cfg-drops-invariant": {
+      "tier": "fast",
+      "claim": "tla-gate-pins-and-witnesses"
+    },
+    "tla-tenant-safe-vacuous-again": {
+      "tier": "fast",
+      "claim": "tla-gate-pins-and-witnesses"
+    },
+    "tla-consume-tenant-consume-unreachable": {
+      "tier": "full",
+      "claim": "tla-consume-ledger-model"
+    },
+    "tla-consume-drops-ledger-check": {
+      "tier": "full",
+      "claim": "tla-consume-ledger-model"
+    },
+    "tla-grantrecovery-void-beside-landed-grant": {
+      "tier": "full",
+      "claim": "tla-grantrecovery-model"
+    },
+    "tla-grantlog-checkpoint-not-failclosed": {
+      "tier": "full",
+      "claim": "tla-grantlog-model"
+    },
+    "tla-projecttx-guarded-use-unreachable": {
+      "tier": "full",
+      "claim": "tla-projecttx-model"
+    },
+    "tla-projecttx-anchor-unreachable": {
+      "tier": "full",
+      "claim": "tla-projecttx-model"
     }
   },
   "claims": [
@@ -531,7 +563,7 @@
     {
       "id": "tla-projecttx-model",
       "$comment": "legacy register: resource-truth-and-project-serialization",
-      "statement": "Within the finite constants of the configurations (two replicas), TLC finds no violation of NoFrontierFork, NoCheckpointFork and NoStaleCheckpoint in ProjectTx_safe.cfg, and the witness configurations (unserialized, checkpoint_fork, stale_cache, pending_cache) still produce their expected counterexamples, so the model keeps showing the bugs the serialization guard is there to prevent.",
+      "statement": "Within the finite constants of the configurations (two replicas), TLC finds no violation of NoFrontierFork, NoCheckpointFork and NoStaleCheckpoint in ProjectTx_safe.cfg, and none of NoRevokedUse in ProjectTx_operational_safe.cfg, where a use takes the project guard, reads the authoritative revocation state and acts while holding the guard. The witness configurations (unserialized, checkpoint_fork, stale_cache, pending_cache, operational_unserialized) still produce their expected counterexamples, so the model keeps showing the bugs the guard is there to prevent, and reachability witnesses show that two records, an attached anchor, a completed guarded use and a held guard are all reachable in the passing models.",
       "method": "tla",
       "artifacts": [
         "formal/tla/run-tlc.sh",
@@ -539,7 +571,9 @@
         "formal/tla/ProjectTx_unserialized.cfg",
         "formal/tla/ProjectTx_checkpoint_fork.cfg",
         "formal/tla/ProjectTx_stale_cache.cfg",
-        "formal/tla/ProjectTx_pending_cache.cfg"
+        "formal/tla/ProjectTx_pending_cache.cfg",
+        "formal/tla/ProjectTx_operational_safe.cfg",
+        "formal/tla/ProjectTx_operational_unserialized.cfg"
       ],
       "gates": [
         "formal-tla",
@@ -550,13 +584,186 @@
         {
           "path": "formal/tla/ProjectTx.tla",
           "symbol": "*",
-          "sha256": "09a8e1a49f85c9a2aa9d1babef55a762cf3d706bffdad7b9bbe4f0c9f191155f"
+          "sha256": "b5ab39e746f8bf136e5275cc86a41c00e5ae1ca6def3e209636bb0a3a462f906"
+        },
+        {
+          "path": "formal/tla/ProjectTx_operational_safe.cfg",
+          "symbol": "*",
+          "sha256": "27180ec9b68c698879e824e85652a3c10576b76885fa73d0db0d10cdfbfb9e78"
         }
       ],
       "mutants": [
-        "tla-projecttx-drops-serialize-guard"
+        "tla-projecttx-drops-serialize-guard",
+        "tla-projecttx-guarded-use-unreachable",
+        "tla-projecttx-anchor-unreachable"
       ],
-      "does_not_establish": "Model-level only: it is not bound to the Go or Postgres code. The bounds are finite (two replicas, small constants), so it says nothing about larger configurations. ProjectTx_operational_safe.cfg holds by definition (Authoritative = TRUE makes badUse and badFinalize unreachable) and is not counted as evidence. GrantLog.tla and ConsumeLedger.tla model superseded designs and are not registered. TLC and the Java runtime are trusted."
+      "does_not_establish": "Model-level only: it is not bound to the Go or Postgres code. The bounds are finite (two replicas, small constants), so it says nothing about larger configurations. NoGhostFinalize is not checked in any passing configuration: with Authoritative = TRUE it holds by definition, and the model has no guard-taking finalize. The guarded use models one design (read and act under the guard, revoke refused while the guard is held); it does not show the implementation does that. TLC and the Java runtime are trusted."
+    },
+    {
+      "id": "tla-consume-ledger-model",
+      "$comment": "legacy register: consume-ledger-model",
+      "statement": "Within the finite constants of the configurations, TLC finds no violation of AtMostOncePerKey and InFlightRecorded in ConsumeLedger_safe.cfg (retention at least the capability lifetime), and none of TenantAtMostOnce or TenantIsolation in ConsumeLedger_tenant_safe.cfg, where an old writer may act once and the legacy exclusion is removed only after a full capability lifetime. The counterexample configurations (short retention, premature legacy removal) still fail as expected, and reachability witnesses show that every use key can be spent, that TenantIsolation's antecedent holds and that the guarded legacy purge fires.",
+      "method": "tla",
+      "artifacts": [
+        "formal/tla/ConsumeLedger.tla",
+        "formal/tla/run-tlc.sh",
+        "formal/tla/ConsumeLedger_safe.cfg",
+        "formal/tla/ConsumeLedger_tenant_safe.cfg",
+        "formal/tla/ConsumeLedger_tenant_unsafe.cfg",
+        "formal/tla/ConsumeLedger_short_retention.cfg",
+        "formal/tla/ConsumeLedger_short_retention_replay.cfg"
+      ],
+      "gates": [
+        "formal-tla",
+        "formal-nightly"
+      ],
+      "detector": "TLC_ONLY=ConsumeLedger.tla bash formal/tla/run-tlc.sh",
+      "covers": [
+        {
+          "path": "formal/tla/ConsumeLedger.tla",
+          "symbol": "*",
+          "sha256": "56014c722713a6c1a5e6535560c7231395a8fa13d7496f32060bc4fc743ac7e9"
+        },
+        {
+          "path": "formal/tla/ConsumeLedger_safe.cfg",
+          "symbol": "*",
+          "sha256": "926925adb6198f85ff7d13b4225de1e0c61a889f05d2f11ef34f2cfacb2d4152"
+        }
+      ],
+      "mutants": [
+        "tla-consume-tenant-consume-unreachable",
+        "tla-consume-drops-ledger-check"
+      ],
+      "does_not_establish": "This models the SUPERSEDED pgledger consume (pgledger now only sweeps). The current consume in server/internal/store/ledger_postgres.go (transaction-bound keys, partial release, the ambiguous-commit rule) is not modelled, and the model has no trace link to any Go code, so a passing result says nothing about current code. The bounds are finite (two instances, two projects, small clock). The earlier ConsumeLedger_tenant_safe.cfg passed vacuously (no consume was reachable); it was changed and now has witnesses. TenantIsolation checks the consume guard only: with the current guard it follows from the guard's definition, and it fails only if P2's consume guard comes to depend on P1's claim (now that its antecedent is reachable). The project isolation counterexample is ConsumeLedger_tenant_isolation.cfg. TLC and the Java runtime are trusted."
+    },
+    {
+      "id": "tla-grantrecovery-model",
+      "$comment": "legacy register: grant-recovery-model",
+      "statement": "Within the finite constants of GrantRecovery_safe.cfg, TLC finds no violation of TypeOK, NoDuplicateSeq, AnchoredGapless, NoLateGrant, TerminalHasWinner and TerminalOnceFenced and no failure of the liveness property CheckpointRecovers under the stated fairness; with an old writer allowed (GrantRecovery_old_writer.cfg) it finds a duplicate seq. Reachability witnesses show that both terminal paths (recorded and voided) are reachable and anchor.",
+      "method": "tla",
+      "artifacts": [
+        "formal/tla/GrantRecovery.tla",
+        "formal/tla/run-tlc.sh",
+        "formal/tla/GrantRecovery_safe.cfg",
+        "formal/tla/GrantRecovery_old_writer.cfg"
+      ],
+      "gates": [
+        "formal-tla",
+        "formal-nightly"
+      ],
+      "detector": "TLC_ONLY=GrantRecovery.tla bash formal/tla/run-tlc.sh",
+      "covers": [
+        {
+          "path": "formal/tla/GrantRecovery.tla",
+          "symbol": "*",
+          "sha256": "c99ccf9133cbbd962d52bc089a17a36dd4d6343e6ba005bf28d8701f66857200"
+        },
+        {
+          "path": "formal/tla/GrantRecovery_safe.cfg",
+          "symbol": "*",
+          "sha256": "f0ff3ec1066f45ab8e37e19793b10ff9c0206935516b0e0f0f808c08b8628683"
+        }
+      ],
+      "mutants": [
+        "tla-grantrecovery-void-beside-landed-grant"
+      ],
+      "does_not_establish": "A model of the recovery design for one reservation, with no trace link to the Go server or Postgres code. Liveness holds only under the stated strong and weak fairness assumptions and excludes permanent database failure. The deployment barrier that forbids an old writer is an assumption of the safe configuration, not something the model enforces. TLC and the Java runtime are trusted."
+    },
+    {
+      "id": "tla-grantlog-model",
+      "$comment": "legacy register: grant-log-model",
+      "statement": "Within the finite constants of the configurations, TLC finds no violation of AnchoredGapless and NoDuplicateSeq in the GrantLog passing configurations, and its liveness configurations hold under the stated retry and fairness assumptions; the pre-fix configurations still produce their counterexamples. Reachability witnesses show that a void is anchored and that a gap is reachable.",
+      "method": "tla",
+      "artifacts": [
+        "formal/tla/GrantLog.tla",
+        "formal/tla/run-tlc.sh",
+        "formal/tla/GrantLog_fixed.cfg",
+        "formal/tla/GrantLog_void_age_only.cfg",
+        "formal/tla/GrantLog_void_index_only.cfg",
+        "formal/tla/GrantLog_fair_retry.cfg",
+        "formal/tla/GrantLog_fixed_live.cfg"
+      ],
+      "gates": [
+        "formal-tla",
+        "formal-nightly"
+      ],
+      "detector": "TLC_ONLY=GrantLog.tla TLC_CFG_RE='GrantLog_(fixed|void_age_only|void_index_only)(_witness_.*)?' bash formal/tla/run-tlc.sh",
+      "covers": [
+        {
+          "path": "formal/tla/GrantLog.tla",
+          "symbol": "*",
+          "sha256": "dd398b9c988db362d9d56478eacfc5c1b2e39b33270246e6cda00a240b83e20c"
+        },
+        {
+          "path": "formal/tla/GrantLog_fixed.cfg",
+          "symbol": "*",
+          "sha256": "0e3f86703b0bd44dc604e93d5312ac75ddb498687100d1ee73c95299163bf1c2"
+        },
+        {
+          "path": "formal/tla/GrantLog_void_age_only.cfg",
+          "symbol": "*",
+          "sha256": "456d262b7d42fffbfe33d47f9cae1e056d28d4e6a2e1a9180b7b268552dbdadc"
+        },
+        {
+          "path": "formal/tla/GrantLog_void_index_only.cfg",
+          "symbol": "*",
+          "sha256": "3dbd1b8fa91ad553b16981a0851a8d2c703808d6eccb6d4c3a4638d6ed5ff908"
+        },
+        {
+          "path": "formal/tla/GrantLog_fair_retry.cfg",
+          "symbol": "*",
+          "sha256": "48bd26322e7f58adceffbcb9eaf0ea821d9b5bfb2d0fccb8d9ca83b131412a32"
+        },
+        {
+          "path": "formal/tla/GrantLog_fixed_live.cfg",
+          "symbol": "*",
+          "sha256": "b1b49db361a9308d8af524fc04e341b3d16800ae18533cc4e6289543cd70a48d"
+        }
+      ],
+      "mutants": [
+        "tla-grantlog-checkpoint-not-failclosed"
+      ],
+      "does_not_establish": "This models the SUPERSEDED single-process, age-based broker_seq recovery. The shipped protocol is GrantRecovery.tla, and nothing here binds to current code. Liveness needs the stated retry and fairness assumptions, and the liveness configuration uses two grants because three are too slow for CI. The mutation detector reruns only the three safety pass configurations and their witnesses (the liveness and counterexample configurations run in formal-tla). TLC and the Java runtime are trusted."
+    },
+    {
+      "id": "tla-gate-pins-and-witnesses",
+      "$comment": "legacy register: tla-gate-pins-and-witnesses",
+      "statement": "formal/tla/run-tlc.sh fails when any configuration declares anything other than its pinned SPECIFICATION, INVARIANT and PROPERTY names, when a passing configuration has no reachability witness, when a witness differs from its passing configuration in anything but its invariant, and when a configuration file is not named by a check line. Each witness asserts an interesting state is never reached and must be violated, so a passing configuration whose guarded actions cannot fire fails the gate.",
+      "method": "tla",
+      "artifacts": [
+        "formal/tla/run-tlc.sh",
+        "formal/tla/ProjectTx_safe.cfg",
+        "formal/tla/ConsumeLedger_tenant_safe.cfg",
+        "formal/tla/ProjectTx_safe_witness_both_recorded.cfg",
+        "formal/tla/ConsumeLedger_tenant_safe_witness_isolation_antecedent.cfg"
+      ],
+      "gates": [
+        "formal-tla",
+        "formal-fast"
+      ],
+      "detector": "TLC_STATIC_ONLY=1 bash formal/tla/run-tlc.sh",
+      "covers": [
+        {
+          "path": "formal/tla/run-tlc.sh",
+          "symbol": "*",
+          "sha256": "a956d41aab620026f8bd678d6a0936334b369b7c1eaa7b1e40be3a8dd3b67704"
+        },
+        {
+          "path": "formal/tla/ProjectTx_safe.cfg",
+          "symbol": "*",
+          "sha256": "cf5b93b168b6cf37cfae54a2c8cf70f9151216eb0702c61b04870af244d44e8c"
+        },
+        {
+          "path": "formal/tla/ConsumeLedger_tenant_safe.cfg",
+          "symbol": "*",
+          "sha256": "2504cf1dd77a71a3d71d69589d6a53dc739b00d40de5fd9e8e63877a7e9533d2"
+        }
+      ],
+      "mutants": [
+        "tla-pass-cfg-drops-invariant",
+        "tla-tenant-safe-vacuous-again"
+      ],
+      "does_not_establish": "That a witness state is the interesting one: each witness is a human choice, and a pass configuration with a weak witness still passes. The static detector checks declarations only; that a witness is actually violated is checked by the TLC run in formal-tla and by the model-level mutants of the individual TLA+ claims. It says nothing about the models' fidelity to the code."
     },
     {
       "id": "seal-implies-verify-shape",

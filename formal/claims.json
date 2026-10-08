@@ -88,6 +88,36 @@
       "evidence_run": "37712087870"
     },
     {
+      "id": "consume-ledger-model",
+      "claim": "TLC checks bounded safety of ConsumeLedger, a model of the superseded pgledger consume and of the tenant migration (AtMostOncePerKey, InFlightRecorded, TenantAtMostOnce, TenantIsolation), with reachability witnesses that the consume path is reachable. The model binds to no current code: the current consume is in server/internal/store/ledger_postgres.go and is not modelled.",
+      "class": "bounded-model-check",
+      "targets": ["TLA+ model"],
+      "assumptions": ["finite instances, projects and clock", "retention at least the capability lifetime in the safe configuration"],
+      "sources": [{"file": "formal/tla/ConsumeLedger.tla", "symbol": "W_IsolationAntecedent"}],
+      "proofs": [{"file": "formal/tla/run-tlc.sh", "symbol": "ConsumeLedger_tenant_safe.cfg"}],
+      "gates": ["formal-tla"]
+    },
+    {
+      "id": "grant-recovery-model",
+      "claim": "TLC checks bounded safety and conditional liveness of GrantRecovery, a model of the fence and void recovery of one reservation, with reachability witnesses for both terminal paths. The model binds to no current code, and the deployment barrier against an old writer is an assumption of the safe configuration.",
+      "class": "bounded-model-check",
+      "targets": ["TLA+ model"],
+      "assumptions": ["one reservation", "weak fairness of database resolution and strong fairness of the fence", "no permanent database failure"],
+      "sources": [{"file": "formal/tla/GrantRecovery.tla", "symbol": "W_AnchoredVoid"}],
+      "proofs": [{"file": "formal/tla/run-tlc.sh", "symbol": "GrantRecovery_safe.cfg"}],
+      "gates": ["formal-tla"]
+    },
+    {
+      "id": "tla-gate-pins-and-witnesses",
+      "claim": "run-tlc.sh pins the SPECIFICATION and the INVARIANT and PROPERTY names of every TLA+ configuration, and requires a reachability witness (a W_ invariant that must be violated) for every passing configuration. This guards against a passing result that checks less than it appears to; it does not show that a witness is the interesting state or that a model matches the code.",
+      "class": "gate-hygiene",
+      "targets": ["TLA+ gate"],
+      "assumptions": ["TLC reports a violated invariant by name", "the pin table is reviewed when a configuration changes"],
+      "sources": [{"file": "formal/tla/run-tlc.sh", "symbol": "witnesses_of"}],
+      "proofs": [{"file": "formal/tla/run-tlc.sh", "symbol": "verify_pin"}],
+      "gates": ["formal-tla", "formal-fast"]
+    },
+    {
       "id": "postgres-void-ordering",
       "claim": "The three named API tests exercise void ordering and recovery against real Postgres 16; skips must fail the CI gate.",
       "class": "real-database-test",
@@ -100,7 +130,7 @@
     },
     {
       "id": "revocation-live-and-durable",
-      "claim": "With a shared Postgres project Store, an acknowledged revoke is committed before a later use checks revocation on any replica; restart does not restore an older admission view. This is tested behavior. The TLA+ configuration ProjectTx_operational_safe is not evidence for it: its invariants hold by definition (it also passes with the project guard turned off).",
+      "claim": "With a shared Postgres project Store, an acknowledged revoke is committed before a later use checks revocation on any replica; restart does not restore an older admission view. This is tested behavior. The TLA+ configuration ProjectTx_operational_safe models a guarded use over a finite design model and is not evidence for this tested behavior (no Postgres commit ordering is modelled).",
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "Postgres mode"],
       "assumptions": ["revocation enabled", "shared Postgres project Store", "all use and revoke paths obey WithProjectWrite"],
@@ -111,7 +141,7 @@
     },
     {
       "id": "pending-grant-durability",
-      "claim": "With a shared Postgres project Store, a committed prepare is visible to finalize on another replica and after issuer restart; retries read the durable pending row. This is tested behavior. The TLA+ configuration ProjectTx_operational_safe is not evidence for it: its invariants hold by definition (it also passes with the project guard turned off).",
+      "claim": "With a shared Postgres project Store, a committed prepare is visible to finalize on another replica and after issuer restart; retries read the durable pending row. This is tested behavior. The TLA+ configuration ProjectTx_operational_safe is not evidence for it: the model has no guard-taking finalize, and NoGhostFinalize holds there by definition, so it is not checked in any passing configuration.",
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "Postgres mode"],
       "assumptions": ["shared Postgres project Store", "prepare and finalize use WithProjectWrite", "pending expiry is checked from the authoritative row"],

@@ -149,8 +149,9 @@ definition in `formal/lean/Averin/`, re-prove it, regenerate `formal/oracle/expe
 oracle (CI rejects a hand-edited file), and add corpus rows to `formal/oracle/inputs.json` for any
 new family. The gate is doing its job when that happens: a proof about a format the code no
 longer uses is worthless. `run-tlc.sh` asserts *expected* outcomes. Each configuration marked pass must pass (some
-model superseded designs and two check nothing, see `formal/README.md`), and each pre-fix variant
-must still produce its counterexample. See
+model superseded designs, see `formal/README.md`), each pre-fix variant
+must still produce its counterexample, and each pass configuration's checked names are pinned and
+paired with a reachability witness that must be violated. See
 [`formal/README.md`](../../formal/README.md) for what each layer proves and what it does not.
 
 ## Lint & supply chain

@@ -94,10 +94,13 @@ informative only. The kit does not fetch run ids; `evidence_run` is optional.
 | `parser-differential-and-fuzz` | fuzz and differential | parser escape, literal, number and whitespace paths | Totality for all inputs (the Lean proof is stronger); input that is not valid UTF-8; allocation failure; stack depth |
 | `kani-encoder-harnesses` | Kani (nightly) | LP framing, base64url tail canonicality | Anything outside the harness bounds; the other Kani harnesses; not distinguishing an unwinding failure from a counterexample |
 | `lean-seal-model` | Lean (nightly) | the hand seal model in `Seal.lean` | That the model matches the Rust; SHA-256, Ed25519, honest signer and NFC are assumptions |
-| `tla-projecttx-model` | TLA+ (nightly, model level) | `ProjectTx.tla`, the project serialization model | Binding to the Go or Postgres code; larger constants; `ProjectTx_operational_safe` holds by definition; the superseded GrantLog and ConsumeLedger models |
+| `tla-projecttx-model` | TLA+ (nightly, model level) | `ProjectTx.tla`, the project serialization model, including a guard-taking use | Binding to the Go or Postgres code; larger constants; `NoGhostFinalize` in a passing configuration (it holds by definition) |
+| `tla-consume-ledger-model` | TLA+ (nightly, model level) | `ConsumeLedger.tla`, the SUPERSEDED pgledger consume and the tenant migration | The current consume in `ledger_postgres.go`; any Go code; larger constants |
+| `tla-grantrecovery-model` | TLA+ (nightly, model level) | `GrantRecovery.tla`, the fence and void recovery for one reservation | Binding to the Go or Postgres code; permanent database failure; the deployment barrier against an old writer (assumed) |
+| `tla-grantlog-model` | TLA+ (nightly, model level) | `GrantLog.tla`, the SUPERSEDED age-based recovery | The shipped recovery protocol; any current code |
+| `tla-gate-pins-and-witnesses` | TLA+ gate (every PR, static) | `run-tlc.sh`: pinned checked names per configuration, reachability witness per pass configuration | That a witness state is the interesting one; model fidelity to the code |
 | `seal-implies-verify-shape` | property test (fast) | `seal`, `check_sealed_shape`, `validate_record_shape` | Nested object shape; hash or signature validity; `seal_checkpoint` (no domain or canon_version pin yet); a defect class the finite generator does not build; producers the Go suite does not reach; `AVERIN_SEAL_SHAPE=shadow` seals unverifiable records on purpose; the doc-hidden `seal_unchecked_for_tests` bypass |
 
-Not yet in the register (still tracked in `formal/claims.json`): the other TLA+ models (GrantLog and
-ConsumeLedger model superseded designs; GrantRecovery is not registered yet), the
+Not yet in the register (still tracked in `formal/claims.json`): the
 Postgres-backed API tests, RFC 3161 target-specific tests, and the Charon/Aeneas production
 proofs. Each needs a mutant and a detector that can run in the kit's scratch tree first.

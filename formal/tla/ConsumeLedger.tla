@@ -2,8 +2,11 @@
 \* STATUS: a model of a SUPERSEDED consume. server/internal/pgledger now only sweeps; the current
 \* consume (server/internal/store/ledger_postgres.go: transaction-bound nonce and jti keys, partial
 \* release, and the ambiguous-commit rule for release) is not modelled. A passing configuration
-\* here says nothing about current code. ConsumeLedger_tenant_safe.cfg is vacuous: no consume is
-\* reachable in any of its states, so TenantIsolation holds trivially.
+\* here says nothing about current code. ConsumeLedger_tenant_safe.cfg used to be vacuous (it set
+\* LegacyPresent = TRUE, and with a legacy exclusion present no consume can happen inside the
+\* capability lifetime, so TenantIsolation held trivially). It now sets LegacyPresent = FALSE, where
+\* an old writer may still act once and consume is reachable; the W_ witnesses below, run by
+\* run-tlc.sh, fail the gate if that stops being true.
 (***************************************************************************)
 (* Consume-before-act (ADR 0003 R5): the resource gateway atomically       *)
 (* consumes a capability's use key (INSERT .. ON CONFLICT DO NOTHING in    *)
@@ -186,4 +189,19 @@ NoBothTenantsConsumed == ~({P1, P2} \subseteq tenantLedger)
 TenantIsolation ==
   (tenantPhase = "new" /\ ~tenantLegacy /\ tenantClock <= MaxTTL /\
    P1 \in tenantLedger /\ P2 \notin tenantLedger) => TenantCanConsume(P2)
+
+(* REACHABILITY WITNESSES (W_ prefix). Each asserts a state is NEVER reached; run-tlc.sh requires the
+   paired witness configuration to VIOLATE it, so a passing configuration whose guarded actions cannot
+   fire fails the gate. *)
+\* Every use key was acted on once (UseLimit reached), through Consume and Act.
+W_AllKeysSpent == ~(\A k \in Keys : acted[k] >= 1)
+\* The antecedent of TenantIsolation: P1 holds the nonce, P2 does not, and P2 could consume.
+W_IsolationAntecedent ==
+  ~(tenantPhase = "new" /\ ~tenantLegacy /\ tenantClock <= MaxTTL /\
+    P1 \in tenantLedger /\ P2 \notin tenantLedger)
+\* The legacy exclusion was removed after an old writer acted (the guarded purge fires). P1 acted
+\* with no new-path claim only through TenantOldAct, which sets tenantLegacy, so only TenantPurge
+\* reaches this state. (A version without "P1 \notin tenantLedger" was also reached through
+\* TenantConsume and TenantAct alone, with the purge disabled, so it witnessed nothing.)
+W_LegacyPurged == ~(tenantActed[P1] >= 1 /\ P1 \notin tenantLedger /\ ~tenantLegacy)
 =============================================================================
