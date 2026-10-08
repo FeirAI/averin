@@ -36,7 +36,21 @@ func kindOf(body string) string {
 	if i := strings.IndexAny(act, ":"); i > 0 {
 		act = act[:i]
 	}
-	return fmt.Sprintf("event_type=%s record_kind=%s action_family=%s", ev, rk, act)
+	// The producer site is told apart by authority.grant_type and authority.enforcement_point as well,
+	// so e.g. the native oauth-scope grant and the ID-JAG grant, or the introspection receipt and the
+	// use receipt, are separate families that must each be reached.
+	var gt, ep string
+	if a, ok := m["authority"].(map[string]any); ok {
+		gt, _ = a["grant_type"].(string)
+		ep, _ = a["enforcement_point"].(string)
+	}
+	var bk string
+	if x, ok := m["extensions"].(map[string]any); ok {
+		if b, ok := x["broker"].(map[string]any); ok {
+			bk, _ = b["kind"].(string)
+		}
+	}
+	return fmt.Sprintf("event_type=%s record_kind=%s action_family=%s grant_type=%s enforcement_point=%s broker_kind=%s", ev, rk, act, gt, ep, bk)
 }
 
 func TestMain(m *testing.M) {
@@ -72,11 +86,18 @@ func TestMain(m *testing.M) {
 			all = append(all, k)
 		}
 		sealObsMu.Unlock()
-		joined := strings.Join(all, "\n")
+		joined := strings.Join(all, "\n") + "\n"
 		for _, want := range []string{
-			"event_type=credential_grant ", "event_type=credential_grant_denied", "event_type=credential_grant_void",
-			"event_type=tool_call", "action_family=use_outcome", "event_type=decision", "event_type=handoff",
-			"event_type=spawn_child", "event_type=incomplete", "record_kind=budget-exhausted", "record_kind=chargeback-posted",
+			// One entry per producer site (kindOf adds authority and broker kind to the family).
+			"event_type=credential_grant record_kind= action_family=db.query grant_type=id-jag enforcement_point=credential_broker broker_kind=grant",
+			"event_type=credential_grant record_kind= action_family=db.query grant_type=oauth-scope enforcement_point=credential_broker broker_kind=grant",
+			"event_type=credential_grant_denied",
+			"broker_kind=grant_void",
+			"broker_kind=use_intent", "broker_kind=use_outcome", "broker_kind=use\n",
+			"broker_kind=introspection_transcript",
+			"event_type=decision record_kind= action_family=approve grant_type= enforcement_point=sdk",
+			"event_type=handoff", "event_type=spawn_child", "event_type=incomplete",
+			"record_kind=budget-exhausted", "record_kind=chargeback-posted",
 		} {
 			if !strings.Contains(joined, want) {
 				fmt.Fprintf(os.Stderr, "SB-29 conformance: the suite no longer seals any record of kind %q through the real core\n", want)

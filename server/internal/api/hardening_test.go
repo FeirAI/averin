@@ -93,3 +93,33 @@ func TestWithBrokerPanicsOnResourceKeyOverlapEvenResourceFirst(t *testing.T) {
 	}()
 	api.New(c, store.NewMem(), "k0").WithResource(rc, "orders-db").WithBroker(brokerSameAsResource)
 }
+
+// TestBatchRecordsAtomicOnUnknownTopLevelKey (SB-29): seal refuses an unknown top-level key, so the
+// batch pre-pass must refuse it too, before any earlier item is sealed and stored.
+func TestBatchRecordsAtomicOnUnknownTopLevelKey(t *testing.T) {
+	h := newServer(t).Routes()
+	batch := `[{"idempotency_key":"ok-1","project_id":"p1","session_id":"s1","action":"db.read"},` +
+		`{"idempotency_key":"ok-2","project_id":"p1","session_id":"s1","action":"db.write","ui_status":"approved"}]`
+	code, body := do(t, h, "POST", "/v2/records", batch)
+	if code != http.StatusBadRequest || !strings.Contains(body, "ui_status") {
+		t.Fatalf("a batch with an unknown top-level key must be 400 naming it, got %d: %s", code, body)
+	}
+	_, dag := do(t, h, "GET", "/v2/dag?project=p1&session=s1", "")
+	if strings.Contains(dag, "db.read") {
+		t.Fatalf("an earlier batch item must not persist when a later item has an unknown key; dag: %s", dag)
+	}
+}
+
+// TestRecordUnknownTopLevelKeyIs400 (SB-29): the single-record path refuses an unknown key with a 400,
+// and still accepts the keys ingest rewrites (input, output, rationale, idempotency_key).
+func TestRecordUnknownTopLevelKeyIs400(t *testing.T) {
+	h := newServer(t).Routes()
+	bad := `{"idempotency_key":"u-1","project_id":"p1","session_id":"s1","action":"db.read","ui_status":"approved"}`
+	if code, body := do(t, h, "POST", "/v2/records", bad); code != http.StatusBadRequest || !strings.Contains(body, "ui_status") {
+		t.Fatalf("unknown top-level key must be 400, got %d: %s", code, body)
+	}
+	ok := `{"idempotency_key":"u-2","project_id":"p1","session_id":"s1","action":"db.read","input":"q","output":"r","rationale":"why"}`
+	if code, body := do(t, h, "POST", "/v2/records", ok); code != http.StatusCreated && code != http.StatusOK {
+		t.Fatalf("input/output/rationale must still be accepted, got %d: %s", code, body)
+	}
+}

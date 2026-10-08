@@ -1375,6 +1375,21 @@ const maxRecordIDBytes = 256
 // must reject the WHOLE batch before any earlier item is sealed) so the two cannot diverge. It does NOT
 // mutate the record (the caller assigns record_id / normalizes authority after).
 func (s *Server) validateGenericRecordItem(rec map[string]any) error {
+	// SB-29: seal refuses an unknown top-level key, which would otherwise surface only at seal time,
+	// after earlier batch items are stored. Refuse it here so the batch stays all-or-nothing. The keys
+	// ingest removes or replaces before sealing are allowed. Skipped in shadow mode (rollback switch).
+	if sh, ok := s.core.(interface{ ShadowSealShape() bool }); !ok || !sh.ShadowSealShape() {
+		for k := range rec {
+			if _, ok := core.AllowedTopKeys[k]; ok {
+				continue
+			}
+			switch k {
+			case "idempotency_key", "input", "output", "rationale":
+				continue
+			}
+			return fmt.Errorf("unknown top-level field %q: a record carries only the closed schema key set (use extensions for custom fields)", k)
+		}
+	}
 	if stringField(rec, "project_id") == "" || stringField(rec, "session_id") == "" {
 		return fmt.Errorf("project_id and session_id are required")
 	}

@@ -72,6 +72,9 @@ func ParseSealShapeMode(raw string) (SealShapeMode, error) {
 // SetSealShapeMode selects enforce (default) or shadow for SealRecord. Call before serving.
 func (c *Core) SetSealShapeMode(m SealShapeMode) { c.shadow = m == SealShapeShadow }
 
+// ShadowSealShape reports whether this core is in AVERIN_SEAL_SHAPE=shadow mode.
+func (c *Core) ShadowSealShape() bool { return c.shadow }
+
 // SealShapeViolations is the process-wide count of bodies sealed in shadow mode although they
 // failed the shape, domain or canon_version check. Always 0 in enforce mode.
 func SealShapeViolations() int64 { return int64(C.averin_seal_shape_violations()) }

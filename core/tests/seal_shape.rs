@@ -93,6 +93,13 @@ fn check_implication(body: &CanonValue, what: &str) -> bool {
                 "seal accepted a body verify_sealed rejects ({what}): {}",
                 body.serialize()
             );
+            // The shipped path serializes the sealed record and verifiers parse it back.
+            let reparsed = CanonValue::parse(&sealed.serialize()).expect("sealed record reparses");
+            assert_eq!(
+                verify_sealed(&reparsed, &vk),
+                Ok(()),
+                "serialize/parse round trip of a sealed record fails verify_sealed ({what})"
+            );
             true
         }
         Err(_) => false,
@@ -179,4 +186,38 @@ fn shadow_mode_seals_a_bad_body_and_counts_it() {
     seal_with_mode(&body_with(&[]), &sk, SealShapeMode::Shadow).unwrap();
     assert_eq!(seal_shape_violations(), good_before);
     assert!(seal_with_mode(&bad, &sk, SealShapeMode::Enforce).is_err());
+}
+
+/// Mechanical guard: the doc-hidden `seal_unchecked_for_tests` bypass must not be called from
+/// production code (core/src), only defined there.
+#[test]
+fn seal_unchecked_for_tests_not_used_in_core_src() {
+    fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, hits);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let text = std::fs::read_to_string(&p).unwrap();
+                for (i, l) in text.lines().enumerate() {
+                    let t = l.trim_start();
+                    if l.contains("seal_unchecked_for_tests")
+                        && !t.starts_with("//")
+                        && !l.contains("fn seal_unchecked_for_tests")
+                    {
+                        hits.push(format!("{}:{}", p.display(), i + 1));
+                    }
+                }
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut hits,
+    );
+    assert!(
+        hits.is_empty(),
+        "seal_unchecked_for_tests used in production code: {hits:?}"
+    );
 }

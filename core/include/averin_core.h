@@ -56,8 +56,8 @@ char *averin_rcp_evidence_hash(const char *input);
 char *averin_seal_record(const char *body, const char *seed_hex);
 char *averin_seal_checkpoint(const char *body, const char *seed_hex);
 
-/* averin_seal_record with a shape mode. averin_seal_record (and shadow == 0) refuses a body that
- * verify_sealed would reject on top-level shape, domain or canon_version. Any other `shadow` value
+/* averin_seal_record with a shape mode. averin_seal_record (and every `shadow` value except 1)
+ * refuses a body that verify_sealed would reject on top-level shape, domain or canon_version. Exactly `shadow` == 1
  * seals such a body anyway and counts it. Rollback switch only: a record sealed in shadow mode is
  * rejected by every verifier. */
 char *averin_seal_record_mode(const char *body, const char *seed_hex, int shadow);

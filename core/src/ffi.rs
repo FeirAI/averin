@@ -223,8 +223,8 @@ pub unsafe extern "C" fn averin_seal_record(
     seal_impl(body, seed_hex, false, crate::record::SealShapeMode::Enforce)
 }
 
-/// [`averin_seal_record`] with an explicit shape mode: `shadow` 0 enforces (identical to
-/// `averin_seal_record`), any other value seals a body that fails the shape, domain or
+/// [`averin_seal_record`] with an explicit shape mode: every `shadow` value except exactly 1
+/// enforces (identical to `averin_seal_record`); exactly 1 seals a body that fails the shape, domain or
 /// canon_version check anyway and counts it (see `averin_seal_shape_violations`). Rollback switch
 /// only: such a record is rejected by every verifier.
 ///
@@ -236,10 +236,10 @@ pub unsafe extern "C" fn averin_seal_record_mode(
     seed_hex: *const c_char,
     shadow: c_int,
 ) -> *mut c_char {
-    let mode = if shadow == 0 {
-        crate::record::SealShapeMode::Enforce
-    } else {
+    let mode = if shadow == 1 {
         crate::record::SealShapeMode::Shadow
+    } else {
+        crate::record::SealShapeMode::Enforce
     };
     seal_impl(body, seed_hex, false, mode)
 }
@@ -764,6 +764,8 @@ mod tests {
             };
             assert!(take(averin_seal_record(cb.as_ptr(), cs.as_ptr())).contains("error"));
             assert!(take(averin_seal_record_mode(cb.as_ptr(), cs.as_ptr(), 0)).contains("error"));
+            assert!(take(averin_seal_record_mode(cb.as_ptr(), cs.as_ptr(), 2)).contains("error"));
+            assert!(take(averin_seal_record_mode(cb.as_ptr(), cs.as_ptr(), -1)).contains("error"));
             let before = averin_seal_shape_violations();
             let shadow = take(averin_seal_record_mode(cb.as_ptr(), cs.as_ptr(), 1));
             assert!(shadow.contains("\"sig\""), "{shadow}");
