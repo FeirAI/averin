@@ -266,6 +266,21 @@
           "path": "core/src/verify/verdict.rs",
           "symbol": "historical_claim",
           "sha256": "c70e58425a5f00692d7f757e919adb4adda700f2086b502b012dc222fd51fb92"
+        },
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "historical_adverse",
+          "sha256": "81a48ecb5bd918d81ccc82bbc6125bc2bd5a33949d852aea6fde04d97f776cae"
+        },
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "historical_ready",
+          "sha256": "e9eb0c594d13b5582955d75b650b9be73f58f8d7d0f5ca8f95fb830d21ee17a0"
+        },
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "decide_claims",
+          "sha256": "8d9b61d4f70d39174448c1a4d9129f996d4c5b8378a35ffc2ce392df79fc9fd4"
         }
       ],
       "mutants": [

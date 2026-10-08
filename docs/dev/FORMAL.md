@@ -32,11 +32,11 @@ claim says what its cheap detector checks, not what the whole proof program show
 2. Add the claim to `formal/kit-claims.json` with `"sha256": ""` in each cover.
 3. Write a mutant: change the covered code so the claim should be false, then
    `git diff -- <covered file> > formal/mutants/<id>.patch` and `git checkout -- <covered file>`.
-   The patch must apply with `git apply` (the legacy suite uses `patch`, which is more lenient;
-   m9, m11, m43 and m63 do not pass `git apply --check` and so cannot be used here yet).
+   The patch must apply with `git apply` (the legacy suite uses `patch`, which is more lenient,
+   so check a reused legacy patch with `git apply --check` first).
 4. Add the id to the `mutants` map with a `tier` (`fast` or `full`). Mutants that edit Lean
-   sources must be named `lean-*`; the legacy `formal/check-mutants.sh` skips those, since it
-   only knows Rust gates.
+   or TLA+ sources must be named `lean-*` or `tla-*`; the legacy `formal/check-mutants.sh` skips
+   those, since it only knows Rust gates (any other name is applied there too and would survive).
 5. `python3 scripts/formal/check_claims.py --claims formal/kit-claims.json --relock --symbol <path>:<symbol>`
    fills the empty hashes.
 6. Commit, then `python3 scripts/formal/check_mutants.py --claims formal/kit-claims.json --only <id>`
@@ -48,7 +48,9 @@ legacy suite on every pull request (`formal-production`), not here, because the 
 set up for the kit. m61, m62 and m64 are also killed by the native parser tests, so they are in this
 register under `parser-differential-and-fuzz`. m60 survives the native fuzz and differential tests
 (they only pass valid UTF-8 strings); only the totality proof kills it, so it is not in this register.
-m63 is not here yet because its patch does not pass `git apply --check`.
+m63 now applies with `git apply` but is not registered yet: it edits `parse_value`, which no kit
+claim covers. m42 and m43 (temporal) and the other Kani mutants (m2, m3, m11 to m13, m22 to m25) are not
+registered either; they stay in the legacy suite.
 
 ## Drift lock and relock policy
 
@@ -85,7 +87,7 @@ informative only. The kit does not fetch run ids; `evidence_run` is optional.
 |---|---|---|---|
 | `preimage-oracle-conformance` | differential vectors | authority, commitment and record preimages, taxonomy tag | Agreement outside the committed corpus; not a refinement proof; nothing about keys or verdicts |
 | `authority-v3-subject-digest-bound` | differential vectors | v3 authority preimage and subject digest | That the projection covers every semantic field; one vector only |
-| `verdict-differential-vs-model` | exhaustive corpus | capstone, revocation readiness, historical claim | States outside the corpus; that verify.rs computes the facts the kernel consumes |
+| `verdict-differential-vs-model` | exhaustive corpus | kernel entry `decide_claims`, capstone, revocation readiness, historical claim and its two helpers | States outside the corpus; that verify.rs computes the facts the kernel consumes |
 | `temporal-revocation-ordering-tests` | test | classify, Merkle v2 proof check, snapshot evaluation | Inputs the tests do not build; example tests, not a proof |
 | `pop-intent-and-disclosure-regressions` | test | per-use checks, bundle verification | Bundle shapes the suite does not build; not a monotonicity proof |
 | `production-call-path-gate` | textual test | signature verify, content hash, bundle verification | Correctness of the extracted code; anything beyond the call sites and cfg forms it scans |

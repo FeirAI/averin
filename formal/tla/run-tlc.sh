@@ -19,9 +19,11 @@ fi
 if command -v sha256sum >/dev/null 2>&1; then sha256=(sha256sum); else sha256=(shasum -a 256); fi
 echo "${TLA_SHA256}  ${JAR}" | "${sha256[@]}" -c --quiet - || { echo "tla2tools.jar checksum mismatch" >&2; exit 1; }
 
+checked=0
 check() { # spec config expected: pass | <invariant or temporal property that must be violated>
   # TLC_ONLY=ProjectTx.tla runs only the configurations of that spec (used by the kit register).
   if [ -n "${TLC_ONLY:-}" ] && [ "$1" != "$TLC_ONLY" ]; then return 0; fi
+  checked=$((checked + 1))
   local out
   out="$(java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -cleanup \
     -config "$2" "$1" 2>&1 || true)"
@@ -84,3 +86,5 @@ check ProjectTx.tla ProjectTx_pending_cache.cfg NoGhostFinalize    # a cached ex
 check ProjectTx.tla ProjectTx_safe.cfg pass                         # DB guard, ambiguity, crash and post-commit anchor
 check ProjectTx.tla ProjectTx_operational_safe.cfg pass             # HOLDS BY DEFINITION: Authoritative = TRUE leaves badUse/badFinalize unreachable
 rm -rf states
+# A TLC_ONLY that names no spec above would otherwise check nothing and still exit 0.
+if [ "$checked" -eq 0 ]; then echo "FAIL: no configuration was checked (TLC_ONLY=${TLC_ONLY:-})" >&2; exit 1; fi
