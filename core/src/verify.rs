@@ -25,8 +25,10 @@ use crate::sign::decode_pubkey;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod headline;
 mod temporal;
 mod verdict;
+pub use headline::{claim_verdict, ClaimVerdict};
 pub use temporal::{
     canonical_ts_millis, revocation_entry_v2, revocation_entry_v2_preimage, revocation_key_v2,
     revocation_key_v2_preimage, revocation_leaves_v2, revocation_merkle_root_v2,
@@ -120,14 +122,55 @@ impl ActionCompleteness {
     /// `attested_complete_over_introspected_surface` over a PURELY-INTROSPECTED native surface; a MIXED
     /// native+PoP bundle reaches NEITHER label (it is `claimed_over_manifest`), keeping each label's MF1
     /// meaning crisp.
+    ///
+    /// SB-28: the conjunction above is NOT the whole claim. It lacks the kernel's authorized and
+    /// temporal obligations, so the label is additionally capped by the kernel: a granted label needs
+    /// `claims.complete_brokered` (or `complete_introspected`) satisfied, else it is
+    /// `claimed_over_manifest`. The label is never stronger than the kernel.
     pub fn of(r: &VerifyReport) -> Self {
         Self::of_with_integrity(r, r.ok, r.broker_trust == "sequence_verified")
+    }
+
+    /// The bare conjunction WITHOUT the kernel cap: what `of` returned before SB-28. Never a claim.
+    /// It exists so tests can show where the old label was stronger than the kernel and can exercise
+    /// the conjunction on synthesized reports. Do not use it to describe a bundle to a person.
+    #[doc(hidden)]
+    pub fn of_conjunction_uncapped(r: &VerifyReport) -> Self {
+        Self::of_conjunction_with_integrity(r, r.ok, r.broker_trust == "sequence_verified")
     }
 
     // The new claims use structural integrity plus typed committed contradictions. Legacy `ok`
     // also includes diagnostics for malformed optional attachments; deleting such an attachment
     // may change `ok` but cannot create proof of a stronger claim.
     fn of_with_integrity(
+        r: &VerifyReport,
+        integrity: bool,
+        broker_sequence_verified: bool,
+    ) -> Self {
+        let label = Self::of_conjunction_with_integrity(r, integrity, broker_sequence_verified);
+        // SB-28: a Level-3 label is never stronger than the claim kernel. The conjunction below
+        // lacks the kernel's authorized and temporal obligations (revocation readiness, anchored
+        // latest checkpoint, pinned record seals, valid uses), so a granted label also needs the
+        // kernel's matching capstone claim satisfied. A downgrade lands on `claimed_over_manifest`.
+        let kernel_ok = match label {
+            ActionCompleteness::AttestedCompleteOverBrokeredSurface => {
+                r.claims.complete_brokered == ClaimDecision::Satisfied
+            }
+            ActionCompleteness::AttestedCompleteOverIntrospectedSurface => {
+                r.claims.complete_introspected == ClaimDecision::Satisfied
+            }
+            _ => true,
+        };
+        if kernel_ok {
+            label
+        } else {
+            ActionCompleteness::ClaimedOverManifest
+        }
+    }
+
+    /// The bare conjunction, without the kernel cap. Kept separate so tests can report where the
+    /// old label was stronger than the kernel.
+    fn of_conjunction_with_integrity(
         r: &VerifyReport,
         integrity: bool,
         broker_sequence_verified: bool,

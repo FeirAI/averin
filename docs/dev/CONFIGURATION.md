@@ -310,8 +310,22 @@ With `opts.json`, the role-disjoint authority key sets are pinned (authentic ver
 mode gates). The `opts.json` keys are documented in [`../operator-verification.md`](../operator-verification.md):
 `broker_authority_keys`, `resource_authority_keys`, `tsa_keys`, `taxonomy`/`taxonomy_keys`/
 `taxonomy_digest`/`taxonomy_version`, `attestation_keys`, `cosig_approver_keys`, `revocation_keys`,
-`federated_broker_keys` (a `{broker_id: [keys]}` map), and `authority_keys`. Exit codes: `0` PASS,
-`1` FAIL, `2` usage/IO error.
+`federated_broker_keys` (a `{broker_id: [keys]}` map), and `authority_keys`. For `bundle`, the `RESULT:` word
+is the same `claimVerdict` rule as the browser verifier and web app. `bundle` exit codes: `0` PASS (requested
+claim satisfied AND signing keys externally pinned), `2` CONSISTENT (requested claim satisfied only
+under the bundle's own unpinned keys: internal consistency, not authenticity), `1` FAIL (legacy `ok`
+false or requested claim refuted) or INSUFFICIENT (requested claim not satisfied, or the claims
+contract is missing or invalid). Usage and unreadable-file errors also exit `2` and print no
+`RESULT:` line, so read the `RESULT:` line, not only the exit code, to tell CONSISTENT from a usage
+error. Without `opts.json`, a bundle that is not valid JSON or RCP exits `1` and prints no `RESULT:`
+line (with `opts.json` it reads `RESULT: FAIL`, as does an invalid `opts.json`). Before this change
+the CLI printed PASS and exited 0 for unpinned bundles.
+
+`record` does not use this rule. It exits `0` when the checks it ran pass: with a key, shape, content
+hash and signature (`PASS (authentic)`); without a key, shape and content hash only (`PASS (integrity
+only)`, which does not authenticate the record). It exits `1` when a check fails or the file is not
+valid JSON or RCP, and `2` on a usage error, an unreadable file or a malformed key. Its exit `0` alone
+does not say whether a key was given.
 
 ---
 

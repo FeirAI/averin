@@ -47,7 +47,11 @@ To build the offline verify CLI and run it against a shipped fixture (no server 
 cargo run -p averin-decision-core --bin averin-verify -- bundle spec/fixtures/bundle-valid.json
 ```
 
-Expected: `RESULT: PASS (integrity) — every record sealed, linked, and checkpoint-consistent.`
+Expected: `RESULT: CONSISTENT (integrity): requested claim satisfied; integrity diagnostics clean.`
+(exit code 2). The fixture is verified under its own keys, which are not externally pinned, so this
+is internal consistency, not authenticity. Pass an `opts.json` that pins the signing keys
+(`{"signing_keys": ["ed25519pub:..."]}`) to get `RESULT: PASS` (exit 0). Exit codes are listed in
+[CONFIGURATION.md](CONFIGURATION.md#averin-verify-cli-coresrcbinaverin_verifyrs).
 
 ## 2. Run the server
 

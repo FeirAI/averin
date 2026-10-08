@@ -190,8 +190,10 @@ decision vultrino has already made tamper-resistant on its own side.
   of an appendable text file an attacker with disk access can rewrite.
 - **Cross-system non-repudiation.** "The agent spent this credential, in this order,
   under this human approval, and here is the result" becomes a single signed bundle
-  an external auditor verifies with `averin-verify bundle` — no trust in vultrino *or*
-  averin's operator required (self-host holds the signing key).
+  an external auditor verifies offline with `averin-verify bundle bundle.json opts.json`,
+  pinning the signing and authority keys out of band. Without pinned keys the result is
+  `CONSISTENT` (internal consistency under the bundle's own keys), not authenticity. The
+  auditor still trusts vultrino for what it emits (see the residuals below).
 - **A real driver for ADR 0005 N-Use** (`bounded_reuse`), exercising that design.
 
 ### Residuals and floors (stated, not papered over — averin house rule)

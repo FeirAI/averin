@@ -5,10 +5,22 @@
 //!                                                With opts.json the role-disjoint authority key sets are
 //!                                                PINNED (authentic verification + the Tier-B/mode gates).
 //!   averin-verify record <record.json> [pubkey]   single record; without a key = integrity only.
+//!
+//! `bundle` prints `RESULT: <word>` where the word is the same `claimVerdict` rule as the browser
+//! verifier (`verifier/claim-verdict.js`) and exits:
+//!   0  PASS          requested claim satisfied AND the signing keys were pinned externally
+//!   2  CONSISTENT    requested claim satisfied only under the bundle's own keys (internal
+//!                    consistency, not authenticity)
+//!   1  FAIL          legacy `ok` false, or the requested claim is refuted
+//!   1  INSUFFICIENT  requested claim not satisfied, or the claims contract missing or invalid
+//! Usage errors and unreadable input files also exit 2 and print no `RESULT:` line (stderr only);
+//! read the `RESULT:` line, not only the exit code, to tell CONSISTENT from a usage error.
 
 use averin_decision_core::record::{validate_record_shape, verify_content_hash, verify_sealed};
 use averin_decision_core::sign::decode_pubkey;
-use averin_decision_core::verify::{report_to_canon, verify_bundle_json, verify_bundle_with_json};
+use averin_decision_core::verify::{
+    claim_verdict, report_to_canon, verify_bundle_json, verify_bundle_with_json, ClaimVerdict,
+};
 use averin_decision_core::CanonValue;
 use std::process::ExitCode;
 
@@ -253,32 +265,45 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         }
     }
     println!();
-    if gb("ok") && claim_contract_satisfied(&report) {
-        // PASS requires both clean legacy diagnostics and the caller's versioned claim.
-        // Echo the bounded capstone level separately so the requested claim stays explicit.
-        println!(
-            "RESULT: PASS ({requested}) — requested claim satisfied; integrity diagnostics clean."
-        );
-        if let Some(note) = historical_claim_note(&report) {
-            println!("{note}");
+    // The headline word is `claimVerdict` (core/src/verify/headline.rs, verifier/claim-verdict.js):
+    // PASS needs the requested claim satisfied AND externally pinned keys; the same satisfied claim
+    // under the bundle's own keys is CONSISTENT (internal consistency, not authenticity).
+    let verdict = claim_verdict(&report);
+    match verdict {
+        ClaimVerdict::Pass | ClaimVerdict::Consistent => {
+            println!(
+                "RESULT: {} ({requested}): requested claim satisfied; integrity diagnostics clean.",
+                verdict.word()
+            );
+            if verdict == ClaimVerdict::Consistent {
+                println!(
+                    "        keys are the bundle's own, NOT externally pinned: this proves internal consistency only, not authenticity."
+                );
+            }
+            if let Some(note) = historical_claim_note(&report) {
+                println!("{note}");
+            }
+            println!(
+                "        capstone: action_completeness={} · grant_accountability={} · broker_trust={}",
+                gs("action_completeness"),
+                gs("grant_accountability"),
+                gs("broker_trust")
+            );
+            println!(
+                "NOTE: The capstone remains bounded by resource_trust:assumed_truthful (MF1)."
+            );
         }
-        println!(
-            "        capstone: action_completeness={} · grant_accountability={} · broker_trust={}",
-            gs("action_completeness"),
-            gs("grant_accountability"),
-            gs("broker_trust")
-        );
-        println!("NOTE: The capstone remains bounded by resource_trust:assumed_truthful (MF1).");
-        ExitCode::SUCCESS
-    } else {
-        println!(
-            "RESULT: FAIL — integrity diagnostics or requested claim are not satisfied; see above."
-        );
-        if let Some(note) = historical_claim_note(&report) {
-            println!("{note}");
+        ClaimVerdict::Insufficient | ClaimVerdict::Fail => {
+            println!(
+                "RESULT: {}: integrity diagnostics or requested claim are not satisfied; see above.",
+                verdict.word()
+            );
+            if let Some(note) = historical_claim_note(&report) {
+                println!("{note}");
+            }
         }
-        ExitCode::from(1)
     }
+    ExitCode::from(verdict.exit_code())
 }
 
 // V-L3: the legacy `ok` is a separate integrity result and can be false while the caller's
@@ -310,34 +335,6 @@ fn historical_claim_note(report: &CanonValue) -> Option<String> {
     Some(format!(
         "        historical_authorized_as_of_snapshot: {decision} (read claims.*; the legacy ok is a separate integrity result and can differ)"
     ))
-}
-
-fn claim_contract_satisfied(report: &CanonValue) -> bool {
-    if report.get("claims_version").and_then(CanonValue::as_str) != Some("2") {
-        return false;
-    }
-    let Some(claims) = report.get("claims") else {
-        return false;
-    };
-    let Some(requested) = claims.get("requested").and_then(CanonValue::as_str) else {
-        return false;
-    };
-    if !matches!(
-        requested,
-        "integrity"
-            | "authenticated"
-            | "authorized"
-            | "historical_authorized_as_of_snapshot"
-            | "complete_brokered"
-            | "complete_introspected"
-    ) {
-        return false;
-    }
-    claims
-        .get("requested_decision")
-        .and_then(CanonValue::as_str)
-        == Some("satisfied")
-        && claims.get(requested).and_then(CanonValue::as_str) == Some("satisfied")
 }
 
 fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
@@ -394,6 +391,17 @@ fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
 #[cfg(test)]
 mod claim_contract_tests {
     use super::*;
+
+    /// A report with a clean `ok` and pinned keys passes only under a valid satisfied contract.
+    fn claim_contract_satisfied(report: &CanonValue) -> bool {
+        let mut fields = match report {
+            CanonValue::Object(f) => f.clone(),
+            _ => vec![],
+        };
+        fields.push(("ok".into(), CanonValue::Bool(true)));
+        fields.push(("keys_externally_pinned".into(), CanonValue::Bool(true)));
+        claim_verdict(&CanonValue::object(fields).unwrap()) == ClaimVerdict::Pass
+    }
 
     fn report(version: &str, decision: &str) -> CanonValue {
         CanonValue::object(vec![

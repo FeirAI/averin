@@ -10113,6 +10113,29 @@ fn tier_b_merkle_revocation_stale_root_nonmembership_proof_does_not_over_block()
 
 // ---- D8: the attested_complete conjunctive capstone ----
 
+// SB-28: `action_completeness` is now capped by the claim kernel, and the synthesized capstone reports below
+// carry the kernel's real (not satisfied) claims, so their serialized label would always read
+// `claimed_over_manifest`. These tests exercise the legacy CONJUNCTION itself, so render the report with the
+// label the uncapped conjunction gives. The cap has its own tests (verify::verdict::differential, over the
+// verdict oracle corpus) and the typed-variants test below (which checks the serialized capped label).
+fn conjunction_json(r: &VerifyReport) -> String {
+    let capped = format!(
+        r#""action_completeness":"{}""#,
+        r.action_completeness().as_str()
+    );
+    let bare = format!(
+        r#""action_completeness":"{}""#,
+        ActionCompleteness::of_conjunction_uncapped(r).as_str()
+    );
+    let json = report_to_json(r);
+    assert_eq!(
+        json.matches(&capped).count(),
+        1,
+        "one action_completeness key"
+    );
+    json.replace(&capped, &bare)
+}
+
 // a VerifyReport with EVERY capstone condition satisfied — start from a real verify result (real wiring),
 // then force the conjunction inputs. Tests then flip one input to prove each is load-bearing.
 fn capstone_report() -> VerifyReport {
@@ -10169,7 +10192,7 @@ fn capstone_report() -> VerifyReport {
 
 #[test]
 fn tier_b_d8_capstone_when_all_conditions_hold() {
-    let out = report_to_json(&capstone_report());
+    let out = conjunction_json(&capstone_report());
     assert!(
         out.contains(r#""action_completeness":"attested_complete_over_brokered_surface""#),
         "the full conjunction must reach the capstone: {out}"
@@ -10200,18 +10223,31 @@ fn tier_b_d8_typed_action_completeness_covers_all_variants_and_never_stale() {
         let i = json.find(key).unwrap() + key.len();
         json[i..].split('"').next().unwrap().to_string()
     };
+    // SB-28: these reports are synthesized, so the kernel's real claims on them are not satisfied. The typed
+    // CONJUNCTION must be `variant`/`literal`; the shipped (kernel-capped) label and its serialization must be
+    // the same, except that a granted capstone label reads `claimed_over_manifest` (an independent literal).
     let check = |r: &VerifyReport, variant: ActionCompleteness, literal: &str| {
         assert_eq!(
-            r.action_completeness(),
+            ActionCompleteness::of_conjunction_uncapped(r),
             variant,
-            "typed verdict for {literal}"
+            "typed conjunction for {literal}"
         );
         assert_eq!(
-            r.action_completeness().as_str(),
+            ActionCompleteness::of_conjunction_uncapped(r).as_str(),
             literal,
             "as_str() for {literal}"
         );
-        assert_eq!(ser(r), literal, "serialized JSON for {literal}");
+        let capped = if literal.starts_with("attested_complete_over_") {
+            "claimed_over_manifest"
+        } else {
+            literal
+        };
+        assert_eq!(
+            r.action_completeness().as_str(),
+            capped,
+            "capped label for {literal}"
+        );
+        assert_eq!(ser(r), capped, "serialized JSON for {literal}");
     };
 
     // 1/4 — the STANDARD capstone: every condition holds over a purely-brokered surface.
@@ -10361,7 +10397,7 @@ fn tier_b_d8_each_condition_is_load_bearing() {
     for (name, mutate) in mutators {
         let mut r = capstone_report();
         mutate(&mut r);
-        let out = report_to_json(&r);
+        let out = conjunction_json(&r);
         assert!(
             out.contains(r#""action_completeness":"claimed_over_manifest""#),
             "removing condition '{name}' must block the capstone (-> claimed_over_manifest): {out}"
@@ -10379,7 +10415,7 @@ fn tier_b_d8_no_manifest_is_not_claimed() {
     // every other condition holds (there is no scope claim to attest completeness over).
     let mut r = capstone_report();
     r.coverage_manifest = None;
-    let out = report_to_json(&r);
+    let out = conjunction_json(&r);
     assert!(
         out.contains(r#""action_completeness":"not_claimed""#),
         "no manifest -> not_claimed: {out}"
@@ -10393,7 +10429,7 @@ fn tier_b_d8_null_manifest_is_not_a_capstone() {
     // OTHER conjunct passing it must NOT reach the capstone (and is not_claimed, not claimed_over_manifest).
     let mut r = capstone_report();
     r.coverage_manifest = Some(CanonValue::Null);
-    let out = report_to_json(&r);
+    let out = conjunction_json(&r);
     assert!(
         !out.contains("attested_complete_over_brokered_surface"),
         "a null manifest must not reach the capstone: {out}"
@@ -10447,7 +10483,7 @@ fn tier_b_d8_one_phase_use_blocks_capstone_end_to_end() {
         r.issues
     );
     assert!(
-        !report_to_json(&r).contains("attested_complete_over_brokered_surface"),
+        !conjunction_json(&r).contains("attested_complete_over_brokered_surface"),
         "a one-phase use must block the capstone"
     );
 }
@@ -11246,7 +11282,7 @@ fn introspected_capstone_report() -> VerifyReport {
 
 #[test]
 fn tier_b_native_introspected_capstone_when_all_hold() {
-    let out = report_to_json(&introspected_capstone_report());
+    let out = conjunction_json(&introspected_capstone_report());
     assert!(
         out.contains(r#""action_completeness":"attested_complete_over_introspected_surface""#),
         "the native conjunction must reach the introspected capstone: {out}"
@@ -11270,7 +11306,7 @@ fn tier_b_mixed_native_and_pop_reaches_neither_label() {
     let mut r = introspected_capstone_report();
     r.uses_matched = 1;
     r.uses_pop_reverified = 1;
-    let out = report_to_json(&r);
+    let out = conjunction_json(&r);
     assert!(
         out.contains(r#""action_completeness":"claimed_over_manifest""#),
         "mixed (native + brokered use) must reach neither label: {out}"
@@ -11283,7 +11319,7 @@ fn tier_b_mixed_native_and_pop_reaches_neither_label() {
     //     not introspected (uses_matched != 0) -> claimed_over_manifest.
     let mut r2 = capstone_report();
     r2.native_credential_present = true;
-    let out2 = report_to_json(&r2);
+    let out2 = conjunction_json(&r2);
     assert!(
         out2.contains(r#""action_completeness":"claimed_over_manifest""#),
         "a brokered surface + a native credential must reach neither label: {out2}"
@@ -11332,7 +11368,7 @@ fn tier_b_d8_introspected_each_condition_is_load_bearing() {
     for (name, mutate) in mutators {
         let mut r = introspected_capstone_report();
         mutate(&mut r);
-        let out = report_to_json(&r);
+        let out = conjunction_json(&r);
         assert!(
             !out.contains("attested_complete_over_introspected_surface"),
             "condition '{name}' removed but introspected capstone still emitted: {out}"
@@ -13091,7 +13127,7 @@ fn federation_capstone_report() -> VerifyReport {
 
 #[test]
 fn tier_b_federation_capstone_reachable_when_clean() {
-    let out = report_to_json(&federation_capstone_report());
+    let out = conjunction_json(&federation_capstone_report());
     assert!(
         out.contains(r#""action_completeness":"attested_complete_over_brokered_surface""#),
         "a clean 2-broker federation must reach the capstone: {out}"
@@ -13102,7 +13138,7 @@ fn tier_b_federation_capstone_reachable_when_clean() {
 fn tier_b_federation_capstone_blocked_by_suppression() {
     let mut r = federation_capstone_report();
     r.cross_broker_suppression = 1; // one broker suppressed
-    let out = report_to_json(&r);
+    let out = conjunction_json(&r);
     assert!(
         !out.contains("attested_complete_over_brokered_surface"),
         "a suppressed federation must NOT reach the capstone: {out}"
@@ -13616,12 +13652,12 @@ fn tier_b_revocation_artifacts_stripped_under_pinned_keys_is_missing() {
     // capstone: `missing` blocks it (a fully-clean capstone report otherwise).
     let mut c = capstone_report();
     assert_eq!(
-        c.action_completeness(),
+        ActionCompleteness::of_conjunction_uncapped(&c),
         ActionCompleteness::AttestedCompleteOverBrokeredSurface
     );
     c.revocation_status = "missing".to_string();
     assert_eq!(
-        c.action_completeness(),
+        ActionCompleteness::of_conjunction_uncapped(&c),
         ActionCompleteness::ClaimedOverManifest
     );
 }
@@ -16360,4 +16396,51 @@ fn temporal_merkle_v2_rejects_cutoff_beyond_watermark() {
     );
     assert_ne!(row.ordering, "proven_before");
     assert_ne!(row.historical, ClaimDecision::Satisfied);
+}
+
+// SB-28: the kernel cap must not make a capstone label unreachable on a real bundle. The real-producer
+// fixtures whose kernel satisfies `complete_brokered` / `complete_introspected` still reach the matching
+// serialized label (the synthesized capstone reports above carry unsatisfied kernel claims, so they cannot
+// show this; the Go capstone tests cover only the brokered label).
+#[test]
+fn sb28_real_producer_fixtures_keep_their_capstone_labels() {
+    for (fixture, claim, label) in [
+        (
+            "claim-complete-v3.json",
+            "complete_brokered",
+            "attested_complete_over_brokered_surface",
+        ),
+        (
+            "claim-native-capstone-v3.json",
+            "complete_introspected",
+            "attested_complete_over_introspected_surface",
+        ),
+    ] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("spec/fixtures")
+            .join(fixture);
+        let f = CanonValue::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let report = CanonValue::parse(&verify_bundle_with_json(
+            &f.get("bundle").unwrap().serialize(),
+            &f.get("opts").unwrap().serialize(),
+        ))
+        .unwrap();
+        assert_eq!(
+            report
+                .get("claims")
+                .and_then(|c| c.get(claim))
+                .and_then(CanonValue::as_str),
+            Some("satisfied"),
+            "{fixture}: kernel {claim}"
+        );
+        assert_eq!(
+            report
+                .get("action_completeness")
+                .and_then(CanonValue::as_str),
+            Some(label),
+            "{fixture}: capped label"
+        );
+    }
 }

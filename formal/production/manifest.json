@@ -98,7 +98,7 @@
     "core/src/record.rs": "fef5d2a650eddc59448f457c4df686f95f23b9fc278f681d4639c9d211905293",
     "core/src/checkpoint.rs": "90ba12e80e5e89811f119840fe44b07a9e90a7d650b9f365b49f9feed3f455c4",
     "core/src/sign.rs": "cd3611f1ee9bfa13c9fa61353b6ea4412254bb539ae4a48ccfeb73babb3e80b3",
-    "core/src/verify/verdict.rs": "3b1cb80cbadf608c51e3731191344e7ff9d0f39b83dd9832335b539fb27aee08",
+    "core/src/verify/verdict.rs": "414a3199247eeed15af8e920d626f42a43c3b50868bf110a6a989e20ae2d1e58",
     "formal/production/Extracted/Types.lean": "f7999c3caef0caaae12617e0576067bb85748c171b992d85b7fa824b5eaac681",
     "formal/production/Extracted/Funs.lean": "d8185899f1a073d66e9b3ef8b16c52166f6c1acda035dd7930b0e47523a073d5",
     "formal/production/Extracted/TypesExternal.lean": "a9071801ad075317db92626a3f341f496b1d38cb7d7158b5fb7b3884c31c5b89",

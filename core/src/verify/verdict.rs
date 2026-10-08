@@ -909,4 +909,131 @@ mod differential {
             }
         }
     }
+
+    /// Builds the legacy report fields the old `action_completeness` conjunction reads, from the
+    /// checked facts they were derived from (the inverse of the projection in `verify.rs`
+    /// where `CapstoneFacts` is built). Fields the corpus cannot express keep their neutral value.
+    fn report_from_facts(f: &ValidatedFacts) -> super::super::VerifyReport {
+        use crate::verify::fatal_config_report;
+        let c = &f.capstone;
+        let mut r = fatal_config_report(None, "oracle");
+        r.ok = f.structural_integrity;
+        r.keys_externally_pinned = !f.pinned_signer_keys.is_empty();
+        r.body_bound_role_evidence = f.pinned_role_authority;
+        r.coverage_manifest = if c.manifest {
+            Some(CanonValue::Bool(true))
+        } else {
+            None
+        };
+        r.one_phase_use_present = !c.two_phase;
+        r.intent_without_outcome = usize::from(!c.no_incomplete_intent);
+        r.taxonomy_status = if c.taxonomy { "validated" } else { "absent" }.into();
+        r.uses_action_unverified = usize::from(!c.every_action_verified);
+        r.uses_matched = usize::from(c.brokered_surface);
+        r.uses_pop_reverified = if c.every_pop_reverified {
+            r.uses_matched
+        } else {
+            0
+        };
+        r.broker_trust = if c.grant_log {
+            "sequence_verified"
+        } else {
+            "assumed"
+        }
+        .into();
+        r.attestation_status = if c.attestation {
+            "attested_claims"
+        } else {
+            "absent"
+        }
+        .into();
+        r.unmatched_violation = usize::from(!c.no_violation);
+        r.unmatched_pending = usize::from(!c.no_pending);
+        r.bounded_reuse_overspent = usize::from(!c.bounded_reuse);
+        r.cosig_threshold_failures = usize::from(!c.cosignatures);
+        r.delegation_monotonicity_violations = usize::from(!c.delegation);
+        r.revocation_status = if c.revocation { "fresh" } else { "stale" }.into();
+        r.cross_broker_suppression = usize::from(!c.federation);
+        r.side_effect_closure_status = if c.coverage { "closed" } else { "open" }.into();
+        r.native_credential_present = c.introspected_surface;
+        r.introspection_status = if c.introspected_surface {
+            "attested"
+        } else {
+            "absent"
+        }
+        .into();
+        r.claims = decide_claims(f);
+        r
+    }
+
+    /// SB-28: the Level-3 label is never stronger than the kernel. Over every corpus case, a
+    /// brokered label implies kernel `complete_brokered` satisfied (introspected likewise).
+    /// Prints the cases where the bare conjunction was stronger (those were overclaims).
+    #[test]
+    fn action_completeness_label_never_stronger_than_kernel() {
+        use crate::verify::ActionCompleteness as A;
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../formal/oracle/verdict-expected.json"
+        );
+        let rows = CanonValue::parse(&std::fs::read_to_string(path).expect("corpus")).unwrap();
+        let mut labelled = 0;
+        let mut overclaims = Vec::new();
+        for row in rows.as_array().unwrap() {
+            let name = row.get("name").and_then(CanonValue::as_str).unwrap();
+            let f = facts(name);
+            let r = report_from_facts(&f);
+            let label = A::of(&r);
+            match label {
+                A::AttestedCompleteOverBrokeredSurface => {
+                    labelled += 1;
+                    assert_eq!(
+                        r.claims.complete_brokered,
+                        ClaimDecision::Satisfied,
+                        "{name}"
+                    );
+                }
+                A::AttestedCompleteOverIntrospectedSurface => {
+                    labelled += 1;
+                    assert_eq!(
+                        r.claims.complete_introspected,
+                        ClaimDecision::Satisfied,
+                        "{name}"
+                    );
+                }
+                _ => {}
+            }
+            {
+                let bare = A::of_conjunction_uncapped(&r);
+                if bare != label {
+                    overclaims.push(format!("{name}:{}", bare.as_str()));
+                }
+            }
+        }
+        assert!(labelled > 0, "the corpus must exercise a granted label");
+        eprintln!("OVERCLAIMS {}: {:?}", overclaims.len(), overclaims);
+    }
+
+    /// SB-28: with every conjunct of the legacy conjunction true, a kernel that does not satisfy the
+    /// matching capstone claim downgrades the label to `claimed_over_manifest`.
+    #[test]
+    fn action_completeness_label_is_capped_by_the_kernel() {
+        use crate::verify::ActionCompleteness as A;
+        for decision in [ClaimDecision::Insufficient, ClaimDecision::Refuted] {
+            let mut brokered = report_from_facts(&facts("bits_191"));
+            assert_eq!(A::of(&brokered), A::AttestedCompleteOverBrokeredSurface);
+            brokered.claims.complete_brokered = decision;
+            assert_eq!(A::of(&brokered), A::ClaimedOverManifest, "{decision:?}");
+            // the other surface's claim is irrelevant to the brokered label
+            let mut other = report_from_facts(&facts("bits_191"));
+            other.claims.complete_introspected = decision;
+            assert_eq!(A::of(&other), A::AttestedCompleteOverBrokeredSurface);
+
+            let mut native = report_from_facts(&facts("introspected"));
+            native.claims.complete_introspected = ClaimDecision::Satisfied;
+            assert_eq!(A::of(&native), A::AttestedCompleteOverIntrospectedSurface);
+            native.claims.complete_introspected = decision;
+            assert_eq!(A::of(&native), A::ClaimedOverManifest, "{decision:?}");
+        }
+    }
 }

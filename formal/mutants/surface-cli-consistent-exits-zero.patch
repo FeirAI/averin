@@ -1,0 +1,13 @@
+diff --git a/core/src/verify/headline.rs b/core/src/verify/headline.rs
+index c69a680..ce45117 100644
+--- a/core/src/verify/headline.rs
++++ b/core/src/verify/headline.rs
+@@ -33,7 +33,7 @@ impl ClaimVerdict {
+     pub fn exit_code(self) -> u8 {
+         match self {
+             Self::Pass => 0,
+-            Self::Consistent => 2,
++            Self::Consistent => 0,
+             Self::Insufficient | Self::Fail => 1,
+         }
+     }
