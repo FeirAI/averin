@@ -160,6 +160,18 @@
       "tier": "full",
       "claim": "kani-encoder-harnesses",
       "detector": "bash formal/run-kani.sh --harness one_byte_tail_is_canonical"
+    },
+    "cli-consistent-exits-zero": {
+      "tier": "fast",
+      "claim": "cli-headline-equals-claim-verdict"
+    },
+    "verdict-word-ignores-pinning": {
+      "tier": "full",
+      "claim": "cli-headline-equals-claim-verdict"
+    },
+    "action-label-drops-kernel-and": {
+      "tier": "fast",
+      "claim": "action-completeness-capped-by-kernel"
     }
   },
   "claims": [
@@ -563,18 +575,105 @@
       ],
       "detector": "cargo test -p averin-decision-core --test seal_shape",
       "covers": [
-        {"path": "core/src/record.rs", "symbol": "seal", "sha256": "9a80b6a0aea4894be9feedd5cf7cb3dcf0ad0a9c022c7b559abb9cf063439b99"},
-        {"path": "core/src/record.rs", "symbol": "seal_with_mode", "sha256": "e7f27e92382d00114b686be2ffcceb7fda9729e0bdef2ab73118382ace759dc7"},
-        {"path": "core/src/record.rs", "symbol": "check_sealed_shape", "sha256": "bd582b7ccd782721fbd570e1d08d2254d98672ed58b5a866c76a931741e513b7"},
-        {"path": "core/src/record.rs", "symbol": "validate_record_shape", "sha256": "28f0d30f2aea440d163fd6cedbbd4cc71e69e3277c93de07e8ccf52e529e8c44"},
-        {"path": "core/src/record.rs", "symbol": "verify_sealed", "sha256": "a2231e0aa30a7313b1719fb5344f6a3408ef1662f4fd6846abb01f9f8475bd27"},
-        {"path": "core/src/record.rs", "symbol": "verify_content_hash", "sha256": "003aa4d1e904632e5392d9ed3651b352cd26c1a0916e1d65d20b4f1bc3c91879"}
+        {
+          "path": "core/src/record.rs",
+          "symbol": "seal",
+          "sha256": "9a80b6a0aea4894be9feedd5cf7cb3dcf0ad0a9c022c7b559abb9cf063439b99"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "seal_with_mode",
+          "sha256": "e7f27e92382d00114b686be2ffcceb7fda9729e0bdef2ab73118382ace759dc7"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "check_sealed_shape",
+          "sha256": "bd582b7ccd782721fbd570e1d08d2254d98672ed58b5a866c76a931741e513b7"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "validate_record_shape",
+          "sha256": "28f0d30f2aea440d163fd6cedbbd4cc71e69e3277c93de07e8ccf52e529e8c44"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "verify_sealed",
+          "sha256": "a2231e0aa30a7313b1719fb5344f6a3408ef1662f4fd6846abb01f9f8475bd27"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "verify_content_hash",
+          "sha256": "003aa4d1e904632e5392d9ed3651b352cd26c1a0916e1d65d20b4f1bc3c91879"
+        }
       ],
       "mutants": [
         "seal-skips-shape-check",
         "seal-skips-domain-pin"
       ],
       "does_not_establish": "Nothing about nested object shape (validate_record_shape checks top-level keys only; the JSON Schema covers the rest), content_hash or signature validity of a body, or any record sealed before this change. Not a proof: the generator is deterministic and finite, so a defect class it does not build is untested. The Go conformance covers only the producers the existing server tests reach, and a body type no test builds is checked only by the seal refusing it at runtime. Nothing about checkpoints: checkpoint::seal_checkpoint still does not pin the checkpoint domain or canon_version (verify_checkpoint_sealed does). AVERIN_SEAL_SHAPE=shadow deliberately seals records no verifier accepts (rollback switch). seal_unchecked_for_tests is a public, doc-hidden bypass of the check that production code must not call; nothing enforces that."
+    },
+    {
+      "id": "cli-headline-equals-claim-verdict",
+      "statement": "The averin-verify bundle headline word is the report's claim verdict: PASS only when the requested claim is satisfied and the signing keys are externally pinned, CONSISTENT when it is satisfied only under the bundle's own keys, INSUFFICIENT when it is not satisfied or the claims contract is missing or invalid, FAIL when ok is false or the claim is refuted. Exit codes are 0 PASS, 2 CONSISTENT, 1 FAIL or INSUFFICIENT. Held by an end-to-end test of the binary on the shipped fixture (unpinned, pinned, unsatisfied claim, tampered) and by a differential of the Rust verdict function against verifier/claim-verdict.js (run with node) over every case of the committed verdict oracle corpus crossed with every requested claim, ok and pinning, plus malformed contracts.",
+      "method": "differential-vectors",
+      "artifacts": [
+        "core/tests/cli_verdict.rs",
+        "core/tests/verdict_word_differential.rs",
+        "verifier/claim-verdict.js",
+        "formal/oracle/verdict-expected.json"
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ],
+      "detector": "cargo test -p averin-decision-core --test cli_verdict --test verdict_word_differential",
+      "covers": [
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "claim_verdict",
+          "sha256": "866062a18830dcb9fda1478fbb3d7b7c7f37244f750c9b9efb237175ca62b745"
+        },
+        {
+          "path": "core/src/verify/verdict.rs",
+          "symbol": "exit_code",
+          "sha256": "0670275482c8d33fad83a703f01e5141b03d0ac6282b4313bb9b3aa62050de01"
+        },
+        {
+          "path": "core/src/bin/averin_verify.rs",
+          "symbol": "verify_bundle_cmd",
+          "sha256": "84022cd40bb956870a7e86e2bbbcf15cb6da0724ddb210bdaa7e2b4af8f7199f"
+        }
+      ],
+      "mutants": [
+        "cli-consistent-exits-zero",
+        "verdict-word-ignores-pinning"
+      ],
+      "does_not_establish": "That the report's claims are right (that is the claim kernel's refinement and oracle differential). Only the words and exit codes derived from a finished report: the web app's TypeScript copy (web/src/lib/claimVerdict.ts) is covered by its own unit tests, not this differential. The corpus rows are claim decisions, not bundles, so the differential crosses them with synthetic ok and pinning flags rather than verifying real bundles. Usage and unreadable-file errors also exit 2, the same code as CONSISTENT, so a caller must read the RESULT line, not only the exit code. Needs node on PATH. A finite differential, not a proof."
+    },
+    {
+      "id": "action-completeness-capped-by-kernel",
+      "statement": "The Level-3 action_completeness label is never stronger than the claim kernel: a brokered capstone label requires the kernel's complete_brokered claim to be satisfied and an introspected label requires complete_introspected, otherwise the label is claimed_over_manifest. Held by a test over every case of the committed verdict oracle corpus (a report is built from each case's checked facts and the shipped label function is applied), by an adversarial test that downgrades a clean capstone report when the kernel is insufficient or refuted, and by the unchanged real-flow capstone tests.",
+      "method": "differential-vectors",
+      "artifacts": [
+        "core/tests/adversarial.rs",
+        "formal/oracle/verdict-expected.json"
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ],
+      "detector": "cargo test -p averin-decision-core --lib --test adversarial -- action_completeness_label",
+      "covers": [
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "of_with_integrity",
+          "sha256": "a8409bc0f1f33f4aafc3ced6a0c88e259cdd96f2916167c30190fa53d012843c"
+        }
+      ],
+      "mutants": [
+        "action-label-drops-kernel-and"
+      ],
+      "does_not_establish": "That the kernel itself is right (see verdict-kernel-refinement). That a label is granted whenever the kernel is satisfied: the cap only removes labels, the legacy conjunction still decides whether one is granted. The corpus test builds each report from checked facts by an inverse projection written in the test, not from real bundles, so a field the projection sets differently from verify.rs could hide or invent a case. The introspected label was not stronger than the kernel on any corpus case, so its cap is exercised only by the adversarial test. Not a proof: a finite corpus."
     }
   ]
 }

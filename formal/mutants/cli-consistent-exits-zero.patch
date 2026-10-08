@@ -1,0 +1,13 @@
+diff --git a/core/src/verify/verdict.rs b/core/src/verify/verdict.rs
+index 3b30b32..7cac087 100644
+--- a/core/src/verify/verdict.rs
++++ b/core/src/verify/verdict.rs
+@@ -150,7 +150,7 @@ impl ClaimVerdict {
+     pub fn exit_code(self) -> u8 {
+         match self {
+             Self::Pass => 0,
+-            Self::Consistent => 2,
++            Self::Consistent => 0,
+             Self::Insufficient | Self::Fail => 1,
+         }
+     }
