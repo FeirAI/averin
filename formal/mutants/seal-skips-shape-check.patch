@@ -1,0 +1,14 @@
+Mutant: seal no longer calls validate_record_shape (an unknown or missing top-level key is sealed).
+
+diff --git a/core/src/record.rs b/core/src/record.rs
+index cb0f050..c4d2ff4 100644
+--- a/core/src/record.rs
++++ b/core/src/record.rs
+@@ -319,7 +319,6 @@ pub fn seal_shape_violations() -> u64 {
+ /// The shape, domain and canon_version part of [`verify_sealed`], applied to an already sealed
+ /// record: [`validate_record_shape`], then the domain pin, then the canon_version pin.
+ fn check_sealed_shape(sealed: &CanonValue) -> Result<(), RecordError> {
+-    validate_record_shape(sealed)?;
+     let domain = str_field(sealed, "domain")?;
+     if domain != RECORD_DOMAIN {
+         return Err(RecordError::DomainMismatch {

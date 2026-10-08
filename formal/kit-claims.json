@@ -148,6 +148,14 @@
       "tier": "full",
       "claim": "tla-projecttx-model"
     },
+    "seal-skips-shape-check": {
+      "tier": "fast",
+      "claim": "seal-implies-verify-shape"
+    },
+    "seal-skips-domain-pin": {
+      "tier": "fast",
+      "claim": "seal-implies-verify-shape"
+    },
     "m9-b64-one-byte-tail": {
       "tier": "full",
       "claim": "kani-encoder-harnesses",
@@ -537,6 +545,33 @@
         "tla-projecttx-drops-serialize-guard"
       ],
       "does_not_establish": "Model-level only: it is not bound to the Go or Postgres code. The bounds are finite (two replicas, small constants), so it says nothing about larger configurations. ProjectTx_operational_safe.cfg holds by definition (Authoritative = TRUE makes badUse and badFinalize unreachable) and is not counted as evidence. GrantLog.tla and ConsumeLedger.tla model superseded designs and are not registered. TLC and the Java runtime are trusted."
+    },
+    {
+      "id": "seal-implies-verify-shape",
+      "statement": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin, so a record that every verifier rejects on those grounds cannot be sealed by this core (SB-29). Held as a deterministic property test over every single defect (unknown key, each dropped required key, wrong or non-string or missing domain, wrong canon_version) plus 600 seeded random defect combinations on the golden record body, and, on the Go side, by running the whole server test suite through the real cgo seal in enforce mode and failing the run if any producer kind is refused or no longer reached.",
+      "method": "property",
+      "artifacts": [
+        "core/tests/seal_shape.rs",
+        "server/internal/api/seal_shape_conformance_test.go",
+        "server/internal/core/core_test.go"
+      ],
+      "gates": [
+        "core",
+        "server",
+        "formal-fast"
+      ],
+      "detector": "cargo test -p averin-decision-core --test seal_shape",
+      "covers": [
+        {"path": "core/src/record.rs", "symbol": "seal", "sha256": "9a80b6a0aea4894be9feedd5cf7cb3dcf0ad0a9c022c7b559abb9cf063439b99"},
+        {"path": "core/src/record.rs", "symbol": "seal_with_mode", "sha256": "e7f27e92382d00114b686be2ffcceb7fda9729e0bdef2ab73118382ace759dc7"},
+        {"path": "core/src/record.rs", "symbol": "check_sealed_shape", "sha256": "bd582b7ccd782721fbd570e1d08d2254d98672ed58b5a866c76a931741e513b7"},
+        {"path": "core/src/record.rs", "symbol": "validate_record_shape", "sha256": "28f0d30f2aea440d163fd6cedbbd4cc71e69e3277c93de07e8ccf52e529e8c44"}
+      ],
+      "mutants": [
+        "seal-skips-shape-check",
+        "seal-skips-domain-pin"
+      ],
+      "does_not_establish": "Nothing about nested object shape (validate_record_shape checks top-level keys only; the JSON Schema covers the rest), content_hash or signature validity of a body, or any record sealed before this change. Not a proof: the generator is deterministic and finite, so a defect class it does not build is untested. The Go conformance covers only the producers the existing server tests reach, and a body type no test builds is checked only by the seal refusing it at runtime. AVERIN_SEAL_SHAPE=shadow deliberately seals records no verifier accepts (rollback switch). seal_unchecked_for_tests is a public, doc-hidden bypass of the check that production code must not call; nothing enforces that."
     }
   ]
 }

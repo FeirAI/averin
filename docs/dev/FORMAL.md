@@ -95,6 +95,7 @@ informative only. The kit does not fetch run ids; `evidence_run` is optional.
 | `kani-encoder-harnesses` | Kani (nightly) | LP framing, base64url tail canonicality | Anything outside the harness bounds; the other Kani harnesses; not distinguishing an unwinding failure from a counterexample |
 | `lean-seal-model` | Lean (nightly) | the hand seal model in `Seal.lean` | That the model matches the Rust; SHA-256, Ed25519, honest signer and NFC are assumptions |
 | `tla-projecttx-model` | TLA+ (nightly, model level) | `ProjectTx.tla`, the project serialization model | Binding to the Go or Postgres code; larger constants; `ProjectTx_operational_safe` holds by definition; the superseded GrantLog and ConsumeLedger models |
+| `seal-implies-verify-shape` | property test (fast) | `seal`, `check_sealed_shape`, `validate_record_shape` | Nested object shape; hash or signature validity; a defect class the finite generator does not build; producers the Go suite does not reach; `AVERIN_SEAL_SHAPE=shadow` seals unverifiable records on purpose; the doc-hidden `seal_unchecked_for_tests` bypass |
 
 Not yet in the register (still tracked in `formal/claims.json`): the other TLA+ models (GrantLog and
 ConsumeLedger model superseded designs; GrantRecovery is not registered yet), the

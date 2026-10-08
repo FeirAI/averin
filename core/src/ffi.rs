@@ -7,7 +7,7 @@
 //! via [`averin_alloc`], calls [`averin_verify_bundle_json`], reads the result, then frees both.
 
 use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_int};
 
 /// Run a verifier closure, CATCHING any panic so it can never unwind across the C/cgo boundary (which is
 /// undefined behavior) and never aborts the host process on untrusted input. On a panic the verifier fails
@@ -220,7 +220,35 @@ pub unsafe extern "C" fn averin_seal_record(
     body: *const c_char,
     seed_hex: *const c_char,
 ) -> *mut c_char {
-    seal_impl(body, seed_hex, false)
+    seal_impl(body, seed_hex, false, crate::record::SealShapeMode::Enforce)
+}
+
+/// [`averin_seal_record`] with an explicit shape mode: `shadow` 0 enforces (identical to
+/// `averin_seal_record`), any other value seals a body that fails the shape, domain or
+/// canon_version check anyway and counts it (see `averin_seal_shape_violations`). Rollback switch
+/// only: such a record is rejected by every verifier.
+///
+/// # Safety
+/// `body` and `seed_hex` must be valid null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn averin_seal_record_mode(
+    body: *const c_char,
+    seed_hex: *const c_char,
+    shadow: c_int,
+) -> *mut c_char {
+    let mode = if shadow == 0 {
+        crate::record::SealShapeMode::Enforce
+    } else {
+        crate::record::SealShapeMode::Shadow
+    };
+    seal_impl(body, seed_hex, false, mode)
+}
+
+/// Number of record bodies sealed in shadow mode despite failing the shape, domain or
+/// canon_version check (process lifetime).
+#[no_mangle]
+pub extern "C" fn averin_seal_shape_violations() -> u64 {
+    crate::record::seal_shape_violations()
 }
 
 /// Seal a checkpoint body (UTF-8 JSON) with an Ed25519 signing key. Returns the sealed checkpoint
@@ -233,7 +261,7 @@ pub unsafe extern "C" fn averin_seal_checkpoint(
     body: *const c_char,
     seed_hex: *const c_char,
 ) -> *mut c_char {
-    seal_impl(body, seed_hex, true)
+    seal_impl(body, seed_hex, true, crate::record::SealShapeMode::Enforce)
 }
 
 /// Return the `ed25519pub:` public key for a 32-byte seed (64 hex chars). The server publishes this
@@ -260,7 +288,12 @@ pub unsafe extern "C" fn averin_pubkey_from_seed(seed_hex: *const c_char) -> *mu
     into_cstring(out)
 }
 
-unsafe fn seal_impl(body: *const c_char, seed_hex: *const c_char, checkpoint: bool) -> *mut c_char {
+unsafe fn seal_impl(
+    body: *const c_char,
+    seed_hex: *const c_char,
+    checkpoint: bool,
+    mode: crate::record::SealShapeMode,
+) -> *mut c_char {
     if body.is_null() || seed_hex.is_null() {
         return std::ptr::null_mut();
     }
@@ -284,7 +317,7 @@ unsafe fn seal_impl(body: *const c_char, seed_hex: *const c_char, checkpoint: bo
     let sealed = if checkpoint {
         crate::checkpoint::seal_checkpoint(&value, &sk).map(|v| v.serialize())
     } else {
-        crate::record::seal(&value, &sk).map(|v| v.serialize())
+        crate::record::seal_with_mode(&value, &sk, mode).map(|v| v.serialize())
     };
     match sealed {
         Ok(json) => into_cstring(json),
@@ -715,6 +748,27 @@ mod tests {
         assert!(call(averin_rcp_evidence_hash, r#"{"a":1.5}"#)
             .unwrap()
             .contains("error"));
+    }
+
+    #[test]
+    fn seal_record_mode_enforces_and_shadows() {
+        let seed = "00".repeat(32);
+        let bad =
+            r#"{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2"}"#;
+        let (cb, cs) = (CString::new(bad).unwrap(), CString::new(seed).unwrap());
+        unsafe {
+            let take = |p: *mut c_char| {
+                let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+                averin_string_free(p);
+                s
+            };
+            assert!(take(averin_seal_record(cb.as_ptr(), cs.as_ptr())).contains("error"));
+            assert!(take(averin_seal_record_mode(cb.as_ptr(), cs.as_ptr(), 0)).contains("error"));
+            let before = averin_seal_shape_violations();
+            let shadow = take(averin_seal_record_mode(cb.as_ptr(), cs.as_ptr(), 1));
+            assert!(shadow.contains("\"sig\""), "{shadow}");
+            assert!(averin_seal_shape_violations() > before);
+        }
     }
 
     #[test]

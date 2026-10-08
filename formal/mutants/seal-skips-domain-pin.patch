@@ -1,0 +1,15 @@
+Mutant: seal skips the domain pin (a body with a foreign domain is sealed).
+
+diff --git a/core/src/record.rs b/core/src/record.rs
+index cb0f050..17a4bb1 100644
+--- a/core/src/record.rs
++++ b/core/src/record.rs
+@@ -321,7 +321,7 @@ pub fn seal_shape_violations() -> u64 {
+ fn check_sealed_shape(sealed: &CanonValue) -> Result<(), RecordError> {
+     validate_record_shape(sealed)?;
+     let domain = str_field(sealed, "domain")?;
+-    if domain != RECORD_DOMAIN {
++    if false && domain != RECORD_DOMAIN {
+         return Err(RecordError::DomainMismatch {
+             expected: RECORD_DOMAIN.to_string(),
+             found: domain.to_string(),

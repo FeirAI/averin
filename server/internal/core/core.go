@@ -17,15 +17,64 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"unsafe"
 )
+
+// sealObserver, when set, sees every SealRecord body and its outcome. It exists for the producer
+// conformance test (SB-29); production code never sets it.
+var sealObserver atomic.Pointer[func(body string, err error)]
+
+// SetSealObserver installs (or, with nil, removes) a hook called after every SealRecord. Test use only.
+func SetSealObserver(fn func(body string, err error)) {
+	if fn == nil {
+		sealObserver.Store(nil)
+		return
+	}
+	sealObserver.Store(&fn)
+}
 
 // Core wraps the Rust integrity core with a held signing seed (self-host). Production backs signing
 // with a KMS instead of a raw seed.
 type Core struct {
 	seedHex string
 	pubKey  string
+	// shadow seals a record body even when verify_sealed would reject its shape, domain or
+	// canon_version (AVERIN_SEAL_SHAPE=shadow). Default false: such a body is refused.
+	shadow bool
 }
+
+// SealShapeMode says what SealRecord does with a body that verify_sealed would reject on top-level
+// shape, domain or canon_version.
+type SealShapeMode string
+
+const (
+	// SealShapeEnforce refuses the body (default).
+	SealShapeEnforce SealShapeMode = "enforce"
+	// SealShapeShadow seals it anyway and counts it. A rollback switch only: every verifier rejects
+	// the resulting record.
+	SealShapeShadow SealShapeMode = "shadow"
+)
+
+// ParseSealShapeMode parses AVERIN_SEAL_SHAPE. Empty means enforce; anything but enforce|shadow is an
+// error so a typo cannot silently weaken the check.
+func ParseSealShapeMode(raw string) (SealShapeMode, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "enforce":
+		return SealShapeEnforce, nil
+	case "shadow":
+		return SealShapeShadow, nil
+	default:
+		return "", fmt.Errorf("AVERIN_SEAL_SHAPE must be enforce or shadow (got %q)", raw)
+	}
+}
+
+// SetSealShapeMode selects enforce (default) or shadow for SealRecord. Call before serving.
+func (c *Core) SetSealShapeMode(m SealShapeMode) { c.shadow = m == SealShapeShadow }
+
+// SealShapeViolations is the process-wide count of bodies sealed in shadow mode although they
+// failed the shape, domain or canon_version check. Always 0 in enforce mode.
+func SealShapeViolations() int64 { return int64(C.averin_seal_shape_violations()) }
 
 // New validates the seed and caches the derived public key.
 func New(seedHex string) (*Core, error) {
@@ -59,13 +108,23 @@ func (c *Core) RcpEvidenceHash(payloadJSON string) (string, error) {
 	return checkValue(goStrFree(C.averin_rcp_evidence_hash(cs)))
 }
 
-// SealRecord seals a Decision Record body, returning the sealed JSON.
+// SealRecord seals a Decision Record body, returning the sealed JSON. In the default enforce mode it
+// returns an error for a body that verify_sealed would reject on top-level shape, domain or
+// canon_version (SB-29).
 func (c *Core) SealRecord(bodyJSON string) (string, error) {
 	cb := C.CString(bodyJSON)
 	cs := C.CString(c.seedHex)
 	defer C.free(unsafe.Pointer(cb))
 	defer C.free(unsafe.Pointer(cs))
-	return checkSeal(goStrFree(C.averin_seal_record(cb, cs)))
+	shadow := C.int(0)
+	if c.shadow {
+		shadow = 1
+	}
+	sealed, err := checkSeal(goStrFree(C.averin_seal_record_mode(cb, cs, shadow)))
+	if obs := sealObserver.Load(); obs != nil {
+		(*obs)(bodyJSON, err)
+	}
+	return sealed, err
 }
 
 // SealCheckpoint seals a checkpoint body.

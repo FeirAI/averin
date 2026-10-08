@@ -81,6 +81,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("signing key: %v", err)
 	}
+	// AVERIN_SEAL_SHAPE=enforce|shadow (default enforce): seal refuses a record body that verify_sealed
+	// would reject on top-level shape, domain or canon_version. shadow seals it anyway and counts it
+	// (averin_seal_shape_violations_total); it is a rollback switch only, the records it writes fail
+	// every verifier.
+	sealShape, err := core.ParseSealShapeMode(os.Getenv("AVERIN_SEAL_SHAPE"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	c.SetSealShapeMode(sealShape)
+	if sealShape == core.SealShapeShadow {
+		log.Printf("WARNING: AVERIN_SEAL_SHAPE=shadow: malformed record bodies are sealed anyway and no verifier will accept them; rollback use only")
+	}
 	keyID := envOr("AVERIN_SIGNING_KEY_ID", "k0")
 	addr := envOr("AVERIN_ADDR", ":8080")
 
@@ -113,7 +125,7 @@ func main() {
 	}
 	st := selectStore()
 
-	srv := api.New(c, st, keyID)
+	srv := api.New(c, st, keyID).WithSealShapeViolations(core.SealShapeViolations)
 	// GET /readyz probes the Postgres store's pool (short-timeout Ping); GET /metrics gets its live
 	// connection-pool gauges. The in-memory store (no AVERIN_DATABASE_URL) registers neither — nothing
 	// to be unready about, nothing to gauge.
@@ -361,6 +373,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("AVERIN_RESOURCE_SEED: %v", err)
 		}
+		rc.SetSealShapeMode(sealShape)
 		if rc.PubKey() == c.PubKey() {
 			log.Fatal("AVERIN_RESOURCE_SEED must differ from AVERIN_SIGNING_SEED (R2: broker and resource recording keys must be disjoint)")
 		}
