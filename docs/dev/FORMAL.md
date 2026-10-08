@@ -1,10 +1,10 @@
 # Formal claims register (kit)
 
-This page describes the second, machine-checked register of what Averin's formal and
-test evidence covers. It does not replace `formal/README.md` (the evidence itself) or
+This page describes a second register of what Averin's formal and test evidence covers,
+checked by a script (the register is checked, not the claims in it). It does not replace `formal/README.md` (the evidence itself) or
 `formal/claims.json` (the full inventory, checked by `scripts/check-claims.py`). It adds
 three things the inventory does not have: a drift lock on the code each claim protects,
-a mutant that proves each detector can fail, and a denylist of overclaim phrases.
+a mutant that shows each detector can fail, and a denylist of overclaim phrases.
 
 ## What the register is
 

@@ -15,7 +15,11 @@
       "verified on the final source",
       "proven by decision-core",
       "proven by the decision-core",
-      "100% verified"
+      "100% verified",
+      "tamper-proof",
+      "tamperproof",
+      "complete and unaltered",
+      "proven by tests"
     ],
     "globs": [
       "README.md",
