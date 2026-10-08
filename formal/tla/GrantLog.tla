@@ -241,4 +241,12 @@ BoundNotBinding == MaxSeq < Bound
 
 (* LIVENESS: a gapped log always becomes checkpointable again (no permanent checkpoint outage). *)
 CheckpointRecovers == []<>(IsPrefix(Recorded))
+
+(* REACHABILITY WITNESSES (W_ prefix). Each asserts a state is NEVER reached; run-tlc.sh requires the
+   paired witness configuration to VIOLATE it, so a passing configuration whose guarded actions cannot
+   fire fails the gate. *)
+\* A seq was voided and a later checkpoint anchored a set that contains it.
+W_VoidAnchored == \A S \in anchored : voided \cap S = {}
+\* A gap in the recorded set is reachable (so CheckpointRecovers is not trivially true).
+W_Gap == IsPrefix(Recorded)
 =============================================================================

@@ -96,4 +96,10 @@ NoLateGrant == outcome = "voided" => "grant" \notin records
 TerminalHasWinner == outcome # None => Cardinality(records) = 1
 TerminalOnceFenced == outcome # None => fence # None
 CheckpointRecovers == <> (outcome # None)
+
+\* REACHABILITY WITNESSES (W_ prefix). Each asserts a state is NEVER reached; run-tlc.sh requires the
+\* paired witness configuration to VIOLATE it, so a passing configuration whose guarded actions cannot
+\* fire fails the gate.
+W_AnchoredVoid == ~(anchored /\ outcome = "voided")
+W_AnchoredRecorded == ~(anchored /\ outcome = "recorded")
 =============================================================================
