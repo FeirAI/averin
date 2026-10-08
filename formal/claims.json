@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "An inventory of bounded claims and the CI jobs that back them. `gates` are jobs the single required check ci-required needs, so they run on every pull request; `scheduled_gates` run only on the schedule or manual dispatch. Evidence of record is a CI run of those jobs on the pinned toolchain (each uploads its logs as an artifact retained 90 days); local runs are informative only. Reference validation is textual, not semantic proof.",
+  "note": "An inventory of bounded claims and the CI jobs that back them. `gates` are jobs the single required check ci-required needs, so they run on every pull request; `scheduled_gates` run only on the schedule or manual dispatch. Evidence of record is a CI run of those jobs on the pinned toolchain (each uploads its logs as an artifact retained 90 days); local runs are informative only. `evidence_run` and `scheduled_evidence_run` name the latest green run of the gates when the entry was last updated: a push run on main, and for the scheduled gates a manual dispatch run that may be on a branch whose tree equals main's (formal/README.md names the commit). Reference validation is textual, not semantic proof.",
   "claims": [
     {
       "id": "seal-and-closure-model",
@@ -10,7 +10,8 @@
       "assumptions": ["SHA-256 collision resistance (never assumed as injectivity; explicit collision witnesses)", "Ed25519 unforgeability, stated as a hypothesis about which messages were signed", "honest signer", "model inputs are post-NFC (Unicode NFC is trusted)", "Lean 4.30.0 kernel"],
       "sources": [{"file": "formal/lean/Averin/Seal.lean", "symbol": "recordHashOf_binding"}, {"file": "formal/lean/Averin/Seal.lean", "symbol": "record_seal_sound"}, {"file": "formal/lean/Averin/Dag.lean", "symbol": "bundle_eq_closure"}, {"file": "formal/lean/Averin/Chain.lean", "symbol": "unique_history"}],
       "proofs": [{"file": "formal/lean/check-axioms.sh", "symbol": "lake env lean scripts/AxiomAudit.lean"}, {"file": "formal/lean/scripts/AxiomAudit.lean", "symbol": "escapeHatches env ourModule"}],
-      "gates": ["formal-lean"]
+      "gates": ["formal-lean"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "rust-model-refinement",
@@ -21,7 +22,9 @@
       "sources": [{"file": "core/src/canon.rs", "symbol": "pub fn serialize"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "Family.msg"}],
       "proofs": [{"file": "core/tests/oracle.rs", "symbol": "every_preimage_family_matches_model"}, {"file": "formal/check-refinement.py", "symbol": "tag inventory: OK"}],
       "gates": ["formal-refinement", "formal-mutants-fast"],
-      "scheduled_gates": ["formal-mutants-full"]
+      "evidence_run": "37712087870",
+      "scheduled_gates": ["formal-mutants-full"],
+      "scheduled_evidence_run": "37678805697"
     },
     {
       "id": "production-seal-refinement",
@@ -32,7 +35,9 @@
       "sources": [{"file": "core/src/record.rs", "symbol": "pub(crate) fn record_hash"}, {"file": "core/src/canon.rs", "symbol": "pub(crate) fn write_canonical"}, {"file": "core/src/sign.rs", "symbol": "pub fn preimage"}],
       "proofs": [{"file": "formal/production/Refinement/Seal.lean", "symbol": "record_hash_binding"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_seal_sound"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_ne_checkpoint"}, {"file": "formal/run-production-refinement.sh", "symbol": "production refinement: OK"}, {"file": "formal/production/ProductionAudit.lean", "symbol": "def runAudit"}],
       "gates": ["formal-production", "formal-mutants-fast"],
-      "scheduled_gates": ["formal-mutants-full"]
+      "evidence_run": "37712087870",
+      "scheduled_gates": ["formal-mutants-full"],
+      "scheduled_evidence_run": "37678805697"
     },
     {
       "id": "verdict-kernel-refinement",
@@ -43,7 +48,9 @@
       "sources": [{"file": "core/src/verify/verdict.rs", "symbol": "pub(super) fn decide_claims"}, {"file": "core/src/verify.rs", "symbol": "report.claims = verdict::decide_claims(&facts);"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "def decideClaim"}],
       "proofs": [{"file": "formal/production/Refinement/Verdict.lean", "symbol": "theorem decide_claims_refines"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_support_erasure"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_satisfied_supports"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_capstone_prerequisites"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_historical_requires_policy"}, {"file": "formal/mutants/m54-verdict-unanchored-capstone-skips-temporal.patch", "symbol": "deletion strengthens the capstone"}, {"file": "formal/mutants/m55-verdict-both-mode-list-deletion-skips-paths.patch", "symbol": "deletion strengthens a required trust claim"}, {"file": "formal/production/ProductionAudit.lean", "symbol": "def standardOnlyModules"}],
       "gates": ["formal-production", "formal-mutants-fast"],
-      "scheduled_gates": ["formal-mutants-full"]
+      "evidence_run": "37712087870",
+      "scheduled_gates": ["formal-mutants-full"],
+      "scheduled_evidence_run": "37678805697"
     },
     {
       "id": "parser-totality",
@@ -53,7 +60,8 @@
       "assumptions": ["Charon/Aeneas/Lean 4.31 toolchain and the Aeneas std models (unbounded Vec capacity, infallible allocation, unbounded stack)", "input size bounded by the caller (MAX_BUNDLE_BYTES in the verify path)", "NFC as an arbitrary function whose outputs fit in usize::MAX bytes (NfcFits hypothesis)", "SHA-256 as an arbitrary function"],
       "sources": [{"file": "core/src/canon.rs", "symbol": "fn parse_document("}, {"file": "formal/production/manifest.json", "symbol": "crate::canon::parse_document"}],
       "proofs": [{"file": "formal/production/Refinement/Parse.lean", "symbol": "theorem parse_document_total"}, {"file": "formal/mutants/m62-parser-decimal-overflow.patch", "symbol": "decimal_i64 drops its overflow guard"}, {"file": "core/tests/parser_differential.rs", "symbol": "fn rewrite_matches_reference_on_generated_corpus"}],
-      "gates": ["formal-production", "core"]
+      "gates": ["formal-production", "core"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "bounded-real-encoders",
@@ -64,7 +72,9 @@
       "sources": [{"file": "core/src/b64.rs", "symbol": "fn full_chunk_is_canonical"}, {"file": "core/src/hashx.rs", "symbol": "fn lp_into_frames_exactly"}, {"file": "core/src/canon.rs", "symbol": "fn utf16_strict_matches_std"}, {"file": "core/src/canon.rs", "symbol": "fn integer_roundtrip()"}, {"file": "core/src/canon.rs", "symbol": "fn accepted_integer_spelling_case"}],
       "proofs": [{"file": "formal/run-kani.sh", "symbol": "run_harness utf16_key_order_is_transitive"}, {"file": "formal/run-kani.sh", "symbol": "run_harness utf16_strict_matches_std"}, {"file": "formal/check-kani-shards.py", "symbol": "accepted_integer_spelling"}, {"file": "formal/check-kani-domains.py", "symbol": "integer_roundtrip"}, {"file": "formal/check-kani-shards.py", "symbol": "string_escape_roundtrip"}, {"file": "formal/kani-string-slices.py", "symbol": "SIZES = {\"ascii\": 16513"}, {"file": "formal/check-kani-success.py", "symbol": "VERIFICATION:- SUCCESSFUL"}, {"file": "formal/run-kani.sh", "symbol": "run_negative_control push_guard_is_in_force"}],
       "gates": ["formal-kani", "formal-kani-extended", "formal-kani-strings-smoke", "formal-mutants-fast"],
-      "scheduled_gates": ["formal-kani-strings-ascii", "formal-kani-strings-mixed", "formal-kani-strings-pure", "formal-mutants-full"]
+      "evidence_run": "37712087870",
+      "scheduled_gates": ["formal-kani-strings-ascii", "formal-kani-strings-mixed", "formal-kani-strings-pure", "formal-mutants-full"],
+      "scheduled_evidence_run": "37678805697"
     },
     {
       "id": "grant-log-model",
@@ -74,7 +84,8 @@
       "assumptions": ["finite configured grant count", "strong fairness of operator void", "weak fairness of open transaction resolution"],
       "sources": [{"file": "formal/tla/GrantLog.tla", "symbol": "CheckpointRecovers"}],
       "proofs": [{"file": "formal/tla/run-tlc.sh", "symbol": "GrantLog_fixed_live.cfg"}],
-      "gates": ["formal-tla"]
+      "gates": ["formal-tla"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "postgres-void-ordering",
@@ -84,7 +95,8 @@
       "assumptions": ["private test schema", "unique record_id index present where void succeeds", "database is reachable"],
       "sources": [{"file": "server/internal/store/postgres.go", "symbol": "VoidBrokerSeq"}],
       "proofs": [{"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidPostgres"}, {"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidGrantLandsFirstPostgres"}, {"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidMarkerFailsPostgres"}, {"file": "scripts/check-go-test-events.py", "symbol": "TestBrokerSeqVoidMarkerFailsPostgres"}],
-      "gates": ["store-postgres"]
+      "gates": ["store-postgres"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "revocation-live-and-durable",
@@ -94,7 +106,8 @@
       "assumptions": ["revocation enabled", "shared Postgres project Store", "all use and revoke paths obey WithProjectWrite"],
       "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "revokeGrantEvent"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "IsRevoked"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
       "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}],
-      "gates": ["store-postgres"]
+      "gates": ["store-postgres"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "pending-grant-durability",
@@ -104,7 +117,8 @@
       "assumptions": ["shared Postgres project Store", "prepare and finalize use WithProjectWrite", "pending expiry is checked from the authoritative row"],
       "sources": [{"file": "server/internal/api/grant_twophase.go", "symbol": "PutPendingGrant"}, {"file": "server/internal/store/operational_postgres.go", "symbol": "PendingGrantLive"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
       "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}],
-      "gates": ["store-postgres"]
+      "gates": ["store-postgres"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "native-rfc3161",
@@ -114,7 +128,8 @@
       "assumptions": ["TSA SPKI pinned out of band", "no production TSA round trip has been validated"],
       "sources": [{"file": "core/src/rfc3161.rs", "symbol": "verify_token"}, {"file": "core/src/anchor.rs", "symbol": "AnchorError::Unsupported"}],
       "proofs": [{"file": "core/src/anchor.rs", "symbol": "rfc3161_no_trusted_tsa_is_an_error_not_a_pass"}, {"file": "scripts/check-staticlib-fresh.sh", "symbol": "the cgo staticlib is OLDER than core source"}],
-      "gates": ["core", "store-postgres", "wasm"]
+      "gates": ["core", "store-postgres", "wasm"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "authority-v3-semantic-body-binding",
@@ -124,7 +139,8 @@
       "assumptions": ["external authority approves the actual structured subject", "SHA-256 collision resistance", "Ed25519 signatures", "recording key remains trusted", "the enumerated projection is reviewed when the record schema changes"],
       "sources": [{"file": "core/src/authority.rs", "symbol": "pub fn subject_projection"}, {"file": "server/internal/api/authority_v3.go", "symbol": "finalizeSemanticRecord"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "authority_v3_digest_bound"}],
       "proofs": [{"file": "core/tests/golden.rs", "symbol": "sdk_prepared_v3_record_matches_govder_subject_bytes"}, {"file": "core/tests/adversarial.rs", "symbol": "v3_signed_grant_and_pop_use_satisfy_body_bound_authorization"}, {"file": "core/src/authority.rs", "symbol": "v3_binds_semantic_body_but_not_recorder_envelope"}, {"file": "server/internal/api/authority_v3_test.go", "symbol": "TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal"}, {"file": "server/internal/api/authority_v3_test.go", "symbol": "TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite"}],
-      "gates": ["core", "server", "formal-lean", "formal-refinement"]
+      "gates": ["core", "server", "formal-lean", "formal-refinement"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "historical-v2-authority-is-unbound",
@@ -134,7 +150,8 @@
       "assumptions": ["historical v2 evidence bytes are immutable", "the original authority verification key remains pinned"],
       "sources": [{"file": "core/src/authority.rs", "symbol": "LegacyUnbound"}, {"file": "core/src/verify.rs", "symbol": "body_bound_role_evidence"}],
       "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "v2_role_evidence_retains_tier_b_joins_but_cannot_satisfy_body_bound_claim"}, {"file": "server/internal/api/server_authority_test.go", "symbol": "legacy_unbound"}],
-      "gates": ["core", "server"]
+      "gates": ["core", "server"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "external-authenticity-pins",
@@ -144,7 +161,8 @@
       "assumptions": ["operator pins role keys and TSA SPKI out of band"],
       "sources": [{"file": "core/src/verify.rs", "symbol": "verify_bundle_with"}],
       "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "out_of_band_key_pinning_governs_authenticity"}],
-      "gates": ["core"]
+      "gates": ["core"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "resource-truth-and-project-serialization",
@@ -154,7 +172,8 @@
       "assumptions": ["resource honestly labels covered actions", "all project writers use WithProjectWrite", "required unique record_id index remains valid", "shared Postgres database"],
       "sources": [{"file": "core/src/verify.rs", "symbol": "assumed_truthful"}, {"file": "server/internal/store/postgres.go", "symbol": "lockProject"}, {"file": "server/internal/api/server.go", "symbol": "createCheckpointTx"}],
       "proofs": [{"file": "server/internal/store/project_tx_test.go", "symbol": "TestPostgresProjectWriteTwoPools"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionProcessCuts"}, {"file": "formal/tla/ProjectTx_safe.cfg", "symbol": "NoFrontierFork"}, {"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
-      "gates": ["core", "server", "store-postgres", "formal-tla"]
+      "gates": ["core", "server", "store-postgres", "formal-tla"],
+      "evidence_run": "37712087870"
     },
     {
       "id": "historical-revocation-ordering",
@@ -165,7 +184,9 @@
       "sources": [{"file": "core/src/verify/temporal.rs", "symbol": "pub(super) fn classify"}, {"file": "core/src/verify/verdict.rs", "symbol": "historical_authorized_as_of_snapshot"}, {"file": "core/src/verify.rs", "symbol": "fn check_use"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "AllocateAuthorizationOrder"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "SnapshotBoundary"}, {"file": "server/migrations/0007_temporal_revocation.sql", "symbol": "revocation_events"}],
       "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "temporal_revocation_decision_table"}, {"file": "core/tests/adversarial.rs", "symbol": "temporal_blocked_use_runs_every_later_check_before_a_historical_positive"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "earlier_snapshot_cannot_flip"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "historical_requires_policy"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalCausalRevokeUseSchedulesPostgres"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalSnapshotExportConsistencyPostgres"}, {"file": "server/internal/api/temporal_revocation_test.go", "symbol": "TestTemporalProducerToVerifierHistoricalClaim"}],
       "gates": ["core", "server", "store-postgres", "formal-lean", "formal-refinement", "formal-mutants-fast"],
-      "scheduled_gates": ["formal-mutants-full"]
+      "evidence_run": "37712087870",
+      "scheduled_gates": ["formal-mutants-full"],
+      "scheduled_evidence_run": "37678805697"
     }
   ]
 }

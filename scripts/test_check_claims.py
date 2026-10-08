@@ -59,6 +59,62 @@ class ClaimCheckerTest(unittest.TestCase):
         self.assertTrue(any("missing/invalid file" in error for error in
                             checker.check_manifest(data, ROOT, self.workflow)))
 
+    def test_unconditional_job_missing_from_needs_rejected(self):
+        # A job with no `if:` that ci-required does not need would run but never gate a pull request.
+        workflow = self.workflow.replace("\njobs:\n", "\njobs:\n  stray:\n    runs-on: ubuntu-latest\n    steps: []\n", 1)
+        self.assertTrue(any("must equal the jobs with no job-level if" in error and "stray" in error for error in
+                            checker.check_manifest(self.data, ROOT, workflow)))
+
+    def test_needed_job_made_conditional_rejected(self):
+        workflow = self.workflow.replace("\n  formal-lean:\n", "\n  formal-lean:\n    if: github.event_name == 'push'\n", 1)
+        self.assertTrue(any("must equal the jobs with no job-level if" in error and "formal-lean" in error for error in
+                            checker.check_manifest(self.data, ROOT, workflow)))
+
+    def test_evidence_run_must_be_a_run_id(self):
+        data = copy.deepcopy(self.data)
+        data["claims"][0]["evidence_run"] = "latest"
+        self.assertTrue(any("must be a GitHub Actions run id" in error for error in
+                            checker.check_manifest(data, ROOT, self.workflow)))
+
+    def test_scheduled_evidence_needs_scheduled_gates(self):
+        data = copy.deepcopy(self.data)
+        data["claims"][0]["scheduled_gates"] = []
+        data["claims"][0]["scheduled_evidence_run"] = "37678805697"
+        self.assertTrue(any("has no scheduled_gates" in error for error in
+                            checker.check_manifest(data, ROOT, self.workflow)))
+
+    def test_valid_evidence_run_accepted(self):
+        data = copy.deepcopy(self.data)
+        data["claims"][0]["evidence_run"] = "37678805697"
+        self.assertEqual([], checker.check_manifest(data, ROOT, self.workflow))
+
+
+class OverclaimDenylistTest(unittest.TestCase):
+    def test_live_copy_is_clean(self):
+        self.assertEqual([], checker.check_copy_tree(ROOT))
+
+    def test_final_source_phrases_rejected(self):
+        for text in ("All of it was verified on the final source.", "Confirmed on final source by hand."):
+            self.assertTrue(checker.check_copy(text, "x.md"), text)
+
+    def test_48_of_48_needs_a_named_run(self):
+        self.assertTrue(checker.check_copy("The mutation suite caught 48/48.", "x.md"))
+        self.assertEqual([], checker.check_copy("CI run 37678805697 caught 48/48 mutants.", "x.md"))
+        # the excuse is per sentence: a run named elsewhere does not cover this one
+        self.assertTrue(checker.check_copy("See CI run 37678805697. The suite caught 48/48.", "x.md"))
+
+    def test_decision_core_proof_claim_for_dag_chain_anchor_rejected(self):
+        for noun in ("DAG", "chain", "anchor"):
+            self.assertTrue(checker.check_copy(f"The {noun} closure is proven by decision-core.", "x.md"), noun)
+        self.assertEqual([], checker.check_copy("Canonical bytes are checked by decision-core tests.", "x.md"))
+
+    def test_scans_the_documented_paths(self):
+        names = {str(p.relative_to(ROOT)) for p in checker.copy_files(ROOT)}
+        self.assertIn("README.md", names)
+        self.assertIn("formal/README.md", names)
+        self.assertIn("formal/claims.json", names)
+        self.assertTrue(any(n.startswith("docs/") for n in names))
+
 
 if __name__ == "__main__":
     unittest.main()

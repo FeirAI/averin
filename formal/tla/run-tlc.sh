@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Model-check the server protocol specs. Each line asserts ONE claim with its EXPECTED outcome: the
-# shipped designs must pass, and each pre-fix / unsafe variant must still produce the counterexample
-# the README names (so the model keeps demonstrating the bug it guards against).
+# Model-check the server protocol specs. Each line asserts ONE claim with its EXPECTED outcome: each
+# configuration marked pass must pass, and each pre-fix / unsafe variant must still produce the
+# counterexample the README names (so the model keeps demonstrating the bug it guards against).
+# GrantLog.tla and ConsumeLedger.tla model superseded designs, and two passing configurations check
+# nothing (marked below); see formal/README.md for what each passing result is evidence for.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -41,7 +43,8 @@ check() { # spec config expected: pass | <invariant or temporal property that mu
   echo "ok  $2 (${3}; $(echo "$out" | grep -oE '[0-9]+ distinct states found' | tail -1))"
 }
 
-# Grant-transparency log (GrantLog.tla).
+# Grant-transparency log (GrantLog.tla): the SUPERSEDED age-based recovery design. The current fence
+# protocol is GrantRecovery.tla, below.
 check GrantLog.tla GrantLog_current.cfg AnchoredGapless        # pre-fix: a gap gets anchored
 check GrantLog.tla GrantLog_release_lost.cfg AnchoredGapless   # a lost release, no fail-closed checkpoint
 check GrantLog.tla GrantLog_failclosed.cfg HoleFree            # release of a non-max orphan leaves a hole
@@ -51,22 +54,23 @@ check GrantLog.tla GrantLog_void_age_only.cfg pass             # ...either guard
 check GrantLog.tla GrantLog_void_index_only.cfg pass           # ...or the UNIQUE record_id index
 check GrantLog.tla GrantLog_void_backstop.cfg NoVoidDuringFlight # ...which really is exercised: the void races an in-flight retry
 check GrantLog.tla GrantLog_void_reachable.cfg NoVoid           # non-vacuity: the guarded void does happen
-check GrantLog.tla GrantLog_fixed.cfg pass                     # shipped design: no anchored gap, no duplicate seq
+check GrantLog.tla GrantLog_fixed.cfg pass                     # SUPERSEDED design (age-based recovery), not the shipped one: no anchored gap, no duplicate seq
 check GrantLog.tla GrantLog_wedge.cfg CheckpointRecovers       # without void, a client that never retries wedges checkpoints
 check GrantLog.tla GrantLog_fair_retry.cfg pass                # ...recovers only if every client retries until it commits
 check GrantLog.tla GrantLog_void_starved.cfg CheckpointRecovers # a client retrying forever, every attempt failing, starves the void
-check GrantLog.tla GrantLog_fixed_live.cfg pass                # with operator void: no permanent checkpoint outage
+check GrantLog.tla GrantLog_fixed_live.cfg pass                # superseded design, with operator void: no permanent checkpoint outage
 
 # Permanent recovery fence over legacy/residual reservations. The unsafe
 # counterexample demonstrates why already-running old credentials must be cut off.
 check GrantRecovery.tla GrantRecovery_old_writer.cfg NoDuplicateSeq
 check GrantRecovery.tla GrantRecovery_safe.cfg pass
 
-# Consume-before-act ledger (ConsumeLedger.tla).
+# Consume-before-act ledger (ConsumeLedger.tla): the SUPERSEDED pgledger consume; the current consume
+# (server/internal/store/ledger_postgres.go) is not modelled.
 check ConsumeLedger.tla ConsumeLedger_safe.cfg pass                               # Retention >= MaxTTL: at most once per key
 check ConsumeLedger.tla ConsumeLedger_short_retention_replay.cfg AtMostOncePerKey # Retention < MaxTTL: replay
 check ConsumeLedger.tla ConsumeLedger_short_retention.cfg InFlightRecorded       # ...and a live in-flight key is pruned
-check ConsumeLedger.tla ConsumeLedger_tenant_safe.cfg pass               # unknown-owner legacy rows block replays through expiry
+check ConsumeLedger.tla ConsumeLedger_tenant_safe.cfg pass               # VACUOUS: no consume is reachable, so TenantIsolation holds trivially
 check ConsumeLedger.tla ConsumeLedger_tenant_unsafe.cfg TenantAtMostOnce # premature legacy exclusion deletion reopens replay
 check ConsumeLedger.tla ConsumeLedger_tenant_isolation.cfg NoBothTenantsConsumed # witness: both projects can consume the equal nonce
 
@@ -76,5 +80,5 @@ check ProjectTx.tla ProjectTx_checkpoint_fork.cfg NoCheckpointFork   # concurren
 check ProjectTx.tla ProjectTx_stale_cache.cfg NoRevokedUse          # a stale replica admits a revoked capability
 check ProjectTx.tla ProjectTx_pending_cache.cfg NoGhostFinalize    # a cached expired challenge can finalize
 check ProjectTx.tla ProjectTx_safe.cfg pass                         # DB guard, ambiguity, crash and post-commit anchor
-check ProjectTx.tla ProjectTx_operational_safe.cfg pass             # durable pending/revocation reads
+check ProjectTx.tla ProjectTx_operational_safe.cfg pass             # HOLDS BY DEFINITION: Authoritative = TRUE leaves badUse/badFinalize unreachable
 rm -rf states

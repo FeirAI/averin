@@ -11,7 +11,10 @@ or model symbols, assumptions, proof or test, supported target and the CI jobs t
 (`gates`, which run on every pull request, and `scheduled_gates`, which run only on the schedule).
 `make check-claims` verifies that the referenced files, symbols and job IDs exist, that every
 `gates` entry is a job the required check `ci-required` needs, and that every `scheduled_gates`
-entry is a schedule-only job. This textual check
+entry is a schedule-only job. It also checks that `ci-required` needs exactly the jobs with no
+job-level `if:`, that any `evidence_run` or `scheduled_evidence_run` is shaped like a run id (not
+that the run exists or was green), and that a short list of known overclaim phrases does not
+appear in `docs/`, this file, `claims.json` or the top-level README. This textual check
 does not prove that a test covers the stated behavior or that a model refines the production code;
 those claims still require review. In particular, the Lean theorems are unbounded **for the model**,
 Kani proves bounded properties of selected real-code harnesses, and the Rust/Lean oracle samples a
@@ -29,18 +32,26 @@ under "Build setting" was invisible locally), and the logs of the local runs bef
 lost.
 
 Each formal job uploads an artifact `evidence-<job>` (retained 90 days) with its log, any Kani
-shard state and `MANIFEST.txt` (commit, run, job, runner, tool versions and the SHA-256 of every
+shard state and `MANIFEST.txt` (checkout and PR head commits, run, job, runner, tool versions (including the production refinement pins) and the SHA-256 of every
 file, written by `scripts/ci-evidence.sh`). Pull requests must pass the single required check
 `ci-required`, which needs every job that runs on a pull request. The Kani string family slices
 (weekly) and `formal-mutants-full` (nightly) run only on the schedule or on manual dispatch, and a
 claim resting on one rests on its latest green scheduled run on main. `main-health.yml` opens an
-issue labelled `main-red` while the latest `ci` run on main is not green.
+issue labelled `main-red` while the latest completed push run or the latest completed scheduled run of `ci` on main is not green, and closes it only when both are green and none is still running.
+
+Run of record for the scheduled set: `workflow_dispatch` run
+[37678805697](https://github.com/FeirAI/averin/actions/runs/37678805697) (2026-10-07 to 2026-10-08,
+commit `9b1ffda`, whose tree is identical to main's merge commit `02b51d9`) ran all 98 jobs green:
+the whole Kani string family under the `-Zinline-mir=no` setting and `formal-mutants-full` (all 48
+mutants caught). It is one run on one commit, not a standing guarantee; the next scheduled run on
+main is the check that it still holds. `claims.json` entries may carry `evidence_run` (the latest
+green run of the claim's `gates`) and `scheduled_evidence_run` (the same for `scheduled_gates`).
 
 | Layer | Tool | What it covers | Run |
 |---|---|---|---|
 | Unbounded proofs over a model | Lean 4 (`lean/`) | canonical-JSON injectivity, UTF-8, LP framing, domain separation of every message a key signs and every tagged or verifier-recomputed preimage (catalogue includes JSON challenges, capability tokens, raw keys, Merkle nodes, the RFC 3161 imprint string and server id derivations; untagged server-local digests are listed as out of scope), the seal theorem for a key shared across every signing role, commitment binding, DAG no-omission, checkpoint-chain uniqueness | `cd lean && lake build --wfail && ./check-axioms.sh` |
 | Bounded proofs over the real Rust | Kani / CBMC (`run-kani.sh`) | run by CI (pull requests, except the string family, which runs weekly): base64url alphabet bijection, `sha256:<hex>` digest-string injectivity and canonicality, exact LP framing, key order equal to UTF-16 code-unit order (5 of 5 harnesses) and transitive; extended set: base64url tail and chunk canonicality (per chunk), the strict UTF-16 decoder against std, the integer round trip over [-99,999, 99,999], canonical numeric spelling (61 of 61 shards), and the string escape round trip exhaustively over its exact 17,031-case domain (17,031 of 17,031). `parse_never_panics` is not verified (superseded by the Lean parser totality theorem). See "Kani" below | `bash formal/run-kani.sh [--extended]` |
-| Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log, consume-before-act ledger, and two-replica project transactions with checkpoints, ambiguous commits, crash/restart, pending grants and revocations | `bash formal/tla/run-tlc.sh` |
+| Protocol and concurrency models | TLA+ / TLC (`tla/`) | grant-transparency log (`GrantLog.tla`, including `GrantLog_fixed`, models a superseded design, not the shipped one; the current fence protocol is `GrantRecovery.tla`), consume-before-act ledger (a superseded consume; `ConsumeLedger_tenant_safe` is vacuous: no consume is reachable), and two-replica project transactions with checkpoints, ambiguous commits, crash/restart, pending grants and revocations (`ProjectTx_operational_safe` holds by definition) | `bash formal/tla/run-tlc.sh` |
 | Production refinement (plan 012) | Charon + Aeneas + Lean 4.31 (`production/`, `run-production-refinement.sh`) | the production seal core (serializer, LP framing, `sha256:` digest string, record/checkpoint preimages and hashes, signature message) is extracted from `core/src` and proved to be the model's `ser`/`lp`/`Family.msg`/`recordHashOf`; the model's seal theorems are applied to it. The verifier's claim kernel (`verify::verdict::decide_claims`) is extracted and proved to return the model's `decideClaim` for every claim, for every evidence state its checked facts correspond to; the verdict model's support-erasure, claim-order, capstone and historical theorems are transported to it. The production RCP parser (`CanonValue::parse`, via `parse_typed`/`parse_document`) is extracted and proved to return for every input of any length (`Refinement.Parse.parse_document_total`: no panic, overflow or out-of-bounds index, and termination), under the hypothesis that NFC's outputs are representable Rust strings, in Aeneas' `std` model (capacity overflow, allocation failure and stack depth not modelled). Axioms: standard + NFC + SHA-256 as arbitrary functions for the seal and parser theorems; the verdict refinement uses only the standard axioms (enforced per declaration by `ProductionAudit.lean`). Seal theorems are partial correctness | `bash formal/run-production-refinement.sh` |
 | Refinement gate | executable Lean oracle (`lean/Oracle`, `oracle/`) + tag inventory (`check-refinement.py`) + golden vectors | the Rust produces byte-for-byte what the Lean definitions compute (canonical JSON, escapes, integers, LP/BE framing, every preimage family, record/checkpoint hash preimages), and every Rust domain tag is a Lean family | `cd lean && lake build oracle && lake exe oracle ../oracle/inputs.json ../oracle/expected.json`, then `cargo test -p averin-decision-core --test oracle` and `python3 formal/check-refinement.py` |
 | Gate regression suite | `check-mutants.sh` + `mutants/*.patch` | 48 known drifts, each of which must be caught by at least one gate | `bash formal/check-mutants.sh` |
@@ -489,8 +500,10 @@ host are given for comparison only:
   and every other byte is rejected.
 - `hex_byte_roundtrip` and `hex_digit_is_canonical`: every byte round-trips through two
   lowercase hex digits, and each digit value has exactly one accepted spelling. Hex is written
-  and read at fixed width, so `"sha256:" ‖ hex_lower(d)` is injective and canonical for every
-  length. This is the `fmt` hypothesis in `Seal.lean`.
+  and read at fixed width, so these per-byte results suggest `"sha256:" ‖ hex_lower(d)` is
+  injective for every length; that step is an argument on paper, not a Kani result. In `Seal.lean`
+  this injectivity is the hypothesis `hfmt`; the production refinement proves it in Lean for the
+  extracted code (`fmtM_inj`).
 - `lp_into_frames_exactly`: `lp_into` emits exactly `uint32_be(len) ‖ b`.
 - `utf16_key_order_is_exact` (family, G1): for every pair of keys of one or two arbitrary scalars,
   `utf16_cmp` (the production `utf16_units` plus `units_lt`) equals the lexicographic order of
@@ -702,8 +715,9 @@ safety invariants; the operational safe configuration does so only by definition
 establish liveness, model SQL error handling, or prove code refinement. Tests
 with independent PostgreSQL pools exercise the corresponding transaction order.
 
-`tla/run-tlc.sh` runs every configuration and checks its **expected** outcome. The fixed designs
-must pass, and each unsafe variant must still produce the counterexample named above. TLC is
+`tla/run-tlc.sh` runs every configuration and checks its **expected** outcome. Each configuration
+marked pass must pass (some model superseded designs and two check nothing, see "What the models
+are evidence for" above), and each unsafe variant must still produce the counterexample named above. TLC is
 pinned to the immutable `v1.7.4` release and verified by sha256.
 
 ## Tool choice: why not K, and why not a separate Z3 layer

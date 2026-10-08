@@ -15,8 +15,8 @@ on:
     - cron: '41 2 * * *'
   workflow_dispatch:
 
-# Every third-party action is pinned by full commit SHA (the tag it resolved to on 2026-09-28 in the
-# trailing comment). Bump by resolving the new tag's commit, never by writing a tag.
+# Every third-party action is pinned by full commit SHA (the tag it resolved to in the trailing
+# comment; last resolved 2026-10-08). Bump by resolving the new tag's commit, never by writing a tag.
 #
 # Required on pull requests: the single aggregator check `ci-required` at the end of this file, which
 # needs every job that runs on a pull request. Jobs that run only on the schedule or on manual
@@ -26,19 +26,23 @@ on:
 # Evidence: every formal job writes its log (and any Kani shard state) to $RUNNER_TEMP/evidence,
 # closes it with scripts/ci-evidence.sh (MANIFEST.txt with commit, run, tool versions, SHA-256 of
 # every file) and uploads it as an artifact retained 90 days (formal/README.md, "Evidence of record").
+# The PR head commit (the checkout on a pull request is a synthetic merge commit); empty off pull requests.
+env:
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
 jobs:
   fuzz:
     name: deterministic RCP fuzz (native C ABI + WASM)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: 1.92.0
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
       - name: bounded pull-request or larger weekly campaign
@@ -49,7 +53,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-fuzz
@@ -63,12 +67,12 @@ jobs:
       run:
         working-directory: core
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: fmt
         run: cargo fmt --check
       - name: clippy
@@ -83,21 +87,21 @@ jobs:
         run: cargo build --release --bin averin-verify --features rfc3161
 
   core-32bit:
-    name: rust decision-core on 32-bit (usize=u32 — wasm32 truncation gate)
+    name: rust decision-core on 32-bit (usize=u32, wasm32 truncation gate)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
       run:
         working-directory: core
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: stable
           targets: i686-unknown-linux-gnu
       # Distinct prefix so this job never shares a cache key with the host-target `core` job
       # (Swatinem also hashes targets; prefix is belt-and-suspenders for the cross-compile case).
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: core-32bit
       # i686 has usize == u32, exactly like the shipped wasm32 verifier. Running the FULL adversarial suite
@@ -123,12 +127,12 @@ jobs:
     name: go server (cgo -> rust core; ingestion + verify pipeline)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.25.13'
       - name: build rust staticlib (cgo links it)
@@ -165,12 +169,12 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.25.13'
       - name: build native RFC 3161 rust staticlib for cgo API tests
@@ -199,7 +203,7 @@ jobs:
           go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... ./internal/pgschema/... ./internal/resourceshim/... | tee "${RUNNER_TEMP}/averin-go-events.json" | python3 ../scripts/check-go-test-events.py
       - name: save Go test events on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: postgres-go-test-events
           path: ${{ runner.temp }}/averin-go-events.json
@@ -211,8 +215,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: bun install --frozen-lockfile
       - run: bun run test
       - run: bun run build
@@ -224,8 +228,8 @@ jobs:
       run:
         working-directory: sdk/typescript
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: bun install --frozen-lockfile
       - run: bun test
       - run: bun run typecheck
@@ -234,13 +238,13 @@ jobs:
     name: "offline verifier (trust-root tests: NUL-truncation, supply-chain pin, accountability)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       # build.sh builds the wasm + self-pins index.html/sidecar to THIS build (wasm32 bytes are host-specific,
       # so the committed dev-host pin is re-derived here rather than asserted — see verifier/SUPPLY-CHAIN.md).
       - name: build wasm + self-pin
@@ -250,18 +254,18 @@ jobs:
         run: bun test
 
   wasm:
-    name: wasm build (verifier skew gate — same core, byte-for-byte)
+    name: "wasm build (verifier skew gate: same core, byte-for-byte)"
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: core
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: build wasm (same C ABI as cgo; no wasm-bindgen, RNG-free)
         run: cargo build --release --target wasm32-unknown-unknown --lib --no-default-features
 
@@ -269,20 +273,20 @@ jobs:
     name: "supply chain (cargo-deny: advisories, licenses, sources, bans)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Scans Cargo.lock for known-vulnerable/yanked crates, non-permissive licenses, and any dependency
       # not from crates.io — a defense for the Rust integrity core (the trust root). Policy: deny.toml.
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories licenses sources bans
 
   formal-lean:
-    name: formal — Lean seal/canon/DAG/chain proofs (no sorry, standard axioms only)
+    name: "formal: Lean seal/canon/DAG/chain proofs (no sorry, standard axioms only)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: leanprover/lean-action@50fcf42d2e460296f1a34b402e990d1b24f8b596 # v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
         with:
           lake-package-directory: formal/lean
           auto-config: false
@@ -300,7 +304,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-lean
@@ -308,10 +312,10 @@ jobs:
           retention-days: 90
 
   formal-refinement:
-    name: formal — Rust ↔ Lean refinement gate (executable Lean oracle + tag inventory)
+    name: "formal: Rust ↔ Lean refinement gate (executable Lean oracle + tag inventory)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: validate claim references and required CI gates
         run: |
           set -o pipefail
@@ -320,8 +324,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - uses: leanprover/lean-action@50fcf42d2e460296f1a34b402e990d1b24f8b596 # v1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
         with:
           lake-package-directory: formal/lean
           auto-config: false
@@ -356,7 +360,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-refinement
@@ -370,7 +374,7 @@ jobs:
   # parser mutants m60-m64) runs in formal-production. Each shard runs the unmutated baseline of
   # exactly its own gates and harnesses first. The full 48 run nightly in formal-mutants-full.
   formal-mutants-fast:
-    name: formal — mutation suite, fast tier (${{ matrix.shard }})
+    name: "formal: mutation suite, fast tier (${{ matrix.shard }})"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -392,11 +396,11 @@ jobs:
     env:
       KANI_TIMEOUT_SECONDS: "1800"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: add swap so a CBMC memory peak cannot kill the hosted runner
         if: matrix.skip_kani == '0'
         run: |
@@ -429,7 +433,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-mutants-fast-${{ matrix.shard }}
@@ -442,17 +446,17 @@ jobs:
   # formal-production (this job skips it, so m50, m54-m58 and m60-m64 must die to another gate here).
   formal-mutants-full:
     if: github.event.schedule == '41 2 * * *' || github.event_name == 'workflow_dispatch'
-    name: formal — mutation suite, all 48 mutants (nightly)
+    name: "formal: mutation suite, all 48 mutants (nightly)"
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
       KANI_TIMEOUT_SECONDS: "1800"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: add swap so a CBMC memory peak cannot kill the hosted runner
         run: |
           sudo swapoff -a || true
@@ -480,7 +484,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-mutants-full
@@ -492,7 +496,7 @@ jobs:
   # run the production-proof detector against its named mutants: a changed preimage byte (m50) and
   # verdict-kernel mutants (m54-m58), and the parser totality mutants (m60-m64, Refinement.Parse).
   formal-production:
-    name: formal — production refinement, Charon/Aeneas extraction proved against the Lean model (${{ matrix.leg }})
+    name: "formal: production refinement, Charon/Aeneas extraction proved against the Lean model (${{ matrix.leg }})"
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -506,7 +510,7 @@ jobs:
           - leg: parser-mutants
             mutants: m60-parser-utf8-truncation-unchecked,m61-parser-literal-unguarded,m62-parser-decimal-overflow,m63-parser-panic-unexpected-char,m64-parser-skip-ws-unbounded
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: toolchain-free checks (extraction freshness, call paths into the proved code, no cfg code, glue)
         run: |
           set -o pipefail
@@ -520,7 +524,7 @@ jobs:
         run: |
           echo "key=$(python3 -c 'import hashlib, json; m = json.load(open("formal/production/manifest.json")); print(hashlib.sha256(json.dumps(m["toolchain"], sort_keys=True).encode()).hexdigest()[:16])')" >> "$GITHUB_OUTPUT"
       - name: cache the pinned toolchain
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/averin-aeneas
@@ -562,7 +566,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-production-${{ matrix.leg }}
@@ -570,14 +574,14 @@ jobs:
           retention-days: 90
 
   formal-kani:
-    name: formal — Kani bounded proofs over the real encoders
+    name: "formal: Kani bounded proofs over the real encoders"
     runs-on: ubuntu-latest
     # Starts with the G1 negative control (push_guard_is_in_force must fail on its guard), then the
     # default set. Measured runtimes are in formal/README.md ("Default set"); the limit leaves room
     # for the Kani setup, the build and a slow runner. A timeout is a failure, never a pass.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Install only; formal/run-kani.sh drives the named harnesses (bare `cargo-kani` would try every
       # harness with default features).
       - name: add swap so a CBMC memory peak cannot kill the hosted runner
@@ -601,7 +605,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-kani
@@ -613,7 +617,7 @@ jobs:
     # measured runtime on this runner (formal/README.md, "Extended set"); a timeout is a failure,
     # never a pass. Every harness that requests kissat gets it from the Kani 0.68.0 bundle the
     # action installs (bin/kissat 4.0.1).
-    name: formal — Kani extended parser/encoding proofs (${{ matrix.harness }})
+    name: "formal: Kani extended parser/encoding proofs (${{ matrix.harness }})"
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.minutes }}
     strategy:
@@ -628,7 +632,7 @@ jobs:
           # A checked shard family (formal/check-kani-shards.py): every shard must pass.
           - { harness: accepted_integer_spelling, minutes: 120 }
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: add swap so a CBMC memory peak cannot kill the hosted runner
         run: |
           sudo swapoff -a || true
@@ -656,7 +660,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-kani-extended-${{ matrix.harness }}
@@ -666,11 +670,11 @@ jobs:
   # PR/push drift check for the string family: a fixed 20-case smoke subset from every cost class
   # (formal/kani-string-smoke.txt, checked against the proved case list). Not the family's proof.
   formal-kani-strings-smoke:
-    name: formal — Kani string round trip smoke subset (20 cases)
+    name: "formal: Kani string round trip smoke subset (20 cases)"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: add swap so a CBMC memory peak cannot kill the hosted runner
         run: |
           sudo swapoff -a || true
@@ -695,7 +699,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-kani-strings-smoke
@@ -711,7 +715,7 @@ jobs:
   # on the weekly schedule and on manual dispatch; pull requests run formal-kani-strings-smoke.
   formal-kani-strings-ascii:
     if: github.event.schedule == '17 3 * * 0' || github.event_name == 'workflow_dispatch'
-    name: formal — Kani string round trip, ASCII (slice ${{ matrix.slice }}/48)
+    name: "formal: Kani string round trip, ASCII (slice ${{ matrix.slice }}/48)"
     runs-on: ubuntu-latest
     # 345 cases per slice.
     timeout-minutes: 360
@@ -721,7 +725,7 @@ jobs:
         slice: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
                 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: add swap so a CBMC memory peak cannot kill the hosted runner
         run: |
           sudo swapoff -a || true
@@ -745,7 +749,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-kani-strings-ascii-${{ matrix.slice }}
@@ -754,7 +758,7 @@ jobs:
 
   formal-kani-strings-mixed:
     if: github.event.schedule == '17 3 * * 0' || github.event_name == 'workflow_dispatch'
-    name: formal — Kani string round trip, one non-ASCII scalar (slice ${{ matrix.slice }}/16)
+    name: "formal: Kani string round trip, one non-ASCII scalar (slice ${{ matrix.slice }}/16)"
     runs-on: ubuntu-latest
     # 33 cases per slice (the last 19).
     timeout-minutes: 360
@@ -763,7 +767,7 @@ jobs:
       matrix:
         slice: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: add swap so a CBMC memory peak cannot kill the hosted runner
         run: |
           sudo swapoff -a || true
@@ -787,7 +791,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-kani-strings-mixed-${{ matrix.slice }}
@@ -798,7 +802,7 @@ jobs:
     # The four cases whose two scalars are both non-ASCII, one per job. AVERIN_KANI_LARGE_RUNNER /
     # AVERIN_KANI_PURE_TIMEOUT_MINUTES can move them to another runner or limit.
     if: github.event.schedule == '17 3 * * 0' || github.event_name == 'workflow_dispatch'
-    name: formal — Kani string round trip, two non-ASCII scalars (case ${{ matrix.slice }}/4)
+    name: "formal: Kani string round trip, two non-ASCII scalars (case ${{ matrix.slice }}/4)"
     runs-on: ${{ vars.AVERIN_KANI_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ fromJSON(vars.AVERIN_KANI_PURE_TIMEOUT_MINUTES || '60') }}
     strategy:
@@ -806,7 +810,7 @@ jobs:
       matrix:
         slice: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: add swap so a CBMC memory peak cannot kill the hosted runner
         run: |
           sudo swapoff -a || true
@@ -831,7 +835,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-kani-strings-pure-${{ matrix.slice }}
@@ -839,11 +843,11 @@ jobs:
           retention-days: 90
 
   formal-tla:
-    name: formal — TLA+ models (expected outcomes; GrantLog and ConsumeLedger model superseded designs)
+    name: "formal: TLA+ models (expected outcomes; GrantLog and ConsumeLedger model superseded designs)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: "21"
@@ -855,7 +859,7 @@ jobs:
       - name: evidence manifest
         if: always()
         run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-formal-tla
