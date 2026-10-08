@@ -20,6 +20,8 @@ those claims still require review. In particular, the Lean theorems are unbounde
 Kani proves bounded properties of selected real-code harnesses, and the Rust/Lean oracle samples a
 fixed corpus. The TLA+ recovery liveness result depends on its retry and fairness assumptions.
 
+A second register, [`kit-claims.json`](kit-claims.json), adds a drift lock on the covered functions, a mutant per claim and an overclaim denylist; see [`docs/dev/FORMAL.md`](../docs/dev/FORMAL.md). It narrows, never widens, the claims here.
+
 ## Evidence of record
 
 Only a CI run counts as evidence for a claim here or in `claims.json`: a run of the named job on
