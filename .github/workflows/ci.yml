@@ -11,7 +11,7 @@ on:
   schedule:
     # Weekly (Sunday): the whole Kani string family and the larger fuzz campaign.
     - cron: '17 3 * * 0'
-    # Nightly: the full 48-mutant suite (formal-mutants-full).
+    # Nightly: the full 48-mutant legacy suite (formal-mutants-full) and every kit mutant (formal-nightly).
     - cron: '41 2 * * *'
   workflow_dispatch:
 
@@ -20,7 +20,7 @@ on:
 #
 # Required on pull requests: the single aggregator check `ci-required` at the end of this file, which
 # needs every job that runs on a pull request. Jobs that run only on the schedule or on manual
-# dispatch (the Kani string family slices, formal-mutants-full) are outside it; a failure there turns
+# dispatch (the Kani string family slices, formal-mutants-full, formal-nightly) are outside it; a failure there turns
 # the scheduled run on main red, which main-health.yml reports as an issue.
 #
 # Evidence: every formal job writes its log (and any Kani shard state) to $RUNNER_TEMP/evidence,
@@ -866,8 +866,6 @@ jobs:
           path: ${{ runner.temp }}/evidence/
           retention-days: 90
 
-  # The single required check (branch protection requires only this). It passes only when every job
-  # that runs on a pull request passed; skipped, cancelled or failed counts as not passed.
   # The shared formal kit (scripts/formal, vendored byte for byte from the kit): the claims register
   # formal/kit-claims.json must match the repo (drift lock, CI gates, overclaim denylist) and every
   # fast-tier mutant must be killed by its detector. Runs on every event, so ci-required needs it.
@@ -947,6 +945,8 @@ jobs:
           path: ${{ runner.temp }}/evidence/
           retention-days: 90
 
+  # The single required check (branch protection requires only this). It passes only when every job
+  # that runs on a pull request passed; skipped, cancelled or failed counts as not passed.
   ci-required:
     name: ci-required
     if: always()

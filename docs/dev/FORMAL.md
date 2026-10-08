@@ -13,7 +13,8 @@ a mutant that proves each detector can fail, and a denylist of overclaim phrases
 edit them here). Each claim carries:
 
 - `statement`: one bounded sentence about what the detector checks.
-- `method`: lean, kani, differential-vectors, exhaustive, fuzz, test (the kit's list).
+- `method`: one of the kit's methods (`scripts/formal/README.md`); this register uses lean, kani,
+  differential-vectors, exhaustive, fuzz and test.
 - `gates`: CI job ids that run the evidence on pull requests or on the schedule.
 - `detector`: a shell command, run from the repo root, that passes on the real tree.
 - `covers`: the exact functions the claim protects, each with a sha256 (the drift lock).
@@ -42,9 +43,12 @@ claim says what its cheap detector checks, not what the whole proof program show
    must report `killed` (it tests HEAD, not the working tree).
 7. Say plainly in `does_not_establish` what remains open.
 
-Mutants that only a Lean extraction proof kills (m50, m54 to m58, m60 to m64) are not in this
-register, because the Aeneas toolchain is not set up for it. They stay in the legacy suite.
-m60 in particular survives the native fuzz and differential tests; only the totality proof kills it.
+The Aeneas production-proof mutants (m50, m54 to m58, and m60 to m64 as proof mutants) run in the
+legacy suite on every pull request (`formal-production`), not here, because the Aeneas toolchain is not
+set up for the kit. m61, m62 and m64 are also killed by the native parser tests, so they are in this
+register under `parser-differential-and-fuzz`. m60 survives the native fuzz and differential tests
+(they only pass valid UTF-8 strings); only the totality proof kills it, so it is not in this register.
+m63 is not here yet because its patch does not pass `git apply --check`.
 
 ## Drift lock and relock policy
 
@@ -85,7 +89,7 @@ informative only. The kit does not fetch run ids; `evidence_run` is optional.
 | `temporal-revocation-ordering-tests` | test | classify, Merkle v2 proof check, snapshot evaluation | Inputs the tests do not build; example tests, not a proof |
 | `pop-intent-and-disclosure-regressions` | test | per-use checks, bundle verification | Bundle shapes the suite does not build; not a monotonicity proof |
 | `production-call-path-gate` | textual test | signature verify, content hash, bundle verification | Correctness of the extracted code; anything beyond the call sites and cfg forms it scans |
-| `parser-differential-and-fuzz` | fuzz and differential | parser escape, literal, number and whitespace paths | Totality for all inputs (the Lean proof is stronger); allocation failure; stack depth |
+| `parser-differential-and-fuzz` | fuzz and differential | parser escape, literal, number and whitespace paths | Totality for all inputs (the Lean proof is stronger); input that is not valid UTF-8; allocation failure; stack depth |
 | `kani-encoder-harnesses` | Kani (nightly) | LP framing, base64url tail canonicality | Anything outside the harness bounds; the other Kani harnesses; not distinguishing an unwinding failure from a counterexample |
 | `lean-seal-model` | Lean (nightly) | the hand seal model in `Seal.lean` | That the model matches the Rust; SHA-256, Ed25519, honest signer and NFC are assumptions |
 

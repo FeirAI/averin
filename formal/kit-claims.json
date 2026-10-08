@@ -377,7 +377,7 @@
     {
       "id": "parser-differential-and-fuzz",
       "$comment": "legacy register: parser-totality",
-      "statement": "The RCP parser matches the reference parser on a generated corpus and survives a seeded deterministic fuzz campaign without panic, including truncated escapes, truncated UTF-8, truncated literals, long digit strings and trailing whitespace.",
+      "statement": "The RCP parser matches the reference parser on a generated corpus and survives a seeded deterministic fuzz campaign without panic, including truncated escapes, truncated literals, long digit strings and trailing whitespace.",
       "method": "fuzz",
       "artifacts": [
         "core/tests/parser_differential.rs",
@@ -417,12 +417,12 @@
         "m62-parser-decimal-overflow",
         "m64-parser-skip-ws-unbounded"
       ],
-      "does_not_establish": "Totality for all inputs (the Lean parser-totality proof in formal/claims.json is the stronger evidence; this checks sampled inputs only). Not allocation failure, stack depth or the uncapped options JSON path."
+      "does_not_establish": "Totality for all inputs (the Lean parser-totality proof in formal/claims.json is the stronger evidence; this checks sampled inputs only). Not input that is not valid UTF-8: both tests pass Rust strings, so a truncated UTF-8 sequence never reaches the parser here (mutant m60 survives these tests; only the totality proof kills it). Not allocation failure, stack depth or the uncapped options JSON path."
     },
     {
       "id": "kani-encoder-harnesses",
       "$comment": "legacy register: bounded-real-encoders",
-      "statement": "Within each harness's stated bounds, Kani checks the real LP framing (4-byte big-endian length), base64url tail canonicality for two- and three-symbol tails.",
+      "statement": "Within each harness's stated bounds, Kani checks the real LP framing (4-byte big-endian length) and base64url tail canonicality for two- and three-symbol tails.",
       "method": "kani",
       "artifacts": [
         "formal/run-kani.sh",
