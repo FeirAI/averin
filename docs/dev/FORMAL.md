@@ -1,7 +1,7 @@
 # Formal claims register (kit)
 
 This page describes a second register of what Averin's formal and test evidence covers,
-checked by a script (the register is checked, not the claims in it). It does not replace `formal/README.md` (the evidence itself) or
+checked by a script (the register is checked, not the claims in it). The kit's default command, `python3 scripts/formal/check_claims.py` with no arguments, fails here by design because it reads the legacy `formal/claims.json`; use `--claims formal/kit-claims.json` or `make formal-kit`. It does not replace `formal/README.md` (the evidence itself) or
 `formal/claims.json` (the full inventory, checked by `scripts/check-claims.py`). It adds
 three things the inventory does not have: a drift lock on the code each claim protects,
 a mutant that shows each detector can fail, and a denylist of overclaim phrases.
@@ -92,7 +92,9 @@ informative only. The kit does not fetch run ids; `evidence_run` is optional.
 | `parser-differential-and-fuzz` | fuzz and differential | parser escape, literal, number and whitespace paths | Totality for all inputs (the Lean proof is stronger); input that is not valid UTF-8; allocation failure; stack depth |
 | `kani-encoder-harnesses` | Kani (nightly) | LP framing, base64url tail canonicality | Anything outside the harness bounds; the other Kani harnesses; not distinguishing an unwinding failure from a counterexample |
 | `lean-seal-model` | Lean (nightly) | the hand seal model in `Seal.lean` | That the model matches the Rust; SHA-256, Ed25519, honest signer and NFC are assumptions |
+| `tla-projecttx-model` | TLA+ (nightly, model level) | `ProjectTx.tla`, the project serialization model | Binding to the Go or Postgres code; larger constants; `ProjectTx_operational_safe` holds by definition; the superseded GrantLog and ConsumeLedger models |
 
-Not yet in the register (still tracked in `formal/claims.json`): the TLA+ configurations, the
+Not yet in the register (still tracked in `formal/claims.json`): the other TLA+ models (GrantLog and
+ConsumeLedger model superseded designs; GrantRecovery is not registered yet), the
 Postgres-backed API tests, RFC 3161 target-specific tests, and the Charon/Aeneas production
 proofs. Each needs a mutant and a detector that can run in the kit's scratch tree first.
