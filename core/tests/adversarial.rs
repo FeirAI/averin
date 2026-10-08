@@ -16397,3 +16397,50 @@ fn temporal_merkle_v2_rejects_cutoff_beyond_watermark() {
     assert_ne!(row.ordering, "proven_before");
     assert_ne!(row.historical, ClaimDecision::Satisfied);
 }
+
+// SB-28: the kernel cap must not make a capstone label unreachable on a real bundle. The real-producer
+// fixtures whose kernel satisfies `complete_brokered` / `complete_introspected` still reach the matching
+// serialized label (the synthesized capstone reports above carry unsatisfied kernel claims, so they cannot
+// show this; the Go capstone tests cover only the brokered label).
+#[test]
+fn sb28_real_producer_fixtures_keep_their_capstone_labels() {
+    for (fixture, claim, label) in [
+        (
+            "claim-complete-v3.json",
+            "complete_brokered",
+            "attested_complete_over_brokered_surface",
+        ),
+        (
+            "claim-native-capstone-v3.json",
+            "complete_introspected",
+            "attested_complete_over_introspected_surface",
+        ),
+    ] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("spec/fixtures")
+            .join(fixture);
+        let f = CanonValue::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let report = CanonValue::parse(&verify_bundle_with_json(
+            &f.get("bundle").unwrap().serialize(),
+            &f.get("opts").unwrap().serialize(),
+        ))
+        .unwrap();
+        assert_eq!(
+            report
+                .get("claims")
+                .and_then(|c| c.get(claim))
+                .and_then(CanonValue::as_str),
+            Some("satisfied"),
+            "{fixture}: kernel {claim}"
+        );
+        assert_eq!(
+            report
+                .get("action_completeness")
+                .and_then(CanonValue::as_str),
+            Some(label),
+            "{fixture}: capped label"
+        );
+    }
+}
