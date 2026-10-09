@@ -283,12 +283,13 @@ func (s *Server) WithContent(c content.Store) *Server {
 	return s
 }
 
-// WithSealShapeViolations exposes the count of record bodies sealed in AVERIN_SEAL_SHAPE=shadow mode
-// although verify_sealed would reject them (a nonzero value means records that no verifier accepts
-// are being written). Always zero in the default enforce mode.
+// WithSealShapeViolations exposes the count of record and checkpoint bodies sealed in
+// AVERIN_SEAL_SHAPE=shadow mode although verify_sealed or verify_checkpoint_sealed would reject them (a
+// nonzero value means records or checkpoints that no verifier accepts are being written). Always zero
+// in the default enforce mode.
 func (s *Server) WithSealShapeViolations(fn func() int64) *Server {
 	s.metrics.CounterFunc("averin_seal_shape_violations_total",
-		"Total records sealed in shadow mode that verify_sealed rejects on shape, domain or canon_version (always 0 in enforce mode).",
+		"Total records and checkpoints sealed in shadow mode that the verifier rejects on shape, domain or canon_version (always 0 in enforce mode).",
 		fn)
 	return s
 }

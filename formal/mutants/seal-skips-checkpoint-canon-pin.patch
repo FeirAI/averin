@@ -1,0 +1,13 @@
+diff --git a/core/src/checkpoint.rs b/core/src/checkpoint.rs
+index 7884cdf..07d4747 100644
+--- a/core/src/checkpoint.rs
++++ b/core/src/checkpoint.rs
+@@ -196,7 +196,7 @@ fn check_sealed_checkpoint_pins(sealed: &CanonValue) -> Result<(), RecordError>
+         .ok_or(RecordError::MissingField("canon_version"))?
+         .as_str()
+         .ok_or(RecordError::FieldNotString("canon_version"))?;
+-    if cv != CHECKPOINT_CANON_VERSION {
++    if cv.is_empty() {
+         return Err(RecordError::CanonVersionMismatch {
+             expected: CHECKPOINT_CANON_VERSION.to_string(),
+             found: cv.to_string(),

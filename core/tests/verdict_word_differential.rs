@@ -2,7 +2,8 @@
 //! the Rust `claim_verdict` and the JS `claimVerdict` (verifier/claim-verdict.js, run with node)
 //! produce the same headline word. The CLI prints `claim_verdict(..).word()` (see cli_verdict.rs
 //! for the end-to-end binary check). Each corpus row is crossed with every requested claim,
-//! `ok` true/false and `keys_externally_pinned` true/false, plus malformed-contract cases.
+//! `ok` true/false and `keys_externally_pinned` true/false, plus malformed-contract cases and
+//! non-boolean `ok` / `keys_externally_pinned` values.
 //!
 //! Needs `node` on PATH (CI ubuntu runners have it). Not a proof: a finite differential.
 
@@ -90,6 +91,16 @@ fn rust_and_js_headline_words_agree_over_the_corpus() {
             "bogus_claim",
             Some("satisfied"),
         ));
+    }
+    // Non-boolean flags: the Rust rule accepts only the JSON boolean true for `ok` and
+    // `keys_externally_pinned`, so a truthy string or number must not read as ok or as pinned in JS.
+    let base = report_json(true, true, "2", first, "authorized", Some("satisfied"));
+    for v in [r#""false""#, r#""true""#, "1", "0", "null", "{}", "[]"] {
+        reports.push(base.replace(
+            r#""keys_externally_pinned":true"#,
+            &format!(r#""keys_externally_pinned":{v}"#),
+        ));
+        reports.push(base.replace(r#""ok":true"#, &format!(r#""ok":{v}"#)));
     }
     reports.push(r#"{"ok":true,"keys_externally_pinned":true}"#.to_string());
     reports.push(r#"{"ok":true,"keys_externally_pinned":true,"claims_version":"2"}"#.to_string());

@@ -5,15 +5,18 @@ const claims = new Set([
 ]);
 const decisions = new Set(["satisfied", "insufficient", "refuted"]);
 
+// `ok` and `keys_externally_pinned` count only as the boolean true, as in the Rust claim_verdict
+// (core/src/verify/headline.rs) and verifier/claim-verdict.js: a truthy string or number is neither
+// ok nor pinning.
 export function claimVerdict(report: any): Verdict {
   const c = report?.claims;
   const valid = report?.claims_version === "2"
     && claims.has(c?.requested)
     && decisions.has(c?.requested_decision)
     && c?.[c.requested] === c.requested_decision;
-  if (!report?.ok || (valid && c.requested_decision === "refuted")) return {word: "FAIL", className: "fail", valid};
+  if (report?.ok !== true || (valid && c.requested_decision === "refuted")) return {word: "FAIL", className: "fail", valid};
   if (!valid || c.requested_decision === "insufficient") return {word: "INSUFFICIENT", className: "qual", valid};
-  return report.keys_externally_pinned
+  return report.keys_externally_pinned === true
     ? {word: "PASS", className: "pass", valid}
     : {word: "CONSISTENT", className: "qual", valid};
 }

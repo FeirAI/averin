@@ -1,6 +1,7 @@
-Mutant: a seal model theorem is stated without its SHA-256 injectivity-of-format hypothesis (proof must break).
+Mutant: a seal model theorem keeps its format hypothesis hfmt but without injectivity (fmt x = fmt y -> True); the proof must break where it needs injectivity (a type mismatch, not an unknown name).
+
 diff --git a/formal/lean/Averin/Seal.lean b/formal/lean/Averin/Seal.lean
-index d2d81dc..b22fe84 100644
+index d2d81dc..a71c95d 100644
 --- a/formal/lean/Averin/Seal.lean
 +++ b/formal/lean/Averin/Seal.lean
 @@ -159,7 +159,7 @@ collides on this body's preimage and the preimage of a body the key holder seale
@@ -8,7 +9,7 @@ index d2d81dc..b22fe84 100644
  `0x00` — JSON PoP challenges, capability tokens, the denial salt (`HonestSigner`).
  -/
 -theorem record_seal_sound (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x = fmt y → x = y)
-+theorem record_seal_sound (H fmt : Bytes → Bytes)
++theorem record_seal_sound (H fmt : Bytes → Bytes) (hfmt : ∀ x y, fmt x = fmt y → True)
      (hlen : ∀ x, (fmt (H x)).length = 71)
      (Signed : Bytes → Prop) (records checkpoints : List CV)
      (honest : HonestSigner H fmt Signed records checkpoints)

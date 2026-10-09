@@ -61,7 +61,11 @@ char *averin_seal_checkpoint(const char *body, const char *seed_hex);
  * seals such a body anyway and counts it. Rollback switch only: a record sealed in shadow mode is
  * rejected by every verifier. */
 char *averin_seal_record_mode(const char *body, const char *seed_hex, int shadow);
-/* Bodies sealed in shadow mode that failed the check, since process start. */
+/* averin_seal_checkpoint with a shape mode. averin_seal_checkpoint (and every `shadow` value except 1)
+ * refuses a checkpoint body that verify_checkpoint_sealed would reject on domain or canon_version.
+ * Exactly `shadow` == 1 seals such a body anyway and counts it. Rollback switch only. */
+char *averin_seal_checkpoint_mode(const char *body, const char *seed_hex, int shadow);
+/* Record and checkpoint bodies sealed in shadow mode that failed the check, since process start. */
 uint64_t averin_seal_shape_violations(void);
 
 /* Return the ed25519pub: public key for a seed (for the server's published key list). */

@@ -1,0 +1,13 @@
+diff --git a/core/src/checkpoint.rs b/core/src/checkpoint.rs
+index 7884cdf..fd23011 100644
+--- a/core/src/checkpoint.rs
++++ b/core/src/checkpoint.rs
+@@ -185,7 +185,7 @@ fn check_sealed_checkpoint_pins(sealed: &CanonValue) -> Result<(), RecordError>
+         .ok_or(RecordError::MissingField("domain"))?
+         .as_str()
+         .ok_or(RecordError::FieldNotString("domain"))?;
+-    if domain != CHECKPOINT_DOMAIN {
++    if domain.is_empty() {
+         return Err(RecordError::DomainMismatch {
+             expected: CHECKPOINT_DOMAIN.to_string(),
+             found: domain.to_string(),

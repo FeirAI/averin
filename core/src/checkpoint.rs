@@ -5,7 +5,7 @@
 use crate::canon::CanonValue;
 use crate::dag::Dag;
 use crate::hashx::{parse_sha256, sha256_prefixed};
-use crate::record::{body_preimage, PreimageFault, RecordError};
+use crate::record::{body_preimage, PreimageFault, RecordError, SealShapeMode};
 use crate::sign::{self, CHECKPOINT_SIG_TAG};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
@@ -176,14 +176,73 @@ pub fn checkpoint_body(
     .map_err(|e| CheckpointError::Hash(RecordError::SignatureInvalid(e.to_string())))
 }
 
-/// Seal a checkpoint body: compute `checkpoint_hash` and sign it (RCP §9.4). `anchor` is added
-/// later by the anchoring job and is excluded from the preimage.
-pub fn seal_checkpoint(cp_body: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
+/// The `domain` and `canon_version` pins of [`verify_checkpoint_sealed`], applied to an already
+/// sealed checkpoint (the checkpoint half of SB-29). The same two comparisons as in
+/// `verify_checkpoint_sealed`; core/tests/seal_shape.rs (`checkpoint_*`) holds them in step.
+fn check_sealed_checkpoint_pins(sealed: &CanonValue) -> Result<(), RecordError> {
+    let domain = sealed
+        .get("domain")
+        .ok_or(RecordError::MissingField("domain"))?
+        .as_str()
+        .ok_or(RecordError::FieldNotString("domain"))?;
+    if domain != CHECKPOINT_DOMAIN {
+        return Err(RecordError::DomainMismatch {
+            expected: CHECKPOINT_DOMAIN.to_string(),
+            found: domain.to_string(),
+        });
+    }
+    let cv = sealed
+        .get("canon_version")
+        .ok_or(RecordError::MissingField("canon_version"))?
+        .as_str()
+        .ok_or(RecordError::FieldNotString("canon_version"))?;
+    if cv != CHECKPOINT_CANON_VERSION {
+        return Err(RecordError::CanonVersionMismatch {
+            expected: CHECKPOINT_CANON_VERSION.to_string(),
+            found: cv.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn seal_checkpoint_unchecked(
+    cp_body: &CanonValue,
+    sk: &SigningKey,
+) -> Result<CanonValue, RecordError> {
     let ch = compute_checkpoint_hash(cp_body)?;
     let sig = sign::sign(CHECKPOINT_SIG_TAG, &ch, sk);
     let stripped = cp_body.without_keys(&["checkpoint_hash", "sig"]);
     let with_hash = set_field(&stripped, "checkpoint_hash", CanonValue::Str(ch));
     Ok(set_field(&with_hash, "sig", CanonValue::Str(sig)))
+}
+
+/// Seal a checkpoint body: compute `checkpoint_hash` and sign it (RCP §9.4). `anchor` is added
+/// later by the anchoring job and is excluded from the preimage.
+///
+/// Rejects every body that [`verify_checkpoint_sealed`] would reject on `domain` or `canon_version`,
+/// so `seal_checkpoint(b)` being `Ok` implies `verify_checkpoint_sealed` accepts the result under the
+/// matching key. It checks nothing that [`validate_chain`] checks (sequence, previous hash, frontier,
+/// record count).
+pub fn seal_checkpoint(cp_body: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
+    seal_checkpoint_with_mode(cp_body, sk, SealShapeMode::Enforce)
+}
+
+/// [`seal_checkpoint`] with an explicit [`SealShapeMode`] (the cgo server maps `AVERIN_SEAL_SHAPE` to
+/// it, as for records). `Shadow` seals a body that fails the pins anyway and counts it in
+/// [`crate::record::seal_shape_violations`]; every verifier rejects such a checkpoint.
+pub fn seal_checkpoint_with_mode(
+    cp_body: &CanonValue,
+    sk: &SigningKey,
+    mode: SealShapeMode,
+) -> Result<CanonValue, RecordError> {
+    let sealed = seal_checkpoint_unchecked(cp_body, sk)?;
+    if let Err(e) = check_sealed_checkpoint_pins(&sealed) {
+        match mode {
+            SealShapeMode::Enforce => return Err(e),
+            SealShapeMode::Shadow => crate::record::count_seal_shape_violation(),
+        }
+    }
+    Ok(sealed)
 }
 
 fn set_field(obj: &CanonValue, key: &str, value: CanonValue) -> CanonValue {
@@ -404,7 +463,8 @@ mod tests {
 
     /// A checkpoint sealed under a foreign `canon_version` is internally consistent (hash and sig both
     /// check) but is outside the profile the seal theorem models, so it must not verify — the same pin
-    /// `record::verify_content_hash` applies to records.
+    /// `record::verify_content_hash` applies to records. `seal_checkpoint` refuses to seal it, so the
+    /// test builds it unchecked, as a hostile key holder could.
     #[test]
     fn foreign_canon_version_is_rejected() {
         let sk = signing_key_from_seed(&[8u8; 32]);
@@ -420,7 +480,14 @@ mod tests {
         )
         .unwrap();
         let foreign = set_field(&body, "canon_version", CanonValue::string("rcp-2"));
-        let sealed = seal_checkpoint(&foreign, &sk).unwrap();
+        assert_eq!(
+            seal_checkpoint(&foreign, &sk),
+            Err(RecordError::CanonVersionMismatch {
+                expected: "rcp-1".into(),
+                found: "rcp-2".into(),
+            })
+        );
+        let sealed = seal_checkpoint_unchecked(&foreign, &sk).unwrap();
         assert_eq!(
             verify_checkpoint_sealed(&sealed, &sk.verifying_key()),
             Err(CheckpointError::Hash(RecordError::CanonVersionMismatch {

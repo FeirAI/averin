@@ -227,3 +227,43 @@ a `400` deny.
 - `averin-migrate` bounds each run by `--timeout` (or `AVERIN_MIGRATE_TIMEOUT`),
   default 90 s. A cutover rewrites migrated history in one transaction; raise the
   timeout for large histories rather than retrying a run that times out.
+
+## Formal evidence bounds (phase 2 close-out)
+
+The claims registers (`docs/dev/FORMAL.md`, `formal/README.md`) state each claim's own limits.
+These are the cross-cutting residuals accepted at the phase 2 close-out, with the condition under
+which each one matters.
+
+- **Seal shape is top-level only.** `record::seal` refuses a body that `verify_sealed` would reject
+  on top-level shape, `domain` or `canon_version`, and `checkpoint::seal_checkpoint` refuses a body
+  that `verify_checkpoint_sealed` would reject on `domain` or `canon_version`. Unknown keys inside
+  nested objects are not checked by either, and a checkpoint's chain fields (sequence, previous
+  hash, frontier, record count) are checked only when a bundle is verified. Records and
+  checkpoints stored before these checks shipped are not re-checked.
+- **The generic records path mirrors the core key list.** In `enforce` mode `/v2/records` refuses
+  an unknown top-level key before sealing, from a Go copy of the core's key list held equal by a
+  parity test. If the copy lags the core, the parity test fails; at runtime the seal still refuses
+  the key, so the failure mode is the old partial batch commit, not an unverifiable seal.
+- **`AVERIN_SEAL_SHAPE=shadow`** seals records and checkpoints that every verifier rejects, on
+  purpose, as a rollback switch. `averin_seal_shape_violations_total` counts them.
+- **Kani mutants run nightly only.** The kit's Kani mutants (m2 to m4, m9 to m12) run in
+  `formal-nightly`, not on pull requests. In the kit a Kani detector that fails for a tool error
+  counts as a kill; the legacy `formal-mutants-full` job tells a completed counterexample from a
+  tool error.
+- **Scheduled evidence lags.** GitHub has started this repository's scheduled `ci` runs about
+  6.5 hours after their cron time, so nightly and weekly evidence (`formal-nightly`,
+  `formal-mutants-full`, the Kani string family) can be most of a day old.
+- **Filtered test detectors.** The kit's vacuity guard fails a cargo test detector whose name
+  filter matches no test, but it proves only that at least one test ran, not that every test the
+  filter was meant to select ran.
+- **TLA+ models are designs.** No model has a trace link to the Go or Postgres code;
+  `NoGhostFinalize` holds by definition and is not checked in any passing `ProjectTx`
+  configuration; reachability witnesses are states a person chose as interesting.
+- **Aeneas production proofs stay in the legacy register.** m50, m54 to m58, m60 to m64 as proof
+  mutants run in `formal-production` (every pull request), not in the kit register.
+- **Verifier headline surfaces.** `averin-verify bundle` exits 2 for CONSISTENT and also for usage
+  or unreadable-file errors, so a caller must read the RESULT line. INSUFFICIENT exits 1, like FAIL.
+  The web app's TypeScript `claimVerdict` is covered by its own unit tests, not by the Rust to JS
+  differential. The kernel cap on the introspected Level-3 label is exercised only by a unit test
+  (no corpus case shows an introspected overclaim). `averin-verify record` with no key still
+  prints `PASS (integrity only)` and exits 0 (see `CONFIGURATION.md`).

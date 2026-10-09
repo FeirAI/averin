@@ -57,3 +57,14 @@ test("historicalClaimNote falls back to insufficient under an invalid claims con
   expect(historicalClaimNote({...r, claims: {requested: "historical_authorized_as_of_snapshot"}})).toBe("insufficient");
   expect(historicalClaimNote(historicalReport("refuted", false))).toBe("refuted");
 });
+
+// Same rule as the Rust claim_verdict (core/src/verify/headline.rs): `ok` and `keys_externally_pinned`
+// count only as the JSON boolean true. A truthy non-boolean ("false", 1, "true") is not pinning and not ok.
+test("only the boolean true counts for ok and keys_externally_pinned", () => {
+  for (const v of ["false", "true", 1, "1", {}, []]) {
+    expect(claimVerdict({...report(), keys_externally_pinned: v}).word).toBe("CONSISTENT");
+    expect(claimVerdict({...report(), ok: v}).word).toBe("FAIL");
+  }
+  expect(claimVerdict({...report(), keys_externally_pinned: null}).word).toBe("CONSISTENT");
+  expect(claimVerdict({...report(), ok: null}).word).toBe("FAIL");
+});

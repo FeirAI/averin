@@ -14,6 +14,12 @@ on:
     # Nightly: the full 48-mutant legacy suite (formal-mutants-full) and every kit mutant (formal-nightly).
     - cron: '41 2 * * *'
   workflow_dispatch:
+    inputs:
+      scope:
+        description: "full runs every scheduled job; kit-nightly skips the Kani string family slices and formal-mutants-full"
+        type: choice
+        options: [full, kit-nightly]
+        default: full
 
 # Every third-party action is pinned by full commit SHA (the tag it resolved to in the trailing
 # comment; last resolved 2026-10-08). Bump by resolving the new tag's commit, never by writing a tag.
@@ -22,6 +28,12 @@ on:
 # needs every job that runs on a pull request. Jobs that run only on the schedule or on manual
 # dispatch (the Kani string family slices, formal-mutants-full, formal-nightly) are outside it; a failure there turns
 # the scheduled run on main red, which main-health.yml reports as an issue.
+#
+# Manual dispatch: `gh workflow run ci.yml --ref <branch>` runs every job (scope full, about 100 jobs
+# with the 68 Kani string family slices). `gh workflow run ci.yml --ref <branch> -f scope=kit-nightly`
+# runs formal-nightly with the pull request jobs, without the string family slices and
+# formal-mutants-full, so the kit's full mutant tier can be checked on a branch without clogging the
+# queue.
 #
 # Evidence: every formal job writes its log (and any Kani shard state) to $RUNNER_TEMP/evidence,
 # closes it with scripts/ci-evidence.sh (MANIFEST.txt with commit, run, tool versions, SHA-256 of
@@ -134,7 +146,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.9'
       - name: build rust staticlib (cgo links it)
         run: cargo build -p averin-decision-core --features rfc3161
       - name: stale-staticlib guard (the cgo lib must match current core source, never a stale trust root)
@@ -176,7 +188,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.9'
       - name: build native RFC 3161 rust staticlib for cgo API tests
         run: cargo build -p averin-decision-core --features rfc3161
       - name: reject stale cgo staticlib
@@ -445,7 +457,7 @@ jobs:
   # scheduled run on main red (main-health.yml). The production-proof detector itself runs in
   # formal-production (this job skips it, so m50, m54-m58 and m60-m64 must die to another gate here).
   formal-mutants-full:
-    if: github.event.schedule == '41 2 * * *' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '41 2 * * *' || (github.event_name == 'workflow_dispatch' && inputs.scope != 'kit-nightly')
     name: "formal: mutation suite, all 48 mutants (nightly)"
     runs-on: ubuntu-latest
     timeout-minutes: 300
@@ -714,7 +726,7 @@ jobs:
   # resume state. The full family is too costly for every push (about 70 jobs): these jobs run only
   # on the weekly schedule and on manual dispatch; pull requests run formal-kani-strings-smoke.
   formal-kani-strings-ascii:
-    if: github.event.schedule == '17 3 * * 0' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '17 3 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.scope != 'kit-nightly')
     name: "formal: Kani string round trip, ASCII (slice ${{ matrix.slice }}/48)"
     runs-on: ubuntu-latest
     # 345 cases per slice.
@@ -757,7 +769,7 @@ jobs:
           retention-days: 90
 
   formal-kani-strings-mixed:
-    if: github.event.schedule == '17 3 * * 0' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '17 3 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.scope != 'kit-nightly')
     name: "formal: Kani string round trip, one non-ASCII scalar (slice ${{ matrix.slice }}/16)"
     runs-on: ubuntu-latest
     # 33 cases per slice (the last 19).
@@ -801,7 +813,7 @@ jobs:
   formal-kani-strings-pure:
     # The four cases whose two scalars are both non-ASCII, one per job. AVERIN_KANI_LARGE_RUNNER /
     # AVERIN_KANI_PURE_TIMEOUT_MINUTES can move them to another runner or limit.
-    if: github.event.schedule == '17 3 * * 0' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '17 3 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.scope != 'kit-nightly')
     name: "formal: Kani string round trip, two non-ASCII scalars (case ${{ matrix.slice }}/4)"
     runs-on: ${{ vars.AVERIN_KANI_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ fromJSON(vars.AVERIN_KANI_PURE_TIMEOUT_MINUTES || '60') }}
@@ -900,8 +912,9 @@ jobs:
           path: ${{ runner.temp }}/evidence/
           retention-days: 90
 
-  # Every kit mutant, including the Kani and Lean ones. Nightly and on manual dispatch only; never
-  # required on pull requests, a failure turns the scheduled run on main red (main-health.yml).
+  # Every kit mutant, including the Kani, Lean and TLA+ ones. Nightly and on manual dispatch only
+  # (scope kit-nightly runs it without the string family slices); never required on pull requests,
+  # a failure turns the scheduled run on main red (main-health.yml).
   formal-nightly:
     if: github.event.schedule == '41 2 * * *' || github.event_name == 'workflow_dispatch'
     name: "formal: kit register, all mutants (nightly)"
@@ -915,6 +928,14 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: add swap so a CBMC memory peak cannot kill the hosted runner
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 12G /mnt/cbmc.swap
+          sudo chmod 600 /mnt/cbmc.swap
+          sudo mkswap /mnt/cbmc.swap
+          sudo swapon /mnt/cbmc.swap
+          free -h
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin

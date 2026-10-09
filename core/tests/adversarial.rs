@@ -23,6 +23,20 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+/// What a hostile key holder can do without `seal`: hash and sign any body with the public
+/// primitives. Builds records a verifier must reject; `seal` itself refuses them (SB-29), and the
+/// core has no public unchecked seal.
+fn hostile_seal(body: &CanonValue, sk: &ed25519_dalek::SigningKey) -> CanonValue {
+    let ch = averin_decision_core::record::compute_content_hash(body).unwrap();
+    let sig = averin_decision_core::sign::sign(averin_decision_core::sign::RECORD_SIG_TAG, &ch, sk);
+    let CanonValue::Object(mut members) = body.without_keys(&["content_hash", "sig"]) else {
+        panic!("hostile_seal on a non-object")
+    };
+    members.push(("content_hash".to_string(), CanonValue::Str(ch)));
+    members.push(("sig".to_string(), CanonValue::Str(sig)));
+    CanonValue::Object(members)
+}
+
 fn fixture() -> CanonValue {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -610,11 +624,7 @@ fn govder_record_with_no_agent_id_evidence_binding() {
     ])
     // Deliberately non-conforming (no agent_id): `seal` now refuses it, so build it unchecked.
     .unwrap();
-    let rec = averin_decision_core::record::seal_unchecked_for_tests(
-        &CanonValue::parse(&body).unwrap(),
-        &seal_key,
-    )
-    .unwrap();
+    let rec = hostile_seal(&CanonValue::parse(&body).unwrap(), &seal_key);
     let bundle = CanonValue::object(vec![
         ("bundle_version".into(), CanonValue::string("1")),
         ("project_id".into(), CanonValue::string("acme")),

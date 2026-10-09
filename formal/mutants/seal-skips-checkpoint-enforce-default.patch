@@ -1,0 +1,13 @@
+diff --git a/core/src/checkpoint.rs b/core/src/checkpoint.rs
+index 7884cdf..6ad4d58 100644
+--- a/core/src/checkpoint.rs
++++ b/core/src/checkpoint.rs
+@@ -224,7 +224,7 @@ fn seal_checkpoint_unchecked(
+ /// matching key. It checks nothing that [`validate_chain`] checks (sequence, previous hash, frontier,
+ /// record count).
+ pub fn seal_checkpoint(cp_body: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
+-    seal_checkpoint_with_mode(cp_body, sk, SealShapeMode::Enforce)
++    seal_checkpoint_with_mode(cp_body, sk, SealShapeMode::Shadow)
+ }
+ 
+ /// [`seal_checkpoint`] with an explicit [`SealShapeMode`] (the cgo server maps `AVERIN_SEAL_SHAPE` to

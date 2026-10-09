@@ -2,7 +2,7 @@ module github.com/feirai/averin/server
 
 go 1.25.0
 
-toolchain go1.25.13
+toolchain go1.26.9
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
