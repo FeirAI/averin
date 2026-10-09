@@ -298,7 +298,8 @@ fn with_field(obj: &CanonValue, key: &str, value: CanonValue) -> CanonValue {
 }
 
 /// What [`seal_with_mode`] does with a body that [`verify_sealed`] would reject on shape,
-/// domain or canon_version.
+/// domain or canon_version (and [`crate::checkpoint::seal_checkpoint_with_mode`] with a checkpoint
+/// body that `verify_checkpoint_sealed` would reject on domain or canon_version).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SealShapeMode {
     /// Return the error and seal nothing (the default; what [`seal`] does).
@@ -310,10 +311,16 @@ pub enum SealShapeMode {
 
 static SEAL_SHAPE_VIOLATIONS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// How many bodies [`seal_with_mode`] sealed in [`SealShapeMode::Shadow`] although
-/// [`verify_sealed`] would reject their shape, domain or canon_version (process lifetime).
+/// How many bodies [`seal_with_mode`] or [`crate::checkpoint::seal_checkpoint_with_mode`] sealed in
+/// [`SealShapeMode::Shadow`] although the matching verifier would reject their shape, domain or
+/// canon_version (process lifetime; records and checkpoints share the count).
 pub fn seal_shape_violations() -> u64 {
     SEAL_SHAPE_VIOLATIONS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Count one checkpoint body sealed in [`SealShapeMode::Shadow`] despite failing its pins.
+pub(crate) fn count_seal_shape_violation() {
+    SEAL_SHAPE_VIOLATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// The shape, domain and canon_version part of [`verify_sealed`], applied to an already sealed
@@ -373,16 +380,6 @@ pub fn seal_with_mode(
         }
     }
     Ok(sealed)
-}
-
-/// Seal with no shape check: the old behaviour, kept only so tests can build records that a
-/// verifier must reject. Never call from production code.
-#[doc(hidden)]
-pub fn seal_unchecked_for_tests(
-    record: &CanonValue,
-    sk: &SigningKey,
-) -> Result<CanonValue, RecordError> {
-    seal_unchecked(record, sk)
 }
 
 /// Verify a record's `sig` against the given verifying key (RCP §9.2). Does **not** re-check the

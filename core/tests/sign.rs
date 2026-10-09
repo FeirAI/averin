@@ -7,6 +7,20 @@ use averin_decision_core::record::{seal, verify_sealed, verify_signature};
 use averin_decision_core::sign::{decode_pubkey, signing_key_from_seed};
 use std::path::PathBuf;
 
+/// What a hostile key holder can do without `seal`: hash and sign any body with the public
+/// primitives. Builds records a verifier must reject; `seal` itself refuses them (SB-29), and the
+/// core has no public unchecked seal.
+fn hostile_seal(body: &CanonValue, sk: &ed25519_dalek::SigningKey) -> CanonValue {
+    let ch = averin_decision_core::record::compute_content_hash(body).unwrap();
+    let sig = averin_decision_core::sign::sign(averin_decision_core::sign::RECORD_SIG_TAG, &ch, sk);
+    let CanonValue::Object(mut members) = body.without_keys(&["content_hash", "sig"]) else {
+        panic!("hostile_seal on a non-object")
+    };
+    members.push(("content_hash".to_string(), CanonValue::Str(ch)));
+    members.push(("sig".to_string(), CanonValue::Str(sig)));
+    CanonValue::Object(members)
+}
+
 fn vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -103,7 +117,7 @@ fn verify_sealed_rejects_unknown_top_level_field() {
     // `seal` itself now refuses the body (SB-29); build the record unchecked, as a hostile
     // key holder could, to keep proving the verifier side.
     assert!(seal(&smuggled, &sk).is_err());
-    let sealed = averin_decision_core::record::seal_unchecked_for_tests(&smuggled, &sk).unwrap();
+    let sealed = hostile_seal(&smuggled, &sk);
     let vk = sk.verifying_key();
     // content_hash + signature alone would pass; verify_sealed rejects the unknown field.
     assert!(verify_signature(&sealed, &vk).is_ok());
