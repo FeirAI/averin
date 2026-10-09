@@ -95,8 +95,8 @@
     "core/Cargo.toml": "0d90d1e08d2d474dcec1648f76a36aab993b098e47ec34d60614e9c67811cc2e",
     "core/src/canon.rs": "717822b3628f20deb923ddfaba17f2499cf0775420b664f7b408e35d5caf483d",
     "core/src/hashx.rs": "3193a42763c19e681181c07bbb8e7ab6f37d0d27dd0bc6124d8f7067b7d043c7",
-    "core/src/record.rs": "fef5d2a650eddc59448f457c4df686f95f23b9fc278f681d4639c9d211905293",
-    "core/src/checkpoint.rs": "90ba12e80e5e89811f119840fe44b07a9e90a7d650b9f365b49f9feed3f455c4",
+    "core/src/record.rs": "fda53c56da857632e8be5edecef08440a578f25a0c332e201f0406ea3ad2f6f3",
+    "core/src/checkpoint.rs": "472db9b8dc865c4cb65543db2c77156caa3264ccb948c2ad4a18fd524ac8ff8a",
     "core/src/sign.rs": "cd3611f1ee9bfa13c9fa61353b6ea4412254bb539ae4a48ccfeb73babb3e80b3",
     "core/src/verify/verdict.rs": "414a3199247eeed15af8e920d626f42a43c3b50868bf110a6a989e20ae2d1e58",
     "formal/production/Extracted/Types.lean": "f7999c3caef0caaae12617e0576067bb85748c171b992d85b7fa824b5eaac681",
@@ -376,6 +376,18 @@
     {
       "file": "core/src/checkpoint.rs",
       "fn": "seal_checkpoint",
+      "body": "seal_checkpoint_with_mode(cp_body, sk, SealShapeMode::Enforce)"
+    },
+    {
+      "file": "core/src/checkpoint.rs",
+      "fn": "seal_checkpoint_with_mode",
+      "contains": [
+        "let sealed = seal_checkpoint_unchecked(cp_body, sk)?;"
+      ]
+    },
+    {
+      "file": "core/src/checkpoint.rs",
+      "fn": "seal_checkpoint_unchecked",
       "contains": [
         "let ch = compute_checkpoint_hash(cp_body)?;",
         "sign::sign(CHECKPOINT_SIG_TAG, &ch, sk)"
