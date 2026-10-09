@@ -53,6 +53,11 @@ is internal consistency, not authenticity. Pass an `opts.json` that pins the sig
 (`{"signing_keys": ["ed25519pub:..."]}`) to get `RESULT: PASS` (exit 0). Exit codes are listed in
 [CONFIGURATION.md](CONFIGURATION.md#averin-verify-cli-coresrcbinaverin_verifyrs).
 
+A single record uses the same words: `averin-verify record <record.json>` prints
+`RESULT: CONSISTENT (integrity only)` (exit code 2) when its shape and content hash check out,
+because no key authenticated it. Only with the signer's key on the command line
+(`averin-verify record <record.json> ed25519pub:...`) does a record get `RESULT: PASS` (exit 0).
+
 ## 2. Run the server
 
 The only required input is a 64-hex (32-byte) Ed25519 signing **seed**. With nothing else set,
