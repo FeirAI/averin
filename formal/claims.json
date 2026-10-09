@@ -334,6 +334,45 @@
         "core",
         "formal-fast"
       ]
+    },
+    {
+      "id": "authority-v3-vectors-match-oracle",
+      "claim": "averin's v3 subject digest and v3 signing preimage reproduce the cross-plane golden vectors in vectors/authority-v3.v1.json, which is repackaged from the executable Lean oracle and the golden vectors by scripts/vectors/gen_authority_v3.py. govder, which signs authority proofs, keeps a byte-identical copy pinned in vectors.lock. Examples only, not a proof; says nothing about approver identity.",
+      "class": "differential",
+      "targets": [
+        "native Rust"
+      ],
+      "assumptions": [
+        "the oracle's expected bytes are generated from the Lean definitions the proofs are about"
+      ],
+      "sources": [
+        {
+          "file": "core/src/authority.rs",
+          "symbol": "pub fn preimage_v3"
+        },
+        {
+          "file": "core/src/authority.rs",
+          "symbol": "pub fn subject_digest_preimage"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/authority_vectors.rs",
+          "symbol": "fn subject_v3_digest_and_preimage_match_the_pinned_bytes"
+        },
+        {
+          "file": "core/tests/authority_vectors.rs",
+          "symbol": "fn canon_json_vectors_serialize_to_the_pinned_bytes"
+        },
+        {
+          "file": "formal/mutants/seams-v3-preimage-drops-digest.patch",
+          "symbol": "evidence_hash,"
+        }
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ]
     }
   ]
 }

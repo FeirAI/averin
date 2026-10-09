@@ -1126,6 +1126,7 @@
     },
     {
       "id": "authority-v3-vectors-match-oracle",
+      "$comment": "legacy register: authority-v3-vectors-match-oracle",
       "statement": "averin's v3 subject digest and v3 signing preimage reproduce the cross-plane golden vectors (vectors/authority-v3.v1.json): the file is repackaged from averin's own executable Lean oracle and golden vectors by scripts/vectors/gen_authority_v3.py (a check fails when the committed file is stale), a Rust test reproduces its canonical serializations, its subject digest and its length-framed preimage, and govder, which signs authority proofs, keeps a byte-identical copy pinned in vectors.lock and checks its own serializer, digest and preimage against it.",
       "method": "differential-vectors",
       "artifacts": [
