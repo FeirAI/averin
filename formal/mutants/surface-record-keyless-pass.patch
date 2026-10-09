@@ -1,0 +1,13 @@
+diff --git a/core/src/bin/averin_verify.rs b/core/src/bin/averin_verify.rs
+index b7e3e9e..5c859d6 100644
+--- a/core/src/bin/averin_verify.rs
++++ b/core/src/bin/averin_verify.rs
+@@ -373,7 +373,7 @@ fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
+             }
+             None => match validate_record_shape(&value).and_then(|()| verify_content_hash(&value)) {
+                 Ok(()) => (
+-                    ClaimVerdict::Consistent,
++                    ClaimVerdict::Pass,
+                     "(integrity only): content_hash recomputes and shape is valid.\n        \
+                      NOT authenticated: no key was given, so the signature was not checked. Pass the \
+                      signer's ed25519pub: key to verify it."

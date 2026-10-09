@@ -243,7 +243,7 @@
     },
     {
       "id": "cli-headline-equals-claim-verdict",
-      "claim": "The averin-verify bundle headline word and exit code equal the report's claim verdict (PASS needs a satisfied requested claim and externally pinned keys; CONSISTENT is the same claim under the bundle's own keys; INSUFFICIENT and FAIL otherwise), the same rule as verifier/claim-verdict.js. A finite differential over the verdict oracle corpus plus an end-to-end test of the binary; not a proof, and it says nothing about whether the claims themselves are right.",
+      "claim": "The averin-verify bundle headline word and exit code equal the report's claim verdict (PASS needs a satisfied requested claim and externally pinned keys; CONSISTENT is the same claim under the bundle's own keys; INSUFFICIENT and FAIL otherwise), the same rule as verifier/claim-verdict.js; averin-verify record uses the same words and exit codes (PASS only under a key passed on the command line, CONSISTENT for a keyless record that checks out, FAIL when a check fails). A finite differential over the verdict oracle corpus plus end-to-end tests of the binary; not a proof, and it says nothing about whether the claims themselves are right.",
       "class": "differential",
       "targets": [
         "native Rust CLI",
@@ -264,6 +264,10 @@
           "symbol": "fn verify_bundle_cmd"
         },
         {
+          "file": "core/src/bin/averin_verify.rs",
+          "symbol": "fn verify_record_cmd"
+        },
+        {
           "file": "verifier/claim-verdict.js",
           "symbol": "export function claimVerdict"
         }
@@ -280,6 +284,14 @@
         {
           "file": "formal/mutants/surface-cli-consistent-exits-zero.patch",
           "symbol": "Self::Consistent => 0"
+        },
+        {
+          "file": "core/tests/cli_verdict.rs",
+          "symbol": "fn keyless_record_is_consistent_not_pass"
+        },
+        {
+          "file": "formal/mutants/surface-record-keyless-pass.patch",
+          "symbol": "ClaimVerdict::Pass,"
         }
       ],
       "gates": [

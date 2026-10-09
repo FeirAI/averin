@@ -262,6 +262,14 @@
     "surface-js-truthy-pinning": {
       "tier": "full",
       "claim": "cli-headline-equals-claim-verdict"
+    },
+    "surface-record-keyless-pass": {
+      "tier": "fast",
+      "claim": "cli-headline-equals-claim-verdict"
+    },
+    "surface-record-bad-signature-consistent": {
+      "tier": "full",
+      "claim": "cli-headline-equals-claim-verdict"
     }
   },
   "claims": [
@@ -1022,7 +1030,7 @@
     {
       "id": "cli-headline-equals-claim-verdict",
       "$comment": "legacy register: cli-headline-equals-claim-verdict",
-      "statement": "The averin-verify bundle headline word is the report's claim verdict: PASS only when the requested claim is satisfied and the signing keys are externally pinned, CONSISTENT when it is satisfied only under the bundle's own keys, INSUFFICIENT when it is not satisfied or the claims contract is missing or invalid, FAIL when ok is false or the claim is refuted. Exit codes are 0 PASS, 2 CONSISTENT, 1 FAIL or INSUFFICIENT. Held by an end-to-end test of the binary on the shipped fixture (unpinned, pinned, unsatisfied claim, tampered) and by a differential of the Rust verdict function against verifier/claim-verdict.js (run with node) over every case of the committed verdict oracle corpus crossed with every requested claim, ok and pinning, plus malformed contracts and non-boolean ok and pinning values (only the boolean true counts in either rule).",
+      "statement": "The averin-verify bundle headline word is the report's claim verdict: PASS only when the requested claim is satisfied and the signing keys are externally pinned, CONSISTENT when it is satisfied only under the bundle's own keys, INSUFFICIENT when it is not satisfied or the claims contract is missing or invalid, FAIL when ok is false or the claim is refuted. Exit codes are 0 PASS, 2 CONSISTENT, 1 FAIL or INSUFFICIENT. Held by an end-to-end test of the binary on the shipped fixture (unpinned, pinned, unsatisfied claim, tampered) and by a differential of the Rust verdict function against verifier/claim-verdict.js (run with node) over every case of the committed verdict oracle corpus crossed with every requested claim, ok and pinning, plus malformed contracts and non-boolean ok and pinning values (only the boolean true counts in either rule). averin-verify record prints a RESULT line with the same words and exit codes: PASS (0) only when a key was passed on the command line and shape, content hash and signature verify under it, CONSISTENT (2) when no key was passed and shape and content hash check out, FAIL (1) when a check fails or the file is not valid JSON. Held by end-to-end tests of the binary on the first record of the shipped fixture (no key, the signer's key, another key, tampered with and without a key, not JSON, a malformed key and a missing file, the last two exiting 2 with no RESULT line).",
       "method": "differential-vectors",
       "artifacts": [
         "core/tests/cli_verdict.rs",
@@ -1057,6 +1065,11 @@
           "sha256": "928fd2a76cd7ecf288eb7235873fa379d9c640fb2d7adb0081fb2f15a34864c2"
         },
         {
+          "path": "core/src/bin/averin_verify.rs",
+          "symbol": "verify_record_cmd",
+          "sha256": "6db63717cac1d7712e930ee2bc4f2af8dab40fab9aeb566685865f5de73b9993"
+        },
+        {
           "path": "verifier/claim-verdict.js",
           "symbol": "*",
           "sha256": "76b429a24ba5fde6da3c967bdda3f64737bbf154ca09ed00f137feac9535c4bb"
@@ -1065,10 +1078,12 @@
       "mutants": [
         "surface-cli-consistent-exits-zero",
         "surface-word-ignores-pinning",
-        "surface-js-truthy-pinning"
+        "surface-js-truthy-pinning",
+        "surface-record-keyless-pass",
+        "surface-record-bad-signature-consistent"
       ],
       "evidence_run": "37865103811",
-      "does_not_establish": "That the report's claims are right (that is the claim kernel's refinement and oracle differential). Only the words and exit codes derived from a finished report: the web app's TypeScript copy (web/src/lib/claimVerdict.ts) is covered by its own unit tests, not this differential. The corpus rows are claim decisions, not bundles, so the differential crosses them with synthetic ok and pinning flags rather than verifying real bundles. Usage and unreadable-file errors also exit 2, the same code as CONSISTENT, so a caller must read the RESULT line, not only the exit code. Non-boolean ok and pinning values are differential-tested on one corpus row only; the TypeScript copy has the same boolean rule and its own unit test for it. The CLI headline is checked end to end only on the four fixture cases; over the corpus it is covered because the CLI prints claim_verdict(report).word(), not by running the binary per case. The record subcommand does not use this rule: it prints PASS (integrity only) and exits 0 for a record checked without any key. Needs node on PATH. A finite differential, not a proof."
+      "does_not_establish": "That the report's claims are right (that is the claim kernel's refinement and oracle differential). Only the words and exit codes derived from a finished report: the web app's TypeScript copy (web/src/lib/claimVerdict.ts) is covered by its own unit tests, not this differential. The corpus rows are claim decisions, not bundles, so the differential crosses them with synthetic ok and pinning flags rather than verifying real bundles. Usage and unreadable-file errors also exit 2, the same code as CONSISTENT, so a caller must read the RESULT line, not only the exit code. Non-boolean ok and pinning values are differential-tested on one corpus row only; the TypeScript copy has the same boolean rule and its own unit test for it. The CLI headline is checked end to end only on the four fixture cases; over the corpus it is covered because the CLI prints claim_verdict(report).word(), not by running the binary per case. For record, PASS means the signature verified under the key given on the command line: the CLI cannot tell whether that key is the right one to trust, and record is tested end to end on one fixture record only. A keyless record's CONSISTENT shares exit code 2 with usage errors, as for bundle. Needs node on PATH. A finite differential, not a proof."
     },
     {
       "id": "action-completeness-capped-by-kernel",

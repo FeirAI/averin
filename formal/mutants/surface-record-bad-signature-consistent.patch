@@ -1,0 +1,13 @@
+diff --git a/core/src/bin/averin_verify.rs b/core/src/bin/averin_verify.rs
+index b7e3e9e..9526057 100644
+--- a/core/src/bin/averin_verify.rs
++++ b/core/src/bin/averin_verify.rs
+@@ -368,7 +368,7 @@ fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
+                         "(authentic): shape, content_hash and signature verified under the key you passed."
+                             .to_string(),
+                     ),
+-                    Err(e) => (ClaimVerdict::Fail, e.to_string()),
++                    Err(e) => (ClaimVerdict::Consistent, e.to_string()),
+                 }
+             }
+             None => match validate_record_shape(&value).and_then(|()| verify_content_hash(&value)) {
