@@ -316,6 +316,7 @@
         "m7-record-unpins-canon-version",
         "m8-rename-taxonomy-tag"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "Agreement outside the committed corpus and tag inventory. It is sampled conformance, not a refinement proof (the proved seal path is production-seal-refinement in formal/claims.json). It does not show the Lean model expresses the intended format, and says nothing about signatures, keys or the verifier's decisions."
     },
     {
@@ -345,6 +346,7 @@
       "mutants": [
         "m15-authority-v3-subject-binding"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "That the subject projection covers every semantic field (reviewed by hand when the record schema changes), the recorder-authenticated exclusions, or that the authority approved the subject. One vector, not all records."
     },
     {
@@ -399,6 +401,7 @@
         "m20-verdict-merkle-root-without-path",
         "m41-temporal-strict-decides-history"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "Evidence states outside the corpus, or that verify.rs computes the facts the kernel consumes (the proved refinement in formal/claims.json covers the kernel only, and the fact computation is tested, not proved)."
     },
     {
@@ -448,6 +451,7 @@
         "m47-temporal-merkle-cutoff-beyond-watermark",
         "m43-temporal-legacy-member-not-total"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "Behaviour on inputs the tests do not construct. This is example-based testing, not a proof of temporal ordering, and it assumes the snapshot and revocation issuer are authentic (pinned out of band)."
     },
     {
@@ -479,6 +483,7 @@
         "m19-failed-intent-consumes-outcome",
         "m21-disclosure-only-counts-present-openings"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "Any bundle shape the adversarial suite does not build. Example-based tests, not a proof of monotonicity under deletion (the Lean model states that; its production kernel refinement does not cover verify.rs fact computation)."
     },
     {
@@ -517,6 +522,7 @@
         "m53-feature-selected-hash",
         "m59-verify-overrides-kernel-claim"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "That the extracted code is correct (that is the Lean proof run in formal-production), or anything beyond the call sites and cfg forms the script scans. It is a textual check, not a semantic one."
     },
     {
@@ -568,6 +574,7 @@
         "m64-parser-skip-ws-unbounded",
         "m63-parser-panic-unexpected-char"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "Totality for all inputs (the Lean parser-totality proof in formal/claims.json is the stronger evidence; this checks sampled inputs only). Not input that is not valid UTF-8: both tests pass Rust strings, so a truncated UTF-8 sequence never reaches the parser here (mutant m60 survives these tests; only the totality proof kills it). Not allocation failure, stack depth or the uncapped options JSON path. The drift lock covers parse_value and the four guarded helpers only; a change to parse_string, parse_number or another callee does not trip it."
     },
     {
@@ -609,6 +616,7 @@
         "m9-b64-one-byte-tail",
         "m11-b64-full-chunk"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "Anything outside the harness bounds: each base64 harness checks one tail or one chunk, so whole-string uniqueness is argued in prose, not proved. The canonical serializer harnesses are the separate claim kani-canon-harnesses; the integer families and the full string family are mutation-tested by the legacy suite only. Kani 0.68.0 and CBMC are trusted. A failing detector here does not tell a tool error or an unwinding failure from a real counterexample; formal/check-kani-mutant.py in the legacy mutation suite makes that distinction. The Kani mutants run only in formal-nightly (schedule and manual dispatch), not on pull requests."
     },
     {
@@ -651,6 +659,7 @@
         "m2-canon-drops-del",
         "m12-utf16-pair-end"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "Anything outside the harness bounds. The string detector is one concrete case of the 17,031-case family (pull requests run a 20-case smoke subset, the weekly schedule runs the whole family, outside this register); the key-order detector is the steered conjunct only, not the four scalar-count shards or transitivity. Kani 0.68.0, CBMC, the bundled kissat and the proof-only std selections A1 and G1 described in formal/README.md are trusted. A failing detector does not tell a tool error from a real counterexample; formal/check-kani-mutant.py in the legacy mutation suite makes that distinction. The Kani mutants run only in formal-nightly (schedule and manual dispatch), not on pull requests."
     },
     {
@@ -679,6 +688,7 @@
         "lean-seal-drops-fmt-injectivity",
         "lean-seal-binding-without-collision-case"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "That the Lean model matches the Rust (see preimage-oracle-conformance and the extraction-based claims in formal/claims.json). Model-level only: SHA-256 collision resistance, Ed25519 unforgeability, an honest signer and post-NFC inputs are assumptions, and the Lean kernel is trusted."
     },
     {
@@ -719,6 +729,7 @@
         "tla-projecttx-guarded-use-unreachable",
         "tla-projecttx-anchor-unreachable"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "Model-level only: it is not bound to the Go or Postgres code. The bounds are finite (two replicas, small constants), so it says nothing about larger configurations. NoGhostFinalize is not checked in any passing configuration: with Authoritative = TRUE it holds by definition, and the model has no guard-taking finalize. The guarded use models one design (read and act under the guard, revoke refused while the guard is held); it does not show the implementation does that. TLC and the Java runtime are trusted."
     },
     {
@@ -757,6 +768,7 @@
         "tla-consume-tenant-consume-unreachable",
         "tla-consume-drops-ledger-check"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "This models the SUPERSEDED pgledger consume (pgledger now only sweeps). The current consume in server/internal/store/ledger_postgres.go (transaction-bound keys, partial release, the ambiguous-commit rule) is not modelled, and the model has no trace link to any Go code, so a passing result says nothing about current code. The bounds are finite (two instances, two projects, small clock). The earlier ConsumeLedger_tenant_safe.cfg passed vacuously (no consume was reachable); it was changed and now has witnesses. TenantIsolation checks the consume guard only: with the current guard it follows from the guard's definition, and it fails only if P2's consume guard comes to depend on P1's claim (now that its antecedent is reachable). The project isolation counterexample is ConsumeLedger_tenant_isolation.cfg. TLC and the Java runtime are trusted."
     },
     {
@@ -791,6 +803,7 @@
       "mutants": [
         "tla-grantrecovery-void-beside-landed-grant"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "A model of the recovery design for one reservation, with no trace link to the Go server or Postgres code. Liveness holds only under the stated strong and weak fairness assumptions and excludes permanent database failure. The deployment barrier that forbids an old writer is an assumption of the safe configuration, not something the model enforces. TLC and the Java runtime are trusted."
     },
     {
@@ -848,6 +861,7 @@
       "mutants": [
         "tla-grantlog-checkpoint-not-failclosed"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "This models the SUPERSEDED single-process, age-based broker_seq recovery. The shipped protocol is GrantRecovery.tla, and nothing here binds to current code. Liveness needs the stated retry and fairness assumptions, and the liveness configuration uses two grants because three are too slow for CI. The mutation detector reruns only the three safety pass configurations and their witnesses (the liveness and counterexample configurations run in formal-tla). TLC and the Java runtime are trusted."
     },
     {
@@ -889,6 +903,7 @@
         "tla-pass-cfg-drops-invariant",
         "tla-tenant-safe-vacuous-again"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "That a witness state is the interesting one: each witness is a human choice, and a pass configuration with a weak witness still passes. The static detector checks declarations only; that a witness is actually violated is checked by the TLC run in formal-tla and by the model-level mutants of the individual TLA+ claims. It says nothing about the models' fidelity to the code."
     },
     {
@@ -949,6 +964,7 @@
         "seal-skips-domain-pin",
         "seal-skips-check-via-public-unchecked"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "Nothing about nested object shape (validate_record_shape checks top-level keys only; the JSON Schema covers the rest), content_hash or signature validity of a body, or any record sealed before this change. Not a proof: the generator is deterministic and finite, so a defect class it does not build is untested. The Go conformance covers only the producers the existing server tests reach, and a body type no test builds is checked only by the seal refusing it at runtime. AVERIN_SEAL_SHAPE=shadow deliberately seals records no verifier accepts (rollback switch). The public entry point guard is a textual scan of core/src for public functions named seal*: a bypass under another name, or one built in another crate from the public hash and sign primitives (as a hostile key holder can), is not caught. Checkpoints are the separate claim checkpoint-seal-implies-verify-pins."
     },
     {
@@ -1000,6 +1016,7 @@
         "seal-skips-checkpoint-canon-pin",
         "seal-skips-checkpoint-enforce-default"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "Nothing that validate_chain checks (sequence, previous hash, frontier, record count, forks), and no unknown-key check (verify_checkpoint_sealed has none). Not hash or signature validity of a body, and not any checkpoint sealed before this change: checkpoints are append-only, so an old malformed one stays. Not a proof: the generator is deterministic and finite. The two pins are written twice (check_sealed_checkpoint_pins and verify_checkpoint_sealed) and are held in step only by this test. The Go conformance covers the one server producer (createCheckpointTx) and the test producers the api suite reaches. AVERIN_SEAL_SHAPE=shadow deliberately seals checkpoints that no verifier accepts (rollback switch)."
     },
     {
@@ -1050,6 +1067,7 @@
         "surface-word-ignores-pinning",
         "surface-js-truthy-pinning"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "That the report's claims are right (that is the claim kernel's refinement and oracle differential). Only the words and exit codes derived from a finished report: the web app's TypeScript copy (web/src/lib/claimVerdict.ts) is covered by its own unit tests, not this differential. The corpus rows are claim decisions, not bundles, so the differential crosses them with synthetic ok and pinning flags rather than verifying real bundles. Usage and unreadable-file errors also exit 2, the same code as CONSISTENT, so a caller must read the RESULT line, not only the exit code. Non-boolean ok and pinning values are differential-tested on one corpus row only; the TypeScript copy has the same boolean rule and its own unit test for it. The CLI headline is checked end to end only on the four fixture cases; over the corpus it is covered because the CLI prints claim_verdict(report).word(), not by running the binary per case. The record subcommand does not use this rule: it prints PASS (integrity only) and exits 0 for a record checked without any key. Needs node on PATH. A finite differential, not a proof."
     },
     {
@@ -1082,6 +1100,7 @@
       "mutants": [
         "surface-label-drops-kernel-and"
       ],
+      "evidence_run": "37865103811",
       "does_not_establish": "That the kernel itself is right (see verdict-kernel-refinement). That a label is granted whenever the kernel is satisfied: the cap only removes labels, the legacy conjunction still decides whether one is granted. The corpus test builds each report from checked facts by an inverse projection written in the test, not from real bundles, so a field the projection sets differently from verify.rs could hide or invent a case. The introspected label was not stronger than the kernel on any corpus case, so its cap is exercised only by the downgrade unit test. The real-flow server capstone tests and the adversarial test sb28_real_producer_fixtures_keep_their_capstone_labels show that clean real-producer bundles still reach the brokered and introspected labels; they do not test the cap. The 586 corpus cases where the bare conjunction was stronger are an upper bound set by the test projection: it does not carry adverse evidence or revoked membership into ok and revoked_uses_blocked as verify.rs does, and with those carried over 38 cases remain. ActionCompleteness::of_conjunction_uncapped is a public, doc-hidden function that returns the uncapped label for tests; nothing enforces that production code does not call it. Not a proof: a finite corpus."
     }
   ]
