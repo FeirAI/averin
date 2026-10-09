@@ -1,0 +1,13 @@
+diff --git a/core/src/authority.rs b/core/src/authority.rs
+index 13ca311..065ef72 100644
+--- a/core/src/authority.rs
++++ b/core/src/authority.rs
+@@ -183,7 +183,7 @@ pub fn subject_digest(record: &CanonValue) -> Result<String, &'static str> {
+ #[doc(hidden)]
+ pub fn subject_digest_preimage(subject: &CanonValue) -> Result<Vec<u8>, &'static str> {
+     let mut bytes = Vec::new();
+-    if !lp_str_into(&mut bytes, SUBJECT_HASH_TAG) || !lp_str_into(&mut bytes, SUBJECT_PROJECTION) {
++    if !lp_str_into(&mut bytes, SUBJECT_PROJECTION) {
+         return Err("authority subject framing overflow");
+     }
+     bytes.extend_from_slice(subject.serialize().as_bytes());

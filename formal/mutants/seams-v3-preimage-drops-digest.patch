@@ -1,0 +1,12 @@
+diff --git a/core/src/authority.rs b/core/src/authority.rs
+index 13ca311..f81bb9d 100644
+--- a/core/src/authority.rs
++++ b/core/src/authority.rs
+@@ -206,7 +206,6 @@ pub fn preimage_v3(
+         project_id,
+         record_id,
+         evidence_hash,
+-        digest,
+     ] {
+         if !lp_str_into(&mut bytes, value) {
+             return Err("authority v3 preimage framing overflow");

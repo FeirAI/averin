@@ -40,6 +40,7 @@ check-claims:
 # Shared formal kit (docs/dev/FORMAL.md): register check plus the fast-tier mutants (needs a committed tree).
 formal-kit:
 	python3 -m unittest discover -s scripts/formal/tests
+	python3 scripts/vectors/check_vectors_lock.py
 	python3 scripts/formal/check_claims.py --claims formal/kit-claims.json
 	python3 scripts/formal/check_mutants.py --claims formal/kit-claims.json --tier fast
 

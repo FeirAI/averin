@@ -898,6 +898,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/evidence"
           {
             python3 -m unittest discover -s scripts/formal/tests &&
+            python3 scripts/vectors/check_vectors_lock.py &&
             python3 scripts/formal/check_claims.py --claims formal/kit-claims.json &&
             python3 scripts/formal/check_mutants.py --claims formal/kit-claims.json --tier fast \
               --scratch "$RUNNER_TEMP/kit-scratch" --json "$RUNNER_TEMP/evidence/formal-fast.json"

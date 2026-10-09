@@ -270,6 +270,12 @@
     "surface-record-bad-signature-consistent": {
       "tier": "full",
       "claim": "cli-headline-equals-claim-verdict"
+    },
+    "seams-v3-preimage-drops-digest": {
+      "tier": "fast"
+    },
+    "seams-subject-digest-tag-dropped": {
+      "tier": "full"
     }
   },
   "claims": [
@@ -1117,6 +1123,37 @@
       ],
       "evidence_run": "37865103811",
       "does_not_establish": "That the kernel itself is right (see verdict-kernel-refinement). That a label is granted whenever the kernel is satisfied: the cap only removes labels, the legacy conjunction still decides whether one is granted. The corpus test builds each report from checked facts by an inverse projection written in the test, not from real bundles, so a field the projection sets differently from verify.rs could hide or invent a case. The introspected label was not stronger than the kernel on any corpus case, so its cap is exercised only by the downgrade unit test. The real-flow server capstone tests and the adversarial test sb28_real_producer_fixtures_keep_their_capstone_labels show that clean real-producer bundles still reach the brokered and introspected labels; they do not test the cap. The 586 corpus cases where the bare conjunction was stronger are an upper bound set by the test projection: it does not carry adverse evidence or revoked membership into ok and revoked_uses_blocked as verify.rs does, and with those carried over 38 cases remain. ActionCompleteness::of_conjunction_uncapped is a public, doc-hidden function that returns the uncapped label for tests; nothing enforces that production code does not call it. Not a proof: a finite corpus."
+    },
+    {
+      "id": "authority-v3-vectors-match-oracle",
+      "statement": "averin's v3 subject digest and v3 signing preimage reproduce the cross-plane golden vectors (vectors/authority-v3.v1.json): the file is repackaged from averin's own executable Lean oracle and golden vectors by scripts/vectors/gen_authority_v3.py (a check fails when the committed file is stale), a Rust test reproduces its canonical serializations, its subject digest and its length-framed preimage, and govder, which signs authority proofs, keeps a byte-identical copy pinned in vectors.lock and checks its own serializer, digest and preimage against it.",
+      "method": "differential-vectors",
+      "artifacts": [
+        "vectors/authority-v3.v1.json",
+        "scripts/vectors/gen_authority_v3.py",
+        "core/tests/authority_vectors.rs"
+      ],
+      "gates": [
+        "core"
+      ],
+      "detector": "python3 scripts/vectors/gen_authority_v3.py --check && cargo test -p averin-decision-core --test authority_vectors",
+      "covers": [
+        {
+          "path": "core/src/authority.rs",
+          "symbol": "preimage_v3",
+          "sha256": "ac2994ee8f16d9f230aba2a4b1f22ee11f5eb506e03b6cfbeb3ff8e4ad82d24a"
+        },
+        {
+          "path": "core/src/authority.rs",
+          "symbol": "subject_digest_preimage",
+          "sha256": "9845ce30afe80a38ae818b55a700ff2b8161d4ef3993754b405b29d6032cd412"
+        }
+      ],
+      "mutants": [
+        "seams-v3-preimage-drops-digest",
+        "seams-subject-digest-tag-dropped"
+      ],
+      "does_not_establish": "Not who approved a record or which evidence an approver saw (approver identity); not that govder's serializer agrees outside the listed examples (govder's own claim checks those); not NFC or rejection agreement of the two parsers beyond the oracle's cases. The oracle's expected bytes are only as good as the Lean definitions they are generated from."
     }
   ]
 }
