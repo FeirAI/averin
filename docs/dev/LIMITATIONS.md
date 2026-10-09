@@ -265,5 +265,7 @@ which each one matters.
   or unreadable-file errors, so a caller must read the RESULT line. INSUFFICIENT exits 1, like FAIL.
   The web app's TypeScript `claimVerdict` is covered by its own unit tests, not by the Rust to JS
   differential. The kernel cap on the introspected Level-3 label is exercised only by a unit test
-  (no corpus case shows an introspected overclaim). `averin-verify record` with no key still
-  prints `PASS (integrity only)` and exits 0 (see `CONFIGURATION.md`).
+  (no corpus case shows an introspected overclaim). `averin-verify record` uses the same words
+  and exit codes (no key: CONSISTENT, exit 2), so the same rule applies: read its RESULT line, as
+  a usage error also exits 2. A PASS there means the signature verified under the key given on
+  the command line; the CLI cannot tell whether that key is the right one to trust.

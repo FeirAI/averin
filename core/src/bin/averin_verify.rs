@@ -7,7 +7,10 @@
 //!   averin-verify record <record.json> [pubkey]   single record; without a key = integrity only.
 //!
 //! `bundle` prints `RESULT: <word>` where the word is the same `claimVerdict` rule as the browser
-//! verifier (`verifier/claim-verdict.js`) and exits:
+//! verifier (`verifier/claim-verdict.js`). `record` prints a `RESULT:` line with the same words and
+//! exit codes: PASS (0) only with the signer's key passed on the command line, CONSISTENT (2) for
+//! a keyless record whose shape and content hash check out, FAIL (1) when a check fails or the
+//! file is not valid JSON. `bundle` exits:
 //!   0  PASS          requested claim satisfied AND the signing keys were pinned externally
 //!   2  CONSISTENT    requested claim satisfied only under the bundle's own keys (internal
 //!                    consistency, not authenticity)
@@ -345,47 +348,47 @@ fn verify_record_cmd(path: &str, pubkey: Option<&String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let value = match CanonValue::parse(&text) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("FAIL: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    match pubkey {
-        Some(pk) => {
-            let vk = match decode_pubkey(pk) {
-                Ok(k) => k,
-                Err(e) => {
-                    eprintln!("error: bad public key: {e}");
-                    return ExitCode::from(2);
-                }
-            };
-            match verify_sealed(&value, &vk) {
-                Ok(()) => {
-                    println!("PASS (authentic): shape + content_hash + signature verified");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("FAIL: {e}");
-                    ExitCode::from(1)
+    // The same words and exit codes as `bundle` (`ClaimVerdict`): PASS only under a key the
+    // caller passed (externally pinned). A record whose shape and content hash check out without
+    // a key is CONSISTENT (exit 2): nothing authenticated it.
+    let (verdict, detail) = match CanonValue::parse(&text) {
+        Err(e) => (ClaimVerdict::Fail, e.to_string()),
+        Ok(value) => match pubkey {
+            Some(pk) => {
+                let vk = match decode_pubkey(pk) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        eprintln!("error: bad public key: {e}");
+                        return ExitCode::from(2);
+                    }
+                };
+                match verify_sealed(&value, &vk) {
+                    Ok(()) => (
+                        ClaimVerdict::Pass,
+                        "(authentic): shape, content_hash and signature verified under the key you passed."
+                            .to_string(),
+                    ),
+                    Err(e) => (ClaimVerdict::Fail, e.to_string()),
                 }
             }
-        }
-        None => match validate_record_shape(&value).and_then(|()| verify_content_hash(&value)) {
-            Ok(()) => {
-                println!(
-                    "PASS (integrity only): content_hash recomputes and shape is valid.\n\
-                     NOTE: not authenticated — pass the signer's ed25519pub: key to verify the signature."
-                );
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("FAIL: {e}");
-                ExitCode::from(1)
-            }
+            None => match validate_record_shape(&value).and_then(|()| verify_content_hash(&value)) {
+                Ok(()) => (
+                    ClaimVerdict::Consistent,
+                    "(integrity only): content_hash recomputes and shape is valid.\n        \
+                     NOT authenticated: no key was given, so the signature was not checked. Pass the \
+                     signer's ed25519pub: key to verify it."
+                        .to_string(),
+                ),
+                Err(e) => (ClaimVerdict::Fail, e.to_string()),
+            },
         },
+    };
+    if verdict == ClaimVerdict::Fail {
+        println!("RESULT: {}: {detail}", verdict.word());
+    } else {
+        println!("RESULT: {} {detail}", verdict.word());
     }
+    ExitCode::from(verdict.exit_code())
 }
 
 #[cfg(test)]

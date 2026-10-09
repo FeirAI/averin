@@ -303,7 +303,7 @@ Not env-configured; arguments only:
 
 ```
 averin-verify bundle <bundle.json> [opts.json]    # full offline verification
-averin-verify record <record.json> [ed25519pub:<key>]   # single record (integrity, or authentic with a key)
+averin-verify record <record.json> [ed25519pub:<key>]   # single record (CONSISTENT, or PASS with the signer's key)
 ```
 
 With `opts.json`, the role-disjoint authority key sets are pinned (authentic verification + the
@@ -321,11 +321,13 @@ error. Without `opts.json`, a bundle that is not valid JSON or RCP exits `1` and
 line (with `opts.json` it reads `RESULT: FAIL`, as does an invalid `opts.json`). Before this change
 the CLI printed PASS and exited 0 for unpinned bundles.
 
-`record` does not use this rule. It exits `0` when the checks it ran pass: with a key, shape, content
-hash and signature (`PASS (authentic)`); without a key, shape and content hash only (`PASS (integrity
-only)`, which does not authenticate the record). It exits `1` when a check fails or the file is not
-valid JSON or RCP, and `2` on a usage error, an unreadable file or a malformed key. Its exit `0` alone
-does not say whether a key was given.
+`record` prints a `RESULT:` line with the same words and exit codes: `0` PASS only when a key was
+passed on the command line and shape, content hash and signature verify under it (`PASS
+(authentic)`); `2` CONSISTENT when no key was passed and shape and content hash check out
+(`CONSISTENT (integrity only)`: nothing authenticated the record); `1` FAIL when a check fails or the
+file is not valid JSON or RCP. A usage error, an unreadable file or a malformed key also exits `2`
+with no `RESULT:` line, so read the `RESULT:` line here too. Before this change a keyless record
+printed `PASS (integrity only)` and exited `0`.
 
 ---
 
