@@ -244,7 +244,7 @@ pub unsafe extern "C" fn averin_seal_record_mode(
     seal_impl(body, seed_hex, false, mode)
 }
 
-/// Number of record bodies sealed in shadow mode despite failing the shape, domain or
+/// Number of record and checkpoint bodies sealed in shadow mode despite failing the shape, domain or
 /// canon_version check (process lifetime).
 #[no_mangle]
 pub extern "C" fn averin_seal_shape_violations() -> u64 {
@@ -252,7 +252,8 @@ pub extern "C" fn averin_seal_shape_violations() -> u64 {
 }
 
 /// Seal a checkpoint body (UTF-8 JSON) with an Ed25519 signing key. Returns the sealed checkpoint
-/// JSON (checkpoint_hash + sig set), or `{"error":"..."}`.
+/// JSON (checkpoint_hash + sig set), or `{"error":"..."}`. Refuses a body that
+/// `verify_checkpoint_sealed` would reject on domain or canon_version.
 ///
 /// # Safety
 /// `body` and `seed_hex` must be valid null-terminated C strings.
@@ -262,6 +263,27 @@ pub unsafe extern "C" fn averin_seal_checkpoint(
     seed_hex: *const c_char,
 ) -> *mut c_char {
     seal_impl(body, seed_hex, true, crate::record::SealShapeMode::Enforce)
+}
+
+/// [`averin_seal_checkpoint`] with an explicit shape mode, as [`averin_seal_record_mode`]: every
+/// `shadow` value except exactly 1 enforces; exactly 1 seals a checkpoint body that fails the domain
+/// or canon_version pin anyway and counts it (see `averin_seal_shape_violations`). Rollback switch
+/// only: such a checkpoint is rejected by every verifier.
+///
+/// # Safety
+/// `body` and `seed_hex` must be valid null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn averin_seal_checkpoint_mode(
+    body: *const c_char,
+    seed_hex: *const c_char,
+    shadow: c_int,
+) -> *mut c_char {
+    let mode = if shadow == 1 {
+        crate::record::SealShapeMode::Shadow
+    } else {
+        crate::record::SealShapeMode::Enforce
+    };
+    seal_impl(body, seed_hex, true, mode)
 }
 
 /// Return the `ed25519pub:` public key for a 32-byte seed (64 hex chars). The server publishes this
@@ -315,7 +337,7 @@ unsafe fn seal_impl(
         Err(e) => return into_cstring(json_error(&format!("body parse error: {e}"))),
     };
     let sealed = if checkpoint {
-        crate::checkpoint::seal_checkpoint(&value, &sk).map(|v| v.serialize())
+        crate::checkpoint::seal_checkpoint_with_mode(&value, &sk, mode).map(|v| v.serialize())
     } else {
         crate::record::seal_with_mode(&value, &sk, mode).map(|v| v.serialize())
     };
@@ -768,6 +790,38 @@ mod tests {
             assert!(take(averin_seal_record_mode(cb.as_ptr(), cs.as_ptr(), -1)).contains("error"));
             let before = averin_seal_shape_violations();
             let shadow = take(averin_seal_record_mode(cb.as_ptr(), cs.as_ptr(), 1));
+            assert!(shadow.contains("\"sig\""), "{shadow}");
+            assert!(averin_seal_shape_violations() > before);
+        }
+    }
+
+    #[test]
+    fn seal_checkpoint_mode_enforces_and_shadows() {
+        let seed = "00".repeat(32);
+        // A checkpoint body under the record domain: verify_checkpoint_sealed rejects it.
+        let bad = r#"{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2","checkpoint_seq":0}"#;
+        let good = r#"{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.checkpoint.v2","checkpoint_seq":0}"#;
+        let (cb, cg, cs) = (
+            CString::new(bad).unwrap(),
+            CString::new(good).unwrap(),
+            CString::new(seed).unwrap(),
+        );
+        unsafe {
+            let take = |p: *mut c_char| {
+                let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+                averin_string_free(p);
+                s
+            };
+            assert!(take(averin_seal_checkpoint(cb.as_ptr(), cs.as_ptr())).contains("error"));
+            for m in [0, 2, -1] {
+                assert!(
+                    take(averin_seal_checkpoint_mode(cb.as_ptr(), cs.as_ptr(), m))
+                        .contains("error")
+                );
+            }
+            assert!(take(averin_seal_checkpoint(cg.as_ptr(), cs.as_ptr())).contains("\"sig\""));
+            let before = averin_seal_shape_violations();
+            let shadow = take(averin_seal_checkpoint_mode(cb.as_ptr(), cs.as_ptr(), 1));
             assert!(shadow.contains("\"sig\""), "{shadow}");
             assert!(averin_seal_shape_violations() > before);
         }

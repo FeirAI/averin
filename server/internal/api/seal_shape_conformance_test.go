@@ -14,10 +14,13 @@ import (
 
 // SB-29 producer conformance. Every record the server emits goes through (*Server).sealAndStore and
 // then the cgo core's SealRecord, which now refuses a body that verify_sealed would reject on shape,
-// domain or canon_version. This TestMain records every body the WHOLE api test suite seals through the
-// real cgo path (the suite drives each producer: generic ingest, grants, denials, use receipts,
-// two-phase use, introspection, void, delegation, ...), so TestMain can fail the run if any producer
-// was refused, and AVERIN_PRINT_SEALED_KINDS=1 prints which kinds were exercised.
+// domain or canon_version. Every checkpoint goes through createCheckpointTx and the core's
+// SealCheckpoint, which refuses a body that verify_checkpoint_sealed would reject on domain or
+// canon_version. This TestMain records every body the WHOLE api test suite seals through the real cgo
+// path (the suite drives each producer: generic ingest, grants, denials, use receipts, two-phase use,
+// introspection, void, delegation, checkpoints with and without per-broker grant heads, ...), so
+// TestMain can fail the run if any producer was refused, and AVERIN_PRINT_SEALED_KINDS=1 prints which
+// kinds were exercised.
 
 var (
 	sealObsMu   sync.Mutex
@@ -25,10 +28,17 @@ var (
 	sealObsBad  []string
 )
 
-func kindOf(body string) string {
+func kindOf(kind core.SealKind, body string) string {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(body), &m); err != nil {
-		return "unparseable"
+		return string(kind) + " unparseable"
+	}
+	if kind == core.SealKindCheckpoint {
+		// The one server checkpoint producer (createCheckpointTx) builds two shapes: with the per-broker
+		// broker_grant_heads map (WithBrokerID) and without it.
+		_, fed := m["broker_grant_heads"]
+		_, head := m["broker_grant_head"]
+		return fmt.Sprintf("checkpoint broker_grant_head=%t broker_grant_heads=%t", head, fed)
 	}
 	ev, _ := m["event_type"].(string)
 	rk, _ := m["record_kind"].(string)
@@ -54,12 +64,12 @@ func kindOf(body string) string {
 }
 
 func TestMain(m *testing.M) {
-	core.SetSealObserver(func(body string, err error) {
+	core.SetSealObserver(func(kind core.SealKind, body string, err error) {
 		sealObsMu.Lock()
 		defer sealObsMu.Unlock()
-		sealObsKind[kindOf(body)]++
+		sealObsKind[kindOf(kind, body)]++
 		if err != nil && strings.Contains(err.Error(), "seal error:") && shapeRefusal(err.Error()) {
-			sealObsBad = append(sealObsBad, kindOf(body)+": "+err.Error())
+			sealObsBad = append(sealObsBad, kindOf(kind, body)+": "+err.Error())
 		}
 	})
 	code := m.Run()
@@ -67,7 +77,7 @@ func TestMain(m *testing.M) {
 	bad := append([]string(nil), sealObsBad...)
 	sealObsMu.Unlock()
 	if len(bad) > 0 {
-		fmt.Fprintf(os.Stderr, "SB-29 conformance: a producer emitted a body seal refuses on shape/domain/canon_version:\n  %s\n", strings.Join(bad, "\n  "))
+		fmt.Fprintf(os.Stderr, "SB-29 conformance: a producer emitted a record or checkpoint body seal refuses on shape/domain/canon_version:\n  %s\n", strings.Join(bad, "\n  "))
 		code = 1
 	}
 	if os.Getenv("AVERIN_PRINT_SEALED_KINDS") != "" {
@@ -98,6 +108,9 @@ func TestMain(m *testing.M) {
 			"event_type=decision record_kind= action_family=approve grant_type= enforcement_point=sdk",
 			"event_type=handoff", "event_type=spawn_child", "event_type=incomplete",
 			"record_kind=budget-exhausted", "record_kind=chargeback-posted",
+			// Both shapes of the server's checkpoint producer (createCheckpointTx).
+			"checkpoint broker_grant_head=true broker_grant_heads=false",
+			"checkpoint broker_grant_head=true broker_grant_heads=true",
 		} {
 			if !strings.Contains(joined, want) {
 				fmt.Fprintf(os.Stderr, "SB-29 conformance: the suite no longer seals any record of kind %q through the real core\n", want)

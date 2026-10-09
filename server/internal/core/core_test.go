@@ -335,3 +335,62 @@ func TestCommitRejectsInteriorNUL(t *testing.T) {
 		t.Fatalf("good-path commit should still succeed: %v", err)
 	}
 }
+
+// conformingCheckpoint is a checkpoint body as the server's createCheckpointTx builds it.
+func conformingCheckpoint(t *testing.T) map[string]any {
+	t.Helper()
+	return map[string]any{
+		"schema_version": "2", "canon_version": "rcp-1", "domain": "flightrecorder.checkpoint.v2",
+		"checkpoint_id": "cp-p-0", "project_id": "p", "checkpoint_seq": 0, "prev_checkpoint_hash": nil,
+		"frontier": []string{}, "record_count": 0, "created_ts": "2026-01-01T00:00:00.000Z",
+		"key": map[string]any{"signing_key_id": "k0", "key_epoch": 0, "key_valid_from": "2026-01-01T00:00:00.000Z", "key_status": "active"},
+	}
+}
+
+// The checkpoint half of SB-29: SealCheckpoint refuses what verify_checkpoint_sealed would reject on its
+// domain or canon_version pin, through the real cgo path.
+func TestSealCheckpointRefusesBadPinsEnforce(t *testing.T) {
+	c, _ := New(seed)
+	if _, err := c.SealCheckpoint(mustJSON(t, conformingCheckpoint(t))); err != nil {
+		t.Fatalf("a conforming checkpoint must seal: %v", err)
+	}
+	cases := map[string]func(map[string]any){
+		"record domain":    func(b map[string]any) { b["domain"] = "flightrecorder.record.v2" },
+		"old domain":       func(b map[string]any) { b["domain"] = "flightrecorder.checkpoint.v1" },
+		"wrong canon":      func(b map[string]any) { b["canon_version"] = "rcp-2" },
+		"domain missing":   func(b map[string]any) { delete(b, "domain") },
+		"canon not string": func(b map[string]any) { b["canon_version"] = 1 },
+	}
+	before := SealShapeViolations()
+	for name, mut := range cases {
+		b := conformingCheckpoint(t)
+		mut(b)
+		if sealed, err := c.SealCheckpoint(mustJSON(t, b)); err == nil {
+			t.Fatalf("%s: enforce mode sealed a checkpoint verify_checkpoint_sealed rejects: %s", name, sealed)
+		}
+	}
+	if SealShapeViolations() != before {
+		t.Fatal("enforce mode must not count violations")
+	}
+}
+
+func TestSealCheckpointShadowSealsAndCounts(t *testing.T) {
+	c, _ := New(seed)
+	c.SetSealShapeMode(SealShapeShadow)
+	b := conformingCheckpoint(t)
+	b["domain"] = "flightrecorder.record.v2"
+	before := SealShapeViolations()
+	sealed, err := c.SealCheckpoint(mustJSON(t, b))
+	if err != nil {
+		t.Fatalf("shadow mode must seal: %v", err)
+	}
+	if SealShapeViolations() != before+1 {
+		t.Fatalf("shadow mode must count the violation")
+	}
+	if !strings.Contains(sealed, `"sig":"ed25519:`) {
+		t.Fatalf("not sealed: %s", sealed)
+	}
+	if _, err := c.SealCheckpoint(mustJSON(t, conformingCheckpoint(t))); err != nil || SealShapeViolations() != before+1 {
+		t.Fatal("a conforming checkpoint must seal without counting")
+	}
+}

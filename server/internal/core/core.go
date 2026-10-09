@@ -21,12 +21,23 @@ import (
 	"unsafe"
 )
 
-// sealObserver, when set, sees every SealRecord body and its outcome. It exists for the producer
-// conformance test (SB-29); production code never sets it.
-var sealObserver atomic.Pointer[func(body string, err error)]
+// SealKind says which seal a SealObserver call came from.
+type SealKind string
 
-// SetSealObserver installs (or, with nil, removes) a hook called after every SealRecord. Test use only.
-func SetSealObserver(fn func(body string, err error)) {
+const (
+	// SealKindRecord is a SealRecord call.
+	SealKindRecord SealKind = "record"
+	// SealKindCheckpoint is a SealCheckpoint call.
+	SealKindCheckpoint SealKind = "checkpoint"
+)
+
+// sealObserver, when set, sees every SealRecord and SealCheckpoint body and its outcome. It exists for
+// the producer conformance test (SB-29); production code never sets it.
+var sealObserver atomic.Pointer[func(kind SealKind, body string, err error)]
+
+// SetSealObserver installs (or, with nil, removes) a hook called after every SealRecord and
+// SealCheckpoint. Test use only.
+func SetSealObserver(fn func(kind SealKind, body string, err error)) {
 	if fn == nil {
 		sealObserver.Store(nil)
 		return
@@ -40,12 +51,14 @@ type Core struct {
 	seedHex string
 	pubKey  string
 	// shadow seals a record body even when verify_sealed would reject its shape, domain or
-	// canon_version (AVERIN_SEAL_SHAPE=shadow). Default false: such a body is refused.
+	// canon_version, and a checkpoint body even when verify_checkpoint_sealed would reject its domain
+	// or canon_version (AVERIN_SEAL_SHAPE=shadow). Default false: such a body is refused.
 	shadow bool
 }
 
 // SealShapeMode says what SealRecord does with a body that verify_sealed would reject on top-level
-// shape, domain or canon_version.
+// shape, domain or canon_version, and what SealCheckpoint does with a body that
+// verify_checkpoint_sealed would reject on domain or canon_version.
 type SealShapeMode string
 
 const (
@@ -69,14 +82,15 @@ func ParseSealShapeMode(raw string) (SealShapeMode, error) {
 	}
 }
 
-// SetSealShapeMode selects enforce (default) or shadow for SealRecord. Call before serving.
+// SetSealShapeMode selects enforce (default) or shadow for SealRecord and SealCheckpoint. Call before
+// serving.
 func (c *Core) SetSealShapeMode(m SealShapeMode) { c.shadow = m == SealShapeShadow }
 
 // ShadowSealShape reports whether this core is in AVERIN_SEAL_SHAPE=shadow mode.
 func (c *Core) ShadowSealShape() bool { return c.shadow }
 
-// SealShapeViolations is the process-wide count of bodies sealed in shadow mode although they
-// failed the shape, domain or canon_version check. Always 0 in enforce mode.
+// SealShapeViolations is the process-wide count of record and checkpoint bodies sealed in shadow mode
+// although they failed the shape, domain or canon_version check. Always 0 in enforce mode.
 func SealShapeViolations() int64 { return int64(C.averin_seal_shape_violations()) }
 
 // New validates the seed and caches the derived public key.
@@ -125,18 +139,27 @@ func (c *Core) SealRecord(bodyJSON string) (string, error) {
 	}
 	sealed, err := checkSeal(goStrFree(C.averin_seal_record_mode(cb, cs, shadow)))
 	if obs := sealObserver.Load(); obs != nil {
-		(*obs)(bodyJSON, err)
+		(*obs)(SealKindRecord, bodyJSON, err)
 	}
 	return sealed, err
 }
 
-// SealCheckpoint seals a checkpoint body.
+// SealCheckpoint seals a checkpoint body. In the default enforce mode it returns an error for a body
+// that verify_checkpoint_sealed would reject on domain or canon_version (the checkpoint half of SB-29).
 func (c *Core) SealCheckpoint(bodyJSON string) (string, error) {
 	cb := C.CString(bodyJSON)
 	cs := C.CString(c.seedHex)
 	defer C.free(unsafe.Pointer(cb))
 	defer C.free(unsafe.Pointer(cs))
-	return checkSeal(goStrFree(C.averin_seal_checkpoint(cb, cs)))
+	shadow := C.int(0)
+	if c.shadow {
+		shadow = 1
+	}
+	sealed, err := checkSeal(goStrFree(C.averin_seal_checkpoint_mode(cb, cs, shadow)))
+	if obs := sealObserver.Load(); obs != nil {
+		(*obs)(SealKindCheckpoint, bodyJSON, err)
+	}
+	return sealed, err
 }
 
 // nulRejectReport is the fail-closed JSON report for a bundle that contains a NUL byte. A C string is

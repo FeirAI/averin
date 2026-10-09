@@ -82,16 +82,17 @@ func main() {
 		log.Fatalf("signing key: %v", err)
 	}
 	// AVERIN_SEAL_SHAPE=enforce|shadow (default enforce): seal refuses a record body that verify_sealed
-	// would reject on top-level shape, domain or canon_version. shadow seals it anyway and counts it
-	// (averin_seal_shape_violations_total); it is a rollback switch only, the records it writes fail
-	// every verifier.
+	// would reject on top-level shape, domain or canon_version, and a checkpoint body that
+	// verify_checkpoint_sealed would reject on domain or canon_version. shadow seals it anyway and counts
+	// it (averin_seal_shape_violations_total); it is a rollback switch only, the records and checkpoints
+	// it writes fail every verifier.
 	sealShape, err := core.ParseSealShapeMode(os.Getenv("AVERIN_SEAL_SHAPE"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	c.SetSealShapeMode(sealShape)
 	if sealShape == core.SealShapeShadow {
-		log.Printf("WARNING: AVERIN_SEAL_SHAPE=shadow: malformed record bodies are sealed anyway and no verifier will accept them; rollback use only")
+		log.Printf("WARNING: AVERIN_SEAL_SHAPE=shadow: malformed record and checkpoint bodies are sealed anyway and no verifier will accept them; rollback use only")
 	}
 	keyID := envOr("AVERIN_SIGNING_KEY_ID", "k0")
 	addr := envOr("AVERIN_ADDR", ":8080")

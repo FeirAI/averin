@@ -713,7 +713,19 @@ fn verifier_enforces_the_models_pinned_constants() {
         ("canon_version", "rcp-2"),
         ("domain", "flightrecorder.checkpoint.v3"),
     ] {
-        let sealed = seal_checkpoint(&set(&body, k, CanonValue::Str(bad.into())), &sk).unwrap();
+        let bad_body = set(&body, k, CanonValue::Str(bad.into()));
+        assert!(
+            seal_checkpoint(&bad_body, &sk).is_err(),
+            "seal_checkpoint must refuse {k}={bad}"
+        );
+        // Built unchecked, as a hostile key holder could: the verifier's pin is still the gate.
+        let ch = compute_checkpoint_hash(&bad_body).unwrap();
+        let sig = sign::sign(sign::CHECKPOINT_SIG_TAG, &ch, &sk);
+        let sealed = set(
+            &set(&bad_body, "checkpoint_hash", CanonValue::Str(ch)),
+            "sig",
+            CanonValue::Str(sig),
+        );
         assert!(
             verify_checkpoint_sealed(&sealed, &vk).is_err(),
             "checkpoint with {k}={bad} must be rejected"
