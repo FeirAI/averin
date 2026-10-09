@@ -29,7 +29,7 @@ on:
 # dispatch (the Kani string family slices, formal-mutants-full, formal-nightly) are outside it; a failure there turns
 # the scheduled run on main red, which main-health.yml reports as an issue.
 #
-# Manual dispatch: `gh workflow run ci.yml --ref <branch>` runs every job (scope full, about 90 jobs
+# Manual dispatch: `gh workflow run ci.yml --ref <branch>` runs every job (scope full, about 100 jobs
 # with the 68 Kani string family slices). `gh workflow run ci.yml --ref <branch> -f scope=kit-nightly`
 # runs formal-nightly with the pull request jobs, without the string family slices and
 # formal-mutants-full, so the kit's full mutant tier can be checked on a branch without clogging the
