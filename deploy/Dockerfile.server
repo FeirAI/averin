@@ -22,7 +22,7 @@ COPY core ./core
 # debug unchanged).
 RUN cargo build --locked --profile server -p averin-decision-core --features rfc3161
 
-FROM golang:1.25.13-bookworm AS gobuild
+FROM golang:1.26.9-bookworm AS gobuild
 WORKDIR /src
 COPY . .
 COPY --from=rustbuild /src/target/server/libaverin_decision_core.a ./target/debug/libaverin_decision_core.a

@@ -11,7 +11,7 @@ other service involved.
 | Tool | Version | Why |
 |------|---------|-----|
 | Rust toolchain | pinned by `rust-toolchain.toml` (**1.92.0**) | builds `averin-decision-core` (the crypto core). rustup auto-installs the pin + the `wasm32` / `i686` targets on first build. |
-| Go | **1.25.13** (pinned in `server/go.mod`) | builds the server (cgo-links the Rust staticlib). |
+| Go | **1.26.9** (pinned in `server/go.mod`) | builds the server (cgo-links the Rust staticlib). |
 | A C toolchain (cgo) | clang/gcc | the Go server uses cgo to call the Rust core. |
 | `openssl` (or any 32-byte hex source) | any | to mint a signing seed. |
 
