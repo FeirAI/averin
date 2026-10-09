@@ -1,6 +1,12 @@
 {
   "schema": 1,
   "$comment": "Kit register (scripts/formal). Complements formal/claims.json, which stays the full inventory read by scripts/check-claims.py; each claim here names its legacy claim in $comment. See docs/dev/FORMAL.md.",
+  "formal_docs": [
+    "docs/dev/FORMAL.md"
+  ],
+  "scratch_cache_dirs": [
+    "formal/lean/.lake"
+  ],
   "overclaim_denylist": {
     "phrases": [
       "formally verified",
@@ -134,7 +140,8 @@
     "m10-b64-two-byte-tail": {
       "tier": "full",
       "claim": "kani-encoder-harnesses",
-      "detector": "bash formal/run-kani.sh --harness two_byte_tail_is_canonical"
+      "detector": "bash formal/run-kani.sh --harness two_byte_tail_is_canonical",
+      "detector_kind": "custom"
     },
     "lean-seal-drops-fmt-injectivity": {
       "tier": "full",
@@ -159,7 +166,8 @@
     "m9-b64-one-byte-tail": {
       "tier": "full",
       "claim": "kani-encoder-harnesses",
-      "detector": "bash formal/run-kani.sh --harness one_byte_tail_is_canonical"
+      "detector": "bash formal/run-kani.sh --harness one_byte_tail_is_canonical",
+      "detector_kind": "custom"
     },
     "surface-cli-consistent-exits-zero": {
       "tier": "fast",
@@ -204,6 +212,56 @@
     "tla-projecttx-anchor-unreachable": {
       "tier": "full",
       "claim": "tla-projecttx-model"
+    },
+    "m11-b64-full-chunk": {
+      "tier": "full",
+      "claim": "kani-encoder-harnesses",
+      "detector": "bash formal/run-kani.sh --harness full_chunk_is_canonical",
+      "detector_kind": "custom"
+    },
+    "m3-utf16-cmp-byte-order": {
+      "tier": "full",
+      "claim": "kani-canon-harnesses"
+    },
+    "m2-canon-drops-del": {
+      "tier": "full",
+      "claim": "kani-canon-harnesses",
+      "detector": "bash formal/run-kani.sh --harness string_escape_roundtrip_00128",
+      "detector_kind": "custom"
+    },
+    "m12-utf16-pair-end": {
+      "tier": "full",
+      "claim": "kani-canon-harnesses",
+      "detector": "bash formal/run-kani.sh --harness utf16_strict_matches_std",
+      "detector_kind": "custom"
+    },
+    "m63-parser-panic-unexpected-char": {
+      "tier": "full",
+      "claim": "parser-differential-and-fuzz"
+    },
+    "m43-temporal-legacy-member-not-total": {
+      "tier": "full",
+      "claim": "temporal-revocation-ordering-tests"
+    },
+    "seal-skips-check-via-public-unchecked": {
+      "tier": "full",
+      "claim": "seal-implies-verify-shape"
+    },
+    "seal-skips-checkpoint-domain-pin": {
+      "tier": "fast",
+      "claim": "checkpoint-seal-implies-verify-pins"
+    },
+    "seal-skips-checkpoint-canon-pin": {
+      "tier": "full",
+      "claim": "checkpoint-seal-implies-verify-pins"
+    },
+    "seal-skips-checkpoint-enforce-default": {
+      "tier": "full",
+      "claim": "checkpoint-seal-implies-verify-pins"
+    },
+    "surface-js-truthy-pinning": {
+      "tier": "full",
+      "claim": "cli-headline-equals-claim-verdict"
     }
   },
   "claims": [
@@ -346,7 +404,7 @@
     {
       "id": "temporal-revocation-ordering-tests",
       "$comment": "legacy register: historical-revocation-ordering",
-      "statement": "The adversarial suite pins the temporal revocation decisions: a receipt at the cutoff ordinal is not before it, an ordinal beyond the snapshot watermark is indeterminate, an over-age snapshot is stale, a Merkle v2 leaf commits mode and cutoff, and a cutoff above the watermark is rejected.",
+      "statement": "The adversarial suite pins the temporal revocation decisions: a receipt at the cutoff ordinal is not before it, an ordinal beyond the snapshot watermark is indeterminate, an over-age snapshot is stale, a Merkle v2 leaf commits mode and cutoff, a cutoff above the watermark is rejected, and a legacy receipt whose grant is on the revocation list counts as a revoked member.",
       "method": "test",
       "artifacts": [
         "core/tests/adversarial.rs"
@@ -375,6 +433,11 @@
           "path": "core/src/verify.rs",
           "symbol": "evaluate_snapshot",
           "sha256": "a4e649351c67b70e4919a5ff1fe43642a4a3606a55a0483fb6a23023fee4088e"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "verify_bundle_with",
+          "sha256": "4e0e288e7cc8a73c8228c31b29335053caba7c64546017c587ef009432c45fcf"
         }
       ],
       "mutants": [
@@ -382,7 +445,8 @@
         "m44-temporal-watermark-ignored",
         "m45-temporal-snapshot-age-ignored",
         "m46-temporal-merkle-cutoff-not-committed",
-        "m47-temporal-merkle-cutoff-beyond-watermark"
+        "m47-temporal-merkle-cutoff-beyond-watermark",
+        "m43-temporal-legacy-member-not-total"
       ],
       "does_not_establish": "Behaviour on inputs the tests do not construct. This is example-based testing, not a proof of temporal ordering, and it assumes the snapshot and revocation issuer are authentic (pinned out of band)."
     },
@@ -430,6 +494,7 @@
         "formal-production"
       ],
       "detector": "python3 formal/production/check-production.py",
+      "detector_kind": "custom",
       "covers": [
         {
           "path": "core/src/sign.rs",
@@ -457,7 +522,7 @@
     {
       "id": "parser-differential-and-fuzz",
       "$comment": "legacy register: parser-totality",
-      "statement": "The RCP parser matches the reference parser on a generated corpus and survives a seeded deterministic fuzz campaign without panic, including truncated escapes, truncated literals, long digit strings and trailing whitespace.",
+      "statement": "The RCP parser matches the reference parser on a generated corpus and survives a seeded deterministic fuzz campaign without panic, including truncated escapes, truncated literals, long digit strings, trailing whitespace and unexpected characters.",
       "method": "fuzz",
       "artifacts": [
         "core/tests/parser_differential.rs",
@@ -489,20 +554,26 @@
           "path": "core/src/canon.rs",
           "symbol": "skip_ws",
           "sha256": "bedb7f3fa37c6b839c263c64c2927b92a6a387006b583694997eb86683ffbe69"
+        },
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "parse_value",
+          "sha256": "193b03ef1873e608a376029e10c57ff898915e5a8556c629e53218de53f709e6"
         }
       ],
       "mutants": [
         "m14-truncated-escape-panic",
         "m61-parser-literal-unguarded",
         "m62-parser-decimal-overflow",
-        "m64-parser-skip-ws-unbounded"
+        "m64-parser-skip-ws-unbounded",
+        "m63-parser-panic-unexpected-char"
       ],
-      "does_not_establish": "Totality for all inputs (the Lean parser-totality proof in formal/claims.json is the stronger evidence; this checks sampled inputs only). Not input that is not valid UTF-8: both tests pass Rust strings, so a truncated UTF-8 sequence never reaches the parser here (mutant m60 survives these tests; only the totality proof kills it). Not allocation failure, stack depth or the uncapped options JSON path."
+      "does_not_establish": "Totality for all inputs (the Lean parser-totality proof in formal/claims.json is the stronger evidence; this checks sampled inputs only). Not input that is not valid UTF-8: both tests pass Rust strings, so a truncated UTF-8 sequence never reaches the parser here (mutant m60 survives these tests; only the totality proof kills it). Not allocation failure, stack depth or the uncapped options JSON path. The drift lock covers parse_value and the four guarded helpers only; a change to parse_string, parse_number or another callee does not trip it."
     },
     {
       "id": "kani-encoder-harnesses",
       "$comment": "legacy register: bounded-real-encoders",
-      "statement": "Within each harness's stated bounds, Kani checks the real LP framing (4-byte big-endian length) and base64url tail canonicality for two- and three-symbol tails.",
+      "statement": "Within each harness's stated bounds, Kani checks the real LP framing (4-byte big-endian length), base64url tail canonicality for two- and three-symbol tails, and the full four-symbol base64url chunk (every accepted spelling is the encoding of the bytes it decodes to).",
       "method": "kani",
       "artifacts": [
         "formal/run-kani.sh",
@@ -514,6 +585,7 @@
         "formal-kani-extended"
       ],
       "detector": "bash formal/run-kani.sh --harness lp_into_frames_exactly",
+      "detector_kind": "custom",
       "covers": [
         {
           "path": "core/src/hashx.rs",
@@ -524,14 +596,62 @@
           "path": "core/src/b64.rs",
           "symbol": "decode_chunk",
           "sha256": "b2df8d39658ff9dad496b4fadc21b0bd3ccfdc7115a350b5f77650310535b701"
+        },
+        {
+          "path": "core/src/b64.rs",
+          "symbol": "encode_chunk",
+          "sha256": "ae3df00542572f9b6af531712ed647af3114287a456b7ce980cf8dec7ef37384"
         }
       ],
       "mutants": [
         "m4-lp-two-byte-length",
         "m10-b64-two-byte-tail",
-        "m9-b64-one-byte-tail"
+        "m9-b64-one-byte-tail",
+        "m11-b64-full-chunk"
       ],
-      "does_not_establish": "Anything outside the harness bounds. It does not cover the other harnesses of bounded-real-encoders in formal/claims.json (UTF-16 key order, strict decoder, integer and string families), which need Kani proof stubs and are mutation-tested by the legacy suite only. Kani 0.68.0 and CBMC are trusted. A failing detector here does not tell an unwinding failure from a real counterexample; formal/check-kani-mutant.py in the legacy mutation suite makes that distinction."
+      "does_not_establish": "Anything outside the harness bounds: each base64 harness checks one tail or one chunk, so whole-string uniqueness is argued in prose, not proved. The canonical serializer harnesses are the separate claim kani-canon-harnesses; the integer families and the full string family are mutation-tested by the legacy suite only. Kani 0.68.0 and CBMC are trusted. A failing detector here does not tell a tool error or an unwinding failure from a real counterexample; formal/check-kani-mutant.py in the legacy mutation suite makes that distinction. The Kani mutants run only in formal-nightly (schedule and manual dispatch), not on pull requests."
+    },
+    {
+      "id": "kani-canon-harnesses",
+      "$comment": "legacy register: bounded-real-encoders",
+      "statement": "Within each harness's stated bounds, Kani checks three properties of the real canonical serializer: write_string then the real parser round-trips the concrete string \"\\x7f\" (case string_escape_roundtrip_00128), member-key order equals UTF-16 code-unit order for the keys where it differs from byte order (utf16_key_order_is_exact_steered), and the strict UTF-16 decoder equals std's on every 1- and 2-unit sequence (utf16_strict_matches_std).",
+      "method": "kani",
+      "artifacts": [
+        "formal/run-kani.sh",
+        "formal/check-kani-success.py",
+        "formal/check-kani-shards.py",
+        "formal/kani-string-smoke.txt"
+      ],
+      "gates": [
+        "formal-kani",
+        "formal-kani-extended",
+        "formal-kani-strings-smoke"
+      ],
+      "detector": "bash formal/run-kani.sh --harness utf16_key_order_is_exact_steered",
+      "detector_kind": "custom",
+      "covers": [
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "escape_into",
+          "sha256": "ac4f035690e3b242e2bfdd268b7d401cc7f5339cdabf611c68654bae56c15fde"
+        },
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "utf16_units",
+          "sha256": "ec30e2da9b562842632a985517e271dbc06665be84127bb2465b2d6244cfb7ae"
+        },
+        {
+          "path": "core/src/canon.rs",
+          "symbol": "decode_utf16_strict",
+          "sha256": "80d889f0737bf7ceb1170f28ffe2ae65e26d95de00a7294f2f582d53c88ac0fe"
+        }
+      ],
+      "mutants": [
+        "m3-utf16-cmp-byte-order",
+        "m2-canon-drops-del",
+        "m12-utf16-pair-end"
+      ],
+      "does_not_establish": "Anything outside the harness bounds. The string detector is one concrete case of the 17,031-case family (pull requests run a 20-case smoke subset, the weekly schedule runs the whole family, outside this register); the key-order detector is the steered conjunct only, not the four scalar-count shards or transitivity. Kani 0.68.0, CBMC, the bundled kissat and the proof-only std selections A1 and G1 described in formal/README.md are trusted. A failing detector does not tell a tool error from a real counterexample; formal/check-kani-mutant.py in the legacy mutation suite makes that distinction. The Kani mutants run only in formal-nightly (schedule and manual dispatch), not on pull requests."
     },
     {
       "id": "lean-seal-model",
@@ -547,6 +667,7 @@
         "formal-lean"
       ],
       "detector": "cd formal/lean && lake build --wfail && bash ./check-axioms.sh",
+      "detector_kind": "custom",
       "covers": [
         {
           "path": "formal/lean/Averin/Seal.lean",
@@ -580,6 +701,7 @@
         "formal-nightly"
       ],
       "detector": "TLC_ONLY=ProjectTx.tla bash formal/tla/run-tlc.sh",
+      "detector_kind": "custom",
       "covers": [
         {
           "path": "formal/tla/ProjectTx.tla",
@@ -618,6 +740,7 @@
         "formal-nightly"
       ],
       "detector": "TLC_ONLY=ConsumeLedger.tla bash formal/tla/run-tlc.sh",
+      "detector_kind": "custom",
       "covers": [
         {
           "path": "formal/tla/ConsumeLedger.tla",
@@ -652,6 +775,7 @@
         "formal-nightly"
       ],
       "detector": "TLC_ONLY=GrantRecovery.tla bash formal/tla/run-tlc.sh",
+      "detector_kind": "custom",
       "covers": [
         {
           "path": "formal/tla/GrantRecovery.tla",
@@ -688,6 +812,7 @@
         "formal-nightly"
       ],
       "detector": "TLC_ONLY=GrantLog.tla TLC_CFG_RE='GrantLog_(fixed|void_age_only|void_index_only)(_witness_.*)?' bash formal/tla/run-tlc.sh",
+      "detector_kind": "custom",
       "covers": [
         {
           "path": "formal/tla/GrantLog.tla",
@@ -742,6 +867,7 @@
         "formal-fast"
       ],
       "detector": "TLC_STATIC_ONLY=1 bash formal/tla/run-tlc.sh",
+      "detector_kind": "custom",
       "covers": [
         {
           "path": "formal/tla/run-tlc.sh",
@@ -768,7 +894,7 @@
     {
       "id": "seal-implies-verify-shape",
       "$comment": "legacy register: seal-implies-verify-shape",
-      "statement": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin, so a record that every verifier rejects on those grounds cannot be sealed through record::seal (SB-29). Held as a deterministic property test over every single defect (unknown key, each dropped required key, wrong or non-string or missing domain, wrong canon_version) plus 600 seeded random defect combinations on the golden record body, and, on the Go side, by running the whole server test suite through the real cgo seal in enforce mode and failing the run if any producer kind is refused or no longer reached.",
+      "statement": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin, so a record that every verifier rejects on those grounds cannot be sealed through record::seal (SB-29). Held as a deterministic property test over every single defect (unknown key, each dropped required key, wrong or non-string or missing domain, wrong canon_version) plus 600 seeded random defect combinations on the golden record body, and a scan that the only public seal entry points in core/src are the checked ones, and, on the Go side, by running the whole server test suite through the real cgo seal in enforce mode and failing the run if any producer kind is refused or no longer reached.",
       "method": "property",
       "artifacts": [
         "core/tests/seal_shape.rs",
@@ -811,18 +937,75 @@
           "path": "core/src/record.rs",
           "symbol": "verify_content_hash",
           "sha256": "003aa4d1e904632e5392d9ed3651b352cd26c1a0916e1d65d20b4f1bc3c91879"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "seal_unchecked",
+          "sha256": "da9ab9bad2f05155ff64a76c60f8a4ac2e7e57cb4ec53651395934fbc2ab2325"
         }
       ],
       "mutants": [
         "seal-skips-shape-check",
-        "seal-skips-domain-pin"
+        "seal-skips-domain-pin",
+        "seal-skips-check-via-public-unchecked"
       ],
-      "does_not_establish": "Nothing about nested object shape (validate_record_shape checks top-level keys only; the JSON Schema covers the rest), content_hash or signature validity of a body, or any record sealed before this change. Not a proof: the generator is deterministic and finite, so a defect class it does not build is untested. The Go conformance covers only the producers the existing server tests reach, and a body type no test builds is checked only by the seal refusing it at runtime. Nothing about checkpoints: checkpoint::seal_checkpoint still does not pin the checkpoint domain or canon_version (verify_checkpoint_sealed does). AVERIN_SEAL_SHAPE=shadow deliberately seals records no verifier accepts (rollback switch). seal_unchecked_for_tests is a public, doc-hidden bypass of the check that production code must not call; nothing enforces that."
+      "does_not_establish": "Nothing about nested object shape (validate_record_shape checks top-level keys only; the JSON Schema covers the rest), content_hash or signature validity of a body, or any record sealed before this change. Not a proof: the generator is deterministic and finite, so a defect class it does not build is untested. The Go conformance covers only the producers the existing server tests reach, and a body type no test builds is checked only by the seal refusing it at runtime. AVERIN_SEAL_SHAPE=shadow deliberately seals records no verifier accepts (rollback switch). The public entry point guard is a textual scan of core/src for public functions named seal*: a bypass under another name, or one built in another crate from the public hash and sign primitives (as a hostile key holder can), is not caught. Checkpoints are the separate claim checkpoint-seal-implies-verify-pins."
+    },
+    {
+      "id": "checkpoint-seal-implies-verify-pins",
+      "$comment": "legacy register: seal-implies-verify-shape",
+      "statement": "checkpoint::seal_checkpoint returns Ok only for a body whose sealed form passes verify_checkpoint_sealed's domain pin and canon_version pin, so a checkpoint that every verifier rejects on those grounds cannot be sealed through seal_checkpoint (the checkpoint half of SB-29); seal_checkpoint is the enforce mode of seal_checkpoint_with_mode. Held as a deterministic property test over every single defect (wrong, non-string or missing domain or canon_version, a preset checkpoint_hash, sig or anchor, an extra or dropped key) plus 600 seeded random defect combinations on a golden checkpoint body, and, on the Go side, by observing every checkpoint the server test suite seals through the real cgo core in enforce mode and failing the run if any is refused or if either shape of the server's checkpoint producer (with and without broker_grant_heads) is no longer reached.",
+      "method": "property",
+      "artifacts": [
+        "core/tests/seal_shape.rs",
+        "server/internal/api/seal_shape_conformance_test.go",
+        "server/internal/core/core_test.go"
+      ],
+      "gates": [
+        "core",
+        "server",
+        "formal-fast"
+      ],
+      "detector": "cargo test -p averin-decision-core --test seal_shape checkpoint_",
+      "detector_kind": "cargo",
+      "covers": [
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "seal_checkpoint",
+          "sha256": "5b01514e86cbf33fc30f528d300d279d2c2512ad442b953049667fdf32a1b052"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "seal_checkpoint_with_mode",
+          "sha256": "af6ebc8155f916f24593e71ae6934addff8ed48713ab9080025cc04b7917a62c"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "seal_checkpoint_unchecked",
+          "sha256": "c5d4dd8514bc4500889178762cabc13933279398389d39de408e88732a182493"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "check_sealed_checkpoint_pins",
+          "sha256": "9db6328528fb4ca00f0e840dfa498144ff0c5c957801a6b352e80a0bac97aeb2"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "verify_checkpoint_sealed",
+          "sha256": "72aced5030be43d47229810170510c9a64d4b54f1ce405b47cc20ae8859c3c46"
+        }
+      ],
+      "mutants": [
+        "seal-skips-checkpoint-domain-pin",
+        "seal-skips-checkpoint-canon-pin",
+        "seal-skips-checkpoint-enforce-default"
+      ],
+      "does_not_establish": "Nothing that validate_chain checks (sequence, previous hash, frontier, record count, forks), and no unknown-key check (verify_checkpoint_sealed has none). Not hash or signature validity of a body, and not any checkpoint sealed before this change: checkpoints are append-only, so an old malformed one stays. Not a proof: the generator is deterministic and finite. The two pins are written twice (check_sealed_checkpoint_pins and verify_checkpoint_sealed) and are held in step only by this test. The Go conformance covers the one server producer (createCheckpointTx) and the test producers the api suite reaches. AVERIN_SEAL_SHAPE=shadow deliberately seals checkpoints that no verifier accepts (rollback switch)."
     },
     {
       "id": "cli-headline-equals-claim-verdict",
       "$comment": "legacy register: cli-headline-equals-claim-verdict",
-      "statement": "The averin-verify bundle headline word is the report's claim verdict: PASS only when the requested claim is satisfied and the signing keys are externally pinned, CONSISTENT when it is satisfied only under the bundle's own keys, INSUFFICIENT when it is not satisfied or the claims contract is missing or invalid, FAIL when ok is false or the claim is refuted. Exit codes are 0 PASS, 2 CONSISTENT, 1 FAIL or INSUFFICIENT. Held by an end-to-end test of the binary on the shipped fixture (unpinned, pinned, unsatisfied claim, tampered) and by a differential of the Rust verdict function against verifier/claim-verdict.js (run with node) over every case of the committed verdict oracle corpus crossed with every requested claim, ok and pinning, plus malformed contracts.",
+      "statement": "The averin-verify bundle headline word is the report's claim verdict: PASS only when the requested claim is satisfied and the signing keys are externally pinned, CONSISTENT when it is satisfied only under the bundle's own keys, INSUFFICIENT when it is not satisfied or the claims contract is missing or invalid, FAIL when ok is false or the claim is refuted. Exit codes are 0 PASS, 2 CONSISTENT, 1 FAIL or INSUFFICIENT. Held by an end-to-end test of the binary on the shipped fixture (unpinned, pinned, unsatisfied claim, tampered) and by a differential of the Rust verdict function against verifier/claim-verdict.js (run with node) over every case of the committed verdict oracle corpus crossed with every requested claim, ok and pinning, plus malformed contracts and non-boolean ok and pinning values (only the boolean true counts in either rule).",
       "method": "differential-vectors",
       "artifacts": [
         "core/tests/cli_verdict.rs",
@@ -855,13 +1038,19 @@
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "verify_bundle_cmd",
           "sha256": "928fd2a76cd7ecf288eb7235873fa379d9c640fb2d7adb0081fb2f15a34864c2"
+        },
+        {
+          "path": "verifier/claim-verdict.js",
+          "symbol": "*",
+          "sha256": "76b429a24ba5fde6da3c967bdda3f64737bbf154ca09ed00f137feac9535c4bb"
         }
       ],
       "mutants": [
         "surface-cli-consistent-exits-zero",
-        "surface-word-ignores-pinning"
+        "surface-word-ignores-pinning",
+        "surface-js-truthy-pinning"
       ],
-      "does_not_establish": "That the report's claims are right (that is the claim kernel's refinement and oracle differential). Only the words and exit codes derived from a finished report: the web app's TypeScript copy (web/src/lib/claimVerdict.ts) is covered by its own unit tests, not this differential. The corpus rows are claim decisions, not bundles, so the differential crosses them with synthetic ok and pinning flags rather than verifying real bundles. Usage and unreadable-file errors also exit 2, the same code as CONSISTENT, so a caller must read the RESULT line, not only the exit code. Agreement holds for reports whose ok and keys_externally_pinned are booleans, as every shipped report producer emits: the JS rule tests truthiness, so on a non-boolean value (for example keys_externally_pinned set to the string false) it can say PASS where the Rust rule says CONSISTENT or FAIL, and the differential does not build such reports. The CLI headline is checked end to end only on the four fixture cases; over the corpus it is covered because the CLI prints claim_verdict(report).word(), not by running the binary per case. The record subcommand does not use this rule: it prints PASS (integrity only) and exits 0 for a record checked without any key. Needs node on PATH. A finite differential, not a proof."
+      "does_not_establish": "That the report's claims are right (that is the claim kernel's refinement and oracle differential). Only the words and exit codes derived from a finished report: the web app's TypeScript copy (web/src/lib/claimVerdict.ts) is covered by its own unit tests, not this differential. The corpus rows are claim decisions, not bundles, so the differential crosses them with synthetic ok and pinning flags rather than verifying real bundles. Usage and unreadable-file errors also exit 2, the same code as CONSISTENT, so a caller must read the RESULT line, not only the exit code. Non-boolean ok and pinning values are differential-tested on one corpus row only; the TypeScript copy has the same boolean rule and its own unit test for it. The CLI headline is checked end to end only on the four fixture cases; over the corpus it is covered because the CLI prints claim_verdict(report).word(), not by running the binary per case. The record subcommand does not use this rule: it prints PASS (integrity only) and exits 0 for a record checked without any key. Needs node on PATH. A finite differential, not a proof."
     },
     {
       "id": "action-completeness-capped-by-kernel",

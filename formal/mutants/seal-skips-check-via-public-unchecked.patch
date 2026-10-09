@@ -1,0 +1,13 @@
+diff --git a/core/src/record.rs b/core/src/record.rs
+index a64e36e..c1d7c04 100644
+--- a/core/src/record.rs
++++ b/core/src/record.rs
+@@ -344,7 +344,7 @@ fn check_sealed_shape(sealed: &CanonValue) -> Result<(), RecordError> {
+     Ok(())
+ }
+ 
+-fn seal_unchecked(record: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
++pub fn seal_unchecked(record: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
+     let content_hash = compute_content_hash(record)?;
+     let sig = sign::sign(sign::RECORD_SIG_TAG, &content_hash, sk);
+     let stripped = record.without_keys(&["content_hash", "sig"]);

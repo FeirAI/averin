@@ -220,19 +220,24 @@
     },
     {
       "id": "seal-implies-verify-shape",
-      "claim": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin (SB-29), checked by a deterministic property test and, for the Go server producers that the server test suite reaches, by running the real cgo seal in enforce mode across that suite. Not a proof; does not cover nested object shape, hash or signature validity, checkpoint::seal_checkpoint, or AVERIN_SEAL_SHAPE=shadow, which seals unverifiable records on purpose as a rollback switch.",
+      "claim": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin (SB-29), and checkpoint::seal_checkpoint returns Ok only for a body whose sealed form passes verify_checkpoint_sealed's domain pin and canon_version pin, checked by deterministic property tests and, for the Go server producers that the server test suite reaches (records and checkpoints), by running the real cgo seal in enforce mode across that suite. Not a proof; does not cover nested object shape, unknown checkpoint keys, the checkpoint chain checks of validate_chain, hash or signature validity, or AVERIN_SEAL_SHAPE=shadow, which seals unverifiable records and checkpoints on purpose as a rollback switch.",
       "class": "property-test",
       "targets": ["native Rust", "Go cgo (same source)"],
       "assumptions": ["the finite deterministic generator builds the defect classes that matter", "the Go suite reaches every producer kind it lists"],
       "sources": [
         {"file": "core/src/record.rs", "symbol": "fn check_sealed_shape"},
-        {"file": "core/src/record.rs", "symbol": "pub fn seal_with_mode"}
+        {"file": "core/src/record.rs", "symbol": "pub fn seal_with_mode"},
+        {"file": "core/src/checkpoint.rs", "symbol": "fn check_sealed_checkpoint_pins"},
+        {"file": "core/src/checkpoint.rs", "symbol": "pub fn seal_checkpoint_with_mode"}
       ],
       "proofs": [
         {"file": "core/tests/seal_shape.rs", "symbol": "fn every_single_defect_keeps_the_implication"},
         {"file": "server/internal/api/seal_shape_conformance_test.go", "symbol": "func TestMain"},
         {"file": "formal/mutants/seal-skips-shape-check.patch", "symbol": "validate_record_shape"},
-        {"file": "formal/mutants/seal-skips-domain-pin.patch", "symbol": "RECORD_DOMAIN"}
+        {"file": "formal/mutants/seal-skips-domain-pin.patch", "symbol": "RECORD_DOMAIN"},
+        {"file": "core/tests/seal_shape.rs", "symbol": "fn checkpoint_every_single_defect_keeps_the_implication"},
+        {"file": "core/tests/seal_shape.rs", "symbol": "fn only_checked_seal_entry_points_are_public"},
+        {"file": "formal/mutants/seal-skips-checkpoint-domain-pin.patch", "symbol": "check_sealed_checkpoint_pins"}
       ],
       "gates": ["core", "server", "formal-fast"]
     },
@@ -246,7 +251,7 @@
       ],
       "assumptions": [
         "the report's claims are produced by the claim kernel",
-        "the report's ok and keys_externally_pinned are booleans, as every shipped producer emits (the JS rule tests truthiness and can disagree on other values)",
+        "the report's ok and keys_externally_pinned are booleans, as every shipped producer emits; on any other value both rules count only the boolean true (differential-tested on one corpus row)",
         "node is on PATH where the differential runs"
       ],
       "sources": [

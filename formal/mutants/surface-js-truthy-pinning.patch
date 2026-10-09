@@ -1,0 +1,13 @@
+diff --git a/verifier/claim-verdict.js b/verifier/claim-verdict.js
+index 116ba43..21befca 100644
+--- a/verifier/claim-verdict.js
++++ b/verifier/claim-verdict.js
+@@ -19,7 +19,7 @@ export function claimVerdict(report) {
+   if (!valid || claims.requested_decision === "insufficient") {
+     return {word: "INSUFFICIENT", className: "qual", valid};
+   }
+-  return report.keys_externally_pinned === true
++  return report.keys_externally_pinned
+     ? {word: "PASS", className: "pass", valid}
+     : {word: "CONSISTENT", className: "qual", valid};
+ }
