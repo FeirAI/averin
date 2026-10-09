@@ -21,7 +21,10 @@ fn vectors() -> CanonValue {
 #[test]
 fn canon_json_vectors_serialize_to_the_pinned_bytes() {
     let v = vectors();
-    let cases = v.get("canon_json").and_then(|c| c.as_array()).expect("canon_json");
+    let cases = v
+        .get("canon_json")
+        .and_then(|c| c.as_array())
+        .expect("canon_json");
     assert!(cases.len() >= 7);
     for c in cases {
         let name = c.get("name").and_then(|x| x.as_str()).unwrap();
@@ -40,6 +43,13 @@ fn subject_v3_digest_and_preimage_match_the_pinned_bytes() {
     let record = s.get("record").unwrap();
     let digest = subject_digest(record).unwrap();
     assert_eq!(digest, g("subject_digest"));
-    let pre = preimage_v3(&g("source"), &g("project_id"), &g("record_id"), &g("evidence_hash"), &digest).unwrap();
+    let pre = preimage_v3(
+        &g("source"),
+        &g("project_id"),
+        &g("record_id"),
+        &g("evidence_hash"),
+        &digest,
+    )
+    .unwrap();
     assert_eq!(hex_lower(&pre), g("preimage_hex"));
 }
