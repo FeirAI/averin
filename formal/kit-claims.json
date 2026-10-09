@@ -1154,6 +1154,7 @@
         "seams-v3-preimage-drops-digest",
         "seams-subject-digest-tag-dropped"
       ],
+      "evidence_run": "37989195424",
       "does_not_establish": "Not who approved a record or which evidence an approver saw (approver identity); not that govder's serializer agrees outside the listed examples (govder's own claim checks those); not NFC or rejection agreement of the two parsers beyond the oracle's cases. The oracle's expected bytes are only as good as the Lean definitions they are generated from."
     }
   ]
