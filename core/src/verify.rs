@@ -2394,6 +2394,9 @@ fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
 ///                    | extensions.govder.body.<key>, each OPTIONAL and included only when
 ///                    | present and non-empty (mirrors govder's stringFieldFromPayload; most
 ///                    | event types carry none of the three)
+///   decided_by / sign_offs_digest (v3 proof only; see the block below)
+///                    | extensions.govder.body.decided_by, and sha256 of the serialization of
+///                    | extensions.govder.body.sign_offs, each included only when present
 ///
 /// Returns false if `extensions.govder` is absent, any REQUIRED field above is missing, the
 /// signed hash is absent, or the two hashes differ.
@@ -2456,6 +2459,33 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
     ] {
         if let Some(v) = body.and_then(|b| s(b, key)).filter(|v| !v.is_empty()) {
             pairs.push((key.to_string(), CanonValue::string(v)));
+        }
+    }
+    // Approver identity (XV-11). A v3 govder authority proof commits to WHO decided an approval:
+    // `decided_by` verbatim (a non-empty string in the body) and `sign_offs_digest`, the sha256 of
+    // the RCP serialization of the body's non-empty `sign_offs` array in the order it was sealed.
+    // Only v3 evidence carries them; a historical v2 record keeps its original field set so its
+    // signed bytes still re-derive. Same spelling as govder's evidenceForRecordV3 and the pinned
+    // vectors/approver-evidence.v1.json.
+    let is_v3 = rec
+        .get("authority")
+        .and_then(|a| s(a, "proof_version"))
+        .as_deref()
+        == Some("v3");
+    if is_v3 {
+        if let Some(v) = body.and_then(|b| s(b, "decided_by")).filter(|v| !v.is_empty()) {
+            pairs.push(("decided_by".to_string(), CanonValue::string(v)));
+        }
+        if let Some(sign_offs) = body
+            .and_then(|b| b.get("sign_offs"))
+            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+        {
+            pairs.push((
+                "sign_offs_digest".to_string(),
+                CanonValue::string(crate::hashx::sha256_prefixed(
+                    sign_offs.serialize().as_bytes(),
+                )),
+            ));
         }
     }
     let evidence = match CanonValue::object(pairs) {
