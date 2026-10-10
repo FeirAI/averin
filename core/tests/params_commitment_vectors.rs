@@ -29,7 +29,10 @@ fn unhex(s: &str) -> Vec<u8> {
 #[test]
 fn commit_reproduces_every_pinned_commitment() {
     let v = vectors();
-    let cases = v.get("vectors").and_then(|c| c.as_array()).expect("vectors");
+    let cases = v
+        .get("vectors")
+        .and_then(|c| c.as_array())
+        .expect("vectors");
     assert!(cases.len() >= 11, "vector file too small: {}", cases.len());
     let mut domains = std::collections::BTreeSet::new();
     for c in cases {
@@ -41,7 +44,11 @@ fn commit_reproduces_every_pinned_commitment() {
             .unwrap_or_else(|e| panic!("{id}: {e}"));
         assert_eq!(got, s("expect"), "{id}");
     }
-    assert_eq!(domains.len(), 4, "every field domain is exercised: {domains:?}");
+    assert_eq!(
+        domains.len(),
+        4,
+        "every field domain is exercised: {domains:?}"
+    );
 }
 
 #[test]
