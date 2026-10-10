@@ -6,6 +6,11 @@
       "file": "authority-v3.v1.json",
       "owner": "averin",
       "sha256": "23d5214cc69b330c4e496e8bae39710e74d689a03b3fb46a67b731801ad60d18"
+    },
+    {
+      "file": "params-commitment.v1.json",
+      "owner": "averin",
+      "sha256": "f443a8bf5b1968c50180d724250bb7ac4c6512bb0f2f984a7e4fc9f334d7eb8b"
     }
   ]
 }

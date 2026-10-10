@@ -1,0 +1,13 @@
+diff --git a/core/src/commit.rs b/core/src/commit.rs
+index 5f2bbdc..a237379 100644
+--- a/core/src/commit.rs
++++ b/core/src/commit.rs
+@@ -82,7 +82,7 @@ pub fn commit_preimage(
+     let mut pre = Vec::with_capacity(32 + value.len());
+     if !lp_str_into(&mut pre, COMMIT_TAG)
+         || !lp_str_into(&mut pre, domain.as_str())
+-        || !lp_into(&mut pre, nonce)
++        || !lp_into(&mut pre, &nonce[..0])
+         || !lp_into(&mut pre, value)
+     {
+         return Err(CommitError::TooLong);
