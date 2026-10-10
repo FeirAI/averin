@@ -57,7 +57,11 @@ fn record_json(case: &CanonValue, evidence_hash: &str, v3: bool) -> String {
         agent = s(case, "agent_id"),
         at = s(case, "occurred_at"),
         outcome = s(case, "outcome"),
-        status = if s(case, "outcome") == "ok" { "ok" } else { "blocked" },
+        status = if s(case, "outcome") == "ok" {
+            "ok"
+        } else {
+            "blocked"
+        },
         body = case.get("body").unwrap().serialize(),
         eh = evidence_hash,
     )
@@ -107,7 +111,10 @@ fn verify_signed(
     .unwrap();
     let bundle = CanonValue::object(vec![
         ("bundle_version".into(), CanonValue::string("1")),
-        ("project_id".into(), CanonValue::string(s(case, "tenant_id"))),
+        (
+            "project_id".into(),
+            CanonValue::string(s(case, "tenant_id")),
+        ),
         ("keys".into(), CanonValue::Array(vec![key_entry])),
         ("records".into(), CanonValue::Array(vec![rec])),
         ("checkpoints".into(), CanonValue::Array(vec![])),
@@ -183,7 +190,11 @@ fn v3_evidence_naming_a_different_decider_is_refused() {
         );
         assert_ne!(forged, canonical, "{name}: no-op mutation");
         let (trust, issues) = verify_signed(&case, &sha256_prefixed(forged.as_bytes()), true);
-        assert_eq!(trust, AuthorityTrust::Verified, "{name}: signature is valid");
+        assert_eq!(
+            trust,
+            AuthorityTrust::Verified,
+            "{name}: signature is valid"
+        );
         assert!(
             rederive_issue(&issues),
             "{name}: evidence naming mallory over a record naming {decider} must not re-derive, got {issues:?}"
@@ -240,7 +251,10 @@ fn v3_evidence_binds_the_ordered_sign_off_set() {
         .unwrap();
     // Evidence signed for the (alice, bob) order, record body sealed in the (bob, alice) order.
     let (_, issues) = verify_signed(&reordered, &s(&case, "evidence_hash"), true);
-    assert!(rederive_issue(&issues), "reordered set re-derived: {issues:?}");
+    assert!(
+        rederive_issue(&issues),
+        "reordered set re-derived: {issues:?}"
+    );
     assert_ne!(s(&case, "evidence_hash"), s(&reordered, "evidence_hash"));
 }
 
@@ -263,5 +277,8 @@ fn v2_records_keep_the_historical_field_set() {
     );
     let (trust, issues) = verify_signed(&case, &sha256_prefixed(legacy.as_bytes()), false);
     assert_eq!(trust, AuthorityTrust::LegacyUnbound);
-    assert!(!rederive_issue(&issues), "v2 record must still re-derive: {issues:?}");
+    assert!(
+        !rederive_issue(&issues),
+        "v2 record must still re-derive: {issues:?}"
+    );
 }

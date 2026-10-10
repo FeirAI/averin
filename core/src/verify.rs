@@ -2473,7 +2473,10 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
         .as_deref()
         == Some("v3");
     if is_v3 {
-        if let Some(v) = body.and_then(|b| s(b, "decided_by")).filter(|v| !v.is_empty()) {
+        if let Some(v) = body
+            .and_then(|b| s(b, "decided_by"))
+            .filter(|v| !v.is_empty())
+        {
             pairs.push(("decided_by".to_string(), CanonValue::string(v)));
         }
         if let Some(sign_offs) = body
