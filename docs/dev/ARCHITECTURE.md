@@ -191,7 +191,10 @@ that NFC returns representable strings; which documents it accepts is tested, no
   elevation that fails verification is **rejected at ingest** by default, not sealed downgraded.
   For a govder v3 approval record the signed evidence also names who decided it: the verifier
   re-derives `evidence_hash` from the record's own fields, including `decided_by` and a digest of
-  the ordered `sign_offs` set, and flags a record whose signed evidence differs. This says the
+  the ordered `sign_offs` set, and flags a record whose signed evidence differs. A v3 record whose
+  signed evidence omits those approver members (history sealed before this binding, or any signer
+  that omits them) is still accepted, with a note ("predates approver binding") instead of an
+  issue, so PASS alone does not tell a bound record from an unbound one; check the notes. This says the
   record names the approvers its signer committed to; it does not say the names are authenticated
   humans or that the approval is recent (that is the operator's identity and broker posture).
 - **Session DAG** — the causal history for one `(project, session)`.
