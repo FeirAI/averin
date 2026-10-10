@@ -1,12 +1,15 @@
 diff --git a/core/src/verify.rs b/core/src/verify.rs
-index 4c33715..d137f4c 100644
+index f75b4b4..d137f4c 100644
 --- a/core/src/verify.rs
 +++ b/core/src/verify.rs
-@@ -2473,9 +2473,6 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
+@@ -2473,12 +2473,6 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
          .as_deref()
          == Some("v3");
      if is_v3 {
--        if let Some(v) = body.and_then(|b| s(b, "decided_by")).filter(|v| !v.is_empty()) {
+-        if let Some(v) = body
+-            .and_then(|b| s(b, "decided_by"))
+-            .filter(|v| !v.is_empty())
+-        {
 -            pairs.push(("decided_by".to_string(), CanonValue::string(v)));
 -        }
          if let Some(sign_offs) = body
