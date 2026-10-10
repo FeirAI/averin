@@ -276,6 +276,9 @@
     },
     "seams-subject-digest-tag-dropped": {
       "tier": "full"
+    },
+    "seams-commit-nonce-not-bound": {
+      "tier": "full"
     }
   },
   "claims": [
@@ -1156,6 +1159,32 @@
       ],
       "evidence_run": "38005705473",
       "does_not_establish": "Not who approved a record or which evidence an approver saw (approver identity); not that govder's serializer agrees outside the listed examples (govder's own claim checks those); not NFC or rejection agreement of the two parsers beyond the oracle's cases. The oracle's expected bytes are only as good as the Lean definitions they are generated from. Byte-identity of the copies in other repos is checked only by the local --peer run of check_vectors_lock.py, not by CI."
+    },
+    {
+      "id": "params-commitment-vectors-match-reference",
+      "$comment": "legacy register: params-commitment-vectors-match-reference",
+      "statement": "averin's hiding commitment (commit::commit, core/src/commit.rs) reproduces every vector in vectors/params-commitment.v1.json: 11 commitments over the four field domains, empty and multibyte values, values on both sides of a one-byte length, and a 1024-byte value, each computed by the independent Python reference scripts/vectors/gen_params_commitment.py (a check fails when the committed file is stale). vultrino keeps a byte-identical copy pinned in vectors.lock and checks its own params_commitment against it, so two Rust implementations agree with a third.",
+      "method": "differential-vectors",
+      "artifacts": [
+        "vectors/params-commitment.v1.json",
+        "scripts/vectors/gen_params_commitment.py",
+        "core/tests/params_commitment_vectors.rs"
+      ],
+      "gates": [
+        "core"
+      ],
+      "detector": "python3 scripts/vectors/gen_params_commitment.py --check && cargo test -p averin-decision-core --test params_commitment_vectors",
+      "covers": [
+        {
+          "path": "core/src/commit.rs",
+          "symbol": "commit_preimage",
+          "sha256": "65606f7dd0ba4b0cb509e00651ea770cdd1c5de0bef9d1b621f7a3103eb2ce18"
+        }
+      ],
+      "mutants": [
+        "seams-commit-nonce-not-bound"
+      ],
+      "does_not_establish": "Only the listed inputs, not every value or nonce. The reference and the implementation share the written format, so a flaw in the format itself (RCP section 9.3) would be in both. It does not show the nonce is random or that a commitment hides a value (the 32-byte nonce is the caller's), nor that the FFI's base64 and hex decoding of its arguments is right. Byte-identity of vultrino's copy is checked only by the local --peer run of check_vectors_lock.py, not by CI. Averin's Go server does not compute commitments (it treats them as opaque strings), so no Go implementation is compared."
     }
   ]
 }
