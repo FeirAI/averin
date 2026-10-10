@@ -1,0 +1,22 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 4c33715..65f95ac 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -2476,17 +2476,6 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
+         if let Some(v) = body.and_then(|b| s(b, "decided_by")).filter(|v| !v.is_empty()) {
+             pairs.push(("decided_by".to_string(), CanonValue::string(v)));
+         }
+-        if let Some(sign_offs) = body
+-            .and_then(|b| b.get("sign_offs"))
+-            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+-        {
+-            pairs.push((
+-                "sign_offs_digest".to_string(),
+-                CanonValue::string(crate::hashx::sha256_prefixed(
+-                    sign_offs.serialize().as_bytes(),
+-                )),
+-            ));
+-        }
+     }
+     let evidence = match CanonValue::object(pairs) {
+         Ok(v) => v,
