@@ -1,8 +1,8 @@
 diff --git a/core/src/verify.rs b/core/src/verify.rs
-index f75b4b4..d137f4c 100644
+index a8e7979..550754a 100644
 --- a/core/src/verify.rs
 +++ b/core/src/verify.rs
-@@ -2473,12 +2473,6 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
+@@ -2486,12 +2486,6 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> GovderEvidence {
          .as_deref()
          == Some("v3");
      if is_v3 {

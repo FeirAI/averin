@@ -1,8 +1,8 @@
 diff --git a/core/src/verify.rs b/core/src/verify.rs
-index f75b4b4..82d21f6 100644
+index a8e7979..142d687 100644
 --- a/core/src/verify.rs
 +++ b/core/src/verify.rs
-@@ -2479,17 +2479,6 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
+@@ -2492,17 +2492,6 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> GovderEvidence {
          {
              pairs.push(("decided_by".to_string(), CanonValue::string(v)));
          }
@@ -18,5 +18,5 @@ index f75b4b4..82d21f6 100644
 -            ));
 -        }
      }
-     let evidence = match CanonValue::object(pairs) {
-         Ok(v) => v,
+     let hash_of = |pairs: Vec<(String, CanonValue)>| {
+         CanonValue::object(pairs)
