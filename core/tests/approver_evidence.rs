@@ -73,7 +73,7 @@ fn verify_signed(
     case: &CanonValue,
     evidence_hash: &str,
     v3: bool,
-) -> (AuthorityTrust, Vec<String>) {
+) -> (AuthorityTrust, Vec<String>, Vec<String>) {
     let authority_key = signing_key_from_seed(&[7u8; 32]);
     let seal_key = signing_key_from_seed(&[0u8; 32]);
     let unsigned = CanonValue::parse(&record_json(case, evidence_hash, v3)).unwrap();
@@ -127,7 +127,11 @@ fn verify_signed(
             ..Default::default()
         },
     );
-    (report.record_trust[0].authority, report.issues)
+    (
+        report.record_trust[0].authority,
+        report.issues,
+        report.record_trust[0].notes.clone(),
+    )
 }
 
 fn rederive_issue(issues: &[String]) -> bool {
@@ -155,7 +159,7 @@ fn v3_approval_evidence_rederives_from_the_pinned_vectors() {
             s(&case, "evidence_hash"),
             "{name}: vector hash"
         );
-        let (trust, issues) = verify_signed(&case, &s(&case, "evidence_hash"), true);
+        let (trust, issues, _) = verify_signed(&case, &s(&case, "evidence_hash"), true);
         assert_eq!(trust, AuthorityTrust::Verified, "{name}");
         assert!(
             !rederive_issue(&issues),
@@ -189,7 +193,7 @@ fn v3_evidence_naming_a_different_decider_is_refused() {
             "\"decided_by\":\"mallory@acme.test\"",
         );
         assert_ne!(forged, canonical, "{name}: no-op mutation");
-        let (trust, issues) = verify_signed(&case, &sha256_prefixed(forged.as_bytes()), true);
+        let (trust, issues, _) = verify_signed(&case, &sha256_prefixed(forged.as_bytes()), true);
         assert_eq!(
             trust,
             AuthorityTrust::Verified,
@@ -202,10 +206,12 @@ fn v3_evidence_naming_a_different_decider_is_refused() {
     }
 }
 
-/// A record whose body carries an approver but whose signed evidence is the pre-XV-11 field set
-/// (decided_by and the sign-off set omitted) no longer re-derives under v3.
+/// History stays valid. A record whose body carries an approver but whose signed evidence is the
+/// pre-XV-11 field set (decided_by and the sign-off set omitted: a record sealed before approver
+/// binding) re-derives under the historical spelling, raises NO issue, and says in its notes that the
+/// approver identity is not committed by the evidence.
 #[test]
-fn v3_evidence_without_the_approver_members_is_refused() {
+fn v3_evidence_without_the_approver_members_is_history_with_a_note() {
     let v = vectors();
     let mut checked = 0;
     for case in cases(&v) {
@@ -217,23 +223,39 @@ fn v3_evidence_without_the_approver_members_is_refused() {
         if !named {
             continue;
         }
-        let legacy = format!(
-            "{{\"agent_id\":{},\"event_id\":{},\"event_type\":\"approval\",\"occurred_at\":{},\"outcome\":{},\"tenant_id\":{}}}",
-            CanonValue::string(s(&case, "agent_id")).serialize(),
-            CanonValue::string(s(&case, "event_id")).serialize(),
-            CanonValue::string(s(&case, "occurred_at")).serialize(),
-            CanonValue::string(s(&case, "outcome")).serialize(),
-            CanonValue::string(s(&case, "tenant_id")).serialize(),
+        let (trust, issues, notes) = verify_signed(
+            &case,
+            &sha256_prefixed(legacy_evidence(&case).as_bytes()),
+            true,
         );
-        let (_, issues) = verify_signed(&case, &sha256_prefixed(legacy.as_bytes()), true);
+        assert_eq!(trust, AuthorityTrust::Verified, "{}", s(&case, "name"));
         assert!(
-            rederive_issue(&issues),
-            "{}: legacy-field-set evidence over an approver-bearing record must not re-derive",
+            !rederive_issue(&issues),
+            "{}: a pre-XV-11 record must stay valid history, got {issues:?}",
+            s(&case, "name")
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("predates approver binding")),
+            "{}: the record must say its approver identity is not bound, notes: {notes:?}",
             s(&case, "name")
         );
         checked += 1;
     }
     assert!(checked >= 6);
+}
+
+/// The historical field set of a vector case (no decided_by, no sign-off digest), canonical.
+fn legacy_evidence(case: &CanonValue) -> String {
+    format!(
+        "{{\"agent_id\":{},\"event_id\":{},\"event_type\":\"approval\",\"occurred_at\":{},\"outcome\":{},\"tenant_id\":{}}}",
+        CanonValue::string(s(case, "agent_id")).serialize(),
+        CanonValue::string(s(case, "event_id")).serialize(),
+        CanonValue::string(s(case, "occurred_at")).serialize(),
+        CanonValue::string(s(case, "outcome")).serialize(),
+        CanonValue::string(s(case, "tenant_id")).serialize(),
+    )
 }
 
 /// Dropping or reordering the sign-off set after signing changes the evidence and is refused, even
@@ -250,7 +272,7 @@ fn v3_evidence_binds_the_ordered_sign_off_set() {
         .find(|c| s(c, "name") == "order-matters")
         .unwrap();
     // Evidence signed for the (alice, bob) order, record body sealed in the (bob, alice) order.
-    let (_, issues) = verify_signed(&reordered, &s(&case, "evidence_hash"), true);
+    let (_, issues, _) = verify_signed(&reordered, &s(&case, "evidence_hash"), true);
     assert!(
         rederive_issue(&issues),
         "reordered set re-derived: {issues:?}"
@@ -267,15 +289,8 @@ fn v2_records_keep_the_historical_field_set() {
         .into_iter()
         .find(|c| s(c, "name") == "single-approver")
         .unwrap();
-    let legacy = format!(
-        "{{\"agent_id\":{},\"event_id\":{},\"event_type\":\"approval\",\"occurred_at\":{},\"outcome\":{},\"tenant_id\":{}}}",
-        CanonValue::string(s(&case, "agent_id")).serialize(),
-        CanonValue::string(s(&case, "event_id")).serialize(),
-        CanonValue::string(s(&case, "occurred_at")).serialize(),
-        CanonValue::string(s(&case, "outcome")).serialize(),
-        CanonValue::string(s(&case, "tenant_id")).serialize(),
-    );
-    let (trust, issues) = verify_signed(&case, &sha256_prefixed(legacy.as_bytes()), false);
+    let legacy = legacy_evidence(&case);
+    let (trust, issues, _) = verify_signed(&case, &sha256_prefixed(legacy.as_bytes()), false);
     assert_eq!(trust, AuthorityTrust::LegacyUnbound);
     assert!(
         !rederive_issue(&issues),
