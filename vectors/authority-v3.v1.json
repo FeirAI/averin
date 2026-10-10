@@ -1,0 +1,663 @@
+{
+ "format": "feir.authority-v3",
+ "version": 1,
+ "owner": "averin",
+ "generator": "scripts/vectors/gen_authority_v3.py (repackages formal/oracle and spec/golden-vectors; computes nothing)",
+ "spec": [
+  "canon_oracle: 'value' encodes a canonical value; an object is {\"obj\": [[key, value], ...]} with member order deliberately unsorted. Integers are JSON integers within int64 (read them exactly, not as floats). 'hex' is the canonical RCP v1 serialization produced by averin's executable Lean oracle (formal/oracle/expected.json).",
+  "esc_oracle: 'cp' is a Unicode code point; 'hex' is how that character appears INSIDE a canonical string (its escaping or its UTF-8 bytes), without the surrounding quotes; a verifier checks it on the one-code-point string minus the two quote bytes.",
+  "int_oracle: the canonical serialization of an integer, as hex.",
+  "canon_json: 'input' is JSON text a producer parses strictly (duplicate keys and non-canonical forms are the producer's to reject); 'canonical_hex' is the canonical serialization.",
+  "subject_v3: 'record' is the semantic record; subject_digest = sha256 over lp(projection) + canonical(record without the recorder envelope and the recursive proof fields); preimage_hex is the length-framed v3 signing preimage over (tag, projection, source, project_id, record_id, evidence_hash, subject_digest) with the stated inputs.",
+  "A signer or verifier of the authority proof reproduces every vector byte for byte. Neither fixes policy: these vectors say nothing about which approver or which evidence an authority may use."
+ ],
+ "consumers": [
+  "govder internal/authority (CanonValue.Serialize, SubjectDigest, PreimageV3)"
+ ],
+ "canon_oracle": [
+  {
+   "name": "null",
+   "value": null,
+   "hex": "6e756c6c"
+  },
+  {
+   "name": "true",
+   "value": true,
+   "hex": "74727565"
+  },
+  {
+   "name": "false",
+   "value": false,
+   "hex": "66616c7365"
+  },
+  {
+   "name": "zero",
+   "value": 0,
+   "hex": "30"
+  },
+  {
+   "name": "i64 max",
+   "value": 9223372036854775807,
+   "hex": "39323233333732303336383534373735383037"
+  },
+  {
+   "name": "i64 min",
+   "value": -9223372036854775808,
+   "hex": "2d39323233333732303336383534373735383038"
+  },
+  {
+   "name": "ints",
+   "value": [
+    -1,
+    1,
+    9,
+    10,
+    -10,
+    100,
+    1000000007,
+    -9223372036854775807
+   ],
+   "hex": "5b2d312c312c392c31302c2d31302c3130302c313030303030303030372c2d393232333337323033363835343737353830375d"
+  },
+  {
+   "name": "empty string",
+   "value": "",
+   "hex": "2222"
+  },
+  {
+   "name": "empty array",
+   "value": [],
+   "hex": "5b5d"
+  },
+  {
+   "name": "empty object",
+   "value": {
+    "obj": []
+   },
+   "hex": "7b7d"
+  },
+  {
+   "name": "nested empties",
+   "value": [
+    [],
+    {
+     "obj": []
+    },
+    [
+     []
+    ],
+    [
+     {
+      "obj": []
+     }
+    ],
+    {
+     "obj": [
+      [
+       "x",
+       {
+        "obj": []
+       }
+      ],
+      [
+       "y",
+       []
+      ],
+      [
+       "z",
+       [
+        [],
+        {
+         "obj": []
+        }
+       ]
+      ]
+     ]
+    },
+    ""
+   ],
+   "hex": "5b5b5d2c7b7d2c5b5b5d5d2c5b7b7d5d2c7b2278223a7b7d2c2279223a5b5d2c227a223a5b5b5d2c7b7d5d7d2c22225d"
+  },
+  {
+   "name": "every C0 control",
+   "value": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f",
+   "hex": "225c75303030305c75303030315c75303030325c75303030335c75303030345c75303030355c75303030365c75303030375c625c745c6e5c75303030625c665c725c75303030655c75303030665c75303031305c75303031315c75303031325c75303031335c75303031345c75303031355c75303031365c75303031375c75303031385c75303031395c75303031615c75303031625c75303031635c75303031645c75303031655c753030316622"
+  },
+  {
+   "name": "DEL",
+   "value": "a\u007fb",
+   "hex": "22617f6222"
+  },
+  {
+   "name": "U+2028 U+2029",
+   "value": "line\u2028sep\u2029para",
+   "hex": "226c696e65e280a8736570e280a97061726122"
+  },
+  {
+   "name": "quote backslash slash",
+   "value": "\"\\/'",
+   "hex": "225c225c5c2f2722"
+  },
+  {
+   "name": "non-ASCII",
+   "value": "caf\u00e9 \u65e5\u672c \u00ff \ud7ff \ue000 \uffff \ud800\udc00 \ud83d\ude00",
+   "hex": "22636166c3a920e697a5e69cac20c3bf20ed9fbf20ee808020efbfbf20f090808020f09f988022"
+  },
+  {
+   "name": "BMP vs astral keys",
+   "value": {
+    "obj": [
+     [
+      "\uffff",
+      1
+     ],
+     [
+      "\ud800\udc00",
+      2
+     ],
+     [
+      "\ue000",
+      3
+     ],
+     [
+      "\ud83d\ude00",
+      4
+     ],
+     [
+      "\ud7ff",
+      5
+     ],
+     [
+      "a",
+      6
+     ],
+     [
+      "",
+      7
+     ],
+     [
+      "\u00e9",
+      8
+     ]
+    ]
+   },
+   "hex": "7b22223a372c2261223a362c22c3a9223a382c22ed9fbf223a352c22f0908080223a322c22f09f9880223a342c22ee8080223a332c22efbfbf223a317d"
+  },
+  {
+   "name": "prefix keys",
+   "value": {
+    "obj": [
+     [
+      "ab",
+      1
+     ],
+     [
+      "a",
+      2
+     ],
+     [
+      "b",
+      3
+     ],
+     [
+      "aa",
+      4
+     ],
+     [
+      "A",
+      5
+     ],
+     [
+      "a\u0000",
+      6
+     ]
+    ]
+   },
+   "hex": "7b2241223a352c2261223a322c22615c7530303030223a362c226161223a342c226162223a312c2262223a337d"
+  },
+  {
+   "name": "escaped keys",
+   "value": {
+    "obj": [
+     [
+      "\u0001",
+      "c0"
+     ],
+     [
+      "\"",
+      "quote"
+     ],
+     [
+      "\\",
+      "backslash"
+     ],
+     [
+      "\u007f",
+      "del"
+     ],
+     [
+      "\u2028",
+      "ls"
+     ]
+    ]
+   },
+   "hex": "7b225c7530303031223a226330222c225c22223a2271756f7465222c225c5c223a226261636b736c617368222c227f223a2264656c222c22e280a8223a226c73227d"
+  },
+  {
+   "name": "nested objects",
+   "value": {
+    "obj": [
+     [
+      "z",
+      {
+       "obj": [
+        [
+         "b",
+         [
+          1,
+          {
+           "obj": [
+            [
+             "d",
+             null
+            ],
+            [
+             "c",
+             false
+            ]
+           ]
+          }
+         ]
+        ],
+        [
+         "a",
+         true
+        ]
+       ]
+      }
+     ],
+     [
+      "m",
+      [
+       {
+        "obj": [
+         [
+          "y",
+          -1
+         ],
+         [
+          "x",
+          "\u001f"
+         ]
+        ]
+       }
+      ]
+     ]
+    ]
+   },
+   "hex": "7b226d223a5b7b2278223a225c7530303166222c2279223a2d317d5d2c227a223a7b2261223a747275652c2262223a5b312c7b2263223a66616c73652c2264223a6e756c6c7d5d7d7d"
+  }
+ ],
+ "esc_oracle": [
+  {
+   "cp": 0,
+   "hex": "5c7530303030"
+  },
+  {
+   "cp": 1,
+   "hex": "5c7530303031"
+  },
+  {
+   "cp": 2,
+   "hex": "5c7530303032"
+  },
+  {
+   "cp": 3,
+   "hex": "5c7530303033"
+  },
+  {
+   "cp": 4,
+   "hex": "5c7530303034"
+  },
+  {
+   "cp": 5,
+   "hex": "5c7530303035"
+  },
+  {
+   "cp": 6,
+   "hex": "5c7530303036"
+  },
+  {
+   "cp": 7,
+   "hex": "5c7530303037"
+  },
+  {
+   "cp": 8,
+   "hex": "5c62"
+  },
+  {
+   "cp": 9,
+   "hex": "5c74"
+  },
+  {
+   "cp": 10,
+   "hex": "5c6e"
+  },
+  {
+   "cp": 11,
+   "hex": "5c7530303062"
+  },
+  {
+   "cp": 12,
+   "hex": "5c66"
+  },
+  {
+   "cp": 13,
+   "hex": "5c72"
+  },
+  {
+   "cp": 14,
+   "hex": "5c7530303065"
+  },
+  {
+   "cp": 15,
+   "hex": "5c7530303066"
+  },
+  {
+   "cp": 16,
+   "hex": "5c7530303130"
+  },
+  {
+   "cp": 17,
+   "hex": "5c7530303131"
+  },
+  {
+   "cp": 18,
+   "hex": "5c7530303132"
+  },
+  {
+   "cp": 19,
+   "hex": "5c7530303133"
+  },
+  {
+   "cp": 20,
+   "hex": "5c7530303134"
+  },
+  {
+   "cp": 21,
+   "hex": "5c7530303135"
+  },
+  {
+   "cp": 22,
+   "hex": "5c7530303136"
+  },
+  {
+   "cp": 23,
+   "hex": "5c7530303137"
+  },
+  {
+   "cp": 24,
+   "hex": "5c7530303138"
+  },
+  {
+   "cp": 25,
+   "hex": "5c7530303139"
+  },
+  {
+   "cp": 26,
+   "hex": "5c7530303161"
+  },
+  {
+   "cp": 27,
+   "hex": "5c7530303162"
+  },
+  {
+   "cp": 28,
+   "hex": "5c7530303163"
+  },
+  {
+   "cp": 29,
+   "hex": "5c7530303164"
+  },
+  {
+   "cp": 30,
+   "hex": "5c7530303165"
+  },
+  {
+   "cp": 31,
+   "hex": "5c7530303166"
+  },
+  {
+   "cp": 32,
+   "hex": "20"
+  },
+  {
+   "cp": 33,
+   "hex": "21"
+  },
+  {
+   "cp": 34,
+   "hex": "5c22"
+  },
+  {
+   "cp": 39,
+   "hex": "27"
+  },
+  {
+   "cp": 47,
+   "hex": "2f"
+  },
+  {
+   "cp": 48,
+   "hex": "30"
+  },
+  {
+   "cp": 65,
+   "hex": "41"
+  },
+  {
+   "cp": 92,
+   "hex": "5c5c"
+  },
+  {
+   "cp": 97,
+   "hex": "61"
+  },
+  {
+   "cp": 126,
+   "hex": "7e"
+  },
+  {
+   "cp": 127,
+   "hex": "7f"
+  },
+  {
+   "cp": 128,
+   "hex": "c280"
+  },
+  {
+   "cp": 159,
+   "hex": "c29f"
+  },
+  {
+   "cp": 160,
+   "hex": "c2a0"
+  },
+  {
+   "cp": 233,
+   "hex": "c3a9"
+  },
+  {
+   "cp": 8232,
+   "hex": "e280a8"
+  },
+  {
+   "cp": 8233,
+   "hex": "e280a9"
+  },
+  {
+   "cp": 55295,
+   "hex": "ed9fbf"
+  },
+  {
+   "cp": 57344,
+   "hex": "ee8080"
+  },
+  {
+   "cp": 65279,
+   "hex": "efbbbf"
+  },
+  {
+   "cp": 65535,
+   "hex": "efbfbf"
+  },
+  {
+   "cp": 65536,
+   "hex": "f0908080"
+  },
+  {
+   "cp": 128512,
+   "hex": "f09f9880"
+  },
+  {
+   "cp": 1114111,
+   "hex": "f48fbfbf"
+  }
+ ],
+ "int_oracle": [
+  {
+   "int": 0,
+   "hex": "30"
+  },
+  {
+   "int": 1,
+   "hex": "31"
+  },
+  {
+   "int": -1,
+   "hex": "2d31"
+  },
+  {
+   "int": 9,
+   "hex": "39"
+  },
+  {
+   "int": 10,
+   "hex": "3130"
+  },
+  {
+   "int": -10,
+   "hex": "2d3130"
+  },
+  {
+   "int": 99,
+   "hex": "3939"
+  },
+  {
+   "int": 100,
+   "hex": "313030"
+  },
+  {
+   "int": 1234567890,
+   "hex": "31323334353637383930"
+  },
+  {
+   "int": -1234567890,
+   "hex": "2d31323334353637383930"
+  },
+  {
+   "int": 9223372036854775807,
+   "hex": "39323233333732303336383534373735383037"
+  },
+  {
+   "int": -9223372036854775807,
+   "hex": "2d39323233333732303336383534373735383037"
+  },
+  {
+   "int": -9223372036854775808,
+   "hex": "2d39323233333732303336383534373735383038"
+  }
+ ],
+ "canon_json": [
+  {
+   "name": "key-sort-ascii",
+   "input": "{\"b\":1,\"a\":2,\"A\":3,\"0\":4}",
+   "canonical_hex": "7b2230223a342c2241223a332c2261223a322c2262223a317d"
+  },
+  {
+   "name": "key-sort-supplementary-plane",
+   "input": "{\"\uffff\":1,\"\ud800\udc00\":2}",
+   "canonical_hex": "7b22f0908080223a322c22efbfbf223a317d"
+  },
+  {
+   "name": "integers-boundaries",
+   "input": "{\"min\":-9223372036854775808,\"max\":9223372036854775807,\"zero\":0,\"neg\":-5}",
+   "canonical_hex": "7b226d6178223a393232333337323033363835343737353830372c226d696e223a2d393232333337323033363835343737353830382c226e6567223a2d352c227a65726f223a307d"
+  },
+  {
+   "name": "null-vs-present",
+   "input": "{\"a\":null,\"b\":false}",
+   "canonical_hex": "7b2261223a6e756c6c2c2262223a66616c73657d"
+  },
+  {
+   "name": "string-escaping",
+   "input": "{\"q\":\"a\\\"b\\\\c/\\n\\t\u00e9\ud83d\ude00\"}",
+   "canonical_hex": "7b2271223a22615c22625c5c632f5c6e5c74c3a9f09f9880227d"
+  },
+  {
+   "name": "nfc-normalization",
+   "input": "{\"k\":\"e\u0301\"}",
+   "canonical_hex": "7b226b223a22c3a9227d"
+  },
+  {
+   "name": "nested-extensions",
+   "input": "{\"extensions\":{\"z\":1,\"a\":[3,2,1]},\"a\":true}",
+   "canonical_hex": "7b2261223a747275652c22657874656e73696f6e73223a7b2261223a5b332c322c315d2c227a223a317d7d"
+  }
+ ],
+ "subject_v3": {
+  "record": {
+   "schema_version": "2",
+   "canon_version": "rcp-1",
+   "domain": "flightrecorder.record.v2",
+   "record_id": "r1",
+   "project_id": "p1",
+   "session_id": "s1",
+   "agent_id": "a1",
+   "agent_version": "1",
+   "span_id": "sp1",
+   "parent_span_id": null,
+   "agent_ts": "2026-01-01T00:00:00.000Z",
+   "event_type": "decision",
+   "action": "approve",
+   "observed_via": "sdk",
+   "status": "ok",
+   "authority": {
+    "source": "human_signed",
+    "enforcement_point": "sdk",
+    "proof_version": "v3",
+    "subject_projection": "averin.authority.subject.v1",
+    "evidence_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+   },
+   "extensions": {
+    "govder": {
+     "body": {
+      "reason": "cafe\u0301"
+     }
+    }
+   },
+   "received_ts": "2026-01-01T00:00:01.000Z",
+   "display_seq": 1,
+   "causal_prev_hashes": [],
+   "key": {
+    "signing_key_id": "k1"
+   }
+  },
+  "source": "human_signed",
+  "project_id": "p1",
+  "record_id": "r1",
+  "evidence_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "subject_digest": "sha256:183e080b0ac9cc7c3738939dcd1ae1fc49578cdd859b5ee563785fc539d24596",
+  "preimage_hex": "0000001361766572696e2e617574686f726974792e76330000001b61766572696e2e617574686f726974792e7375626a6563742e76310000000c68756d616e5f7369676e6564000000027031000000027231000000477368613235363a31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131000000477368613235363a31383365303830623061633963633763333733383933396463643161653166633439353738636464383539623565653536333738356663353339643234353936"
+ }
+}
