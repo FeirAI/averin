@@ -466,7 +466,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "4e0e288e7cc8a73c8228c31b29335053caba7c64546017c587ef009432c45fcf"
+          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
         }
       ],
       "mutants": [
@@ -501,7 +501,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "4e0e288e7cc8a73c8228c31b29335053caba7c64546017c587ef009432c45fcf"
+          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
         }
       ],
       "mutants": [
@@ -540,7 +540,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "4e0e288e7cc8a73c8228c31b29335053caba7c64546017c587ef009432c45fcf"
+          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
         }
       ],
       "mutants": [
@@ -1214,6 +1214,11 @@
           "path": "core/src/verify.rs",
           "symbol": "govder_evidence_rederivable",
           "sha256": "bc8afa49546078b84e9364cda56b3078b07c18fb2cbd5dbc62b404ea4b7efea0"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "verify_bundle_with",
+          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
         }
       ],
       "mutants": [
