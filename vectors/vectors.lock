@@ -3,6 +3,11 @@
   "repo": "averin",
   "files": [
     {
+      "file": "approver-evidence.v1.json",
+      "owner": "averin",
+      "sha256": "37e9adc9ff37f923b6dd33c45f4fac4f5e0e3b1ae32007884d3809c27f970a42"
+    },
+    {
       "file": "authority-v3.v1.json",
       "owner": "averin",
       "sha256": "23d5214cc69b330c4e496e8bae39710e74d689a03b3fb46a67b731801ad60d18"

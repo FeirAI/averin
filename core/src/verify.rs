@@ -2364,6 +2364,18 @@ fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// How a govder record's signed evidence relates to what the verifier re-derives from its own fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GovderEvidence {
+    /// The signed evidence_hash is the re-derived one (approver members included when present).
+    Bound,
+    /// A record that names an approver (decided_by / sign_offs) whose signed evidence is the
+    /// historical field set: valid history, but its approver identity is not bound by the evidence.
+    ApproverUnbound,
+    /// The signed evidence_hash matches neither spelling (or a required field is missing).
+    Mismatch,
+}
+
 /// Re-derive a GOVDER record's `evidence_hash` and confirm it equals the signed
 /// `authority.evidence_hash` (ADR 0003 R1, threat #4 — the govder analogue of
 /// `evidence_rederivable` above). Without this, `authority.evidence_hash` for every govder
@@ -2394,21 +2406,24 @@ fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
 ///                    | extensions.govder.body.<key>, each OPTIONAL and included only when
 ///                    | present and non-empty (mirrors govder's stringFieldFromPayload; most
 ///                    | event types carry none of the three)
+///   decided_by / sign_offs_digest (v3 proof only; see the block below)
+///                    | extensions.govder.body.decided_by, and sha256 of the serialization of
+///                    | extensions.govder.body.sign_offs, each included only when present
 ///
 /// Returns false if `extensions.govder` is absent, any REQUIRED field above is missing, the
 /// signed hash is absent, or the two hashes differ.
-fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
+fn govder_evidence_rederivable(rec: &CanonValue) -> GovderEvidence {
     let signed = match rec
         .get("authority")
         .and_then(|a| a.get("evidence_hash"))
         .and_then(|v| v.as_str())
     {
         Some(h) => h,
-        None => return false,
+        None => return GovderEvidence::Mismatch,
     };
     let gov = match rec.get("extensions").and_then(|e| e.get("govder")) {
         Some(g) => g,
-        None => return false,
+        None => return GovderEvidence::Mismatch,
     };
     // agent_id, unlike the fields below, may be LEGITIMATELY ABSENT from the wire: govder's
     // Record.AgentID carries `json:",omitempty"`, and an approval/sign-off record with neither
@@ -2422,23 +2437,23 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
     let agent_id = s(rec, "agent_id").unwrap_or_default();
     let tenant_id = match s(rec, "project_id") {
         Some(v) => v,
-        None => return false,
+        None => return GovderEvidence::Mismatch,
     };
     let event_type = match s(gov, "type") {
         Some(v) => v,
-        None => return false,
+        None => return GovderEvidence::Mismatch,
     };
     let event_id = match s(gov, "event_id") {
         Some(v) => v,
-        None => return false,
+        None => return GovderEvidence::Mismatch,
     };
     let outcome = match s(gov, "outcome") {
         Some(v) => v,
-        None => return false,
+        None => return GovderEvidence::Mismatch,
     };
     let occurred_at = match s(gov, "occurred_at") {
         Some(v) => v,
-        None => return false,
+        None => return GovderEvidence::Mismatch,
     };
     let mut pairs = vec![
         ("event_type".to_string(), CanonValue::string(event_type)),
@@ -2458,11 +2473,54 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> bool {
             pairs.push((key.to_string(), CanonValue::string(v)));
         }
     }
-    let evidence = match CanonValue::object(pairs) {
-        Ok(v) => v,
-        Err(_) => return false,
+    let legacy_pairs = pairs.clone();
+    // Approver identity (XV-11). A v3 govder authority proof commits to WHO decided an approval:
+    // `decided_by` verbatim (a non-empty string in the body) and `sign_offs_digest`, the sha256 of
+    // the RCP serialization of the body's non-empty `sign_offs` array in the order it was sealed.
+    // Only v3 evidence carries them; a historical v2 record keeps its original field set so its
+    // signed bytes still re-derive. Same spelling as govder's evidenceForRecordV3 and the pinned
+    // vectors/approver-evidence.v1.json.
+    let is_v3 = rec
+        .get("authority")
+        .and_then(|a| s(a, "proof_version"))
+        .as_deref()
+        == Some("v3");
+    if is_v3 {
+        if let Some(v) = body
+            .and_then(|b| s(b, "decided_by"))
+            .filter(|v| !v.is_empty())
+        {
+            pairs.push(("decided_by".to_string(), CanonValue::string(v)));
+        }
+        if let Some(sign_offs) = body
+            .and_then(|b| b.get("sign_offs"))
+            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+        {
+            pairs.push((
+                "sign_offs_digest".to_string(),
+                CanonValue::string(crate::hashx::sha256_prefixed(
+                    sign_offs.serialize().as_bytes(),
+                )),
+            ));
+        }
+    }
+    let hash_of = |pairs: Vec<(String, CanonValue)>| {
+        CanonValue::object(pairs)
+            .ok()
+            .map(|e| crate::hashx::sha256_prefixed(e.serialize().as_bytes()))
     };
-    crate::hashx::sha256_prefixed(evidence.serialize().as_bytes()) == signed
+    let carries_approver = pairs.len() != legacy_pairs.len();
+    if hash_of(pairs).as_deref() == Some(signed) {
+        return GovderEvidence::Bound;
+    }
+    // A record sealed before XV-11 carries decided_by / sign_offs in its body but its signed
+    // evidence is the historical field set. Those records stay valid history: they re-derive under
+    // the legacy spelling and are reported as approver-unbound (a note, not an issue). Anything that
+    // matches neither spelling is a mismatch.
+    if carries_approver && hash_of(legacy_pairs).as_deref() == Some(signed) {
+        return GovderEvidence::ApproverUnbound;
+    }
+    GovderEvidence::Mismatch
 }
 
 /// Length-prefixed framing (LP4) shared by EVERY broker/resource challenge + Merkle-leaf preimage below: a
@@ -5413,14 +5471,21 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             .get("extensions")
             .and_then(|e| e.get("govder"))
             .is_some()
-            && !govder_evidence_rederivable(rec)
         {
-            semantic_record_conflict = true;
-            let msg = format!(
-                "record {i}: authority.evidence_hash is not re-derivable from the govder record's own fields (payload absent or divergent — R1, threat #4)"
-            );
-            notes.push(msg.clone());
-            issues.push(msg);
+            match govder_evidence_rederivable(rec) {
+                GovderEvidence::Bound => {}
+                GovderEvidence::ApproverUnbound => notes.push(format!(
+                    "record {i}: the govder record names its approver(s) but its signed evidence predates approver binding, so decided_by and the sign-off set are not committed by authority.evidence_hash"
+                )),
+                GovderEvidence::Mismatch => {
+                    semantic_record_conflict = true;
+                    let msg = format!(
+                        "record {i}: authority.evidence_hash is not re-derivable from the govder record's own fields (payload absent or divergent — R1, threat #4)"
+                    );
+                    notes.push(msg.clone());
+                    issues.push(msg);
+                }
+            }
         }
 
         pending.push(Pending {
