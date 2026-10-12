@@ -192,6 +192,9 @@ type Server struct {
 	requirePinnedAuthority bool
 	// Explicit rollout gate: require v3 for newly ingested external elevation.
 	requireBodyBoundAuthority bool
+
+	// posture is the startup guard state GET /v2/posture reports (posture.go).
+	posture Posture
 	// authorityDowngradeLogAt throttles the WARNING that names a failed authority elevation (a govder/averin
 	// key misalignment can otherwise spam it on every ingest). Guarded by ingestMu around updates.
 	authorityDowngradeLogAt time.Time
@@ -919,6 +922,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v2/verify", s.handleVerify)
 	mux.HandleFunc("GET /v2/export", s.handleExport)
 	mux.HandleFunc("GET /v2/usage", s.handleUsage)
+	mux.HandleFunc("GET /v2/posture", s.handlePosture) // read-only startup-guard report for the deploy verifier
 
 	// averin#20: an opt-in coarse ingest rate limit wraps the mux INNERMOST (so in the guarded path it runs
 	// AFTER auth — an unauthenticated request is 401, not 429 — and applies in the dev/no-auth path too). Unset

@@ -4,11 +4,15 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feirai/averin/server/internal/core"
 )
@@ -240,5 +244,65 @@ func TestIsDevSigningSeed(t *testing.T) {
 				t.Fatalf("isDevSigningSeed(%q) = %v, want %v", tc.seed, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestPosture_LiveProcessReportsItsStartupGuards builds and runs the real binary (the wiring is in
+// main()) and reads GET /v2/posture from the live process: the keyed deployment says so, the
+// build stamps flow through, and the dev signing seed is reported as the violation it is.
+func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the cgo binary; skipped under -short")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "averin-server-posture")
+	if out, err := exec.Command("go", "build", "-ldflags", "-X main.coreRustc=rustc-test-stamp", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Skipf("could not build averin-server (cgo toolchain?): %v\n%s", err, out)
+	}
+	run := func(t *testing.T, seed string) map[string]any {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := l.Addr().String()
+		_ = l.Close()
+		cmd := exec.Command(bin)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=" + addr,
+			"AVERIN_SIGNING_SEED=" + seed, "AVERIN_API_KEYS=proj:tok"}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/v2/posture?project=proj", nil)
+			req.Header.Set("Authorization", "Bearer tok")
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("posture: status %d", resp.StatusCode)
+				}
+				var b map[string]any
+				if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
+					t.Fatal(err)
+				}
+				return b
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatal("averin-server never answered /v2/posture")
+		return nil
+	}
+	b := run(t, strings.Repeat("a1", 32))
+	if b["api_keys_configured"] != true || b["signing_seed_is_dev"] != false || b["durable_store"] != false || b["require_prod_secrets"] != false {
+		t.Fatalf("fresh seed, keyed, in-memory: %v", b)
+	}
+	build := b["build"].(map[string]any)
+	if build["core_rustc"] != "rustc-test-stamp" || build["go_version"] == "" {
+		t.Fatalf("build stamps did not reach the report: %v", build)
+	}
+	b = run(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+	if b["signing_seed_is_dev"] != true {
+		t.Fatalf("the dev seed must be reported: %v", b)
 	}
 }
