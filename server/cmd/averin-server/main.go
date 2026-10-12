@@ -37,6 +37,10 @@ import (
 	"github.com/feirai/averin/server/internal/witness"
 )
 
+// coreRustc is the rustc that built the linked decision-core staticlib. The build scripts stamp it at
+// link time (go build -ldflags "-X main.coreRustc=<rustc --version>"); an unstamped build reports none.
+var coreRustc string
+
 func main() {
 	seed := secretEnvOrFile("AVERIN_SIGNING_SEED")
 	if seed == "" {
@@ -58,7 +62,9 @@ func main() {
 	// store volatile in-memory (consumed jti/nonce + two-phase grants reset on restart, reopening a
 	// /v2/use replay window). Mirrors govder's GOVDER_REQUIRE_AUTHORITY_SEED and leria's
 	// LERIA_REQUIRE_PROD_SECRETS.
+	requireProdSecrets := false
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("AVERIN_REQUIRE_PROD_SECRETS"))); v == "1" || v == "true" {
+		requireProdSecrets = true
 		var missing []string
 		if strings.TrimSpace(os.Getenv("AVERIN_API_KEYS")) == "" {
 			missing = append(missing, "AVERIN_API_KEYS (the app API would be UNAUTHENTICATED)")
@@ -127,6 +133,14 @@ func main() {
 	st := selectStore()
 
 	srv := api.New(c, st, keyID).WithSealShapeViolations(core.SealShapeViolations)
+	// GET /v2/posture: the startup guard state, read-only, for the deploy-time posture verifier.
+	_, onPostgres := st.(*store.Postgres)
+	srv.WithPosture(api.Posture{
+		RequireProdSecrets: requireProdSecrets,
+		DurableStore:       onPostgres,
+		SigningSeedIsDev:   isDevSigningSeed(seed),
+		CoreRustc:          coreRustc,
+	})
 	// GET /readyz probes the Postgres store's pool (short-timeout Ping); GET /metrics gets its live
 	// connection-pool gauges. The in-memory store (no AVERIN_DATABASE_URL) registers neither — nothing
 	// to be unready about, nothing to gauge.

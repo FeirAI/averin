@@ -288,6 +288,22 @@
     },
     "xv11-unbound-history-without-note": {
       "tier": "full"
+    },
+    "posture-keys-always-reported": {
+      "tier": "full",
+      "claim": "posture-report-live"
+    },
+    "posture-pin-switch-hardcoded": {
+      "tier": "full",
+      "claim": "posture-report-live"
+    },
+    "posture-core-rustc-dropped": {
+      "tier": "full",
+      "claim": "posture-report-live"
+    },
+    "posture-dev-seed-not-reported": {
+      "tier": "full",
+      "claim": "posture-report-live"
     }
   },
   "claims": [
@@ -1227,6 +1243,48 @@
         "xv11-unbound-history-without-note"
       ],
       "does_not_establish": "Not that the named subjects are authenticated, are humans, are in a configured group or are distinct (an operator and broker property, XV-10); not that the approval is recent; not that a signer committed to the right names (a signer that signs evidence naming mallory over a record naming mallory is consistent, and a signer that omits the approver members is accepted as pre-binding history, so the binding holds only for records whose signer includes them); not NFC or escaping agreement beyond the vector cases. The subject digest already covers the whole record body; this adds the evidence commitment an offline verifier checks by re-derivation."
+    },
+    {
+      "id": "posture-report-live",
+      "$comment": "legacy register: posture-report-live",
+      "statement": "GET /v2/posture sits under the ordinary project API-key auth (401 without the project's bearer on a keyed deployment) and reports from the running process whether the app API is keyed (an explicit open store counts as not keyed), whether the Postgres store is wired, whether the signing seed is the committed dev seed, whether AVERIN_REQUIRE_PROD_SECRETS is on, the two authority-pin switches, and the Go toolchain, git commit and (when the build script stamped it) rustc of the linked decision core. A real averin-server process, built and started in the test, reports the keyed in-memory deployment and reports the dev seed as such. Booleans and build identifiers only.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/posture.go",
+        "server/internal/api/posture_test.go",
+        "server/cmd/averin-server/main.go",
+        "server/cmd/averin-server/main_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run TestPosture_ && go test -count=1 ./cmd/averin-server -run TestPosture_",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/api/posture.go",
+          "symbol": "handlePosture",
+          "sha256": "bf5b497e2080f6e904aa65dcb33d23414d39d6c8ea50a350a10c0289ecb717b4"
+        },
+        {
+          "path": "server/internal/api/posture.go",
+          "symbol": "buildInfoPosture",
+          "sha256": "8440913b83a2fceaba4e1f4e2e0d375bd336e6d8f4ebf8737e1361c68e30c8fe"
+        },
+        {
+          "path": "server/cmd/averin-server/main.go",
+          "symbol": "main",
+          "sha256": "7ae32ed1a5bb30562a3a20be69ec1dfeb9556e49976886aa6d771755c9dfa765"
+        }
+      ],
+      "mutants": [
+        "posture-keys-always-reported",
+        "posture-pin-switch-hardcoded",
+        "posture-core-rustc-dropped",
+        "posture-dev-seed-not-reported"
+      ],
+      "does_not_establish": "The live-process test cannot start with AVERIN_REQUIRE_PROD_SECRETS=1 (that gate needs a Postgres URL), so the wiring of that flag and of durable_store=true is covered only by the handler test with a hand-built Posture, not by a running binary. The rustc stamp is whatever the build script passed with -ldflags; the Rust staticlib itself carries no version, so an unstamped build reports none and the verifier must treat that as unknown. The report says what was configured, not that the database is reachable or the keys are strong. On an unauthenticated deployment the route answers anyone (and says api_keys_configured is false). The vcs revision is present only for a binary built inside a git checkout.",
+      "evidence_run": "38192274401"
     }
   ]
 }

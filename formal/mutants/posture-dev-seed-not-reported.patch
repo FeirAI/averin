@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-server/main.go b/server/cmd/averin-server/main.go
+index 83813c0..97fe74f 100644
+--- a/server/cmd/averin-server/main.go
++++ b/server/cmd/averin-server/main.go
+@@ -138,7 +138,7 @@ func main() {
+ 	srv.WithPosture(api.Posture{
+ 		RequireProdSecrets: requireProdSecrets,
+ 		DurableStore:       onPostgres,
+-		SigningSeedIsDev:   isDevSigningSeed(seed),
++		SigningSeedIsDev:   false,
+ 		CoreRustc:          coreRustc,
+ 	})
+ 	// GET /readyz probes the Postgres store's pool (short-timeout Ping); GET /metrics gets its live
