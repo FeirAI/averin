@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/posture.go b/server/internal/api/posture.go
+index 194dcf8..fbe1699 100644
+--- a/server/internal/api/posture.go
++++ b/server/internal/api/posture.go
+@@ -36,7 +36,7 @@ func (s *Server) WithPosture(p Posture) *Server {
+ 
+ func buildInfoPosture(coreRustc string) map[string]any {
+ 	out := map[string]any{"go_version": runtime.Version()}
+-	if coreRustc != "" {
++	if coreRustc == "-" {
+ 		out["core_rustc"] = coreRustc
+ 	}
+ 	if bi, ok := debug.ReadBuildInfo(); ok {

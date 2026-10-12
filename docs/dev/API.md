@@ -30,6 +30,7 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | GET | `/v2/dag` | A session's sealed records (trace-waterfall view). | always |
 | GET | `/v2/sessions` | List a project's session ids. | always |
 | GET | `/v2/usage` | Usage / billable counts for a project. | always |
+| GET | `/v2/posture` | Read-only startup-guard report for the deploy-time verifier. | always |
 | POST | `/v2/grants` | Credential broker: issue a `gateway_enforced` grant (Tier-A). | `AVERIN_BROKER_ISSUING_SEED` |
 | POST | `/v2/grants/prepare` | Two-phase grant, phase 1 (mint + reveal). | broker (+ cosig) |
 | POST | `/v2/grants/finalize` | Two-phase grant, phase 2 (attach approver sigs + commit). | broker (+ cosig) |
@@ -195,6 +196,19 @@ A session's sealed records, in causal/display order, for the trace-waterfall vie
 ## GET `/v2/usage?project=<id>`
 
 `{ "usage": {...}, "free_tier": <n>, "billable_records": <n>, "billable_exports": <n> }`.
+
+---
+
+## GET `/v2/posture?project=<id>`
+
+A read-only report of the guards this process was started with, for the posture verifier in feir-os
+(`deploy/vps/deploy.sh verify-posture`). It is under the same project API-key auth as every other `/v2` route:
+on a keyed deployment it needs the project's bearer. Booleans and build identifiers only, never a key, a seed or
+a DSN: `schema`, `plane`, `build` (`go_version`, `vcs_revision`, `vcs_modified`, `core_rustc` when the build
+stamped it with `-ldflags "-X main.coreRustc=..."`), `require_prod_secrets`, `api_keys_configured` (false when the
+app API is unauthenticated), `durable_store` (Postgres wired), `signing_seed_is_dev`, `require_pinned_authority`,
+`require_body_bound_authority`. It says what was configured, not that the database is reachable. On an
+unauthenticated deployment it answers anyone and reports `api_keys_configured: false`.
 
 ---
 

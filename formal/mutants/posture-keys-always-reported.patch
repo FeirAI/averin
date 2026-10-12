@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/posture.go b/server/internal/api/posture.go
+index 194dcf8..a781ebe 100644
+--- a/server/internal/api/posture.go
++++ b/server/internal/api/posture.go
+@@ -58,7 +58,7 @@ func buildInfoPosture(coreRustc string) map[string]any {
+ // unauthenticated deployment it answers anyone, and reports api_keys_configured=false, which is
+ // exactly the violation. Booleans and build identifiers only: no key, no seed, no DSN.
+ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
+-	keyed := s.auth != nil && !auth.IsOpen(s.auth)
++	keyed := s.auth != nil || auth.IsOpen(s.auth)
+ 	w.Header().Set("Cache-Control", "no-store")
+ 	writeJSON(w, http.StatusOK, map[string]any{
+ 		"schema":                       PostureSchema,
