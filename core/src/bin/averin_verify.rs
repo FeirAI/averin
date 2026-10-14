@@ -395,7 +395,9 @@ fn unbound_approver_notes(report: &CanonValue) -> Vec<String> {
             if let Some(notes) = row.get("notes").and_then(CanonValue::as_array) {
                 for n in notes {
                     if let Some(t) = n.as_str() {
-                        if t.contains("predates approver binding") || t.contains("names no approver") {
+                        if t.contains("predates approver binding")
+                            || t.contains("names no approver")
+                        {
                             out.push(t.to_string());
                         }
                     }

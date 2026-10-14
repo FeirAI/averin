@@ -553,17 +553,20 @@ fn ave10_decided_approval_naming_nobody_fails_when_binding_is_required() {
     let v = vectors();
     for (name, body) in [
         ("decided_by absent", r#"{"status":"approved"}"#),
-        ("decided_by empty", r#"{"status":"approved","decided_by":""}"#),
-        ("denied, none", r#"{"status":"denied"}"#),
         (
-            "empty sign_offs",
-            r#"{"status":"approved","sign_offs":[]}"#,
+            "decided_by empty",
+            r#"{"status":"approved","decided_by":""}"#,
         ),
+        ("denied, none", r#"{"status":"denied"}"#),
+        ("empty sign_offs", r#"{"status":"approved","sign_offs":[]}"#),
     ] {
         let case = case_with_body(&v, body);
         let hash = sha256_prefixed(legacy_evidence(&case).as_bytes());
         let (_, off, notes) = verify_signed_with(&case, &hash, true, false, None);
-        assert!(!names_no_approver_issue(&off), "{name}: policy off: {off:?}");
+        assert!(
+            !names_no_approver_issue(&off),
+            "{name}: policy off: {off:?}"
+        );
         assert!(
             notes.iter().any(|n| n.contains("names no approver")),
             "{name}: the note is always there: {notes:?}"
