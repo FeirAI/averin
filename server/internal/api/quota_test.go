@@ -30,7 +30,7 @@ func usageRecords(t *testing.T, h http.Handler, project string) int {
 	return u.Records
 }
 
-// TestQuota_RefusesWritesPastTheCap (AVE-07): the cap is per project, exact, all-or-nothing for a batch,
+// TestQuota_RefusesWritesPastTheCap (AVE-07): the cap is per project, exact, item by item for a batch (the items that fit before the cap stay stored),
 // does not refuse an idempotent replay, and reads keep working.
 func TestQuota_RefusesWritesPastTheCap(t *testing.T) {
 	c, err := core.New(seed)

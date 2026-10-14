@@ -15,11 +15,11 @@ import (
 	"github.com/feirai/averin/server/internal/store"
 )
 
-// TestVerifyAndExportFailUnboundApprovalUnderPinnedKey (AVE-10): with the approver-binding policy on and the
+// TestVerifyFailsUnboundApprovalUnderPinnedKey (AVE-10): with the approver-binding policy on and the
 // authority key pinned, an approval whose signed evidence leaves out who approved fails the server's OWN
-// /v2/verify and its export self-verify, and says why. Without the pinned authority key the record would be
+// /v2/verify and says why (export reuses the verdict only for its completeness wording and does not refuse). Without the pinned authority key the record would be
 // Unverifiable and the policy could never fire, which is what this test guards against.
-func TestVerifyAndExportFailUnboundApprovalUnderPinnedKey(t *testing.T) {
+func TestVerifyFailsUnboundApprovalUnderPinnedKey(t *testing.T) {
 	c, err := core.New(seed)
 	if err != nil {
 		t.Fatal(err)

@@ -1556,7 +1556,7 @@
       "gates": [
         "server"
       ],
-      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestVerifyAndExportFailUnboundApprovalUnderPinnedKey'",
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestVerifyFailsUnboundApprovalUnderPinnedKey'",
       "covers": [
         {
           "path": "server/internal/api/server.go",

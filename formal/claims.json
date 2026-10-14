@@ -1410,7 +1410,7 @@
       "proofs": [
         {
           "file": "server/internal/api/approver_binding_verify_test.go",
-          "symbol": "TestVerifyAndExportFailUnboundApprovalUnderPinnedKey"
+          "symbol": "TestVerifyFailsUnboundApprovalUnderPinnedKey"
         },
         {
           "file": "formal/mutants/surface-ave10-server-verify-unpinned.patch",

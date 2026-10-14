@@ -19,7 +19,7 @@ add `Authorization: Bearer <api-key>`, submit, and return the sealed record.
 ```python
 from averin import Client
 
-c = Client("http://localhost:8080", "demo", api_key=None)   # api_key only if AVERIN_API_KEYS is set
+c = Client("http://localhost:8080", "demo", api_key=None)   # api_key is required unless the server runs in AVERIN_DEV_MODE with no keys
 sealed = c.record("sess-1", "search", event_type="tool_call", inp="summarize the contract")
 print(sealed["record_id"], sealed["content_hash"])
 ```
