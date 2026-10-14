@@ -1346,7 +1346,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "2270e2beeb009d0e67b587f1074bc944180c188a9b56f9bbb1f068e2cf2dbe41"
+          "sha256": "f55625bbd70955665fc2b6e9e8590c9b39b03c720dfe148f7b5a5b1ac8de50aa"
         }
       ],
       "mutants": [
@@ -1536,6 +1536,7 @@
     },
     {
       "id": "server-verify-fails-unbound-approval",
+      "$comment": "legacy register: server-verify-fails-unbound-approval",
       "statement": "With the approver-binding policy on and the project's authority key pinned, the server's own GET /v2/verify fails a govder approval whose signed evidence leaves out who approved and says so in the issues, and does not when the policy is off. The server passes the project's pinned authority keys (project pin first, then the global pin, per source) to the verifier as authority_keys, so a govder record is read as verified or legacy-unbound rather than unverifiable.",
       "method": "test",
       "artifacts": [
