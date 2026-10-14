@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-migrate/main.go b/server/cmd/averin-migrate/main.go
+index f65edb7..00ba595 100644
+--- a/server/cmd/averin-migrate/main.go
++++ b/server/cmd/averin-migrate/main.go
+@@ -93,7 +93,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
+ 			modes++
+ 		}
+ 	}
+-	if modes > 1 {
++	if false && modes > 1 {
+ 		return fail(exitUsage, "--init, --hook, --check-runtime and --purge-legacy are mutually exclusive")
+ 	}
+ 	var oldRoles []string

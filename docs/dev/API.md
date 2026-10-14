@@ -207,7 +207,7 @@ on a keyed deployment it needs the project's bearer. Booleans and build identifi
 a DSN: `schema`, `plane`, `build` (`go_version`, `vcs_revision`, `vcs_modified`, `core_rustc` when the build
 stamped it with `-ldflags "-X main.coreRustc=..."`), `require_prod_secrets`, `api_keys_configured` (false when the
 app API is unauthenticated), `durable_store` (Postgres wired), `signing_seed_is_dev`, `require_pinned_authority`,
-`require_body_bound_authority`. It says what was configured, not that the database is reachable. On an
+`require_body_bound_authority`, `region` (`AVERIN_REGION`, empty when not declared), `schema_version` (the Postgres schema version this binary understands, 0 with in-memory storage) and `runtime_role_verified` (true when startup verified the Postgres credential is a least-privilege runtime role). It says what was configured, not that the database is reachable. On an
 unauthenticated deployment it answers anyone and reports `api_keys_configured: false`.
 
 ---

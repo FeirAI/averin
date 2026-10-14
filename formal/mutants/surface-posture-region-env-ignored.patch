@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-server/main.go b/server/cmd/averin-server/main.go
+index 9623b9a..ced3d8c 100644
+--- a/server/cmd/averin-server/main.go
++++ b/server/cmd/averin-server/main.go
+@@ -117,7 +117,7 @@ func main() {
+ 	// Use the SAME raw DSN the stores connect with (selectStore/pgledger/pgdurable read os.Getenv
+ 	// untrimmed) so migrate and connect operate on a byte-identical string.
+ 	// AVERIN_REGION: the cell's region label, reported by GET /v2/posture (validated; a typo is fatal).
+-	region, err := api.ParseRegion(os.Getenv("AVERIN_REGION"))
++	region, err := "", error(nil)
+ 	if err != nil {
+ 		log.Fatalf("AVERIN_REGION: %v", err)
+ 	}

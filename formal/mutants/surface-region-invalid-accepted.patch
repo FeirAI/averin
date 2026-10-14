@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/posture.go b/server/internal/api/posture.go
+index 372b8f5..9885de5 100644
+--- a/server/internal/api/posture.go
++++ b/server/internal/api/posture.go
+@@ -56,7 +56,7 @@ func ParseRegion(raw string) (string, error) {
+ 	}
+ 	for i := 0; i < len(r); i++ {
+ 		c := r[i]
+-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9' && i > 0) || (c == '-' && i > 0)) {
++		if false {
+ 			return "", fmt.Errorf("region %q must be lower-case letters, digits and hyphens, starting with a letter", r)
+ 		}
+ 	}

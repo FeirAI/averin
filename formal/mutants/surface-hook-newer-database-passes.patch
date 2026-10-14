@@ -1,0 +1,15 @@
+diff --git a/server/internal/pgschema/hook.go b/server/internal/pgschema/hook.go
+index 190650a..c68800b 100644
+--- a/server/internal/pgschema/hook.go
++++ b/server/internal/pgschema/hook.go
+@@ -98,9 +98,7 @@ func Hook(ctx context.Context, dsn string, oldRoles []string, newRole string) (H
+ 	res.Before, res.After = st.Stored, st.Stored
+ 	switch {
+ 	case st.Stored > CurrentSchemaVersion:
+-		// migrate re-reads under the lock and refuses with the downgrade message.
+-		_, err := Initialize(ctx, dsn)
+-		return res, err
++		return res, nil
+ 	case st.Fresh():
+ 		initialized, err := Initialize(ctx, dsn)
+ 		if err != nil {

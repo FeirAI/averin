@@ -50,6 +50,18 @@ The compose file therefore separates the identities:
 | 3 | `grants` (one-shot) | `averin_owner` | `postgres/runtime-grants.sql`: DML on the averin tables for `averin_app`, then revokes every privilege the append-only contract forbids (the same lists `pgschema.CheckRuntime` enforces) |
 | 4 | `server` | `averin_app` | starts only after `grants` succeeded; its startup re-checks the role before serving |
 
+**Automation and Kubernetes (`averin-migrate --hook`).** Step 2 can run as a pre-upgrade Job with
+`averin-migrate --hook` instead of `--init`. It is idempotent: an empty database is initialized, one at
+the current version is left unchanged (`noop`), and one that is behind is advanced only when
+`--old-runtime` and `--new-runtime` are given, through the same validated cutover barrier. Without
+them an older database is left untouched and the command prints `cutover_required` and exits 3, so a
+Job fails distinctly from an error and a maintenance window is not skipped silently. Concurrent runs
+serialize on the advisory lock. After the grants step, `averin-migrate --check-runtime` (with
+`AVERIN_DATABASE_URL` set to the runtime DSN) runs the server's own runtime-role check, so a role
+with too much privilege fails the Job, not the first pod. Set `AVERIN_REGION` to the cell's region
+label; `GET /v2/posture` reports it. Details: [docs/dev/CONFIGURATION.md](../docs/dev/CONFIGURATION.md#schema-versioning--upgrades).
+The Kubernetes chart that runs these Jobs is a separate feir-os item (not part of this change).
+
 The runtime role keeps full DML on operational tables (nonce/JTI claims, pending grants and the like);
 the append-only and immutable tables get only what the server needs. Role creation runs only on an
 empty data volume: to change a role password later, use `ALTER ROLE` and update the environment.
