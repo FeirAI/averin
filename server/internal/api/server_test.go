@@ -35,7 +35,7 @@ func newServer(t *testing.T) *api.Server {
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
-	return api.New(c, store.NewMem(), "k0")
+	return api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore())
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string) (int, string) {
@@ -121,7 +121,7 @@ func TestV3AuthorityRejectsNonNFCIdentityBeforeLookupOrSeal(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := store.NewMem()
-	h := api.New(c, st, "k0").Routes()
+	h := api.New(c, st, "k0").WithAuth(auth.NewOpenStore()).Routes()
 	for _, identity := range []struct{ field, value string }{
 		{"project_id", "e\u0301"}, {"record_id", "e\u0301"},
 	} {
@@ -214,7 +214,7 @@ func TestContentCommitmentAndSelectiveDisclosure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
-	srv := api.New(c, store.NewMem(), "k0")
+	srv := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore())
 	h := srv.Routes()
 
 	// Ingest a record carrying raw low-entropy fields (input + output).
@@ -311,7 +311,7 @@ func TestSelectiveDisclosureSurvivesRawRetentionDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("content store: %v", err)
 	}
-	srv := api.New(c, store.NewMem(), "k0").WithContent(contentStore)
+	srv := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithContent(contentStore)
 	h := srv.Routes()
 	postRecord(t, h, `{"idempotency_key":"retention-1","project_id":"p1","session_id":"s1","action":"llm.call","input":"visible prompt"}`)
 	if removed, err := contentStore.PurgeOlderThan(time.Now().Add(time.Hour)); err != nil || removed != 1 {
@@ -587,29 +587,29 @@ func TestEmptyBatchRejected(t *testing.T) {
 	}
 }
 
-func TestUsageMetering(t *testing.T) {
-	h := newSrv(t)
+// TestUsageReportsDurableRecordCount: GET /v2/usage reads the stored record count (a retry that collapsed
+// onto an existing record is not counted) and the configured quota, for the asking project only.
+func TestUsageReportsDurableRecordCount(t *testing.T) {
+	h := newServer(t).WithProjectQuota(50).Routes()
 	postRecord(t, h, `{"idempotency_key":"u1","project_id":"p1","session_id":"s1","action":"a"}`)
-	postRecord(t, h, `{"idempotency_key":"u1","project_id":"p1","session_id":"s1","action":"a"}`) // retry, not billed
+	postRecord(t, h, `{"idempotency_key":"u1","project_id":"p1","session_id":"s1","action":"a"}`) // retry collapses
 	postRecord(t, h, `{"idempotency_key":"u2","project_id":"p1","session_id":"s1","action":"b"}`)
-	do(t, h, "GET", "/v2/export?project=p1", "")
+	postRecord(t, h, `{"idempotency_key":"u3","project_id":"p2","session_id":"s1","action":"b"}`)
 
 	code, resp := do(t, h, "GET", "/v2/usage?project=p1", "")
 	if code != http.StatusOK {
 		t.Fatalf("usage %d: %s", code, resp)
 	}
 	var out struct {
-		Usage struct {
-			Records int64 `json:"records"`
-			Exports int64 `json:"exports"`
-		} `json:"usage"`
+		Records int `json:"records"`
+		Quota   int `json:"quota_records"`
 	}
 	json.Unmarshal([]byte(resp), &out)
-	if out.Usage.Records != 2 { // 2 unique records (the retry collapsed, not metered)
-		t.Fatalf("expected 2 metered records, got %d", out.Usage.Records)
+	if out.Records != 2 || out.Quota != 50 {
+		t.Fatalf("want records=2 quota_records=50, got %s", resp)
 	}
-	if out.Usage.Exports != 1 {
-		t.Fatalf("expected 1 export, got %d", out.Usage.Exports)
+	if code, _ := do(t, h, "GET", "/v2/usage", ""); code != http.StatusBadRequest {
+		t.Fatalf("usage without project must be 400, got %d", code)
 	}
 }
 

@@ -19,12 +19,12 @@ boundary between "averin ships this" and "your deployment provides this."
 
 ## 1. Per-project authentication / authorization (Phase 2)
 
-**Current state.** `server/internal/auth/auth.go` ships a fail-closed, constant-time `KeyStore`
-(`ValidFor(project, token) bool`) + `MapStore` + an `auth.Middleware(ks, "project")`, and it IS wired:
-`Routes()` (`server.go:422-426`) applies the middleware to `/v2/*` whenever a `KeyStore` is configured via
-`WithAuth`. The **default is open** (no `KeyStore` → dev/single-tenant), documented in `coverage-limits.md`.
-So Phase-1 — "is this token valid for this project?" — exists. What's deferred (Phase 2, per the `auth.go`
-header) is **RBAC, SSO, scoped/expiring tokens, and per-route permissions**.
+**Current state.** `server/internal/auth` ships a fail-closed, constant-time `MapStore` that holds, per
+project, tokens with a role (`read`, `write`, `admin`) and an optional expiry, and `auth.MiddlewareRoles`
+applies a per-route role requirement (`api/auth_roles.go`; anything unclassified needs `admin`). It IS wired:
+`Routes()` applies it to `/v2/*`. A server with no auth store refuses every request, and `averin-server` refuses
+to start without `AVERIN_API_KEYS` unless `AVERIN_DEV_MODE=1`. What is still not built is SSO/OIDC and
+short-lived signed tokens; static keys with `not_after` are the shipped model.
 
 **Production design.**
 - **Scoped + expiring tokens.** Replace the static token set with short-lived tokens (JWT/PASETO) carrying
@@ -45,8 +45,9 @@ header) is **RBAC, SSO, scoped/expiring tokens, and per-route permissions**.
 
 **External infra.** An IdP (SSO/SAML/OIDC) to issue tokens; a secrets store (KMS/Vault) for any static keys.
 
-**Readiness checklist.** Auth ON in prod (never the open default); every `/v2/*` route requires a token;
-roles enforced; tokens expire; project-bind holds; 401/403 bodies are generic (no token echo).
+**Readiness checklist.** Auth ON in prod (there is no open default outside `AVERIN_DEV_MODE=1`); every `/v2/*`
+route requires a token; roles enforced; tokens expire (set `not_after`); project-bind holds; 401/403 bodies are
+generic (no token echo).
 
 **Operator action.** Choose the model (static keys vs. OIDC); provision the IdP; configure per-project
 keys/roles; **set `WithAuth` in the production wiring** (the open default is dev-only).

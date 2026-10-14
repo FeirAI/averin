@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestNativeGrantAndIntrospectionRoundTripsThroughRustVerifier(t *testing.T) 
 	rawSeed, _ := hex.DecodeString(resourceSeed)
 	rawRes := ed25519.NewKeyFromSeed(rawSeed)
 	tsa := testTSAKey()
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
 		WithIntrospection(rawRes).

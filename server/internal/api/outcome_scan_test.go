@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestUseOutcomeScansSessionOnce(t *testing.T) {
 	c, _ := core.New(seed)
 	rc, _ := core.New(resourceSeed)
 	sc := &sessionScanCounter{Store: store.NewMem()}
-	h := api.New(c, sc, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	h := api.New(c, sc, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 	ak := grantAgentKey()
 
 	grantID, capb := mkGrant(t, h, ak, "idem-grant")

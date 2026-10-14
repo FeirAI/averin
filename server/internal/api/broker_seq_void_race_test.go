@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"sync"
@@ -45,7 +46,7 @@ func TestBrokerSeqRecoveryPerpetualFailedRetries(t *testing.T) {
 	t.Run("failed retries cannot postpone the permanent fence", func(t *testing.T) {
 		clk := newFakeClock()
 		ls := &flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}
-		h := api.New(mustCore(t), ls, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
+		h := api.New(mustCore(t), ls, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
 
 		reserveGrantSeq(t, ls.Store, "idem-race") // T0: an orphaned durable reservation
 		for i := 0; i < 3; i++ {
@@ -69,7 +70,7 @@ func TestBrokerSeqRecoveryPerpetualFailedRetries(t *testing.T) {
 	t.Run("fresh reservation needs no wall clock delay", func(t *testing.T) {
 		clk := newFakeClock()
 		fs := &flakyGrantStore{Store: store.NewMem().WithClock(clk.Now)}
-		h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
+		h := api.New(mustCore(t), fs, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
 
 		reserveGrantSeq(t, fs.Store, "idem-ctl")
 		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
@@ -85,7 +86,7 @@ func TestBrokerSeqVoidRevokesVoidedGrant(t *testing.T) {
 	fs := &flakyGrantStore{Store: store.NewMem()}
 	c := mustCore(t)
 	rev := revocationKey()
-	h := api.New(c, fs, "k0").WithBroker(brokerIssuingKey()).WithRevocation(rev).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+	h := api.New(c, fs, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithRevocation(rev).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 
 	reserveGrantSeq(t, fs.Store, "idem-rv1")

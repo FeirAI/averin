@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"testing"
 
@@ -46,7 +47,7 @@ func TestUseFailsClosedOnIdemStoreError(t *testing.T) {
 		t.Fatalf("resource core: %v", err)
 	}
 	fs := &failIdemStore{Store: store.NewMem()}
-	h := api.New(c, fs, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	h := api.New(c, fs, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 
 	ak := grantAgentKey()
 	grantID, cap := mkGrant(t, h, ak, "idem-grant") // grant minted while the store is healthy
@@ -99,7 +100,7 @@ func TestSealFailsClosedOnHeadsStoreError(t *testing.T) {
 		t.Fatalf("resource core: %v", err)
 	}
 	fh := &failHeadsStore{Store: store.NewMem()}
-	h := api.New(c, fh, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	h := api.New(c, fh, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 
 	ak := grantAgentKey()
 	grantID, cap := mkGrant(t, h, ak, "idem-grant") // grant seals while Heads is healthy
@@ -163,7 +164,7 @@ func TestUseReleasesCredentialOnPreCommitPutFailure(t *testing.T) {
 		t.Fatalf("resource core: %v", err)
 	}
 	fp := &failPutStore{Store: store.NewMem()}
-	h := api.New(c, fp, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	h := api.New(c, fp, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 	ak := grantAgentKey()
 	grantID, cap := mkGrant(t, h, ak, "idem-grant") // grant stores while PutRecord is healthy
 
@@ -205,7 +206,7 @@ func TestUseReleasesCredentialOnSealFailure(t *testing.T) {
 		t.Fatalf("resource core: %v", err)
 	}
 	fsc := &failSealCore{Sealer: realCore}
-	h := api.New(fsc, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	h := api.New(fsc, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 	ak := grantAgentKey()
 	grantID, cap := mkGrant(t, h, ak, "idem-grant") // grant seals while SealRecord is healthy
 
@@ -234,7 +235,7 @@ func TestUseReleasesCredentialOnReceiptBuildFailure(t *testing.T) {
 		t.Fatalf("resource core: %v", err)
 	}
 	fc := &failContentStore{Store: content.NewMemStore()}
-	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(fc).Routes()
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(fc).Routes()
 	ak := grantAgentKey()
 	grantID, cap := mkGrant(t, h, ak, "idem-grant") // grant minted while the content store is healthy
 

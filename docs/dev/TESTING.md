@@ -171,7 +171,7 @@ a real deployment would and is the authoritative reference for the build/config/
 
 - builds the Rust staticlib first (`cargo build -p averin-decision-core`), then
   `go build -o averin-server ./cmd/averin-server`;
-- runs it in-memory + unauthenticated with `AVERIN_SIGNING_SEED`, `AVERIN_ADDR`,
+- runs it in-memory + unauthenticated (`AVERIN_DEV_MODE=1`) with `AVERIN_SIGNING_SEED`, `AVERIN_ADDR`,
   `AVERIN_POLICY_ENGINE_PUBKEY` + `AVERIN_HUMAN_SIGNED_PUBKEY` (pinning external authority keys), and
   `AVERIN_WITNESS_DIR`;
 - drives `POST /v2/records`, `GET /v2/verify`, `POST /v2/checkpoints`, and

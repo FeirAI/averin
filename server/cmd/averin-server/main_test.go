@@ -155,6 +155,7 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 			// broker seed file-mounted == inline revocation seed → R2 fatal.
 			name: "broker-via-file",
 			env: []string{
+				"AVERIN_DEV_MODE=1",
 				"AVERIN_SIGNING_SEED=" + seedSigning,
 				"AVERIN_BROKER_ISSUING_SEED_FILE=" + sharedFile,
 				"AVERIN_REVOCATION_SEED=" + seedShared,
@@ -164,6 +165,7 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 			// resource seed file-mounted == inline revocation seed → R2 fatal (broker enabled separately).
 			name: "resource-via-file",
 			env: []string{
+				"AVERIN_DEV_MODE=1",
 				"AVERIN_SIGNING_SEED=" + seedSigning,
 				"AVERIN_BROKER_ISSUING_SEED=" + seedBroker,
 				"AVERIN_RESOURCE_SEED_FILE=" + sharedFile,
@@ -268,7 +270,7 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 		_ = l.Close()
 		cmd := exec.Command(bin)
 		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=" + addr,
-			"AVERIN_SIGNING_SEED=" + seed, "AVERIN_API_KEYS=proj:tok"}
+			"AVERIN_DEV_MODE=1", "AVERIN_SIGNING_SEED=" + seed, "AVERIN_API_KEYS=proj:tok"}
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}

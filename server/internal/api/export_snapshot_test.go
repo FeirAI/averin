@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ type interleavingStore struct {
 func TestExportSnapshotNotTornPostgres(t *testing.T) {
 	pg, _ := newVoidTestPostgres(t)
 	is := &interleavingStore{Store: pg}
-	h := api.New(mustCore(t), is, "k0").WithRevocation(revocationKey()).Routes()
+	h := api.New(mustCore(t), is, "k0").WithAuth(auth.NewOpenStore()).WithRevocation(revocationKey()).Routes()
 	postRecord(t, h, `{"idempotency_key":"k1","project_id":"p1","session_id":"s1"}`)
 	if code, response := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
 		t.Fatalf("first checkpoint (%d): %s", code, response)
@@ -104,7 +105,7 @@ func (s *interleavingStore) Checkpoints(p string) ([]store.Checkpoint, error) {
 // contained in the exported records.
 func TestExportSnapshotNotTorn(t *testing.T) {
 	is := &interleavingStore{Store: store.NewMem()}
-	h := api.New(mustCore(t), is, "k0").Routes()
+	h := api.New(mustCore(t), is, "k0").WithAuth(auth.NewOpenStore()).Routes()
 	postRecord(t, h, `{"idempotency_key":"k1","project_id":"p1","session_id":"s1"}`)
 	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
 		t.Fatalf("checkpoint (%d): %s", code, r)

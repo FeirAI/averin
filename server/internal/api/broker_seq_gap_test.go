@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -94,7 +95,7 @@ func grantSeqOf(t *testing.T, resp string) int64 {
 // takes seq 2, the recorded set is {2}, and every later checkpoint anchors a permanent D6 gap.
 func TestGrantTransientSealErrorReleasesSeq(t *testing.T) {
 	fs := &flakyGrantStore{Store: store.NewMem()}
-	h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).Routes()
+	h := api.New(mustCore(t), fs, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).Routes()
 	ak := grantAgentKey()
 
 	fs.failHeads = true
@@ -123,7 +124,7 @@ func TestGrantTransientSealErrorReleasesSeq(t *testing.T) {
 // checkpoints could never be signed again. The store must KEEP it, so g1's successful retry records seq 1.
 func TestFailedGrantTransactionDoesNotReserveSequence(t *testing.T) {
 	fs := &flakyGrantStore{Store: store.NewMem()}
-	h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).Routes()
+	h := api.New(mustCore(t), fs, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).Routes()
 	ak := grantAgentKey()
 	fs.failHeads = true
 	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-g1", "read:orders", ak, ak)); code != http.StatusInternalServerError {
@@ -145,7 +146,7 @@ func TestFailedGrantTransactionDoesNotReserveSequence(t *testing.T) {
 // FAIL CLOSED (refuse to sign); once the retry records the grant, checkpointing succeeds and verifies.
 func TestCheckpointRefusesReservedSeqGap(t *testing.T) {
 	base := store.NewMem()
-	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).Routes()
+	h := api.New(mustCore(t), base, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).Routes()
 	ak := grantAgentKey()
 	if seq := reserveGrantSeq(t, base, "idem-amb"); seq != 1 {
 		t.Fatalf("reserved seq = %d", seq)
@@ -202,7 +203,7 @@ func (l *lateCommitStore) land(t *testing.T) {
 func TestRetryNeverReleasesReusedSeq(t *testing.T) {
 	base := store.NewMem()
 	fs := &flakyGrantStore{Store: base}
-	h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).Routes()
+	h := api.New(mustCore(t), fs, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).Routes()
 	ak := grantAgentKey()
 	reserveGrantSeq(t, base, "idem-g1")
 	fs.failHeads = true

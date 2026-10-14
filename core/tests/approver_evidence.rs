@@ -74,6 +74,39 @@ fn verify_signed(
     evidence_hash: &str,
     v3: bool,
 ) -> (AuthorityTrust, Vec<String>, Vec<String>) {
+    verify_signed_with(case, evidence_hash, v3, false, None)
+}
+
+/// As `verify_signed`, with the AVE-10 approver-binding policy chosen by the caller.
+fn verify_signed_with(
+    case: &CanonValue,
+    evidence_hash: &str,
+    v3: bool,
+    require_approver_binding: bool,
+    approver_binding_since: Option<&str>,
+) -> (AuthorityTrust, Vec<String>, Vec<String>) {
+    let (bundle, authority_key) = build_bundle(case, evidence_hash, v3);
+    let report = verify_bundle_with(
+        &bundle,
+        &VerifyOptions {
+            trusted_authority_keys: vec![authority_key.verifying_key()],
+            require_approver_binding,
+            approver_binding_since: approver_binding_since.map(str::to_string),
+            ..Default::default()
+        },
+    );
+    (
+        report.record_trust[0].authority,
+        report.issues,
+        report.record_trust[0].notes.clone(),
+    )
+}
+
+fn build_bundle(
+    case: &CanonValue,
+    evidence_hash: &str,
+    v3: bool,
+) -> (CanonValue, ed25519_dalek::SigningKey) {
     let authority_key = signing_key_from_seed(&[7u8; 32]);
     let seal_key = signing_key_from_seed(&[0u8; 32]);
     let unsigned = CanonValue::parse(&record_json(case, evidence_hash, v3)).unwrap();
@@ -120,18 +153,7 @@ fn verify_signed(
         ("checkpoints".into(), CanonValue::Array(vec![])),
     ])
     .unwrap();
-    let report = verify_bundle_with(
-        &bundle,
-        &VerifyOptions {
-            trusted_authority_keys: vec![authority_key.verifying_key()],
-            ..Default::default()
-        },
-    );
-    (
-        report.record_trust[0].authority,
-        report.issues,
-        report.record_trust[0].notes.clone(),
-    )
+    (bundle, authority_key)
 }
 
 fn rederive_issue(issues: &[String]) -> bool {
@@ -295,5 +317,206 @@ fn v2_records_keep_the_historical_field_set() {
     assert!(
         !rederive_issue(&issues),
         "v2 record must still re-derive: {issues:?}"
+    );
+}
+
+fn binding_issue(issues: &[String]) -> bool {
+    issues.iter().any(|i| {
+        i.contains("approver binding is required") && i.contains("does not commit who approved")
+    })
+}
+
+fn unbound_cases(v: &CanonValue) -> Vec<CanonValue> {
+    cases(v)
+        .into_iter()
+        .filter(|c| {
+            c.get("body")
+                .and_then(|b| b.get("decided_by"))
+                .and_then(|d| d.as_str())
+                .is_some_and(|d| !d.is_empty())
+        })
+        .collect()
+}
+
+/// AVE-10: with the policy on, an approval whose signed evidence leaves out who approved is an issue
+/// (the verdict fails). With it off (the default) the same record stays history with a note.
+#[test]
+fn ave10_unbound_approval_fails_when_binding_is_required() {
+    let v = vectors();
+    let mut checked = 0;
+    for case in unbound_cases(&v) {
+        let hash = sha256_prefixed(legacy_evidence(&case).as_bytes());
+        let name = s(&case, "name");
+        let (_, off, _) = verify_signed_with(&case, &hash, true, false, None);
+        assert!(
+            !binding_issue(&off),
+            "{name}: policy off must not raise it: {off:?}"
+        );
+        let (trust, on, notes) = verify_signed_with(&case, &hash, true, true, None);
+        assert_eq!(
+            trust,
+            AuthorityTrust::Verified,
+            "{name}: the signature itself is fine"
+        );
+        assert!(
+            binding_issue(&on),
+            "{name}: policy on must raise the issue, got {on:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("predates approver binding")),
+            "{name}: the note stays: {notes:?}"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 6);
+}
+
+/// AVE-10: a properly bound approval raises nothing under the strict policy.
+#[test]
+fn ave10_bound_approval_passes_when_binding_is_required() {
+    let v = vectors();
+    for case in cases(&v) {
+        let (trust, issues, _) =
+            verify_signed_with(&case, &s(&case, "evidence_hash"), true, true, None);
+        assert_eq!(trust, AuthorityTrust::Verified, "{}", s(&case, "name"));
+        assert!(
+            !binding_issue(&issues) && !rederive_issue(&issues),
+            "{}: bound evidence must be clean under the strict policy, got {issues:?}",
+            s(&case, "name")
+        );
+    }
+}
+
+/// AVE-10 cutover: a record received before `approver_binding_since` stays history, one received at or
+/// after it fails. The vector records are received at their `occurred_at`.
+#[test]
+fn ave10_cutover_separates_history_from_new_records() {
+    let v = vectors();
+    for case in unbound_cases(&v) {
+        let hash = sha256_prefixed(legacy_evidence(&case).as_bytes());
+        let at = s(&case, "occurred_at");
+        let name = s(&case, "name");
+        let (_, issues, _) =
+            verify_signed_with(&case, &hash, true, true, Some("9999-01-01T00:00:00.000Z"));
+        assert!(
+            !binding_issue(&issues),
+            "{name}: before the cutover it is history: {issues:?}"
+        );
+        let (_, issues, _) = verify_signed_with(&case, &hash, true, true, Some(&at));
+        assert!(
+            binding_issue(&issues),
+            "{name}: received exactly at the cutover must fail: {issues:?}"
+        );
+        let (_, issues, _) =
+            verify_signed_with(&case, &hash, true, true, Some("0001-01-01T00:00:00.000Z"));
+        assert!(
+            binding_issue(&issues),
+            "{name}: after the cutover it must fail: {issues:?}"
+        );
+    }
+}
+
+/// AVE-10 through the JSON opts path the server, the CLI and the browser verifier use: the policy is read
+/// from opts.json, a wrong type or a cutover without the policy is an error, never a silent default.
+#[test]
+fn ave10_policy_is_read_from_json_options() {
+    use averin_decision_core::verify::verify_bundle_with_json;
+    let v = vectors();
+    let case = unbound_cases(&v).remove(0);
+    let hash = sha256_prefixed(legacy_evidence(&case).as_bytes());
+    let (bundle, key) = build_bundle(&case, &hash, true);
+    let text = bundle.serialize();
+    let pk = encode_pubkey(&key.verifying_key());
+    let run = |extra: &str| {
+        let opts = format!("{{\"authority_keys\":[\"{pk}\"]{extra}}}");
+        CanonValue::parse(&verify_bundle_with_json(&text, &opts))
+            .unwrap()
+            .serialize()
+    };
+    assert!(!run("").contains("approver binding is required"));
+    assert!(run(",\"require_approver_binding\":true").contains("approver binding is required"));
+    assert!(run(",\"require_approver_binding\":\"yes\"").contains("must be a boolean"));
+    assert!(
+        run(",\"approver_binding_since\":\"2026-01-01T00:00:00.000Z\"")
+            .contains("needs require_approver_binding")
+    );
+    assert!(
+        run(",\"require_approver_binding\":true,\"approver_binding_since\":\"yesterday\"")
+            .contains("canonical timestamp")
+    );
+    assert!(!run(",\"require_approver_binding\":true,\"approver_binding_since\":\"9999-01-01T00:00:00.000Z\"").contains("approver binding is required"));
+}
+
+/// AVE-10 on the command line: `averin-verify bundle` fails an approval that does not commit who
+/// approved, says why and counts it, unless `--allow-unbound-approvers` accepts it as history; a bound
+/// approval is untouched.
+#[test]
+fn ave10_cli_fails_unbound_approval_and_shows_the_reason() {
+    use std::process::Command;
+    let v = vectors();
+    let case = unbound_cases(&v).remove(0);
+    let dir = std::env::temp_dir().join(format!("averin-ave10-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = |hash: &str, extra: &[&str]| {
+        let (bundle, key) = build_bundle(&case, hash, true);
+        let b = dir.join("bundle.json");
+        let o = dir.join("opts.json");
+        std::fs::write(&b, bundle.serialize()).unwrap();
+        std::fs::write(
+            &o,
+            format!(
+                "{{\"authority_keys\":[\"{}\"]}}",
+                encode_pubkey(&key.verifying_key())
+            ),
+        )
+        .unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_averin-verify"))
+            .arg("bundle")
+            .arg(&b)
+            .arg(&o)
+            .args(extra)
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    let unbound = sha256_prefixed(legacy_evidence(&case).as_bytes());
+    // The one-record fixture has no checkpoint, so the verdict is FAIL either way; what the policy adds is
+    // the issue line and the count, which is what these assertions pin.
+    let (code, out) = run(&unbound, &[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("RESULT: FAIL"), "{out}");
+    assert!(
+        out.contains("approver binding is required"),
+        "reason shown:\n{out}"
+    );
+    assert!(
+        out.contains("approvals not committing the approver: 1"),
+        "count shown:\n{out}"
+    );
+
+    let (_, out) = run(&unbound, &["--allow-unbound-approvers"]);
+    assert!(
+        !out.contains("approver binding is required"),
+        "opt-out accepts history:\n{out}"
+    );
+    assert!(
+        out.contains("approvals not committing the approver: 1"),
+        "still counted:\n{out}"
+    );
+    assert!(out.contains("--allow-unbound-approvers"), "{out}");
+
+    let (_, out) = run(&s(&case, "evidence_hash"), &[]);
+    assert!(
+        !out.contains("approver binding is required"),
+        "a bound approval is untouched:\n{out}"
+    );
+    assert!(
+        !out.contains("approvals not committing the approver"),
+        "{out}"
     );
 }

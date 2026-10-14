@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -206,7 +207,7 @@ func TestHandleVerifyCoalescesConcurrentCoreCalls(t *testing.T) {
 		started: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	srv := New(sealer, store.NewMem(), "k0")
+	srv := New(sealer, store.NewMem(), "k0").WithAuth(auth.NewOpenStore())
 	h := srv.Routes()
 
 	first := make(chan int, 1)
@@ -252,7 +253,7 @@ func TestHandleVerifyReturns503WhenUniqueFlightCapacityIsFull(t *testing.T) {
 		started: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	srv := New(sealer, store.NewMem(), "k0")
+	srv := New(sealer, store.NewMem(), "k0").WithAuth(auth.NewOpenStore())
 	srv.verifyFlights.maxFlights = 1
 	h := srv.Routes()
 
@@ -289,7 +290,7 @@ func TestHandleVerifyDoesNotExposeRecoveredPanic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
-	srv := New(panicVerifySealer{Sealer: base}, store.NewMem(), "k0")
+	srv := New(panicVerifySealer{Sealer: base}, store.NewMem(), "k0").WithAuth(auth.NewOpenStore())
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/v2/verify?project=tenant-a", nil))
 	if rec.Code != http.StatusInternalServerError {

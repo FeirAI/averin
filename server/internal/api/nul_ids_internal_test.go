@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +36,7 @@ func TestNULInIDsRejected(t *testing.T) {
 	}
 	rev := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x5a}, 32))
 	brk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, 32))
-	h := New(c, store.NewMem(), "k0").WithBroker(brk).WithResource(rc, "orders-db").
+	h := New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brk).WithResource(rc, "orders-db").
 		WithIntrospection(ed25519.NewKeyFromSeed(resSeed)).WithRevocation(rev).Routes()
 
 	do := func(method, target, body string, hdr map[string]string) (int, string) {
