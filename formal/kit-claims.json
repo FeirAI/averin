@@ -353,10 +353,6 @@
       "tier": "full",
       "claim": "project-record-quota"
     },
-    "surface-ave07-replay-counted": {
-      "tier": "full",
-      "claim": "project-record-quota"
-    },
     "surface-ave07-quota-status-not-507": {
       "tier": "full",
       "claim": "project-record-quota"
@@ -372,6 +368,10 @@
     "surface-ave10-cli-default-not-strict": {
       "tier": "fast",
       "claim": "approver-binding-policy-fails-unbound"
+    },
+    "surface-ave07-replay-refused-at-cap": {
+      "tier": "full",
+      "claim": "project-record-quota"
     }
   },
   "claims": [
@@ -1487,7 +1487,7 @@
       "mutants": [
         "surface-ave07-quota-off-by-one",
         "surface-ave07-quota-never-refuses",
-        "surface-ave07-replay-counted",
+        "surface-ave07-replay-refused-at-cap",
         "surface-ave07-quota-status-not-507"
       ],
       "does_not_establish": "The cap counts stored records of every kind, not bytes, so the storage bound is the cap times the per-record body limit. A batch POST /v2/records is item by item, so the items that fit before the cap stay stored. The detector runs on the in-memory store; the concurrent two-replica case is TestProjectQuotaAcrossReplicasPostgres, which the store-postgres job runs and the detector does not. The cap is off until AVERIN_PROJECT_MAX_RECORDS is set. A refused write also fails closed on a record-count read error, which is not tested here."
