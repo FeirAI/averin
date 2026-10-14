@@ -1350,7 +1350,7 @@
     },
     {
       "id": "approver-binding-policy-fails-unbound",
-      "claim": "With require_approver_binding in the verifier options a govder approval whose signed evidence omits decided_by and the sign-off set fails verification (an issue, not a note), a bound approval raises nothing, approver_binding_since leaves earlier records as history, and the averin-verify CLI applies the policy by default, shows the reason and a count, and accepts unbound history only with --allow-unbound-approvers. Not that the approvers are authenticated humans or distinct, not a record that names no approver, and the library default is off for historical bundles.",
+      "claim": "With require_approver_binding in the verifier options a govder approval whose signed evidence omits decided_by and the sign-off set, and a decided (approved or denied) govder approval whose body names no approver at all, fail verification (an issue, not a note), a bound approval raises nothing, approver_binding_since leaves earlier records as history, and the averin-verify CLI applies the policy by default, shows the reason and a count, and accepts unbound history only with --allow-unbound-approvers. Not that the approvers are authenticated humans or distinct, and the library default is off for historical bundles.",
       "class": "differential",
       "targets": [
         "native Rust"
@@ -1372,6 +1372,14 @@
         {
           "file": "core/tests/approver_evidence.rs",
           "symbol": "fn ave10_cli_fails_unbound_approval_and_shows_the_reason"
+        },
+        {
+          "file": "core/tests/approver_evidence.rs",
+          "symbol": "fn ave10_decided_approval_naming_nobody_fails_when_binding_is_required"
+        },
+        {
+          "file": "formal/mutants/surface-ave10-names-nobody-passes.patch",
+          "symbol": "carries_approver"
         },
         {
           "file": "formal/mutants/surface-ave10-required-binding-ignored.patch",

@@ -373,6 +373,10 @@
       "tier": "full",
       "claim": "project-record-quota"
     },
+    "surface-ave10-names-nobody-passes": {
+      "tier": "fast",
+      "claim": "approver-binding-policy-fails-unbound"
+    },
     "surface-ave10-server-verify-unpinned": {
       "tier": "fast",
       "claim": "server-verify-fails-unbound-approval"
@@ -554,7 +558,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "21f485b589405f1da7df2308e03bbbfcb56ca4d066959b7a92644b8b92be0415"
+          "sha256": "9f5e0daa06d8fb1e7d4da4584075128d72cf5d30a93aeb1fe07ab10c44d90bb6"
         }
       ],
       "mutants": [
@@ -589,7 +593,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "21f485b589405f1da7df2308e03bbbfcb56ca4d066959b7a92644b8b92be0415"
+          "sha256": "9f5e0daa06d8fb1e7d4da4584075128d72cf5d30a93aeb1fe07ab10c44d90bb6"
         }
       ],
       "mutants": [
@@ -628,7 +632,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "21f485b589405f1da7df2308e03bbbfcb56ca4d066959b7a92644b8b92be0415"
+          "sha256": "9f5e0daa06d8fb1e7d4da4584075128d72cf5d30a93aeb1fe07ab10c44d90bb6"
         }
       ],
       "mutants": [
@@ -1168,7 +1172,7 @@
         {
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "verify_bundle_cmd",
-          "sha256": "b3c9e270504ad4266f579a166742987ddd4e0df4ed7b77279c7d63ce88c276ad"
+          "sha256": "df61ff6bc0b4fea86f2c5ed87558835447c9dd5dcf636522410de2e1f1334954"
         },
         {
           "path": "core/src/bin/averin_verify.rs",
@@ -1301,12 +1305,12 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "govder_evidence_rederivable",
-          "sha256": "bc8afa49546078b84e9364cda56b3078b07c18fb2cbd5dbc62b404ea4b7efea0"
+          "sha256": "03553a0d5fb1286cf3bfe13a5bfcf62648b06626c7e3fa68e242bce8c8a0bade"
         },
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "21f485b589405f1da7df2308e03bbbfcb56ca4d066959b7a92644b8b92be0415"
+          "sha256": "9f5e0daa06d8fb1e7d4da4584075128d72cf5d30a93aeb1fe07ab10c44d90bb6"
         }
       ],
       "mutants": [
@@ -1502,7 +1506,7 @@
     {
       "id": "approver-binding-policy-fails-unbound",
       "$comment": "legacy register: approver-binding-policy-fails-unbound",
-      "statement": "With require_approver_binding set in the verifier options, a govder approval whose signed evidence leaves out decided_by and the sign-off set is an issue (the verdict fails) instead of a note, a properly bound approval raises nothing, and approver_binding_since keeps records received before the cutover as history (a record received exactly at it fails). The policy is read from JSON options, and a wrong type or a cutover without the policy is an error. The averin-verify CLI requires binding by default, prints the reason and a count of unbound approvals, and accepts them as history only with --allow-unbound-approvers.",
+      "statement": "With require_approver_binding set in the verifier options, a govder approval whose signed evidence leaves out decided_by and the sign-off set is an issue (the verdict fails) instead of a note, as is a decided (approved or denied) govder approval whose body names no approver at all, a properly bound approval raises nothing, and approver_binding_since keeps records received before the cutover as history (a record received exactly at it fails). The policy is read from JSON options, and a wrong type or a cutover without the policy is an error. The averin-verify CLI requires binding by default, prints the reason and a count of unbound approvals, and accepts them as history only with --allow-unbound-approvers.",
       "method": "test",
       "artifacts": [
         "core/src/verify.rs",
@@ -1521,6 +1525,11 @@
           "sha256": "d61e53bf115f45660592e0e93469ed69ed0f9700a14af8e3d3d67acd16b559a9"
         },
         {
+          "path": "core/src/verify.rs",
+          "symbol": "govder_evidence_rederivable",
+          "sha256": "03553a0d5fb1286cf3bfe13a5bfcf62648b06626c7e3fa68e242bce8c8a0bade"
+        },
+        {
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "effective_opts",
           "sha256": "a0e3a5cc7fd87289ce31c09fda2d701f61e5d8136a3ddb315dc21990dea597ff"
@@ -1529,9 +1538,10 @@
       "mutants": [
         "surface-ave10-required-binding-ignored",
         "surface-ave10-cutover-inverted",
-        "surface-ave10-cli-default-not-strict"
+        "surface-ave10-cli-default-not-strict",
+        "surface-ave10-names-nobody-passes"
       ],
-      "does_not_establish": "Not that the named approvers are authenticated people, are distinct or are in any group (an operator and broker property), and not that a signer committed to the right names: a signer that signs evidence naming mallory over a record naming mallory is consistent. The policy only bites for a govder record whose body names an approver; a record that names none is not an approval to bind. The cutover compares canonical received_ts strings, which the recorder stamps, so it is as good as the recorder's clock. The option is off in the library by default (historical bundles keep verifying); the CLI turns it on, and the browser verifier only when its options say so. The CLI only reports an unbound approval for a record whose authority key its opts.json pins; without that key the record is unverifiable and nothing is printed. The server side is the separate claim server-verify-fails-unbound-approval.",
+      "does_not_establish": "Not that the named approvers are authenticated people, are distinct or are in any group (an operator and broker property), and not that a signer committed to the right names: a signer that signs evidence naming mallory over a record naming mallory is consistent. The policy covers a decided govder approval (status approved or denied) that names no approver, and exempts pending, expired and escalation records, which carry no decider by design; a record whose body names an approver but whose evidence omits it is the unbound case. The cutover compares canonical received_ts strings, which the recorder stamps, so it is as good as the recorder's clock. The option is off in the library by default (historical bundles keep verifying); the CLI turns it on, and the browser verifier only when its options say so. The CLI only reports an unbound approval for a record whose authority key its opts.json pins; without that key the record is unverifiable and nothing is printed. The server side is the separate claim server-verify-fails-unbound-approval.",
       "evidence_run": "38515586748"
     },
     {
