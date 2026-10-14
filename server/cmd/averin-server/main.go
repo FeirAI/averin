@@ -91,7 +91,7 @@ func main() {
 			missing = append(missing, "AVERIN_SIGNING_SEED is the well-known committed dev seed (a globally-known, forgeable integrity root)")
 		}
 		if len(missing) > 0 {
-			log.Fatalf("the production gate is on (the default unless AVERIN_DEV_MODE=1) but required prod secret(s) are empty/absent: %s", strings.Join(missing, "; "))
+			log.Fatalf("AVERIN_REQUIRE_PROD_SECRETS is set but required prod secret(s) are empty/absent: %s (the production gate is on by default; AVERIN_DEV_MODE=1 turns it off for local development)", strings.Join(missing, "; "))
 		}
 	}
 
