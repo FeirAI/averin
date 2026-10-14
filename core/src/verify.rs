@@ -2420,6 +2420,9 @@ enum GovderEvidence {
     /// A record that names an approver (decided_by / sign_offs) whose signed evidence is the
     /// historical field set: valid history, but its approver identity is not bound by the evidence.
     ApproverUnbound,
+    /// A decided (approved or denied) govder approval whose body names no approver at all: no
+    /// non-empty decided_by and no sign-offs, so there is nobody for the evidence to bind.
+    NamesNoApprover,
     /// The signed evidence_hash matches neither spelling (or a required field is missing).
     Mismatch,
 }
@@ -2559,6 +2562,16 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> GovderEvidence {
     };
     let carries_approver = pairs.len() != legacy_pairs.len();
     if hash_of(pairs).as_deref() == Some(signed) {
+        // AVE-10: a decided approval that names nobody is not an approval to bind. Expired and
+        // escalation records are exempt (they carry no decider by design).
+        let decided = gov.get("type").and_then(|v| v.as_str()) == Some("approval")
+            && matches!(
+                body.and_then(|b| s(b, "status")).as_deref(),
+                Some("approved") | Some("denied")
+            );
+        if decided && !carries_approver {
+            return GovderEvidence::NamesNoApprover;
+        }
         return GovderEvidence::Bound;
     }
     // A record sealed before XV-11 carries decided_by / sign_offs in its body but its signed
@@ -5531,6 +5544,18 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                         semantic_record_conflict = true;
                         issues.push(format!(
                             "record {i}: approver binding is required and this approval does not commit who approved: decided_by and the sign-off set are not covered by the signed evidence"
+                        ));
+                    }
+                }
+                GovderEvidence::NamesNoApprover => {
+                    let msg = format!(
+                        "record {i}: the govder approval names no approver (no decided_by and no sign-offs), so there is no approver for the signed evidence to bind"
+                    );
+                    notes.push(msg.clone());
+                    if approver_binding_required(opts, rec) {
+                        semantic_record_conflict = true;
+                        issues.push(format!(
+                            "record {i}: approver binding is required and this approval names no approver: decided_by and the sign-off set are absent"
                         ));
                     }
                 }

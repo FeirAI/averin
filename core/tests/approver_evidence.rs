@@ -520,3 +520,71 @@ fn ave10_cli_fails_unbound_approval_and_shows_the_reason() {
         "{out}"
     );
 }
+
+/// A copy of the single-approver vector whose body is `body_json` (the evidence stays the historical
+/// field set, which is also what govder seals when a decision has no decider).
+fn case_with_body(v: &CanonValue, body_json: &str) -> CanonValue {
+    let base = cases(v).into_iter().next().unwrap();
+    let mut pairs = Vec::new();
+    for k in [
+        "event_id",
+        "agent_id",
+        "tenant_id",
+        "outcome",
+        "occurred_at",
+    ] {
+        pairs.push((k.to_string(), CanonValue::string(s(&base, k))));
+    }
+    pairs.push(("body".to_string(), CanonValue::parse(body_json).unwrap()));
+    CanonValue::object(pairs).unwrap()
+}
+
+fn names_no_approver_issue(issues: &[String]) -> bool {
+    issues
+        .iter()
+        .any(|i| i.contains("approver binding is required") && i.contains("names no approver"))
+}
+
+/// AVE-10: a decided govder approval that names no approver at all (decided_by absent or empty, no
+/// sign-offs) fails under the strict policy, even though its signed evidence matches. A pending
+/// record, which has no decider by design, stays clean.
+#[test]
+fn ave10_decided_approval_naming_nobody_fails_when_binding_is_required() {
+    let v = vectors();
+    for (name, body) in [
+        ("decided_by absent", r#"{"status":"approved"}"#),
+        ("decided_by empty", r#"{"status":"approved","decided_by":""}"#),
+        ("denied, none", r#"{"status":"denied"}"#),
+        (
+            "empty sign_offs",
+            r#"{"status":"approved","sign_offs":[]}"#,
+        ),
+    ] {
+        let case = case_with_body(&v, body);
+        let hash = sha256_prefixed(legacy_evidence(&case).as_bytes());
+        let (_, off, notes) = verify_signed_with(&case, &hash, true, false, None);
+        assert!(!names_no_approver_issue(&off), "{name}: policy off: {off:?}");
+        assert!(
+            notes.iter().any(|n| n.contains("names no approver")),
+            "{name}: the note is always there: {notes:?}"
+        );
+        let (trust, on, _) = verify_signed_with(&case, &hash, true, true, None);
+        assert_eq!(trust, AuthorityTrust::Verified, "{name}");
+        assert!(
+            names_no_approver_issue(&on),
+            "{name}: policy on must raise the issue, got {on:?}"
+        );
+    }
+    for (name, body) in [
+        ("pending", r#"{"status":"pending"}"#),
+        ("expired", r#"{"status":"expired"}"#),
+    ] {
+        let case = case_with_body(&v, body);
+        let hash = sha256_prefixed(legacy_evidence(&case).as_bytes());
+        let (_, on, notes) = verify_signed_with(&case, &hash, true, true, None);
+        assert!(
+            !names_no_approver_issue(&on) && !notes.iter().any(|n| n.contains("names no approver")),
+            "{name}: exempt: {on:?} {notes:?}"
+        );
+    }
+}

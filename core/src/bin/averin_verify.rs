@@ -329,7 +329,7 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>, allow_unbound: bool
     let unbound = unbound_approver_notes(&report);
     if !unbound.is_empty() {
         println!(
-            "  approvals not committing the approver: {} (decided_by and the sign-off set are not covered by the signed evidence)",
+            "  approvals not committing the approver: {} (decided_by and the sign-off set are absent or not covered by the signed evidence)",
             unbound.len()
         );
         for n in unbound.iter().take(3) {
@@ -395,7 +395,7 @@ fn unbound_approver_notes(report: &CanonValue) -> Vec<String> {
             if let Some(notes) = row.get("notes").and_then(CanonValue::as_array) {
                 for n in notes {
                     if let Some(t) = n.as_str() {
-                        if t.contains("predates approver binding") {
+                        if t.contains("predates approver binding") || t.contains("names no approver") {
                             out.push(t.to_string());
                         }
                     }
