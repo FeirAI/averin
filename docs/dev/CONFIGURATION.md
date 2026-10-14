@@ -90,8 +90,8 @@ and a database **newer** than the binary is refused. Without the roles an older 
 untouched, the command prints `cutover_required` and exits **3**, so a Job can surface "a maintenance
 window is needed" distinctly from a failure. Every state change runs under the same advisory-lock
 transaction as server startup, so concurrent runs serialize: exactly one reports `initialized` or
-`cutover`, the others report `noop`. It prints one JSON line on stdout (`plane`, `action`,
-`schema_before`, `schema_after`, `schema_current`); exit status 0 success, 1 refused or failed,
+`cutover`, the others report `noop`. On success, and for `cutover_required`, it prints one JSON line on stdout (`plane`, `action`,
+`schema_before`, `schema_after`, `schema_current`); a refusal or failure (a database newer than the binary, an unreachable database) prints a message on stderr and no JSON line, so read the exit status, not stdout, to tell failure from success; exit status 0 success, 1 refused or failed,
 2 usage or configuration, 3 cutover required. It does not grant the runtime role anything: run the
 grants step after it, then verify the runtime credential with `averin-migrate --check-runtime`
 (reads `AVERIN_DATABASE_URL`, the runtime DSN; runs the same check the server runs at startup, so an
