@@ -1558,7 +1558,7 @@
         "surface-ave10-server-verify-unpinned"
       ],
       "does_not_establish": "Only /v2/verify refuses: export reuses the same verdict for its completeness wording and still returns a bundle. A project with no pinned authority key reads govder records as unverifiable and the policy cannot fire there. The test uses the in-memory store and one human_signed key; per-project key resolution is covered by the existing authority tests, not this one. It does not show the named approvers are authenticated people.",
-      "evidence_run": "38515586748"
+      "evidence_run": "38545168433"
     }
   ]
 }
