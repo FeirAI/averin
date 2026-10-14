@@ -1410,7 +1410,8 @@
         "surface-ave05-expiry-ignored",
         "surface-ave05-role-order-inverted"
       ],
-      "does_not_establish": "Not that tokens are strong, stored safely or rotated, and not SSO or OIDC. The nine write routes are listed by path, so a renamed or new route needs admin until it is classified (stricter, never looser). Expiry is judged by the server clock, so a skewed clock moves it, and the legacy proj:token form never expires. A 403 tells the holder of a valid token that the token is valid for that project. The recovery route has its own credentials and is not covered. The tests run on the in-memory store; role checks do not depend on the store."
+      "does_not_establish": "Not that tokens are strong, stored safely or rotated, and not SSO or OIDC. The nine write routes are listed by path, so a renamed or new route needs admin until it is classified (stricter, never looser). Expiry is judged by the server clock, so a skewed clock moves it, and the legacy proj:token form never expires. A 403 tells the holder of a valid token that the token is valid for that project. The recovery route has its own credentials and is not covered. The tests run on the in-memory store; role checks do not depend on the store.",
+      "evidence_run": "38515586748"
     },
     {
       "id": "startup-config-fails-closed",
@@ -1455,7 +1456,8 @@
         "surface-ave07-budget-accepts-unknown-fields",
         "surface-ave10-server-binding-default-off"
       ],
-      "does_not_establish": "No test starts a binary with the production gate on and serves (the gate needs a Postgres URL), so that path is covered by the parser test and by the refusal cases, not by a running server. The gate checks that settings exist, not that keys are strong or the database is reachable. An explicit AVERIN_REQUIRE_BODY_BOUND_AUTHORITY=0 or AVERIN_REQUIRE_APPROVER_BINDING=0 still turns those two off (migration opt-outs, logged as warnings). The settings of feir-os and govder are not covered here."
+      "does_not_establish": "No test starts a binary with the production gate on and serves (the gate needs a Postgres URL), so that path is covered by the parser test and by the refusal cases, not by a running server. The gate checks that settings exist, not that keys are strong or the database is reachable. An explicit AVERIN_REQUIRE_BODY_BOUND_AUTHORITY=0 or AVERIN_REQUIRE_APPROVER_BINDING=0 still turns those two off (migration opt-outs, logged as warnings). The settings of feir-os and govder are not covered here.",
+      "evidence_run": "38515586748"
     },
     {
       "id": "project-record-quota",
@@ -1490,7 +1492,8 @@
         "surface-ave07-replay-refused-at-cap",
         "surface-ave07-quota-status-not-507"
       ],
-      "does_not_establish": "The cap counts stored records of every kind, not bytes, so the storage bound is the cap times the per-record body limit. A batch POST /v2/records is item by item, so the items that fit before the cap stay stored. The detector runs on the in-memory store; the concurrent two-replica case is TestProjectQuotaAcrossReplicasPostgres, which the store-postgres job runs and the detector does not. The cap is off until AVERIN_PROJECT_MAX_RECORDS is set. A refused write also fails closed on a record-count read error, which is not tested here."
+      "does_not_establish": "The cap counts stored records of every kind, not bytes, so the storage bound is the cap times the per-record body limit. A batch POST /v2/records is item by item, so the items that fit before the cap stay stored. The detector runs on the in-memory store; the concurrent two-replica case is TestProjectQuotaAcrossReplicasPostgres, which the store-postgres job runs and the detector does not. The cap is off until AVERIN_PROJECT_MAX_RECORDS is set. A refused write also fails closed on a record-count read error, which is not tested here.",
+      "evidence_run": "38515586748"
     },
     {
       "id": "approver-binding-policy-fails-unbound",
@@ -1524,7 +1527,8 @@
         "surface-ave10-cutover-inverted",
         "surface-ave10-cli-default-not-strict"
       ],
-      "does_not_establish": "Not that the named approvers are authenticated people, are distinct or are in any group (an operator and broker property), and not that a signer committed to the right names: a signer that signs evidence naming mallory over a record naming mallory is consistent. The policy only bites for a govder record whose body names an approver; a record that names none is not an approval to bind. The cutover compares canonical received_ts strings, which the recorder stamps, so it is as good as the recorder's clock. The option is off in the library by default (historical bundles keep verifying); the server and CLI turn it on, and the browser verifier only when its options say so."
+      "does_not_establish": "Not that the named approvers are authenticated people, are distinct or are in any group (an operator and broker property), and not that a signer committed to the right names: a signer that signs evidence naming mallory over a record naming mallory is consistent. The policy only bites for a govder record whose body names an approver; a record that names none is not an approval to bind. The cutover compares canonical received_ts strings, which the recorder stamps, so it is as good as the recorder's clock. The option is off in the library by default (historical bundles keep verifying); the server and CLI turn it on, and the browser verifier only when its options say so.",
+      "evidence_run": "38515586748"
     }
   ]
 }
