@@ -1360,7 +1360,7 @@
         "posture-dev-seed-not-reported"
       ],
       "does_not_establish": "The live-process test cannot start with AVERIN_REQUIRE_PROD_SECRETS=1 (that gate needs a Postgres URL), so the wiring of that flag and of durable_store=true is covered only by the handler test with a hand-built Posture, not by a running binary. The rustc stamp is whatever the build script passed with -ldflags; the Rust staticlib itself carries no version, so an unstamped build reports none and the verifier must treat that as unknown. The report says what was configured, not that the database is reachable or the keys are strong. On an unauthenticated deployment the route answers anyone (and says api_keys_configured is false). The vcs revision is present only for a binary built inside a git checkout.",
-      "evidence_run": "38192274401"
+      "evidence_run": "38561263968"
     },
     {
       "id": "api-token-and-role-enforcement",
@@ -1542,7 +1542,7 @@
         "surface-ave10-names-nobody-passes"
       ],
       "does_not_establish": "Not that the named approvers are authenticated people, are distinct or are in any group (an operator and broker property), and not that a signer committed to the right names: a signer that signs evidence naming mallory over a record naming mallory is consistent. The policy covers a decided govder approval (status approved or denied) that names no approver, and exempts pending, expired and escalation records, which carry no decider by design; a record whose body names an approver but whose evidence omits it is the unbound case. The cutover compares canonical received_ts strings, which the recorder stamps, so it is as good as the recorder's clock. The option is off in the library by default (historical bundles keep verifying); the CLI turns it on, and the browser verifier only when its options say so. The CLI only reports an unbound approval for a record whose authority key its opts.json pins; without that key the record is unverifiable and nothing is printed. The server side is the separate claim server-verify-fails-unbound-approval.",
-      "evidence_run": "38515586748"
+      "evidence_run": "38561263968"
     },
     {
       "id": "server-verify-fails-unbound-approval",
