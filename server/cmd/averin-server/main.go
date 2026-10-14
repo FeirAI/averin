@@ -91,7 +91,7 @@ func main() {
 			missing = append(missing, "AVERIN_SIGNING_SEED is the well-known committed dev seed (a globally-known, forgeable integrity root)")
 		}
 		if len(missing) > 0 {
-			log.Fatalf("AVERIN_REQUIRE_PROD_SECRETS is set but required prod secret(s) are empty/absent: %s", strings.Join(missing, "; "))
+			log.Fatalf("the production gate is on (the default unless AVERIN_DEV_MODE=1) but required prod secret(s) are empty/absent: %s", strings.Join(missing, "; "))
 		}
 	}
 
@@ -279,8 +279,8 @@ func main() {
 	if !bodyBound {
 		log.Printf("WARNING: body-bound authority is OFF: v2 approval proofs are still accepted as elevated (set AVERIN_REQUIRE_BODY_BOUND_AUTHORITY=1)")
 	}
-	// AVE-10: a govder approval whose signed evidence leaves out who approved fails the server's own verify and
-	// export. On by default (off in dev mode). AVERIN_APPROVER_BINDING_SINCE (canonical timestamp) keeps older
+	// AVE-10: a govder approval whose signed evidence leaves out who approved fails the server's own /v2/verify
+	// (given pinned authority keys, as govder needs anyway). On by default (off in dev mode). AVERIN_APPROVER_BINDING_SINCE (canonical timestamp) keeps older
 	// records, received before it, as history with a note.
 	approverBinding, abErr := requireApproverBindingFromEnv(os.Getenv("AVERIN_REQUIRE_APPROVER_BINDING"), os.Getenv("AVERIN_APPROVER_BINDING_SINCE"), devMode)
 	if abErr != nil {

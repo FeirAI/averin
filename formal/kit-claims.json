@@ -372,6 +372,10 @@
     "surface-ave07-replay-refused-at-cap": {
       "tier": "full",
       "claim": "project-record-quota"
+    },
+    "surface-ave10-server-verify-unpinned": {
+      "tier": "fast",
+      "claim": "server-verify-fails-unbound-approval"
     }
   },
   "claims": [
@@ -1342,7 +1346,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "c2fc906b16457ec187bd997a5079eb89e569ff8a22db3777eb0ecc8eabe7b9d1"
+          "sha256": "2270e2beeb009d0e67b587f1074bc944180c188a9b56f9bbb1f068e2cf2dbe41"
         }
       ],
       "mutants": [
@@ -1527,7 +1531,32 @@
         "surface-ave10-cutover-inverted",
         "surface-ave10-cli-default-not-strict"
       ],
-      "does_not_establish": "Not that the named approvers are authenticated people, are distinct or are in any group (an operator and broker property), and not that a signer committed to the right names: a signer that signs evidence naming mallory over a record naming mallory is consistent. The policy only bites for a govder record whose body names an approver; a record that names none is not an approval to bind. The cutover compares canonical received_ts strings, which the recorder stamps, so it is as good as the recorder's clock. The option is off in the library by default (historical bundles keep verifying); the server and CLI turn it on, and the browser verifier only when its options say so.",
+      "does_not_establish": "Not that the named approvers are authenticated people, are distinct or are in any group (an operator and broker property), and not that a signer committed to the right names: a signer that signs evidence naming mallory over a record naming mallory is consistent. The policy only bites for a govder record whose body names an approver; a record that names none is not an approval to bind. The cutover compares canonical received_ts strings, which the recorder stamps, so it is as good as the recorder's clock. The option is off in the library by default (historical bundles keep verifying); the CLI turns it on, and the browser verifier only when its options say so. The CLI only reports an unbound approval for a record whose authority key its opts.json pins; without that key the record is unverifiable and nothing is printed. The server side is the separate claim server-verify-fails-unbound-approval.",
+      "evidence_run": "38515586748"
+    },
+    {
+      "id": "server-verify-fails-unbound-approval",
+      "statement": "With the approver-binding policy on and the project's authority key pinned, the server's own GET /v2/verify fails a govder approval whose signed evidence leaves out who approved and says so in the issues, and does not when the policy is off. The server passes the project's pinned authority keys (project pin first, then the global pin, per source) to the verifier as authority_keys, so a govder record is read as verified or legacy-unbound rather than unverifiable.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/server.go",
+        "server/internal/api/approver_binding_verify_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestVerifyAndExportFailUnboundApprovalUnderPinnedKey'",
+      "covers": [
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "selfVerifyOptsFor",
+          "sha256": "416c9cb12e93c95c7ededfd3109ea75d3284a12b916e029c32149e443507267c"
+        }
+      ],
+      "mutants": [
+        "surface-ave10-server-verify-unpinned"
+      ],
+      "does_not_establish": "Only /v2/verify refuses: export reuses the same verdict for its completeness wording and still returns a bundle. A project with no pinned authority key reads govder records as unverifiable and the policy cannot fire there. The test uses the in-memory store and one human_signed key; per-project key resolution is covered by the existing authority tests, not this one. It does not show the named approvers are authenticated people.",
       "evidence_run": "38515586748"
     }
   ]

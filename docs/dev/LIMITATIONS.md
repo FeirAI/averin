@@ -125,6 +125,12 @@ What remains:
   and a flood of distinct project ids falls back to the global bucket.
 - **Monitor database size and `averin_quota_rejections_total`.** There is no in-store eviction, and a
   project at its cap refuses all new evidence (fail closed) until the operator raises the cap.
+- **Pending two-phase grants are not counted.** `POST /v2/grants/prepare` (a write-role route) stores a
+  pending row without a record, so the cap does not count it, and a pending row is removed only when its
+  key is reused or the grant is finalized. A holder of a write token can add pending rows with distinct
+  keys. Bound this with the ingest budget and the reverse-proxy limit until pending rows are swept.
+- **Counting cost.** With the cap on, each write transaction counts the project's stored records, which is
+  linear in the project size, so ingest slows as a project nears a large cap. Keep the cap modest.
 - A batch `POST /v2/records` is item by item, so the items that fit before the cap stay stored.
 
 ## Consume-ledger retention is a correctness parameter

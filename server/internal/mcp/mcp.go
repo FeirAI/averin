@@ -39,6 +39,34 @@ type rpcError struct {
 type Server struct {
 	averinURL string
 	client    *http.Client
+	token     string
+}
+
+// WithToken sets the API token sent as a Bearer credential on every request. Outside AVERIN_DEV_MODE the
+// averin server refuses requests without one.
+func (s *Server) WithToken(token string) *Server {
+	s.token = token
+	return s
+}
+
+func (s *Server) do(method, path string, body []byte) (string, error) {
+	req, err := http.NewRequest(method, s.averinURL+path, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	if method == http.MethodPost {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if s.token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return string(out), nil
 }
 
 func New(averinURL string) *Server {
@@ -163,24 +191,10 @@ func (s *Server) toolResult(id json.RawMessage, text string, err error) *Respons
 
 func (s *Server) post(path string, body map[string]any) (string, error) {
 	b, _ := json.Marshal(body)
-	resp, err := s.client.Post(s.averinURL+path, "application/json", bytes.NewReader(b))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	return string(out), nil
+	return s.do(http.MethodPost, path, b)
 }
 
-func (s *Server) get(path string) (string, error) {
-	resp, err := s.client.Get(s.averinURL + path)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	return string(out), nil
-}
+func (s *Server) get(path string) (string, error) { return s.do(http.MethodGet, path, nil) }
 
 func ok(id json.RawMessage, result any) *Response {
 	return &Response{JSONRPC: "2.0", ID: id, Result: result}

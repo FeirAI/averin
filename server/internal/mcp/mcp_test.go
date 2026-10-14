@@ -82,3 +82,20 @@ func TestUnknownMethod(t *testing.T) {
 		t.Fatalf("expected method-not-found, got %v", resp.Error)
 	}
 }
+
+// TestTokenIsSentAsBearer (AVE-05): outside dev mode the averin API refuses a request with no token, so the
+// MCP bridge sends the configured one on both POST and GET paths and sends no header when none is set.
+func TestTokenIsSentAsBearer(t *testing.T) {
+	var auths []string
+	averin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auths = append(auths, r.Header.Get("Authorization"))
+		w.Write([]byte(`{"results":[{"created":true,"record":{"content_hash":"sha256:abc"}}]}`))
+	}))
+	defer averin.Close()
+	call := `{"name":"record_decision","arguments":{"project_id":"p1","session_id":"s1","action":"x","rationale":"r"}}`
+	New(averin.URL).WithToken("tok-1").Handle(req(t, "tools/call", call))
+	New(averin.URL).Handle(req(t, "tools/call", call))
+	if len(auths) != 2 || auths[0] != "Bearer tok-1" || auths[1] != "" {
+		t.Fatalf("authorization headers = %q", auths)
+	}
+}

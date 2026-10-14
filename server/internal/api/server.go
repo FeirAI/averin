@@ -192,7 +192,9 @@ type Server struct {
 	requirePinnedAuthority bool
 	// Explicit rollout gate: require v3 for newly ingested external elevation.
 	requireBodyBoundAuthority bool
-	// AVE-10: the verifier policy the server's own verify and export use for approvals that do not commit who approved.
+	// AVE-10: the verifier policy the server's own /v2/verify (and the verdict its export reuses for the completeness wording)
+	// applies to approvals that do not commit who approved. It only fires for a record the verifier reads as Verified or
+	// legacy-unbound, which needs the project's authority keys pinned (selfVerifyOptsFor does that).
 	requireApproverBinding bool
 	approverBindingSince   string
 
@@ -397,7 +399,7 @@ func (s *Server) WithDeniedGrantLog() *Server {
 	return s
 }
 
-// WithRequireApproverBinding (AVE-10) makes the server's own verify and export treat a govder approval whose
+// WithRequireApproverBinding (AVE-10) makes the server's own verify treat a govder approval whose
 // signed evidence does not commit who approved as a verification failure. since, when non-empty, is a canonical
 // YYYY-MM-DDTHH:MM:SS.mmmZ cutover: records received before it stay history (with a note). Off by default in the
 // library; averin-server turns it on unless AVERIN_DEV_MODE=1.
@@ -4089,7 +4091,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 // configuration) can never share a result. The result is shared only while the work is in flight; errors and
 // integrity-failure reports are never retained as a reassuring answer for a later request.
 func (s *Server) verifyProject(ctx context.Context, projectID string) (string, error) {
-	verifyOpts := s.selfVerifyOpts()
+	verifyOpts := s.selfVerifyOptsFor(projectID)
 	key := verificationKey(projectID, verifyOpts)
 	return s.verifyFlights.run(ctx, key, func() (string, error) {
 		// Unlike acquireBundleSlot, this worker has no ResponseWriter. It waits for capacity so a burst of
@@ -4124,7 +4126,13 @@ func verificationKey(projectID, verifyOpts string) string {
 // public out-of-band roots via WithExternalVerificationRoots: an attestation issuer and an RFC 3161 TSA SPKI.
 // This keeps the default self-view from self-pinning a producer key while allowing the product view to surface a
 // real auditor-pinned D7 verdict when the deployment has actually configured the full trust path.
-func (s *Server) selfVerifyOpts() string {
+func (s *Server) selfVerifyOpts() string { return s.selfVerifyOptsFor("") }
+
+// selfVerifyOptsFor is selfVerifyOpts for one project. It additionally pins that project's generic authority
+// keys (the same keys ingest elevates under, project pin first then the global default per source) as
+// authority_keys. Without them a govder-signed record is Unverifiable in the server's own view, so the
+// approver-binding policy (which only inspects Verified and legacy-unbound records) would never fire there.
+func (s *Server) selfVerifyOptsFor(project string) string {
 	enc := func(pub ed25519.PublicKey) string {
 		return "ed25519pub:" + base64.RawURLEncoding.EncodeToString(pub)
 	}
@@ -4134,6 +4142,22 @@ func (s *Server) selfVerifyOpts() string {
 		if s.approverBindingSince != "" {
 			opts["approver_binding_since"] = s.approverBindingSince
 		}
+	}
+	var authKeys []string
+	for _, src := range []string{"policy_engine_signed", "human_signed", "delegate_signed"} {
+		if k, ok := s.authorityKeyFor(project, src); ok {
+			e := enc(k)
+			dup := false
+			for _, x := range authKeys {
+				dup = dup || x == e
+			}
+			if !dup {
+				authKeys = append(authKeys, e)
+			}
+		}
+	}
+	if len(authKeys) > 0 {
+		opts["authority_keys"] = authKeys
 	}
 	if s.brokerID != "" {
 		opts["federated_broker_keys"] = map[string]any{s.brokerID: []string{s.core.PubKey()}}
@@ -4243,7 +4267,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// verifier used by /v2/verify and change the line only when the complete capstone is
 	// actually present.  The wording retains the two load-bearing bounds: brokered surface
 	// (not every action an agent might take) and assumed-truthful resource reporting.
-	verificationReport := s.core.VerifyBundleWith(bundle, s.selfVerifyOpts())
+	verificationReport := s.core.VerifyBundleWith(bundle, s.selfVerifyOptsFor(projectID))
 	gaps := []string{completenessGapLine(verificationReport)}
 	if mode == "selective_disclosure" || mode == "full_evidence" {
 		disclosures, err := s.buildDisclosures(r.Context(), projectID, snapshotDisclosures)
