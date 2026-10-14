@@ -1,0 +1,13 @@
+diff --git a/server/internal/auth/auth.go b/server/internal/auth/auth.go
+index 17e7738..ad10eeb 100644
+--- a/server/internal/auth/auth.go
++++ b/server/internal/auth/auth.go
+@@ -57,7 +57,7 @@ func (r Role) String() string {
+ 
+ // Allows reports whether a token holding r may call a route that needs `need`. A zero or unknown
+ // role allows nothing.
+-func (r Role) Allows(need Role) bool { return r >= RoleRead && r <= RoleAdmin && r >= need }
++func (r Role) Allows(need Role) bool { return r >= RoleRead && r <= RoleAdmin && r <= need }
+ 
+ // ParseRole parses "read", "write" or "admin" (exact, lower case). Anything else is an error so a
+ // typo in the key file never silently becomes a stronger or weaker role.

@@ -1,0 +1,11 @@
+diff --git a/server/internal/api/auth_roles.go b/server/internal/api/auth_roles.go
+index 2802e1d..617be8f 100644
+--- a/server/internal/api/auth_roles.go
++++ b/server/internal/api/auth_roles.go
+@@ -31,5 +31,5 @@ func requiredRole(r *http.Request) auth.Role {
+ 			return auth.RoleWrite
+ 		}
+ 	}
+-	return auth.RoleAdmin
++	return auth.RoleRead
+ }

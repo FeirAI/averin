@@ -1,0 +1,13 @@
+diff --git a/core/src/bin/averin_verify.rs b/core/src/bin/averin_verify.rs
+index 2315718..7a60578 100644
+--- a/core/src/bin/averin_verify.rs
++++ b/core/src/bin/averin_verify.rs
+@@ -87,7 +87,7 @@ fn effective_opts(
+     allow_unbound: bool,
+ ) -> Result<Option<String>, String> {
+     let Some(text) = opts_text else {
+-        return Ok(if allow_unbound {
++        return Ok(if true {
+             None
+         } else {
+             Some(r#"{"require_approver_binding":true}"#.to_string())

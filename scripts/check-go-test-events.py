@@ -57,6 +57,7 @@ REQUIRED = (
     # Plan 007 project transactions and every other Go test cited as evidence by formal/claims.json or
     # the docs: a skipped or absent one must fail the real-Postgres gate, not pass silently.
     f"{API_PACKAGE}:TestProjectTransactionsAcrossReplicas",
+    f"{API_PACKAGE}:TestProjectQuotaAcrossReplicasPostgres",
     f"{API_PACKAGE}:TestProjectTransactionProcessCuts",
     f"{API_PACKAGE}:TestProjectTransactionsProcessRestartBoundaries",
     f"{API_PACKAGE}:TestExportSnapshotNotTornPostgres",

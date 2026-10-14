@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/quota.go b/server/internal/api/quota.go
+index d8e91a1..9c0d2f7 100644
+--- a/server/internal/api/quota.go
++++ b/server/internal/api/quota.go
+@@ -85,7 +85,7 @@ func (q *quotaWriter) WriteHeader(code int) {
+ 		}
+ 		q.ResponseWriter.Header().Set("Content-Type", "application/json")
+ 		q.ResponseWriter.Header().Del("Content-Length")
+-		q.ResponseWriter.WriteHeader(http.StatusInsufficientStorage)
++		q.ResponseWriter.WriteHeader(http.StatusBadRequest)
+ 		q.ResponseWriter.Write([]byte(`{"error":"project record quota exceeded"}` + "\n"))
+ 		return
+ 	}

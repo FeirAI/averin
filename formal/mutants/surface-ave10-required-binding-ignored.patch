@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 54d5250..b4b0370 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -2401,7 +2401,7 @@ fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
+ /// `received_ts` is a canonical instant strictly before the cutover (an unreadable `received_ts` counts as
+ /// after it).
+ fn approver_binding_required(opts: &VerifyOptions, rec: &CanonValue) -> bool {
+-    if !opts.require_approver_binding {
++    if true {
+         return false;
+     }
+     match (&opts.approver_binding_since, s(rec, "received_ts")) {
