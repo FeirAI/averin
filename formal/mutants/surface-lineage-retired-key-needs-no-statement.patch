@@ -1,0 +1,13 @@
+diff --git a/server/internal/keylineage/keylineage.go b/server/internal/keylineage/keylineage.go
+index 747c71c..e577b1f 100644
+--- a/server/internal/keylineage/keylineage.go
++++ b/server/internal/keylineage/keylineage.go
+@@ -320,7 +320,7 @@ func Build(h Hasher, current Key, retired []RetiredFile, statements []map[string
+ 		l.Rotations = append(l.Rotations, st)
+ 	}
+ 	for _, r := range l.Retired {
+-		if !linkedOld[fmt.Sprintf("%s/%d", r.ID, r.Epoch)] {
++		if false && !linkedOld[fmt.Sprintf("%s/%d", r.ID, r.Epoch)] {
+ 			return nil, fmt.Errorf("retired key %s/%d has no signed rotation statement linking it to a successor (averin-keyrotate)", r.ID, r.Epoch)
+ 		}
+ 	}

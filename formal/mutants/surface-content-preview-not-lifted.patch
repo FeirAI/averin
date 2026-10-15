@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 62a3b44..ae311a1 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -3226,7 +3226,7 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
+ // itself and is refused when it carries a raw preview.
+ func liftContentPreview(rec map[string]any) error {
+ 	ext, ok := rec["extensions"].(map[string]any)
+-	if !ok {
++	if !ok || true {
+ 		return nil
+ 	}
+ 	raw, present := ext["content_preview"]

@@ -28,6 +28,7 @@ import (
 	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/keylineage"
 	"github.com/feirai/averin/server/internal/meter"
 	"github.com/feirai/averin/server/internal/pgdurable"
 	"github.com/feirai/averin/server/internal/pgledger"
@@ -133,6 +134,7 @@ func main() {
 	st := selectStore()
 
 	srv := api.New(c, st, keyID).WithSealShapeViolations(core.SealShapeViolations)
+	srv = srv.WithKeyLineage(loadKeyLineage(c, keyID))
 	// GET /v2/posture: the startup guard state, read-only, for the deploy-time posture verifier.
 	_, onPostgres := st.(*store.Postgres)
 	srv.WithPosture(api.Posture{
@@ -729,6 +731,51 @@ const maxSeedFileBytes = 4096
 //   - file contents are trimmed (mounted secrets carry a trailing newline).
 //   - an inline value is returned RAW (never trimmed away): a whitespace/garbage value must reach the
 //     caller's decoder and fail loud, not silently resolve to "" and DISABLE an optional role.
+//
+// loadKeyLineage reads the recording-key history (AVE-04): AVERIN_SIGNING_KEY_EPOCH (default 0) names the epoch
+// the current key signs under; AVERIN_RETIRED_SIGNING_KEYS_FILE lists the retired keys (JSON array of
+// {signing_key_id, key_epoch, public_key, key_status: retired|compromised, status_changed_at}); and
+// AVERIN_KEY_ROTATIONS_FILE holds the signed statements `averin-keyrotate` produced (JSON array). Any
+// inconsistency is fatal: a lineage that does not hold together would publish history no verifier can check.
+func loadKeyLineage(c *core.Core, keyID string) *keylineage.Lineage {
+	epoch := int64(0)
+	if raw := strings.TrimSpace(os.Getenv("AVERIN_SIGNING_KEY_EPOCH")); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 0 {
+			log.Fatalf("AVERIN_SIGNING_KEY_EPOCH must be a non-negative integer: %q", raw)
+		}
+		epoch = n
+	}
+	var retired []keylineage.RetiredFile
+	if p := strings.TrimSpace(os.Getenv("AVERIN_RETIRED_SIGNING_KEYS_FILE")); p != "" {
+		readJSONFile(p, "AVERIN_RETIRED_SIGNING_KEYS_FILE", &retired)
+	}
+	var stmts []map[string]any
+	if p := strings.TrimSpace(os.Getenv("AVERIN_KEY_ROTATIONS_FILE")); p != "" {
+		readJSONFile(p, "AVERIN_KEY_ROTATIONS_FILE", &stmts)
+	}
+	l, err := keylineage.Build(c, keylineage.Key{ID: keyID, Epoch: epoch, PublicKey: c.PubKey()}, retired, stmts)
+	if err != nil {
+		log.Fatalf("recording-key lineage: %v", err)
+	}
+	if len(l.Retired) > 0 {
+		log.Printf("recording-key lineage: current %s/%d, %d retired key(s), %d signed rotation statement(s)", keyID, epoch, len(l.Retired), len(l.Rotations))
+	}
+	return l
+}
+
+func readJSONFile(path, name string, into any) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("%s: %v", name, err)
+	}
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(into); err != nil {
+		log.Fatalf("%s: %v", name, err)
+	}
+}
+
 func secretEnvOrFile(name string) string {
 	rawInline := os.Getenv(name)
 	rawFile := os.Getenv(name + "_FILE")

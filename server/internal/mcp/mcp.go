@@ -129,7 +129,7 @@ func (s *Server) callTool(req Request) *Response {
 			body["event_type"] = et
 		}
 		if r := arg("rationale"); r != "" {
-			body["extensions"] = map[string]any{"content_preview": map[string]any{"rationale": r}}
+			body["rationale"] = r // top level: the server commits it instead of signing it in the clear
 		}
 		out, err := s.post("/v2/records", body)
 		return s.toolResult(req.ID, out, err)

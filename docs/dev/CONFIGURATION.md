@@ -30,6 +30,9 @@ The ingestion + app API. Started with `./averin-server`.
 |----------|---------|----------|----------|
 | `AVERIN_SIGNING_SEED` (or `_FILE`) | — | **Yes** | 64 hex chars = 32-byte Ed25519 seed; the key all records/checkpoints are signed with. **Missing ⇒ fatal** (`log.Fatal`). Invalid (bad hex / wrong length) ⇒ fatal. Production backs signing with a KMS instead of a raw seed. |
 | `AVERIN_SIGNING_KEY_ID` | `k0` | No | The `signing_key_id` stamped into each record's `key` block and the export key descriptor. |
+| `AVERIN_SIGNING_KEY_EPOCH` | `0` | No | The `key_epoch` stamped on new records and checkpoints; raise it with each rotation. Non-integer or negative ⇒ fatal. |
+| `AVERIN_RETIRED_SIGNING_KEYS_FILE` | unset | No | JSON array of retired recording keys `{signing_key_id, key_epoch, public_key, key_status: retired\|compromised, status_changed_at}`. Written by `averin-keyrotate`. Published in every export. An entry with no signed rotation statement, a duplicate of the current key, or a non-canonical time ⇒ fatal. |
+| `AVERIN_KEY_ROTATIONS_FILE` | unset | No | JSON array of signed rotation statements from `averin-keyrotate`. Every statement must verify and the chain must end at the current key, else fatal. Published in every export as `key_rotations`. See [KEY-ROTATION.md](KEY-ROTATION.md). |
 | `AVERIN_ADDR` | `:8080` | No | Listen address (`host:port`). |
 
 ### Storage & durability

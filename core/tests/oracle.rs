@@ -401,6 +401,11 @@ fn every_preimage_family_matches_model() {
                 &sign::preimage(verify::REVOCATION_LIST_V2_DOMAIN, tail()).unwrap(),
                 want,
             ),
+            "key rotation" => check(
+                name,
+                &sign::preimage(verify::KEY_ROTATION_SIG_TAG, tail()).unwrap(),
+                want,
+            ),
             "revocation merkle root v2" => check(
                 name,
                 &sign::preimage(verify::MERKLE_ROOT_V2_DOMAIN, tail()).unwrap(),
