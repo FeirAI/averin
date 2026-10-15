@@ -774,6 +774,23 @@ pub const SEGMENT_FORMAT: &str = "averin.segment.v1";
 /// and federation heads do the same per broker. A segment reports them `assumed`/absent.
 const SEGMENT_NOT_EVALUATED: [&str; 2] = ["broker_grant_log", "federation_heads"];
 
+/// The checks a month cannot make, for `SegmentReport::not_evaluated`. A first month (no base) evaluates all of
+/// them. A month with parents before its base cannot show its record set is complete: a record dropped from it
+/// can be replaced by an earlier month's record without changing the count, the heads or any signature.
+fn segment_not_evaluated(has_base: bool, has_earlier_parents: bool) -> Vec<String> {
+    if !has_base {
+        return Vec::new();
+    }
+    let mut v: Vec<String> = SEGMENT_NOT_EVALUATED
+        .iter()
+        .map(|x| x.to_string())
+        .collect();
+    if has_earlier_parents {
+        v.push("record_completeness".to_string());
+    }
+    v
+}
+
 fn is_month(m: &str) -> bool {
     let b = m.as_bytes();
     b.len() == 7
@@ -8181,20 +8198,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             earlier_parent_ref_hashes: dag_opt
                 .as_ref()
                 .map_or_else(Vec::new, |d| d.earlier_refs.iter().cloned().collect()),
-            not_evaluated: if segment.base.is_some() {
-                let mut v: Vec<String> = SEGMENT_NOT_EVALUATED
-                    .iter()
-                    .map(|x| x.to_string())
-                    .collect();
-                // Any parent outside the month means a dropped record can be hidden behind an earlier one: the
-                // month alone cannot say its record set is complete. The chain command does.
-                if dag_opt.as_ref().is_some_and(|d| !d.earlier_refs.is_empty()) {
-                    v.push("record_completeness".to_string());
-                }
-                v
-            } else {
-                Vec::new()
-            },
+            not_evaluated: segment_not_evaluated(
+                segment.base.is_some(),
+                dag_opt.as_ref().is_some_and(|d| !d.earlier_refs.is_empty()),
+            ),
         }
     });
     let mut report = VerifyReport {
