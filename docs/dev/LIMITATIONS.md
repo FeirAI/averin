@@ -98,11 +98,20 @@ isolation but is volatile across process restart. It is a development store:
 every project write copies that project's entire state (O(n) in its records,
 disclosures and index maps) to make the transaction private, and it never prunes
 expired pending grants. Online capability use now
-checks its signed project against the authenticated project. A multi-replica
-deployment claim still needs scoped nonce claims and bounded sequence recovery
-tested together. Until then, keep the
+checks its signed project against the authenticated project. Scoped nonce
+claims and bounded sequence recovery are built, and a failure matrix in CI
+(`multiwriter`: two or three real `averin-server` processes on one Postgres, a
+capability used concurrently, a revoke against a use, `kill -9` during prepare
+and finalize, stranded sequence recovery while the other process writes, a lost
+COMMIT acknowledgment cut before and after the server commits, each checked by
+a trace monitor against the `ProjectTx` invariants) found no violation. That is
+not yet a multi-replica deployment claim: each replica still reads its own
+content directory, so a record disclosed through another replica needs the
+content in Postgres first; the ingest budget is per process; the optional
+witness is not in object storage; and Postgres failover and more than two
+concurrent writers are not exercised. Until those are done, keep the
 single-writer-per-project deployment policy even though frontier and checkpoint
-writes now serialize across replicas.
+writes serialize across replicas.
 
 ## Storage growth is unbounded and append-only (monitoring is a hard deploy requirement)
 
