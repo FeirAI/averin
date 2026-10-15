@@ -1,0 +1,12 @@
+--- a/server/internal/api/posture.go
++++ b/server/internal/api/posture.go
+@@ -81,6 +81,9 @@
+ func (s *Server) authorityPinsReport() []map[string]string {
+ 	out := make([]map[string]string, 0, len(s.policyEngineKeys))
+ 	for pin, key := range s.policyEngineKeys {
++		if pin.project == "" {
++			continue
++		}
+ 		out = append(out, map[string]string{"project": pin.project, "source": pin.source, "pubkey": hex.EncodeToString(key)})
+ 	}
+ 	sort.Slice(out, func(i, j int) bool {

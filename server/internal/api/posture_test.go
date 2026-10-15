@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -143,5 +144,46 @@ func TestPosture_OpenDeploymentReportsNoFingerprints(t *testing.T) {
 		if !ok || len(sf) != 0 {
 			t.Errorf("%s: secret_fingerprints = %v, want an empty object", name, b["secret_fingerprints"])
 		}
+	}
+}
+
+// FEI-40 relationship D: averin reports every pinned authority key (public verifying keys, so as they
+// are) with the project each is pinned for ("" = the global default) and the source it vouches for,
+// so the verifier can compare them with the keys govder derives from its authority seed. A server
+// with no pin reports an empty list, never null.
+func TestPosture_ReportsEveryPinnedAuthorityKey(t *testing.T) {
+	pubOf := func(seedByte byte) ed25519.PublicKey {
+		seed := make([]byte, ed25519.SeedSize)
+		for i := range seed {
+			seed[i] = seedByte
+		}
+		return ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	}
+	global, scoped := pubOf(0x11), pubOf(0x22)
+	h := newServer(t).
+		WithPolicyEngineKey("policy_engine_signed", global).
+		WithProjectAuthorityKey("acme", "human_signed", scoped).
+		Routes()
+	_, b := postureReq(h, "p1", "")
+	pins, ok := b["authority_pins"].([]any)
+	if !ok || len(pins) != 2 {
+		t.Fatalf("authority_pins = %v, want two pins", b["authority_pins"])
+	}
+	want := []map[string]string{
+		{"project": "", "source": "policy_engine_signed", "pubkey": hex.EncodeToString(global)},
+		{"project": "acme", "source": "human_signed", "pubkey": hex.EncodeToString(scoped)},
+	}
+	// sorted by project then source: "" first
+	for i, w := range want {
+		g := pins[i].(map[string]any)
+		for k, v := range w {
+			if g[k] != v {
+				t.Errorf("pin %d %s = %v, want %v", i, k, g[k], v)
+			}
+		}
+	}
+	_, empty := postureReq(newServer(t).Routes(), "p1", "")
+	if l, ok := empty["authority_pins"].([]any); !ok || len(l) != 0 {
+		t.Errorf("unpinned server authority_pins = %v, want an empty list", empty["authority_pins"])
 	}
 }

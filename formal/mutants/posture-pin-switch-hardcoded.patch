@@ -1,8 +1,7 @@
 diff --git a/server/internal/api/posture.go b/server/internal/api/posture.go
-index dd462ca..fca0655 100644
 --- a/server/internal/api/posture.go
 +++ b/server/internal/api/posture.go
-@@ -88,7 +88,7 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
+@@ -108,7 +108,7 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
  		"api_keys_configured":          keyed,
  		"durable_store":                s.posture.DurableStore,
  		"signing_seed_is_dev":          s.posture.SigningSeedIsDev,
@@ -10,4 +9,4 @@ index dd462ca..fca0655 100644
 +		"require_pinned_authority":     true,
  		"require_body_bound_authority": s.requireBodyBoundAuthority,
  		"secret_fingerprints":          s.secretFingerprints(),
- 	})
+ 		"authority_pins":               s.authorityPinsReport(),

@@ -376,6 +376,10 @@
     "posture-api-key-fingerprints-first-only": {
       "tier": "fast",
       "claim": "posture-api-key-fingerprints"
+    },
+    "posture-authority-pins-global-dropped": {
+      "tier": "fast",
+      "claim": "posture-authority-pins"
     }
   },
   "claims": [
@@ -1336,7 +1340,7 @@
         {
           "path": "server/internal/api/posture.go",
           "symbol": "handlePosture",
-          "sha256": "737bfab9cdd1c86d977c23644c346b4644d89713a738ca28b4bf73c236c063b0"
+          "sha256": "15d909586475f322b53f4e83d3da1685e12c9450351ba97b5880c3e14714d8ae"
         },
         {
           "path": "server/internal/api/posture.go",
@@ -1588,6 +1592,32 @@
       ],
       "does_not_establish": "That the key a calling plane sends equals one averin accepts: this claim proves only averin's side of the report. The comparison is feir-os deploy/posture/evaluate.jq (relationship averin-api-key), tested there against stub reports, and the sending planes' own claims prove what they report. No keyed-averin four-plane run exists, so the whole chain is not exercised in one real-process run. Keys averin does not hold in its in-process store (none today) would not be reported. A fingerprint lets someone who holds it test guesses for a weak key offline; the endpoint is behind a project key. Not that a key is strong or rotated.",
       "evidence_run": "38710384463"
+    },
+    {
+      "id": "posture-authority-pins",
+      "$comment": "legacy register: posture-authority-pins",
+      "statement": "GET /v2/posture reports under authority_pins every pinned external authority verifying key as {project, source, pubkey hex}, where project is empty for the global default pin, sorted by project then source, and an empty list (not null) when nothing is pinned, so the deploy-time verifier can compare the keys with the ones govder derives from its authority seed. The values are public keys, reported as they are.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/posture.go",
+        "server/internal/api/posture_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run TestPosture_ReportsEveryPinnedAuthorityKey",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/api/posture.go",
+          "symbol": "authorityPinsReport",
+          "sha256": "cef3b9e8fe77425c6f1318177ade23334db8c54e7fbd4e6e7428f5c094a33852"
+        }
+      ],
+      "mutants": [
+        "posture-authority-pins-global-dropped"
+      ],
+      "does_not_establish": "That govder derives the same keys (the comparison is feir-os deploy/posture/evaluate.jq, tested against stub reports, and govder's own claim proves what it reports), that the pins are the ones averin actually verifies with at request time beyond the map this report reads, or that any key is strong or rotated."
     }
   ]
 }

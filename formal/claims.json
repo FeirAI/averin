@@ -648,6 +648,38 @@
         "server",
         "formal-fast"
       ]
+    },
+    {
+      "id": "posture-authority-pins",
+      "claim": "GET /v2/posture reports under authority_pins every pinned external authority verifying key as {project, source, pubkey hex} (project empty for the global default), sorted, and an empty list when nothing is pinned, so the deploy-time verifier can compare them with the keys govder derives from its authority seed. Public keys only. Not that govder derives the same keys (feir-os evaluate.jq compares, tested against stub reports), or that any key is strong or rotated.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "the deployment's build script stamps the rustc version with -ldflags; an unstamped build reports none",
+        "the deploy-time verifier calls the endpoint with a project key"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/posture.go",
+          "symbol": "authorityPinsReport"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/posture_test.go",
+          "symbol": "TestPosture_ReportsEveryPinnedAuthorityKey"
+        },
+        {
+          "file": "formal/mutants/posture-authority-pins-global-dropped.patch",
+          "symbol": "pin.project == \"\""
+        }
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ]
     }
   ]
 }

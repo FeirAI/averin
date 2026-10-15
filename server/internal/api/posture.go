@@ -1,9 +1,11 @@
 package api
 
 import (
+	"encoding/hex"
 	"net/http"
 	"runtime"
 	"runtime/debug"
+	"sort"
 
 	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/secretfp"
@@ -72,6 +74,24 @@ func (s *Server) secretFingerprints() map[string][]string {
 	return out
 }
 
+// authorityPinsReport lists every pinned external authority key as {project, source, pubkey} (FEI-40
+// relationship D). The values are PUBLIC verifying keys, so they are reported as they are (no
+// fingerprint): the deploy-time verifier compares them for equality with the keys govder derives from
+// its authority seed. Project "" is the global default pin. Sorted so the report is deterministic.
+func (s *Server) authorityPinsReport() []map[string]string {
+	out := make([]map[string]string, 0, len(s.policyEngineKeys))
+	for pin, key := range s.policyEngineKeys {
+		out = append(out, map[string]string{"project": pin.project, "source": pin.source, "pubkey": hex.EncodeToString(key)})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i]["project"] != out[j]["project"] {
+			return out[i]["project"] < out[j]["project"]
+		}
+		return out[i]["source"] < out[j]["source"]
+	})
+	return out
+}
+
 // handlePosture is GET /v2/posture: a read-only report of the guards this process runs with, for
 // the deploy-time verifier. It sits under the ordinary /v2 project API-key auth (the route needs
 // ?project=<p> and that project's bearer), so on a keyed deployment only a key holder reads it; on an
@@ -91,5 +111,6 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
 		"require_pinned_authority":     s.requirePinnedAuthority,
 		"require_body_bound_authority": s.requireBodyBoundAuthority,
 		"secret_fingerprints":          s.secretFingerprints(),
+		"authority_pins":               s.authorityPinsReport(),
 	})
 }
