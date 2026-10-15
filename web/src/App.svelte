@@ -127,6 +127,12 @@
         <div class="lvl">{report.cleartext_content_records} record(s) carry prompt or answer text signed in the
           clear (extensions.content_preview); it cannot be erased from this history.</div>
       {/if}
+      {#if report.segment}
+        <div class="lvl">This is one month ({report.segment.month}) of the history, {report.segment.link === 'genesis'
+          ? 'the first month' : report.segment.link === 'base_pinned'
+          ? "chained to the previous month's checkpoint you pinned" : 'starting from a base checkpoint nobody pinned'}.
+          Earlier months are not checked here, and the grant log is not evaluated across months.</div>
+      {/if}
       {#if !report.keys_externally_pinned}
         <div class="lvl">Keys are bundle-supplied (not externally pinned): this proves internal
           consistency under the bundle's own key claims, not authenticity against an out-of-band
