@@ -2,9 +2,12 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -296,6 +299,16 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 	b := run(t, strings.Repeat("a1", 32))
 	if b["api_keys_configured"] != true || b["signing_seed_is_dev"] != false || b["durable_store"] != false || b["require_prod_secrets"] != false {
 		t.Fatalf("fresh seed, keyed, in-memory: %v", b)
+	}
+	// FEI-40: the live process reports the keyed fingerprint of the API key it accepts, never the key.
+	mac := hmac.New(sha256.New, []byte("tok"))
+	mac.Write([]byte("feir-secret-alignment/v1:averin-api-key"))
+	wantFP := hex.EncodeToString(mac.Sum(nil)[:16])
+	if sf, _ := b["secret_fingerprints"].(map[string]any); sf == nil || fmt.Sprint(sf["averin-api-key"]) != "["+wantFP+"]" {
+		t.Fatalf("live process must report the fingerprint of AVERIN_API_KEYS' token (%s): %v", wantFP, b["secret_fingerprints"])
+	}
+	if raw, _ := json.Marshal(b); strings.Contains(string(raw), `"tok"`) {
+		t.Fatalf("the live report carries the API key: %s", raw)
 	}
 	build := b["build"].(map[string]any)
 	if build["core_rustc"] != "rustc-test-stamp" || build["go_version"] == "" {

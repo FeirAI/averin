@@ -16,6 +16,11 @@
       "file": "params-commitment.v1.json",
       "owner": "averin",
       "sha256": "f443a8bf5b1968c50180d724250bb7ac4c6512bb0f2f984a7e4fc9f334d7eb8b"
+    },
+    {
+      "file": "secret-fingerprint.v1.json",
+      "owner": "feir-os",
+      "sha256": "70029b247125e27494217a228c7e674cea7617e606586fa5bba0307fc51eb2fd"
     }
   ]
 }

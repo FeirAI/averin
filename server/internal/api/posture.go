@@ -6,6 +6,7 @@ import (
 	"runtime/debug"
 
 	"github.com/feirai/averin/server/internal/auth"
+	"github.com/feirai/averin/server/internal/secretfp"
 )
 
 // PostureSchema is the version of the GET /v2/posture body; the deploy-time posture verifier
@@ -52,6 +53,25 @@ func buildInfoPosture(coreRustc string) map[string]any {
 	return out
 }
 
+// relAverinAPIKey names the shared-secret relationship between averin and the planes that call it
+// (govder, vultrino, the feir-os broker): the project bearer they send is one averin accepts. The
+// string is the same in every plane and in feir-os deploy/posture/evaluate.jq, and is part of the
+// fingerprinted message.
+const relAverinAPIKey = "averin-api-key"
+
+// secretFingerprints is the keyed fingerprint of every API key this process ACCEPTS (FEI-40), so the
+// verifier can compare them with the fingerprints of the keys the calling planes SEND. Empty when the
+// deployment is open or unkeyed (nothing is accepted by value). Never a key.
+func (s *Server) secretFingerprints() map[string][]string {
+	out := map[string][]string{}
+	if ms, ok := s.auth.(*auth.MapStore); ok && ms != nil {
+		if fps := secretfp.Fingerprints(ms.Tokens(), relAverinAPIKey); len(fps) > 0 {
+			out[relAverinAPIKey] = fps
+		}
+	}
+	return out
+}
+
 // handlePosture is GET /v2/posture: a read-only report of the guards this process runs with, for
 // the deploy-time verifier. It sits under the ordinary /v2 project API-key auth (the route needs
 // ?project=<p> and that project's bearer), so on a keyed deployment only a key holder reads it; on an
@@ -70,5 +90,6 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
 		"signing_seed_is_dev":          s.posture.SigningSeedIsDev,
 		"require_pinned_authority":     s.requirePinnedAuthority,
 		"require_body_bound_authority": s.requireBodyBoundAuthority,
+		"secret_fingerprints":          s.secretFingerprints(),
 	})
 }

@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -114,6 +115,30 @@ func (ks *MapStore) ContainsToken(token string) bool {
 		}
 	}
 	return match == 1
+}
+
+// Tokens returns every distinct accepted token across all projects, sorted. It exists for the
+// posture report, which fingerprints them (never prints them) so the deploy-time verifier can check
+// that the key each calling plane holds is one averin accepts (FEI-40).
+func (ks *MapStore) Tokens() []string {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	seen := map[string]struct{}{}
+	var out []string
+	for _, tokens := range ks.keys {
+		for _, t := range tokens {
+			if t == "" {
+				continue
+			}
+			if _, dup := seen[t]; dup {
+				continue
+			}
+			seen[t] = struct{}{}
+			out = append(out, t)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // openStore is the explicit, dev-only "allow everything" KeyStore. See NewOpenStore.
