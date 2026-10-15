@@ -282,6 +282,38 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 	}
 }
 
+// keyBlock is the `key` block stamped on every record and checkpoint: the current recording key and its epoch.
+func (s *Server) keyBlock() map[string]any {
+	return map[string]any{
+		"signing_key_id": s.signingKeyID,
+		"key_epoch":      s.keyEpoch,
+		"key_valid_from": s.keyValidFrom,
+		"key_status":     "active",
+	}
+}
+
+// bundleKeys is the export `keys` array: the current key first, then (AVE-04) every retired key with its status,
+// so a verifier can check history signed before a rotation.
+func (s *Server) bundleKeys() []any {
+	if s.lineage != nil {
+		return s.lineage.Entries("active")
+	}
+	return []any{map[string]any{
+		"signing_key_id": s.signingKeyID,
+		"key_epoch":      s.keyEpoch,
+		"public_key":     s.core.PubKey(),
+		"key_status":     "active",
+	}}
+}
+
+// addKeyRotations publishes the signed statements that link each retired recording key to its successor, so a
+// verifier that pinned an earlier key can follow the chain to the key that signed the newer records.
+func (s *Server) addKeyRotations(bundle map[string]any) {
+	if s.lineage != nil && len(s.lineage.Rotations) > 0 {
+		bundle["key_rotations"] = s.lineage.Rotations
+	}
+}
+
 // WithKeyLineage installs the validated recording-key history (AVE-04): the epoch stamped on new records and the
 // retired keys and signed rotation statements every bundle publishes. The current key must be the lineage's
 // current key (id, epoch and public key), else the stamp and the published key would disagree.
@@ -1722,12 +1754,7 @@ func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string,
 	rec["causal_prev_hashes"] = parents
 
 	// signing key block
-	rec["key"] = map[string]any{
-		"signing_key_id": s.signingKeyID,
-		"key_epoch":      s.keyEpoch,
-		"key_valid_from": s.keyValidFrom,
-		"key_status":     "active",
-	}
+	rec["key"] = s.keyBlock()
 	if err := s.assertFinalAuthorityV3(rec); err != nil {
 		return "", false, fmt.Errorf("seal: %w", err)
 	}
@@ -3888,12 +3915,7 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Che
 		"record_count":         count,
 		"broker_grant_head":    grantHead,
 		"created_ts":           ts(s.now()),
-		"key": map[string]any{
-			"signing_key_id": s.signingKeyID,
-			"key_epoch":      s.keyEpoch,
-			"key_valid_from": s.keyValidFrom,
-			"key_status":     "active",
-		},
+		"key":                  s.keyBlock(),
 	}
 	// M4 (ADR 0005): when this broker has a federation id, ALSO emit the per-broker_id `broker_grant_heads` MAP.
 	// A single configured broker_id owns the project's whole gapless [1..N] log, so its partition == the flat
@@ -4513,27 +4535,14 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 			checkpoints[i] = json.RawMessage(c.JSON)
 		}
 	}
-	keyEntries := []any{map[string]any{
-		"signing_key_id": s.signingKeyID,
-		"key_epoch":      s.keyEpoch,
-		"public_key":     s.core.PubKey(),
-		"key_status":     "active",
-	}}
-	if s.lineage != nil {
-		keyEntries = s.lineage.Entries("active") // current key first, then every retired key with its status
-	}
 	bundle := map[string]any{
 		"bundle_version": "1",
 		"project_id":     projectID,
-		"keys":           keyEntries,
+		"keys":           s.bundleKeys(),
 		"records":        records,
 		"checkpoints":    checkpoints,
 	}
-	// AVE-04: the signed statements that link each retired recording key to its successor, so a verifier that
-	// pinned an earlier key can follow the chain to the key that signed the newer records.
-	if s.lineage != nil && len(s.lineage.Rotations) > 0 {
-		bundle["key_rotations"] = s.lineage.Rotations
-	}
+	s.addKeyRotations(bundle)
 	// T6/D8: emit the operator-declared coverage_manifest verbatim. Its digest is bound into the
 	// deployment_attestation (above), so the closure the verifier checks is the one the operator attested.
 	if s.coverageManifest != "" {

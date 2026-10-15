@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 62a3b44..0c67862 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -3243,7 +3243,7 @@ func liftContentPreview(rec map[string]any) error {
+ 	for k := range m {
+ 		switch k {
+ 		case "input", "output", "rationale":
+-			if _, dup := rec[k]; dup {
++			if _, dup := rec[k]; dup && false {
+ 				return fmt.Errorf("%q is set both at the top level and in extensions.content_preview", k)
+ 			}
+ 		default:

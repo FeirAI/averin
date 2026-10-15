@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index d82fbe2..1b80b78 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -5330,6 +5330,8 @@ fn evaluate_key_rotations(
+                 continue;
+             }
+             handovers.push((ovk, oe.status.clone(), nvk));
++        } else {
++            handovers.push((ovk, oe.status.clone(), nvk));
+         }
+         out.verified += 1;
+     }

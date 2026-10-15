@@ -1,0 +1,12 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 62a3b44..82b6dac 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -3247,6 +3247,7 @@ func liftContentPreview(rec map[string]any) error {
+ 				return fmt.Errorf("%q is set both at the top level and in extensions.content_preview", k)
+ 			}
+ 		default:
++			continue
+ 			return fmt.Errorf("extensions.content_preview.%s is not allowed: only input, output and rationale can be carried, and they are committed (send other data under another extensions key)", k)
+ 		}
+ 	}

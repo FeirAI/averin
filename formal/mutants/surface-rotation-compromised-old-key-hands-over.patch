@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index d82fbe2..aea8ba3 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -5358,7 +5358,7 @@ fn evaluate_key_rotations(
+             let Some((_, pinned_status)) = trusted.iter().find(|(k, _)| k == ovk) else {
+                 continue;
+             };
+-            if status_rank(&worst_status(pinned_status, bundle_status)) > 1 {
++            if status_rank(&worst_status(pinned_status, bundle_status)) > 9 {
+                 continue;
+             }
+             if role_sets.iter().any(|set| set.contains(nvk)) {

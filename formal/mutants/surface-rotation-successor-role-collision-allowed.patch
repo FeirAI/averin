@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index d82fbe2..fbae7a3 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -5361,7 +5361,7 @@ fn evaluate_key_rotations(
+             if status_rank(&worst_status(pinned_status, bundle_status)) > 1 {
+                 continue;
+             }
+-            if role_sets.iter().any(|set| set.contains(nvk)) {
++            if false && role_sets.iter().any(|set| set.contains(nvk)) {
+                 issues.push(
+                     "key_rotations: the successor key is also a pinned role key; refusing to extend trust (role separation)"
+                         .into(),
