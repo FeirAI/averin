@@ -1,5 +1,5 @@
 diff --git a/server/internal/witness/tsa_preset.go b/server/internal/witness/tsa_preset.go
-index c3dff0e..54c9ad3 100644
+index c3dff0e..795624e 100644
 --- a/server/internal/witness/tsa_preset.go
 +++ b/server/internal/witness/tsa_preset.go
 @@ -34,7 +34,7 @@ var tsaPresets = map[string]TSAPreset{
@@ -7,7 +7,7 @@ index c3dff0e..54c9ad3 100644
  func LookupTSAPreset(name string) (TSAPreset, error) {
  	p, ok := tsaPresets[strings.ToLower(strings.TrimSpace(name))]
 -	if !ok {
-+	if false {
++	if false && !ok {
  		names := make([]string, 0, len(tsaPresets))
  		for n := range tsaPresets {
  			names = append(names, n)
