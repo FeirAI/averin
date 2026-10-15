@@ -654,7 +654,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "613e98b1e550a326431bb9e5ae3dceef5668f446ca5b03279e3566c7b11cdd65"
+          "sha256": "db5560759f9ded222f5496ba5651d88c1609bcea13a8eba8c9e5d7a4fdc0350c"
         }
       ],
       "mutants": [
@@ -689,7 +689,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "613e98b1e550a326431bb9e5ae3dceef5668f446ca5b03279e3566c7b11cdd65"
+          "sha256": "db5560759f9ded222f5496ba5651d88c1609bcea13a8eba8c9e5d7a4fdc0350c"
         }
       ],
       "mutants": [
@@ -728,7 +728,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "613e98b1e550a326431bb9e5ae3dceef5668f446ca5b03279e3566c7b11cdd65"
+          "sha256": "db5560759f9ded222f5496ba5651d88c1609bcea13a8eba8c9e5d7a4fdc0350c"
         }
       ],
       "mutants": [
@@ -1406,7 +1406,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "613e98b1e550a326431bb9e5ae3dceef5668f446ca5b03279e3566c7b11cdd65"
+          "sha256": "db5560759f9ded222f5496ba5651d88c1609bcea13a8eba8c9e5d7a4fdc0350c"
         }
       ],
       "mutants": [
@@ -1783,6 +1783,11 @@
           "path": "core/src/dag.rs",
           "symbol": "build_from",
           "sha256": "1139d309dd3c1ed6cab60c437216029682f48a0b3e7ad970debb19ec6fe62159"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "segment_not_evaluated",
+          "sha256": "9ed79b1a5985e64dd69494ea222740e54fa8f11811615cb04dc1d13547489edb"
         }
       ],
       "mutants": [

@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 59941e0..c53d262 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -785,7 +785,7 @@ fn segment_not_evaluated(has_base: bool, has_earlier_parents: bool) -> Vec<Strin
+         .iter()
+         .map(|x| x.to_string())
+         .collect();
+-    if has_earlier_parents {
++    if false && has_earlier_parents {
+         v.push("record_completeness".to_string());
+     }
+     v
