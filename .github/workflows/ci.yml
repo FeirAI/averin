@@ -220,6 +220,65 @@ jobs:
           name: postgres-go-test-events
           path: ${{ runner.temp }}/averin-go-events.json
 
+  # AVE-08: the two-process failure matrix (formal/kit-claims.json, multi-writer-failure-matrix). Real
+  # averin-server processes on one Postgres schema; holds, SIGKILL and an in-test TCP proxy that loses a
+  # COMMIT acknowledgment (not toxiproxy) inject the faults; a trace monitor checks the recorded run. The two
+  # semantic mutants of the claim must make the same matrix fail, run here so the claim's evidence is this job's.
+  multiwriter:
+    name: Two-process multi-writer failure matrix (real Postgres, fault injection, trace monitor, mutants)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      AVERIN_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.9'
+      - name: build native RFC 3161 rust staticlib for cgo API tests
+        run: cargo build -p averin-decision-core --features rfc3161
+      - name: reject stale cgo staticlib
+        run: ./scripts/check-staticlib-fresh.sh
+      - name: the matrix and the trace monitor's negative controls
+        working-directory: server
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          go test -json -count=1 -p 4 ./internal/api -run 'TestMultiWriter' | tee "$RUNNER_TEMP/evidence/multiwriter-go-events.json" | python3 ../scripts/check-go-test-events.py --group multiwriter
+      - name: both semantic mutants must make the matrix fail
+        run: |
+          set -o pipefail
+          for mutant in multiwriter-guard-lock-skipped multiwriter-use-ignores-revocation; do
+            python3 scripts/formal/check_mutants.py --claims formal/kit-claims.json --only "$mutant" --timeout 1500 \
+              --scratch "$RUNNER_TEMP/mw-scratch-$mutant" --cargo-target-dir "$RUNNER_TEMP/mw-kit-target" \
+              --json "$RUNNER_TEMP/evidence/$mutant.json" 2>&1 | tee -a "$RUNNER_TEMP/evidence/run.log"
+          done
+      - name: evidence manifest
+        if: always()
+        run: bash scripts/ci-evidence.sh "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-multiwriter
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 90
+
   web:
     name: web app (svelte build + trace unit tests)
     runs-on: ubuntu-latest
@@ -924,8 +983,22 @@ jobs:
     name: "formal: kit register, all mutants (nightly)"
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # The multi-writer-failure-matrix detector needs a real Postgres (its mutants run the two-process matrix).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       KANI_TIMEOUT_SECONDS: "1800"
+      AVERIN_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
@@ -979,7 +1052,7 @@ jobs:
   ci-required:
     name: ci-required
     if: always()
-    needs: [fuzz, core, core-32bit, server, store-postgres, web, sdk, verifier, wasm, supply-chain, formal-lean, formal-refinement, formal-mutants-fast, formal-production, formal-kani, formal-kani-extended, formal-kani-strings-smoke, formal-tla, formal-fast]
+    needs: [fuzz, core, core-32bit, server, store-postgres, multiwriter, web, sdk, verifier, wasm, supply-chain, formal-lean, formal-refinement, formal-mutants-fast, formal-production, formal-kani, formal-kani-extended, formal-kani-strings-smoke, formal-tla, formal-fast]
     runs-on: ubuntu-latest
     steps:
       - name: every required job passed

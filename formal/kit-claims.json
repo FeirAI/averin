@@ -364,6 +364,14 @@
     "surface-content-preview-rationale-not-committed": {
       "tier": "full",
       "claim": "content-preview-committed"
+    },
+    "multiwriter-guard-lock-skipped": {
+      "tier": "full",
+      "claim": "multi-writer-failure-matrix"
+    },
+    "multiwriter-use-ignores-revocation": {
+      "tier": "full",
+      "claim": "multi-writer-failure-matrix"
     }
   },
   "claims": [
@@ -1499,6 +1507,43 @@
       ],
       "does_not_establish": "Records sealed before this change keep their cleartext text for good; nothing here erases them. That a client cannot put personal data elsewhere in the signed body (another extensions key, agent_id, action, a tool argument): only the three text fields and the legacy preview key are committed. That the commitment hides a guessable value: it is salted, but the encrypted store can be read by whoever holds the master key. The Python and TypeScript SDK shapes are asserted by their own unit tests (the TypeScript one runs in the sdk job, the Python one is not run in CI), not by this detector.",
       "evidence_run": "38686890625"
+    },
+    {
+      "id": "multi-writer-failure-matrix",
+      "$comment": "legacy register: multi-writer-failure-matrix",
+      "statement": "Real averin-server processes run on one PostgreSQL schema and the matrix injects one failure per leg: one nonce used by eight racing requests over two processes; one use request sent six times; a prospective and a total revoke against a use that has already read the revocation state; a use against an uncommitted revoke; kill -9 while a prepare or a finalize transaction is open, with a request waiting on the other process; stranded broker_seq recovery while the other process writes, and a recovery process killed between its fence and its terminal transaction; a lost COMMIT acknowledgment cut before and after the server committed, for finalize, use and revoke, retried on both processes; and checkpoints from both processes at once. After each leg a trace monitor finds no violation of: no use admitted after an acknowledged revoke, one admission per nonce, no session fork, a numbered checkpoint chain whose last checkpoint equals the committed frontier, no receipt at or after its prospective cutoff, a gapless broker_seq log, and every acknowledged operation durable. The monitor has negative controls that fail on a hand-built violation of each rule.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/multiwriter_test.go",
+        "server/internal/api/multiwriter_child_test.go",
+        "server/internal/api/multiwriter_proxy_test.go",
+        "server/internal/api/multiwriter_monitor_test.go",
+        "scripts/check-go-test-events.py"
+      ],
+      "gates": [
+        "multiwriter",
+        "store-postgres"
+      ],
+      "detector": "bash -o pipefail -c ': \"${AVERIN_TEST_DATABASE_URL:?a Postgres DSN is required}\" && ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -json -count=1 -p 4 ./internal/api -run TestMultiWriter | python3 ../scripts/check-go-test-events.py --group multiwriter'",
+      "detector_kind": "custom",
+      "covers": [
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "lockProject",
+          "sha256": "eaa0b6afc98538b46a3065ad2896df7c7ecd3b28dcb84b31055457e9591344b9"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "handleUsePhase",
+          "sha256": "a97a209652f8031363346be166aab68c6009f3e6ed35a03b5c2d07ff15fef49e"
+        }
+      ],
+      "mutants": [
+        "multiwriter-guard-lock-skipped",
+        "multiwriter-use-ignores-revocation"
+      ],
+      "does_not_establish": "Two or three processes on one Postgres 16 schema with a shared content directory on the same host, not a cluster, not Postgres failover, and not more than two concurrent writers per project. The faults are injected by a store wrapper in the test binary and a TCP proxy that understands the simple-query COMMIT of a project write transaction; a COMMIT sent any other way is not cut (the test then fails on its fired-once check). The monitor checks the invariants it lists on the runs it saw; the TLA+ model is not tied to the code, and a passing matrix is sampled interleavings, not exhaustive ones. Timing windows (a request still waiting after 1.5 seconds) assume the host schedules the processes. It says nothing about a content store shared by replicas (the processes read one local directory), the per-replica ingest budget, an object-storage witness, or the deployment policy: single-writer-per-project stays until those exist.",
+      "evidence_run": "38679250521"
     }
   ]
 }

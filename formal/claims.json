@@ -196,7 +196,7 @@
     },
     {
       "id": "resource-truth-and-project-serialization",
-      "claim": "The strongest completeness label remains conditional on truthful resource labeling. Project frontier and checkpoint writes now serialize through a persisted Postgres guard, tested with two pools and separate processes; full multi-instance deployment remains gated by authenticated capability-project binding, scoped nonce claims, and bounded recovery. The finite TLA+ model is not a production proof.",
+      "claim": "The strongest completeness label remains conditional on truthful resource labeling. Project frontier and checkpoint writes now serialize through a persisted Postgres guard, tested with two pools and separate processes; full multi-instance deployment remains gated on a content store shared by replicas and a per-replica ingest budget; authenticated capability-project binding, scoped nonce claims and bounded recovery are built and run together in the two-process failure matrix (multi-writer-failure-matrix). The finite TLA+ model is not a production proof.",
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "offline verifier"],
       "assumptions": ["resource honestly labels covered actions", "all project writers use WithProjectWrite", "required unique record_id index remains valid", "shared Postgres database"],
@@ -204,6 +204,16 @@
       "proofs": [{"file": "server/internal/store/project_tx_test.go", "symbol": "TestPostgresProjectWriteTwoPools"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionProcessCuts"}, {"file": "formal/tla/ProjectTx_safe.cfg", "symbol": "NoFrontierFork"}, {"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
       "gates": ["core", "server", "store-postgres", "formal-tla"],
       "evidence_run": "37712087870"
+    },
+    {
+      "id": "multi-writer-failure-matrix",
+      "claim": "Real averin-server processes on one PostgreSQL schema survive a scripted matrix of single failures with no invariant violation found by a trace monitor: one nonce used by racing requests over two processes, one use identity sent repeatedly, a prospective and a total revoke against a use that already read the revocation state, a use against an uncommitted revoke, kill -9 during an open prepare or finalize transaction, stranded broker_seq recovery while the other process writes and a recovery process killed between its fence and its terminal transaction, a lost COMMIT acknowledgment cut before and after the server committed (finalize, use and revoke, retried on both processes), and concurrent checkpoints. The monitor checks no use after an acknowledged revoke, one admission per nonce, no session fork, a numbered checkpoint chain ending at the committed frontier, no receipt at or after its cutoff, a gapless broker_seq log, and every acknowledged operation durable, and has negative controls. Sampled interleavings of two or three processes on one Postgres 16 schema, not a proof, and not a cluster: it excludes a content store shared by replicas, the per-replica ingest budget, an object-storage witness and Postgres failover, so the single-writer-per-project deployment policy stays.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": ["Go server", "Postgres mode"],
+      "assumptions": ["PostgreSQL serializes the project guard row", "the TCP proxy sees the simple-query COMMIT of a project write transaction", "all project writers use WithProjectWrite", "the processes share one local content directory"],
+      "sources": [{"file": "server/internal/store/postgres.go", "symbol": "lockProject"}, {"file": "server/internal/api/server.go", "symbol": "handleUsePhase"}, {"file": "server/internal/api/project_tx.go", "symbol": "withProjectWrite"}],
+      "proofs": [{"file": "server/internal/api/multiwriter_test.go", "symbol": "TestMultiWriterFailureMatrix"}, {"file": "server/internal/api/multiwriter_monitor_test.go", "symbol": "TestMultiWriterMonitorNegativeControls"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoRevokedUse"}, {"file": "formal/mutants/multiwriter-guard-lock-skipped.patch", "symbol": "FOR UPDATE"}, {"file": "formal/mutants/multiwriter-use-ignores-revocation.patch", "symbol": "IsRevoked(trustedProject, id)"}],
+      "gates": ["multiwriter", "store-postgres", "formal-fast"]
     },
     {
       "id": "historical-revocation-ordering",

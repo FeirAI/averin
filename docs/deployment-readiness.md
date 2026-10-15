@@ -10,10 +10,10 @@ boundary between "averin ships this" and "your deployment provides this."
 |------|---------------|------------------|--------|
 | 1. Per-project authn/authz (Phase 2) | API-key auth (`auth.KeyStore` + `Middleware`, wired) | IdP (SSO/SAML/OIDC), secrets store, RBAC/scoped-token layer | **Phase-1 done; Phase-2 layered design** |
 | 2. HSM/TPM sender-key (B12) | raw ed25519 keys + PoP binding (theft-fails-PoP test) | HSM/TPM/KMS + agent secure element | **Needs a `Signer` interface + hardware** |
-| 3. Multi-instance project writes (D6) | persisted project guard, bound transactions and authenticated capability-project binding | scoped nonce claims, bounded recovery and a failure matrix | **Transaction and project-binding seams done; full HA gate pending** |
+| 3. Multi-instance project writes (D6) | persisted project guard, bound transactions, authenticated capability-project binding, tenant and resource scoped nonce claims, a bounded sequence-recovery fence, and a two-process failure matrix with a trace monitor run on every pull request (`multiwriter` job) | a content store shared by the replicas, the per-replica ingest budget, and an optional object-storage witness | **Database write path exercised under two-process faults; replicas still gated on the shared content store and ingest budget** |
 | 4. TEE/remote-attestation enforcement (D7) | signed `deployment_attestation` claim | TEE hardware + attestation service + quote-verify lib | **Assertion today; hardware-root design** |
 | 5. git remote + push | clean tree, `.gitignore` hardened | remote URL + push credentials | **Repo push-ready; operator action** |
-| 6. Durable consume-before-act ledger (R5) | project Store claims and receipt share one transaction; `pgledger` sweeps | shared Postgres and resource-scoped nonce claims | **Atomic seam done; scope gate pending** |
+| 6. Durable consume-before-act ledger (R5) | project Store claims and receipt share one transaction; nonce and JTI claims are scoped by project and resource (migration `0006`); `pgledger` sweeps; one use of a capability across two processes is part of the failure matrix | shared Postgres | **Done for the Postgres store** |
 
 ---
 
@@ -96,11 +96,32 @@ connection; a separate project can proceed while a guard is held. The
 `record_id` UNIQUE index is checked before unsafe writes. Export uses one
 repeatable-read snapshot. Independent-pool tests cover these seams.
 
-**Deployment policy.** Continue using one writer per project until the
-scoped nonce claims and bounded sequence recovery
-are integrated and their two-process failure matrix
-passes. This project transaction seam alone does not justify an end-to-end
-multi-replica safety claim. On DB outage, writes fail closed rather than
+**Failure matrix.** The `multiwriter` job runs two or three real `averin-server`
+processes on one Postgres schema and injects, one leg at a time: one nonce used
+by eight racing requests over two processes; one use request sent six times; a
+revoke (prospective and total) against a use that has already read the
+revocation state; a use against a revoke that has not committed; `kill -9` while
+a prepare or a finalize transaction is open (a request waiting on the other
+process then proceeds); stranded `broker_seq` recovery while the other process
+writes, and a recovery process killed between its fence and its terminal
+transaction; a lost COMMIT acknowledgment cut before and after the server
+committed, for finalize, use and revoke, retried on both processes; and
+checkpoints from both processes at once. A trace monitor then checks the
+recorded run and the committed state against the invariants of
+`formal/tla/ProjectTx.tla` (no use after an acknowledged revoke, one
+consumption per nonce, no session fork, a numbered checkpoint chain whose last
+checkpoint equals the committed frontier, no receipt at or after its cutoff, a
+gapless `broker_seq` log, every acknowledged operation durable). Faults are
+injected by a store wrapper in the test binary and an in-test TCP proxy in front
+of Postgres (not toxiproxy), so the shipped server has no fault points. Two
+semantic mutants (the guard row not locked, a revocation answer ignored on use)
+must make the matrix fail.
+
+**Deployment policy.** Keep one writer per project for now. The matrix shows
+the database write path holds under these faults; it does not cover a content
+store shared by replicas (each replica reads its own content directory today),
+the per-replica ingest budget, an object-storage witness, Postgres failover, or
+more than two concurrent writers. On DB outage, writes fail closed rather than
 remaining available.
 
 ---

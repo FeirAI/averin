@@ -1,0 +1,13 @@
+diff --git a/server/internal/store/postgres.go b/server/internal/store/postgres.go
+index 03bb832..60ac348 100644
+--- a/server/internal/store/postgres.go
++++ b/server/internal/store/postgres.go
+@@ -127,7 +127,7 @@ func lockProject(ctx context.Context, tx pgx.Tx, projectID string) error {
+ 		return fmt.Errorf("store: create project guard: %w", err)
+ 	}
+ 	var held string
+-	if err := tx.QueryRow(ctx, `SELECT project_id FROM project_write_guard WHERE project_id=$1 FOR UPDATE`, projectID).Scan(&held); err != nil {
++	if err := tx.QueryRow(ctx, `SELECT project_id FROM project_write_guard WHERE project_id=$1`, projectID).Scan(&held); err != nil {
+ 		return fmt.Errorf("store: lock project: %w", err)
+ 	}
+ 	return nil
