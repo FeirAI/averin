@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 5c8e924..a6f92b5 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -8314,7 +8314,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+     let brokered_use_valid = report.uses_total > 0
+         // a month with a use or outcome whose counterpart sits in an earlier month cannot decide
+         // `authorized` alone: whole-history verification would count an unconsumed outcome as a violation
+-        && segment_unresolved.is_empty()
++        && true
+         && report.uses_matched == report.uses_total
+         && report.uses_pop_reverified == report.uses_matched
+         && report.unmatched_violation == 0
