@@ -29,6 +29,7 @@ import (
 	"github.com/feirai/averin/server/internal/broker"
 	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/keylineage"
 	"github.com/feirai/averin/server/internal/meter"
 	"github.com/feirai/averin/server/internal/metrics"
 	"github.com/feirai/averin/server/internal/otel"
@@ -161,6 +162,8 @@ type Server struct {
 	// claimed_over_manifest). This is a DECLARATION, never auto-derived from what happened.
 	coverageManifest string
 	signingKeyID     string
+	keyEpoch         int64               // epoch stamped on every record and checkpoint (AVERIN_SIGNING_KEY_EPOCH)
+	lineage          *keylineage.Lineage // retired keys + signed rotation statements published in every bundle (AVE-04)
 	keyValidFrom     string
 	now              func() time.Time // injectable clock for tests
 	// M6/M2 (ADR 0005) — the ONLINE two-phase grant flow (/v2/grants/prepare + /v2/grants/finalize). A
@@ -277,6 +280,21 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		mUseOutcome: reg.CounterVec("averin_use_requests_total",
 			"Total POST /v2/use (and /v2/use-intent) requests by capability-authorization outcome.", "outcome"),
 	}
+}
+
+// WithKeyLineage installs the validated recording-key history (AVE-04): the epoch stamped on new records and the
+// retired keys and signed rotation statements every bundle publishes. The current key must be the lineage's
+// current key (id, epoch and public key), else the stamp and the published key would disagree.
+func (s *Server) WithKeyLineage(l *keylineage.Lineage) *Server {
+	if l == nil {
+		return s
+	}
+	if l.Current.ID != s.signingKeyID || l.Current.PublicKey != s.core.PubKey() {
+		panic("api: key lineage current key does not match the server's signing key")
+	}
+	s.keyEpoch = l.Current.Epoch
+	s.lineage = l
+	return s
 }
 
 // WithContent swaps in a durable content store (e.g. content.NewFSStore) for the raw low-entropy
@@ -1395,6 +1413,9 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 			return fmt.Errorf("unknown top-level field %q: a record carries only the closed schema key set (use extensions for custom fields)", k)
 		}
 	}
+	if err := liftContentPreview(rec); err != nil {
+		return err
+	}
 	if stringField(rec, "project_id") == "" || stringField(rec, "session_id") == "" {
 		return fmt.Errorf("project_id and session_id are required")
 	}
@@ -1703,7 +1724,7 @@ func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string,
 	// signing key block
 	rec["key"] = map[string]any{
 		"signing_key_id": s.signingKeyID,
-		"key_epoch":      0,
+		"key_epoch":      s.keyEpoch,
 		"key_valid_from": s.keyValidFrom,
 		"key_status":     "active",
 	}
@@ -3193,6 +3214,49 @@ func (s *Server) buildUseOutcomeRecord(outcomeID, projectID, sessionID, grantID,
 	return rec, nil
 }
 
+// liftContentPreview moves prompt and answer text that older SDKs, the recording proxy and the MCP server
+// put under extensions.content_preview up to the top-level input/output/rationale fields, so
+// commitLowEntropyFields turns it into a hiding commitment and the text lives in the encrypted, purgeable
+// content store instead of the signed body (AVE-02). Without this the text is signed in the clear, exported
+// with every bundle and can never be erased.
+//
+// Fail closed: a content_preview that is not an object, carries any key other than input/output/rationale,
+// or duplicates a top-level field of the same name is refused (it would otherwise be signed verbatim). A
+// body-bound v3 authority claim cannot be rewritten after the caller signed it, so it must commit the text
+// itself and is refused when it carries a raw preview.
+func liftContentPreview(rec map[string]any) error {
+	ext, ok := rec["extensions"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, present := ext["content_preview"]
+	if !present {
+		return nil
+	}
+	if authorityV3Claim(rec) {
+		return fmt.Errorf("extensions.content_preview is not allowed on a body-bound (v3) authority record: commit input/output/rationale instead")
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("extensions.content_preview must be an object with input/output/rationale")
+	}
+	for k := range m {
+		switch k {
+		case "input", "output", "rationale":
+			if _, dup := rec[k]; dup {
+				return fmt.Errorf("%q is set both at the top level and in extensions.content_preview", k)
+			}
+		default:
+			return fmt.Errorf("extensions.content_preview.%s is not allowed: only input, output and rationale can be carried, and they are committed (send other data under another extensions key)", k)
+		}
+	}
+	for k, v := range m {
+		rec[k] = v
+	}
+	delete(ext, "content_preview")
+	return nil
+}
+
 // commitLowEntropyFields replaces each raw input/output/rationale field in rec with a hiding
 // commitment {alg, commitment, low_entropy}, storing the raw value content-addressed and minting a
 // fresh nonce. It returns the disclosure secrets (bound to recordID) to persist atomically with the
@@ -3826,7 +3890,7 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Che
 		"created_ts":           ts(s.now()),
 		"key": map[string]any{
 			"signing_key_id": s.signingKeyID,
-			"key_epoch":      0,
+			"key_epoch":      s.keyEpoch,
 			"key_valid_from": s.keyValidFrom,
 			"key_status":     "active",
 		},
@@ -4449,18 +4513,26 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 			checkpoints[i] = json.RawMessage(c.JSON)
 		}
 	}
-	keyEntry := map[string]any{
+	keyEntries := []any{map[string]any{
 		"signing_key_id": s.signingKeyID,
-		"key_epoch":      0,
+		"key_epoch":      s.keyEpoch,
 		"public_key":     s.core.PubKey(),
 		"key_status":     "active",
+	}}
+	if s.lineage != nil {
+		keyEntries = s.lineage.Entries("active") // current key first, then every retired key with its status
 	}
 	bundle := map[string]any{
 		"bundle_version": "1",
 		"project_id":     projectID,
-		"keys":           []any{keyEntry},
+		"keys":           keyEntries,
 		"records":        records,
 		"checkpoints":    checkpoints,
+	}
+	// AVE-04: the signed statements that link each retired recording key to its successor, so a verifier that
+	// pinned an earlier key can follow the chain to the key that signed the newer records.
+	if s.lineage != nil && len(s.lineage.Rotations) > 0 {
+		bundle["key_rotations"] = s.lineage.Rotations
 	}
 	// T6/D8: emit the operator-declared coverage_manifest verbatim. Its digest is bound into the
 	// deployment_attestation (above), so the closure the verifier checks is the one the operator attested.

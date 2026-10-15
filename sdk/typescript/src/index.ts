@@ -163,11 +163,11 @@ export function buildRecord(
   if (tin !== undefined || tout !== undefined) {
     rec.tokens = { in: tin ?? 0n, out: tout ?? 0n };
   }
-  const content: Record<string, unknown> = {};
-  if (opts.input !== undefined) content.input = opts.input;
-  if (opts.output !== undefined) content.output = opts.output;
-  if (opts.rationale !== undefined) content.rationale = opts.rationale;
-  if (Object.keys(content).length) rec.extensions = { content_preview: content };
+  // Raw content goes at the TOP LEVEL: the server replaces each field with a salted hiding commitment, keeps the
+  // text in its encrypted content store (retention-purged, erasable) and signs only the commitment.
+  if (opts.input !== undefined) rec.input = opts.input;
+  if (opts.output !== undefined) rec.output = opts.output;
+  if (opts.rationale !== undefined) rec.rationale = opts.rationale;
   if (opts.authority) rec.authority = { ...opts.authority };
   if (opts.framework) rec.framework = opts.framework;
   if (opts.extensions) rec.extensions = { ...(rec.extensions as object), ...opts.extensions };

@@ -51,6 +51,7 @@
     {"family": "grant head step", "fields": [{"hex": "b807ef08eb667015cab8143ac303bcb60e23f6dc72c873d7f5119b12967e804f"}, {"u64": 7}, {"s": "sha256:0909090909090909090909090909090909090909090909090909090909090909"}]},
     {"family": "revocation leaf", "fields": [{"s": "grant-revoked-1"}]},
     {"family": "revocation statement v2", "fields": [], "tail": {"s": "sha256:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"}},
+    {"family": "key rotation", "fields": [], "tail": {"s": "sha256:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"}},
     {"family": "revocation merkle root v2", "fields": [], "tail": {"s": "sha256:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"}},
     {"family": "revocation key v2", "fields": [{"s": "grant-revoked-\u00e9"}]},
     {"family": "revocation state v2", "fields": [{"s": "prospective"}, {"u64": 7}]},

@@ -56,6 +56,22 @@ read still scans `O(records)` (a per-row `::jsonb` cast), holding the project gu
 `content_hash` column — is a **deferred** rearchitecture: it needs a schema migration/backfill and is
 not worth reopening a grant-suppression race for here.
 
+## Text signed before prompt commitment stays in the clear
+
+Since ADR 0008 the server commits prompt and answer text instead of signing it, so it can be erased. Records
+sealed **before** that change carry their text in `extensions.content_preview`, inside a signed, hash-chained
+body, and cannot be edited or erased selectively without breaking the chain. An export reports the number of
+such records as `cleartext_content_records`. For them the only remedy is the whole-store one (SECURITY.md,
+*Data retention & erasure*): start a new project and destroy the old store.
+
+## Key rotation does not prove when the old key stopped signing
+
+A signed rotation statement links the retiring recording key to its successor and lets a verifier that pinned
+only the old key follow the chain. It does not prove the old key signed nothing after `rotated_at`: for a
+scheduled rotation that rests on destroying the old seed, for a compromise on a verified timestamp anchor
+taken before `status_changed_at` (KEY-ROTATION.md). The statements live in the export, not in the project
+chain.
+
 ## OTel secret scrubbing only protects newly-sealed records
 
 `scrubAttributes` recursively redacts secret-shaped keys and values (including inside nested

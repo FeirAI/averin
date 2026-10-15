@@ -63,11 +63,10 @@ func (p *Proxy) Handler() http.Handler {
 const (
 	maxReqBody = 16 << 20  // 16 MiB request cap
 	maxCapture = 512 << 10 // only buffer this much of the response for the recorded preview
-	// maxPreview hard-caps each sealed extensions.content_preview side (input/output). These bodies are
-	// append-only and permanently un-erasable (NOT routed through commitLowEntropyFields / the retention
-	// purge — see SECURITY.md §Data retention & erasure), so a large prompt/completion would otherwise bloat
-	// the store forever. Truncation only shortens the human-readable preview; it never affects verification
-	// (content_preview is not committed or signed).
+	// maxPreview hard-caps each recorded side (input/output). The text goes to averin as the top-level
+	// input/output fields, which the server commits and keeps in its encrypted, retention-purged content store
+	// (AVE-02); only a salted commitment is signed. The cap still bounds what a large prompt or completion can
+	// add to that store. Truncation only shortens the recorded text; the commitment covers what was sent.
 	maxPreview = 16 << 10 // 16 KiB per preview side
 )
 
@@ -180,12 +179,8 @@ func (p *Proxy) recordCall(r *http.Request, reqBody, respBody []byte, httpStatus
 		"observed_via": "proxy",
 		"status":       status,
 		"agent_id":     model,
-		"extensions": map[string]any{
-			"content_preview": map[string]any{
-				"input":  truncatePreview(scrub.Redact(string(reqBody))),
-				"output": outText,
-			},
-		},
+		"input":        truncatePreview(scrub.Redact(string(reqBody))),
+		"output":       outText,
 	}
 	if tin >= 0 || tout >= 0 {
 		rec["tokens"] = map[string]any{"in": max0(tin), "out": max0(tout)}

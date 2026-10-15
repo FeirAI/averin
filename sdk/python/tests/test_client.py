@@ -89,7 +89,8 @@ def test_client_submits_with_idempotency_and_returns_record():
     assert captured["headers"]["Idempotency-Key"] == "fixed-key"
     assert captured["body"]["idempotency_key"] == "fixed-key"
     assert captured["body"]["project_id"] == "p1"
-    assert captured["body"]["extensions"]["content_preview"]["rationale"] == "why"
+    assert captured["body"]["rationale"] == "why"
+    assert "extensions" not in captured["body"]
     assert out["content_hash"] == "sha256:abc"
 
 

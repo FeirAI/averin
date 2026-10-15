@@ -8,6 +8,9 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 pub const RECORD_SIG_TAG: &str = "averin.record.sig.v1";
 pub const CHECKPOINT_SIG_TAG: &str = "averin.checkpoint.sig.v1";
+/// Domain of a signed key-rotation statement (AVE-04): both the retiring and the successor key sign the digest
+/// of the statement under it.
+pub const KEY_ROTATION_SIG_TAG: &str = "averin.key_rotation.v1";
 
 pub const SIG_PREFIX: &str = "ed25519:";
 pub const PUBKEY_PREFIX: &str = "ed25519pub:";
