@@ -1295,6 +1295,11 @@
           "path": "verifier/claim-verdict.js",
           "symbol": "*",
           "sha256": "fa7771a563af0cc22eae1dc4f813451048472bf877e2ce992d46e4cb591e830b"
+        },
+        {
+          "path": "core/src/verify/headline.rs",
+          "symbol": "month_claim_verdict",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         }
       ],
       "mutants": [
@@ -1823,6 +1828,11 @@
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "chain_cmd",
           "sha256": "de485ae4df4b4e4cc69f375678068b8d1a1f718c8e801f2b14b92dd54001c7fa"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "brokered_use_is_valid",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         }
       ],
       "mutants": [

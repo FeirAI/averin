@@ -2657,6 +2657,21 @@ fn evidence_rederivable(rec: &CanonValue, payload_key: &str) -> bool {
     crate::hashx::sha256_prefixed(payload.serialize().as_bytes()) == signed
 }
 
+/// The brokered half of the `authorized` claim: every use matched and PoP re-verified, no violation or pending
+/// intent, a validated taxonomy, and no use or outcome whose counterpart sits in an earlier month. A month with
+/// such a cross-month reference cannot decide `authorized` alone: whole-history verification would count an
+/// outcome no closed intent consumed as a violation, and a month cannot see that.
+fn brokered_use_is_valid(report: &VerifyReport, no_cross_month_unresolved: bool) -> bool {
+    report.uses_total > 0
+        && no_cross_month_unresolved
+        && report.uses_matched == report.uses_total
+        && report.uses_pop_reverified == report.uses_matched
+        && report.unmatched_violation == 0
+        && report.unmatched_pending == 0
+        && report.taxonomy_status == "validated"
+        && report.uses_action_unverified == 0
+}
+
 /// Read a string field from a record's canonical evidence payload at `extensions.broker.<payload_key>`
 /// (ADR 0003 — the verifier reads match inputs ONLY from the proven payload).
 pub(crate) fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
@@ -8311,16 +8326,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         && report.grant_total > 0
         && report.grant_verified == report.grant_total
         && body_bound_role_evidence;
-    let brokered_use_valid = report.uses_total > 0
-        // a month with a use or outcome whose counterpart sits in an earlier month cannot decide
-        // `authorized` alone: whole-history verification would count an unconsumed outcome as a violation
-        && segment_unresolved.is_empty()
-        && report.uses_matched == report.uses_total
-        && report.uses_pop_reverified == report.uses_matched
-        && report.unmatched_violation == 0
-        && report.unmatched_pending == 0
-        && report.taxonomy_status == "validated"
-        && report.uses_action_unverified == 0;
+    let brokered_use_valid = brokered_use_is_valid(&report, segment_unresolved.is_empty());
     let introspected_use_valid = report.native_credential_present
         && report.introspection_status == "attested"
         && report.introspection_transcripts_total > 0
