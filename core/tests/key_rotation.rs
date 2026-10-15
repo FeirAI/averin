@@ -269,3 +269,36 @@ fn the_report_json_carries_the_rotation_counts() {
     let j = averin_decision_core::verify::report_to_json(&r);
     assert!(j.contains("\"key_rotations_chain_trusted\":1"), "{j}");
 }
+
+#[test]
+fn a_statement_not_signed_by_the_new_key_is_refused() {
+    // a compromise statement needs only the successor's signature, so that signature must really be the successor's
+    let thief = signing_key_from_seed(&[77u8; 32]);
+    let b = bundle_with(vec![statement("compromise", None, &thief)], "compromised");
+    let r = verify_bundle_with(&b, &pin(&new_sk(), None, None));
+    assert!(!r.ok);
+    assert_eq!(r.key_rotations_verified, 0);
+    assert!(
+        r.issues.iter().any(|i| i.contains("sig_new")),
+        "{:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn a_successor_that_is_also_a_pinned_role_key_is_not_trusted() {
+    let b = bundle_with(
+        vec![statement("scheduled", Some(&old_sk()), &new_sk())],
+        "retired",
+    );
+    let mut opts = pin(&old_sk(), None, None);
+    opts.resource_authority_keys = vec![new_sk().verifying_key()];
+    let r = verify_bundle_with(&b, &opts);
+    assert_eq!(r.key_rotations_chain_trusted, 0);
+    assert!(
+        r.issues.iter().any(|i| i.contains("role")),
+        "{:?}",
+        r.issues
+    );
+    assert!(none_proven(&r));
+}

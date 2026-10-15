@@ -5183,6 +5183,18 @@ fn check_role_disjointness(
     None
 }
 
+/// AVE-02: the number of records whose signed body carries `extensions.content_preview`, prompt or answer text
+/// in the clear that no retention purge can erase. Informational: it feeds no verdict.
+fn count_cleartext_content(records: &[CanonValue]) -> usize {
+    records
+        .iter()
+        .filter(|r| {
+            r.get("extensions")
+                .is_some_and(|e| e.get("content_preview").is_some())
+        })
+        .count()
+}
+
 /// Outcome of [`evaluate_key_rotations`].
 struct RotationEval {
     total: usize,
@@ -5757,13 +5769,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // selective-disclosure entries (optional): bind revealed (value, nonce) to record commitments.
     let (disclosures_total, disclosures_verified, cred_descriptors) =
         verify_disclosures(bundle, records, &mut issues);
-    let cleartext_content_records = records
-        .iter()
-        .filter(|r| {
-            r.get("extensions")
-                .is_some_and(|e| e.get("content_preview").is_some())
-        })
-        .count();
+    let cleartext_content_records = count_cleartext_content(records);
 
     // ---- 3. DAG ----
     let (dag_ok, dag_heads, collapsed_duplicates, dag_opt) = match dag::build(records) {

@@ -108,6 +108,16 @@ func TestBuildRefusesAnInconsistentLineage(t *testing.T) {
 			_, err := keylineage.Build(f.h, f.cur, r, []map[string]any{f.stmt})
 			return err
 		},
+		"compromise statement signed by a key that is not the successor": func() error {
+			c := setup(t, "compromise")
+			bad, err := keylineage.Sign(c.h, c.old, c.cur, at, "compromise", nil, priv(t, newSeed))
+			if err != nil {
+				return err
+			}
+			bad["sig_new"] = forgedSig(t, c, bad)
+			_, err = keylineage.Build(c.h, c.cur, c.ret, []map[string]any{bad})
+			return err
+		},
 		"chain does not reach the current key": func() error {
 			other := keylineage.Key{ID: "k2", Epoch: 2, PublicKey: f.cur.PublicKey}
 			_, err := keylineage.Build(f.h, other, f.ret, []map[string]any{f.stmt})
@@ -143,4 +153,17 @@ func TestCompromiseStatementCarriesNoOldKeySignature(t *testing.T) {
 	if _, err := keylineage.Build(f.h, f.cur, f.ret, []map[string]any{f.stmt}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// forgedSig signs the statement's digest with a key that is not the successor's.
+func forgedSig(t *testing.T, f fx, st map[string]any) string {
+	t.Helper()
+	thief := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	fake := keylineage.Key{ID: f.cur.ID, Epoch: f.cur.Epoch, PublicKey: keylineage.PubString(thief.Public().(ed25519.PublicKey))}
+	s2, err := keylineage.Sign(f.h, f.old, fake, at, "compromise", nil, thief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the same message layout, signed by the thief over the thief's own statement: it must not verify for ours
+	return s2["sig_new"].(string)
 }
