@@ -670,7 +670,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "20356d4cf453ed82b5e5cd925f2380a6fbc7ff6a29eabcee9a699aed3903cb0b"
+          "sha256": "a0b2a2f0fe49782416bf57ebf8aebc7e461c890eda2bdd87060d8d0ba271419a"
         }
       ],
       "mutants": [
@@ -705,7 +705,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "20356d4cf453ed82b5e5cd925f2380a6fbc7ff6a29eabcee9a699aed3903cb0b"
+          "sha256": "a0b2a2f0fe49782416bf57ebf8aebc7e461c890eda2bdd87060d8d0ba271419a"
         }
       ],
       "mutants": [
@@ -744,7 +744,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "20356d4cf453ed82b5e5cd925f2380a6fbc7ff6a29eabcee9a699aed3903cb0b"
+          "sha256": "a0b2a2f0fe49782416bf57ebf8aebc7e461c890eda2bdd87060d8d0ba271419a"
         }
       ],
       "mutants": [
@@ -1299,7 +1299,7 @@
         {
           "path": "core/src/verify/headline.rs",
           "symbol": "month_claim_verdict",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          "sha256": "eeb2536d03c9129380db7f61a49c14ac70b18999c60879bb8b69cde33416a202"
         }
       ],
       "mutants": [
@@ -1427,7 +1427,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "20356d4cf453ed82b5e5cd925f2380a6fbc7ff6a29eabcee9a699aed3903cb0b"
+          "sha256": "a0b2a2f0fe49782416bf57ebf8aebc7e461c890eda2bdd87060d8d0ba271419a"
         }
       ],
       "mutants": [
@@ -1832,7 +1832,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "brokered_use_is_valid",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          "sha256": "c918e9a7b0e90d8c36c4aa63546be925f2fb18c71725989d25c4cf1bd00488c1"
         }
       ],
       "mutants": [
