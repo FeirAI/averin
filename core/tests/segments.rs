@@ -809,3 +809,23 @@ fn an_intermediate_checkpoint_naming_a_head_the_month_does_not_carry_fails() {
     assert!(!r.ok);
     assert!(issues(&r).contains("OMISSION"), "{}", issues(&r));
 }
+
+// ---- committed fixtures: the same three months, for the browser verifier's skew test ----
+
+/// `spec/fixtures/segment-<month>.json` are the three months of `build()` as `split_bundle` cuts them. A drift
+/// fails here; `AVERIN_WRITE_FIXTURES=1 cargo test --test segments committed_segment_fixtures` rewrites them.
+#[test]
+fn committed_segment_fixtures_match_the_builder() {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../spec/fixtures");
+    for (month, bundle) in segments() {
+        let path = dir.join(format!("segment-{month}.json"));
+        let want = bundle.serialize() + "\n";
+        if std::env::var("AVERIN_WRITE_FIXTURES").is_ok() {
+            std::fs::write(&path, &want).unwrap();
+        }
+        let have = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("{}: {e} (run with AVERIN_WRITE_FIXTURES=1)", path.display())
+        });
+        assert_eq!(have, want, "{} drifted from the builder", path.display());
+    }
+}
