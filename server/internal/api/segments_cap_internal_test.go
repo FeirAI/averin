@@ -66,7 +66,7 @@ func TestOverTheCapIsRefusedWithAPointerToMonths(t *testing.T) {
 
 // The cap is on the serialized bundle, not on the records alone: with the cap one byte under the real export, the
 // records themselves still fit but the bundle (checkpoints and keys included) does not, so it must be refused.
-func TestCapCountsTheSerializedBundleNotJustTheRecords(t *testing.T) {
+func TestOverTheCapCountsTheSerializedBundleNotJustTheRecords(t *testing.T) {
 	now := time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 	s := New(testCore(t), store.NewMem().WithClock(clock), "k0").WithClock(clock)

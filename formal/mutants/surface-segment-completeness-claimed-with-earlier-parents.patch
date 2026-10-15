@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index b8ec36c..e030286 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -8188,7 +8188,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+                     .collect();
+                 // Any parent outside the month means a dropped record can be hidden behind an earlier one: the
+                 // month alone cannot say its record set is complete. The chain command does.
+-                if dag_opt.as_ref().is_some_and(|d| !d.earlier_refs.is_empty()) {
++                if false && dag_opt.as_ref().is_some_and(|d| !d.earlier_refs.is_empty()) {
+                     v.push("record_completeness".to_string());
+                 }
+                 v

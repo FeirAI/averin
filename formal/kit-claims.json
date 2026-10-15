@@ -460,6 +460,22 @@
     "surface-segments-block-base-count-zero": {
       "tier": "full",
       "claim": "month-segments-server"
+    },
+    "surface-segment-base-frontier-carried-allowed": {
+      "tier": "full",
+      "claim": "month-segment-verifier"
+    },
+    "surface-segment-completeness-claimed-with-earlier-parents": {
+      "tier": "full",
+      "claim": "month-segment-verifier"
+    },
+    "surface-tsa-auth-header-over-http-accepted": {
+      "tier": "full",
+      "claim": "tsa-off-by-default-with-presets"
+    },
+    "surface-segments-bundle-cap-ignores-serialized-size": {
+      "tier": "full",
+      "claim": "month-segments-server"
     }
   },
   "claims": [
@@ -638,7 +654,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "4e10a9717a305b3625f63ab4eb0c5d7ea61f0eb6dd17453ad7bf0029d2bbb196"
+          "sha256": "613e98b1e550a326431bb9e5ae3dceef5668f446ca5b03279e3566c7b11cdd65"
         }
       ],
       "mutants": [
@@ -673,7 +689,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "4e10a9717a305b3625f63ab4eb0c5d7ea61f0eb6dd17453ad7bf0029d2bbb196"
+          "sha256": "613e98b1e550a326431bb9e5ae3dceef5668f446ca5b03279e3566c7b11cdd65"
         }
       ],
       "mutants": [
@@ -712,7 +728,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "4e10a9717a305b3625f63ab4eb0c5d7ea61f0eb6dd17453ad7bf0029d2bbb196"
+          "sha256": "613e98b1e550a326431bb9e5ae3dceef5668f446ca5b03279e3566c7b11cdd65"
         }
       ],
       "mutants": [
@@ -1252,7 +1268,7 @@
         {
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "verify_bundle_cmd",
-          "sha256": "0df7030cfaab1fd0465ba26986321b67119c9d5b69df0217a49db561dc942679"
+          "sha256": "f87f35bb87ee43e5021f870a3cee56f42ce501834ea53fdb59c06ef94e2c0709"
         },
         {
           "path": "core/src/bin/averin_verify.rs",
@@ -1390,7 +1406,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "4e10a9717a305b3625f63ab4eb0c5d7ea61f0eb6dd17453ad7bf0029d2bbb196"
+          "sha256": "613e98b1e550a326431bb9e5ae3dceef5668f446ca5b03279e3566c7b11cdd65"
         }
       ],
       "mutants": [
@@ -1431,7 +1447,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "d5bc7745f9c92f8c8709f6747fa1cebf5b9195ba0f210818dc89a87df4093db0"
+          "sha256": "1465d6cdd45e3aeef58ecb0905cf1dfbc5dab463795c1ed2b71f6c9da1d181c3"
         }
       ],
       "mutants": [
@@ -1685,7 +1701,7 @@
     {
       "id": "tsa-off-by-default-with-presets",
       "$comment": "legacy register: tsa-off-by-default-with-presets",
-      "statement": "The server enables timestamp anchoring only when AVERIN_TSA_PRESET or AVERIN_TSA_URL is set, resolves the freetsa preset to its URL and pin, refuses a preset together with a URL and an unknown preset, sends AVERIN_TSA_AUTH_HEADER only when it is configured, builds a request byte-identical to the one FreeTSA, DigiCert and Sectigo accepted, and unwraps each of their recorded responses to the recorded token.",
+      "statement": "The server enables timestamp anchoring only when AVERIN_TSA_PRESET or AVERIN_TSA_URL is set, resolves the freetsa preset to its URL and pin, refuses a preset together with a URL and an unknown preset, sends AVERIN_TSA_AUTH_HEADER only when it is configured and refuses to start with it unless the TSA URL is https, builds a request byte-identical to the one FreeTSA, DigiCert and Sectigo accepted, and unwraps each of their recorded responses to the recorded token.",
       "method": "test",
       "artifacts": [
         "server/cmd/averin-server/main.go",
@@ -1714,13 +1730,19 @@
           "path": "server/internal/witness/tsa.go",
           "symbol": "HTTPTSA.Stamp",
           "sha256": "97efc08ca37cfaf8f272d84446df02ce26a9b4edc0340bfec9f81c4f23a62eb6"
+        },
+        {
+          "path": "server/cmd/averin-server/main.go",
+          "symbol": "checkTSAAuthTransport",
+          "sha256": "41dfe3dc7c2181e1227d74cb29d1888789da35506f2403d1e67481c26c0a01e7"
         }
       ],
       "mutants": [
         "surface-tsa-preset-and-url-both-accepted",
         "surface-tsa-auth-header-not-sent",
         "surface-tsa-unknown-preset-accepted",
-        "surface-tsa-on-by-default"
+        "surface-tsa-on-by-default",
+        "surface-tsa-auth-header-over-http-accepted"
       ],
       "does_not_establish": "That an authority is reachable, accepts the request today or that a stamp is obtained: the tests serve recorded responses from a local HTTP server and never reach a live authority, and a failed stamp leaves the checkpoint un-anchored by design. That main wires resolveTSAConfig into srv.WithTSA: the wiring is read, not run, since a live-process test would need a network authority. That the preset's pinned key is the authority's current signing key; it is the key seen on 2026-10-15 and the operator confirms it before relying on an anchor.",
       "evidence_run": "38705908676"
@@ -1728,7 +1750,7 @@
     {
       "id": "month-segment-verifier",
       "$comment": "legacy register: month-segment-verification",
-      "statement": "The verifier checks a month segment on its own (carried base checkpoint verified like any checkpoint, chain from the base, checkpoints inside the stated UTC month and the base before it, latest frontier equal to the segment's heads including base heads no record references, record_count equal to the base's count plus the records carried, a caller's base pin equal to the stated base) and keeps the whole-history rules for a bundle with no base; split_bundle cuts a whole-history bundle by month and refuses months that go backwards and records no checkpoint commits; ChainState requires each month to start from the previous head and every cross-month use or outcome reference to exist in an earlier month.",
+      "statement": "The verifier checks a month segment on its own (carried base checkpoint verified like any checkpoint, chain from the base, checkpoints inside the stated UTC month and the base before it, latest frontier equal to the segment's heads including base heads no record references, record_count equal to the base's count plus the records carried, no carried record a member of the base frontier, a caller's base pin equal to the stated base) and keeps the whole-history rules for a bundle with no base; split_bundle cuts a whole-history bundle by month and refuses months that go backwards and records no checkpoint commits; ChainState requires each month to start from the previous head and every cross-month use or outcome reference to exist in an earlier month; a month with parents before its base lists their hashes and reports record_completeness as not evaluated, and ChainState refuses a parent that names no record in this or any earlier month.",
       "method": "test",
       "artifacts": [
         "core/src/segment.rs",
@@ -1750,7 +1772,7 @@
         {
           "path": "core/src/segment.rs",
           "symbol": "validate_segment_chain",
-          "sha256": "1df3f8d6ca551310ca377a0bb4e91673bba4624d654ffd7ed0147a5dc0a227f3"
+          "sha256": "01fe3c6095513b040d829e8624d7962de8f0c8bfdf4a32cde3885b009c5028b1"
         },
         {
           "path": "core/src/segment.rs",
@@ -1770,15 +1792,17 @@
         "surface-segment-base-heads-always-heads",
         "surface-segment-month-bounds-unchecked",
         "surface-segment-missing-parent-allowed-without-base",
-        "surface-chain-cross-month-reference-unresolved-passes"
+        "surface-chain-cross-month-reference-unresolved-passes",
+        "surface-segment-base-frontier-carried-allowed",
+        "surface-segment-completeness-claimed-with-earlier-parents"
       ],
-      "does_not_establish": "That earlier months are intact: a single month proves itself and its link, and only the chain over every month (or a pin from a month already verified) says more. The grant-log transparency chain, federation heads and the use-to-grant match across a month boundary: a month reports the first two as not evaluated and lists the cross-month uses and outcomes unresolved, and the chain checks only that the named record exists in an earlier month. That a record named as unresolved was not substituted by an unrelated earlier record with the same id: existence is checked by record id. That the exclusion of a use whose grant is absent from the bundle is limited to grants that are not in the bundle: no test builds a grant that is in the segment but fails to index. That the tests' bundles come from a server: they are built with the core seal functions (the server claim covers that), and the segment rules that read a deployment attestation or revocation list are exercised only by the server tests.",
+      "does_not_establish": "That a single month's record set is complete when it has parents before its base: a record dropped from it can be replaced by an earlier month's record without changing the count, the heads or a signature, so the month reports record_completeness as not evaluated and only the chain over every month rules the swap out. That earlier months are intact: a single month proves itself and its link, and only the chain over every month (or a pin from a month already verified) says more. The grant-log transparency chain, federation heads and the use-to-grant match across a month boundary: a month reports the first two as not evaluated and lists the cross-month uses and outcomes unresolved, and the chain checks only that the named record exists in an earlier month. That a record named as unresolved was not substituted by an unrelated earlier record with the same id: existence is checked by record id. That the exclusion of a use whose grant is absent from the bundle is limited to grants that are not in the bundle: no test builds a grant that is in the segment but fails to index. That the tests' bundles come from a server: they are built with the core seal functions (the server claim covers that), and the segment rules that read a deployment attestation or revocation list are exercised only by the server tests.",
       "evidence_run": "38705908676"
     },
     {
       "id": "month-segments-server",
       "$comment": "legacy register: month-segment-verification",
-      "statement": "The server cuts a project's checkpoint chain by the UTC month of created_ts, serves a month as the base checkpoint plus the month's checkpoints and exactly the records they commit beyond the base (read from the store by range, not the whole history), stamps the segment block with the base's seq, hash and record count, refuses a malformed or empty month, refuses a whole history or a month over the single-bundle limit with 413, and every month it serves verifies offline under pinned keys, chains to the previous month's head and verifies in the server's own self-view.",
+      "statement": "The server cuts a project's checkpoint chain by the UTC month of created_ts, serves a month as the base checkpoint plus the month's checkpoints and exactly the records they commit beyond the base (read from the store by range, not the whole history), stamps the segment block with the base's seq, hash and record count, refuses a malformed or empty month, refuses a whole history or a month whose serialized bundle is over the single-bundle limit with 413, and every month it serves verifies offline under pinned keys, chains to the previous month's head and verifies in the server's own self-view.",
       "method": "test",
       "artifacts": [
         "server/internal/api/segments.go",
@@ -1809,7 +1833,7 @@
         {
           "path": "server/internal/api/server.go",
           "symbol": "buildBundleView",
-          "sha256": "6b0438ccba309e1104a63921fc4e3a0bb0eedde9429cb3b37ce41ca98402528f"
+          "sha256": "3c7513c3f6d8455c7c5f5e1ee7e1e6dff56cfbc5f53361d7d157fcb56659ec8e"
         }
       ],
       "mutants": [
@@ -1817,9 +1841,10 @@
         "surface-segments-record-range-drops-last",
         "surface-segments-base-checkpoint-not-carried",
         "surface-segments-size-cap-not-enforced",
-        "surface-segments-block-base-count-zero"
+        "surface-segments-block-base-count-zero",
+        "surface-segments-bundle-cap-ignores-serialized-size"
       ],
-      "does_not_establish": "That the Postgres store returns the same range as the in-memory store: these tests run against the in-memory store, and RecordsPage's SQL ordering is covered only by its own store tests. That a month's disclosures are limited to its own records: no test exports a disclosing mode for a month. That the size limit equals the verifier's: the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test. That a month stays under the limit as a project grows: a month over 256 MiB is refused, not split. The revocation and attestation behaviour of a month is checked only where the tests configure them (anchored months verify clean; the self-view reports the unanchored revocation list exactly as a whole-history export does).",
+      "does_not_establish": "That the Postgres store returns the same range as the in-memory store: these tests run against the in-memory store, and RecordsPage's SQL ordering is covered only by its own store tests. That a month's disclosures are limited to its own records: no test exports a disclosing mode for a month. That the size limit equals the verifier's: the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test. That a month stays under the limit as a project grows: a month over 256 MiB is refused, not split. The revocation and attestation behaviour of a month is checked only where the tests configure them (anchored months verify clean; the self-view reports the unanchored revocation list exactly as a whole-history export does). That a month's record range is right when the wall clock stepped back on Postgres: the range is a position in (inserted_at, ctid) order and a stepped-back clock makes the month fail to verify rather than verify a wrong set; the Postgres month test runs only in the Postgres CI job.",
       "evidence_run": "38705908676"
     }
   ]

@@ -614,7 +614,7 @@
     },
     {
       "id": "tsa-off-by-default-with-presets",
-      "claim": "Trusted timestamps are off unless an operator sets AVERIN_TSA_PRESET or AVERIN_TSA_URL; the freetsa preset is one setting and logs the signing key to pin; AVERIN_TSA_URL takes any other authority and AVERIN_TSA_AUTH_HEADER the credential header a paid one needs; setting a preset and a URL together, or an unknown preset, is fatal at start-up. The client's request is byte-identical to the one FreeTSA, DigiCert and Sectigo accepted and unwraps each of their recorded responses to the recorded token. Not that an authority is reachable or that anchoring succeeds (a TSA outage stores the checkpoint un-anchored), and the pinned preset key is a trust decision the operator confirms.",
+      "claim": "Trusted timestamps are off unless an operator sets AVERIN_TSA_PRESET or AVERIN_TSA_URL; the freetsa preset is one setting and logs the signing key to pin; AVERIN_TSA_URL takes any other authority and AVERIN_TSA_AUTH_HEADER the credential header a paid one needs, which is refused at start-up unless the TSA URL is https; setting a preset and a URL together, or an unknown preset, is fatal at start-up. The client's request is byte-identical to the one FreeTSA, DigiCert and Sectigo accepted and unwraps each of their recorded responses to the recorded token. Not that an authority is reachable or that anchoring succeeds (a TSA outage stores the checkpoint un-anchored), and the pinned preset key is a trust decision the operator confirms.",
       "class": "tested-implementation-with-deployment-limit",
       "targets": [
         "Go server"
@@ -629,6 +629,10 @@
           "symbol": "resolveTSAConfig"
         },
         {
+          "file": "server/cmd/averin-server/main.go",
+          "symbol": "checkTSAAuthTransport"
+        },
+        {
           "file": "server/internal/witness/tsa_preset.go",
           "symbol": "LookupTSAPreset"
         },
@@ -641,6 +645,10 @@
         {
           "file": "server/cmd/averin-server/tsa_config_test.go",
           "symbol": "TestResolveTSAConfig"
+        },
+        {
+          "file": "server/cmd/averin-server/tsa_config_test.go",
+          "symbol": "TestTSAAuthHeaderRequiresHTTPS"
         },
         {
           "file": "server/internal/witness/tsa_recorded_test.go",
@@ -662,7 +670,7 @@
     },
     {
       "id": "month-segment-verification",
-      "claim": "A month segment (bundle.segment, averin.segment.v1) verifies on its own: its base checkpoint is carried and checked like every checkpoint, the chain starts at that base, every checkpoint falls in the stated UTC month and the base before it, the latest frontier equals the segment's heads and its record_count equals the base's count plus the records carried, and a base the caller pinned must be the base stated. averin-verify chain additionally requires each month to start from the previous month's head, months and projects to agree, every parent a month points before its base to exist in an earlier month, and every grant or intent a use or outcome names across a month boundary to be held by an earlier month. A month reports the grant-log chain and federation heads as not evaluated and never counts a cross-month use or outcome as matched. Not that earlier months are intact (only the chain over all of them says so), the use-to-grant predicate across months, the grant-log transparency chain over a whole history, or that a recorder showing different histories to different auditors is caught (that needs external anchoring).",
+      "claim": "A month segment (bundle.segment, averin.segment.v1) verifies on its own: its base checkpoint is carried and checked like every checkpoint, the chain starts at that base, every checkpoint falls in the stated UTC month and the base before it, the latest frontier equals the segment's heads, its record_count equals the base's count plus the records carried and no carried record is a member of the base frontier, and a base the caller pinned must be the base stated. averin-verify chain additionally requires each month to start from the previous month's head, months and projects to agree, every parent a month points before its base to exist in an earlier month, and every grant or intent a use or outcome names across a month boundary to be held by an earlier month. A month reports the grant-log chain and federation heads as not evaluated and never counts a cross-month use or outcome as matched. Not that a month with parents before its base has a complete record set on its own (such a month reports record_completeness as not evaluated, and only the chain closes it), that earlier months are intact (only the chain over all of them says so), the use-to-grant predicate across months, the grant-log transparency chain over a whole history, or that a recorder showing different histories to different auditors is caught (that needs external anchoring).",
       "class": "tested-implementation",
       "targets": [
         "native Rust",
@@ -711,6 +719,14 @@
         },
         {
           "file": "core/tests/segments.rs",
+          "symbol": "a_dropped_record_replaced_by_a_base_frontier_record_fails_the_month"
+        },
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "a_dropped_record_replaced_by_an_old_record_is_reported_incomplete_and_the_chain_catches_it"
+        },
+        {
+          "file": "core/tests/segments.rs",
           "symbol": "a_month_with_a_missing_record_fails_the_count_and_the_dag"
         },
         {
@@ -724,6 +740,14 @@
         {
           "file": "server/internal/api/segments_cap_internal_test.go",
           "symbol": "TestOverTheCapIsRefusedWithAPointerToMonths"
+        },
+        {
+          "file": "server/internal/api/segments_cap_internal_test.go",
+          "symbol": "TestOverTheCapCountsTheSerializedBundleNotJustTheRecords"
+        },
+        {
+          "file": "server/internal/api/segments_e2e_test.go",
+          "symbol": "TestMonthSegmentsOnPostgres"
         },
         {
           "file": "formal/mutants/surface-segment-count-ignores-base.patch",
