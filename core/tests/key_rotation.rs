@@ -300,3 +300,16 @@ fn a_successor_that_is_also_a_pinned_role_key_is_not_trusted() {
     );
     assert!(none_proven(&r));
 }
+
+#[test]
+fn a_compromise_statement_extends_no_trust_even_when_nothing_else_marks_the_old_key_bad() {
+    // the bundle lists the old key as merely retired and the auditor pinned it plain: the only thing that stops
+    // the handover is the statement's own reason
+    let b = bundle_with(vec![statement("compromise", None, &new_sk())], "retired");
+    let r = verify_bundle_with(&b, &pin(&old_sk(), None, None));
+    assert_eq!(
+        (r.key_rotations_verified, r.key_rotations_chain_trusted),
+        (1, 0)
+    );
+    assert!(none_proven(&r));
+}

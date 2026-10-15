@@ -73,6 +73,13 @@ func TestBuildRefusesAnInconsistentLineage(t *testing.T) {
 			_, err := keylineage.Build(f.h, f.cur, f.ret, nil)
 			return err
 		},
+		"a second retired key is left unlinked": func() error {
+			r := append([]keylineage.RetiredFile{}, f.ret...)
+			other := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+			r = append(r, keylineage.RetiredFile{SigningKeyID: "k0b", KeyEpoch: 0, PublicKey: keylineage.PubString(other.Public().(ed25519.PublicKey)), KeyStatus: "retired", StatusChangedAt: at})
+			_, err := keylineage.Build(f.h, f.cur, r, []map[string]any{f.stmt})
+			return err
+		},
 		"statement tampered after signing": func() error {
 			bad := map[string]any{}
 			for k, v := range f.stmt {
