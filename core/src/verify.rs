@@ -266,6 +266,16 @@ pub struct VerifyReport {
     /// Selective-disclosure entries in the bundle, and how many matched their record's commitment.
     pub disclosures_total: usize,
     pub disclosures_verified: usize,
+    /// Signed key-rotation statements in `bundle.key_rotations` (AVE-04), how many verified (both required
+    /// signatures valid under the keys the bundle lists), and how many signing keys became trusted ONLY through
+    /// a verified `scheduled` rotation from an externally pinned key that was not revoked or compromised.
+    pub key_rotations_total: usize,
+    pub key_rotations_verified: usize,
+    pub key_rotations_chain_trusted: usize,
+    /// Records whose body carries `extensions.content_preview` (AVE-02 legacy): prompt or answer text signed
+    /// in the clear, which no retention purge can erase. Zero on a bundle sealed after the server began
+    /// committing that text. A count for the reader, never a verdict input.
+    pub cleartext_content_records: usize,
     /// Credential-broker grants (`event_type=credential_grant`) and how many verified to
     /// `gateway_enforced` under a pinned authority key (Level 3 Tier-A grant accountability).
     pub grant_total: usize,
@@ -1506,6 +1516,19 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("chain_ok".into(), CanonValue::Bool(r.chain_ok)),
         ("disclosures_total".into(), count(r.disclosures_total)),
         ("disclosures_verified".into(), count(r.disclosures_verified)),
+        ("key_rotations_total".into(), count(r.key_rotations_total)),
+        (
+            "key_rotations_verified".into(),
+            count(r.key_rotations_verified),
+        ),
+        (
+            "key_rotations_chain_trusted".into(),
+            count(r.key_rotations_chain_trusted),
+        ),
+        (
+            "cleartext_content_records".into(),
+            count(r.cleartext_content_records),
+        ),
         ("grant_total".into(), count(r.grant_total)),
         ("grant_verified".into(), count(r.grant_verified)),
         ("denied_grants".into(), count(r.denied_grants)),
@@ -2264,6 +2287,10 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         chain_ok: false,
         disclosures_total: 0,
         disclosures_verified: 0,
+        key_rotations_total: 0,
+        key_rotations_verified: 0,
+        key_rotations_chain_trusted: 0,
+        cleartext_content_records: 0,
         grant_total: 0,
         grant_verified: 0,
         denied_grants: 0,
@@ -5156,6 +5183,206 @@ fn check_role_disjointness(
     None
 }
 
+/// Signing domain of a key-rotation statement (AVE-04): the retiring and the successor key each sign the digest
+/// of the statement under it. A Lean `Family` and an oracle case pin its separation from every other domain.
+pub const KEY_ROTATION_SIG_TAG: &str = "averin.key_rotation.v1";
+
+/// AVE-02: the number of records whose signed body carries `extensions.content_preview`, prompt or answer text
+/// in the clear that no retention purge can erase. Informational: it feeds no verdict.
+fn count_cleartext_content(records: &[CanonValue]) -> usize {
+    records
+        .iter()
+        .filter(|r| {
+            r.get("extensions")
+                .is_some_and(|e| e.get("content_preview").is_some())
+        })
+        .count()
+}
+
+/// Outcome of [`evaluate_key_rotations`].
+struct RotationEval {
+    total: usize,
+    verified: usize,
+    /// Keys trusted only because a verified `scheduled` rotation links them to a pinned key.
+    chain_trusted: Vec<VerifyingKey>,
+}
+
+/// A key reference inside a rotation statement: exactly `signing_key_id`, `key_epoch`, `public_key`.
+fn rotation_key_ref(v: &CanonValue) -> Option<(String, i64, String)> {
+    let o = v.as_object()?;
+    if o.len() != 3 {
+        return None;
+    }
+    Some((
+        s(v, "signing_key_id")?,
+        v.get("key_epoch")?.as_int()?,
+        s(v, "public_key")?,
+    ))
+}
+
+/// AVE-04: verify `bundle.key_rotations`, the signed statements that link a retired recording key to its
+/// successor. A statement is `{kind:"key_rotation", old_key, new_key, rotated_at, reason, sig_new[, sig_old]}`;
+/// both keys must be listed in the bundle's `keys` with the stated public key; `sig_new` (and, for a `scheduled`
+/// reason, `sig_old`) is an Ed25519 signature over the digest of the statement without its signatures, under the
+/// `averin.key_rotation.v1` domain. A malformed or unverifiable statement is a hard issue (fail closed).
+///
+/// Only a `scheduled` rotation extends trust, and only from a key that is already externally pinned and whose
+/// pinned and bundle-listed status is not revoked or compromised: the old key authorises its successor. A
+/// `compromise` rotation is signed by the successor alone (the old key proves nothing once stolen) and links the
+/// keys for the reader only; the auditor must pin the successor directly. A successor that collides with a
+/// pinned role key is refused. Without external pinning nothing is extended.
+fn evaluate_key_rotations(
+    bundle: &CanonValue,
+    keys: &BTreeMap<(String, i64), KeyEntry>,
+    opts: &VerifyOptions,
+    issues: &mut Vec<String>,
+) -> RotationEval {
+    let mut out = RotationEval {
+        total: 0,
+        verified: 0,
+        chain_trusted: Vec::new(),
+    };
+    let Some(raw) = bundle.get("key_rotations") else {
+        return out;
+    };
+    let Some(list) = raw.as_array() else {
+        issues.push("key_rotations is not an array".into());
+        return out;
+    };
+    let mut handovers: Vec<(VerifyingKey, String, VerifyingKey)> = Vec::new();
+    for (i, st) in list.iter().enumerate() {
+        out.total += 1;
+        let fail = |issues: &mut Vec<String>, why: &str| {
+            issues.push(format!("key_rotations[{i}]: {why}"));
+        };
+        let Some(obj) = st.as_object() else {
+            fail(issues, "not an object");
+            continue;
+        };
+        if let Some((k, _)) = obj.iter().find(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "kind" | "old_key" | "new_key" | "rotated_at" | "reason" | "sig_new" | "sig_old"
+            )
+        }) {
+            fail(issues, &format!("unknown field {k:?}"));
+            continue;
+        }
+        if s(st, "kind").as_deref() != Some("key_rotation") {
+            fail(issues, "kind is not key_rotation");
+            continue;
+        }
+        let reason = s(st, "reason").unwrap_or_default();
+        if reason != "scheduled" && reason != "compromise" {
+            fail(issues, "reason is not scheduled|compromise");
+            continue;
+        }
+        match s(st, "rotated_at") {
+            Some(t) if is_canonical_ts(&t) => {}
+            _ => {
+                fail(issues, "rotated_at is not a canonical timestamp");
+                continue;
+            }
+        }
+        let (Some(old), Some(new)) = (
+            st.get("old_key").and_then(rotation_key_ref),
+            st.get("new_key").and_then(rotation_key_ref),
+        ) else {
+            fail(
+                issues,
+                "old_key/new_key must be exactly {signing_key_id, key_epoch, public_key}",
+            );
+            continue;
+        };
+        if (old.0.as_str(), old.1) == (new.0.as_str(), new.1) || old.2 == new.2 {
+            fail(issues, "old and new key are the same key");
+            continue;
+        }
+        let (Some(oe), Some(ne)) = (
+            keys.get(&(old.0.clone(), old.1)),
+            keys.get(&(new.0.clone(), new.1)),
+        ) else {
+            fail(issues, "old_key/new_key is not listed in the bundle keys");
+            continue;
+        };
+        let (Ok(ovk), Ok(nvk)) = (decode_pubkey(&old.2), decode_pubkey(&new.2)) else {
+            fail(issues, "public_key does not decode");
+            continue;
+        };
+        if ovk != oe.vk || nvk != ne.vk {
+            fail(issues, "public_key differs from the bundle key entry");
+            continue;
+        }
+        let mut body = obj.clone();
+        body.retain(|(k, _)| k != "sig_new" && k != "sig_old");
+        let digest = crate::hashx::sha256_prefixed(CanonValue::Object(body).serialize().as_bytes());
+        let sig_ok = |field: &str, vk: &VerifyingKey| {
+            s(st, field).is_some_and(|sig| {
+                crate::sign::verify(KEY_ROTATION_SIG_TAG, &digest, &sig, vk).is_ok()
+            })
+        };
+        if !sig_ok("sig_new", &nvk) {
+            fail(issues, "sig_new does not verify under the new key");
+            continue;
+        }
+        if reason == "scheduled" {
+            if !sig_ok("sig_old", &ovk) {
+                fail(
+                    issues,
+                    "a scheduled rotation needs a valid sig_old from the old key",
+                );
+                continue;
+            }
+            handovers.push((ovk, oe.status.clone(), nvk));
+        }
+        out.verified += 1;
+    }
+    let Some(pinned) = opts.trusted_keys.as_ref() else {
+        return out;
+    };
+    let mut trusted: Vec<(VerifyingKey, String)> = pinned
+        .iter()
+        .map(|t| (t.vk, t.status.clone().unwrap_or_else(|| "active".into())))
+        .collect();
+    let role_sets: [&Vec<VerifyingKey>; 7] = [
+        &opts.trusted_authority_keys,
+        &opts.resource_authority_keys,
+        &opts.taxonomy_keys,
+        &opts.attestation_keys,
+        &opts.trusted_tsa_keys,
+        &opts.cosig_approver_keys,
+        &opts.revocation_keys,
+    ];
+    loop {
+        let mut changed = false;
+        for (ovk, bundle_status, nvk) in &handovers {
+            if trusted.iter().any(|(k, _)| k == nvk) {
+                continue;
+            }
+            let Some((_, pinned_status)) = trusted.iter().find(|(k, _)| k == ovk) else {
+                continue;
+            };
+            if status_rank(&worst_status(pinned_status, bundle_status)) > 1 {
+                continue;
+            }
+            if role_sets.iter().any(|set| set.contains(nvk)) {
+                issues.push(
+                    "key_rotations: the successor key is also a pinned role key; refusing to extend trust (role separation)"
+                        .into(),
+                );
+                continue;
+            }
+            trusted.push((*nvk, "active".into()));
+            out.chain_trusted.push(*nvk);
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+    out
+}
+
 /// Build the bundle's signing-key store: (signing_key_id, key_epoch) -> KeyEntry, decoding each declared
 /// public_key. A malformed entry (undecodable key, or missing id/epoch/public_key) is recorded as an issue and
 /// skipped — that simply leaves any record referencing it signature-unverifiable downstream (fail-closed).
@@ -5275,12 +5502,30 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
 
     // Seam 2 — the bundle's signing-key store ((signing_key_id, key_epoch) -> KeyEntry).
     let keys = build_key_store(key_entries, &mut issues);
+    // AVE-04: signed key-rotation statements extend the pinned set by the keys a pinned, not-revoked,
+    // not-compromised key handed over to. Without external pinning the set stays absent (None).
+    let rotation_eval = evaluate_key_rotations(bundle, &keys, opts, &mut issues);
+    let effective_trusted: Option<Vec<TrustedKey>> = opts.trusted_keys.as_ref().map(|set| {
+        set.iter()
+            .map(|t| TrustedKey {
+                vk: t.vk,
+                status: t.status.clone(),
+                status_changed_at: t.status_changed_at.clone(),
+            })
+            .chain(
+                rotation_eval
+                    .chain_trusted
+                    .iter()
+                    .map(|vk| TrustedKey::from(*vk)),
+            )
+            .collect()
+    });
     let pinned_for = |vk: &VerifyingKey| -> Option<&TrustedKey> {
-        opts.trusted_keys
+        effective_trusted
             .as_ref()
             .and_then(|set| set.iter().find(|t| &t.vk == vk))
     };
-    let is_trusted = |vk: &VerifyingKey| match &opts.trusted_keys {
+    let is_trusted = |vk: &VerifyingKey| match &effective_trusted {
         Some(_) => pinned_for(vk).is_some(),
         None => true,
     };
@@ -5528,6 +5773,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // selective-disclosure entries (optional): bind revealed (value, nonce) to record commitments.
     let (disclosures_total, disclosures_verified, cred_descriptors) =
         verify_disclosures(bundle, records, &mut issues);
+    let cleartext_content_records = count_cleartext_content(records);
 
     // ---- 3. DAG ----
     let (dag_ok, dag_heads, collapsed_duplicates, dag_opt) = match dag::build(records) {
@@ -7626,6 +7872,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         chain_ok,
         disclosures_total,
         disclosures_verified,
+        key_rotations_total: rotation_eval.total,
+        key_rotations_verified: rotation_eval.verified,
+        key_rotations_chain_trusted: rotation_eval.chain_trusted.len(),
+        cleartext_content_records,
         grant_total,
         denied_grants,
         grant_verified,
@@ -7720,8 +7970,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         && report.introspection_status == "attested"
         && report.introspection_transcripts_total > 0
         && report.introspection_transcripts_verified == report.introspection_transcripts_total;
-    let pinned_signer_keys: Vec<[u8; 32]> = opts
-        .trusted_keys
+    let pinned_signer_keys: Vec<[u8; 32]> = effective_trusted
         .as_ref()
         .map(|set| set.iter().map(|k| k.vk.to_bytes()).collect())
         .unwrap_or_default();

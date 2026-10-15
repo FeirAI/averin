@@ -119,6 +119,14 @@
       {#if historicalDecision}
         <div class="lvl">Requested historical_authorized_as_of_snapshot claim: <b>{historicalDecision}</b>. The legacy verdict above is a separate integrity result and can differ; read this claim from claims.*, not from ok.</div>
       {/if}
+      {#if report.key_rotations_total}
+        <div class="lvl">Signed key rotations verified: {report.key_rotations_verified}/{report.key_rotations_total}
+          ({report.key_rotations_chain_trusted} key(s) trusted through the chain from a pinned key).</div>
+      {/if}
+      {#if report.cleartext_content_records}
+        <div class="lvl">{report.cleartext_content_records} record(s) carry prompt or answer text signed in the
+          clear (extensions.content_preview); it cannot be erased from this history.</div>
+      {/if}
       {#if !report.keys_externally_pinned}
         <div class="lvl">Keys are bundle-supplied (not externally pinned): this proves internal
           consistency under the bundle's own key claims, not authenticity against an out-of-band

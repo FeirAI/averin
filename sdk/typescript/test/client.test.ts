@@ -78,7 +78,8 @@ test("client submits with idempotency key and returns the record", async () => {
   expect(captured.url).toBe("http://localhost:8080/v2/records");
   expect(captured.headers["Idempotency-Key"]).toBe("fixed");
   expect(captured.body.idempotency_key).toBe("fixed");
-  expect((captured.body.extensions as any).content_preview.rationale).toBe("why");
+  expect(captured.body.rationale).toBe("why");
+  expect(captured.body.extensions).toBeUndefined();
   expect(out.content_hash).toBe("sha256:abc");
 });
 

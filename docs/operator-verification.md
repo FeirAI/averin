@@ -82,6 +82,24 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
 All keys are base64url-no-pad ed25519 public keys with an `ed25519pub:` prefix (the form
 `averin-server` logs at startup, and the form `core.PubKey()` returns).
 
+## Following averin's own recording-key rotation (ADR 0008)
+
+When the operator rotates averin's recording key, each export lists the current and every retired key and
+carries signed `key_rotations`. If you pinned only the old key in `signing_keys`, the verifier trusts the
+new key for the records it signed once a `scheduled` statement signed by both keys links it to your pinned
+key (`key_rotations_chain_trusted` in the report). Two rules keep that safe: a key you (or the bundle) mark
+`compromised` or `revoked` hands nothing over, and a `compromise` statement never extends trust, so after
+a compromise pin the new key yourself and pin the old one like this:
+
+```jsonc
+{ "signing_keys": [
+    { "key": "ed25519pub:<old-key>", "status": "compromised", "status_changed_at": "2026-06-15T10:05:00.000Z" },
+    "ed25519pub:<new-key>" ] }
+```
+
+Records the old key signed stay trusted only when a verified timestamp anchor shows they existed before
+`status_changed_at`. The operator's side is in [docs/dev/KEY-ROTATION.md](dev/KEY-ROTATION.md).
+
 ## Rotating / retiring a compromised role key (ADR 0006 §1)
 
 If you learn (out of band — a key-transparency record, an incident) that one of your pinned **authority** keys
