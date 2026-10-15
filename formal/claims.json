@@ -35,7 +35,7 @@
       "sources": [{"file": "core/src/record.rs", "symbol": "pub(crate) fn record_hash"}, {"file": "core/src/canon.rs", "symbol": "pub(crate) fn write_canonical"}, {"file": "core/src/sign.rs", "symbol": "pub fn preimage"}],
       "proofs": [{"file": "formal/production/Refinement/Seal.lean", "symbol": "record_hash_binding"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_seal_sound"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_ne_checkpoint"}, {"file": "formal/run-production-refinement.sh", "symbol": "production refinement: OK"}, {"file": "formal/production/ProductionAudit.lean", "symbol": "def runAudit"}],
       "gates": ["formal-production", "formal-mutants-fast"],
-      "evidence_run": "37712087870",
+      "evidence_run": "38705908676",
       "scheduled_gates": ["formal-mutants-full"],
       "scheduled_evidence_run": "37678805697"
     },
@@ -158,7 +158,8 @@
       "assumptions": ["TSA SPKI pinned out of band", "the recorded responses are what those authorities send today; no scheduled job re-stamps at them", "RSA signature verification by the rsa crate (public-key operations only)"],
       "sources": [{"file": "core/src/rfc3161.rs", "symbol": "verify_token"}, {"file": "core/src/rfc3161.rs", "symbol": "verify_rsa"}, {"file": "core/src/anchor.rs", "symbol": "AnchorError::Unsupported"}],
       "proofs": [{"file": "core/src/anchor.rs", "symbol": "rfc3161_no_trusted_tsa_is_an_error_not_a_pass"}, {"file": "core/src/rfc3161.rs", "symbol": "recorded_real_tsa_tokens_verify_and_bind"}, {"file": "core/src/rfc3161.rs", "symbol": "synthetic_rsa_profiles_verify_and_reject_tampering"}, {"file": "core/src/rfc3161.rs", "symbol": "rsa_keys_under_2048_bits_are_refused"}, {"file": "server/internal/witness/tsa_recorded_test.go", "symbol": "TestHTTPTSAUnwrapsRecordedRealResponses"}, {"file": "scripts/check-staticlib-fresh.sh", "symbol": "the cgo staticlib is OLDER than core source"}, {"file": "formal/mutants/surface-rsa-signature-checked-over-wrong-bytes.patch", "symbol": "hash.digest(tst_bytes)"}],
-      "gates": ["core", "store-postgres", "wasm"]
+      "gates": ["core", "store-postgres", "wasm"],
+      "evidence_run": "38705908676"
     },
     {
       "id": "authority-v3-semantic-body-binding",
@@ -169,7 +170,7 @@
       "sources": [{"file": "core/src/authority.rs", "symbol": "pub fn subject_projection"}, {"file": "server/internal/api/authority_v3.go", "symbol": "finalizeSemanticRecord"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "authority_v3_digest_bound"}],
       "proofs": [{"file": "core/tests/golden.rs", "symbol": "sdk_prepared_v3_record_matches_govder_subject_bytes"}, {"file": "core/tests/adversarial.rs", "symbol": "v3_signed_grant_and_pop_use_satisfy_body_bound_authorization"}, {"file": "core/src/authority.rs", "symbol": "v3_binds_semantic_body_but_not_recorder_envelope"}, {"file": "server/internal/api/authority_v3_test.go", "symbol": "TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal"}, {"file": "server/internal/api/authority_v3_test.go", "symbol": "TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite"}],
       "gates": ["core", "server", "formal-lean", "formal-refinement"],
-      "evidence_run": "37712087870"
+      "evidence_run": "38705908676"
     },
     {
       "id": "historical-v2-authority-is-unbound",
@@ -223,7 +224,7 @@
       "sources": [{"file": "core/src/verify/temporal.rs", "symbol": "pub(super) fn classify"}, {"file": "core/src/verify/verdict.rs", "symbol": "historical_authorized_as_of_snapshot"}, {"file": "core/src/verify.rs", "symbol": "fn check_use"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "AllocateAuthorizationOrder"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "SnapshotBoundary"}, {"file": "server/migrations/0007_temporal_revocation.sql", "symbol": "revocation_events"}],
       "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "temporal_revocation_decision_table"}, {"file": "core/tests/adversarial.rs", "symbol": "temporal_blocked_use_runs_every_later_check_before_a_historical_positive"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "earlier_snapshot_cannot_flip"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "historical_requires_policy"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalCausalRevokeUseSchedulesPostgres"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalSnapshotExportConsistencyPostgres"}, {"file": "server/internal/api/temporal_revocation_test.go", "symbol": "TestTemporalProducerToVerifierHistoricalClaim"}],
       "gates": ["core", "server", "store-postgres", "formal-lean", "formal-refinement", "formal-mutants-fast"],
-      "evidence_run": "37712087870",
+      "evidence_run": "38705908676",
       "scheduled_gates": ["formal-mutants-full"],
       "scheduled_evidence_run": "37678805697"
     },
@@ -306,7 +307,8 @@
       "gates": [
         "core",
         "formal-fast"
-      ]
+      ],
+      "evidence_run": "38705908676"
     },
     {
       "id": "action-completeness-capped-by-kernel",
@@ -447,7 +449,8 @@
       "gates": [
         "core",
         "formal-fast"
-      ]
+      ],
+      "evidence_run": "38705908676"
     },
     {
       "id": "posture-report-live",
@@ -487,7 +490,8 @@
       "gates": [
         "server",
         "formal-fast"
-      ]
+      ],
+      "evidence_run": "38705908676"
     },
     {
       "id": "signing-key-rotation-chain",
@@ -653,7 +657,8 @@
       ],
       "gates": [
         "server"
-      ]
+      ],
+      "evidence_run": "38705908676"
     },
     {
       "id": "month-segment-verification",
@@ -729,7 +734,8 @@
         "core",
         "server",
         "formal-fast"
-      ]
+      ],
+      "evidence_run": "38705908676"
     }
   ]
 }

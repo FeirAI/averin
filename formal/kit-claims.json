@@ -649,7 +649,7 @@
         "m47-temporal-merkle-cutoff-beyond-watermark",
         "m43-temporal-legacy-member-not-total"
       ],
-      "evidence_run": "37865103811",
+      "evidence_run": "38705908676",
       "does_not_establish": "Behaviour on inputs the tests do not construct. This is example-based testing, not a proof of temporal ordering, and it assumes the snapshot and revocation issuer are authentic (pinned out of band)."
     },
     {
@@ -681,7 +681,7 @@
         "m19-failed-intent-consumes-outcome",
         "m21-disclosure-only-counts-present-openings"
       ],
-      "evidence_run": "37865103811",
+      "evidence_run": "38705908676",
       "does_not_establish": "Any bundle shape the adversarial suite does not build. Example-based tests, not a proof of monotonicity under deletion (the Lean model states that; its production kernel refinement does not cover verify.rs fact computation)."
     },
     {
@@ -720,7 +720,7 @@
         "m53-feature-selected-hash",
         "m59-verify-overrides-kernel-claim"
       ],
-      "evidence_run": "37865103811",
+      "evidence_run": "38705908676",
       "does_not_establish": "That the extracted code is correct (that is the Lean proof run in formal-production), or anything beyond the call sites and cfg forms the script scans. It is a textual check, not a semantic one."
     },
     {
@@ -1272,7 +1272,7 @@
         "surface-record-keyless-pass",
         "surface-record-bad-signature-consistent"
       ],
-      "evidence_run": "37865103811",
+      "evidence_run": "38705908676",
       "does_not_establish": "That the report's claims are right (that is the claim kernel's refinement and oracle differential). Only the words and exit codes derived from a finished report: the web app's TypeScript copy (web/src/lib/claimVerdict.ts) is covered by its own unit tests, not this differential. The corpus rows are claim decisions, not bundles, so the differential crosses them with synthetic ok and pinning flags rather than verifying real bundles. Usage and unreadable-file errors also exit 2, the same code as CONSISTENT, so a caller must read the RESULT line, not only the exit code. Non-boolean ok and pinning values are differential-tested on one corpus row only; the TypeScript copy has the same boolean rule and its own unit test for it. The CLI headline is checked end to end only on the four fixture cases; over the corpus it is covered because the CLI prints claim_verdict(report).word(), not by running the binary per case. For record, PASS means the signature verified under the key given on the command line: the CLI cannot tell whether that key is the right one to trust, and record is tested end to end on one fixture record only. A keyless record's CONSISTENT shares exit code 2 with usage errors, as for bundle. Needs node on PATH. A finite differential, not a proof."
     },
     {
@@ -1398,7 +1398,8 @@
         "xv11-evidence-drops-sign-offs-digest",
         "xv11-unbound-history-without-note"
       ],
-      "does_not_establish": "Not that the named subjects are authenticated, are humans, are in a configured group or are distinct (an operator and broker property, XV-10); not that the approval is recent; not that a signer committed to the right names (a signer that signs evidence naming mallory over a record naming mallory is consistent, and a signer that omits the approver members is accepted as pre-binding history, so the binding holds only for records whose signer includes them); not NFC or escaping agreement beyond the vector cases. The subject digest already covers the whole record body; this adds the evidence commitment an offline verifier checks by re-derivation."
+      "does_not_establish": "Not that the named subjects are authenticated, are humans, are in a configured group or are distinct (an operator and broker property, XV-10); not that the approval is recent; not that a signer committed to the right names (a signer that signs evidence naming mallory over a record naming mallory is consistent, and a signer that omits the approver members is accepted as pre-binding history, so the binding holds only for records whose signer includes them); not NFC or escaping agreement beyond the vector cases. The subject digest already covers the whole record body; this adds the evidence commitment an offline verifier checks by re-derivation.",
+      "evidence_run": "38705908676"
     },
     {
       "id": "posture-report-live",
@@ -1440,7 +1441,7 @@
         "posture-dev-seed-not-reported"
       ],
       "does_not_establish": "The live-process test cannot start with AVERIN_REQUIRE_PROD_SECRETS=1 (that gate needs a Postgres URL), so the wiring of that flag and of durable_store=true is covered only by the handler test with a hand-built Posture, not by a running binary. The rustc stamp is whatever the build script passed with -ldflags; the Rust staticlib itself carries no version, so an unstamped build reports none and the verifier must treat that as unknown. The report says what was configured, not that the database is reachable or the keys are strong. On an unauthenticated deployment the route answers anyone (and says api_keys_configured is false). The vcs revision is present only for a binary built inside a git checkout.",
-      "evidence_run": "38192274401"
+      "evidence_run": "38705908676"
     },
     {
       "id": "key-rotation-verifier",
@@ -1678,7 +1679,8 @@
         "surface-rsa-pss-salt-length-from-params-ignored",
         "surface-rsa-sha384-read-as-sha256"
       ],
-      "does_not_establish": "That any current authority still answers with these algorithms: the three responses were recorded once, on 2026-10-15, and no CI job stamps at a live authority, so a change at an authority shows up when an operator next anchors. That the TSA certificate chain, its policy or its clock were checked: the relying party pins the signing key (an RSA or EC SubjectPublicKeyInfo) and nothing else is walked. That the pinned key is the right one for an authority; the FreeTSA key the server logs is the one in the certificate seen on 2026-10-15 and the operator confirms it. That the rsa crate's verify is correct beyond the tests here, or that it is safe to use for private-key operations (RUSTSEC-2023-0071): averin only verifies. The synthetic tokens are built by the test, not by an authority, and no token with more than one SignerInfo, an RSA-PSS salt over 64 bytes or a SHA-1 hash is accepted or tested beyond rejection."
+      "does_not_establish": "That any current authority still answers with these algorithms: the three responses were recorded once, on 2026-10-15, and no CI job stamps at a live authority, so a change at an authority shows up when an operator next anchors. That the TSA certificate chain, its policy or its clock were checked: the relying party pins the signing key (an RSA or EC SubjectPublicKeyInfo) and nothing else is walked. That the pinned key is the right one for an authority; the FreeTSA key the server logs is the one in the certificate seen on 2026-10-15 and the operator confirms it. That the rsa crate's verify is correct beyond the tests here, or that it is safe to use for private-key operations (RUSTSEC-2023-0071): averin only verifies. The synthetic tokens are built by the test, not by an authority, and no token with more than one SignerInfo, an RSA-PSS salt over 64 bytes or a SHA-1 hash is accepted or tested beyond rejection.",
+      "evidence_run": "38705908676"
     },
     {
       "id": "tsa-off-by-default-with-presets",
@@ -1720,7 +1722,8 @@
         "surface-tsa-unknown-preset-accepted",
         "surface-tsa-on-by-default"
       ],
-      "does_not_establish": "That an authority is reachable, accepts the request today or that a stamp is obtained: the tests serve recorded responses from a local HTTP server and never reach a live authority, and a failed stamp leaves the checkpoint un-anchored by design. That main wires resolveTSAConfig into srv.WithTSA: the wiring is read, not run, since a live-process test would need a network authority. That the preset's pinned key is the authority's current signing key; it is the key seen on 2026-10-15 and the operator confirms it before relying on an anchor."
+      "does_not_establish": "That an authority is reachable, accepts the request today or that a stamp is obtained: the tests serve recorded responses from a local HTTP server and never reach a live authority, and a failed stamp leaves the checkpoint un-anchored by design. That main wires resolveTSAConfig into srv.WithTSA: the wiring is read, not run, since a live-process test would need a network authority. That the preset's pinned key is the authority's current signing key; it is the key seen on 2026-10-15 and the operator confirms it before relying on an anchor.",
+      "evidence_run": "38705908676"
     },
     {
       "id": "month-segment-verifier",
@@ -1769,7 +1772,8 @@
         "surface-segment-missing-parent-allowed-without-base",
         "surface-chain-cross-month-reference-unresolved-passes"
       ],
-      "does_not_establish": "That earlier months are intact: a single month proves itself and its link, and only the chain over every month (or a pin from a month already verified) says more. The grant-log transparency chain, federation heads and the use-to-grant match across a month boundary: a month reports the first two as not evaluated and lists the cross-month uses and outcomes unresolved, and the chain checks only that the named record exists in an earlier month. That a record named as unresolved was not substituted by an unrelated earlier record with the same id: existence is checked by record id. That the exclusion of a use whose grant is absent from the bundle is limited to grants that are not in the bundle: no test builds a grant that is in the segment but fails to index. That the tests' bundles come from a server: they are built with the core seal functions (the server claim covers that), and the segment rules that read a deployment attestation or revocation list are exercised only by the server tests."
+      "does_not_establish": "That earlier months are intact: a single month proves itself and its link, and only the chain over every month (or a pin from a month already verified) says more. The grant-log transparency chain, federation heads and the use-to-grant match across a month boundary: a month reports the first two as not evaluated and lists the cross-month uses and outcomes unresolved, and the chain checks only that the named record exists in an earlier month. That a record named as unresolved was not substituted by an unrelated earlier record with the same id: existence is checked by record id. That the exclusion of a use whose grant is absent from the bundle is limited to grants that are not in the bundle: no test builds a grant that is in the segment but fails to index. That the tests' bundles come from a server: they are built with the core seal functions (the server claim covers that), and the segment rules that read a deployment attestation or revocation list are exercised only by the server tests.",
+      "evidence_run": "38705908676"
     },
     {
       "id": "month-segments-server",
@@ -1815,7 +1819,8 @@
         "surface-segments-size-cap-not-enforced",
         "surface-segments-block-base-count-zero"
       ],
-      "does_not_establish": "That the Postgres store returns the same range as the in-memory store: these tests run against the in-memory store, and RecordsPage's SQL ordering is covered only by its own store tests. That a month's disclosures are limited to its own records: no test exports a disclosing mode for a month. That the size limit equals the verifier's: the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test. That a month stays under the limit as a project grows: a month over 256 MiB is refused, not split. The revocation and attestation behaviour of a month is checked only where the tests configure them (anchored months verify clean; the self-view reports the unanchored revocation list exactly as a whole-history export does)."
+      "does_not_establish": "That the Postgres store returns the same range as the in-memory store: these tests run against the in-memory store, and RecordsPage's SQL ordering is covered only by its own store tests. That a month's disclosures are limited to its own records: no test exports a disclosing mode for a month. That the size limit equals the verifier's: the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test. That a month stays under the limit as a project grows: a month over 256 MiB is refused, not split. The revocation and attestation behaviour of a month is checked only where the tests configure them (anchored months verify clean; the self-view reports the unanchored revocation list exactly as a whole-history export does).",
+      "evidence_run": "38705908676"
     }
   ]
 }
