@@ -1,0 +1,13 @@
+diff --git a/core/src/rfc3161.rs b/core/src/rfc3161.rs
+index 02298ec..3a250cc 100644
+--- a/core/src/rfc3161.rs
++++ b/core/src/rfc3161.rs
+@@ -47,7 +47,7 @@ impl HashAlg {
+         if *o == ID_SHA256 {
+             Some(Self::Sha256)
+         } else if *o == ID_SHA384 {
+-            Some(Self::Sha384)
++            Some(Self::Sha256)
+         } else if *o == ID_SHA512 {
+             Some(Self::Sha512)
+         } else {

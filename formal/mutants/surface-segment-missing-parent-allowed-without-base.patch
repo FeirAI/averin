@@ -1,0 +1,18 @@
+diff --git a/core/src/dag.rs b/core/src/dag.rs
+index edb34c0..bf2042f 100644
+--- a/core/src/dag.rs
++++ b/core/src/dag.rs
+@@ -144,12 +144,7 @@ pub fn build_from(
+                         }
+                         continue;
+                     }
+-                    None => {
+-                        return Err(DagError::MissingParent {
+-                            record: ch.clone(),
+-                            parent: p.to_string(),
+-                        });
+-                    }
++                    None => continue,
+                 }
+             }
+             if !seen.insert(p) {

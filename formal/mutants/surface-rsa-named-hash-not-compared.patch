@@ -1,0 +1,13 @@
+diff --git a/core/src/rfc3161.rs b/core/src/rfc3161.rs
+index 02298ec..fda7240 100644
+--- a/core/src/rfc3161.rs
++++ b/core/src/rfc3161.rs
+@@ -111,7 +111,7 @@ impl SigScheme {
+             None
+         };
+         if let Some(h) = named {
+-            return if h == hash {
++            return if h == h {
+                 Ok(Self::RsaPkcs1)
+             } else {
+                 Err(Rfc3161Error::UnsupportedSigAlg)

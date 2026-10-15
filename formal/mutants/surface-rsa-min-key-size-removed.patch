@@ -1,0 +1,13 @@
+diff --git a/core/src/rfc3161.rs b/core/src/rfc3161.rs
+index 02298ec..a2c130e 100644
+--- a/core/src/rfc3161.rs
++++ b/core/src/rfc3161.rs
+@@ -167,7 +167,7 @@ fn verify_rsa(
+ 
+     let key =
+         RsaPublicKey::from_public_key_der(spki_der).map_err(|_| Rfc3161Error::UnsupportedSigAlg)?;
+-    if key.size() * 8 < MIN_RSA_BITS {
++    if key.size() * 8 < 8 {
+         return Err(Rfc3161Error::UnsupportedSigAlg);
+     }
+     let r = match (pss_salt, hash) {

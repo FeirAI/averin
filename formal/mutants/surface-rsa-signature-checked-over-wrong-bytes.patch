@@ -1,0 +1,13 @@
+diff --git a/core/src/rfc3161.rs b/core/src/rfc3161.rs
+index 02298ec..3c7e7f5 100644
+--- a/core/src/rfc3161.rs
++++ b/core/src/rfc3161.rs
+@@ -347,7 +347,7 @@ pub fn verify_token(token_der: &[u8], tsa_spki_der: &[u8]) -> Result<Verified, R
+     match scheme {
+         SigScheme::EcdsaP256Sha256 => verify_ecdsa_p256(tsa_spki_der, &tbs, sig)?,
+         SigScheme::EcdsaP384Sha512 => verify_ecdsa_p384(tsa_spki_der, &tbs, sig)?,
+-        SigScheme::RsaPkcs1 => verify_rsa(tsa_spki_der, hash, &hash.digest(&tbs), sig, None)?,
++        SigScheme::RsaPkcs1 => verify_rsa(tsa_spki_der, hash, &hash.digest(tst_bytes), sig, None)?,
+         SigScheme::RsaPss { salt_len } => {
+             verify_rsa(tsa_spki_der, hash, &hash.digest(&tbs), sig, Some(salt_len))?
+         }

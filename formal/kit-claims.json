@@ -372,6 +372,94 @@
     "multiwriter-use-ignores-revocation": {
       "tier": "full",
       "claim": "multi-writer-failure-matrix"
+    },
+    "surface-rsa-signature-checked-over-wrong-bytes": {
+      "tier": "fast",
+      "claim": "rfc3161-recorded-real-tsa"
+    },
+    "surface-rsa-named-hash-not-compared": {
+      "tier": "full",
+      "claim": "rfc3161-recorded-real-tsa"
+    },
+    "surface-rsa-min-key-size-removed": {
+      "tier": "full",
+      "claim": "rfc3161-recorded-real-tsa"
+    },
+    "surface-rsa-pss-mgf-hash-unchecked": {
+      "tier": "full",
+      "claim": "rfc3161-recorded-real-tsa"
+    },
+    "surface-rsa-pss-salt-length-from-params-ignored": {
+      "tier": "full",
+      "claim": "rfc3161-recorded-real-tsa"
+    },
+    "surface-rsa-sha384-read-as-sha256": {
+      "tier": "full",
+      "claim": "rfc3161-recorded-real-tsa"
+    },
+    "surface-tsa-preset-and-url-both-accepted": {
+      "tier": "full",
+      "claim": "tsa-off-by-default-with-presets"
+    },
+    "surface-tsa-auth-header-not-sent": {
+      "tier": "full",
+      "claim": "tsa-off-by-default-with-presets"
+    },
+    "surface-tsa-unknown-preset-accepted": {
+      "tier": "full",
+      "claim": "tsa-off-by-default-with-presets"
+    },
+    "surface-tsa-on-by-default": {
+      "tier": "full",
+      "claim": "tsa-off-by-default-with-presets"
+    },
+    "surface-segment-count-ignores-base": {
+      "tier": "fast",
+      "claim": "month-segment-verifier"
+    },
+    "surface-segment-base-pin-mismatch-ignored": {
+      "tier": "full",
+      "claim": "month-segment-verifier"
+    },
+    "surface-segment-frontier-members-unchecked": {
+      "tier": "full",
+      "claim": "month-segment-verifier"
+    },
+    "surface-segment-base-heads-always-heads": {
+      "tier": "full",
+      "claim": "month-segment-verifier"
+    },
+    "surface-segment-month-bounds-unchecked": {
+      "tier": "full",
+      "claim": "month-segment-verifier"
+    },
+    "surface-segment-missing-parent-allowed-without-base": {
+      "tier": "full",
+      "claim": "month-segment-verifier"
+    },
+    "surface-chain-cross-month-reference-unresolved-passes": {
+      "tier": "full",
+      "claim": "month-segment-verifier"
+    },
+    "surface-segments-month-grouped-by-year": {
+      "tier": "full",
+      "claim": "month-segments-server"
+    },
+    "surface-segments-record-range-drops-last": {
+      "tier": "full",
+      "claim": "month-segments-server"
+    },
+    "surface-segments-base-checkpoint-not-carried": {
+      "tier": "full",
+      "claim": "month-segments-server"
+    },
+    "surface-segments-size-cap-not-enforced": {
+      "tier": "full",
+      "claim": "month-segments-server"
+    },
+    "surface-segments-block-base-count-zero": {
+      "tier": "full",
+      "claim": "month-segments-server"
     }
   },
   "claims": [
@@ -550,7 +638,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
+          "sha256": "4e10a9717a305b3625f63ab4eb0c5d7ea61f0eb6dd17453ad7bf0029d2bbb196"
         }
       ],
       "mutants": [
@@ -585,7 +673,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
+          "sha256": "4e10a9717a305b3625f63ab4eb0c5d7ea61f0eb6dd17453ad7bf0029d2bbb196"
         }
       ],
       "mutants": [
@@ -624,7 +712,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
+          "sha256": "4e10a9717a305b3625f63ab4eb0c5d7ea61f0eb6dd17453ad7bf0029d2bbb196"
         }
       ],
       "mutants": [
@@ -1164,7 +1252,7 @@
         {
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "verify_bundle_cmd",
-          "sha256": "928fd2a76cd7ecf288eb7235873fa379d9c640fb2d7adb0081fb2f15a34864c2"
+          "sha256": "0df7030cfaab1fd0465ba26986321b67119c9d5b69df0217a49db561dc942679"
         },
         {
           "path": "core/src/bin/averin_verify.rs",
@@ -1302,7 +1390,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
+          "sha256": "4e10a9717a305b3625f63ab4eb0c5d7ea61f0eb6dd17453ad7bf0029d2bbb196"
         }
       ],
       "mutants": [
@@ -1342,7 +1430,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "5209bcf62f377d94aa3d560f775207666044e475e41740e78aab8d13b58a0436"
+          "sha256": "d5bc7745f9c92f8c8709f6747fa1cebf5b9195ba0f210818dc89a87df4093db0"
         }
       ],
       "mutants": [
@@ -1544,6 +1632,190 @@
       ],
       "does_not_establish": "Two or three processes on one Postgres 16 schema with a shared content directory on the same host, not a cluster, not Postgres failover, and not more than two concurrent writers per project. The faults are injected by a store wrapper in the test binary and a TCP proxy that understands the simple-query COMMIT of a project write transaction; a COMMIT sent any other way is not cut (the test then fails on its fired-once check). The monitor checks the invariants it lists on the runs it saw; the TLA+ model is not tied to the code, and a passing matrix is sampled interleavings, not exhaustive ones. Timing windows (a request still waiting after 1.5 seconds) assume the host schedules the processes. It says nothing about a content store shared by replicas (the processes read one local directory), the per-replica ingest budget, an object-storage witness, or the deployment policy: single-writer-per-project stays until those exist.",
       "evidence_run": "38679250521"
+    },
+    {
+      "id": "rfc3161-recorded-real-tsa",
+      "$comment": "legacy register: native-rfc3161",
+      "statement": "The native RFC 3161 verifier accepts the TimeStampTokens FreeTSA (ECDSA P-384/SHA-512), DigiCert (RSA PKCS#1 v1.5/SHA-256) and Sectigo (RSA PKCS#1 v1.5/SHA-384) returned on 2026-10-15, against the signing certificate's key, binds each to its message and genTime, and rejects each under another authority's key and with a flipped signature bit; on synthetic tokens it verifies RSA PKCS#1 v1.5 and RSASSA-PSS with SHA-256, SHA-384 and SHA-512 and rejects a named hash or PSS hash or MGF1 hash that disagrees with the SignerInfo digest, a wrong PSS salt length and an RSA key under 2048 bits.",
+      "method": "test",
+      "artifacts": [
+        "core/src/rfc3161.rs",
+        "core/tests/fixtures/tsa/README.md",
+        "core/tests/fixtures/tsa/message.txt"
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ],
+      "detector": "cargo test -p averin-decision-core --features rfc3161 --lib rfc3161::tests",
+      "covers": [
+        {
+          "path": "core/src/rfc3161.rs",
+          "symbol": "verify_token",
+          "sha256": "66d15b84ee4f0e14022fcfd0ca88068f9e1f68d8ab486b4b7a2a823c9f377f3f"
+        },
+        {
+          "path": "core/src/rfc3161.rs",
+          "symbol": "verify_rsa",
+          "sha256": "b09997e7956f4a307a677d60aff71116530e84656186c9b2138a0d48d15d9198"
+        },
+        {
+          "path": "core/src/rfc3161.rs",
+          "symbol": "select",
+          "sha256": "0d948bc7f197f82de7d81507d77529c66a0ea1ea9bfdd6abcc15e53c5cd812c1"
+        },
+        {
+          "path": "core/src/rfc3161.rs",
+          "symbol": "from_oid",
+          "sha256": "93e03916d5893f179932fb9bbc7971d0de3b338dd6fc67b27b633efbe356cd8a"
+        }
+      ],
+      "mutants": [
+        "surface-rsa-signature-checked-over-wrong-bytes",
+        "surface-rsa-named-hash-not-compared",
+        "surface-rsa-min-key-size-removed",
+        "surface-rsa-pss-mgf-hash-unchecked",
+        "surface-rsa-pss-salt-length-from-params-ignored",
+        "surface-rsa-sha384-read-as-sha256"
+      ],
+      "does_not_establish": "That any current authority still answers with these algorithms: the three responses were recorded once, on 2026-10-15, and no CI job stamps at a live authority, so a change at an authority shows up when an operator next anchors. That the TSA certificate chain, its policy or its clock were checked: the relying party pins the signing key (an RSA or EC SubjectPublicKeyInfo) and nothing else is walked. That the pinned key is the right one for an authority; the FreeTSA key the server logs is the one in the certificate seen on 2026-10-15 and the operator confirms it. That the rsa crate's verify is correct beyond the tests here, or that it is safe to use for private-key operations (RUSTSEC-2023-0071): averin only verifies. The synthetic tokens are built by the test, not by an authority, and no token with more than one SignerInfo, an RSA-PSS salt over 64 bytes or a SHA-1 hash is accepted or tested beyond rejection."
+    },
+    {
+      "id": "tsa-off-by-default-with-presets",
+      "$comment": "legacy register: tsa-off-by-default-with-presets",
+      "statement": "The server enables timestamp anchoring only when AVERIN_TSA_PRESET or AVERIN_TSA_URL is set, resolves the freetsa preset to its URL and pin, refuses a preset together with a URL and an unknown preset, sends AVERIN_TSA_AUTH_HEADER only when it is configured, builds a request byte-identical to the one FreeTSA, DigiCert and Sectigo accepted, and unwraps each of their recorded responses to the recorded token.",
+      "method": "test",
+      "artifacts": [
+        "server/cmd/averin-server/main.go",
+        "server/cmd/averin-server/tsa_config_test.go",
+        "server/internal/witness/tsa.go",
+        "server/internal/witness/tsa_preset.go",
+        "server/internal/witness/tsa_recorded_test.go",
+        "server/internal/witness/testdata/message.txt"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/witness ./cmd/averin-server -run 'TSA|ResolveTSA|BuildTimeStampReq|TimeStamp'",
+      "covers": [
+        {
+          "path": "server/cmd/averin-server/main.go",
+          "symbol": "resolveTSAConfig",
+          "sha256": "d3c062719c86fae30cdea0fc45494325bc96c473bad7a394968dc60575d23c64"
+        },
+        {
+          "path": "server/internal/witness/tsa_preset.go",
+          "symbol": "LookupTSAPreset",
+          "sha256": "972f4593175dbbe76952020fb1a51744231775e3232560f899083f7362fb2d79"
+        },
+        {
+          "path": "server/internal/witness/tsa.go",
+          "symbol": "HTTPTSA.Stamp",
+          "sha256": "97efc08ca37cfaf8f272d84446df02ce26a9b4edc0340bfec9f81c4f23a62eb6"
+        }
+      ],
+      "mutants": [
+        "surface-tsa-preset-and-url-both-accepted",
+        "surface-tsa-auth-header-not-sent",
+        "surface-tsa-unknown-preset-accepted",
+        "surface-tsa-on-by-default"
+      ],
+      "does_not_establish": "That an authority is reachable, accepts the request today or that a stamp is obtained: the tests serve recorded responses from a local HTTP server and never reach a live authority, and a failed stamp leaves the checkpoint un-anchored by design. That main wires resolveTSAConfig into srv.WithTSA: the wiring is read, not run, since a live-process test would need a network authority. That the preset's pinned key is the authority's current signing key; it is the key seen on 2026-10-15 and the operator confirms it before relying on an anchor."
+    },
+    {
+      "id": "month-segment-verifier",
+      "$comment": "legacy register: month-segment-verification",
+      "statement": "The verifier checks a month segment on its own (carried base checkpoint verified like any checkpoint, chain from the base, checkpoints inside the stated UTC month and the base before it, latest frontier equal to the segment's heads including base heads no record references, record_count equal to the base's count plus the records carried, a caller's base pin equal to the stated base) and keeps the whole-history rules for a bundle with no base; split_bundle cuts a whole-history bundle by month and refuses months that go backwards and records no checkpoint commits; ChainState requires each month to start from the previous head and every cross-month use or outcome reference to exist in an earlier month.",
+      "method": "test",
+      "artifacts": [
+        "core/src/segment.rs",
+        "core/src/dag.rs",
+        "core/src/verify.rs",
+        "core/tests/segments.rs"
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ],
+      "detector": "cargo test -p averin-decision-core --test segments",
+      "covers": [
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "evaluate_segment",
+          "sha256": "993dccf3effaeced1fd6c8f919110f997662f990c6ac418b6c345670fa218bf1"
+        },
+        {
+          "path": "core/src/segment.rs",
+          "symbol": "validate_segment_chain",
+          "sha256": "1df3f8d6ca551310ca377a0bb4e91673bba4624d654ffd7ed0147a5dc0a227f3"
+        },
+        {
+          "path": "core/src/segment.rs",
+          "symbol": "absorb",
+          "sha256": "42ae7d58d38b46f1c3f08f5856bc11589baf0b75c715cc3bc00b71d0630e9bb8"
+        },
+        {
+          "path": "core/src/dag.rs",
+          "symbol": "build_from",
+          "sha256": "1139d309dd3c1ed6cab60c437216029682f48a0b3e7ad970debb19ec6fe62159"
+        }
+      ],
+      "mutants": [
+        "surface-segment-count-ignores-base",
+        "surface-segment-base-pin-mismatch-ignored",
+        "surface-segment-frontier-members-unchecked",
+        "surface-segment-base-heads-always-heads",
+        "surface-segment-month-bounds-unchecked",
+        "surface-segment-missing-parent-allowed-without-base",
+        "surface-chain-cross-month-reference-unresolved-passes"
+      ],
+      "does_not_establish": "That earlier months are intact: a single month proves itself and its link, and only the chain over every month (or a pin from a month already verified) says more. The grant-log transparency chain, federation heads and the use-to-grant match across a month boundary: a month reports the first two as not evaluated and lists the cross-month uses and outcomes unresolved, and the chain checks only that the named record exists in an earlier month. That a record named as unresolved was not substituted by an unrelated earlier record with the same id: existence is checked by record id. That the exclusion of a use whose grant is absent from the bundle is limited to grants that are not in the bundle: no test builds a grant that is in the segment but fails to index. That the tests' bundles come from a server: they are built with the core seal functions (the server claim covers that), and the segment rules that read a deployment attestation or revocation list are exercised only by the server tests."
+    },
+    {
+      "id": "month-segments-server",
+      "$comment": "legacy register: month-segment-verification",
+      "statement": "The server cuts a project's checkpoint chain by the UTC month of created_ts, serves a month as the base checkpoint plus the month's checkpoints and exactly the records they commit beyond the base (read from the store by range, not the whole history), stamps the segment block with the base's seq, hash and record count, refuses a malformed or empty month, refuses a whole history or a month over the single-bundle limit with 413, and every month it serves verifies offline under pinned keys, chains to the previous month's head and verifies in the server's own self-view.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/segments.go",
+        "server/internal/api/server.go",
+        "server/internal/api/segments_e2e_test.go",
+        "server/internal/api/segments_cap_internal_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestMonth|TestOverTheCap'",
+      "covers": [
+        {
+          "path": "server/internal/api/segments.go",
+          "symbol": "planSegments",
+          "sha256": "fe9cdc11e5fc99c020b7e2cb25b9dbfc3d187bb90a10daf12cef2735a6ddc796"
+        },
+        {
+          "path": "server/internal/api/segments.go",
+          "symbol": "segmentRecords",
+          "sha256": "5a64b6a5b0e834dcfd7619a3e3da054e00f85e03f3a795829a6f93d116108d88"
+        },
+        {
+          "path": "server/internal/api/segments.go",
+          "symbol": "segmentBlock",
+          "sha256": "43d82bc249a8c00f9cc6528f1706d34b264fbabce62ddcf648559377ae166ed1"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "buildBundleView",
+          "sha256": "6b0438ccba309e1104a63921fc4e3a0bb0eedde9429cb3b37ce41ca98402528f"
+        }
+      ],
+      "mutants": [
+        "surface-segments-month-grouped-by-year",
+        "surface-segments-record-range-drops-last",
+        "surface-segments-base-checkpoint-not-carried",
+        "surface-segments-size-cap-not-enforced",
+        "surface-segments-block-base-count-zero"
+      ],
+      "does_not_establish": "That the Postgres store returns the same range as the in-memory store: these tests run against the in-memory store, and RecordsPage's SQL ordering is covered only by its own store tests. That a month's disclosures are limited to its own records: no test exports a disclosing mode for a month. That the size limit equals the verifier's: the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test. That a month stays under the limit as a project grows: a month over 256 MiB is refused, not split. The revocation and attestation behaviour of a month is checked only where the tests configure them (anchored months verify clean; the self-view reports the unanchored revocation list exactly as a whole-history export does)."
     }
   ]
 }

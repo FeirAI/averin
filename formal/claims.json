@@ -152,14 +152,13 @@
     },
     {
       "id": "native-rfc3161",
-      "claim": "The native feature verifies RFC 3161 tokens against pinned TSA SPKI; the lean WASM build reports RFC 3161 as Unsupported.",
+      "claim": "The native feature verifies RFC 3161 tokens against a pinned TSA SPKI under ECDSA P-256/SHA-256, ECDSA P-384/SHA-512, RSA PKCS#1 v1.5 and RSASSA-PSS (SHA-256/384/512, keys of at least 2048 bits), and accepts the tokens FreeTSA, DigiCert and Sectigo returned on 2026-10-15; the lean WASM build reports RFC 3161 as Unsupported. Not that any CI job stamps at a live authority, that the TSA certificate chain or policy was checked (the relying party pins the key), or that the TSA clock is accurate.",
       "class": "target-specific-test",
       "targets": ["native Rust with rfc3161", "Go cgo with rfc3161", "WASM without rfc3161"],
-      "assumptions": ["TSA SPKI pinned out of band", "no production TSA round trip has been validated"],
-      "sources": [{"file": "core/src/rfc3161.rs", "symbol": "verify_token"}, {"file": "core/src/anchor.rs", "symbol": "AnchorError::Unsupported"}],
-      "proofs": [{"file": "core/src/anchor.rs", "symbol": "rfc3161_no_trusted_tsa_is_an_error_not_a_pass"}, {"file": "scripts/check-staticlib-fresh.sh", "symbol": "the cgo staticlib is OLDER than core source"}],
-      "gates": ["core", "store-postgres", "wasm"],
-      "evidence_run": "37712087870"
+      "assumptions": ["TSA SPKI pinned out of band", "the recorded responses are what those authorities send today; no scheduled job re-stamps at them", "RSA signature verification by the rsa crate (public-key operations only)"],
+      "sources": [{"file": "core/src/rfc3161.rs", "symbol": "verify_token"}, {"file": "core/src/rfc3161.rs", "symbol": "verify_rsa"}, {"file": "core/src/anchor.rs", "symbol": "AnchorError::Unsupported"}],
+      "proofs": [{"file": "core/src/anchor.rs", "symbol": "rfc3161_no_trusted_tsa_is_an_error_not_a_pass"}, {"file": "core/src/rfc3161.rs", "symbol": "recorded_real_tsa_tokens_verify_and_bind"}, {"file": "core/src/rfc3161.rs", "symbol": "synthetic_rsa_profiles_verify_and_reject_tampering"}, {"file": "core/src/rfc3161.rs", "symbol": "rsa_keys_under_2048_bits_are_refused"}, {"file": "server/internal/witness/tsa_recorded_test.go", "symbol": "TestHTTPTSAUnwrapsRecordedRealResponses"}, {"file": "scripts/check-staticlib-fresh.sh", "symbol": "the cgo staticlib is OLDER than core source"}, {"file": "formal/mutants/surface-rsa-signature-checked-over-wrong-bytes.patch", "symbol": "hash.digest(tst_bytes)"}],
+      "gates": ["core", "store-postgres", "wasm"]
     },
     {
       "id": "authority-v3-semantic-body-binding",
@@ -608,6 +607,129 @@
         "formal-fast"
       ],
       "evidence_run": "38686890625"
+    },
+    {
+      "id": "tsa-off-by-default-with-presets",
+      "claim": "Trusted timestamps are off unless an operator sets AVERIN_TSA_PRESET or AVERIN_TSA_URL; the freetsa preset is one setting and logs the signing key to pin; AVERIN_TSA_URL takes any other authority and AVERIN_TSA_AUTH_HEADER the credential header a paid one needs; setting a preset and a URL together, or an unknown preset, is fatal at start-up. The client's request is byte-identical to the one FreeTSA, DigiCert and Sectigo accepted and unwraps each of their recorded responses to the recorded token. Not that an authority is reachable or that anchoring succeeds (a TSA outage stores the checkpoint un-anchored), and the pinned preset key is a trust decision the operator confirms.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "the operator pins the TSA key out of band before relying on an anchor",
+        "outbound HTTPS to the chosen authority is permitted"
+      ],
+      "sources": [
+        {
+          "file": "server/cmd/averin-server/main.go",
+          "symbol": "resolveTSAConfig"
+        },
+        {
+          "file": "server/internal/witness/tsa_preset.go",
+          "symbol": "LookupTSAPreset"
+        },
+        {
+          "file": "server/internal/witness/tsa.go",
+          "symbol": "Authorization"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/cmd/averin-server/tsa_config_test.go",
+          "symbol": "TestResolveTSAConfig"
+        },
+        {
+          "file": "server/internal/witness/tsa_recorded_test.go",
+          "symbol": "TestBuildTimeStampReqMatchesRequestRealTSAsAccepted"
+        },
+        {
+          "file": "server/internal/witness/tsa_recorded_test.go",
+          "symbol": "TestHTTPTSASendsConfiguredAuthorization"
+        },
+        {
+          "file": "formal/mutants/surface-tsa-preset-and-url-both-accepted.patch",
+          "symbol": "case false:"
+        }
+      ],
+      "gates": [
+        "server"
+      ]
+    },
+    {
+      "id": "month-segment-verification",
+      "claim": "A month segment (bundle.segment, averin.segment.v1) verifies on its own: its base checkpoint is carried and checked like every checkpoint, the chain starts at that base, every checkpoint falls in the stated UTC month and the base before it, the latest frontier equals the segment's heads and its record_count equals the base's count plus the records carried, and a base the caller pinned must be the base stated. averin-verify chain additionally requires each month to start from the previous month's head, months and projects to agree, every parent a month points before its base to exist in an earlier month, and every grant or intent a use or outcome names across a month boundary to be held by an earlier month. A month reports the grant-log chain and federation heads as not evaluated and never counts a cross-month use or outcome as matched. Not that earlier months are intact (only the chain over all of them says so), the use-to-grant predicate across months, the grant-log transparency chain over a whole history, or that a recorder showing different histories to different auditors is caught (that needs external anchoring).",
+      "class": "tested-implementation",
+      "targets": [
+        "native Rust",
+        "Go server",
+        "Go cgo with rfc3161"
+      ],
+      "assumptions": [
+        "checkpoint created_ts is the recorder's own signed clock",
+        "Ed25519 unforgeability",
+        "records are cut by checkpoint record_count in insertion order"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "evaluate_segment"
+        },
+        {
+          "file": "core/src/segment.rs",
+          "symbol": "validate_segment_chain"
+        },
+        {
+          "file": "core/src/segment.rs",
+          "symbol": "ChainState"
+        },
+        {
+          "file": "core/src/dag.rs",
+          "symbol": "build_from"
+        },
+        {
+          "file": "server/internal/api/segments.go",
+          "symbol": "planSegments"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "buildBundleView"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "every_month_verifies_alone_and_links_to_the_previous_head"
+        },
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "the_chain_with_a_month_removed_fails"
+        },
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "a_month_with_a_missing_record_fails_the_count_and_the_dag"
+        },
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "the_chain_resolves_cross_month_references_against_earlier_months_only"
+        },
+        {
+          "file": "server/internal/api/segments_e2e_test.go",
+          "symbol": "TestMonthSegmentsExportVerifyAndChain"
+        },
+        {
+          "file": "server/internal/api/segments_cap_internal_test.go",
+          "symbol": "TestOverTheCapIsRefusedWithAPointerToMonths"
+        },
+        {
+          "file": "formal/mutants/surface-segment-count-ignores-base.patch",
+          "symbol": "checked_add(0)"
+        }
+      ],
+      "gates": [
+        "core",
+        "server",
+        "formal-fast"
+      ]
     }
   ]
 }
