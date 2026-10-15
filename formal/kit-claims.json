@@ -312,6 +312,10 @@
     "multiwriter-use-ignores-revocation": {
       "tier": "full",
       "claim": "multi-writer-failure-matrix"
+    },
+    "posture-api-key-fingerprints-first-only": {
+      "tier": "fast",
+      "claim": "posture-api-key-fingerprints"
     }
   },
   "claims": [
@@ -1272,7 +1276,7 @@
         {
           "path": "server/internal/api/posture.go",
           "symbol": "handlePosture",
-          "sha256": "bf5b497e2080f6e904aa65dcb33d23414d39d6c8ea50a350a10c0289ecb717b4"
+          "sha256": "737bfab9cdd1c86d977c23644c346b4644d89713a738ca28b4bf73c236c063b0"
         },
         {
           "path": "server/internal/api/posture.go",
@@ -1330,6 +1334,45 @@
       ],
       "does_not_establish": "Two or three processes on one Postgres 16 schema with a shared content directory on the same host, not a cluster, not Postgres failover, and not more than two concurrent writers per project. The faults are injected by a store wrapper in the test binary and a TCP proxy that understands the simple-query COMMIT of a project write transaction; a COMMIT sent any other way is not cut (the test then fails on its fired-once check). The monitor checks the invariants it lists on the runs it saw; the TLA+ model is not tied to the code, and a passing matrix is sampled interleavings, not exhaustive ones. Timing windows (a request still waiting after 1.5 seconds) assume the host schedules the processes. It says nothing about a content store shared by replicas (the processes read one local directory), the per-replica ingest budget, an object-storage witness, or the deployment policy: single-writer-per-project stays until those exist.",
       "evidence_run": "38679250521"
+    },
+    {
+      "id": "posture-api-key-fingerprints",
+      "$comment": "FEI-40: new legacy claim posture-api-key-fingerprints",
+      "statement": "GET /v2/posture reports, under the relationship name averin-api-key, a keyed fingerprint (first 16 bytes of HMAC-SHA256 keyed by the token over the label feir-secret-alignment/v1:averin-api-key, pinned by vectors/secret-fingerprint.v1.json) of EVERY distinct API key the keyed deployment accepts across all its projects, so the deploy-time verifier can check that the key govder, vultrino and the broker send is one averin accepts. An open or unkeyed deployment reports an empty object. A real averin-server process started with AVERIN_API_KEYS reports the fingerprint of its token. No key appears in the body.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/posture.go",
+        "server/internal/api/posture_test.go",
+        "server/internal/auth/auth.go",
+        "server/internal/secretfp/secretfp.go",
+        "server/cmd/averin-server/main_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run TestPosture_ && go test -count=1 ./internal/secretfp && go test -count=1 ./cmd/averin-server -run TestPosture_LiveProcess",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/api/posture.go",
+          "symbol": "secretFingerprints",
+          "sha256": "fc3283700fc78263159790b254b54eff33497aad565bc306c5c47c150a666505"
+        },
+        {
+          "path": "server/internal/auth/auth.go",
+          "symbol": "Tokens",
+          "sha256": "6c743175e47abe9818c1d78ef84290b1c2c414fe64f98b141ed747ab6eb19b86"
+        },
+        {
+          "path": "server/internal/secretfp/secretfp.go",
+          "symbol": "Fingerprint",
+          "sha256": "1301f9c270d3cdc1249340f4c90fd78f8633f85fc4010a644c838b31e776c223"
+        }
+      ],
+      "mutants": [
+        "posture-api-key-fingerprints-first-only"
+      ],
+      "does_not_establish": "That the key a calling plane sends equals one averin accepts: this claim proves only averin's side of the report. The comparison is feir-os deploy/posture/evaluate.jq (relationship averin-api-key), tested there against stub reports, and the sending planes' own claims prove what they report. No keyed-averin four-plane run exists, so the whole chain is not exercised in one real-process run. Keys averin does not hold in its in-process store (none today) would not be reported. A fingerprint lets someone who holds it test guesses for a weak key offline; the endpoint is behind a project key. Not that a key is strong or rotated."
     }
   ]
 }

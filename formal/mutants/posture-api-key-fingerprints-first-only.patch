@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/posture.go b/server/internal/api/posture.go
+index dd462ca..614d89b 100644
+--- a/server/internal/api/posture.go
++++ b/server/internal/api/posture.go
+@@ -65,7 +65,7 @@ const relAverinAPIKey = "averin-api-key"
+ func (s *Server) secretFingerprints() map[string][]string {
+ 	out := map[string][]string{}
+ 	if ms, ok := s.auth.(*auth.MapStore); ok && ms != nil {
+-		if fps := secretfp.Fingerprints(ms.Tokens(), relAverinAPIKey); len(fps) > 0 {
++		if fps := secretfp.Fingerprints(ms.Tokens()[:1], relAverinAPIKey); len(fps) > 0 {
+ 			out[relAverinAPIKey] = fps
+ 		}
+ 	}
