@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 62a3b44..76f5ae6 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -3233,7 +3233,7 @@ func liftContentPreview(rec map[string]any) error {
+ 	if !present {
+ 		return nil
+ 	}
+-	if authorityV3Claim(rec) {
++	if false && authorityV3Claim(rec) {
+ 		return fmt.Errorf("extensions.content_preview is not allowed on a body-bound (v3) authority record: commit input/output/rationale instead")
+ 	}
+ 	m, ok := raw.(map[string]any)

@@ -82,9 +82,11 @@ func TestProxyForwardsAndRecordsScrubbed(t *testing.T) {
 	if toks["in"] != 12 || toks["out"] != 7 {
 		t.Fatalf("usage not extracted: %v", toks)
 	}
-	preview := r["extensions"].(map[string]any)["content_preview"].(map[string]any)
-	in := preview["input"].(string)
-	outStr := preview["output"].(string)
+	if _, ok := r["extensions"]; ok {
+		t.Fatalf("the proxy must send prompt text as top-level input/output, never under extensions: %v", r["extensions"])
+	}
+	in := r["input"].(string)
+	outStr := r["output"].(string)
 	// secrets must be redacted in BOTH directions, and the upstream Authorization never recorded
 	if strings.Contains(in, "sk-zzzz") || strings.Contains(outStr, "sk-abcdef") {
 		t.Fatalf("secret leaked into record: in=%q out=%q", in, outStr)
@@ -118,7 +120,7 @@ func TestSSESecretSplitAcrossChunksIsScrubbed(t *testing.T) {
 	resp.Body.Close()
 
 	rec.wait(t, 1)
-	out := rec.records[0]["extensions"].(map[string]any)["content_preview"].(map[string]any)["output"].(string)
+	out := rec.records[0]["output"].(string)
 	if strings.Contains(out, "sk-abcdefghijklmnop1234") {
 		t.Fatalf("reassembled secret leaked: %q", out)
 	}

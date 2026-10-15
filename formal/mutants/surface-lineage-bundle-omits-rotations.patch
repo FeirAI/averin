@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index e80f6c1..2b29b79 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -310,7 +310,7 @@ func (s *Server) bundleKeys() []any {
+ // verifier that pinned an earlier key can follow the chain to the key that signed the newer records.
+ func (s *Server) addKeyRotations(bundle map[string]any) {
+ 	if s.lineage != nil && len(s.lineage.Rotations) > 0 {
+-		bundle["key_rotations"] = s.lineage.Rotations
++		_ = s.lineage.Rotations
+ 	}
+ }
+ 

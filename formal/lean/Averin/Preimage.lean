@@ -63,6 +63,8 @@ def merkleRootSigV2 : Family :=
   ⟨"revocation merkle root v2", "averin.broker.revocation.merkleroot.v2", [], true⟩
 /-- `verify.rs` deployment attestation, via `sign::verify`. -/
 def attestationSig : Family := ⟨"attestation", "averin.attestation.v1", [], true⟩
+/-- `verify.rs::evaluate_key_rotations` (AVE-04), via `sign::verify` under `verify::KEY_ROTATION_SIG_TAG`. -/
+def keyRotationSig : Family := ⟨"key rotation", "averin.key_rotation.v1", [], true⟩
 /-- `authority.rs::preimage`: `LP(tag) ‖ LP(source) ‖ LP(project_id) ‖ LP(record_id) ‖ utf8(evidence_hash)`. -/
 def authoritySig : Family :=
   ⟨"authority evidence", "averin.authority.v2", [.framed, .framed, .framed], true⟩
@@ -75,7 +77,7 @@ def testAnchorSig : Family := ⟨"test anchor", "averin.anchor.v1", [.framed, .f
 
 def signedFamilies : List Family :=
   [recordSig, checkpointSig, taxonomySig, revocationSig, merkleRootSig, attestationSig,
-   authoritySig, authoritySigV3, testAnchorSig, revocationSigV2, merkleRootSigV2]
+   authoritySig, authoritySigV3, testAnchorSig, revocationSigV2, merkleRootSigV2, keyRotationSig]
 
 /-! ## Challenge families (SHA-256 of the preimage; the raw 32-byte digest is what is signed) -/
 
@@ -257,9 +259,9 @@ theorem signed_message_long (F : Family) (hF : F ∈ signedFamilies) (vs : List 
     subst hvs
     have hs : F.schema ≠ [] := by
       simp only [signedFamilies, List.mem_cons, List.not_mem_nil, or_false] at hF
-      rcases hF with h | h | h | h | h | h | h | h | h | h | h <;> subst h <;> simp_all [recordSig,
+      rcases hF with h | h | h | h | h | h | h | h | h | h | h | h <;> subst h <;> simp_all [recordSig,
         checkpointSig, taxonomySig, revocationSig, merkleRootSig, attestationSig, authoritySig,
-        authoritySigV3, testAnchorSig, revocationSigV2, merkleRootSigV2]
+        authoritySigV3, testAnchorSig, revocationSigV2, merkleRootSigV2, keyRotationSig]
     match hsch : F.schema, hs with
     | f :: fs, _ =>
       simp only [encodeFields, Field.encode, lp, List.length_append, be32_length]

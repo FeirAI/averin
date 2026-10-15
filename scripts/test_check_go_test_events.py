@@ -25,6 +25,13 @@ class GoTestEventGateTest(unittest.TestCase):
         self.assertEqual(len(set(gate.REQUIRED)), len(gate.REQUIRED))
         self.assertTrue(all(item.count(":") == 1 for item in gate.REQUIRED))
 
+    def test_multiwriter_group_is_part_of_the_full_list_and_alone_is_enough_for_its_job(self):
+        self.assertTrue(set(gate.MULTIWRITER) <= set(gate.REQUIRED))
+        self.assertEqual(set(gate.GROUPS["multiwriter"]), set(gate.MULTIWRITER))
+        lines = stream(*[event(action, item.split(":", 1)[1]) for item in gate.MULTIWRITER for action in ("run", "pass")])
+        self.assertEqual([], gate.check_events(lines, gate.GROUPS["multiwriter"]))
+        self.assertTrue(gate.check_events(lines[:-2], gate.GROUPS["multiwriter"]))
+
     def test_pass(self):
         lines = stream(event("run", "TestRequired"), event("pass", "TestRequired"),
                        event("skip", "TestUnrelatedFixture"))

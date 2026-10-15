@@ -1,0 +1,14 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index d5da5c9..8916096 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -2590,7 +2590,8 @@ func (s *Server) handleUsePhase(w http.ResponseWriter, r *http.Request, brokerKi
+ 			if voided {
+ 				return true, nil
+ 			}
+-			return st.IsRevoked(trustedProject, id)
++			_, err = st.IsRevoked(trustedProject, id) // MUTANT: the answer is read and then ignored
++			return false, err
+ 		})
+ 		ev, e := shim.ValidateUse(ur.Capability, ur.UseSig, op, ur.Nonce, s.now())
+ 		if errors.Is(e, resourceshim.ErrRevocationCheck) || errors.Is(e, resourceshim.ErrLedgerUnavailable) ||

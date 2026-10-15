@@ -196,7 +196,7 @@
     },
     {
       "id": "resource-truth-and-project-serialization",
-      "claim": "The strongest completeness label remains conditional on truthful resource labeling. Project frontier and checkpoint writes now serialize through a persisted Postgres guard, tested with two pools and separate processes; full multi-instance deployment remains gated by authenticated capability-project binding, scoped nonce claims, and bounded recovery. The finite TLA+ model is not a production proof.",
+      "claim": "The strongest completeness label remains conditional on truthful resource labeling. Project frontier and checkpoint writes now serialize through a persisted Postgres guard, tested with two pools and separate processes; full multi-instance deployment remains gated on a content store shared by replicas and a per-replica ingest budget; authenticated capability-project binding, scoped nonce claims and bounded recovery are built and run together in the two-process failure matrix (multi-writer-failure-matrix). The finite TLA+ model is not a production proof.",
       "class": "tested-implementation-with-deployment-limit",
       "targets": ["Go server", "offline verifier"],
       "assumptions": ["resource honestly labels covered actions", "all project writers use WithProjectWrite", "required unique record_id index remains valid", "shared Postgres database"],
@@ -204,6 +204,16 @@
       "proofs": [{"file": "server/internal/store/project_tx_test.go", "symbol": "TestPostgresProjectWriteTwoPools"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionProcessCuts"}, {"file": "formal/tla/ProjectTx_safe.cfg", "symbol": "NoFrontierFork"}, {"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
       "gates": ["core", "server", "store-postgres", "formal-tla"],
       "evidence_run": "37712087870"
+    },
+    {
+      "id": "multi-writer-failure-matrix",
+      "claim": "Real averin-server processes on one PostgreSQL schema survive a scripted matrix of single failures with no invariant violation found by a trace monitor: one nonce used by racing requests over two processes, one use identity sent repeatedly, a prospective and a total revoke against a use that already read the revocation state, a use against an uncommitted revoke, kill -9 during an open prepare or finalize transaction, stranded broker_seq recovery while the other process writes and a recovery process killed between its fence and its terminal transaction, a lost COMMIT acknowledgment cut before and after the server committed (finalize, use and revoke, retried on both processes), and concurrent checkpoints. The monitor checks no use after an acknowledged revoke, one admission per nonce, no session fork, a numbered checkpoint chain ending at the committed frontier, no receipt at or after its cutoff, a gapless broker_seq log, and every acknowledged operation durable, and has negative controls. Sampled interleavings of two or three processes on one Postgres 16 schema, not a proof, and not a cluster: it excludes a content store shared by replicas, the per-replica ingest budget, an object-storage witness and Postgres failover, so the single-writer-per-project deployment policy stays.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": ["Go server", "Postgres mode"],
+      "assumptions": ["PostgreSQL serializes the project guard row", "the TCP proxy sees the simple-query COMMIT of a project write transaction", "all project writers use WithProjectWrite", "the processes share one local content directory"],
+      "sources": [{"file": "server/internal/store/postgres.go", "symbol": "lockProject"}, {"file": "server/internal/api/server.go", "symbol": "handleUsePhase"}, {"file": "server/internal/api/project_tx.go", "symbol": "withProjectWrite"}],
+      "proofs": [{"file": "server/internal/api/multiwriter_test.go", "symbol": "TestMultiWriterFailureMatrix"}, {"file": "server/internal/api/multiwriter_monitor_test.go", "symbol": "TestMultiWriterMonitorNegativeControls"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoRevokedUse"}, {"file": "formal/mutants/multiwriter-guard-lock-skipped.patch", "symbol": "FOR UPDATE"}, {"file": "formal/mutants/multiwriter-use-ignores-revocation.patch", "symbol": "IsRevoked(trustedProject, id)"}],
+      "gates": ["multiwriter", "store-postgres", "formal-fast"]
     },
     {
       "id": "historical-revocation-ordering",
@@ -479,6 +489,125 @@
         "server",
         "formal-fast"
       ]
+    },
+    {
+      "id": "signing-key-rotation-chain",
+      "claim": "averin's recording key can be rotated without breaking history checks. The server stamps an operator-set epoch, publishes the current and every retired key with its status, and publishes signed rotation statements (new domain averin.key_rotation.v1) that link each retired key to its successor, refusing to start when the lineage is inconsistent. The verifier counts a statement as verified only when its signatures hold over keys the bundle lists, and extends an externally pinned key's trust to the successor only through a verified scheduled statement from a key that is neither revoked nor compromised; a compromise statement extends none. A bundle exported across a rotation by a real server verifies from the old key's pin alone and stops verifying when the statement is stripped. Not that the old key signed nothing after the rotation time (the operator destroys the old seed, or for a compromise a timestamp anchor taken before the compromise time decides), that the rotation happened at the stated time, or that the operator followed the runbook.",
+      "class": "model-and-tested-implementation",
+      "targets": [
+        "native Rust",
+        "Go server",
+        "Go cgo with rfc3161"
+      ],
+      "assumptions": [
+        "the operator holds the old seed at a scheduled rotation and destroys it afterwards",
+        "the auditor pins the old key out of band and marks it compromised when it is",
+        "Ed25519 unforgeability"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "evaluate_key_rotations"
+        },
+        {
+          "file": "server/internal/keylineage/keylineage.go",
+          "symbol": "func Build"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "WithKeyLineage"
+        },
+        {
+          "file": "formal/lean/Averin/Preimage.lean",
+          "symbol": "keyRotationSig"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/key_rotation.rs",
+          "symbol": "scheduled_handover_carries_a_pinned_old_key_to_its_successor"
+        },
+        {
+          "file": "core/tests/key_rotation.rs",
+          "symbol": "a_compromise_rotation_links_the_keys_but_extends_no_trust"
+        },
+        {
+          "file": "server/internal/api/keyrotation_test.go",
+          "symbol": "TestRotatedKeyHistoryVerifiesFromTheOldPin"
+        },
+        {
+          "file": "server/internal/keylineage/keylineage_test.go",
+          "symbol": "TestBuildRefusesAnInconsistentLineage"
+        },
+        {
+          "file": "core/tests/oracle.rs",
+          "symbol": "key rotation"
+        },
+        {
+          "file": "formal/mutants/surface-rotation-scheduled-skips-sig-old.patch",
+          "symbol": "false && !sig_ok"
+        }
+      ],
+      "gates": [
+        "core",
+        "server",
+        "formal-refinement",
+        "formal-lean",
+        "formal-fast"
+      ],
+      "evidence_run": "38686890625"
+    },
+    {
+      "id": "content-preview-committed",
+      "claim": "Prompt and answer text from the SDKs, the recording proxy and the MCP server is committed, not signed. The server moves input, output and rationale out of extensions.content_preview to the top level at ingest, so the signed body carries only salted hiding commitments, the text sits in the content store where a retention purge removes it, and the history still verifies after the purge. A content_preview that is not an object, carries another key, repeats a top-level field or sits on a body-bound v3 authority record is refused. The verifier reports how many records still carry cleartext content_preview (cleartext_content_records). Not that records sealed before this change are erased: their text is part of signed, chained bodies and stays; that personal data placed elsewhere in the body is committed; or that the Python SDK test runs in CI.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": [
+        "Go server",
+        "native Rust verifier",
+        "WASM verifier (same source)"
+      ],
+      "assumptions": [
+        "the deployment sets AVERIN_CONTENT_DIR with a master key and AVERIN_RAW_RETENTION_DAYS, else nothing is purged",
+        "clients put the text in the three named fields or the legacy preview key"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "liftContentPreview"
+        },
+        {
+          "file": "server/internal/proxy/proxy.go",
+          "symbol": "maxPreview"
+        },
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "count_cleartext_content"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/content_preview_test.go",
+          "symbol": "TestLegacyContentPreviewIsCommittedNotSignedAndCanBeErased"
+        },
+        {
+          "file": "server/internal/api/content_preview_test.go",
+          "symbol": "TestContentPreviewShapesThatWouldBeSignedVerbatimAreRefused"
+        },
+        {
+          "file": "core/tests/legacy_content.rs",
+          "symbol": "a_bundle_with_signed_cleartext_text_is_counted"
+        },
+        {
+          "file": "formal/mutants/surface-content-preview-not-lifted.patch",
+          "symbol": "if !ok || true"
+        }
+      ],
+      "gates": [
+        "server",
+        "core",
+        "formal-fast"
+      ],
+      "evidence_run": "38686890625"
     },
     {
       "id": "migrate-hook",

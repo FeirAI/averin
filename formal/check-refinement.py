@@ -105,6 +105,7 @@ def string_literals(text: str, lang: str):
 NAMED_TAGS = {
     "recordSig": ("core/src/sign.rs", r'RECORD_SIG_TAG: &str = "([^"]+)"'),
     "checkpointSig": ("core/src/sign.rs", r'CHECKPOINT_SIG_TAG: &str = "([^"]+)"'),
+    "keyRotationSig": ("core/src/verify.rs", r'KEY_ROTATION_SIG_TAG: &str = "([^"]+)"'),
     "authoritySig": ("core/src/authority.rs", r'AUTHORITY_SIG_TAG: &str = "([^"]+)"'),
     "testAnchorSig": ("core/src/anchor.rs", r'ANCHOR_TAG: &str = "([^"]+)"'),
     "commitment": ("core/src/commit.rs", r'COMMIT_TAG: &str = "([^"]+)"'),

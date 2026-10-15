@@ -360,6 +360,74 @@
     "surface-region-invalid-accepted": {
       "tier": "full",
       "claim": "posture-report-live"
+    },
+    "surface-rotation-scheduled-skips-sig-old": {
+      "tier": "fast",
+      "claim": "key-rotation-verifier"
+    },
+    "surface-rotation-compromised-old-key-hands-over": {
+      "tier": "full",
+      "claim": "key-rotation-verifier"
+    },
+    "surface-rotation-compromise-extends-trust": {
+      "tier": "full",
+      "claim": "key-rotation-verifier"
+    },
+    "surface-rotation-new-key-signature-unchecked": {
+      "tier": "full",
+      "claim": "key-rotation-verifier"
+    },
+    "surface-rotation-successor-role-collision-allowed": {
+      "tier": "full",
+      "claim": "key-rotation-verifier"
+    },
+    "surface-cleartext-count-always-zero": {
+      "tier": "fast",
+      "claim": "cleartext-content-count"
+    },
+    "surface-lineage-retired-key-needs-no-statement": {
+      "tier": "full",
+      "claim": "key-lineage-server"
+    },
+    "surface-lineage-new-key-signature-unchecked": {
+      "tier": "full",
+      "claim": "key-lineage-server"
+    },
+    "surface-lineage-bundle-omits-rotations": {
+      "tier": "full",
+      "claim": "key-lineage-server"
+    },
+    "surface-lineage-record-stamps-epoch-zero": {
+      "tier": "full",
+      "claim": "key-lineage-server"
+    },
+    "surface-content-preview-not-lifted": {
+      "tier": "full",
+      "claim": "content-preview-committed"
+    },
+    "surface-content-preview-unknown-keys-allowed": {
+      "tier": "full",
+      "claim": "content-preview-committed"
+    },
+    "surface-content-preview-duplicate-overwrites": {
+      "tier": "full",
+      "claim": "content-preview-committed"
+    },
+    "surface-content-preview-v3-raw-allowed": {
+      "tier": "full",
+      "claim": "content-preview-committed"
+    },
+    "surface-content-preview-rationale-not-committed": {
+      "tier": "full",
+      "claim": "content-preview-committed"
+    },
+    "multiwriter-guard-lock-skipped": {
+      "tier": "full",
+      "claim": "multi-writer-failure-matrix"
+    },
+    "multiwriter-use-ignores-revocation": {
+      "tier": "full",
+      "claim": "multi-writer-failure-matrix"
     }
   },
   "claims": [
@@ -538,7 +606,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
+          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
         }
       ],
       "mutants": [
@@ -573,7 +641,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
+          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
         }
       ],
       "mutants": [
@@ -612,7 +680,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
+          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
         }
       ],
       "mutants": [
@@ -1290,7 +1358,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
+          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
         }
       ],
       "mutants": [
@@ -1330,7 +1398,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "a324a525869947a77cbd805fa46457acb00617fe7a6b83aa2ff7b08c2925a01e"
+          "sha256": "240e5b35c9883cff9f1ac63a301ba3c6df62121a1a36ed74735460246c9681a9"
         },
         {
           "path": "server/internal/api/posture.go",
@@ -1419,6 +1487,197 @@
       ],
       "does_not_establish": "Runs against Postgres 16 (CI) and the version used locally, one server, not a failover pair or a connection pooler in transaction mode (the advisory transaction lock needs a session-stable connection; the customer install test checks that, not this claim). The concurrency test is six goroutines racing, evidence that the lock serializes them and not a proof; the lock-skipped mutant is in the nightly tier because a race can in principle pass. Says nothing about the content of a migration step or the cutover barrier's own checks (other pgschema tests cover those), about rollback (a newer database is refused, not downgraded), or whether a deployment runs the hook: the Kubernetes Job that does is a feir-os item. The --check-runtime test covers the refusal of an owning credential, not every privilege the check inspects (pgschema.CheckRuntime has its own tests). Without AVERIN_TEST_DATABASE_URL the Postgres-backed tests skip, so a local run without a database proves only the usage cases.",
       "evidence_run": "38640736603"
+    },
+    {
+      "id": "key-rotation-verifier",
+      "$comment": "legacy register: signing-key-rotation-chain",
+      "statement": "The verifier reads bundle.key_rotations: a statement counts as verified only when its closed field set, canonical time, the new key's signature and (for a scheduled rotation) the old key's signature all hold over the keys the bundle lists; a pinned key that is neither revoked nor compromised (by the pin or by the bundle) passes trust to the successor of a verified scheduled statement, a compromise statement passes none, a successor that is also a pinned role key is refused, and without external pinning nothing is extended.",
+      "method": "test",
+      "artifacts": [
+        "core/src/verify.rs",
+        "core/tests/key_rotation.rs"
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ],
+      "detector": "cargo test -p averin-decision-core --test key_rotation",
+      "covers": [
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "evaluate_key_rotations",
+          "sha256": "6df9954618afde986672eef7dce0db2088157f51a8b2418f895061491102e5a0"
+        }
+      ],
+      "mutants": [
+        "surface-rotation-scheduled-skips-sig-old",
+        "surface-rotation-compromised-old-key-hands-over",
+        "surface-rotation-compromise-extends-trust",
+        "surface-rotation-new-key-signature-unchecked",
+        "surface-rotation-successor-role-collision-allowed"
+      ],
+      "does_not_establish": "That the old key signed nothing after rotated_at: a holder of the old key can still seal records under it, so a scheduled rotation relies on the old seed being destroyed and a compromise on a verified timestamp anchor taken before status_changed_at. That the rotation happened at the stated time; the statement is not a record in the project chain. That the pinned old key was the right key to trust. The tests build their bundles from one fixture with the fixture key as the successor, not from a server that really rotated (the server claim covers that), and they do not cover a chain of more than one rotation. The verifier signing domain averin.key_rotation.v1 is separated from the other signing domains by the Lean catalogue and the oracle corpus, not by these tests.",
+      "evidence_run": "38686890625"
+    },
+    {
+      "id": "cleartext-content-count",
+      "$comment": "legacy register: content-preview-committed",
+      "statement": "The verifier reports in cleartext_content_records the number of records whose signed body carries extensions.content_preview, and reports zero for a bundle without any. The count is informational and feeds no verdict.",
+      "method": "test",
+      "artifacts": [
+        "core/src/verify.rs",
+        "core/tests/legacy_content.rs"
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ],
+      "detector": "cargo test -p averin-decision-core --test legacy_content",
+      "covers": [
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "count_cleartext_content",
+          "sha256": "dda327fb2baabcd0f659b49cd79b28a7611564bba488ea18f5b54c63f7628b18"
+        }
+      ],
+      "mutants": [
+        "surface-cleartext-count-always-zero"
+      ],
+      "does_not_establish": "That the text is personal data, or that the record could have been erased: only that a content_preview key is present in the signed body. Text a client puts under another extensions key is not counted. The browser verifier shows the number but a test only checks the field is present and zero on the plain fixture.",
+      "evidence_run": "38686890625"
+    },
+    {
+      "id": "key-lineage-server",
+      "$comment": "legacy register: signing-key-rotation-chain",
+      "statement": "averin-server refuses a recording-key lineage that does not hold together (a retired key with no verifying rotation statement, a statement with a bad signature or unknown field, a chain that does not end at the current key, a duplicate or non-canonical entry), stamps new records and checkpoints with the configured epoch, and exports the current and retired keys with their status and the signed statements; a bundle exported across a rotation by a real server verifies under the Rust core from the OLD key's pin alone, and fails to when the statement is stripped or the rotation is a compromise.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/keylineage/keylineage.go",
+        "server/internal/api/server.go",
+        "server/internal/api/keyrotation_test.go",
+        "server/internal/keylineage/keylineage_test.go",
+        "server/cmd/averin-keyrotate/main.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/keylineage ./internal/api ./cmd/averin-keyrotate -run 'TestBuild|TestSign|TestCompromise|TestRotatedKey|TestDefaultServerStamps|TestKeyrotate'",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/keylineage/keylineage.go",
+          "symbol": "Build",
+          "sha256": "504d5089cddafbe9f4b277b6d8f4afecf4a5e12afa4704d503f6e67facc0766b"
+        },
+        {
+          "path": "server/internal/keylineage/keylineage.go",
+          "symbol": "Verify",
+          "sha256": "049ca9b31a5aea8880a8026d2e0bbff4eb5c6d8eb415008b739714a74bff2da2"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "keyBlock",
+          "sha256": "881735341314b68924876619713071d81e84546dd653fdd170f5c851e133252f"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "bundleKeys",
+          "sha256": "4fe7d02653245a485139cee9608433a7872d15cb89d3e54f8e5dae1ad929759d"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "addKeyRotations",
+          "sha256": "44a0dee5d3fefa2a85fb5506388b57efdede1cdfd6acb688bad21731e0fc5dce"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "WithKeyLineage",
+          "sha256": "4faf8f00315407ad8a601663000ea7d18bd7a9eb730889c66e274a7d00163ba4"
+        }
+      ],
+      "mutants": [
+        "surface-lineage-retired-key-needs-no-statement",
+        "surface-lineage-new-key-signature-unchecked",
+        "surface-lineage-bundle-omits-rotations",
+        "surface-lineage-record-stamps-epoch-zero"
+      ],
+      "does_not_establish": "That the operator followed the runbook (checkpoint and anchor under the old key before switching) or destroyed the old seed. That the files the server reads are the ones averin-keyrotate wrote: a hand-edited file is accepted if it still verifies. The server test rotates once with an in-memory store; a Postgres store, several rotations and the averin-server startup failure path (log.Fatal) are not exercised end to end, only the loader's success path and Build's refusals are. The signing domain is a new context whose separation from the others rests on the Lean catalogue.",
+      "evidence_run": "38686890625"
+    },
+    {
+      "id": "content-preview-committed",
+      "$comment": "legacy register: content-preview-committed",
+      "statement": "Prompt and answer text sent under extensions.content_preview is moved to the top-level input/output/rationale at ingest and committed, so the signed record carries only salted commitments, the text sits in the content store, a retention purge removes it, and the history still verifies afterwards; a content_preview that is not an object, carries another key, repeats a top-level field, or sits on a body-bound v3 authority record is refused with a 400; the recording proxy and the MCP server send the text at the top level.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/server.go",
+        "server/internal/api/content_preview_test.go",
+        "server/internal/proxy/proxy.go",
+        "server/internal/mcp/mcp.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'ContentPreview|V3AuthorityRecordCannot|ExtensionsWithout' && go test -count=1 ./internal/proxy ./internal/mcp",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "liftContentPreview",
+          "sha256": "022dbfe1a056f5cde9678ea27fac30c9085b47e95a9c6f855c197ef0e92896e9"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "commitLowEntropyFields",
+          "sha256": "89e5b3e7ff759d513d30fde3fbaaf29dc54bfa405caffa9c2717ef3919807581"
+        }
+      ],
+      "mutants": [
+        "surface-content-preview-not-lifted",
+        "surface-content-preview-unknown-keys-allowed",
+        "surface-content-preview-duplicate-overwrites",
+        "surface-content-preview-v3-raw-allowed",
+        "surface-content-preview-rationale-not-committed"
+      ],
+      "does_not_establish": "Records sealed before this change keep their cleartext text for good; nothing here erases them. That a client cannot put personal data elsewhere in the signed body (another extensions key, agent_id, action, a tool argument): only the three text fields and the legacy preview key are committed. That the commitment hides a guessable value: it is salted, but the encrypted store can be read by whoever holds the master key. The Python and TypeScript SDK shapes are asserted by their own unit tests (the TypeScript one runs in the sdk job, the Python one is not run in CI), not by this detector.",
+      "evidence_run": "38686890625"
+    },
+    {
+      "id": "multi-writer-failure-matrix",
+      "$comment": "legacy register: multi-writer-failure-matrix",
+      "statement": "Real averin-server processes run on one PostgreSQL schema and the matrix injects one failure per leg: one nonce used by eight racing requests over two processes; one use request sent six times; a prospective and a total revoke against a use that has already read the revocation state; a use against an uncommitted revoke; kill -9 while a prepare or a finalize transaction is open, with a request waiting on the other process; stranded broker_seq recovery while the other process writes, and a recovery process killed between its fence and its terminal transaction; a lost COMMIT acknowledgment cut before and after the server committed, for finalize, use and revoke, retried on both processes; and checkpoints from both processes at once. After each leg a trace monitor finds no violation of: no use admitted after an acknowledged revoke, one admission per nonce, no session fork, a numbered checkpoint chain whose last checkpoint equals the committed frontier, no receipt at or after its prospective cutoff, a gapless broker_seq log, and every acknowledged operation durable. The monitor has negative controls that fail on a hand-built violation of each rule.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/multiwriter_test.go",
+        "server/internal/api/multiwriter_child_test.go",
+        "server/internal/api/multiwriter_proxy_test.go",
+        "server/internal/api/multiwriter_monitor_test.go",
+        "scripts/check-go-test-events.py"
+      ],
+      "gates": [
+        "multiwriter",
+        "store-postgres"
+      ],
+      "detector": "bash -o pipefail -c ': \"${AVERIN_TEST_DATABASE_URL:?a Postgres DSN is required}\" && ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -json -count=1 -p 4 ./internal/api -run TestMultiWriter | python3 ../scripts/check-go-test-events.py --group multiwriter'",
+      "detector_kind": "custom",
+      "covers": [
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "lockProject",
+          "sha256": "eaa0b6afc98538b46a3065ad2896df7c7ecd3b28dcb84b31055457e9591344b9"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "handleUsePhase",
+          "sha256": "a97a209652f8031363346be166aab68c6009f3e6ed35a03b5c2d07ff15fef49e"
+        }
+      ],
+      "mutants": [
+        "multiwriter-guard-lock-skipped",
+        "multiwriter-use-ignores-revocation"
+      ],
+      "does_not_establish": "Two or three processes on one Postgres 16 schema with a shared content directory on the same host, not a cluster, not Postgres failover, and not more than two concurrent writers per project. The faults are injected by a store wrapper in the test binary and a TCP proxy that understands the simple-query COMMIT of a project write transaction; a COMMIT sent any other way is not cut (the test then fails on its fired-once check). The monitor checks the invariants it lists on the runs it saw; the TLA+ model is not tied to the code, and a passing matrix is sampled interleavings, not exhaustive ones. Timing windows (a request still waiting after 1.5 seconds) assume the host schedules the processes. It says nothing about a content store shared by replicas (the processes read one local directory), the per-replica ingest budget, an object-storage witness, or the deployment policy: single-writer-per-project stays until those exist.",
+      "evidence_run": "38679250521"
     }
   ]
 }
