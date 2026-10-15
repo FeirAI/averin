@@ -971,6 +971,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v2/dag", s.handleDAG)
 	mux.HandleFunc("GET /v2/verify", s.handleVerify)
 	mux.HandleFunc("GET /v2/export", s.handleExport)
+	mux.HandleFunc("GET /v2/segments", s.handleSegments)
 	mux.HandleFunc("GET /v2/usage", s.handleUsage)
 	mux.HandleFunc("GET /v2/posture", s.handlePosture) // read-only startup-guard report for the deploy verifier
 
@@ -4138,12 +4139,17 @@ func (s *Server) handleDAG(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	setBundleWriteDeadline(w)
 	projectID := r.URL.Query().Get("project")
+	month := r.URL.Query().Get("month")
 	// The work is coalesced before taking a bundle slot. A Telegram/browser refresh storm for one project
 	// therefore consumes one build slot, not one slot per waiting HTTP request.
-	report, err := s.verifyProject(r.Context(), projectID)
+	report, err := s.verifyProject(r.Context(), projectID, month)
 	if err != nil {
 		if errors.Is(err, errVerifyOverloaded) {
 			writeErr(w, http.StatusServiceUnavailable, "too many concurrent verification requests; retry shortly")
+			return
+		}
+		if errors.Is(err, errBadMonth) || errors.Is(err, errNoSuchMonth) || errors.Is(err, errBundleTooBig) || errors.Is(err, errMonthTooBig) {
+			writeBundleErr(w, err)
 			return
 		}
 		// A disconnected client cannot receive an error response. The shared verification is intentionally
@@ -4162,16 +4168,21 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 // project and the trust-root options, so requests from different tenants (or with different verifier
 // configuration) can never share a result. The result is shared only while the work is in flight; errors and
 // integrity-failure reports are never retained as a reassuring answer for a later request.
-func (s *Server) verifyProject(ctx context.Context, projectID string) (string, error) {
+func (s *Server) verifyProject(ctx context.Context, projectID, month string) (string, error) {
 	verifyOpts := s.selfVerifyOpts()
-	key := verificationKey(projectID, verifyOpts)
+	flightProject := projectID
+	if month != "" {
+		// A month and the whole history are different results; they must never share a flight.
+		flightProject += "\x00" + month
+	}
+	key := verificationKey(flightProject, verifyOpts)
 	return s.verifyFlights.run(ctx, key, func() (string, error) {
 		// Unlike acquireBundleSlot, this worker has no ResponseWriter. It waits for capacity so a burst of
 		// unrelated exports cannot cause a duplicate verification or make the first request fail spuriously.
 		s.bundleSem <- struct{}{}
 		defer func() { <-s.bundleSem }()
 
-		bundle, err := s.buildBundle(projectID, false)
+		bundle, _, err := s.buildBundleView(ctx, projectID, false, month)
 		if err != nil {
 			return "", err
 		}
@@ -4279,9 +4290,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown record_kind %q (allowed: budget-exhausted, chargeback-posted)", recordKind))
 		return
 	}
-	bundle, snapshotDisclosures, err := s.buildBundleWithSnapshot(r.Context(), projectID, true)
+	bundle, snapshotDisclosures, err := s.buildBundleView(r.Context(), projectID, true, r.URL.Query().Get("month"))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeBundleErr(w, err)
 		return
 	}
 	s.meter.ExportIssued(projectID) // billable per export
@@ -4476,6 +4487,14 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 }
 
 func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, includeDisclosures bool) (string, []store.DisclosureSecret, error) {
+	return s.buildBundleView(ctx, projectID, includeDisclosures, "")
+}
+
+// buildBundleView builds the whole-history bundle (month == "") or the month segment for `month` (AVE-01):
+// the same snapshot, keys, revocation list and attestation, over only that month's records and checkpoints
+// plus the base checkpoint, with the `segment` block. A whole-history build that would exceed the verifier's
+// size cap fails with errBundleTooBig instead of producing a file no verifier accepts.
+func (s *Server) buildBundleView(ctx context.Context, projectID string, includeDisclosures bool, month string) (string, []store.DisclosureSecret, error) {
 	// One repeatable-read snapshot prevents an export from combining a new
 	// checkpoint with an older record set, or a fresh revocation list with a
 	// different anchor/record cutoff. The complete uncheckpointed tail remains.
@@ -4486,6 +4505,7 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 	var boundary time.Time
 	var watermark int64
 	var secrets []store.DisclosureSecret
+	var plan *segmentPlan
 	err := s.st.WithProjectRead(ctx, projectID, func(st store.Store) error {
 		var err error
 		// Plan 009: the boundary time and authorization high watermark are captured inside this
@@ -4500,8 +4520,30 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 		if anchors, err = st.Anchors(projectID); err != nil {
 			return err
 		}
-		if recs, err = st.AllRecords(projectID); err != nil {
-			return err
+		if month == "" {
+			if recs, err = st.AllRecords(projectID); err != nil {
+				return err
+			}
+		} else {
+			plans, perr := planSegments(checks)
+			if perr != nil {
+				return perr
+			}
+			p, perr := findSegment(plans, month)
+			if perr != nil {
+				return perr
+			}
+			plan = &p
+			if recs, err = segmentRecords(st, projectID, p); err != nil {
+				return err
+			}
+			// The bundle carries the base checkpoint (when there is one) and the month's own checkpoints; the
+			// revocation window and the attestation below are derived from the latest of these.
+			checks = checks[:0:0]
+			if p.Base != nil {
+				checks = append(checks, *p.Base)
+			}
+			checks = append(checks, p.Own...)
 		}
 		if s.revocationKey != nil {
 			revocationEvents, err = st.RevocationEvents(projectID)
@@ -4516,6 +4558,32 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 	})
 	if err != nil {
 		return "", nil, err
+	}
+	size := 0
+	for _, r := range recs {
+		size += len(r.JSON)
+	}
+	if size > maxSingleBundleBytes {
+		if month != "" {
+			return "", nil, errMonthTooBig
+		}
+		return "", nil, errBundleTooBig
+	}
+	if month != "" && includeDisclosures {
+		// A month discloses only the openings of its own records.
+		inMonth := make(map[string]struct{}, len(recs))
+		for _, r := range recs {
+			if id := recordIDOf(r.JSON); id != "" {
+				inMonth[id] = struct{}{}
+			}
+		}
+		kept := secrets[:0:0]
+		for _, d := range secrets {
+			if _, ok := inMonth[d.RecordID]; ok {
+				kept = append(kept, d)
+			}
+		}
+		secrets = kept
 	}
 	records := make([]json.RawMessage, len(recs))
 	for i, r := range recs {
@@ -4541,6 +4609,9 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 		"keys":           s.bundleKeys(),
 		"records":        records,
 		"checkpoints":    checkpoints,
+	}
+	if plan != nil {
+		bundle["segment"] = segmentBlock(*plan)
 	}
 	s.addKeyRotations(bundle)
 	// T6/D8: emit the operator-declared coverage_manifest verbatim. Its digest is bound into the
@@ -4637,6 +4708,15 @@ func setDefault(m map[string]any, k, val string) {
 func jsonRaw(v any) (json.RawMessage, error) {
 	b, err := json.Marshal(v)
 	return json.RawMessage(b), err
+}
+
+// recordIDOf returns the record_id of a sealed record's JSON ("" when absent or unparseable).
+func recordIDOf(sealed string) string {
+	var m struct {
+		RecordID string `json:"record_id"`
+	}
+	_ = json.Unmarshal([]byte(sealed), &m)
+	return m.RecordID
 }
 
 func recordMeta(sealed string) (contentHash string, parents []string, session string) {

@@ -5,7 +5,7 @@
 
 use crate::canon::CanonValue;
 use crate::hashx::parse_sha256;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, PartialEq)]
 pub enum DagError {
@@ -53,6 +53,15 @@ pub struct Dag {
     pub topo_order: Vec<String>,
     /// Count of collapsed duplicate `content_hash`es (threat #8).
     pub collapsed_duplicates: usize,
+    /// Segment mode only (see [`build_from`]): the base checkpoint's frontier. Its members are records of
+    /// earlier months that this record set does not carry; a parent edge to one resolves here, and one that no
+    /// record references stays a head.
+    pub external_frontier: BTreeSet<String>,
+    /// Segment mode only: parents that are neither a record in the set nor in `external_frontier`. They name
+    /// records older than the base. A whole-history chain check resolves them against the earlier months;
+    /// a single month cannot, so it only counts them. Always empty outside segment mode (a missing parent is
+    /// then an error).
+    pub earlier_refs: BTreeSet<String>,
 }
 
 fn content_hash_of(rec: &CanonValue, i: usize) -> Result<String, DagError> {
@@ -82,6 +91,17 @@ fn parents_of(rec: &CanonValue, i: usize) -> Result<Vec<&str>, DagError> {
 
 /// Build and validate the causal DAG over a set of (already content-hash-verified) records.
 pub fn build(records: &[CanonValue]) -> Result<Dag, DagError> {
+    build_from(records, None)
+}
+
+/// [`build`] over one month segment. With `base_frontier = Some(heads of the base checkpoint)` a parent that
+/// is not in `records` is not an error: it resolves to the base frontier when it is a member, and is recorded in
+/// [`Dag::earlier_refs`] otherwise. `None` is exactly [`build`]. Base frontier members that no record
+/// references are heads of the segment, so the latest checkpoint's frontier is still compared with every head.
+pub fn build_from(
+    records: &[CanonValue],
+    base_frontier: Option<&BTreeSet<String>>,
+) -> Result<Dag, DagError> {
     // 1. index by content_hash; collapse exact duplicates (same content_hash == same bytes).
     let mut by_hash: BTreeMap<String, usize> = BTreeMap::new();
     let mut collapsed_duplicates = 0usize;
@@ -100,6 +120,8 @@ pub fn build(records: &[CanonValue]) -> Result<Dag, DagError> {
     let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut referenced: BTreeMap<&str, bool> =
         by_hash.keys().map(|k| (k.as_str(), false)).collect();
+    let mut base_referenced: BTreeSet<&str> = BTreeSet::new();
+    let mut earlier_refs: BTreeSet<String> = BTreeSet::new();
 
     for (ch, &i) in &by_hash {
         let parents = parents_of(&records[i], i)?;
@@ -113,10 +135,22 @@ pub fn build(records: &[CanonValue]) -> Result<Dag, DagError> {
                 });
             }
             if !by_hash.contains_key(p) {
-                return Err(DagError::MissingParent {
-                    record: ch.clone(),
-                    parent: p.to_string(),
-                });
+                match base_frontier {
+                    Some(base) => {
+                        if let Some(member) = base.get(p) {
+                            base_referenced.insert(member.as_str());
+                        } else {
+                            earlier_refs.insert(p.to_string());
+                        }
+                        continue;
+                    }
+                    None => {
+                        return Err(DagError::MissingParent {
+                            record: ch.clone(),
+                            parent: p.to_string(),
+                        });
+                    }
+                }
             }
             if !seen.insert(p) {
                 continue;
@@ -166,13 +200,23 @@ pub fn build(records: &[CanonValue]) -> Result<Dag, DagError> {
         .filter(|(_, &r)| !r)
         .map(|(&k, _)| k.to_string())
         .collect();
+    if let Some(base) = base_frontier {
+        heads.extend(
+            base.iter()
+                .filter(|m| !base_referenced.contains(m.as_str()) && !by_hash.contains_key(*m))
+                .cloned(),
+        );
+    }
     heads.sort();
+    heads.dedup();
 
     Ok(Dag {
         by_hash,
         heads,
         topo_order: topo,
         collapsed_duplicates,
+        external_frontier: base_frontier.cloned().unwrap_or_default(),
+        earlier_refs,
     })
 }
 

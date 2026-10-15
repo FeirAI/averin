@@ -5,34 +5,43 @@ bugs; each names the constraint, why it holds, and (where relevant) the deferred
 would lift it. See [`../coverage-limits.md`](../coverage-limits.md) for the trust-model coverage
 limits and [SECURITY.md](SECURITY.md) for what averin deliberately does not do.
 
-## Export / verify build the whole project bundle in memory
+## Export / verify of a whole history are bounded; long histories go by month
 
-`GET /v2/export` and `GET /v2/verify` build the bundle by reading the project's **entire** record and
-checkpoint history into memory (`buildBundle` → `store.AllRecords` + `store.Checkpoints`), materializing
-every sealed record as a `json.RawMessage`, then serializing the whole bundle in one response. The
-offline verifier re-derives the DAG, frontier, and checkpoint chain over the **closed set**, so the
-bundle is intentionally whole-history — records cannot be pruned without breaking causal-parent /
-frontier resolution.
+`GET /v2/export` and `GET /v2/verify` without `month` still build the project's **entire** record and
+checkpoint history in memory (`buildBundleView` reads `store.AllRecords` + `store.Checkpoints` in one repeatable-read
+snapshot, materializing every sealed record as a `json.RawMessage`) and serialize it in one response. The
+offline verifier re-derives the DAG, frontier and checkpoint chain over that closed set, and **refuses any file
+over 256 MiB** (CLI, browser and `/v2/verify` alike).
 
-Consequences and the bounds that contain them:
+What contains this:
 
-- **Peak memory ≈ O(project history).** A very large project's export/verify holds its full sealed
-  history in RAM for the duration of the build. Size the process (or shard tenants) accordingly.
-- **Concurrency cap.** Concurrent export/verify builds are bounded by a semaphore
-  (`maxConcurrentBundleReads`, currently **4**). A request that would exceed the cap gets a retryable
-  `503` rather than piling on memory pressure.
-- **Write-timeout exemption.** The server's global 60s `WriteTimeout` (Slowloris / slow-body defense
-  for every other route) would hard-kill a large-but-legitimate export mid-write. Export/verify
-  therefore run under a **per-handler write deadline** (`bundleWriteTimeout`, currently **10m**) set via
-  `http.ResponseController`; every other route keeps the finite `WriteTimeout`.
-- **Not retroactive.** These bounds only shape *how* the current whole-history bundle is served.
+- **Month segments** ([SEGMENTS.md](SEGMENTS.md)). `GET /v2/export?month=YYYY-MM` and
+  `GET /v2/verify?month=YYYY-MM` serve one month, chained to the previous month's last checkpoint, reading only that
+  month's records from the store. `averin-verify chain` checks all the months. No single export or verification
+  has to hold the history.
+- **A refusal, not an unverifiable file.** A whole-history build whose records exceed 256 MiB fails with `413` and a
+  pointer to `/v2/segments`; a single month that does is refused with its own `413`.
+- **Concurrency cap.** Concurrent export/verify builds are bounded by a semaphore (`maxConcurrentBundleReads`,
+  currently **4**). A request over the cap gets a retryable `503`.
+- **Write-timeout exemption.** The global 60s `WriteTimeout` would kill a large-but-legitimate export mid-write, so
+  export/verify run under a per-handler deadline (`bundleWriteTimeout`, **10m**).
 
-**Deferred:** a **cursor-streaming export** — open the JSON envelope, stream sealed records from a
-store cursor with an `http.Flusher`, and close it — would make export memory **constant** (independent
-of history size) and remove the need for both the concurrency cap and the extended deadline. It
-requires a paged/cursor store method and an incremental bundle writer that emits **byte-identical**
-bytes to today's build (the offline verifier re-derives over the whole set, so the framing must not
-change). That is a design item, not yet built.
+What it does not do:
+
+- **A month cannot evaluate the grant-log transparency chain or the federation heads.** They chain every grant
+  since the project began, so a month that starts after a base reports `broker_trust: assumed` and the capstone
+  claims stay unsatisfied for it (`segment.not_evaluated`). Only the first month and a whole-history bundle
+  evaluate them, so a project past the 256 MiB limit has no single check of its whole grant log.
+- **A use or outcome whose grant or intent is in an earlier month** is listed (`unresolved_cross_month`), never
+  matched. The chain checks the named record exists in an earlier month, not the full use-to-grant match.
+- **A month is bounded by its own size.** A project that records more than 256 MiB in a month cannot be verified
+  month by month; cutting finer than a month is not built.
+- **Peak memory of a whole-history build is O(history)** for projects under the limit, and the in-memory store holds
+  everything regardless.
+
+**Deferred:** a **cursor-streaming export** (constant memory, byte-identical framing) and **checkpoint
+accumulators** that would let a bundle start from a pinned checkpoint and prove earlier parents by membership
+(removing the two month-boundary gaps above) are not built. The segment design needs neither.
 
 ## App list endpoint pages in the store (not in RAM)
 

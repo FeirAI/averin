@@ -43,7 +43,8 @@ Core modules (`core/src/`):
 | `dag.rs` | Causal DAG build, duplicate collapse, head/frontier derivation. |
 | `checkpoint.rs` | Checkpoint hash + chain verification (fork/omission/gap). |
 | `verify.rs` | The full bundle verifier + the typed report + the mode gates. |
-| `rfc3161.rs` | RFC 3161 (DER/CMS) timestamp-token parsing (feature `rfc3161`). |
+| `rfc3161.rs` | RFC 3161 (DER/CMS) timestamp-token parsing and verification: ECDSA and RSA TSA signatures (feature `rfc3161`). |
+| `segment.rs` | Month segments (AVE-01): split a whole-history bundle by month and chain the months ([SEGMENTS.md](SEGMENTS.md)). |
 | `anchor.rs` | Anchor join helpers. |
 | `ffi.rs` / `b64.rs` / `hashx.rs` | the C ABI, base64url, length-prefix hashing. |
 

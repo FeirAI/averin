@@ -134,6 +134,7 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 | `AVERIN_DB_SUPERUSER_PASSWORD` / `AVERIN_DB_OWNER_PASSWORD` / `AVERIN_DB_RUNTIME_PASSWORD` | db, migrate, grants, server | **required** (compose sets `:?`) | passwords of the Postgres bootstrap superuser, `averin_owner` and `averin_app` (URL-safe) |
 | `AVERIN_MIGRATION_DATABASE_URL` | migrate | compose: `averin_owner` | the migration credential `averin-migrate` uses; never given to the server |
 | `AVERIN_API_KEYS` | server | (none) | `proj-a:tok1,tok2;proj-b:tok3` — per-project API-key auth. **Unset = unauthenticated** (dev/single-tenant only). |
+| `AVERIN_TSA_PRESET` | server | (none) | `freetsa` = one-setting anchoring at FreeTSA (free, no service level); see `docs/dev/TIMESTAMPS.md`. Anchoring is off unless this or `AVERIN_TSA_URL` is set. |
 | `AVERIN_TSA_URL` | server | (none) | RFC 3161 TSA URL — anchors every checkpoint (threat #3 backdating). The verifier pins the TSA out-of-band (`tsa_keys`/`tsa_spki_b64`). |
 | `AVERIN_CONTENT_DIR` / `AVERIN_WITNESS_DIR` | server | (none) | durable content-store / append-only checkpoint-witness directories. |
 | `STRIPE_API_KEY` | server | (none) | enables usage-based metering reporting; no key = local counting only |

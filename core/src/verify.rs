@@ -18,9 +18,10 @@
 use crate::anchor::verify_anchor_keyed;
 use crate::authority::{verify_authority_with_key, AuthorityTrust};
 use crate::canon::CanonValue;
-use crate::checkpoint::{validate_chain, verify_checkpoint_sealed};
+use crate::checkpoint::verify_checkpoint_sealed;
 use crate::dag;
 use crate::record::{validate_record_shape, verify_content_hash, verify_sealed};
+use crate::segment::{validate_segment_chain, SegmentBase};
 use crate::sign::decode_pubkey;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::collections::{BTreeMap, BTreeSet};
@@ -276,6 +277,9 @@ pub struct VerifyReport {
     /// in the clear, which no retention purge can erase. Zero on a bundle sealed after the server began
     /// committing that text. A count for the reader, never a verdict input.
     pub cleartext_content_records: usize,
+    /// AVE-01: present only when the bundle is a month segment (`bundle.segment`). What the segment covers, its
+    /// link to the previous month and what it did not evaluate. `None` for every whole-history bundle.
+    pub segment: Option<SegmentReport>,
     /// Credential-broker grants (`event_type=credential_grant`) and how many verified to
     /// `gateway_enforced` under a pinned authority key (Level 3 Tier-A grant accountability).
     pub grant_total: usize,
@@ -714,6 +718,196 @@ pub struct VerifyOptions {
     /// set: every OTHER role (resource/taxonomy/attestation/tsa/cosig/revocation/generic-authority) must be
     /// disjoint from that union (a FATAL config error otherwise); distinct brokers MAY share a key.
     pub federated_broker_keys: BTreeMap<String, Vec<VerifyingKey>>,
+    /// AVE-01: the base checkpoint hash the auditor expects a month segment to start from (the previous month's
+    /// `segment.head_checkpoint_hash`, or `"genesis"` for the first month). Never read from the bundle. `Some`
+    /// makes the link a checked fact (`segment.link = "base_pinned"`); a bundle that is not a segment, or one
+    /// that starts from a different base, then fails.
+    pub segment_base_pin: Option<String>,
+}
+
+/// AVE-01: a month segment's verdict-side facts (see [`evaluate_segment`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentReport {
+    pub month: String,
+    pub base_seq: Option<i64>,
+    pub base_checkpoint_hash: Option<String>,
+    /// The latest checkpoint the segment carries: the next month's base.
+    pub head_seq: i64,
+    pub head_checkpoint_hash: Option<String>,
+    /// Records through the head: the base checkpoint's count plus the records carried.
+    pub head_record_count: i64,
+    /// `genesis` (first month, no base), `base_pinned` (the base hash equals the caller's pin) or
+    /// `base_unpinned` (the base is internally consistent but nobody pinned it).
+    pub link: &'static str,
+    /// The base checkpoint carries a verified trusted timestamp.
+    pub base_anchored: bool,
+    /// Parents that name records older than the base and are not in its frontier. A single month cannot resolve
+    /// them; `averin-verify chain` does.
+    pub earlier_parent_refs: usize,
+    /// `(kind, record_id, reference)` of each use (naming a grant) or use_outcome (naming an intent) whose
+    /// counterpart is not in this segment. Never counted as matched or as a violation here; the chain resolves them.
+    pub unresolved_cross_month: Vec<(String, String, String)>,
+    /// Checks a month cannot make on its own, reported as not performed rather than as passed.
+    pub not_evaluated: Vec<String>,
+}
+
+/// What `evaluate_segment` extracts from `bundle.segment` and the carried base checkpoint.
+struct SegmentEval {
+    present: bool,
+    month: String,
+    base: Option<SegmentBaseInfo>,
+}
+
+struct SegmentBaseInfo {
+    seq: i64,
+    hash: String,
+    record_count: i64,
+    frontier: BTreeSet<String>,
+}
+
+pub const SEGMENT_FORMAT: &str = "averin.segment.v1";
+
+/// The two checks a month segment cannot make: grant-log transparency chains every grant since the project began,
+/// and federation heads do the same per broker. A segment reports them `assumed`/absent.
+const SEGMENT_NOT_EVALUATED: [&str; 2] = ["broker_grant_log", "federation_heads"];
+
+fn is_month(m: &str) -> bool {
+    let b = m.as_bytes();
+    b.len() == 7
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && matches!(&b[5..], [b'0', b'1'..=b'9'] | [b'1', b'0'..=b'2'])
+}
+
+/// Read and check `bundle.segment` (AVE-01). A bundle without one is a whole-history bundle and is untouched.
+/// With one: the format is pinned, `month` is `YYYY-MM`, the base is either absent (first month) or
+/// the carried checkpoint with that seq and hash, whose `record_count` and frontier become the base context.
+/// The base's own signature, key and anchor are checked with every other checkpoint, so nothing here trusts it.
+fn evaluate_segment(
+    bundle: &CanonValue,
+    checkpoints: &[CanonValue],
+    opts: &VerifyOptions,
+    issues: &mut Vec<String>,
+) -> SegmentEval {
+    let none = |present| SegmentEval {
+        present,
+        month: String::new(),
+        base: None,
+    };
+    let Some(seg) = bundle.get("segment") else {
+        if opts.segment_base_pin.is_some() {
+            issues.push(
+                "segment: a base pin was supplied but the bundle is not a month segment".into(),
+            );
+        }
+        return none(false);
+    };
+    if seg.as_object().is_none() {
+        issues.push("segment: not an object".into());
+        return none(true);
+    }
+    if s(seg, "format").as_deref() != Some(SEGMENT_FORMAT) {
+        issues.push(format!("segment: format is not {SEGMENT_FORMAT}"));
+        return none(true);
+    }
+    let month = match s(seg, "month") {
+        Some(m) if is_month(&m) => m,
+        _ => {
+            issues.push("segment: month is not YYYY-MM".into());
+            return none(true);
+        }
+    };
+    let base_seq = seg.get("base_seq");
+    let base_hash = seg.get("base_checkpoint_hash");
+    let base_count = seg.get("base_record_count").and_then(|v| v.as_int());
+    let base = match (base_seq, base_hash) {
+        (Some(CanonValue::Null), Some(CanonValue::Null)) if base_count == Some(0) => None,
+        (Some(sq), Some(h)) => {
+            let (Some(seq), Some(hash), Some(count)) = (sq.as_int(), h.as_str(), base_count) else {
+                issues.push(
+                    "segment: base_seq, base_checkpoint_hash and base_record_count are malformed"
+                        .into(),
+                );
+                return SegmentEval {
+                    present: true,
+                    month,
+                    base: None,
+                };
+            };
+            let carried = checkpoints.iter().find(|cp| {
+                cp.get("checkpoint_seq").and_then(|v| v.as_int()) == Some(seq)
+                    && s(cp, "checkpoint_hash").as_deref() == Some(hash)
+            });
+            let Some(cp) = carried else {
+                issues.push(format!(
+                    "segment: base checkpoint {seq} ({hash}) is not carried in the bundle"
+                ));
+                return SegmentEval {
+                    present: true,
+                    month,
+                    base: None,
+                };
+            };
+            if cp.get("record_count").and_then(|v| v.as_int()) != Some(count) {
+                issues.push("segment: base_record_count does not match the base checkpoint".into());
+            }
+            let frontier: BTreeSet<String> = cp
+                .get("frontier")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|h| h.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(SegmentBaseInfo {
+                seq,
+                hash: hash.to_string(),
+                record_count: count,
+                frontier,
+            })
+        }
+        _ => {
+            issues.push(
+                "segment: base_seq, base_checkpoint_hash and base_record_count are inconsistent"
+                    .into(),
+            );
+            return none(true);
+        }
+    };
+    if let Some(pin) = &opts.segment_base_pin {
+        let actual = base.as_ref().map_or("genesis", |b| b.hash.as_str());
+        if pin != actual {
+            issues.push(format!("segment: base is {actual}, expected {pin}"));
+        }
+    }
+    // Month membership is the recorder's signed `created_ts`: every checkpoint after the base falls in `month`
+    // and the base falls before it. Without this the label would name nothing.
+    for cp in checkpoints {
+        let is_base = base
+            .as_ref()
+            .is_some_and(|b| cp.get("checkpoint_seq").and_then(|v| v.as_int()) == Some(b.seq));
+        match s(cp, "created_ts").filter(|t| is_canonical_ts(t)) {
+            Some(t) => {
+                let m = &t[..7];
+                if is_base && m >= month.as_str() {
+                    issues.push(format!(
+                        "segment: base checkpoint is dated {m}, not before {month}"
+                    ));
+                } else if !is_base && m != month {
+                    issues.push(format!(
+                        "segment: checkpoint dated {m} is outside segment month {month}"
+                    ));
+                }
+            }
+            None => issues.push("segment: a checkpoint has no canonical created_ts".into()),
+        }
+    }
+    SegmentEval {
+        present: true,
+        month,
+        base,
+    }
 }
 
 struct KeyEntry {
@@ -1488,7 +1682,7 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             .unwrap()
         })
         .collect();
-    CanonValue::object(vec![
+    let mut members: Vec<(String, CanonValue)> = vec![
         ("ok".into(), CanonValue::Bool(r.ok)),
         ("claims_version".into(), CanonValue::string("2")),
         ("claims".into(), r.claims.to_canon()),
@@ -1737,6 +1931,53 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("issues".into(), str_array(&r.issues)),
         ("first_broken_link".into(), opt_str(&r.first_broken_link)),
         ("record_trust".into(), CanonValue::Array(records)),
+    ];
+    // Only a month segment carries this section, so every whole-history report keeps its bytes.
+    if let Some(sg) = &r.segment {
+        members.push(("segment".into(), segment_to_canon(sg)));
+    }
+    CanonValue::object(members).unwrap()
+}
+
+fn segment_to_canon(sg: &SegmentReport) -> CanonValue {
+    let int_or_null = |v: Option<i64>| v.map_or(CanonValue::Null, CanonValue::Int);
+    CanonValue::object(vec![
+        ("format".into(), CanonValue::string(SEGMENT_FORMAT)),
+        ("month".into(), CanonValue::string(sg.month.clone())),
+        ("base_seq".into(), int_or_null(sg.base_seq)),
+        (
+            "base_checkpoint_hash".into(),
+            opt_str(&sg.base_checkpoint_hash),
+        ),
+        ("head_seq".into(), CanonValue::Int(sg.head_seq)),
+        (
+            "head_checkpoint_hash".into(),
+            opt_str(&sg.head_checkpoint_hash),
+        ),
+        (
+            "head_record_count".into(),
+            CanonValue::Int(sg.head_record_count),
+        ),
+        ("link".into(), CanonValue::string(sg.link)),
+        ("base_anchored".into(), CanonValue::Bool(sg.base_anchored)),
+        ("earlier_parent_refs".into(), count(sg.earlier_parent_refs)),
+        (
+            "unresolved_cross_month".into(),
+            CanonValue::Array(
+                sg.unresolved_cross_month
+                    .iter()
+                    .map(|(kind, record_id, reference)| {
+                        CanonValue::object(vec![
+                            ("kind".into(), CanonValue::string(kind.clone())),
+                            ("record_id".into(), CanonValue::string(record_id.clone())),
+                            ("ref".into(), CanonValue::string(reference.clone())),
+                        ])
+                        .unwrap()
+                    })
+                    .collect(),
+            ),
+        ),
+        ("not_evaluated".into(), str_array(&sg.not_evaluated)),
     ])
     .unwrap()
 }
@@ -2024,6 +2265,17 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         cosig_approver_keys,
         revocation_keys,
         trusted_keys: signing,
+        segment_base_pin: match opts_val.get("segment_base_checkpoint_hash") {
+            None | Some(CanonValue::Null) => None,
+            Some(v) => match v.as_str() {
+                Some(h) if h == "genesis" || crate::hashx::parse_sha256(h).is_some() => {
+                    Some(h.to_string())
+                }
+                _ => return error_report(
+                    "segment_base_checkpoint_hash must be \"genesis\" or a sha256: checkpoint hash",
+                ),
+            },
+        },
     };
     report_json_with_digest(&verify_bundle_with(&bundle, &opts), bundle_text.as_bytes())
 }
@@ -2291,6 +2543,7 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         key_rotations_verified: 0,
         key_rotations_chain_trusted: 0,
         cleartext_content_records: 0,
+        segment: None,
         grant_total: 0,
         grant_verified: 0,
         denied_grants: 0,
@@ -5482,6 +5735,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let key_entries = arr(bundle, "keys", &empty, &mut issues);
     let records = arr(bundle, "records", &empty, &mut issues);
     let checkpoints = arr(bundle, "checkpoints", &empty, &mut issues);
+    // AVE-01: a month segment states a base checkpoint and a month. Read once, before the DAG and chain checks that
+    // need the base; a whole-history bundle has no `segment` and every later branch on it is a no-op.
+    let segment = evaluate_segment(bundle, checkpoints, opts, &mut issues);
     if bundle.as_object().is_none() {
         issues.push("bundle is not a JSON object".into());
     }
@@ -5776,13 +6032,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let cleartext_content_records = count_cleartext_content(records);
 
     // ---- 3. DAG ----
-    let (dag_ok, dag_heads, collapsed_duplicates, dag_opt) = match dag::build(records) {
-        Ok(d) => (true, d.heads.len(), d.collapsed_duplicates, Some(d)),
-        Err(e) => {
-            issues.push(format!("DAG invalid: {e}"));
-            (false, 0, 0, None)
-        }
-    };
+    let (dag_ok, dag_heads, collapsed_duplicates, dag_opt) =
+        match dag::build_from(records, segment.base.as_ref().map(|b| &b.frontier)) {
+            Ok(d) => (true, d.heads.len(), d.collapsed_duplicates, Some(d)),
+            Err(e) => {
+                issues.push(format!("DAG invalid: {e}"));
+                (false, 0, 0, None)
+            }
+        };
 
     // ---- 4. checkpoints + anchors ----
     let mut checkpoints_verified = 0usize;
@@ -6059,7 +6316,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut chain_ok = true;
     match &dag_opt {
         Some(d) if !checkpoints.is_empty() => {
-            if let Err(e) = validate_chain(checkpoints, d) {
+            let base = segment.base.as_ref().map(|b| SegmentBase {
+                seq: b.seq,
+                hash: &b.hash,
+                record_count: b.record_count,
+            });
+            if let Err(e) = validate_segment_chain(checkpoints, d, base.as_ref()) {
                 chain_ok = false;
                 issues.push(format!("checkpoint chain: {e}"));
             }
@@ -6336,6 +6598,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // Index closed, fully-verified grants by grant_id, reading match fields ONLY from the proven
     // grant_evidence (R1). See `GrantInfo`.
     let mut grants_by_id: BTreeMap<String, GrantInfo> = BTreeMap::new();
+    // AVE-01: in a segment that starts after a base checkpoint, a use or outcome may name a grant or intent sealed in
+    // an earlier month. No record in this bundle carries that id, so the join cannot be made here: it is
+    // listed as unresolved (never matched, never a violation) and `averin-verify chain` resolves it against
+    // the earlier months. A reference to a record that IS in the bundle but failed to index stays a violation.
+    let segment_record_ids: BTreeSet<&str> = if segment.base.is_some() {
+        records
+            .iter()
+            .filter_map(|r| r.get("record_id").and_then(|v| v.as_str()))
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut segment_unresolved: BTreeSet<(String, String, String)> = BTreeSet::new();
     // A required credential disclosure applies to every accepted committed broker grant,
     // including an unused grant. Counting only disclosures the exporter chose to provide would
     // let one opened grant mask a second grant's missing descriptor.
@@ -7121,6 +7396,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             // a CLOSED use needs a CLOSED grant (unchanged R3 semantics); a committed-only use may pair with a
             // committed-only grant, but can then only end as pending.
             Some(g) if g.closed || !use_closed => g,
+            None if segment.base.is_some() && !segment_record_ids.contains(gid.as_str()) => {
+                segment_unresolved.insert(("use".into(), rt.record_id.clone(), gid.clone()));
+                continue;
+            }
             _ => {
                 unmatched_violation += 1;
                 violation(&mut issues, format!("no matching {} grant '{gid}' — action without a credential (Tier-B violation)", if use_closed { "closed" } else { "committed" }));
@@ -7240,6 +7519,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut legacy_orphans = 0usize;
     for o in &outcomes {
         if !consumed_outcomes.contains(&o.record_id) {
+            if segment.base.is_some() && !segment_record_ids.contains(o.intent_ref.as_str()) {
+                segment_unresolved.insert((
+                    "use_outcome".into(),
+                    o.record_id.clone(),
+                    o.intent_ref.clone(),
+                ));
+                continue;
+            }
             unmatched_violation += 1;
             legacy_orphans += 1;
             if !hist_consumed_outcomes.contains(&o.record_id) {
@@ -7691,6 +7978,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut per_broker_trust: Vec<(String, String)> = Vec::new();
     let broker_issues_before = issues.len();
     let broker_trust = match dag_opt.as_ref() {
+        // AVE-01: grant-log transparency (D6) and federation heads chain every grant since the project began. A
+        // month that starts after a base checkpoint cannot re-derive them, so it reports `assumed` (never a
+        // verified sequence) and the capstone claims stay unsatisfied; the first month and whole-history
+        // bundles evaluate them as always.
+        Some(_) if segment.base.is_some() => "assumed".to_string(),
         Some(d) => {
             let full_committed = committed_set(records, &d.by_hash, &d.heads);
             // ACTIVATION (spec §M4): a committed, INTEGRITY-PROVEN Broker grant carrying a non-empty signed
@@ -7853,6 +8145,42 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         && relevant_roles
             .iter()
             .all(|rt| rt.authority == AuthorityTrust::Verified);
+    let segment_report = segment.present.then(|| {
+        let head = checkpoints
+            .iter()
+            .max_by_key(|cp| cp.get("checkpoint_seq").and_then(|v| v.as_int()));
+        SegmentReport {
+            month: segment.month.clone(),
+            base_seq: segment.base.as_ref().map(|b| b.seq),
+            base_checkpoint_hash: segment.base.as_ref().map(|b| b.hash.clone()),
+            head_seq: latest_cp_seq,
+            head_checkpoint_hash: head.and_then(|cp| s(cp, "checkpoint_hash")),
+            head_record_count: head
+                .and_then(|cp| cp.get("record_count").and_then(|v| v.as_int()))
+                .unwrap_or(0),
+            link: match &segment.base {
+                None => "genesis",
+                Some(b) if opts.segment_base_pin.as_deref() == Some(b.hash.as_str()) => {
+                    "base_pinned"
+                }
+                Some(_) => "base_unpinned",
+            },
+            base_anchored: segment
+                .base
+                .as_ref()
+                .is_some_and(|b| anchored.iter().any(|(seq, _, _)| *seq == b.seq)),
+            earlier_parent_refs: dag_opt.as_ref().map_or(0, |d| d.earlier_refs.len()),
+            unresolved_cross_month: segment_unresolved.iter().cloned().collect(),
+            not_evaluated: if segment.base.is_some() {
+                SEGMENT_NOT_EVALUATED
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        }
+    });
     let mut report = VerifyReport {
         ok,
         claims: ClaimResults::fatal(),
@@ -7876,6 +8204,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         key_rotations_verified: rotation_eval.verified,
         key_rotations_chain_trusted: rotation_eval.chain_trusted.len(),
         cleartext_content_records,
+        segment: segment_report,
         grant_total,
         denied_grants,
         grant_verified,
