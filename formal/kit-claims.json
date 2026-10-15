@@ -1617,7 +1617,8 @@
       "mutants": [
         "posture-authority-pins-global-dropped"
       ],
-      "does_not_establish": "That govder derives the same keys (the comparison is feir-os deploy/posture/evaluate.jq, tested against stub reports, and govder's own claim proves what it reports), that the pins are the ones averin actually verifies with at request time beyond the map this report reads, or that any key is strong or rotated."
+      "does_not_establish": "That govder derives the same keys (the comparison is feir-os deploy/posture/evaluate.jq, tested against stub reports, and govder's own claim proves what it reports), that the pins are the ones averin actually verifies with at request time beyond the map this report reads, or that any key is strong or rotated.",
+      "evidence_run": "38732527046"
     }
   ]
 }
