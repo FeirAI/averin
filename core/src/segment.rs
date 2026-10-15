@@ -18,7 +18,7 @@ use crate::canon::CanonValue;
 use crate::checkpoint::{validate_chain, CheckpointError};
 use crate::dag::Dag;
 use crate::hashx::parse_sha256;
-use crate::verify::SEGMENT_FORMAT;
+use crate::verify::{ev_str, SEGMENT_FORMAT};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn str_of<'a>(v: &'a CanonValue, k: &str) -> Option<&'a str> {
@@ -215,8 +215,10 @@ pub fn split_bundle(bundle: &CanonValue) -> Result<Vec<(String, CanonValue)>, St
 /// The month-by-month walk behind `averin-verify chain`: feed it each segment's bundle and report, oldest first.
 /// It checks what no single month can: that each segment starts from the previous one's head, that months and
 /// projects agree, that every parent a month points before its base exists in an earlier month, and that every
-/// grant or intent a use or outcome names across a month boundary is held by an earlier month (existence only: the
-/// use-to-grant predicate is evaluated in the month that holds both, never across months).
+/// grant or intent a use or outcome names across a month boundary is held by an earlier month, and that an outcome
+/// binds the earlier intent it names (grant and intent_hash). The use-to-grant predicate (scope, expiry, key
+/// binding) is NOT evaluated across months: a month with such a cross-month use or outcome reports `authorized`
+/// as insufficient.
 #[derive(Default)]
 pub struct ChainState {
     project_id: Option<String>,
@@ -225,6 +227,8 @@ pub struct ChainState {
     last_month: Option<String>,
     seen: BTreeSet<String>,
     seen_ids: BTreeSet<String>,
+    /// earlier `use_intent` records: record_id -> (grant_id, content_hash)
+    intents: BTreeMap<String, (String, String)>,
     pub months: usize,
     pub records: usize,
     pub issues: Vec<String>,
@@ -341,9 +345,41 @@ impl ChainState {
                 issue(format!(
                     "{kind} {rid} names {reference}, which no earlier month holds"
                 ));
+            } else if kind == "use_outcome" {
+                // the outcome must bind the earlier use_intent it names: same grant, intent_hash == its content_hash
+                let outcome = records.iter().find(|r| str_of(r, "record_id") == Some(rid));
+                let og = outcome.and_then(|r| ev_str(r, "use_outcome", "grant_id"));
+                let oh = outcome.and_then(|r| ev_str(r, "use_outcome", "intent_hash"));
+                match self.intents.get(reference) {
+                    None => issue(format!(
+                        "use_outcome {rid} names {reference}, which is not a use_intent held by an earlier month"
+                    )),
+                    Some((g, h)) if og.as_deref() != Some(g.as_str()) || oh.as_deref() != Some(h.as_str()) => {
+                        issue(format!(
+                            "use_outcome {rid} does not bind the earlier use_intent {reference} (grant or intent_hash differs)"
+                        ));
+                    }
+                    Some(_) => {}
+                }
             }
         }
         self.seen.extend(mine.iter().map(|h| h.to_string()));
+        for r in records {
+            let intent = ev_str(r, "use_evidence", "kind").as_deref() == Some("use_intent")
+                && r.get("extensions")
+                    .and_then(|e| e.get("broker"))
+                    .and_then(|b| b.get("kind"))
+                    .and_then(CanonValue::as_str)
+                    == Some("use_intent");
+            if let (true, Some(id), Some(g), Some(h)) = (
+                intent,
+                str_of(r, "record_id"),
+                ev_str(r, "use_evidence", "grant_id"),
+                str_of(r, "content_hash"),
+            ) {
+                self.intents.insert(id.to_string(), (g, h.to_string()));
+            }
+        }
         self.seen_ids.extend(
             records
                 .iter()

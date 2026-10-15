@@ -338,7 +338,7 @@ func main() {
 		srv.WithTSA(&witness.HTTPTSA{URL: tsaURL, Authorization: os.Getenv("AVERIN_TSA_AUTH_HEADER")})
 		log.Printf("checkpoint anchoring -> RFC 3161 TSA %s", tsaURL)
 		if tsaPin != "" {
-			log.Printf("TSA preset key to pin for verification (AVERIN_VERIFY_TSA_SPKI_B64 / tsa_keys): %s", tsaPin)
+			log.Printf("TSA preset key to pin for verification (AVERIN_VERIFY_TSA_SPKI_B64 / opts.json tsa_spki_b64): %s", tsaPin)
 		}
 	}
 	// credential broker (Level 3 Tier-A): POST /v2/grants. The issuing key signs the capabilities;

@@ -8,7 +8,7 @@
     setToken,
   } from "./lib/api";
   import { buildWaterfall, recLabel, type Rec } from "./lib/trace";
-  import { claimVerdict, historicalClaimNote } from "./lib/claimVerdict";
+  import { claimVerdict, historicalClaimNote, segmentResidual } from "./lib/claimVerdict";
   import { revocationView } from "./lib/revocationView";
 
   let project = $state("proj-001");
@@ -132,6 +132,12 @@
           ? 'the first month' : report.segment.link === 'base_pinned'
           ? "chained to the previous month's checkpoint you pinned" : 'starting from a base checkpoint nobody pinned'}.
           Earlier months are not checked here, and the grant log is not evaluated across months.</div>
+        {#if segmentResidual(report)}
+          <div class="lvl">Cannot pass on its own: {report.segment.link === 'base_unpinned' ? 'the base is not a pinned previous head' : 'record completeness was not evaluated (this month has parents before its base)'}. Check every month in order with averin-verify chain.</div>
+        {/if}
+        {#if report.segment.not_evaluated?.length}
+          <div class="lvl">Not evaluated for this month: {report.segment.not_evaluated.join(', ')}.</div>
+        {/if}
       {/if}
       {#if !report.keys_externally_pinned}
         <div class="lvl">Keys are bundle-supplied (not externally pinned): this proves internal

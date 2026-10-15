@@ -11,7 +11,8 @@ use averin_decision_core::record::seal;
 use averin_decision_core::segment::{split_bundle, ChainState};
 use averin_decision_core::sign::signing_key_from_seed;
 use averin_decision_core::verify::{
-    report_to_canon, verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
+    claim_verdict, report_to_canon, verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions,
+    VerifyReport,
 };
 use ed25519_dalek::SigningKey;
 use std::collections::BTreeSet;
@@ -994,4 +995,155 @@ fn a_dropped_record_replaced_by_an_old_record_is_reported_incomplete_and_the_cha
     let chain = run_chain(&[segs[0].1.clone(), attacked]);
     assert!(!chain.is_ok(), "{:?}", chain.issues);
     assert!(chain.issues.iter().any(|i| i.contains("name no record")));
+}
+
+// ---- fail-closed headline and claim-aware chain ----
+
+fn write_json(dir: &std::path::Path, name: &str, v: &CanonValue) -> std::path::PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, v.serialize()).unwrap();
+    p
+}
+
+fn key_opts(extra: &str) -> String {
+    format!(
+        r#"{{"signing_keys":["{}"]{extra}}}"#,
+        averin_decision_core::sign::encode_pubkey(&sk().verifying_key())
+    )
+}
+
+#[test]
+fn a_month_whose_completeness_is_not_evaluated_never_gets_a_pass_word_or_exit_zero() {
+    let dir = scratch("residual");
+    let segs = two_month_project(true);
+    let pin = hash_of_cp(&segs[0].1);
+    // shape (b): drop b, add the old r0 that a also names. One month cannot tell.
+    let attacked = drop_and_add(&segs[1].1, "r4", find_record(&segs[0].1, "r0"));
+    let honest = write_json(&dir, "honest.json", &segs[1].1);
+    let bad = write_json(&dir, "attacked.json", &attacked);
+    let pinned_opts = dir.join("pinned.json");
+    std::fs::write(
+        &pinned_opts,
+        key_opts(&format!(r#","segment_base_checkpoint_hash":"{pin}""#)),
+    )
+    .unwrap();
+    let unpinned_opts = dir.join("unpinned.json");
+    std::fs::write(&unpinned_opts, key_opts("")).unwrap();
+    for (file, opts) in [
+        (&bad, &pinned_opts),
+        (&honest, &pinned_opts),
+        (&bad, &unpinned_opts),
+    ] {
+        let (word, code, stdout) = cli(&["bundle".as_ref(), file.as_os_str(), opts.as_os_str()]);
+        assert_eq!((word.as_str(), code), ("INSUFFICIENT", 1), "{stdout}");
+        assert!(stdout.contains("cannot PASS alone"), "{stdout}");
+    }
+    // the headline function agrees, and a month with an exact bound still passes
+    let r = verify_bundle_with(&attacked, &with_pin(&pin));
+    assert_eq!(
+        claim_verdict(&report_to_canon(&r)),
+        averin_decision_core::verify::ClaimVerdict::Insufficient
+    );
+    let exact = two_month_project(false);
+    let exact_pin = hash_of_cp(&exact[0].1);
+    let r = verify_bundle_with(&exact[1].1, &with_pin(&exact_pin));
+    assert_eq!(
+        claim_verdict(&report_to_canon(&r)),
+        averin_decision_core::verify::ClaimVerdict::Pass
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn chain_honours_the_requested_claim_and_names_it() {
+    let dir = scratch("chainclaim");
+    let months = segments();
+    let files: Vec<std::path::PathBuf> = months
+        .iter()
+        .map(|(m, b)| write_json(&dir, &format!("{m}.json"), b))
+        .collect();
+    let opts = dir.join("authorized.json");
+    std::fs::write(
+        &opts,
+        key_opts(r#","claim_policy":{"requested":"authorized"}"#),
+    )
+    .unwrap();
+    // each month alone does not satisfy `authorized` (there is no brokered use), so the chain cannot either
+    let (word, _, _) = cli(&["bundle".as_ref(), files[0].as_os_str(), opts.as_os_str()]);
+    assert_eq!(word, "INSUFFICIENT");
+    let mut args: Vec<&std::ffi::OsStr> =
+        vec!["chain".as_ref(), "--opts".as_ref(), opts.as_os_str()];
+    args.extend(files.iter().map(|f| f.as_os_str()));
+    let (word, code, stdout) = cli(&args);
+    assert_eq!((word.as_str(), code), ("INSUFFICIENT", 1), "{stdout}");
+    assert!(stdout.contains("requested claim authorized"), "{stdout}");
+    assert!(stdout.contains("scope, expiry and key binding"), "{stdout}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn hand_month(
+    month: &str,
+    base: Option<&str>,
+    head: &str,
+    head_count: i64,
+    records: &str,
+    unresolved: &str,
+) -> (CanonValue, CanonValue) {
+    let (bs, bh, bc) = match base {
+        Some(h) => ("1".to_string(), format!("\"{h}\""), "1"),
+        None => ("null".to_string(), "null".to_string(), "0"),
+    };
+    let bundle = parse(&format!(
+        r#"{{"project_id":"p","records":[{records}],"checkpoints":[],"segment":{{"format":"averin.segment.v1","month":"{month}","base_seq":{bs},"base_checkpoint_hash":{bh},"base_record_count":{bc}}}}}"#
+    ));
+    let report = parse(&format!(
+        r#"{{"ok":true,"segment":{{"month":"{month}","link":"base_pinned","head_checkpoint_hash":"{head}","head_record_count":{head_count},"unresolved_cross_month":[{unresolved}]}}}}"#
+    ));
+    (bundle, report)
+}
+
+#[test]
+fn the_chain_checks_that_an_outcome_binds_the_earlier_intent_it_names() {
+    let h1 = format!("sha256:{}", "11".repeat(32));
+    let h2 = format!("sha256:{}", "22".repeat(32));
+    let ch_i = format!("sha256:{}", "aa".repeat(32));
+    let ch_o = format!("sha256:{}", "bb".repeat(32));
+    let intent = |grant: &str, kind: &str| {
+        format!(
+            r#"{{"content_hash":"{ch_i}","record_id":"i1","causal_prev_hashes":[],"extensions":{{"broker":{{"kind":"{kind}","use_evidence":{{"kind":"{kind}","grant_id":"{grant}"}}}}}}}}"#
+        )
+    };
+    let outcome = |grant: &str, ihash: &str| {
+        format!(
+            r#"{{"content_hash":"{ch_o}","record_id":"o1","causal_prev_hashes":[],"extensions":{{"broker":{{"use_outcome":{{"kind":"use_outcome","grant_id":"{grant}","intent_ref":"i1","intent_hash":"{ihash}"}}}}}}}}"#
+        )
+    };
+    let unresolved = r#"{"kind":"use_outcome","record_id":"o1","ref":"i1"}"#;
+    let run = |m1: &str, m2: &str| {
+        let (b1, r1) = hand_month("2026-06", None, &h1, 1, m1, "");
+        let (b2, r2) = hand_month("2026-07", Some(&h1), &h2, 2, m2, unresolved);
+        let mut chain = ChainState::new();
+        chain.absorb(&b1, &r1);
+        chain.absorb(&b2, &r2);
+        chain
+    };
+    // the outcome names the intent's grant and content hash: resolved
+    let ok = run(&intent("g1", "use_intent"), &outcome("g1", &ch_i));
+    assert!(ok.is_ok(), "{:?}", ok.issues);
+    // a different grant, a different intent hash, or a record that is not a use_intent: refused
+    for (m1, m2) in [
+        (intent("g1", "use_intent"), outcome("g2", &ch_i)),
+        (intent("g1", "use_intent"), outcome("g1", &ch_o)),
+        (intent("g1", "grant"), outcome("g1", &ch_i)),
+    ] {
+        let c = run(&m1, &m2);
+        assert!(!c.is_ok(), "{m1} / {m2}");
+        assert!(
+            c.issues
+                .iter()
+                .any(|i| i.contains("use_intent") || i.contains("does not bind")),
+            "{:?}",
+            c.issues
+        );
+    }
 }

@@ -133,7 +133,7 @@
     </div>
 
     <script type="module">
-      import { claimVerdict, historicalClaimNote } from "./claim-verdict.js";
+      import { claimVerdict, historicalClaimNote, segmentResidual } from "./claim-verdict.js";
       import { revocationView } from "./revocation-view.js";
       import { initAverin } from "./averin.js";
 
@@ -390,7 +390,7 @@
             ${r.key_rotations_total ? stat(`${r.key_rotations_verified}/${r.key_rotations_total}`, `signed key rotations verified · ${r.key_rotations_chain_trusted} key(s) trusted through the chain`) : ""}
           </div>
           ${r.cleartext_content_records ? `<div class="vsub">${r.cleartext_content_records} record(s) carry prompt or answer text signed in the clear (<code>extensions.content_preview</code>); it cannot be erased from this history.</div>` : ""}
-          ${r.segment ? `<div class="vsub">This is one month (<code>${esc(String(r.segment.month))}</code>) of the history, ${r.segment.link === "genesis" ? "the first month" : r.segment.link === "base_pinned" ? "chained to the previous month's checkpoint you pinned" : "starting from a base checkpoint nobody pinned"}. Earlier months are not checked here, and the grant log is not evaluated across months.</div>` : ""}
+          ${r.segment ? `<div class="vsub">This is one month (<code>${esc(String(r.segment.month))}</code>) of the history, ${r.segment.link === "genesis" ? "the first month" : r.segment.link === "base_pinned" ? "chained to the previous month's checkpoint you pinned" : "starting from a base checkpoint nobody pinned"}. Earlier months are not checked here, and the grant log is not evaluated across months.</div>${segmentResidual(r) ? `<div class="vsub">Cannot pass on its own: ${r.segment.link === "base_unpinned" ? "the base is not a pinned previous head" : "record completeness was not evaluated (this month has parents before its base)"}. Check every month in order with averin-verify chain.</div>` : ""}${Array.isArray(r.segment.not_evaluated) && r.segment.not_evaluated.length ? `<div class="vsub">Not evaluated for this month: ${esc(r.segment.not_evaluated.join(", "))}.</div>` : ""}` : ""}
           ${acct}
           ${modes ? `<div class="sec">modes</div><div class="modes">${modes}</div>` : ""}
           ${revocationSec}

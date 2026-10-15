@@ -167,7 +167,7 @@ fn verify_rsa(
 
     let key =
         RsaPublicKey::from_public_key_der(spki_der).map_err(|_| Rfc3161Error::UnsupportedSigAlg)?;
-    if key.size() * 8 < MIN_RSA_BITS {
+    if key.n().bits() < MIN_RSA_BITS {
         return Err(Rfc3161Error::UnsupportedSigAlg);
     }
     let r = match (pss_salt, hash) {

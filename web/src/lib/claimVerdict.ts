@@ -8,6 +8,15 @@ const decisions = new Set(["satisfied", "insufficient", "refuted"]);
 // `ok` and `keys_externally_pinned` count only as the boolean true, as in the Rust claim_verdict
 // (core/src/verify/headline.rs) and verifier/claim-verdict.js: a truthy string or number is neither
 // ok nor pinning.
+// A month segment whose base is not the pinned previous head, or whose record completeness was not
+// evaluated, never earns PASS or CONSISTENT (same rule as segment_residual in headline.rs).
+export function segmentResidual(report: any): boolean {
+  const sg = report?.segment;
+  if (!sg || typeof sg !== "object") return false;
+  return sg.link === "base_unpinned"
+    || (Array.isArray(sg.not_evaluated) && sg.not_evaluated.includes("record_completeness"));
+}
+
 export function claimVerdict(report: any): Verdict {
   const c = report?.claims;
   const valid = report?.claims_version === "2"
@@ -15,7 +24,7 @@ export function claimVerdict(report: any): Verdict {
     && decisions.has(c?.requested_decision)
     && c?.[c.requested] === c.requested_decision;
   if (report?.ok !== true || (valid && c.requested_decision === "refuted")) return {word: "FAIL", className: "fail", valid};
-  if (!valid || c.requested_decision === "insufficient") return {word: "INSUFFICIENT", className: "qual", valid};
+  if (!valid || c.requested_decision === "insufficient" || segmentResidual(report)) return {word: "INSUFFICIENT", className: "qual", valid};
   return report.keys_externally_pinned === true
     ? {word: "PASS", className: "pass", valid}
     : {word: "CONSISTENT", className: "qual", valid};

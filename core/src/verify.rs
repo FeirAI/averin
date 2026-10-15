@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod headline;
 mod temporal;
 mod verdict;
-pub use headline::{claim_verdict, ClaimVerdict};
+pub use headline::{claim_verdict, month_claim_verdict, segment_residual, ClaimVerdict};
 pub use temporal::{
     canonical_ts_millis, revocation_entry_v2, revocation_entry_v2_preimage, revocation_key_v2,
     revocation_key_v2_preimage, revocation_leaves_v2, revocation_merkle_root_v2,
@@ -2659,7 +2659,7 @@ fn evidence_rederivable(rec: &CanonValue, payload_key: &str) -> bool {
 
 /// Read a string field from a record's canonical evidence payload at `extensions.broker.<payload_key>`
 /// (ADR 0003 — the verifier reads match inputs ONLY from the proven payload).
-fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
+pub(crate) fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
     rec.get("extensions")
         .and_then(|e| e.get("broker"))
         .and_then(|b| b.get(payload_key))
@@ -8312,6 +8312,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         && report.grant_verified == report.grant_total
         && body_bound_role_evidence;
     let brokered_use_valid = report.uses_total > 0
+        // a month with a use or outcome whose counterpart sits in an earlier month cannot decide
+        // `authorized` alone: whole-history verification would count an unconsumed outcome as a violation
+        && segment_unresolved.is_empty()
         && report.uses_matched == report.uses_total
         && report.uses_pop_reverified == report.uses_matched
         && report.unmatched_violation == 0

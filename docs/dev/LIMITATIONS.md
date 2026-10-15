@@ -39,15 +39,25 @@ What it does not do:
   month with no such parents is exact. A signed per-checkpoint delta commitment would close this for a single
   month; it is not built.
 - **A month's record range is read by position.** On Postgres the order is `(inserted_at, ctid)` and the checkpoint
-  `record_count` is a position in it, so a wall clock stepped back can make a month carry the wrong records. That
-  fails closed (the month and its neighbour do not verify), it never verifies a wrong set. The month export is
-  covered on real Postgres in CI.
+  `record_count` is a position in it. Two things can break it: a wall clock stepped back, and two server replicas
+  whose transactions commit in the opposite order to their start times (`inserted_at` is the transaction start). A
+  checkpoint cut between such records makes that month and the next unverifiable. Both fail closed (the months do
+  not verify), they never verify a wrong set. A monotonic per-project insertion sequence would remove it and needs
+  a schema change; it is not built. Separately, the server refuses to plan months (409) for a project whose
+  checkpoint `created_ts` months go backwards, for example after a clock step at a month boundary. The month
+  export is covered on real Postgres in CI.
 - **A use or outcome whose grant or intent is in an earlier month** is listed (`unresolved_cross_month`), never
-  matched. The chain checks the named record exists in an earlier month, not the full use-to-grant match.
+  matched. The chain checks that the named record exists in an earlier month and, for an outcome, that it is a
+  `use_intent` whose grant and content hash the outcome binds. It does not check scope, expiry or key binding across
+  months, so a month with such a use or outcome reports `authorized` as insufficient, and so does a chain that
+  requests it.
+- **A month with parents before its base, or an unpinned base, never passes alone.** Its headline is capped at
+  INSUFFICIENT (exit 1) in the CLI, the browser verifier and the web app, because record completeness is only
+  bounded by the chain.
 - **A month is bounded by its own size.** A project that records more than 256 MiB in a month cannot be verified
   month by month; cutting finer than a month is not built.
-- **Peak memory of a whole-history build is O(history)** for projects under the limit, and the in-memory store holds
-  everything regardless.
+- **Peak memory of a whole-history build is O(history)**, including for a project over the limit: the whole history
+  is loaded before the size check answers 413. The in-memory store holds everything regardless.
 
 **Deferred:** a **cursor-streaming export** (constant memory, byte-identical framing) and **checkpoint
 accumulators** that would let a bundle start from a pinned checkpoint and prove earlier parents by membership

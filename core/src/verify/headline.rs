@@ -39,8 +39,30 @@ impl ClaimVerdict {
     }
 }
 
-/// Reads a serialized report (`report_to_canon` / `verify_bundle_with_json` output).
+/// True when a month-segment report carries a residual that one month cannot close: its base is not the pinned
+/// previous head, or its record completeness was not evaluated (it has parents before its base). Such a report
+/// never earns PASS or CONSISTENT on its own; `averin-verify chain` closes both across months.
+pub fn segment_residual(report: &CanonValue) -> bool {
+    let Some(sg) = report.get("segment") else {
+        return false;
+    };
+    let unpinned = sg.get("link").and_then(CanonValue::as_str) == Some("base_unpinned");
+    let incomplete = sg
+        .get("not_evaluated")
+        .and_then(CanonValue::as_array)
+        .is_some_and(|a| a.iter().any(|x| x.as_str() == Some("record_completeness")));
+    unpinned || incomplete
+}
+
+/// Reads a serialized report (`report_to_canon` / `verify_bundle_with_json` output). A month segment with a
+/// residual a single month cannot close (see [`segment_residual`]) is capped at INSUFFICIENT.
 pub fn claim_verdict(report: &CanonValue) -> ClaimVerdict {
+    month_claim_verdict(report, true)
+}
+
+/// As [`claim_verdict`], with the segment residual cap optional. The chain verdict passes `false` because it
+/// checks the link and the cross-month completeness itself.
+pub fn month_claim_verdict(report: &CanonValue, cap_segment_residual: bool) -> ClaimVerdict {
     let flag = |k: &str| matches!(report.get(k), Some(CanonValue::Bool(true)));
     let claims = report.get("claims");
     let requested = claims
@@ -71,7 +93,10 @@ pub fn claim_verdict(report: &CanonValue) -> ClaimVerdict {
         && own_field == decision;
     if !flag("ok") || (valid && decision == Some("refuted")) {
         ClaimVerdict::Fail
-    } else if !valid || decision == Some("insufficient") {
+    } else if !valid
+        || decision == Some("insufficient")
+        || (cap_segment_residual && segment_residual(report))
+    {
         ClaimVerdict::Insufficient
     } else if flag("keys_externally_pinned") {
         ClaimVerdict::Pass

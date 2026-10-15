@@ -94,8 +94,16 @@ averin-verify chain --opts opts.json 2026-06.json 2026-07.json 2026-08.json
 verifies each month pinned to the previous month's head (`genesis` for the first), then checks what no single
 month can: months strictly increase, the project is the same, each base count equals the previous head count,
 every parent a month points before its base exists in an earlier month, and every grant or intent that a use or
-outcome names across a month boundary is held by an earlier month. It reads one file at a time. `PASS` needs
-pinned signing keys; without them the word is `CONSISTENT`, as for a single bundle.
+outcome names across a month boundary is held by an earlier month (and an outcome binds the earlier `use_intent` it
+names: same grant, `intent_hash` equal to that intent's content hash). It reads one file at a time. The chain word is
+the worst month's claim word for the requested claim in `opts.json` (FAIL, then INSUFFICIENT, then CONSISTENT, then
+PASS), and the RESULT line names the claim. `PASS` needs pinned signing keys; without them the word is
+`CONSISTENT`, as for a single bundle.
+
+**One month never passes alone when it has a residual it cannot close.** A month whose base is not the pinned
+previous head (`link: base_unpinned`), or whose `not_evaluated` lists `record_completeness`, gets the headline
+INSUFFICIENT and exit code 1 from `averin-verify bundle`, the browser verifier and the web app, whatever the claim
+says. Only the chain closes those.
 
 ## What a month does not check
 
@@ -108,8 +116,9 @@ A month reports these as not evaluated rather than as passed (`segment.not_evalu
 - **A use or outcome whose grant or intent was sealed in an earlier month.** It is listed in
   `segment.unresolved_cross_month`, never counted as matched and never as a violation (the counterpart is not in
   the bundle). The chain command checks that the named record exists in an earlier month. It does not re-run the
-  use-to-grant match across months: scope, expiry and key binding are checked in the month that holds both
-  records.
+  use-to-grant match across months: no month holds both records of such a pair, so scope, expiry and key binding
+  are not checked for it anywhere. A month with one reports the `authorized` claim as insufficient (a whole-history
+  bundle would count an unconsumed outcome as a violation), and so does a chain that requests it.
 
 Everything else a bundle check does applies to a month: record integrity and signatures, key rotation, the DAG,
 the checkpoint chain, anchors and backdating, disclosures, the deployment attestation and revocation list the server

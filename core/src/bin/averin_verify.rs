@@ -29,7 +29,8 @@ use averin_decision_core::record::{validate_record_shape, verify_content_hash, v
 use averin_decision_core::segment::{split_bundle, ChainState};
 use averin_decision_core::sign::decode_pubkey;
 use averin_decision_core::verify::{
-    claim_verdict, report_to_canon, verify_bundle_json, verify_bundle_with_json, ClaimVerdict,
+    claim_verdict, month_claim_verdict, report_to_canon, segment_residual, verify_bundle_json,
+    verify_bundle_with_json, ClaimVerdict,
 };
 use averin_decision_core::CanonValue;
 use std::process::ExitCode;
@@ -347,6 +348,11 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
                 "RESULT: {}: integrity diagnostics or requested claim are not satisfied; see above.",
                 verdict.word()
             );
+            if segment_residual(&report) {
+                println!(
+                    "        this is one month whose base is not a pinned previous head or whose record completeness was not evaluated: it cannot PASS alone. Run `averin-verify chain` over every month."
+                );
+            }
             if let Some(note) = historical_claim_note(&report) {
                 println!("{note}");
             }
@@ -517,6 +523,8 @@ fn chain_cmd(args: &[String]) -> ExitCode {
     };
     let mut chain = ChainState::new();
     let mut all_pinned = true;
+    let mut worst = ClaimVerdict::Pass;
+    let mut requested_claim = String::from("integrity");
     for file in files {
         let text = match std::fs::read_to_string(file) {
             Ok(t) => t,
@@ -557,6 +565,23 @@ fn chain_cmd(args: &[String]) -> ExitCode {
             report.get("keys_externally_pinned"),
             Some(CanonValue::Bool(true))
         );
+        let mv = month_claim_verdict(&report, false);
+        let rank = |v: ClaimVerdict| match v {
+            ClaimVerdict::Pass => 0,
+            ClaimVerdict::Consistent => 1,
+            ClaimVerdict::Insufficient => 2,
+            ClaimVerdict::Fail => 3,
+        };
+        if rank(mv) > rank(worst) {
+            worst = mv;
+        }
+        if let Some(r) = report
+            .get("claims")
+            .and_then(|c| c.get("requested"))
+            .and_then(CanonValue::as_str)
+        {
+            requested_claim = r.to_string();
+        }
         let month = report
             .get("segment")
             .and_then(|s| s.get("month"))
@@ -587,10 +612,17 @@ fn chain_cmd(args: &[String]) -> ExitCode {
     for i in &chain.issues {
         println!("  x {i}");
     }
-    if chain.is_ok() {
+    if chain.is_ok() && worst != ClaimVerdict::Fail {
+        // worst-first over every month's claim verdict, so a claim a month refutes or cannot decide is never
+        // upgraded by chaining; pinned keys are required for PASS
+        let word = match worst {
+            ClaimVerdict::Pass if all_pinned => ClaimVerdict::Pass,
+            ClaimVerdict::Pass | ClaimVerdict::Consistent => ClaimVerdict::Consistent,
+            other => other,
+        };
         println!(
-            "RESULT: {} (chain): {} month(s), {} records, head {} ({} records through it).",
-            if all_pinned { "PASS" } else { "CONSISTENT" },
+            "RESULT: {} (chain, requested claim {requested_claim}): {} month(s), {} records, head {} ({} records through it).",
+            word.word(),
             chain.months,
             chain.records,
             chain.head_hash().unwrap_or("-"),
@@ -600,16 +632,19 @@ fn chain_cmd(args: &[String]) -> ExitCode {
             "        Each month verified and links to the previous head; the first month starts at genesis."
         );
         println!(
-            "        Not checked across months: grant-log transparency and federation heads (verify a whole-history bundle for those)."
+            "        Not checked across months: grant-log transparency and federation heads (verify a whole-history bundle for those), and use/outcome scope, expiry and key binding for a use or outcome whose grant or intent sits in an earlier month (such a month reports `authorized` as insufficient)."
         );
-        if all_pinned {
-            ExitCode::SUCCESS
-        } else {
+        if word == ClaimVerdict::Insufficient {
+            println!(
+                "        a month does not satisfy the requested claim {requested_claim}; run `averin-verify bundle` on it for the reason."
+            );
+        }
+        if worst == ClaimVerdict::Pass && !all_pinned {
             println!(
                 "        keys are the bundles' own, NOT externally pinned: pass --opts with signing_keys to check authenticity."
             );
-            ExitCode::from(2)
         }
+        ExitCode::from(word.exit_code())
     } else {
         println!("RESULT: FAIL (chain): see above.");
         ExitCode::from(1)
