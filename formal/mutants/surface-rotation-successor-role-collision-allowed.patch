@@ -1,8 +1,8 @@
 diff --git a/core/src/verify.rs b/core/src/verify.rs
-index d82fbe2..fbae7a3 100644
+index a01f899..588a53b 100644
 --- a/core/src/verify.rs
 +++ b/core/src/verify.rs
-@@ -5361,7 +5361,7 @@ fn evaluate_key_rotations(
+@@ -5365,7 +5365,7 @@ fn evaluate_key_rotations(
              if status_rank(&worst_status(pinned_status, bundle_status)) > 1 {
                  continue;
              }

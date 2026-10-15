@@ -1,8 +1,8 @@
 diff --git a/core/src/verify.rs b/core/src/verify.rs
-index d82fbe2..bb752c3 100644
+index a01f899..5ba660a 100644
 --- a/core/src/verify.rs
 +++ b/core/src/verify.rs
-@@ -5322,7 +5322,7 @@ fn evaluate_key_rotations(
+@@ -5326,7 +5326,7 @@ fn evaluate_key_rotations(
              continue;
          }
          if reason == "scheduled" {

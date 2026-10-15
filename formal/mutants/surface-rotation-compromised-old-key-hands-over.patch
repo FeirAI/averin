@@ -1,8 +1,8 @@
 diff --git a/core/src/verify.rs b/core/src/verify.rs
-index d82fbe2..aea8ba3 100644
+index a01f899..735ab56 100644
 --- a/core/src/verify.rs
 +++ b/core/src/verify.rs
-@@ -5358,7 +5358,7 @@ fn evaluate_key_rotations(
+@@ -5362,7 +5362,7 @@ fn evaluate_key_rotations(
              let Some((_, pinned_status)) = trusted.iter().find(|(k, _)| k == ovk) else {
                  continue;
              };

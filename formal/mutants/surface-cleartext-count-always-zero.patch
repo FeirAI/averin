@@ -1,8 +1,8 @@
 diff --git a/core/src/verify.rs b/core/src/verify.rs
-index d82fbe2..4a19e52 100644
+index a01f899..e5ecf97 100644
 --- a/core/src/verify.rs
 +++ b/core/src/verify.rs
-@@ -5190,7 +5190,7 @@ fn count_cleartext_content(records: &[CanonValue]) -> usize {
+@@ -5194,7 +5194,7 @@ fn count_cleartext_content(records: &[CanonValue]) -> usize {
          .iter()
          .filter(|r| {
              r.get("extensions")

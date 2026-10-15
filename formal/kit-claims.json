@@ -325,7 +325,7 @@
       "tier": "full",
       "claim": "key-rotation-verifier"
     },
-    "surface-rotation-cleartext-count-always-zero": {
+    "surface-cleartext-count-always-zero": {
       "tier": "fast",
       "claim": "cleartext-content-count"
     },
@@ -542,7 +542,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
+          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
         }
       ],
       "mutants": [
@@ -577,7 +577,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
+          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
         }
       ],
       "mutants": [
@@ -616,7 +616,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
+          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
         }
       ],
       "mutants": [
@@ -1294,7 +1294,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "71f86d4a070c29fd030e0d1736cf6033f4eadec6654a1a281c5168c5b0e41c8a"
+          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
         }
       ],
       "mutants": [
@@ -1334,7 +1334,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "7ae32ed1a5bb30562a3a20be69ec1dfeb9556e49976886aa6d771755c9dfa765"
+          "sha256": "5209bcf62f377d94aa3d560f775207666044e475e41740e78aab8d13b58a0436"
         }
       ],
       "mutants": [
@@ -1353,7 +1353,6 @@
       "method": "test",
       "artifacts": [
         "core/src/verify.rs",
-        "core/src/sign.rs",
         "core/tests/key_rotation.rs"
       ],
       "gates": [
@@ -1365,7 +1364,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "evaluate_key_rotations",
-          "sha256": "986b4d8dc064e5b4c38e7659c3c6f54c5ad91c0ef532ce2ed44eb5bcade5ce8c"
+          "sha256": "6df9954618afde986672eef7dce0db2088157f51a8b2418f895061491102e5a0"
         }
       ],
       "mutants": [
@@ -1399,7 +1398,7 @@
         }
       ],
       "mutants": [
-        "surface-rotation-cleartext-count-always-zero"
+        "surface-cleartext-count-always-zero"
       ],
       "does_not_establish": "That the text is personal data, or that the record could have been erased: only that a content_preview key is present in the signed body. Text a client puts under another extensions key is not counted. The browser verifier shows the number but a test only checks the field is present and zero on the plain fixture."
     },
