@@ -1745,7 +1745,7 @@
         "surface-tsa-auth-header-over-http-accepted"
       ],
       "does_not_establish": "That an authority is reachable, accepts the request today or that a stamp is obtained: the tests serve recorded responses from a local HTTP server and never reach a live authority, and a failed stamp leaves the checkpoint un-anchored by design. That main wires resolveTSAConfig into srv.WithTSA: the wiring is read, not run, since a live-process test would need a network authority. That the preset's pinned key is the authority's current signing key; it is the key seen on 2026-10-15 and the operator confirms it before relying on an anchor.",
-      "evidence_run": "38705908676"
+      "evidence_run": "38718313766"
     },
     {
       "id": "month-segment-verifier",
@@ -1802,7 +1802,7 @@
         "surface-segment-completeness-claimed-with-earlier-parents"
       ],
       "does_not_establish": "That a single month's record set is complete when it has parents before its base: a record dropped from it can be replaced by an earlier month's record without changing the count, the heads or a signature, so the month reports record_completeness as not evaluated and only the chain over every month rules the swap out. That earlier months are intact: a single month proves itself and its link, and only the chain over every month (or a pin from a month already verified) says more. The grant-log transparency chain, federation heads and the use-to-grant match across a month boundary: a month reports the first two as not evaluated and lists the cross-month uses and outcomes unresolved, and the chain checks only that the named record exists in an earlier month. That a record named as unresolved was not substituted by an unrelated earlier record with the same id: existence is checked by record id. That the exclusion of a use whose grant is absent from the bundle is limited to grants that are not in the bundle: no test builds a grant that is in the segment but fails to index. That the tests' bundles come from a server: they are built with the core seal functions (the server claim covers that), and the segment rules that read a deployment attestation or revocation list are exercised only by the server tests.",
-      "evidence_run": "38705908676"
+      "evidence_run": "38718313766"
     },
     {
       "id": "month-segments-server",
@@ -1850,7 +1850,7 @@
         "surface-segments-bundle-cap-ignores-serialized-size"
       ],
       "does_not_establish": "That the Postgres store returns the same range as the in-memory store: these tests run against the in-memory store, and RecordsPage's SQL ordering is covered only by its own store tests. That a month's disclosures are limited to its own records: no test exports a disclosing mode for a month. That the size limit equals the verifier's: the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test. That a month stays under the limit as a project grows: a month over 256 MiB is refused, not split. The revocation and attestation behaviour of a month is checked only where the tests configure them (anchored months verify clean; the self-view reports the unanchored revocation list exactly as a whole-history export does). That a month's record range is right when the wall clock stepped back on Postgres: the range is a position in (inserted_at, ctid) order and a stepped-back clock makes the month fail to verify rather than verify a wrong set; the Postgres month test runs only in the Postgres CI job.",
-      "evidence_run": "38705908676"
+      "evidence_run": "38718313766"
     }
   ]
 }
