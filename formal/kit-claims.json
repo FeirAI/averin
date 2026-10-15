@@ -1296,7 +1296,7 @@
         "posture-dev-seed-not-reported"
       ],
       "does_not_establish": "The live-process test cannot start with AVERIN_REQUIRE_PROD_SECRETS=1 (that gate needs a Postgres URL), so the wiring of that flag and of durable_store=true is covered only by the handler test with a hand-built Posture, not by a running binary. The rustc stamp is whatever the build script passed with -ldflags; the Rust staticlib itself carries no version, so an unstamped build reports none and the verifier must treat that as unknown. The report says what was configured, not that the database is reachable or the keys are strong. On an unauthenticated deployment the route answers anyone (and says api_keys_configured is false). The vcs revision is present only for a binary built inside a git checkout.",
-      "evidence_run": "38192274401"
+      "evidence_run": "38693696204"
     },
     {
       "id": "multi-writer-failure-matrix",
@@ -1372,7 +1372,8 @@
       "mutants": [
         "posture-api-key-fingerprints-first-only"
       ],
-      "does_not_establish": "That the key a calling plane sends equals one averin accepts: this claim proves only averin's side of the report. The comparison is feir-os deploy/posture/evaluate.jq (relationship averin-api-key), tested there against stub reports, and the sending planes' own claims prove what they report. No keyed-averin four-plane run exists, so the whole chain is not exercised in one real-process run. Keys averin does not hold in its in-process store (none today) would not be reported. A fingerprint lets someone who holds it test guesses for a weak key offline; the endpoint is behind a project key. Not that a key is strong or rotated."
+      "does_not_establish": "That the key a calling plane sends equals one averin accepts: this claim proves only averin's side of the report. The comparison is feir-os deploy/posture/evaluate.jq (relationship averin-api-key), tested there against stub reports, and the sending planes' own claims prove what they report. No keyed-averin four-plane run exists, so the whole chain is not exercised in one real-process run. Keys averin does not hold in its in-process store (none today) would not be reported. A fingerprint lets someone who holds it test guesses for a weak key offline; the endpoint is behind a project key. Not that a key is strong or rotated.",
+      "evidence_run": "38693696204"
     }
   ]
 }
