@@ -68,10 +68,17 @@ prints a `segment:` line and checks, on top of everything a bundle check does:
 2. the chain starts at the base (not at seq 0) and has at least one checkpoint after it;
 3. every checkpoint falls in the month, the base before it;
 4. the latest checkpoint's frontier equals the segment's heads (a base head that no record references is still a
-   head) and its `record_count` equals the base's count plus the records carried, so a dropped or added
-   record fails;
-5. a parent that is a base head resolves; a parent older than that is counted as `earlier_parent_refs` and left to
-   the chain check.
+   head), its `record_count` equals the base's count plus the records carried, and no carried record is a member of
+   the base checkpoint's frontier (an earlier month owns those);
+5. a parent that is a base head resolves; a parent older than that is counted as `earlier_parent_refs`, listed by
+   hash in `earlier_parent_ref_hashes`, and left to the chain check.
+
+**What one month proves about its own record set.** When `earlier_parent_refs` is 0, the checks above force the
+carried set to equal the records reachable from the latest frontier minus those reachable from the base frontier, so
+a dropped or substituted record fails. When it is above 0, a record dropped from the month can be replaced by an
+earlier month's record without changing the count, the heads or the signatures, and one month cannot tell. The
+report then lists `record_completeness` in `segment.not_evaluated` and the CLI says so; only `averin-verify chain`,
+which knows every earlier month, closes it (it refuses a parent that names no record in this or any earlier month).
 
 `opts.json` may carry `segment_base_checkpoint_hash`: `"genesis"` for the first month, otherwise the previous
 month's `segment.head_checkpoint_hash`. Then the link is a checked fact (`link: base_pinned`); a different base,

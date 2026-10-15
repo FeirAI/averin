@@ -744,6 +744,9 @@ pub struct SegmentReport {
     /// Parents that name records older than the base and are not in its frontier. A single month cannot resolve
     /// them; `averin-verify chain` does.
     pub earlier_parent_refs: usize,
+    /// The hashes behind `earlier_parent_refs`, sorted. When any exist the month's record set is only bounded
+    /// by the chain, so `record_completeness` is listed in `not_evaluated`.
+    pub earlier_parent_ref_hashes: Vec<String>,
     /// `(kind, record_id, reference)` of each use (naming a grant) or use_outcome (naming an intent) whose
     /// counterpart is not in this segment. Never counted as matched or as a violation here; the chain resolves them.
     pub unresolved_cross_month: Vec<(String, String, String)>,
@@ -1961,6 +1964,10 @@ fn segment_to_canon(sg: &SegmentReport) -> CanonValue {
         ("link".into(), CanonValue::string(sg.link)),
         ("base_anchored".into(), CanonValue::Bool(sg.base_anchored)),
         ("earlier_parent_refs".into(), count(sg.earlier_parent_refs)),
+        (
+            "earlier_parent_ref_hashes".into(),
+            str_array(&sg.earlier_parent_ref_hashes),
+        ),
         (
             "unresolved_cross_month".into(),
             CanonValue::Array(
@@ -8171,11 +8178,20 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 .is_some_and(|b| anchored.iter().any(|(seq, _, _)| *seq == b.seq)),
             earlier_parent_refs: dag_opt.as_ref().map_or(0, |d| d.earlier_refs.len()),
             unresolved_cross_month: segment_unresolved.iter().cloned().collect(),
+            earlier_parent_ref_hashes: dag_opt
+                .as_ref()
+                .map_or_else(Vec::new, |d| d.earlier_refs.iter().cloned().collect()),
             not_evaluated: if segment.base.is_some() {
-                SEGMENT_NOT_EVALUATED
+                let mut v: Vec<String> = SEGMENT_NOT_EVALUATED
                     .iter()
                     .map(|x| x.to_string())
-                    .collect()
+                    .collect();
+                // Any parent outside the month means a dropped record can be hidden behind an earlier one: the
+                // month alone cannot say its record set is complete. The chain command does.
+                if dag_opt.as_ref().is_some_and(|d| !d.earlier_refs.is_empty()) {
+                    v.push("record_completeness".to_string());
+                }
+                v
             } else {
                 Vec::new()
             },

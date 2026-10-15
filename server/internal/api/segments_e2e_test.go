@@ -49,11 +49,15 @@ func setSegNow(t time.Time) {
 func buildThreeMonths(t *testing.T) segFixture { return buildThreeMonthsOpt(t, false) }
 
 func buildThreeMonthsOpt(t *testing.T, withRevocation bool) segFixture {
+	return buildThreeMonthsOn(t, withRevocation, store.NewMem().WithClock(segNow))
+}
+
+func buildThreeMonthsOn(t *testing.T, withRevocation bool, st store.Store) segFixture {
 	t.Helper()
 	c, _ := core.New(seed)
 	rc, _ := core.New(resourceSeed)
 	setSegNow(time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC))
-	srv := api.New(c, store.NewMem().WithClock(segNow), "k0").
+	srv := api.New(c, st, "k0").
 		WithClock(segNow).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
@@ -181,7 +185,18 @@ func parseSegReport(t *testing.T, s string) segReport {
 }
 
 func TestMonthSegmentsExportVerifyAndChain(t *testing.T) {
-	f := buildThreeMonths(t)
+	checkMonthSegments(t, buildThreeMonths(t))
+}
+
+// The same exercise against real Postgres, where the month's record range is read by position from
+// (inserted_at, ctid) order. Skips without AVERIN_TEST_DATABASE_URL; the Postgres CI job sets it.
+func TestMonthSegmentsOnPostgres(t *testing.T) {
+	pg, _ := newVoidTestPostgres(t)
+	checkMonthSegments(t, buildThreeMonthsOn(t, false, pg))
+}
+
+func checkMonthSegments(t *testing.T, f segFixture) {
+	t.Helper()
 
 	// the whole-history export still verifies
 	if r := parseSegReport(t, f.c.VerifyBundleWith(f.whole, f.pins(""))); !r.OK || r.Segment != nil {
@@ -228,8 +243,16 @@ func TestMonthSegmentsExportVerifyAndChain(t *testing.T) {
 		if r.Segment.HeadCount != records {
 			t.Fatalf("%s head count %d != running total %d", s.Month, r.Segment.HeadCount, records)
 		}
-		if i > 0 && (r.Broker != "assumed" || len(r.Segment.NotEvaluated) != 2) {
+		// August also has a parent before its base, so its record set is only bounded by the chain
+		wantNotEval := 2
+		if i == 2 {
+			wantNotEval = 3
+		}
+		if i > 0 && (r.Broker != "assumed" || len(r.Segment.NotEvaluated) != wantNotEval) {
 			t.Fatalf("%s must report the grant log as not evaluated: broker_trust=%s %v", s.Month, r.Broker, r.Segment.NotEvaluated)
+		}
+		if i == 2 && r.Segment.NotEvaluated[2] != "record_completeness" {
+			t.Fatalf("August must not claim record completeness: %v", r.Segment.NotEvaluated)
 		}
 		if i == 2 {
 			if r.Segment.EarlierRefs != 1 {

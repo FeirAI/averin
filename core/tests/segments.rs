@@ -241,8 +241,21 @@ fn a_month_reports_what_it_could_not_evaluate_and_the_head_count() {
     let segs = segments();
     let r = verify_bundle_with(&segs[2].1, &pinned());
     let sg = r.segment.unwrap();
-    assert_eq!(sg.not_evaluated, ["broker_grant_log", "federation_heads"]);
+    // month three has a parent that points before its base, so its record set is only bounded by the chain
+    assert_eq!(
+        sg.not_evaluated,
+        [
+            "broker_grant_log",
+            "federation_heads",
+            "record_completeness"
+        ]
+    );
     assert_eq!(sg.head_record_count, 8);
+    let second = verify_bundle_with(&segs[1].1, &pinned()).segment.unwrap();
+    assert_eq!(
+        second.not_evaluated,
+        ["broker_grant_log", "federation_heads"]
+    );
     assert_eq!(r.broker_trust, "assumed");
     // the first month evaluates everything a whole bundle does
     let first = verify_bundle_with(&segs[0].1, &pinned()).segment.unwrap();
@@ -638,6 +651,17 @@ fn cli_splits_a_bundle_and_chains_its_months() {
         stdout.contains("Earlier months are NOT checked here"),
         "{stdout}"
     );
+    // ... and a month whose record set only the chain can bound says so
+    let (_, _, stdout) = cli(&["bundle".as_ref(), files[2].as_os_str(), opts.as_os_str()]);
+    assert!(
+        stdout.contains("RECORD COMPLETENESS NOT EVALUATED"),
+        "{stdout}"
+    );
+    assert!(
+        !cli(&["bundle".as_ref(), files[1].as_os_str(), opts.as_os_str()])
+            .2
+            .contains("RECORD COMPLETENESS NOT EVALUATED")
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -828,4 +852,146 @@ fn committed_segment_fixtures_match_the_builder() {
         });
         assert_eq!(have, want, "{} drifted from the builder", path.display());
     }
+}
+
+// ---- single-month completeness: a dropped record must not hide behind an earlier month's record ----
+
+/// Month one is a chain r0 <- r1 <- r2 (frontier [r2]). Month two is a, b(a), c(b, a), d(c) with a naming the base
+/// frontier r2, and, when `forced_old`, also the old non-frontier r0 (a `use_outcome` naming its intent).
+fn two_month_project(forced_old: bool) -> Vec<(String, CanonValue)> {
+    let mut records: Vec<CanonValue> = Vec::new();
+    let mut prev: Vec<String> = Vec::new();
+    for n in 0..3 {
+        let r = record(n, "sess-A", &prev, &format!("2026-06-10T10:0{n}:00.000Z"));
+        prev = vec![hash(&r)];
+        records.push(r);
+    }
+    let (r0, r2) = (hash(&records[0]), hash(&records[2]));
+    let mut a_parents = vec![r2.clone()];
+    if forced_old {
+        a_parents.push(r0);
+    }
+    a_parents.sort();
+    let a = record(3, "sess-A", &a_parents, "2026-07-10T10:00:00.000Z");
+    let b = record(4, "sess-A", &[hash(&a)], "2026-07-10T10:01:00.000Z");
+    let mut c_parents = vec![hash(&a), hash(&b)];
+    c_parents.sort();
+    let c = record(5, "sess-A", &c_parents, "2026-07-10T10:02:00.000Z");
+    let d = record(6, "sess-A", &[hash(&c)], "2026-07-10T10:03:00.000Z");
+    let frontiers = [
+        (vec![r2], 3i64, "2026-06-28"),
+        (vec![hash(&d)], 7, "2026-07-28"),
+    ];
+    records.extend([a, b, c, d]);
+    let mut cps: Vec<CanonValue> = Vec::new();
+    for (i, (frontier, count, day)) in frontiers.iter().enumerate() {
+        let prev_hash = cps.last().map(|c: &CanonValue| {
+            c.get("checkpoint_hash")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        });
+        let body = checkpoint_body(
+            &format!("cp{i}"),
+            PROJECT,
+            i as i64,
+            prev_hash.as_deref(),
+            frontier,
+            *count,
+            &format!("{day}T12:00:00.000Z"),
+            key_block(),
+        )
+        .unwrap();
+        cps.push(seal_checkpoint(&body, &sk()).unwrap());
+    }
+    split_bundle(&whole(&Project {
+        records,
+        checkpoints: cps,
+    }))
+    .expect("split")
+}
+
+fn drop_and_add(month: &CanonValue, drop_id: &str, add: CanonValue) -> CanonValue {
+    let mut recs: Vec<CanonValue> = arr(month, "records")
+        .into_iter()
+        .filter(|r| r.get("record_id").unwrap().as_str() != Some(drop_id))
+        .collect();
+    recs.push(add);
+    set(month, "records", CanonValue::Array(recs))
+}
+
+fn find_record(month: &CanonValue, id: &str) -> CanonValue {
+    arr(month, "records")
+        .into_iter()
+        .find(|r| r.get("record_id").unwrap().as_str() == Some(id))
+        .unwrap()
+}
+
+#[test]
+fn an_honest_two_month_project_verifies_alone_and_in_chain() {
+    for forced in [false, true] {
+        let segs = two_month_project(forced);
+        let r = verify_bundle_with(&segs[1].1, &with_pin(&hash_of_cp(&segs[0].1)));
+        assert!(r.ok, "{}", issues(&r));
+        let sg = r.segment.unwrap();
+        // without a forced old parent every parent is in the month or the base frontier: completeness is exact
+        assert_eq!(sg.earlier_parent_refs, usize::from(forced));
+        assert_eq!(sg.earlier_parent_ref_hashes.len(), usize::from(forced));
+        assert_eq!(
+            sg.not_evaluated.iter().any(|x| x == "record_completeness"),
+            forced
+        );
+        assert!(run_chain(&[segs[0].1.clone(), segs[1].1.clone()]).is_ok());
+    }
+}
+
+fn hash_of_cp(month: &CanonValue) -> String {
+    let cps = arr(month, "checkpoints");
+    cps.last()
+        .unwrap()
+        .get("checkpoint_hash")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn a_dropped_record_replaced_by_a_base_frontier_record_fails_the_month() {
+    // shape (a): drop b, add r2 (the base frontier member a references). Count and heads still match.
+    let segs = two_month_project(false);
+    let r2 = find_record(&segs[0].1, "r2");
+    let attacked = drop_and_add(&segs[1].1, "r4", r2);
+    let r = verify_bundle_with(&attacked, &with_pin(&hash_of_cp(&segs[0].1)));
+    assert!(!r.ok);
+    assert!(!r.chain_ok);
+    assert!(issues(&r).contains("already commits"), "{}", issues(&r));
+}
+
+#[test]
+fn a_dropped_record_replaced_by_an_old_record_is_reported_incomplete_and_the_chain_catches_it() {
+    // shape (b): a also names old r0; drop b, add r0. One month cannot tell, so it must not claim completeness.
+    let segs = two_month_project(true);
+    let pin = hash_of_cp(&segs[0].1);
+    let honest = verify_bundle_with(&segs[1].1, &with_pin(&pin))
+        .segment
+        .unwrap();
+    let r0 = find_record(&segs[0].1, "r0");
+    let attacked = drop_and_add(&segs[1].1, "r4", r0);
+    let r = verify_bundle_with(&attacked, &with_pin(&pin));
+    let sg = r.segment.clone().unwrap();
+    assert!(sg.not_evaluated.iter().any(|x| x == "record_completeness"));
+    assert_eq!(sg.earlier_parent_refs, honest.earlier_parent_refs);
+    assert_ne!(
+        sg.earlier_parent_ref_hashes, honest.earlier_parent_ref_hashes,
+        "the dropped record's hash must be visible"
+    );
+    assert!(sg
+        .earlier_parent_ref_hashes
+        .contains(&hash(&find_record(&segs[1].1, "r4"))));
+    // the chain, which knows every earlier month, refuses it
+    let chain = run_chain(&[segs[0].1.clone(), attacked]);
+    assert!(!chain.is_ok(), "{:?}", chain.issues);
+    assert!(chain.issues.iter().any(|i| i.contains("name no record")));
 }

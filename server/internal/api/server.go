@@ -4657,7 +4657,18 @@ func (s *Server) buildBundleView(ctx context.Context, projectID string, includeD
 		}
 	}
 	out, err := json.Marshal(bundle)
-	return string(out), secrets, err
+	if err != nil {
+		return "", nil, err
+	}
+	// The cap the verifier enforces is on the serialized bundle, which also holds the checkpoints, keys,
+	// revocation list and attestation the records-only pre-check above does not count.
+	if len(out) > maxSingleBundleBytes {
+		if month != "" {
+			return "", nil, errMonthTooBig
+		}
+		return "", nil, errBundleTooBig
+	}
+	return string(out), secrets, nil
 }
 
 // attachAnchor adds an `anchor` block to a sealed checkpoint JSON. The anchor is excluded from the

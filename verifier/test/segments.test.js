@@ -41,5 +41,9 @@ test("the month that points before its base lists the earlier parent and reports
   const v = await averin();
   const r = v.verifyBundle(month("2026-08"));
   expect(r.segment.earlier_parent_refs).toBe(1);
-  expect(r.segment.not_evaluated).toEqual(["broker_grant_log", "federation_heads"]);
+  expect(r.segment.earlier_parent_ref_hashes.length).toBe(1);
+  // its record set is only bounded by the chain, and the month says so
+  expect(r.segment.not_evaluated).toEqual(["broker_grant_log", "federation_heads", "record_completeness"]);
+  const july = v.verifyBundle(month("2026-07"));
+  expect(july.segment.not_evaluated).toEqual(["broker_grant_log", "federation_heads"]);
 });

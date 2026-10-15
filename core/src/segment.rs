@@ -383,6 +383,9 @@ pub enum SegmentChainError {
     BaseMismatch { stated_seq: i64, found_seq: i64 },
     /// No checkpoint follows the base, so the segment commits nothing.
     SegmentEmpty { base_seq: i64 },
+    /// The segment carries a record the base checkpoint's frontier already commits. An earlier month owns it, so
+    /// carrying it here would let a dropped record of this month be replaced by one from before the base.
+    BaseFrontierCarried { hash: String },
 }
 
 impl std::fmt::Display for SegmentChainError {
@@ -392,6 +395,10 @@ impl std::fmt::Display for SegmentChainError {
             Self::BaseMismatch { stated_seq, found_seq } => write!(
                 f,
                 "segment base checkpoint seq {stated_seq} is not the first checkpoint carried (found {found_seq})"
+            ),
+            Self::BaseFrontierCarried { hash } => write!(
+                f,
+                "segment carries record {hash}, which the base checkpoint's frontier already commits"
             ),
             Self::SegmentEmpty { base_seq } => {
                 write!(f, "segment has no checkpoint after its base checkpoint {base_seq}")
@@ -444,6 +451,19 @@ pub fn validate_segment_chain(
             stated_seq: base.seq,
             found_seq: first_seq,
         });
+    }
+
+    // A record the base frontier commits belongs to an earlier month. Refusing it here is what makes the
+    // single-month bound exact: with no earlier parent refs, latest frontier == heads and count == base + carried
+    // force the carried set to be closure(frontier) minus closure(base frontier).
+    if let Some(bf) = first.get("frontier").and_then(CanonValue::as_array) {
+        for fh in bf.iter().filter_map(CanonValue::as_str) {
+            if dag.by_hash.contains_key(fh) {
+                return Err(SegmentChainError::BaseFrontierCarried {
+                    hash: fh.to_string(),
+                });
+            }
+        }
     }
 
     for w in ordered.windows(2) {

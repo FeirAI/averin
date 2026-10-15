@@ -183,6 +183,18 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         println!(
             "                `averin-verify chain` over every month to check the whole history."
         );
+        let incomplete = sg
+            .get("not_evaluated")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| a.iter().any(|x| x.as_str() == Some("record_completeness")));
+        if incomplete {
+            println!(
+                "                RECORD COMPLETENESS NOT EVALUATED: this month has parents before its base, so a record"
+            );
+            println!(
+                "                dropped from it could be replaced by an earlier one. Only `chain` can rule that out."
+            );
+        }
     }
     // Tier-B / ADR-0005 mode gates (only meaningful when the relevant key set was pinned via opts.json).
     println!(

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -328,6 +329,9 @@ func main() {
 	// the TSA's key out-of-band to trust the anchor.
 	tsaURL, tsaPin, err := resolveTSAConfig(os.Getenv("AVERIN_TSA_PRESET"), os.Getenv("AVERIN_TSA_URL"))
 	if err != nil {
+		log.Fatal(err)
+	}
+	if err := checkTSAAuthTransport(tsaURL, os.Getenv("AVERIN_TSA_AUTH_HEADER")); err != nil {
 		log.Fatal(err)
 	}
 	if tsaURL != "" {
@@ -1022,4 +1026,18 @@ func resolveTSAConfig(preset, url string) (stampURL, pinSPKIB64 string, err erro
 	default:
 		return url, "", nil
 	}
+}
+
+// checkTSAAuthTransport refuses to start with a credential header that would travel in clear text: the
+// header is sent on every stamp request, so it is only allowed with an https URL. Some authorities publish
+// plain http endpoints; a paid account must use their https one, or none.
+func checkTSAAuthTransport(stampURL, authHeader string) error {
+	if strings.TrimSpace(authHeader) == "" || strings.TrimSpace(stampURL) == "" {
+		return nil
+	}
+	u, err := neturl.Parse(strings.TrimSpace(stampURL))
+	if err != nil || !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("AVERIN_TSA_AUTH_HEADER is set but the TSA URL %q is not https: the credential would be sent in clear text; use the authority's https endpoint", stampURL)
+	}
+	return nil
 }

@@ -17,7 +17,7 @@ any record content. Whether that outbound call is acceptable on your infrastruct
 |---|---|
 | `AVERIN_TSA_PRESET=freetsa` | One setting: stamp at https://freetsa.org/tsr. The server logs the TSA signing key to pin. |
 | `AVERIN_TSA_URL=<url>` | Any other authority (DigiCert, Sectigo, GlobalSign, a private one). Setting both this and the preset is fatal. |
-| `AVERIN_TSA_AUTH_HEADER=<value>` | The `Authorization` header a paid authority needs (for example `Basic ...`). Read from the environment and sent as is. |
+| `AVERIN_TSA_AUTH_HEADER=<value>` | The `Authorization` header a paid authority needs (for example `Basic ...`). Read from the environment and sent as is. Start-up is refused unless the TSA URL is https, so the credential never travels in clear text. |
 
 An unknown preset name is fatal at start-up. Anchoring is best-effort: a TSA outage stores the checkpoint
 un-anchored and is reported, it never stops the chain; a checkpoint can be back-anchored later.

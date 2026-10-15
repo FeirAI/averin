@@ -32,6 +32,16 @@ What it does not do:
   since the project began, so a month that starts after a base reports `broker_trust: assumed` and the capstone
   claims stay unsatisfied for it (`segment.not_evaluated`). Only the first month and a whole-history bundle
   evaluate them, so a project past the 256 MiB limit has no single check of its whole grant log.
+- **A month with parents before its base cannot show its record set is complete.** When `earlier_parent_refs` is
+  above 0, a record dropped from the month can be replaced by an earlier month's record without changing the
+  record count, the heads or any signature. The month then lists `record_completeness` in `segment.not_evaluated`
+  and reports the hashes (`earlier_parent_ref_hashes`); `averin-verify chain` over every month catches the swap. A
+  month with no such parents is exact. A signed per-checkpoint delta commitment would close this for a single
+  month; it is not built.
+- **A month's record range is read by position.** On Postgres the order is `(inserted_at, ctid)` and the checkpoint
+  `record_count` is a position in it, so a wall clock stepped back can make a month carry the wrong records. That
+  fails closed (the month and its neighbour do not verify), it never verifies a wrong set. The month export is
+  covered on real Postgres in CI.
 - **A use or outcome whose grant or intent is in an earlier month** is listed (`unresolved_cross_month`), never
   matched. The chain checks the named record exists in an earlier month, not the full use-to-grant match.
 - **A month is bounded by its own size.** A project that records more than 256 MiB in a month cannot be verified
