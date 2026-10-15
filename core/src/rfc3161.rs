@@ -802,16 +802,21 @@ mod tests {
     }
 
     fn pss_alg(h: HashAlg, salt: u32) -> spki::AlgorithmIdentifierOwned {
-        let ha = spki::AlgorithmIdentifierOwned {
-            oid: hash_oid(h),
+        pss_alg_with(h, h, salt)
+    }
+
+    /// PSS parameters naming hash `h` with an MGF1 over `mgf_h` (a TSA that mixes them is refused).
+    fn pss_alg_with(h: HashAlg, mgf_h: HashAlg, salt: u32) -> spki::AlgorithmIdentifierOwned {
+        let alg = |oid| spki::AlgorithmIdentifierOwned {
+            oid,
             parameters: None,
         };
         let mgf = spki::AlgorithmIdentifierOwned {
             oid: ID_MGF1,
-            parameters: Some(der::Any::encode_from(&ha).unwrap()),
+            parameters: Some(der::Any::encode_from(&alg(hash_oid(mgf_h))).unwrap()),
         };
         let params = PssParams {
-            hash: Some(ha),
+            hash: Some(alg(hash_oid(h))),
             mgf: Some(mgf),
             salt_len: Some(salt),
             trailer: None,
@@ -892,6 +897,18 @@ mod tests {
             &sk,
             HashAlg::Sha256,
             pss_alg(HashAlg::Sha512, 32),
+            Some(32),
+            b"m",
+        );
+        assert_eq!(
+            verify_token(&tok, &spki),
+            Err(Rfc3161Error::UnsupportedSigAlg)
+        );
+        // MGF1 over a different hash than the PSS hash and the digest
+        let tok = rsa_token(
+            &sk,
+            HashAlg::Sha256,
+            pss_alg_with(HashAlg::Sha256, HashAlg::Sha512, 32),
             Some(32),
             b"m",
         );

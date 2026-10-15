@@ -714,3 +714,98 @@ fn the_chain_resolves_cross_month_references_against_earlier_months_only() {
     chain.absorb(&b2s, &r2s);
     assert!(!chain.is_ok());
 }
+
+// ---- rules a month shares with a whole-history bundle ----
+
+#[test]
+fn a_whole_history_bundle_with_a_missing_record_still_fails_as_a_broken_link() {
+    // The relaxation that lets a month point before its base must not reach a bundle with no base.
+    let p = build();
+    let mut recs = p.records.clone();
+    recs.remove(0); // the first record is the parent of the second
+    let b = CanonValue::object(vec![
+        ("bundle_version".into(), CanonValue::string("1")),
+        ("project_id".into(), CanonValue::string(PROJECT)),
+        ("keys".into(), keys()),
+        ("records".into(), CanonValue::Array(recs)),
+        (
+            "checkpoints".into(),
+            CanonValue::Array(p.checkpoints.clone()),
+        ),
+    ])
+    .unwrap();
+    let r = verify_bundle_with(&b, &pinned());
+    assert!(!r.ok);
+    assert!(!r.dag_ok, "{}", issues(&r));
+    // and the same hole in a first-month segment (no base) is a DAG failure too
+    let first = segments().remove(0).1;
+    let mut recs = arr(&first, "records");
+    recs.remove(0);
+    let r = verify_bundle_with(&set(&first, "records", CanonValue::Array(recs)), &pinned());
+    assert!(!r.dag_ok, "{}", issues(&r));
+}
+
+#[test]
+fn an_intermediate_checkpoint_naming_a_head_the_month_does_not_carry_fails() {
+    // Month two with an extra checkpoint in the middle whose frontier names a record that exists nowhere. The
+    // latest checkpoint is honest, so only the per-checkpoint frontier rule can catch it.
+    let segs = segments();
+    let b = &segs[1].1;
+    let cps = arr(b, "checkpoints");
+    let (base, last) = (&cps[0], &cps[1]);
+    let base_hash = base
+        .get("checkpoint_hash")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let bogus = format!("sha256:{}", "ee".repeat(32));
+    let mid_body = checkpoint_body(
+        "cp-mid",
+        PROJECT,
+        1,
+        Some(&base_hash),
+        &[bogus],
+        4,
+        "2026-07-20T12:00:00.000Z",
+        key_block(),
+    )
+    .unwrap();
+    let mid = seal_checkpoint(&mid_body, &sk()).unwrap();
+    let mid_hash = mid
+        .get("checkpoint_hash")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let frontier: Vec<String> = last
+        .get("frontier")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h.as_str().unwrap().to_string())
+        .collect();
+    let last_body = checkpoint_body(
+        "cp-last",
+        PROJECT,
+        2,
+        Some(&mid_hash),
+        &frontier,
+        5,
+        "2026-07-28T12:00:00.000Z",
+        key_block(),
+    )
+    .unwrap();
+    let last2 = seal_checkpoint(&last_body, &sk()).unwrap();
+    let r = verify_bundle_with(
+        &set(
+            b,
+            "checkpoints",
+            CanonValue::Array(vec![base.clone(), mid, last2]),
+        ),
+        &pinned(),
+    );
+    assert!(!r.ok);
+    assert!(issues(&r).contains("OMISSION"), "{}", issues(&r));
+}
