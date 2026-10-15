@@ -403,7 +403,7 @@ fn every_preimage_family_matches_model() {
             ),
             "key rotation" => check(
                 name,
-                &sign::preimage(sign::KEY_ROTATION_SIG_TAG, tail()).unwrap(),
+                &sign::preimage(verify::KEY_ROTATION_SIG_TAG, tail()).unwrap(),
                 want,
             ),
             "revocation merkle root v2" => check(

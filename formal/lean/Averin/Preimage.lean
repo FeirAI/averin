@@ -63,7 +63,7 @@ def merkleRootSigV2 : Family :=
   ⟨"revocation merkle root v2", "averin.broker.revocation.merkleroot.v2", [], true⟩
 /-- `verify.rs` deployment attestation, via `sign::verify`. -/
 def attestationSig : Family := ⟨"attestation", "averin.attestation.v1", [], true⟩
-/-- `verify.rs::evaluate_key_rotations` (AVE-04), via `sign::verify` under `sign::KEY_ROTATION_SIG_TAG`. -/
+/-- `verify.rs::evaluate_key_rotations` (AVE-04), via `sign::verify` under `verify::KEY_ROTATION_SIG_TAG`. -/
 def keyRotationSig : Family := ⟨"key rotation", "averin.key_rotation.v1", [], true⟩
 /-- `authority.rs::preimage`: `LP(tag) ‖ LP(source) ‖ LP(project_id) ‖ LP(record_id) ‖ utf8(evidence_hash)`. -/
 def authoritySig : Family :=

@@ -1,13 +1,13 @@
 diff --git a/server/internal/api/server.go b/server/internal/api/server.go
-index 62a3b44..2d4a6bc 100644
+index e80f6c1..2b29b79 100644
 --- a/server/internal/api/server.go
 +++ b/server/internal/api/server.go
-@@ -4532,7 +4532,7 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string,
- 	// AVE-04: the signed statements that link each retired recording key to its successor, so a verifier that
- 	// pinned an earlier key can follow the chain to the key that signed the newer records.
+@@ -310,7 +310,7 @@ func (s *Server) bundleKeys() []any {
+ // verifier that pinned an earlier key can follow the chain to the key that signed the newer records.
+ func (s *Server) addKeyRotations(bundle map[string]any) {
  	if s.lineage != nil && len(s.lineage.Rotations) > 0 {
 -		bundle["key_rotations"] = s.lineage.Rotations
 +		_ = s.lineage.Rotations
  	}
- 	// T6/D8: emit the operator-declared coverage_manifest verbatim. Its digest is bound into the
- 	// deployment_attestation (above), so the closure the verifier checks is the one the operator attested.
+ }
+ 

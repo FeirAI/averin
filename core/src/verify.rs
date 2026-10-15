@@ -5183,6 +5183,10 @@ fn check_role_disjointness(
     None
 }
 
+/// Signing domain of a key-rotation statement (AVE-04): the retiring and the successor key each sign the digest
+/// of the statement under it. A Lean `Family` and an oracle case pin its separation from every other domain.
+pub const KEY_ROTATION_SIG_TAG: &str = "averin.key_rotation.v1";
+
 /// AVE-02: the number of records whose signed body carries `extensions.content_preview`, prompt or answer text
 /// in the clear that no retention purge can erase. Informational: it feeds no verdict.
 fn count_cleartext_content(records: &[CanonValue]) -> usize {
@@ -5314,7 +5318,7 @@ fn evaluate_key_rotations(
         let digest = crate::hashx::sha256_prefixed(CanonValue::Object(body).serialize().as_bytes());
         let sig_ok = |field: &str, vk: &VerifyingKey| {
             s(st, field).is_some_and(|sig| {
-                crate::sign::verify(crate::sign::KEY_ROTATION_SIG_TAG, &digest, &sig, vk).is_ok()
+                crate::sign::verify(KEY_ROTATION_SIG_TAG, &digest, &sig, vk).is_ok()
             })
         };
         if !sig_ok("sig_new", &nvk) {

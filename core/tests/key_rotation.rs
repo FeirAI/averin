@@ -3,11 +3,9 @@
 
 use averin_decision_core::canon::CanonValue;
 use averin_decision_core::hashx::sha256_prefixed;
-use averin_decision_core::sign::{
-    encode_pubkey, sign, signing_key_from_seed, KEY_ROTATION_SIG_TAG,
-};
+use averin_decision_core::sign::{encode_pubkey, sign, signing_key_from_seed};
 use averin_decision_core::verify::{
-    verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions, VerifyReport,
+    verify_bundle_with, TrustLevel, TrustedKey, VerifyOptions, VerifyReport, KEY_ROTATION_SIG_TAG,
 };
 use ed25519_dalek::SigningKey;
 use std::path::PathBuf;

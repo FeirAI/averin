@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-// Tag is the Ed25519 signing domain of a key-rotation statement (core sign::KEY_ROTATION_SIG_TAG).
+// Tag is the Ed25519 signing domain of a key-rotation statement (core verify::KEY_ROTATION_SIG_TAG).
 const Tag = "averin.key_rotation.v1"
 
 const pubPrefix = "ed25519pub:"

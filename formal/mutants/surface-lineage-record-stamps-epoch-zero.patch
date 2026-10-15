@@ -1,10 +1,10 @@
 diff --git a/server/internal/api/server.go b/server/internal/api/server.go
-index 62a3b44..eedcc73 100644
+index e80f6c1..11ce30f 100644
 --- a/server/internal/api/server.go
 +++ b/server/internal/api/server.go
-@@ -1724,7 +1724,7 @@ func (s *Server) sealAndStore(st store.Store, projectID, sessionID, idem string,
- 	// signing key block
- 	rec["key"] = map[string]any{
+@@ -286,7 +286,7 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
+ func (s *Server) keyBlock() map[string]any {
+ 	return map[string]any{
  		"signing_key_id": s.signingKeyID,
 -		"key_epoch":      s.keyEpoch,
 +		"key_epoch":      0,
