@@ -489,6 +489,46 @@
         "server",
         "formal-fast"
       ]
+    },
+    {
+      "id": "posture-api-key-fingerprints",
+      "claim": "GET /v2/posture reports, under averin-api-key, a keyed fingerprint of every distinct API key the keyed deployment accepts (HMAC-SHA256 keyed by the token over feir-secret-alignment/v1:averin-api-key, pinned by vectors/secret-fingerprint.v1.json), so the deploy-time verifier can check the key govder, vultrino and the broker send is one averin accepts; an open or unkeyed deployment reports an empty object; a real averin-server started with AVERIN_API_KEYS reports its token's fingerprint; no key is in the body. Not that a sending plane's key equals one of them (the comparison is feir-os evaluate.jq, tested against stub reports, and there is no keyed-averin four-plane run), that keys are strong or rotated, or that a fingerprint is private against a weak key.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "the deployment's build script stamps the rustc version with -ldflags; an unstamped build reports none",
+        "the deploy-time verifier calls the endpoint with a project key"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/posture.go",
+          "symbol": "secretFingerprints"
+        },
+        {
+          "file": "server/internal/auth/auth.go",
+          "symbol": "func (ks *MapStore) Tokens"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/posture_test.go",
+          "symbol": "TestPosture_ReportsFingerprintsOfEveryAcceptedAPIKeyAndNeverTheKey"
+        },
+        {
+          "file": "server/cmd/averin-server/main_test.go",
+          "symbol": "TestPosture_LiveProcessReportsItsStartupGuards"
+        },
+        {
+          "file": "formal/mutants/posture-api-key-fingerprints-first-only.patch",
+          "symbol": "Tokens()[:1]"
+        }
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ]
     }
   ]
 }

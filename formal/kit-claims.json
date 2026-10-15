@@ -1337,7 +1337,7 @@
     },
     {
       "id": "posture-api-key-fingerprints",
-      "$comment": "FEI-40: new legacy claim posture-api-key-fingerprints",
+      "$comment": "legacy register: posture-api-key-fingerprints",
       "statement": "GET /v2/posture reports, under the relationship name averin-api-key, a keyed fingerprint (first 16 bytes of HMAC-SHA256 keyed by the token over the label feir-secret-alignment/v1:averin-api-key, pinned by vectors/secret-fingerprint.v1.json) of EVERY distinct API key the keyed deployment accepts across all its projects, so the deploy-time verifier can check that the key govder, vultrino and the broker send is one averin accepts. An open or unkeyed deployment reports an empty object. A real averin-server process started with AVERIN_API_KEYS reports the fingerprint of its token. No key appears in the body.",
       "method": "test",
       "artifacts": [

@@ -207,8 +207,14 @@ on a keyed deployment it needs the project's bearer. Booleans and build identifi
 a DSN: `schema`, `plane`, `build` (`go_version`, `vcs_revision`, `vcs_modified`, `core_rustc` when the build
 stamped it with `-ldflags "-X main.coreRustc=..."`), `require_prod_secrets`, `api_keys_configured` (false when the
 app API is unauthenticated), `durable_store` (Postgres wired), `signing_seed_is_dev`, `require_pinned_authority`,
-`require_body_bound_authority`. It says what was configured, not that the database is reachable. On an
-unauthenticated deployment it answers anyone and reports `api_keys_configured: false`.
+`require_body_bound_authority`, and `secret_fingerprints` (an object; on a keyed deployment `averin-api-key` is a
+list with one keyed fingerprint per distinct API key averin accepts across all projects: the first 16 bytes of
+HMAC-SHA256 keyed by the token over `feir-secret-alignment/v1:averin-api-key`, vectors in
+`vectors/secret-fingerprint.v1.json`; empty on an open deployment). feir-os's verifier checks that the key
+govder, vultrino and the broker send is on that list, so a wrong key fails the launch instead of surfacing as
+401s later. A fingerprint is not the key, but someone who holds it can test guesses for a weak key offline,
+which is why the report sits behind a project key. It says what was configured, not that the database is
+reachable. On an unauthenticated deployment it answers anyone and reports `api_keys_configured: false`.
 
 ---
 
