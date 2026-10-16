@@ -511,3 +511,27 @@ fn the_chain_command_fails_a_use_whose_grant_no_month_holds() {
     assert_eq!((word.as_str(), code), ("FAIL", 1), "{stdout}");
     assert!(stdout.contains("ghost"), "{stdout}");
 }
+
+#[test]
+fn a_chain_whose_months_were_not_pinned_to_each_others_heads_fails_though_the_whole_verifies() {
+    // every month verified with no base pin: each month is fine, the concatenation is the honest history, and the
+    // chain still refuses it because nobody said month two follows month one
+    let whole = honest_reusable();
+    assert_ne!(
+        whole_verdict(&whole, RequestedClaim::Integrity),
+        ClaimVerdict::Fail
+    );
+    let mut chain = ChainState::new();
+    for m in months_of(&whole) {
+        let r = verify_bundle_with(&m, &opts(RequestedClaim::Integrity, None));
+        chain.absorb(&m, &report_to_canon(&r));
+    }
+    assert!(!chain.is_ok());
+    let v = chain.finish_with(|w| {
+        Some(report_to_canon(&verify_bundle_with(
+            w,
+            &opts(RequestedClaim::Integrity, None),
+        )))
+    });
+    assert_eq!(v.verdict, ClaimVerdict::Fail);
+}

@@ -242,15 +242,13 @@ pub struct ChainState {
     seen_checkpoints: BTreeSet<String>,
     /// the non-history members (keys and the like) of the latest month, as a whole-history export would carry them
     members: Vec<(String, CanonValue)>,
-    /// a month failed or refuted its claim: final, no later month repairs it
-    month_fail: bool,
     pub months: usize,
     pub records: usize,
     pub issues: Vec<String>,
 }
 
 /// What the chain concludes: the claim verdict of the concatenated history (FAIL when the chain itself is
-/// broken or a month failed), and that whole-history report.
+/// broken, which includes a month that does not verify), and that whole-history report.
 pub struct ChainVerdict {
     pub verdict: ClaimVerdict,
     pub whole: Option<CanonValue>,
@@ -460,10 +458,6 @@ impl ChainState {
                     .collect()
             })
             .unwrap_or_default();
-        // a refuted claim or a failed month is final; an insufficient one may be a cross-month gap the whole closes
-        if month_claim_verdict(report, false) == ClaimVerdict::Fail {
-            self.month_fail = true;
-        }
         self.records += records.len();
         self.months += 1;
         self.last_month = Some(month);
@@ -501,8 +495,8 @@ impl ChainState {
     /// The chain verdict. `verify` runs the whole-history verifier on the rebuilt bundle and returns its report
     /// (`verify_bundle_with_json`, or `report_to_canon` of `verify_bundle_with`), under the options the months were
     /// verified with and no segment pin; it returns `None` when the whole history is too large to verify in one piece
-    /// (over the verifier's byte cap), which is the case months exist for. FAIL when the chain is broken, a month
-    /// failed or refuted its claim, or the whole history does not verify; otherwise the whole history's own verdict
+    /// (over the verifier's byte cap), which is the case months exist for. FAIL when the chain is broken (a
+    /// month that does not verify is a chain issue) or the whole history does not verify; otherwise the whole history's own verdict
     /// (a month is never more informed than the whole, so a month's INSUFFICIENT on a cross-month gap does not outvote
     /// it). When the whole cannot be verified, the cross-month rules are not evaluated, so the verdict is capped at
     /// INSUFFICIENT: it is never better than what was actually checked.
@@ -521,7 +515,7 @@ impl ChainState {
             Some(r) => month_claim_verdict(r, false),
             None => ClaimVerdict::Insufficient,
         };
-        if !self.is_ok() || self.month_fail {
+        if !self.is_ok() {
             verdict = ClaimVerdict::Fail;
         }
         ChainVerdict {
