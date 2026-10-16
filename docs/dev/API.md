@@ -203,7 +203,7 @@ A session's sealed records, in causal/display order, for the trace-waterfall vie
 
 A read-only report of the guards this process was started with, for the posture verifier in feir-os
 (`deploy/vps/deploy.sh verify-posture`). It is under the same project API-key auth as every other `/v2` route:
-on a keyed deployment it needs the project's bearer. Booleans and build identifiers only, never a key, a seed or
+on a keyed deployment it needs the project's bearer. Booleans, one integer (`schema_version`), a short region label and build identifiers only, never a key, a seed or
 a DSN: `schema`, `plane`, `build` (`go_version`, `vcs_revision`, `vcs_modified`, `core_rustc` when the build
 stamped it with `-ldflags "-X main.coreRustc=..."`), `require_prod_secrets`, `api_keys_configured` (false when the
 app API is unauthenticated), `durable_store` (Postgres wired), `signing_seed_is_dev`, `require_pinned_authority`,

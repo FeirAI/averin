@@ -452,7 +452,7 @@
     },
     {
       "id": "posture-report-live",
-      "claim": "GET /v2/posture sits under the ordinary project API-key auth (401 without the project's bearer on a keyed deployment) and reports from the running process whether the app API is keyed (an explicit open store counts as not keyed), whether the Postgres store is wired, whether the signing seed is the committed dev seed, whether AVERIN_REQUIRE_PROD_SECRETS is on, the two authority-pin switches, and the Go toolchain, git commit and (when the build script stamped it) rustc of the linked decision core. A real averin-server process, built and started in the test, reports the keyed in-memory deployment and reports the dev seed as such. It also reports the region label (AVERIN_REGION), the Postgres schema version the binary understands and whether startup verified the runtime database role. Booleans, a short region label and build identifiers only. Not that the database is reachable, that the keys are strong, that AVERIN_REQUIRE_PROD_SECRETS reaches a running binary (the live-process test cannot boot with it on without Postgres), or that a deployment calls the endpoint (the feir-os posture verifier does).",
+      "claim": "GET /v2/posture sits under the ordinary project API-key auth (401 without the project's bearer on a keyed deployment) and reports from the running process whether the app API is keyed (an explicit open store counts as not keyed), whether the Postgres store is wired, whether the signing seed is the committed dev seed, whether AVERIN_REQUIRE_PROD_SECRETS is on, the two authority-pin switches, and the Go toolchain, git commit and (when the build script stamped it) rustc of the linked decision core. A real averin-server process, built and started in the test, reports the keyed in-memory deployment and reports the dev seed as such. It also reports the region label (AVERIN_REGION), the Postgres schema version the binary understands and whether startup verified the runtime database role. Booleans, a short region label, the schema version (an integer) and build identifiers only. Not that the database is reachable, that the keys are strong, that AVERIN_REQUIRE_PROD_SECRETS reaches a running binary (the live-process test cannot boot with it on without Postgres), or that a deployment calls the endpoint (the feir-os posture verifier does).",
       "class": "tested-implementation-with-deployment-limit",
       "targets": [
         "Go server"
@@ -644,7 +644,7 @@
         "store-postgres",
         "formal-fast"
       ],
-      "evidence_run": "38640736603"
+      "evidence_run": "38951172449"
     }
   ]
 }
