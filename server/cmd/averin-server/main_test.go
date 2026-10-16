@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
@@ -261,7 +262,7 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-ldflags", "-X main.coreRustc=rustc-test-stamp", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Skipf("could not build averin-server (cgo toolchain?): %v\n%s", err, out)
 	}
-	run := func(t *testing.T, seed string) map[string]any {
+	run := func(t *testing.T, seed string, extraEnv ...string) map[string]any {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
@@ -271,6 +272,7 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 		cmd := exec.Command(bin)
 		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=" + addr,
 			"AVERIN_DEV_MODE=1", "AVERIN_SIGNING_SEED=" + seed, "AVERIN_API_KEYS=proj:tok"}
+		cmd.Env = append(cmd.Env, extraEnv...)
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
@@ -295,7 +297,13 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 		t.Fatal("averin-server never answered /v2/posture")
 		return nil
 	}
-	b := run(t, strings.Repeat("a1", 32))
+	b := run(t, strings.Repeat("a1", 32), "AVERIN_REGION= eu-central-1 ")
+	if b["region"] != "eu-central-1" || b["schema_version"] != float64(0) || b["runtime_role_verified"] != false {
+		t.Fatalf("region, schema version and runtime-role fields: %v", b)
+	}
+	if b["dev_mode"] != true {
+		t.Fatalf("this process was started with AVERIN_DEV_MODE=1 and must report dev_mode=true: %v", b)
+	}
 	if b["api_keys_configured"] != true || b["signing_seed_is_dev"] != false || b["durable_store"] != false || b["require_prod_secrets"] != false {
 		t.Fatalf("fresh seed, keyed, in-memory: %v", b)
 	}
@@ -306,5 +314,40 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 	b = run(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
 	if b["signing_seed_is_dev"] != true {
 		t.Fatalf("the dev seed must be reported: %v", b)
+	}
+	if b["region"] != "" {
+		t.Fatalf("an undeclared region must be reported empty: %v", b)
+	}
+}
+
+// An invalid AVERIN_REGION stops startup instead of being reported as a region nobody meant.
+func TestRegion_InvalidValueRefusesStart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the cgo binary; skipped under -short")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "averin-server-region")
+	// This test binary already links the cgo staticlib, so a failing build is a real failure here,
+	// not a reason to skip (a skip would be a green result for a test that never ran).
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("could not build averin-server: %v\n%s", err, out)
+	}
+	// A server that wrongly ignores AVERIN_REGION starts and listens; without a deadline this test
+	// would hang until go test's own timeout and leave the server running.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin)
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=127.0.0.1:0",
+		"AVERIN_DEV_MODE=1", "AVERIN_SIGNING_SEED=" + strings.Repeat("a1", 32), "AVERIN_REGION=EU West"}
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("an invalid AVERIN_REGION did not stop the server within 30s (it started and kept running)\n%s", out)
+	}
+	if err == nil {
+		t.Fatalf("an invalid AVERIN_REGION started the server\n%s", out)
+	}
+	if !strings.Contains(string(out), "AVERIN_REGION") {
+		t.Fatalf("the refusal must name AVERIN_REGION\n%s", out)
 	}
 }

@@ -56,6 +56,22 @@ read still scans `O(records)` (a per-row `::jsonb` cast), holding the project gu
 `content_hash` column — is a **deferred** rearchitecture: it needs a schema migration/backfill and is
 not worth reopening a grant-suppression race for here.
 
+## Text signed before prompt commitment stays in the clear
+
+Since ADR 0008 the server commits prompt and answer text instead of signing it, so it can be erased. Records
+sealed **before** that change carry their text in `extensions.content_preview`, inside a signed, hash-chained
+body, and cannot be edited or erased selectively without breaking the chain. An export reports the number of
+such records as `cleartext_content_records`. For them the only remedy is the whole-store one (SECURITY.md,
+*Data retention & erasure*): start a new project and destroy the old store.
+
+## Key rotation does not prove when the old key stopped signing
+
+A signed rotation statement links the retiring recording key to its successor and lets a verifier that pinned
+only the old key follow the chain. It does not prove the old key signed nothing after `rotated_at`: for a
+scheduled rotation that rests on destroying the old seed, for a compromise on a verified timestamp anchor
+taken before `status_changed_at` (KEY-ROTATION.md). The statements live in the export, not in the project
+chain.
+
 ## OTel secret scrubbing only protects newly-sealed records
 
 `scrubAttributes` recursively redacts secret-shaped keys and values (including inside nested
@@ -98,11 +114,20 @@ isolation but is volatile across process restart. It is a development store:
 every project write copies that project's entire state (O(n) in its records,
 disclosures and index maps) to make the transaction private, and it never prunes
 expired pending grants. Online capability use now
-checks its signed project against the authenticated project. A multi-replica
-deployment claim still needs scoped nonce claims and bounded sequence recovery
-tested together. Until then, keep the
+checks its signed project against the authenticated project. Scoped nonce
+claims and bounded sequence recovery are built, and a failure matrix in CI
+(`multiwriter`: two or three real `averin-server` processes on one Postgres, a
+capability used concurrently, a revoke against a use, `kill -9` during prepare
+and finalize, stranded sequence recovery while the other process writes, a lost
+COMMIT acknowledgment cut before and after the server commits, each checked by
+a trace monitor against the `ProjectTx` invariants) found no violation. That is
+not yet a multi-replica deployment claim: each replica still reads its own
+content directory, so a record disclosed through another replica needs the
+content in Postgres first; the ingest budget is per process; the optional
+witness is not in object storage; and Postgres failover and more than two
+concurrent writers are not exercised. Until those are done, keep the
 single-writer-per-project deployment policy even though frontier and checkpoint
-writes now serialize across replicas.
+writes serialize across replicas.
 
 ## Storage only grows, and the cap is by record count (a deploy requirement is still monitoring)
 

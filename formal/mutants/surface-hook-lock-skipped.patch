@@ -1,0 +1,15 @@
+diff --git a/server/internal/pgschema/pgschema.go b/server/internal/pgschema/pgschema.go
+index cc94d0e..dc50460 100644
+--- a/server/internal/pgschema/pgschema.go
++++ b/server/internal/pgschema/pgschema.go
+@@ -158,9 +158,7 @@ func migrate(ctx context.Context, dsn string, roles *cutoverRoles, refuseFresh b
+ 
+ 	// Serialize concurrently-booting replicas. Taken FIRST so the version read happens under the lock;
+ 	// a transaction-scoped lock auto-releases on COMMIT/ROLLBACK (nothing to unlock, nothing to leak).
+-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, advisoryLockKey); err != nil {
+-		return fmt.Errorf("pgschema: advisory lock: %w", err)
+-	}
++	_ = advisoryLockKey
+ 
+ 	// The version ledger itself. Guarded by an existence probe so a steady-state boot issues ZERO DDL —
+ 	// the table is created only the first time averin ever migrates this DB. Under the advisory lock only

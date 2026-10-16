@@ -11,8 +11,8 @@ import (
 
 const truncMarker = "…[averin: preview truncated]"
 
-// TestTruncatePreviewBoundsAndValidUTF8 (averin#17): content_preview bodies are append-only and permanently
-// un-erasable, so truncatePreview is the ONLY bound on their stored size. It must cap the payload at maxPreview
+// TestTruncatePreviewBoundsAndValidUTF8 (averin#17): recorded prompt and answer text is kept in the content store,
+// so truncatePreview is the ONLY bound on its stored size. It must cap the payload at maxPreview
 // bytes, keep the result valid UTF-8 (never split a multi-byte rune at the seam), and carry a visible marker.
 func TestTruncatePreviewBoundsAndValidUTF8(t *testing.T) {
 	// Under the cap: passed through verbatim (no marker).
@@ -68,9 +68,11 @@ func TestProxyTruncatesHugePreview(t *testing.T) {
 	resp.Body.Close()
 
 	rec.wait(t, 1)
-	preview := rec.records[0]["extensions"].(map[string]any)["content_preview"].(map[string]any)
-	in := preview["input"].(string)
-	out := preview["output"].(string)
+	if _, ok := rec.records[0]["extensions"]; ok {
+		t.Fatalf("the proxy must not put prompt text under extensions: %v", rec.records[0]["extensions"])
+	}
+	in := rec.records[0]["input"].(string)
+	out := rec.records[0]["output"].(string)
 	if len(in) > maxPreview+len(truncMarker) || !strings.HasSuffix(in, truncMarker) {
 		t.Fatalf("input preview not truncated: %d bytes, suffix-ok=%v", len(in), strings.HasSuffix(in, truncMarker))
 	}

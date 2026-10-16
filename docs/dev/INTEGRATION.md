@@ -31,16 +31,13 @@ supply one. The `**kwargs` are passed to `build_record`, whose named arguments i
 `event_type` (default `tool_call`; must be a valid event type), `status`, `observed_via`, `inp`
 (raw input — note the keyword is `inp`), `output`, `rationale`, `authority`, `cost_micros_usd`,
 `tokens_in`/`tokens_out` (integers only — floats/bools raise `ValueError`), `parent_span_id`,
-`framework`, and `extensions`. Raw `inp`/`output`/`rationale` are carried under
-`extensions.content_preview` (sdk/python `client.py:86`, sdk/typescript `index.ts:93`). **Note the
-limitation:** the server only converts *top-level* `input`/`output`/`rationale` to hiding commitments
-(`commitLowEntropyFields`, `server.go:2063-2097` iterates exactly `["input","output","rationale"]`).
-It has **no reader for `extensions.content_preview`**, so content the SDKs place there rides verbatim
-into the signed body under `extensions` (the canonicalizer passes `extensions` through unchanged). The
-plaintext-never-enters-the-signed-body guarantee holds **only for the top-level-field path** (the curl
-in [QUICKSTART.md](QUICKSTART.md)); on the default SDK/proxy path the raw content is signed in the
-clear. To get hiding commitments from a client, send the raw value at the **top level** of the record
-body (or pre-commit it yourself). See SECURITY.md threat #6.
+`framework`, and `extensions`. Raw `inp`/`output`/`rationale` are sent at the **top level** of the record (sdk/python `client.py`,
+sdk/typescript `index.ts`). The server replaces each with a salted hiding commitment, keeps the text in
+its encrypted content store (retention-purged after `AVERIN_RAW_RETENTION_DAYS`) and signs only the
+commitment, so the text can be erased later while the history still verifies. A body from an older
+client that puts them under `extensions.content_preview` is lifted to the top level the same way; any
+other key under `content_preview` is refused. Records sealed before this change keep that text in the
+clear (reported by the verifier as `cleartext_content_records`). See SECURITY.md threat #6.
 
 **TypeScript:**
 

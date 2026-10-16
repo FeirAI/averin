@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 62a3b44..f706fd2 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -3264,7 +3264,7 @@ func liftContentPreview(rec map[string]any) error {
+ // be rejected by the closed schema).
+ func (s *Server) commitLowEntropyFields(rec map[string]any, recordID string) ([]store.DisclosureSecret, error) {
+ 	var out []store.DisclosureSecret
+-	for _, field := range []string{"input", "output", "rationale"} {
++	for _, field := range []string{"input", "output"} {
+ 		v, ok := rec[field]
+ 		if !ok {
+ 			continue

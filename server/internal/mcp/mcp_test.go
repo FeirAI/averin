@@ -60,6 +60,9 @@ func TestRecordDecisionToolCallsAverin(t *testing.T) {
 	if !strings.Contains(gotBody, `"action":"db.write"`) || !strings.Contains(gotBody, `"rationale":"why"`) {
 		t.Fatalf("body missing fields: %s", gotBody)
 	}
+	if strings.Contains(gotBody, "content_preview") {
+		t.Fatalf("the rationale must be sent at the top level so the server commits it: %s", gotBody)
+	}
 	content := resp.Result.(map[string]any)["content"].([]map[string]any)
 	if !strings.Contains(content[0]["text"].(string), "sha256:abc") {
 		t.Fatalf("tool result missing sealed hash: %v", content)

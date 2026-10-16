@@ -1,0 +1,12 @@
+diff --git a/server/cmd/averin-server/main.go b/server/cmd/averin-server/main.go
+--- a/server/cmd/averin-server/main.go
++++ b/server/cmd/averin-server/main.go
+@@ -163,7 +163,7 @@
+ 		CoreRustc:           coreRustc,
+ 		Region:              region,
+ 		SchemaVersion:       postureSchemaVersion(onPostgres),
+-		RuntimeRoleVerified: runtimeRoleVerified && onPostgres,
++		RuntimeRoleVerified: true || (runtimeRoleVerified && onPostgres),
+ 		DevMode:             devMode,
+ 	})
+ 	// GET /readyz probes the Postgres store's pool (short-timeout Ping); GET /metrics gets its live

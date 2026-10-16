@@ -57,6 +57,20 @@ the append-only test also uses a freshly created non-owner least-privilege role 
 `REVOKE` actually bites. The DSN needs sufficient privilege to create that test role and private
 schemas. Run `make check-claims` for textual validation of the claim inventory and CI job IDs.
 
+The two-process multi-writer matrix is `TestMultiWriterFailureMatrix` (with
+`TestMultiWriterMonitorNegativeControls`, which proves the trace monitor can fail) in
+`server/internal/api/multiwriter_*_test.go`. It re-executes the test binary as separate
+`averin-server` processes on one schema, holds or kills them at named points inside a project
+transaction, and cuts the COMMIT acknowledgment with an in-test TCP proxy. To run it alone:
+
+```bash
+AVERIN_TEST_DATABASE_URL='postgres://test-user:test-password@localhost:55432/test-db?sslmode=disable' \
+  go test -count=1 -p 4 ./server/internal/api -run TestMultiWriter   # from server/: ./internal/api
+```
+
+CI runs it as the `multiwriter` job, which also requires the two semantic mutants
+`multiwriter-guard-lock-skipped` and `multiwriter-use-ignores-revocation` (formal/mutants) to make it fail.
+
 ### SDKs
 
 ```bash

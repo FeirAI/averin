@@ -28,6 +28,7 @@ import (
 	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/core"
+	"github.com/feirai/averin/server/internal/keylineage"
 	"github.com/feirai/averin/server/internal/pgdurable"
 	"github.com/feirai/averin/server/internal/pgledger"
 	"github.com/feirai/averin/server/internal/pgschema"
@@ -128,6 +129,12 @@ func main() {
 	// fail CheckRuntime forever). No-op when storage is in-memory (no AVERIN_DATABASE_URL).
 	// Use the SAME raw DSN the stores connect with (selectStore/pgledger/pgdurable read os.Getenv
 	// untrimmed) so migrate and connect operate on a byte-identical string.
+	// AVERIN_REGION: the cell's region label, reported by GET /v2/posture (validated; a typo is fatal).
+	region, err := api.ParseRegion(os.Getenv("AVERIN_REGION"))
+	if err != nil {
+		log.Fatalf("AVERIN_REGION: %v", err)
+	}
+	runtimeRoleVerified := false
 	if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
 		mctx, mcancel := context.WithTimeout(context.Background(), 60*time.Second)
 		err := pgschema.MigrateForRuntime(mctx, dsn)
@@ -140,18 +147,24 @@ func main() {
 			log.Fatalf("storage: runtime credential readiness: %v", err)
 		}
 		mcancel()
+		runtimeRoleVerified = true
 		log.Printf("storage: schema migrated (averin DB at version %d)", pgschema.CurrentSchemaVersion)
 	}
 	st := selectStore()
 
 	srv := api.New(c, st, keyID).WithSealShapeViolations(core.SealShapeViolations)
+	srv = srv.WithKeyLineage(loadKeyLineage(c, keyID))
 	// GET /v2/posture: the startup guard state, read-only, for the deploy-time posture verifier.
 	_, onPostgres := st.(*store.Postgres)
 	srv.WithPosture(api.Posture{
-		RequireProdSecrets: requireProdSecrets,
-		DurableStore:       onPostgres,
-		SigningSeedIsDev:   isDevSigningSeed(seed),
-		CoreRustc:          coreRustc,
+		RequireProdSecrets:  requireProdSecrets,
+		DurableStore:        onPostgres,
+		SigningSeedIsDev:    isDevSigningSeed(seed),
+		CoreRustc:           coreRustc,
+		Region:              region,
+		SchemaVersion:       postureSchemaVersion(onPostgres),
+		RuntimeRoleVerified: runtimeRoleVerified && onPostgres,
+		DevMode:             devMode,
 	})
 	// GET /readyz probes the Postgres store's pool (short-timeout Ping); GET /metrics gets its live
 	// connection-pool gauges. The in-memory store (no AVERIN_DATABASE_URL) registers neither — nothing
@@ -778,6 +791,51 @@ const maxSeedFileBytes = 4096
 //   - file contents are trimmed (mounted secrets carry a trailing newline).
 //   - an inline value is returned RAW (never trimmed away): a whitespace/garbage value must reach the
 //     caller's decoder and fail loud, not silently resolve to "" and DISABLE an optional role.
+//
+// loadKeyLineage reads the recording-key history (AVE-04): AVERIN_SIGNING_KEY_EPOCH (default 0) names the epoch
+// the current key signs under; AVERIN_RETIRED_SIGNING_KEYS_FILE lists the retired keys (JSON array of
+// {signing_key_id, key_epoch, public_key, key_status: retired|compromised, status_changed_at}); and
+// AVERIN_KEY_ROTATIONS_FILE holds the signed statements `averin-keyrotate` produced (JSON array). Any
+// inconsistency is fatal: a lineage that does not hold together would publish history no verifier can check.
+func loadKeyLineage(c *core.Core, keyID string) *keylineage.Lineage {
+	epoch := int64(0)
+	if raw := strings.TrimSpace(os.Getenv("AVERIN_SIGNING_KEY_EPOCH")); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 0 {
+			log.Fatalf("AVERIN_SIGNING_KEY_EPOCH must be a non-negative integer: %q", raw)
+		}
+		epoch = n
+	}
+	var retired []keylineage.RetiredFile
+	if p := strings.TrimSpace(os.Getenv("AVERIN_RETIRED_SIGNING_KEYS_FILE")); p != "" {
+		readJSONFile(p, "AVERIN_RETIRED_SIGNING_KEYS_FILE", &retired)
+	}
+	var stmts []map[string]any
+	if p := strings.TrimSpace(os.Getenv("AVERIN_KEY_ROTATIONS_FILE")); p != "" {
+		readJSONFile(p, "AVERIN_KEY_ROTATIONS_FILE", &stmts)
+	}
+	l, err := keylineage.Build(c, keylineage.Key{ID: keyID, Epoch: epoch, PublicKey: c.PubKey()}, retired, stmts)
+	if err != nil {
+		log.Fatalf("recording-key lineage: %v", err)
+	}
+	if len(l.Retired) > 0 {
+		log.Printf("recording-key lineage: current %s/%d, %d retired key(s), %d signed rotation statement(s)", keyID, epoch, len(l.Retired), len(l.Rotations))
+	}
+	return l
+}
+
+func readJSONFile(path, name string, into any) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("%s: %v", name, err)
+	}
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(into); err != nil {
+		log.Fatalf("%s: %v", name, err)
+	}
+}
+
 func secretEnvOrFile(name string) string {
 	rawInline := os.Getenv(name)
 	rawFile := os.Getenv(name + "_FILE")
@@ -996,4 +1054,13 @@ func decodeAuthorityPubKey(raw string) (ed25519.PublicKey, error) {
 		return ed25519.PublicKey(b), nil
 	}
 	return nil, fmt.Errorf("not a 32-byte ed25519 public key (accepts 64-hex or base64url-no-pad, optional ed25519pub: prefix): %q", raw)
+}
+
+// postureSchemaVersion is the Postgres schema version this binary understands, or 0 when storage is
+// in-memory (there is no schema to version).
+func postureSchemaVersion(onPostgres bool) int {
+	if !onPostgres {
+		return 0
+	}
+	return pgschema.CurrentSchemaVersion
 }

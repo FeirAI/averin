@@ -245,9 +245,11 @@ boundary time (transaction start) and the authorization high watermark, which th
 revocation list signs as captured. An RFC 3161 anchor is attached only
 after its checkpoint commits and can be backfilled idempotently. Live replicas
 read pending grants and revocations from the project Store, not from boot
-caches. Keep the single-writer deployment policy until authenticated
-capability-project binding, scoped nonce claims and bounded sequence recovery
-are integrated and tested together.
+caches. Authenticated capability-project binding, scoped nonce claims and
+bounded sequence recovery are integrated and run together in the two-process
+failure matrix (`multiwriter` in CI). Keep the single-writer deployment policy
+until the content store is shared between replicas and the ingest budget is
+per replica (see [LIMITATIONS](LIMITATIONS.md)).
 
 Append-only is the integrity invariant: records are written once, keyed by `(project, idempotency
 key)`; a retry collapses onto the existing row rather than duplicating. Disclosure secrets are

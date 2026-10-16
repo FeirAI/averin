@@ -56,12 +56,16 @@ what truly happened in the world.
   reference the signed record exports (`extensions.feir_evidence.payloads[field]`) is the hiding
   **commitment**, never a plain digest — an unsalted digest of a low-entropy value in the
   always-exported body would be dictionary-reversible, undoing exactly what the commitment hides.
-  **Bound:** this conversion (`commitLowEntropyFields`) covers only those three top-level
-  fields. Content the SDKs and proxy place under `extensions.content_preview` is **not** committed —
-  it is signed verbatim under `extensions` (the proxy regex-scrubs secrets first and hard-truncates
-  each side to a bounded length, but does not hide or erase the body). To hide content, send it at the
-  top level (or pre-commit it). This has a retention/erasure consequence — see
-  *Data retention & erasure* below — and [INTEGRATION.md](INTEGRATION.md).
+  The SDKs, the recording proxy and the MCP server send these fields at the top level. A body from
+  an older client that still puts them under `extensions.content_preview` is moved to the top level at
+  ingest, so it is committed the same way. **Bounds:** a `content_preview` that is not an object, carries
+  any other key, or repeats a top-level field is refused with a 400 (it would otherwise be signed
+  verbatim), and a body-bound v3 authority record that carries one is refused (the server cannot rewrite
+  a body the caller already signed). Records sealed **before** this change keep their cleartext
+  `content_preview` for good: the verifier counts them in `cleartext_content_records`, and the only
+  remedy for those is the whole-store remedy below. The proxy regex-scrubs secrets and truncates each
+  side to 16 KiB before sending, which bounds what it adds to the content store; it does not hide
+  anything by itself. This and [INTEGRATION.md](INTEGRATION.md) describe the erasure consequence.
 - **Authority is declared by default; elevation is verified.** `authority.source: caller_declared`
   is forgeable and presented as such. Elevation to `policy_engine_signed` / `human_signed` /
   `delegate_signed` / `gateway_enforced` requires an `evidence_sig` that verifies under a pinned key;
@@ -227,16 +231,14 @@ deliberate consequence you must design around before recording personal data:
   content store, is encrypted at rest, and is **retention-purged** after `AVERIN_RAW_RETENTION_DAYS`
   (after which the record still verifies from its commitment). This is the closest thing to erasure
   averin offers — and it works **only** for top-level committed fields.
-- **`extensions.content_preview` (the flagship proxy/SDK path) is the un-erasable case.** Prompt/
-  completion bodies the OpenAI-compatible proxy and the SDKs place under `extensions.content_preview`
-  are signed **verbatim** — **not** committed, **not** in the encrypted content store, and **not**
-  covered by the `AVERIN_RAW_RETENTION_DAYS` purge. They are therefore **permanent, always-exported,
-  and un-erasable**. The proxy regex-scrubs secrets and **hard-truncates** each preview side to a
-  bounded length (`maxPreview`, 16 KiB) so a large body cannot bloat the store without bound, but
-  truncation is a size cap, **not** erasure or hiding. **To keep personal/regulated content erasable,
-  do not rely on `content_preview` — send the content at the top level (or pre-commit it) so it lives
-  in the purgeable, encrypted content store.** Full commitment-hiding of `content_preview` is a
-  **deferred** design item; see [INTEGRATION.md](INTEGRATION.md).
+- **Prompt and answer text from the SDKs, proxy and MCP is erasable from now on.** Those clients send
+  `input`/`output`/`rationale` at the top level, and the server also lifts the old
+  `extensions.content_preview` shape to the top level at ingest, so every such text enters the signed body
+  only as a salted commitment and lives in the encrypted, retention-purged content store. **Records sealed
+  before this change are the exception:** their cleartext `content_preview` is signed into the body and
+  cannot be erased selectively. An export of such a history reports them in `cleartext_content_records`
+  so the reader knows how much is permanent; for those the whole-store remedy above is the only one.
+  Run with `AVERIN_RAW_RETENTION_DAYS` set, otherwise nothing is purged.
 
 ## Reporting
 

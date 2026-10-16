@@ -11,6 +11,13 @@ STORE_PACKAGE = "github.com/feirai/averin/server/internal/store"
 PGSCHEMA_PACKAGE = "github.com/feirai/averin/server/internal/pgschema"
 PGLEDGER_PACKAGE = "github.com/feirai/averin/server/internal/pgledger"
 RESOURCESHIM_PACKAGE = "github.com/feirai/averin/server/internal/resourceshim"
+# Plan AVE-08: the two-process multi-writer failure matrix and the negative controls of its trace monitor.
+# The `multiwriter` CI job requires exactly these (--group multiwriter); the store-postgres job requires them
+# too, because it runs the whole api package.
+MULTIWRITER = (
+    f"{API_PACKAGE}:TestMultiWriterFailureMatrix",
+    f"{API_PACKAGE}:TestMultiWriterMonitorNegativeControls",
+)
 REQUIRED = (
     f"{API_PACKAGE}:TestTenantNonceOfflineProjectComposition",
     f"{API_PACKAGE}:TestBrokerSeqVoidPostgres",
@@ -80,7 +87,8 @@ REQUIRED = (
     f"{RESOURCESHIM_PACKAGE}:TestLedgerStoreErrorIsNotAReplay",
     f"{RESOURCESHIM_PACKAGE}:TestLedgerInvalidClaimIsNotAnOutage",
     f"{API_PACKAGE}:TestUseLedgerInvariantIs500",
-)
+) + MULTIWRITER
+GROUPS = {"multiwriter": MULTIWRITER}
 
 
 def check_events(lines, required=REQUIRED):
@@ -131,8 +139,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--require", action="append", metavar="TEST",
                         help="replace the default required list; repeat for each test")
+    parser.add_argument("--group", choices=sorted(GROUPS),
+                        help="require only this named group of tests (the job that runs just that group)")
     args = parser.parse_args()
-    errors = check_events(sys.stdin, args.require or REQUIRED)
+    errors = check_events(sys.stdin, args.require or (GROUPS[args.group] if args.group else REQUIRED))
     if errors:
         for error in errors:
             print(error, file=sys.stderr)

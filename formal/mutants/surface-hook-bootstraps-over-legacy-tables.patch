@@ -1,0 +1,13 @@
+diff --git a/server/internal/pgschema/hook.go b/server/internal/pgschema/hook.go
+index 190650a..605630c 100644
+--- a/server/internal/pgschema/hook.go
++++ b/server/internal/pgschema/hook.go
+@@ -40,7 +40,7 @@ type State struct {
+ 
+ // Fresh reports a truly empty database: no ledger and no tables, the only state ordinary
+ // initialization may bootstrap.
+-func (s State) Fresh() bool { return !s.HasLedger && !s.HasTables }
++func (s State) Fresh() bool { return !s.HasLedger }
+ 
+ // Inspect reads a database's schema state with SELECTs only: no DDL, no advisory lock. A hook uses
+ // it to choose a path; the path itself (Initialize or CutoverReport) re-reads the state under the

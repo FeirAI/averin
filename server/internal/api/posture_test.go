@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/feirai/averin/server/internal/api"
@@ -51,6 +52,9 @@ func TestPosture_KeyedDeploymentReportsItsGuardsAndRefusesAnonymous(t *testing.T
 			t.Errorf("%s = %v, want %v", k, b[k], want)
 		}
 	}
+	if b["dev_mode"] != false {
+		t.Errorf("dev_mode = %v, want false for a process started without AVERIN_DEV_MODE", b["dev_mode"])
+	}
 	build := b["build"].(map[string]any)
 	if build["go_version"] != runtime.Version() || build["core_rustc"] != "rustc 1.99.0 (test)" {
 		t.Errorf("build = %v", build)
@@ -76,10 +80,56 @@ func TestPosture_OpenDeploymentReportsNoKeysAndNoGuards(t *testing.T) {
 	}
 }
 
+// AVE-06: a process started in dev mode says so, and a handler nobody wired a posture into claims no dev
+// mode either (the verifier then fails the missing guards, not a silent absence).
+func TestPosture_ReportsDevMode(t *testing.T) {
+	h := newServer(t).WithPosture(api.Posture{DevMode: true}).WithAuth(auth.NewOpenStore()).Routes()
+	_, b := postureReq(h, "p1", "")
+	if b["dev_mode"] != true {
+		t.Fatalf("dev_mode = %v, want true", b["dev_mode"])
+	}
+	_, b = postureReq(newServer(t).WithAuth(auth.NewOpenStore()).Routes(), "p1", "")
+	if b["dev_mode"] != false {
+		t.Fatalf("an unwired posture reports dev_mode = %v, want false", b["dev_mode"])
+	}
+}
+
 func TestPosture_ReportsTheAuthorityPinSwitches(t *testing.T) {
 	h := newServer(t).WithRequirePinnedAuthority(false).WithRequireBodyBoundAuthority(true).Routes()
 	_, b := postureReq(h, "p1", "")
 	if b["require_pinned_authority"] != false || b["require_body_bound_authority"] != true {
 		t.Fatalf("pin switches = %v / %v", b["require_pinned_authority"], b["require_body_bound_authority"])
+	}
+}
+
+// The region label, the schema version and whether the runtime role was verified at startup are
+// reported as given; a server nobody wired a posture into claims none of them.
+func TestPosture_ReportsRegionSchemaVersionAndRuntimeRole(t *testing.T) {
+	h := newServer(t).WithPosture(api.Posture{Region: "eu-central-1", SchemaVersion: 7, RuntimeRoleVerified: true}).Routes()
+	_, b := postureReq(h, "p1", "")
+	if b["region"] != "eu-central-1" || b["schema_version"] != float64(7) || b["runtime_role_verified"] != true {
+		t.Fatalf("posture = %v", b)
+	}
+	_, z := postureReq(newServer(t).Routes(), "p1", "")
+	if z["region"] != "" || z["schema_version"] != float64(0) || z["runtime_role_verified"] != false {
+		t.Fatalf("a server with no posture claims region/schema/role: %v", z)
+	}
+}
+
+func TestParseRegion(t *testing.T) {
+	for _, c := range []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false}, {"  ", "", false}, {"eu-central-1", "eu-central-1", false}, {" eu-west-1 ", "eu-west-1", false},
+		{"EU-west-1", "", true}, {"1eu", "", true}, {"-eu", "", true}, {"eu west", "", true}, {"eu_west", "", true},
+		{strings.Repeat("a", api.MaxRegionLen), strings.Repeat("a", api.MaxRegionLen), false},
+		{strings.Repeat("a", api.MaxRegionLen+1), "", true},
+	} {
+		got, err := api.ParseRegion(c.in)
+		if (err != nil) != c.wantErr || got != c.want {
+			t.Errorf("ParseRegion(%q) = %q, %v; want %q, err=%v", c.in, got, err, c.want, c.wantErr)
+		}
 	}
 }

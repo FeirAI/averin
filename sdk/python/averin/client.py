@@ -74,16 +74,15 @@ def build_record(
         rec["cost_micros_usd"] = cost_micros_usd
     if tokens_in is not None or tokens_out is not None:
         rec["tokens"] = {"in": tokens_in or 0, "out": tokens_out or 0}
-    # Raw content is sent for the server to commit (self-host) or omitted if the caller pre-commits.
-    content: dict[str, Any] = {}
+    # Raw content goes at the TOP LEVEL: the server replaces each field with a salted hiding commitment, keeps
+    # the text in its encrypted content store (retention-purged, erasable) and signs only the commitment.
+    # (extensions.content_preview, used before AVE-02, is still accepted and lifted by the server.)
     if inp is not None:
-        content["input"] = inp
+        rec["input"] = inp
     if output is not None:
-        content["output"] = output
+        rec["output"] = output
     if rationale is not None:
-        content["rationale"] = rationale
-    if content:
-        rec.setdefault("extensions", {})["content_preview"] = content
+        rec["rationale"] = rationale
     if authority is not None:
         # source is decided by the server (never silently "verified"); we pass the declared basis.
         rec["authority"] = dict(authority)

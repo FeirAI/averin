@@ -214,11 +214,11 @@ survives restarts), and the configured cap (`0` = none). A store read error is `
 
 A read-only report of the guards this process was started with, for the posture verifier in feir-os
 (`deploy/vps/deploy.sh verify-posture`). It is under the same project API-key auth as every other `/v2` route:
-on a keyed deployment it needs the project's bearer. Booleans and build identifiers only, never a key, a seed or
+on a keyed deployment it needs the project's bearer. Booleans, one integer (`schema_version`), a short region label and build identifiers only, never a key, a seed or
 a DSN: `schema`, `plane`, `build` (`go_version`, `vcs_revision`, `vcs_modified`, `core_rustc` when the build
 stamped it with `-ldflags "-X main.coreRustc=..."`), `require_prod_secrets`, `api_keys_configured` (false when the
 app API is unauthenticated), `durable_store` (Postgres wired), `signing_seed_is_dev`, `require_pinned_authority`,
-`require_body_bound_authority`. It says what was configured, not that the database is reachable. On an
+`require_body_bound_authority`, `region` (`AVERIN_REGION`, empty when not declared), `schema_version` (the Postgres schema version this binary understands, 0 with in-memory storage) and `runtime_role_verified` (true when startup verified the Postgres credential is a least-privilege runtime role). It says what was configured, not that the database is reachable. On an
 unauthenticated deployment it answers anyone and reports `api_keys_configured: false`.
 
 ---
@@ -511,7 +511,7 @@ Other allowed keys: `anchored_ts`, `record_kind`, `input_commit`, `output_commit
 
 - `content_hash`: `sha256:<hex>` over `SHA-256( LP(domain) ‖ LP(canon_version) ‖ RCP-serialize(body \ {content_hash, sig}) )`.
 - `sig`: `ed25519:<base64url-no-pad>` over the domain-tagged content hash (tag `averin.record.sig.v1`).
-- `key`: `{signing_key_id, key_epoch, key_valid_from, key_status}`.
+- `key`: `{signing_key_id, key_epoch, key_valid_from, key_status}`. `key_epoch` is `AVERIN_SIGNING_KEY_EPOCH`.
 - `input_commit` / `output_commit` / `rationale_commit`:
   `{alg: "sha256", commitment: "sha256:<hex>", low_entropy: bool}` — a hiding commitment; the raw
   value lives in the content store (encrypted at rest) and is revealed only via a disclosing export.
@@ -553,7 +553,8 @@ the latest frontier equals the actual DAG heads.
 ## Bundle object
 
 `GET /v2/export` returns: `bundle_version`, `project_id`, `keys` (`[{signing_key_id, key_epoch,
-public_key, key_status}]`), `records[]`, `checkpoints[]`, `mode`, `gap_report`, and (when
+public_key, key_status}]`: the current key first, then each retired key with `status_changed_at`),
+`key_rotations` (signed rotation statements, only after a rotation; see [KEY-ROTATION.md](KEY-ROTATION.md)), `records[]`, `checkpoints[]`, `mode`, `gap_report`, and (when
 configured/applicable) `coverage_manifest`, `revocation_list`, `deployment_attestation`,
 `disclosures`, `filtered_records` + `record_kind_filter`.
 
@@ -574,6 +575,8 @@ Key fields:
 | `checkpoints_total`, `checkpoints_verified`, `chain_ok` | int/bool | |
 | `checkpoints_anchored` | int | Checkpoints whose anchor **verified** under a pinned TSA (`tsa_keys` / `tsa_spki_b64`) on a verified checkpoint. `0` whenever no TSA trust is pinned. (Changed: it used to count every checkpoint carrying an `anchor` field, verified or not.) |
 | `checkpoints_anchors_attached` | int | Checkpoints that merely **carry** an `anchor` field. Unverified: anyone can attach one, so never read it as timestamp evidence. |
+| `key_rotations_total`, `key_rotations_verified`, `key_rotations_chain_trusted` | int | Signed recording-key rotation statements in `bundle.key_rotations`, how many verified, and how many keys are trusted only because a verified `scheduled` statement links them to a pinned key that is neither revoked nor compromised. A statement that does not verify is also an `issues` entry. |
+| `cleartext_content_records` | int | Records whose signed body carries `extensions.content_preview`: prompt or answer text in the clear that no retention purge can erase (sealed before the server began committing it). A count for the reader, not an input to any verdict. |
 | `grant_accountability` | string | `not_applicable` / `incomplete` / `complete` (Tier-A). |
 | `broker_trust` | string | `assumed` / `sequence_verified`. |
 | `uses_matched`, `uses_pop_reverified`, `unmatched_violation`, `unmatched_pending`, `grants_unused` | int | Tier-B join. |
