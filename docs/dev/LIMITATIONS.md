@@ -30,8 +30,9 @@ What it does not do:
 
 - **A month cannot evaluate the grant-log transparency chain or the federation heads.** They chain every grant
   since the project began, so a month that starts after a base reports `broker_trust: assumed` and the capstone
-  claims stay unsatisfied for it (`segment.not_evaluated`). Only the first month and a whole-history bundle
-  evaluate them, so a project past the 256 MiB limit has no single check of its whole grant log.
+  claims stay unsatisfied for it (`segment.not_evaluated`). Only the first month, a whole-history bundle and
+  `averin-verify chain` (which rebuilds the whole history) evaluate them, so a project whose whole history is past the
+  256 MiB limit has no single check of its whole grant log.
 - **A month with parents before its base cannot show its record set is complete.** When `earlier_parent_refs` is
   above 0, a record dropped from the month can be replaced by an earlier month's record without changing the
   record count, the heads or any signature. The month then lists `record_completeness` in `segment.not_evaluated`
@@ -47,10 +48,12 @@ What it does not do:
   checkpoint `created_ts` months go backwards, for example after a clock step at a month boundary. The month
   export is covered on real Postgres in CI.
 - **A use or outcome whose grant or intent is in an earlier month** is listed (`unresolved_cross_month`), never
-  matched. The chain checks that the named record exists in an earlier month and, for an outcome, that it is a
-  `use_intent` whose grant and content hash the outcome binds. It does not check scope, expiry or key binding across
-  months, so a month with such a use or outcome reports `authorized` as insufficient, and so does a chain that
-  requests it.
+  matched, so a month with one reports `authorized` as insufficient. `averin-verify chain` checks that the named record
+  exists in an earlier month, refuses a record two months both carry, and then verifies the concatenated history as
+  one bundle, so the match, scope, expiry, key binding and single use are decided there, as in a whole-history export.
+  That needs the whole history in memory and under the 256 MiB verifier cap; over it the chain word is capped at
+  INSUFFICIENT and says the cross-month rules were not run. `revocation_list` and `deployment_attestation` are not in
+  month files, so the concatenation does not have them either.
 - **A month with parents before its base, or an unpinned base, never passes alone.** Its headline is capped at
   INSUFFICIENT (exit 1) in the CLI, the browser verifier and the web app, because record completeness is only
   bounded by the chain.

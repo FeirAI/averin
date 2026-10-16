@@ -29,8 +29,8 @@ use averin_decision_core::record::{validate_record_shape, verify_content_hash, v
 use averin_decision_core::segment::{split_bundle, ChainState};
 use averin_decision_core::sign::decode_pubkey;
 use averin_decision_core::verify::{
-    claim_verdict, month_claim_verdict, report_to_canon, segment_residual, verify_bundle_json,
-    verify_bundle_with_json, ClaimVerdict,
+    claim_verdict, report_to_canon, segment_residual, verify_bundle_json, verify_bundle_with_json,
+    ClaimVerdict, MAX_BUNDLE_BYTES,
 };
 use averin_decision_core::CanonValue;
 use std::process::ExitCode;
@@ -522,8 +522,6 @@ fn chain_cmd(args: &[String]) -> ExitCode {
         None => CanonValue::Object(Vec::new()),
     };
     let mut chain = ChainState::new();
-    let mut all_pinned = true;
-    let mut worst = ClaimVerdict::Pass;
     let mut requested_claim = String::from("integrity");
     for file in files {
         let text = match std::fs::read_to_string(file) {
@@ -561,27 +559,6 @@ fn chain_cmd(args: &[String]) -> ExitCode {
             }
         };
         let ok = matches!(report.get("ok"), Some(CanonValue::Bool(true)));
-        all_pinned &= matches!(
-            report.get("keys_externally_pinned"),
-            Some(CanonValue::Bool(true))
-        );
-        let mv = month_claim_verdict(&report, false);
-        let rank = |v: ClaimVerdict| match v {
-            ClaimVerdict::Pass => 0,
-            ClaimVerdict::Consistent => 1,
-            ClaimVerdict::Insufficient => 2,
-            ClaimVerdict::Fail => 3,
-        };
-        if rank(mv) > rank(worst) {
-            worst = mv;
-        }
-        if let Some(r) = report
-            .get("claims")
-            .and_then(|c| c.get("requested"))
-            .and_then(CanonValue::as_str)
-        {
-            requested_claim = r.to_string();
-        }
         let month = report
             .get("segment")
             .and_then(|s| s.get("month"))
@@ -612,43 +589,83 @@ fn chain_cmd(args: &[String]) -> ExitCode {
     for i in &chain.issues {
         println!("  x {i}");
     }
-    if chain.is_ok() && worst != ClaimVerdict::Fail {
-        // worst-first over every month's claim verdict, so a claim a month refutes or cannot decide is never
-        // upgraded by chaining; pinned keys are required for PASS
-        let word = match worst {
-            ClaimVerdict::Pass if all_pinned => ClaimVerdict::Pass,
-            ClaimVerdict::Pass | ClaimVerdict::Consistent => ClaimVerdict::Consistent,
-            other => other,
-        };
-        println!(
-            "RESULT: {} (chain, requested claim {requested_claim}): {} month(s), {} records, head {} ({} records through it).",
-            word.word(),
-            chain.months,
-            chain.records,
-            chain.head_hash().unwrap_or("-"),
-            chain.head_record_count()
-        );
-        println!(
-            "        Each month verified and links to the previous head; the first month starts at genesis."
-        );
-        println!(
-            "        Not checked across months: grant-log transparency and federation heads (verify a whole-history bundle for those), and use/outcome scope, expiry and key binding for a use or outcome whose grant or intent sits in an earlier month (such a month reports `authorized` as insufficient)."
-        );
-        if word == ClaimVerdict::Insufficient {
-            println!(
-                "        a month does not satisfy the requested claim {requested_claim}; run `averin-verify bundle` on it for the reason."
-            );
-        }
-        if worst == ClaimVerdict::Pass && !all_pinned {
-            println!(
-                "        keys are the bundles' own, NOT externally pinned: pass --opts with signing_keys to check authenticity."
-            );
-        }
-        ExitCode::from(word.exit_code())
-    } else {
+    if !chain.is_ok() {
         println!("RESULT: FAIL (chain): see above.");
-        ExitCode::from(1)
+        return ExitCode::from(1);
     }
+    // The months, put back together, are one whole-history bundle: verify it as one, with the options the months
+    // were verified under and no segment pin. The verdict is that whole history's own, so a cross-month hard
+    // violation (a use with no matching grant, a second use of a single-use grant) reaches it as it would in one export.
+    let whole_opts = {
+        let mut members = base_opts.as_object().cloned().unwrap_or_default();
+        members.retain(|(k, _)| k != "segment_base_checkpoint_hash");
+        CanonValue::object(members)
+            .map(|o| o.serialize())
+            .unwrap_or_default()
+    };
+    let mut over_cap = false;
+    let outcome = chain.finish_with(|whole| {
+        let text = whole.serialize();
+        if text.len() > MAX_BUNDLE_BYTES {
+            over_cap = true;
+            return None;
+        }
+        Some(
+            CanonValue::parse(&verify_bundle_with_json(&text, &whole_opts))
+                .unwrap_or(CanonValue::Null),
+        )
+    });
+    let word = outcome.verdict;
+    if let Some(report) = &outcome.whole {
+        if let Some(r) = report
+            .get("claims")
+            .and_then(|c| c.get("requested"))
+            .and_then(CanonValue::as_str)
+        {
+            requested_claim = r.to_string();
+        }
+        if !matches!(report.get("ok"), Some(CanonValue::Bool(true))) {
+            if let Some(issues) = report.get("issues").and_then(CanonValue::as_array) {
+                println!("  whole history, as the months concatenated:");
+                for i in issues.iter().take(8).filter_map(CanonValue::as_str) {
+                    println!("    x {i}");
+                }
+            }
+        }
+    }
+    if word == ClaimVerdict::Fail {
+        println!("RESULT: FAIL (chain, requested claim {requested_claim}): the concatenated history does not verify; see above.");
+        return ExitCode::from(1);
+    }
+    println!(
+        "RESULT: {} (chain, requested claim {requested_claim}): {} month(s), {} records, head {} ({} records through it).",
+        word.word(),
+        chain.months,
+        chain.records,
+        chain.head_hash().unwrap_or("-"),
+        chain.head_record_count()
+    );
+    println!(
+        "        Each month verified and links to the previous head; the first month starts at genesis; no record is carried by two months."
+    );
+    println!(
+        "        The verdict is the whole history's: the months, concatenated, were verified as one bundle (grant-log transparency and federation heads included when the months carry them). revocation_list and deployment_attestation are not in month files, so they are not part of it."
+    );
+    if over_cap {
+        println!(
+            "        the concatenated history is over the verifier's {MAX_BUNDLE_BYTES}-byte cap, so the cross-month rules (grant-to-use match, single use, grant log) were NOT run: the word is capped at INSUFFICIENT. Each month and every link were checked."
+        );
+    } else if word == ClaimVerdict::Insufficient {
+        println!(
+            "        the history does not satisfy the requested claim {requested_claim}; the concatenated history is the same as a whole-history export would be."
+        );
+    }
+    if word == ClaimVerdict::Consistent {
+        println!(
+            "        keys are the bundles' own, NOT externally pinned: pass --opts with signing_keys to check authenticity."
+        );
+    }
+    ExitCode::from(word.exit_code())
 }
 
 #[cfg(test)]

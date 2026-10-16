@@ -95,10 +95,20 @@ verifies each month pinned to the previous month's head (`genesis` for the first
 month can: months strictly increase, the project is the same, each base count equals the previous head count,
 every parent a month points before its base exists in an earlier month, and every grant or intent that a use or
 outcome names across a month boundary is held by an earlier month (and an outcome binds the earlier `use_intent` it
-names: same grant, `intent_hash` equal to that intent's content hash). It reads one file at a time. The chain word is
-the worst month's claim word for the requested claim in `opts.json` (FAIL, then INSUFFICIENT, then CONSISTENT, then
-PASS), and the RESULT line names the claim. `PASS` needs pinned signing keys; without them the word is
-`CONSISTENT`, as for a single bundle.
+names: same grant, `intent_hash` equal to that intent's content hash). It also refuses a month that carries a record
+(by content hash or by record id) an earlier month already holds: months partition the history, no record is reused.
+
+Then it puts the months back together and verifies the result as one whole-history bundle, with the options in
+`opts.json` and no segment pin. The chain word is that whole history's own claim word for the requested claim (FAIL,
+INSUFFICIENT, CONSISTENT or PASS), and the RESULT line names the claim. So a violation that spans months reaches the
+word exactly as it does in one export: a use whose grant no month holds, a second use of a single-use grant, an
+outcome no intent closes. The rule is a test: verifying the months in sequence gives the same word as verifying the
+concatenated history (core/tests/segments_cross_month.rs), for the default claim and for `authorized`. `PASS` needs
+pinned signing keys; without them the word is `CONSISTENT`, as for a single bundle.
+
+The cost is memory: the chain holds every month's records and checkpoints, and the concatenation must fit the
+verifier's 256 MiB cap. When it does not (the very case months exist for), the cross-month rules are not run, the
+RESULT line says so, and the word is capped at INSUFFICIENT. Each month and every link were still checked.
 
 **One month never passes alone when it has a residual it cannot close.** A month whose base is not the pinned
 previous head (`link: base_unpinned`), or whose `not_evaluated` lists `record_completeness`, gets the headline
@@ -112,13 +122,14 @@ A month reports these as not evaluated rather than as passed (`segment.not_evalu
 - **The grant-log transparency chain** (`broker_trust`, D6) and the **federation heads**. They chain every
   grant since the project began, so a month that starts after a base cannot re-derive them. A month reports
   `broker_trust: assumed`, and the capstone claims stay unsatisfied for it. The first month and a whole-history
-  bundle evaluate them. The chain command does not evaluate them across months either.
+  bundle evaluate them. The chain command rebuilds the whole history from the months, so it evaluates them
+  whenever the months carry the grant-log members and the history fits the verifier's cap.
 - **A use or outcome whose grant or intent was sealed in an earlier month.** It is listed in
   `segment.unresolved_cross_month`, never counted as matched and never as a violation (the counterpart is not in
-  the bundle). The chain command checks that the named record exists in an earlier month. It does not re-run the
-  use-to-grant match across months: no month holds both records of such a pair, so scope, expiry and key binding
-  are not checked for it anywhere. A month with one reports the `authorized` claim as insufficient (a whole-history
-  bundle would count an unconsumed outcome as a violation), and so does a chain that requests it.
+  the bundle). A month with one reports the `authorized` claim as insufficient (a whole-history bundle would count an
+  unconsumed outcome as a violation). The chain command checks that the named record exists in an earlier month, and
+  then the use-to-grant match runs where both records are, in the concatenated history it verifies as one bundle
+  (scope, expiry, key binding and single use included), unless that history is over the verifier's cap.
 
 Everything else a bundle check does applies to a month: record integrity and signatures, key rotation, the DAG,
 the checkpoint chain, anchors and backdating, disclosures, the deployment attestation and revocation list the server

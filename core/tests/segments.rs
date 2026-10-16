@@ -676,10 +676,9 @@ fn hand_segment(
     record_id: &str,
     unresolved: &str,
 ) -> (CanonValue, CanonValue) {
-    let ch = format!(
-        "sha256:{}",
-        format!("{:02x}", record_id.len() + month.len()).repeat(32)
-    );
+    // a distinct content hash per (record, month): a chain refuses a record two months both carry
+    let ch =
+        averin_decision_core::hashx::sha256_prefixed(format!("{record_id}/{month}").as_bytes());
     let (bs, bh, bc) = match base {
         Some(h) => ("1".to_string(), format!("\"{h}\""), "1"),
         None => ("null".to_string(), "null".to_string(), "0"),
@@ -1077,7 +1076,10 @@ fn chain_honours_the_requested_claim_and_names_it() {
     let (word, code, stdout) = cli(&args);
     assert_eq!((word.as_str(), code), ("INSUFFICIENT", 1), "{stdout}");
     assert!(stdout.contains("requested claim authorized"), "{stdout}");
-    assert!(stdout.contains("scope, expiry and key binding"), "{stdout}");
+    assert!(
+        stdout.contains("does not satisfy the requested claim authorized"),
+        "{stdout}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

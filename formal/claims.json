@@ -1511,7 +1511,7 @@
     },
     {
       "id": "month-segment-verification",
-      "claim": "A month segment (bundle.segment, averin.segment.v1) verifies on its own: its base checkpoint is carried and checked like every checkpoint, the chain starts at that base, every checkpoint falls in the stated UTC month and the base before it, the latest frontier equals the segment's heads, its record_count equals the base's count plus the records carried and no carried record is a member of the base frontier, and a base the caller pinned must be the base stated. averin-verify chain additionally requires each month to start from the previous month's head, months and projects to agree, every parent a month points before its base to exist in an earlier month, and every grant or intent a use or outcome names across a month boundary to be held by an earlier month. A month reports the grant-log chain and federation heads as not evaluated and never counts a cross-month use or outcome as matched. Not that a month with parents before its base has a complete record set on its own (such a month reports record_completeness as not evaluated, and only the chain closes it), that earlier months are intact (only the chain over all of them says so), the use-to-grant predicate across months, the grant-log transparency chain over a whole history, or that a recorder showing different histories to different auditors is caught (that needs external anchoring).",
+      "claim": "A month segment (bundle.segment, averin.segment.v1) verifies on its own: its base checkpoint is carried and checked like every checkpoint, the chain starts at that base, every checkpoint falls in the stated UTC month and the base before it, the latest frontier equals the segment's heads, its record_count equals the base's count plus the records carried and no carried record is a member of the base frontier, and a base the caller pinned must be the base stated. averin-verify chain additionally requires each month to start from the previous month's head, months and projects to agree, every parent a month points before its base to exist in an earlier month, and every grant or intent a use or outcome names across a month boundary to be held by an earlier month, and no record (by content hash or record id) to be carried by two months; it then verifies the months, put back together, as one whole-history bundle and its claim word is that whole history's, so a use with no matching grant or a second use of a single-use grant that spans months reaches the word as it does in one export (when that history fits the verifier's byte cap; over it the word is capped at INSUFFICIENT). A month reports the grant-log chain and federation heads as not evaluated and never counts a cross-month use or outcome as matched. Not that a month with parents before its base has a complete record set on its own (such a month reports record_completeness as not evaluated, and only the chain closes it), that earlier months are intact (only the chain over all of them says so), the use-to-grant predicate or the grant-log transparency chain inside one month, a revocation list or deployment attestation for a chain (month files do not carry them), the cross-month rules for a history over the byte cap, or that a recorder showing different histories to different auditors is caught (that needs external anchoring).",
       "class": "tested-implementation",
       "targets": [
         "native Rust",
@@ -1535,6 +1535,10 @@
         {
           "file": "core/src/segment.rs",
           "symbol": "ChainState"
+        },
+        {
+          "file": "core/src/segment.rs",
+          "symbol": "finish_with"
         },
         {
           "file": "core/src/dag.rs",
@@ -1589,6 +1593,14 @@
         {
           "file": "server/internal/api/segments_e2e_test.go",
           "symbol": "TestMonthSegmentsOnPostgres"
+        },
+        {
+          "file": "core/tests/segments_cross_month.rs",
+          "symbol": "a_second_use_of_a_single_use_grant_in_a_later_month_reaches_the_whole_histories_verdict"
+        },
+        {
+          "file": "core/tests/segments_cross_month.rs",
+          "symbol": "a_month_that_carries_a_record_an_earlier_month_already_holds_is_refused"
         },
         {
           "file": "formal/mutants/surface-segment-count-ignores-base.patch",

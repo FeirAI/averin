@@ -18,7 +18,7 @@ use crate::canon::CanonValue;
 use crate::checkpoint::{validate_chain, CheckpointError};
 use crate::dag::Dag;
 use crate::hashx::parse_sha256;
-use crate::verify::{ev_str, SEGMENT_FORMAT};
+use crate::verify::{ev_str, month_claim_verdict, ClaimVerdict, SEGMENT_FORMAT};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn str_of<'a>(v: &'a CanonValue, k: &str) -> Option<&'a str> {
@@ -216,9 +216,15 @@ pub fn split_bundle(bundle: &CanonValue) -> Result<Vec<(String, CanonValue)>, St
 /// It checks what no single month can: that each segment starts from the previous one's head, that months and
 /// projects agree, that every parent a month points before its base exists in an earlier month, and that every
 /// grant or intent a use or outcome names across a month boundary is held by an earlier month, and that an outcome
-/// binds the earlier intent it names (grant and intent_hash). The use-to-grant predicate (scope, expiry, key
-/// binding) is NOT evaluated across months: a month with such a cross-month use or outcome reports `authorized`
-/// as insufficient.
+/// binds the earlier intent it names (grant and intent_hash). It refuses a month that carries a record (by content
+/// hash or record id) an earlier month already holds: months partition the history, no record is reused.
+///
+/// The use-to-grant predicate (scope, expiry, key binding, single use) is not evaluated inside one month for a use or
+/// outcome whose counterpart is earlier, so a month reports `authorized` as insufficient. The chain does not
+/// re-implement that predicate: [`ChainState::finish_with`] rebuilds the whole history from the absorbed months
+/// ([`ChainState::whole_bundle`]) and runs the ordinary whole-history verifier on it, so a cross-month hard violation
+/// (a use with no matching grant, a second use of a single-use grant) reaches the verdict exactly as it does for the
+/// concatenated history. The cost is that the chain holds every month's records and checkpoints in memory.
 #[derive(Default)]
 pub struct ChainState {
     project_id: Option<String>,
@@ -229,9 +235,25 @@ pub struct ChainState {
     seen_ids: BTreeSet<String>,
     /// earlier `use_intent` records: record_id -> (grant_id, content_hash)
     intents: BTreeMap<String, (String, String)>,
+    /// every absorbed record, month by month, for the whole-history check
+    all_records: Vec<CanonValue>,
+    /// every distinct checkpoint (a base is carried again by the next month) in the order first seen
+    all_checkpoints: Vec<CanonValue>,
+    seen_checkpoints: BTreeSet<String>,
+    /// the non-history members (keys and the like) of the latest month, as a whole-history export would carry them
+    members: Vec<(String, CanonValue)>,
+    /// a month failed or refuted its claim: final, no later month repairs it
+    month_fail: bool,
     pub months: usize,
     pub records: usize,
     pub issues: Vec<String>,
+}
+
+/// What the chain concludes: the claim verdict of the concatenated history (FAIL when the chain itself is
+/// broken or a month failed), and that whole-history report.
+pub struct ChainVerdict {
+    pub verdict: ClaimVerdict,
+    pub whole: Option<CanonValue>,
 }
 
 impl ChainState {
@@ -363,6 +385,29 @@ impl ChainState {
                 }
             }
         }
+        // months partition the history: a record an earlier month already holds is never carried again
+        let reused_hash: BTreeSet<&str> = mine
+            .iter()
+            .copied()
+            .filter(|h| self.seen.contains(*h))
+            .collect();
+        let reused_id: BTreeSet<&str> = records
+            .iter()
+            .filter_map(|r| str_of(r, "record_id"))
+            .filter(|id| self.seen_ids.contains(*id))
+            .collect();
+        if !reused_hash.is_empty() || !reused_id.is_empty() {
+            issue(format!(
+                "{} record(s) already absorbed from an earlier month (no record is carried by two months), e.g. {}",
+                reused_hash.len().max(reused_id.len()),
+                reused_hash
+                    .iter()
+                    .chain(reused_id.iter())
+                    .next()
+                    .copied()
+                    .unwrap_or("")
+            ));
+        }
         self.seen.extend(mine.iter().map(|h| h.to_string()));
         for r in records {
             let intent = ev_str(r, "use_evidence", "kind").as_deref() == Some("use_intent")
@@ -385,6 +430,40 @@ impl ChainState {
                 .iter()
                 .filter_map(|r| str_of(r, "record_id").map(String::from)),
         );
+        self.all_records.extend(records.iter().cloned());
+        for c in array_of(bundle, "checkpoints") {
+            let key = str_of(c, "checkpoint_hash").map(String::from);
+            if key
+                .as_ref()
+                .is_none_or(|k| self.seen_checkpoints.insert(k.clone()))
+            {
+                self.all_checkpoints.push(c.clone());
+            }
+        }
+        self.members = bundle
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .filter(|(k, _)| {
+                        !matches!(
+                            k.as_str(),
+                            "records"
+                                | "checkpoints"
+                                | "segment"
+                                | "revocation_list"
+                                | "deployment_attestation"
+                                | "filtered_records"
+                                | "disclosures"
+                        )
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        // a refuted claim or a failed month is final; an insufficient one may be a cross-month gap the whole closes
+        if month_claim_verdict(report, false) == ClaimVerdict::Fail {
+            self.month_fail = true;
+        }
         self.records += records.len();
         self.months += 1;
         self.last_month = Some(month);
@@ -398,6 +477,57 @@ impl ChainState {
     /// True when every absorbed segment verified, linked and resolved, and at least one was absorbed.
     pub fn is_ok(&self) -> bool {
         self.months > 0 && self.issues.is_empty()
+    }
+
+    /// The absorbed months as one whole-history bundle: every record in month order, every distinct checkpoint,
+    /// and the latest month's other members (keys and the like). No `segment` block. `revocation_list` and
+    /// `deployment_attestation` are not in month files, so they are not here either. `None` before any month.
+    pub fn whole_bundle(&self) -> Option<CanonValue> {
+        if self.months == 0 {
+            return None;
+        }
+        let mut members = self.members.clone();
+        members.push((
+            "records".into(),
+            CanonValue::Array(self.all_records.clone()),
+        ));
+        members.push((
+            "checkpoints".into(),
+            CanonValue::Array(self.all_checkpoints.clone()),
+        ));
+        CanonValue::object(members).ok()
+    }
+
+    /// The chain verdict. `verify` runs the whole-history verifier on the rebuilt bundle and returns its report
+    /// (`verify_bundle_with_json`, or `report_to_canon` of `verify_bundle_with`), under the options the months were
+    /// verified with and no segment pin; it returns `None` when the whole history is too large to verify in one piece
+    /// (over the verifier's byte cap), which is the case months exist for. FAIL when the chain is broken, a month
+    /// failed or refuted its claim, or the whole history does not verify; otherwise the whole history's own verdict
+    /// (a month is never more informed than the whole, so a month's INSUFFICIENT on a cross-month gap does not outvote
+    /// it). When the whole cannot be verified, the cross-month rules are not evaluated, so the verdict is capped at
+    /// INSUFFICIENT: it is never better than what was actually checked.
+    pub fn finish_with(
+        &self,
+        verify: impl FnOnce(&CanonValue) -> Option<CanonValue>,
+    ) -> ChainVerdict {
+        let Some(whole) = self.whole_bundle() else {
+            return ChainVerdict {
+                verdict: ClaimVerdict::Fail,
+                whole: None,
+            };
+        };
+        let report = verify(&whole);
+        let mut verdict = match &report {
+            Some(r) => month_claim_verdict(r, false),
+            None => ClaimVerdict::Insufficient,
+        };
+        if !self.is_ok() || self.month_fail {
+            verdict = ClaimVerdict::Fail;
+        }
+        ChainVerdict {
+            verdict,
+            whole: report,
+        }
     }
 }
 
