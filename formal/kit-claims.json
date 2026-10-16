@@ -305,6 +305,62 @@
       "tier": "full",
       "claim": "posture-report-live"
     },
+    "surface-hook-fresh-check-dropped": {
+      "tier": "fast",
+      "claim": "migrate-hook"
+    },
+    "surface-hook-cutover-without-roles": {
+      "tier": "fast",
+      "claim": "migrate-hook"
+    },
+    "surface-hook-noop-reported-as-initialized": {
+      "tier": "fast",
+      "claim": "migrate-hook"
+    },
+    "surface-hook-newer-database-passes": {
+      "tier": "fast",
+      "claim": "migrate-hook"
+    },
+    "surface-hook-bootstraps-over-legacy-tables": {
+      "tier": "fast",
+      "claim": "migrate-hook"
+    },
+    "surface-hook-exit-three-dropped": {
+      "tier": "fast",
+      "claim": "migrate-hook"
+    },
+    "surface-hook-modes-not-exclusive": {
+      "tier": "fast",
+      "claim": "migrate-hook"
+    },
+    "surface-hook-check-runtime-always-ok": {
+      "tier": "fast",
+      "claim": "migrate-hook"
+    },
+    "surface-hook-lock-skipped": {
+      "tier": "full",
+      "claim": "migrate-hook"
+    },
+    "surface-posture-region-dropped": {
+      "tier": "fast",
+      "claim": "posture-report-live"
+    },
+    "surface-posture-runtime-role-hardcoded": {
+      "tier": "fast",
+      "claim": "posture-report-live"
+    },
+    "surface-posture-region-env-ignored": {
+      "tier": "fast",
+      "claim": "posture-report-live"
+    },
+    "surface-posture-schema-version-always-reported": {
+      "tier": "fast",
+      "claim": "posture-report-live"
+    },
+    "surface-region-invalid-accepted": {
+      "tier": "fast",
+      "claim": "posture-report-live"
+    },
     "surface-rotation-scheduled-skips-sig-old": {
       "tier": "fast",
       "claim": "key-rotation-verifier"
@@ -1315,7 +1371,7 @@
     {
       "id": "posture-report-live",
       "$comment": "legacy register: posture-report-live",
-      "statement": "GET /v2/posture sits under the ordinary project API-key auth (401 without the project's bearer on a keyed deployment) and reports from the running process whether the app API is keyed (an explicit open store counts as not keyed), whether the Postgres store is wired, whether the signing seed is the committed dev seed, whether AVERIN_REQUIRE_PROD_SECRETS is on, the two authority-pin switches, and the Go toolchain, git commit and (when the build script stamped it) rustc of the linked decision core. A real averin-server process, built and started in the test, reports the keyed in-memory deployment and reports the dev seed as such. Booleans and build identifiers only.",
+      "statement": "GET /v2/posture sits under the ordinary project API-key auth (401 without the project's bearer on a keyed deployment) and reports from the running process whether the app API is keyed (an explicit open store counts as not keyed), whether the Postgres store is wired, whether the signing seed is the committed dev seed, whether AVERIN_REQUIRE_PROD_SECRETS is on, the two authority-pin switches, and the Go toolchain, git commit and (when the build script stamped it) rustc of the linked decision core. A real averin-server process, built and started in the test, reports the keyed in-memory deployment and reports the dev seed as such. It also reports the region label (AVERIN_REGION, validated; an invalid value stops startup), the Postgres schema version the binary understands (0 with in-memory storage) and whether startup verified the runtime database role. Booleans, a short region label, the schema version (an integer) and build identifiers only.",
       "method": "test",
       "artifacts": [
         "server/internal/api/posture.go",
@@ -1326,13 +1382,13 @@
       "gates": [
         "server"
       ],
-      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run TestPosture_ && go test -count=1 ./cmd/averin-server -run TestPosture_",
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestPosture_|TestParseRegion' && go test -count=1 ./cmd/averin-server -run 'TestPosture_|TestRegion_'",
       "detector_kind": "go",
       "covers": [
         {
           "path": "server/internal/api/posture.go",
           "symbol": "handlePosture",
-          "sha256": "bf5b497e2080f6e904aa65dcb33d23414d39d6c8ea50a350a10c0289ecb717b4"
+          "sha256": "9f14bf2bd17b58996d261328b877fae062d1b85e8ca60b210b0f4fcd629c9974"
         },
         {
           "path": "server/internal/api/posture.go",
@@ -1342,17 +1398,95 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "5209bcf62f377d94aa3d560f775207666044e475e41740e78aab8d13b58a0436"
+          "sha256": "240e5b35c9883cff9f1ac63a301ba3c6df62121a1a36ed74735460246c9681a9"
+        },
+        {
+          "path": "server/internal/api/posture.go",
+          "symbol": "ParseRegion",
+          "sha256": "87a43e2dd6654200e52b6435d62bc308bee5c123b22375d7973583c173a741dd"
+        },
+        {
+          "path": "server/cmd/averin-server/main.go",
+          "symbol": "postureSchemaVersion",
+          "sha256": "294dd229e34e78841da674f51fec004c276e8ecf9f564298fecdd9df9915ff91"
         }
       ],
       "mutants": [
         "posture-keys-always-reported",
         "posture-pin-switch-hardcoded",
         "posture-core-rustc-dropped",
-        "posture-dev-seed-not-reported"
+        "posture-dev-seed-not-reported",
+        "surface-posture-region-dropped",
+        "surface-posture-runtime-role-hardcoded",
+        "surface-posture-region-env-ignored",
+        "surface-posture-schema-version-always-reported",
+        "surface-region-invalid-accepted"
       ],
-      "does_not_establish": "The live-process test cannot start with AVERIN_REQUIRE_PROD_SECRETS=1 (that gate needs a Postgres URL), so the wiring of that flag and of durable_store=true is covered only by the handler test with a hand-built Posture, not by a running binary. The rustc stamp is whatever the build script passed with -ldflags; the Rust staticlib itself carries no version, so an unstamped build reports none and the verifier must treat that as unknown. The report says what was configured, not that the database is reachable or the keys are strong. On an unauthenticated deployment the route answers anyone (and says api_keys_configured is false). The vcs revision is present only for a binary built inside a git checkout.",
-      "evidence_run": "38192274401"
+      "does_not_establish": "The live-process test cannot start with AVERIN_REQUIRE_PROD_SECRETS=1 (that gate needs a Postgres URL), so the wiring of that flag and of durable_store=true is covered only by the handler test with a hand-built Posture, not by a running binary. The rustc stamp is whatever the build script passed with -ldflags; the Rust staticlib itself carries no version, so an unstamped build reports none and the verifier must treat that as unknown. The report says what was configured, not that the database is reachable or the keys are strong. On an unauthenticated deployment the route answers anyone (and says api_keys_configured is false). The vcs revision is present only for a binary built inside a git checkout. The live-process test runs in-memory, so runtime_role_verified=true and a non-zero schema_version are checked only by the handler test with a hand-built Posture; a Postgres-backed process reports them from the same code path but is not started here.",
+      "evidence_run": "38951172449"
+    },
+    {
+      "id": "migrate-hook",
+      "$comment": "legacy register: migrate-hook",
+      "statement": "`averin-migrate --hook` (pgschema.Hook) initializes an empty Postgres database, leaves one at the current schema version unchanged and reports noop on a rerun, and refuses one newer than the binary; it does not bootstrap over an unstamped legacy schema; it advances an older database only when both --old-runtime and --new-runtime are given (through the validated cutover) and otherwise changes nothing, prints cutover_required and exits 3; six concurrent runs on an empty database report exactly one initialized, the others noop, with each version stamped once. `--check-runtime` runs the server's own runtime-role check and exits 1 with a JSON line when it refuses an owning credential. The mode flags are mutually exclusive and usage errors exit 2. Checked against a real Postgres, one private database per test.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/pgschema/hook.go",
+        "server/internal/pgschema/hook_test.go",
+        "server/cmd/averin-migrate/main.go",
+        "server/cmd/averin-migrate/main_test.go"
+      ],
+      "gates": [
+        "store-postgres",
+        "formal-fast"
+      ],
+      "detector": "cd server && go test -count=1 -p 4 ./internal/pgschema ./cmd/averin-migrate -run 'Hook|Inspect|RunUsage|RunCheck'",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/pgschema/hook.go",
+          "symbol": "Hook",
+          "sha256": "01d3ced292d03da42de98594ac29771d6bd0c4d710b077c5566cc679c83bce19"
+        },
+        {
+          "path": "server/internal/pgschema/hook.go",
+          "symbol": "Inspect",
+          "sha256": "c7f24f89a1422413bd4d1507df5e05bdfbabfac18c194b1c7b95f6efa0fae902"
+        },
+        {
+          "path": "server/internal/pgschema/hook.go",
+          "symbol": "State.Fresh",
+          "sha256": "91ecdca559832aacbcfaa7c19fdd75a9e211821c40fd9fc55c7ae799155af57e"
+        },
+        {
+          "path": "server/internal/pgschema/hook.go",
+          "symbol": "CutoverReport",
+          "sha256": "f35de51ad21c306092c7089105bcdb841b61c37ceb9710456e047ff9757216fa"
+        },
+        {
+          "path": "server/internal/pgschema/pgschema.go",
+          "symbol": "migrate",
+          "sha256": "54908eb7bb04ba195cdc96c951e43c2913f0b85bcd114ebc83ab7064290e3b04"
+        },
+        {
+          "path": "server/cmd/averin-migrate/main.go",
+          "symbol": "run",
+          "sha256": "5fedc4327691635743cd240fc3669643ff461b01c466da54c29ae2271a12659c"
+        }
+      ],
+      "mutants": [
+        "surface-hook-fresh-check-dropped",
+        "surface-hook-cutover-without-roles",
+        "surface-hook-noop-reported-as-initialized",
+        "surface-hook-newer-database-passes",
+        "surface-hook-bootstraps-over-legacy-tables",
+        "surface-hook-exit-three-dropped",
+        "surface-hook-modes-not-exclusive",
+        "surface-hook-check-runtime-always-ok",
+        "surface-hook-lock-skipped"
+      ],
+      "does_not_establish": "Runs against Postgres 16 (CI) and the version used locally, one server, not a failover pair or a connection pooler in transaction mode (the advisory transaction lock needs a session-stable connection; the customer install test checks that, not this claim). The concurrency test is six goroutines racing, evidence that the lock serializes them and not a proof; the lock-skipped mutant is in the nightly tier because a race can in principle pass. Says nothing about the content of a migration step or the cutover barrier's own checks (other pgschema tests cover those), about rollback (a newer database is refused, not downgraded), or whether a deployment runs the hook: the Kubernetes Job that does is a feir-os item. The --check-runtime test covers the refusal of an owning credential, not every privilege the check inspects (pgschema.CheckRuntime has its own tests). Without AVERIN_TEST_DATABASE_URL the Postgres-backed tests skip, so a local run without a database proves only the usage cases.",
+      "evidence_run": "38951172449"
     },
     {
       "id": "key-rotation-verifier",

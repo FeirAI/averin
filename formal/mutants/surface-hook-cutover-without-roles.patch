@@ -1,0 +1,13 @@
+diff --git a/server/internal/pgschema/hook.go b/server/internal/pgschema/hook.go
+index 190650a..b9b7e37 100644
+--- a/server/internal/pgschema/hook.go
++++ b/server/internal/pgschema/hook.go
+@@ -117,7 +117,7 @@ func Hook(ctx context.Context, dsn string, oldRoles []string, newRole string) (H
+ 		return res, nil
+ 	}
+ 	// Behind, or unstamped legacy tables.
+-	if len(oldRoles) == 0 || newRole == "" {
++	if false {
+ 		res.Action = HookCutoverRequired
+ 		return res, ErrCutoverRequired
+ 	}
