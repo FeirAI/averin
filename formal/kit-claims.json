@@ -342,23 +342,23 @@
       "claim": "migrate-hook"
     },
     "surface-posture-region-dropped": {
-      "tier": "full",
+      "tier": "fast",
       "claim": "posture-report-live"
     },
     "surface-posture-runtime-role-hardcoded": {
-      "tier": "full",
+      "tier": "fast",
       "claim": "posture-report-live"
     },
     "surface-posture-region-env-ignored": {
-      "tier": "full",
+      "tier": "fast",
       "claim": "posture-report-live"
     },
     "surface-posture-schema-version-always-reported": {
-      "tier": "full",
+      "tier": "fast",
       "claim": "posture-report-live"
     },
     "surface-region-invalid-accepted": {
-      "tier": "full",
+      "tier": "fast",
       "claim": "posture-report-live"
     },
     "surface-rotation-scheduled-skips-sig-old": {
