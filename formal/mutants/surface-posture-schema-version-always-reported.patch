@@ -1,0 +1,14 @@
+diff --git a/server/cmd/averin-server/main.go b/server/cmd/averin-server/main.go
+index 9623b9a..b795636 100644
+--- a/server/cmd/averin-server/main.go
++++ b/server/cmd/averin-server/main.go
+@@ -962,8 +962,6 @@ func decodeAuthorityPubKey(raw string) (ed25519.PublicKey, error) {
+ // postureSchemaVersion is the Postgres schema version this binary understands, or 0 when storage is
+ // in-memory (there is no schema to version).
+ func postureSchemaVersion(onPostgres bool) int {
+-	if !onPostgres {
+-		return 0
+-	}
++	_ = onPostgres
+ 	return pgschema.CurrentSchemaVersion
+ }

@@ -118,6 +118,12 @@ func main() {
 	// fail CheckRuntime forever). No-op when storage is in-memory (no AVERIN_DATABASE_URL).
 	// Use the SAME raw DSN the stores connect with (selectStore/pgledger/pgdurable read os.Getenv
 	// untrimmed) so migrate and connect operate on a byte-identical string.
+	// AVERIN_REGION: the cell's region label, reported by GET /v2/posture (validated; a typo is fatal).
+	region, err := api.ParseRegion(os.Getenv("AVERIN_REGION"))
+	if err != nil {
+		log.Fatalf("AVERIN_REGION: %v", err)
+	}
+	runtimeRoleVerified := false
 	if dsn := os.Getenv("AVERIN_DATABASE_URL"); dsn != "" {
 		mctx, mcancel := context.WithTimeout(context.Background(), 60*time.Second)
 		err := pgschema.MigrateForRuntime(mctx, dsn)
@@ -130,6 +136,7 @@ func main() {
 			log.Fatalf("storage: runtime credential readiness: %v", err)
 		}
 		mcancel()
+		runtimeRoleVerified = true
 		log.Printf("storage: schema migrated (averin DB at version %d)", pgschema.CurrentSchemaVersion)
 	}
 	st := selectStore()
@@ -139,10 +146,13 @@ func main() {
 	// GET /v2/posture: the startup guard state, read-only, for the deploy-time posture verifier.
 	_, onPostgres := st.(*store.Postgres)
 	srv.WithPosture(api.Posture{
-		RequireProdSecrets: requireProdSecrets,
-		DurableStore:       onPostgres,
-		SigningSeedIsDev:   isDevSigningSeed(seed),
-		CoreRustc:          coreRustc,
+		RequireProdSecrets:  requireProdSecrets,
+		DurableStore:        onPostgres,
+		SigningSeedIsDev:    isDevSigningSeed(seed),
+		CoreRustc:           coreRustc,
+		Region:              region,
+		SchemaVersion:       postureSchemaVersion(onPostgres),
+		RuntimeRoleVerified: runtimeRoleVerified && onPostgres,
 	})
 	// GET /readyz probes the Postgres store's pool (short-timeout Ping); GET /metrics gets its live
 	// connection-pool gauges. The in-memory store (no AVERIN_DATABASE_URL) registers neither — nothing
@@ -1040,4 +1050,13 @@ func checkTSAAuthTransport(stampURL, authHeader string) error {
 		return fmt.Errorf("AVERIN_TSA_AUTH_HEADER is set but the TSA URL %q is not https: the credential would be sent in clear text; use the authority's https endpoint", stampURL)
 	}
 	return nil
+}
+
+// postureSchemaVersion is the Postgres schema version this binary understands, or 0 when storage is
+// in-memory (there is no schema to version).
+func postureSchemaVersion(onPostgres bool) int {
+	if !onPostgres {
+		return 0
+	}
+	return pgschema.CurrentSchemaVersion
 }
