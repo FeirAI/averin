@@ -1,13 +1,13 @@
 diff --git a/core/src/bin/averin_verify.rs b/core/src/bin/averin_verify.rs
-index cbedff9..443fb73 100644
+index baee20f..98846bb 100644
 --- a/core/src/bin/averin_verify.rs
 +++ b/core/src/bin/averin_verify.rs
-@@ -572,7 +572,7 @@ fn chain_cmd(args: &[String]) -> ExitCode {
-             ClaimVerdict::Insufficient => 2,
-             ClaimVerdict::Fail => 3,
-         };
--        if rank(mv) > rank(worst) {
-+        if false && rank(mv) > rank(worst) {
-             worst = mv;
-         }
-         if let Some(r) = report
+@@ -598,7 +598,7 @@ fn chain_cmd(args: &[String]) -> ExitCode {
+     // violation (a use with no matching grant, a second use of a single-use grant) reaches it as it would in one export.
+     let whole_opts = {
+         let mut members = base_opts.as_object().cloned().unwrap_or_default();
+-        members.retain(|(k, _)| k != "segment_base_checkpoint_hash");
++        members.retain(|(k, _)| k != "segment_base_checkpoint_hash" && k != "claim_policy");
+         CanonValue::object(members)
+             .map(|o| o.serialize())
+             .unwrap_or_default()
