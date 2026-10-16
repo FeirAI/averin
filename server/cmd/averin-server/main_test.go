@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
@@ -321,13 +322,23 @@ func TestRegion_InvalidValueRefusesStart(t *testing.T) {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "averin-server-region")
+	// This test binary already links the cgo staticlib, so a failing build is a real failure here,
+	// not a reason to skip (a skip would be a green result for a test that never ran).
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Skipf("could not build averin-server (cgo toolchain?): %v\n%s", err, out)
+		t.Fatalf("could not build averin-server: %v\n%s", err, out)
 	}
-	cmd := exec.Command(bin)
+	// A server that wrongly ignores AVERIN_REGION starts and listens; without a deadline this test
+	// would hang until go test's own timeout and leave the server running.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin)
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=127.0.0.1:0",
 		"AVERIN_SIGNING_SEED=" + strings.Repeat("a1", 32), "AVERIN_REGION=EU West"}
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("an invalid AVERIN_REGION did not stop the server within 30s (it started and kept running)\n%s", out)
+	}
 	if err == nil {
 		t.Fatalf("an invalid AVERIN_REGION started the server\n%s", out)
 	}
