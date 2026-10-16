@@ -87,7 +87,7 @@ services:
       # prepared the schema and its privileges). A steady-state boot issues zero DDL; a database at
       # another schema version is a fail-closed refusal to start.
       AVERIN_DATABASE_URL: postgres://averin_app:${AVERIN_DB_RUNTIME_PASSWORD:?set AVERIN_DB_RUNTIME_PASSWORD (runtime identity)}@db:5432/averin?sslmode=disable
-      # REQUIRED — the server refuses every request, and refuses to start, without keys. Legacy form
+      # REQUIRED, the server refuses every request, and refuses to start, without keys. Legacy form
       # `proj:token` makes admin tokens; the JSON form scopes tokens (read, write, admin) with an expiry.
       AVERIN_API_KEYS: ${AVERIN_API_KEYS:?set AVERIN_API_KEYS, e.g. export AVERIN_API_KEYS=default:$(openssl rand -hex 24)}
     # loopback only; expose via your own authenticated reverse proxy.
