@@ -1937,7 +1937,7 @@
         {
           "path": "core/src/segment.rs",
           "symbol": "absorb",
-          "sha256": "3c18292056b35505cf91a1bd17bce6fc64eab46f3fa86541a073185eca46c6db"
+          "sha256": "01c04b5a29990d48862d1f79c0f6138c7bc8300704b9cc4457b347607cce0311"
         },
         {
           "path": "core/src/dag.rs",
@@ -1972,7 +1972,7 @@
         {
           "path": "core/src/segment.rs",
           "symbol": "finish_with",
-          "sha256": "9e196d4c2004a83f57f651e00d6d5612f0ef0c77e341bbb40b4c19a75b29254d"
+          "sha256": "d12a220be08d3719800dce4758ae8133d16063fe33bb5dca3288a5cb0e1d942a"
         },
         {
           "path": "core/src/segment.rs",
@@ -1998,7 +1998,7 @@
         "surface-chain-record-id-reuse-allowed",
         "surface-chain-whole-verdict-ignored",
         "surface-chain-over-cap-not-capped",
-        "surface-chain-month-failure-outvoted",
+        "surface-chain-broken-chain-outvoted",
         "surface-chain-whole-drops-later-months"
       ],
       "does_not_establish": "That a single month's record set is complete when it has parents before its base: a record dropped from it can be replaced by an earlier month's record without changing the count, the heads or a signature, so the month reports record_completeness as not evaluated and only the chain over every month rules the swap out. That earlier months are intact: a single month proves itself and its link, and only the chain over every month (or a pin from a month already verified) says more. The grant-log transparency chain, federation heads and the use-to-grant match inside one month: a month reports the first two as not evaluated and lists the cross-month uses and outcomes unresolved; across months the chain relies on the concatenated history verified as one bundle, which has no revocation list or deployment attestation (month files do not carry them), holds every month in memory, and is not run when it is over the verifier's byte cap (the word is then capped at INSUFFICIENT). That a record named as unresolved was not substituted by an unrelated earlier record with the same id: existence is checked by record id. That the exclusion of a use whose grant is absent from the bundle is limited to grants that are not in the bundle: no test builds a grant that is in the segment but fails to index. That the tests' bundles come from a server: they are built with the core seal functions (the server claim covers that), and the segment rules that read a deployment attestation or revocation list are exercised only by the server tests. That the browser verifier and web app apply the headline cap in a browser: it is tested as pure functions (bun and vitest), the same rule as the Rust headline, and the CLI word and exit code are tested end to end.",

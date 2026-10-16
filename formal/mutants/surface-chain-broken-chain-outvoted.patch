@@ -1,13 +1,13 @@
 diff --git a/core/src/segment.rs b/core/src/segment.rs
-index 370426f..79f6676 100644
+index e837d8f..d391e5c 100644
 --- a/core/src/segment.rs
 +++ b/core/src/segment.rs
-@@ -521,7 +521,7 @@ impl ChainState {
+@@ -515,7 +515,7 @@ impl ChainState {
              Some(r) => month_claim_verdict(r, false),
              None => ClaimVerdict::Insufficient,
          };
--        if !self.is_ok() || self.month_fail {
-+        if false && (!self.is_ok() || self.month_fail) {
+-        if !self.is_ok() {
++        if false && !self.is_ok() {
              verdict = ClaimVerdict::Fail;
          }
          ChainVerdict {
