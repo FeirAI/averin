@@ -85,9 +85,9 @@ answered `/healthz` and `/readyz`, recorded, checkpointed and verified a record 
 ### Authentication boundaries
 
 Configure network exposure and access controls explicitly; this guide does not certify safe
-off-host deployment or observed listener bindings. With `AVERIN_API_KEYS` configured, the server's
-`/v2/` router requires a `project` query parameter and a matching project key. A recognized
-`Authorization: Bearer` header takes precedence over `X-Api-Key`. An unset configuration bypasses
+off-host deployment or observed listener bindings. The server's
+`/v2/` router requires a `project` query parameter and a matching project key, and `averin-server` refuses to start without `AVERIN_API_KEYS` unless `AVERIN_DEV_MODE=1`. Tokens carry a role (read, write, admin) and an optional expiry. A recognized
+`Authorization: Bearer` header takes precedence over `X-Api-Key`. Only the explicit dev mode bypasses
 this gate; a nonempty configuration that parses to zero projects prevents server startup.
 `GET /healthz`, `/readyz` and `/metrics` remain outside the project-token gate. This is not a
 claim of RBAC, SSO or a complete authorization audit of every handler.
@@ -145,11 +145,12 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 | `AVERIN_DATABASE_URL` | server | compose: `averin_app` | Postgres DSN for the database-backed store and ledger, as a least-privilege runtime role distinct from the table owner. The server refuses to start as the table owner, as a superuser or against an empty database: initialize with `averin-migrate --init` under the owner/migration credential and grant the runtime role first (compose does both, see "Database roles"; `docs/dev/CONFIGURATION.md`). Production durability/isolation are not established. Unset = in-memory (dev, NOT durable). |
 | `AVERIN_DB_SUPERUSER_PASSWORD` / `AVERIN_DB_OWNER_PASSWORD` / `AVERIN_DB_RUNTIME_PASSWORD` | db, migrate, grants, server | **required** (compose sets `:?`) | passwords of the Postgres bootstrap superuser, `averin_owner` and `averin_app` (URL-safe) |
 | `AVERIN_MIGRATION_DATABASE_URL` | migrate | compose: `averin_owner` | the migration credential `averin-migrate` uses; never given to the server |
-| `AVERIN_API_KEYS` | server | (none) | `proj-a:tok1,tok2;proj-b:tok3` — per-project API-key auth. **Unset = unauthenticated** (dev/single-tenant only). |
+| `AVERIN_API_KEYS` | server | **required** (compose sets `:?`) | `proj-a:tok1,tok2;proj-b:tok3` (admin tokens, no expiry) or a JSON array of scoped keys `[{"project","token" or "token_sha256","role":"read\|write\|admin","not_after"}]`. **Unset = the server refuses to start** unless `AVERIN_DEV_MODE=1` (local development only, then the API is open). |
+| `AVERIN_DEV_MODE` | server | unset | `1` selects local development: no keys needed (open API), in-memory store and the dev signing seed allowed, the production gate and strict approver binding default off. Never set it in production. |
 | `AVERIN_TSA_PRESET` | server | (none) | `freetsa` = one-setting anchoring at FreeTSA (free, no service level); see `docs/dev/TIMESTAMPS.md`. Anchoring is off unless this or `AVERIN_TSA_URL` is set. |
 | `AVERIN_TSA_URL` | server | (none) | RFC 3161 TSA URL — anchors every checkpoint (threat #3 backdating). The verifier pins the TSA out-of-band (`tsa_keys`/`tsa_spki_b64`). |
 | `AVERIN_CONTENT_DIR` / `AVERIN_WITNESS_DIR` | server | (none) | durable content-store / append-only checkpoint-witness directories. |
-| `STRIPE_API_KEY` | server | (none) | enables usage-based metering reporting; no key = local counting only |
+| `AVERIN_PROJECT_MAX_RECORDS` / `AVERIN_INGEST_BUDGET` | server | off | per-project stored-record cap (writes past it get `507`) and the ingest rate limiter (`429`); see `docs/dev/CONFIGURATION.md` |
 | `AVERIN_UPSTREAM` | proxy | `https://api.openai.com` | upstream LLM |
 | `AVERIN_PROJECT_ID` | proxy | `default` | project the proxy records under |
 | `AVERIN_PROXY_INBOUND_TOKEN` | proxy | **required** (compose sets `:?`) | shared secret inbound callers must present (`X-Averin-Proxy-Token` / `Bearer`). **Unset = OPEN RELAY + evidence-injection surface — bind to loopback or behind your own auth.** |
@@ -197,5 +198,3 @@ building a Merkle revocation root or a cross-broker cert.
 
 - **MCP server** (`averin-mcp`): exposes `record_decision`, `get_session_trace`, `verify_record`,
   `request_export` over stdio. `AVERIN_SERVER_URL=http://localhost:8080 averin-mcp`.
-- **x402** (`internal/x402`): an experimental 402 micropayment guard with spend-limit / replay /
-  idempotency guards. Stripe is the real revenue path.

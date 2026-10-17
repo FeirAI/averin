@@ -723,6 +723,16 @@ pub struct VerifyOptions {
     /// makes the link a checked fact (`segment.link = "base_pinned"`); a bundle that is not a segment, or one
     /// that starts from a different base, then fails.
     pub segment_base_pin: Option<String>,
+    /// AVE-10: when true, a govder record that names its approver(s) but whose signed evidence does not
+    /// commit them (a signer that predates approver binding, or one that leaves the members out) is an
+    /// `issues` failure instead of a note, so the verdict fails. Chosen by the caller, never read from the
+    /// bundle. Default false: historical bundles keep verifying with the note.
+    pub require_approver_binding: bool,
+    /// AVE-10 cutover: when `Some` (a canonical `YYYY-MM-DDTHH:MM:SS.mmmZ` instant) and
+    /// `require_approver_binding` is true, only records whose `received_ts` is at or after it must be
+    /// bound; earlier records stay history with the note. A record with no canonical `received_ts` is
+    /// treated as after the cutover (fail closed).
+    pub approver_binding_since: Option<String>,
 }
 
 /// AVE-01: a month segment's verdict-side facts (see [`evaluate_segment`]).
@@ -2270,7 +2280,29 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
             Ok(m) => m,
             Err(e) => return error_report(&e),
         };
+    // AVE-10: opt-in strict approver binding, with an optional canonical cutover instant. A wrong type is an
+    // error (fail closed: a typo must not silently leave the policy off).
+    let require_approver_binding = match opts_val.get("require_approver_binding") {
+        None | Some(CanonValue::Null) => false,
+        Some(CanonValue::Bool(b)) => *b,
+        Some(_) => return error_report("require_approver_binding must be a boolean"),
+    };
+    let approver_binding_since =
+        match opts_val.get("approver_binding_since") {
+            None | Some(CanonValue::Null) => None,
+            Some(v) => match v.as_str() {
+                Some(t) if is_canonical_ts(t) => Some(t.to_string()),
+                _ => return error_report(
+                    "approver_binding_since must be a canonical timestamp YYYY-MM-DDTHH:MM:SS.mmmZ",
+                ),
+            },
+        };
+    if approver_binding_since.is_some() && !require_approver_binding {
+        return error_report("approver_binding_since needs require_approver_binding: true");
+    }
     let opts = VerifyOptions {
+        require_approver_binding,
+        approver_binding_since,
         claim_policy: match ClaimPolicy::parse(&opts_val) {
             Ok(p) => p,
             Err(e) => return error_report(&e),
@@ -2688,6 +2720,22 @@ pub(crate) fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option
         .map(String::from)
 }
 
+/// AVE-10: whether an unbound approval in `rec` must fail verification under `opts`. With the policy off it
+/// never does. With it on and no cutover it always does. With a cutover it does unless the record's
+/// `received_ts` is a canonical instant strictly before the cutover (an unreadable `received_ts` counts as
+/// after it).
+fn approver_binding_required(opts: &VerifyOptions, rec: &CanonValue) -> bool {
+    if !opts.require_approver_binding {
+        return false;
+    }
+    match (&opts.approver_binding_since, s(rec, "received_ts")) {
+        (Some(since), Some(received)) if is_canonical_ts(&received) => {
+            received.as_str() >= since.as_str()
+        }
+        _ => true,
+    }
+}
+
 /// How a govder record's signed evidence relates to what the verifier re-derives from its own fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GovderEvidence {
@@ -2696,6 +2744,9 @@ enum GovderEvidence {
     /// A record that names an approver (decided_by / sign_offs) whose signed evidence is the
     /// historical field set: valid history, but its approver identity is not bound by the evidence.
     ApproverUnbound,
+    /// A decided (approved or denied) govder approval whose body names no approver at all: no
+    /// non-empty decided_by and no sign-offs, so there is nobody for the evidence to bind.
+    NamesNoApprover,
     /// The signed evidence_hash matches neither spelling (or a required field is missing).
     Mismatch,
 }
@@ -2835,6 +2886,16 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> GovderEvidence {
     };
     let carries_approver = pairs.len() != legacy_pairs.len();
     if hash_of(pairs).as_deref() == Some(signed) {
+        // AVE-10: a decided approval that names nobody is not an approval to bind. Expired and
+        // escalation records are exempt (they carry no decider by design).
+        let decided = gov.get("type").and_then(|v| v.as_str()) == Some("approval")
+            && matches!(
+                body.and_then(|b| s(b, "status")).as_deref(),
+                Some("approved") | Some("denied")
+            );
+        if decided && !carries_approver {
+            return GovderEvidence::NamesNoApprover;
+        }
         return GovderEvidence::Bound;
     }
     // A record sealed before XV-11 carries decided_by / sign_offs in its body but its signed
@@ -6019,9 +6080,30 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         {
             match govder_evidence_rederivable(rec) {
                 GovderEvidence::Bound => {}
-                GovderEvidence::ApproverUnbound => notes.push(format!(
-                    "record {i}: the govder record names its approver(s) but its signed evidence predates approver binding, so decided_by and the sign-off set are not committed by authority.evidence_hash"
-                )),
+                GovderEvidence::ApproverUnbound => {
+                    let msg = format!(
+                        "record {i}: the govder record names its approver(s) but its signed evidence predates approver binding, so decided_by and the sign-off set are not committed by authority.evidence_hash"
+                    );
+                    notes.push(msg.clone());
+                    if approver_binding_required(opts, rec) {
+                        semantic_record_conflict = true;
+                        issues.push(format!(
+                            "record {i}: approver binding is required and this approval does not commit who approved: decided_by and the sign-off set are not covered by the signed evidence"
+                        ));
+                    }
+                }
+                GovderEvidence::NamesNoApprover => {
+                    let msg = format!(
+                        "record {i}: the govder approval names no approver (no decided_by and no sign-offs), so there is no approver for the signed evidence to bind"
+                    );
+                    notes.push(msg.clone());
+                    if approver_binding_required(opts, rec) {
+                        semantic_record_conflict = true;
+                        issues.push(format!(
+                            "record {i}: approver binding is required and this approval names no approver: decided_by and the sign-off set are absent"
+                        ));
+                    }
+                }
                 GovderEvidence::Mismatch => {
                     semantic_record_conflict = true;
                     let msg = format!(

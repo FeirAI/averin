@@ -36,15 +36,29 @@ use averin_decision_core::CanonValue;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    // AVE-10: approver binding is required unless the caller opts out for history sealed before it.
+    let allow_unbound = args
+        .iter()
+        .skip(2)
+        .any(|a| a == "--allow-unbound-approvers");
+    args.retain(|a| a != "--allow-unbound-approvers");
     match args.get(1).map(String::as_str) {
-        Some("bundle") if args.len() >= 3 => verify_bundle_cmd(&args[2], args.get(3)),
+        Some("bundle") if args.len() >= 3 => {
+            verify_bundle_cmd(&args[2], args.get(3), allow_unbound)
+        }
         Some("record") if args.len() >= 3 => verify_record_cmd(&args[2], args.get(3)),
         Some("split") if args.len() == 4 => split_cmd(&args[2], &args[3]),
         Some("chain") if args.len() >= 3 => chain_cmd(&args[2..]),
         _ => {
             eprintln!("usage:");
-            eprintln!("  averin-verify bundle <bundle.json> [opts.json]   (opts.json pins role-disjoint keys)");
+            eprintln!(
+                "  averin-verify bundle <bundle.json> [opts.json] [--allow-unbound-approvers]"
+            );
+            eprintln!("    (opts.json pins role-disjoint keys; an approval whose signed evidence does not commit");
+            eprintln!("    who approved FAILS unless --allow-unbound-approvers is given, for history sealed before");
+            eprintln!("    approver binding. opts.json may instead set require_approver_binding and an optional");
+            eprintln!("    approver_binding_since cutover instant, which then win over the flag.)");
             eprintln!("  averin-verify record <record.json> [ed25519pub:<key>]");
             eprintln!("  averin-verify split <bundle.json> <outdir>   (one month segment per month, AVE-01)");
             eprintln!("  averin-verify chain [--opts opts.json] <month1.json> <month2.json> ...");
@@ -77,7 +91,42 @@ fn main() -> ExitCode {
     }
 }
 
-fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
+/// The options text the CLI verifies with: the caller's opts.json, with `require_approver_binding: true`
+/// added unless the file sets it or `--allow-unbound-approvers` was given. With no opts.json the only
+/// option is that one (everything else is the same as the keyless default).
+fn effective_opts(
+    opts_text: Option<String>,
+    allow_unbound: bool,
+) -> Result<Option<String>, String> {
+    let Some(text) = opts_text else {
+        return Ok(if allow_unbound {
+            None
+        } else {
+            Some(r#"{"require_approver_binding":true}"#.to_string())
+        });
+    };
+    if allow_unbound {
+        return Ok(Some(text));
+    }
+    let parsed =
+        CanonValue::parse(&text).map_err(|e| format!("opts is not valid JSON/RCP: {e}"))?;
+    let Some(pairs) = parsed.as_object() else {
+        return Err("opts must be a JSON object".to_string());
+    };
+    if parsed.get("require_approver_binding").is_some() {
+        return Ok(Some(text));
+    }
+    let mut pairs = pairs.clone();
+    pairs.push((
+        "require_approver_binding".to_string(),
+        CanonValue::Bool(true),
+    ));
+    CanonValue::object(pairs)
+        .map(|v| Some(v.serialize()))
+        .map_err(|e| format!("opts: {e}"))
+}
+
+fn verify_bundle_cmd(path: &str, opts_path: Option<&String>, allow_unbound: bool) -> ExitCode {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
@@ -88,23 +137,31 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
     // With an opts.json, PIN the role-disjoint authority key sets (authentic verification + the Tier-B/mode
     // gates: cosig/revocation/federation/native/attestation/taxonomy). Without it, internal-consistency only
     // (keys from the bundle). The report comes back as canonical JSON either way, so one printer serves both.
-    let report: CanonValue = match opts_path {
-        Some(op) => {
-            let opts_text = match std::fs::read_to_string(op) {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("error: cannot read opts {op}: {e}");
-                    return ExitCode::from(2);
-                }
-            };
-            match CanonValue::parse(&verify_bundle_with_json(&text, &opts_text)) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("FAIL: verifier returned non-JSON: {e}");
-                    return ExitCode::from(1);
-                }
+    let opts_text = match opts_path {
+        Some(op) => match std::fs::read_to_string(op) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("error: cannot read opts {op}: {e}");
+                return ExitCode::from(2);
             }
+        },
+        None => None,
+    };
+    let opts_text = match effective_opts(opts_text, allow_unbound) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
         }
+    };
+    let report: CanonValue = match opts_text {
+        Some(ot) => match CanonValue::parse(&verify_bundle_with_json(&text, &ot)) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("FAIL: verifier returned non-JSON: {e}");
+                return ExitCode::from(1);
+            }
+        },
         None => match verify_bundle_json(&text) {
             Ok(r) => report_to_canon(&r),
             Err(e) => {
@@ -333,6 +390,27 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
             }
         }
     }
+    // AVE-10: say plainly how many approvals do not commit who approved, whatever the verdict, with the
+    // reason, so a PASS or CONSISTENT headline cannot hide them.
+    let unbound = unbound_approver_notes(&report);
+    if !unbound.is_empty() {
+        println!(
+            "  approvals not committing the approver: {} (decided_by and the sign-off set are absent or not covered by the signed evidence)",
+            unbound.len()
+        );
+        for n in unbound.iter().take(3) {
+            println!("    - {n}");
+        }
+        if unbound.len() > 3 {
+            println!(
+                "    - ... {} more (see record_trust notes)",
+                unbound.len() - 3
+            );
+        }
+        if allow_unbound {
+            println!("    accepted as history because --allow-unbound-approvers was given.");
+        }
+    }
     println!();
     // The headline word is `claimVerdict` (core/src/verify/headline.rs, verifier/claim-verdict.js):
     // PASS needs the requested claim satisfied AND externally pinned keys; the same satisfied claim
@@ -378,6 +456,27 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         }
     }
     ExitCode::from(verdict.exit_code())
+}
+
+/// The record_trust notes that say an approval's signed evidence does not commit its approver.
+fn unbound_approver_notes(report: &CanonValue) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(rows) = report.get("record_trust").and_then(CanonValue::as_array) {
+        for row in rows {
+            if let Some(notes) = row.get("notes").and_then(CanonValue::as_array) {
+                for n in notes {
+                    if let Some(t) = n.as_str() {
+                        if t.contains("predates approver binding")
+                            || t.contains("names no approver")
+                        {
+                            out.push(t.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 // V-L3: the legacy `ok` is a separate integrity result and can be false while the caller's

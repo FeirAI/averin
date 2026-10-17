@@ -1,13 +1,12 @@
 diff --git a/server/cmd/averin-server/main.go b/server/cmd/averin-server/main.go
-index 9623b9a..8cb804f 100644
 --- a/server/cmd/averin-server/main.go
 +++ b/server/cmd/averin-server/main.go
-@@ -149,7 +149,7 @@ func main() {
+@@ -163,7 +163,7 @@
  		CoreRustc:           coreRustc,
  		Region:              region,
  		SchemaVersion:       postureSchemaVersion(onPostgres),
 -		RuntimeRoleVerified: runtimeRoleVerified && onPostgres,
 +		RuntimeRoleVerified: true || (runtimeRoleVerified && onPostgres),
+ 		DevMode:             devMode,
  	})
  	// GET /readyz probes the Postgres store's pool (short-timeout Ping); GET /metrics gets its live
- 	// connection-pool gauges. The in-memory store (no AVERIN_DATABASE_URL) registers neither — nothing

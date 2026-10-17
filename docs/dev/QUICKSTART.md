@@ -60,15 +60,17 @@ because no key authenticated it. Only with the signer's key on the command line
 
 ## 2. Run the server
 
-The only required input is a 64-hex (32-byte) Ed25519 signing **seed**. With nothing else set,
-the server runs in dev mode: in-memory store, no auth (it logs loud warnings about both).
+The required input is a 64-hex (32-byte) Ed25519 signing **seed**. By default the server runs
+as a production server and refuses to start without `AVERIN_API_KEYS`, a database and a real seed.
+For local development set `AVERIN_DEV_MODE=1`: in-memory store, no auth (it logs loud warnings about both).
 
 ```bash
-AVERIN_SIGNING_SEED=$(openssl rand -hex 32) AVERIN_ADDR=127.0.0.1:8080 ./averin-server
+AVERIN_DEV_MODE=1 AVERIN_SIGNING_SEED=$(openssl rand -hex 32) AVERIN_ADDR=127.0.0.1:8080 ./averin-server
 # logs: averin-server listening on 127.0.0.1:8080 (pubkey ed25519pub:...)
 ```
 
-Without `AVERIN_API_KEYS` set, the API is unauthenticated, so keep it on loopback.
+In dev mode without `AVERIN_API_KEYS` the API is unauthenticated, so keep it on loopback. Outside dev
+mode there is no unauthenticated API: with no keys the server does not start.
 
 On startup the server displays a public key. Authenticate that key through an independently
 trusted channel before treating it as an auditor's trust root; display alone is not authentication. Health check:
@@ -190,7 +192,8 @@ image-build, clean-machine setup or deployment path. Services must be independen
 built and configured before using examples that depend on them.
 
 ```bash
-AVERIN_SIGNING_SEED=$(openssl rand -hex 32) docker compose -f deploy/docker-compose.yml up --build
+AVERIN_SIGNING_SEED=$(openssl rand -hex 32) AVERIN_API_KEYS=default:$(openssl rand -hex 24) \
+  docker compose -f deploy/docker-compose.yml up --build   # also needs the passwords the compose file asks for
 ```
 
 - web app: <http://localhost:8088>  (offline verifier under `/verifier/`)

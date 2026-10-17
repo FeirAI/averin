@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/keylineage"
 	"github.com/feirai/averin/server/internal/store"
@@ -66,7 +67,7 @@ func newRotationFixture(t *testing.T, reason string) rotationFixture {
 func (f rotationFixture) history(t *testing.T, status, reasonStatusAt string) string {
 	t.Helper()
 	st := store.NewMem()
-	a := api.New(f.oldCore, st, f.oldKey.ID).Routes()
+	a := api.New(f.oldCore, st, f.oldKey.ID).WithAuth(auth.NewOpenStore()).Routes()
 	postRecord(t, a, `{"idempotency_key":"a1","project_id":"p1","session_id":"s1","action":"db.query"}`)
 	if code, resp := do(t, a, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
 		t.Fatalf("old checkpoint (%d): %s", code, resp)
@@ -78,7 +79,7 @@ func (f rotationFixture) history(t *testing.T, status, reasonStatusAt string) st
 	if err != nil {
 		t.Fatalf("lineage: %v", err)
 	}
-	b := api.New(f.newCore, st, f.newKey.ID).WithKeyLineage(lin).Routes()
+	b := api.New(f.newCore, st, f.newKey.ID).WithAuth(auth.NewOpenStore()).WithKeyLineage(lin).Routes()
 	rec, _ := postRecord(t, b, `{"idempotency_key":"b1","project_id":"p1","session_id":"s1","action":"db.query"}`)
 	if kb, _ := rec["key"].(map[string]any); kb["signing_key_id"] != "k1" || kb["key_epoch"] != float64(1) {
 		t.Fatalf("new record not stamped with the new key and epoch: %v", rec["key"])

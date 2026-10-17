@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -47,7 +48,7 @@ func TestGrantPrepareProjectSerialization(t *testing.T) {
 	brokerKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
 	agentKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, ed25519.SeedSize))
 	st := store.NewMem()
-	s := New(testCore(t), st, "k0").WithBroker(brokerKey)
+	s := New(testCore(t), st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerKey)
 	release := holdProject(t, st, "p1")
 	defer func() {
 		if release != nil {
@@ -95,7 +96,7 @@ func TestRevokeProjectSerialization(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := store.NewMem()
-	s := New(testCore(t), st, "k0").WithRevocation(revKey)
+	s := New(testCore(t), st, "k0").WithAuth(auth.NewOpenStore()).WithRevocation(revKey)
 	release := holdProject(t, st, "p1")
 	defer func() {
 		if release != nil {

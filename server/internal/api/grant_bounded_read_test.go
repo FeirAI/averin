@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -47,7 +48,7 @@ func TestGrantReadProbesCancelWhilePoolIsHeld(t *testing.T) {
 	}
 	defer limited.Close()
 	sharedContent := content.NewMemStore()
-	initial := api.New(mustCore(t), limited, "k0").WithContent(sharedContent).WithBroker(brokerIssuingKey()).Routes()
+	initial := api.New(mustCore(t), limited, "k0").WithAuth(auth.NewOpenStore()).WithContent(sharedContent).WithBroker(brokerIssuingKey()).Routes()
 	ak := grantAgentKey()
 	grant := grantBody("idem-bounded", "read:orders", ak, ak)
 	if code, body := do(t, initial, http.MethodPost, "/v2/grants", grant); code != http.StatusCreated {
@@ -55,7 +56,7 @@ func TestGrantReadProbesCancelWhilePoolIsHeld(t *testing.T) {
 	}
 
 	probe := &readEntryStore{Store: limited, entered: make(chan struct{}, 1)}
-	h := api.New(mustCore(t), probe, "k0").WithContent(sharedContent).WithBroker(brokerIssuingKey()).Routes()
+	h := api.New(mustCore(t), probe, "k0").WithAuth(auth.NewOpenStore()).WithContent(sharedContent).WithBroker(brokerIssuingKey()).Routes()
 	holdCtx, holdCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer holdCancel()
 	locked := make(chan struct{})

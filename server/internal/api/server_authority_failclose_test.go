@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -43,7 +44,7 @@ func TestRequirePinnedAuthorityRejectsMisalignedElevation(t *testing.T) {
 	}
 	pinned := ed25519.NewKeyFromSeed(peSeed(0x51)) // key the server pins for human_signed
 	wrong := ed25519.NewKeyFromSeed(peSeed(0x52))  // MISALIGNMENT: records are signed by this other key
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithPolicyEngineKey("human_signed", pinned.Public().(ed25519.PublicKey)).
 		WithRequirePinnedAuthority(true).Routes()
 
@@ -80,7 +81,7 @@ func TestFailedElevationUnderFailOpenOptOutDowngradesToCallerDeclared(t *testing
 	}
 	pinned := ed25519.NewKeyFromSeed(peSeed(0x51))
 	wrong := ed25519.NewKeyFromSeed(peSeed(0x52))
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithPolicyEngineKey("human_signed", pinned.Public().(ed25519.PublicKey)).
 		WithRequirePinnedAuthority(false).Routes() // EXPLICIT fail-open opt-out
 
@@ -108,7 +109,7 @@ func TestDefaultPostureIsFailClosed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("core: %v", err)
 		}
-		srv := api.New(c, store.NewMem(), "k0") // NO WithRequirePinnedAuthority call at all
+		srv := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()) // NO WithRequirePinnedAuthority call at all
 		for _, o := range opts {
 			srv = o(srv)
 		}
@@ -161,7 +162,7 @@ func TestRequirePinnedAuthorityElevatesValidEvidence(t *testing.T) {
 		t.Fatalf("core: %v", err)
 	}
 	pinned := ed25519.NewKeyFromSeed(peSeed(0x51))
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithPolicyEngineKey("human_signed", pinned.Public().(ed25519.PublicKey)).
 		WithRequirePinnedAuthority(true).Routes()
 
@@ -182,7 +183,7 @@ func TestRequirePinnedAuthorityIgnoresCallerDeclared(t *testing.T) {
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
-	h := api.New(c, store.NewMem(), "k0").WithRequirePinnedAuthority(true).Routes()
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithRequirePinnedAuthority(true).Routes()
 	code, r := do(t, h, "POST", "/v2/records", `{"idempotency_key":"k1","project_id":"p1","session_id":"s1","action":"db.read"}`)
 	if code != http.StatusCreated {
 		t.Fatalf("the toggle must not affect ordinary caller_declared traffic, got %d: %s", code, r)

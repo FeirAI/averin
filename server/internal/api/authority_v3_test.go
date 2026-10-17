@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"os"
 	"reflect"
@@ -48,7 +49,7 @@ func TestGovderBudgetSafeModeV3FixtureSealsAtGenericIngest(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := store.NewMem()
-	h := api.New(recorder, st, "k0").WithPolicyEngineKey("policy_engine_signed", ed25519.PublicKey(pub)).Routes()
+	h := api.New(recorder, st, "k0").WithAuth(auth.NewOpenStore()).WithPolicyEngineKey("policy_engine_signed", ed25519.PublicKey(pub)).Routes()
 	raw, err := json.Marshal(fixture.Record)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +105,7 @@ func TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite(t *testing.T) {
 	}
 	pub := ed25519.NewKeyFromSeed(externalSeed).Public().(ed25519.PublicKey)
 	st := store.NewMem()
-	h := api.New(recorder, st, "k0").WithPolicyEngineKey("human_signed", pub).Routes()
+	h := api.New(recorder, st, "k0").WithAuth(auth.NewOpenStore()).WithPolicyEngineKey("human_signed", pub).Routes()
 	raw, err := json.Marshal(fixture.Prepared)
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +177,7 @@ func TestV3NonNFCIdentityRejectedBeforeAuthorityLookup(t *testing.T) {
 	}
 	st := store.NewMem()
 	// No external key is configured: an authority lookup would fail if it ran.
-	h := api.New(recorder, st, "k0").Routes()
+	h := api.New(recorder, st, "k0").WithAuth(auth.NewOpenStore()).Routes()
 	for _, field := range []string{"project_id", "record_id"} {
 		t.Run(field, func(t *testing.T) {
 			original, _ := json.Marshal(fixture.Prepared)
@@ -213,7 +214,7 @@ func TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal(t *testing.T) {
 	}
 	pub := ed25519.NewKeyFromSeed(externalSeed).Public().(ed25519.PublicKey)
 	st := store.NewMem()
-	h := api.New(recorder, st, "k0").WithPolicyEngineKey("human_signed", pub).Routes()
+	h := api.New(recorder, st, "k0").WithAuth(auth.NewOpenStore()).WithPolicyEngineKey("human_signed", pub).Routes()
 	rec := map[string]any{
 		"schema_version": "2", "canon_version": "rcp-1", "domain": "flightrecorder.record.v2",
 		"project_id": "p1", "record_id": "r1", "session_id": "s1", "agent_id": "a1",
@@ -361,7 +362,7 @@ func TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal(t *testing.T) {
 	bad := batchRecord("batch-bad", "idem-bad")
 	bad["action"] = "not approved"
 	batchStore := store.NewMem()
-	batchHandler := api.New(recorder, batchStore, "k0").WithPolicyEngineKey("human_signed", pub).Routes()
+	batchHandler := api.New(recorder, batchStore, "k0").WithAuth(auth.NewOpenStore()).WithPolicyEngineKey("human_signed", pub).Routes()
 	batch, _ := json.Marshal([]any{good, bad})
 	if code, body := do(t, batchHandler, "POST", "/v2/records", string(batch)); code < 400 {
 		t.Fatalf("invalid later v3 proof did not reject batch (%d): %s", code, body)

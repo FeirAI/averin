@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/store"
 )
 
@@ -17,7 +18,7 @@ import (
 func TestOverTheCapIsRefusedWithAPointerToMonths(t *testing.T) {
 	now := time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
-	s := New(testCore(t), store.NewMem().WithClock(clock), "k0").WithClock(clock)
+	s := New(testCore(t), store.NewMem().WithClock(clock), "k0").WithAuth(auth.NewOpenStore()).WithClock(clock)
 	h := s.Routes()
 	get := func(path string) (int, string) {
 		rec := httptest.NewRecorder()
@@ -69,7 +70,7 @@ func TestOverTheCapIsRefusedWithAPointerToMonths(t *testing.T) {
 func TestOverTheCapCountsTheSerializedBundleNotJustTheRecords(t *testing.T) {
 	now := time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
-	s := New(testCore(t), store.NewMem().WithClock(clock), "k0").WithClock(clock)
+	s := New(testCore(t), store.NewMem().WithClock(clock), "k0").WithAuth(auth.NewOpenStore()).WithClock(clock)
 	h := s.Routes()
 	do := func(method, path, body string) (int, string) {
 		rec := httptest.NewRecorder()

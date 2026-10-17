@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/store"
 )
@@ -58,6 +59,7 @@ func buildThreeMonthsOn(t *testing.T, withRevocation bool, st store.Store) segFi
 	rc, _ := core.New(resourceSeed)
 	setSegNow(time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC))
 	srv := api.New(c, st, "k0").
+		WithAuth(auth.NewOpenStore()).
 		WithClock(segNow).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").

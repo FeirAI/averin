@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -40,7 +41,7 @@ func outcomeBody(idem, intentID, status string) string {
 func TestRevokedGrantUseRejected(t *testing.T) {
 	c, _ := core.New(seed)
 	rc, _ := core.New(resourceSeed)
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
 		WithRevocation(revocationKey()).
@@ -83,7 +84,7 @@ func newStaleIdemServer(t *testing.T) (http.Handler, *staleIdemStore) {
 	t.Helper()
 	rc, _ := core.New(resourceSeed)
 	st := &staleIdemStore{Store: store.NewMem(), hide: map[string]bool{}}
-	return api.New(mustCore(t), st, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes(), st
+	return api.New(mustCore(t), st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes(), st
 }
 
 // TestUseCollapseOntoForeignReceiptIs409: when the seal collapses (created=false) onto a row stored under the same

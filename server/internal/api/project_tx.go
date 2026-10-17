@@ -3,38 +3,50 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/feirai/averin/server/internal/store"
 )
 
-// countedStore defers external metering until the evidence transaction commits.
+// countedStore enforces the per-project record quota inside the evidence transaction.
 type countedStore struct {
 	store.Store
-	created int
+	max       int // 0 = no quota
+	mark      *quotaMark
+	created   int
+	base      int // records stored before this transaction's first insert
+	baseKnown bool
 }
 
 func (s *countedStore) PutRecord(projectID, idemKey string, rec store.Record) (store.Record, bool, error) {
 	stored, created, err := s.Store.PutRecord(projectID, idemKey, rec)
-	if err == nil && created {
-		s.created++
+	if err != nil || !created {
+		return stored, created, err
 	}
-	return stored, created, err
+	s.created++
+	if s.max <= 0 {
+		return stored, created, nil
+	}
+	if !s.baseKnown {
+		// The count is read in the same transaction after the insert, so it includes this record.
+		n, cerr := s.Store.RecordCount(projectID)
+		if cerr != nil {
+			return store.Record{}, false, fmt.Errorf("quota: read record count: %w", cerr) // fail closed
+		}
+		s.base = n - 1
+		s.baseKnown = true
+	}
+	if s.base+s.created > s.max {
+		s.mark.hit()
+		return store.Record{}, false, errProjectQuota
+	}
+	return stored, created, nil
 }
 
 func (s *Server) withProjectWrite(ctx context.Context, projectID string, fn func(store.Store) error) error {
-	var count int
-	err := s.st.WithProjectWrite(ctx, projectID, func(bound store.Store) error {
-		c := &countedStore{Store: bound}
-		if err := fn(c); err != nil {
-			return err
-		}
-		count = c.created
-		return nil
+	return s.st.WithProjectWrite(ctx, projectID, func(bound store.Store) error {
+		return fn(&countedStore{Store: bound, max: s.projectQuota, mark: quotaMarkFrom(ctx)})
 	})
-	if err == nil && count != 0 {
-		s.meter.RecordsIngested(projectID, count)
-	}
-	return err
 }
 
 // errRollbackDecided rolls back a project transaction whose HTTP outcome the callback has

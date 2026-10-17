@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"io"
 	"net"
 	"net/http"
@@ -137,7 +138,7 @@ func TestProjectTxChildProcess(t *testing.T) {
 	if stage := os.Getenv("AVERIN_PROJECT_TX_PAUSE_STAGE"); stage != "" {
 		projectStore = &pauseProjectStore{Store: st, stage: stage, idem: os.Getenv("AVERIN_PROJECT_TX_PAUSE_IDEM"), marker: os.Getenv("AVERIN_PROJECT_TX_PAUSE_MARKER")}
 	}
-	srv := api.New(recordingCore, projectStore, "k0").WithContent(fs).WithBroker(brokerIssuingKey()).WithCosigPolicy(1, []ed25519.PublicKey{approver.Public().(ed25519.PublicKey)}).WithResource(resourceCore, "orders-db").WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore())
+	srv := api.New(recordingCore, projectStore, "k0").WithAuth(auth.NewOpenStore()).WithContent(fs).WithBroker(brokerIssuingKey()).WithCosigPolicy(1, []ed25519.PublicKey{approver.Public().(ed25519.PublicKey)}).WithResource(resourceCore, "orders-db").WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore())
 	if os.Getenv("AVERIN_PROJECT_TX_REVOCATION_V2") == "1" {
 		srv = srv.WithRevocationExportV2()
 	}

@@ -1,0 +1,16 @@
+diff --git a/server/internal/auth/auth.go b/server/internal/auth/auth.go
+index 17e7738..4d59c48 100644
+--- a/server/internal/auth/auth.go
++++ b/server/internal/auth/auth.go
+@@ -201,10 +201,7 @@ func (ks *MapStore) RoleFor(project, token string, now time.Time) (Role, bool) {
+ 	var role, matched int
+ 	for _, e := range entries {
+ 		eq := subtle.ConstantTimeCompare(got[:], e.digest[:])
+-		live := 0
+-		if e.live(now) {
+-			live = 1
+-		}
++		live := 1
+ 		hit := eq & live
+ 		role = subtle.ConstantTimeSelect(hit, int(e.role), role)
+ 		matched |= hit

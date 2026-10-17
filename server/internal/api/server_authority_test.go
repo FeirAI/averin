@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -50,7 +51,7 @@ func TestPolicyEngineSignedAuthorityElevates(t *testing.T) {
 	// F3: this test drives the DOWNGRADE path (forged sig / cross-project replay / non-canonical hash must
 	// seal as caller_declared), which is the explicit fail-OPEN opt-out. Under the default fail-closed
 	// posture those same records are REJECTED — covered by TestDefaultPostureIsFailClosed.
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithPolicyEngineKey("policy_engine_signed", pe.Public().(ed25519.PublicKey)).
 		WithRequirePinnedAuthority(false).Routes()
 
@@ -135,7 +136,7 @@ func TestMultipleAuthorityKeysElevatePerSource(t *testing.T) {
 	pe := ed25519.NewKeyFromSeed(peSeed(0x44))    // policy engine (signs policy_engine_signed)
 	human := ed25519.NewKeyFromSeed(peSeed(0x46)) // human-approval service (signs human_signed) — a DIFFERENT key
 	rogue := ed25519.NewKeyFromSeed(peSeed(0x47)) // unpinned key
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithPolicyEngineKey("policy_engine_signed", pe.Public().(ed25519.PublicKey)).
 		WithPolicyEngineKey("human_signed", human.Public().(ed25519.PublicKey)).
 		WithRequirePinnedAuthority(false). // F3: this test asserts the DOWNGRADE path (fail-open opt-out)
@@ -226,13 +227,13 @@ func TestAuthorityKeyRejectsDuplicateSourceAndReusedKey(t *testing.T) {
 	}
 	mustPanic("duplicate source", func() {
 		c, _ := core.New(seed)
-		api.New(c, store.NewMem(), "k0").
+		api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 			WithPolicyEngineKey("policy_engine_signed", pe).
 			WithPolicyEngineKey("policy_engine_signed", human)
 	})
 	mustPanic("one key reused across two sources", func() {
 		c, _ := core.New(seed)
-		api.New(c, store.NewMem(), "k0").
+		api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 			WithPolicyEngineKey("policy_engine_signed", pe).
 			WithPolicyEngineKey("human_signed", pe)
 	})
@@ -251,7 +252,7 @@ func TestDelegateSignedAuthorityElevates(t *testing.T) {
 	delegate := ed25519.NewKeyFromSeed(peSeed(0x48)) // role-separated delegate-agent authority
 	wrong := ed25519.NewKeyFromSeed(peSeed(0x49))    // an unpinned key
 	policy := ed25519.NewKeyFromSeed(peSeed(0x44))   // the policy-engine key (cross-source test)
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithPolicyEngineKey("delegate_signed", delegate.Public().(ed25519.PublicKey)).
 		WithRequirePinnedAuthority(false). // F3: this test asserts the DOWNGRADE path (fail-open opt-out)
 		Routes()
@@ -333,7 +334,7 @@ func TestAuthorityRejectsUnknownPinnedSource(t *testing.T) {
 	mustPanic("unknown source", func() {
 		c, _ := core.New(seed)
 		k := ed25519.NewKeyFromSeed(peSeed(0x50)).Public().(ed25519.PublicKey)
-		api.New(c, store.NewMem(), "k0").WithPolicyEngineKey("unknown_source", k)
+		api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithPolicyEngineKey("unknown_source", k)
 	})
 }
 
@@ -360,7 +361,7 @@ func TestPolicyEngineKeyMustBeDisjointFromResource(t *testing.T) {
 			}()
 			c, _ := core.New(seed)
 			rc, _ := core.New(resourceSeed)
-			s := api.New(c, store.NewMem(), "k0")
+			s := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore())
 			if order == "resource-first" {
 				s.WithResource(rc, "orders-db").WithPolicyEngineKey("policy_engine_signed", rpub)
 			} else {

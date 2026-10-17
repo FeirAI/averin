@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"testing"
 
@@ -14,7 +15,7 @@ import (
 // dry-run the authority decision so the whole batch is rejected (same documented retryable 500) and NOTHING is
 // sealed; a batch of plain items still commits.
 func TestBatchAuthorityRejectionIsAllOrNothing(t *testing.T) {
-	h := api.New(mustCore(t), store.NewMem(), "k0").WithRequirePinnedAuthority(true).Routes()
+	h := api.New(mustCore(t), store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithRequirePinnedAuthority(true).Routes()
 	batch := `[{"idempotency_key":"k1","project_id":"p1","session_id":"s1","action":"ok"},
 	           {"idempotency_key":"k2","project_id":"p1","session_id":"s1","authority":{"source":"policy_engine_signed"}}]`
 	if code, resp := do(t, h, "POST", "/v2/records", batch); code != http.StatusInternalServerError {

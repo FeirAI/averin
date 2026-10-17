@@ -17,8 +17,8 @@ Do not use any key, seed, signature, or identifier from here outside a test.
 The development signing seed in `golden-vectors/sign-vectors.json` is a
 publicly known sequential byte pattern:
 real Ed25519 material, chosen so that anyone can reproduce the vectors, and
-refused by the server when `AVERIN_REQUIRE_PROD_SECRETS` is set to `1` or
-`true`. This note states intended use; it is not a per-fixture provenance
+refused by the server unless `AVERIN_DEV_MODE=1` is set (the production gate,
+`AVERIN_REQUIRE_PROD_SECRETS`, is on by default). This note states intended use; it is not a per-fixture provenance
 audit.
 
 Regenerating a vector is a deliberate act; see the test that owns it.

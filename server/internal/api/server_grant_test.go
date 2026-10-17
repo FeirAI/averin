@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -31,7 +32,7 @@ func newBrokerServer(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
-	return api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).Routes()
+	return api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).Routes()
 }
 
 // grantBody builds a JSON grant request whose agent_sig proves possession of the agent key (PoP),
@@ -514,7 +515,7 @@ func TestGrantAmbiguousCommitDoesNotReleaseSeq(t *testing.T) {
 		t.Fatalf("core: %v", err)
 	}
 	st := &ambiguousCommitStore{Store: store.NewMem(), failNextCreate: true}
-	h := api.New(c, st, "k0").WithBroker(brokerIssuingKey()).Routes()
+	h := api.New(c, st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).Routes()
 	ak := grantAgentKey()
 	// first grant hits the ambiguous commit; the handler re-reads, finds the durable record, keeps seq 1.
 	if code, resp := do(t, h, "POST", "/v2/grants", grantBody("idem-1", "read:orders", ak, ak)); code != http.StatusCreated {

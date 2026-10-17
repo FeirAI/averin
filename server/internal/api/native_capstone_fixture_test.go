@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"os"
 	"strings"
@@ -34,7 +35,7 @@ func TestExportNativeCapstoneV3Fixture(t *testing.T) {
 	tsa := testTSAKey()
 	manifest := `{"side_effect_closure":[{"resource_id":"orders-db","action":"db.query:orders-ro","may_touch":[]}]}`
 	fixedNow := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
-	h := api.New(c, store.NewMem().WithClock(fixedNow), "k0").
+	h := api.New(c, store.NewMem().WithClock(fixedNow), "k0").WithAuth(auth.NewOpenStore()).
 		WithClock(fixedNow).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").

@@ -1,0 +1,17 @@
+diff --git a/server/internal/api/project_tx.go b/server/internal/api/project_tx.go
+index 171e3db..a8f4def 100644
+--- a/server/internal/api/project_tx.go
++++ b/server/internal/api/project_tx.go
+@@ -20,6 +20,12 @@ type countedStore struct {
+ 
+ func (s *countedStore) PutRecord(projectID, idemKey string, rec store.Record) (store.Record, bool, error) {
+ 	stored, created, err := s.Store.PutRecord(projectID, idemKey, rec)
++	if err == nil && !created && s.max > 0 {
++		if n, cerr := s.Store.RecordCount(projectID); cerr == nil && n >= s.max {
++			s.mark.hit()
++			return store.Record{}, false, errProjectQuota
++		}
++	}
+ 	if err != nil || !created {
+ 		return stored, created, err
+ 	}

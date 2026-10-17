@@ -156,6 +156,7 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 			// broker seed file-mounted == inline revocation seed → R2 fatal.
 			name: "broker-via-file",
 			env: []string{
+				"AVERIN_DEV_MODE=1",
 				"AVERIN_SIGNING_SEED=" + seedSigning,
 				"AVERIN_BROKER_ISSUING_SEED_FILE=" + sharedFile,
 				"AVERIN_REVOCATION_SEED=" + seedShared,
@@ -165,6 +166,7 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 			// resource seed file-mounted == inline revocation seed → R2 fatal (broker enabled separately).
 			name: "resource-via-file",
 			env: []string{
+				"AVERIN_DEV_MODE=1",
 				"AVERIN_SIGNING_SEED=" + seedSigning,
 				"AVERIN_BROKER_ISSUING_SEED=" + seedBroker,
 				"AVERIN_RESOURCE_SEED_FILE=" + sharedFile,
@@ -269,7 +271,7 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 		_ = l.Close()
 		cmd := exec.Command(bin)
 		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=" + addr,
-			"AVERIN_SIGNING_SEED=" + seed, "AVERIN_API_KEYS=proj:tok"}
+			"AVERIN_DEV_MODE=1", "AVERIN_SIGNING_SEED=" + seed, "AVERIN_API_KEYS=proj:tok"}
 		cmd.Env = append(cmd.Env, extraEnv...)
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
@@ -299,12 +301,26 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 	if b["region"] != "eu-central-1" || b["schema_version"] != float64(0) || b["runtime_role_verified"] != false {
 		t.Fatalf("region, schema version and runtime-role fields: %v", b)
 	}
+	if b["dev_mode"] != true {
+		t.Fatalf("this process was started with AVERIN_DEV_MODE=1 and must report dev_mode=true: %v", b)
+	}
+	// Dev mode turns approver binding off by default; the live process must report what it runs with.
+	if v, ok := b["require_approver_binding"]; !ok || v != false {
+		t.Fatalf("dev mode defaults approver binding off and must report require_approver_binding=false: %v", b)
+	}
+	if v, ok := b["approver_binding_since"]; !ok || v != nil {
+		t.Fatalf("no cutover set, so approver_binding_since must be present and null: %v", b)
+	}
 	if b["api_keys_configured"] != true || b["signing_seed_is_dev"] != false || b["durable_store"] != false || b["require_prod_secrets"] != false {
 		t.Fatalf("fresh seed, keyed, in-memory: %v", b)
 	}
 	build := b["build"].(map[string]any)
 	if build["core_rustc"] != "rustc-test-stamp" || build["go_version"] == "" {
 		t.Fatalf("build stamps did not reach the report: %v", build)
+	}
+	b = run(t, strings.Repeat("a1", 32), "AVERIN_REQUIRE_APPROVER_BINDING=1", "AVERIN_APPROVER_BINDING_SINCE=2026-10-01T00:00:00.000Z")
+	if b["require_approver_binding"] != true || b["approver_binding_since"] != "2026-10-01T00:00:00.000Z" {
+		t.Fatalf("explicit approver binding and cutover must be reported: %v", b)
 	}
 	b = run(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
 	if b["signing_seed_is_dev"] != true {
@@ -334,7 +350,7 @@ func TestRegion_InvalidValueRefusesStart(t *testing.T) {
 	cmd := exec.CommandContext(ctx, bin)
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=127.0.0.1:0",
-		"AVERIN_SIGNING_SEED=" + strings.Repeat("a1", 32), "AVERIN_REGION=EU West"}
+		"AVERIN_DEV_MODE=1", "AVERIN_SIGNING_SEED=" + strings.Repeat("a1", 32), "AVERIN_REGION=EU West"}
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("an invalid AVERIN_REGION did not stop the server within 30s (it started and kept running)\n%s", out)

@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -64,7 +65,7 @@ func exerciseVoidGrantLandsFirst(t *testing.T, base store.Store, h http.Handler)
 
 func TestBrokerSeqVoidGrantLandsFirstMem(t *testing.T) {
 	base := store.NewMem()
-	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+	h := api.New(mustCore(t), base, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	exerciseVoidGrantLandsFirst(t, base, h)
 	if code, r := do(t, h, "POST", "/v2/revoke?project=p1", `{"project_id":"p1","grant_id":"unrelated"}`); code != http.StatusCreated || !strings.Contains(r, `"revoked_total":1`) {
 		t.Fatalf("lost void revoked landed grant (%d): %s", code, r)
@@ -75,7 +76,7 @@ func TestBrokerSeqVoidGrantLandsFirstMem(t *testing.T) {
 func exerciseVoidMarkerFails(t *testing.T, base store.Store) {
 	t.Helper()
 	fs := &failMarkStore{Store: base, failMark: true}
-	h := api.New(mustCore(t), fs, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+	h := api.New(mustCore(t), fs, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 	reserveGrantSeq(t, base, "idem-mf1")
 	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusServiceUnavailable || !strings.Contains(resp, "injected void-marker") || !strings.Contains(resp, `"fenced":true`) {
@@ -110,7 +111,7 @@ func TestBrokerSeqVoidMarkerFailsMem(t *testing.T) { exerciseVoidMarkerFails(t, 
 
 func TestBrokerSeqVoidInertLegacyMarker(t *testing.T) {
 	base := store.NewMem()
-	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+	h := api.New(mustCore(t), base, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	mkGrant(t, h, grantAgentKey(), "idem-inert")
 	res := reservation(t, base, 1)
 	if err := base.VoidBrokerSeq("p1", res.GrantID, 1); err != nil {
@@ -129,12 +130,12 @@ func TestBrokerSeqVoidBootFloor(t *testing.T) {
 	base := store.NewMem().WithClock(clk.Now)
 	reserveGrantSeq(t, base, "idem-boot")
 	clk.Advance(3 * time.Hour)
-	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
+	h := api.New(mustCore(t), base, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
 	clk.Advance(10 * time.Minute)
 	if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
 		t.Fatalf("durable fence does not reset at boot (%d): %s", code, resp)
 	}
-	restarted := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
+	restarted := api.New(mustCore(t), base, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithClock(clk.Now).WithRecoveryAuth(testRecoveryStore()).Routes()
 	if code, resp := doRecovery(t, restarted, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusOK || !strings.Contains(resp, `"outcome":"voided"`) {
 		t.Fatalf("restart lost terminal result (%d): %s", code, resp)
 	}

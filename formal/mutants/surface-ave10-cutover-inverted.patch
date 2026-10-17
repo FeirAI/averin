@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 54d5250..43f1d97 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -2406,7 +2406,7 @@ fn approver_binding_required(opts: &VerifyOptions, rec: &CanonValue) -> bool {
+     }
+     match (&opts.approver_binding_since, s(rec, "received_ts")) {
+         (Some(since), Some(received)) if is_canonical_ts(&received) => {
+-            received.as_str() >= since.as_str()
++            received.as_str() <= since.as_str()
+         }
+         _ => true,
+     }

@@ -30,7 +30,6 @@ import (
 	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/keylineage"
-	"github.com/feirai/averin/server/internal/meter"
 	"github.com/feirai/averin/server/internal/metrics"
 	"github.com/feirai/averin/server/internal/otel"
 	"github.com/feirai/averin/server/internal/resourceshim"
@@ -70,9 +69,8 @@ type Sealer interface {
 type Server struct {
 	core      Sealer
 	st        store.Store
-	content   content.Store // raw low-entropy values (committed at ingest, revealed on disclosure)
-	meter     meter.Meter
-	auth      auth.KeyStore      // nil = no per-project auth (dev/single-tenant)
+	content   content.Store      // raw low-entropy values (committed at ingest, revealed on disclosure)
+	auth      auth.KeyStore      // nil = every /v2 request refused; auth.NewOpenStore() = explicit dev-open
 	recovery  auth.RecoveryStore // nil = deny all broker_seq:recover actions
 	witness   witness.Witness    // nil = no external witness configured
 	tsa       witness.TSA        // nil = no external timestamp anchoring configured
@@ -106,7 +104,9 @@ type Server struct {
 	// leaked token (or an unauthenticated default deploy) cannot drive unbounded billable, append-only DB growth.
 	// Reuses the denial_budget.go two-level bucket. nil = unlimited (the prior behavior — this is opt-in
 	// defense-in-depth; a reverse-proxy/gateway limit remains the PRIMARY, HARD control, see CONFIGURATION.md).
-	ingestBudget *denialBudget
+	projectQuota   int // max stored records per project; 0 = unlimited (WithProjectQuota)
+	mQuotaRejected *metrics.Counter
+	ingestBudget   *denialBudget
 	// T7 (ADR 0002 / coverage-limits #4): pinned EXTERNAL authority verifying keys, keyed by
 	// (project, source). When a generic record carries a matching source plus an authority evidence_sig
 	// that verifies under the key pinned for THAT (project, source), it is stamped with that elevated
@@ -195,6 +195,11 @@ type Server struct {
 	requirePinnedAuthority bool
 	// Explicit rollout gate: require v3 for newly ingested external elevation.
 	requireBodyBoundAuthority bool
+	// AVE-10: the verifier policy the server's own /v2/verify (and the verdict its export reuses for the completeness wording)
+	// applies to approvals that do not commit who approved. It only fires for a record the verifier reads as Verified or
+	// legacy-unbound, which needs the project's authority keys pinned (selfVerifyOptsFor does that).
+	requireApproverBinding bool
+	approverBindingSince   string
 
 	// posture is the startup guard state GET /v2/posture reports (posture.go).
 	posture Posture
@@ -249,7 +254,6 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		core:          core,
 		st:            st,
 		content:       content.NewMemStore(), // in-memory by default; WithContent for a durable store
-		meter:         meter.NewMem(),
 		signingKeyID:  signingKeyID,
 		keyValidFrom:  "2026-01-01T00:00:00.000Z",
 		now:           time.Now,
@@ -344,24 +348,6 @@ func (s *Server) WithSealShapeViolations(fn func() int64) *Server {
 	s.metrics.CounterFunc("averin_seal_shape_violations_total",
 		"Total records and checkpoints sealed in shadow mode that the verifier rejects on shape, domain or canon_version (always 0 in enforce mode).",
 		fn)
-	return s
-}
-
-// WithMeter swaps in a usage meter (e.g. a Stripe reporter). Returns the server for chaining. When m
-// is a *meter.StripeReporter, its best-effort async-queue drop count is also exposed on GET /metrics
-// (a nonzero, growing rate means billable events — and thus revenue — are being silently lost).
-func (s *Server) WithMeter(m meter.Meter) *Server {
-	s.meter = m
-	if sr, ok := m.(*meter.StripeReporter); ok {
-		s.metrics.CounterFunc("averin_meter_queue_drops_total",
-			"Total usage-metering events dropped from the async reporter queue under back-pressure.",
-			sr.Dropped)
-		// averin#15: a delivery failure (transport error or non-2xx, most often an unmapped
-		// project→stripe_customer_id) is not retried, so a growing count is silent under-billing.
-		s.metrics.CounterFunc("averin_meter_post_failures_total",
-			"Total usage-metering events whose Stripe delivery failed (transport error or non-2xx response); not retried.",
-			sr.PostFailures)
-	}
 	return s
 }
 
@@ -460,6 +446,16 @@ func (s *Server) WithBrokerID(brokerID string) *Server {
 // posture needs.
 func (s *Server) WithDeniedGrantLog() *Server {
 	s.denyLog = true
+	return s
+}
+
+// WithRequireApproverBinding (AVE-10) makes the server's own verify treat a govder approval whose
+// signed evidence does not commit who approved as a verification failure. since, when non-empty, is a canonical
+// YYYY-MM-DDTHH:MM:SS.mmmZ cutover: records received before it stay history (with a note). Off by default in the
+// library; averin-server turns it on unless AVERIN_DEV_MODE=1.
+func (s *Server) WithRequireApproverBinding(on bool, since string) *Server {
+	s.requireApproverBinding = on
+	s.approverBindingSince = since
 	return s
 }
 
@@ -979,8 +975,11 @@ func (s *Server) Routes() http.Handler {
 	// AFTER auth — an unauthenticated request is 401, not 429 — and applies in the dev/no-auth path too). Unset
 	// (the default) leaves the routes unlimited, exactly as before.
 	var handler http.Handler = mux
+	if s.projectQuota > 0 {
+		handler = s.quotaGuard(handler)
+	}
 	if s.ingestBudget != nil {
-		handler = s.rateLimitIngest(mux)
+		handler = s.rateLimitIngest(handler)
 	}
 	guarded := http.NewServeMux()
 	guarded.HandleFunc("GET /healthz", healthz)
@@ -991,10 +990,15 @@ func (s *Server) Routes() http.Handler {
 	// credential access to other writer routes.
 	guarded.Handle("POST /v2/broker-seq/void", auth.RecoveryMiddleware(s.recovery)(handler))
 	guarded.Handle("GET /v2/broker-seq/void", auth.RecoveryMiddleware(s.recovery)(handler))
-	if s.auth == nil || auth.IsOpen(s.auth) {
+	switch {
+	case s.auth == nil:
+		// FAIL CLOSED (AVE-05): no token configured and no explicit dev-open store (WithAuth(auth.NewOpenStore()))
+		// refuses every /v2 request. Only the cluster probes above stay reachable.
+		guarded.Handle("/v2/", auth.DenyAll(handler))
+	case auth.IsOpen(s.auth):
 		guarded.Handle("/v2/", handler)
-	} else {
-		guarded.Handle("/v2/", auth.Middleware(s.auth, "project")(handler))
+	default:
+		guarded.Handle("/v2/", auth.MiddlewareRoles(s.auth, "project", requiredRole)(handler))
 	}
 	return s.rejectIdentityParams(guarded)
 }
@@ -4033,16 +4037,26 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
+// handleUsage reports the project's durable stored record count and the configured record quota
+// (0 = none). The count is read from the store, so it survives restarts, unlike the removed in-memory meter.
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
-	u := s.meter.Usage(projectID)
-	billRecords, billExports := meter.Billable(u)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"usage":            u,
-		"free_tier":        meter.FreeTierRecords,
-		"billable_records": billRecords,
-		"billable_exports": billExports,
+	if projectID == "" {
+		writeErr(w, http.StatusBadRequest, "project query param is required")
+		return
+	}
+	var n int
+	err := s.st.WithProjectRead(r.Context(), projectID, func(st store.Store) error {
+		var e error
+		n, e = st.RecordCount(projectID)
+		return e
 	})
+	if err != nil {
+		// FAIL CLOSED: a store read error is a 500, never a zero that reads as "empty project".
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"records": n, "quota_records": s.projectQuota})
 }
 
 // handleDAG returns a session's sealed records (the causal DAG) for the trace-waterfall view.
@@ -4169,7 +4183,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 // configuration) can never share a result. The result is shared only while the work is in flight; errors and
 // integrity-failure reports are never retained as a reassuring answer for a later request.
 func (s *Server) verifyProject(ctx context.Context, projectID, month string) (string, error) {
-	verifyOpts := s.selfVerifyOpts()
+	verifyOpts := s.selfVerifyOptsFor(projectID)
 	flightProject := projectID
 	if month != "" {
 		// A month and the whole history are different results; they must never share a flight.
@@ -4209,11 +4223,39 @@ func verificationKey(projectID, verifyOpts string) string {
 // public out-of-band roots via WithExternalVerificationRoots: an attestation issuer and an RFC 3161 TSA SPKI.
 // This keeps the default self-view from self-pinning a producer key while allowing the product view to surface a
 // real auditor-pinned D7 verdict when the deployment has actually configured the full trust path.
-func (s *Server) selfVerifyOpts() string {
+func (s *Server) selfVerifyOpts() string { return s.selfVerifyOptsFor("") }
+
+// selfVerifyOptsFor is selfVerifyOpts for one project. It additionally pins that project's generic authority
+// keys (the same keys ingest elevates under, project pin first then the global default per source) as
+// authority_keys. Without them a govder-signed record is Unverifiable in the server's own view, so the
+// approver-binding policy (which only inspects Verified and legacy-unbound records) would never fire there.
+func (s *Server) selfVerifyOptsFor(project string) string {
 	enc := func(pub ed25519.PublicKey) string {
 		return "ed25519pub:" + base64.RawURLEncoding.EncodeToString(pub)
 	}
 	opts := map[string]any{}
+	if s.requireApproverBinding {
+		opts["require_approver_binding"] = true
+		if s.approverBindingSince != "" {
+			opts["approver_binding_since"] = s.approverBindingSince
+		}
+	}
+	var authKeys []string
+	for _, src := range []string{"policy_engine_signed", "human_signed", "delegate_signed"} {
+		if k, ok := s.authorityKeyFor(project, src); ok {
+			e := enc(k)
+			dup := false
+			for _, x := range authKeys {
+				dup = dup || x == e
+			}
+			if !dup {
+				authKeys = append(authKeys, e)
+			}
+		}
+	}
+	if len(authKeys) > 0 {
+		opts["authority_keys"] = authKeys
+	}
 	if s.brokerID != "" {
 		opts["federated_broker_keys"] = map[string]any{s.brokerID: []string{s.core.PubKey()}}
 	} else {
@@ -4295,7 +4337,6 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		writeBundleErr(w, err)
 		return
 	}
-	s.meter.ExportIssued(projectID) // billable per export
 	var obj map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(bundle), &obj)
 	obj["mode"], _ = jsonRaw(mode)
@@ -4323,7 +4364,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// verifier used by /v2/verify and change the line only when the complete capstone is
 	// actually present.  The wording retains the two load-bearing bounds: brokered surface
 	// (not every action an agent might take) and assumed-truthful resource reporting.
-	verificationReport := s.core.VerifyBundleWith(bundle, s.selfVerifyOpts())
+	verificationReport := s.core.VerifyBundleWith(bundle, s.selfVerifyOptsFor(projectID))
 	gaps := []string{completenessGapLine(verificationReport)}
 	if mode == "selective_disclosure" || mode == "full_evidence" {
 		disclosures, err := s.buildDisclosures(r.Context(), projectID, snapshotDisclosures)

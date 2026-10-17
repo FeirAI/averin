@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,7 +27,7 @@ func TestRevokeSetSizeCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(c, store.NewMem(), "k0").WithRevocation(rev)
+	s := New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithRevocation(rev)
 
 	s.revocationCap = 3
 	for _, id := range []string{"g0", "g1", "g2"} {
