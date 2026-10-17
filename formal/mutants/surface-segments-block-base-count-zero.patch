@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/segments.go b/server/internal/api/segments.go
+index c57203d..52cc417 100644
+--- a/server/internal/api/segments.go
++++ b/server/internal/api/segments.go
+@@ -110,7 +110,7 @@ func segmentBlock(p segmentPlan) map[string]any {
+ 	if p.Base != nil {
+ 		b["base_seq"] = p.Base.Seq
+ 		b["base_checkpoint_hash"] = p.Base.CheckpointHash
+-		b["base_record_count"] = p.From
++		b["base_record_count"] = int64(0)
+ 	}
+ 	return b
+ }

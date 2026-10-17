@@ -147,6 +147,7 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 | `AVERIN_MIGRATION_DATABASE_URL` | migrate | compose: `averin_owner` | the migration credential `averin-migrate` uses; never given to the server |
 | `AVERIN_API_KEYS` | server | **required** (compose sets `:?`) | `proj-a:tok1,tok2;proj-b:tok3` (admin tokens, no expiry) or a JSON array of scoped keys `[{"project","token" or "token_sha256","role":"read\|write\|admin","not_after"}]`. **Unset = the server refuses to start** unless `AVERIN_DEV_MODE=1` (local development only, then the API is open). |
 | `AVERIN_DEV_MODE` | server | unset | `1` selects local development: no keys needed (open API), in-memory store and the dev signing seed allowed, the production gate and strict approver binding default off. Never set it in production. |
+| `AVERIN_TSA_PRESET` | server | (none) | `freetsa` = one-setting anchoring at FreeTSA (free, no service level); see `docs/dev/TIMESTAMPS.md`. Anchoring is off unless this or `AVERIN_TSA_URL` is set. |
 | `AVERIN_TSA_URL` | server | (none) | RFC 3161 TSA URL — anchors every checkpoint (threat #3 backdating). The verifier pins the TSA out-of-band (`tsa_keys`/`tsa_spki_b64`). |
 | `AVERIN_CONTENT_DIR` / `AVERIN_WITNESS_DIR` | server | (none) | durable content-store / append-only checkpoint-witness directories. |
 | `AVERIN_PROJECT_MAX_RECORDS` / `AVERIN_INGEST_BUDGET` | server | off | per-project stored-record cap (writes past it get `507`) and the ingest rate limiter (`429`); see `docs/dev/CONFIGURATION.md` |

@@ -1,0 +1,15 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 4dc2587..7013497 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4540,9 +4540,7 @@ func (s *Server) buildBundleView(ctx context.Context, projectID string, includeD
+ 			// The bundle carries the base checkpoint (when there is one) and the month's own checkpoints; the
+ 			// revocation window and the attestation below are derived from the latest of these.
+ 			checks = checks[:0:0]
+-			if p.Base != nil {
+-				checks = append(checks, *p.Base)
+-			}
++			_ = p.Base
+ 			checks = append(checks, p.Own...)
+ 		}
+ 		if s.revocationKey != nil {

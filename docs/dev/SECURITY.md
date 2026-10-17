@@ -189,11 +189,12 @@ parser's functional correctness, and the trusted base (SHA-256, Ed25519, NFC, st
   catch every secret shape**. The primary protection is that self-host data never leaves customer
   infra; do not put secrets in prompts.
 - **RFC 3161 verification is native-only.** The DER/CMS token parser supports the ECDSA
-  P-256/SHA-256 and P-384/SHA-512 TSA profiles and ships under the `rfc3161`
+  P-256/SHA-256, ECDSA P-384/SHA-512, RSA PKCS#1 v1.5 and RSASSA-PSS (SHA-256/384/512, at least 2048-bit keys) TSA profiles and ships under the `rfc3161`
   feature in the native CLI; the in-browser WASM verifier is built `--no-default-features` (RNG-free,
   lean) and reports an `rfc3161` anchor as **Unsupported — never a silent pass**. Production-anchored
-  bundles are verified by the native/CLI verifier. The production Go anchoring round-trip against a
-  real third-party TSA is the remaining open item.
+  bundles are verified by the native/CLI verifier. The verifier and the Go client are tested against responses
+  recorded from FreeTSA, DigiCert and Sectigo; anchoring is off by default and no CI job stamps at a live
+  authority ([TIMESTAMPS.md](TIMESTAMPS.md)).
 - **Native/STS introspection relocates the TCB, it does not remove it.** For credentials whose
   effective scope the verifier can't recompute offline, the binding proves the resource *signed* its
   introspection transcript — the transcript's truthfulness is the same `resource_trust` boundary.

@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 4dc2587..54901a4 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4563,7 +4563,7 @@ func (s *Server) buildBundleView(ctx context.Context, projectID string, includeD
+ 	for _, r := range recs {
+ 		size += len(r.JSON)
+ 	}
+-	if size > maxSingleBundleBytes {
++	if size > maxSingleBundleBytes*1000 {
+ 		if month != "" {
+ 			return "", nil, errMonthTooBig
+ 		}

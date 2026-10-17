@@ -1,0 +1,13 @@
+diff --git a/core/src/segment.rs b/core/src/segment.rs
+index 0cc62af..7cbe156 100644
+--- a/core/src/segment.rs
++++ b/core/src/segment.rs
+@@ -559,7 +559,7 @@ impl ChainState {
+             "checkpoints".into(),
+             CanonValue::Array(self.all_checkpoints.clone()),
+         ));
+-        if self.has_disclosures {
++        if false && self.has_disclosures {
+             members.push((
+                 "disclosures".into(),
+                 CanonValue::Array(self.all_disclosures.clone()),
