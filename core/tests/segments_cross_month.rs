@@ -19,8 +19,8 @@ use averin_decision_core::record::seal;
 use averin_decision_core::segment::{split_bundle, ChainState};
 use averin_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use averin_decision_core::verify::{
-    claim_verdict, cnf_kid as vk_cnf_kid, report_to_canon, verify_bundle_with, ClaimPolicy, ClaimVerdict, RequestedClaim,
-    TrustedKey, VerifyOptions,
+    claim_verdict, cnf_kid as vk_cnf_kid, report_to_canon, verify_bundle_with, ClaimPolicy,
+    ClaimVerdict, RequestedClaim, TrustedKey, VerifyOptions,
 };
 use ed25519_dalek::SigningKey;
 
@@ -669,7 +669,10 @@ fn a_grant_revoked_by_the_latest_list_and_used_only_in_a_later_month_fails_whole
             assert!(!w_ok, "{label}: the whole history must be not ok");
             assert_eq!(w, ClaimVerdict::Fail, "{label} {claim:?}");
             // the month holding the use does not verify itself, so the chain also names it as an issue
-            assert!(!c_ok, "{label}: the month with the revoked use is a chain issue");
+            assert!(
+                !c_ok,
+                "{label}: the month with the revoked use is a chain issue"
+            );
             assert_eq!(c, ClaimVerdict::Fail, "{label} {claim:?}: chain");
             let cw = cw.expect("chain whole report");
             assert_ne!(
@@ -711,7 +714,10 @@ fn the_chain_keeps_only_the_latest_months_revocation_list_and_attestation() {
     let mut chain = ChainState::new();
     for m in &months {
         let pin = chain.next_pin();
-        let r = verify_bundle_with(m, &revocation_opts(RequestedClaim::Integrity, Some(&pin), &rev, &tsa));
+        let r = verify_bundle_with(
+            m,
+            &revocation_opts(RequestedClaim::Integrity, Some(&pin), &rev, &tsa),
+        );
         chain.absorb(m, &report_to_canon(&r));
     }
     let whole = chain.whole_bundle().expect("whole");
@@ -748,7 +754,10 @@ fn a_month_with_a_base_never_passes_on_its_own_while_the_whole_and_the_chain_fai
             let mut chain = ChainState::new();
             let r0 = verify_bundle_with(&months[0], &opts(claim, Some(&chain.next_pin())));
             chain.absorb(&months[0], &report_to_canon(&r0));
-            report_to_canon(&verify_bundle_with(&months[1], &opts(claim, Some(&chain.next_pin()))))
+            report_to_canon(&verify_bundle_with(
+                &months[1],
+                &opts(claim, Some(&chain.next_pin())),
+            ))
         };
         let ne = pin_report
             .get("segment")
@@ -765,8 +774,17 @@ fn a_month_with_a_base_never_passes_on_its_own_while_the_whole_and_the_chain_fai
 #[test]
 fn the_first_month_with_no_base_is_not_capped() {
     let months = months_of(&honest_reusable());
-    let r = report_to_canon(&verify_bundle_with(&months[0], &opts(RequestedClaim::Integrity, Some("genesis"))));
-    let ne = r.get("segment").unwrap().get("not_evaluated").unwrap().as_array().unwrap();
+    let r = report_to_canon(&verify_bundle_with(
+        &months[0],
+        &opts(RequestedClaim::Integrity, Some("genesis")),
+    ));
+    let ne = r
+        .get("segment")
+        .unwrap()
+        .get("not_evaluated")
+        .unwrap()
+        .as_array()
+        .unwrap();
     assert!(ne.is_empty(), "{ne:?}");
     assert_ne!(claim_verdict(&r), ClaimVerdict::Insufficient);
 }
@@ -872,7 +890,10 @@ fn disclosures_in_every_month_reach_the_chains_whole_history() {
         x
     };
     let wr = report_to_canon(&verify_bundle_with(&whole, &o(None)));
-    assert_eq!(wr.get("disclosures_total").and_then(CanonValue::as_int), Some(2));
+    assert_eq!(
+        wr.get("disclosures_total").and_then(CanonValue::as_int),
+        Some(2)
+    );
     let (w, _, c, c_ok, cw, _) = differential_under(&whole, &months, &o);
     assert!(c_ok, "chain issues");
     let cw = cw.expect("chain whole report");
@@ -909,8 +930,12 @@ fn a_history_over_the_cap_is_not_rebuilt_and_never_passes() {
     }
     assert!(chain.is_ok(), "{:?}", chain.issues);
     assert!(chain.over_cap());
-    assert!(chain.whole_bundle().is_none(), "nothing is held over the cap");
-    let v = chain.finish_with(|_| panic!("the verifier must not be asked to take an over-cap history"));
+    assert!(
+        chain.whole_bundle().is_none(),
+        "nothing is held over the cap"
+    );
+    let v =
+        chain.finish_with(|_| panic!("the verifier must not be asked to take an over-cap history"));
     assert_eq!(v.verdict, ClaimVerdict::Insufficient);
     assert!(v.whole.is_none());
     // under a roomy cap the same months rebuild

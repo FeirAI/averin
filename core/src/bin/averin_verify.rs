@@ -832,8 +832,14 @@ mod chain_notes_tests {
     #[test]
     fn over_the_cap_the_output_does_not_claim_the_whole_was_verified() {
         let text = chain_notes(ClaimVerdict::Insufficient, "integrity", false, true).join("\n");
-        assert!(!text.contains("concatenated, were verified as one bundle"), "{text}");
-        assert!(!text.contains("The verdict is the whole history's"), "{text}");
+        assert!(
+            !text.contains("concatenated, were verified as one bundle"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("The verdict is the whole history's"),
+            "{text}"
+        );
         assert!(text.contains("NOT verified as one bundle"), "{text}");
         assert!(text.contains("capped at INSUFFICIENT"), "{text}");
     }
@@ -841,7 +847,10 @@ mod chain_notes_tests {
     #[test]
     fn a_verified_whole_says_so_and_names_no_cap() {
         let text = chain_notes(ClaimVerdict::Pass, "integrity", true, false).join("\n");
-        assert!(text.contains("The verdict is the whole history's"), "{text}");
+        assert!(
+            text.contains("The verdict is the whole history's"),
+            "{text}"
+        );
         assert!(!text.contains("byte cap"), "{text}");
     }
 }

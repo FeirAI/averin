@@ -52,9 +52,8 @@ pub fn segment_residual(report: &CanonValue) -> bool {
         .get("not_evaluated")
         .and_then(CanonValue::as_array)
         .is_some_and(|a| {
-            a.iter().any(|x| {
-                matches!(x.as_str(), Some("record_completeness" | "cross_month_uses"))
-            })
+            a.iter()
+                .any(|x| matches!(x.as_str(), Some("record_completeness" | "cross_month_uses")))
         });
     unpinned || incomplete
 }
