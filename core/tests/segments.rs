@@ -248,14 +248,15 @@ fn a_month_reports_what_it_could_not_evaluate_and_the_head_count() {
         [
             "broker_grant_log",
             "federation_heads",
-            "record_completeness"
+            "record_completeness",
+            "cross_month_uses"
         ]
     );
     assert_eq!(sg.head_record_count, 8);
     let second = verify_bundle_with(&segs[1].1, &pinned()).segment.unwrap();
     assert_eq!(
         second.not_evaluated,
-        ["broker_grant_log", "federation_heads"]
+        ["broker_grant_log", "federation_heads", "cross_month_uses"]
     );
     assert_eq!(r.broker_trust, "assumed");
     // the first month evaluates everything a whole bundle does
@@ -1037,17 +1038,27 @@ fn a_month_whose_completeness_is_not_evaluated_never_gets_a_pass_word_or_exit_ze
         assert_eq!((word.as_str(), code), ("INSUFFICIENT", 1), "{stdout}");
         assert!(stdout.contains("cannot PASS alone"), "{stdout}");
     }
-    // the headline function agrees, and a month with an exact bound still passes
+    // the headline function agrees
     let r = verify_bundle_with(&attacked, &with_pin(&pin));
     assert_eq!(
         claim_verdict(&report_to_canon(&r)),
         averin_decision_core::verify::ClaimVerdict::Insufficient
     );
+    // a month with an exact record bound is still capped, because it has a base (cross_month_uses); only the first
+    // month, which has none, can pass alone
     let exact = two_month_project(false);
     let exact_pin = hash_of_cp(&exact[0].1);
     let r = verify_bundle_with(&exact[1].1, &with_pin(&exact_pin));
+    let sg = r.segment.as_ref().unwrap();
+    assert!(!sg.not_evaluated.iter().any(|x| x == "record_completeness"));
+    assert!(sg.not_evaluated.iter().any(|x| x == "cross_month_uses"));
     assert_eq!(
         claim_verdict(&report_to_canon(&r)),
+        averin_decision_core::verify::ClaimVerdict::Insufficient
+    );
+    let first = verify_bundle_with(&exact[0].1, &with_pin("genesis"));
+    assert_eq!(
+        claim_verdict(&report_to_canon(&first)),
         averin_decision_core::verify::ClaimVerdict::Pass
     );
     let _ = std::fs::remove_dir_all(dir);

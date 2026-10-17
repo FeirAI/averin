@@ -70,6 +70,8 @@ test("only the boolean true counts for ok and keys_externally_pinned", () => {
 test("a month segment with an unpinned base or unevaluated completeness never passes", () => {
   const seg = (link: string, not_evaluated: string[] = []) => ({...report(), segment: {link, not_evaluated}});
   expect(claimVerdict(seg("base_pinned")).word).toBe("PASS");
+  expect(claimVerdict(seg("base_pinned", ["cross_month_uses"])).word).toBe("INSUFFICIENT");
+  expect(claimVerdict(seg("genesis")).word).toBe("PASS");
   expect(claimVerdict(seg("base_unpinned")).word).toBe("INSUFFICIENT");
   expect(claimVerdict(seg("base_pinned", ["record_completeness"])).word).toBe("INSUFFICIENT");
   expect(claimVerdict({...seg("base_unpinned"), ok: false}).word).toBe("FAIL");

@@ -750,7 +750,8 @@ pub struct SegmentReport {
     /// `(kind, record_id, reference)` of each use (naming a grant) or use_outcome (naming an intent) whose
     /// counterpart is not in this segment. Never counted as matched or as a violation here; the chain resolves them.
     pub unresolved_cross_month: Vec<(String, String, String)>,
-    /// Checks a month cannot make on its own, reported as not performed rather than as passed.
+    /// Checks a month cannot make on its own, reported as not performed rather than as passed. A month with a base
+    /// always lists `cross_month_uses` (uniqueness and revocation across months).
     pub not_evaluated: Vec<String>,
 }
 
@@ -788,6 +789,10 @@ fn segment_not_evaluated(has_base: bool, has_earlier_parents: bool) -> Vec<Strin
     if has_earlier_parents {
         v.push("record_completeness".to_string());
     }
+    // A month with a base cannot close the rules that span months: a second use of a single-use grant, a replayed
+    // PoP nonce or ledger commitment, a use of a grant no month holds, a revocation that lands on a grant an earlier
+    // month issued. Only the chain, on the concatenated history, can.
+    v.push("cross_month_uses".to_string());
     v
 }
 
@@ -7436,6 +7441,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             // committed-only grant, but can then only end as pending.
             Some(g) if g.closed || !use_closed => g,
             None if segment.base.is_some() && !segment_record_ids.contains(gid.as_str()) => {
+                // The grant is in an earlier month, so the rest of the use predicate waits for the chain. A grant
+                // the signed revocation_list this month carries names as revoked is blocked here all the same
+                // (M5): a signed revocation is monotone, and it does not depend on where the grant was issued.
+                if revocation.revoked.contains(&gid) {
+                    revoked_uses_blocked += 1;
+                    revoked_membership_found = true;
+                    violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_list ({}) marks REVOKED — blocked (M5)", revocation.status));
+                }
                 segment_unresolved.insert(("use".into(), rt.record_id.clone(), gid.clone()));
                 continue;
             }

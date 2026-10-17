@@ -3,7 +3,8 @@
 A project's whole history used to travel as one export, built in memory, and the verifier refuses any file
 over 256 MiB. A project that keeps recording therefore reached a size where nothing could be checked. A
 **month segment** is the answer: the history is cut into one bundle per month, each chained to the previous
-month's last checkpoint, so no single export, and no single verification, has to hold all of it.
+month's last checkpoint. A month export and a month check are bounded by the month, not by the history. The
+chain's cross-month verdict is different: it needs the concatenation in memory and under the 256 MiB cap (see "Verifying").
 
 A whole-history export still works and is still the only way to evaluate the grant-log transparency chain (see
 "What a month does not check"). It is refused with HTTP 413 once it would exceed the cap, and the response
@@ -50,8 +51,9 @@ month, not by the history. A month whose records alone exceed 256 MiB is refused
 accept it. Checkpoint more often and the cut moves with the checkpoints, but the month label does not split.
 
 Offline, from an old whole-history bundle: `averin-verify split <bundle.json> <outdir>` writes
-`<project>-<YYYY-MM>.json` per month. A `revocation_list` and `deployment_attestation` are not copied (they bind
-the whole bundle's latest checkpoint and cannot be re-issued offline).
+`<project>-<YYYY-MM>.json` per month. A `revocation_list` and `deployment_attestation` bind the whole bundle's latest
+checkpoint and cannot be re-issued offline for an earlier month, so split copies them into the last month only (its
+head is the whole history's head). The server re-issues both for every month it serves.
 
 ## Verifying
 
@@ -106,14 +108,24 @@ outcome no intent closes. The rule is a test: verifying the months in sequence g
 concatenated history (core/tests/segments_cross_month.rs), for the default claim and for `authorized`. `PASS` needs
 pinned signing keys; without them the word is `CONSISTENT`, as for a single bundle.
 
-The cost is memory: the chain holds every month's records and checkpoints, and the concatenation must fit the
-verifier's 256 MiB cap. When it does not (the very case months exist for), the cross-month rules are not run, the
-RESULT line says so, and the word is capped at INSUFFICIENT. Each month and every link were still checked.
+The rebuilt history is what a whole-history export would carry: every record and checkpoint, every month's
+disclosures, and the latest month's `revocation_list` and `deployment_attestation` (they bind its head, which is the
+concatenation's head). A revocation that lands on a grant an earlier month issued therefore reaches the word too.
 
-**One month never passes alone when it has a residual it cannot close.** A month whose base is not the pinned
-previous head (`link: base_unpinned`), or whose `not_evaluated` lists `record_completeness`, gets the headline
-INSUFFICIENT and exit code 1 from `averin-verify bundle`, the browser verifier and the web app, whatever the claim
-says. Only the chain closes those.
+The cost is memory: the chain holds every month's records and checkpoints, and the concatenation must fit the
+verifier's 256 MiB cap. The chain adds up the serialized size as it takes each month; once the total passes the cap it
+stops holding records and does not rebuild the history. When it does not fit (the very case months exist for), the
+cross-month rules are not run, the RESULT line says so, and the word is capped at INSUFFICIENT. A history over the cap
+can therefore never PASS here, and a cross-month double use in it is not reported as FAIL. Each month and every link
+were still checked.
+
+**A month with a base never passes alone.** A month with a base lists `cross_month_uses` in `segment.not_evaluated`,
+because one month cannot rule out a second use of a single-use grant, a replayed PoP nonce or ledger commitment, a
+use of a grant no month holds, or a revocation that lands on an earlier month's grant. So every month with a base,
+and any month whose base is not the pinned previous head (`link: base_unpinned`) or whose `not_evaluated` lists
+`record_completeness`, gets the headline INSUFFICIENT and exit code 1 from `averin-verify bundle`, the browser
+verifier and the web app, whatever the claim says. Only the first month (no base) can pass alone. The CLI prints the
+number of unresolved cross-month references in its `segment:` block. Only the chain closes the rest.
 
 ## What a month does not check
 
@@ -131,9 +143,14 @@ A month reports these as not evaluated rather than as passed (`segment.not_evalu
   then the use-to-grant match runs where both records are, in the concatenated history it verifies as one bundle
   (scope, expiry, key binding and single use included), unless that history is over the verifier's cap.
 
+- **Uniqueness and revocation across months** (`cross_month_uses`): a second use of a single-use grant, a replayed PoP
+  nonce or ledger commitment, a use of a grant no month holds, and the use of a grant an earlier month issued that a
+  later list revokes. One month blocks a use of an earlier month's grant that its own signed `revocation_list` names as
+  revoked, but cannot see the rest. The chain closes them on the concatenated history.
+
 Everything else a bundle check does applies to a month: record integrity and signatures, key rotation, the DAG,
 the checkpoint chain, anchors and backdating, disclosures, the deployment attestation and revocation list the server
-re-issues for the month, and the claims contract.
+re-issues for the month, and the claims contract. A month with a base is still capped below PASS by the items above.
 
 ## What the link proves, and what it does not
 

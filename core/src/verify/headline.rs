@@ -40,8 +40,9 @@ impl ClaimVerdict {
 }
 
 /// True when a month-segment report carries a residual that one month cannot close: its base is not the pinned
-/// previous head, or its record completeness was not evaluated (it has parents before its base). Such a report
-/// never earns PASS or CONSISTENT on its own; `averin-verify chain` closes both across months.
+/// previous head, its record completeness was not evaluated (it has parents before its base), or it has a base at
+/// all and so lists `cross_month_uses` (single use, nonce and ledger replay, ghost grants and revocation across
+/// months). Such a report never earns PASS or CONSISTENT on its own; `averin-verify chain` closes them across months.
 pub fn segment_residual(report: &CanonValue) -> bool {
     let Some(sg) = report.get("segment") else {
         return false;
@@ -50,7 +51,11 @@ pub fn segment_residual(report: &CanonValue) -> bool {
     let incomplete = sg
         .get("not_evaluated")
         .and_then(CanonValue::as_array)
-        .is_some_and(|a| a.iter().any(|x| x.as_str() == Some("record_completeness")));
+        .is_some_and(|a| {
+            a.iter().any(|x| {
+                matches!(x.as_str(), Some("record_completeness" | "cross_month_uses"))
+            })
+        });
     unpinned || incomplete
 }
 

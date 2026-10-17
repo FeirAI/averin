@@ -4,6 +4,10 @@
 //! same verdict as verifying the concatenated history, on honest and on hostile histories, for the default claim and
 //! for `authorized`.
 //!
+//! Round-1 review fixes covered here: a revocation that lands on a grant an earlier month issued, the three single-month
+//! cases a month with a base used to PASS (second use of a single-use grant, a use of a grant no month holds, a replayed
+//! nonce), disclosures carried through the chain, and the size cap.
+//!
 //! The histories are real: a signed broker grant, resource-signed uses, signed checkpoints, split by month with
 //! `split_bundle` (a month is the checkpoint's `created_ts`).
 
@@ -15,7 +19,7 @@ use averin_decision_core::record::seal;
 use averin_decision_core::segment::{split_bundle, ChainState};
 use averin_decision_core::sign::{encode_pubkey, signing_key_from_seed};
 use averin_decision_core::verify::{
-    claim_verdict, report_to_canon, verify_bundle_with, ClaimPolicy, ClaimVerdict, RequestedClaim,
+    claim_verdict, cnf_kid as vk_cnf_kid, report_to_canon, verify_bundle_with, ClaimPolicy, ClaimVerdict, RequestedClaim,
     TrustedKey, VerifyOptions,
 };
 use ed25519_dalek::SigningKey;
@@ -534,4 +538,401 @@ fn a_chain_whose_months_were_not_pinned_to_each_others_heads_fails_though_the_wh
         )))
     });
     assert_eq!(v.verdict, ClaimVerdict::Fail);
+}
+
+// ======== round-1 review fixes ========
+
+fn revocation_opts(
+    requested: RequestedClaim,
+    pin: Option<&str>,
+    rev: &SigningKey,
+    tsa: &SigningKey,
+) -> VerifyOptions {
+    let mut o = opts(requested, pin);
+    o.revocation_keys = vec![rev.verifying_key()];
+    o.trusted_tsa_keys = vec![tsa.verifying_key()];
+    o
+}
+
+/// A signed revocation list naming `revoked` grant ids, valid across the test months.
+fn revocation_list(rev: &SigningKey, revoked: &[&str]) -> CanonValue {
+    let body = CanonValue::object(vec![
+        (
+            "issuer_kid".into(),
+            CanonValue::string(vk_cnf_kid(&rev.verifying_key())),
+        ),
+        (
+            "issued_at".into(),
+            CanonValue::string("2026-06-01T00:00:00.000Z"),
+        ),
+        (
+            "not_after".into(),
+            CanonValue::string("2026-09-01T00:00:00.000Z"),
+        ),
+        (
+            "revoked_grant_ids".into(),
+            CanonValue::Array(revoked.iter().map(|g| CanonValue::string(*g)).collect()),
+        ),
+    ])
+    .unwrap();
+    let digest = sha256_prefixed(body.serialize().as_bytes());
+    let sig = averin_decision_core::sign::sign("averin.revocation.v1", &digest, rev);
+    set(&body, "sig", CanonValue::string(sig))
+}
+
+/// Every checkpoint carries a trusted timestamp, one second after it was created.
+fn anchor_all(b: &CanonValue, tsa: &SigningKey) -> CanonValue {
+    let cps: Vec<CanonValue> = arr(b, "checkpoints")
+        .into_iter()
+        .map(|cp| {
+            let h = cp
+                .get("checkpoint_hash")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string();
+            let ts = cp
+                .get("created_ts")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .replace("12:00:00.000Z", "12:00:01.000Z");
+            let a = averin_decision_core::anchor::make_test_anchor(&h, &ts, tsa, "tsa-1");
+            averin_decision_core::checkpoint::attach_anchor(&cp, a)
+        })
+        .collect();
+    set(b, "checkpoints", CanonValue::Array(cps))
+}
+
+/// The grant is in June; its only use is in July.
+fn grant_then_late_use() -> CanonValue {
+    let g = seal_grant("g1", "session_grant", &[]);
+    let u1 = seal_use("use-1", "g1", "g1", 0, &[hash(&g)]);
+    history(&[("2026-06-28", vec![g]), ("2026-07-28", vec![u1])])
+}
+
+/// `(whole verdict, whole ok, chain verdict, chain ok, chain's whole report, each month's own verdict)` with every
+/// month and the whole verified under `o`.
+#[allow(clippy::type_complexity)]
+fn differential_under(
+    whole: &CanonValue,
+    months: &[CanonValue],
+    o: &dyn Fn(Option<&str>) -> VerifyOptions,
+) -> (
+    ClaimVerdict,
+    bool,
+    ClaimVerdict,
+    bool,
+    Option<CanonValue>,
+    Vec<ClaimVerdict>,
+) {
+    let wr = report_to_canon(&verify_bundle_with(whole, &o(None)));
+    let w_ok = wr.get("ok") == Some(&CanonValue::Bool(true));
+    let mut chain = ChainState::new();
+    let mut month_words = Vec::new();
+    for m in months {
+        let pin = chain.next_pin();
+        let r = report_to_canon(&verify_bundle_with(m, &o(Some(&pin))));
+        month_words.push(claim_verdict(&r));
+        chain.absorb(m, &r);
+    }
+    let cv = chain.finish_with(|w| Some(report_to_canon(&verify_bundle_with(w, &o(None)))));
+    (
+        claim_verdict(&wr),
+        w_ok,
+        cv.verdict,
+        chain.is_ok(),
+        cv.whole,
+        month_words,
+    )
+}
+
+#[test]
+fn a_grant_revoked_by_the_latest_list_and_used_only_in_a_later_month_fails_whole_and_chain() {
+    let rev = signing_key_from_seed(&[77u8; 32]);
+    let tsa = averin_decision_core::anchor::test_tsa_key(&[200u8; 32]);
+    let anchored = anchor_all(&grant_then_late_use(), &tsa);
+    let rl = revocation_list(&rev, &["g1"]);
+    let whole = set(&anchored, "revocation_list", rl.clone());
+    // (a) the list only in the last month, as split_bundle copies it; (b) in every month, as the server serves them
+    let split = months_of(&whole);
+    assert!(split[0].get("revocation_list").is_none());
+    assert!(split[1].get("revocation_list").is_some());
+    let every: Vec<CanonValue> = months_of(&anchored)
+        .into_iter()
+        .map(|m| set(&m, "revocation_list", rl.clone()))
+        .collect();
+    for (label, months) in [("last month only", &split), ("every month", &every)] {
+        for claim in CLAIMS {
+            let o = |pin: Option<&str>| revocation_opts(claim, pin, &rev, &tsa);
+            let (w, w_ok, c, c_ok, cw, month_words) = differential_under(&whole, months, &o);
+            assert!(!w_ok, "{label}: the whole history must be not ok");
+            assert_eq!(w, ClaimVerdict::Fail, "{label} {claim:?}");
+            // the month holding the use does not verify itself, so the chain also names it as an issue
+            assert!(!c_ok, "{label}: the month with the revoked use is a chain issue");
+            assert_eq!(c, ClaimVerdict::Fail, "{label} {claim:?}: chain");
+            let cw = cw.expect("chain whole report");
+            assert_ne!(
+                cw.get("revocation_status").and_then(CanonValue::as_str),
+                Some("missing"),
+                "{label}: the chain's whole must carry the latest list"
+            );
+            // the month holding the use blocks the revoked grant itself, with the list it carries
+            assert_ne!(month_words[1], ClaimVerdict::Pass, "{label} {claim:?}");
+        }
+    }
+    // the month holding the use refuses it on its own where it carries the list
+    let o = |pin: Option<&str>| revocation_opts(RequestedClaim::Integrity, pin, &rev, &tsa);
+    let (_, _, _, _, _, month_words) = differential_under(&whole, &every, &o);
+    assert_eq!(month_words[1], ClaimVerdict::Fail);
+    // and the same history with a list that does not name g1 is not failed by the list
+    let ok_list = revocation_list(&rev, &["other"]);
+    let honest_whole = set(&anchored, "revocation_list", ok_list);
+    let honest_months = months_of(&honest_whole);
+    let o = |pin: Option<&str>| revocation_opts(RequestedClaim::Integrity, pin, &rev, &tsa);
+    let (w, _, c, c_ok, _, _) = differential_under(&honest_whole, &honest_months, &o);
+    assert!(c_ok);
+    assert_ne!(w, ClaimVerdict::Fail);
+    assert_eq!(c, w);
+}
+
+#[test]
+fn the_chain_keeps_only_the_latest_months_revocation_list_and_attestation() {
+    let rev = signing_key_from_seed(&[77u8; 32]);
+    let tsa = averin_decision_core::anchor::test_tsa_key(&[200u8; 32]);
+    let anchored = anchor_all(&honest_reusable(), &tsa);
+    let early = revocation_list(&rev, &["early"]);
+    let late = revocation_list(&rev, &["late"]);
+    let months = months_of(&anchored);
+    let months = vec![
+        set(&months[0], "revocation_list", early),
+        set(&months[1], "revocation_list", late.clone()),
+    ];
+    let mut chain = ChainState::new();
+    for m in &months {
+        let pin = chain.next_pin();
+        let r = verify_bundle_with(m, &revocation_opts(RequestedClaim::Integrity, Some(&pin), &rev, &tsa));
+        chain.absorb(m, &report_to_canon(&r));
+    }
+    let whole = chain.whole_bundle().expect("whole");
+    assert_eq!(whole.get("revocation_list"), Some(&late));
+}
+
+#[test]
+fn a_month_with_a_base_never_passes_on_its_own_while_the_whole_and_the_chain_fail() {
+    // (a) a second use of a single-use grant, (b) a use of a grant no month holds, (c) a replayed PoP nonce
+    let g1 = seal_grant("g1", "session_grant", &[]);
+    let u1 = seal_use("use-1", "g1", "g1", 0, &[hash(&g1)]);
+    let g2 = seal_grant("g2", "session_grant", &[hash(&u1)]);
+    let u2 = seal_use("use-2", "g2", "g2", 0, &[hash(&g2)]); // the same (resource, nonce) as use-1
+    let replay = history(&[("2026-06-28", vec![g1, u1]), ("2026-07-28", vec![g2, u2])]);
+    for (name, whole) in [
+        ("single use", two_uses("single_operation")),
+        ("ghost grant", ghost_use()),
+        ("nonce replay", replay),
+    ] {
+        let months = months_of(&whole);
+        let claim = RequestedClaim::Integrity;
+        let o = |pin: Option<&str>| opts(claim, pin);
+        let (w, _, c, c_ok, _, month_words) = differential_under(&whole, &months, &o);
+        assert_eq!(w, ClaimVerdict::Fail, "{name}: whole");
+        assert!(c_ok || name == "ghost grant", "{name}");
+        assert_eq!(c, ClaimVerdict::Fail, "{name}: chain");
+        // the first month starts at genesis and is a whole-history bundle of its own; the month with a base is capped
+        assert_eq!(
+            month_words[1],
+            ClaimVerdict::Insufficient,
+            "{name}: the month alone, pinned to the right base, must not pass"
+        );
+        let pin_report = {
+            let mut chain = ChainState::new();
+            let r0 = verify_bundle_with(&months[0], &opts(claim, Some(&chain.next_pin())));
+            chain.absorb(&months[0], &report_to_canon(&r0));
+            report_to_canon(&verify_bundle_with(&months[1], &opts(claim, Some(&chain.next_pin()))))
+        };
+        let ne = pin_report
+            .get("segment")
+            .and_then(|s| s.get("not_evaluated"))
+            .and_then(CanonValue::as_array)
+            .unwrap();
+        assert!(
+            ne.iter().any(|x| x.as_str() == Some("cross_month_uses")),
+            "{name}: {ne:?}"
+        );
+    }
+}
+
+#[test]
+fn the_first_month_with_no_base_is_not_capped() {
+    let months = months_of(&honest_reusable());
+    let r = report_to_canon(&verify_bundle_with(&months[0], &opts(RequestedClaim::Integrity, Some("genesis"))));
+    let ne = r.get("segment").unwrap().get("not_evaluated").unwrap().as_array().unwrap();
+    assert!(ne.is_empty(), "{ne:?}");
+    assert_ne!(claim_verdict(&r), ClaimVerdict::Insufficient);
+}
+
+// ---- disclosures through the chain ----
+
+fn cred_grant(gid: &str, prev: &[String], nonce_byte: u8) -> (CanonValue, CanonValue) {
+    let cnf = signing_key_from_seed(&[5u8; 32]);
+    let descriptor = CanonValue::object(vec![
+        ("act".into(), CanonValue::string(ACTION)),
+        ("aud".into(), CanonValue::string(RESOURCE)),
+        (
+            "cnf".into(),
+            CanonValue::string(averin_decision_core::b64::encode(
+                cnf.verifying_key().as_bytes(),
+            )),
+        ),
+        ("exp".into(), CanonValue::Int(EXP)),
+        ("iat".into(), CanonValue::Int(ISSUED)),
+        ("jti".into(), CanonValue::string(gid)),
+        ("nbf".into(), CanonValue::Int(ISSUED)),
+        ("scope".into(), CanonValue::string("read:orders")),
+        ("single_use".into(), CanonValue::Bool(true)),
+        ("sub".into(), CanonValue::string("agent-1")),
+        ("typ".into(), CanonValue::string("capability")),
+    ])
+    .unwrap();
+    let dbytes = descriptor.serialize();
+    let binding = sha256_prefixed(dbytes.as_bytes());
+    let nonce = [nonce_byte; 32];
+    let commitment = averin_decision_core::commit(
+        averin_decision_core::FieldDomain::parse("credential").unwrap(),
+        dbytes.as_bytes(),
+        &nonce,
+    )
+    .unwrap();
+    let ge = set(
+        &set(
+            &set(
+                &set(
+                    &grant_evidence(gid, "single_operation"),
+                    "cnf_kid",
+                    CanonValue::string(vk_cnf_kid(&cnf.verifying_key())),
+                ),
+                "credential_binding",
+                CanonValue::string(binding),
+            ),
+            "scope",
+            CanonValue::string("read:orders"),
+        ),
+        "agent_id",
+        CanonValue::string("agent-1"),
+    );
+    let eh = sha256_prefixed(ge.serialize().as_bytes());
+    let esig = sign_evidence("gateway_enforced", PROJECT, gid, &eh, &rec_key());
+    let prev_json =
+        CanonValue::Array(prev.iter().map(|p| CanonValue::string(p.clone())).collect()).serialize();
+    let body = format!(
+        r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
+        "record_id":"{gid}","project_id":"{PROJECT}","agent_id":"agent","agent_version":"averin-broker",
+        "session_id":"s","span_id":"sp-{gid}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":0,
+        "agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z",
+        "event_type":"credential_grant","action":"{ACTION}","observed_via":"broker","status":"ok",
+        "authority":{{"source":"gateway_enforced","enforcement_point":"credential_broker","grant_type":"id-jag","grant_id":"{gid}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
+        "credential_commit":{{"alg":"sha256","commitment":"{commitment}","low_entropy":true}},
+        "extensions":{{"broker":{{"kind":"grant","grant_evidence":{ge}}}}},
+        "key":{{"signing_key_id":"k0","key_epoch":0,"key_valid_from":"2026-06-01T00:00:00.000Z","key_status":"active"}}}}"#,
+        ge = ge.serialize(),
+    );
+    let rec = seal(&parse(&body), &rec_key()).unwrap();
+    let disclosure = CanonValue::object(vec![
+        ("record_id".into(), CanonValue::string(gid)),
+        ("field".into(), CanonValue::string("credential")),
+        (
+            "value_b64".into(),
+            CanonValue::string(averin_decision_core::b64::encode(dbytes.as_bytes())),
+        ),
+        (
+            "nonce_hex".into(),
+            CanonValue::string(averin_decision_core::hashx::hex_lower(&nonce)),
+        ),
+    ])
+    .unwrap();
+    (rec, disclosure)
+}
+
+#[test]
+fn disclosures_in_every_month_reach_the_chains_whole_history() {
+    let (g1, d1) = cred_grant("g1", &[], 0x11);
+    let (g2, d2) = cred_grant("g2", &[hash(&g1)], 0x22);
+    let whole = set(
+        &history(&[("2026-06-28", vec![g1]), ("2026-07-28", vec![g2])]),
+        "disclosures",
+        CanonValue::Array(vec![d1, d2]),
+    );
+    let months = months_of(&whole);
+    assert_eq!(arr(&months[0], "disclosures").len(), 1);
+    assert_eq!(arr(&months[1], "disclosures").len(), 1);
+    let claim = RequestedClaim::Authorized;
+    let o = |pin: Option<&str>| {
+        let mut x = opts(claim, pin);
+        x.claim_policy.require_disclosure = true;
+        x
+    };
+    let wr = report_to_canon(&verify_bundle_with(&whole, &o(None)));
+    assert_eq!(wr.get("disclosures_total").and_then(CanonValue::as_int), Some(2));
+    let (w, _, c, c_ok, cw, _) = differential_under(&whole, &months, &o);
+    assert!(c_ok, "chain issues");
+    let cw = cw.expect("chain whole report");
+    assert_eq!(
+        cw.get("disclosures_total").and_then(CanonValue::as_int),
+        Some(2),
+        "the chain must carry every month's disclosures"
+    );
+    assert_eq!(cw.get("claims"), wr.get("claims"), "same claim decisions");
+    assert_eq!(c, w);
+    // the rebuilt bundle's disclosures are the whole's, in order
+    let mut chain = ChainState::new();
+    for m in &months {
+        let pin = chain.next_pin();
+        let r = verify_bundle_with(m, &o(Some(&pin)));
+        chain.absorb(m, &report_to_canon(&r));
+    }
+    assert_eq!(
+        arr(&chain.whole_bundle().unwrap(), "disclosures"),
+        arr(&whole, "disclosures")
+    );
+}
+
+// ---- the size cap ----
+
+#[test]
+fn a_history_over_the_cap_is_not_rebuilt_and_never_passes() {
+    let months = months_of(&honest_reusable());
+    let mut chain = ChainState::with_cap(1000);
+    for m in &months {
+        let pin = chain.next_pin();
+        let r = verify_bundle_with(m, &opts(RequestedClaim::Integrity, Some(&pin)));
+        chain.absorb(m, &report_to_canon(&r));
+    }
+    assert!(chain.is_ok(), "{:?}", chain.issues);
+    assert!(chain.over_cap());
+    assert!(chain.whole_bundle().is_none(), "nothing is held over the cap");
+    let v = chain.finish_with(|_| panic!("the verifier must not be asked to take an over-cap history"));
+    assert_eq!(v.verdict, ClaimVerdict::Insufficient);
+    assert!(v.whole.is_none());
+    // under a roomy cap the same months rebuild
+    let mut roomy = ChainState::with_cap(1 << 30);
+    for m in &months {
+        let pin = roomy.next_pin();
+        let r = verify_bundle_with(m, &opts(RequestedClaim::Integrity, Some(&pin)));
+        roomy.absorb(m, &report_to_canon(&r));
+    }
+    assert!(!roomy.over_cap());
+    assert!(roomy.whole_bundle().is_some());
+}
+
+#[test]
+fn a_broken_chain_over_the_cap_fails_rather_than_insufficient() {
+    let months = months_of(&honest_reusable());
+    let mut chain = ChainState::with_cap(1000);
+    for m in &months {
+        // no pin: the second month's base is not the previous head
+        let r = verify_bundle_with(m, &opts(RequestedClaim::Integrity, None));
+        chain.absorb(m, &report_to_canon(&r));
+    }
+    assert!(chain.over_cap());
+    assert_eq!(chain.finish_with(|_| None).verdict, ClaimVerdict::Fail);
 }

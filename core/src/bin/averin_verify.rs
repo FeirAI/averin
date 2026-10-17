@@ -184,6 +184,25 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
         println!(
             "                `averin-verify chain` over every month to check the whole history."
         );
+        let unresolved = sg
+            .get("unresolved_cross_month")
+            .and_then(|v| v.as_array())
+            .map_or(0, Vec::len);
+        println!(
+            "                unresolved cross-month references (a use or outcome whose grant or intent is in an earlier month): {unresolved}"
+        );
+        let cross_month = sg
+            .get("not_evaluated")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| a.iter().any(|x| x.as_str() == Some("cross_month_uses")));
+        if cross_month {
+            println!(
+                "                CROSS-MONTH USES NOT EVALUATED: a month with a base cannot rule out a second use of a single-use"
+            );
+            println!(
+                "                grant, a replayed PoP nonce, a use of a grant no month holds, or a revocation across months."
+            );
+        }
         let incomplete = sg
             .get("not_evaluated")
             .and_then(|v| v.as_array())
@@ -350,7 +369,7 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>) -> ExitCode {
             );
             if segment_residual(&report) {
                 println!(
-                    "        this is one month whose base is not a pinned previous head or whose record completeness was not evaluated: it cannot PASS alone. Run `averin-verify chain` over every month."
+                    "        this is one month with a base, or one whose base is not a pinned previous head: it cannot rule out cross-month uses (single use, nonce replay, ghost grants, revocation) or record completeness, so it cannot PASS alone. Run `averin-verify chain` over every month."
                 );
             }
             if let Some(note) = historical_claim_note(&report) {
@@ -498,6 +517,29 @@ fn split_cmd(path: &str, outdir: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// The explanatory lines under the chain RESULT. "The verdict is the whole history's" is said only when the
+/// concatenation really was verified as one bundle; over the verifier's byte cap it was not, and the lines say so
+/// instead of both.
+fn chain_notes(
+    word: ClaimVerdict,
+    requested_claim: &str,
+    whole_verified: bool,
+    over_cap: bool,
+) -> Vec<String> {
+    let mut v = vec![
+        "        Each month verified and links to the previous head; the first month starts at genesis; no record is carried by two months.".to_string(),
+    ];
+    if whole_verified {
+        v.push("        The verdict is the whole history's: the months, concatenated, were verified as one bundle (grant-log transparency and federation heads included when the months carry them). The latest month's revocation_list and deployment_attestation, when it carries them, are part of it.".to_string());
+        if word == ClaimVerdict::Insufficient {
+            v.push(format!("        the history does not satisfy the requested claim {requested_claim}; the concatenated history is the same as a whole-history export would be."));
+        }
+    } else if over_cap {
+        v.push(format!("        the concatenated history is over the verifier's {MAX_BUNDLE_BYTES}-byte cap, so it was NOT verified as one bundle and the cross-month rules (grant-to-use match, single use, nonce replay, revocation, grant log) were NOT run: the word is capped at INSUFFICIENT. Each month and every link were checked."));
+    }
+    v
+}
+
 /// `averin-verify chain [--opts opts.json] <month1.json> ...`: verify the months in the order given, each pinned to
 /// the previous month's head (`genesis` for the first), then resolve cross-month parents. Reads one file at a time.
 fn chain_cmd(args: &[String]) -> ExitCode {
@@ -603,7 +645,7 @@ fn chain_cmd(args: &[String]) -> ExitCode {
             .map(|o| o.serialize())
             .unwrap_or_default()
     };
-    let mut over_cap = false;
+    let mut over_cap = chain.over_cap();
     let outcome = chain.finish_with(|whole| {
         let text = whole.serialize();
         if text.len() > MAX_BUNDLE_BYTES {
@@ -645,20 +687,8 @@ fn chain_cmd(args: &[String]) -> ExitCode {
         chain.head_hash().unwrap_or("-"),
         chain.head_record_count()
     );
-    println!(
-        "        Each month verified and links to the previous head; the first month starts at genesis; no record is carried by two months."
-    );
-    println!(
-        "        The verdict is the whole history's: the months, concatenated, were verified as one bundle (grant-log transparency and federation heads included when the months carry them). revocation_list and deployment_attestation are not in month files, so they are not part of it."
-    );
-    if over_cap {
-        println!(
-            "        the concatenated history is over the verifier's {MAX_BUNDLE_BYTES}-byte cap, so the cross-month rules (grant-to-use match, single use, grant log) were NOT run: the word is capped at INSUFFICIENT. Each month and every link were checked."
-        );
-    } else if word == ClaimVerdict::Insufficient {
-        println!(
-            "        the history does not satisfy the requested claim {requested_claim}; the concatenated history is the same as a whole-history export would be."
-        );
+    for line in chain_notes(word, &requested_claim, outcome.whole.is_some(), over_cap) {
+        println!("{line}");
     }
     if word == ClaimVerdict::Consistent {
         println!(
@@ -792,5 +822,26 @@ mod claim_contract_tests {
     fn historical_claim_note_is_none_for_an_unsupported_claims_version() {
         assert!(historical_claim_note(&historical_report("1", "satisfied")).is_none());
         assert!(historical_claim_note(&CanonValue::object(vec![]).unwrap()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod chain_notes_tests {
+    use super::*;
+
+    #[test]
+    fn over_the_cap_the_output_does_not_claim_the_whole_was_verified() {
+        let text = chain_notes(ClaimVerdict::Insufficient, "integrity", false, true).join("\n");
+        assert!(!text.contains("concatenated, were verified as one bundle"), "{text}");
+        assert!(!text.contains("The verdict is the whole history's"), "{text}");
+        assert!(text.contains("NOT verified as one bundle"), "{text}");
+        assert!(text.contains("capped at INSUFFICIENT"), "{text}");
+    }
+
+    #[test]
+    fn a_verified_whole_says_so_and_names_no_cap() {
+        let text = chain_notes(ClaimVerdict::Pass, "integrity", true, false).join("\n");
+        assert!(text.contains("The verdict is the whole history's"), "{text}");
+        assert!(!text.contains("byte cap"), "{text}");
     }
 }

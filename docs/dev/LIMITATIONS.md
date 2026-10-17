@@ -17,8 +17,9 @@ What contains this:
 
 - **Month segments** ([SEGMENTS.md](SEGMENTS.md)). `GET /v2/export?month=YYYY-MM` and
   `GET /v2/verify?month=YYYY-MM` serve one month, chained to the previous month's last checkpoint, reading only that
-  month's records from the store. `averin-verify chain` checks all the months. No single export or verification
-  has to hold the history.
+  month's records from the store. `averin-verify chain` checks all the months. A month export and a month check are bounded by
+  the month. The chain's cross-month verdict is not: it needs the concatenation in memory and under the 256 MiB
+  cap, and over the cap it is INSUFFICIENT.
 - **A refusal, not an unverifiable file.** A whole-history build whose records exceed 256 MiB fails with `413` and a
   pointer to `/v2/segments`; a single month that does is refused with its own `413`.
 - **Concurrency cap.** Concurrent export/verify builds are bounded by a semaphore (`maxConcurrentBundleReads`,
@@ -52,11 +53,15 @@ What it does not do:
   exists in an earlier month, refuses a record two months both carry, and then verifies the concatenated history as
   one bundle, so the match, scope, expiry, key binding and single use are decided there, as in a whole-history export.
   That needs the whole history in memory and under the 256 MiB verifier cap; over it the chain word is capped at
-  INSUFFICIENT and says the cross-month rules were not run. `revocation_list` and `deployment_attestation` are not in
-  month files, so the concatenation does not have them either.
-- **A month with parents before its base, or an unpinned base, never passes alone.** Its headline is capped at
-  INSUFFICIENT (exit 1) in the CLI, the browser verifier and the web app, because record completeness is only
-  bounded by the chain.
+  INSUFFICIENT and says the cross-month rules were not run (so a history over the cap never gets PASS from the chain,
+  and a cross-month double use in it is not reported as FAIL; carrying that state month by month is not built). The
+  concatenation carries the latest month's `revocation_list` and `deployment_attestation` (a server re-issues them for
+  every month; `averin-verify split` copies them into the last month) and every month's disclosures.
+- **A month with a base never passes alone.** Its headline is capped at INSUFFICIENT (exit 1) in the CLI, the browser
+  verifier and the web app, because one month cannot close the rules that span months (a second use of a single-use
+  grant, a replayed nonce or ledger commitment, a use of a grant no month holds, a revocation across months;
+  `segment.not_evaluated` lists `cross_month_uses`). The same cap applies to a month with parents before its base
+  (record completeness) and to an unpinned base. Only the first month, which has no base, can pass alone.
 - **A month is bounded by its own size.** A project that records more than 256 MiB in a month cannot be verified
   month by month; cutting finer than a month is not built.
 - **Peak memory of a whole-history build is O(history)**, including for a project over the limit: the whole history

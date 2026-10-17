@@ -18,7 +18,7 @@ use crate::canon::CanonValue;
 use crate::checkpoint::{validate_chain, CheckpointError};
 use crate::dag::Dag;
 use crate::hashx::parse_sha256;
-use crate::verify::{ev_str, month_claim_verdict, ClaimVerdict, SEGMENT_FORMAT};
+use crate::verify::{ev_str, month_claim_verdict, ClaimVerdict, MAX_BUNDLE_BYTES, SEGMENT_FORMAT};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn str_of<'a>(v: &'a CanonValue, k: &str) -> Option<&'a str> {
@@ -33,6 +33,26 @@ fn array_of<'a>(v: &'a CanonValue, k: &str) -> &'a [CanonValue] {
 
 fn seq_of(cp: &CanonValue) -> Option<i64> {
     cp.get("checkpoint_seq").and_then(CanonValue::as_int)
+}
+
+/// The members of a bundle that are history (or per-month) rather than the keys and the like a chain carries from its
+/// latest month: records, checkpoints, the segment block, the two documents that bind the latest head, and the
+/// record-level extras.
+fn is_history_member(k: &str) -> bool {
+    matches!(
+        k,
+        "records"
+            | "checkpoints"
+            | "segment"
+            | "revocation_list"
+            | "deployment_attestation"
+            | "filtered_records"
+            | "disclosures"
+    )
+}
+
+fn serialized_len(v: &CanonValue) -> usize {
+    v.serialize().len() + 1
 }
 
 fn parents_of(rec: &CanonValue) -> impl Iterator<Item = &str> {
@@ -72,7 +92,8 @@ fn closure(
 /// signatures; run the verifier on every output (`averin-verify chain`).
 ///
 /// `revocation_list` and `deployment_attestation` bind the whole bundle's latest checkpoint and cannot be
-/// re-issued offline, so they are not copied into a split segment.
+/// re-issued offline for an earlier month, so they are copied into the last segment only: its head is the whole
+/// history's head, the one they bind. (A server re-issues them for every month it serves.)
 pub fn split_bundle(bundle: &CanonValue) -> Result<Vec<(String, CanonValue)>, String> {
     let records = array_of(bundle, "records");
     let mut cps: Vec<&CanonValue> = array_of(bundle, "checkpoints").iter().collect();
@@ -110,7 +131,8 @@ pub fn split_bundle(bundle: &CanonValue) -> Result<Vec<(String, CanonValue)>, St
     let mut prev_closure: BTreeSet<String> = BTreeSet::new();
     let mut base: Option<&CanonValue> = None;
     let mut total_assigned = 0usize;
-    for (month, group) in &groups {
+    for (gi, (month, group)) in groups.iter().enumerate() {
+        let is_last = gi + 1 == groups.len();
         let last = group.last().ok_or("empty month group")?;
         let frontier = array_of(last, "frontier");
         let committed = closure(records, &by_hash, frontier);
@@ -148,20 +170,16 @@ pub fn split_bundle(bundle: &CanonValue) -> Result<Vec<(String, CanonValue)>, St
             .as_object()
             .ok_or("bundle is not an object")?
             .iter()
-            .filter(|(k, _)| {
-                !matches!(
-                    k.as_str(),
-                    "records"
-                        | "checkpoints"
-                        | "segment"
-                        | "revocation_list"
-                        | "deployment_attestation"
-                        | "filtered_records"
-                        | "disclosures"
-                )
-            })
+            .filter(|(k, _)| !is_history_member(k))
             .cloned()
             .collect();
+        if is_last {
+            for key in ["revocation_list", "deployment_attestation"] {
+                if let Some(v) = bundle.get(key) {
+                    members.push((key.to_string(), v.clone()));
+                }
+            }
+        }
         let mut cps_out: Vec<CanonValue> = base.into_iter().cloned().collect();
         cps_out.extend(group.iter().map(|c| (*c).clone()));
         members.push(("records".into(), CanonValue::Array(mine.clone())));
@@ -224,7 +242,13 @@ pub fn split_bundle(bundle: &CanonValue) -> Result<Vec<(String, CanonValue)>, St
 /// re-implement that predicate: [`ChainState::finish_with`] rebuilds the whole history from the absorbed months
 /// ([`ChainState::whole_bundle`]) and runs the ordinary whole-history verifier on it, so a cross-month hard violation
 /// (a use with no matching grant, a second use of a single-use grant) reaches the verdict exactly as it does for the
-/// concatenated history. The cost is that the chain holds every month's records and checkpoints in memory.
+/// concatenated history. The cost is that the chain holds every month's records and checkpoints in memory, and that a
+/// history whose concatenation is over the verifier's byte cap ([`MAX_BUNDLE_BYTES`]) is not rebuilt at all: the
+/// chain tracks the size as it absorbs, stops accumulating once it passes the cap, and answers INSUFFICIENT.
+///
+/// The latest month's `revocation_list` and `deployment_attestation` are kept (they bind its head, which is the
+/// concatenation's head), and every month's disclosures are concatenated, so the rebuilt bundle is what a whole-history
+/// export would carry.
 #[derive(Default)]
 pub struct ChainState {
     project_id: Option<String>,
@@ -242,6 +266,17 @@ pub struct ChainState {
     seen_checkpoints: BTreeSet<String>,
     /// the non-history members (keys and the like) of the latest month, as a whole-history export would carry them
     members: Vec<(String, CanonValue)>,
+    /// the latest month's revocation list and deployment attestation, when it carries them
+    latest_bound: Vec<(String, CanonValue)>,
+    /// every month's disclosures, and whether any month had a `disclosures` member at all
+    all_disclosures: Vec<CanonValue>,
+    has_disclosures: bool,
+    /// serialized bytes of the accumulated records, checkpoints and disclosures, and of the latest-month members: a
+    /// lower bound of the concatenation's serialized size
+    history_bytes: usize,
+    latest_extra_bytes: usize,
+    cap_override: Option<usize>,
+    over_cap: bool,
     pub months: usize,
     pub records: usize,
     pub issues: Vec<String>,
@@ -257,6 +292,19 @@ pub struct ChainVerdict {
 impl ChainState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A chain with its own byte cap instead of [`MAX_BUNDLE_BYTES`] (tests lower it).
+    pub fn with_cap(cap: usize) -> Self {
+        Self {
+            cap_override: Some(cap),
+            ..Self::default()
+        }
+    }
+
+    /// True once the absorbed history is known to serialize over the byte cap: the whole is then not rebuilt.
+    pub fn over_cap(&self) -> bool {
+        self.over_cap
     }
 
     /// The base pin to verify the next segment with: the previous head, or `genesis` for the first month.
@@ -428,36 +476,57 @@ impl ChainState {
                 .iter()
                 .filter_map(|r| str_of(r, "record_id").map(String::from)),
         );
-        self.all_records.extend(records.iter().cloned());
-        for c in array_of(bundle, "checkpoints") {
-            let key = str_of(c, "checkpoint_hash").map(String::from);
-            if key
-                .as_ref()
-                .is_none_or(|k| self.seen_checkpoints.insert(k.clone()))
-            {
-                self.all_checkpoints.push(c.clone());
-            }
-        }
-        self.members = bundle
+        let latest_members: Vec<(String, CanonValue)> = bundle
             .as_object()
             .map(|o| {
                 o.iter()
-                    .filter(|(k, _)| {
-                        !matches!(
-                            k.as_str(),
-                            "records"
-                                | "checkpoints"
-                                | "segment"
-                                | "revocation_list"
-                                | "deployment_attestation"
-                                | "filtered_records"
-                                | "disclosures"
-                        )
-                    })
+                    .filter(|(k, _)| !is_history_member(k))
                     .cloned()
                     .collect()
             })
             .unwrap_or_default();
+        let latest_bound: Vec<(String, CanonValue)> = ["revocation_list", "deployment_attestation"]
+            .iter()
+            .filter_map(|k| bundle.get(k).map(|v| (k.to_string(), v.clone())))
+            .collect();
+        let disclosures = array_of(bundle, "disclosures");
+        self.has_disclosures |= bundle.get("disclosures").is_some();
+        self.latest_extra_bytes = latest_members
+            .iter()
+            .chain(latest_bound.iter())
+            .map(|(k, v)| k.len() + serialized_len(v))
+            .sum();
+        if !self.over_cap {
+            let mut added = 0usize;
+            let mut new_cps: Vec<CanonValue> = Vec::new();
+            for c in array_of(bundle, "checkpoints") {
+                let key = str_of(c, "checkpoint_hash").map(String::from);
+                if key
+                    .as_ref()
+                    .is_none_or(|k| self.seen_checkpoints.insert(k.clone()))
+                {
+                    added += serialized_len(c);
+                    new_cps.push(c.clone());
+                }
+            }
+            added += records.iter().map(serialized_len).sum::<usize>();
+            added += disclosures.iter().map(serialized_len).sum::<usize>();
+            self.history_bytes = self.history_bytes.saturating_add(added);
+            let cap = self.cap_override.unwrap_or(MAX_BUNDLE_BYTES);
+            if self.history_bytes.saturating_add(self.latest_extra_bytes) > cap {
+                // the concatenation cannot be verified in one piece: stop holding it
+                self.over_cap = true;
+                self.all_records = Vec::new();
+                self.all_checkpoints = Vec::new();
+                self.all_disclosures = Vec::new();
+            } else {
+                self.all_records.extend(records.iter().cloned());
+                self.all_checkpoints.extend(new_cps);
+                self.all_disclosures.extend(disclosures.iter().cloned());
+            }
+        }
+        self.members = latest_members;
+        self.latest_bound = latest_bound;
         self.records += records.len();
         self.months += 1;
         self.last_month = Some(month);
@@ -474,10 +543,11 @@ impl ChainState {
     }
 
     /// The absorbed months as one whole-history bundle: every record in month order, every distinct checkpoint,
-    /// and the latest month's other members (keys and the like). No `segment` block. `revocation_list` and
-    /// `deployment_attestation` are not in month files, so they are not here either. `None` before any month.
+    /// every month's disclosures, and the latest month's other members (keys and the like), including its
+    /// `revocation_list` and `deployment_attestation` (they bind the latest head, which is the concatenation's).
+    /// No `segment` block. `None` before any month, and once the history is over the byte cap.
     pub fn whole_bundle(&self) -> Option<CanonValue> {
-        if self.months == 0 {
+        if self.months == 0 || self.over_cap {
             return None;
         }
         let mut members = self.members.clone();
@@ -489,6 +559,13 @@ impl ChainState {
             "checkpoints".into(),
             CanonValue::Array(self.all_checkpoints.clone()),
         ));
+        if self.has_disclosures {
+            members.push((
+                "disclosures".into(),
+                CanonValue::Array(self.all_disclosures.clone()),
+            ));
+        }
+        members.extend(self.latest_bound.iter().cloned());
         CanonValue::object(members).ok()
     }
 
@@ -504,6 +581,17 @@ impl ChainState {
         &self,
         verify: impl FnOnce(&CanonValue) -> Option<CanonValue>,
     ) -> ChainVerdict {
+        if self.months > 0 && self.over_cap {
+            // never built, never verified: the cross-month rules were not run
+            return ChainVerdict {
+                verdict: if self.is_ok() {
+                    ClaimVerdict::Insufficient
+                } else {
+                    ClaimVerdict::Fail
+                },
+                whole: None,
+            };
+        }
         let Some(whole) = self.whole_bundle() else {
             return ChainVerdict {
                 verdict: ClaimVerdict::Fail,
