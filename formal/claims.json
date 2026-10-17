@@ -6,250 +6,1029 @@
       "id": "seal-and-closure-model",
       "claim": "The Lean model gives seal binding and closed DAG/checkpoint history under its honest-signer assumption; every hash-dependent conclusion is in explicit-witness form (equal bodies, or a SHA-256 collision on the two specific framed preimages), the standard reduction to SHA-256 collision resistance.",
       "class": "unbounded-model-proof",
-      "targets": ["Lean model"],
-      "assumptions": ["SHA-256 collision resistance (never assumed as injectivity; explicit collision witnesses)", "Ed25519 unforgeability, stated as a hypothesis about which messages were signed", "honest signer", "model inputs are post-NFC (Unicode NFC is trusted)", "Lean 4.30.0 kernel"],
-      "sources": [{"file": "formal/lean/Averin/Seal.lean", "symbol": "recordHashOf_binding"}, {"file": "formal/lean/Averin/Seal.lean", "symbol": "record_seal_sound"}, {"file": "formal/lean/Averin/Dag.lean", "symbol": "bundle_eq_closure"}, {"file": "formal/lean/Averin/Chain.lean", "symbol": "unique_history"}],
-      "proofs": [{"file": "formal/lean/check-axioms.sh", "symbol": "lake env lean scripts/AxiomAudit.lean"}, {"file": "formal/lean/scripts/AxiomAudit.lean", "symbol": "escapeHatches env ourModule"}],
-      "gates": ["formal-lean"],
+      "targets": [
+        "Lean model"
+      ],
+      "assumptions": [
+        "SHA-256 collision resistance (never assumed as injectivity; explicit collision witnesses)",
+        "Ed25519 unforgeability, stated as a hypothesis about which messages were signed",
+        "honest signer",
+        "model inputs are post-NFC (Unicode NFC is trusted)",
+        "Lean 4.30.0 kernel"
+      ],
+      "sources": [
+        {
+          "file": "formal/lean/Averin/Seal.lean",
+          "symbol": "recordHashOf_binding"
+        },
+        {
+          "file": "formal/lean/Averin/Seal.lean",
+          "symbol": "record_seal_sound"
+        },
+        {
+          "file": "formal/lean/Averin/Dag.lean",
+          "symbol": "bundle_eq_closure"
+        },
+        {
+          "file": "formal/lean/Averin/Chain.lean",
+          "symbol": "unique_history"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "formal/lean/check-axioms.sh",
+          "symbol": "lake env lean scripts/AxiomAudit.lean"
+        },
+        {
+          "file": "formal/lean/scripts/AxiomAudit.lean",
+          "symbol": "escapeHatches env ourModule"
+        }
+      ],
+      "gates": [
+        "formal-lean"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "rust-model-refinement",
       "claim": "Rust matches the executable Lean preimage oracle on a fixed corpus and tag inventory; this is sampled conformance, not a mechanized refinement proof.",
       "class": "sampled-conformance",
-      "targets": ["native Rust"],
-      "assumptions": ["corpus covers the relevant drift", "Lean model expresses the intended format"],
-      "sources": [{"file": "core/src/canon.rs", "symbol": "pub fn serialize"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "Family.msg"}],
-      "proofs": [{"file": "core/tests/oracle.rs", "symbol": "every_preimage_family_matches_model"}, {"file": "formal/check-refinement.py", "symbol": "tag inventory: OK"}],
-      "gates": ["formal-refinement", "formal-mutants-fast"],
+      "targets": [
+        "native Rust"
+      ],
+      "assumptions": [
+        "corpus covers the relevant drift",
+        "Lean model expresses the intended format"
+      ],
+      "sources": [
+        {
+          "file": "core/src/canon.rs",
+          "symbol": "pub fn serialize"
+        },
+        {
+          "file": "formal/lean/Averin/Preimage.lean",
+          "symbol": "Family.msg"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/oracle.rs",
+          "symbol": "every_preimage_family_matches_model"
+        },
+        {
+          "file": "formal/check-refinement.py",
+          "symbol": "tag inventory: OK"
+        }
+      ],
+      "gates": [
+        "formal-refinement",
+        "formal-mutants-fast"
+      ],
       "evidence_run": "37712087870",
-      "scheduled_gates": ["formal-mutants-full"],
+      "scheduled_gates": [
+        "formal-mutants-full"
+      ],
       "scheduled_evidence_run": "37678805697"
     },
     {
       "id": "production-seal-refinement",
       "claim": "The production seal core (canonical serializer, LP framing, sha256 digest string, record/checkpoint preimages and hashes, signature message) is extracted from core/src by Charon/Aeneas and proved to compute the Lean model's definitions; the model's explicit-witness seal theorems are applied to it (equal hashes give the same body or a SHA-256 collision on the two specific production preimages). Partial correctness only (results when the extracted function returns Ok; a panic or error yields no hash); arithmetic overflow panics in every shipped profile (overflow-checks in release and server, default in dev), matching the model's failure on overflow. serialize()'s final from_utf8 and the PreimageFault-to-RecordError mapping are unextracted glue pinned by call-path checks; base64 (core/src/b64.rs) is excluded as off the hashed/signed path and covered by plan 011's Kani proofs; the verifier's decision logic is refined only in its claim kernel (see verdict-kernel-refinement).",
       "class": "extracted-refinement-proof",
-      "targets": ["native Rust", "WASM Rust (same source)"],
-      "assumptions": ["Charon/Aeneas/Lean 4.31 toolchain, mathlib and the Aeneas std models (pinned in manifest.json)", "rustc (exact pinned nightly for extraction; 1.92.0 for builds)", "NFC and SHA-256 as arbitrary functions (unicode-normalization incl. its ASCII fast path; sha2)", "String/str UTF-8 model", "overflow-checks enabled in the shipped profiles", "Ed25519 as the model's Signed hypothesis"],
-      "sources": [{"file": "core/src/record.rs", "symbol": "pub(crate) fn record_hash"}, {"file": "core/src/canon.rs", "symbol": "pub(crate) fn write_canonical"}, {"file": "core/src/sign.rs", "symbol": "pub fn preimage"}],
-      "proofs": [{"file": "formal/production/Refinement/Seal.lean", "symbol": "record_hash_binding"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_seal_sound"}, {"file": "formal/production/Refinement/Seal.lean", "symbol": "production_record_ne_checkpoint"}, {"file": "formal/run-production-refinement.sh", "symbol": "production refinement: OK"}, {"file": "formal/production/ProductionAudit.lean", "symbol": "def runAudit"}],
-      "gates": ["formal-production", "formal-mutants-fast"],
+      "targets": [
+        "native Rust",
+        "WASM Rust (same source)"
+      ],
+      "assumptions": [
+        "Charon/Aeneas/Lean 4.31 toolchain, mathlib and the Aeneas std models (pinned in manifest.json)",
+        "rustc (exact pinned nightly for extraction; 1.92.0 for builds)",
+        "NFC and SHA-256 as arbitrary functions (unicode-normalization incl. its ASCII fast path; sha2)",
+        "String/str UTF-8 model",
+        "overflow-checks enabled in the shipped profiles",
+        "Ed25519 as the model's Signed hypothesis"
+      ],
+      "sources": [
+        {
+          "file": "core/src/record.rs",
+          "symbol": "pub(crate) fn record_hash"
+        },
+        {
+          "file": "core/src/canon.rs",
+          "symbol": "pub(crate) fn write_canonical"
+        },
+        {
+          "file": "core/src/sign.rs",
+          "symbol": "pub fn preimage"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "formal/production/Refinement/Seal.lean",
+          "symbol": "record_hash_binding"
+        },
+        {
+          "file": "formal/production/Refinement/Seal.lean",
+          "symbol": "production_record_seal_sound"
+        },
+        {
+          "file": "formal/production/Refinement/Seal.lean",
+          "symbol": "production_record_ne_checkpoint"
+        },
+        {
+          "file": "formal/run-production-refinement.sh",
+          "symbol": "production refinement: OK"
+        },
+        {
+          "file": "formal/production/ProductionAudit.lean",
+          "symbol": "def runAudit"
+        }
+      ],
+      "gates": [
+        "formal-production",
+        "formal-mutants-fast"
+      ],
       "evidence_run": "37712087870",
-      "scheduled_gates": ["formal-mutants-full"],
+      "scheduled_gates": [
+        "formal-mutants-full"
+      ],
       "scheduled_evidence_run": "37678805697"
     },
     {
       "id": "verdict-kernel-refinement",
       "claim": "The verifier's claim kernel verify::verdict::decide_claims (every function it calls, including the seal-key and anchor searches, the revocation-mode, capstone and plan 009 historical conditions) is extracted from core/src by Charon/Aeneas and proved to return, for every claim and the requested one, exactly the Lean verdict model's decideClaim on any evidence state its checked facts correspond to (Refinement.Corresponds). The model's support-erasure and claim-order theorems (deleting supporting attachments never adds a satisfied claim and never changes a refutation, with fixed signed records, pins, policy and authenticated adverse evidence), Supports inversion, capstone prerequisites, committed-contradiction refutation and the historical results hold for the production results. Total correctness, standard axioms only (enforced per declaration of the verdict modules and the extracted kernel by ProductionAudit.lean). Not proved: that verify.rs computes facts satisfying the correspondence (signature, pin, join, Merkle-path and snapshot passes, counter-to-fact joins); that boundary is pinned by call-path checks and tested by the verdict oracle differential and the adversarial suite.",
       "class": "extracted-refinement-proof",
-      "targets": ["native Rust", "WASM Rust (same source)", "Go cgo (same source)"],
-      "assumptions": ["Charon/Aeneas/Lean toolchain and Aeneas std models", "rustc", "String::is_empty model", "verify.rs computes facts satisfying Refinement.Corresponds"],
-      "sources": [{"file": "core/src/verify/verdict.rs", "symbol": "pub(super) fn decide_claims"}, {"file": "core/src/verify.rs", "symbol": "report.claims = verdict::decide_claims(&facts);"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "def decideClaim"}],
-      "proofs": [{"file": "formal/production/Refinement/Verdict.lean", "symbol": "theorem decide_claims_refines"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_support_erasure"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_satisfied_supports"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_capstone_prerequisites"}, {"file": "formal/production/Refinement/VerdictClaims.lean", "symbol": "theorem production_historical_requires_policy"}, {"file": "formal/mutants/m54-verdict-unanchored-capstone-skips-temporal.patch", "symbol": "deletion strengthens the capstone"}, {"file": "formal/mutants/m55-verdict-both-mode-list-deletion-skips-paths.patch", "symbol": "deletion strengthens a required trust claim"}, {"file": "formal/production/ProductionAudit.lean", "symbol": "def standardOnlyModules"}],
-      "gates": ["formal-production", "formal-mutants-fast"],
+      "targets": [
+        "native Rust",
+        "WASM Rust (same source)",
+        "Go cgo (same source)"
+      ],
+      "assumptions": [
+        "Charon/Aeneas/Lean toolchain and Aeneas std models",
+        "rustc",
+        "String::is_empty model",
+        "verify.rs computes facts satisfying Refinement.Corresponds"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify/verdict.rs",
+          "symbol": "pub(super) fn decide_claims"
+        },
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "report.claims = verdict::decide_claims(&facts);"
+        },
+        {
+          "file": "formal/lean/Averin/Verdict.lean",
+          "symbol": "def decideClaim"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "formal/production/Refinement/Verdict.lean",
+          "symbol": "theorem decide_claims_refines"
+        },
+        {
+          "file": "formal/production/Refinement/VerdictClaims.lean",
+          "symbol": "theorem production_support_erasure"
+        },
+        {
+          "file": "formal/production/Refinement/VerdictClaims.lean",
+          "symbol": "theorem production_satisfied_supports"
+        },
+        {
+          "file": "formal/production/Refinement/VerdictClaims.lean",
+          "symbol": "theorem production_capstone_prerequisites"
+        },
+        {
+          "file": "formal/production/Refinement/VerdictClaims.lean",
+          "symbol": "theorem production_historical_requires_policy"
+        },
+        {
+          "file": "formal/mutants/m54-verdict-unanchored-capstone-skips-temporal.patch",
+          "symbol": "deletion strengthens the capstone"
+        },
+        {
+          "file": "formal/mutants/m55-verdict-both-mode-list-deletion-skips-paths.patch",
+          "symbol": "deletion strengthens a required trust claim"
+        },
+        {
+          "file": "formal/production/ProductionAudit.lean",
+          "symbol": "def standardOnlyModules"
+        }
+      ],
+      "gates": [
+        "formal-production",
+        "formal-mutants-fast"
+      ],
       "evidence_run": "37712087870",
-      "scheduled_gates": ["formal-mutants-full"],
+      "scheduled_gates": [
+        "formal-mutants-full"
+      ],
       "scheduled_evidence_run": "37678805697"
     },
     {
       "id": "parser-totality",
       "claim": "The production RCP parser (CanonValue::parse via parse_typed/parse_document and every function it calls) is extracted from core/src by Charon/Aeneas and proved to return for every byte string of any length (Refinement.Parse.parse_document_total): no panic, arithmetic overflow, out-of-bounds index or divergence. Hypothesis NfcFits (the trusted NFC primitive returns representable Rust strings), never an axiom. The theorem holds in Aeneas' std model: Rust Vec capacity overflow (a panic above isize::MAX bytes, reachable on wasm32 by one string of more than about 2^29 UTF-16 units), allocation failure and stack depth are not modelled; the verifier rejects bundles over MAX_BUNDLE_BYTES (256 MiB) before parsing, while the options JSON and the standalone canonicalize export are uncapped and rely on their callers. Not proved: which documents it accepts or what they parse to (tests, fuzzing, the parser differential and plan 011's Kani families cover that), the error rendering into_public, and NFC's own panic-freedom. Supersedes the unverified Kani harness parse_never_panics as panic-freedom evidence. The parser mutants m60-m64 are run against the regenerated proof (the CI job formal-production) on every pull request.",
       "class": "extracted-refinement-proof",
-      "targets": ["native Rust", "WASM Rust (same source)", "Go cgo (same source)"],
-      "assumptions": ["Charon/Aeneas/Lean 4.31 toolchain and the Aeneas std models (unbounded Vec capacity, infallible allocation, unbounded stack)", "input size bounded by the caller (MAX_BUNDLE_BYTES in the verify path)", "NFC as an arbitrary function whose outputs fit in usize::MAX bytes (NfcFits hypothesis)", "SHA-256 as an arbitrary function"],
-      "sources": [{"file": "core/src/canon.rs", "symbol": "fn parse_document("}, {"file": "formal/production/manifest.json", "symbol": "crate::canon::parse_document"}],
-      "proofs": [{"file": "formal/production/Refinement/Parse.lean", "symbol": "theorem parse_document_total"}, {"file": "formal/mutants/m62-parser-decimal-overflow.patch", "symbol": "decimal_i64 drops its overflow guard"}, {"file": "core/tests/parser_differential.rs", "symbol": "fn rewrite_matches_reference_on_generated_corpus"}],
-      "gates": ["formal-production", "core"],
+      "targets": [
+        "native Rust",
+        "WASM Rust (same source)",
+        "Go cgo (same source)"
+      ],
+      "assumptions": [
+        "Charon/Aeneas/Lean 4.31 toolchain and the Aeneas std models (unbounded Vec capacity, infallible allocation, unbounded stack)",
+        "input size bounded by the caller (MAX_BUNDLE_BYTES in the verify path)",
+        "NFC as an arbitrary function whose outputs fit in usize::MAX bytes (NfcFits hypothesis)",
+        "SHA-256 as an arbitrary function"
+      ],
+      "sources": [
+        {
+          "file": "core/src/canon.rs",
+          "symbol": "fn parse_document("
+        },
+        {
+          "file": "formal/production/manifest.json",
+          "symbol": "crate::canon::parse_document"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "formal/production/Refinement/Parse.lean",
+          "symbol": "theorem parse_document_total"
+        },
+        {
+          "file": "formal/mutants/m62-parser-decimal-overflow.patch",
+          "symbol": "decimal_i64 drops its overflow guard"
+        },
+        {
+          "file": "core/tests/parser_differential.rs",
+          "symbol": "fn rewrite_matches_reference_on_generated_corpus"
+        }
+      ],
+      "gates": [
+        "formal-production",
+        "core"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "bounded-real-encoders",
       "claim": "Kani proves, only within each harness's stated bounds, properties of the real Rust: base64url alphabet bijection; base64url tail and 4-symbol chunk canonicality over the full per-chunk domains (whole-string uniqueness is argued in prose from the chunking, not proved); sha256:<hex> digest-string injectivity and canonicality per byte; exact LP framing; member-key order equal to UTF-16 code-unit order for keys of one or two scalars (5 of 5 harnesses) and transitive for single-scalar keys; the strict UTF-16 decoder equal to std's on every 1- and 2-unit sequence; the typed integer round trip for every n in [-99,999, 99,999]; canonical spelling of every accepted numeric literal of 1 to 4 bytes (61 of 61 shards); write_string then the real parser (real NFC) returns exactly Str(s) for every string of at most two scalars from ASCII, U+00E9 and U+1F600, exhaustively over the exact 17,031-case domain. CI runs every harness above on each pull request (formal-kani, formal-kani-extended) except the string family, of which pull requests run a 20-case smoke subset and the weekly schedule runs all 17,031 cases (formal-kani-strings-ascii, -mixed, -pure); the string claim rests on the latest green weekly run. Every Kani-detected mutant (m2-m4, m9-m13, m22-m25) must be refuted by its named harness on each pull request (formal-mutants-fast); all 48 mutants run nightly (formal-mutants-full). Not claimed: parse_never_panics (not verified; parser panic-freedom is the parser-totality claim).",
       "class": "bounded-implementation-proof",
-      "targets": ["native Rust harnesses"],
-      "assumptions": ["harness bounds and feature selections in run-kani.sh (no default features; built with -Zinline-mir=no, so rustc's MIR inliner cannot bypass a stub)", "std semantics, with two proof-only selections: A1 align_offset returning usize::MAX (documented as permitted) and G1 Vec::push restricted to its non-growth branch (fails closed; the negative control push_guard_is_in_force must fail on it before the default set runs)", "numeric route guard stub in the integer harnesses (fail-closed, checked unreachable for numeric input)", "Kani 0.68.0 / CBMC 6.11 and the bundled kissat 4.0.1", "real unicode-normalization NFC inside the harnesses that parse strings"],
-      "sources": [{"file": "core/src/b64.rs", "symbol": "fn full_chunk_is_canonical"}, {"file": "core/src/hashx.rs", "symbol": "fn lp_into_frames_exactly"}, {"file": "core/src/canon.rs", "symbol": "fn utf16_strict_matches_std"}, {"file": "core/src/canon.rs", "symbol": "fn integer_roundtrip()"}, {"file": "core/src/canon.rs", "symbol": "fn accepted_integer_spelling_case"}],
-      "proofs": [{"file": "formal/run-kani.sh", "symbol": "run_harness utf16_key_order_is_transitive"}, {"file": "formal/run-kani.sh", "symbol": "run_harness utf16_strict_matches_std"}, {"file": "formal/check-kani-shards.py", "symbol": "accepted_integer_spelling"}, {"file": "formal/check-kani-domains.py", "symbol": "integer_roundtrip"}, {"file": "formal/check-kani-shards.py", "symbol": "string_escape_roundtrip"}, {"file": "formal/kani-string-slices.py", "symbol": "SIZES = {\"ascii\": 16513"}, {"file": "formal/check-kani-success.py", "symbol": "VERIFICATION:- SUCCESSFUL"}, {"file": "formal/run-kani.sh", "symbol": "run_negative_control push_guard_is_in_force"}],
-      "gates": ["formal-kani", "formal-kani-extended", "formal-kani-strings-smoke", "formal-mutants-fast"],
+      "targets": [
+        "native Rust harnesses"
+      ],
+      "assumptions": [
+        "harness bounds and feature selections in run-kani.sh (no default features; built with -Zinline-mir=no, so rustc's MIR inliner cannot bypass a stub)",
+        "std semantics, with two proof-only selections: A1 align_offset returning usize::MAX (documented as permitted) and G1 Vec::push restricted to its non-growth branch (fails closed; the negative control push_guard_is_in_force must fail on it before the default set runs)",
+        "numeric route guard stub in the integer harnesses (fail-closed, checked unreachable for numeric input)",
+        "Kani 0.68.0 / CBMC 6.11 and the bundled kissat 4.0.1",
+        "real unicode-normalization NFC inside the harnesses that parse strings"
+      ],
+      "sources": [
+        {
+          "file": "core/src/b64.rs",
+          "symbol": "fn full_chunk_is_canonical"
+        },
+        {
+          "file": "core/src/hashx.rs",
+          "symbol": "fn lp_into_frames_exactly"
+        },
+        {
+          "file": "core/src/canon.rs",
+          "symbol": "fn utf16_strict_matches_std"
+        },
+        {
+          "file": "core/src/canon.rs",
+          "symbol": "fn integer_roundtrip()"
+        },
+        {
+          "file": "core/src/canon.rs",
+          "symbol": "fn accepted_integer_spelling_case"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "formal/run-kani.sh",
+          "symbol": "run_harness utf16_key_order_is_transitive"
+        },
+        {
+          "file": "formal/run-kani.sh",
+          "symbol": "run_harness utf16_strict_matches_std"
+        },
+        {
+          "file": "formal/check-kani-shards.py",
+          "symbol": "accepted_integer_spelling"
+        },
+        {
+          "file": "formal/check-kani-domains.py",
+          "symbol": "integer_roundtrip"
+        },
+        {
+          "file": "formal/check-kani-shards.py",
+          "symbol": "string_escape_roundtrip"
+        },
+        {
+          "file": "formal/kani-string-slices.py",
+          "symbol": "SIZES = {\"ascii\": 16513"
+        },
+        {
+          "file": "formal/check-kani-success.py",
+          "symbol": "VERIFICATION:- SUCCESSFUL"
+        },
+        {
+          "file": "formal/run-kani.sh",
+          "symbol": "run_negative_control push_guard_is_in_force"
+        }
+      ],
+      "gates": [
+        "formal-kani",
+        "formal-kani-extended",
+        "formal-kani-strings-smoke",
+        "formal-mutants-fast"
+      ],
       "evidence_run": "37712087870",
-      "scheduled_gates": ["formal-kani-strings-ascii", "formal-kani-strings-mixed", "formal-kani-strings-pure", "formal-mutants-full"],
+      "scheduled_gates": [
+        "formal-kani-strings-ascii",
+        "formal-kani-strings-mixed",
+        "formal-kani-strings-pure",
+        "formal-mutants-full"
+      ],
       "scheduled_evidence_run": "37678805697"
     },
     {
       "id": "grant-log-model",
       "claim": "TLC checks bounded safety and conditional liveness of GrantLog, a model of the historical single-process, age-based broker_seq recovery design that the current fence protocol superseded (the current protocol is modelled separately in GrantRecovery.tla, which this claim does not cover). The model binds to no current code; its value is the counterexamples it keeps. Recovery needs the stated retry and fairness assumptions.",
       "class": "bounded-model-check",
-      "targets": ["TLA+ model"],
-      "assumptions": ["finite configured grant count", "strong fairness of operator void", "weak fairness of open transaction resolution"],
-      "sources": [{"file": "formal/tla/GrantLog.tla", "symbol": "CheckpointRecovers"}],
-      "proofs": [{"file": "formal/tla/run-tlc.sh", "symbol": "GrantLog_fixed_live.cfg"}],
-      "gates": ["formal-tla"],
+      "targets": [
+        "TLA+ model"
+      ],
+      "assumptions": [
+        "finite configured grant count",
+        "strong fairness of operator void",
+        "weak fairness of open transaction resolution"
+      ],
+      "sources": [
+        {
+          "file": "formal/tla/GrantLog.tla",
+          "symbol": "CheckpointRecovers"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "formal/tla/run-tlc.sh",
+          "symbol": "GrantLog_fixed_live.cfg"
+        }
+      ],
+      "gates": [
+        "formal-tla"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "consume-ledger-model",
       "claim": "TLC checks bounded safety of ConsumeLedger, a model of the superseded pgledger consume and of the tenant migration (AtMostOncePerKey, InFlightRecorded, TenantAtMostOnce, TenantIsolation), with reachability witnesses that the consume path is reachable. The model binds to no current code: the current consume is in server/internal/store/ledger_postgres.go and is not modelled.",
       "class": "bounded-model-check",
-      "targets": ["TLA+ model"],
-      "assumptions": ["finite instances, projects and clock", "retention at least the capability lifetime in the safe configuration"],
-      "sources": [{"file": "formal/tla/ConsumeLedger.tla", "symbol": "W_IsolationAntecedent"}],
-      "proofs": [{"file": "formal/tla/run-tlc.sh", "symbol": "ConsumeLedger_tenant_safe.cfg"}],
-      "gates": ["formal-tla"]
+      "targets": [
+        "TLA+ model"
+      ],
+      "assumptions": [
+        "finite instances, projects and clock",
+        "retention at least the capability lifetime in the safe configuration"
+      ],
+      "sources": [
+        {
+          "file": "formal/tla/ConsumeLedger.tla",
+          "symbol": "W_IsolationAntecedent"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "formal/tla/run-tlc.sh",
+          "symbol": "ConsumeLedger_tenant_safe.cfg"
+        }
+      ],
+      "gates": [
+        "formal-tla"
+      ]
     },
     {
       "id": "grant-recovery-model",
       "claim": "TLC checks bounded safety and conditional liveness of GrantRecovery, a model of the fence and void recovery of one reservation, with reachability witnesses for both terminal paths. The model binds to no current code, and the deployment barrier against an old writer is an assumption of the safe configuration.",
       "class": "bounded-model-check",
-      "targets": ["TLA+ model"],
-      "assumptions": ["one reservation", "weak fairness of database resolution and strong fairness of the fence", "no permanent database failure"],
-      "sources": [{"file": "formal/tla/GrantRecovery.tla", "symbol": "W_AnchoredVoid"}],
-      "proofs": [{"file": "formal/tla/run-tlc.sh", "symbol": "GrantRecovery_safe.cfg"}],
-      "gates": ["formal-tla"]
+      "targets": [
+        "TLA+ model"
+      ],
+      "assumptions": [
+        "one reservation",
+        "weak fairness of database resolution and strong fairness of the fence",
+        "no permanent database failure"
+      ],
+      "sources": [
+        {
+          "file": "formal/tla/GrantRecovery.tla",
+          "symbol": "W_AnchoredVoid"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "formal/tla/run-tlc.sh",
+          "symbol": "GrantRecovery_safe.cfg"
+        }
+      ],
+      "gates": [
+        "formal-tla"
+      ]
     },
     {
       "id": "tla-gate-pins-and-witnesses",
       "claim": "run-tlc.sh pins the SPECIFICATION and the INVARIANT and PROPERTY names of every TLA+ configuration, and requires a reachability witness (a W_ invariant that must be violated) for every passing configuration. This guards against a passing result that checks less than it appears to; it does not show that a witness is the interesting state or that a model matches the code.",
       "class": "gate-hygiene",
-      "targets": ["TLA+ gate"],
-      "assumptions": ["TLC reports a violated invariant by name", "the pin table is reviewed when a configuration changes"],
-      "sources": [{"file": "formal/tla/run-tlc.sh", "symbol": "witnesses_of"}],
-      "proofs": [{"file": "formal/tla/run-tlc.sh", "symbol": "verify_pin"}],
-      "gates": ["formal-tla", "formal-fast"]
+      "targets": [
+        "TLA+ gate"
+      ],
+      "assumptions": [
+        "TLC reports a violated invariant by name",
+        "the pin table is reviewed when a configuration changes"
+      ],
+      "sources": [
+        {
+          "file": "formal/tla/run-tlc.sh",
+          "symbol": "witnesses_of"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "formal/tla/run-tlc.sh",
+          "symbol": "verify_pin"
+        }
+      ],
+      "gates": [
+        "formal-tla",
+        "formal-fast"
+      ]
     },
     {
       "id": "postgres-void-ordering",
       "claim": "The three named API tests exercise void ordering and recovery against real Postgres 16; skips must fail the CI gate.",
       "class": "real-database-test",
-      "targets": ["Go server", "Postgres 16"],
-      "assumptions": ["private test schema", "unique record_id index present where void succeeds", "database is reachable"],
-      "sources": [{"file": "server/internal/store/postgres.go", "symbol": "VoidBrokerSeq"}],
-      "proofs": [{"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidPostgres"}, {"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidGrantLandsFirstPostgres"}, {"file": "server/internal/api/broker_seq_void_pg_test.go", "symbol": "TestBrokerSeqVoidMarkerFailsPostgres"}, {"file": "scripts/check-go-test-events.py", "symbol": "TestBrokerSeqVoidMarkerFailsPostgres"}],
-      "gates": ["store-postgres"],
+      "targets": [
+        "Go server",
+        "Postgres 16"
+      ],
+      "assumptions": [
+        "private test schema",
+        "unique record_id index present where void succeeds",
+        "database is reachable"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "VoidBrokerSeq"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/broker_seq_void_pg_test.go",
+          "symbol": "TestBrokerSeqVoidPostgres"
+        },
+        {
+          "file": "server/internal/api/broker_seq_void_pg_test.go",
+          "symbol": "TestBrokerSeqVoidGrantLandsFirstPostgres"
+        },
+        {
+          "file": "server/internal/api/broker_seq_void_pg_test.go",
+          "symbol": "TestBrokerSeqVoidMarkerFailsPostgres"
+        },
+        {
+          "file": "scripts/check-go-test-events.py",
+          "symbol": "TestBrokerSeqVoidMarkerFailsPostgres"
+        }
+      ],
+      "gates": [
+        "store-postgres"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "revocation-live-and-durable",
       "claim": "With a shared Postgres project Store, an acknowledged revoke is committed before a later use checks revocation on any replica; restart does not restore an older admission view. This is tested behavior. The TLA+ configuration ProjectTx_operational_safe models a guarded use over a finite design model and is not evidence for this tested behavior (no Postgres commit ordering is modelled).",
       "class": "tested-implementation-with-deployment-limit",
-      "targets": ["Go server", "Postgres mode"],
-      "assumptions": ["revocation enabled", "shared Postgres project Store", "all use and revoke paths obey WithProjectWrite"],
-      "sources": [{"file": "server/internal/api/revocation_server.go", "symbol": "revokeGrantEvent"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "IsRevoked"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
-      "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}],
-      "gates": ["store-postgres"],
+      "targets": [
+        "Go server",
+        "Postgres mode"
+      ],
+      "assumptions": [
+        "revocation enabled",
+        "shared Postgres project Store",
+        "all use and revoke paths obey WithProjectWrite"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/revocation_server.go",
+          "symbol": "revokeGrantEvent"
+        },
+        {
+          "file": "server/internal/store/temporal_postgres.go",
+          "symbol": "IsRevoked"
+        },
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "WithProjectWrite"
+        },
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "WithProjectRead"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/project_tx_replicas_test.go",
+          "symbol": "TestProjectTransactionsAcrossReplicas"
+        },
+        {
+          "file": "server/internal/api/project_tx_process_test.go",
+          "symbol": "TestProjectTransactionsProcessRestartBoundaries"
+        }
+      ],
+      "gates": [
+        "store-postgres"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "pending-grant-durability",
       "claim": "With a shared Postgres project Store, a committed prepare is visible to finalize on another replica and after issuer restart; retries read the durable pending row. This is tested behavior. The TLA+ configuration ProjectTx_operational_safe is not evidence for it: the model has no guard-taking finalize, and NoGhostFinalize holds there by definition, so it is not checked in any passing configuration.",
       "class": "tested-implementation-with-deployment-limit",
-      "targets": ["Go server", "Postgres mode"],
-      "assumptions": ["shared Postgres project Store", "prepare and finalize use WithProjectWrite", "pending expiry is checked from the authoritative row"],
-      "sources": [{"file": "server/internal/api/grant_twophase.go", "symbol": "PutPendingGrant"}, {"file": "server/internal/store/operational_postgres.go", "symbol": "PendingGrantLive"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectWrite"}, {"file": "server/internal/store/postgres.go", "symbol": "WithProjectRead"}],
-      "proofs": [{"file": "server/internal/api/project_tx_replicas_test.go", "symbol": "TestProjectTransactionsAcrossReplicas"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionsProcessRestartBoundaries"}],
-      "gates": ["store-postgres"],
+      "targets": [
+        "Go server",
+        "Postgres mode"
+      ],
+      "assumptions": [
+        "shared Postgres project Store",
+        "prepare and finalize use WithProjectWrite",
+        "pending expiry is checked from the authoritative row"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/grant_twophase.go",
+          "symbol": "PutPendingGrant"
+        },
+        {
+          "file": "server/internal/store/operational_postgres.go",
+          "symbol": "PendingGrantLive"
+        },
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "WithProjectWrite"
+        },
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "WithProjectRead"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/project_tx_replicas_test.go",
+          "symbol": "TestProjectTransactionsAcrossReplicas"
+        },
+        {
+          "file": "server/internal/api/project_tx_process_test.go",
+          "symbol": "TestProjectTransactionsProcessRestartBoundaries"
+        }
+      ],
+      "gates": [
+        "store-postgres"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "native-rfc3161",
       "claim": "The native feature verifies RFC 3161 tokens against pinned TSA SPKI; the lean WASM build reports RFC 3161 as Unsupported.",
       "class": "target-specific-test",
-      "targets": ["native Rust with rfc3161", "Go cgo with rfc3161", "WASM without rfc3161"],
-      "assumptions": ["TSA SPKI pinned out of band", "no production TSA round trip has been validated"],
-      "sources": [{"file": "core/src/rfc3161.rs", "symbol": "verify_token"}, {"file": "core/src/anchor.rs", "symbol": "AnchorError::Unsupported"}],
-      "proofs": [{"file": "core/src/anchor.rs", "symbol": "rfc3161_no_trusted_tsa_is_an_error_not_a_pass"}, {"file": "scripts/check-staticlib-fresh.sh", "symbol": "the cgo staticlib is OLDER than core source"}],
-      "gates": ["core", "store-postgres", "wasm"],
+      "targets": [
+        "native Rust with rfc3161",
+        "Go cgo with rfc3161",
+        "WASM without rfc3161"
+      ],
+      "assumptions": [
+        "TSA SPKI pinned out of band",
+        "no production TSA round trip has been validated"
+      ],
+      "sources": [
+        {
+          "file": "core/src/rfc3161.rs",
+          "symbol": "verify_token"
+        },
+        {
+          "file": "core/src/anchor.rs",
+          "symbol": "AnchorError::Unsupported"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/src/anchor.rs",
+          "symbol": "rfc3161_no_trusted_tsa_is_an_error_not_a_pass"
+        },
+        {
+          "file": "scripts/check-staticlib-fresh.sh",
+          "symbol": "the cgo staticlib is OLDER than core source"
+        }
+      ],
+      "gates": [
+        "core",
+        "store-postgres",
+        "wasm"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "authority-v3-semantic-body-binding",
       "claim": "A verified v3 authority proof binds the finalized semantic record, including commitments and unknown extensions. Receipt, display sequence, causal parents and signing-key envelope are recorder-authenticated exclusions; the authority does not approve their values.",
       "class": "model-and-tested-implementation",
-      "targets": ["native Rust verifier", "Go server producer and ingest"],
-      "assumptions": ["external authority approves the actual structured subject", "SHA-256 collision resistance", "Ed25519 signatures", "recording key remains trusted", "the enumerated projection is reviewed when the record schema changes"],
-      "sources": [{"file": "core/src/authority.rs", "symbol": "pub fn subject_projection"}, {"file": "server/internal/api/authority_v3.go", "symbol": "finalizeSemanticRecord"}, {"file": "formal/lean/Averin/Preimage.lean", "symbol": "authority_v3_digest_bound"}],
-      "proofs": [{"file": "core/tests/golden.rs", "symbol": "sdk_prepared_v3_record_matches_govder_subject_bytes"}, {"file": "core/tests/adversarial.rs", "symbol": "v3_signed_grant_and_pop_use_satisfy_body_bound_authorization"}, {"file": "core/src/authority.rs", "symbol": "v3_binds_semantic_body_but_not_recorder_envelope"}, {"file": "server/internal/api/authority_v3_test.go", "symbol": "TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal"}, {"file": "server/internal/api/authority_v3_test.go", "symbol": "TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite"}],
-      "gates": ["core", "server", "formal-lean", "formal-refinement"],
+      "targets": [
+        "native Rust verifier",
+        "Go server producer and ingest"
+      ],
+      "assumptions": [
+        "external authority approves the actual structured subject",
+        "SHA-256 collision resistance",
+        "Ed25519 signatures",
+        "recording key remains trusted",
+        "the enumerated projection is reviewed when the record schema changes"
+      ],
+      "sources": [
+        {
+          "file": "core/src/authority.rs",
+          "symbol": "pub fn subject_projection"
+        },
+        {
+          "file": "server/internal/api/authority_v3.go",
+          "symbol": "finalizeSemanticRecord"
+        },
+        {
+          "file": "formal/lean/Averin/Preimage.lean",
+          "symbol": "authority_v3_digest_bound"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/golden.rs",
+          "symbol": "sdk_prepared_v3_record_matches_govder_subject_bytes"
+        },
+        {
+          "file": "core/tests/adversarial.rs",
+          "symbol": "v3_signed_grant_and_pop_use_satisfy_body_bound_authorization"
+        },
+        {
+          "file": "core/src/authority.rs",
+          "symbol": "v3_binds_semantic_body_but_not_recorder_envelope"
+        },
+        {
+          "file": "server/internal/api/authority_v3_test.go",
+          "symbol": "TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal"
+        },
+        {
+          "file": "server/internal/api/authority_v3_test.go",
+          "symbol": "TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite"
+        }
+      ],
+      "gates": [
+        "core",
+        "server",
+        "formal-lean",
+        "formal-refinement"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "historical-v2-authority-is-unbound",
       "claim": "Valid historical v2 authority evidence remains signature-valid and eligible for its independent Tier-B evidence joins, but carries an explicit legacy_unbound status and cannot satisfy body-bound authorization or completeness claims.",
       "class": "backward-compatibility-test",
-      "targets": ["native Rust verifier", "Go server exports"],
-      "assumptions": ["historical v2 evidence bytes are immutable", "the original authority verification key remains pinned"],
-      "sources": [{"file": "core/src/authority.rs", "symbol": "LegacyUnbound"}, {"file": "core/src/verify.rs", "symbol": "body_bound_role_evidence"}],
-      "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "v2_role_evidence_retains_tier_b_joins_but_cannot_satisfy_body_bound_claim"}, {"file": "server/internal/api/server_authority_test.go", "symbol": "legacy_unbound"}],
-      "gates": ["core", "server"],
+      "targets": [
+        "native Rust verifier",
+        "Go server exports"
+      ],
+      "assumptions": [
+        "historical v2 evidence bytes are immutable",
+        "the original authority verification key remains pinned"
+      ],
+      "sources": [
+        {
+          "file": "core/src/authority.rs",
+          "symbol": "LegacyUnbound"
+        },
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "body_bound_role_evidence"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/adversarial.rs",
+          "symbol": "v2_role_evidence_retains_tier_b_joins_but_cannot_satisfy_body_bound_claim"
+        },
+        {
+          "file": "server/internal/api/server_authority_test.go",
+          "symbol": "legacy_unbound"
+        }
+      ],
+      "gates": [
+        "core",
+        "server"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "external-authenticity-pins",
       "claim": "Authentic role and TSA verdicts require independently obtained public keys; self-reported bundle keys do not establish operator authenticity.",
       "class": "deployment-assumption",
-      "targets": ["CLI", "WASM", "Go cgo"],
-      "assumptions": ["operator pins role keys and TSA SPKI out of band"],
-      "sources": [{"file": "core/src/verify.rs", "symbol": "verify_bundle_with"}],
-      "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "out_of_band_key_pinning_governs_authenticity"}],
-      "gates": ["core"],
+      "targets": [
+        "CLI",
+        "WASM",
+        "Go cgo"
+      ],
+      "assumptions": [
+        "operator pins role keys and TSA SPKI out of band"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "verify_bundle_with"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/adversarial.rs",
+          "symbol": "out_of_band_key_pinning_governs_authenticity"
+        }
+      ],
+      "gates": [
+        "core"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "resource-truth-and-project-serialization",
       "claim": "The strongest completeness label remains conditional on truthful resource labeling. Project frontier and checkpoint writes now serialize through a persisted Postgres guard, tested with two pools and separate processes; full multi-instance deployment remains gated on a content store shared by replicas and a per-replica ingest budget; authenticated capability-project binding, scoped nonce claims and bounded recovery are built and run together in the two-process failure matrix (multi-writer-failure-matrix). The finite TLA+ model is not a production proof.",
       "class": "tested-implementation-with-deployment-limit",
-      "targets": ["Go server", "offline verifier"],
-      "assumptions": ["resource honestly labels covered actions", "all project writers use WithProjectWrite", "required unique record_id index remains valid", "shared Postgres database"],
-      "sources": [{"file": "core/src/verify.rs", "symbol": "assumed_truthful"}, {"file": "server/internal/store/postgres.go", "symbol": "lockProject"}, {"file": "server/internal/api/server.go", "symbol": "createCheckpointTx"}],
-      "proofs": [{"file": "server/internal/store/project_tx_test.go", "symbol": "TestPostgresProjectWriteTwoPools"}, {"file": "server/internal/api/project_tx_process_test.go", "symbol": "TestProjectTransactionProcessCuts"}, {"file": "formal/tla/ProjectTx_safe.cfg", "symbol": "NoFrontierFork"}, {"file": "docs/dev/LIMITATIONS.md", "symbol": "single-writer-per-project"}],
-      "gates": ["core", "server", "store-postgres", "formal-tla"],
+      "targets": [
+        "Go server",
+        "offline verifier"
+      ],
+      "assumptions": [
+        "resource honestly labels covered actions",
+        "all project writers use WithProjectWrite",
+        "required unique record_id index remains valid",
+        "shared Postgres database"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "assumed_truthful"
+        },
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "lockProject"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "createCheckpointTx"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/store/project_tx_test.go",
+          "symbol": "TestPostgresProjectWriteTwoPools"
+        },
+        {
+          "file": "server/internal/api/project_tx_process_test.go",
+          "symbol": "TestProjectTransactionProcessCuts"
+        },
+        {
+          "file": "formal/tla/ProjectTx_safe.cfg",
+          "symbol": "NoFrontierFork"
+        },
+        {
+          "file": "docs/dev/LIMITATIONS.md",
+          "symbol": "single-writer-per-project"
+        }
+      ],
+      "gates": [
+        "core",
+        "server",
+        "store-postgres",
+        "formal-tla"
+      ],
       "evidence_run": "37712087870"
     },
     {
       "id": "multi-writer-failure-matrix",
       "claim": "Real averin-server processes on one PostgreSQL schema survive a scripted matrix of single failures with no invariant violation found by a trace monitor: one nonce used by racing requests over two processes, one use identity sent repeatedly, a prospective and a total revoke against a use that already read the revocation state, a use against an uncommitted revoke, kill -9 during an open prepare or finalize transaction, stranded broker_seq recovery while the other process writes and a recovery process killed between its fence and its terminal transaction, a lost COMMIT acknowledgment cut before and after the server committed (finalize, use and revoke, retried on both processes), and concurrent checkpoints. The monitor checks no use after an acknowledged revoke, one admission per nonce, no session fork, a numbered checkpoint chain ending at the committed frontier, no receipt at or after its cutoff, a gapless broker_seq log, and every acknowledged operation durable, and has negative controls. Sampled interleavings of two or three processes on one Postgres 16 schema, not a proof, and not a cluster: it excludes a content store shared by replicas, the per-replica ingest budget, an object-storage witness and Postgres failover, so the single-writer-per-project deployment policy stays.",
       "class": "tested-implementation-with-deployment-limit",
-      "targets": ["Go server", "Postgres mode"],
-      "assumptions": ["PostgreSQL serializes the project guard row", "the TCP proxy sees the simple-query COMMIT of a project write transaction", "all project writers use WithProjectWrite", "the processes share one local content directory"],
-      "sources": [{"file": "server/internal/store/postgres.go", "symbol": "lockProject"}, {"file": "server/internal/api/server.go", "symbol": "handleUsePhase"}, {"file": "server/internal/api/project_tx.go", "symbol": "withProjectWrite"}],
-      "proofs": [{"file": "server/internal/api/multiwriter_test.go", "symbol": "TestMultiWriterFailureMatrix"}, {"file": "server/internal/api/multiwriter_monitor_test.go", "symbol": "TestMultiWriterMonitorNegativeControls"}, {"file": "formal/tla/ProjectTx_operational_safe.cfg", "symbol": "NoRevokedUse"}, {"file": "formal/mutants/multiwriter-guard-lock-skipped.patch", "symbol": "FOR UPDATE"}, {"file": "formal/mutants/multiwriter-use-ignores-revocation.patch", "symbol": "IsRevoked(trustedProject, id)"}],
-      "gates": ["multiwriter", "store-postgres", "formal-fast"]
+      "targets": [
+        "Go server",
+        "Postgres mode"
+      ],
+      "assumptions": [
+        "PostgreSQL serializes the project guard row",
+        "the TCP proxy sees the simple-query COMMIT of a project write transaction",
+        "all project writers use WithProjectWrite",
+        "the processes share one local content directory"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "lockProject"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "handleUsePhase"
+        },
+        {
+          "file": "server/internal/api/project_tx.go",
+          "symbol": "withProjectWrite"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/multiwriter_test.go",
+          "symbol": "TestMultiWriterFailureMatrix"
+        },
+        {
+          "file": "server/internal/api/multiwriter_monitor_test.go",
+          "symbol": "TestMultiWriterMonitorNegativeControls"
+        },
+        {
+          "file": "formal/tla/ProjectTx_operational_safe.cfg",
+          "symbol": "NoRevokedUse"
+        },
+        {
+          "file": "formal/mutants/multiwriter-guard-lock-skipped.patch",
+          "symbol": "FOR UPDATE"
+        },
+        {
+          "file": "formal/mutants/multiwriter-use-ignores-revocation.patch",
+          "symbol": "IsRevoked(trustedProject, id)"
+        }
+      ],
+      "gates": [
+        "multiwriter",
+        "store-postgres",
+        "formal-fast"
+      ]
     },
     {
       "id": "historical-revocation-ordering",
       "claim": "Under the caller-selected db_serialized_v1 policy, historical_authorized_as_of_snapshot is satisfied only when every validated receipt carries a body-bound resource-signed authorization ordinal below its grant's authenticated prospective cutoff and at or below the watermark of an authenticated, fresh v2 revocation snapshot for the project. Current revocation still blocks ok, revoked_uses_blocked, authorized and the capstone under every policy; strict, total, legacy v1, stripped, stale or malformed evidence never yields a historical positive. The model theorem covers the claim kernel and support erasure, not the verifier's extraction passes; the order is Averin's database order, not physical action time.",
       "class": "model-and-tested-implementation",
-      "targets": ["native Rust verifier", "WASM", "Go cgo", "Go server producer", "Postgres mode"],
-      "assumptions": ["honest resource signer signs one ordinal per receipt in its committing transaction", "honest revocation signer signs the boundary time and watermark it read", "PostgreSQL serializes the project guard row", "caller supplies a trustworthy evaluation time and freshness bound"],
-      "sources": [{"file": "core/src/verify/temporal.rs", "symbol": "pub(super) fn classify"}, {"file": "core/src/verify/verdict.rs", "symbol": "historical_authorized_as_of_snapshot"}, {"file": "core/src/verify.rs", "symbol": "fn check_use"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "AllocateAuthorizationOrder"}, {"file": "server/internal/store/temporal_postgres.go", "symbol": "SnapshotBoundary"}, {"file": "server/migrations/0007_temporal_revocation.sql", "symbol": "revocation_events"}],
-      "proofs": [{"file": "core/tests/adversarial.rs", "symbol": "temporal_revocation_decision_table"}, {"file": "core/tests/adversarial.rs", "symbol": "temporal_blocked_use_runs_every_later_check_before_a_historical_positive"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "earlier_snapshot_cannot_flip"}, {"file": "formal/lean/Averin/Verdict.lean", "symbol": "historical_requires_policy"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalCausalRevokeUseSchedulesPostgres"}, {"file": "server/internal/api/temporal_revocation_pg_test.go", "symbol": "TestTemporalSnapshotExportConsistencyPostgres"}, {"file": "server/internal/api/temporal_revocation_test.go", "symbol": "TestTemporalProducerToVerifierHistoricalClaim"}],
-      "gates": ["core", "server", "store-postgres", "formal-lean", "formal-refinement", "formal-mutants-fast"],
+      "targets": [
+        "native Rust verifier",
+        "WASM",
+        "Go cgo",
+        "Go server producer",
+        "Postgres mode"
+      ],
+      "assumptions": [
+        "honest resource signer signs one ordinal per receipt in its committing transaction",
+        "honest revocation signer signs the boundary time and watermark it read",
+        "PostgreSQL serializes the project guard row",
+        "caller supplies a trustworthy evaluation time and freshness bound"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify/temporal.rs",
+          "symbol": "pub(super) fn classify"
+        },
+        {
+          "file": "core/src/verify/verdict.rs",
+          "symbol": "historical_authorized_as_of_snapshot"
+        },
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "fn check_use"
+        },
+        {
+          "file": "server/internal/store/temporal_postgres.go",
+          "symbol": "AllocateAuthorizationOrder"
+        },
+        {
+          "file": "server/internal/store/temporal_postgres.go",
+          "symbol": "SnapshotBoundary"
+        },
+        {
+          "file": "server/migrations/0007_temporal_revocation.sql",
+          "symbol": "revocation_events"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/adversarial.rs",
+          "symbol": "temporal_revocation_decision_table"
+        },
+        {
+          "file": "core/tests/adversarial.rs",
+          "symbol": "temporal_blocked_use_runs_every_later_check_before_a_historical_positive"
+        },
+        {
+          "file": "formal/lean/Averin/Verdict.lean",
+          "symbol": "earlier_snapshot_cannot_flip"
+        },
+        {
+          "file": "formal/lean/Averin/Verdict.lean",
+          "symbol": "historical_requires_policy"
+        },
+        {
+          "file": "server/internal/api/temporal_revocation_pg_test.go",
+          "symbol": "TestTemporalCausalRevokeUseSchedulesPostgres"
+        },
+        {
+          "file": "server/internal/api/temporal_revocation_pg_test.go",
+          "symbol": "TestTemporalSnapshotExportConsistencyPostgres"
+        },
+        {
+          "file": "server/internal/api/temporal_revocation_test.go",
+          "symbol": "TestTemporalProducerToVerifierHistoricalClaim"
+        }
+      ],
+      "gates": [
+        "core",
+        "server",
+        "store-postgres",
+        "formal-lean",
+        "formal-refinement",
+        "formal-mutants-fast"
+      ],
       "evidence_run": "37712087870",
-      "scheduled_gates": ["formal-mutants-full"],
+      "scheduled_gates": [
+        "formal-mutants-full"
+      ],
       "scheduled_evidence_run": "37678805697"
     },
     {
       "id": "seal-implies-verify-shape",
       "claim": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin (SB-29), and checkpoint::seal_checkpoint returns Ok only for a body whose sealed form passes verify_checkpoint_sealed's domain pin and canon_version pin, checked by deterministic property tests and, for the Go server producers that the server test suite reaches (records and checkpoints), by running the real cgo seal in enforce mode across that suite. Not a proof; does not cover nested object shape, unknown checkpoint keys, the checkpoint chain checks of validate_chain, hash or signature validity, or AVERIN_SEAL_SHAPE=shadow, which seals unverifiable records and checkpoints on purpose as a rollback switch.",
       "class": "property-test",
-      "targets": ["native Rust", "Go cgo (same source)"],
-      "assumptions": ["the finite deterministic generator builds the defect classes that matter", "the Go suite reaches every producer kind it lists"],
+      "targets": [
+        "native Rust",
+        "Go cgo (same source)"
+      ],
+      "assumptions": [
+        "the finite deterministic generator builds the defect classes that matter",
+        "the Go suite reaches every producer kind it lists"
+      ],
       "sources": [
-        {"file": "core/src/record.rs", "symbol": "fn check_sealed_shape"},
-        {"file": "core/src/record.rs", "symbol": "pub fn seal_with_mode"},
-        {"file": "core/src/checkpoint.rs", "symbol": "fn check_sealed_checkpoint_pins"},
-        {"file": "core/src/checkpoint.rs", "symbol": "pub fn seal_checkpoint_with_mode"}
+        {
+          "file": "core/src/record.rs",
+          "symbol": "fn check_sealed_shape"
+        },
+        {
+          "file": "core/src/record.rs",
+          "symbol": "pub fn seal_with_mode"
+        },
+        {
+          "file": "core/src/checkpoint.rs",
+          "symbol": "fn check_sealed_checkpoint_pins"
+        },
+        {
+          "file": "core/src/checkpoint.rs",
+          "symbol": "pub fn seal_checkpoint_with_mode"
+        }
       ],
       "proofs": [
-        {"file": "core/tests/seal_shape.rs", "symbol": "fn every_single_defect_keeps_the_implication"},
-        {"file": "server/internal/api/seal_shape_conformance_test.go", "symbol": "func TestMain"},
-        {"file": "formal/mutants/seal-skips-shape-check.patch", "symbol": "validate_record_shape"},
-        {"file": "formal/mutants/seal-skips-domain-pin.patch", "symbol": "RECORD_DOMAIN"},
-        {"file": "core/tests/seal_shape.rs", "symbol": "fn checkpoint_every_single_defect_keeps_the_implication"},
-        {"file": "core/tests/seal_shape.rs", "symbol": "fn only_checked_seal_entry_points_are_public"},
-        {"file": "formal/mutants/seal-skips-checkpoint-domain-pin.patch", "symbol": "check_sealed_checkpoint_pins"}
+        {
+          "file": "core/tests/seal_shape.rs",
+          "symbol": "fn every_single_defect_keeps_the_implication"
+        },
+        {
+          "file": "server/internal/api/seal_shape_conformance_test.go",
+          "symbol": "func TestMain"
+        },
+        {
+          "file": "formal/mutants/seal-skips-shape-check.patch",
+          "symbol": "validate_record_shape"
+        },
+        {
+          "file": "formal/mutants/seal-skips-domain-pin.patch",
+          "symbol": "RECORD_DOMAIN"
+        },
+        {
+          "file": "core/tests/seal_shape.rs",
+          "symbol": "fn checkpoint_every_single_defect_keeps_the_implication"
+        },
+        {
+          "file": "core/tests/seal_shape.rs",
+          "symbol": "fn only_checked_seal_entry_points_are_public"
+        },
+        {
+          "file": "formal/mutants/seal-skips-checkpoint-domain-pin.patch",
+          "symbol": "check_sealed_checkpoint_pins"
+        }
       ],
-      "gates": ["core", "server", "formal-fast"]
+      "gates": [
+        "core",
+        "server",
+        "formal-fast"
+      ]
     },
     {
       "id": "cli-headline-equals-claim-verdict",
@@ -608,6 +1387,78 @@
         "formal-fast"
       ],
       "evidence_run": "38686890625"
+    },
+    {
+      "id": "posture-api-key-fingerprints",
+      "claim": "GET /v2/posture reports, under averin-api-key, a keyed fingerprint of every distinct API key the keyed deployment accepts (HMAC-SHA256 keyed by the token over feir-secret-alignment/v1:averin-api-key, pinned by vectors/secret-fingerprint.v1.json), so the deploy-time verifier can check the key govder, vultrino and the broker send is one averin accepts; an open or unkeyed deployment reports an empty object; a real averin-server started with AVERIN_API_KEYS reports its token's fingerprint; no key is in the body. Not that a sending plane's key equals one of them (the comparison is feir-os evaluate.jq, tested against stub reports, and there is no keyed-averin four-plane run), that keys are strong or rotated, or that a fingerprint is private against a weak key.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "the deployment's build script stamps the rustc version with -ldflags; an unstamped build reports none",
+        "the deploy-time verifier calls the endpoint with a project key"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/posture.go",
+          "symbol": "secretFingerprints"
+        },
+        {
+          "file": "server/internal/auth/auth.go",
+          "symbol": "func (ks *MapStore) Tokens"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/posture_test.go",
+          "symbol": "TestPosture_ReportsFingerprintsOfEveryAcceptedAPIKeyAndNeverTheKey"
+        },
+        {
+          "file": "server/cmd/averin-server/main_test.go",
+          "symbol": "TestPosture_LiveProcessReportsItsStartupGuards"
+        },
+        {
+          "file": "formal/mutants/posture-api-key-fingerprints-first-only.patch",
+          "symbol": "Tokens()[:1]"
+        }
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ]
+    },
+    {
+      "id": "posture-authority-pins",
+      "claim": "GET /v2/posture reports under authority_pins every pinned external authority verifying key as {project, source, pubkey hex} (project empty for the global default), sorted, and an empty list when nothing is pinned, so the deploy-time verifier can compare them with the keys govder derives from its authority seed. Public keys only. Not that govder derives the same keys (feir-os evaluate.jq compares, tested against stub reports), or that any key is strong or rotated.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "the deployment's build script stamps the rustc version with -ldflags; an unstamped build reports none",
+        "the deploy-time verifier calls the endpoint with a project key"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/posture.go",
+          "symbol": "authorityPinsReport"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/posture_test.go",
+          "symbol": "TestPosture_ReportsEveryPinnedAuthorityKey"
+        },
+        {
+          "file": "formal/mutants/posture-authority-pins-global-dropped.patch",
+          "symbol": "pin.project == \"\""
+        }
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ]
     },
     {
       "id": "migrate-hook",
