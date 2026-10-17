@@ -1,0 +1,12 @@
+diff --git a/core/src/segment.rs b/core/src/segment.rs
+index 0cc62af..a013a2b 100644
+--- a/core/src/segment.rs
++++ b/core/src/segment.rs
+@@ -565,7 +565,6 @@ impl ChainState {
+                 CanonValue::Array(self.all_disclosures.clone()),
+             ));
+         }
+-        members.extend(self.latest_bound.iter().cloned());
+         CanonValue::object(members).ok()
+     }
+ 

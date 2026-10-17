@@ -243,16 +243,20 @@ func checkMonthSegments(t *testing.T, f segFixture) {
 		if r.Segment.HeadCount != records {
 			t.Fatalf("%s head count %d != running total %d", s.Month, r.Segment.HeadCount, records)
 		}
-		// August also has a parent before its base, so its record set is only bounded by the chain
-		wantNotEval := 2
+		// every month with a base lists cross_month_uses; August also has a parent before its base, so its record
+		// set is only bounded by the chain
+		wantNotEval := 3
 		if i == 2 {
-			wantNotEval = 3
+			wantNotEval = 4
 		}
 		if i > 0 && (r.Broker != "assumed" || len(r.Segment.NotEvaluated) != wantNotEval) {
 			t.Fatalf("%s must report the grant log as not evaluated: broker_trust=%s %v", s.Month, r.Broker, r.Segment.NotEvaluated)
 		}
 		if i == 2 && r.Segment.NotEvaluated[2] != "record_completeness" {
 			t.Fatalf("August must not claim record completeness: %v", r.Segment.NotEvaluated)
+		}
+		if i > 0 && r.Segment.NotEvaluated[len(r.Segment.NotEvaluated)-1] != "cross_month_uses" {
+			t.Fatalf("%s must not claim the cross-month rules: %v", s.Month, r.Segment.NotEvaluated)
 		}
 		if i == 2 {
 			if r.Segment.EarlierRefs != 1 {

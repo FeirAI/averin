@@ -1,15 +1,15 @@
 diff --git a/core/src/segment.rs b/core/src/segment.rs
-index 370426f..cf335c8 100644
+index 0cc62af..00ab9b8 100644
 --- a/core/src/segment.rs
 +++ b/core/src/segment.rs
-@@ -430,7 +430,9 @@ impl ChainState {
-                 .iter()
-                 .filter_map(|r| str_of(r, "record_id").map(String::from)),
-         );
--        self.all_records.extend(records.iter().cloned());
-+        if self.months == 0 {
-+            self.all_records.extend(records.iter().cloned());
-+        }
-         for c in array_of(bundle, "checkpoints") {
-             let key = str_of(c, "checkpoint_hash").map(String::from);
-             if key
+@@ -520,7 +520,9 @@ impl ChainState {
+                 self.all_checkpoints = Vec::new();
+                 self.all_disclosures = Vec::new();
+             } else {
+-                self.all_records.extend(records.iter().cloned());
++                if self.months == 0 {
++                    self.all_records.extend(records.iter().cloned());
++                }
+                 self.all_checkpoints.extend(new_cps);
+                 self.all_disclosures.extend(disclosures.iter().cloned());
+             }

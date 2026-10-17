@@ -726,7 +726,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a0b2a2f0fe49782416bf57ebf8aebc7e461c890eda2bdd87060d8d0ba271419a"
+          "sha256": "b6b5f2b2a2b6e6c433baaadaff0b15e3e2604ec7101ee02c53ed9d939a3f75e1"
         }
       ],
       "mutants": [
@@ -761,7 +761,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a0b2a2f0fe49782416bf57ebf8aebc7e461c890eda2bdd87060d8d0ba271419a"
+          "sha256": "b6b5f2b2a2b6e6c433baaadaff0b15e3e2604ec7101ee02c53ed9d939a3f75e1"
         }
       ],
       "mutants": [
@@ -800,7 +800,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a0b2a2f0fe49782416bf57ebf8aebc7e461c890eda2bdd87060d8d0ba271419a"
+          "sha256": "b6b5f2b2a2b6e6c433baaadaff0b15e3e2604ec7101ee02c53ed9d939a3f75e1"
         }
       ],
       "mutants": [
@@ -1340,7 +1340,7 @@
         {
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "verify_bundle_cmd",
-          "sha256": "1bdb5cd1511f28170b7d4f9dcc80bccc604b2d128f4704352b2103c8c1afb94a"
+          "sha256": "18c6abfd0cab93181a7694b3a3b714f824a91cbcb9f531a10b4799a250df6fe4"
         },
         {
           "path": "core/src/bin/averin_verify.rs",
@@ -1350,7 +1350,7 @@
         {
           "path": "verifier/claim-verdict.js",
           "symbol": "*",
-          "sha256": "fa7771a563af0cc22eae1dc4f813451048472bf877e2ce992d46e4cb591e830b"
+          "sha256": "35cc4b13e296122994e074002bd955c373db8694329139b413afbacabe78272d"
         },
         {
           "path": "core/src/verify/headline.rs",
@@ -1483,7 +1483,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a0b2a2f0fe49782416bf57ebf8aebc7e461c890eda2bdd87060d8d0ba271419a"
+          "sha256": "b6b5f2b2a2b6e6c433baaadaff0b15e3e2604ec7101ee02c53ed9d939a3f75e1"
         }
       ],
       "mutants": [
@@ -1905,7 +1905,7 @@
     {
       "id": "month-segment-verifier",
       "$comment": "legacy register: month-segment-verification",
-      "statement": "The verifier checks a month segment on its own (carried base checkpoint verified like any checkpoint, chain from the base, checkpoints inside the stated UTC month and the base before it, latest frontier equal to the segment's heads including base heads no record references, record_count equal to the base's count plus the records carried, no carried record a member of the base frontier, a caller's base pin equal to the stated base) and keeps the whole-history rules for a bundle with no base; split_bundle cuts a whole-history bundle by month and refuses months that go backwards and records no checkpoint commits; ChainState requires each month to start from the previous head and every cross-month use or outcome reference to exist in an earlier month; a month with parents before its base lists their hashes and reports record_completeness as not evaluated, and ChainState refuses a parent that names no record in this or any earlier month; a month with an unpinned base or with record_completeness not evaluated gets the headline INSUFFICIENT (exit 1) from the CLI and the browser and web verifiers; a month with a use or outcome whose counterpart sits in an earlier month reports authorized as insufficient; ChainState requires an outcome to bind the earlier use_intent it names (grant and intent_hash); ChainState refuses a record (by content hash or by record id) that two months both carry; and averin-verify chain puts the months back together (ChainState::whole_bundle), verifies that as one whole-history bundle under the same options, and returns its claim word for the requested claim (FAIL when the chain, a month or the whole does not verify), so a use with no matching grant or a second use of a single-use grant that spans months reaches the word exactly as in a whole-history check, and verifying the months in sequence gives the same word as verifying the concatenated history (differential test, default claim and authorized); when the concatenation is over the verifier's byte cap the cross-month rules are not run and the word is capped at INSUFFICIENT, and it names the claim.",
+      "statement": "The verifier checks a month segment on its own (carried base checkpoint verified like any checkpoint, chain from the base, checkpoints inside the stated UTC month and the base before it, latest frontier equal to the segment's heads including base heads no record references, record_count equal to the base's count plus the records carried, no carried record a member of the base frontier, a caller's base pin equal to the stated base) and keeps the whole-history rules for a bundle with no base; split_bundle cuts a whole-history bundle by month and refuses months that go backwards and records no checkpoint commits; ChainState requires each month to start from the previous head and every cross-month use or outcome reference to exist in an earlier month; a month with parents before its base lists their hashes and reports record_completeness as not evaluated, and ChainState refuses a parent that names no record in this or any earlier month; a month with a base lists cross_month_uses as not evaluated, and a month with a base, an unpinned base or record_completeness not evaluated gets the headline INSUFFICIENT (exit 1) from the CLI and the browser and web verifiers, so only a first month can pass alone; a month blocks a use of an earlier month's grant that its own signed revocation list names as revoked; a month with a use or outcome whose counterpart sits in an earlier month reports authorized as insufficient; ChainState requires an outcome to bind the earlier use_intent it names (grant and intent_hash); ChainState refuses a record (by content hash or by record id) that two months both carry; and averin-verify chain puts the months back together (ChainState::whole_bundle), verifies that as one whole-history bundle under the same options (the latest month's revocation list and deployment attestation, when it carries them, and every month's disclosures are part of it, and split_bundle copies the two documents into the last month), and returns its claim word for the requested claim (FAIL when the chain, a month or the whole does not verify), so a use with no matching grant or a second use of a single-use grant that spans months reaches the word exactly as in a whole-history check, and verifying the months in sequence gives the same word as verifying the concatenated history (differential test, default claim and authorized); when the concatenation is over the verifier's byte cap (tracked as the chain absorbs each month, which then stops holding records) the cross-month rules are not run and the word is capped at INSUFFICIENT, the CLI does not say the history was verified as one bundle, and it names the claim.",
       "method": "test",
       "artifacts": [
         "core/src/segment.rs",
@@ -1922,7 +1922,7 @@
         "core",
         "formal-fast"
       ],
-      "detector": "cargo test -p averin-decision-core --features rfc3161 --test segments --test segments_cross_month && cargo test -p averin-decision-core --features rfc3161 --test adversarial a_month_with_an_unresolved_cross_month_outcome",
+      "detector": "cargo test -p averin-decision-core --features rfc3161 --test segments --test segments_cross_month && cargo test -p averin-decision-core --features rfc3161 --test adversarial a_month_with_an_unresolved_cross_month_outcome && cargo test -p averin-decision-core --bin averin-verify chain_notes",
       "covers": [
         {
           "path": "core/src/verify.rs",
@@ -1937,7 +1937,7 @@
         {
           "path": "core/src/segment.rs",
           "symbol": "absorb",
-          "sha256": "01c04b5a29990d48862d1f79c0f6138c7bc8300704b9cc4457b347607cce0311"
+          "sha256": "06a398e5beb9bc7e21b0992852910486c4b865b85814260687c74960b2fe1185"
         },
         {
           "path": "core/src/dag.rs",
@@ -1947,7 +1947,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "segment_not_evaluated",
-          "sha256": "9ed79b1a5985e64dd69494ea222740e54fa8f11811615cb04dc1d13547489edb"
+          "sha256": "f7430650a6d587472c922b431ebfbbed7ec498ae2f105f493464112f78c196d7"
         },
         {
           "path": "core/src/verify/headline.rs",
@@ -1957,12 +1957,12 @@
         {
           "path": "core/src/verify/headline.rs",
           "symbol": "segment_residual",
-          "sha256": "72d903a05978d4e56344bc1cdbe7ddbb32f1e367cf14a1e2ba174fcab2b0a364"
+          "sha256": "e8807b2e54062d6386566334e6433eaaf149f3d7890937807172f3ed9717d05e"
         },
         {
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "chain_cmd",
-          "sha256": "fcbed7e89504c39edd69698f30df1b21db24a8805f3722ceac6d7acea3f0af58"
+          "sha256": "fb3e2a3d49eca75fd39f3155d3ba1a6182e9425e8022c7a8643e0a6790703c85"
         },
         {
           "path": "core/src/verify.rs",
@@ -1972,12 +1972,27 @@
         {
           "path": "core/src/segment.rs",
           "symbol": "finish_with",
-          "sha256": "d12a220be08d3719800dce4758ae8133d16063fe33bb5dca3288a5cb0e1d942a"
+          "sha256": "1e1100a8e3c30fe0456b31ec107d5b9178c1bc687c46ebfccdfc20db5da6815b"
         },
         {
           "path": "core/src/segment.rs",
           "symbol": "whole_bundle",
-          "sha256": "784c061fb5edd8ae4e1f13e7e65b89859cd68290313b3fa7a8e9923d05993cf6"
+          "sha256": "b6b254f64f68f4458b7d648eaf99d5a72e9c44b2065604604bf5f54cb4a2b901"
+        },
+        {
+          "path": "core/src/segment.rs",
+          "symbol": "split_bundle",
+          "sha256": "e0f8fdfcf650dbfd08a1560a34c5a2f81b5e6083f95ba8576b4bbc38eb55ff2e"
+        },
+        {
+          "path": "core/src/bin/averin_verify.rs",
+          "symbol": "chain_notes",
+          "sha256": "0a647b6b75d6e3840008317dac0250e4e859867f59f9fb87249521e4c11016f9"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "verify_bundle_with",
+          "sha256": "b6b5f2b2a2b6e6c433baaadaff0b15e3e2604ec7101ee02c53ed9d939a3f75e1"
         }
       ],
       "mutants": [
@@ -1999,10 +2014,18 @@
         "surface-chain-whole-verdict-ignored",
         "surface-chain-over-cap-not-capped",
         "surface-chain-broken-chain-outvoted",
-        "surface-chain-whole-drops-later-months"
+        "surface-chain-whole-drops-later-months",
+        "surface-chain-whole-drops-bound-documents",
+        "surface-chain-whole-drops-disclosures",
+        "surface-split-last-month-drops-revocation",
+        "surface-segment-revoked-earlier-grant-use-unblocked",
+        "surface-segment-cross-month-uses-not-listed",
+        "surface-segment-residual-ignores-cross-month-uses",
+        "surface-chain-size-not-tracked",
+        "surface-chain-over-cap-claims-whole-verified"
       ],
-      "does_not_establish": "That a single month's record set is complete when it has parents before its base: a record dropped from it can be replaced by an earlier month's record without changing the count, the heads or a signature, so the month reports record_completeness as not evaluated and only the chain over every month rules the swap out. That earlier months are intact: a single month proves itself and its link, and only the chain over every month (or a pin from a month already verified) says more. The grant-log transparency chain, federation heads and the use-to-grant match inside one month: a month reports the first two as not evaluated and lists the cross-month uses and outcomes unresolved; across months the chain relies on the concatenated history verified as one bundle, which has no revocation list or deployment attestation (month files do not carry them), holds every month in memory, and is not run when it is over the verifier's byte cap (the word is then capped at INSUFFICIENT). That a record named as unresolved was not substituted by an unrelated earlier record with the same id: existence is checked by record id. That the exclusion of a use whose grant is absent from the bundle is limited to grants that are not in the bundle: no test builds a grant that is in the segment but fails to index. That the tests' bundles come from a server: they are built with the core seal functions (the server claim covers that), and the segment rules that read a deployment attestation or revocation list are exercised only by the server tests. That the browser verifier and web app apply the headline cap in a browser: it is tested as pure functions (bun and vitest), the same rule as the Rust headline, and the CLI word and exit code are tested end to end.",
-      "evidence_run": "38733044075"
+      "does_not_establish": "That a single month's record set is complete when it has parents before its base: a record dropped from it can be replaced by an earlier month's record without changing the count, the heads or a signature, so the month reports record_completeness as not evaluated and only the chain over every month rules the swap out. That earlier months are intact: a single month proves itself and its link, and only the chain over every month (or a pin from a month already verified) says more. The grant-log transparency chain, federation heads and the use-to-grant match inside one month: a month reports the first two as not evaluated and lists the cross-month uses and outcomes unresolved; across months the chain relies on the concatenated history verified as one bundle, which carries a revocation list and deployment attestation only when the latest month has them (a server re-issues them for every month, split copies them into the last month only), holds every month in memory, and is not run when it is over the verifier's byte cap (the word is then capped at INSUFFICIENT: a history over the cap never gets PASS from the chain, and a cross-month double use in it is not reported as FAIL, because the cross-month state is not carried month by month). That a month alone rules out a second use of a single-use grant, a replayed nonce or ledger commitment, a ghost grant or a revocation across months: it does not, it lists cross_month_uses as not evaluated and is capped below PASS. That a record named as unresolved was not substituted by an unrelated earlier record with the same id: existence is checked by record id. That the exclusion of a use whose grant is absent from the bundle is limited to grants that are not in the bundle: no test builds a grant that is in the segment but fails to index. That the tests' bundles come from a server: they are built with the core seal functions (the server claim covers that), and the segment rules that read a deployment attestation or revocation list are exercised only by the server tests. That the browser verifier and web app apply the headline cap in a browser: it is tested as pure functions (bun and vitest), the same rule as the Rust headline, and the CLI word and exit code are tested end to end.",
+      "evidence_run": "38980642612"
     },
     {
       "id": "month-segments-server",
