@@ -2,6 +2,7 @@
 // does natively: the same report, the link pin honored, and a dropped record or a wrong base rejected.
 import { test, expect } from "bun:test";
 import { initAverin } from "../averin.js";
+import { segmentResidual } from "../claim-verdict.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -43,7 +44,17 @@ test("the month that points before its base lists the earlier parent and reports
   expect(r.segment.earlier_parent_refs).toBe(1);
   expect(r.segment.earlier_parent_ref_hashes.length).toBe(1);
   // its record set is only bounded by the chain, and the month says so
-  expect(r.segment.not_evaluated).toEqual(["broker_grant_log", "federation_heads", "record_completeness"]);
+  expect(r.segment.not_evaluated).toEqual(["broker_grant_log", "federation_heads", "record_completeness", "cross_month_uses"]);
   const july = v.verifyBundle(month("2026-07"));
-  expect(july.segment.not_evaluated).toEqual(["broker_grant_log", "federation_heads"]);
+  expect(july.segment.not_evaluated).toEqual(["broker_grant_log", "federation_heads", "cross_month_uses"]);
+});
+
+test("a month with a base never gets a pass headline in the browser verifier, the first month can", async () => {
+  const v = await averin();
+  const june = v.verifyBundleWith(month("2026-06"), JSON.stringify({ segment_base_checkpoint_hash: "genesis" }));
+  expect(june.segment.not_evaluated).toEqual([]);
+  expect(segmentResidual(june)).toBe(false);
+  const july = v.verifyBundleWith(month("2026-07"), JSON.stringify({ segment_base_checkpoint_hash: june.segment.head_checkpoint_hash }));
+  expect(july.segment.link).toBe("base_pinned");
+  expect(segmentResidual(july)).toBe(true);
 });
