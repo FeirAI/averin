@@ -133,3 +133,23 @@ func TestParseRegion(t *testing.T) {
 		}
 	}
 }
+
+// Approver binding (AVE-10) is reported with its cutover, so a deploy-time verifier sees an explicit
+// AVERIN_REQUIRE_APPROVER_BINDING=0 and a far-future AVERIN_APPROVER_BINDING_SINCE.
+func TestPosture_ReportsApproverBinding(t *testing.T) {
+	_, b := postureReq(newServer(t).WithRequireApproverBinding(true, "").Routes(), "p1", "")
+	if b["require_approver_binding"] != true {
+		t.Fatalf("require_approver_binding = %v, want true", b["require_approver_binding"])
+	}
+	if v, ok := b["approver_binding_since"]; !ok || v != nil {
+		t.Fatalf("approver_binding_since = %v (present=%v), want null", v, ok)
+	}
+	_, b = postureReq(newServer(t).WithRequireApproverBinding(true, "2026-10-01T00:00:00.000Z").Routes(), "p1", "")
+	if b["approver_binding_since"] != "2026-10-01T00:00:00.000Z" {
+		t.Fatalf("approver_binding_since = %v", b["approver_binding_since"])
+	}
+	_, b = postureReq(newServer(t).WithRequireApproverBinding(false, "").Routes(), "p1", "")
+	if b["require_approver_binding"] != false {
+		t.Fatalf("require_approver_binding = %v, want false", b["require_approver_binding"])
+	}
+}

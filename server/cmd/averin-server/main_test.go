@@ -304,12 +304,23 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 	if b["dev_mode"] != true {
 		t.Fatalf("this process was started with AVERIN_DEV_MODE=1 and must report dev_mode=true: %v", b)
 	}
+	// Dev mode turns approver binding off by default; the live process must report what it runs with.
+	if v, ok := b["require_approver_binding"]; !ok || v != false {
+		t.Fatalf("dev mode defaults approver binding off and must report require_approver_binding=false: %v", b)
+	}
+	if v, ok := b["approver_binding_since"]; !ok || v != nil {
+		t.Fatalf("no cutover set, so approver_binding_since must be present and null: %v", b)
+	}
 	if b["api_keys_configured"] != true || b["signing_seed_is_dev"] != false || b["durable_store"] != false || b["require_prod_secrets"] != false {
 		t.Fatalf("fresh seed, keyed, in-memory: %v", b)
 	}
 	build := b["build"].(map[string]any)
 	if build["core_rustc"] != "rustc-test-stamp" || build["go_version"] == "" {
 		t.Fatalf("build stamps did not reach the report: %v", build)
+	}
+	b = run(t, strings.Repeat("a1", 32), "AVERIN_REQUIRE_APPROVER_BINDING=1", "AVERIN_APPROVER_BINDING_SINCE=2026-10-01T00:00:00.000Z")
+	if b["require_approver_binding"] != true || b["approver_binding_since"] != "2026-10-01T00:00:00.000Z" {
+		t.Fatalf("explicit approver binding and cutover must be reported: %v", b)
 	}
 	b = run(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
 	if b["signing_seed_is_dev"] != true {

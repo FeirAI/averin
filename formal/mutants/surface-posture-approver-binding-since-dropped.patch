@@ -1,0 +1,11 @@
+diff --git a/server/internal/api/posture.go b/server/internal/api/posture.go
+--- a/server/internal/api/posture.go
++++ b/server/internal/api/posture.go
+@@ -123,6 +123,6 @@
+ 		"runtime_role_verified":        s.posture.RuntimeRoleVerified,
+ 		"dev_mode":                     s.posture.DevMode,
+ 		"require_approver_binding":     s.requireApproverBinding,
+-		"approver_binding_since":       s.approverBindingSinceReport(),
++		"approver_binding_since":       nil,
+ 	})
+ }

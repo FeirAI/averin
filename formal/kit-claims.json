@@ -508,6 +508,14 @@
     "surface-posture-dev-mode-not-reported": {
       "tier": "fast",
       "claim": "posture-report-live"
+    },
+    "surface-posture-approver-binding-hardcoded": {
+      "tier": "fast",
+      "claim": "posture-report-live"
+    },
+    "surface-posture-approver-binding-since-dropped": {
+      "tier": "fast",
+      "claim": "posture-report-live"
     }
   },
   "claims": [
@@ -1451,7 +1459,7 @@
     {
       "id": "posture-report-live",
       "$comment": "legacy register: posture-report-live",
-      "statement": "GET /v2/posture sits under the ordinary project API-key auth (401 without the project's bearer on a keyed deployment) and reports from the running process whether the app API is keyed (an explicit open store counts as not keyed), whether the Postgres store is wired, whether the signing seed is the committed dev seed, whether AVERIN_REQUIRE_PROD_SECRETS is on, the two authority-pin switches, and the Go toolchain, git commit and (when the build script stamped it) rustc of the linked decision core. A real averin-server process, built and started in the test, reports the keyed in-memory deployment and reports the dev seed as such. It also reports whether AVERIN_DEV_MODE selected development mode (dev_mode, true only for a process started with that variable), the region label (AVERIN_REGION, validated; an invalid value stops startup), the Postgres schema version the binary understands (0 with in-memory storage) and whether startup verified the runtime database role. Booleans, a short region label, the schema version (an integer) and build identifiers only.",
+      "statement": "GET /v2/posture sits under the ordinary project API-key auth (401 without the project's bearer on a keyed deployment) and reports from the running process whether the app API is keyed (an explicit open store counts as not keyed), whether the Postgres store is wired, whether the signing seed is the committed dev seed, whether AVERIN_REQUIRE_PROD_SECRETS is on, the two authority-pin switches, and the Go toolchain, git commit and (when the build script stamped it) rustc of the linked decision core. A real averin-server process, built and started in the test, reports the keyed in-memory deployment and reports the dev seed as such. It also reports whether AVERIN_DEV_MODE selected development mode (dev_mode, true only for a process started with that variable), whether approver binding is required and its cutover instant (require_approver_binding, and approver_binding_since as the canonical string or null), the region label (AVERIN_REGION, validated; an invalid value stops startup), the Postgres schema version the binary understands (0 with in-memory storage) and whether startup verified the runtime database role. Booleans, a short region label, the schema version (an integer) and build identifiers only.",
       "method": "test",
       "artifacts": [
         "server/internal/api/posture.go",
@@ -1468,7 +1476,7 @@
         {
           "path": "server/internal/api/posture.go",
           "symbol": "handlePosture",
-          "sha256": "db3b81c0a05b6600db449a8ed1cea307635ae7760f54a6dd1fb9d148471683e5"
+          "sha256": "66290527027fa5169557a7ced28629c3b790152afbe6e314992e24410c454122"
         },
         {
           "path": "server/internal/api/posture.go",
@@ -1501,7 +1509,9 @@
         "surface-posture-region-env-ignored",
         "surface-posture-schema-version-always-reported",
         "surface-region-invalid-accepted",
-        "surface-posture-dev-mode-not-reported"
+        "surface-posture-dev-mode-not-reported",
+        "surface-posture-approver-binding-hardcoded",
+        "surface-posture-approver-binding-since-dropped"
       ],
       "does_not_establish": "The live-process test cannot start with AVERIN_REQUIRE_PROD_SECRETS=1 (that gate needs a Postgres URL), so the wiring of that flag and of durable_store=true is covered only by the handler test with a hand-built Posture, not by a running binary. The rustc stamp is whatever the build script passed with -ldflags; the Rust staticlib itself carries no version, so an unstamped build reports none and the verifier must treat that as unknown. The report says what was configured, not that the database is reachable or the keys are strong. On an unauthenticated deployment the route answers anyone (and says api_keys_configured is false). The vcs revision is present only for a binary built inside a git checkout. The live-process test runs in-memory, so runtime_role_verified=true and a non-zero schema_version are checked only by the handler test with a hand-built Posture; a Postgres-backed process reports them from the same code path but is not started here.",
       "evidence_run": "38951172449"

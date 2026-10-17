@@ -90,6 +90,16 @@ func buildInfoPosture(coreRustc string) map[string]any {
 	return out
 }
 
+// approverBindingSinceReport is the approver-binding cutover as GET /v2/posture reports it: the
+// canonical string, or null when none is set. A cutover in the far future switches the policy off as
+// surely as require_approver_binding=false does, so the verifier needs to see both.
+func (s *Server) approverBindingSinceReport() any {
+	if s.approverBindingSince == "" {
+		return nil
+	}
+	return s.approverBindingSince
+}
+
 // handlePosture is GET /v2/posture: a read-only report of the guards this process runs with, for
 // the deploy-time verifier. It sits under the ordinary /v2 project API-key auth (the route needs
 // ?project=<p> and that project's bearer), so on a keyed deployment only a key holder reads it; on an
@@ -112,5 +122,7 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
 		"schema_version":               s.posture.SchemaVersion,
 		"runtime_role_verified":        s.posture.RuntimeRoleVerified,
 		"dev_mode":                     s.posture.DevMode,
+		"require_approver_binding":     s.requireApproverBinding,
+		"approver_binding_since":       s.approverBindingSinceReport(),
 	})
 }
