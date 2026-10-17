@@ -54,7 +54,8 @@ What it does not do:
   one bundle, so the match, scope, expiry, key binding and single use are decided there, as in a whole-history export.
   That needs the whole history in memory and under the 256 MiB verifier cap; over it the chain word is capped at
   INSUFFICIENT and says the cross-month rules were not run (so a history over the cap never gets PASS from the chain,
-  and a cross-month double use in it is not reported as FAIL; carrying that state month by month is not built). The
+  and a cross-month double use in it is not reported as FAIL; carrying that state month by month is not built; accepted as a written limit and tracked in
+  FeirAI/feir-ops#9). The
   concatenation carries the latest month's `revocation_list` and `deployment_attestation` (a server re-issues them for
   every month; `averin-verify split` copies them into the last month) and every month's disclosures.
 - **A month with a base never passes alone.** Its headline is capped at INSUFFICIENT (exit 1) in the CLI, the browser
