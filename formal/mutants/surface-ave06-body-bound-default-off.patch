@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-server/config.go b/server/cmd/averin-server/config.go
+index 339005a..d39b7a9 100644
+--- a/server/cmd/averin-server/config.go
++++ b/server/cmd/averin-server/config.go
+@@ -46,7 +46,7 @@ func requireProdSecretsFromEnv(raw string, devMode bool) (bool, error) {
+ // An explicit value always wins, so a migration can still opt out with 0 (logged loudly by the caller).
+ func requireBodyBoundFromEnv(raw string, devMode bool) (bool, error) {
+ 	if strings.TrimSpace(raw) == "" {
+-		return !devMode, nil
++		return false, nil
+ 	}
+ 	return boolFromEnv("AVERIN_REQUIRE_BODY_BOUND_AUTHORITY", raw)
+ }

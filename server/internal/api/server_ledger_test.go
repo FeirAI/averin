@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"testing"
 
@@ -19,7 +20,7 @@ func TestWithResourceUsesProjectStoreLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithResource(resourceCore, "orders-db").Routes()
+	h := api.New(mustCore(t), base, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(resourceCore, "orders-db").Routes()
 	ak := grantAgentKey()
 	grantID, capability := mkGrant(t, h, ak, "idem-ledger")
 	claim, err := resourceshim.NewNonceClaim("p1", "orders-db", "nonce-1")

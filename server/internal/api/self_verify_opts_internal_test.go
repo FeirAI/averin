@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"testing"
 
 	"github.com/feirai/averin/server/internal/core"
@@ -34,7 +35,7 @@ func TestSelfVerifyOptsPinsMeaningfulRolesNotAttestation(t *testing.T) {
 	att, rev, brokerIssue, approver := gen(), gen(), gen(), gen()
 
 	// Fully-configured FEDERATED server: broker_id set -> the broker key pins under federated_broker_keys.
-	s := New(c, store.NewMem(), "k0").
+	s := New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssue).
 		WithBrokerID("broker-A").
 		WithResource(rc, "orders-db").
@@ -73,7 +74,7 @@ func TestSelfVerifyOptsPinsMeaningfulRolesNotAttestation(t *testing.T) {
 	}
 
 	// Non-federated server: the broker key pins under the flat broker_authority_keys, no federation map.
-	s2 := New(c, store.NewMem(), "k0").WithBroker(brokerIssue).WithResource(rc, "orders-db")
+	s2 := New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssue).WithResource(rc, "orders-db")
 	var opts2 map[string]any
 	if err := json.Unmarshal([]byte(s2.selfVerifyOpts()), &opts2); err != nil {
 		t.Fatal(err)
@@ -96,7 +97,7 @@ func TestSelfVerifyOptsIncludesCompleteExternalAttestationPair(t *testing.T) {
 		t.Fatal(err)
 	}
 	spki := []byte{0x30, 0x03, 0x01, 0x02, 0x03}
-	s := New(c, store.NewMem(), "k0").WithExternalVerificationRoots(
+	s := New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithExternalVerificationRoots(
 		[]ed25519.PublicKey{att.Public().(ed25519.PublicKey)},
 		[][]byte{spki},
 	)
@@ -109,7 +110,7 @@ func TestSelfVerifyOptsIncludesCompleteExternalAttestationPair(t *testing.T) {
 	}
 
 	// A partial pair must never turn evaluation on.
-	partial := New(c, store.NewMem(), "k0").WithExternalVerificationRoots(
+	partial := New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithExternalVerificationRoots(
 		[]ed25519.PublicKey{att.Public().(ed25519.PublicKey)}, nil,
 	)
 	opts = nil
@@ -131,7 +132,7 @@ func TestSelfVerifyOptsIncludesCompleteExternalTaxonomyTuple(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := "sha256:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-	s := New(c, store.NewMem(), "k0").WithExternalTaxonomy(
+	s := New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithExternalTaxonomy(
 		[]byte(`{"taxonomy_version":7}`), []ed25519.PublicKey{pub}, digest, 7,
 	)
 	var opts map[string]any

@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ func TestDenialBudgetBoundsVaryingScopeSweep(t *testing.T) {
 		if err != nil {
 			t.Fatalf("core: %v", err)
 		}
-		s := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithDeniedGrantLog()
+		s := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithDeniedGrantLog()
 		if withBudget {
 			// burst 2, ~zero refill over the test's sub-second runtime; global generous so the per-project
 			// bucket is the binding limit.

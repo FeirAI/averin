@@ -1,0 +1,14 @@
+diff --git a/server/cmd/averin-server/config.go b/server/cmd/averin-server/config.go
+index 339005a..d877ee7 100644
+--- a/server/cmd/averin-server/config.go
++++ b/server/cmd/averin-server/config.go
+@@ -83,8 +83,7 @@ func parseBudget(name, raw string) (*budgetJSON, error) {
+ 		return &budgetJSON{}, nil
+ 	}
+ 	dec := json.NewDecoder(bytes.NewReader([]byte(t)))
+-	dec.DisallowUnknownFields()
+-	var b budgetJSON
++		var b budgetJSON
+ 	if err := dec.Decode(&b); err != nil {
+ 		return nil, fmt.Errorf("%s must be 0, 1 or a JSON object of per_project_per_sec, per_project_burst, global_per_sec, global_burst, max_projects: %v", name, err)
+ 	}

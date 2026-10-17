@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"net/url"
 	"os"
@@ -101,7 +102,7 @@ func TestBrokerSeqVoidPostgres(t *testing.T) {
 	ak := grantAgentKey()
 	t.Run("unique index present", func(t *testing.T) {
 		pg, _ := newVoidTestPostgres(t)
-		h := api.New(mustCore(t), pg, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+		h := api.New(mustCore(t), pg, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 		reserveGrantSeq(t, pg, "idem-pg1")
 		mkGrant(t, h, ak, "idem-pg2")
 		if code, resp := doRecovery(t, h, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated {
@@ -124,7 +125,7 @@ func TestBrokerSeqVoidPostgres(t *testing.T) {
 		if _, err := admin.Exec(ctx, `CREATE INDEX records_project_record_id_idx ON records (project_id, md5(json::jsonb ->> 'record_id'))`); err != nil {
 			t.Fatal(err)
 		}
-		h := api.New(mustCore(t), pg, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+		h := api.New(mustCore(t), pg, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 		if code, resp := doRecovery(t, h, "GET", "/v2/broker-seq/void?project=p1&broker_seq=1", ""); code != http.StatusOK || !strings.Contains(resp, `"record_id_unique_enforced":false`) || !strings.Contains(resp, `"fence":null`) {
 			t.Fatalf("read-only preflight must diagnose unsafe index (%d): %s", code, resp)
 		}
@@ -184,8 +185,8 @@ func exerciseBrokerSeqVoidConcurrentGrantPostgres(t *testing.T, abort bool) {
 		}
 	}()
 	sharedContent := content.NewMemStore()
-	grantHandler := api.New(mustCore(t), hold, "k0").WithContent(sharedContent).WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).Routes()
-	voidHandler := api.New(mustCore(t), other, "k0").WithContent(sharedContent).WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
+	grantHandler := api.New(mustCore(t), hold, "k0").WithAuth(auth.NewOpenStore()).WithContent(sharedContent).WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).Routes()
+	voidHandler := api.New(mustCore(t), other, "k0").WithAuth(auth.NewOpenStore()).WithContent(sharedContent).WithBroker(brokerIssuingKey()).WithRevocation(revocationKey()).WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore()).Routes()
 	ak := grantAgentKey()
 	type result struct {
 		code int

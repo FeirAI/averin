@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -29,7 +30,7 @@ func newBrokerResourceServer(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatalf("resource core: %v", err)
 	}
-	return api.New(c, store.NewMem(), "k0").
+	return api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
 		Routes()

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"sync"
@@ -36,7 +37,7 @@ func TestProjectTransactionsAcrossReplicas(t *testing.T) {
 	}
 	sharedContent := content.NewMemStore()
 	newReplica := func(st store.Store) http.Handler {
-		return api.New(mustCore(t), st, "k0").WithContent(sharedContent).WithBroker(brokerIssuingKey()).WithCosigPolicy(1, []ed25519.PublicKey{approver.Public().(ed25519.PublicKey)}).WithResource(resourceCore, "orders-db").WithRevocation(revocationKey()).Routes()
+		return api.New(mustCore(t), st, "k0").WithAuth(auth.NewOpenStore()).WithContent(sharedContent).WithBroker(brokerIssuingKey()).WithCosigPolicy(1, []ed25519.PublicKey{approver.Public().(ed25519.PublicKey)}).WithResource(resourceCore, "orders-db").WithRevocation(revocationKey()).Routes()
 	}
 	h1, h2 := newReplica(first), newReplica(second)
 	ak := grantAgentKey()

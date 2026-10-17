@@ -56,7 +56,7 @@ Three honest trust levels (used verbatim in product copy):
 | Path | What |
 |------|------|
 | `core/` | **Rust `decision-core`** — canonicalize → commit → hash → sign → DAG-link → checkpoint → verify. One crate → FFI lib + the `averin-verify` CLI (`src/bin`) + WASM. The single source of truth. |
-| `server/` | Go: app API + ingestion, OpenAI-compatible recording proxy (`internal/proxy`), credential broker + resource gateway, MCP server, export, anchoring. (Experimental x402 metering lives in `internal/x402`, not yet wired into the binary.) |
+| `server/` | Go: app API + ingestion, OpenAI-compatible recording proxy (`internal/proxy`), credential broker + resource gateway, MCP server, export, anchoring. |
 | `web/` | Svelte 5 + Vite SPA (client-only) — trace-waterfall run view |
 | `verifier/` | Vanilla JS + WASM standalone offline verifier (no framework) |
 | `sdk/python`, `sdk/typescript` | Client SDKs |
@@ -74,8 +74,8 @@ procedures and candidate named in the test-evidence paragraph.
   → verify, from one crate to **three targets**: verify CLI, WASM, and cgo FFI. Golden vectors;
   Native RFC 3161 verification requires the `rfc3161` build feature; WASM reports such anchors as `Unsupported`.
 - **Go server** (cgo → core) — ingestion (`/v2/records`, idempotency, DAG-linking, sealing),
-  app/verify/export API, OpenAI-compatible recording proxy (secret-scrubbed), Stripe metering,
-  MCP server, experimental x402.
+  app/verify/export API, OpenAI-compatible recording proxy (secret-scrubbed),
+  MCP server.
 - **SDKs** — Python + TypeScript. **Web** — Svelte 5 SPA (trace waterfall) + a frameworkless
   **offline verifier** (vanilla + locally built WASM). The retained Docker Compose
   recipes are not a validated self-host path for this source-only alpha.

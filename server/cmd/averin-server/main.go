@@ -29,7 +29,6 @@ import (
 	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/keylineage"
-	"github.com/feirai/averin/server/internal/meter"
 	"github.com/feirai/averin/server/internal/pgdurable"
 	"github.com/feirai/averin/server/internal/pgledger"
 	"github.com/feirai/averin/server/internal/pgschema"
@@ -63,9 +62,22 @@ func main() {
 	// store volatile in-memory (consumed jti/nonce + two-phase grants reset on restart, reopening a
 	// /v2/use replay window). Mirrors govder's GOVDER_REQUIRE_AUTHORITY_SEED and leria's
 	// LERIA_REQUIRE_PROD_SECRETS.
-	requireProdSecrets := false
-	if v := strings.ToLower(strings.TrimSpace(os.Getenv("AVERIN_REQUIRE_PROD_SECRETS"))); v == "1" || v == "true" {
-		requireProdSecrets = true
+	//
+	// AVE-06: the gate is ON by default. The only ways off are the explicit AVERIN_DEV_MODE=1 (local
+	// development: open API allowed, in-memory store, dev seed) or, inside dev mode, an explicit
+	// AVERIN_REQUIRE_PROD_SECRETS=0. AVERIN_REQUIRE_PROD_SECRETS=0 without dev mode is refused.
+	devMode, err := devModeFromEnv(os.Getenv("AVERIN_DEV_MODE"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	requireProdSecrets, err := requireProdSecretsFromEnv(os.Getenv("AVERIN_REQUIRE_PROD_SECRETS"), devMode)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if devMode {
+		log.Printf("WARNING: AVERIN_DEV_MODE=1: development mode. With no AVERIN_API_KEYS the API is OPEN to every caller, the store may be in-memory and the signing seed may be the public dev seed. Never use in production.")
+	}
+	if requireProdSecrets {
 		var missing []string
 		if strings.TrimSpace(os.Getenv("AVERIN_API_KEYS")) == "" {
 			missing = append(missing, "AVERIN_API_KEYS (the app API would be UNAUTHENTICATED)")
@@ -80,7 +92,7 @@ func main() {
 			missing = append(missing, "AVERIN_SIGNING_SEED is the well-known committed dev seed (a globally-known, forgeable integrity root)")
 		}
 		if len(missing) > 0 {
-			log.Fatalf("AVERIN_REQUIRE_PROD_SECRETS is set but required prod secret(s) are empty/absent: %s", strings.Join(missing, "; "))
+			log.Fatalf("AVERIN_REQUIRE_PROD_SECRETS is set but required prod secret(s) are empty/absent: %s (the production gate is on by default; AVERIN_DEV_MODE=1 turns it off for local development)", strings.Join(missing, "; "))
 		}
 	}
 
@@ -152,6 +164,7 @@ func main() {
 		Region:              region,
 		SchemaVersion:       postureSchemaVersion(onPostgres),
 		RuntimeRoleVerified: runtimeRoleVerified && onPostgres,
+		DevMode:             devMode,
 	})
 	// GET /readyz probes the Postgres store's pool (short-timeout Ping); GET /metrics gets its live
 	// connection-pool gauges. The in-memory store (no AVERIN_DATABASE_URL) registers neither — nothing
@@ -171,25 +184,26 @@ func main() {
 		srv.WithGauge("averin_store_pool_max_conns", "Store Postgres pool: configured max connections.",
 			func() float64 { return float64(pg.PoolStat().MaxConns) })
 	}
-	// usage metering -> Stripe (the real revenue path). No key = local counting only. Retained so
-	// graceful shutdown can drain its async queue (billable events) before exit.
-	meterReporter := meter.NewStripeReporter(meter.NewMem(), meter.StripeConfig{
-		APIKey: os.Getenv("STRIPE_API_KEY"),
-	})
-	srv.WithMeter(meterReporter)
-
-	// project-scoped API keys: AVERIN_API_KEYS="proj-a:tok1,tok2;proj-b:tok3". Unset = no auth (dev).
+	// API keys (AVE-05): AVERIN_API_KEYS is either the legacy "proj-a:tok1,tok2;proj-b:tok3" (admin, no
+	// expiry) or a JSON array of scoped keys {project, token|token_sha256, role, not_after}. With no keys
+	// the API refuses every /v2 request unless AVERIN_DEV_MODE=1 selects the explicit open store.
 	var writerKeys auth.KeyStore
-	if raw := os.Getenv("AVERIN_API_KEYS"); raw != "" {
-		ks, n := auth.ParseKeys(raw)
+	if raw := os.Getenv("AVERIN_API_KEYS"); strings.TrimSpace(raw) != "" {
+		ks, n, kerr := auth.ParseKeysConfig(raw)
+		if kerr != nil {
+			log.Fatalf("%v", kerr)
+		}
 		if n == 0 {
-			log.Fatal("AVERIN_API_KEYS is set but parsed to zero keys — refusing to start in silent deny-all (use 'proj:tok' form)")
+			log.Fatal("AVERIN_API_KEYS is set but parsed to zero keys: refusing to start in silent deny-all (use 'proj:tok' form or the JSON form)")
 		}
 		srv.WithAuth(ks)
 		writerKeys = ks
 		log.Printf("per-project API-key auth enabled (%d projects)", n)
+	} else if devMode {
+		srv.WithAuth(auth.NewOpenStore())
+		log.Printf("WARNING: no AVERIN_API_KEYS set and AVERIN_DEV_MODE=1: the app API is UNAUTHENTICATED")
 	} else {
-		log.Printf("WARNING: no AVERIN_API_KEYS set — the app API is UNAUTHENTICATED (dev/single-tenant only)")
+		log.Fatal("AVERIN_API_KEYS is not set: the API would refuse every request. Set AVERIN_API_KEYS, or AVERIN_DEV_MODE=1 for local development")
 	}
 	// AVERIN_RECOVERY_KEYS is a separate broker_seq:recover authority. An absent
 	// configuration denies all recovery actions even when ordinary auth is open.
@@ -270,13 +284,51 @@ func main() {
 	srv.WithRequirePinnedAuthority(requirePinned)
 	// Reader-first rollout: enable after every external authority producer has
 	// moved to v3. This never changes the classification of immutable v2 history.
-	switch raw := os.Getenv("AVERIN_REQUIRE_BODY_BOUND_AUTHORITY"); raw {
-	case "", "0", "false":
-		srv.WithRequireBodyBoundAuthority(false)
-	case "1", "true":
-		srv.WithRequireBodyBoundAuthority(true)
-	default:
-		log.Fatalf("AVERIN_REQUIRE_BODY_BOUND_AUTHORITY must be 1/true/0/false (got %q)", raw)
+	bodyBound, err := requireBodyBoundFromEnv(os.Getenv("AVERIN_REQUIRE_BODY_BOUND_AUTHORITY"), devMode)
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.WithRequireBodyBoundAuthority(bodyBound)
+	if !bodyBound {
+		log.Printf("WARNING: body-bound authority is OFF: v2 approval proofs are still accepted as elevated (set AVERIN_REQUIRE_BODY_BOUND_AUTHORITY=1)")
+	}
+	// AVE-10: a govder approval whose signed evidence leaves out who approved fails the server's own /v2/verify
+	// (given pinned authority keys, as govder needs anyway). On by default (off in dev mode). AVERIN_APPROVER_BINDING_SINCE (canonical timestamp) keeps older
+	// records, received before it, as history with a note.
+	approverBinding, abErr := requireApproverBindingFromEnv(os.Getenv("AVERIN_REQUIRE_APPROVER_BINDING"), os.Getenv("AVERIN_APPROVER_BINDING_SINCE"), devMode)
+	if abErr != nil {
+		log.Fatal(abErr)
+	}
+	srv.WithRequireApproverBinding(approverBinding.on, approverBinding.since)
+	if !approverBinding.on {
+		log.Printf("WARNING: approver binding is not required: an approval whose signed evidence leaves out who approved still verifies, with a note (set AVERIN_REQUIRE_APPROVER_BINDING=1)")
+	}
+	// AVE-07: storage and rate controls.
+	if q, qerr := nonNegativeIntFromEnv("AVERIN_PROJECT_MAX_RECORDS", os.Getenv("AVERIN_PROJECT_MAX_RECORDS")); qerr != nil {
+		log.Fatal(qerr)
+	} else if q > 0 {
+		srv.WithProjectQuota(q)
+		log.Printf("per-project record quota on: %d records (writes past it get 507)", q)
+	}
+	if ib, ierr := ingestBudgetFromEnv(os.Getenv("AVERIN_INGEST_BUDGET")); ierr != nil {
+		log.Fatal(ierr)
+	} else if ib != nil {
+		srv.WithIngestBudget(*ib)
+		log.Printf("ingest rate limit on (429 past the per-project or global budget)")
+	}
+	if denyLog, derr := boolFromEnv("AVERIN_DENIED_GRANT_LOG", os.Getenv("AVERIN_DENIED_GRANT_LOG")); derr != nil {
+		log.Fatal(derr)
+	} else if denyLog {
+		srv.WithDeniedGrantLog()
+		db, berr := deniedGrantBudgetFromEnv(os.Getenv("AVERIN_DENIED_GRANT_BUDGET"))
+		if berr != nil {
+			log.Fatal(berr)
+		}
+		// A log with no budget is the unbounded form; the budget is always installed with the log (defaults when unset).
+		srv.WithDeniedGrantBudget(db)
+		log.Printf("denied-grant log on, with a rate budget")
+	} else if strings.TrimSpace(os.Getenv("AVERIN_DENIED_GRANT_BUDGET")) != "" {
+		log.Fatal("AVERIN_DENIED_GRANT_BUDGET is set but AVERIN_DENIED_GRANT_LOG is not on")
 	}
 	if requirePinned {
 		log.Printf("AVERIN_REQUIRE_PINNED_AUTHORITY on (default): a claimed authority elevation that fails key verification is REJECTED (fail-closed), not downgraded to caller_declared")
@@ -635,7 +687,7 @@ func main() {
 	// request currently executing a finalize. With AVERIN_DATABASE_URL set, the cross-request
 	// prepare->finalize window (and the revoked-grant set) now survive a restart too — see WithDurable
 	// above; without it, both stay in-memory only and the drain is what limits the blast radius of a
-	// stop. After the HTTP drain we flush the async Stripe meter queue and close the store pool, all
+	// stop. After the HTTP drain we close the store pool, all
 	// within the same deadline.
 	//
 	// DEADLINE: keep it UNDER the orchestrator's stop grace or it gets SIGKILLed mid-drain. Default
@@ -666,9 +718,7 @@ func main() {
 		if err := httpSrv.Shutdown(ctx); err != nil {
 			log.Printf("averin-server: HTTP graceful shutdown timed out (some in-flight work was cut): %v", err)
 		}
-		// Handlers have drained (no more send()) → flush the Stripe meter queue, then release the
-		// store pool, within whatever deadline remains.
-		meterReporter.Close(ctx)
+		// Handlers have drained (no more send()): release the store pool within whatever deadline remains.
 		if c, ok := st.(interface{ Close() }); ok {
 			c.Close()
 		}

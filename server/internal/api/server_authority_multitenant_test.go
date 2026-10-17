@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -80,7 +81,7 @@ func TestPerTenantAuthorityKeysElevateInTheirOwnProject(t *testing.T) {
 	acmeKey := ed25519.NewKeyFromSeed(peSeed(0x60))   // govder DeriveSeed(seed, "tenant_acme",   approval)
 	globexKey := ed25519.NewKeyFromSeed(peSeed(0x61)) // govder DeriveSeed(seed, "tenant_globex", approval)
 
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithProjectAuthorityKey(tenantAcme, "human_signed", acmeKey.Public().(ed25519.PublicKey)).
 		WithProjectAuthorityKey(tenantGlobex, "human_signed", globexKey.Public().(ed25519.PublicKey)).
 		Routes()
@@ -136,7 +137,7 @@ func TestTenantAuthorityKeyIsNotAuthoritativeInAnotherTenantsProject(t *testing.
 	}
 	acmeKey := ed25519.NewKeyFromSeed(peSeed(0x60))
 	globexKey := ed25519.NewKeyFromSeed(peSeed(0x61))
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithProjectAuthorityKey(tenantAcme, "human_signed", acmeKey.Public().(ed25519.PublicKey)).
 		WithProjectAuthorityKey(tenantGlobex, "human_signed", globexKey.Public().(ed25519.PublicKey)).
 		Routes()
@@ -173,7 +174,7 @@ func TestGlobalAuthorityPinRemainsTheDefault(t *testing.T) {
 	}
 	global := ed25519.NewKeyFromSeed(peSeed(0x62))
 	scoped := ed25519.NewKeyFromSeed(peSeed(0x63))
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithPolicyEngineKey("human_signed", global.Public().(ed25519.PublicKey)). // global default
 		WithProjectAuthorityKey(tenantAcme, "human_signed", scoped.Public().(ed25519.PublicKey)).
 		Routes()
@@ -201,7 +202,7 @@ func TestPerTenantPinsCoverEveryVerifiedSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
-	srv := api.New(c, store.NewMem(), "k0")
+	srv := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore())
 	keys := map[string]map[string]ed25519.PrivateKey{}
 	b := byte(0x70)
 	for _, tenant := range []string{tenantAcme, tenantGlobex} {
