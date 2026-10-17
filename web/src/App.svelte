@@ -133,7 +133,7 @@
           ? "chained to the previous month's checkpoint you pinned" : 'starting from a base checkpoint nobody pinned'}.
           Earlier months are not checked here, and the grant log is not evaluated across months.</div>
         {#if segmentResidual(report)}
-          <div class="lvl">Cannot pass on its own: {report.segment.link === 'base_unpinned' ? 'the base is not a pinned previous head' : 'record completeness was not evaluated (this month has parents before its base)'}. Check every month in order with averin-verify chain.</div>
+          <div class="lvl">Cannot pass on its own: {[report.segment.link === 'base_unpinned' ? 'the base is not a pinned previous head' : null, (report.segment.not_evaluated ?? []).includes('record_completeness') ? 'record completeness was not evaluated (this month has parents before its base)' : null, (report.segment.not_evaluated ?? []).includes('cross_month_uses') ? 'a month with a base cannot rule out a second use of a single-use grant, a replayed nonce, a use of a grant no month holds, or a revocation across months' : null].filter(Boolean).join('; ')}. Check every month in order with averin-verify chain.</div>
         {/if}
         {#if report.segment.not_evaluated?.length}
           <div class="lvl">Not evaluated for this month: {report.segment.not_evaluated.join(', ')}.</div>
