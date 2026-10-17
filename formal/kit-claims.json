@@ -1957,7 +1957,7 @@
         {
           "path": "core/src/verify/headline.rs",
           "symbol": "segment_residual",
-          "sha256": "e8807b2e54062d6386566334e6433eaaf149f3d7890937807172f3ed9717d05e"
+          "sha256": "985e4969f4e94c6242ed0aa45ec54c62499d6ee2955a6fbbe2dd1587a458a84c"
         },
         {
           "path": "core/src/bin/averin_verify.rs",
