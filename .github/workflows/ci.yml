@@ -212,7 +212,7 @@ jobs:
         run: |
           set -o pipefail
           : "${AVERIN_TEST_DATABASE_URL:?Postgres DSN is required for the API race gate}"
-          go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... ./internal/pgschema/... ./internal/resourceshim/... | tee "${RUNNER_TEMP}/averin-go-events.json" | python3 ../scripts/check-go-test-events.py
+          go test -json -count=1 ./internal/api/... ./internal/store/... ./internal/pgledger/... ./internal/pgdurable/... ./internal/pgschema/... ./internal/resourceshim/... ./cmd/averin-migrate/... | tee "${RUNNER_TEMP}/averin-go-events.json" | python3 ../scripts/check-go-test-events.py
       - name: save Go test events on failure
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -945,6 +945,22 @@ jobs:
     name: "formal: kit register, drift lock, fast-tier mutants"
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # The migrate-hook claim's mutants run the pgschema and averin-migrate tests against a real Postgres
+    # (the same service as store-postgres); AVERIN_TEST_DATABASE_URL is set on the mutant step below.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      AVERIN_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch

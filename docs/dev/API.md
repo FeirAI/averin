@@ -203,11 +203,11 @@ A session's sealed records, in causal/display order, for the trace-waterfall vie
 
 A read-only report of the guards this process was started with, for the posture verifier in feir-os
 (`deploy/vps/deploy.sh verify-posture`). It is under the same project API-key auth as every other `/v2` route:
-on a keyed deployment it needs the project's bearer. Booleans and build identifiers only, never a key, a seed or
+on a keyed deployment it needs the project's bearer. Booleans, one integer (`schema_version`), a short region label and build identifiers only, never a key, a seed or
 a DSN: `schema`, `plane`, `build` (`go_version`, `vcs_revision`, `vcs_modified`, `core_rustc` when the build
 stamped it with `-ldflags "-X main.coreRustc=..."`), `require_prod_secrets`, `api_keys_configured` (false when the
 app API is unauthenticated), `durable_store` (Postgres wired), `signing_seed_is_dev`, `require_pinned_authority`,
-`require_body_bound_authority`, and `secret_fingerprints` (an object; on a keyed deployment `averin-api-key` is a
+`require_body_bound_authority`, `region` (`AVERIN_REGION`, empty when not declared), `schema_version` (the Postgres schema version this binary understands, 0 with in-memory storage), `runtime_role_verified` (true when startup verified the Postgres credential is a least-privilege runtime role), and `secret_fingerprints` (an object; on a keyed deployment `averin-api-key` is a
 list with one keyed fingerprint per distinct API key averin accepts across all projects: the first 16 bytes of
 HMAC-SHA256 keyed by the token over `feir-secret-alignment/v1:averin-api-key`, vectors in
 `vectors/secret-fingerprint.v1.json`; empty on an open deployment). feir-os's verifier checks that the key

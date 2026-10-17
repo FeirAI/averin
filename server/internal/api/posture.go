@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strings"
 
 	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/secretfp"
@@ -29,6 +31,39 @@ type Posture struct {
 	// CoreRustc is the rustc that built the linked decision-core staticlib, stamped at link time
 	// by the build scripts (-ldflags "-X main.coreRustc=..."). Empty when the build did not stamp it.
 	CoreRustc string
+	// Region is the cell's region label (AVERIN_REGION; "" = not declared), reported so the deploy-time
+	// verifier can require every plane of a cell to name the same region. averin does not interpret it.
+	Region string
+	// SchemaVersion is the Postgres schema version this binary understands (pgschema.CurrentSchemaVersion).
+	// 0 when storage is in-memory.
+	SchemaVersion int
+	// RuntimeRoleVerified is true when startup ran pgschema.CheckRuntime on the Postgres credential and it
+	// passed (a failure is fatal, so a serving Postgres-backed process reports true). False in-memory.
+	RuntimeRoleVerified bool
+}
+
+// MaxRegionLen bounds a region label.
+const MaxRegionLen = 64
+
+// ParseRegion validates a raw AVERIN_REGION value: lower-case letters, digits and hyphens, at most
+// MaxRegionLen bytes, starting with a letter (for example "eu-central-1"). Empty (after trimming) means
+// not declared and returns "". Anything else is an error, so a typo stops startup instead of being
+// reported as a region the operator did not mean.
+func ParseRegion(raw string) (string, error) {
+	r := strings.TrimSpace(raw)
+	if r == "" {
+		return "", nil
+	}
+	if len(r) > MaxRegionLen {
+		return "", fmt.Errorf("region is %d bytes, over the %d-byte cap", len(r), MaxRegionLen)
+	}
+	for i := 0; i < len(r); i++ {
+		c := r[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9' && i > 0) || (c == '-' && i > 0)) {
+			return "", fmt.Errorf("region %q must be lower-case letters, digits and hyphens, starting with a letter", r)
+		}
+	}
+	return r, nil
 }
 
 // WithPosture records the startup guard state GET /v2/posture reports.
@@ -112,5 +147,8 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
 		"require_body_bound_authority": s.requireBodyBoundAuthority,
 		"secret_fingerprints":          s.secretFingerprints(),
 		"authority_pins":               s.authorityPinsReport(),
+		"region":                       s.posture.Region,
+		"schema_version":               s.posture.SchemaVersion,
+		"runtime_role_verified":        s.posture.RuntimeRoleVerified,
 	})
 }

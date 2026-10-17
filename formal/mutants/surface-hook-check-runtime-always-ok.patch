@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-migrate/main.go b/server/cmd/averin-migrate/main.go
+index f65edb7..b588e57 100644
+--- a/server/cmd/averin-migrate/main.go
++++ b/server/cmd/averin-migrate/main.go
+@@ -121,7 +121,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
+ 		if dsn == "" {
+ 			return fail(exitUsage, "AVERIN_DATABASE_URL (the runtime role's DSN) is required for --check-runtime")
+ 		}
+-		if err := pgschema.CheckRuntime(ctx, dsn); err != nil {
++		if err := error(nil); err != nil {
+ 			printJSON(stdout, map[string]any{"plane": "averin", "action": runtimeCheckAction, "ok": false, "error": err.Error()})
+ 			return fail(exitFailed, "runtime credential check refused: %v", err)
+ 		}

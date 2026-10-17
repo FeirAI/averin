@@ -1,7 +1,8 @@
 diff --git a/server/internal/api/posture.go b/server/internal/api/posture.go
+index 8af0706..4e335b5 100644
 --- a/server/internal/api/posture.go
 +++ b/server/internal/api/posture.go
-@@ -108,7 +108,7 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
+@@ -143,7 +143,7 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
  		"api_keys_configured":          keyed,
  		"durable_store":                s.posture.DurableStore,
  		"signing_seed_is_dev":          s.posture.SigningSeedIsDev,

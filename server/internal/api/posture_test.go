@@ -187,3 +187,35 @@ func TestPosture_ReportsEveryPinnedAuthorityKey(t *testing.T) {
 		t.Errorf("unpinned server authority_pins = %v, want an empty list", empty["authority_pins"])
 	}
 }
+
+// The region label, the schema version and whether the runtime role was verified at startup are
+// reported as given; a server nobody wired a posture into claims none of them.
+func TestPosture_ReportsRegionSchemaVersionAndRuntimeRole(t *testing.T) {
+	h := newServer(t).WithPosture(api.Posture{Region: "eu-central-1", SchemaVersion: 7, RuntimeRoleVerified: true}).Routes()
+	_, b := postureReq(h, "p1", "")
+	if b["region"] != "eu-central-1" || b["schema_version"] != float64(7) || b["runtime_role_verified"] != true {
+		t.Fatalf("posture = %v", b)
+	}
+	_, z := postureReq(newServer(t).Routes(), "p1", "")
+	if z["region"] != "" || z["schema_version"] != float64(0) || z["runtime_role_verified"] != false {
+		t.Fatalf("a server with no posture claims region/schema/role: %v", z)
+	}
+}
+
+func TestParseRegion(t *testing.T) {
+	for _, c := range []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false}, {"  ", "", false}, {"eu-central-1", "eu-central-1", false}, {" eu-west-1 ", "eu-west-1", false},
+		{"EU-west-1", "", true}, {"1eu", "", true}, {"-eu", "", true}, {"eu west", "", true}, {"eu_west", "", true},
+		{strings.Repeat("a", api.MaxRegionLen), strings.Repeat("a", api.MaxRegionLen), false},
+		{strings.Repeat("a", api.MaxRegionLen+1), "", true},
+	} {
+		got, err := api.ParseRegion(c.in)
+		if (err != nil) != c.wantErr || got != c.want {
+			t.Errorf("ParseRegion(%q) = %q, %v; want %q, err=%v", c.in, got, err, c.want, c.wantErr)
+		}
+	}
+}

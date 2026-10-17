@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-migrate/main.go b/server/cmd/averin-migrate/main.go
+index f65edb7..fde41d9 100644
+--- a/server/cmd/averin-migrate/main.go
++++ b/server/cmd/averin-migrate/main.go
+@@ -143,7 +143,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
+ 		case err == nil:
+ 			return exitOK
+ 		case errors.Is(err, pgschema.ErrCutoverRequired):
+-			return fail(exitCutoverNeeded, "%v", err)
++			return fail(exitFailed, "%v", err)
+ 		default:
+ 			return fail(exitFailed, "hook refused: %v", err)
+ 		}
