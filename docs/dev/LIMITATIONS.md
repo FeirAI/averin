@@ -329,3 +329,27 @@ which each one matters.
   and exit codes (no key: CONSISTENT, exit 2), so the same rule applies: read its RESULT line, as
   a usage error also exits 2. A PASS there means the signature verified under the key given on
   the command line; the CLI cannot tell whether that key is the right one to trust.
+
+## Gateway refusal records are a reported floor
+
+`POST /v2/refusals` seals what the gateway reports (feir-ops#1). The verifier counts integrity-proven
+refusal records (`gateway_refusals`, `gateway_refusal_attempts`); it cannot know about an attempt that was
+never reported.
+
+- **Level 1 and Level 2 only.** A refusal record proves the report was sealed unchanged and is in the
+  checked history. It does not prove the gateway reported every refusal, and a gateway that suppressed a
+  report before sealing is undetectable. Level 3 is not claimed for refusals.
+- **Any project writer can submit one.** The route needs the `write` role, and a deployment that shares one
+  averin token across planes lets any holder add a refusal record. The generic ingest path rejects every
+  refusal marker, but it cannot tell two writers apart. A gateway-only key needs a producer-labelled
+  `AVERIN_API_KEYS` entry.
+- **The count is a floor.** An attempt with no authenticated agent is not recorded, and a producer crash can
+  lose its pending window. Producers coalesce repeats into one record with an `attempts` count, and fall back
+  to a per-class summary under a storm, so the count stays exact while the detail is reduced.
+- **Volume is the producer's to bound.** Each record is a normal record, and `attempts` is capped at 10^9 per
+  record, but nothing in averin limits how many refusal records a writer submits; the per-month 256 MiB
+  segment cap still applies. Use `AVERIN_INGEST_BUDGET` and the producer's own budget.
+- **No taxonomy or manifest entry.** A refusal never touches the operation taxonomy, the coverage manifest or
+  the deployment attestation. Signing a new Solo taxonomy version (FEI-36) is a separate release step with the
+  owner's key; the vectors committed with this kind are signed by TEST-ONLY keys listed in
+  `spec/test-keys.json`, which no deployment may pin.

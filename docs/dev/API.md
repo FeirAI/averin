@@ -47,6 +47,7 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | POST | `/v2/grants/prepare` | Two-phase grant, phase 1 (mint + reveal). | broker (+ cosig) |
 | POST | `/v2/grants/finalize` | Two-phase grant, phase 2 (attach approver sigs + commit). | broker (+ cosig) |
 | POST | `/v2/introspection` | Native/STS: record a resource introspection transcript. | resource gateway |
+| POST | `/v2/refusals` | Seal one gateway refusal record (`record_kind` `gateway-refusal`). Role `write`. | always |
 | POST | `/v2/use` | Resource gateway: one-phase use receipt (Tier-B). | `AVERIN_RESOURCE_SEED` |
 | POST | `/v2/use-intent` | Two-phase use, phase 1 (before the side effect). | resource gateway |
 | POST | `/v2/use-outcome` | Two-phase use, phase 2 (after the side effect). | resource gateway |
@@ -114,13 +115,52 @@ on it).
   ids) — reserved for the broker/resource endpoints.
 - `event_type == "credential_grant_denied"` — reserved for the broker denied-grant log.
 - `extensions.broker` and `extensions.broker_denial` — reserved for the broker/resource lifecycle.
-- `record_kind` (optional) must be one of `budget-exhausted`, `chargeback-posted`.
+- `record_kind` (optional) must be one of `budget-exhausted`, `chargeback-posted`. The third kind,
+  `gateway-refusal`, is reserved for `POST /v2/refusals`.
+- `event_type == "gateway_refusal"`, `record_kind == "gateway-refusal"`, `observed_via == "gateway"`,
+  `extensions.gateway_refusal`, a `record_id` with the prefix `refusal-` and an `idempotency_key` with the
+  prefix `refusal:` are reserved for the gateway refusal endpoint. A refusal is signed by the server key like
+  any record, so the verifier cannot tell a server-built one from a forged one by its signature; reserving
+  every marker at ingest is the only defence against inflating a blocked-attempts count.
 
 **No NUL in identifiers (every route).** A `project_id`, `idempotency_key`, `record_id` (and the
 `/v2/revoke` `grant_id`) containing U+0000 (for example an escaped `\u0000` in the JSON body), a `?project=`
 query parameter containing `%00`, or an `Idempotency-Key` header containing NUL is a `400`. The server
 derives deterministic ids and keys by joining these values with a NUL separator, so a NUL inside one would
 let two different `(project_id, idempotency_key)` pairs derive the same grant, use or outcome id.
+
+---
+
+## POST `/v2/refusals`
+
+Seals one gateway refusal record: the gateway refused an agent's attempt and reports it. Role `write`. The
+server builds the record itself from a closed set of fields (the B11 denied-grant pattern), so a caller
+cannot choose the record id, a free-text reason, params or a URL. It is chained into the `session_id` the
+caller names (vultrino uses its `[averin]` session), checkpointed and anchored like any record.
+
+Body (an unknown field is a `400`):
+
+| Field | Meaning |
+|---|---|
+| `project_id`, `session_id`, `idempotency_key` | Required. The key may also come in the `Idempotency-Key` header. A replay returns the same record with `200` and `created: false`. |
+| `agent_id` | Required, `[A-Za-z0-9._:-]{1,128}`. |
+| `action` | The refused action. A name outside that pattern is stored as the literal `invalid_name`. `*` only on a summary. |
+| `entry_point` | `mcp`, `execute`, `llm` or `approval_resume` (required unless `summary`). |
+| `reason_class` | One of the 14 classes in `vectors/refusal-classes.v1.json` (required unless `summary`). Never free text. |
+| `credential` | Optional resolved alias, same name rule. |
+| `attempts` | 1 to 10^9: the number of coalesced refusals this record stands for. |
+| `first_at`, `last_at` | RFC3339, `first_at <= last_at <= now + 5 minutes`. |
+| `summary`, `by_class` | A summary merges refusals a producer could not seal one by one: `by_class` counts per class, no `reason_class`, and `attempts` equals the sum. |
+
+The sealed record has `event_type` `gateway_refusal`, `record_kind` `gateway-refusal`, `observed_via`
+`gateway`, `status` `refused`, **no** `authority` and **no** `extensions.broker`. It is never a grant or a
+use, so it cannot enter the coverage closure, the deployment attestation or the operation taxonomy: no
+taxonomy rotation is needed to record a refusal. The verifier counts it as `gateway_refusals` (see the
+report fields). Response `201 {"record_id","created":true}`.
+
+`GET /v2/records` also takes `record_kind=<kind>` (only that kind) and `exclude_record_kind=<kind>`; the page
+is the newest `limit` matching records. The scan is bounded (50000 records) and `truncated` is `true` when the
+bound stops it or the page is full.
 
 ---
 
@@ -554,7 +594,8 @@ Other allowed keys: `anchored_ts`, `record_kind`, `input_commit`, `output_commit
 
 - `observed_via`: `proxy`, `sdk`, `otel`, `broker` (Level-2 honesty — what each path captures;
   `broker` is stamped by the server on every grant / use receipt / intent / outcome record).
-- `record_kind` (optional): `budget-exhausted`, `chargeback-posted`.
+- `record_kind` (optional): `budget-exhausted`, `chargeback-posted`, `gateway-refusal`.
+- `observed_via` also admits `gateway` on a gateway refusal record only (reserved, see above).
 - `authority.source`: `caller_declared` (the forgeable default), `policy_engine_signed`,
   `human_signed`, `delegate_signed`, `gateway_enforced` (the broker's own source). An evidence triple
   verifying under the key pinned for the record's `(project_id, source)` elevates from
@@ -609,6 +650,9 @@ Key fields:
 | `key_rotations_total`, `key_rotations_verified`, `key_rotations_chain_trusted` | int | Signed recording-key rotation statements in `bundle.key_rotations`, how many verified, and how many keys are trusted only because a verified `scheduled` statement links them to a pinned key that is neither revoked nor compromised. A statement that does not verify is also an `issues` entry. |
 | `cleartext_content_records` | int | Records whose signed body carries `extensions.content_preview`: prompt or answer text in the clear that no retention purge can erase (sealed before the server began committing it). A count for the reader, not an input to any verdict. |
 | `segment` | object | Only on a month segment: `month`, `base_seq`, `base_checkpoint_hash`, `head_seq`, `head_checkpoint_hash`, `head_record_count`, `link` (`genesis` / `base_pinned` / `base_unpinned`), `base_anchored`, `earlier_parent_refs`, `unresolved_cross_month` (uses and outcomes whose grant or intent is in an earlier month) and `not_evaluated` (the grant-log chain and federation heads; `record_completeness` when the month has parents before its base; `cross_month_uses` for every month with a base, which caps its headline at INSUFFICIENT). Absent on a whole-history report. |
+| `gateway_refusals` | int | Sealed gateway refusal records (`record_kind` `gateway-refusal`), counted only when the record is integrity-proven and its shape is valid, deduplicated by `content_hash`. Keyed on `record_kind`, never on `event_type` alone, so a history that predates the kind keeps its verdict. Always present (zero when none). |
+| `gateway_refusal_attempts` | int | Sum of `attempts` over the counted refusal records. A floor: an attempt without an authenticated agent is not recorded, a refusal the producer could not seal is a receipt gap, and a producer crash can lose a short window. |
+| `gateway_refusals_by_class` | object | `gateway_refusal_attempts` by reason class (closed vocabulary). A malformed refusal (unknown class or entry point, authority or broker evidence carried, an unknown key, a divergent `event_type`, attempts not equal to the sum of `by_class`) is a hard `issues` entry and is not counted. |
 | `grant_accountability` | string | `not_applicable` / `incomplete` / `complete` (Tier-A). |
 | `broker_trust` | string | `assumed` / `sequence_verified`. |
 | `uses_matched`, `uses_pop_reverified`, `unmatched_violation`, `unmatched_pending`, `grants_unused` | int | Tier-B join. |
