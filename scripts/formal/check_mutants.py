@@ -35,18 +35,34 @@ def run_detector_full(cmd: str, cwd: Path, timeout: int,
     where status is pass, fail or timeout and output is the full combined output."""
     p = subprocess.Popen(cmd, shell=True, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, encoding="utf-8", errors="replace", start_new_session=True, env=env)
-    try:
-        out, _ = p.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+
+    def _kill_group() -> None:
         try:
-            os.killpg(p.pid, signal.SIGKILL)  # only the group we started
-        except ProcessLookupError:
+            os.killpg(p.pid, signal.SIGKILL)  # only the session we started
+        except (ProcessLookupError, PermissionError):
             pass
+
+    prev_term = None
+    try:  # SIGTERM to the runner must unwind through the finally below, not skip it
+        prev_term = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(143)))
+    except ValueError:  # not the main thread
+        pass
+    try:
         try:
-            out, _ = p.communicate(timeout=10)  # bounded: a stray holder of the pipe must not hang the runner
+            out, _ = p.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            out = ""
-        return "timeout", -1, out or ""
+            _kill_group()
+            try:
+                out, _ = p.communicate(timeout=10)  # bounded: a stray holder of the pipe must not hang the runner
+            except subprocess.TimeoutExpired:
+                out = ""
+            return "timeout", -1, out or ""
+    finally:
+        # every exit path (normal exit, runner interrupt, SIGTERM): a server the detector
+        # orphaned stays in its session and is removed with it
+        _kill_group()
+        if prev_term is not None:
+            signal.signal(signal.SIGTERM, prev_term)
     return ("pass" if p.returncode == 0 else "fail"), p.returncode, out or ""
 
 

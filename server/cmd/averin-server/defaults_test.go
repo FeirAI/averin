@@ -128,9 +128,7 @@ func buildForDefaults(t *testing.T) (bin, dir string) {
 func runToExit(t *testing.T, bin string, env ...string) (string, error) {
 	t.Helper()
 	res := runRefusal(t, bin, nil, append([]string{"PATH=" + os.Getenv("PATH")}, env...), refusalBound)
-	if res.Leaked || res.TimedOut {
-		t.Fatalf("the process did not refuse to start within %s (timed out=%v leaked=%v)\n%s", refusalBound, res.TimedOut, res.Leaked, res.Out)
-	}
+	requireRefusal(t, res)
 	return res.Out, res.Err
 }
 
@@ -173,7 +171,7 @@ func startAndGet(t *testing.T, bin, dir string, env []string, method, path, bear
 		if bearer != "" {
 			req.Header.Set("Authorization", "Bearer "+bearer)
 		}
-		if resp, err := http.DefaultClient.Do(req); err == nil {
+		if resp, err := serverClient.Do(req); err == nil {
 			resp.Body.Close()
 			return resp.StatusCode, stop
 		}

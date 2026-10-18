@@ -114,7 +114,10 @@ func TestSecretEnvOrFile_Fatal(t *testing.T) {
 		t.Run(tc.scenario, func(t *testing.T) {
 			env := append(os.Environ(), "AVERIN_TEST_FATAL_CASE="+tc.scenario)
 			env = append(env, tc.env...)
-			startServerExpectRefusal(t, os.Args[0], []string{"-test.run=TestSecretEnvOrFile_Fatal"}, env)
+			out := startServerExpectRefusal(t, os.Args[0], []string{"-test.run=TestSecretEnvOrFile_Fatal"}, env)
+			if !strings.Contains(out, name) {
+				t.Fatalf("the log.Fatal message must name %s, so this is the reader's refusal and not another failure\n%s", name, out)
+			}
 		})
 	}
 }
@@ -265,7 +268,7 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 		for time.Now().Before(deadline) {
 			req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/v2/posture?project=proj", nil)
 			req.Header.Set("Authorization", "Bearer tok")
-			if resp, err := http.DefaultClient.Do(req); err == nil {
+			if resp, err := serverClient.Do(req); err == nil {
 				defer resp.Body.Close()
 				if resp.StatusCode != http.StatusOK {
 					t.Fatalf("posture: status %d", resp.StatusCode)

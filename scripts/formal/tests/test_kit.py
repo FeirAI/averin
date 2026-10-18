@@ -739,6 +739,69 @@ class MutantRunner(unittest.TestCase):
             os.kill(pid, 9)  # only the pid this test started
             self.fail("detector child survived the runner's timeout")
 
+    def _gone_within(self, pid, secs=5.0):
+        import os, time
+        end = time.time() + secs
+        while time.time() < end:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def test_nonzero_exit_before_timeout_still_kills_the_detectors_group(self):
+        # feir-ops#13 review: a detector that exits non-zero (go test's own -timeout panic) while a server
+        # it started is still running must not leave that server behind; the runner sees a plain 'fail'.
+        import os, tempfile
+        tmp = Path(tempfile.mkdtemp())
+        pidfile = tmp / "child.pid"
+        st, rc, _ = cm.run_detector_full("sleep 300 >/dev/null 2>&1 & echo $! > %s; exit 3" % pidfile, tmp, 60)
+        self.assertEqual((st, rc), ("fail", 3))
+        pid = int(pidfile.read_text())
+        ok = self._gone_within(pid)
+        if not ok:
+            os.kill(pid, 9)  # only the pid this test started
+        self.assertTrue(ok, "detector child survived a non-zero exit")
+
+    def test_passing_exit_also_kills_the_detectors_group(self):
+        import os, tempfile
+        tmp = Path(tempfile.mkdtemp())
+        pidfile = tmp / "child.pid"
+        st, rc, _ = cm.run_detector_full("sleep 300 >/dev/null 2>&1 & echo $! > %s; exit 0" % pidfile, tmp, 60)
+        self.assertEqual((st, rc), ("pass", 0))
+        pid = int(pidfile.read_text())
+        ok = self._gone_within(pid)
+        if not ok:
+            os.kill(pid, 9)
+        self.assertTrue(ok, "detector child survived a zero exit")
+
+    def test_sigterm_to_the_runner_kills_the_detectors_group(self):
+        import os, signal, subprocess, sys, tempfile, time
+        tmp = Path(tempfile.mkdtemp())
+        pidfile = tmp / "child.pid"
+        kit = str(Path(cm.__file__).resolve().parent)
+        code = ("import sys; sys.path.insert(0, %r); import check_mutants as cm; from pathlib import Path; "
+                "cm.run_detector_full(%r, Path(%r), 300)"
+                % (kit, "sleep 300 >/dev/null 2>&1 & echo $! > %s; sleep 300" % pidfile, str(tmp)))
+        runner = subprocess.Popen([sys.executable, "-I", "-c", code])
+        try:
+            for _ in range(100):
+                if pidfile.exists() and pidfile.read_text().strip():
+                    break
+                time.sleep(0.1)
+            pid = int(pidfile.read_text())
+            time.sleep(0.2)
+            runner.send_signal(signal.SIGTERM)  # only the runner this test started
+            runner.wait(timeout=20)
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+        ok = self._gone_within(pid)
+        if not ok:
+            os.kill(pid, 9)
+        self.assertTrue(ok, "detector child survived SIGTERM to the runner")
+
     def test_empty_tier_selection_fails_unless_allowed(self):
         def all_full(c):
             c["mutants"] = {}
