@@ -15,6 +15,7 @@ use ed25519_dalek::SigningKey;
 use std::path::PathBuf;
 
 type Body = Vec<(String, CanonValue)>;
+type Edit = Box<dyn Fn(&mut Body)>;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -131,7 +132,7 @@ fn bundle(bodies: Vec<Body>) -> CanonValue {
     let mut prev: Option<String> = None;
     for (i, mut b) in bodies.into_iter().enumerate() {
         set(&mut b, "display_seq", CanonValue::Int(i as i64));
-        let parents = prev.iter().map(|h| CanonValue::string(h)).collect();
+        let parents = prev.iter().map(CanonValue::string).collect();
         set(&mut b, "causal_prev_hashes", CanonValue::Array(parents));
         let rec = seal(&CanonValue::Object(b), &sk).expect("seal");
         prev = Some(
@@ -254,7 +255,7 @@ fn a_replayed_refusal_is_counted_once() {
 // gateway-refusal-shape-fail-closed
 #[test]
 fn malformed_refusals_are_hard_issues_and_never_counted() {
-    let cases: Vec<(&str, Box<dyn Fn(&mut Body)>)> = vec![
+    let cases: Vec<(&str, Edit)> = vec![
         (
             "unknown class",
             Box::new(|b| ext_member(b, |g| set(g, "reason_class", CanonValue::string("because")))),

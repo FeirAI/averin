@@ -644,6 +644,66 @@
     "surface-chain-ignores-requested-claim": {
       "tier": "full",
       "claim": "month-segment-verifier"
+    },
+    "gateway-refusal-ingest-record-kind-not-reserved": {
+      "tier": "fast",
+      "claim": "gateway-refusal-reserved-at-ingest"
+    },
+    "gateway-refusal-ingest-record-id-prefix-not-reserved": {
+      "tier": "full",
+      "claim": "gateway-refusal-reserved-at-ingest"
+    },
+    "gateway-refusal-ingest-idem-prefix-not-reserved": {
+      "tier": "full",
+      "claim": "gateway-refusal-reserved-at-ingest"
+    },
+    "gateway-refusal-ingest-extension-not-reserved": {
+      "tier": "full",
+      "claim": "gateway-refusal-reserved-at-ingest"
+    },
+    "gateway-refusal-endpoint-accepts-unknown-fields": {
+      "tier": "fast",
+      "claim": "gateway-refusal-endpoint-closed"
+    },
+    "gateway-refusal-endpoint-keeps-free-text-names": {
+      "tier": "full",
+      "claim": "gateway-refusal-endpoint-closed"
+    },
+    "gateway-refusal-endpoint-allows-future-time": {
+      "tier": "full",
+      "claim": "gateway-refusal-endpoint-closed"
+    },
+    "gateway-refusal-list-exclude-filter-inverted": {
+      "tier": "full",
+      "claim": "gateway-refusal-endpoint-closed"
+    },
+    "gateway-refusal-count-drops-trust-gate": {
+      "tier": "fast",
+      "claim": "gateway-refusal-counted-when-proven"
+    },
+    "gateway-refusal-count-drops-dedupe": {
+      "tier": "full",
+      "claim": "gateway-refusal-counted-when-proven"
+    },
+    "gateway-refusal-accepts-unknown-class": {
+      "tier": "fast",
+      "claim": "gateway-refusal-shape-fail-closed"
+    },
+    "gateway-refusal-shape-allows-authority": {
+      "tier": "full",
+      "claim": "gateway-refusal-shape-fail-closed"
+    },
+    "gateway-refusal-harvests-touched-pairs": {
+      "tier": "fast",
+      "claim": "gateway-refusal-never-widens-surface"
+    },
+    "gateway-refusal-counts-on-event-type": {
+      "tier": "fast",
+      "claim": "legacy-history-unchanged"
+    },
+    "gateway-refusal-report-omits-attempts": {
+      "tier": "fast",
+      "claim": "cross-impl-refusal-vector"
     }
   },
   "claims": [
@@ -822,7 +882,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "810259ccab154db584b130f84617f0083458c60d15b596dbed1588126a0b1f1a"
+          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
         }
       ],
       "mutants": [
@@ -857,7 +917,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "810259ccab154db584b130f84617f0083458c60d15b596dbed1588126a0b1f1a"
+          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
         }
       ],
       "mutants": [
@@ -896,7 +956,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "810259ccab154db584b130f84617f0083458c60d15b596dbed1588126a0b1f1a"
+          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
         }
       ],
       "mutants": [
@@ -1436,7 +1496,7 @@
         {
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "verify_bundle_cmd",
-          "sha256": "27dda9cb29760a93b4d4382eef83c8c23915c0a94f9c6c99bdd699e726155db1"
+          "sha256": "7ca73998b34571b1eb061ac4ed669ea4b079a32f433ceafac1baa16a36b3e40d"
         },
         {
           "path": "core/src/bin/averin_verify.rs",
@@ -1579,7 +1639,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "810259ccab154db584b130f84617f0083458c60d15b596dbed1588126a0b1f1a"
+          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
         }
       ],
       "mutants": [
@@ -2017,7 +2077,7 @@
         {
           "path": "server/internal/api/server.go",
           "symbol": "Routes",
-          "sha256": "102030382728f0046bcf3f18fc9fe998b8e3589a845728617d6eb4adc72ec655"
+          "sha256": "83f182481c5448d222964baffefeb9e4fbfdc54f06785b010d6270b734edd8ae"
         }
       ],
       "mutants": [
@@ -2366,7 +2426,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "810259ccab154db584b130f84617f0083458c60d15b596dbed1588126a0b1f1a"
+          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
         }
       ],
       "mutants": [
@@ -2448,6 +2508,221 @@
       ],
       "does_not_establish": "That the Postgres store returns the same range as the in-memory store in every case: the month tests here run against the in-memory store, and the Postgres month test covers one project in CI, not concurrent replicas. That a month's disclosures are limited to its own records: no test exports a disclosing mode for a month. That the size limit equals the verifier's: the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test. That a month stays under the limit as a project grows: a month over 256 MiB is refused, not split. The revocation and attestation behaviour of a month is checked only where the tests configure them (anchored months verify clean; the self-view reports the unanchored revocation list exactly as a whole-history export does). That a month's record range is right when the wall clock stepped back or two replicas committed out of start-time order on Postgres: the range is a position in (inserted_at, ctid) order and such a case makes the month fail to verify rather than verify a wrong set; a project whose checkpoint months go backwards gets no month plan (409). The Postgres month test runs only in the Postgres CI job.",
       "evidence_run": "38718313766"
+    },
+    {
+      "id": "gateway-refusal-reserved-at-ingest",
+      "$comment": "legacy register: gateway-refusal-reserved-at-ingest",
+      "statement": "The generic ingest path rejects every gateway refusal marker with a 400: event_type gateway_refusal, record_kind gateway-refusal, observed_via gateway, extensions.gateway_refusal, a record_id with the prefix refusal- and an idempotency_key with the prefix refusal:. A control record without a marker still ingests. Reserving the markers is the only defence against a project writer inflating a blocked-attempts count, because the server signs a forged refusal exactly like a real one.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/server.go",
+        "server/internal/api/refusals_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestGatewayRefusalReservedAtIngest'",
+      "covers": [
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "validateGenericRecordItem",
+          "sha256": "483303d4a805082d8a0780c7a7e85f00add1aa91cc6b240ec07ebf2dc2120c8e"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "reservedRecordID",
+          "sha256": "8535336f069bf573dbce0e9432edccfafe1331c8951c16d13359a7f4375d24fd"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "reservedIdem",
+          "sha256": "8fda4d5ad2e26f3d06e18de9244bfa067ce22b0ed174db0fcfd8aadbd44e6cec"
+        }
+      ],
+      "mutants": [
+        "gateway-refusal-ingest-record-kind-not-reserved",
+        "gateway-refusal-ingest-record-id-prefix-not-reserved",
+        "gateway-refusal-ingest-idem-prefix-not-reserved",
+        "gateway-refusal-ingest-extension-not-reserved"
+      ],
+      "does_not_establish": "That POST /v2/refusals itself authenticates its caller beyond the write role: any project writer can submit a refusal, and a deployment that shares one averin token across planes cannot tell two writers apart. That a refusal reflects a real refusal: averin seals what the gateway reports. That a path other than the generic ingest (a future endpoint) reserves the markers."
+    },
+    {
+      "id": "gateway-refusal-endpoint-closed",
+      "$comment": "legacy register: gateway-refusal-endpoint-closed",
+      "statement": "POST /v2/refusals builds the record itself from a closed body: an unknown field (params, a free-text reason), an unknown reason class or entry point, a zero attempts count, a last_at in the future, a first_at after last_at, an agent_id outside the plain-identifier pattern, a summary whose by_class does not sum to attempts, and a by_class on a non-summary record are all a 400 and seal nothing. An unsafe action name is stored as the literal invalid_name. A replay of the same idempotency key returns the same record. GET /v2/records filters by record_kind and exclude_record_kind, rejects an unknown kind, and pages over the matching records.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/refusals.go",
+        "server/internal/api/refusals_test.go",
+        "server/internal/api/server.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestRefusalSealsChainsAndVerifies|TestRefusalIsIdempotentPerKey|TestRefusalRequestIsClosed|TestRefusalSanitizesAgentSuppliedNamesAndSealsSummary|TestListRecordsKindFilter|TestRefusalVocabularyMatchesSpec'",
+      "covers": [
+        {
+          "path": "server/internal/api/refusals.go",
+          "symbol": "decodeRefusalRequest",
+          "sha256": "db422bc53504b45a00ee2850e93cf7932829edee04cfa9b110d4322bad9be43f"
+        },
+        {
+          "path": "server/internal/api/refusals.go",
+          "symbol": "validateRefusal",
+          "sha256": "4e9827560cc497c2f68ea1cbe7ae9ce3a80327f46c28487188eafc72a9f3e20b"
+        },
+        {
+          "path": "server/internal/api/refusals.go",
+          "symbol": "handleRefusals",
+          "sha256": "d1d14fbb94242153670e6f1be53316211e4b2938f11cdea25a243ea78228e143"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "handleListRecords",
+          "sha256": "d6cf0ed4bc1132236c2cdc134eb85bf975c455872e17eeb7e4ccbf75e553c508"
+        }
+      ],
+      "mutants": [
+        "gateway-refusal-endpoint-accepts-unknown-fields",
+        "gateway-refusal-endpoint-keeps-free-text-names",
+        "gateway-refusal-endpoint-allows-future-time",
+        "gateway-refusal-list-exclude-filter-inverted"
+      ],
+      "does_not_establish": "Rate limiting of refusal submissions (AVERIN_INGEST_BUDGET and the producer's own budget bound volume). That the in-memory store and Postgres return the same filtered page: the filter tests run on the in-memory store. That a name inside the allowed pattern is harmless to a reader: it is still agent-supplied. Behaviour under concurrent replicas that each hold their own id salt (a replay is answered from the stored idempotency key, not from the id)."
+    },
+    {
+      "id": "gateway-refusal-counted-when-proven",
+      "$comment": "legacy register: gateway-refusal-counted-when-proven",
+      "statement": "The verifier counts gateway refusals (gateway_refusals, gateway_refusal_attempts, gateway_refusals_by_class) only for records that are integrity-proven under the caller's pinned keys and whose shape is valid, and counts a verbatim replayed record once.",
+      "method": "test",
+      "artifacts": [
+        "core/src/verify.rs",
+        "core/tests/gateway_refusal.rs"
+      ],
+      "gates": [
+        "core"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --test gateway_refusal -- counts_integrity_proven unproven_refusals a_replayed_refusal",
+      "covers": [
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "verify_bundle_with",
+          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
+        }
+      ],
+      "mutants": [
+        "gateway-refusal-count-drops-trust-gate",
+        "gateway-refusal-count-drops-dedupe"
+      ],
+      "does_not_establish": "That the gateway reported every refusal: the count is a floor (an attempt with no authenticated agent is not recorded, a refusal the producer could not seal is a gap, a producer crash can lose a short window). That a refusal really happened: a record is the gateway's report sealed unchanged (Level 1 and Level 2, never Level 3). Behaviour on a record whose key is merely bundle-declared and not pinned: it counts as integrity-proven under the bundle's own keys, the same as every other record."
+    },
+    {
+      "id": "gateway-refusal-shape-fail-closed",
+      "$comment": "legacy register: gateway-refusal-shape-fail-closed",
+      "statement": "A record with record_kind gateway-refusal that has an unknown reason class or entry point, a zero attempts count, an unknown extension key, a divergent event_type, an authority block, extensions.broker evidence, a summary whose attempts differ from the sum of by_class, a summary with an unknown class, or no extensions.gateway_refusal is a hard verification issue (ok is false) and is never counted.",
+      "method": "test",
+      "artifacts": [
+        "core/src/refusal.rs",
+        "core/tests/gateway_refusal.rs"
+      ],
+      "gates": [
+        "core"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --test gateway_refusal -- malformed_refusals_are_hard_issues vocabulary_matches_the_spec_file",
+      "covers": [
+        {
+          "path": "core/src/refusal.rs",
+          "symbol": "check_shape",
+          "sha256": "fd68fa9318012f895362bb9bf2562c5d0d0604e945c321b4a2ec5afa150b82e5"
+        }
+      ],
+      "mutants": [
+        "gateway-refusal-accepts-unknown-class",
+        "gateway-refusal-shape-allows-authority"
+      ],
+      "does_not_establish": "That a well-formed refusal is true. That the closed vocabulary is complete for a future gateway: a new class needs a vocabulary change in core, the server and vectors/refusal-classes.v1.json together (a test pins the copies). That the free-text fields a producer might add are absent from other record kinds: the shape guard applies only to record_kind gateway-refusal."
+    },
+    {
+      "id": "gateway-refusal-never-widens-surface",
+      "$comment": "legacy register: gateway-refusal-never-widens-surface",
+      "statement": "A real-producer capstone history that also contains gateway refusals of ungranted actions stays attested complete over the brokered surface, with the side-effect closure closed, the attestation validated and the taxonomy (a TEST-signed version 8) validated; the refusals are counted and add no resource, action pair or manifest entry. The committed fixture is signed by test-only keys listed in spec/test-keys.json.",
+      "method": "test",
+      "artifacts": [
+        "core/src/verify.rs",
+        "core/tests/gateway_refusal.rs",
+        "spec/fixtures/capstone-with-refusals-v3.json",
+        "spec/test-keys.json"
+      ],
+      "gates": [
+        "core"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --test gateway_refusal -- vector_expectations_are_the_intended_ones",
+      "covers": [
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "verify_bundle_with",
+          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
+        }
+      ],
+      "mutants": [
+        "gateway-refusal-harvests-touched-pairs"
+      ],
+      "does_not_establish": "That the production Solo taxonomy or coverage manifest is signed: no production signature exists in this change (FEI-36 is a separate release step with the owner's key), and the test keys are public labels no deployment may pin. That a refusal for an action that WAS granted does not show in the surface: it names no resource, so it never contributes a pair, but the granted pair is already part of the surface."
+    },
+    {
+      "id": "legacy-history-unchanged",
+      "$comment": "legacy register: legacy-history-unchanged",
+      "statement": "A generic record that carries event_type gateway_refusal but no record_kind (which an older averin could seal) is neither counted nor shape-checked: its bundle verifies with the same issues and the same proven count as the same bundle with an ordinary event_type. The verifier keys on record_kind, never on event_type alone.",
+      "method": "test",
+      "artifacts": [
+        "core/src/refusal.rs",
+        "core/tests/gateway_refusal.rs"
+      ],
+      "gates": [
+        "core"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --test gateway_refusal -- legacy_event_type_only_record_keeps_its_verdict",
+      "covers": [
+        {
+          "path": "core/src/refusal.rs",
+          "symbol": "is_refusal",
+          "sha256": "8f047e5799cde05f5cc4e03479d92da3bc44ee5cfebe3640bf81bf5f3e33e038"
+        }
+      ],
+      "mutants": [
+        "gateway-refusal-counts-on-event-type"
+      ],
+      "does_not_establish": "The verdict of every existing history: the test pins one legacy shape and the older vectors in the committed corpora, not a quantification over all histories. That an old verifier shows a new history's refusal count: it verifies the history and shows no count."
+    },
+    {
+      "id": "cross-impl-refusal-vector",
+      "$comment": "legacy register: cross-impl-refusal-vector",
+      "statement": "The native verifier, the cgo FFI and the WASM verifier produce the same refusal fields (ok, gateway_refusals, gateway_refusal_attempts, gateway_refusals_by_class, and whether a refusal shape issue is present) for the four committed rows: a refusals bundle, a legacy event_type-only bundle, an unknown-class bundle and the capstone with refusals; the report serializer always carries the three fields.",
+      "method": "differential-vectors",
+      "artifacts": [
+        "spec/fixtures/gateway-refusal-vectors.json",
+        "core/tests/gateway_refusal.rs",
+        "server/internal/core/refusal_vectors_test.go",
+        "verifier/test/gateway-refusal.test.js"
+      ],
+      "gates": [
+        "core",
+        "server",
+        "verifier"
+      ],
+      "detector": "cargo test -q -p averin-decision-core --test gateway_refusal -- committed_vector_file_replays report_serializes_the_refusal_fields",
+      "covers": [
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "report_to_canon",
+          "sha256": "52eda4dadfc6855a52894167db9e12208575b687e0a2c13fabb71e4bfe25f1e2"
+        }
+      ],
+      "mutants": [
+        "gateway-refusal-report-omits-attempts"
+      ],
+      "does_not_establish": "That the three targets agree on inputs outside the four rows. The detector runs the native replay only; the cgo and WASM replays run in the server and verifier jobs, and the expectations in the file come from the native verifier and are pinned to literals in the same test file. The vectors are signed by test-only keys."
     }
   ]
 }

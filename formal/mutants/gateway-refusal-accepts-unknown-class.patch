@@ -1,0 +1,12 @@
+diff --git a/core/src/refusal.rs b/core/src/refusal.rs
+index 1e7410d..a0829cb 100644
+--- a/core/src/refusal.rs
++++ b/core/src/refusal.rs
+@@ -164,7 +164,6 @@ pub fn check_shape(rec: &CanonValue) -> Result<Counted, String> {
+         let class = g
+             .get("reason_class")
+             .and_then(|v| v.as_str())
+-            .filter(|c| REASON_CLASSES.contains(c))
+             .ok_or("extensions.gateway_refusal.reason_class is outside the closed set")?;
+         by_class.insert(class.to_string(), attempts as u64);
+     }

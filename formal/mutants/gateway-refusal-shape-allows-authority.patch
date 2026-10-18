@@ -1,0 +1,13 @@
+diff --git a/core/src/refusal.rs b/core/src/refusal.rs
+index 1e7410d..5f27576 100644
+--- a/core/src/refusal.rs
++++ b/core/src/refusal.rs
+@@ -79,7 +79,7 @@ pub fn check_shape(rec: &CanonValue) -> Result<Counted, String> {
+             "record_kind {KIND} requires event_type {EVENT_TYPE}"
+         ));
+     }
+-    if rec.get("authority").is_some() {
++    if rec.get("authority").is_some() && false {
+         return Err("a gateway refusal carries no authority block".into());
+     }
+     let ext = rec
