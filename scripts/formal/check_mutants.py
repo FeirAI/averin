@@ -42,7 +42,10 @@ def run_detector_full(cmd: str, cwd: Path, timeout: int,
             os.killpg(p.pid, signal.SIGKILL)  # only the group we started
         except ProcessLookupError:
             pass
-        out, _ = p.communicate()
+        try:
+            out, _ = p.communicate(timeout=10)  # bounded: a stray holder of the pipe must not hang the runner
+        except subprocess.TimeoutExpired:
+            out = ""
         return "timeout", -1, out or ""
     return ("pass" if p.returncode == 0 else "fail"), p.returncode, out or ""
 

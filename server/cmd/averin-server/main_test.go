@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -113,13 +112,9 @@ func TestSecretEnvOrFile_Fatal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.scenario, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-test.run=TestSecretEnvOrFile_Fatal")
-			cmd.Env = append(os.Environ(), "AVERIN_TEST_FATAL_CASE="+tc.scenario)
-			cmd.Env = append(cmd.Env, tc.env...)
-			out, err := cmd.CombinedOutput()
-			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
-				t.Fatalf("scenario %q: expected non-zero exit from log.Fatal, got %v\n%s", tc.scenario, err, out)
-			}
+			env := append(os.Environ(), "AVERIN_TEST_FATAL_CASE="+tc.scenario)
+			env = append(env, tc.env...)
+			startServerExpectRefusal(t, os.Args[0], []string{"-test.run=TestSecretEnvOrFile_Fatal"}, env)
 		})
 	}
 }
@@ -180,14 +175,9 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(bin)
 			// Minimal env: avoid inheriting any real seeds; bind nowhere (it fatals before listening).
-			cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...)
-			out, err := cmd.CombinedOutput()
-			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
-				t.Fatalf("%s: expected the R2 guard to fatal (non-zero exit), got err=%v\noutput:\n%s", tc.name, err, out)
-			}
-			if !strings.Contains(string(out), "R2 role separation") {
+			out := startServerExpectRefusal(t, bin, nil, append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...))
+			if !strings.Contains(out, "R2 role separation") {
 				t.Fatalf("%s: exited non-zero but not via the R2 guard; output:\n%s", tc.name, out)
 			}
 		})
@@ -217,13 +207,8 @@ func TestRequireProdSecrets_FailsClosed(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(bin)
-			cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...)
-			out, err := cmd.CombinedOutput()
-			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
-				t.Fatalf("%s: expected fail-closed exit, got %v\n%s", tc.name, err, out)
-			}
-			if !strings.Contains(string(out), "AVERIN_REQUIRE_PROD_SECRETS") {
+			out := startServerExpectRefusal(t, bin, nil, append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...))
+			if !strings.Contains(out, "AVERIN_REQUIRE_PROD_SECRETS") {
 				t.Fatalf("%s: exited non-zero but not via the gate:\n%s", tc.name, out)
 			}
 		})
@@ -272,14 +257,10 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 		}
 		addr := l.Addr().String()
 		_ = l.Close()
-		cmd := exec.Command(bin)
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=" + addr,
+		env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=" + addr,
 			"AVERIN_DEV_MODE=1", "AVERIN_SIGNING_SEED=" + seed, "AVERIN_API_KEYS=proj:tok"}
-		cmd.Env = append(cmd.Env, extraEnv...)
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+		env = append(env, extraEnv...)
+		startServerProc(t, bin, env)
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
 			req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/v2/posture?project=proj", nil)
@@ -356,22 +337,11 @@ func TestRegion_InvalidValueRefusesStart(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("could not build averin-server: %v\n%s", err, out)
 	}
-	// A server that wrongly ignores AVERIN_REGION starts and listens; without a deadline this test
-	// would hang until go test's own timeout and leave the server running.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin)
-	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=127.0.0.1:0",
-		"AVERIN_DEV_MODE=1", "AVERIN_SIGNING_SEED=" + strings.Repeat("a1", 32), "AVERIN_REGION=EU West"}
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("an invalid AVERIN_REGION did not stop the server within 30s (it started and kept running)\n%s", out)
-	}
-	if err == nil {
-		t.Fatalf("an invalid AVERIN_REGION started the server\n%s", out)
-	}
-	if !strings.Contains(string(out), "AVERIN_REGION") {
+	// A server that wrongly ignores AVERIN_REGION starts and listens; the helper bounds the wait,
+	// kills it, and fails the test instead of leaving it running.
+	out := startServerExpectRefusal(t, bin, nil, []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=127.0.0.1:0",
+		"AVERIN_DEV_MODE=1", "AVERIN_SIGNING_SEED=" + strings.Repeat("a1", 32), "AVERIN_REGION=EU West"})
+	if !strings.Contains(out, "AVERIN_REGION") {
 		t.Fatalf("the refusal must name AVERIN_REGION\n%s", out)
 	}
 }

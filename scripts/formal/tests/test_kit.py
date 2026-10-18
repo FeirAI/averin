@@ -720,6 +720,25 @@ class MutantRunner(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("baseline", buf.getvalue())
 
+    def test_timeout_kills_the_detectors_whole_process_group(self):
+        # feir-ops#13: a detector that spawns a long-lived child (a test binary that execs a server)
+        # must not leave that child behind when the runner times it out.
+        import io, os, tempfile, time
+        pidfile = Path(tempfile.mkdtemp()) / "child.pid"
+        d = self.build(detector_ok="sleep 300 & echo $! > %s; wait" % pidfile)
+        code = cm.run(d, d / "formal" / "claims.json", only="kills", out=io.StringIO(), timeout=2)
+        self.assertEqual(code, 1)
+        pid = int(pidfile.read_text())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, 9)  # only the pid this test started
+            self.fail("detector child survived the runner's timeout")
+
     def test_empty_tier_selection_fails_unless_allowed(self):
         def all_full(c):
             c["mutants"] = {}

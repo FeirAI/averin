@@ -124,12 +124,14 @@ func buildForDefaults(t *testing.T) (bin, dir string) {
 	return bin, dir
 }
 
+// runToExit runs a server that is expected to refuse; a server that keeps running fails the test.
 func runToExit(t *testing.T, bin string, env ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command(bin)
-	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, env...)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	res := runRefusal(t, bin, nil, append([]string{"PATH=" + os.Getenv("PATH")}, env...), refusalBound)
+	if res.Leaked || res.TimedOut {
+		t.Fatalf("the process did not refuse to start within %s (timed out=%v leaked=%v)\n%s", refusalBound, res.TimedOut, res.Leaked, res.Out)
+	}
+	return res.Out, res.Err
 }
 
 // TestDefaults_RefuseToStartWithoutKeysOrDevMode: the production gate is on by default, so a process
@@ -164,12 +166,7 @@ func startAndGet(t *testing.T, bin, dir string, env []string, method, path, bear
 	}
 	addr := l.Addr().String()
 	_ = l.Close()
-	cmd := exec.Command(bin)
-	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=" + addr}, env...)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	stop := func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }
+	stop := startServerProc(t, bin, append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=" + addr}, env...))
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequest(method, "http://"+addr+path, nil)
