@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 86f810c..ecbb6fe 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -7444,7 +7444,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+                 // The grant is in an earlier month, so the rest of the use predicate waits for the chain. A grant
+                 // the signed revocation_list this month carries names as revoked is blocked here all the same
+                 // (M5): a signed revocation is monotone, and it does not depend on where the grant was issued.
+-                if revocation.revoked.contains(&gid) {
++                if false && revocation.revoked.contains(&gid) {
+                     revoked_uses_blocked += 1;
+                     revoked_membership_found = true;
+                     violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_list ({}) marks REVOKED — blocked (M5)", revocation.status));

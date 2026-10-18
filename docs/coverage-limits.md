@@ -82,14 +82,14 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   *after deployment* must verify the newest version first and fall back to older versions under an
   explicitly downgraded/legacy status — never a silent hard cutover that drops historical verification.
 - **RFC 3161 wire format.** The DER/CMS `TimeStampToken` parser + verifier is implemented for the
-  ECDSA P-256/SHA-256 and P-384/SHA-512 TSA profiles and
+  ECDSA P-256/SHA-256, ECDSA P-384/SHA-512, RSA PKCS#1 v1.5 and RSASSA-PSS (SHA-256/384/512, keys of at least 2048 bits) TSA profiles and
   feature-gated (`rfc3161`); it ships in the native verify CLI (built with the feature in CI) and is
   exercised end to end by the hermetic `test-anchor`/mini-TSA suite. It is **intentionally native-only**:
   the in-browser WASM verifier is built `--no-default-features` to stay lean and RNG-free (the P-256
   curve-arithmetic stack the RFC 3161 path needs transitively pulls `getrandom`, which has no
   `wasm32-unknown-unknown` backend), so a WASM verifier reports an `rfc3161` anchor as `Unsupported`
   — **never a silent pass** — and production-anchored bundles are verified by the native/CLI verifier.
-  The remaining open item is the production Go anchoring round-trip against a real third-party TSA.
+  It is tested against responses recorded from FreeTSA, DigiCert and Sectigo (2026-10-15); no CI job stamps at a live authority, and anchoring is off unless an operator turns it on ([TIMESTAMPS.md](dev/TIMESTAMPS.md)).
 - **Best-effort secret scrubbing.** The proxy, SDK, and OTel ingestion paths run captured I/O through
   regex-based credential/PII redaction (`server/internal/scrub`) before anything is stored or hashed;
   the OTel path additionally drops attributes whose key names a credential (authorization / api key /

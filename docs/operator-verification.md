@@ -39,8 +39,13 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
   // native introspection-transcript signer (averin.resource.introspection.v1).
   "resource_authority_keys": ["ed25519pub:<resource-recording-key>"],
 
-  // D3/D7 time anchoring: the TSA key(s) (or "tsa_spki_b64" for an RFC 3161 TSA's DER SPKI).
+  // D3/D7 time anchoring: the TSA key(s) (or "tsa_spki_b64" for an RFC 3161 TSA's DER SPKI; ECDSA and RSA
+  // TSA signatures are accepted, see docs/dev/TIMESTAMPS.md).
   "tsa_keys": ["ed25519pub:<tsa-key>"],
+
+  // Month segments (docs/dev/SEGMENTS.md): the base checkpoint hash this month must start from (the previous
+  // month's segment.head_checkpoint_hash), or "genesis" for the first month. `averin-verify chain` sets it for you.
+  "segment_base_checkpoint_hash": "sha256:<previous month head>",
 
   // D4 operation taxonomy (MF5): the SIGNED taxonomy artifact + its issuer key(s) + the pinned
   // content digest + version it must match to reach `validated` (a signed-but-unpinned taxonomy stays untrusted).

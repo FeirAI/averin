@@ -1,0 +1,13 @@
+diff --git a/core/src/dag.rs b/core/src/dag.rs
+index edb34c0..b92b76a 100644
+--- a/core/src/dag.rs
++++ b/core/src/dag.rs
+@@ -203,7 +203,7 @@ pub fn build_from(
+     if let Some(base) = base_frontier {
+         heads.extend(
+             base.iter()
+-                .filter(|m| !base_referenced.contains(m.as_str()) && !by_hash.contains_key(*m))
++                .filter(|m| !by_hash.contains_key(*m))
+                 .cloned(),
+         );
+     }

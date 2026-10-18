@@ -1,0 +1,13 @@
+diff --git a/core/src/segment.rs b/core/src/segment.rs
+index 1e17eaf..d8b88ea 100644
+--- a/core/src/segment.rs
++++ b/core/src/segment.rs
+@@ -337,7 +337,7 @@ impl ChainState {
+                 issue("malformed unresolved_cross_month entry".into());
+                 continue;
+             };
+-            if !self.seen_ids.contains(reference) {
++            if false && !self.seen_ids.contains(reference) {
+                 issue(format!(
+                     "{kind} {rid} names {reference}, which no earlier month holds"
+                 ));

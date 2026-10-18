@@ -20,6 +20,7 @@ pub mod hashx;
 pub mod record;
 #[cfg(feature = "rfc3161")]
 pub mod rfc3161;
+pub mod segment;
 pub mod sign;
 pub mod verify;
 

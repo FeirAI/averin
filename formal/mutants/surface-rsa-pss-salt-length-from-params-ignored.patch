@@ -1,0 +1,13 @@
+diff --git a/core/src/rfc3161.rs b/core/src/rfc3161.rs
+index 02298ec..e29b1de 100644
+--- a/core/src/rfc3161.rs
++++ b/core/src/rfc3161.rs
+@@ -143,7 +143,7 @@ impl SigScheme {
+             if ph != hash || mgf_hash != hash || p.trailer.unwrap_or(1) != 1 {
+                 return Err(Rfc3161Error::UnsupportedSigAlg);
+             }
+-            let salt_len = p.salt_len.unwrap_or(20) as usize;
++            let salt_len = p.salt_len.map_or(20, |_| 32) as usize;
+             // A salt longer than the hash is not used by any TSA and only widens the parser.
+             if salt_len > 64 {
+                 return Err(Rfc3161Error::UnsupportedSigAlg);

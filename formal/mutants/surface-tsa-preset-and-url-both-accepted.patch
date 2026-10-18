@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-server/main.go b/server/cmd/averin-server/main.go
+index 83bfa39..63b3e83 100644
+--- a/server/cmd/averin-server/main.go
++++ b/server/cmd/averin-server/main.go
+@@ -1011,7 +1011,7 @@ func decodeAuthorityPubKey(raw string) (ed25519.PublicKey, error) {
+ func resolveTSAConfig(preset, url string) (stampURL, pinSPKIB64 string, err error) {
+ 	preset, url = strings.TrimSpace(preset), strings.TrimSpace(url)
+ 	switch {
+-	case preset != "" && url != "":
++	case false:
+ 		return "", "", fmt.Errorf("AVERIN_TSA_PRESET and AVERIN_TSA_URL are both set: choose one")
+ 	case preset != "":
+ 		p, perr := witness.LookupTSAPreset(preset)

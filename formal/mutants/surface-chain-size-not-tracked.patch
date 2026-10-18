@@ -1,0 +1,13 @@
+diff --git a/core/src/segment.rs b/core/src/segment.rs
+index 0cc62af..c0aa5e1 100644
+--- a/core/src/segment.rs
++++ b/core/src/segment.rs
+@@ -513,7 +513,7 @@ impl ChainState {
+             added += disclosures.iter().map(serialized_len).sum::<usize>();
+             self.history_bytes = self.history_bytes.saturating_add(added);
+             let cap = self.cap_override.unwrap_or(MAX_BUNDLE_BYTES);
+-            if self.history_bytes.saturating_add(self.latest_extra_bytes) > cap {
++            if self.history_bytes.saturating_add(self.latest_extra_bytes) > usize::MAX {
+                 // the concatenation cannot be verified in one piece: stop holding it
+                 self.over_cap = true;
+                 self.all_records = Vec::new();

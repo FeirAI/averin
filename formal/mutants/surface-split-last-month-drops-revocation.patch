@@ -1,0 +1,13 @@
+diff --git a/core/src/segment.rs b/core/src/segment.rs
+index 0cc62af..9c12bf9 100644
+--- a/core/src/segment.rs
++++ b/core/src/segment.rs
+@@ -173,7 +173,7 @@ pub fn split_bundle(bundle: &CanonValue) -> Result<Vec<(String, CanonValue)>, St
+             .filter(|(k, _)| !is_history_member(k))
+             .cloned()
+             .collect();
+-        if is_last {
++        if is_last && false {
+             for key in ["revocation_list", "deployment_attestation"] {
+                 if let Some(v) = bundle.get(key) {
+                     members.push((key.to_string(), v.clone()));

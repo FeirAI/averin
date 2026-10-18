@@ -111,6 +111,9 @@ type HTTPTSA struct {
 	Client *http.Client
 	// ContentType is the request content type; defaults to the RFC 3161 timestamp-query media type.
 	ContentType string
+	// Authorization, when set, is sent as the Authorization header (for example "Basic ..." for a
+	// paid authority that bills per account). Empty sends none.
+	Authorization string
 	// MaxResponseBytes caps the response read to avoid an unbounded body from a hostile/buggy TSA.
 	MaxResponseBytes int64
 }
@@ -140,6 +143,9 @@ func (t *HTTPTSA) Stamp(ctx context.Context, imprintSHA256 []byte) ([]byte, erro
 	}
 	req.Header.Set("Content-Type", ct)
 	req.Header.Set("Accept", "application/timestamp-reply")
+	if t.Authorization != "" {
+		req.Header.Set("Authorization", t.Authorization)
+	}
 
 	cl := t.Client
 	if cl == nil {

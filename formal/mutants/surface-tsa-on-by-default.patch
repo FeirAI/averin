@@ -1,0 +1,12 @@
+diff --git a/server/cmd/averin-server/main.go b/server/cmd/averin-server/main.go
+index 83bfa39..c25ec45 100644
+--- a/server/cmd/averin-server/main.go
++++ b/server/cmd/averin-server/main.go
+@@ -1020,6 +1020,6 @@ func resolveTSAConfig(preset, url string) (stampURL, pinSPKIB64 string, err erro
+ 		}
+ 		return p.URL, p.SPKIB64, nil
+ 	default:
+-		return url, "", nil
++		return "https://freetsa.org/tsr", "", nil
+ 	}
+ }

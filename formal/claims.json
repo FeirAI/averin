@@ -146,7 +146,7 @@
         "formal-production",
         "formal-mutants-fast"
       ],
-      "evidence_run": "37712087870",
+      "evidence_run": "38705908676",
       "scheduled_gates": [
         "formal-mutants-full"
       ],
@@ -603,7 +603,7 @@
     },
     {
       "id": "native-rfc3161",
-      "claim": "The native feature verifies RFC 3161 tokens against pinned TSA SPKI; the lean WASM build reports RFC 3161 as Unsupported.",
+      "claim": "The native feature verifies RFC 3161 tokens against a pinned TSA SPKI under ECDSA P-256/SHA-256, ECDSA P-384/SHA-512, RSA PKCS#1 v1.5 and RSASSA-PSS (SHA-256/384/512, keys of at least 2048 bits), and accepts the tokens FreeTSA, DigiCert and Sectigo returned on 2026-10-15; the lean WASM build reports RFC 3161 as Unsupported. Not that any CI job stamps at a live authority, that the TSA certificate chain or policy was checked (the relying party pins the key), or that the TSA clock is accurate.",
       "class": "target-specific-test",
       "targets": [
         "native Rust with rfc3161",
@@ -612,12 +612,17 @@
       ],
       "assumptions": [
         "TSA SPKI pinned out of band",
-        "no production TSA round trip has been validated"
+        "the recorded responses are what those authorities send today; no scheduled job re-stamps at them",
+        "RSA signature verification by the rsa crate (public-key operations only)"
       ],
       "sources": [
         {
           "file": "core/src/rfc3161.rs",
           "symbol": "verify_token"
+        },
+        {
+          "file": "core/src/rfc3161.rs",
+          "symbol": "verify_rsa"
         },
         {
           "file": "core/src/anchor.rs",
@@ -630,8 +635,28 @@
           "symbol": "rfc3161_no_trusted_tsa_is_an_error_not_a_pass"
         },
         {
+          "file": "core/src/rfc3161.rs",
+          "symbol": "recorded_real_tsa_tokens_verify_and_bind"
+        },
+        {
+          "file": "core/src/rfc3161.rs",
+          "symbol": "synthetic_rsa_profiles_verify_and_reject_tampering"
+        },
+        {
+          "file": "core/src/rfc3161.rs",
+          "symbol": "rsa_keys_under_2048_bits_are_refused"
+        },
+        {
+          "file": "server/internal/witness/tsa_recorded_test.go",
+          "symbol": "TestHTTPTSAUnwrapsRecordedRealResponses"
+        },
+        {
           "file": "scripts/check-staticlib-fresh.sh",
           "symbol": "the cgo staticlib is OLDER than core source"
+        },
+        {
+          "file": "formal/mutants/surface-rsa-signature-checked-over-wrong-bytes.patch",
+          "symbol": "hash.digest(tst_bytes)"
         }
       ],
       "gates": [
@@ -639,7 +664,7 @@
         "store-postgres",
         "wasm"
       ],
-      "evidence_run": "37712087870"
+      "evidence_run": "38705908676"
     },
     {
       "id": "authority-v3-semantic-body-binding",
@@ -698,7 +723,7 @@
         "formal-lean",
         "formal-refinement"
       ],
-      "evidence_run": "37712087870"
+      "evidence_run": "38705908676"
     },
     {
       "id": "historical-v2-authority-is-unbound",
@@ -822,6 +847,62 @@
       "evidence_run": "37712087870"
     },
     {
+      "id": "multi-writer-failure-matrix",
+      "claim": "Real averin-server processes on one PostgreSQL schema survive a scripted matrix of single failures with no invariant violation found by a trace monitor: one nonce used by racing requests over two processes, one use identity sent repeatedly, a prospective and a total revoke against a use that already read the revocation state, a use against an uncommitted revoke, kill -9 during an open prepare or finalize transaction, stranded broker_seq recovery while the other process writes and a recovery process killed between its fence and its terminal transaction, a lost COMMIT acknowledgment cut before and after the server committed (finalize, use and revoke, retried on both processes), and concurrent checkpoints. The monitor checks no use after an acknowledged revoke, one admission per nonce, no session fork, a numbered checkpoint chain ending at the committed frontier, no receipt at or after its cutoff, a gapless broker_seq log, and every acknowledged operation durable, and has negative controls. Sampled interleavings of two or three processes on one Postgres 16 schema, not a proof, and not a cluster: it excludes a content store shared by replicas, the per-replica ingest budget, an object-storage witness and Postgres failover, so the single-writer-per-project deployment policy stays.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": [
+        "Go server",
+        "Postgres mode"
+      ],
+      "assumptions": [
+        "PostgreSQL serializes the project guard row",
+        "the TCP proxy sees the simple-query COMMIT of a project write transaction",
+        "all project writers use WithProjectWrite",
+        "the processes share one local content directory"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "lockProject"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "handleUsePhase"
+        },
+        {
+          "file": "server/internal/api/project_tx.go",
+          "symbol": "withProjectWrite"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/multiwriter_test.go",
+          "symbol": "TestMultiWriterFailureMatrix"
+        },
+        {
+          "file": "server/internal/api/multiwriter_monitor_test.go",
+          "symbol": "TestMultiWriterMonitorNegativeControls"
+        },
+        {
+          "file": "formal/tla/ProjectTx_operational_safe.cfg",
+          "symbol": "NoRevokedUse"
+        },
+        {
+          "file": "formal/mutants/multiwriter-guard-lock-skipped.patch",
+          "symbol": "FOR UPDATE"
+        },
+        {
+          "file": "formal/mutants/multiwriter-use-ignores-revocation.patch",
+          "symbol": "IsRevoked(trustedProject, id)"
+        }
+      ],
+      "gates": [
+        "multiwriter",
+        "store-postgres",
+        "formal-fast"
+      ]
+    },
+    {
       "id": "historical-revocation-ordering",
       "claim": "Under the caller-selected db_serialized_v1 policy, historical_authorized_as_of_snapshot is satisfied only when every validated receipt carries a body-bound resource-signed authorization ordinal below its grant's authenticated prospective cutoff and at or below the watermark of an authenticated, fresh v2 revocation snapshot for the project. Current revocation still blocks ok, revoked_uses_blocked, authorized and the capstone under every policy; strict, total, legacy v1, stripped, stale or malformed evidence never yields a historical positive. The model theorem covers the claim kernel and support erasure, not the verifier's extraction passes; the order is Averin's database order, not physical action time.",
       "class": "model-and-tested-implementation",
@@ -902,7 +983,7 @@
         "formal-refinement",
         "formal-mutants-fast"
       ],
-      "evidence_run": "37712087870",
+      "evidence_run": "38705908676",
       "scheduled_gates": [
         "formal-mutants-full"
       ],
@@ -1030,7 +1111,8 @@
       "gates": [
         "core",
         "formal-fast"
-      ]
+      ],
+      "evidence_run": "38705908676"
     },
     {
       "id": "action-completeness-capped-by-kernel",
@@ -1171,7 +1253,8 @@
       "gates": [
         "core",
         "formal-fast"
-      ]
+      ],
+      "evidence_run": "38705908676"
     },
     {
       "id": "posture-report-live",
@@ -1211,7 +1294,341 @@
       "gates": [
         "server",
         "formal-fast"
-      ]
+      ],
+      "evidence_run": "38705908676"
+    },
+    {
+      "id": "signing-key-rotation-chain",
+      "claim": "averin's recording key can be rotated without breaking history checks. The server stamps an operator-set epoch, publishes the current and every retired key with its status, and publishes signed rotation statements (new domain averin.key_rotation.v1) that link each retired key to its successor, refusing to start when the lineage is inconsistent. The verifier counts a statement as verified only when its signatures hold over keys the bundle lists, and extends an externally pinned key's trust to the successor only through a verified scheduled statement from a key that is neither revoked nor compromised; a compromise statement extends none. A bundle exported across a rotation by a real server verifies from the old key's pin alone and stops verifying when the statement is stripped. Not that the old key signed nothing after the rotation time (the operator destroys the old seed, or for a compromise a timestamp anchor taken before the compromise time decides), that the rotation happened at the stated time, or that the operator followed the runbook.",
+      "class": "model-and-tested-implementation",
+      "targets": [
+        "native Rust",
+        "Go server",
+        "Go cgo with rfc3161"
+      ],
+      "assumptions": [
+        "the operator holds the old seed at a scheduled rotation and destroys it afterwards",
+        "the auditor pins the old key out of band and marks it compromised when it is",
+        "Ed25519 unforgeability"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "evaluate_key_rotations"
+        },
+        {
+          "file": "server/internal/keylineage/keylineage.go",
+          "symbol": "func Build"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "WithKeyLineage"
+        },
+        {
+          "file": "formal/lean/Averin/Preimage.lean",
+          "symbol": "keyRotationSig"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/key_rotation.rs",
+          "symbol": "scheduled_handover_carries_a_pinned_old_key_to_its_successor"
+        },
+        {
+          "file": "core/tests/key_rotation.rs",
+          "symbol": "a_compromise_rotation_links_the_keys_but_extends_no_trust"
+        },
+        {
+          "file": "server/internal/api/keyrotation_test.go",
+          "symbol": "TestRotatedKeyHistoryVerifiesFromTheOldPin"
+        },
+        {
+          "file": "server/internal/keylineage/keylineage_test.go",
+          "symbol": "TestBuildRefusesAnInconsistentLineage"
+        },
+        {
+          "file": "core/tests/oracle.rs",
+          "symbol": "key rotation"
+        },
+        {
+          "file": "formal/mutants/surface-rotation-scheduled-skips-sig-old.patch",
+          "symbol": "false && !sig_ok"
+        }
+      ],
+      "gates": [
+        "core",
+        "server",
+        "formal-refinement",
+        "formal-lean",
+        "formal-fast"
+      ],
+      "evidence_run": "38686890625"
+    },
+    {
+      "id": "content-preview-committed",
+      "claim": "Prompt and answer text from the SDKs, the recording proxy and the MCP server is committed, not signed. The server moves input, output and rationale out of extensions.content_preview to the top level at ingest, so the signed body carries only salted hiding commitments, the text sits in the content store where a retention purge removes it, and the history still verifies after the purge. A content_preview that is not an object, carries another key, repeats a top-level field or sits on a body-bound v3 authority record is refused. The verifier reports how many records still carry cleartext content_preview (cleartext_content_records). Not that records sealed before this change are erased: their text is part of signed, chained bodies and stays; that personal data placed elsewhere in the body is committed; or that the Python SDK test runs in CI.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": [
+        "Go server",
+        "native Rust verifier",
+        "WASM verifier (same source)"
+      ],
+      "assumptions": [
+        "the deployment sets AVERIN_CONTENT_DIR with a master key and AVERIN_RAW_RETENTION_DAYS, else nothing is purged",
+        "clients put the text in the three named fields or the legacy preview key"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "liftContentPreview"
+        },
+        {
+          "file": "server/internal/proxy/proxy.go",
+          "symbol": "maxPreview"
+        },
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "count_cleartext_content"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/content_preview_test.go",
+          "symbol": "TestLegacyContentPreviewIsCommittedNotSignedAndCanBeErased"
+        },
+        {
+          "file": "server/internal/api/content_preview_test.go",
+          "symbol": "TestContentPreviewShapesThatWouldBeSignedVerbatimAreRefused"
+        },
+        {
+          "file": "core/tests/legacy_content.rs",
+          "symbol": "a_bundle_with_signed_cleartext_text_is_counted"
+        },
+        {
+          "file": "formal/mutants/surface-content-preview-not-lifted.patch",
+          "symbol": "if !ok || true"
+        }
+      ],
+      "gates": [
+        "server",
+        "core",
+        "formal-fast"
+      ],
+      "evidence_run": "38686890625"
+    },
+    {
+      "id": "migrate-hook",
+      "claim": "`averin-migrate --hook` is the idempotent pre-upgrade Job mode: it initializes an empty Postgres database, leaves one at the current schema version unchanged, refuses one newer than the binary, never bootstraps over an unstamped legacy schema, advances an older database only with both cutover roles (otherwise prints cutover_required and exits 3 without changing anything), and serializes concurrent runs on the advisory lock; `--check-runtime` runs the server's runtime-role check. Not that a Kubernetes Job runs it (a feir-os item), that the connection path preserves the session-scoped advisory lock (a pooler in transaction mode would not), or the content of any migration step.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "the migration credential is the schema owner and, for an advancing cutover, can see every session (pg_read_all_stats)",
+        "the deployment connects the hook directly to Postgres, not through a transaction-mode pooler"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/pgschema/hook.go",
+          "symbol": "HookCutoverRequired"
+        },
+        {
+          "file": "server/cmd/averin-migrate/main.go",
+          "symbol": "exitCutoverNeeded"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/pgschema/hook_test.go",
+          "symbol": "TestHookConcurrentRunsInitializeOnce"
+        },
+        {
+          "file": "server/cmd/averin-migrate/main_test.go",
+          "symbol": "TestRunHookExitsThreeWhenACutoverIsNeeded"
+        }
+      ],
+      "gates": [
+        "store-postgres",
+        "formal-fast"
+      ],
+      "evidence_run": "38951172449"
+    },
+    {
+      "id": "tsa-off-by-default-with-presets",
+      "claim": "Trusted timestamps are off unless an operator sets AVERIN_TSA_PRESET or AVERIN_TSA_URL; the freetsa preset is one setting and logs the signing key to pin; AVERIN_TSA_URL takes any other authority and AVERIN_TSA_AUTH_HEADER the credential header a paid one needs, which is refused at start-up unless the TSA URL is https; setting a preset and a URL together, or an unknown preset, is fatal at start-up. The client's request is byte-identical to the one FreeTSA, DigiCert and Sectigo accepted and unwraps each of their recorded responses to the recorded token. Not that an authority is reachable or that anchoring succeeds (a TSA outage stores the checkpoint un-anchored), and the pinned preset key is a trust decision the operator confirms.",
+      "class": "tested-implementation-with-deployment-limit",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "the operator pins the TSA key out of band before relying on an anchor",
+        "outbound HTTPS to the chosen authority is permitted"
+      ],
+      "sources": [
+        {
+          "file": "server/cmd/averin-server/main.go",
+          "symbol": "resolveTSAConfig"
+        },
+        {
+          "file": "server/cmd/averin-server/main.go",
+          "symbol": "checkTSAAuthTransport"
+        },
+        {
+          "file": "server/internal/witness/tsa_preset.go",
+          "symbol": "LookupTSAPreset"
+        },
+        {
+          "file": "server/internal/witness/tsa.go",
+          "symbol": "Authorization"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/cmd/averin-server/tsa_config_test.go",
+          "symbol": "TestResolveTSAConfig"
+        },
+        {
+          "file": "server/cmd/averin-server/tsa_config_test.go",
+          "symbol": "TestTSAAuthHeaderRequiresHTTPS"
+        },
+        {
+          "file": "server/internal/witness/tsa_recorded_test.go",
+          "symbol": "TestBuildTimeStampReqMatchesRequestRealTSAsAccepted"
+        },
+        {
+          "file": "server/internal/witness/tsa_recorded_test.go",
+          "symbol": "TestHTTPTSASendsConfiguredAuthorization"
+        },
+        {
+          "file": "formal/mutants/surface-tsa-preset-and-url-both-accepted.patch",
+          "symbol": "case false:"
+        }
+      ],
+      "gates": [
+        "server"
+      ],
+      "evidence_run": "38718313766"
+    },
+    {
+      "id": "month-segment-verification",
+      "claim": "A month segment (bundle.segment, averin.segment.v1) verifies on its own: its base checkpoint is carried and checked like every checkpoint, the chain starts at that base, every checkpoint falls in the stated UTC month and the base before it, the latest frontier equals the segment's heads, its record_count equals the base's count plus the records carried and no carried record is a member of the base frontier, and a base the caller pinned must be the base stated. averin-verify chain additionally requires each month to start from the previous month's head, months and projects to agree, every parent a month points before its base to exist in an earlier month, and every grant or intent a use or outcome names across a month boundary to be held by an earlier month, and no record (by content hash or record id) to be carried by two months; it then verifies the months, put back together, as one whole-history bundle and its claim word is that whole history's, so a use with no matching grant or a second use of a single-use grant that spans months reaches the word as it does in one export (when that history fits the verifier's byte cap; over it the word is capped at INSUFFICIENT). A month reports the grant-log chain, federation heads and (with a base) cross_month_uses as not evaluated and never counts a cross-month use or outcome as matched; the chain's rebuilt history carries the latest month's revocation list and deployment attestation and every month's disclosures. Not that a month with parents before its base has a complete record set on its own (such a month reports record_completeness as not evaluated, and only the chain closes it), that earlier months are intact (only the chain over all of them says so), the use-to-grant predicate or the grant-log transparency chain inside one month, a revocation list or deployment attestation for a chain unless the latest month carries them (a server re-issues them for every month, split copies them into the last month only), the cross-month rules for a history over the byte cap (the word is then INSUFFICIENT, never PASS, and a cross-month double use in it is not reported as FAIL), a month with a base ruling out cross-month uses on its own (it lists cross_month_uses as not evaluated and is capped at INSUFFICIENT), or that a recorder showing different histories to different auditors is caught (that needs external anchoring).",
+      "class": "tested-implementation",
+      "targets": [
+        "native Rust",
+        "Go server",
+        "Go cgo with rfc3161"
+      ],
+      "assumptions": [
+        "checkpoint created_ts is the recorder's own signed clock",
+        "Ed25519 unforgeability",
+        "records are cut by checkpoint record_count in insertion order"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "evaluate_segment"
+        },
+        {
+          "file": "core/src/segment.rs",
+          "symbol": "validate_segment_chain"
+        },
+        {
+          "file": "core/src/segment.rs",
+          "symbol": "ChainState"
+        },
+        {
+          "file": "core/src/segment.rs",
+          "symbol": "finish_with"
+        },
+        {
+          "file": "core/src/dag.rs",
+          "symbol": "build_from"
+        },
+        {
+          "file": "server/internal/api/segments.go",
+          "symbol": "planSegments"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "buildBundleView"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "every_month_verifies_alone_and_links_to_the_previous_head"
+        },
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "the_chain_with_a_month_removed_fails"
+        },
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "a_dropped_record_replaced_by_a_base_frontier_record_fails_the_month"
+        },
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "a_dropped_record_replaced_by_an_old_record_is_reported_incomplete_and_the_chain_catches_it"
+        },
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "a_month_with_a_missing_record_fails_the_count_and_the_dag"
+        },
+        {
+          "file": "core/tests/segments.rs",
+          "symbol": "the_chain_resolves_cross_month_references_against_earlier_months_only"
+        },
+        {
+          "file": "server/internal/api/segments_e2e_test.go",
+          "symbol": "TestMonthSegmentsExportVerifyAndChain"
+        },
+        {
+          "file": "server/internal/api/segments_cap_internal_test.go",
+          "symbol": "TestOverTheCapIsRefusedWithAPointerToMonths"
+        },
+        {
+          "file": "server/internal/api/segments_cap_internal_test.go",
+          "symbol": "TestOverTheCapCountsTheSerializedBundleNotJustTheRecords"
+        },
+        {
+          "file": "server/internal/api/segments_e2e_test.go",
+          "symbol": "TestMonthSegmentsOnPostgres"
+        },
+        {
+          "file": "core/tests/segments_cross_month.rs",
+          "symbol": "a_second_use_of_a_single_use_grant_in_a_later_month_reaches_the_whole_histories_verdict"
+        },
+        {
+          "file": "core/tests/segments_cross_month.rs",
+          "symbol": "a_month_that_carries_a_record_an_earlier_month_already_holds_is_refused"
+        },
+        {
+          "file": "core/tests/segments_cross_month.rs",
+          "symbol": "a_grant_revoked_by_the_latest_list_and_used_only_in_a_later_month_fails_whole_and_chain"
+        },
+        {
+          "file": "core/tests/segments_cross_month.rs",
+          "symbol": "a_month_with_a_base_never_passes_on_its_own_while_the_whole_and_the_chain_fail"
+        },
+        {
+          "file": "core/tests/segments_cross_month.rs",
+          "symbol": "disclosures_in_every_month_reach_the_chains_whole_history"
+        },
+        {
+          "file": "core/tests/segments_cross_month.rs",
+          "symbol": "a_history_over_the_cap_is_not_rebuilt_and_never_passes"
+        },
+        {
+          "file": "formal/mutants/surface-segment-count-ignores-base.patch",
+          "symbol": "checked_add(0)"
+        }
+      ],
+      "gates": [
+        "core",
+        "server",
+        "formal-fast"
+      ],
+      "evidence_run": "38980642612"
     },
     {
       "id": "api-token-and-role-enforcement",
@@ -1421,218 +1838,6 @@
         "server",
         "formal-fast"
       ]
-    },
-    {
-      "id": "multi-writer-failure-matrix",
-      "claim": "Real averin-server processes on one PostgreSQL schema survive a scripted matrix of single failures with no invariant violation found by a trace monitor: one nonce used by racing requests over two processes, one use identity sent repeatedly, a prospective and a total revoke against a use that already read the revocation state, a use against an uncommitted revoke, kill -9 during an open prepare or finalize transaction, stranded broker_seq recovery while the other process writes and a recovery process killed between its fence and its terminal transaction, a lost COMMIT acknowledgment cut before and after the server committed (finalize, use and revoke, retried on both processes), and concurrent checkpoints. The monitor checks no use after an acknowledged revoke, one admission per nonce, no session fork, a numbered checkpoint chain ending at the committed frontier, no receipt at or after its cutoff, a gapless broker_seq log, and every acknowledged operation durable, and has negative controls. Sampled interleavings of two or three processes on one Postgres 16 schema, not a proof, and not a cluster: it excludes a content store shared by replicas, the per-replica ingest budget, an object-storage witness and Postgres failover, so the single-writer-per-project deployment policy stays.",
-      "class": "tested-implementation-with-deployment-limit",
-      "targets": [
-        "Go server",
-        "Postgres mode"
-      ],
-      "assumptions": [
-        "PostgreSQL serializes the project guard row",
-        "the TCP proxy sees the simple-query COMMIT of a project write transaction",
-        "all project writers use WithProjectWrite",
-        "the processes share one local content directory"
-      ],
-      "sources": [
-        {
-          "file": "server/internal/store/postgres.go",
-          "symbol": "lockProject"
-        },
-        {
-          "file": "server/internal/api/server.go",
-          "symbol": "handleUsePhase"
-        },
-        {
-          "file": "server/internal/api/project_tx.go",
-          "symbol": "withProjectWrite"
-        }
-      ],
-      "proofs": [
-        {
-          "file": "server/internal/api/multiwriter_test.go",
-          "symbol": "TestMultiWriterFailureMatrix"
-        },
-        {
-          "file": "server/internal/api/multiwriter_monitor_test.go",
-          "symbol": "TestMultiWriterMonitorNegativeControls"
-        },
-        {
-          "file": "formal/tla/ProjectTx_operational_safe.cfg",
-          "symbol": "NoRevokedUse"
-        },
-        {
-          "file": "formal/mutants/multiwriter-guard-lock-skipped.patch",
-          "symbol": "FOR UPDATE"
-        },
-        {
-          "file": "formal/mutants/multiwriter-use-ignores-revocation.patch",
-          "symbol": "IsRevoked(trustedProject, id)"
-        }
-      ],
-      "gates": [
-        "multiwriter",
-        "store-postgres",
-        "formal-fast"
-      ]
-    },
-    {
-      "id": "signing-key-rotation-chain",
-      "claim": "averin's recording key can be rotated without breaking history checks. The server stamps an operator-set epoch, publishes the current and every retired key with its status, and publishes signed rotation statements (new domain averin.key_rotation.v1) that link each retired key to its successor, refusing to start when the lineage is inconsistent. The verifier counts a statement as verified only when its signatures hold over keys the bundle lists, and extends an externally pinned key's trust to the successor only through a verified scheduled statement from a key that is neither revoked nor compromised; a compromise statement extends none. A bundle exported across a rotation by a real server verifies from the old key's pin alone and stops verifying when the statement is stripped. Not that the old key signed nothing after the rotation time (the operator destroys the old seed, or for a compromise a timestamp anchor taken before the compromise time decides), that the rotation happened at the stated time, or that the operator followed the runbook.",
-      "class": "model-and-tested-implementation",
-      "targets": [
-        "native Rust",
-        "Go server",
-        "Go cgo with rfc3161"
-      ],
-      "assumptions": [
-        "the operator holds the old seed at a scheduled rotation and destroys it afterwards",
-        "the auditor pins the old key out of band and marks it compromised when it is",
-        "Ed25519 unforgeability"
-      ],
-      "sources": [
-        {
-          "file": "core/src/verify.rs",
-          "symbol": "evaluate_key_rotations"
-        },
-        {
-          "file": "server/internal/keylineage/keylineage.go",
-          "symbol": "func Build"
-        },
-        {
-          "file": "server/internal/api/server.go",
-          "symbol": "WithKeyLineage"
-        },
-        {
-          "file": "formal/lean/Averin/Preimage.lean",
-          "symbol": "keyRotationSig"
-        }
-      ],
-      "proofs": [
-        {
-          "file": "core/tests/key_rotation.rs",
-          "symbol": "scheduled_handover_carries_a_pinned_old_key_to_its_successor"
-        },
-        {
-          "file": "core/tests/key_rotation.rs",
-          "symbol": "a_compromise_rotation_links_the_keys_but_extends_no_trust"
-        },
-        {
-          "file": "server/internal/api/keyrotation_test.go",
-          "symbol": "TestRotatedKeyHistoryVerifiesFromTheOldPin"
-        },
-        {
-          "file": "server/internal/keylineage/keylineage_test.go",
-          "symbol": "TestBuildRefusesAnInconsistentLineage"
-        },
-        {
-          "file": "core/tests/oracle.rs",
-          "symbol": "key rotation"
-        },
-        {
-          "file": "formal/mutants/surface-rotation-scheduled-skips-sig-old.patch",
-          "symbol": "false && !sig_ok"
-        }
-      ],
-      "gates": [
-        "core",
-        "server",
-        "formal-refinement",
-        "formal-lean",
-        "formal-fast"
-      ],
-      "evidence_run": "38686890625"
-    },
-    {
-      "id": "content-preview-committed",
-      "claim": "Prompt and answer text from the SDKs, the recording proxy and the MCP server is committed, not signed. The server moves input, output and rationale out of extensions.content_preview to the top level at ingest, so the signed body carries only salted hiding commitments, the text sits in the content store where a retention purge removes it, and the history still verifies after the purge. A content_preview that is not an object, carries another key, repeats a top-level field or sits on a body-bound v3 authority record is refused. The verifier reports how many records still carry cleartext content_preview (cleartext_content_records). Not that records sealed before this change are erased: their text is part of signed, chained bodies and stays; that personal data placed elsewhere in the body is committed; or that the Python SDK test runs in CI.",
-      "class": "tested-implementation-with-deployment-limit",
-      "targets": [
-        "Go server",
-        "native Rust verifier",
-        "WASM verifier (same source)"
-      ],
-      "assumptions": [
-        "the deployment sets AVERIN_CONTENT_DIR with a master key and AVERIN_RAW_RETENTION_DAYS, else nothing is purged",
-        "clients put the text in the three named fields or the legacy preview key"
-      ],
-      "sources": [
-        {
-          "file": "server/internal/api/server.go",
-          "symbol": "liftContentPreview"
-        },
-        {
-          "file": "server/internal/proxy/proxy.go",
-          "symbol": "maxPreview"
-        },
-        {
-          "file": "core/src/verify.rs",
-          "symbol": "count_cleartext_content"
-        }
-      ],
-      "proofs": [
-        {
-          "file": "server/internal/api/content_preview_test.go",
-          "symbol": "TestLegacyContentPreviewIsCommittedNotSignedAndCanBeErased"
-        },
-        {
-          "file": "server/internal/api/content_preview_test.go",
-          "symbol": "TestContentPreviewShapesThatWouldBeSignedVerbatimAreRefused"
-        },
-        {
-          "file": "core/tests/legacy_content.rs",
-          "symbol": "a_bundle_with_signed_cleartext_text_is_counted"
-        },
-        {
-          "file": "formal/mutants/surface-content-preview-not-lifted.patch",
-          "symbol": "if !ok || true"
-        }
-      ],
-      "gates": [
-        "server",
-        "core",
-        "formal-fast"
-      ],
-      "evidence_run": "38686890625"
-    },
-    {
-      "id": "migrate-hook",
-      "claim": "`averin-migrate --hook` is the idempotent pre-upgrade Job mode: it initializes an empty Postgres database, leaves one at the current schema version unchanged, refuses one newer than the binary, never bootstraps over an unstamped legacy schema, advances an older database only with both cutover roles (otherwise prints cutover_required and exits 3 without changing anything), and serializes concurrent runs on the advisory lock; `--check-runtime` runs the server's runtime-role check. Not that a Kubernetes Job runs it (a feir-os item), that the connection path preserves the session-scoped advisory lock (a pooler in transaction mode would not), or the content of any migration step.",
-      "class": "tested-implementation-with-deployment-limit",
-      "targets": [
-        "Go server"
-      ],
-      "assumptions": [
-        "the migration credential is the schema owner and, for an advancing cutover, can see every session (pg_read_all_stats)",
-        "the deployment connects the hook directly to Postgres, not through a transaction-mode pooler"
-      ],
-      "sources": [
-        {
-          "file": "server/internal/pgschema/hook.go",
-          "symbol": "HookCutoverRequired"
-        },
-        {
-          "file": "server/cmd/averin-migrate/main.go",
-          "symbol": "exitCutoverNeeded"
-        }
-      ],
-      "proofs": [
-        {
-          "file": "server/internal/pgschema/hook_test.go",
-          "symbol": "TestHookConcurrentRunsInitializeOnce"
-        },
-        {
-          "file": "server/cmd/averin-migrate/main_test.go",
-          "symbol": "TestRunHookExitsThreeWhenACutoverIsNeeded"
-        }
-      ],
-      "gates": [
-        "store-postgres",
-        "formal-fast"
-      ],
-      "evidence_run": "38951172449"
     }
   ]
 }

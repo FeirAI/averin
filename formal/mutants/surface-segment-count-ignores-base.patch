@@ -1,0 +1,13 @@
+diff --git a/core/src/segment.rs b/core/src/segment.rs
+index 1e17eaf..a84a16c 100644
+--- a/core/src/segment.rs
++++ b/core/src/segment.rs
+@@ -557,7 +557,7 @@ pub fn validate_segment_chain(
+     // 2^32 + n would truncate to n and match an n-record DAG (a platform-dependent verdict).
+     let expected = i64::try_from(dag.by_hash.len())
+         .ok()
+-        .and_then(|n| n.checked_add(base.record_count));
++        .and_then(|n| n.checked_add(0));
+     if expected != Some(stated) {
+         return Err(c(CheckpointError::RecordCountMismatch {
+             seq,

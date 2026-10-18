@@ -1,0 +1,13 @@
+diff --git a/core/src/segment.rs b/core/src/segment.rs
+index 2d6aef0..b2c131c 100644
+--- a/core/src/segment.rs
++++ b/core/src/segment.rs
+@@ -458,7 +458,7 @@ pub fn validate_segment_chain(
+     // force the carried set to be closure(frontier) minus closure(base frontier).
+     if let Some(bf) = first.get("frontier").and_then(CanonValue::as_array) {
+         for fh in bf.iter().filter_map(CanonValue::as_str) {
+-            if dag.by_hash.contains_key(fh) {
++            if false && dag.by_hash.contains_key(fh) {
+                 return Err(SegmentChainError::BaseFrontierCarried {
+                     hash: fh.to_string(),
+                 });
