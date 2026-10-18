@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/store"
@@ -34,7 +35,7 @@ func TestLegacyContentPreviewIsCommittedNotSignedAndCanBeErased(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := api.New(c, store.NewMem(), "k0").WithContent(cs).Routes()
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithContent(cs).Routes()
 	rec, created := postRecord(t, h, legacyBody("legacy-1"))
 	if !created {
 		t.Fatal("not created")

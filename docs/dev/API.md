@@ -8,14 +8,25 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 
 ## Authentication
 
-- When `AVERIN_API_KEYS` is **unset**, ordinary `/v2/*` routes are unauthenticated. Dev /
-  single-tenant only. The recovery route always requires `AVERIN_RECOVERY_KEYS`.
-- When `AVERIN_API_KEYS` is set, ordinary `/v2/*` routes are gated by project-scoped API-key middleware;
-  `/healthz` stays open. Credentials are read from `Authorization: Bearer <token>` (scheme is
-  case-insensitive) **or** `X-Api-Key: <token>`; the project comes from the `?project=` query
-  parameter. A token not valid for that project gets a generic `401` (`{"error":"unauthorized"}`,
-  with `WWW-Authenticate: Bearer realm="averin"`). The check is constant-time and fails closed.
+- Every `/v2/*` route needs a token. A server with **no token configured refuses every `/v2/*` request**
+  (`401`), and `averin-server` refuses to start without `AVERIN_API_KEYS` unless `AVERIN_DEV_MODE=1`
+  selects the explicit, warned-about open store (local development only). `/healthz`, `/readyz` and
+  `/metrics` stay outside the gate.
+- Credentials are read from `Authorization: Bearer <token>` (scheme is case-insensitive) **or**
+  `X-Api-Key: <token>`; the project comes from the `?project=` query parameter. An unknown, wrong-project
+  or **expired** token gets a generic `401` (`{"error":"unauthorized"}`, with
+  `WWW-Authenticate: Bearer realm="averin"`). The check is constant-time and fails closed.
+- **Roles.** A token has a role: `read` (every `GET`), `write` (read, plus the evidence-adding `POST`s:
+  `/v2/records`, `/v2/grants`, `/v2/grants/prepare`, `/v2/grants/finalize`, `/v2/introspection`,
+  `/v2/use`, `/v2/use-intent`, `/v2/use-outcome`, `/v2/otel/traces`) or `admin` (everything, including
+  `POST /v2/revoke` and `POST /v2/checkpoints`). Any other method or path, and any route added later, needs
+  `admin` until it is classified. A valid token whose role is too low gets a generic `403`
+  (`{"error":"forbidden"}`). Tokens written in the legacy `proj:token` form are `admin` with no expiry.
 - With auth on, a body `project_id` that does not match the authorized `?project=` is `403`.
+- **Quota.** With `AVERIN_PROJECT_MAX_RECORDS` set, a write that would take the project past the cap is
+  refused with `507` (`{"error":"project record quota exceeded"}`) and stores nothing; an idempotent
+  replay of a stored record still succeeds. With `AVERIN_INGEST_BUDGET` set, `POST /v2/*` past the
+  per-project or global rate is `429` with `Retry-After`.
 
 ## Routes
 
@@ -29,7 +40,7 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | GET | `/v2/export` | Export a verifiable bundle (proof / disclosure). | always |
 | GET | `/v2/dag` | A session's sealed records (trace-waterfall view). | always |
 | GET | `/v2/sessions` | List a project's session ids. | always |
-| GET | `/v2/usage` | Usage / billable counts for a project. | always |
+| GET | `/v2/usage` | Stored record count and the configured record quota for a project. | always |
 | GET | `/v2/posture` | Read-only startup-guard report for the deploy-time verifier. | always |
 | POST | `/v2/grants` | Credential broker: issue a `gateway_enforced` grant (Tier-A). | `AVERIN_BROKER_ISSUING_SEED` |
 | POST | `/v2/grants/prepare` | Two-phase grant, phase 1 (mint + reveal). | broker (+ cosig) |
@@ -184,8 +195,7 @@ A session's sealed records, in causal/display order, for the trace-waterfall vie
 
 **Response `200`:** `{ "records": [ /* sealed records */ ] }`. Both query params required (`400`).
 
-> Phase-1 authz limit: with `AVERIN_API_KEYS` unset, any caller who can reach this endpoint can read
-> any project's data. Run single-tenant or behind your own auth until you configure project keys.
+> Reads need a token valid for the project (any role). Only the explicit dev mode serves this unauthenticated.
 
 ---
 
@@ -195,7 +205,8 @@ A session's sealed records, in causal/display order, for the trace-waterfall vie
 
 ## GET `/v2/usage?project=<id>`
 
-`{ "usage": {...}, "free_tier": <n>, "billable_records": <n>, "billable_exports": <n> }`.
+`{ "records": <n>, "quota_records": <n> }`: the project's stored record count, read from the store (it
+survives restarts), and the configured cap (`0` = none). A store read error is `500`, never a zero.
 
 ---
 
@@ -207,7 +218,7 @@ on a keyed deployment it needs the project's bearer. Booleans, one integer (`sch
 a DSN: `schema`, `plane`, `build` (`go_version`, `vcs_revision`, `vcs_modified`, `core_rustc` when the build
 stamped it with `-ldflags "-X main.coreRustc=..."`), `require_prod_secrets`, `api_keys_configured` (false when the
 app API is unauthenticated), `durable_store` (Postgres wired), `signing_seed_is_dev`, `require_pinned_authority`,
-`require_body_bound_authority`, `region` (`AVERIN_REGION`, empty when not declared), `schema_version` (the Postgres schema version this binary understands, 0 with in-memory storage), `runtime_role_verified` (true when startup verified the Postgres credential is a least-privilege runtime role), and `secret_fingerprints` (an object; on a keyed deployment `averin-api-key` is a
+`require_body_bound_authority`, `region` (`AVERIN_REGION`, empty when not declared), `schema_version` (the Postgres schema version this binary understands, 0 with in-memory storage), `runtime_role_verified` (true when startup verified the Postgres credential is a least-privilege runtime role), `dev_mode` (true only for a process started with `AVERIN_DEV_MODE=1`; the feir-os posture verifier fails it), `require_approver_binding` (whether the server's own verify requires a govder approval to name who approved), `approver_binding_since` (the canonical cutover string, or `null` when none is set; a far-future cutover turns the requirement off as surely as `require_approver_binding=false`, so the verifier reads both), and `secret_fingerprints` (an object; on a keyed deployment `averin-api-key` is a
 list with one keyed fingerprint per distinct API key averin accepts across all projects: the first 16 bytes of
 HMAC-SHA256 keyed by the token over `feir-secret-alignment/v1:averin-api-key`, vectors in
 `vectors/secret-fingerprint.v1.json`; empty on an open deployment). feir-os's verifier checks that the key

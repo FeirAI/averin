@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -22,7 +23,7 @@ func TestRevocationServerBlocksRevokedUseEndToEnd(t *testing.T) {
 	rc, _ := core.New(resourceSeed)
 	tsa := testTSAKey()
 	rev := revocationKey()
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
 		WithRevocation(rev).
@@ -83,7 +84,7 @@ func TestRevocationServerBlocksRevokedUseEndToEnd(t *testing.T) {
 func TestRevocationDisabledNoList(t *testing.T) {
 	c, _ := core.New(seed)
 	rc, _ := core.New(resourceSeed)
-	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 	ak := grantAgentKey()
 	grantID, _ := mkGrant(t, h, ak, "idem-grant")
 	rb, _ := json.Marshal(map[string]any{"project_id": "p1", "grant_id": grantID})

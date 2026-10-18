@@ -3,6 +3,7 @@ package api_test
 import (
 	"crypto/ed25519"
 	"encoding/hex"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -23,7 +24,7 @@ func TestWithResourcePanicsOnSigningKeyOverlap(t *testing.T) {
 			t.Fatal("WithResource must panic when the resource key equals the server signing key (R2)")
 		}
 	}()
-	api.New(c, store.NewMem(), "k0").WithResource(rcSame, "orders-db")
+	api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithResource(rcSame, "orders-db")
 }
 
 // TestBatchRecordsAtomicOnMalformedItem (F14): a /v2/records batch whose LATER item fails a DEEP
@@ -91,7 +92,7 @@ func TestWithBrokerPanicsOnResourceKeyOverlapEvenResourceFirst(t *testing.T) {
 			t.Fatal("WithBroker must panic when the broker key equals the resource key, even WithResource-first (R2)")
 		}
 	}()
-	api.New(c, store.NewMem(), "k0").WithResource(rc, "orders-db").WithBroker(brokerSameAsResource)
+	api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithResource(rc, "orders-db").WithBroker(brokerSameAsResource)
 }
 
 // TestBatchRecordsAtomicOnUnknownTopLevelKey (SB-29): seal refuses an unknown top-level key, so the

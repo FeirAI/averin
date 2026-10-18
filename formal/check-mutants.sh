@@ -225,7 +225,7 @@ if [ "$use_kani" = 1 ]; then
   # scoped run must not re-run every harness of the suite).
   baseline_harnesses=()
   for patch in formal/mutants/*.patch; do
-    case "$(basename "$patch")" in lean-*|tla-*|seal-skips-*|surface-*|multiwriter-*) continue ;; esac  # Lean, TLA+, seal-shape, verdict-surface and multi-writer (Go, needs Postgres) mutants belong to the kit register
+    case "$(basename "$patch")" in lean-*|tla-*|seal-skips-*|surface-*|multiwriter-*|posture-*|xv11-*) continue ;; esac  # Lean, TLA+, seal-shape, verdict-surface, multi-writer (Go, needs Postgres), posture (Go) and approver-evidence (own detector) mutants belong to the kit register
     name="$(basename "$patch" .patch)"
     if [ "${MUTANTS_ONLY+x}" = x ]; then
       selected=0
@@ -250,7 +250,7 @@ echo "   ok"
 survivors=0
 executed=0
 for patch in formal/mutants/*.patch; do
-  case "$(basename "$patch")" in lean-*|tla-*|seal-skips-*|surface-*|multiwriter-*) continue ;; esac  # Lean, TLA+, seal-shape, verdict-surface and multi-writer (Go, needs Postgres) mutants belong to the kit register
+  case "$(basename "$patch")" in lean-*|tla-*|seal-skips-*|surface-*|multiwriter-*|posture-*|xv11-*) continue ;; esac  # Lean, TLA+, seal-shape, verdict-surface, multi-writer (Go, needs Postgres), posture (Go) and approver-evidence (own detector) mutants belong to the kit register
   name="$(basename "$patch" .patch)"
   if [ "${MUTANTS_ONLY+x}" = x ]; then
     selected=0

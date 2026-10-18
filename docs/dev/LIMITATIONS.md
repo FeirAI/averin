@@ -129,38 +129,35 @@ concurrent writers are not exercised. Until those are done, keep the
 single-writer-per-project deployment policy even though frontier and checkpoint
 writes serialize across replicas.
 
-## Storage growth is unbounded and append-only (monitoring is a hard deploy requirement)
+## Storage only grows, and the cap is by record count (a deploy requirement is still monitoring)
 
-The record store is **append-only by design** (the migration `REVOKE`s UPDATE/DELETE/TRUNCATE) and the
-app API is **Phase-1** — it has no per-project authentication/authorization or storage quota of its own
-(see [SECURITY.md](SECURITY.md) and `docs/coverage-limits.md`). Every accepted ingest therefore grows
-the database **permanently**; nothing in averin caps total per-project record count or bytes, and
-records cannot be deleted (that is the integrity invariant). **Two operator controls are HARD deploy
-requirements, not options:**
+The record store is **append-only by design** (the migration `REVOKE`s UPDATE/DELETE/TRUNCATE), so every
+accepted ingest grows the database **permanently** and records cannot be deleted (that is the integrity
+invariant). averin bounds the growth with admission control, all configured by environment variable (see
+[CONFIGURATION.md](CONFIGURATION.md)):
 
-- **A reverse-proxy / API-gateway rate limit in front of averin** is the PRIMARY control against a
-  leaked token (or an unauthenticated dev-posture deploy) driving unbounded billable, append-only
-  growth. averin ships an **opt-in** in-process backstop (`WithIngestBudget`, a coarse per-project +
-  global token bucket that answers `429` on `POST /v2/*` ingest — see
-  [CONFIGURATION.md](CONFIGURATION.md)); it is **defense-in-depth**, not a substitute for the gateway
-  limit, and is **off by default** (so no existing deployment is throttled).
-- **Database-growth monitoring + capacity alerting.** Because storage only ever grows, operators MUST
-  monitor DB size / per-project record counts and alert well before exhaustion. There is no in-store
-  eviction to fall back on.
+- `AVERIN_PROJECT_MAX_RECORDS` caps stored records per project, enforced inside the project write
+  transaction (exact across replicas); a write past the cap is `507` and stores nothing.
+- `AVERIN_INGEST_BUDGET` is a per-project and global rate limit (`429`); `AVERIN_DENIED_GRANT_LOG` is
+  always paired with its own budget.
 
-**Deferred:** a first-class configurable per-project record/byte quota (a `429`/`507` at ingest) and
-per-project authz are Phase-2 items.
+What remains:
 
-## Usage metering is best-effort and volatile (bounded revenue loss)
-
-The billing meter's base counter is **in-memory** (`meter.Mem`); the Stripe reporter forwards billable
-events best-effort over a bounded async queue. This bounds metering accuracy — see
-[CONFIGURATION.md](CONFIGURATION.md) *Metering loss bounds* for the exact failure modes (restart
-re-grants the free tier; a full queue or a non-2xx/transport delivery failure drops the event with no
-retry) and the `/metrics` counters that make the loss observable
-(`averin_meter_queue_drops_total`, `averin_meter_post_failures_total`). **Deferred:** a durable
-per-project counter (a Postgres table beside the store, surviving restart) plus **idempotent, retried**
-Stripe delivery (meter-event ids) would close the loss; it is documented, not built.
+- **The cap counts records, not bytes.** The storage bound is the cap times the per-record body limit.
+  There is no per-project byte quota.
+- **Both controls are off until configured**; set them. A reverse-proxy or gateway rate limit stays the
+  primary control against a leaked token, because the in-process limiter's per-project state is bounded
+  and a flood of distinct project ids falls back to the global bucket.
+- **Monitor database size and `averin_quota_rejections_total`.** There is no in-store eviction, and a
+  project at its cap refuses all new evidence (fail closed) until the operator raises the cap.
+- **Pending two-phase grants are briefly uncounted.** `POST /v2/grants/prepare` (a write-role route) stores
+  a pending row without a record, so the cap does not count it. On Postgres the sweeper removes rows older
+  than the 15-minute pending TTL plus a 1-minute grace, so a flood of distinct keys is uncounted for roughly
+  16 to 21 minutes before it is swept. The in-memory dev store has no sweep. Bound a burst with the ingest
+  budget and the reverse-proxy limit.
+- **Counting cost.** With the cap on, each write transaction counts the project's stored records, which is
+  linear in the project size, so ingest slows as a project nears a large cap. Keep the cap modest.
+- A batch `POST /v2/records` is item by item, so the items that fit before the cap stay stored.
 
 ## Consume-ledger retention is a correctness parameter
 

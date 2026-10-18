@@ -1,8 +1,8 @@
 diff --git a/server/internal/api/posture.go b/server/internal/api/posture.go
-index 8af0706..0764c27 100644
+index 997e430..434c9b7 100644
 --- a/server/internal/api/posture.go
 +++ b/server/internal/api/posture.go
-@@ -147,7 +147,7 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
+@@ -160,7 +160,7 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
  		"require_body_bound_authority": s.requireBodyBoundAuthority,
  		"secret_fingerprints":          s.secretFingerprints(),
  		"authority_pins":               s.authorityPinsReport(),
@@ -10,4 +10,4 @@ index 8af0706..0764c27 100644
 +		"region":                       "",
  		"schema_version":               s.posture.SchemaVersion,
  		"runtime_role_verified":        s.posture.RuntimeRoleVerified,
- 	})
+ 		"dev_mode":                     s.posture.DevMode,

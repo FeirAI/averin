@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-server/config.go b/server/cmd/averin-server/config.go
+index 339005a..0f181b9 100644
+--- a/server/cmd/averin-server/config.go
++++ b/server/cmd/averin-server/config.go
+@@ -122,7 +122,7 @@ type approverBindingPolicy struct {
+ // requireApproverBindingFromEnv decides AVE-10. Unset: on, unless dev mode. An explicit value wins. since
+ // must be a canonical timestamp and needs the policy on.
+ func requireApproverBindingFromEnv(raw, since string, devMode bool) (approverBindingPolicy, error) {
+-	on := !devMode
++	on := false
+ 	if strings.TrimSpace(raw) != "" {
+ 		v, err := boolFromEnv("AVERIN_REQUIRE_APPROVER_BINDING", raw)
+ 		if err != nil {

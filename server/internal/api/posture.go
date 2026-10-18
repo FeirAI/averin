@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/feirai/averin/server/internal/auth"
-	"github.com/feirai/averin/server/internal/secretfp"
 )
 
 // PostureSchema is the version of the GET /v2/posture body; the deploy-time posture verifier
@@ -40,6 +39,9 @@ type Posture struct {
 	// RuntimeRoleVerified is true when startup ran pgschema.CheckRuntime on the Postgres credential and it
 	// passed (a failure is fatal, so a serving Postgres-backed process reports true). False in-memory.
 	RuntimeRoleVerified bool
+	// DevMode is true when AVERIN_DEV_MODE=1 selected development mode (open API allowed, in-memory store,
+	// dev seed, production gate and strict proofs off by default). The deploy-time verifier refuses it.
+	DevMode bool
 }
 
 // MaxRegionLen bounds a region label.
@@ -94,7 +96,7 @@ func buildInfoPosture(coreRustc string) map[string]any {
 // (govder, vultrino, the feir-os broker): the project bearer they send is one averin accepts. The
 // string is the same in every plane and in feir-os deploy/posture/evaluate.jq, and is part of the
 // fingerprinted message.
-const relAverinAPIKey = "averin-api-key"
+const relAverinAPIKey = auth.FingerprintRelationship
 
 // secretFingerprints is the keyed fingerprint of every API key this process ACCEPTS (FEI-40), so the
 // verifier can compare them with the fingerprints of the keys the calling planes SEND. Empty when the
@@ -102,7 +104,7 @@ const relAverinAPIKey = "averin-api-key"
 func (s *Server) secretFingerprints() map[string][]string {
 	out := map[string][]string{}
 	if ms, ok := s.auth.(*auth.MapStore); ok && ms != nil {
-		if fps := secretfp.Fingerprints(ms.Tokens(), relAverinAPIKey); len(fps) > 0 {
+		if fps := ms.Fingerprints(); len(fps) > 0 {
 			out[relAverinAPIKey] = fps
 		}
 	}
@@ -125,6 +127,16 @@ func (s *Server) authorityPinsReport() []map[string]string {
 		return out[i]["source"] < out[j]["source"]
 	})
 	return out
+}
+
+// approverBindingSinceReport is the approver-binding cutover as GET /v2/posture reports it: the
+// canonical string, or null when none is set. A cutover in the far future switches the policy off as
+// surely as require_approver_binding=false does, so the verifier needs to see both.
+func (s *Server) approverBindingSinceReport() any {
+	if s.approverBindingSince == "" {
+		return nil
+	}
+	return s.approverBindingSince
 }
 
 // handlePosture is GET /v2/posture: a read-only report of the guards this process runs with, for
@@ -150,5 +162,8 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
 		"region":                       s.posture.Region,
 		"schema_version":               s.posture.SchemaVersion,
 		"runtime_role_verified":        s.posture.RuntimeRoleVerified,
+		"dev_mode":                     s.posture.DevMode,
+		"require_approver_binding":     s.requireApproverBinding,
+		"approver_binding_since":       s.approverBindingSinceReport(),
 	})
 }

@@ -1,0 +1,12 @@
+diff --git a/server/cmd/averin-server/main.go b/server/cmd/averin-server/main.go
+--- a/server/cmd/averin-server/main.go
++++ b/server/cmd/averin-server/main.go
+@@ -164,7 +164,7 @@
+ 		Region:              region,
+ 		SchemaVersion:       postureSchemaVersion(onPostgres),
+ 		RuntimeRoleVerified: runtimeRoleVerified && onPostgres,
+-		DevMode:             devMode,
++		DevMode:             false,
+ 	})
+ 	// GET /readyz probes the Postgres store's pool (short-timeout Ping); GET /metrics gets its live
+ 	// connection-pool gauges. The in-memory store (no AVERIN_DATABASE_URL) registers neither — nothing

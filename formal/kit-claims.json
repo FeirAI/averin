@@ -436,6 +436,94 @@
     "posture-authority-pins-global-dropped": {
       "tier": "fast",
       "claim": "posture-authority-pins"
+    },
+    "surface-ave05-nil-auth-opens-api": {
+      "tier": "full",
+      "claim": "api-token-and-role-enforcement"
+    },
+    "surface-ave05-route-roles-ignored": {
+      "tier": "full",
+      "claim": "api-token-and-role-enforcement"
+    },
+    "surface-ave05-unclassified-route-is-write": {
+      "tier": "full",
+      "claim": "api-token-and-role-enforcement"
+    },
+    "surface-ave05-expiry-ignored": {
+      "tier": "full",
+      "claim": "api-token-and-role-enforcement"
+    },
+    "surface-ave05-role-order-inverted": {
+      "tier": "full",
+      "claim": "api-token-and-role-enforcement"
+    },
+    "surface-ave06-prod-gate-default-off": {
+      "tier": "full",
+      "claim": "startup-config-fails-closed"
+    },
+    "surface-ave06-prod-gate-off-outside-dev": {
+      "tier": "full",
+      "claim": "startup-config-fails-closed"
+    },
+    "surface-ave06-body-bound-default-off": {
+      "tier": "full",
+      "claim": "startup-config-fails-closed"
+    },
+    "surface-ave07-budget-accepts-unknown-fields": {
+      "tier": "full",
+      "claim": "startup-config-fails-closed"
+    },
+    "surface-ave10-server-binding-default-off": {
+      "tier": "full",
+      "claim": "startup-config-fails-closed"
+    },
+    "surface-ave07-quota-off-by-one": {
+      "tier": "full",
+      "claim": "project-record-quota"
+    },
+    "surface-ave07-quota-never-refuses": {
+      "tier": "full",
+      "claim": "project-record-quota"
+    },
+    "surface-ave07-quota-status-not-507": {
+      "tier": "full",
+      "claim": "project-record-quota"
+    },
+    "surface-ave10-required-binding-ignored": {
+      "tier": "fast",
+      "claim": "approver-binding-policy-fails-unbound"
+    },
+    "surface-ave10-cutover-inverted": {
+      "tier": "full",
+      "claim": "approver-binding-policy-fails-unbound"
+    },
+    "surface-ave10-cli-default-not-strict": {
+      "tier": "fast",
+      "claim": "approver-binding-policy-fails-unbound"
+    },
+    "surface-ave07-replay-refused-at-cap": {
+      "tier": "full",
+      "claim": "project-record-quota"
+    },
+    "surface-ave10-names-nobody-passes": {
+      "tier": "fast",
+      "claim": "approver-binding-policy-fails-unbound"
+    },
+    "surface-ave10-server-verify-unpinned": {
+      "tier": "fast",
+      "claim": "server-verify-fails-unbound-approval"
+    },
+    "surface-posture-dev-mode-not-reported": {
+      "tier": "fast",
+      "claim": "posture-report-live"
+    },
+    "surface-posture-approver-binding-hardcoded": {
+      "tier": "fast",
+      "claim": "posture-report-live"
+    },
+    "surface-posture-approver-binding-since-dropped": {
+      "tier": "fast",
+      "claim": "posture-report-live"
     }
   },
   "claims": [
@@ -614,7 +702,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
+          "sha256": "9e950589cfd2663a3a81248d4404e9aa2a5c45f8dce03537cb4d0cb1dccf070a"
         }
       ],
       "mutants": [
@@ -649,7 +737,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
+          "sha256": "9e950589cfd2663a3a81248d4404e9aa2a5c45f8dce03537cb4d0cb1dccf070a"
         }
       ],
       "mutants": [
@@ -688,7 +776,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
+          "sha256": "9e950589cfd2663a3a81248d4404e9aa2a5c45f8dce03537cb4d0cb1dccf070a"
         }
       ],
       "mutants": [
@@ -1228,7 +1316,7 @@
         {
           "path": "core/src/bin/averin_verify.rs",
           "symbol": "verify_bundle_cmd",
-          "sha256": "928fd2a76cd7ecf288eb7235873fa379d9c640fb2d7adb0081fb2f15a34864c2"
+          "sha256": "df61ff6bc0b4fea86f2c5ed87558835447c9dd5dcf636522410de2e1f1334954"
         },
         {
           "path": "core/src/bin/averin_verify.rs",
@@ -1346,7 +1434,7 @@
     {
       "id": "approver-identity-in-signed-evidence",
       "$comment": "legacy register: approver-identity-in-signed-evidence",
-      "statement": "For a v3 govder authority proof, averin re-derives the signed evidence_hash from the record's own fields including decided_by and a digest of the ordered sign-off set (extensions.govder.body.sign_offs), and reports the record when the signed evidence differs: evidence naming a different decider and a sign-off set reordered after signing are each refused. A record sealed before approver binding (its body names an approver, its signed evidence is the historical field set) stays valid history: it raises no issue and its notes say that decided_by and the sign-off set are not committed by the evidence. The spelling is pinned by vectors/approver-evidence.v1.json, generated by an independent Python reference (scripts/vectors/gen_approver_evidence.py) and copied byte for byte into govder, whose signer reproduces every case. Historical v2 evidence keeps its original field set.",
+      "statement": "For a v3 govder authority proof, averin re-derives the signed evidence_hash from the record's own fields including decided_by and a digest of the ordered sign-off set (extensions.govder.body.sign_offs), and reports the record when the signed evidence differs: evidence naming a different decider and a sign-off set reordered after signing are each refused. A record sealed before approver binding (its body names an approver, its signed evidence is the historical field set) stays valid history under the default verifier options: it raises no issue and its notes say that decided_by and the sign-off set are not committed by the evidence (the approver-binding-policy-fails-unbound claim covers the option that makes it an issue). The spelling is pinned by vectors/approver-evidence.v1.json, generated by an independent Python reference (scripts/vectors/gen_approver_evidence.py) and copied byte for byte into govder, whose signer reproduces every case. Historical v2 evidence keeps its original field set.",
       "method": "differential-vectors",
       "artifacts": [
         "vectors/approver-evidence.v1.json",
@@ -1361,12 +1449,12 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "govder_evidence_rederivable",
-          "sha256": "bc8afa49546078b84e9364cda56b3078b07c18fb2cbd5dbc62b404ea4b7efea0"
+          "sha256": "03553a0d5fb1286cf3bfe13a5bfcf62648b06626c7e3fa68e242bce8c8a0bade"
         },
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "03f97dea10288ebe659d4de245931c1974bf343181e286c443bd9ec2005391fc"
+          "sha256": "9e950589cfd2663a3a81248d4404e9aa2a5c45f8dce03537cb4d0cb1dccf070a"
         }
       ],
       "mutants": [
@@ -1374,12 +1462,12 @@
         "xv11-evidence-drops-sign-offs-digest",
         "xv11-unbound-history-without-note"
       ],
-      "does_not_establish": "Not that the named subjects are authenticated, are humans, are in a configured group or are distinct (an operator and broker property, XV-10); not that the approval is recent; not that a signer committed to the right names (a signer that signs evidence naming mallory over a record naming mallory is consistent, and a signer that omits the approver members is accepted as pre-binding history, so the binding holds only for records whose signer includes them); not NFC or escaping agreement beyond the vector cases. The subject digest already covers the whole record body; this adds the evidence commitment an offline verifier checks by re-derivation."
+      "does_not_establish": "Not that the named subjects are authenticated, are humans, are in a configured group or are distinct (an operator and broker property, XV-10); not that the approval is recent; not that a signer committed to the right names (a signer that signs evidence naming mallory over a record naming mallory is consistent, and a signer that omits the approver members is accepted as pre-binding history unless the caller requires binding, so the binding holds only for records whose signer includes them or where the policy is on); not NFC or escaping agreement beyond the vector cases. The subject digest already covers the whole record body; this adds the evidence commitment an offline verifier checks by re-derivation."
     },
     {
       "id": "posture-report-live",
       "$comment": "legacy register: posture-report-live",
-      "statement": "GET /v2/posture sits under the ordinary project API-key auth (401 without the project's bearer on a keyed deployment) and reports from the running process whether the app API is keyed (an explicit open store counts as not keyed), whether the Postgres store is wired, whether the signing seed is the committed dev seed, whether AVERIN_REQUIRE_PROD_SECRETS is on, the two authority-pin switches, and the Go toolchain, git commit and (when the build script stamped it) rustc of the linked decision core. A real averin-server process, built and started in the test, reports the keyed in-memory deployment and reports the dev seed as such. It also reports the region label (AVERIN_REGION, validated; an invalid value stops startup), the Postgres schema version the binary understands (0 with in-memory storage) and whether startup verified the runtime database role. Booleans, a short region label, the schema version (an integer) and build identifiers only.",
+      "statement": "GET /v2/posture sits under the ordinary project API-key auth (401 without the project's bearer on a keyed deployment) and reports from the running process whether the app API is keyed (an explicit open store counts as not keyed), whether the Postgres store is wired, whether the signing seed is the committed dev seed, whether AVERIN_REQUIRE_PROD_SECRETS is on, the two authority-pin switches, and the Go toolchain, git commit and (when the build script stamped it) rustc of the linked decision core. A real averin-server process, built and started in the test, reports the keyed in-memory deployment and reports the dev seed as such. It also reports whether AVERIN_DEV_MODE selected development mode (dev_mode, true only for a process started with that variable), whether approver binding is required and its cutover instant (require_approver_binding, and approver_binding_since as the canonical string or null), the region label (AVERIN_REGION, validated; an invalid value stops startup), the Postgres schema version the binary understands (0 with in-memory storage) and whether startup verified the runtime database role. Booleans, a short region label, the schema version (an integer) and build identifiers only.",
       "method": "test",
       "artifacts": [
         "server/internal/api/posture.go",
@@ -1396,7 +1484,7 @@
         {
           "path": "server/internal/api/posture.go",
           "symbol": "handlePosture",
-          "sha256": "9706766b7ff61f85c57339fa2c6ea488550be62894ee4b051d73b6450421a78b"
+          "sha256": "00ed534f48f4da28092716bed836957aed9eec3d9ad7def5346d1a5e436409e8"
         },
         {
           "path": "server/internal/api/posture.go",
@@ -1406,7 +1494,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "240e5b35c9883cff9f1ac63a301ba3c6df62121a1a36ed74735460246c9681a9"
+          "sha256": "b7529f86b97bd5eeefaf8acdc1956ed951cd7a566ffb99a809f9344fd0301c08"
         },
         {
           "path": "server/internal/api/posture.go",
@@ -1428,7 +1516,10 @@
         "surface-posture-runtime-role-hardcoded",
         "surface-posture-region-env-ignored",
         "surface-posture-schema-version-always-reported",
-        "surface-region-invalid-accepted"
+        "surface-region-invalid-accepted",
+        "surface-posture-dev-mode-not-reported",
+        "surface-posture-approver-binding-hardcoded",
+        "surface-posture-approver-binding-since-dropped"
       ],
       "does_not_establish": "The live-process test cannot start with AVERIN_REQUIRE_PROD_SECRETS=1 (that gate needs a Postgres URL), so the wiring of that flag and of durable_store=true is covered only by the handler test with a hand-built Posture, not by a running binary. The rustc stamp is whatever the build script passed with -ldflags; the Rust staticlib itself carries no version, so an unstamped build reports none and the verifier must treat that as unknown. The report says what was configured, not that the database is reachable or the keys are strong. On an unauthenticated deployment the route answers anyone (and says api_keys_configured is false). The vcs revision is present only for a binary built inside a git checkout. The live-process test runs in-memory, so runtime_role_verified=true and a non-zero schema_version are checked only by the handler test with a hand-built Posture; a Postgres-backed process reports them from the same code path but is not started here.",
       "evidence_run": "38951172449"
@@ -1708,12 +1799,12 @@
         {
           "path": "server/internal/api/posture.go",
           "symbol": "secretFingerprints",
-          "sha256": "fc3283700fc78263159790b254b54eff33497aad565bc306c5c47c150a666505"
+          "sha256": "63238013fe73f9d68ec57b66ec94df987cc7d3061e962fda2db745f506ee9c4f"
         },
         {
           "path": "server/internal/auth/auth.go",
-          "symbol": "Tokens",
-          "sha256": "6c743175e47abe9818c1d78ef84290b1c2c414fe64f98b141ed747ab6eb19b86"
+          "symbol": "Fingerprints",
+          "sha256": "ab6259454e206ebac545ca3fca1cddcc574cd58c706beedf71cc11973f8d2d21"
         },
         {
           "path": "server/internal/secretfp/secretfp.go",
@@ -1724,7 +1815,7 @@
       "mutants": [
         "posture-api-key-fingerprints-first-only"
       ],
-      "does_not_establish": "That the key a calling plane sends equals one averin accepts: this claim proves only averin's side of the report. The comparison is feir-os deploy/posture/evaluate.jq (relationship averin-api-key), tested there against stub reports, and the sending planes' own claims prove what they report. No keyed-averin four-plane run exists, so the whole chain is not exercised in one real-process run. Keys averin does not hold in its in-process store (none today) would not be reported. A fingerprint lets someone who holds it test guesses for a weak key offline; the endpoint is behind a project key. Not that a key is strong or rotated.",
+      "does_not_establish": "That the key a calling plane sends equals one averin accepts: this claim proves only averin's side of the report. The comparison is feir-os deploy/posture/evaluate.jq (relationship averin-api-key), tested there against stub reports, and the sending planes' own claims prove what they report. No keyed-averin four-plane run exists, so the whole chain is not exercised in one real-process run. Keys averin does not hold in its in-process store (none today) would not be reported, and a key configured only by its SHA-256 digest (token_sha256) has no fingerprint, because the store keeps digests and computes a fingerprint only from a token it is given; the verifier then finds no match and fails closed. A fingerprint lets someone who holds it test guesses for a weak key offline; the endpoint is behind a project key. Not that a key is strong or rotated.",
       "evidence_run": "38710384463"
     },
     {
@@ -1753,6 +1844,214 @@
       ],
       "does_not_establish": "That govder derives the same keys (the comparison is feir-os deploy/posture/evaluate.jq, tested against stub reports, and govder's own claim proves what it reports), that the pins are the ones averin actually verifies with at request time beyond the map this report reads, or that any key is strong or rotated.",
       "evidence_run": "38732527046"
+    },
+    {
+      "id": "api-token-and-role-enforcement",
+      "$comment": "legacy register: api-token-and-role-enforcement",
+      "statement": "A server with no auth store refuses every /v2 request with 401 whatever credential it is sent, while /healthz stays up. With scoped tokens a token is accepted only for its own project, only before its not_after instant (the instant itself is expired), and only for the routes its role allows: read for GET and HEAD, write for the nine evidence-adding POST routes, admin for everything else, including revoke, checkpoints, other methods and any path not listed. A valid token whose role is too low gets 403, an unknown, wrong-project or expired token gets 401. A real averin-server process given JSON keys enforces the same split. Legacy proj:token keys are admin tokens with no expiry.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/auth/auth.go",
+        "server/internal/auth/keysconfig.go",
+        "server/internal/auth/roles_test.go",
+        "server/internal/api/auth_roles.go",
+        "server/internal/api/auth_roles_test.go",
+        "server/cmd/averin-server/defaults_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/auth && go test -count=1 ./internal/api -run 'TestAuth_' && go test -count=1 ./cmd/averin-server -run 'TestDefaults_ScopedKeysEnforcedByTheBinary'",
+      "covers": [
+        {
+          "path": "server/internal/auth/auth.go",
+          "symbol": "RoleFor",
+          "sha256": "a9ec0fa9eec6db1d661a37b3372dd34d1705bf1ec58090713d233b3a47d82457"
+        },
+        {
+          "path": "server/internal/auth/auth.go",
+          "symbol": "Allows",
+          "sha256": "00f98f4a0bb2ed73020617107fa5c5f9450cc8b7cff44dcbbaa19345d7c40368"
+        },
+        {
+          "path": "server/internal/auth/auth.go",
+          "symbol": "MiddlewareRoles",
+          "sha256": "e7857f975503149a4b5831ee0e20d37607719b257dd17ac7029fdcc0d2d62390"
+        },
+        {
+          "path": "server/internal/auth/keysconfig.go",
+          "symbol": "ParseKeysConfig",
+          "sha256": "b2a321f68bb42c7de5a0d4da8f0e4e523dcb8319a4cc794887357a9e93a6539a"
+        },
+        {
+          "path": "server/internal/api/auth_roles.go",
+          "symbol": "requiredRole",
+          "sha256": "986eafb6bd617f65bab4fe2bd2c3da9f33e1b9c290b6444203a43e282b84ac34"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "Routes",
+          "sha256": "888a5897a620131acd6283e44f2832c59f009951ee5395b7e71624991177f9e4"
+        }
+      ],
+      "mutants": [
+        "surface-ave05-nil-auth-opens-api",
+        "surface-ave05-route-roles-ignored",
+        "surface-ave05-unclassified-route-is-write",
+        "surface-ave05-expiry-ignored",
+        "surface-ave05-role-order-inverted"
+      ],
+      "does_not_establish": "Not that tokens are strong, stored safely or rotated, and not SSO or OIDC. The nine write routes are listed by path, so a renamed or new route needs admin until it is classified (stricter, never looser). Expiry is judged by the server clock, so a skewed clock moves it, and the legacy proj:token form never expires. A 403 tells the holder of a valid token that the token is valid for that project. The recovery route has its own credentials and is not covered. The tests run on the in-memory store; role checks do not depend on the store.",
+      "evidence_run": "38515586748"
+    },
+    {
+      "id": "startup-config-fails-closed",
+      "$comment": "legacy register: startup-config-fails-closed",
+      "statement": "averin-server's startup configuration fails closed. The parser functions decide that the production gate, body-bound approval proofs and strict approver binding are on unless AVERIN_DEV_MODE=1, that AVERIN_REQUIRE_PROD_SECRETS=0 is refused outside dev mode, and that the rate-limit, denied-grant and cutover settings reject unknown fields, negative values and malformed values instead of leaving a limit silently off. A real averin-server process given only a seed refuses to start and names AVERIN_API_KEYS and the gate, refuses keys without a database, refuses REQUIRE_PROD_SECRETS=0 without dev mode, and with AVERIN_DEV_MODE=1 and no keys serves an open API but enforces keys when given. The server's own verify carries the approver-binding policy only when it is configured.",
+      "method": "test",
+      "artifacts": [
+        "server/cmd/averin-server/config.go",
+        "server/cmd/averin-server/defaults_test.go",
+        "server/internal/api/approver_binding_opts_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./cmd/averin-server -run 'TestConfigParsers|TestDefaults_RefuseToStartWithoutKeysOrDevMode|TestDefaults_DevModeIsTheOnlyOpenAPI' && go test -count=1 ./internal/api -run 'TestSelfVerifyOpts_ApproverBindingPolicy'",
+      "covers": [
+        {
+          "path": "server/cmd/averin-server/config.go",
+          "symbol": "requireProdSecretsFromEnv",
+          "sha256": "c1ecf27668cea8fffb07c1c037e6cd04089e2b150395859298d5c3fab658c8e4"
+        },
+        {
+          "path": "server/cmd/averin-server/config.go",
+          "symbol": "requireBodyBoundFromEnv",
+          "sha256": "06cd867bd3b460b217da639de5298f03995f9d0c9ee64fcfc79f3cbec1f2f4d0"
+        },
+        {
+          "path": "server/cmd/averin-server/config.go",
+          "symbol": "requireApproverBindingFromEnv",
+          "sha256": "d71673ea4cbea407a47e007fa94f205f6c1d62a5ae4f602ce01f6e72be15a9ba"
+        },
+        {
+          "path": "server/cmd/averin-server/config.go",
+          "symbol": "parseBudget",
+          "sha256": "b4ca469271bf07ed32fd364207caa278b5b38cb3f9c852dd87fb0e4aeba29efc"
+        }
+      ],
+      "mutants": [
+        "surface-ave06-prod-gate-default-off",
+        "surface-ave06-prod-gate-off-outside-dev",
+        "surface-ave06-body-bound-default-off",
+        "surface-ave07-budget-accepts-unknown-fields",
+        "surface-ave10-server-binding-default-off"
+      ],
+      "does_not_establish": "No test starts a binary with the production gate on and serves (the gate needs a Postgres URL), so that path is covered by the parser test and by the refusal cases, not by a running server. The gate checks that settings exist, not that keys are strong or the database is reachable. An explicit AVERIN_REQUIRE_BODY_BOUND_AUTHORITY=0 or AVERIN_REQUIRE_APPROVER_BINDING=0 still turns those two off (migration opt-outs, logged as warnings). The settings of feir-os and govder are not covered here.",
+      "evidence_run": "38515586748"
+    },
+    {
+      "id": "project-record-quota",
+      "$comment": "legacy register: project-record-quota",
+      "statement": "With a per-project record cap, a write that would take the project past the cap is answered 507 and stores nothing, the project stops exactly at the cap, an idempotent replay of a stored record still succeeds, another project and every read are unaffected, the refusal is counted, and GET /v2/usage reports the stored count and the cap read from the store. On Postgres, two server replicas writing concurrently to one project with a cap of 7 store exactly 7 records.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/quota.go",
+        "server/internal/api/project_tx.go",
+        "server/internal/api/quota_test.go",
+        "server/internal/api/quota_pg_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestQuota_|TestUsageReportsDurableRecordCount'",
+      "covers": [
+        {
+          "path": "server/internal/api/project_tx.go",
+          "symbol": "PutRecord",
+          "sha256": "c279ca87578bfe1050d9c32ae2e6ff36a64be8d1a1bd19062b0c095e510f178c"
+        },
+        {
+          "path": "server/internal/api/quota.go",
+          "symbol": "WriteHeader",
+          "sha256": "a60584bb775b37c8503be06e8fe0d56aaabbb4a7a45294e183fe4e5d6323e435"
+        }
+      ],
+      "mutants": [
+        "surface-ave07-quota-off-by-one",
+        "surface-ave07-quota-never-refuses",
+        "surface-ave07-replay-refused-at-cap",
+        "surface-ave07-quota-status-not-507"
+      ],
+      "does_not_establish": "The cap counts stored records of every kind, not bytes, so the storage bound is the cap times the per-record body limit. A batch POST /v2/records is item by item, so the items that fit before the cap stay stored. The detector runs on the in-memory store; the concurrent two-replica case is TestProjectQuotaAcrossReplicasPostgres, which the store-postgres job runs and the detector does not. The cap is off until AVERIN_PROJECT_MAX_RECORDS is set. A refused write also fails closed on a record-count read error, which is not tested here.",
+      "evidence_run": "38515586748"
+    },
+    {
+      "id": "approver-binding-policy-fails-unbound",
+      "$comment": "legacy register: approver-binding-policy-fails-unbound",
+      "statement": "With require_approver_binding set in the verifier options, a govder approval whose signed evidence leaves out decided_by and the sign-off set is an issue (the verdict fails) instead of a note, as is a decided (approved or denied) govder approval whose body names no approver at all, a properly bound approval raises nothing, and approver_binding_since keeps records received before the cutover as history (a record received exactly at it fails). The policy is read from JSON options, and a wrong type or a cutover without the policy is an error. The averin-verify CLI requires binding by default, prints the reason and a count of unbound approvals, and accepts them as history only with --allow-unbound-approvers.",
+      "method": "test",
+      "artifacts": [
+        "core/src/verify.rs",
+        "core/src/bin/averin_verify.rs",
+        "core/tests/approver_evidence.rs",
+        "vectors/approver-evidence.v1.json"
+      ],
+      "gates": [
+        "core"
+      ],
+      "detector": "cargo test -p averin-decision-core --test approver_evidence ave10",
+      "covers": [
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "approver_binding_required",
+          "sha256": "d61e53bf115f45660592e0e93469ed69ed0f9700a14af8e3d3d67acd16b559a9"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "govder_evidence_rederivable",
+          "sha256": "03553a0d5fb1286cf3bfe13a5bfcf62648b06626c7e3fa68e242bce8c8a0bade"
+        },
+        {
+          "path": "core/src/bin/averin_verify.rs",
+          "symbol": "effective_opts",
+          "sha256": "a0e3a5cc7fd87289ce31c09fda2d701f61e5d8136a3ddb315dc21990dea597ff"
+        }
+      ],
+      "mutants": [
+        "surface-ave10-required-binding-ignored",
+        "surface-ave10-cutover-inverted",
+        "surface-ave10-cli-default-not-strict",
+        "surface-ave10-names-nobody-passes"
+      ],
+      "does_not_establish": "Not that the named approvers are authenticated people, are distinct or are in any group (an operator and broker property), and not that a signer committed to the right names: a signer that signs evidence naming mallory over a record naming mallory is consistent. The policy covers a decided govder approval (status approved or denied) that names no approver, and exempts pending, expired and escalation records, which carry no decider by design; a record whose body names an approver but whose evidence omits it is the unbound case. The cutover compares canonical received_ts strings, which the recorder stamps, so it is as good as the recorder's clock. The option is off in the library by default (historical bundles keep verifying); the CLI turns it on, and the browser verifier only when its options say so. The CLI only reports an unbound approval for a record whose authority key its opts.json pins; without that key the record is unverifiable and nothing is printed. The server side is the separate claim server-verify-fails-unbound-approval.",
+      "evidence_run": "38561263968"
+    },
+    {
+      "id": "server-verify-fails-unbound-approval",
+      "$comment": "legacy register: server-verify-fails-unbound-approval",
+      "statement": "With the approver-binding policy on and the project's authority key pinned, the server's own GET /v2/verify fails a govder approval whose signed evidence leaves out who approved and says so in the issues, and does not when the policy is off. The server passes the project's pinned authority keys (project pin first, then the global pin, per source) to the verifier as authority_keys, so a govder record is read as verified or legacy-unbound rather than unverifiable.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/server.go",
+        "server/internal/api/approver_binding_verify_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestVerifyFailsUnboundApprovalUnderPinnedKey'",
+      "covers": [
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "selfVerifyOptsFor",
+          "sha256": "416c9cb12e93c95c7ededfd3109ea75d3284a12b916e029c32149e443507267c"
+        }
+      ],
+      "mutants": [
+        "surface-ave10-server-verify-unpinned"
+      ],
+      "does_not_establish": "Only /v2/verify refuses: export reuses the same verdict for its completeness wording and still returns a bundle. A project with no pinned authority key reads govder records as unverifiable and the policy cannot fire there. The test uses the in-memory store and one human_signed key; per-project key resolution is covered by the existing authority tests, not this one. It does not show the named approvers are authenticated people.",
+      "evidence_run": "38545168433"
     }
   ]
 }

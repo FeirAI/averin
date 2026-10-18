@@ -132,20 +132,23 @@ parser's functional correctness, and the trusted base (SHA-256, Ed25519, NFC, st
 
 - **Record authenticity** is cryptographic and offline: pin the signer's `ed25519pub:` key (logged
   at startup, or carried in the bundle's `keys`) and verify — no server trust needed.
-- **API authn** (`server/internal/auth`): optional project-scoped API keys (`AVERIN_API_KEYS`). When
-  configured, ordinary `/v2/*` routes require a valid token for the `?project=`; comparison is
-  constant-time over SHA-256 digests; it **fails closed** (unknown project / empty token ⇒ deny); a
-  zero-key config refuses to start (no silent deny-all); tokens are never logged. The dev-only
-  open-store mode is explicit and warned about.
+- **API authn and authz** (`server/internal/auth`): project-scoped API keys (`AVERIN_API_KEYS`) are
+  required. Without keys the server refuses to start, and a server with no auth store refuses every
+  `/v2/*` request; the only open mode is the explicit `AVERIN_DEV_MODE=1`, which logs a warning. Each
+  token has a role (`read`, `write`, `admin`; see [API.md](API.md)) and an optional `not_after` expiry.
+  Routes not classified need `admin`. Comparison is constant-time over SHA-256 digests; it **fails
+  closed** (unknown project, empty token, expired token, role too low); a zero-key config refuses to
+  start (no silent deny-all); tokens are never logged and `token_sha256` keeps them out of the config.
 - **Recovery authz:** `GET` preflight and `POST /v2/broker-seq/void` require separate `AVERIN_RECOVERY_KEYS`
   credential for the exact project. Ordinary writer possession, absent recovery config, and dev-open
   ordinary auth do not grant recovery. The credential identifies an actor signed into the tombstone
   with the required reason and operation ID for a new void. A permanent operational fence binds
   the same action before reconciliation; a legacy tombstone without original actor/operation metadata
   is never retroactively attributed. This is one narrow permission, not general RBAC.
-- **Ordinary API authz is Phase-1 limited.** Full RBAC/SSO/scoped-and-expiring tokens are outside
-  this implementation. With `AVERIN_API_KEYS` unset, ordinary app API routes are unauthenticated.
-- Without `AVERIN_API_KEYS` set, the API is unauthenticated, so keep it on loopback.
+- **What this does not do.** There is no SSO or OIDC, no per-token revocation list (retire a token by
+  removing it or by its `not_after`), and the legacy `proj:token` form still means an admin token with no
+  expiry. Roles are per project; there is no finer scope than read, write and admin.
+- In dev mode without `AVERIN_API_KEYS` the API is unauthenticated, so keep it on loopback.
 
 ## Trust boundaries
 

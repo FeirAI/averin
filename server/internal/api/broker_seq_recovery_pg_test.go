@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,7 +20,7 @@ func TestBrokerSeqRecoveryFencePersistsAcrossReplicasPostgres(t *testing.T) {
 	pg, admin := newVoidTestPostgres(t)
 	reserveGrantSeq(t, pg, "orphan-replica")
 	failing := &failMarkStore{Store: pg, failMark: true}
-	first := api.New(mustCore(t), failing, "k0").WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
+	first := api.New(mustCore(t), failing, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
 	if code, body := doRecovery(t, first, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusServiceUnavailable || !strings.Contains(body, `"fenced":true`) {
 		t.Fatalf("first replica must report durable incomplete recovery: %d %s", code, body)
 	}
@@ -37,7 +38,7 @@ func TestBrokerSeqRecoveryFencePersistsAcrossReplicasPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	second := api.New(mustCore(t), other, "k0").WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
+	second := api.New(mustCore(t), other, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
 	if code, body := doRecovery(t, second, "POST", "/v2/broker-seq/void?project=p1", voidBody(1)); code != http.StatusCreated || !strings.Contains(body, `"outcome":"voided"`) {
 		t.Fatalf("second replica failed to complete recovery: %d %s", code, body)
 	}
@@ -84,8 +85,8 @@ func TestBrokerSeqRecoveryCancelThenGrantCommitsPostgres(t *testing.T) {
 		}
 	}()
 	shared := content.NewMemStore()
-	grantHandler := api.New(mustCore(t), hold, "k0").WithContent(shared).WithBroker(brokerIssuingKey()).Routes()
-	recoveryHandler := api.New(mustCore(t), other, "k0").WithContent(shared).WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
+	grantHandler := api.New(mustCore(t), hold, "k0").WithAuth(auth.NewOpenStore()).WithContent(shared).WithBroker(brokerIssuingKey()).Routes()
+	recoveryHandler := api.New(mustCore(t), other, "k0").WithAuth(auth.NewOpenStore()).WithContent(shared).WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
 	grantDone := make(chan struct {
 		code int
 		body string
@@ -166,7 +167,7 @@ func TestBrokerSeqRecoveryBlockedGuardDeadlinePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	h := api.New(mustCore(t), other, "k0").WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
+	h := api.New(mustCore(t), other, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
 	start := time.Now()
 	reqCtx, stop := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer stop()

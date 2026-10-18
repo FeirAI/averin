@@ -56,6 +56,9 @@ func TestPosture_KeyedDeploymentReportsItsGuardsAndRefusesAnonymous(t *testing.T
 			t.Errorf("%s = %v, want %v", k, b[k], want)
 		}
 	}
+	if b["dev_mode"] != false {
+		t.Errorf("dev_mode = %v, want false for a process started without AVERIN_DEV_MODE", b["dev_mode"])
+	}
 	build := b["build"].(map[string]any)
 	if build["go_version"] != runtime.Version() || build["core_rustc"] != "rustc 1.99.0 (test)" {
 		t.Errorf("build = %v", build)
@@ -78,6 +81,20 @@ func TestPosture_OpenDeploymentReportsNoKeysAndNoGuards(t *testing.T) {
 				t.Errorf("%s: %s = %v, want false", name, k, b[k])
 			}
 		}
+	}
+}
+
+// AVE-06: a process started in dev mode says so, and a handler nobody wired a posture into claims no dev
+// mode either (the verifier then fails the missing guards, not a silent absence).
+func TestPosture_ReportsDevMode(t *testing.T) {
+	h := newServer(t).WithPosture(api.Posture{DevMode: true}).WithAuth(auth.NewOpenStore()).Routes()
+	_, b := postureReq(h, "p1", "")
+	if b["dev_mode"] != true {
+		t.Fatalf("dev_mode = %v, want true", b["dev_mode"])
+	}
+	_, b = postureReq(newServer(t).WithAuth(auth.NewOpenStore()).Routes(), "p1", "")
+	if b["dev_mode"] != false {
+		t.Fatalf("an unwired posture reports dev_mode = %v, want false", b["dev_mode"])
 	}
 }
 
@@ -217,5 +234,25 @@ func TestParseRegion(t *testing.T) {
 		if (err != nil) != c.wantErr || got != c.want {
 			t.Errorf("ParseRegion(%q) = %q, %v; want %q, err=%v", c.in, got, err, c.want, c.wantErr)
 		}
+	}
+}
+
+// Approver binding (AVE-10) is reported with its cutover, so a deploy-time verifier sees an explicit
+// AVERIN_REQUIRE_APPROVER_BINDING=0 and a far-future AVERIN_APPROVER_BINDING_SINCE.
+func TestPosture_ReportsApproverBinding(t *testing.T) {
+	_, b := postureReq(newServer(t).WithRequireApproverBinding(true, "").Routes(), "p1", "")
+	if b["require_approver_binding"] != true {
+		t.Fatalf("require_approver_binding = %v, want true", b["require_approver_binding"])
+	}
+	if v, ok := b["approver_binding_since"]; !ok || v != nil {
+		t.Fatalf("approver_binding_since = %v (present=%v), want null", v, ok)
+	}
+	_, b = postureReq(newServer(t).WithRequireApproverBinding(true, "2026-10-01T00:00:00.000Z").Routes(), "p1", "")
+	if b["approver_binding_since"] != "2026-10-01T00:00:00.000Z" {
+		t.Fatalf("approver_binding_since = %v", b["approver_binding_since"])
+	}
+	_, b = postureReq(newServer(t).WithRequireApproverBinding(false, "").Routes(), "p1", "")
+	if b["require_approver_binding"] != false {
+		t.Fatalf("require_approver_binding = %v, want false", b["require_approver_binding"])
 	}
 }

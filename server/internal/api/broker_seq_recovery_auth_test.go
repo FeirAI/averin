@@ -18,7 +18,7 @@ func TestBrokerSeqRecoveryPreflightReadOnly(t *testing.T) {
 	if _, _, err := base.AllocateBrokerSeq("p1", "reserved-grant"); err != nil {
 		t.Fatal(err)
 	}
-	h := api.New(mustCore(t), base, "k0").WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
+	h := api.New(mustCore(t), base, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithRecoveryAuth(testRecoveryStore()).Routes()
 	path := "/v2/broker-seq/void?project=p1&broker_seq=1"
 	if code, _ := do(t, h, "GET", path, ""); code != http.StatusForbidden {
 		t.Fatalf("ordinary GET accessed recovery preflight: %d", code)
@@ -55,7 +55,7 @@ func TestBrokerSeqRecoveryDecomposedReasonReplay(t *testing.T) {
 	if _, _, err := st.AllocateBrokerSeq("p1", "reserved-grant"); err != nil {
 		t.Fatal(err)
 	}
-	h := api.New(mustCore(t), st, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).
+	h := api.New(mustCore(t), st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).
 		WithRecoveryAuth(testRecoveryStore()).Routes()
 	body := fmt.Sprintf(`{"project_id":"p1","broker_seq":1,"operation_id":"incident-1","reason":%q}`, "Cafe\u0301 recovery")
 	code, response := recoveryRequest(h, "test-recovery-token", body)
@@ -86,7 +86,7 @@ func TestBrokerSeqRecoveryAuthorizationAndEvidence(t *testing.T) {
 	}
 	recovery := testRecoveryStore()
 	c := mustCore(t)
-	h := api.New(c, st, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).
+	h := api.New(c, st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).
 		WithAuth(auth.NewMapStore(map[string][]string{"p1": {"writer-token"}})).WithRecoveryAuth(recovery).Routes()
 	body := voidBody(1)
 	for _, tc := range []struct {
@@ -199,7 +199,7 @@ func TestBrokerSeqRecoveryAuthorizationAndEvidence(t *testing.T) {
 }
 
 func TestBrokerSeqRecoveryDevOpenStillDenied(t *testing.T) {
-	h := api.New(mustCore(t), store.NewMem(), "k0").WithBroker(brokerIssuingKey()).
+	h := api.New(mustCore(t), store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).
 		WithAuth(auth.NewOpenStore()).Routes()
 	for _, token := range []string{"", "ordinary-writer"} {
 		if code, response := recoveryRequest(h, token, voidBody(1)); code != http.StatusForbidden {
@@ -214,7 +214,7 @@ func TestBrokerSeqRecoveryDeniedPostgres(t *testing.T) {
 	if err != nil || seq != 1 {
 		t.Fatalf("reserve seq: %d %v", seq, err)
 	}
-	h := api.New(mustCore(t), pg, "k0").WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).
+	h := api.New(mustCore(t), pg, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithBrokerSeqVoidMinAge(0).
 		WithAuth(auth.NewMapStore(map[string][]string{"p1": {"writer-token"}})).WithRecoveryAuth(testRecoveryStore()).Routes()
 	if code, response := recoveryRequest(h, "writer-token", voidBody(1)); code != http.StatusForbidden {
 		t.Fatalf("writer recovery got %d: %s", code, response)

@@ -63,7 +63,7 @@ func TestBrokerSeqRecoveryLegacyTombstoneAttribution(t *testing.T) {
 				t.Fatal(err)
 			}
 			blobs := &countRecoveryContent{Store: content.NewMemStore()}
-			s := New(c, base, "k0").WithContent(blobs).WithBroker(brokerKey).WithResource(resourceCore, "orders-db").WithRecoveryAuth(rs)
+			s := New(c, base, "k0").WithAuth(auth.NewOpenStore()).WithContent(blobs).WithBroker(brokerKey).WithResource(resourceCore, "orders-db").WithRecoveryAuth(rs)
 			old := brokerSeqVoidRequest{ProjectID: "p1", BrokerSeq: 1, SessionID: "broker-seq-void", ActorID: tc.actor, OperationID: tc.op, Reason: "original incident"}
 			rec, err := s.buildGrantVoidRecord(old, "g1")
 			if err != nil {

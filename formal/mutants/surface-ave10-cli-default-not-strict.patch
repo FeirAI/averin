@@ -1,0 +1,13 @@
+diff --git a/core/src/bin/averin_verify.rs b/core/src/bin/averin_verify.rs
+index 2315718..d42129b 100644
+--- a/core/src/bin/averin_verify.rs
++++ b/core/src/bin/averin_verify.rs
+@@ -107,7 +107,7 @@ fn effective_opts(
+     let mut pairs = pairs.clone();
+     pairs.push((
+         "require_approver_binding".to_string(),
+-        CanonValue::Bool(true),
++        CanonValue::Bool(false),
+     ));
+     CanonValue::object(pairs)
+         .map(|v| Some(v.serialize()))
