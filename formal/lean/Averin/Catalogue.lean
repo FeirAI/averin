@@ -367,7 +367,7 @@ theorem server_id_nul_collision :
 
 def serverIdNamespaces : List String :=
   ["averin.grant.id.v1", "averin.use.id.v1", "averin.denial.id.v1", "averin.use_outcome.id.v1",
-   "averin.introspection.id.v1"]
+   "averin.introspection.id.v1", "averin.refusal.id.v1"]
 
 theorem namespaces_nul_free : ∀ ns ∈ serverIdNamespaces, 0 ∉ ascii ns := by decide
 
