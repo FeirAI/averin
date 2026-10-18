@@ -6636,6 +6636,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut grant_content_seen: BTreeMap<String, String> = BTreeMap::new();
     let mut grant_equivocations: BTreeSet<String> = BTreeSet::new();
     let grant_issues_before = issues.len();
+    // A malformed refusal is a hard issue but carries no grant or use evidence, so it must not read as a
+    // grant contradiction: its issues join `issues` only after the grant window closes.
+    let mut refusal_issues: Vec<String> = Vec::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if s(rec, "event_type").as_deref() == Some("credential_grant")
@@ -6719,7 +6722,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         // count covers only integrity-proven, shape-valid records, deduped by content_hash.
         if crate::refusal::is_refusal(rec) && seen_refusals.insert(rt.content_hash.as_str()) {
             match crate::refusal::check_shape(rec) {
-                Err(why) => issues.push(format!(
+                Err(why) => refusal_issues.push(format!(
                     "gateway refusal {} ({}): {why} (fail-closed)",
                     rt.index, rt.record_id
                 )),
@@ -6739,6 +6742,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
 
     let grant_contradiction = issues.len() > grant_issues_before;
+    issues.extend(refusal_issues);
     // ---- Tier-B (ADR 0003 step 5): use↔grant join (R3) ----
     // CLOSED = a record's content_hash is transitively committed by a verified, ANCHORED checkpoint (the union of
     // the anchored committed sets). COMMITTED = transitively committed by ANY verified (signed, key-honored)

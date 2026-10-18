@@ -36,8 +36,10 @@ pub const REASON_CLASSES: &[&str] = &[
 /// Closed set of entry points.
 pub const ENTRY_POINTS: &[&str] = &["mcp", "execute", "llm", "approval_resume"];
 
-/// Keys allowed inside `extensions.gateway_refusal`. Anything else fails closed, so a refusal can never
-/// smuggle params, a URL or free text.
+/// Keys allowed inside `extensions.gateway_refusal`. Anything else fails closed. Every allowed key is also
+/// type-checked in `check_shape` (names are a short plain identifier, timestamps the canonical form, the
+/// fixed top-level markers an exact value), so a refusal can smuggle neither an object, a URL nor free text
+/// through a key that is allowed.
 const ALLOWED_KEYS: &[&str] = &[
     "v",
     "reason_class",
@@ -60,6 +62,27 @@ pub struct Counted {
     pub by_class: BTreeMap<String, u64>,
 }
 
+/// A short plain identifier: `[A-Za-z0-9._:-]{1,128}` (mirrors the server's `refusalName`).
+fn is_name(s: &str) -> bool {
+    (1..=128).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+}
+
+/// The canonical millisecond UTC form the server writes: `YYYY-MM-DDTHH:MM:SS.mmmZ`.
+fn is_canonical_time(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 24
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            10 => *c == b'T',
+            13 | 16 => *c == b':',
+            19 => *c == b'.',
+            23 => *c == b'Z',
+            _ => c.is_ascii_digit(),
+        })
+}
+
 /// Whether `rec` is a refusal record (keyed on `record_kind` only).
 pub fn is_refusal(rec: &CanonValue) -> bool {
     rec.get("record_kind").and_then(|v| v.as_str()) == Some(KIND)
@@ -78,6 +101,20 @@ pub fn check_shape(rec: &CanonValue) -> Result<Counted, String> {
         return Err(format!(
             "record_kind {KIND} requires event_type {EVENT_TYPE}"
         ));
+    }
+    // The server writes these constants; any other value is not a record the gateway endpoint sealed.
+    if rec.get("status").and_then(|v| v.as_str()) != Some("refused") {
+        return Err("a gateway refusal has status refused".into());
+    }
+    if rec.get("observed_via").and_then(|v| v.as_str()) != Some("gateway") {
+        return Err("a gateway refusal has observed_via gateway".into());
+    }
+    let action_ok = rec
+        .get("action")
+        .and_then(|v| v.as_str())
+        .is_some_and(|a| a == "*" || is_name(a));
+    if !action_ok {
+        return Err("a gateway refusal action must be a plain identifier or *".into());
     }
     if rec.get("authority").is_some() {
         return Err("a gateway refusal carries no authority block".into());
@@ -112,8 +149,19 @@ pub fn check_shape(rec: &CanonValue) -> Result<Counted, String> {
         .filter(|n| (1..=MAX_ATTEMPTS).contains(n))
         .ok_or("extensions.gateway_refusal.attempts must be an integer in 1..=1000000000")?;
     for k in ["first_at", "last_at"] {
-        if g.get(k).and_then(|v| v.as_str()).is_none() {
-            return Err(format!("extensions.gateway_refusal.{k} is required"));
+        if !g
+            .get(k)
+            .and_then(|v| v.as_str())
+            .is_some_and(is_canonical_time)
+        {
+            return Err(format!(
+                "extensions.gateway_refusal.{k} must be a canonical UTC timestamp"
+            ));
+        }
+    }
+    if let Some(c) = g.get("credential") {
+        if !c.as_str().is_some_and(is_name) {
+            return Err("extensions.gateway_refusal.credential must be a plain identifier".into());
         }
     }
     let summary = match g.get("summary") {

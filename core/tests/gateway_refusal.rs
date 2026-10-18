@@ -334,6 +334,58 @@ fn malformed_refusals_are_hard_issues_and_never_counted() {
             }),
         ),
         ("missing extension", Box::new(|b| del(b, "extensions"))),
+        (
+            "credential is an object carrying a url",
+            Box::new(|b| {
+                ext_member(b, |g| {
+                    set(
+                        g,
+                        "credential",
+                        j(r#"{"url":"https://evil/?token=sk-live-123","params":{"a":"b"}}"#),
+                    )
+                })
+            }),
+        ),
+        (
+            "credential is a url string",
+            Box::new(|b| {
+                ext_member(b, |g| {
+                    set(
+                        g,
+                        "credential",
+                        CanonValue::string("https://evil/?token=sk-live-123"),
+                    )
+                })
+            }),
+        ),
+        (
+            "first_at is free text",
+            Box::new(|b| {
+                ext_member(b, |g| {
+                    set(g, "first_at", CanonValue::string("see https://evil/x"))
+                })
+            }),
+        ),
+        (
+            "last_at is not canonical",
+            Box::new(|b| {
+                ext_member(b, |g| {
+                    set(g, "last_at", CanonValue::string("2026-01-01T00:00:00Z"))
+                })
+            }),
+        ),
+        (
+            "status is not refused",
+            Box::new(|b| set(b, "status", CanonValue::string("ok"))),
+        ),
+        (
+            "observed_via is not gateway",
+            Box::new(|b| set(b, "observed_via", CanonValue::string("proxy"))),
+        ),
+        (
+            "action is free text",
+            Box::new(|b| set(b, "action", CanonValue::string("delete https://evil/?k=v"))),
+        ),
     ];
     for (name, f) in cases {
         let mut bad = refusal("r1", "not_granted", 3);
@@ -346,6 +398,34 @@ fn malformed_refusals_are_hard_issues_and_never_counted() {
             "{name}: a malformed refusal is never counted"
         );
         assert_eq!(r.gateway_refusal_attempts, 0, "{name}");
+    }
+}
+
+// A malformed refusal is a hard issue, but it carries no grant or use evidence: it must not turn the
+// authorization claims into a contradiction (refuted). The verdict is the same as for the same history
+// without the refusal being well formed: integrity stays satisfied, nothing is refuted.
+#[test]
+fn a_malformed_refusal_is_not_a_grant_contradiction() {
+    use averin_decision_core::verify::ClaimDecision;
+    let mut bad = refusal("r1", "not_granted", 3);
+    ext_member(&mut bad, |g| {
+        set(g, "reason_class", CanonValue::string("because"))
+    });
+    let r = verify(&bundle(vec![tool_call("r0"), bad]));
+    assert!(!r.ok);
+    assert_eq!(refusal_issues(&r).len(), 1, "{:?}", r.issues);
+    let c = r.claims();
+    for (name, d) in [
+        ("authorized", c.authorized),
+        ("complete_brokered", c.complete_brokered),
+        ("complete_introspected", c.complete_introspected),
+        ("temporal", c.temporal),
+    ] {
+        assert_ne!(
+            d,
+            ClaimDecision::Refuted,
+            "{name}: a refusal shape failure refutes no authorization claim"
+        );
     }
 }
 
