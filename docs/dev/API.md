@@ -233,8 +233,20 @@ on a keyed deployment it needs the project's bearer. Booleans, one integer (`sch
 a DSN: `schema`, `plane`, `build` (`go_version`, `vcs_revision`, `vcs_modified`, `core_rustc` when the build
 stamped it with `-ldflags "-X main.coreRustc=..."`), `require_prod_secrets`, `api_keys_configured` (false when the
 app API is unauthenticated), `durable_store` (Postgres wired), `signing_seed_is_dev`, `require_pinned_authority`,
-`require_body_bound_authority`, `region` (`AVERIN_REGION`, empty when not declared), `schema_version` (the Postgres schema version this binary understands, 0 with in-memory storage) `runtime_role_verified` (true when startup verified the Postgres credential is a least-privilege runtime role) `dev_mode` (true only for a process started with `AVERIN_DEV_MODE=1`; the feir-os posture verifier fails it), `require_approver_binding` (whether the server's own verify requires a govder approval to name who approved) and `approver_binding_since` (the canonical cutover string, or `null` when none is set; a far-future cutover turns the requirement off as surely as `require_approver_binding=false`, so the verifier reads both). It says what was configured, not that the database is reachable. On an
-unauthenticated deployment it answers anyone and reports `api_keys_configured: false`.
+`require_body_bound_authority`, `region` (`AVERIN_REGION`, empty when not declared), `schema_version` (the Postgres schema version this binary understands, 0 with in-memory storage), `runtime_role_verified` (true when startup verified the Postgres credential is a least-privilege runtime role), `dev_mode` (true only for a process started with `AVERIN_DEV_MODE=1`; the feir-os posture verifier fails it), `require_approver_binding` (whether the server's own verify requires a govder approval to name who approved), `approver_binding_since` (the canonical cutover string, or `null` when none is set; a far-future cutover turns the requirement off as surely as `require_approver_binding=false`, so the verifier reads both), and `secret_fingerprints` (an object; on a keyed deployment `averin-api-key` is a
+list with one keyed fingerprint per distinct API key averin accepts across all projects: the first 16 bytes of
+HMAC-SHA256 keyed by the token over `feir-secret-alignment/v1:averin-api-key`, vectors in
+`vectors/secret-fingerprint.v1.json`; empty on an open deployment). feir-os's verifier checks that the key
+govder, vultrino and the broker send is on that list, so a wrong key fails the launch instead of surfacing as
+401s later. A fingerprint is not the key, but someone who holds it can test guesses for a weak key offline,
+which is why the report sits behind a project key. The list is one set across all projects, so a key
+holder can read the fingerprints of other projects' keys, and the verifier cannot tell that a key was sent for
+the wrong project; fine for a single-project host, to be split per project before a shared multi-tenant
+deployment. `authority_pins` (a list, empty when nothing is pinned) names every pinned authority verifying key as
+`{project, source, pubkey}`: `project` is empty for the global default pin, `pubkey` is the hex public key (public,
+so reported as it is). feir-os's verifier compares it with the keys govder derives from its authority seed. It
+says what was configured, not that the database is
+reachable. On an unauthenticated deployment it answers anyone and reports `api_keys_configured: false`.
 
 ---
 

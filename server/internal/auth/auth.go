@@ -19,9 +19,12 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/feirai/averin/server/internal/secretfp"
 )
 
 // KeyStore answers whether a token authorizes access to a project. Implementations MUST compare
@@ -86,6 +89,10 @@ type keyEntry struct {
 	digest   [32]byte
 	role     Role
 	notAfter time.Time // zero = no expiry
+	// fp is the posture-report fingerprint of the token, computed when the plaintext was in hand
+	// (AddScoped) so the store keeps only the digest. Empty for a digest-configured key, which cannot
+	// be fingerprinted: the verifier then sees no matching fingerprint and fails closed.
+	fp string
 }
 
 // live reports whether the entry has not expired at now. The expiry instant itself is expired.
@@ -138,15 +145,15 @@ func (ks *MapStore) AddScoped(project, token string, role Role, notAfter time.Ti
 	if token == "" {
 		return
 	}
-	ks.addDigest(project, sha256.Sum256([]byte(token)), role, notAfter)
+	ks.addDigest(project, sha256.Sum256([]byte(token)), role, notAfter, secretfp.Fingerprint(token, FingerprintRelationship))
 }
 
 // AddDigest is AddScoped for a token whose SHA-256 is configured instead of the token itself.
 func (ks *MapStore) AddDigest(project string, digest [32]byte, role Role, notAfter time.Time) {
-	ks.addDigest(project, digest, role, notAfter)
+	ks.addDigest(project, digest, role, notAfter, "")
 }
 
-func (ks *MapStore) addDigest(project string, digest [32]byte, role Role, notAfter time.Time) {
+func (ks *MapStore) addDigest(project string, digest [32]byte, role Role, notAfter time.Time, fp string) {
 	if project == "" || !role.Allows(RoleRead) {
 		return
 	}
@@ -154,11 +161,14 @@ func (ks *MapStore) addDigest(project string, digest [32]byte, role Role, notAft
 	defer ks.mu.Unlock()
 	for i, e := range ks.keys[project] {
 		if e.digest == digest {
-			ks.keys[project][i] = keyEntry{digest: digest, role: role, notAfter: notAfter}
+			if fp == "" {
+				fp = e.fp
+			}
+			ks.keys[project][i] = keyEntry{digest: digest, role: role, notAfter: notAfter, fp: fp}
 			return
 		}
 	}
-	ks.keys[project] = append(ks.keys[project], keyEntry{digest: digest, role: role, notAfter: notAfter})
+	ks.keys[project] = append(ks.keys[project], keyEntry{digest: digest, role: role, notAfter: notAfter, fp: fp})
 }
 
 // ValidFor reports whether token is accepted for project at any role. It fails closed: an empty token,
@@ -232,6 +242,34 @@ func (ks *MapStore) ContainsToken(token string) bool {
 		}
 	}
 	return match == 1
+}
+
+// FingerprintRelationship is the secret-alignment relationship the averin API key is fingerprinted
+// under. It is the same string in every plane and in feir-os deploy/posture/evaluate.jq.
+const FingerprintRelationship = "averin-api-key"
+
+// Fingerprints returns the distinct posture fingerprints of every accepted token across all projects,
+// sorted (FEI-40). The store keeps only SHA-256 digests; each fingerprint was computed when the token
+// was added, so no plaintext is retained. Keys configured by digest have none.
+func (ks *MapStore) Fingerprints() []string {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	seen := map[string]struct{}{}
+	var out []string
+	for _, entries := range ks.keys {
+		for _, e := range entries {
+			if e.fp == "" {
+				continue
+			}
+			if _, dup := seen[e.fp]; dup {
+				continue
+			}
+			seen[e.fp] = struct{}{}
+			out = append(out, e.fp)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // openStore is the explicit, dev-only "allow everything" KeyStore. See NewOpenStore.

@@ -1,10 +1,11 @@
 diff --git a/server/internal/api/posture.go b/server/internal/api/posture.go
+index 997e430..434c9b7 100644
 --- a/server/internal/api/posture.go
 +++ b/server/internal/api/posture.go
-@@ -108,7 +108,7 @@
- 		"signing_seed_is_dev":          s.posture.SigningSeedIsDev,
- 		"require_pinned_authority":     s.requirePinnedAuthority,
+@@ -160,7 +160,7 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
  		"require_body_bound_authority": s.requireBodyBoundAuthority,
+ 		"secret_fingerprints":          s.secretFingerprints(),
+ 		"authority_pins":               s.authorityPinsReport(),
 -		"region":                       s.posture.Region,
 +		"region":                       "",
  		"schema_version":               s.posture.SchemaVersion,

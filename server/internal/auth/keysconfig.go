@@ -9,6 +9,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/feirai/averin/server/internal/secretfp"
 )
 
 // keyConfigEntry is one scoped credential in the JSON form of AVERIN_API_KEYS.
@@ -62,6 +64,7 @@ func ParseKeysConfig(raw string) (*MapStore, int, error) {
 			return nil, 0, fmt.Errorf("AVERIN_API_KEYS JSON: entry %d: role must be read, write or admin", i)
 		}
 		var digest [32]byte
+		var fp string
 		switch {
 		case e.Token != "" && e.TokenSHA256 != "":
 			return nil, 0, fmt.Errorf("AVERIN_API_KEYS JSON: entry %d: give token or token_sha256, not both", i)
@@ -70,6 +73,7 @@ func ParseKeysConfig(raw string) (*MapStore, int, error) {
 				return nil, 0, fmt.Errorf("AVERIN_API_KEYS JSON: entry %d: token has surrounding whitespace", i)
 			}
 			digest = sha256.Sum256([]byte(e.Token))
+			fp = secretfp.Fingerprint(e.Token, FingerprintRelationship)
 		case e.TokenSHA256 != "":
 			b, err := hex.DecodeString(e.TokenSHA256)
 			if err != nil || len(b) != 32 {
@@ -95,7 +99,7 @@ func ParseKeysConfig(raw string) (*MapStore, int, error) {
 				return nil, 0, fmt.Errorf("AVERIN_API_KEYS JSON: entry %d: duplicate project and token", i)
 			}
 		}
-		ks.addDigest(e.Project, digest, role, notAfter)
+		ks.addDigest(e.Project, digest, role, notAfter, fp)
 		projects[e.Project] = true
 	}
 	return ks, len(projects), nil

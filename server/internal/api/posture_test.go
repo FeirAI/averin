@@ -1,6 +1,10 @@
 package api_test
 
 import (
+	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -99,6 +103,105 @@ func TestPosture_ReportsTheAuthorityPinSwitches(t *testing.T) {
 	_, b := postureReq(h, "p1", "")
 	if b["require_pinned_authority"] != false || b["require_body_bound_authority"] != true {
 		t.Fatalf("pin switches = %v / %v", b["require_pinned_authority"], b["require_body_bound_authority"])
+	}
+}
+
+// FEI-40: a keyed deployment reports a keyed fingerprint of every API key it accepts, per
+// relationship "averin-api-key", so the verifier can check the key each calling plane sends is one
+// averin accepts. The expected values are computed here independently (HMAC-SHA256 keyed by the
+// token over the fixed label), and the report never contains a token.
+func TestPosture_ReportsFingerprintsOfEveryAcceptedAPIKeyAndNeverTheKey(t *testing.T) {
+	fp := func(secret string) string {
+		m := hmac.New(sha256.New, []byte(secret))
+		m.Write([]byte("feir-secret-alignment/v1:averin-api-key"))
+		return hex.EncodeToString(m.Sum(nil)[:16])
+	}
+	h := newServer(t).
+		WithAuth(auth.NewMapStore(map[string][]string{"p1": {"tok-one", "tok-two"}, "p2": {"tok-three", "tok-one"}})).
+		Routes()
+	req := httptest.NewRequest(http.MethodGet, "/v2/posture?project=p1", nil)
+	req.Header.Set("Authorization", "Bearer tok-one")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("keyed: %d", rec.Code)
+	}
+	var b struct {
+		SecretFingerprints map[string][]string `json:"secret_fingerprints"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil {
+		t.Fatal(err)
+	}
+	got := b.SecretFingerprints["averin-api-key"]
+	want := map[string]bool{fp("tok-one"): true, fp("tok-two"): true, fp("tok-three"): true}
+	if len(got) != len(want) {
+		t.Fatalf("fingerprints = %v, want the %d distinct accepted keys", got, len(want))
+	}
+	for _, g := range got {
+		if !want[g] {
+			t.Errorf("unexpected fingerprint %s", g)
+		}
+	}
+	for _, tok := range []string{"tok-one", "tok-two", "tok-three"} {
+		if strings.Contains(rec.Body.String(), tok) {
+			t.Fatalf("the posture report must never carry an API key (%q found)", tok)
+		}
+	}
+}
+
+// An open or unkeyed deployment accepts no key by value: it reports no fingerprint (an empty object,
+// not a fingerprint of nothing), which the verifier reads as "nothing to compare".
+func TestPosture_OpenDeploymentReportsNoFingerprints(t *testing.T) {
+	for name, h := range map[string]http.Handler{
+		"no auth store": newServer(t).Routes(),
+		"explicit open": newServer(t).WithAuth(auth.NewOpenStore()).Routes(),
+	} {
+		_, b := postureReq(h, "p1", "")
+		sf, ok := b["secret_fingerprints"].(map[string]any)
+		if !ok || len(sf) != 0 {
+			t.Errorf("%s: secret_fingerprints = %v, want an empty object", name, b["secret_fingerprints"])
+		}
+	}
+}
+
+// FEI-40 relationship D: averin reports every pinned authority key (public verifying keys, so as they
+// are) with the project each is pinned for ("" = the global default) and the source it vouches for,
+// so the verifier can compare them with the keys govder derives from its authority seed. A server
+// with no pin reports an empty list, never null.
+func TestPosture_ReportsEveryPinnedAuthorityKey(t *testing.T) {
+	pubOf := func(seedByte byte) ed25519.PublicKey {
+		seed := make([]byte, ed25519.SeedSize)
+		for i := range seed {
+			seed[i] = seedByte
+		}
+		return ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	}
+	global, scoped := pubOf(0x11), pubOf(0x22)
+	h := newServer(t).
+		WithPolicyEngineKey("policy_engine_signed", global).
+		WithProjectAuthorityKey("acme", "human_signed", scoped).
+		Routes()
+	_, b := postureReq(h, "p1", "")
+	pins, ok := b["authority_pins"].([]any)
+	if !ok || len(pins) != 2 {
+		t.Fatalf("authority_pins = %v, want two pins", b["authority_pins"])
+	}
+	want := []map[string]string{
+		{"project": "", "source": "policy_engine_signed", "pubkey": hex.EncodeToString(global)},
+		{"project": "acme", "source": "human_signed", "pubkey": hex.EncodeToString(scoped)},
+	}
+	// sorted by project then source: "" first
+	for i, w := range want {
+		g := pins[i].(map[string]any)
+		for k, v := range w {
+			if g[k] != v {
+				t.Errorf("pin %d %s = %v, want %v", i, k, g[k], v)
+			}
+		}
+	}
+	_, empty := postureReq(newServer(t).Routes(), "p1", "")
+	if l, ok := empty["authority_pins"].([]any); !ok || len(l) != 0 {
+		t.Errorf("unpinned server authority_pins = %v, want an empty list", empty["authority_pins"])
 	}
 }
 
