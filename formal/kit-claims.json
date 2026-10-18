@@ -2591,7 +2591,7 @@
         {
           "path": "server/internal/api/refusals.go",
           "symbol": "handleRefusals",
-          "sha256": "d1d14fbb94242153670e6f1be53316211e4b2938f11cdea25a243ea78228e143"
+          "sha256": "edbab9e9d3bacf9510be45d5865164cf8bb698ab92a391676397ef87f926e0fe"
         },
         {
           "path": "server/internal/api/server.go",
@@ -2651,6 +2651,11 @@
           "path": "core/src/refusal.rs",
           "symbol": "check_shape",
           "sha256": "6d18eec84ff9ff63c2dce9a090a3fd348b4be642bd8f5685624fdf6c0f65816e"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "verify_bundle_with",
+          "sha256": "dadff3f28699be0608dcb87608876b2b33395878ef5361b856c252a553641bd2"
         }
       ],
       "mutants": [
@@ -2666,7 +2671,7 @@
     {
       "id": "gateway-refusal-never-widens-surface",
       "$comment": "legacy register: gateway-refusal-never-widens-surface",
-      "statement": "A real-producer capstone history that also contains gateway refusals of ungranted actions stays attested complete over the brokered surface, with the side-effect closure closed, the attestation validated and the taxonomy (a TEST-signed version 8) validated; the refusals are counted and add no resource, action pair or manifest entry. The committed fixture is signed by test-only keys listed in spec/test-keys.json.",
+      "statement": "A real-producer capstone history that also contains gateway refusals of ungranted actions stays attested complete over the brokered surface, with the side-effect closure closed, the attestation validated and the taxonomy (TEST-signed at version 9000001, a number no release uses) validated; the refusals are counted and add no resource, action pair or manifest entry. The committed fixture is signed by test-only keys listed in spec/test-keys.json.",
       "method": "test",
       "artifacts": [
         "core/src/verify.rs",

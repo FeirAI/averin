@@ -105,9 +105,10 @@ func refusalCapstone(t *testing.T) (anchored, opts string, c *core.Core) {
 	}
 	_, exp := do(t, h, "GET", "/v2/export?project=p1", "")
 	anchored = attachTestAnchor(t, exp, tsa)
-	// Taxonomy v8 (the next Solo version), signed by the TEST taxonomy key: the rotation prepared in code
-	// without any production signature. It lists only the granted pair; refusals never add to it.
-	taxJSON, digest, ver, err := taxonomy.Sign(c, taxKey, 8, 0, 9_999_999_999,
+	// A taxonomy signed by the TEST taxonomy key at a version no production Solo taxonomy uses (testTaxonomyVersion,
+	// far above any release number), so this pin set cannot be mistaken for or copied as a production one. It
+	// lists only the granted pair; refusals never add to it, and no rotation is needed to record a refusal.
+	taxJSON, digest, ver, err := taxonomy.Sign(c, taxKey, testTaxonomyVersion, 0, 9_999_999_999,
 		[]taxonomy.Entry{{ResourceID: "orders-db", Action: "db.query:orders-ro"}}, nil)
 	if err != nil {
 		t.Fatalf("taxonomy.Sign: %v", err)
@@ -116,6 +117,10 @@ func refusalCapstone(t *testing.T) (anchored, opts string, c *core.Core) {
 		c.PubKey(), c.PubKey(), rc.PubKey(), tsaPubEncoded(tsa), attestPubEncoded(att), taxJSON, attestPubEncoded(taxKey), digest, ver)
 	return anchored, opts, c
 }
+
+// testTaxonomyVersion is deliberately not a release version: a TEST-signed taxonomy must never share a version
+// number with one a deployment could pin.
+const testTaxonomyVersion = 9_000_001
 
 func wantRefusalCapstone(t *testing.T, rep string) {
 	t.Helper()

@@ -21,7 +21,8 @@ import (
 // signature: reserving the markers at ingest is the only defence against forged refusals.
 
 // refusalIdemPrefix namespaces the stored idempotency key of a refusal record. Like denialIdemPrefix it is
-// reserved at every other entry point, so no caller can pre-seed a key the refusal endpoint will later use.
+// reserved at every other entry point, so no other route can pre-seed a key this endpoint will later use (a
+// caller of this endpoint itself still can: see LIMITATIONS).
 const refusalIdemPrefix = "refusal:"
 
 // refusalRecordIDPrefix is the reserved record_id namespace of refusal records.
@@ -219,7 +220,9 @@ func (s *Server) handleRefusals(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "refusal salt unavailable")
 		return
 	}
-	// The record id is salted with a server secret so a caller can neither precompute nor squat it.
+	// The record id is salted with a server secret so a caller cannot precompute it. That does not stop a
+	// project writer from pre-seeding the idempotency key itself (dedup is keyed on it, not on the id): see
+	// docs/dev/LIMITATIONS.md, "A prior submission can suppress a refusal".
 	storedIdem := refusalIdemPrefix + idem
 	recordID := refusalRecordIDPrefix + uuidV5Shaped("averin.refusal.id.v1", rr.ProjectID, salt+"\x00"+idem)
 

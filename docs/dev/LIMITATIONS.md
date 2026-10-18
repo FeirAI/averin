@@ -344,8 +344,27 @@ never reported.
   refusal marker, but it cannot tell two writers apart. A gateway-only key needs a producer-labelled
   `AVERIN_API_KEYS` entry.
 - **The count is a floor.** An attempt with no authenticated agent is not recorded, and a producer crash can
-  lose its pending window. Producers coalesce repeats into one record with an `attempts` count, and fall back
-  to a per-class summary under a storm, so the count stays exact while the detail is reduced.
+  lose its pending window. A producer may coalesce repeats into one record with an `attempts` count, or merge
+  a storm into a per-class summary; whether and how a given producer does so is that producer's behaviour
+  (vultrino's is not shipped yet), and averin only counts what is sealed. The count is a lower bound, never
+  an exact total of refusals.
+- **A prior submission can suppress a refusal.** A replay is keyed on the caller's `idempotency_key`
+  (stored as `refusal:<key>`), not on the record id, whose salt does not hide it from a caller who can
+  predict the gateway's key. A project writer who posts that key first through `/v2/refusals` makes the
+  gateway's real refusal return `200 created:false` and never be sealed, and a replay whose fields differ
+  from the stored record is not rejected, only answered with the stored id. Compare the returned
+  `record_id` and `created` flag with what you sent, and give each producer keys a peer writer cannot
+  predict (random per record, not a counter or a hash of public fields).
+- **Names are stored verbatim.** An agent-chosen tool or credential name that matches
+  `[A-Za-z0-9._:-]{1,128}` is written into a permanent signed record that no purge can erase. A
+  token-shaped string (an `sk-` key, a `vut_` token) fits that pattern, so an agent that has seen a secret can
+  push it into the record by naming an unknown tool after it. The producer must redact or refuse names that
+  look like secrets before calling the endpoint; averin does not.
+- **A filtered record list is a bounded scan.** `GET /v2/records?record_kind=` and `exclude_record_kind=`
+  page the store newest-first and decode every record, up to 50000 per request, inside a read transaction.
+  On a large project with few matching records each call pays that scan, and past 50000 records it reports
+  `truncated: true` with an incomplete answer. `total` stays the unfiltered record count. The Postgres path
+  of this scan has no test yet.
 - **Volume is the producer's to bound.** Each record is a normal record, and `attempts` is capped at 10^9 per
   record, but nothing in averin limits how many refusal records a writer submits; the per-month 256 MiB
   segment cap still applies. Use `AVERIN_INGEST_BUDGET` and the producer's own budget.

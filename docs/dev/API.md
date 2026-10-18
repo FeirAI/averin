@@ -137,6 +137,8 @@ Seals one gateway refusal record: the gateway refused an agent's attempt and rep
 server builds the record itself from a closed set of fields (the B11 denied-grant pattern), so a caller
 cannot choose the record id, a free-text reason, params or a URL. It is chained into the `session_id` the
 caller names (vultrino uses its `[averin]` session), checkpointed and anchored like any record.
+A replay is keyed on `idempotency_key`: a key already stored returns that record with `created: false`
+whatever the other fields say, so use keys that a peer writer cannot predict (see LIMITATIONS).
 
 Body (an unknown field is a `400`):
 
@@ -144,10 +146,10 @@ Body (an unknown field is a `400`):
 |---|---|
 | `project_id`, `session_id`, `idempotency_key` | Required. The key may also come in the `Idempotency-Key` header. A replay returns the same record with `200` and `created: false`. |
 | `agent_id` | Required, `[A-Za-z0-9._:-]{1,128}`. |
-| `action` | The refused action. A name outside that pattern is stored as the literal `invalid_name`. `*` only on a summary. |
+| `action` | The refused action. A name outside that pattern is stored as the literal `invalid_name`. `*` only on a summary. A name inside the pattern is stored verbatim in a permanent record, including a string shaped like a secret: the caller must not pass one. |
 | `entry_point` | `mcp`, `execute`, `llm` or `approval_resume` (required unless `summary`). |
 | `reason_class` | One of the 14 classes in `vectors/refusal-classes.v1.json` (required unless `summary`). Never free text. |
-| `credential` | Optional resolved alias, same name rule. |
+| `credential` | Optional resolved alias, same name rule, stored verbatim (never pass a secret value). |
 | `attempts` | 1 to 10^9: the number of coalesced refusals this record stands for. |
 | `first_at`, `last_at` | RFC3339, `first_at <= last_at <= now + 5 minutes`. |
 | `summary`, `by_class` | A summary merges refusals a producer could not seal one by one: `by_class` counts per class, no `reason_class`, and `attempts` equals the sum. |
@@ -159,8 +161,10 @@ taxonomy rotation is needed to record a refusal. The verifier counts it as `gate
 report fields). Response `201 {"record_id","created":true}`.
 
 `GET /v2/records` also takes `record_kind=<kind>` (only that kind) and `exclude_record_kind=<kind>`; the page
-is the newest `limit` matching records. The scan is bounded (50000 records) and `truncated` is `true` when the
-bound stops it or the page is full.
+is the newest `limit` matching records. The scan is bounded: it reads and decodes up to 50000 records
+newest-first inside a read transaction, so a filtered call costs a scan even when few records match.
+`truncated` is `true` when the bound stops it or the page is full. `total` is the unfiltered record count of
+the project, not the number of matches. The scan over Postgres is untested.
 
 ---
 
