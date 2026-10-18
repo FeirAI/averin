@@ -1,0 +1,13 @@
+diff --git a/core/src/segment.rs b/core/src/segment.rs
+index 370426f..f6ddb9d 100644
+--- a/core/src/segment.rs
++++ b/core/src/segment.rs
+@@ -396,7 +396,7 @@ impl ChainState {
+             .filter_map(|r| str_of(r, "record_id"))
+             .filter(|id| self.seen_ids.contains(*id))
+             .collect();
+-        if !reused_hash.is_empty() || !reused_id.is_empty() {
++        if false && (!reused_hash.is_empty() || !reused_id.is_empty()) {
+             issue(format!(
+                 "{} record(s) already absorbed from an earlier month (no record is carried by two months), e.g. {}",
+                 reused_hash.len().max(reused_id.len()),

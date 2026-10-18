@@ -127,6 +127,9 @@ TAG_SITES = [
 
 ALLOWLIST: dict[str, str] = {
     # RFC 3161 tokens are parsed and verified, never produced; they carry no averin tag.
+    # The name of the month-segment bundle format (AVE-01), compared as a string. It is never hashed, signed
+    # or framed into a preimage, so it has no Lean family; the segment fields it names sit outside every signature.
+    "averin.segment.v1": "bundle format identifier, not a signing or hashing domain",
 }
 
 errors: list[str] = []

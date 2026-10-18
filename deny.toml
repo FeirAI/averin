@@ -1,12 +1,19 @@
 # cargo-deny supply-chain policy for the Rust integrity core (the trust root). Enforced in CI.
 # Run locally: cargo deny check
 
+[graph]
+# Check the tree the shipped verifier and server are built with, not only the default features: the
+# `rfc3161` feature (real TSA token verification) brings in the RSA verifier.
+features = ["rfc3161"]
+
 [advisories]
 version = 2
 # A YANKED crate in Cargo.lock is a supply-chain smell (pulled for a reason) — fail on it.
 # Known vulnerabilities are always denied under schema v2 and cannot be downgraded here.
 yanked = "deny"
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2023-0071", reason = "Marvin timing attack on RSA private-key operations (decrypt, sign). averin uses the rsa crate only to VERIFY RSA timestamp-authority signatures with a public key (core/src/rfc3161.rs verify_rsa); no private key is ever loaded, so there is nothing to recover. Tests that sign with RSA run in dev builds only. Revisit if a patched rsa ships or the verify path changes." },
+]
 
 [licenses]
 version = 2

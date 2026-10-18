@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { claimVerdict, historicalClaimNote } from "../claim-verdict.js";
+import { claimVerdict, historicalClaimNote, segmentResidual } from "../claim-verdict.js";
 
 const report = (decision = "satisfied") => ({
   ok: true,
@@ -67,4 +67,15 @@ test("only the boolean true counts for ok and keys_externally_pinned", () => {
   }
   expect(claimVerdict({...report(), keys_externally_pinned: null}).word).toBe("CONSISTENT");
   expect(claimVerdict({...report(), ok: null}).word).toBe("FAIL");
+});
+
+test("a month segment with an unpinned base or unevaluated completeness never passes", () => {
+  const seg = (link, not_evaluated = []) => ({...report(), segment: {link, not_evaluated}});
+  expect(claimVerdict(seg("base_pinned")).word).toBe("PASS");
+  expect(claimVerdict(seg("genesis", ["broker_grant_log"])).word).toBe("PASS");
+  expect(claimVerdict(seg("base_unpinned")).word).toBe("INSUFFICIENT");
+  expect(claimVerdict(seg("base_pinned", ["record_completeness"])).word).toBe("INSUFFICIENT");
+  expect(claimVerdict({...seg("base_unpinned"), keys_externally_pinned: false}).word).toBe("INSUFFICIENT");
+  expect(claimVerdict({...seg("base_unpinned"), ok: false}).word).toBe("FAIL");
+  expect(segmentResidual(report())).toBe(false);
 });

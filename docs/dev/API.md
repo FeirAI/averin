@@ -37,7 +37,8 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | POST | `/v2/otel/traces` | Ingest OTel/OpenInference spans, mapped to records. | always |
 | POST | `/v2/checkpoints` | Seal the current frontier into the checkpoint chain. | always |
 | GET | `/v2/verify` | Server-side verification report for a project. | always |
-| GET | `/v2/export` | Export a verifiable bundle (proof / disclosure). | always |
+| GET | `/v2/export` | Export a verifiable bundle (proof / disclosure), whole history or one month. | always |
+| GET | `/v2/segments` | List the project's month segments (AVE-01). | always |
 | GET | `/v2/dag` | A session's sealed records (trace-waterfall view). | always |
 | GET | `/v2/sessions` | List a project's session ids. | always |
 | GET | `/v2/usage` | Stored record count and the configured record quota for a project. | always |
@@ -160,9 +161,11 @@ original grant if it can still finish or run the bounded operator
 
 ---
 
-## GET `/v2/verify?project=<id>`
+## GET `/v2/verify?project=<id>[&month=YYYY-MM]`
 
-Returns the **server's self-view** verification report (built from the project's full bundle,
+Returns the **server's self-view** verification report (built from the project's full bundle, or, with `month`, from
+that month's [segment](SEGMENTS.md); `404` if no checkpoint was created in that month, `400` for a malformed
+month, `413` when the whole history or the month exceeds the 256 MiB single-bundle limit,
 self-pinning only the roles meaningful without an externally-held TSA key — broker/federation,
 resource, revocation, cosig; **not** attestation, which needs a pinned TSA). For an authoritative,
 independent verdict, export and verify offline with your own pinned keys.
@@ -171,12 +174,24 @@ independent verdict, export and verify offline with your own pinned keys.
 
 ---
 
+## GET `/v2/segments?project=<id>`
+
+Lists the project's month segments, oldest first: `{project_id, format: "averin.segment.v1", segments: [{month,
+records, first_seq, last_seq, head_hash, base_seq, base_hash, records_before}]}`. `base_seq` and `base_hash` are
+`null` for the first month. Reads checkpoints only. See [SEGMENTS.md](SEGMENTS.md).
+
+---
+
 ## GET `/v2/export?project=<id>`
 
-Returns a verifiable [bundle](#bundle-object) for offline verification.
+Returns a verifiable [bundle](#bundle-object) for offline verification. A whole-history export larger than the
+256 MiB the verifier accepts is refused with `413` and a pointer to the month segments.
 
 Query parameters:
 
+- `month` (optional, `YYYY-MM`) - export that month's [segment](SEGMENTS.md) instead of the whole history: the
+  base checkpoint, the month's checkpoints and records, and a `segment` block. `404` if no checkpoint was created
+  in that month, `400` for a malformed month, `413` if the month alone exceeds the limit.
 - `mode` (default `proof_only`) — one of `proof_only`, `selective_disclosure`, `full_evidence`.
   Disclosing modes attach a `disclosures` array (`{record_id, field, value_b64, nonce_hex}`) so an
   offline verifier can open each committed field against its record's commitment. A field whose raw
@@ -560,7 +575,9 @@ hashes), `record_count`, `created_ts`, `broker_grant_head` (the grant-transparen
 and an optional `anchor` (an RFC 3161 token, attached at export). The chain enforces: first seq is
 `0` with null prev; no seq gaps; no two distinct checkpoints sharing a seq or a prev (fork, threat
 #2); record_count non-decreasing; every frontier head present in the bundle (omission, threat #1);
-the latest frontier equals the actual DAG heads.
+the latest frontier equals the actual DAG heads. A [month segment](SEGMENTS.md) starts the chain at its
+carried base checkpoint instead of seq `0`, and the latest `record_count` equals the base's count plus the
+records carried.
 
 ## Bundle object
 
@@ -568,7 +585,9 @@ the latest frontier equals the actual DAG heads.
 public_key, key_status}]`: the current key first, then each retired key with `status_changed_at`),
 `key_rotations` (signed rotation statements, only after a rotation; see [KEY-ROTATION.md](KEY-ROTATION.md)), `records[]`, `checkpoints[]`, `mode`, `gap_report`, and (when
 configured/applicable) `coverage_manifest`, `revocation_list`, `deployment_attestation`,
-`disclosures`, `filtered_records` + `record_kind_filter`.
+`disclosures`, `filtered_records` + `record_kind_filter`. A month export also carries `segment`
+(`{format: "averin.segment.v1", month, base_seq, base_checkpoint_hash, base_record_count}`, see
+[SEGMENTS.md](SEGMENTS.md)) and its `checkpoints[]` starts with the base checkpoint.
 
 ## Verification report
 
@@ -589,6 +608,7 @@ Key fields:
 | `checkpoints_anchors_attached` | int | Checkpoints that merely **carry** an `anchor` field. Unverified: anyone can attach one, so never read it as timestamp evidence. |
 | `key_rotations_total`, `key_rotations_verified`, `key_rotations_chain_trusted` | int | Signed recording-key rotation statements in `bundle.key_rotations`, how many verified, and how many keys are trusted only because a verified `scheduled` statement links them to a pinned key that is neither revoked nor compromised. A statement that does not verify is also an `issues` entry. |
 | `cleartext_content_records` | int | Records whose signed body carries `extensions.content_preview`: prompt or answer text in the clear that no retention purge can erase (sealed before the server began committing it). A count for the reader, not an input to any verdict. |
+| `segment` | object | Only on a month segment: `month`, `base_seq`, `base_checkpoint_hash`, `head_seq`, `head_checkpoint_hash`, `head_record_count`, `link` (`genesis` / `base_pinned` / `base_unpinned`), `base_anchored`, `earlier_parent_refs`, `unresolved_cross_month` (uses and outcomes whose grant or intent is in an earlier month) and `not_evaluated` (the grant-log chain and federation heads; `record_completeness` when the month has parents before its base; `cross_month_uses` for every month with a base, which caps its headline at INSUFFICIENT). Absent on a whole-history report. |
 | `grant_accountability` | string | `not_applicable` / `incomplete` / `complete` (Tier-A). |
 | `broker_trust` | string | `assumed` / `sequence_verified`. |
 | `uses_matched`, `uses_pop_reverified`, `unmatched_violation`, `unmatched_pending`, `grants_unused` | int | Tier-B join. |

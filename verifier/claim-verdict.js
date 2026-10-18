@@ -16,12 +16,24 @@ export function claimVerdict(report) {
   if (report?.ok !== true || (valid && claims.requested_decision === "refuted")) {
     return {word: "FAIL", className: "fail", valid};
   }
-  if (!valid || claims.requested_decision === "insufficient") {
+  if (!valid || claims.requested_decision === "insufficient" || segmentResidual(report)) {
     return {word: "INSUFFICIENT", className: "qual", valid};
   }
   return report.keys_externally_pinned === true
     ? {word: "PASS", className: "pass", valid}
     : {word: "CONSISTENT", className: "qual", valid};
+}
+
+// A month segment whose base is not the pinned previous head, whose record completeness was not
+// evaluated, or that has a base at all (it lists cross_month_uses: single use, nonce and ledger replay,
+// ghost grants and revocation across months need the chain) never earns PASS or CONSISTENT (same rule as
+// segment_residual in headline.rs).
+export function segmentResidual(report) {
+  const sg = report?.segment;
+  if (!sg || typeof sg !== "object") return false;
+  return sg.link === "base_unpinned"
+    || (Array.isArray(sg.not_evaluated)
+      && (sg.not_evaluated.includes("record_completeness") || sg.not_evaluated.includes("cross_month_uses")));
 }
 
 // V-L3: the legacy `ok` is a separate integrity result and can be false while the caller's requested

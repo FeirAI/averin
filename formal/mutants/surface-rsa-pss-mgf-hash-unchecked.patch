@@ -1,0 +1,13 @@
+diff --git a/core/src/rfc3161.rs b/core/src/rfc3161.rs
+index 02298ec..df6b4dc 100644
+--- a/core/src/rfc3161.rs
++++ b/core/src/rfc3161.rs
+@@ -140,7 +140,7 @@ impl SigScheme {
+                 .and_then(|x| x.decode_as::<spki::AlgorithmIdentifierOwned>().ok())
+                 .and_then(|a| HashAlg::from_oid(&a.oid))
+                 .ok_or(Rfc3161Error::UnsupportedSigAlg)?;
+-            if ph != hash || mgf_hash != hash || p.trailer.unwrap_or(1) != 1 {
++            if ph != hash || mgf_hash != mgf_hash || p.trailer.unwrap_or(1) != 1 {
+                 return Err(Rfc3161Error::UnsupportedSigAlg);
+             }
+             let salt_len = p.salt_len.unwrap_or(20) as usize;

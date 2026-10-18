@@ -1,10 +1,10 @@
 diff --git a/core/src/verify/headline.rs b/core/src/verify/headline.rs
-index c69a680..b1834a0 100644
+index be1d399..961307d 100644
 --- a/core/src/verify/headline.rs
 +++ b/core/src/verify/headline.rs
-@@ -73,7 +73,7 @@ pub fn claim_verdict(report: &CanonValue) -> ClaimVerdict {
-         ClaimVerdict::Fail
-     } else if !valid || decision == Some("insufficient") {
+@@ -98,7 +98,7 @@ pub fn month_claim_verdict(report: &CanonValue, cap_segment_residual: bool) -> C
+         || (cap_segment_residual && segment_residual(report))
+     {
          ClaimVerdict::Insufficient
 -    } else if flag("keys_externally_pinned") {
 +    } else if flag("keys_externally_pinned") || true {

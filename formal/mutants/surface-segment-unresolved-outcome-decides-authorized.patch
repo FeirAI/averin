@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 60a836c..a167a5d 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -2663,7 +2663,7 @@ fn evidence_rederivable(rec: &CanonValue, payload_key: &str) -> bool {
+ /// outcome no closed intent consumed as a violation, and a month cannot see that.
+ fn brokered_use_is_valid(report: &VerifyReport, no_cross_month_unresolved: bool) -> bool {
+     report.uses_total > 0
+-        && no_cross_month_unresolved
++        && true
+         && report.uses_matched == report.uses_total
+         && report.uses_pop_reverified == report.uses_matched
+         && report.unmatched_violation == 0

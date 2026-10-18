@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/segments.go b/server/internal/api/segments.go
+index c57203d..ee56684 100644
+--- a/server/internal/api/segments.go
++++ b/server/internal/api/segments.go
+@@ -72,7 +72,7 @@ func planSegments(checks []store.Checkpoint) ([]segmentPlan, error) {
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		month := m.CreatedTS[:7]
++		month := m.CreatedTS[:4]
+ 		if n := len(plans); n > 0 && plans[n-1].Month > month {
+ 			return nil, fmt.Errorf("checkpoint %d is dated %s after a checkpoint dated %s: cannot cut month segments", c.Seq, month, plans[n-1].Month)
+ 		}

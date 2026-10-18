@@ -21,7 +21,7 @@ default = ["std"]
 std = ["dep:getrandom"]
 # Real RFC 3161 DER/CMS TimeStampToken verification (used by the Go anchoring job + CLI).
 # Off by default so the WASM verifier bundle stays lean (test-anchor needs none of this).
-rfc3161 = ["dep:cms", "dep:x509-cert", "dep:der", "dep:spki", "dep:const-oid", "dep:p256", "dep:p384", "dep:ecdsa", "dep:signature"]
+rfc3161 = ["dep:cms", "dep:x509-cert", "dep:der", "dep:spki", "dep:const-oid", "dep:p256", "dep:p384", "dep:ecdsa", "dep:signature", "dep:rsa"]
 # Exposes the in-Rust mini-TSA token builder (rfc3161::make_test_token) for fixtures/tests.
 test-tsa = ["rfc3161"]
 
@@ -41,6 +41,8 @@ const-oid = { version = "0.9", optional = true, features = ["db"] }
 p256 = { version = "0.13", optional = true, features = ["ecdsa", "pkcs8"] }
 ecdsa = { version = "0.16", optional = true, features = ["der"] }
 signature = { version = "2", optional = true }
+# Verify-only RSA (PKCS#1 v1.5 and PSS) for the TSAs that sign with RSA (DigiCert, Sectigo). No signing, no keygen.
+rsa = { version = "0.9", optional = true, default-features = false, features = ["std", "sha2"] }
 p384 = { version = "0.13", features = ["ecdsa", "pkcs8"], optional = true }
 
 [dev-dependencies]

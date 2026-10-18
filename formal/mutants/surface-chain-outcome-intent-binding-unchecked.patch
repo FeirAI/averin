@@ -1,0 +1,13 @@
+diff --git a/core/src/segment.rs b/core/src/segment.rs
+index 2131b81..70d18ef 100644
+--- a/core/src/segment.rs
++++ b/core/src/segment.rs
+@@ -354,7 +354,7 @@ impl ChainState {
+                     None => issue(format!(
+                         "use_outcome {rid} names {reference}, which is not a use_intent held by an earlier month"
+                     )),
+-                    Some((g, h)) if og.as_deref() != Some(g.as_str()) || oh.as_deref() != Some(h.as_str()) => {
++                    Some((g, h)) if false && (og.as_deref() != Some(g.as_str()) || oh.as_deref() != Some(h.as_str())) => {
+                         issue(format!(
+                             "use_outcome {rid} does not bind the earlier use_intent {reference} (grant or intent_hash differs)"
+                         ));

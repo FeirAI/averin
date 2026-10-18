@@ -1,0 +1,13 @@
+diff --git a/core/src/segment.rs b/core/src/segment.rs
+index e837d8f..3a66ff2 100644
+--- a/core/src/segment.rs
++++ b/core/src/segment.rs
+@@ -512,7 +512,7 @@ impl ChainState {
+         };
+         let report = verify(&whole);
+         let mut verdict = match &report {
+-            Some(r) => month_claim_verdict(r, false),
++            Some(_) => ClaimVerdict::Consistent,
+             None => ClaimVerdict::Insufficient,
+         };
+         if !self.is_ok() {

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -384,11 +385,23 @@ func main() {
 		srv.WithWitness(w)
 		log.Printf("checkpoint witness -> %s", dir)
 	}
-	// third-party RFC 3161 timestamp anchoring for sealed checkpoints (threat #3 backdating). The
-	// verifier must pin this TSA's cert out-of-band to trust the anchor.
-	if url := os.Getenv("AVERIN_TSA_URL"); url != "" {
-		srv.WithTSA(&witness.HTTPTSA{URL: url})
-		log.Printf("checkpoint anchoring -> RFC 3161 TSA %s", url)
+	// third-party RFC 3161 timestamp anchoring for sealed checkpoints (threat #3 backdating). OFF by
+	// default. AVERIN_TSA_PRESET=freetsa is the one-setting way to switch it on; AVERIN_TSA_URL points
+	// at any other authority (a paid one may also need AVERIN_TSA_AUTH_HEADER). The verifier must pin
+	// the TSA's key out-of-band to trust the anchor.
+	tsaURL, tsaPin, err := resolveTSAConfig(os.Getenv("AVERIN_TSA_PRESET"), os.Getenv("AVERIN_TSA_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := checkTSAAuthTransport(tsaURL, os.Getenv("AVERIN_TSA_AUTH_HEADER")); err != nil {
+		log.Fatal(err)
+	}
+	if tsaURL != "" {
+		srv.WithTSA(&witness.HTTPTSA{URL: tsaURL, Authorization: os.Getenv("AVERIN_TSA_AUTH_HEADER")})
+		log.Printf("checkpoint anchoring -> RFC 3161 TSA %s", tsaURL)
+		if tsaPin != "" {
+			log.Printf("TSA preset key to pin for verification (AVERIN_VERIFY_TSA_SPKI_B64 / opts.json tsa_spki_b64): %s", tsaPin)
+		}
 	}
 	// credential broker (Level 3 Tier-A): POST /v2/grants. The issuing key signs the capabilities;
 	// the recording key (the server signing key) signs the gateway_enforced evidence. Unset = off.
@@ -1054,6 +1067,39 @@ func decodeAuthorityPubKey(raw string) (ed25519.PublicKey, error) {
 		return ed25519.PublicKey(b), nil
 	}
 	return nil, fmt.Errorf("not a 32-byte ed25519 public key (accepts 64-hex or base64url-no-pad, optional ed25519pub: prefix): %q", raw)
+}
+
+// resolveTSAConfig turns AVERIN_TSA_PRESET / AVERIN_TSA_URL into the URL to stamp against and, for a
+// preset, the key to pin. Both set is refused rather than guessed at: the preset names an authority and
+// its key, so overriding only the URL would silently disagree with the pin.
+func resolveTSAConfig(preset, url string) (stampURL, pinSPKIB64 string, err error) {
+	preset, url = strings.TrimSpace(preset), strings.TrimSpace(url)
+	switch {
+	case preset != "" && url != "":
+		return "", "", fmt.Errorf("AVERIN_TSA_PRESET and AVERIN_TSA_URL are both set: choose one")
+	case preset != "":
+		p, perr := witness.LookupTSAPreset(preset)
+		if perr != nil {
+			return "", "", perr
+		}
+		return p.URL, p.SPKIB64, nil
+	default:
+		return url, "", nil
+	}
+}
+
+// checkTSAAuthTransport refuses to start with a credential header that would travel in clear text: the
+// header is sent on every stamp request, so it is only allowed with an https URL. Some authorities publish
+// plain http endpoints; a paid account must use their https one, or none.
+func checkTSAAuthTransport(stampURL, authHeader string) error {
+	if strings.TrimSpace(authHeader) == "" || strings.TrimSpace(stampURL) == "" {
+		return nil
+	}
+	u, err := neturl.Parse(strings.TrimSpace(stampURL))
+	if err != nil || !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("AVERIN_TSA_AUTH_HEADER is set but the TSA URL %q is not https: the credential would be sent in clear text; use the authority's https endpoint", stampURL)
+	}
+	return nil
 }
 
 // postureSchemaVersion is the Postgres schema version this binary understands, or 0 when storage is

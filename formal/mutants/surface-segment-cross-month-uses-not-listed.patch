@@ -1,0 +1,12 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 86f810c..da25e5a 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -792,7 +792,6 @@ fn segment_not_evaluated(has_base: bool, has_earlier_parents: bool) -> Vec<Strin
+     // A month with a base cannot close the rules that span months: a second use of a single-use grant, a replayed
+     // PoP nonce or ledger commitment, a use of a grant no month holds, a revocation that lands on a grant an earlier
+     // month issued. Only the chain, on the concatenated history, can.
+-    v.push("cross_month_uses".to_string());
+     v
+ }
+ 
