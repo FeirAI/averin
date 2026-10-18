@@ -180,7 +180,9 @@ func TestListRecordsKindFilter(t *testing.T) {
 		if code, r := do(t, h, "POST", "/v2/refusals", refusalBody("lf-"+string(rune('a'+i)), "not_granted", "mcp", "t", 1)); code != http.StatusCreated {
 			t.Fatalf("%d %s", code, r)
 		}
-		postRecord(t, h, `{"project_id":"p1","session_id":"s1","idempotency_key":"gen-`+string(rune('a'+i))+`","event_type":"decision"}`)
+		if i < 2 { // 3 refusals and 2 others: a filter that selects the wrong side cannot pass by equal counts
+			postRecord(t, h, `{"project_id":"p1","session_id":"s1","idempotency_key":"gen-`+string(rune('a'+i))+`","event_type":"decision"}`)
+		}
 	}
 	count := func(q string) (int, bool) {
 		code, resp := do(t, h, "GET", "/v2/records?project=p1&"+q, "")
@@ -197,14 +199,14 @@ func TestListRecordsKindFilter(t *testing.T) {
 	if n, _ := count("record_kind=gateway-refusal"); n != 3 {
 		t.Fatalf("include filter: want 3 refusals, got %d", n)
 	}
-	if n, _ := count("exclude_record_kind=gateway-refusal"); n != 3 {
-		t.Fatalf("exclude filter: want 3 others, got %d", n)
+	if n, _ := count("exclude_record_kind=gateway-refusal"); n != 2 {
+		t.Fatalf("exclude filter: want 2 others, got %d", n)
 	}
-	if n, tr := count("exclude_record_kind=gateway-refusal&limit=2"); n != 2 || !tr {
-		t.Fatalf("exclude with limit 2: want 2 and truncated, got %d %v", n, tr)
+	if n, tr := count("exclude_record_kind=gateway-refusal&limit=1"); n != 1 || !tr {
+		t.Fatalf("exclude with limit 1: want 1 and truncated, got %d %v", n, tr)
 	}
-	if n, _ := count(""); n != 6 {
-		t.Fatalf("no filter: want 6, got %d", n)
+	if n, _ := count(""); n != 5 {
+		t.Fatalf("no filter: want 5, got %d", n)
 	}
 	if code, _ := do(t, h, "GET", "/v2/records?project=p1&record_kind=nope", ""); code != http.StatusBadRequest {
 		t.Fatalf("unknown kind must be 400, got %d", code)
