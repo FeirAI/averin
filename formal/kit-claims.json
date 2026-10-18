@@ -693,6 +693,22 @@
       "tier": "full",
       "claim": "gateway-refusal-shape-fail-closed"
     },
+    "gateway-refusal-shape-credential-unchecked": {
+      "tier": "full",
+      "claim": "gateway-refusal-shape-fail-closed"
+    },
+    "gateway-refusal-shape-time-unchecked": {
+      "tier": "full",
+      "claim": "gateway-refusal-shape-fail-closed"
+    },
+    "gateway-refusal-shape-marker-unchecked": {
+      "tier": "full",
+      "claim": "gateway-refusal-shape-fail-closed"
+    },
+    "gateway-refusal-issue-counts-as-grant-contradiction": {
+      "tier": "full",
+      "claim": "gateway-refusal-shape-fail-closed"
+    },
     "gateway-refusal-harvests-touched-pairs": {
       "tier": "fast",
       "claim": "gateway-refusal-never-widens-surface"
@@ -882,7 +898,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
+          "sha256": "dadff3f28699be0608dcb87608876b2b33395878ef5361b856c252a553641bd2"
         }
       ],
       "mutants": [
@@ -917,7 +933,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
+          "sha256": "dadff3f28699be0608dcb87608876b2b33395878ef5361b856c252a553641bd2"
         }
       ],
       "mutants": [
@@ -956,7 +972,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
+          "sha256": "dadff3f28699be0608dcb87608876b2b33395878ef5361b856c252a553641bd2"
         }
       ],
       "mutants": [
@@ -1639,7 +1655,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
+          "sha256": "dadff3f28699be0608dcb87608876b2b33395878ef5361b856c252a553641bd2"
         }
       ],
       "mutants": [
@@ -2426,7 +2442,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
+          "sha256": "dadff3f28699be0608dcb87608876b2b33395878ef5361b856c252a553641bd2"
         }
       ],
       "mutants": [
@@ -2608,7 +2624,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
+          "sha256": "dadff3f28699be0608dcb87608876b2b33395878ef5361b856c252a553641bd2"
         }
       ],
       "mutants": [
@@ -2620,7 +2636,7 @@
     {
       "id": "gateway-refusal-shape-fail-closed",
       "$comment": "legacy register: gateway-refusal-shape-fail-closed",
-      "statement": "A record with record_kind gateway-refusal that has an unknown reason class or entry point, a zero attempts count, an unknown extension key, a divergent event_type, an authority block, extensions.broker evidence, a summary whose attempts differ from the sum of by_class, a summary with an unknown class, or no extensions.gateway_refusal is a hard verification issue (ok is false) and is never counted.",
+      "statement": "A record with record_kind gateway-refusal that has an unknown reason class or entry point, a zero attempts count, an unknown extension key, a divergent event_type, an authority block, extensions.broker evidence, a summary whose attempts differ from the sum of by_class, a summary with an unknown class, a credential, action, first_at or last_at that is not a plain identifier or canonical timestamp, a status other than refused, an observed_via other than gateway, or no extensions.gateway_refusal is a hard verification issue (ok is false) and is never counted. The issue is not a grant contradiction: it does not refute the authorization claims.",
       "method": "test",
       "artifacts": [
         "core/src/refusal.rs",
@@ -2629,17 +2645,21 @@
       "gates": [
         "core"
       ],
-      "detector": "cargo test -q -p averin-decision-core --test gateway_refusal -- malformed_refusals_are_hard_issues vocabulary_matches_the_spec_file",
+      "detector": "cargo test -q -p averin-decision-core --test gateway_refusal -- malformed_refusals_are_hard_issues a_malformed_refusal_is_not_a_grant_contradiction vocabulary_matches_the_spec_file",
       "covers": [
         {
           "path": "core/src/refusal.rs",
           "symbol": "check_shape",
-          "sha256": "fd68fa9318012f895362bb9bf2562c5d0d0604e945c321b4a2ec5afa150b82e5"
+          "sha256": "6d18eec84ff9ff63c2dce9a090a3fd348b4be642bd8f5685624fdf6c0f65816e"
         }
       ],
       "mutants": [
         "gateway-refusal-accepts-unknown-class",
-        "gateway-refusal-shape-allows-authority"
+        "gateway-refusal-shape-allows-authority",
+        "gateway-refusal-shape-credential-unchecked",
+        "gateway-refusal-shape-time-unchecked",
+        "gateway-refusal-shape-marker-unchecked",
+        "gateway-refusal-issue-counts-as-grant-contradiction"
       ],
       "does_not_establish": "That a well-formed refusal is true. That the closed vocabulary is complete for a future gateway: a new class needs a vocabulary change in core, the server and vectors/refusal-classes.v1.json together (a test pins the copies). That the free-text fields a producer might add are absent from other record kinds: the shape guard applies only to record_kind gateway-refusal."
     },
@@ -2662,7 +2682,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "e61998eeb13ce92dae2beb57eb818f1815444d69ee4b47c629c9fdbd17184d80"
+          "sha256": "dadff3f28699be0608dcb87608876b2b33395878ef5361b856c252a553641bd2"
         }
       ],
       "mutants": [

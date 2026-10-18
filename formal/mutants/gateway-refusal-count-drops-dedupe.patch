@@ -1,13 +1,13 @@
 diff --git a/core/src/verify.rs b/core/src/verify.rs
-index 28e434f..439fa27 100644
+index 7cd4d46..3bd70f3 100644
 --- a/core/src/verify.rs
 +++ b/core/src/verify.rs
-@@ -6717,7 +6717,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+@@ -6720,7 +6720,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
          // feir-ops#1: gateway refusals, keyed on record_kind (never event_type alone, so a legacy generic
          // record with that event_type keeps its verdict). The shape guard fails closed as a hard issue; the
          // count covers only integrity-proven, shape-valid records, deduped by content_hash.
 -        if crate::refusal::is_refusal(rec) && seen_refusals.insert(rt.content_hash.as_str()) {
 +        if crate::refusal::is_refusal(rec) && { seen_refusals.insert(rt.content_hash.as_str()); true } {
              match crate::refusal::check_shape(rec) {
-                 Err(why) => issues.push(format!(
+                 Err(why) => refusal_issues.push(format!(
                      "gateway refusal {} ({}): {why} (fail-closed)",

@@ -1,0 +1,13 @@
+diff --git a/core/src/refusal.rs b/core/src/refusal.rs
+index 7586c0b..fa465ff 100644
+--- a/core/src/refusal.rs
++++ b/core/src/refusal.rs
+@@ -103,7 +103,7 @@ pub fn check_shape(rec: &CanonValue) -> Result<Counted, String> {
+         ));
+     }
+     // The server writes these constants; any other value is not a record the gateway endpoint sealed.
+-    if rec.get("status").and_then(|v| v.as_str()) != Some("refused") {
++    if rec.get("status").and_then(|v| v.as_str()) != Some("refused") && false {
+         return Err("a gateway refusal has status refused".into());
+     }
+     if rec.get("observed_via").and_then(|v| v.as_str()) != Some("gateway") {
