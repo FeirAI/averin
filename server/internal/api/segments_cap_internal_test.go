@@ -109,3 +109,39 @@ func TestOverTheCapCountsTheSerializedBundleNotJustTheRecords(t *testing.T) {
 		t.Fatalf("a bundle exactly at the cap is served: %v", err)
 	}
 }
+
+// The records-only pre-check refuses an over-cap project BEFORE any per-checkpoint, signing or serialising work
+// (the serialized-size check at the end of buildBundleView would reach the same 413 only after building the whole
+// bundle, which is the memory a 413 exists to avoid). Observable here as error precedence: the stored checkpoint
+// below is not a JSON object and carries an anchor, so building the bundle would fail in attachAnchor; with the
+// pre-check in place the over-cap refusal wins, and once the cap is lifted the same project does hit that build
+// error (proving the build step is really reached without the pre-check).
+func TestOverTheCapIsRefusedBeforeTheBundleIsBuilt(t *testing.T) {
+	now := time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	st := store.NewMem().WithClock(clock)
+	s := New(testCore(t), st, "k0").WithAuth(auth.NewOpenStore()).WithClock(clock)
+	h := s.Routes()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v2/records", strings.NewReader(`{"idempotency_key":"k1","project_id":"p1","session_id":"s1","record_id":"r1"}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("record: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := st.PutCheckpoint("p1", store.Checkpoint{JSON: `[]`, CheckpointHash: "h", Seq: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutAnchor("p1", 1, "dG9rZW4"); err != nil {
+		t.Fatal(err)
+	}
+
+	old := maxSingleBundleBytes
+	defer func() { maxSingleBundleBytes = old }()
+	maxSingleBundleBytes = 10
+	if _, _, err := s.buildBundleView(context.Background(), "p1", false, ""); !errors.Is(err, errBundleTooBig) {
+		t.Fatalf("an over-cap history must be refused by the pre-check before the bundle is built: %v", err)
+	}
+	maxSingleBundleBytes = old
+	if _, _, err := s.buildBundleView(context.Background(), "p1", false, ""); err == nil || errors.Is(err, errBundleTooBig) {
+		t.Fatalf("test premise: under the cap this project must fail while building the bundle: %v", err)
+	}
+}
