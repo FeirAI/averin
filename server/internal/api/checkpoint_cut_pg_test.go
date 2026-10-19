@@ -52,3 +52,20 @@ func TestIncrementalReadCostIsConstantInHistoryPostgres(t *testing.T) {
 		return pg, func(n int) { pgBulkHistory(t, admin, n) }
 	}, 300, 50)
 }
+
+// TestIncrementalReadRefusesOrdinalGapPostgres: the owner role deletes the record at ordinal 5 of 10; every page
+// that spans the hole is a 500 (it would otherwise repeat record 7 and hide record 5 under a 200).
+func TestIncrementalReadRefusesOrdinalGapPostgres(t *testing.T) {
+	pg, admin := newVoidTestPostgres(t)
+	pgBulkHistory(t, admin, 10)
+	if _, err := admin.Exec(context.Background(), `DELETE FROM records WHERE project_id='p' AND ord=5`); err != nil {
+		t.Fatal(err)
+	}
+	checkGapRefused(t, cutServer(t, pg, "").Routes())
+}
+
+// TestIncrementalReadSnapshotHoldsUnderConcurrentCutPostgres: the same interleaving on the repeatable-read store.
+func TestIncrementalReadSnapshotHoldsUnderConcurrentCutPostgres(t *testing.T) {
+	pg, _ := newVoidTestPostgres(t)
+	checkSnapshotUnderCut(t, pg)
+}

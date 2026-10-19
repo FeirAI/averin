@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/feirai/averin/server/internal/store"
@@ -286,4 +287,116 @@ func TestIncrementalReadFailsClosed(t *testing.T) {
 	if code, _ := do(t, cutServer(t, st, "").Routes(), "GET", "/v2/records?"+irQuery(0, 10, "at_seq", "0").Encode(), ""); code != http.StatusInternalServerError {
 		t.Fatalf("unreadable at_seq count: want 500, got %d", code)
 	}
+}
+
+// gapReadStore hides the record at ordinal gap from RecordsAfter, as a store whose ordinals have a hole would
+// (an owner-role delete, a hand-edited restore): the page then holds the next ordinal in its place.
+type gapReadStore struct {
+	store.Store
+	gap int64
+}
+
+func (g gapReadStore) WithProjectRead(ctx context.Context, p string, fn func(store.Store) error) error {
+	return g.Store.WithProjectRead(ctx, p, func(b store.Store) error { return fn(gapReadStore{b, g.gap}) })
+}
+func (g gapReadStore) RecordsAfter(p string, a int64, l int) ([]store.Record, error) {
+	v, err := g.Store.RecordsAfter(p, a, l+1)
+	if err != nil {
+		return nil, err
+	}
+	out := v[:0:0]
+	for _, r := range v {
+		if r.Ord != g.gap && len(out) < l {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// checkGapRefused: with ordinal 5 of 10 missing and limit 3, the pages [1 2 3] and [7 8 9] (from after=6) are
+// intact and served; every page that spans the hole, and the short page that ends below the total, is a 500.
+func checkGapRefused(t *testing.T, r http.Handler) {
+	t.Helper()
+	for _, c := range []struct {
+		after int64
+		limit int
+		want  int
+	}{{0, 3, 200}, {3, 3, 500}, {4, 3, 500}, {0, 100, 500}, {5, 3, 200}, {6, 3, 200}, {9, 3, 200}, {0, 4, 200}, {0, 5, 500}} {
+		code, _ := irGet(t, r, irQuery(c.after, c.limit))
+		if code != c.want {
+			t.Errorf("after=%d limit=%d: want %d, got %d", c.after, c.limit, c.want, code)
+		}
+	}
+}
+
+// TestIncrementalReadRefusesOrdinalGap: next_after is positional but the store selects by ordinal, so a gap would
+// repeat one record and hide another under a 200; the read refuses any page that is not exactly after+1..after+len.
+func TestIncrementalReadRefusesOrdinalGap(t *testing.T) {
+	st := store.NewMem()
+	h := newCutHistory(t, st, "p", 3)
+	for i := 0; i < 10; i++ {
+		h.plain()
+	}
+	checkGapRefused(t, cutServer(t, gapReadStore{st, 5}, "").Routes())
+	// Without a gap the same requests are all served, and an empty page past the total (a reader ahead of the
+	// store) is not a gap.
+	r := cutServer(t, st, "").Routes()
+	for _, after := range []int64{0, 3, 9, 10, 25} {
+		if code, _ := irGet(t, r, irQuery(after, 3)); code != http.StatusOK {
+			t.Fatalf("no gap, after=%d: %d", after, code)
+		}
+	}
+}
+
+// interleaving runs hook once, from inside the read transaction, right after RecordsAfter returns.
+type interleaving struct {
+	store.Store
+	once *sync.Once
+	hook func()
+}
+
+func (s interleaving) WithProjectRead(ctx context.Context, p string, fn func(store.Store) error) error {
+	return s.Store.WithProjectRead(ctx, p, func(b store.Store) error { return fn(interleaving{Store: b, once: s.once, hook: s.hook}) })
+}
+func (s interleaving) RecordsAfter(p string, a int64, l int) ([]store.Record, error) {
+	v, err := s.Store.RecordsAfter(p, a, l)
+	s.once.Do(s.hook)
+	return v, err
+}
+
+// checkSnapshotUnderCut: while the read is in flight (after its page is read), 30 records are written and a
+// checkpoint is cut on the outer store. The response must still be one snapshot: the latest checkpoint is the
+// pre-write one, covers no more than the total, and the total is exactly the records served.
+func checkSnapshotUnderCut(t *testing.T, st store.Store) {
+	t.Helper()
+	h := newCutHistory(t, st, "p", 11)
+	plain := cutServer(t, st, "")
+	for i := 0; i < 40; i++ {
+		h.plain()
+	}
+	cp0, err := cutOnce(t, plain, st, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped := interleaving{Store: st, once: &sync.Once{}}
+	wrapped.hook = func() {
+		for i := 0; i < 30; i++ {
+			h.plain()
+		}
+		if _, err := cutOnce(t, plain, st, "p"); err != nil {
+			t.Error(err)
+		}
+	}
+	code, got := irGet(t, cutServer(t, wrapped, "").Routes(), irQuery(0, 1000))
+	if code != http.StatusOK {
+		t.Fatalf("code %d", code)
+	}
+	if got.Latest == nil || got.Latest.Seq != cp0.Seq || got.Latest.RecordCount > got.Total || got.Total != int64(len(got.Records)) {
+		t.Fatalf("fields from different snapshots: total=%d records=%d latest=%+v (pre-write seq %d)", got.Total, len(got.Records), got.Latest, cp0.Seq)
+	}
+}
+
+// TestIncrementalReadSnapshotHoldsUnderConcurrentCut: total, page and checkpoints come from one snapshot.
+func TestIncrementalReadSnapshotHoldsUnderConcurrentCut(t *testing.T) {
+	checkSnapshotUnderCut(t, store.NewMem())
 }

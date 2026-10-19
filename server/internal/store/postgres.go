@@ -958,7 +958,7 @@ func (p *Postgres) RecordsAfter(projectID string, after int64, limit int) ([]Rec
 	}
 	ctx := p.callContext()
 	rows, err := p.queries().Query(ctx, `
-		SELECT json, content_hash, session_id, parents
+		SELECT json, content_hash, session_id, parents, ord
 		FROM records
 		WHERE project_id = $1 AND ord > $2
 		ORDER BY ord
@@ -967,7 +967,19 @@ func (p *Postgres) RecordsAfter(projectID string, after int64, limit int) ([]Rec
 	if err != nil {
 		return nil, fmt.Errorf("store: records after: %w", err)
 	}
-	return collectRecords(rows)
+	defer rows.Close()
+	out := []Record{}
+	for rows.Next() {
+		var rec Record
+		if err := rows.Scan(&rec.JSON, &rec.ContentHash, &rec.SessionID, &rec.Parents, &rec.Ord); err != nil {
+			return nil, fmt.Errorf("store: scan record: %w", err)
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate records: %w", err)
+	}
+	return out, nil
 }
 
 // PutCheckpoint inserts a checkpoint. Insert-only: the schema forbids UPDATE/DELETE on checkpoints,

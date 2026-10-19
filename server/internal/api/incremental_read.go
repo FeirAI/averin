@@ -122,6 +122,15 @@ func (s *Server) handleIncrementalRead(w http.ResponseWriter, r *http.Request, p
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// FAIL CLOSED on an ordinal gap: next_after is positional (after + page length) while the store selects by
+	// ordinal value and totals by the largest ordinal, so a gap (an owner-role delete, a hand-edited restore)
+	// would repeat one record and hide another under a 200. The page must be exactly after+1..after+len, and
+	// a page that stops short of the total must end at it. An empty page past the total is a reader that is
+	// ahead of the store (a truncation it reads from total), not a gap.
+	if gap, ok := ordinalGap(p.after, page, total, p.limit); !ok {
+		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("record ordinal gap at %d", gap))
+		return
+	}
 	out := make([]json.RawMessage, len(page))
 	for i, rec := range page {
 		out[i] = json.RawMessage(rec.JSON)
@@ -141,4 +150,24 @@ func (s *Server) handleIncrementalRead(w http.ResponseWriter, r *http.Request, p
 		resp["at_seq"] = at
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// ordinalGap reports whether the page is contiguous from after+1 and, when it is short or empty, reaches the
+// total; when not, it returns the first ordinal that is missing.
+func ordinalGap(after int64, page []store.Record, total, limit int) (int64, bool) {
+	for i, rec := range page {
+		if rec.Ord != after+int64(i)+1 {
+			return after + int64(i) + 1, false
+		}
+	}
+	end := after + int64(len(page))
+	if len(page) < limit {
+		if len(page) == 0 && after >= int64(total) {
+			return 0, true
+		}
+		if end != int64(total) {
+			return end + 1, false
+		}
+	}
+	return 0, true
 }

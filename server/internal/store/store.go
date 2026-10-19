@@ -24,6 +24,9 @@ type Record struct {
 	ContentHash string // sha256:...
 	SessionID   string
 	Parents     []string // causal_prev_hashes
+	// Ord is the record's insertion ordinal. Only RecordsAfter sets it (zero everywhere else), so a reader of a
+	// page can check that the ordinals are contiguous instead of trusting that the store has no gap.
+	Ord int64
 	// Disclosures are the secrets that open this record's committed low-entropy fields. They are
 	// persisted ATOMICALLY with the record (and only when the record is freshly created), so a
 	// committed field can never end up in a sealed record with no way to disclose it. Empty for
@@ -799,7 +802,11 @@ func (m *Mem) RecordsAfter(projectID string, after int64, limit int) ([]Record, 
 	if end > int64(len(recs)) || end < after {
 		end = int64(len(recs))
 	}
-	return append([]Record{}, recs[after:end]...), nil
+	out := append([]Record{}, recs[after:end]...)
+	for i := range out {
+		out[i].Ord = after + int64(i) + 1
+	}
+	return out, nil
 }
 
 func (m *Mem) PutCheckpoint(projectID string, cp Checkpoint) error {

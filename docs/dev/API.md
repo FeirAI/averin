@@ -222,6 +222,10 @@ reader compares these on every page: the hash at the seq it holds, the latest se
 below what it held, and `total` not below the latest count. The read costs the page plus two
 checkpoint rows, whatever the history size.
 
+If the store's ordinals have a gap (a page that is not exactly the ordinals `after+1` onward, or a short page
+that ends below `total`), the read is a 500 (`record ordinal gap at N`), never a page that repeats one record
+and hides another.
+
 It verifies nothing and builds no bundle. A reader that follows it holds a read frontier bound to a
 signed checkpoint, not a verified one; the records are as authentic as the store they came from. A
 rewrite below the reader's frontier is for the reader's own re-read to find. Each page is its own

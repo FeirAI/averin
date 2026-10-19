@@ -704,6 +704,14 @@
     "incremental-read-limit-uncapped": {
       "tier": "full",
       "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-ordinal-gap-not-checked": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-latest-outside-snapshot": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
     }
   },
   "claims": [
@@ -2606,7 +2614,7 @@
     {
       "id": "incremental-read-continuity-snapshot",
       "$comment": "legacy register: incremental-read-continuity-snapshot",
-      "statement": "GET /v2/records with after=<n>&order=asc returns, oldest first, the records with insertion ordinal n+1 onward (at most limit, capped at 1000), and from the same repeatable-read snapshot the store's record total, the latest checkpoint (seq, hash, record_count) and, when at_seq=<k> is given, the checkpoint with that seq (absent when the project has no such seq). The records are the same rows the store holds at those ordinals; next_after is after plus the page length and more says whether records remain past it. A store error, or a checkpoint whose record_count cannot be read, is a 500, never an empty page or a count of zero; a request that is not exactly this shape (order other than asc, a missing, negative or non-numeric after, at_seq without after, offset with after) is a 400. The rows read are the page plus two checkpoint rows, the same at 1, 3 and 12 months of history. The read runs no verification and builds no bundle.",
+      "statement": "GET /v2/records with after=<n>&order=asc returns, oldest first, the records with insertion ordinal n+1 onward (at most limit, capped at 1000), and from the same repeatable-read snapshot the store's record total, the latest checkpoint (seq, hash, record_count) and, when at_seq=<k> is given, the checkpoint with that seq (absent when the project has no such seq). The records are the same rows the store holds at those ordinals; next_after is after plus the page length and more says whether records remain past it. A store error, a checkpoint whose record_count cannot be read, or a page whose ordinals are not exactly after+1 onward (or that stops short of the total) is a 500, never an empty page, a count of zero or a 200 that repeats one record and hides another; a request that is not exactly this shape (order other than asc, a missing, negative or non-numeric after, at_seq without after, offset with after) is a 400. The rows read are the page plus two checkpoint rows, the same at 1, 3 and 12 months of history. The read runs no verification and builds no bundle.",
       "method": "property",
       "artifacts": [
         "server/internal/api/incremental_read.go",
@@ -2632,7 +2640,7 @@
         {
           "path": "server/internal/api/incremental_read.go",
           "symbol": "handleIncrementalRead",
-          "sha256": "5aa7ea0872233468ff8af2af0bf0769e0278c7ed834d381c61619105ca1605b1"
+          "sha256": "6f89e7830a18866c1ecb2fc743eaa8ba78d789db5ec0a5d3a41a17937afac3b0"
         }
       ],
       "mutants": [
@@ -2643,7 +2651,9 @@
         "incremental-read-more-always-false",
         "incremental-read-unreadable-checkpoint-count-is-zero",
         "incremental-read-store-error-served-as-empty",
-        "incremental-read-limit-uncapped"
+        "incremental-read-limit-uncapped",
+        "incremental-read-ordinal-gap-not-checked",
+        "incremental-read-latest-outside-snapshot"
       ],
       "does_not_establish": "That the records served are authentic: the read verifies nothing, so what a reader holds afterwards is a read frontier bound to a signed checkpoint that it can compare on the next read, not a verified one. That a reader detects an in-place rewrite below its frontier: that is the reader's rolling re-read, not this endpoint. That the snapshot is consistent across pages: each page is its own snapshot, so a reader must check the continuity fields (the checkpoint at its frontier seq, the latest seq, record counts and total) on every page. That the Postgres read uses the ordinal index in every plan: the Postgres cost test counts rows, and runs only in the Postgres CI job."
     }
