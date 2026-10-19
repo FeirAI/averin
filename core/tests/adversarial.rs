@@ -16509,3 +16509,73 @@ fn latest_verified_checkpoint_is_reported_for_a_growing_tail() {
         (None, None)
     );
 }
+
+/// Regenerates the real-output fixture feir-os uses for its pending-state tests
+/// (`app/internal/api/testdata/averin_tail_sequence.json`). A chain of grants grows by two
+/// records at a time while each checkpoint covers the records of the look before:
+/// `AVERIN_TAIL_FIXTURE_OUT=/path/file.json cargo test -p averin-decision-core --test adversarial
+/// -- --ignored write_tail_sequence_fixture`. Reports are the unmodified `report_to_canon` output.
+#[test]
+#[ignore]
+fn write_tail_sequence_fixture() {
+    let out = std::env::var("AVERIN_TAIL_FIXTURE_OUT").expect("AVERIN_TAIL_FIXTURE_OUT");
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let kc = signing_key_from_seed(&[42u8; 32]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let mut grants: Vec<CanonValue> = Vec::new();
+    for i in 0..8 {
+        let prev: Vec<String> = grants
+            .last()
+            .map(|g| vec![content_hash_of(g)])
+            .unwrap_or_default();
+        grants.push(seal_grant_prev(&rec, &rec, &format!("g-{i}"), &ge, &prev));
+    }
+    let key_block =
+        CanonValue::parse(r#"{"signing_key_id":"kc","key_epoch":0,"key_status":"active"}"#)
+            .unwrap();
+    // checkpoint j covers the first covers[j] grants
+    let covers = [1usize, 3, 5, 7, 8];
+    let mut cps: Vec<CanonValue> = Vec::new();
+    for (j, c) in covers.iter().enumerate() {
+        let prev_hash = cps.last().map(checkpoint_hash);
+        cps.push(
+            seal_checkpoint(
+                &checkpoint_body(
+                    &format!("cp{j}"),
+                    "proj-001",
+                    j as i64,
+                    prev_hash.as_deref(),
+                    &[content_hash_of(&grants[c - 1])],
+                    *c as i64,
+                    &format!("2026-06-15T10:{:02}:00.000Z", 5 + j),
+                    key_block.clone(),
+                )
+                .unwrap(),
+                &kc,
+            )
+            .unwrap(),
+        );
+    }
+    let key_entry = |id: &str, vk: &VerifyingKey| {
+        CanonValue::object(vec![
+            ("signing_key_id".into(), CanonValue::string(id)),
+            ("key_epoch".into(), CanonValue::Int(0)),
+            ("public_key".into(), CanonValue::string(encode_pubkey(vk))),
+            ("key_status".into(), CanonValue::string("active")),
+        ])
+        .unwrap()
+    };
+    let keys = vec![
+        key_entry("k0", &rec.verifying_key()),
+        key_entry("kc", &kc.verifying_key()),
+    ];
+    // (records visible, checkpoints visible): a pass at 1, then tails of 3, 5, 7 records, then a pass at 8.
+    let looks = [(1usize, 1usize), (3, 1), (5, 2), (7, 3), (8, 5)];
+    let mut reports: Vec<String> = Vec::new();
+    for (n, k) in looks {
+        let b = rebuild(keys.clone(), grants[..n].to_vec(), cps[..k].to_vec());
+        let r = averin_decision_core::verify::verify_bundle(&b);
+        reports.push(averin_decision_core::verify::report_to_canon(&r).serialize());
+    }
+    std::fs::write(out, format!("[{}]\n", reports.join(",\n"))).unwrap();
+}
