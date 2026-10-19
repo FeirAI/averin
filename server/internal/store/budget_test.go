@@ -96,3 +96,41 @@ func TestPostgresWithBudgetCancelsAStatementAndKeepsTheTransaction(t *testing.T)
 		t.Fatalf("the transaction must still commit: %v", err)
 	}
 }
+
+// TestPostgresWithBudgetCoversTheWholeFunction: the budget is a deadline for all of fn, not an allowance per
+// statement. Two 400 ms statements fit one by one inside a 600 ms budget, but together they do not: the second is
+// cancelled with the time that remains, and a statement that starts after the deadline is not sent at all.
+func TestPostgresWithBudgetCoversTheWholeFunction(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	err := p.WithProjectWrite(context.Background(), "p", func(st Store) error {
+		b := st.(*Postgres)
+		start := time.Now()
+		budgetErr := st.WithBudget(600*time.Millisecond, func(in Store) error {
+			q := in.(*Postgres).queries()
+			if _, e := q.Exec(b.callContext(), `SELECT pg_sleep(0.4)`); e != nil {
+				return e
+			}
+			_, e := q.Exec(b.callContext(), `SELECT pg_sleep(0.4)`)
+			return e
+		})
+		if !errors.Is(budgetErr, ErrBudgetExceeded) {
+			t.Fatalf("two statements of 400 ms under a 600 ms budget: %v, want ErrBudgetExceeded", budgetErr)
+		}
+		if took := time.Since(start); took > 700*time.Millisecond {
+			t.Fatalf("the budget let fn run %s, want about 600 ms (the second statement must be cut short)", took)
+		}
+		late := st.WithBudget(50*time.Millisecond, func(in Store) error {
+			time.Sleep(80 * time.Millisecond)
+			_, e := in.(*Postgres).queries().Exec(b.callContext(), `SELECT 1`)
+			return e
+		})
+		if !errors.Is(late, ErrBudgetExceeded) {
+			t.Fatalf("a statement after the deadline: %v, want ErrBudgetExceeded", late)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("the transaction must still commit: %v", err)
+	}
+}

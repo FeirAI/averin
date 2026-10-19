@@ -736,6 +736,10 @@
     "surface-arena-trim-after-bundle-verify-removed": {
       "tier": "full",
       "claim": "cgo-bundle-verify-heap-trim"
+    },
+    "checkpoint-cut-over-budget-full-body-not-compared": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
     }
   },
   "claims": [
@@ -2544,7 +2548,7 @@
     {
       "id": "checkpoint-cut-incremental-equals-full",
       "$comment": "legacy register: checkpoint-cut-incremental-equals-full",
-      "statement": "The checkpoint cut reads the latest checkpoint and the records after it (not the whole history) and produces the same body as the full computation over the whole project: the same sequence number and previous hash, the record count as the base count plus the records after it, the frontier as the base frontier minus the parents of the new records plus the new records no new record names, and the grant-transparency head (and the per-broker head of a federated broker) as the prior head's cumulative root folded over the grants after it, chained to the prior head; it refuses to sign unless the new grants carry exactly the next broker_seq values and the allocated maximum matches, and refuses when the store's record count differs from the base count plus the records after it or when a page of the records after the base does not hold exactly the next ordinals in order; it takes the full computation when there is no usable base. A cut also computes the full body with the same timestamp and refuses to sign, with an alert and a counter, unless the two are identical, when the checkpoint being cut has a sequence number that is a multiple of 100 (chosen per project, so a rotation of projects cannot dodge it, and a refused sequence number is shadow-checked again after a restart), when it is the project's first incremental cut since the process started, and for every cut once a mismatch has been seen. A shadow that cannot run (the full computation errors, hits the statement timeout or exceeds its own time budget) does not refuse: the incremental body is signed, a failed counter moves, an alert is logged and the project's next shadow waits for a backoff. The grant log counts a record as a grant or void tombstone only by exact-case keys and string values, as the verifier does; a record with a differently cased key or a value of another type is neither counted nor an error, in the full and the incremental cut alike. The rows a cut reads are the same at 1, 3 and 12 months of history.",
+      "statement": "The checkpoint cut reads the latest checkpoint and the records after it (not the whole history) and produces the same body as the full computation over the whole project: the same sequence number and previous hash, the record count as the base count plus the records after it, the frontier as the base frontier minus the parents of the new records plus the new records no new record names, and the grant-transparency head (and the per-broker head of a federated broker) as the prior head's cumulative root folded over the grants after it, chained to the prior head; it refuses to sign unless the new grants carry exactly the next broker_seq values and the allocated maximum matches, and refuses when the store's record count differs from the base count plus the records after it or when a page of the records after the base does not hold exactly the next ordinals in order; it takes the full computation when there is no usable base. A cut also computes the full body with the same timestamp and refuses to sign, with an alert and a counter, unless the two are identical, when the checkpoint being cut has a sequence number that is a multiple of 100 (chosen per project, so a rotation of projects cannot dodge it, and a refused sequence number is shadow-checked again after a restart), when it is the project's first incremental cut since the process started, and for every cut once a mismatch has been seen. A shadow that cannot run (the full computation errors, hits the statement timeout or runs out of its own time budget before producing a body) does not refuse: the incremental body is signed, a failed counter moves, an alert is logged and the project's next shadow waits for a backoff; a full body that was computed but came back over budget is still compared, a mismatch refuses and a match is signed and counted as late. The grant log counts a record as a grant or void tombstone only by exact-case keys and string values, as the verifier does; a record with a differently cased key or a value of another type is neither counted nor an error, in the full and the incremental cut alike. The rows a cut reads are the same at 1, 3 and 12 months of history.",
       "method": "property",
       "artifacts": [
         "server/internal/api/checkpoint_cut.go",
@@ -2584,7 +2588,7 @@
         {
           "path": "server/internal/api/checkpoint_cut.go",
           "symbol": "checkpointBodyChecked",
-          "sha256": "08b5452f472fb7749bcbf67d424d66d04961224963add4135f82dca7a620af62"
+          "sha256": "81cdd54177dd574996f83c896a13cd782f4b78d475b2579ea12fcb0da1bf9dfd"
         },
         {
           "path": "server/internal/api/server.go",
@@ -2634,6 +2638,7 @@
         "checkpoint-cut-shadow-global-counter",
         "checkpoint-cut-shadow-skips-first-cut",
         "checkpoint-cut-shadow-cannot-run-refuses",
+        "checkpoint-cut-over-budget-full-body-not-compared",
         "checkpoint-cut-shadow-ignores-backoff",
         "checkpoint-cut-skips-page-ordinal-check"
       ],

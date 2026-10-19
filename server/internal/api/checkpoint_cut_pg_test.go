@@ -102,4 +102,20 @@ func TestCheckpointCutRefusesADeletedRecordPostgres(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "ordinals are not contiguous") {
 		t.Fatalf("a deleted record in a non-last page must refuse the cut, got %+v %v", cp, err)
 	}
+	// The history is made whole again (the same row put back at ordinal 500): the next cut signs.
+	if _, err := admin.Exec(context.Background(), `
+		INSERT INTO records (project_id, idempotency_key, content_hash, session_id, parents, json, inserted_at, ord)
+		SELECT 'p', 'bulk'||g, 'sha256:q-'||lpad(g::text, 6, '0'), 's'||(g % 5),
+		       ARRAY['sha256:q-'||lpad((g-1)::text, 6, '0')],
+		       '{"extensions":{}}', now(), g
+		FROM generate_series(500, 500) g`); err != nil {
+		t.Fatal(err)
+	}
+	cp, err = cutOnce(t, s, pg, "p")
+	if err != nil {
+		t.Fatalf("the cut over a whole history must sign: %v", err)
+	}
+	if cp.Seq != 1 {
+		t.Fatalf("signed seq %d after the refusal, want 1 (the refused seq is retried)", cp.Seq)
+	}
 }

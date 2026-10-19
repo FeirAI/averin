@@ -141,9 +141,36 @@ func TestCheckpointCutShadowMismatchStillRefusesAfterFailure(t *testing.T) {
 	}
 }
 
-// TestCheckpointCutShadowBudgetIsClamped: the shadow's budget has a ceiling below the statement timeout.
+// TestCheckpointCutShadowOverBudgetFullBodyStillCompares: a full body that came back late was computed, so it is
+// compared. With a tampered base the incremental cut disagrees with it and must refuse and latch, however slow
+// the full computation was.
+func TestCheckpointCutShadowOverBudgetFullBodyStillCompares(t *testing.T) {
+	r := newShadowRig(t, 20*time.Millisecond)
+	r.spy.slowFull = 80 * time.Millisecond
+	r.spy.tamper = bogusBase("p")
+	_, err := r.cut()
+	if err == nil || !strings.Contains(err.Error(), "disagrees with the full computation") {
+		t.Fatalf("an over-budget full body that disagrees must refuse, got %v", err)
+	}
+	if _, _, _, mism := r.s.CutStatsForTest(); mism != 1 {
+		t.Fatalf("mismatches %d, want 1", mism)
+	}
+	if r.s.ShadowFailedForTest() != 0 {
+		t.Fatalf("a computed body is not a shadow that could not run; failed %d, want 0", r.s.ShadowFailedForTest())
+	}
+}
+
+// TestCheckpointCutShadowBudgetIsClamped: the shadow's budget has a ceiling below the statement timeout, and a
+// request above it is clamped to it.
 func TestCheckpointCutShadowBudgetIsClamped(t *testing.T) {
 	if api.MaxCheckpointShadowBudget >= 30*time.Second || api.DefaultCheckpointShadowBudget > api.MaxCheckpointShadowBudget {
 		t.Fatalf("default %s and ceiling %s must sit below the 30 s statement timeout", api.DefaultCheckpointShadowBudget, api.MaxCheckpointShadowBudget)
+	}
+	s := api.New(mustCore(t), store.NewMem(), "k0").WithCheckpointShadowBudget(60 * time.Second)
+	if got := s.ShadowBudgetForTest(); got != api.MaxCheckpointShadowBudget {
+		t.Fatalf("effective budget %s after asking for 60s, want the ceiling %s", got, api.MaxCheckpointShadowBudget)
+	}
+	if got := api.New(mustCore(t), store.NewMem(), "k0").ShadowBudgetForTest(); got != api.DefaultCheckpointShadowBudget {
+		t.Fatalf("default effective budget %s, want %s", got, api.DefaultCheckpointShadowBudget)
 	}
 }

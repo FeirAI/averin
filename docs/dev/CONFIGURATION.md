@@ -191,13 +191,15 @@ starting `ALERT`, and makes every later cut a checked cut until the process rest
 the same seq and checked again, so a restart does not let it through.
 `averin_checkpoint_shadow_checks_total` counts the checks that ran.
 
-A shadow that cannot run does not refuse the checkpoint: if the full computation fails to read, hits the 30 s
-statement timeout or exceeds the shadow's own time budget, the incremental body (which passed its own count and
+A shadow that cannot run does not refuse the checkpoint: if the full computation fails to read, hits the
+statement timeout or runs out of the shadow's own time budget before it has produced a body, the incremental body (which passed its own count and
 contiguity guards) is signed, `averin_checkpoint_shadow_failed_total` is incremented, a line starting `ALERT` is
 logged, and that project's next shadow attempt waits for a backoff (10 minutes, doubling per consecutive failure
-up to 64 times that, reset when a shadow runs). The shadow's budget is 5 s by default, so a checked cut never holds
-the project write guard for the whole statement timeout; each statement gets the budget, so a whole shadow can
-take a few times it. Neither value has an environment variable; they are the `WithCheckpointShadowBudget`
+up to 64 times that, reset when a shadow runs). A full body that was computed but came back over budget is still compared: a mismatch refuses, a match is
+signed and counted as failed (late) with the same backoff. The shadow's budget is 5 s by default and covers the
+WHOLE shadow: on Postgres the statement timeout is re-issued with the time that remains before every statement,
+so a checked cut never holds the project write guard for much longer than the budget (the ceiling is 20 s, below
+the 30 s statement timeout). Neither value has an environment variable; they are the `WithCheckpointShadowBudget`
 (ceiling 20 s) and `WithCheckpointShadowBackoff` options on the server. Alert on any non-zero rate of
 `averin_checkpoint_shadow_failed_total`: it means the shadow has stopped being effective for that history size.
 

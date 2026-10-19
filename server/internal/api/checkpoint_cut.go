@@ -327,8 +327,9 @@ func (s *Server) checkpointBody(projectID string, seq int64, prev string, hasPre
 // incremental cut that disagrees with the definition must never reach a signature, because checkpoints are
 // append-only. A shadow that CANNOT RUN (a read error, a statement timeout, its own time budget) is not a
 // disagreement: the incremental body is signed, averin_checkpoint_shadow_failed_total is counted, an ALERT is
-// logged and the project's next shadow waits for a backoff. The shadow therefore stops being effective once the
-// full computation no longer fits its budget; the counter shows it, and the differential tests plus the per-cut
+// logged and the project's next shadow waits for a backoff. A full body that was computed but came back over
+// budget is still compared: a mismatch refuses, a match is signed and counted as late. The shadow therefore
+// stops being effective once the full computation no longer fits its budget; the counter shows it, and the differential tests plus the per-cut
 // count and contiguity guards are what still hold the equality.
 func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[string]any, error) {
 	created := ts(s.now())
@@ -367,17 +368,19 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
 		log.Printf("ALERT: checkpoint cut for project %s REFUSED: the full computation refuses (%v) where the incremental cut would sign; every later cut is now shadow-checked", projectID, ferr)
 		return nil, fmt.Errorf("checkpoint refused: the incremental cut disagrees with the full computation: %w", ferr)
 	}
-	if ferr != nil {
-		// The shadow could not run (read error, statement timeout, its own budget). It is a check, not part of the
-		// definition: sign the incremental body, which passed its own count and contiguity guards, and make the
-		// failure loud. Refusing on "could not check" would stop checkpoints for good once history outgrows the
+	// A full body that WAS computed is always compared, even when it came back late (ErrBudgetExceeded with a
+	// body): a late answer is still an answer, and the incremental body is never signed unseen when one exists.
+	late := ferr != nil && full != nil && errors.Is(ferr, store.ErrBudgetExceeded)
+	if ferr != nil && !late {
+		// The shadow produced no body (a read error, a statement timeout, its own budget). It is a check, not part
+		// of the definition: sign the incremental body, which passed its own count and contiguity guards, and make
+		// the failure loud. Refusing on "could not check" would stop checkpoints for good once history outgrows the
 		// full computation.
 		s.mCutShadowFailed.Inc()
 		wait := s.shadowFailed(projectID)
 		log.Printf("ALERT: checkpoint cut for project %s signed WITHOUT its shadow check: the full computation could not run (%v); next shadow attempt in %s", projectID, ferr, wait)
 		return body, nil
 	}
-	s.shadowRan(projectID)
 	a, _ := json.Marshal(body)
 	b, _ := json.Marshal(full)
 	if !bytes.Equal(a, b) {
@@ -385,6 +388,14 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
 		s.mCutShadowMismatch.Inc()
 		log.Printf("ALERT: checkpoint cut for project %s REFUSED: the incremental cut differs from the full computation in %s; every later cut is now shadow-checked", projectID, differingFields(body, full))
 		return nil, fmt.Errorf("checkpoint refused: the incremental cut disagrees with the full computation")
+	}
+	if late {
+		// The bodies agree, but the full computation no longer fits its budget: count it and back off.
+		s.mCutShadowFailed.Inc()
+		wait := s.shadowFailed(projectID)
+		log.Printf("ALERT: checkpoint cut for project %s shadow ran LATE (%v) and matched; next shadow attempt in %s", projectID, ferr, wait)
+	} else {
+		s.shadowRan(projectID)
 	}
 	s.cut.verified.Store(projectID, struct{}{})
 	return full, nil
