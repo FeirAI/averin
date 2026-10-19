@@ -3,11 +3,13 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/feirai/averin/server/internal/broker"
 	"github.com/feirai/averin/server/internal/store"
@@ -17,6 +19,16 @@ import (
 // compared. A mismatch refuses to sign.
 const DefaultCheckpointShadowEvery = 100
 
+// The shadow's own time budget and the backoff after a shadow that could not run (lead decision, history
+// scaling PR2): the full computation is O(history) and stops completing as history grows, so it must neither
+// hold the project write guard for the whole statement timeout nor be retried on every cut.
+const (
+	DefaultCheckpointShadowBudget  = 5 * time.Second
+	MaxCheckpointShadowBudget      = 20 * time.Second // below the 30 s statement timeout, which it must never reach
+	DefaultCheckpointShadowBackoff = 10 * time.Minute
+	maxShadowBackoffDoublings      = 6 // the wait doubles per consecutive failure up to 64 times the base
+)
+
 // checkpointCutState is the per-server bookkeeping of the shadow check.
 type checkpointCutState struct {
 	every       int64        // 0 means DefaultCheckpointShadowEvery
@@ -24,6 +36,17 @@ type checkpointCutState struct {
 	verified    sync.Map     // project -> struct{}: its first incremental cut since process start passed a shadow check
 	incremental atomic.Int64 // cuts taken incrementally (observable in tests)
 	full        atomic.Int64 // cuts taken by the full computation (no usable base, or a guard disagreed)
+
+	budget  time.Duration // 0 means DefaultCheckpointShadowBudget
+	backoff time.Duration // 0 means DefaultCheckpointShadowBackoff
+	mu      sync.Mutex
+	retry   map[string]shadowRetry // project -> when its next shadow attempt may run
+}
+
+// shadowRetry is the backoff state of one project after a shadow that could not run.
+type shadowRetry struct {
+	notBefore time.Time
+	fails     int
 }
 
 // WithCheckpointShadowEvery sets the shadow-check period (every n-th incremental cut also runs the full
@@ -35,6 +58,62 @@ func (s *Server) WithCheckpointShadowEvery(n int) *Server {
 	}
 	s.cut.every = int64(n)
 	return s
+}
+
+// WithCheckpointShadowBudget sets the time budget of one shadow computation (default 5 s, at most 20 s, at
+// least 1 ms): a shadow that cannot finish inside it does not hold the project write guard any longer and counts
+// as "could not run", not as a mismatch.
+func (s *Server) WithCheckpointShadowBudget(d time.Duration) *Server {
+	if d < time.Millisecond {
+		d = time.Millisecond
+	}
+	if d > MaxCheckpointShadowBudget {
+		d = MaxCheckpointShadowBudget
+	}
+	s.cut.budget = d
+	return s
+}
+
+// WithCheckpointShadowBackoff sets the base wait before a project's next shadow attempt after one that could
+// not run (default 10 min; it doubles per consecutive failure up to 64 times, and resets when a shadow runs).
+// d < 1 ms is treated as 1 ms.
+func (s *Server) WithCheckpointShadowBackoff(d time.Duration) *Server {
+	if d < time.Millisecond {
+		d = time.Millisecond
+	}
+	s.cut.backoff = d
+	return s
+}
+
+// shadowWaiting reports whether the project's next shadow attempt is still inside its backoff.
+func (s *Server) shadowWaiting(projectID string) bool {
+	s.cut.mu.Lock()
+	defer s.cut.mu.Unlock()
+	r, ok := s.cut.retry[projectID]
+	return ok && s.now().Before(r.notBefore)
+}
+
+// shadowFailed records a shadow that could not run and schedules the next attempt after a backoff.
+func (s *Server) shadowFailed(projectID string) time.Duration {
+	base := s.cut.backoff
+	if base <= 0 {
+		base = DefaultCheckpointShadowBackoff
+	}
+	s.cut.mu.Lock()
+	defer s.cut.mu.Unlock()
+	if s.cut.retry == nil {
+		s.cut.retry = map[string]shadowRetry{}
+	}
+	r := s.cut.retry[projectID]
+	wait := base << min(r.fails, maxShadowBackoffDoublings)
+	s.cut.retry[projectID] = shadowRetry{notBefore: s.now().Add(wait), fails: r.fails + 1}
+	return wait
+}
+
+func (s *Server) shadowRan(projectID string) {
+	s.cut.mu.Lock()
+	delete(s.cut.retry, projectID)
+	s.cut.mu.Unlock()
 }
 
 // cutBase is what the incremental cut reads from the latest checkpoint L.
@@ -166,6 +245,9 @@ func (s *Server) cutBodyIncremental(st store.Store, projectID, created string) (
 		if perr != nil {
 			return nil, false, fmt.Errorf("checkpoint: read project snapshot: %w", perr)
 		}
+		if oerr := store.CheckPageOrdinals(page, after); oerr != nil {
+			return nil, false, fmt.Errorf("checkpoint refused: %w", oerr)
+		}
 		for _, r := range page {
 			fold.Add(r)
 		}
@@ -243,7 +325,11 @@ func (s *Server) checkpointBody(projectID string, seq int64, prev string, hasPre
 // first incremental cut of the project since this process started and has not yet passed a shadow check (a base
 // altered while the process was down, and a first cut after migration), or (c) a mismatch has latched. An
 // incremental cut that disagrees with the definition must never reach a signature, because checkpoints are
-// append-only.
+// append-only. A shadow that CANNOT RUN (a read error, a statement timeout, its own time budget) is not a
+// disagreement: the incremental body is signed, averin_checkpoint_shadow_failed_total is counted, an ALERT is
+// logged and the project's next shadow waits for a backoff. The shadow therefore stops being effective once the
+// full computation no longer fits its budget; the counter shows it, and the differential tests plus the per-cut
+// count and contiguity guards are what still hold the equality.
 func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[string]any, error) {
 	created := ts(s.now())
 	body, inc, err := s.cutBodyIncremental(st, projectID, created)
@@ -264,11 +350,34 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
 	if verified && !s.cut.latched.Load() && seq%every != 0 {
 		return body, nil
 	}
-	s.mCutShadowChecks.Inc()
-	full, ferr := s.cutBodyFull(st, projectID, created)
-	if ferr != nil {
-		return nil, fmt.Errorf("checkpoint refused: shadow full computation failed: %w", ferr)
+	if s.shadowWaiting(projectID) {
+		return body, nil // the last shadow of this project could not run: wait out its backoff, then try again
 	}
+	s.mCutShadowChecks.Inc()
+	var full map[string]any
+	ferr := st.WithBudget(s.shadowBudget(), func(b store.Store) error {
+		var e error
+		full, e = s.cutBodyFull(b, projectID, created)
+		return e
+	})
+	var refusal *cutRefusedError
+	if errors.As(ferr, &refusal) { // the definition itself refuses where the incremental cut would sign: a disagreement
+		s.cut.latched.Store(true)
+		s.mCutShadowMismatch.Inc()
+		log.Printf("ALERT: checkpoint cut for project %s REFUSED: the full computation refuses (%v) where the incremental cut would sign; every later cut is now shadow-checked", projectID, ferr)
+		return nil, fmt.Errorf("checkpoint refused: the incremental cut disagrees with the full computation: %w", ferr)
+	}
+	if ferr != nil {
+		// The shadow could not run (read error, statement timeout, its own budget). It is a check, not part of the
+		// definition: sign the incremental body, which passed its own count and contiguity guards, and make the
+		// failure loud. Refusing on "could not check" would stop checkpoints for good once history outgrows the
+		// full computation.
+		s.mCutShadowFailed.Inc()
+		wait := s.shadowFailed(projectID)
+		log.Printf("ALERT: checkpoint cut for project %s signed WITHOUT its shadow check: the full computation could not run (%v); next shadow attempt in %s", projectID, ferr, wait)
+		return body, nil
+	}
+	s.shadowRan(projectID)
 	a, _ := json.Marshal(body)
 	b, _ := json.Marshal(full)
 	if !bytes.Equal(a, b) {
@@ -280,6 +389,20 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
 	s.cut.verified.Store(projectID, struct{}{})
 	return full, nil
 }
+
+func (s *Server) shadowBudget() time.Duration {
+	if s.cut.budget <= 0 {
+		return DefaultCheckpointShadowBudget
+	}
+	return s.cut.budget
+}
+
+// cutRefusedError marks a refusal by the full computation itself (a broker_seq gap), as opposed to a read that
+// failed: the first is a verdict, the second means the check could not run.
+type cutRefusedError struct{ err error }
+
+func (e *cutRefusedError) Error() string { return "checkpoint refused: " + e.err.Error() }
+func (e *cutRefusedError) Unwrap() error { return e.err }
 
 // differingFields names the top-level body fields whose values differ (never the values: a frontier can be long).
 func differingFields(a, b map[string]any) string {

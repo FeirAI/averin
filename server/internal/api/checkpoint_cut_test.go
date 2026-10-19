@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/feirai/averin/server/internal/api"
 	"github.com/feirai/averin/server/internal/auth"
@@ -21,6 +22,11 @@ type rowSpy struct {
 	rows *rowCount
 	// tamper, when set, rewrites the latest checkpoint a cut reads (a corrupted or hostile base).
 	tamper func(store.Checkpoint) store.Checkpoint
+	// failFull makes the full computation's frontier read fail; slowFull makes it take that long (the two ways a
+	// shadow cannot run). dropOrd hides the record with that ordinal from RecordsAfter, as if it were deleted.
+	failFull error
+	slowFull time.Duration
+	dropOrd  int64
 }
 
 type rowCount struct {
@@ -41,8 +47,14 @@ func newRowSpy(s store.Store) *rowSpy { return &rowSpy{Store: s, rows: &rowCount
 
 func (r *rowSpy) WithProjectWrite(ctx context.Context, p string, fn func(store.Store) error) error {
 	return r.Store.WithProjectWrite(ctx, p, func(b store.Store) error {
-		return fn(&rowSpy{Store: b, rows: r.rows, tamper: r.tamper})
+		return fn(r.bind(b))
 	})
+}
+func (r *rowSpy) WithBudget(d time.Duration, fn func(store.Store) error) error {
+	return r.Store.WithBudget(d, func(b store.Store) error { return fn(r.bind(b)) })
+}
+func (r *rowSpy) bind(b store.Store) *rowSpy {
+	return &rowSpy{Store: b, rows: r.rows, tamper: r.tamper, failFull: r.failFull, slowFull: r.slowFull, dropOrd: r.dropOrd}
 }
 func (r *rowSpy) AllRecords(p string) ([]store.Record, error) {
 	v, err := r.Store.AllRecords(p)
@@ -51,6 +63,15 @@ func (r *rowSpy) AllRecords(p string) ([]store.Record, error) {
 }
 func (r *rowSpy) RecordsAfter(p string, after int64, limit int) ([]store.Record, error) {
 	v, err := r.Store.RecordsAfter(p, after, limit)
+	if r.dropOrd > 0 {
+		kept := v[:0:0]
+		for _, rec := range v {
+			if rec.Ord != r.dropOrd {
+				kept = append(kept, rec)
+			}
+		}
+		v = kept
+	}
 	r.rows.add(len(v))
 	return v, err
 }
@@ -82,6 +103,12 @@ func (r *rowSpy) CheckpointsRange(p string, a, b int64) ([]store.Checkpoint, err
 
 // ProjectHeads is the full anti-join: it examines every record of the project, whatever it returns.
 func (r *rowSpy) ProjectHeads(p string) ([]string, error) {
+	if r.slowFull > 0 {
+		time.Sleep(r.slowFull)
+	}
+	if r.failFull != nil {
+		return nil, r.failFull
+	}
 	v, err := r.Store.ProjectHeads(p)
 	if n, cerr := r.Store.RecordCount(p); cerr == nil {
 		r.rows.add(n)

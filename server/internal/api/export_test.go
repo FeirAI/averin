@@ -27,3 +27,6 @@ func (s *Server) CreateCheckpointTxForTest(st store.Store, projectID string) (st
 func (s *Server) CutStatsForTest() (incremental, full, shadowChecks, shadowMismatches int64) {
 	return s.cut.incremental.Load(), s.cut.full.Load(), s.mCutShadowChecks.Value(), s.mCutShadowMismatch.Value()
 }
+
+// ShadowFailedForTest reports how many shadow checks could not run.
+func (s *Server) ShadowFailedForTest() int64 { return s.mCutShadowFailed.Value() }

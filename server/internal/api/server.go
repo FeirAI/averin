@@ -232,6 +232,7 @@ type Server struct {
 	mCheckpointsSealed   *metrics.Counter
 	mCutShadowChecks     *metrics.Counter
 	mCutShadowMismatch   *metrics.Counter
+	mCutShadowFailed     *metrics.Counter
 	cut                  checkpointCutState
 	mWitnessFailures     *metrics.Counter
 	mAnchorFailures      *metrics.Counter
@@ -279,6 +280,8 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 			"Total incremental checkpoint cuts also computed in full and compared (1 in 100 by default)."),
 		mCutShadowMismatch: reg.Counter("averin_checkpoint_shadow_mismatch_total",
 			"Total incremental checkpoint cuts that differed from the full computation. Each one REFUSED to sign; alert on any non-zero value."),
+		mCutShadowFailed: reg.Counter("averin_checkpoint_shadow_failed_total",
+			"Total shadow checks that could not run (full computation errored or exceeded its time budget). The cut was signed from the incremental body without the check; a rising value means the shadow is no longer effective for that history size."),
 		mWitnessFailures: reg.Counter("averin_witness_append_failures_total",
 			"Total checkpoint witness-append failures (checkpoint stored un-witnessed, backfillable)."),
 		mAnchorFailures: reg.Counter("averin_checkpoint_anchor_failures_total",
@@ -3936,7 +3939,7 @@ func (s *Server) cutBodyFull(st store.Store, projectID, created string) (map[str
 	// anchor a PERMANENT "not a gapless [1..N] prefix" verifier failure. Refuse to sign instead; the gap closes
 	// when the reserved grant is retried (its deterministic grant_id reclaims the seq) or the orphan is released.
 	if err := checkGaplessGrantLog(gl, maxAlloc); err != nil {
-		return nil, fmt.Errorf("checkpoint refused: %w", err)
+		return nil, &cutRefusedError{err}
 	}
 	prior, err := s.priorGrantHeadRoot(st, projectID)
 	if err != nil {

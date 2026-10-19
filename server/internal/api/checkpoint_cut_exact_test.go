@@ -212,3 +212,30 @@ func TestCheckpointCutExactCasePoisonPostgres(t *testing.T) {
 	pg, _ := newVoidTestPostgres(t)
 	exactCasePoison(t, pg)
 }
+
+// TestCheckpointCutRefusesAMissingRecordInAPage: a record missing from a page (deleted by a role that can) makes the
+// page shorter than its ordinal span; the cut refuses instead of reading the next page one row early.
+func TestCheckpointCutRefusesAMissingRecordInAPage(t *testing.T) {
+	st := store.NewMem()
+	spy := newRowSpy(st)
+	s := api.New(mustCore(t), spy, "k0").WithAuth(auth.NewOpenStore()).WithCheckpointShadowEvery(1 << 30)
+	h := newCutHistory(t, st, "p", 8)
+	for i := 0; i < 10; i++ {
+		h.plain()
+	}
+	if _, err := cutOnce(t, s, spy, "p"); err != nil { // checkpoint at 10
+		t.Fatal(err)
+	}
+	for i := 0; i < 1100; i++ { // ords 11..1110: the first page of the next cut is full, so a gap there is not the last page
+		h.plain()
+	}
+	spy.dropOrd = 500
+	cp, err := cutOnce(t, s, spy, "p")
+	if err == nil || !strings.Contains(err.Error(), "ordinals are not contiguous") {
+		t.Fatalf("a missing record in a non-last page must refuse, got cp %+v err %v", cp, err)
+	}
+	spy.dropOrd = 0
+	if cp, err := cutOnce(t, s, spy, "p"); err != nil || !strings.Contains(cp.JSON, `"record_count":1110`) {
+		t.Fatalf("the intact history must cut: %v %s", err, cp.JSON)
+	}
+}
