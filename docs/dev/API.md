@@ -17,7 +17,7 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
   or **expired** token gets a generic `401` (`{"error":"unauthorized"}`, with
   `WWW-Authenticate: Bearer realm="averin"`). The check is constant-time and fails closed.
 - **Roles.** A token has a role: `read` (every `GET`), `write` (read, plus the evidence-adding `POST`s:
-  `/v2/records`, `/v2/grants`, `/v2/grants/prepare`, `/v2/grants/finalize`, `/v2/introspection`,
+  `/v2/records`, `/v2/refusals`, `/v2/grants`, `/v2/grants/prepare`, `/v2/grants/finalize`, `/v2/introspection`,
   `/v2/use`, `/v2/use-intent`, `/v2/use-outcome`, `/v2/otel/traces`) or `admin` (everything, including
   `POST /v2/revoke` and `POST /v2/checkpoints`). Any other method or path, and any route added later, needs
   `admin` until it is classified. A valid token whose role is too low gets a generic `403`
@@ -92,7 +92,9 @@ record. The same key under two different `project_id`s does not collide and is a
 ```
 
 `created` is `false` for an idempotent collapse (a retry under the same key). Errors: `400`
-(invalid body, missing required field, reserved field/prefix, non-canonical field), `403`
+(invalid body, missing required field, reserved field/prefix, non-canonical field, a malformed or
+incomplete v3 authority claim, or, with `AVERIN_REQUIRE_BODY_BOUND_AUTHORITY` on (the default outside dev
+mode), an elevated external authority claim that is not v3), `403`
 (project_id mismatch with auth), `409` (the `record_id` is already held by a different record in the
 project — see below).
 
@@ -211,11 +213,14 @@ original grant if it can still finish or run the bounded operator
 Returns the **server's self-view** verification report (built from the project's full bundle, or, with `month`, from
 that month's [segment](SEGMENTS.md); `404` if no checkpoint was created in that month, `400` for a malformed
 month, `413` when the whole history or the month exceeds the 256 MiB single-bundle limit,
-self-pinning only the roles meaningful without an externally-held TSA key — broker/federation,
-resource, revocation, cosig; **not** attestation, which needs a pinned TSA). For an authoritative,
+self-pinning the broker/federation, resource, revocation and cosig roles and the project's pinned
+authority keys; attestation and the signed taxonomy are evaluated only when the operator has configured
+their out-of-band roots, `AVERIN_VERIFY_ATTESTATION_PUBKEY` with `AVERIN_VERIFY_TSA_SPKI_B64` and the
+`AVERIN_VERIFY_TAXONOMY_*` set). For an authoritative,
 independent verdict, export and verify offline with your own pinned keys.
 
-**Response `200`:** the [verification report](#verification-report) JSON.
+**Response `200`:** the [verification report](#verification-report) JSON. When verification is
+overloaded the request is refused with a retryable `503`.
 
 ---
 
@@ -230,14 +235,18 @@ records, first_seq, last_seq, head_hash, base_seq, base_hash, records_before}]}`
 ## GET `/v2/export?project=<id>`
 
 Returns a verifiable [bundle](#bundle-object) for offline verification. A whole-history export larger than the
-256 MiB the verifier accepts is refused with `413` and a pointer to the month segments.
+256 MiB the verifier accepts is refused with `413` and a pointer to the month segments. At most 4 bundle
+builds run at once; a request past that is refused with a retryable `503`.
 
 Query parameters:
 
 - `month` (optional, `YYYY-MM`) - export that month's [segment](SEGMENTS.md) instead of the whole history: the
   base checkpoint, the month's checkpoints and records, and a `segment` block. `404` if no checkpoint was created
   in that month, `400` for a malformed month, `413` if the month alone exceeds the limit.
-- `mode` (default `proof_only`) — one of `proof_only`, `selective_disclosure`, `full_evidence`.
+- `mode` (default `proof_only`): `proof_only`, `selective_disclosure` or `full_evidence`. The two
+  disclosing modes currently behave the same: each opens every committed field that still has raw
+  content (narrowed only by `record_kind`), with no per-field selection. Any other value is not
+  rejected: it is echoed in the bundle's `mode` and exports commitments only, like `proof_only`.
   Disclosing modes attach a `disclosures` array (`{record_id, field, value_b64, nonce_hex}`) so an
   offline verifier can open each committed field against its record's commitment. A field whose raw
   payload has been purged by retention is simply omitted from `disclosures` (the sealed record still
@@ -358,9 +367,13 @@ Request (`grantRequest`):
   "grant_id": "<uuid>",
   "capability": "<minted sender-constrained token>",
   "expires_at": "2026-...Z",
-  "scope_class": "single_operation"
+  "scope_class": "single_operation",
+  "created": true,
+  "record": { /* the sealed grant record */ }
 }
 ```
+
+`created` is `false` (still `201`) for an idempotent retry that returns the original grant.
 
 Errors: `400` (validation, failed PoP, forbidden scope, malformed), `409` (idempotency key reused
 for a *different* grant request, or the grant's reserved `broker_seq` was voided by the operator —
@@ -384,13 +397,14 @@ are not accepted by online brokered grant routes after the cutoff, including com
 ### POST `/v2/grants/prepare` and `/v2/grants/finalize` (two-phase)
 
 `prepare` takes the same `grantRequest` body (PoP-validated first), mints the credential without
-committing, and returns the challenge inputs (`grant_id`, `credential_binding`, `cnf_kid`, `exp`,
-`cosig_threshold`). `finalize` takes **the same `grantRequest` body again** (including `agent_pubkey` /
+committing, and returns `200` with the challenge inputs (`grant_id`, `credential_binding`, `cnf_kid`, `exp`,
+`cosig_threshold` when a cosig policy is set) and `finalized: false`. `finalize` takes **the same `grantRequest` body again** (including `agent_pubkey` /
 `agent_sig`) plus `cosignatures` and/or `delegation_hops`, re-validates the proof-of-possession, and
 commits. Both phases answer only the request that prepared the grant: an already-pending or committed
 grant under the same `idempotency_key` is returned only when the request matches it (the same rule as a
 `/v2/grants` retry), else `409`; a body without a valid `agent_sig` is a `400`. `finalize` with no
-prior `prepare` is a `409`.
+prior `prepare` is a `409`. A store failure while preparing, looking up the pending grant or committing
+the finalize answers `503`.
 
 With `AVERIN_DATABASE_URL`, pending challenges persist and rehydrate after restart. They are still
 served from a local cache: a different live replica may answer `409` until it is restarted or the
@@ -506,8 +520,9 @@ Request: `{ "project_id": "...", "grant_id": "...", "mode": "total"|"prospective
 **Response `201`:**
 `{ "revoked": "<grant_id>", "project_id": "...", "mode": "<effective mode>", "cutoff_order": <n>
 (prospective only), "created": <bool>, "revoked_total": <n>, "note": "..." }`.
-Errors: `400`, `403`, `429` (the per-project revoked-set cap is reached — explicit, never a silent
-fail-open), `501` (revocation not enabled).
+Errors: `400`, `403`, `429` (the per-project revoked-set cap is reached: explicit, never a silent
+fail-open), `501` (revocation not enabled), `503` (the revocation could not be durably persisted and did
+not take effect; retry).
 
 ---
 
@@ -638,7 +653,8 @@ Other allowed keys: `anchored_ts`, `record_kind`, `input_commit`, `output_commit
   verifying under the key pinned for the record's `(project_id, source)` elevates from
   `caller_declared` to the matching source. A claim that does **not** verify — or whose source is
   unpinned for that project — is **rejected with a retryable `500`** by default
-  (`AVERIN_REQUIRE_PINNED_AUTHORITY`); set it to `0` to restore the legacy silent downgrade.
+  (`AVERIN_REQUIRE_PINNED_AUTHORITY`); set it to `0` to restore the legacy silent downgrade for v2 claims
+  (a v3 claim that fails verification is rejected either way).
 - `key.key_status`: `active`, `retired`, `revoked`, `compromised` (the record's own signing-key
   lifecycle; echoed verbatim into the verify report). Not to be confused with the `opts.json`
   pinned-authority role-key rotation status (`active`/`rotated`/`compromised`/`revoked`, ADR 0006),

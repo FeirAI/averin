@@ -253,9 +253,11 @@ barrier before starting any new writer or enabling recovery:
    ```
 
    This single transaction validates the retired-role barrier, applies pending steps through
-   `0007`, and records the DB-time legacy nonce-exclusion cutoff (the `0007` step leaves an
+   `0008` (schema version 8), and records the DB-time legacy nonce-exclusion cutoff (the `0007` step leaves an
    existing cutoff unchanged). The v7 step retires the boolean `revocations` table: grant the new
    runtime `SELECT, INSERT` on `authorization_receipts` and `revocation_events` before starting it.
+   The v8 step backfills `records.ord` by rewriting the whole `records` table inside this
+   transaction, so size the maintenance window to the table.
    An advancing cutover refuses while the new runtime identity has any session or the database has
    any prepared transaction, so do not start new runtimes before the command commits. It also
    refuses while **any other client backend** (any role, including an unnamed LOGIN member of a
@@ -293,8 +295,9 @@ Legacy nonce/JTI rows have unknown owners and remain global replay exclusions. O
 sweeps leave them intact. Only after the recorded DB-time cutoff plus the 24-hour hold can an
 operator invoke `averin-migrate --purge-legacy` with the same role flags and migration credential.
 Do not reset that clock during later schema cutovers. If a later migration requires retiring
-writers, repeat its maintenance barrier; the v6 marker cannot authorize a new rollout. Migration
-`0007` is such a step: a database already at v6 needs the same retired-role barrier again.
+writers, repeat its maintenance barrier; the v6 marker cannot authorize a new rollout. Migrations
+`0007` and `0008` are such steps: a database already at v6 or v7 needs the same retired-role barrier again,
+and the ordinary server refuses to start on a database below the current schema version (8).
 
 For a dedicated old role, the administrative checks include:
 
@@ -420,8 +423,8 @@ time from a role-separated key:
 ## Running it
 
 ```bash
-# build the CLI once
-cargo build --release --bin averin-verify
+# build the CLI once (with rfc3161, or RFC 3161 anchors are reported as Unsupported)
+cargo build --release -p averin-decision-core --bin averin-verify --features rfc3161
 
 # internal consistency
 target/release/averin-verify bundle bundle.json
@@ -430,6 +433,6 @@ target/release/averin-verify bundle bundle.json
 target/release/averin-verify bundle bundle.json opts.json
 ```
 
-A non-zero exit = FAIL. The keys you pin here are the out-of-band trust root — distribute them through a
+Exit codes: `0` = PASS (claim satisfied, signing keys pinned out of band), `2` = CONSISTENT (satisfied only under the bundle's own keys, not authenticated; a usage error or unreadable file also exits `2`, with no `RESULT:` line), `1` = FAIL or INSUFFICIENT. Only `0` is an authenticated pass, so read the `RESULT:` line. The keys you pin here are the out-of-band trust root — distribute them through a
 channel independent of the server (the server can produce a bundle, but it can never make the verifier
 accept one its pinned keys don't authenticate).

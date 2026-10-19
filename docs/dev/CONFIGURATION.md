@@ -28,7 +28,7 @@ The ingestion + app API. Started with `./averin-server`.
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_SIGNING_SEED` (or `_FILE`) | — | **Yes** | 64 hex chars = 32-byte Ed25519 seed; the key all records/checkpoints are signed with. **Missing ⇒ fatal** (`log.Fatal`). Invalid (bad hex / wrong length) ⇒ fatal. Production backs signing with a KMS instead of a raw seed. |
+| `AVERIN_SIGNING_SEED` (or `_FILE`) | — | **Yes** | 64 hex chars = 32-byte Ed25519 seed; the key all records/checkpoints are signed with. **Missing ⇒ fatal** (`log.Fatal`). Invalid (bad hex / wrong length) ⇒ fatal. There is no KMS or HSM signer integration in this release: the server always signs with this raw seed, so protect it with your secrets store and file permissions. |
 | `AVERIN_SIGNING_KEY_ID` | `k0` | No | The `signing_key_id` stamped into each record's `key` block and the export key descriptor. |
 | `AVERIN_SIGNING_KEY_EPOCH` | `0` | No | The `key_epoch` stamped on new records and checkpoints; raise it with each rotation. Non-integer or negative ⇒ fatal. |
 | `AVERIN_RETIRED_SIGNING_KEYS_FILE` | unset | No | JSON array of retired recording keys `{signing_key_id, key_epoch, public_key, key_status: retired\|compromised, status_changed_at}`. Written by `averin-keyrotate`. Published in every export. An entry with no signed rotation statement, a duplicate of the current key, or a non-canonical time ⇒ fatal. |
@@ -47,8 +47,8 @@ The ingestion + app API. Started with `./averin-server`.
 | `AVERIN_WITNESS_DIR` | unset ⇒ no witness | No | Filesystem directory for a customer-controlled append-only checkpoint witness (`<dir>/<project>/checkpoint-<seq>.json`). Best-effort: a witness write failure is a warning, not fatal. Defends omission/rewrite (threats #1/#15). |
 | `AVERIN_TSA_PRESET` | unset ⇒ no anchoring | No | `freetsa` stamps at https://freetsa.org/tsr (free, no service level) and logs the signing key to pin. An unknown name is fatal; setting it together with `AVERIN_TSA_URL` is fatal. See [TIMESTAMPS.md](TIMESTAMPS.md). |
 | `AVERIN_TSA_AUTH_HEADER` | unset ⇒ none sent | No | The `Authorization` header value a paid TSA needs (for example `Basic ...`), sent with every stamp request to `AVERIN_TSA_URL` or the preset. Start-up is refused when it is set with a URL that is not https. |
-| `AVERIN_TSA_URL` | unset ⇒ no anchoring | No | URL of a third-party RFC 3161 timestamp authority. When set, sealed checkpoints are anchored with an RFC 3161 token (attached at export), defending backdating (threat #3). The verifier must pin this TSA's cert out-of-band (`tsa_keys` in `opts.json`) to trust the anchor. |
-| `AVERIN_ATTESTATION_SEED` (or `_FILE`) | unset ⇒ no deployment attestation | Yes | 64 hex chars = role-separated Ed25519 issuer seed. When set, exports carry a signed `deployment_attestation` bound to the latest checkpoint. This alone does not make `/v2/verify` attested; the verifier roots below must also be independently pinned. |
+| `AVERIN_TSA_URL` | unset ⇒ no anchoring | No | URL of a third-party RFC 3161 timestamp authority. When set, sealed checkpoints are anchored with an RFC 3161 token (attached at export), defending backdating (threat #3). The verifier must pin this TSA's signing-certificate public key out of band (`tsa_spki_b64` in `opts.json`, or `AVERIN_VERIFY_TSA_SPKI_B64` for `/v2/verify`) to trust the anchor; `tsa_keys` is only for the hermetic `test-anchor` scheme. See [TIMESTAMPS.md](TIMESTAMPS.md). |
+| `AVERIN_ATTESTATION_SEED` (or `_FILE`) | unset ⇒ no deployment attestation | No | 64 hex chars = role-separated Ed25519 issuer seed (a bad value is fatal, and a key equal to the signing, broker, resource or revocation key aborts startup). When set, exports carry a signed `deployment_attestation` bound to the latest checkpoint. This alone does not make `/v2/verify` attested; the verifier roots below must also be independently pinned. |
 | `AVERIN_VERIFY_ATTESTATION_PUBKEY` | unset ⇒ D7 unevaluated | No | Comma-separated `ed25519pub:` issuer keys pinned out of band by the operator/auditor. Must be configured together with `AVERIN_VERIFY_TSA_SPKI_B64`; partial configuration is fatal. |
 | `AVERIN_VERIFY_TSA_SPKI_B64` | unset ⇒ D7 unevaluated | No | Comma-separated base64url-no-pad DER SubjectPublicKeyInfo values from the chosen RFC 3161 TSA signing certificate. These public roots make the product-facing `/v2/verify` endpoint evaluate the timestamp and attestation instead of trusting producer-supplied cert material. |
 | `AVERIN_VERIFY_TAXONOMY_FILE` | unset ⇒ D4 absent | No | Path to the signed operation-taxonomy JSON artifact. Must be configured with the issuer key, digest, and version below; a partial tuple is fatal. |
@@ -187,7 +187,7 @@ The cut of checkpoint seq 100, 200, ... of each project, and the first increment
 process starts, are also computed in full and refused if they differ. There is no environment variable
 to turn this off. Alert on `averin_checkpoint_shadow_mismatch_total > 0`: a mismatch refuses that checkpoint
 (`POST /v2/checkpoints` returns 500, "the incremental cut disagrees with the full computation"), logs a line
-starting `ALERT`, and makes every later cut a checked cut until the process restarts. The refused seq is retried as
+starting `ALERT`, and makes every later cut a checked cut until the process restarts, except while a project waits out the backoff after a shadow that could not run (below): that project's incremental body is then signed unchecked. The refused seq is retried as
 the same seq and checked again, so a restart does not let it through.
 `averin_checkpoint_shadow_checks_total` counts the checks that ran.
 
@@ -250,8 +250,8 @@ sweeper and its own readiness probe, not a separate request-time claim path.
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
 | `AVERIN_REQUIRE_PROD_SECRETS` | **`1` (on)**, off in dev mode | No | **Fail-closed prod gate, on by default.** Refuses to start unless `AVERIN_API_KEYS` is set (else the app API would be refused or open), `AVERIN_DATABASE_URL` is set (else the store would be volatile in-memory, reopening a `/v2/use` replay window), and `AVERIN_SIGNING_SEED` is **not** the well-known committed dev seed (a globally-known, forgeable integrity root). Any of the three missing/failing is fatal (`log.Fatal`, names each missing one). The gate is turned off only by `AVERIN_DEV_MODE=1` (then `AVERIN_REQUIRE_PROD_SECRETS=0` is also accepted); `AVERIN_REQUIRE_PROD_SECRETS=0` outside dev mode is refused at startup. Mirrors govder's `GOVDER_REQUIRE_AUTHORITY_SEED` and leria's `LERIA_REQUIRE_PROD_SECRETS`. feir-os sets `1` explicitly. |
-| `AVERIN_SECRET_PATTERNS` | unset ⇒ built-in patterns only | No | JSON string array of extra RE2 regexes, atomically appended to the built-in credential-scrubbing rules (`server/internal/scrub`) that redact provider API keys, PEM private keys, JWTs, `Bearer`/`Basic` auth, generic `key: value` secrets, and high-entropy hex from captured I/O before it is stored or hashed. Each match is replaced with `[REDACTED:configured]`. **A malformed pattern (bad regex) is fatal at startup** — a typo must not silently create a secret-capture gap. Scrubbing is defense-in-depth (RE2 is linear-time / no ReDoS, but cannot catch every secret shape); the primary protection is that self-hosted data never leaves customer infra. |
-| `AVERIN_SHUTDOWN_TIMEOUT` | `25s` | No | Graceful-drain deadline on SIGINT/SIGTERM: `http.Server.Shutdown` lets in-flight requests (and, with `AVERIN_DATABASE_URL` set, the cross-request prepare→finalize window) finish before exit, then closes the store pool, all within this deadline. An unparseable or non-positive value logs a warning and keeps the default. **Must stay under the orchestrator's stop grace** (the shipped Kubernetes manifest sets `terminationGracePeriod=30s`; for docker-compose set `stop_grace_period >=` this) or the process is SIGKILLed mid-drain. `averin-proxy` reads the same variable with a different default (`60s`, below, it streams long completions and needs more room to drain). |
+| `AVERIN_SECRET_PATTERNS` | unset ⇒ built-in patterns only | No | JSON string array of extra RE2 regexes, atomically appended to the built-in credential-scrubbing rules (`server/internal/scrub`) that redact provider API keys, PEM private keys, JWTs, `Bearer`/`Basic` auth, generic `key: value` secrets, and high-entropy hex. In `averin-server` the scrubber runs only on the OTel ingest path (`POST /v2/otel/traces`), before the record is stored or hashed; records sent to `POST /v2/records` (the SDK and raw HTTP path) are not scrubbed. `averin-proxy` scrubs what it captures with the built-in rules only: it does not read this variable. Each match is replaced with `[REDACTED:configured]`. **A malformed pattern (bad regex) is fatal at startup** — a typo must not silently create a secret-capture gap. Scrubbing is defense-in-depth (RE2 is linear-time / no ReDoS, but cannot catch every secret shape); the primary protection is that self-hosted data never leaves customer infra. |
+| `AVERIN_SHUTDOWN_TIMEOUT` | `25s` | No | Graceful-drain deadline on SIGINT/SIGTERM: `http.Server.Shutdown` lets in-flight requests (and, with `AVERIN_DATABASE_URL` set, the cross-request prepare→finalize window) finish before exit, then closes the store pool, all within this deadline. An unparseable or non-positive value logs a warning and keeps the default. **Must stay under the orchestrator's stop grace** (no Kubernetes manifest ships with averin, so set `terminationGracePeriodSeconds` above this yourself; the shipped docker-compose file sets `stop_grace_period: 30s` for the server) or the process is SIGKILLed mid-drain. `averin-proxy` reads the same variable with a different default (`60s`, below, it streams long completions and needs more room to drain). |
 
 ### Storage and rate controls (quota, ingest limiter, denied-grant log)
 
@@ -268,11 +268,10 @@ Still operator work: a reverse-proxy or gateway rate limit in front of averin re
 against a leaked token, and database size and the quota rejection counter should be monitored. See
 [LIMITATIONS.md](LIMITATIONS.md).
 
-> Note on options not exposed as env vars in the binary: the server library
-> (`server/internal/api`) also supports `WithAttestation` (deployment-attestation export) and
+> Note: the server library options `WithAttestation` (deployment-attestation export) and
 > `WithCoverageManifest` (the operator-declared `side_effect_closure`, required for the
-> `attested_complete_over_brokered_surface` capstone). These are wired by embedders / the e2e
-> harness, not by an `averin-server` env var in the current `main.go`.
+> `attested_complete_over_brokered_surface` capstone) are both set by `averin-server` env vars,
+> `AVERIN_ATTESTATION_SEED` and `AVERIN_COVERAGE_MANIFEST` (see the storage table above).
 
 ---
 
@@ -371,7 +370,7 @@ printed `PASS (integrity only)` and exited `0`.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `AVERIN_DB_PASSWORD` | `averin` | Postgres password (and folded into the server's `AVERIN_DATABASE_URL`). |
+| `AVERIN_DB_SUPERUSER_PASSWORD`, `AVERIN_DB_OWNER_PASSWORD`, `AVERIN_DB_RUNTIME_PASSWORD` | **none, set all three** | Three Postgres passwords, passed to the `db` service as compose secrets: the bootstrap superuser (first-boot init only, never used by averin), `averin_owner` (the migration identity used by the one-shot `migrate` and `grants` services) and `averin_app` (the least-privilege runtime identity in the server's `AVERIN_DATABASE_URL`). Compose uses `:?` for the owner and runtime passwords, so `docker compose up` refuses to start without them. |
 | `AVERIN_SIGNING_SEED` | **none — required** | Server signing seed. Compose uses `${AVERIN_SIGNING_SEED:?...}`, so `docker compose up` refuses to start without it; generate a fresh one with `openssl rand -hex 32`. |
 | `AVERIN_API_KEYS` | **none, required** | The server's project API keys (compose uses `${AVERIN_API_KEYS:?...}`); the server refuses to start without them. |
 | `AVERIN_PROXY_AVERIN_TOKEN` | **none, required** | The write (or admin) token for `AVERIN_PROJECT_ID` that the proxy records with. Must be one of the tokens in `AVERIN_API_KEYS`. |

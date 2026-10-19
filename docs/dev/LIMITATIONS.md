@@ -406,7 +406,7 @@ never reported.
 - **The count is a floor.** An attempt with no authenticated agent is not recorded, and a producer crash can
   lose its pending window. A producer may coalesce repeats into one record with an `attempts` count, or merge
   a storm into a per-class summary; whether and how a given producer does so is that producer's behaviour
-  (vultrino's is not shipped yet), and averin only counts what is sealed. The count is a lower bound, never
+  (vultrino, when its default-off `[averin]` seal client is enabled, coalesces repeats per window and merges refusals past its record budget into a per-class summary; see vultrino's configuration docs), and averin only counts what is sealed. The count is a lower bound, never
   an exact total of refusals.
 - **A prior submission can suppress a refusal.** A replay is keyed on the caller's `idempotency_key`
   (stored as `refusal:<key>`), not on the record id, whose salt does not hide it from a caller who can

@@ -19,10 +19,15 @@ add `Authorization: Bearer <api-key>`, submit, and return the sealed record.
 ```python
 from averin import Client
 
-c = Client("http://localhost:8080", "demo", api_key=None)   # api_key is required unless the server runs in AVERIN_DEV_MODE with no keys
+c = Client("http://localhost:8080", "demo", api_key=None)   # as written, works only against an AVERIN_DEV_MODE server with no keys (see below)
 sealed = c.record("sess-1", "search", event_type="tool_call", inp="summarize the contract")
 print(sealed["record_id"], sealed["content_hash"])
 ```
+
+**Keyed servers.** Both SDKs post to `<base_url>/v2/records` without the `?project=<id>` query parameter
+that a server with `AVERIN_API_KEYS` reads the project from, so against such a server an SDK call is
+refused with `401` even when `api_key` is set. Pass a custom `transport` that appends
+`?project=<project_id>` to the URL, or call `POST /v2/records?project=<id>` directly.
 
 `Client(base_url, project_id, *, api_key=None, transport=None)`. `record(session_id, action, *,
 idempotency_key=None, **kwargs)` builds + submits in one call; `submit(record_body, *,
@@ -92,7 +97,10 @@ For the `opts.json` role-key reference, see [`../operator-verification.md`](../o
 If you run your own policy engine or human-approval service, you can get records elevated past the
 forgeable `caller_declared`:
 
-1. Have that service sign the authority evidence triple with its own key (off the averin server).
+1. Have that service sign a body-bound v3 authority proof over the final record with its own key (off the
+   averin server); see "Body-bound authority proofs (v3)" at the end of this page. Outside
+   `AVERIN_DEV_MODE` an elevated claim carrying only the older v2 evidence triple is refused with a
+   `400` unless `AVERIN_REQUIRE_BODY_BOUND_AUTHORITY=0`.
 2. Pin its public key on the server: `AVERIN_POLICY_ENGINE_PUBKEY` (source `policy_engine_signed`),
    `AVERIN_HUMAN_SIGNED_PUBKEY` (source `human_signed`), and/or `AVERIN_DELEGATE_SIGNED_PUBKEY`
    (source `delegate_signed`). If the signing key differs **per averin project** (it does for govder,
@@ -102,7 +110,8 @@ forgeable `caller_declared`:
    ingest; an auditor pinning the same keys reads them as `verified`.
 4. **A claim that does not verify is rejected, not downgraded.** By default
    (`AVERIN_REQUIRE_PINNED_AUTHORITY`, now `1`) a record claiming an elevated source averin cannot
-   verify for its project gets a retryable `500` and is not sealed at all. Align the pins **before**
+   verify for its project gets a retryable `500` and is not sealed at all (a v2 claim refused by the
+   default body-bound policy gets a `400` before any key check). Align the pins **before**
    pointing a signing producer at averin, or the producer's seals will fail loudly.
 
 The credential broker (`POST /v2/grants`) + resource gateway (`POST /v2/use`) are also fully usable
@@ -172,13 +181,13 @@ at ingest rather than being rejected (or, under the fail-open opt-out, normalizi
 Cross-plane integration tests exercising this wiring live in the FeirOS repositories, not in this
 repo; that harness is a **single-tenant** wiring, so it exercises the global-pin form only.
 
-### vultrino (ENFORCE) ↔ averin  *(design note, not yet wired)*
+### vultrino (ENFORCE) ↔ averin  *(optional producer in vultrino, default off)*
 
-[`../vultrino-integration.md`](../vultrino-integration.md) specifies how vultrino (the enforcement
-plane) would seal an offline-verifiable proof of every gated action into averin — using the same
-`POST /v2/records` + broker/resource contracts above. It is explicitly a **design note**: no code in
-the averin tree depends on it. Treat it as the map a future wiring commit follows, not a shipped
-feature.
+vultrino's repository has an optional averin seal client (default off, described there as a spike
+behind a flag) that posts to the broker, resource and refusal routes above (`/v2/grants`, `/v2/use`,
+`/v2/use-intent`, `/v2/use-outcome`, `/v2/refusals`). [`../vultrino-integration.md`](../vultrino-integration.md)
+is the original **design note** for that composition and is partly out of date. No code in the averin
+tree depends on vultrino.
 # Body-bound authority proofs (v3)
 
 An external policy, human, or delegate authority signs the **final semantic
@@ -196,5 +205,7 @@ sealing, after stamping receipt, display sequence, DAG parents and recording
 key. A malformed or incomplete v3 claim is rejected without falling back to
 v2. Valid historical v2 proofs remain visible as `legacy_unbound` and retain
 their old key and embedded-evidence checks, but cannot satisfy a body-bound
-authorization claim. Enable `AVERIN_REQUIRE_BODY_BOUND_AUTHORITY=1` after
-external producers are updated to reject new v2 elevated ingest.
+authorization claim. `AVERIN_REQUIRE_BODY_BOUND_AUTHORITY` is on by
+default outside `AVERIN_DEV_MODE`, so new generic ingest already refuses (`400`) an elevated external
+claim that is not v3. An explicit `0` is a logged migration opt-out for a producer that still signs v2;
+update such producers to v3 and remove the opt-out.

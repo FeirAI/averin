@@ -38,8 +38,9 @@ what truly happened in the world.
   (and, where the migration forbids it, `INSERT`) on any append-only table, directly or through a role
   it inherits. Ordinary startup also refuses to bootstrap an empty database (the runtime would own it):
   initialize once with `averin-migrate --init` under the migration credential. A single-credential
-  self-host that connects as the table owner (the `deploy/docker-compose.yml` default) therefore does
-  not start against Postgres; see [CONFIGURATION.md](CONFIGURATION.md) for the role split.
+  self-host that connects as the table owner therefore does not start against Postgres. The shipped
+  `deploy/docker-compose.yml` already uses the split (`averin_owner` for migration, a separate
+  least-privilege `averin_app` runtime role); see [CONFIGURATION.md](CONFIGURATION.md) for the role split.
 - **No DAG fork / no checkpoint fork.** The checkpoint chain rejects seq gaps, two checkpoints
   sharing a seq or prev (threat #2), a decreasing record_count, and a latest frontier that doesn't
   equal the actual heads.
