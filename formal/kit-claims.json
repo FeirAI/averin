@@ -816,6 +816,10 @@
     "gateway-refusal-report-omits-attempts": {
       "tier": "fast",
       "claim": "cross-impl-refusal-vector"
+    },
+    "gateway-refusal-kind-filter-ignored-on-incremental-read": {
+      "tier": "full",
+      "claim": "gateway-refusal-endpoint-closed"
     }
   },
   "claims": [
@@ -2844,7 +2848,7 @@
     {
       "id": "gateway-refusal-endpoint-closed",
       "$comment": "legacy register: gateway-refusal-endpoint-closed",
-      "statement": "POST /v2/refusals builds the record itself from a closed body: an unknown field (params, a free-text reason), an unknown reason class or entry point, a zero attempts count, a last_at in the future, a first_at after last_at, an agent_id outside the plain-identifier pattern, a summary whose by_class does not sum to attempts, and a by_class on a non-summary record are all a 400 and seal nothing. An unsafe action name is stored as the literal invalid_name. A replay of the same idempotency key returns the same record. GET /v2/records filters by record_kind and exclude_record_kind, rejects an unknown kind, and pages over the matching records.",
+      "statement": "POST /v2/refusals builds the record itself from a closed body: an unknown field (params, a free-text reason), an unknown reason class or entry point, a zero attempts count, a last_at in the future, a first_at after last_at, an agent_id outside the plain-identifier pattern, a summary whose by_class does not sum to attempts, and a by_class on a non-summary record are all a 400 and seal nothing. An unsafe action name is stored as the literal invalid_name. A replay of the same idempotency key returns the same record. GET /v2/records filters by record_kind and exclude_record_kind, rejects an unknown kind, and pages over the matching records; an incremental read (the contiguous, ordinal-checked mode) refuses either filter with a 400 instead of ignoring it.",
       "method": "test",
       "artifacts": [
         "server/internal/api/refusals.go",
@@ -2854,7 +2858,7 @@
       "gates": [
         "server"
       ],
-      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestRefusalSealsChainsAndVerifies|TestRefusalIsIdempotentPerKey|TestRefusalRequestIsClosed|TestRefusalSanitizesAgentSuppliedNamesAndSealsSummary|TestListRecordsKindFilter|TestRefusalVocabularyMatchesSpec'",
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestRefusalSealsChainsAndVerifies|TestRefusalIsIdempotentPerKey|TestRefusalRequestIsClosed|TestRefusalSanitizesAgentSuppliedNamesAndSealsSummary|TestListRecordsKindFilter|TestRefusalVocabularyMatchesSpec|TestIncrementalReadRefusesAKindFilter'",
       "covers": [
         {
           "path": "server/internal/api/refusals.go",
@@ -2874,14 +2878,15 @@
         {
           "path": "server/internal/api/server.go",
           "symbol": "handleListRecords",
-          "sha256": "d6cf0ed4bc1132236c2cdc134eb85bf975c455872e17eeb7e4ccbf75e553c508"
+          "sha256": "5b160fba3c9ceb592fa6633977c1dc14811e515ff9aafb33dc52e8de6741f496"
         }
       ],
       "mutants": [
         "gateway-refusal-endpoint-accepts-unknown-fields",
         "gateway-refusal-endpoint-keeps-free-text-names",
         "gateway-refusal-endpoint-allows-future-time",
-        "gateway-refusal-list-exclude-filter-inverted"
+        "gateway-refusal-list-exclude-filter-inverted",
+        "gateway-refusal-kind-filter-ignored-on-incremental-read"
       ],
       "does_not_establish": "Rate limiting of refusal submissions (AVERIN_INGEST_BUDGET and the producer's own budget bound volume). That the in-memory store and Postgres return the same filtered page: the filter tests run on the in-memory store. That a name inside the allowed pattern is harmless to a reader: it is still agent-supplied. Behaviour under concurrent replicas that each hold their own id salt (a replay is answered from the stored idempotency key, not from the id)."
     },

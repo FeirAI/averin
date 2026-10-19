@@ -456,3 +456,17 @@ func checkSnapshotUnderCut(t *testing.T, mk func(t *testing.T) store.Store) {
 func TestIncrementalReadSnapshotHoldsUnderConcurrentCut(t *testing.T) {
 	checkSnapshotUnderCut(t, func(*testing.T) store.Store { return store.NewMem() })
 }
+
+// An incremental read is a contiguous page of every record, so a record_kind or exclude_record_kind
+// filter (feir-ops#1) cannot be honoured there: the combination is refused, never silently ignored.
+func TestIncrementalReadRefusesAKindFilter(t *testing.T) {
+	st := store.NewMem()
+	h := newCutHistory(t, st, "p", 4)
+	h.plain()
+	for _, kv := range [][2]string{{"record_kind", "refusal"}, {"exclude_record_kind", "refusal"}, {"record_kind", "no-such-kind"}} {
+		code, body := do(t, cutServer(t, st, "").Routes(), "GET", "/v2/records?"+irQuery(0, 10, kv[0], kv[1]).Encode(), "")
+		if code != http.StatusBadRequest || !strings.Contains(body, "cannot be combined with an incremental read") {
+			t.Fatalf("%s=%s with an incremental read: want 400 naming the conflict, got %d (%s)", kv[0], kv[1], code, body)
+		}
+	}
+}
