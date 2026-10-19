@@ -51,8 +51,9 @@ What it does not do:
   stays: a wall clock stepped back, or two replicas whose transactions committed in the opposite order to their
   start times, before the migration can still leave a checkpoint cut between such records, which makes that month
   and the next unverifiable. That fails closed (the months do not verify), it never verifies a wrong set. The
-  heads (frontier) query still reads the whole project: the ordinal gives `ProjectHeadsSince`, which computes
-  the frontier from a base frontier and the records after it, but the checkpoint cut does not use it yet.
+  heads (frontier) query `ProjectHeads` still reads the whole project; the checkpoint cut no longer calls it
+  (see "Checkpoint cut is incremental, with a sampled shadow check" below), but the first cut of a project and
+  the cut's fallback still do.
   Separately, the server refuses to plan months (409) for a project whose checkpoint `created_ts` months go
   backwards, for example after a clock step at a month boundary. The month export is covered on real Postgres
   in CI. The in-memory store numbers records by their position in its insertion-ordered list.
@@ -86,6 +87,31 @@ accumulators** that would let a bundle start from a pinned checkpoint and prove 
 `RecordCount`, so a list call no longer materializes the whole history in memory the way the prior
 `AllRecords`-then-slice did. `limit` defaults to 100 (capped at 1000); `offset` (default 0) pages
 deeper. This is the paged read path; the export/verify bound above is separate.
+
+## Checkpoint cut is incremental, with a sampled shadow check
+
+A checkpoint is cut from the latest checkpoint plus the records after it: the new frontier, the record count
+and the grant-transparency head are derived from the previous checkpoint's signed values and only the new
+records, so the work and the rows read per cut do not grow with the project's history (the argument that this
+equals the full computation is a comment on `cutBodyIncremental`). The full computation (all records,
+all grants, all checkpoints) is still used for a project's first checkpoint, for a latest checkpoint that has no
+grant head (written before the D6 head), for a federated broker with no entry in the latest checkpoint yet, and
+when the stored checkpoint count disagrees with the latest sequence number.
+
+What this does not give:
+
+- **The incremental cut trusts the latest stored checkpoint** as the base. It is signed, but the cut does not
+  re-verify the signature or the chain below it. A latest checkpoint that was corrupted in the store (not by the
+  signing key) is carried forward by every unshadowed cut.
+- **The check against the full computation is sampled.** One incremental cut in 100 (`averin_checkpoint_shadow_checks_total`)
+  also computes the full body and refuses to sign unless it is byte-identical. A divergence on an unshadowed
+  cut is signed, because checkpoints are append-only; the next shadowed cut, or the offline verifier, finds it.
+  After one mismatch (`averin_checkpoint_shadow_mismatch_total`, a log line starting `ALERT`) every cut is checked
+  until the process restarts. The shadow computation is O(history) and runs inside the project write
+  transaction, so one cut in 100 takes as long as every cut did before.
+- A cut refuses (as the full computation does) when the new grants do not carry exactly the next `broker_seq`
+  values, and when the store's record count is not the base count plus the records after it.
+- `ProjectHeads` (the full anti-join) is unchanged and still O(history); only the cut stopped using it.
 
 ## Checkpoint grant-head read is filtered, not indexed
 

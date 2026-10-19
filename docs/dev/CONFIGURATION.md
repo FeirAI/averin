@@ -180,6 +180,15 @@ Whether or not the fail-closed toggle is on, a **failed** elevation increments
 `averin_authority_downgrades_total` and emits a rate-limited `WARNING` naming the claimed source and
 the pinned-key id — so a govder/averin key misalignment is visible in both metrics and logs.
 
+### Checkpoint cut shadow check (no setting)
+
+Checkpoints are cut incrementally (see LIMITATIONS, "Checkpoint cut is incremental, with a sampled shadow check").
+One incremental cut in 100 is also computed in full and refused if it differs. There is no environment variable
+to turn this off. Alert on `averin_checkpoint_shadow_mismatch_total > 0`: a mismatch refuses that checkpoint
+(`POST /v2/checkpoints` returns 500, "the incremental cut disagrees with the full computation"), logs a line
+starting `ALERT`, and makes every later cut a checked cut until the process restarts.
+`averin_checkpoint_shadow_checks_total` counts the checks that ran.
+
 ### Credential broker (Level 3 Tier-A — `POST /v2/grants`)
 
 | Variable | Default | Required | Behavior |
