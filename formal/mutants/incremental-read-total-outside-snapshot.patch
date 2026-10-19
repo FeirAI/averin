@@ -1,0 +1,12 @@
+diff --git a/server/internal/api/incremental_read.go b/server/internal/api/incremental_read.go
+--- a/server/internal/api/incremental_read.go
++++ b/server/internal/api/incremental_read.go
+@@ -87,7 +87,7 @@ func (s *Server) handleIncrementalRead(w http.ResponseWriter, r *http.Request, p
+ 	)
+ 	err := s.st.WithProjectRead(r.Context(), projectID, func(st store.Store) error {
+ 		var e error
+-		if total, e = st.RecordCount(projectID); e != nil {
++		if total, e = s.st.RecordCount(projectID); e != nil {
+ 			return e
+ 		}
+ 		if page, e = st.RecordsAfter(projectID, p.after, p.limit); e != nil {

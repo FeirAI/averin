@@ -1,5 +1,4 @@
 diff --git a/server/internal/api/incremental_read.go b/server/internal/api/incremental_read.go
-index df4fdd2..03bff76 100644
 --- a/server/internal/api/incremental_read.go
 +++ b/server/internal/api/incremental_read.go
 @@ -127,7 +127,7 @@ func (s *Server) handleIncrementalRead(w http.ResponseWriter, r *http.Request, p
@@ -8,6 +7,6 @@ index df4fdd2..03bff76 100644
  	// ahead of the store (a truncation it reads from total), not a gap.
 -	if err := ordinalGap(p.after, page, total, p.limit); err != nil {
 +	if err := ordinalGap(p.after, page, total, p.limit); err != nil && false {
- 		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("record ordinal gap at %d", gap))
+ 		writeErr(w, http.StatusInternalServerError, err.Error())
  		return
  	}

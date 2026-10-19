@@ -713,6 +713,14 @@
       "tier": "full",
       "claim": "incremental-read-continuity-snapshot"
     },
+    "incremental-read-short-page-end-not-checked": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-total-outside-snapshot": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
     "checkpoint-cut-shadow-cannot-run-refuses": {
       "tier": "full",
       "claim": "checkpoint-cut-incremental-equals-full"
@@ -2656,7 +2664,12 @@
         {
           "path": "server/internal/api/incremental_read.go",
           "symbol": "handleIncrementalRead",
-          "sha256": "6f89e7830a18866c1ecb2fc743eaa8ba78d789db5ec0a5d3a41a17937afac3b0"
+          "sha256": "350293f388103b60475d98362c5e5c47abeef5092e0779577e53149ef2f53f47"
+        },
+        {
+          "path": "server/internal/api/incremental_read.go",
+          "symbol": "ordinalGap",
+          "sha256": "2c40238ca7f458c4662e2471b958ff655d300e35ea00dff4d7ecd839db8114d7"
         }
       ],
       "mutants": [
@@ -2669,7 +2682,9 @@
         "incremental-read-store-error-served-as-empty",
         "incremental-read-limit-uncapped",
         "incremental-read-ordinal-gap-not-checked",
-        "incremental-read-latest-outside-snapshot"
+        "incremental-read-latest-outside-snapshot",
+        "incremental-read-short-page-end-not-checked",
+        "incremental-read-total-outside-snapshot"
       ],
       "does_not_establish": "That the records served are authentic: the read verifies nothing, so what a reader holds afterwards is a read frontier bound to a signed checkpoint that it can compare on the next read, not a verified one. That a reader detects an in-place rewrite below its frontier: that is the reader's rolling re-read, not this endpoint. That the snapshot is consistent across pages: each page is its own snapshot, so a reader must check the continuity fields (the checkpoint at its frontier seq, the latest seq, record counts and total) on every page. That the Postgres read uses the ordinal index in every plan: the Postgres cost test counts rows, and runs only in the Postgres CI job."
     }
