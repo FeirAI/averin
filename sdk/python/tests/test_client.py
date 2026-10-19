@@ -85,7 +85,7 @@ def test_client_submits_with_idempotency_and_returns_record():
     c = averin.Client("http://localhost:8080/", "p1", transport=transport)
     out = c.record("s1", "db.query", idempotency_key="fixed-key", rationale="why")
 
-    assert captured["url"] == "http://localhost:8080/v2/records"
+    assert captured["url"] == "http://localhost:8080/v2/records?project=p1"
     assert captured["headers"]["Idempotency-Key"] == "fixed-key"
     assert captured["body"]["idempotency_key"] == "fixed-key"
     assert captured["body"]["project_id"] == "p1"
@@ -118,3 +118,19 @@ def test_auto_idempotency_key_is_unique():
     c.record("s1", "a")
     c.record("s1", "a")
     assert len(keys) == 2
+
+
+def test_project_query_is_url_encoded_and_auth_header_kept():
+    captured = {}
+
+    def transport(url, headers, body):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["body"] = json.loads(body)
+        return json.dumps({"results": [{"record": {}}]})
+
+    c = averin.Client("http://x", "team a/1", api_key="k1", transport=transport)
+    c.record("s1", "act")
+    assert captured["url"] == "http://x/v2/records?project=team%20a%2F1"
+    assert captured["body"]["project_id"] == "team a/1"
+    assert captured["headers"]["Authorization"] == "Bearer k1"

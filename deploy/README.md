@@ -205,5 +205,7 @@ building a Merkle revocation root or a cross-broker cert.
 - **MCP server** (`averin-mcp`): exposes `record_decision`, `get_session_trace`, `verify_record`,
   `request_export` over stdio. `AVERIN_SERVER_URL=http://localhost:8080 AVERIN_API_TOKEN=<token> averin-mcp`.
   A server with `AVERIN_API_KEYS` set (required unless `AVERIN_DEV_MODE=1`) refuses requests without
-  the token (sent as a Bearer token). `record_decision` posts without the `?project=` query parameter,
-  so such a server refuses it even with a valid token; it works only against a server with no keys.
+  the token (sent as a Bearer token). The tools send `?project=<project_id>`, so the token must hold
+  the role each call needs for that project: write for `record_decision`, read for `get_session_trace`
+  and `verify_record`. `request_export` only returns an export URL, which the caller fetches with a
+  read token.

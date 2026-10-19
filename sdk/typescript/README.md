@@ -9,8 +9,8 @@ server semantic defaults and FEIR lineage before approval. Submission adds only 
 idempotency key outside the signed subject. The server checks the proof against the record it
 seals; the SDK does not sign an opaque digest.
 
-`new Client(baseUrl, projectId, { apiKey })` sends the key as an `Authorization: Bearer` header,
-but posts to `/v2/records` without the `?project=` query parameter that the server's project-key
-check reads. A server with `AVERIN_API_KEYS` set (required unless `AVERIN_DEV_MODE=1`) therefore
-refuses the request with `401`, which the built-in transport raises as an `AverinError`. Supply a
-`transport` that adds `?project=<projectId>` to the URL, or use a development-mode server with no keys.
+`new Client(baseUrl, projectId, { apiKey })` sends the key as an `Authorization: Bearer` header and
+posts to `/v2/records?project=<projectId>` (URL-encoded, equal to the record's `project_id`), which is
+where the server's project-key check reads the project. A server with `AVERIN_API_KEYS` set (required
+unless `AVERIN_DEV_MODE=1`) accepts a token with the write role for that project and refuses any other
+with `401`, which the built-in transport raises as an `AverinError`. A custom `transport` receives that URL.
