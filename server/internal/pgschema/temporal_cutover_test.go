@@ -76,7 +76,7 @@ func TestTemporalRevocationCutoverFromV6(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Migrate(ctx, scoped); err == nil || !strings.Contains(err.Error(), "maintenance cutover to v7") {
+	if err := Migrate(ctx, scoped); err == nil || !strings.Contains(err.Error(), "maintenance cutover to v8") {
 		t.Fatalf("ordinary startup advanced a v6 schema without a barrier: %v", err)
 	}
 	if maxVersion(t, admin) != 6 {
@@ -128,7 +128,7 @@ func TestTemporalRevocationCutoverFromV6(t *testing.T) {
 	if err := cutover(t, scoped, []string{live}, next); err != nil {
 		t.Fatalf("authorized v7 cutover: %v", err)
 	}
-	if maxVersion(t, admin) != 7 || regExists(t, admin, "revocations") {
+	if maxVersion(t, admin) != CurrentSchemaVersion || regExists(t, admin, "revocations") {
 		t.Fatal("v7 cutover did not advance or left the boolean relation writable by name")
 	}
 
