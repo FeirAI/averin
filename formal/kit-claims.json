@@ -2454,6 +2454,7 @@
       "evidence_run": "38718313766"
     },
     {
+      "$comment": "legacy register: project-record-quota",
       "id": "cgo-bundle-verify-heap-trim",
       "statement": "After each full-bundle verification through cgo (Core.VerifyBundle and Core.VerifyBundleWith, which VerifyBundleWithAuthority and VerifyBundleWithRoles call), the server asks glibc to return freed C-heap pages to the OS with malloc_trim(0), once per verification and after the bundle copy and the Rust result are freed; on a build whose C library is not glibc the call is a no-op. A server test seals 1000 generic records over 12 sessions with 10 checkpoints, verifies the resulting bundle once on each of 8 distinct locked OS threads and requires resident memory to grow by less than 32 MB (without the trim the same test grows about 50 MB); it skips with a message where the trim is not supported.",
       "method": "test",
