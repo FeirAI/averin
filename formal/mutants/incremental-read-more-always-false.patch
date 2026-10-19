@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/incremental_read.go b/server/internal/api/incremental_read.go
+index 2ccf624..a75fd0d 100644
+--- a/server/internal/api/incremental_read.go
++++ b/server/internal/api/incremental_read.go
+@@ -132,7 +132,7 @@ func (s *Server) handleIncrementalRead(w http.ResponseWriter, r *http.Request, p
+ 		"total":      total,
+ 		"after":      p.after,
+ 		"next_after": next,
+-		"more":       next < int64(total),
++		"more":       false,
+ 	}
+ 	if latest != nil {
+ 		resp["latest_checkpoint"] = latest

@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/incremental_read.go b/server/internal/api/incremental_read.go
+index 2ccf624..aa2da3a 100644
+--- a/server/internal/api/incremental_read.go
++++ b/server/internal/api/incremental_read.go
+@@ -44,7 +44,7 @@ func parseIncrementalRead(q url.Values) (p incrementalReadParams, incremental bo
+ 		if e != nil || n < 1 {
+ 			return p, true, fmt.Errorf("limit must be a positive integer")
+ 		}
+-		p.limit = min(n, 1000)
++		p.limit = n
+ 	}
+ 	if q.Has("at_seq") {
+ 		p.atSeq, err = strconv.ParseInt(q.Get("at_seq"), 10, 64)

@@ -1998,6 +1998,65 @@
       "gates": [
         "server"
       ]
+    },
+    {
+      "id": "incremental-read-continuity-snapshot",
+      "claim": "GET /v2/records with after and order=asc serves the records after an insertion ordinal oldest first (at most 1000 per page) together, from one repeatable-read snapshot, with the store total, the latest checkpoint (seq, hash, record_count) and, on request, the checkpoint at a given seq (absent when there is none). A store error or an unreadable checkpoint count is a 500, a malformed request a 400, and the rows read are the page plus two checkpoint rows at any history size. Not that the records are authentic (nothing is verified and no bundle is built: a reader holds a read frontier bound to a signed checkpoint, not a verified one), that a rewrite below a reader's frontier is detected by this endpoint (the reader's own rolling re-read does that), that separate pages share a snapshot (a reader checks the continuity fields on every page), or that the Postgres plan uses the ordinal index in every case (the Postgres test counts rows and runs in the Postgres CI job).",
+      "class": "tested-implementation",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "records are numbered in insertion order under the project write transaction",
+        "a checkpoint's record_count is the number of records it covers"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/incremental_read.go",
+          "symbol": "parseIncrementalRead"
+        },
+        {
+          "file": "server/internal/api/incremental_read.go",
+          "symbol": "toReadCheckpoint"
+        },
+        {
+          "file": "server/internal/api/incremental_read.go",
+          "symbol": "handleIncrementalRead"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/incremental_read_test.go",
+          "symbol": "TestIncrementalReadSnapshotAgreesWithStore"
+        },
+        {
+          "file": "server/internal/api/incremental_read_test.go",
+          "symbol": "TestIncrementalReadPagesConcatenate"
+        },
+        {
+          "file": "server/internal/api/incremental_read_test.go",
+          "symbol": "TestIncrementalReadRejectsBadParameters"
+        },
+        {
+          "file": "server/internal/api/incremental_read_test.go",
+          "symbol": "TestIncrementalReadCostIsConstantInHistory"
+        },
+        {
+          "file": "server/internal/api/incremental_read_test.go",
+          "symbol": "TestIncrementalReadCapsLimit"
+        },
+        {
+          "file": "server/internal/api/incremental_read_test.go",
+          "symbol": "TestIncrementalReadFailsClosed"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_pg_test.go",
+          "symbol": "TestIncrementalReadCostIsConstantInHistoryPostgres"
+        }
+      ],
+      "gates": [
+        "server"
+      ]
     }
   ]
 }
