@@ -1,13 +1,13 @@
 diff --git a/server/internal/api/segments.go b/server/internal/api/segments.go
-index c57203d..eca2b35 100644
+index fcb144d..bc92808 100644
 --- a/server/internal/api/segments.go
 +++ b/server/internal/api/segments.go
-@@ -122,7 +122,7 @@ func segmentRecords(st store.Store, projectID string, p segmentPlan) ([]store.Re
- 	if err != nil {
- 		return nil, err
- 	}
+@@ -119,7 +119,7 @@ func segmentBlock(p segmentPlan) map[string]any {
+ // ordinal: the n records after ordinal From, one index range read whose cost is the month's size and does not
+ // depend on how much history lies after it.
+ func segmentRecords(st store.Store, projectID string, p segmentPlan) ([]store.Record, error) {
 -	n := int(p.To - p.From)
 +	n := int(p.To-p.From) - 1
- 	off := total - int(p.To)
- 	if n < 0 || off < 0 {
- 		return nil, fmt.Errorf("segment %s: checkpoint record counts exceed the %d stored records", p.Month, total)
+ 	if n < 0 {
+ 		return nil, fmt.Errorf("segment %s: checkpoint record counts run backwards (%d to %d)", p.Month, p.From, p.To)
+ 	}

@@ -53,7 +53,7 @@ import (
 
 // CurrentSchemaVersion is the schema version this binary understands. A stored version above this is a
 // fail-closed refusal to open; a stored version below it is migrated forward, step by step, to this.
-const CurrentSchemaVersion = 7
+const CurrentSchemaVersion = 8
 
 // LegacyExclusionFloor is stamped using the database clock by migration 0006.
 // It must exceed every capability accepted by the new resource shim.
@@ -86,6 +86,8 @@ var baselineV1 = migrations.Schema + "\n" + pgledger.SchemaSQL + "\n" + pgdurabl
 //   - v7 (migrations.TemporalRevocation): the per-project authorization order on the project guard,
 //     immutable revocation events (pre-v7 revocations become total) and the receipt-ordinal backstop.
 //     It needs its own validated writer barrier even after a v6 cutover (plan 009).
+//   - v8 (migrations.RecordOrdinal): records.ord, the gapless per-project insertion ordinal, backfilled in
+//     (inserted_at, ctid) order, so counts, the newest record and "records after N" are index reads.
 var steps = []string{
 	baselineV1,
 	migrations.RecordIDUnique,
@@ -94,6 +96,7 @@ var steps = []string{
 	migrations.BrokerSeqRecovery,
 	migrations.TenantNonceLedger,
 	migrations.TemporalRevocation,
+	migrations.RecordOrdinal,
 }
 
 // Migrate brings the averin Postgres DB at dsn up to CurrentSchemaVersion under a single advisory lock,
@@ -120,7 +123,7 @@ func MigrateForRuntime(ctx context.Context, dsn string) error {
 }
 
 // Cutover applies an existing database's forward transitions (v6 nonce ledger,
-// v7 temporal revocation) only after the operator has retired every explicitly
+// v7 temporal revocation, v8 record ordinal) only after the operator has retired every explicitly
 // named old runtime identity. The barrier is re-validated for every advancing
 // run, even when an earlier version was already cut over. It never manages
 // roles or sessions itself; failed barriers leave the schema unchanged.

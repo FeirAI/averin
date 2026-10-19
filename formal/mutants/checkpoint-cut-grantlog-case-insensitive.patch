@@ -1,0 +1,15 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -3826,6 +3826,11 @@
+ 			return nil
+ 		}
+ 		v = m[k]
++		for mk, mv := range m {
++			if strings.EqualFold(mk, k) {
++				v = mv
++			}
++		}
+ 	}
+ 	return v
+ }

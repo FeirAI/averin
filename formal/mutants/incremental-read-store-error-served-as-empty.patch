@@ -1,0 +1,15 @@
+diff --git a/server/internal/api/incremental_read.go b/server/internal/api/incremental_read.go
+index 2ccf624..1106c93 100644
+--- a/server/internal/api/incremental_read.go
++++ b/server/internal/api/incremental_read.go
+@@ -90,9 +90,7 @@ func (s *Server) handleIncrementalRead(w http.ResponseWriter, r *http.Request, p
+ 		if total, e = st.RecordCount(projectID); e != nil {
+ 			return e
+ 		}
+-		if page, e = st.RecordsAfter(projectID, p.after, p.limit); e != nil {
+-			return e
+-		}
++		page, _ = st.RecordsAfter(projectID, p.after, p.limit)
+ 		cp, ok, e := st.LatestCheckpoint(projectID)
+ 		if e != nil {
+ 			return e

@@ -40,14 +40,23 @@ What it does not do:
   and reports the hashes (`earlier_parent_ref_hashes`); `averin-verify chain` over every month catches the swap. A
   month with no such parents is exact. A signed per-checkpoint delta commitment would close this for a single
   month; it is not built.
-- **A month's record range is read by position.** On Postgres the order is `(inserted_at, ctid)` and the checkpoint
-  `record_count` is a position in it. Two things can break it: a wall clock stepped back, and two server replicas
-  whose transactions commit in the opposite order to their start times (`inserted_at` is the transaction start). A
-  checkpoint cut between such records makes that month and the next unverifiable. Both fail closed (the months do
-  not verify), they never verify a wrong set. A monotonic per-project insertion sequence would remove it and needs
-  a schema change; it is not built. Separately, the server refuses to plan months (409) for a project whose
-  checkpoint `created_ts` months go backwards, for example after a clock step at a month boundary. The month
-  export is covered on real Postgres in CI.
+- **A month's record range is read by position, and the position is a per-project insertion ordinal only from
+  schema version 8.** Each Postgres record carries `records.ord`, 1, 2, 3, ... per project in insertion order
+  (migration 0008), assigned while the writer holds the project's write-guard row lock, so two replicas cannot
+  commit in an order that differs from their ordinals and a wall clock step cannot reorder them. A checkpoint's
+  `record_count` is a position in that order, a month's range and "the records after checkpoint N" are index
+  range reads, and the record count and the newest record are one index entry each, whatever the history. Records
+  that were stored before the migration were numbered by it in `(inserted_at, ctid)` order, the order they had
+  been read in until then and the one every earlier checkpoint was cut against, so for those rows the old hazard
+  stays: a wall clock stepped back, or two replicas whose transactions committed in the opposite order to their
+  start times, before the migration can still leave a checkpoint cut between such records, which makes that month
+  and the next unverifiable. That fails closed (the months do not verify), it never verifies a wrong set. The
+  heads (frontier) query `ProjectHeads` still reads the whole project; the checkpoint cut no longer calls it
+  (see "Checkpoint cut is incremental, with a sampled shadow check" below), but the first cut of a project and
+  the cut's fallback still do.
+  Separately, the server refuses to plan months (409) for a project whose checkpoint `created_ts` months go
+  backwards, for example after a clock step at a month boundary. The month export is covered on real Postgres
+  in CI. The in-memory store numbers records by their position in its insertion-ordered list.
 - **A use or outcome whose grant or intent is in an earlier month** is listed (`unresolved_cross_month`), never
   matched, so a month with one reports `authorized` as insufficient. `averin-verify chain` checks that the named record
   exists in an earlier month, refuses a record two months both carry, and then verifies the concatenated history as
@@ -82,6 +91,53 @@ accumulators** that would let a bundle start from a pinned checkpoint and prove 
 `RecordCount`, so a list call no longer materializes the whole history in memory the way the prior
 `AllRecords`-then-slice did. `limit` defaults to 100 (capped at 1000); `offset` (default 0) pages
 deeper. This is the paged read path; the export/verify bound above is separate.
+
+## Checkpoint cut is incremental, with a sampled shadow check
+
+A checkpoint is cut from the latest checkpoint plus the records after it: the new frontier, the record count
+and the grant-transparency head are derived from the previous checkpoint's signed values and only the new
+records, so the work and the rows read per cut do not grow with the project's history (the argument that this
+equals the full computation is a comment on `cutBodyIncremental`). The full computation (all records,
+all grants, all checkpoints) is still used for a project's first checkpoint, for a latest checkpoint that has no
+grant head (written before the D6 head), for a federated broker with no entry in the latest checkpoint yet, and
+when the stored checkpoint count disagrees with the latest sequence number.
+
+What this does not give:
+
+- **The incremental cut trusts the latest stored checkpoint** as the base. It is signed, but the cut does not
+  re-verify the signature or the chain below it. A latest checkpoint that was corrupted in the store (not by the
+  signing key) is carried forward by every unshadowed cut.
+- **The check against the full computation is sampled, per project.** The cut of checkpoint seq 100, 200, ... of a
+  project also computes the full body and refuses to sign unless it is byte-identical
+  (`averin_checkpoint_shadow_checks_total`); the sample is chosen from the checkpoint being cut, so it does not
+  depend on how cuts of different projects interleave. The first incremental cut of each project after the process
+  starts is also checked once, which covers a base changed while the process was down and the first cut after an
+  upgrade. A divergence on any other cut is signed, because checkpoints are append-only; the next shadowed cut of
+  that project, or the offline verifier, finds it. A refusal is not stored: it recurs because the refused seq is
+  cut again as the same seq and checked again, also after a restart. After one mismatch
+  (`averin_checkpoint_shadow_mismatch_total`, a log line starting `ALERT`) every cut is checked until the process
+  restarts. The shadow computation is O(history) and runs inside the project write transaction, so a checked cut
+  takes as long as every cut did before, up to the shadow's own time budget (5 s by default, at most 20 s).
+- **The shadow stops being effective as history grows.** A shadow that cannot run (the full computation errors,
+  hits the statement timeout, or runs out of that budget before producing a body) does not refuse: the incremental body is signed,
+  `averin_checkpoint_shadow_failed_total` is incremented, an `ALERT` line is logged, and that project's next
+  shadow waits for a backoff (not the next cut). A mismatch still refuses, and so does one found in a full body that came back over budget (a computed body is always compared; a match is signed and counted as late). The budget covers the whole shadow, not each statement. Once the full computation no longer
+  fits its budget the counter rises on every attempt and the sampled check is effectively off for that project.
+  What still holds the equality then is the differential tests (incremental equals full on random histories,
+  in memory and on Postgres) and the guards every cut applies itself: the record count must equal the base count
+  plus the records after it, every page of those records must hold exactly the next ordinals, and the new grants
+  must carry exactly the next `broker_seq` values.
+- **Grant membership is exact-case.** Both cuts count a record as a grant or void tombstone only when
+  `extensions.broker.kind` and `authority.enforcement_point` are strings under exactly those keys, as the offline
+  verifier does; a record with a differently cased key or a value of another type is not counted and does not fail
+  the cut.
+- A cut refuses (as the full computation does) when the new grants do not carry exactly the next `broker_seq`
+  values, when the store's record count is not the base count plus the records after it, and when a page of the
+  records after the base does not hold exactly the next ordinals in order (a record deleted from the middle of
+  the range, which would otherwise shift the next page by one row). The same page check guards the head fold
+  `ProjectHeadsSince` and the month-segment record read. A delete needs a database role that can delete from
+  `records`; the application role cannot.
+- `ProjectHeads` (the full anti-join) is unchanged and still O(history); only the cut stopped using it.
 
 ## Checkpoint grant-head read is filtered, not indexed
 

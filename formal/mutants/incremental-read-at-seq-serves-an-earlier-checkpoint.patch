@@ -1,0 +1,19 @@
+diff --git a/server/internal/api/incremental_read.go b/server/internal/api/incremental_read.go
+index 2ccf624..d134c3f 100644
+--- a/server/internal/api/incremental_read.go
++++ b/server/internal/api/incremental_read.go
+@@ -103,12 +103,12 @@ func (s *Server) handleIncrementalRead(w http.ResponseWriter, r *http.Request, p
+ 			}
+ 		}
+ 		if p.hasAt {
+-			cps, e := st.CheckpointsRange(projectID, p.atSeq, p.atSeq)
++			cps, e := st.CheckpointsRange(projectID, 0, p.atSeq)
+ 			if e != nil {
+ 				return e
+ 			}
+ 			for _, c := range cps {
+-				if c.Seq == p.atSeq {
++				if at == nil {
+ 					if at, e = toReadCheckpoint(c); e != nil {
+ 						return e
+ 					}

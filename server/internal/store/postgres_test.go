@@ -30,6 +30,14 @@ import (
 // store whose pool defaults to that schema. The returned cleanup drops the schema and closes.
 func newTestStore(t *testing.T) (*Postgres, func()) {
 	t.Helper()
+	p, _, done := newTracedTestStore(t)
+	return p, done
+}
+
+// newTracedTestStore is newTestStore plus a recorder of every statement the store sends (text and
+// arguments), so a test can ask the database how many rows each one examined without restating the SQL.
+func newTracedTestStore(t *testing.T) (*Postgres, *sqlTrace, func()) {
+	t.Helper()
 	dsn := os.Getenv("AVERIN_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("set AVERIN_TEST_DATABASE_URL to run Postgres store tests")
@@ -50,6 +58,8 @@ func newTestStore(t *testing.T) (*Postgres, func()) {
 	// Pin every connection in the pool to the private schema so the migration's unqualified table
 	// names resolve there and the test is fully isolated.
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	trace := &sqlTrace{}
+	cfg.ConnConfig.Tracer = trace
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -125,6 +135,17 @@ func newTestStore(t *testing.T) (*Postgres, func()) {
 		t.Fatalf("apply migration 0007: %v", err)
 	}
 
+	// History-scaling PR1 (0008): the per-project insertion ordinal.
+	migration8, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0008_record_ordinal.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0008: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration8)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0008: %v", err)
+	}
+
 	p := &Postgres{pool: pool}
 	cleanup := func() {
 		dctx, dcancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -132,7 +153,7 @@ func newTestStore(t *testing.T) (*Postgres, func()) {
 		_, _ = pool.Exec(dctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
 		pool.Close()
 	}
-	return p, cleanup
+	return p, trace, cleanup
 }
 
 func rec(hash, session string, parents ...string) Record {

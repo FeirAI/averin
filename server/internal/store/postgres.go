@@ -692,7 +692,7 @@ func (p *Postgres) Heads(projectID, sessionID string) ([]string, error) {
 		  AND NOT EXISTS (
 			SELECT 1 FROM records c
 			WHERE c.project_id = $1 AND c.session_id = $2
-			  AND r.content_hash = ANY (c.parents)
+			  AND c.parents @> ARRAY[r.content_hash]
 		  )
 		ORDER BY r.content_hash ASC
 	`, projectID, sessionID)
@@ -717,7 +717,7 @@ func (p *Postgres) ProjectHeads(projectID string) ([]string, error) {
 		  AND NOT EXISTS (
 			SELECT 1 FROM records c
 			WHERE c.project_id = $1
-			  AND r.content_hash = ANY (c.parents)
+			  AND c.parents @> ARRAY[r.content_hash]
 		  )
 		ORDER BY r.content_hash ASC
 	`, projectID)
@@ -845,7 +845,7 @@ func (p *Postgres) AllRecords(projectID string) ([]Record, error) {
 		SELECT json, content_hash, session_id, parents
 		FROM records
 		WHERE project_id = $1
-		ORDER BY inserted_at, ctid
+		ORDER BY ord
 	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("store: all records: %w", err)
@@ -855,7 +855,8 @@ func (p *Postgres) AllRecords(projectID string) ([]Record, error) {
 
 // RecordsPage returns up to `limit` records NEWEST-FIRST, skipping the newest `offset`, via SQL LIMIT/OFFSET
 // so a large tenant's list call never materializes the whole history in RAM. Ordering mirrors AllRecords'
-// (inserted_at, ctid) but DESC, so the newest record is first. Never nil.
+// ord (the per-project insertion ordinal) but DESC, so the newest record is first and a limit-1 read touches
+// one index entry whatever the history. Never nil.
 func (p *Postgres) RecordsPage(projectID string, limit, offset int) ([]Record, error) {
 	if err := p.checkProject(projectID); err != nil {
 		return nil, err
@@ -871,7 +872,7 @@ func (p *Postgres) RecordsPage(projectID string, limit, offset int) ([]Record, e
 		SELECT json, content_hash, session_id, parents
 		FROM records
 		WHERE project_id = $1
-		ORDER BY inserted_at DESC, ctid DESC
+		ORDER BY ord DESC
 		LIMIT $2 OFFSET $3
 	`, projectID, limit, offset)
 	if err != nil {
@@ -900,7 +901,7 @@ func (p *Postgres) GrantRecords(projectID string) ([]Record, error) {
 		FROM records
 		WHERE project_id = $1
 		  AND json::jsonb #>> '{extensions,broker,kind}' IN ('grant', 'grant_void')
-		ORDER BY inserted_at, ctid
+		ORDER BY ord
 	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("store: grant records: %w", err)
@@ -924,9 +925,9 @@ func collectRecords(rows pgx.Rows) ([]Record, error) {
 	return out, nil
 }
 
-// RecordCount returns the number of DISTINCT content_hashes stored for the project (matching Mem,
-// which counts unique content, not insert attempts). Because (project_id, content_hash) is unique,
-// this equals the row count, but DISTINCT keeps the semantics explicit.
+// RecordCount returns the number of records stored for the project. The per-project insertion ordinal
+// (records.ord) is gapless 1..n, so the count is the largest ordinal: one descent of the (project_id, ord)
+// index, whatever the history. A project with no records has count 0.
 func (p *Postgres) RecordCount(projectID string) (int, error) {
 	if err := p.checkProject(projectID); err != nil {
 		return 0, err
@@ -934,13 +935,163 @@ func (p *Postgres) RecordCount(projectID string) (int, error) {
 	ctx := p.callContext()
 	var n int
 	err := p.queries().QueryRow(ctx, `
-		SELECT count(DISTINCT content_hash) FROM records WHERE project_id = $1
+		SELECT COALESCE((SELECT ord FROM records WHERE project_id = $1 ORDER BY ord DESC LIMIT 1), 0)
 	`, projectID).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: record count: %w", err)
 	}
 	return n, nil
 }
+
+// RecordsAfter returns up to limit records with ordinal greater than after, oldest first (ordinals after+1,
+// after+2, ...): an index range read that touches only the rows returned. after<=0 starts at the first record;
+// limit<=0 returns an empty slice. Never nil.
+func (p *Postgres) RecordsAfter(projectID string, after int64, limit int) ([]Record, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return []Record{}, nil
+	}
+	if after < 0 {
+		after = 0
+	}
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
+		SELECT json, content_hash, session_id, parents, ord
+		FROM records
+		WHERE project_id = $1 AND ord > $2
+		ORDER BY ord
+		LIMIT $3
+	`, projectID, after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: records after: %w", err)
+	}
+	return collectRecordsOrd(rows)
+}
+
+// collectRecordsOrd is collectRecords for a query that also selects ord as its fifth column.
+func collectRecordsOrd(rows pgx.Rows) ([]Record, error) {
+	defer rows.Close()
+	out := []Record{}
+	for rows.Next() {
+		var rec Record
+		if err := rows.Scan(&rec.JSON, &rec.ContentHash, &rec.SessionID, &rec.Parents, &rec.Ord); err != nil {
+			return nil, fmt.Errorf("store: scan record: %w", err)
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate records: %w", err)
+	}
+	return out, nil
+}
+
+// WithBudget runs fn under a statement timeout inside a savepoint of the project transaction: a statement that
+// exceeds d is cancelled by the server, the savepoint is rolled back (the transaction stays usable and the
+// timeout setting reverts with it), and the error wraps ErrBudgetExceeded. The budget covers the WHOLE of fn:
+// before every statement the timeout is re-issued with the time that remains (a statement that starts with
+// nothing left is not sent and fails with ErrBudgetExceeded), so fn cannot outlast d by more than the one
+// statement in flight when the clock runs out. A fn that finishes but took longer than d overall is reported as
+// exceeded too.
+func (p *Postgres) WithBudget(d time.Duration, fn func(Store) error) error {
+	if p.tx == nil {
+		return errors.New("store: WithBudget needs a project transaction")
+	}
+	if p.active != nil && !p.active.Load() {
+		return errors.New("store: project transaction already closed")
+	}
+	ctx := p.callContext()
+	ms := d.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	var prev string
+	if err := p.tx.QueryRow(ctx, `SELECT current_setting('statement_timeout')`).Scan(&prev); err != nil {
+		return fmt.Errorf("store: read statement timeout: %w", err)
+	}
+	sp, err := p.tx.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin budget savepoint: %w", err)
+	}
+	rollback := func() {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = sp.Rollback(rctx)
+	}
+	if _, err := sp.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = %d`, ms)); err != nil {
+		rollback()
+		return fmt.Errorf("store: set budget timeout: %w", err)
+	}
+	start := time.Now()
+	b := &Postgres{pool: p.pool, tx: &budgetTx{Tx: sp, deadline: start.Add(d)}, projectID: p.projectID, ctx: p.ctx, active: p.active}
+	if ferr := fn(b); ferr != nil {
+		rollback()
+		var pe *pgconn.PgError
+		if errors.As(ferr, &pe) && pe.Code == "57014" {
+			return fmt.Errorf("%w: %v", ErrBudgetExceeded, ferr)
+		}
+		return ferr
+	}
+	elapsed := time.Since(start)
+	if _, err := sp.Exec(ctx, `SELECT set_config('statement_timeout', $1, true)`, prev); err != nil {
+		rollback()
+		return fmt.Errorf("store: restore statement timeout: %w", err)
+	}
+	if err := sp.Commit(ctx); err != nil {
+		return fmt.Errorf("store: release budget savepoint: %w", err)
+	}
+	if elapsed > d {
+		return fmt.Errorf("%w (took %s, budget %s)", ErrBudgetExceeded, elapsed.Round(time.Millisecond), d)
+	}
+	return nil
+}
+
+// budgetTx is the transaction view handed to the function under WithBudget. It re-issues SET LOCAL
+// statement_timeout with the time left before every statement, so the budget is a deadline for the whole
+// function rather than a per-statement allowance.
+type budgetTx struct {
+	pgx.Tx
+	deadline time.Time
+}
+
+// arm sets the statement timeout to the time left, or reports ErrBudgetExceeded when none is left.
+func (b *budgetTx) arm(ctx context.Context) error {
+	left := time.Until(b.deadline)
+	if left <= 0 {
+		return fmt.Errorf("%w: no time left for the next statement", ErrBudgetExceeded)
+	}
+	ms := (left + time.Millisecond - 1) / time.Millisecond
+	if _, err := b.Tx.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = %d`, int64(ms))); err != nil {
+		return fmt.Errorf("store: arm budget timeout: %w", err)
+	}
+	return nil
+}
+
+func (b *budgetTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if err := b.arm(ctx); err != nil {
+		return pgconn.CommandTag{}, err
+	}
+	return b.Tx.Exec(ctx, sql, args...)
+}
+
+func (b *budgetTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if err := b.arm(ctx); err != nil {
+		return nil, err
+	}
+	return b.Tx.Query(ctx, sql, args...)
+}
+
+func (b *budgetTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if err := b.arm(ctx); err != nil {
+		return errRow{err}
+	}
+	return b.Tx.QueryRow(ctx, sql, args...)
+}
+
+type errRow struct{ err error }
+
+func (e errRow) Scan(...any) error { return e.err }
 
 // PutCheckpoint inserts a checkpoint. Insert-only: the schema forbids UPDATE/DELETE on checkpoints,
 // and (project_id, seq) is the primary key, so a re-used seq is rejected rather than overwriting.
@@ -994,8 +1145,9 @@ func (p *Postgres) Checkpoints(projectID string) ([]Checkpoint, error) {
 	return out, nil
 }
 
-// NextCheckpointSeq returns the next checkpoint sequence number: the count of existing checkpoints
-// for the project (0-based, matching Mem). This is the value the caller passes as Checkpoint.Seq.
+// NextCheckpointSeq returns the next checkpoint sequence number: one past the highest stored seq, which equals
+// the count of existing checkpoints because seqs are assigned 0..n-1 (0-based, matching Mem); a primary-key
+// index read instead of a count over every checkpoint. This is the value the caller passes as Checkpoint.Seq.
 func (p *Postgres) NextCheckpointSeq(projectID string) (int64, error) {
 	if err := p.checkProject(projectID); err != nil {
 		return 0, err
@@ -1003,7 +1155,7 @@ func (p *Postgres) NextCheckpointSeq(projectID string) (int64, error) {
 	ctx := p.callContext()
 	var n int64
 	err := p.queries().QueryRow(ctx, `
-		SELECT count(*) FROM checkpoints WHERE project_id = $1
+		SELECT COALESCE((SELECT seq + 1 FROM checkpoints WHERE project_id = $1 ORDER BY seq DESC LIMIT 1), 0)
 	`, projectID).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: next checkpoint seq: %w", err)
@@ -1195,4 +1347,84 @@ func (p *Postgres) LatestCheckpointHash(projectID string) (string, bool, error) 
 		return "", false, fmt.Errorf("store: latest checkpoint hash: %w", err)
 	}
 	return hash, true, nil
+}
+
+// LatestCheckpoint returns the highest-seq checkpoint, ok=false if the project has none: one primary-key
+// index read.
+func (p *Postgres) LatestCheckpoint(projectID string) (Checkpoint, bool, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return Checkpoint{}, false, err
+	}
+	ctx := p.callContext()
+	var cp Checkpoint
+	err := p.queries().QueryRow(ctx, `
+		SELECT json, checkpoint_hash, seq
+		FROM checkpoints
+		WHERE project_id = $1
+		ORDER BY seq DESC
+		LIMIT 1
+	`, projectID).Scan(&cp.JSON, &cp.CheckpointHash, &cp.Seq)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Checkpoint{}, false, nil
+		}
+		return Checkpoint{}, false, fmt.Errorf("store: latest checkpoint: %w", err)
+	}
+	return cp, true, nil
+}
+
+// CheckpointsRange returns the checkpoints with fromSeq <= seq <= toSeq, seq ascending. Never nil.
+func (p *Postgres) CheckpointsRange(projectID string, fromSeq, toSeq int64) ([]Checkpoint, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
+		SELECT json, checkpoint_hash, seq
+		FROM checkpoints
+		WHERE project_id = $1 AND seq >= $2 AND seq <= $3
+		ORDER BY seq ASC
+	`, projectID, fromSeq, toSeq)
+	if err != nil {
+		return nil, fmt.Errorf("store: checkpoints range: %w", err)
+	}
+	defer rows.Close()
+	out := []Checkpoint{}
+	for rows.Next() {
+		var cp Checkpoint
+		if err := rows.Scan(&cp.JSON, &cp.CheckpointHash, &cp.Seq); err != nil {
+			return nil, fmt.Errorf("store: scan checkpoint: %w", err)
+		}
+		out = append(out, cp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate checkpoints range: %w", err)
+	}
+	return out, nil
+}
+
+// AnchorsRange returns seq -> token_b64 for fromSeq <= seq <= toSeq. Never nil.
+func (p *Postgres) AnchorsRange(projectID string, fromSeq, toSeq int64) (map[int64]string, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `SELECT seq, token_b64 FROM anchors WHERE project_id = $1 AND seq >= $2 AND seq <= $3`, projectID, fromSeq, toSeq)
+	if err != nil {
+		return nil, fmt.Errorf("store: anchors range: %w", err)
+	}
+	defer rows.Close()
+	out := map[int64]string{}
+	for rows.Next() {
+		var seq int64
+		var tok string
+		if err := rows.Scan(&seq, &tok); err != nil {
+			return nil, fmt.Errorf("store: scan anchor: %w", err)
+		}
+		out[seq] = tok
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate anchors range: %w", err)
+	}
+	return out, nil
 }

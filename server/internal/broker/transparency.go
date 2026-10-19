@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
+	"strings"
 )
 
 // grantHeadTag domain-separates the cumulative grant-transparency hash chain (ADR 0004 D6 / MF2).
@@ -71,22 +73,68 @@ func BrokerGrantHeads(perBroker map[string][]GrantSeqHash, prior map[string]stri
 }
 
 func GrantHeadRoot(grants []GrantSeqHash) string {
-	lp4 := func(buf, b []byte) []byte {
-		var n [4]byte
-		binary.BigEndian.PutUint32(n[:], uint32(len(b)))
-		return append(append(buf, n[:]...), b...)
-	}
-	seed := sha256.Sum256(lp4(nil, []byte(grantHeadTag)))
-	acc := seed[:]
+	return foldGrantHeadRoot(grantHeadSeed(), grants)
+}
+
+func grantHeadLP4(buf, b []byte) []byte {
+	var n [4]byte
+	binary.BigEndian.PutUint32(n[:], uint32(len(b)))
+	return append(append(buf, n[:]...), b...)
+}
+
+func grantHeadSeed() []byte {
+	seed := sha256.Sum256(grantHeadLP4(nil, []byte(grantHeadTag)))
+	return seed[:]
+}
+
+// foldGrantHeadRoot is the left fold of the chain over `grants` starting from accumulator `acc`.
+func foldGrantHeadRoot(acc []byte, grants []GrantSeqHash) string {
 	for _, g := range grants {
-		buf := lp4(nil, []byte(grantHeadTag))
+		buf := grantHeadLP4(nil, []byte(grantHeadTag))
 		buf = append(buf, acc...)
 		var s [8]byte
 		binary.BigEndian.PutUint64(s[:], uint64(g.Seq))
 		buf = append(buf, s[:]...)
-		buf = lp4(buf, []byte(g.ContentHash))
+		buf = grantHeadLP4(buf, []byte(g.ContentHash))
 		sum := sha256.Sum256(buf)
 		acc = sum[:]
 	}
 	return "sha256:" + hex.EncodeToString(acc)
+}
+
+// GrantHeadRootFrom continues the chain from a previously computed root: because GrantHeadRoot is a left fold
+// from a fixed seed, GrantHeadRoot(g1..gN) == GrantHeadRootFrom(GrantHeadRoot(g1..gM), g(M+1)..gN) for every
+// M <= N (the incremental checkpoint cut relies on exactly this). An unparseable priorRoot is an error, never
+// a silent restart from the seed.
+func GrantHeadRootFrom(priorRoot string, grants []GrantSeqHash) (string, error) {
+	hexPart, ok := strings.CutPrefix(priorRoot, "sha256:")
+	if !ok {
+		return "", fmt.Errorf("grant head root %q is not sha256:<hex>", priorRoot)
+	}
+	acc, err := hex.DecodeString(hexPart)
+	if err != nil || len(acc) != sha256.Size {
+		return "", fmt.Errorf("grant head root %q is not sha256:<64 hex>", priorRoot)
+	}
+	return foldGrantHeadRoot(acc, grants), nil
+}
+
+// BrokerGrantHeadFrom is BrokerGrantHead for the incremental cut: the grants after the prior head (seq
+// priorMaxSeq+1..), chained from the prior head's cumulative_root. The result equals BrokerGrantHead over the
+// whole log when the prior head covers exactly the log prefix 1..priorMaxSeq.
+func BrokerGrantHeadFrom(priorRoot string, priorMaxSeq int64, after []GrantSeqHash) (map[string]any, error) {
+	root, err := GrantHeadRootFrom(priorRoot, after)
+	if err != nil {
+		return nil, err
+	}
+	maxSeq := priorMaxSeq
+	for _, g := range after {
+		if g.Seq > maxSeq {
+			maxSeq = g.Seq
+		}
+	}
+	return map[string]any{
+		"max_seq":         maxSeq,
+		"prior_head_hash": priorRoot,
+		"cumulative_root": root,
+	}, nil
 }

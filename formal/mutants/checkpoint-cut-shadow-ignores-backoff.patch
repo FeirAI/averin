@@ -1,0 +1,12 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -350,7 +350,7 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
+ 	if verified && !s.cut.latched.Load() && seq%every != 0 {
+ 		return body, nil
+ 	}
+-	if s.shadowWaiting(projectID) {
++	if false && s.shadowWaiting(projectID) {
+ 		return body, nil // the last shadow of this project could not run: wait out its backoff, then try again
+ 	}
+ 	s.mCutShadowChecks.Inc()

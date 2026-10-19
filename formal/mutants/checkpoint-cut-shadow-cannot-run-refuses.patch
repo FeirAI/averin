@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+index d2df461..bc80217 100644
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -379,7 +379,7 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
+ 		s.mCutShadowFailed.Inc()
+ 		wait := s.shadowFailed(projectID)
+ 		log.Printf("ALERT: checkpoint cut for project %s signed WITHOUT its shadow check: the full computation could not run (%v); next shadow attempt in %s", projectID, ferr, wait)
+-		return body, nil
++		return nil, fmt.Errorf("checkpoint refused: shadow full computation failed: %w", ferr)
+ 	}
+ 	a, _ := json.Marshal(body)
+ 	b, _ := json.Marshal(full)

@@ -1,0 +1,12 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -160,7 +160,7 @@
+ 	// D: the records after L, paged. Only the frontier fold and the grant members are kept.
+ 	var fold store.FrontierFold
+ 	var gl []broker.GrantSeqHash
+-	after := base.count
++	after := base.count - 1
+ 	for {
+ 		page, perr := st.RecordsAfter(projectID, after, store.HeadsPageSize)
+ 		if perr != nil {
