@@ -258,6 +258,17 @@ pub struct VerifyReport {
     pub collapsed_duplicates: usize,
     pub checkpoints_total: usize,
     pub checkpoints_verified: usize,
+    /// `checkpoint_seq` and signed `record_count` of the highest-seq checkpoint whose seal verified, or
+    /// `None` when no checkpoint verified or the count is not a non-negative integer. Context for
+    /// `oldest_uncovered_received_at` (the field that measures tail age); never an input to any verdict.
+    pub latest_checkpoint_seq: Option<i64>,
+    pub latest_checkpoint_record_count: Option<u64>,
+    /// The earliest `received_ts` (RFC 3339) among the records the latest VERIFIED checkpoint does not cover
+    /// (not in the DAG closure of its frontier); with no verified checkpoint, the earliest `received_ts` of all
+    /// records. `None` when every record is covered (or the DAG is invalid, or there are no records). An
+    /// uncovered record without a canonical `received_ts` reports the epoch, so it can only age a consumer out.
+    /// Display-only: never an input to any verdict.
+    pub oldest_uncovered_received_at: Option<String>,
     /// Checkpoints whose external anchor VERIFIED under a pinned TSA (on a verified checkpoint, TSA key honored)
     /// — the anchors that actually contribute trust. `checkpoints_anchors_attached` counts mere PRESENCE of an
     /// `anchor` field (unverified: anyone can attach garbage), so the two are never conflated.
@@ -1547,6 +1558,29 @@ fn committed_set(
     seen
 }
 
+/// The earliest `received_ts` among the records NOT covered by the latest verified checkpoint's frontier (the
+/// verifier's own membership notion, `committed_set`: the causal closure of the frontier). `frontier` is `None`
+/// when no checkpoint verified, so every record counts as uncovered. `None` when every record is covered. An
+/// uncovered record without a canonical `received_ts` reports the epoch, so it can only age a consumer out.
+fn oldest_uncovered_received_ts(
+    records: &[CanonValue],
+    by_hash: &BTreeMap<String, usize>,
+    frontier: Option<&[String]>,
+) -> Option<String> {
+    let covered = frontier.map(|f| committed_set(records, by_hash, f));
+    records
+        .iter()
+        .filter(|rec| match (&covered, s(rec, "content_hash")) {
+            (Some(c), Some(h)) => !c.contains(&h),
+            _ => true,
+        })
+        .map(|rec| match s(rec, "received_ts") {
+            Some(t) if is_canonical_ts(&t) => t,
+            _ => "1970-01-01T00:00:00.000Z".to_string(),
+        })
+        .min()
+}
+
 /// Verify selective-disclosure entries against the per-record hiding commitments embedded in the
 /// (signed) record bodies. A bundle MAY carry a top-level `disclosures` array; each entry reveals
 /// `(value, nonce)` for one `<field>_commit` so an auditor can confirm the disclosed value is the
@@ -1746,6 +1780,22 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("collapsed_duplicates".into(), count(r.collapsed_duplicates)),
         ("checkpoints_total".into(), count(r.checkpoints_total)),
         ("checkpoints_verified".into(), count(r.checkpoints_verified)),
+        (
+            "latest_checkpoint_seq".into(),
+            r.latest_checkpoint_seq
+                .map_or(CanonValue::Null, CanonValue::Int),
+        ),
+        (
+            "latest_checkpoint_record_count".into(),
+            r.latest_checkpoint_record_count
+                .map_or(CanonValue::Null, |n| count(n as usize)),
+        ),
+        (
+            "oldest_uncovered_received_at".into(),
+            r.oldest_uncovered_received_at
+                .clone()
+                .map_or(CanonValue::Null, CanonValue::Str),
+        ),
         ("checkpoints_anchored".into(), count(r.checkpoints_anchored)),
         (
             "checkpoints_anchors_attached".into(),
@@ -2624,6 +2674,9 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         collapsed_duplicates: 0,
         checkpoints_total: 0,
         checkpoints_verified: 0,
+        latest_checkpoint_seq: None,
+        latest_checkpoint_record_count: None,
+        oldest_uncovered_received_at: None,
         checkpoints_anchored: 0,
         checkpoints_anchors_attached: 0,
         chain_ok: false,
@@ -6201,6 +6254,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
 
     // ---- 4. checkpoints + anchors ----
     let mut checkpoints_verified = 0usize;
+    let mut latest_checkpoint: Option<(i64, u64)> = None;
+    let mut latest_checkpoint_frontier: Vec<String> = Vec::new();
     let mut checkpoints_anchored = 0usize;
     let mut checkpoints_anchors_attached = 0usize;
     // (seq, anchored_ts, frontier) for each checkpoint with a verified anchor
@@ -6387,6 +6442,17 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         };
         if cp_verified {
             checkpoints_verified += 1;
+            if let (Some(seq), Some(n)) = (
+                cp.get("checkpoint_seq").and_then(|v| v.as_int()),
+                cp.get("record_count")
+                    .and_then(|v| v.as_int())
+                    .and_then(|n| u64::try_from(n).ok()),
+            ) {
+                if latest_checkpoint.is_none_or(|(best, _)| seq > best) {
+                    latest_checkpoint = Some((seq, n));
+                    latest_checkpoint_frontier = cp_frontier.clone();
+                }
+            }
             verified_frontiers.extend(cp_frontier.iter().cloned());
         }
         if cp.get("anchor").is_some() {
@@ -8376,6 +8442,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             ),
         }
     });
+    // Progress signal (display only, never a verdict input): see `oldest_uncovered_received_at`.
+    let oldest_uncovered_received_at = dag_opt.as_ref().and_then(|d| {
+        oldest_uncovered_received_ts(
+            records,
+            &d.by_hash,
+            latest_checkpoint.map(|_| latest_checkpoint_frontier.as_slice()),
+        )
+    });
     let mut report = VerifyReport {
         ok,
         claims: ClaimResults::fatal(),
@@ -8390,6 +8464,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         collapsed_duplicates,
         checkpoints_total: checkpoints.len(),
         checkpoints_verified,
+        latest_checkpoint_seq: latest_checkpoint.map(|(q, _)| q),
+        latest_checkpoint_record_count: latest_checkpoint.map(|(_, n)| n),
+        oldest_uncovered_received_at,
         checkpoints_anchored,
         checkpoints_anchors_attached,
         chain_ok,

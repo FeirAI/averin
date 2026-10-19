@@ -1391,6 +1391,27 @@ fn seal_grant_prev(
     ge: &CanonValue,
     prev: &[String],
 ) -> CanonValue {
+    seal_grant_at(
+        rec_sk,
+        broker_sk,
+        record_id,
+        ge,
+        prev,
+        "s",
+        "2026-06-15T10:00:00.000Z",
+    )
+}
+
+/// `seal_grant_prev` with an explicit session and `received_ts`.
+fn seal_grant_at(
+    rec_sk: &SigningKey,
+    broker_sk: &SigningKey,
+    record_id: &str,
+    ge: &CanonValue,
+    prev: &[String],
+    session: &str,
+    received: &str,
+) -> CanonValue {
     let eh = sha256_prefixed(ge.serialize().as_bytes());
     let esig = sign_evidence("gateway_enforced", "proj-001", record_id, &eh, broker_sk);
     let action = ge.get("action").unwrap().as_str().unwrap();
@@ -1399,8 +1420,8 @@ fn seal_grant_prev(
     let body = format!(
         r#"{{"schema_version":"2","canon_version":"rcp-1","domain":"flightrecorder.record.v2",
         "record_id":"{record_id}","project_id":"proj-001","agent_id":"agent","agent_version":"averin-broker",
-        "session_id":"s","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":0,
-        "agent_ts":"2026-06-15T10:00:00.000Z","received_ts":"2026-06-15T10:00:00.000Z",
+        "session_id":"{session}","span_id":"sp-{record_id}","parent_span_id":null,"causal_prev_hashes":{prev_json},"display_seq":0,
+        "agent_ts":"{received}","received_ts":"{received}",
         "event_type":"credential_grant","action":"{action}","observed_via":"broker","status":"ok",
         "authority":{{"source":"gateway_enforced","enforcement_point":"credential_broker","grant_type":"id-jag","grant_id":"{record_id}","evidence_hash":"{eh}","evidence_sig":"{esig}"}},
         "extensions":{{"broker":{{"kind":"grant","grant_evidence":{ge}}}}},
@@ -16453,6 +16474,345 @@ fn sb28_real_producer_fixtures_keep_their_capstone_labels() {
             "{fixture}: capped label"
         );
     }
+}
+
+// ---- latest_checkpoint_seq / latest_checkpoint_record_count: a progress signal for a growing unsealed tail ----
+
+#[test]
+fn latest_verified_checkpoint_is_reported_for_a_growing_tail() {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let kc = signing_key_from_seed(&[42u8; 32]);
+    let opts = VerifyOptions {
+        trusted_keys: Some(vec![rec.verifying_key().into(), kc.verifying_key().into()]),
+        ..Default::default()
+    };
+    let full = kc_chain_bundle(&rec, &kc, None);
+    let r = verify_bundle_with(&full, &opts);
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(
+        (r.latest_checkpoint_seq, r.latest_checkpoint_record_count),
+        (Some(1), Some(2))
+    );
+
+    // A record newer than the latest checkpoint (cp1 withheld, so g2 is unsealed): averin reports the
+    // FRONTIER form (the frontier check runs before the count check), never a record_count issue, and the
+    // latest verified checkpoint's signed seq and count are still reported.
+    let tail = rebuild(
+        arr(&full, "keys"),
+        arr(&full, "records"),
+        vec![arr(&full, "checkpoints")[0].clone()],
+    );
+    let r = verify_bundle_with(&tail, &opts);
+    assert!(!r.ok);
+    assert_eq!(r.checkpoints_verified, r.checkpoints_total);
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("uncommitted or omitted session")),
+        "{:?}",
+        r.issues
+    );
+    assert!(
+        !r.issues.iter().any(|i| i.contains("record_count")),
+        "{:?}",
+        r.issues
+    );
+    assert_eq!(
+        (r.latest_checkpoint_seq, r.latest_checkpoint_record_count),
+        (Some(0), Some(1))
+    );
+
+    // No verified checkpoint: nothing is reported.
+    let none = rebuild(arr(&full, "keys"), arr(&full, "records"), vec![]);
+    let r = verify_bundle_with(&none, &opts);
+    assert_eq!(
+        (r.latest_checkpoint_seq, r.latest_checkpoint_record_count),
+        (None, None)
+    );
+}
+
+/// Builds a bundle from per-record (id, session, parent index, received_ts) and checkpoints given as
+/// (frontier record index, record_count, seq); each checkpoint chains to the first earlier one with seq-1.
+fn progress_bundle(
+    recs: &[(&str, &str, Option<usize>, &str)],
+    cps: &[(usize, i64, i64)],
+) -> CanonValue {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let kc = signing_key_from_seed(&[42u8; 32]);
+    let ge = grant_evidence(GID, ACTION, RESOURCE, "single_operation", CNF, ISSUED, EXP);
+    let mut grants: Vec<CanonValue> = Vec::new();
+    for (id, sess, parent, ts) in recs {
+        let prev: Vec<String> = parent
+            .map(|i| vec![content_hash_of(&grants[i])])
+            .unwrap_or_default();
+        grants.push(seal_grant_at(&rec, &rec, id, &ge, &prev, sess, ts));
+    }
+    let key_block =
+        CanonValue::parse(r#"{"signing_key_id":"kc","key_epoch":0,"key_status":"active"}"#)
+            .unwrap();
+    let mut chain: Vec<CanonValue> = Vec::new();
+    for (j, (fi, n, seq)) in cps.iter().enumerate() {
+        let prev_hash = chain
+            .iter()
+            .find(|c| c.get("checkpoint_seq").and_then(|v| v.as_int()) == Some(*seq - 1))
+            .map(checkpoint_hash);
+        chain.push(
+            seal_checkpoint(
+                &checkpoint_body(
+                    &format!("cp{j}"),
+                    "proj-001",
+                    *seq,
+                    prev_hash.as_deref(),
+                    &[content_hash_of(&grants[*fi])],
+                    *n,
+                    "2026-06-15T10:09:00.000Z",
+                    key_block.clone(),
+                )
+                .unwrap(),
+                &kc,
+            )
+            .unwrap(),
+        );
+    }
+    let key_entry = |id: &str, vk: &VerifyingKey| {
+        CanonValue::object(vec![
+            ("signing_key_id".into(), CanonValue::string(id)),
+            ("key_epoch".into(), CanonValue::Int(0)),
+            ("public_key".into(), CanonValue::string(encode_pubkey(vk))),
+            ("key_status".into(), CanonValue::string("active")),
+        ])
+        .unwrap()
+    };
+    rebuild(
+        vec![
+            key_entry("k0", &rec.verifying_key()),
+            key_entry("kc", &kc.verifying_key()),
+        ],
+        grants,
+        chain,
+    )
+}
+
+fn progress_report(b: &CanonValue) -> averin_decision_core::verify::VerifyReport {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let kc = signing_key_from_seed(&[42u8; 32]);
+    let opts = VerifyOptions {
+        trusted_keys: Some(vec![rec.verifying_key().into(), kc.verifying_key().into()]),
+        ..Default::default()
+    };
+    verify_bundle_with(b, &opts)
+}
+
+#[test]
+fn oldest_uncovered_is_the_first_record_a_young_tail_adds() {
+    let recs = [
+        ("a0", "s", None, "2026-06-15T10:00:00.000Z"),
+        ("a1", "s", Some(0), "2026-06-15T10:01:00.000Z"),
+        ("a2", "s", Some(1), "2026-06-15T10:02:00.000Z"),
+        ("a3", "s", Some(2), "2026-06-15T10:03:00.000Z"),
+    ];
+    // checkpoint covers a0 and a1; a2 and a3 are the unsealed tail
+    let r = progress_report(&progress_bundle(&recs, &[(1, 2, 0)]));
+    assert_eq!(r.latest_checkpoint_seq, Some(0));
+    assert_eq!(
+        r.oldest_uncovered_received_at.as_deref(),
+        Some("2026-06-15T10:02:00.000Z"),
+        "{:?}",
+        r.issues
+    );
+    assert!(r
+        .issues
+        .iter()
+        .any(|i| i.contains("uncommitted or omitted session")));
+    // The report carries the field in its canonical form
+    let c = averin_decision_core::verify::report_to_canon(&r).serialize();
+    assert!(c.contains("\"oldest_uncovered_received_at\":\"2026-06-15T10:02:00.000Z\""));
+}
+
+#[test]
+fn oldest_uncovered_names_an_omitted_session_while_another_grows() {
+    // session "o" has one old record that no checkpoint commits; session "s" keeps growing and IS covered up to a2
+    let recs = [
+        ("a0", "s", None, "2026-06-15T10:01:00.000Z"),
+        ("a1", "s", Some(0), "2026-06-15T10:02:00.000Z"),
+        ("o0", "o", None, "2026-06-15T10:00:30.000Z"),
+        ("a2", "s", Some(1), "2026-06-15T10:03:00.000Z"),
+        ("a3", "s", Some(3), "2026-06-15T10:04:00.000Z"),
+    ];
+    let r = progress_report(&progress_bundle(&recs, &[(3, 3, 0)]));
+    assert_eq!(
+        r.oldest_uncovered_received_at.as_deref(),
+        Some("2026-06-15T10:00:30.000Z"),
+        "the omitted session's record must be reported, not the growing tail: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn oldest_uncovered_after_a_rollback_is_the_oldest_record_the_kept_checkpoint_misses() {
+    let recs = [
+        ("a0", "s", None, "2026-06-15T10:00:00.000Z"),
+        ("a1", "s", Some(0), "2026-06-15T10:01:00.000Z"),
+        ("a2", "s", Some(1), "2026-06-15T10:02:00.000Z"),
+        ("a3", "s", Some(2), "2026-06-15T10:03:00.000Z"),
+    ];
+    // two checkpoints were issued (covering a0 then a2); the bundle is served with only the first
+    let full = progress_bundle(&recs, &[(0, 1, 0), (2, 3, 1)]);
+    let rolled = rebuild(
+        arr(&full, "keys"),
+        arr(&full, "records"),
+        vec![arr(&full, "checkpoints")[0].clone()],
+    );
+    let r = progress_report(&rolled);
+    assert_eq!(r.latest_checkpoint_seq, Some(0));
+    assert_eq!(
+        r.oldest_uncovered_received_at.as_deref(),
+        Some("2026-06-15T10:01:00.000Z")
+    );
+}
+
+#[test]
+fn oldest_uncovered_uses_only_the_latest_checkpoint_when_its_frontier_is_behind_an_earlier_one() {
+    let recs = [
+        ("a0", "s", None, "2026-06-15T10:00:00.000Z"),
+        ("a1", "s", Some(0), "2026-06-15T10:01:00.000Z"),
+        ("a2", "s", Some(1), "2026-06-15T10:02:00.000Z"),
+        ("a3", "s", Some(2), "2026-06-15T10:03:00.000Z"),
+    ];
+    // cp0 covers up to a2 (3 records); the latest, cp1, has a frontier BEHIND it (a0) with the count unchanged
+    let r = progress_report(&progress_bundle(&recs, &[(2, 3, 0), (0, 3, 1)]));
+    assert_eq!(r.latest_checkpoint_seq, Some(1), "{:?}", r.issues);
+    assert_eq!(
+        r.oldest_uncovered_received_at.as_deref(),
+        Some("2026-06-15T10:01:00.000Z"),
+        "the earlier checkpoint's frontier must not count as covered: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn oldest_uncovered_without_a_checkpoint_is_the_oldest_record_and_null_when_all_covered() {
+    let recs = [
+        ("a0", "s", None, "2026-06-15T10:00:00.000Z"),
+        ("a1", "s", Some(0), "2026-06-15T10:01:00.000Z"),
+    ];
+    let r = progress_report(&progress_bundle(&recs, &[]));
+    assert_eq!(r.latest_checkpoint_seq, None);
+    assert_eq!(
+        r.oldest_uncovered_received_at.as_deref(),
+        Some("2026-06-15T10:00:00.000Z")
+    );
+    let r = progress_report(&progress_bundle(&recs, &[(1, 2, 0)]));
+    assert_eq!(r.oldest_uncovered_received_at, None, "{:?}", r.issues);
+    let c = averin_decision_core::verify::report_to_canon(&r).serialize();
+    assert!(c.contains("\"oldest_uncovered_received_at\":null"));
+}
+
+/// Regenerates the real-output fixture feir-os uses for its pending-state tests
+/// (`app/internal/api/testdata/averin_pending_scenarios.json`): a JSON object of named scenarios, each the
+/// unmodified `report_to_canon` output of the real verifier. Timestamps are fixed (base 2026-06-15T10:00:00Z):
+/// `AVERIN_TAIL_FIXTURE_OUT=/path/file.json cargo test -p averin-decision-core --test adversarial
+/// -- --ignored write_pending_scenarios_fixture`.
+#[test]
+#[ignore]
+fn write_pending_scenarios_fixture() {
+    let out = std::env::var("AVERIN_TAIL_FIXTURE_OUT").expect("AVERIN_TAIL_FIXTURE_OUT");
+    let ts = |secs: u32| {
+        format!(
+            "2026-06-15T{:02}:{:02}:{:02}.000Z",
+            10 + secs / 3600,
+            secs / 60 % 60,
+            secs % 60
+        )
+    };
+    let mut scenarios: Vec<(String, String)> = Vec::new();
+    let mut add = |name: &str, b: &CanonValue| {
+        let r = progress_report(b);
+        scenarios.push((
+            name.to_string(),
+            averin_decision_core::verify::report_to_canon(&r).serialize(),
+        ));
+    };
+    // a busy system at several record spacings: five records one spacing apart, the checkpoint covers the
+    // first three, the last two are the unsealed tail
+    for (name, step) in [
+        ("busy_30s", 30u32),
+        ("busy_61s", 61),
+        ("busy_5m", 300),
+        ("busy_3h", 10800),
+    ] {
+        let t: Vec<String> = (0..5).map(|i| ts(i * step)).collect();
+        let recs: Vec<(&str, &str, Option<usize>, &str)> = vec![
+            ("a0", "s", None, &t[0]),
+            ("a1", "s", Some(0), &t[1]),
+            ("a2", "s", Some(1), &t[2]),
+            ("a3", "s", Some(2), &t[3]),
+            ("a4", "s", Some(3), &t[4]),
+        ];
+        add(name, &progress_bundle(&recs, &[(2, 3, 0)]));
+    }
+    let t = |s: u32| ts(s);
+    // everything covered
+    add(
+        "all_covered",
+        &progress_bundle(
+            &[("a0", "s", None, &t(0)), ("a1", "s", Some(0), &t(10))],
+            &[(1, 2, 0)],
+        ),
+    );
+    // a live session "o" no checkpoint commits, while session "s" grows and is covered up to a2
+    add(
+        "omitted_session",
+        &progress_bundle(
+            &[
+                ("a0", "s", None, &t(60)),
+                ("a1", "s", Some(0), &t(120)),
+                ("o0", "o", None, &t(30)),
+                ("a2", "s", Some(1), &t(180)),
+                ("a3", "s", Some(3), &t(240)),
+            ],
+            &[(3, 3, 0)],
+        ),
+    );
+    // two checkpoints issued, the bundle served with only the first
+    let recs4 = [
+        ("a0", "s", None, t(0)),
+        ("a1", "s", Some(0), t(60)),
+        ("a2", "s", Some(1), t(120)),
+        ("a3", "s", Some(2), t(180)),
+    ];
+    let r4: Vec<(&str, &str, Option<usize>, &str)> = recs4
+        .iter()
+        .map(|(a, b, c, d)| (*a, *b, *c, d.as_str()))
+        .collect();
+    let full = progress_bundle(&r4, &[(0, 1, 0), (2, 3, 1)]);
+    add(
+        "rollback_kept_first_checkpoint",
+        &rebuild(
+            arr(&full, "keys"),
+            arr(&full, "records"),
+            vec![arr(&full, "checkpoints")[0].clone()],
+        ),
+    );
+    // a checkpoint whose frontier equals the heads but whose signed count is too low
+    add("record_count_mismatch", &progress_bundle(&r4, &[(3, 3, 0)]));
+    // the signed count shrinks between checkpoints
+    add(
+        "record_count_decreased",
+        &progress_bundle(&r4, &[(1, 2, 0), (2, 1, 1)]),
+    );
+    // two checkpoints at the same seq
+    add(
+        "fork",
+        &progress_bundle(&r4, &[(0, 1, 0), (1, 2, 1), (2, 3, 1)]),
+    );
+    // no checkpoint yet
+    add("no_checkpoint", &progress_bundle(&r4, &[]));
+    let body: Vec<String> = scenarios
+        .iter()
+        .map(|(n, r)| format!("\"{n}\":{r}"))
+        .collect();
+    std::fs::write(out, format!("{{{}}}\n", body.join(",\n"))).unwrap();
 }
 
 // ---- AVE-01: a month that cannot see an outcome's intent must not decide `authorized` ----

@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index e8699d2..98c58f3 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -1567,7 +1567,7 @@ fn oldest_uncovered_received_ts(
+     by_hash: &BTreeMap<String, usize>,
+     frontier: Option<&[String]>,
+ ) -> Option<String> {
+-    let covered = frontier.map(|f| committed_set(records, by_hash, f));
++    let covered: Option<BTreeSet<String>> = frontier.map(|_| BTreeSet::new());
+     records
+         .iter()
+         .filter(|rec| match (&covered, s(rec, "content_hash")) {
