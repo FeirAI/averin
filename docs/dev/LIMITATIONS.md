@@ -119,9 +119,9 @@ What this does not give:
   restarts. The shadow computation is O(history) and runs inside the project write transaction, so a checked cut
   takes as long as every cut did before, up to the shadow's own time budget (5 s by default, at most 20 s).
 - **The shadow stops being effective as history grows.** A shadow that cannot run (the full computation errors,
-  hits the statement timeout, or exceeds that budget) does not refuse: the incremental body is signed,
+  hits the statement timeout, or runs out of that budget before producing a body) does not refuse: the incremental body is signed,
   `averin_checkpoint_shadow_failed_total` is incremented, an `ALERT` line is logged, and that project's next
-  shadow waits for a backoff (not the next cut). A mismatch still refuses. Once the full computation no longer
+  shadow waits for a backoff (not the next cut). A mismatch still refuses, and so does one found in a full body that came back over budget (a computed body is always compared; a match is signed and counted as late). The budget covers the whole shadow, not each statement. Once the full computation no longer
   fits its budget the counter rises on every attempt and the sampled check is effectively off for that project.
   What still holds the equality then is the differential tests (incremental equals full on random histories,
   in memory and on Postgres) and the guards every cut applies itself: the record count must equal the base count

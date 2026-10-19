@@ -989,9 +989,11 @@ func collectRecordsOrd(rows pgx.Rows) ([]Record, error) {
 
 // WithBudget runs fn under a statement timeout inside a savepoint of the project transaction: a statement that
 // exceeds d is cancelled by the server, the savepoint is rolled back (the transaction stays usable and the
-// timeout setting reverts with it), and the error wraps ErrBudgetExceeded. Each statement gets d, so the whole
-// of fn is bounded by d times its number of statements; a fn that finishes but took longer than d overall is
-// reported as exceeded too.
+// timeout setting reverts with it), and the error wraps ErrBudgetExceeded. The budget covers the WHOLE of fn:
+// before every statement the timeout is re-issued with the time that remains (a statement that starts with
+// nothing left is not sent and fails with ErrBudgetExceeded), so fn cannot outlast d by more than the one
+// statement in flight when the clock runs out. A fn that finishes but took longer than d overall is reported as
+// exceeded too.
 func (p *Postgres) WithBudget(d time.Duration, fn func(Store) error) error {
 	if p.tx == nil {
 		return errors.New("store: WithBudget needs a project transaction")
@@ -1021,8 +1023,8 @@ func (p *Postgres) WithBudget(d time.Duration, fn func(Store) error) error {
 		rollback()
 		return fmt.Errorf("store: set budget timeout: %w", err)
 	}
-	b := &Postgres{pool: p.pool, tx: sp, projectID: p.projectID, ctx: p.ctx, active: p.active}
 	start := time.Now()
+	b := &Postgres{pool: p.pool, tx: &budgetTx{Tx: sp, deadline: start.Add(d)}, projectID: p.projectID, ctx: p.ctx, active: p.active}
 	if ferr := fn(b); ferr != nil {
 		rollback()
 		var pe *pgconn.PgError
@@ -1044,6 +1046,52 @@ func (p *Postgres) WithBudget(d time.Duration, fn func(Store) error) error {
 	}
 	return nil
 }
+
+// budgetTx is the transaction view handed to the function under WithBudget. It re-issues SET LOCAL
+// statement_timeout with the time left before every statement, so the budget is a deadline for the whole
+// function rather than a per-statement allowance.
+type budgetTx struct {
+	pgx.Tx
+	deadline time.Time
+}
+
+// arm sets the statement timeout to the time left, or reports ErrBudgetExceeded when none is left.
+func (b *budgetTx) arm(ctx context.Context) error {
+	left := time.Until(b.deadline)
+	if left <= 0 {
+		return fmt.Errorf("%w: no time left for the next statement", ErrBudgetExceeded)
+	}
+	ms := (left + time.Millisecond - 1) / time.Millisecond
+	if _, err := b.Tx.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = %d`, int64(ms))); err != nil {
+		return fmt.Errorf("store: arm budget timeout: %w", err)
+	}
+	return nil
+}
+
+func (b *budgetTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if err := b.arm(ctx); err != nil {
+		return pgconn.CommandTag{}, err
+	}
+	return b.Tx.Exec(ctx, sql, args...)
+}
+
+func (b *budgetTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if err := b.arm(ctx); err != nil {
+		return nil, err
+	}
+	return b.Tx.Query(ctx, sql, args...)
+}
+
+func (b *budgetTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if err := b.arm(ctx); err != nil {
+		return errRow{err}
+	}
+	return b.Tx.QueryRow(ctx, sql, args...)
+}
+
+type errRow struct{ err error }
+
+func (e errRow) Scan(...any) error { return e.err }
 
 // PutCheckpoint inserts a checkpoint. Insert-only: the schema forbids UPDATE/DELETE on checkpoints,
 // and (project_id, seq) is the primary key, so a re-used seq is rejected rather than overwriting.

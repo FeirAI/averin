@@ -1,6 +1,8 @@
 package api
 
 import (
+	"time"
+
 	"github.com/feirai/averin/server/internal/store"
 )
 
@@ -30,3 +32,6 @@ func (s *Server) CutStatsForTest() (incremental, full, shadowChecks, shadowMisma
 
 // ShadowFailedForTest reports how many shadow checks could not run.
 func (s *Server) ShadowFailedForTest() int64 { return s.mCutShadowFailed.Value() }
+
+// ShadowBudgetForTest reports the effective shadow budget (after clamping and defaulting).
+func (s *Server) ShadowBudgetForTest() time.Duration { return s.shadowBudget() }
