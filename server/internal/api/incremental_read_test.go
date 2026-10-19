@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
@@ -277,6 +278,15 @@ func TestIncrementalReadFailsClosed(t *testing.T) {
 	h.plain()
 	if code, _ := do(t, cutServer(t, failingReadStore{st}, "").Routes(), "GET", "/v2/records?"+irQuery(0, 10).Encode(), ""); code != http.StatusInternalServerError {
 		t.Fatalf("store error: want 500, got %d", code)
+	}
+	// A store error at after == total (the page is empty and the total is reached) is still a 500, and the body
+	// carries the store error, not an ordinal-gap message: an empty page there would otherwise read as "nothing new".
+	code, body := do(t, cutServer(t, failingReadStore{st}, "").Routes(), "GET", "/v2/records?"+irQuery(1, 10).Encode(), "")
+	if code != http.StatusInternalServerError {
+		t.Fatalf("store error at after == total: want 500, got %d (%s)", code, body)
+	}
+	if !strings.Contains(body, "store down") || strings.Contains(body, "ordinal") {
+		t.Fatalf("store error at after == total: body %q must carry the store error and no ordinal-gap message", body)
 	}
 	if err := st.PutCheckpoint("p", store.Checkpoint{Seq: 0, CheckpointHash: "sha256:bad", JSON: `{"record_count":"many"}`}); err != nil {
 		t.Fatal(err)

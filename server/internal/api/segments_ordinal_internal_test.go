@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -59,5 +60,47 @@ func TestSegmentRecordsReadsTheMonthByOrdinal(t *testing.T) {
 		} else if spy.afterCalls[0] != first {
 			t.Fatalf("%d months: read %v, 1 month read %v", months, spy.afterCalls[0], first)
 		}
+	}
+}
+
+// gapAfterSpy hides the record at ordinal gap from RecordsAfter and fills the page with the next one, as a store
+// with a hole in its ordinals would (an owner-role delete, a hand-edited restore).
+type gapAfterSpy struct {
+	store.Store
+	gap int64
+}
+
+func (g gapAfterSpy) RecordsAfter(p string, after int64, limit int) ([]store.Record, error) {
+	v, err := g.Store.RecordsAfter(p, after, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	out := v[:0:0]
+	for _, r := range v {
+		if r.Ord != g.gap && len(out) < limit {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// TestSegmentRecordsRefusesAnOrdinalGap: a record deleted inside the month's range would pull in the first record
+// AFTER the month (a record after To) to keep the page the right length, so the count matches and only the
+// ordinal check sees it. The month export must refuse rather than ship a month that holds another month's record.
+func TestSegmentRecordsRefusesAnOrdinalGap(t *testing.T) {
+	const perMonth = 6
+	m := store.NewMem()
+	for g := 1; g <= 2*perMonth; g++ {
+		if _, _, err := m.PutRecord("p", fmt.Sprintf("k%d", g), store.Record{ContentHash: fmt.Sprintf("sha256:%d", g)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan := segmentPlan{Month: "2026-01", From: 0, To: perMonth}
+	if _, err := segmentRecords(gapAfterSpy{m, 99}, "p", plan); err != nil {
+		t.Fatalf("no gap in range: %v", err)
+	}
+	_, err := segmentRecords(gapAfterSpy{m, 3}, "p", plan)
+	if !errors.Is(err, store.ErrOrdinalGap) {
+		t.Fatalf("a hole inside the month with a record after To: err %v, want ErrOrdinalGap", err)
 	}
 }

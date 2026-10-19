@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -416,5 +417,43 @@ func TestPostgresOrdinalIndexServesReads(t *testing.T) {
 		if !strings.Contains(plan.String(), "records_project_ord_uniq") || strings.Contains(plan.String(), "Seq Scan") {
 			t.Fatalf("statement %q does not use the ordinal index:\n%s", q.sql, plan.String())
 		}
+	}
+}
+
+// gapAfterStore hides the record at ordinal gap from RecordsAfter and fills the page with the next one, as a
+// store with a hole in its ordinals would.
+type gapAfterStore struct {
+	Store
+	gap int64
+}
+
+func (g gapAfterStore) RecordsAfter(p string, after int64, limit int) ([]Record, error) {
+	v, err := g.Store.RecordsAfter(p, after, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	out := v[:0:0]
+	for _, r := range v {
+		if r.Ord != g.gap && len(out) < limit {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// TestProjectHeadsSinceRefusesAnOrdinalGap: a hole after the base would fold a wrong record set into the frontier
+// (a later record read in place of the missing one), so ProjectHeadsSince returns ErrOrdinalGap.
+func TestProjectHeadsSinceRefusesAnOrdinalGap(t *testing.T) {
+	m := NewMem()
+	for i := 1; i <= 8; i++ {
+		if _, _, err := m.PutRecord("p", fmt.Sprintf("k%d", i), rec(fmt.Sprintf("sha256:g%d", i), "s1")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ProjectHeadsSince(gapAfterStore{m, 99}, "p", nil, 2); err != nil {
+		t.Fatalf("no gap: %v", err)
+	}
+	if _, err := ProjectHeadsSince(gapAfterStore{m, 5}, "p", nil, 2); !errors.Is(err, ErrOrdinalGap) {
+		t.Fatalf("hole at ordinal 5 after the base: err %v, want ErrOrdinalGap", err)
 	}
 }
