@@ -673,11 +673,55 @@
       "tier": "full",
       "claim": "checkpoint-cut-incremental-equals-full"
     },
-    "checkpoint-cut-shadow-cannot-run-refuses": {
+    "incremental-read-after-off-by-one": {
       "tier": "full",
-      "claim": "checkpoint-cut-incremental-equals-full"
+      "claim": "incremental-read-continuity-snapshot"
     },
-    "checkpoint-cut-over-budget-full-body-not-compared": {
+    "incremental-read-at-seq-serves-an-earlier-checkpoint": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-at-seq-missing-falls-back-to-latest": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-total-is-the-page-end": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-more-always-false": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-unreadable-checkpoint-count-is-zero": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-store-error-served-as-empty": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-limit-uncapped": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-ordinal-gap-not-checked": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-latest-outside-snapshot": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-short-page-end-not-checked": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "incremental-read-total-outside-snapshot": {
+      "tier": "full",
+      "claim": "incremental-read-continuity-snapshot"
+    },
+    "checkpoint-cut-shadow-cannot-run-refuses": {
       "tier": "full",
       "claim": "checkpoint-cut-incremental-equals-full"
     },
@@ -692,6 +736,10 @@
     "surface-arena-trim-after-bundle-verify-removed": {
       "tier": "full",
       "claim": "cgo-bundle-verify-heap-trim"
+    },
+    "checkpoint-cut-over-budget-full-body-not-compared": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
     },
     "gateway-refusal-ingest-record-kind-not-reserved": {
       "tier": "fast",
@@ -768,6 +816,10 @@
     "gateway-refusal-report-omits-attempts": {
       "tier": "fast",
       "claim": "cross-impl-refusal-vector"
+    },
+    "gateway-refusal-kind-filter-ignored-on-incremental-read": {
+      "tier": "full",
+      "claim": "gateway-refusal-endpoint-closed"
     }
   },
   "claims": [
@@ -2673,6 +2725,59 @@
       "does_not_establish": "That the incremental cut equals the full computation on every history: the equality is argued in the code comment and checked on random histories (sessions, forced older parents, grants, voids, idempotent retries, idle cuts) and by the shadow check on the cuts of sequence number a multiple of 100 and on the first cut of each project after a start, so a divergence on any other cut is signed (a checkpoint is append-only) and is caught at the next shadowed cut of that project or by the verifier. That a corrupted or tampered latest checkpoint is detected on an unshadowed cut: the base is trusted as signed. That a refusal is remembered: it is not stored, it recurs because the refused sequence number is retried and shadow-checked again; a cut that was signed before the next shadowed one stays signed. That the Postgres ordinal and record count are right under concurrent writers (the store tests cover that). That the cost is constant for the frontier: a project with a very large frontier still carries it in every checkpoint. That the shadow keeps running as history grows: the full computation is O(history) and stops fitting its budget, the failed counter shows it, and from then on only the differential tests and the per-cut count and contiguity guards hold the equality. That the full computation, used for the first cut and as the definition, is cheap: it is O(history). The Postgres variants of the differential and cost tests run only in the Postgres CI job."
     },
     {
+      "id": "incremental-read-continuity-snapshot",
+      "$comment": "legacy register: incremental-read-continuity-snapshot",
+      "statement": "GET /v2/records with after=<n>&order=asc returns, oldest first, the records with insertion ordinal n+1 onward (at most limit, capped at 1000), and from the same repeatable-read snapshot the store's record total, the latest checkpoint (seq, hash, record_count) and, when at_seq=<k> is given, the checkpoint with that seq (absent when the project has no such seq). The records are the same rows the store holds at those ordinals; next_after is after plus the page length and more says whether records remain past it. A store error, a checkpoint whose record_count cannot be read, or a page whose ordinals are not exactly after+1 onward (or that stops short of the total) is a 500, never an empty page, a count of zero or a 200 that repeats one record and hides another; a request that is not exactly this shape (order other than asc, a missing, negative or non-numeric after, at_seq without after, offset with after) is a 400. The rows read are the page plus two checkpoint rows, the same at 1, 3 and 12 months of history. The read runs no verification and builds no bundle.",
+      "method": "property",
+      "artifacts": [
+        "server/internal/api/incremental_read.go",
+        "server/internal/api/incremental_read_test.go",
+        "server/internal/api/checkpoint_cut_pg_test.go",
+        "server/internal/store/store.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestIncrementalRead'",
+      "covers": [
+        {
+          "path": "server/internal/api/incremental_read.go",
+          "symbol": "parseIncrementalRead",
+          "sha256": "7d15a828222ca9162f4ffbdb265fbc995e9acc82d5913ef451b86f448801ad18"
+        },
+        {
+          "path": "server/internal/api/incremental_read.go",
+          "symbol": "toReadCheckpoint",
+          "sha256": "0eab684c04123109d8597e22ba835377c04258941de4fbf9f81feb0b25a097d6"
+        },
+        {
+          "path": "server/internal/api/incremental_read.go",
+          "symbol": "handleIncrementalRead",
+          "sha256": "350293f388103b60475d98362c5e5c47abeef5092e0779577e53149ef2f53f47"
+        },
+        {
+          "path": "server/internal/api/incremental_read.go",
+          "symbol": "ordinalGap",
+          "sha256": "2c40238ca7f458c4662e2471b958ff655d300e35ea00dff4d7ecd839db8114d7"
+        }
+      ],
+      "mutants": [
+        "incremental-read-after-off-by-one",
+        "incremental-read-at-seq-serves-an-earlier-checkpoint",
+        "incremental-read-at-seq-missing-falls-back-to-latest",
+        "incremental-read-total-is-the-page-end",
+        "incremental-read-more-always-false",
+        "incremental-read-unreadable-checkpoint-count-is-zero",
+        "incremental-read-store-error-served-as-empty",
+        "incremental-read-limit-uncapped",
+        "incremental-read-ordinal-gap-not-checked",
+        "incremental-read-latest-outside-snapshot",
+        "incremental-read-short-page-end-not-checked",
+        "incremental-read-total-outside-snapshot"
+      ],
+      "does_not_establish": "That the records served are authentic: the read verifies nothing, so what a reader holds afterwards is a read frontier bound to a signed checkpoint that it can compare on the next read, not a verified one. That a reader detects an in-place rewrite below its frontier: that is the reader's rolling re-read, not this endpoint. That the snapshot is consistent across pages: each page is its own snapshot, so a reader must check the continuity fields (the checkpoint at its frontier seq, the latest seq, record counts and total) on every page. That the Postgres read uses the ordinal index in every plan: the Postgres cost test counts rows, and runs only in the Postgres CI job."
+    },
+    {
       "$comment": "legacy register: project-record-quota",
       "id": "cgo-bundle-verify-heap-trim",
       "statement": "After each full-bundle verification through cgo (Core.VerifyBundle and Core.VerifyBundleWith, which VerifyBundleWithAuthority and VerifyBundleWithRoles call), the server asks glibc to return freed C-heap pages to the OS with malloc_trim(0), once per verification and after the bundle copy and the Rust result are freed; on a build whose C library is not glibc the call is a no-op. A server test seals 1000 generic records over 12 sessions with 10 checkpoints, verifies the resulting bundle once on each of 8 distinct locked OS threads and requires resident memory to grow by less than 32 MB (without the trim the same test grows about 50 MB); it skips with a message where the trim is not supported.",
@@ -2743,7 +2848,7 @@
     {
       "id": "gateway-refusal-endpoint-closed",
       "$comment": "legacy register: gateway-refusal-endpoint-closed",
-      "statement": "POST /v2/refusals builds the record itself from a closed body: an unknown field (params, a free-text reason), an unknown reason class or entry point, a zero attempts count, a last_at in the future, a first_at after last_at, an agent_id outside the plain-identifier pattern, a summary whose by_class does not sum to attempts, and a by_class on a non-summary record are all a 400 and seal nothing. An unsafe action name is stored as the literal invalid_name. A replay of the same idempotency key returns the same record. GET /v2/records filters by record_kind and exclude_record_kind, rejects an unknown kind, and pages over the matching records.",
+      "statement": "POST /v2/refusals builds the record itself from a closed body: an unknown field (params, a free-text reason), an unknown reason class or entry point, a zero attempts count, a last_at in the future, a first_at after last_at, an agent_id outside the plain-identifier pattern, a summary whose by_class does not sum to attempts, and a by_class on a non-summary record are all a 400 and seal nothing. An unsafe action name is stored as the literal invalid_name. A replay of the same idempotency key returns the same record. GET /v2/records filters by record_kind and exclude_record_kind, rejects an unknown kind, and pages over the matching records; an incremental read (the contiguous, ordinal-checked mode) refuses either filter with a 400 instead of ignoring it.",
       "method": "test",
       "artifacts": [
         "server/internal/api/refusals.go",
@@ -2753,7 +2858,7 @@
       "gates": [
         "server"
       ],
-      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestRefusalSealsChainsAndVerifies|TestRefusalIsIdempotentPerKey|TestRefusalRequestIsClosed|TestRefusalSanitizesAgentSuppliedNamesAndSealsSummary|TestListRecordsKindFilter|TestRefusalVocabularyMatchesSpec'",
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestRefusalSealsChainsAndVerifies|TestRefusalIsIdempotentPerKey|TestRefusalRequestIsClosed|TestRefusalSanitizesAgentSuppliedNamesAndSealsSummary|TestListRecordsKindFilter|TestRefusalVocabularyMatchesSpec|TestIncrementalReadRefusesAKindFilter'",
       "covers": [
         {
           "path": "server/internal/api/refusals.go",
@@ -2773,14 +2878,15 @@
         {
           "path": "server/internal/api/server.go",
           "symbol": "handleListRecords",
-          "sha256": "d6cf0ed4bc1132236c2cdc134eb85bf975c455872e17eeb7e4ccbf75e553c508"
+          "sha256": "5b160fba3c9ceb592fa6633977c1dc14811e515ff9aafb33dc52e8de6741f496"
         }
       ],
       "mutants": [
         "gateway-refusal-endpoint-accepts-unknown-fields",
         "gateway-refusal-endpoint-keeps-free-text-names",
         "gateway-refusal-endpoint-allows-future-time",
-        "gateway-refusal-list-exclude-filter-inverted"
+        "gateway-refusal-list-exclude-filter-inverted",
+        "gateway-refusal-kind-filter-ignored-on-incremental-read"
       ],
       "does_not_establish": "Rate limiting of refusal submissions (AVERIN_INGEST_BUDGET and the producer's own budget bound volume). That the in-memory store and Postgres return the same filtered page: the filter tests run on the in-memory store. That a name inside the allowed pattern is harmless to a reader: it is still agent-supplied. Behaviour under concurrent replicas that each hold their own id salt (a replay is answered from the stored idempotency key, not from the id)."
     },

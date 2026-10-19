@@ -1,0 +1,14 @@
+diff --git a/server/internal/api/incremental_read.go b/server/internal/api/incremental_read.go
+index 2ccf624..e9dc801 100644
+--- a/server/internal/api/incremental_read.go
++++ b/server/internal/api/incremental_read.go
+@@ -115,6 +115,9 @@ func (s *Server) handleIncrementalRead(w http.ResponseWriter, r *http.Request, p
+ 				}
+ 			}
+ 		}
++		if p.hasAt && at == nil {
++			at = latest
++		}
+ 		return nil
+ 	})
+ 	if err != nil {

@@ -50,6 +50,11 @@ func (r *rowSpy) WithProjectWrite(ctx context.Context, p string, fn func(store.S
 		return fn(r.bind(b))
 	})
 }
+func (r *rowSpy) WithProjectRead(ctx context.Context, p string, fn func(store.Store) error) error {
+	return r.Store.WithProjectRead(ctx, p, func(b store.Store) error {
+		return fn(r.bind(b))
+	})
+}
 func (r *rowSpy) WithBudget(d time.Duration, fn func(store.Store) error) error {
 	return r.Store.WithBudget(d, func(b store.Store) error { return fn(r.bind(b)) })
 }

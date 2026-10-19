@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/incremental_read.go b/server/internal/api/incremental_read.go
+index 2ccf624..3c345aa 100644
+--- a/server/internal/api/incremental_read.go
++++ b/server/internal/api/incremental_read.go
+@@ -68,7 +68,7 @@ func toReadCheckpoint(cp store.Checkpoint) (*readCheckpoint, error) {
+ 	}
+ 	if err := json.Unmarshal([]byte(cp.JSON), &b); err != nil || b.RecordCount == nil || *b.RecordCount < 0 {
+ 		// FAIL CLOSED: a checkpoint whose count cannot be read must not become a frontier.
+-		return nil, fmt.Errorf("checkpoint %d has no readable record_count", cp.Seq)
++		return &readCheckpoint{Seq: cp.Seq, Hash: cp.CheckpointHash}, nil
+ 	}
+ 	return &readCheckpoint{Seq: cp.Seq, Hash: cp.CheckpointHash, RecordCount: *b.RecordCount}, nil
+ }

@@ -36,6 +36,7 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | POST | `/v2/records` | Ingest one record or a batch array. | always |
 | POST | `/v2/otel/traces` | Ingest OTel/OpenInference spans, mapped to records. | always |
 | POST | `/v2/checkpoints` | Seal the current frontier into the checkpoint chain. | always |
+| GET | `/v2/records` | List records newest first, or (with `after` and `order=asc`) read oldest first from an ordinal. | always |
 | GET | `/v2/verify` | Server-side verification report for a project. | always |
 | GET | `/v2/export` | Export a verifiable bundle (proof / disclosure), whole history or one month. | always |
 | GET | `/v2/segments` | List the project's month segments (AVE-01). | always |
@@ -245,6 +246,38 @@ Query parameters:
 - `record_kind` (optional) — filter to a typed view. Must be a valid `record_kind`; an unknown value
   is `400`. Adds a `filtered_records` array + a `record_kind_filter` echo. The canonical `records`/
   `checkpoints` arrays are left intact (so the bundle still verifies); the filter is a typed *view*.
+
+---
+
+## GET `/v2/records?project=<id>&after=<n>&order=asc[&limit=<L>][&at_seq=<k>]`
+
+The incremental read. Without `after`, `order` and `at_seq` this route is the newest-first list
+(`limit`, `offset`, `total`, `truncated`). With `after=<n>&order=asc` it returns the records with
+insertion ordinal `n+1` onward, oldest first, at most `limit` (default 100, capped at 1000), in
+`records`. The ordinal is the position a checkpoint's `record_count` refers to, so
+`after=<record_count of checkpoint k>` reads the records that checkpoint does not cover. `after=0`
+reads from the first record.
+
+From the same repeatable-read snapshot the response also carries `total` (the store's record count),
+`after`, `next_after` (`after` plus the page length), `more` (records remain past `next_after`),
+`latest_checkpoint` (`seq`, `hash`, `record_count`; absent when the project has no checkpoint) and,
+when `at_seq=<k>` is given, `at_seq` (the checkpoint with that seq; absent when there is none). A
+reader compares these on every page: the hash at the seq it holds, the latest seq and count not
+below what it held, and `total` not below the latest count. The read costs the page plus two
+checkpoint rows, whatever the history size.
+
+If the store's ordinals have a gap (a page that is not exactly the ordinals `after+1` onward, or a short page
+that does not end at `total`), the read is a 500 (the error starts `record ordinal gap`), never a page that
+repeats one record and hides another. The page check is the same one the checkpoint cut and the segment read
+use. An empty page with `after` at or past `total` is not a gap: it is a reader that is ahead of the store, and
+the response is `200` with no records and `more` false.
+
+It verifies nothing and builds no bundle. A reader that follows it holds a read frontier bound to a
+signed checkpoint, not a verified one; the records are as authentic as the store they came from. A
+rewrite below the reader's frontier is for the reader's own re-read to find. Each page is its own
+snapshot. `order` other than `asc`, a missing, negative or non-numeric `after` or `at_seq`,
+`at_seq` without `after` and `offset` with `after` are `400`; a store error, or a checkpoint whose
+`record_count` cannot be read, is `500`.
 
 ---
 
