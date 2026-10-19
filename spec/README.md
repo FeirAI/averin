@@ -7,8 +7,10 @@ the test data the verifiers are checked against.
 |---|---|
 | `decision-record.schema.json`, `checkpoint.schema.json` | JSON Schemas for the record and checkpoint shapes. |
 | `schema-v2.md`, `rcp-v1.md` | Prose specifications for the record schema and the checkpoint protocol. |
+| `authority-subject-v1.md`, `authority-subject-v1.json` | Authority subject v1: the projection a v3 authority signature approves, its digest and signature preimages, and the authority verdict vocabulary (`.md`), with the machine-readable field policy (`.json`). |
+| `grant-pop-v2.md` | Brokered grant proof of possession v2: the signed byte sequence, identifier and request validation rules, and the offline-verification limits. |
 | `fixtures/` | Example bundles used by the Rust, Go, and JavaScript test suites. |
-| `golden-vectors/` | Canonicalization and signature vectors that every verifier implementation must reproduce byte for byte. |
+| `golden-vectors/` | Canonicalization, signature, authority-subject and broker-preimage vectors that every verifier implementation must reproduce byte for byte (positive cases only; see `rcp-v1.md` section 11). |
 | `../vectors/refusal-classes.v1.json` | Closed vocabularies (14 reason classes, 4 entry points) of the gateway refusal record (`record_kind` `gateway-refusal`). core, the server and a test pin their copies to this file; vultrino and feir-os vendor it under the vectors lock. |
 | `test-keys.json` | **TEST-ONLY** public keys behind the new vectors (`fixtures/capstone-with-refusals-v3.json`, `fixtures/gateway-refusal-vectors.json`, `verifier/samples/refusals*.json`). Seed = sha256 of a public label, so anyone can recompute them. Never pin one in a deployment. |
 

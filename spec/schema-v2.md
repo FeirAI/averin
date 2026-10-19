@@ -9,7 +9,7 @@ model. Per the **schema-now / enforce-later** discipline, every field that canno
 honestly later is present now even though its *enforcement* (credential broker, policy
 co-signing, full coverage) ships progressively.
 
-See `decision-record.schema.json` for the machine-checkable schema and `rcp-1.md` for how a
+See `decision-record.schema.json` for the machine-checkable schema and `rcp-v1.md` for how a
 body becomes bytes. Field reference (grouped as in spec §6):
 
 ## Versioning & domain separation
@@ -23,6 +23,10 @@ body becomes bytes. Field reference (grouped as in spec §6):
 - `causal_prev_hashes`: array of `sha256:…` content-hashes of causal parents. Semantically a
   **set**: MUST be **de-duplicated and sorted ascending by byte order** before canonicalization
   (RCP §7) so equivalent parent sets hash identically. A record with `[]` is a run root.
+  averin's recorder always seals the set that way (the server replaces any caller-supplied parents
+  with the sorted, de-duplicated union of the session's current heads), but averin's verifier does
+  not currently reject an unsorted or duplicated set: it treats parents as a set, with duplicates
+  collapsed. A stricter independent verifier may reject such input (see RCP §7).
 - `display_seq`: server-assigned **UI-only ordering — NOT a trust primitive**.
 
 ## Time (three clocks; agent clock untrusted — threat #11)
@@ -31,36 +35,51 @@ body becomes bytes. Field reference (grouped as in spec §6):
   hash-links + the anchored checkpoint, never from `agent_ts`.
 
 ## Observed event (observed, not necessarily complete)
-- `event_type`: `llm_call|tool_call|decision|approval_gate|handoff|spawn_child|incomplete|credential_grant`.
+- `event_type`: `llm_call|tool_call|decision|approval_gate|handoff|spawn_child|incomplete|credential_grant|gateway_refusal`.
   `credential_grant` is a credential-broker grant record (Level 3 — see ADR 0002): the broker recorded
   that it issued a scoped, short-lived credential under `gateway_enforced` authority. Its grant-specific
   fields (`issuance_status`, `scope_class`, `conformance_level`, `credential_binding`) live under
   `extensions.broker` — NOT as new top-level keys — so the closed record schema is unchanged.
-- `action`, `status`: `ok|error|blocked|pending_approval|incomplete`.
-- `observed_via`: `proxy|sdk|otel|broker` — provenance of the observation itself (Level-2 honesty).
+  `gateway_refusal` is a record that a gateway refused an action (`record_kind` `gateway-refusal`,
+  `status` `refused`, `observed_via` `gateway`, detail under `extensions.gateway_refusal`, no
+  `authority` block). It is reserved for `POST /v2/refusals`: the generic ingest path rejects it.
+- `action`, `status`: `ok|error|blocked|pending_approval|incomplete|refused`. `refused` is used only
+  by gateway refusal records.
+- `observed_via`: `proxy|sdk|otel|broker|gateway`: provenance of the observation itself (Level-2 honesty).
   `broker` marks a record produced by the credential broker (a grant) or a resource use-receipt.
+  `gateway` marks a gateway refusal record.
+- `record_kind` (optional, a sibling of `event_type` that does not replace it): a typed evidence kind,
+  one of `budget-exhausted|chargeback-posted|gateway-refusal` in the JSON Schema. It is an ordinary
+  signed top-level field. The verifier admits it as a known top-level key and acts only on
+  `gateway-refusal`.
 - `input_commit` / `output_commit` / `rationale_commit` / `credential_commit`: `{alg, commitment,
-  low_entropy}` hiding commitments (RCP §8.3). `credential_commit` is the credential-broker grant's
+  low_entropy}` hiding commitments (RCP §9.3). `credential_commit` is the credential-broker grant's
   descriptor under its dedicated domain (ADR 0004 D1; a grant no longer overloads `input_commit`).
 - `tokens`: `{in:int, out:int}`. `cost_micros_usd`: **integer micro-USD — NO floats**.
 
 ## Authority (the moat — gradient, not annotation)
-- `authority.source`: `caller_declared|policy_engine_signed|human_signed|gateway_enforced`.
+- `authority.source`: `caller_declared|policy_engine_signed|human_signed|delegate_signed|gateway_enforced`.
 - `authority.enforcement_point`: `sdk|proxy|tool_gateway|credential_broker|external`.
 - `authority.decision_basis`: `auto|human_approved|policy_allowed|policy_denied`.
 - `policy_hash` (content hash of the EXACT policy — resolve by hash, threat #14),
   `policy_snapshot_ref` `{uri,digest,object_version}`, `grant_id`, `grant_type`
   (`id-jag|oauth-scope|role|none`), `authorizing_principal`, `delegation_chain[]`.
 - `evidence_hash`, `evidence_sig` (`ed25519:…|null` — the signature **from the authority
-  system**; presence is what upgrades `declared` → `verified`), `evaluated_at`,
-  `expires_at`, `nonce`.
+  system**), `evaluated_at`, `expires_at`, `nonce`. Presence of a signature does not by itself make
+  authority `verified`. For a non-`caller_declared` source, averin's verifier reports: `legacy_unbound`
+  for a valid historical v2 signature (it binds the evidence, not the record body); `verified` only
+  for a v3 proof (`proof_version`, `subject_projection`, `subject_digest`, see
+  `authority-subject-v1.md`) whose signature verifies under a pinned key and whose digest matches the
+  record body; `unverifiable` when the claim is well formed but no authority keys are pinned;
+  `failed` when evidence is missing or malformed or no pinned key verifies it. `caller_declared`
+  (and an unknown source) is `declared`; no authority block is `none`.
 
 ## Content addressing (mutable keys are a vuln — threat #5)
 - `content`: `{uri, digest (sha256:…), length:int, content_type, enc_key_id, object_version}`.
   `object_version` (S3 version id / ETag) pins immutability.
 
 ## Integrity & key epoch
-- `content_hash` (RCP §8.1), `sig` (RCP §8.2).
+- `content_hash` (RCP §9.1), `sig` (RCP §9.2).
 - `key`: `{signing_key_id, key_epoch:int, key_valid_from, key_valid_until,
   key_status (active|retired|revoked|compromised), status_changed_at (required iff status is
   revoked|compromised), key_attestation_ref (attests the status/time), rotation_prev_key_sig}`.
@@ -68,19 +87,46 @@ body becomes bytes. Field reference (grouped as in spec §6):
   trustworthy **only if** an anchored checkpoint with anchor-time `T ≤ status_changed_at`
   transitively commits the record's `content_hash`; otherwise the verifier reports it
   **untrusted** (never a silent pass).
+  **averin today:** the producer requirements for the block stay. averin's verifier does not read
+  `key_valid_from`, `key_valid_until`, `key_attestation_ref` or `rotation_prev_key_sig`, so a record
+  signed outside its stated window is not rejected on that basis. Status and its time come from the
+  bundle's `keys[]` entry or the auditor's pinned key list (under pinning the bundle's own time is
+  ignored); rotation is verified through separate `key_rotations` statements. The effective status is
+  the worst of record, bundle and pin; `retired` counts like `active`; a missing or unknown
+  `key_status` counts as `unknown` and the record is untrusted (details in RCP §10.2).
 
 ## Misc
 - `framework` (e.g. `openai-agents`), `extensions` (the ONLY place unknown fields tolerated).
 
 ---
 
-## Checkpoint object (frontier commitment — see rcp-1 §9.4 / §10)
+## Checkpoint object (frontier commitment; see rcp-v1.md §9.4 / §10)
 `schema_version: "2"`, `canon_version: "rcp-1"`, `domain: "flightrecorder.checkpoint.v2"`.
 Fields: `checkpoint_id`, `project_id`, `checkpoint_seq` (per-project monotonic from 0, +1, no
 gaps), `prev_checkpoint_hash` (`sha256:…|null`; null only at seq 0 — chains checkpoints),
 `frontier` (de-duplicated, byte-sorted set of current head `content_hash`es — RCP §10),
 `record_count` (cumulative distinct records, non-decreasing), `created_ts`, `checkpoint_hash`,
-`sig`, and a post-sign `anchor` `{scheme, token_b64, anchored_ts, tsa_url, witness_uri,
-witness_object_version}`. Machine schema: `checkpoint.schema.json`. The deterministic frontier
-computation and the offline verification algorithm (omission/fork/backdate detection) are
-specified in RCP §10.
+`sig`, a `key` block, optional grant-transparency heads, and a post-sign `anchor` `{scheme, token_b64,
+anchored_ts, tsa_url, witness_uri, witness_object_version}`. Machine schema: `checkpoint.schema.json`.
+The deterministic frontier computation and the offline verification algorithm (omission/fork/backdate
+detection) are specified in RCP §10.
+
+- `key`: `{signing_key_id, key_epoch:int, key_valid_from, key_valid_until, key_status
+  (active|retired|revoked|compromised), status_changed_at, key_attestation_ref}`, the same block as
+  on a record except that it has no `rotation_prev_key_sig`. The verifier applies the RCP §10.2 status
+  rule to the checkpoint's signing key as it does to a record's, and, as for records, does not read
+  the validity window or `key_attestation_ref`.
+- `broker_grant_head` (optional): `{max_seq:int, prior_head_hash, cumulative_root}`, the cumulative
+  root over the broker's grant log up to `max_seq`, chained to the previous checkpoint's root. It is
+  inside the signed, anchored checkpoint so the broker cannot equivocate on its grant log.
+- `broker_grant_heads` (optional, federated brokers): a map from `broker_id` to the same
+  `{max_seq, prior_head_hash, cumulative_root}` object. A well-formed checkpoint carries at most one of
+  the two forms.
+- `anchor` contents per scheme (`rfc3161`, `test-anchor`), including what each scheme signs and which
+  time is used, are specified in RCP §10.1.1.
+
+**Known schema mismatches (not corrected here).** `checkpoint.schema.json` declares `anchor` with
+`additionalProperties: false` and no `tsa_key_id`, yet the `test-anchor` scheme emits a `tsa_key_id`
+member. It also declares `broker_grant_head` but not `broker_grant_heads`, which federated checkpoints
+carry. The schemas are advisory (see the note on the authority of the profile over the schema at the top of `rcp-v1.md`), and
+averin's verifier does not run them.
