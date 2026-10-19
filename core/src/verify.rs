@@ -257,6 +257,13 @@ pub struct VerifyReport {
     pub collapsed_duplicates: usize,
     pub checkpoints_total: usize,
     pub checkpoints_verified: usize,
+    /// `checkpoint_seq` and signed `record_count` of the highest-seq checkpoint whose seal verified, or
+    /// `None` when no checkpoint verified or the count is not a non-negative integer. A progress signal for a
+    /// consumer watching an unsealed tail grow: read it only together with `checkpoints_verified ==
+    /// checkpoints_total` and no chain issue other than the latest-checkpoint coverage ones (seq continuity is
+    /// checked by `validate_chain` before coverage). It is never an input to any verdict.
+    pub latest_checkpoint_seq: Option<i64>,
+    pub latest_checkpoint_record_count: Option<u64>,
     /// Checkpoints whose external anchor VERIFIED under a pinned TSA (on a verified checkpoint, TSA key honored)
     /// — the anchors that actually contribute trust. `checkpoints_anchors_attached` counts mere PRESENCE of an
     /// `anchor` field (unverified: anyone can attach garbage), so the two are never conflated.
@@ -1508,6 +1515,16 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("collapsed_duplicates".into(), count(r.collapsed_duplicates)),
         ("checkpoints_total".into(), count(r.checkpoints_total)),
         ("checkpoints_verified".into(), count(r.checkpoints_verified)),
+        (
+            "latest_checkpoint_seq".into(),
+            r.latest_checkpoint_seq
+                .map_or(CanonValue::Null, CanonValue::Int),
+        ),
+        (
+            "latest_checkpoint_record_count".into(),
+            r.latest_checkpoint_record_count
+                .map_or(CanonValue::Null, |n| count(n as usize)),
+        ),
         ("checkpoints_anchored".into(), count(r.checkpoints_anchored)),
         (
             "checkpoints_anchors_attached".into(),
@@ -2282,6 +2299,8 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         collapsed_duplicates: 0,
         checkpoints_total: 0,
         checkpoints_verified: 0,
+        latest_checkpoint_seq: None,
+        latest_checkpoint_record_count: None,
         checkpoints_anchored: 0,
         checkpoints_anchors_attached: 0,
         chain_ok: false,
@@ -5786,6 +5805,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
 
     // ---- 4. checkpoints + anchors ----
     let mut checkpoints_verified = 0usize;
+    let mut latest_checkpoint: Option<(i64, u64)> = None;
     let mut checkpoints_anchored = 0usize;
     let mut checkpoints_anchors_attached = 0usize;
     // (seq, anchored_ts, frontier) for each checkpoint with a verified anchor
@@ -5972,6 +5992,16 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         };
         if cp_verified {
             checkpoints_verified += 1;
+            if let (Some(seq), Some(n)) = (
+                cp.get("checkpoint_seq").and_then(|v| v.as_int()),
+                cp.get("record_count")
+                    .and_then(|v| v.as_int())
+                    .and_then(|n| u64::try_from(n).ok()),
+            ) {
+                if latest_checkpoint.map_or(true, |(best, _)| seq > best) {
+                    latest_checkpoint = Some((seq, n));
+                }
+            }
             verified_frontiers.extend(cp_frontier.iter().cloned());
         }
         if cp.get("anchor").is_some() {
@@ -7867,6 +7897,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         collapsed_duplicates,
         checkpoints_total: checkpoints.len(),
         checkpoints_verified,
+        latest_checkpoint_seq: latest_checkpoint.map(|(q, _)| q),
+        latest_checkpoint_record_count: latest_checkpoint.map(|(_, n)| n),
         checkpoints_anchored,
         checkpoints_anchors_attached,
         chain_ok,

@@ -16454,3 +16454,58 @@ fn sb28_real_producer_fixtures_keep_their_capstone_labels() {
         );
     }
 }
+
+// ---- latest_checkpoint_seq / latest_checkpoint_record_count: a progress signal for a growing unsealed tail ----
+
+#[test]
+fn latest_verified_checkpoint_is_reported_for_a_growing_tail() {
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let kc = signing_key_from_seed(&[42u8; 32]);
+    let opts = VerifyOptions {
+        trusted_keys: Some(vec![rec.verifying_key().into(), kc.verifying_key().into()]),
+        ..Default::default()
+    };
+    let full = kc_chain_bundle(&rec, &kc, None);
+    let r = verify_bundle_with(&full, &opts);
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(
+        (r.latest_checkpoint_seq, r.latest_checkpoint_record_count),
+        (Some(1), Some(2))
+    );
+
+    // A record newer than the latest checkpoint (cp1 withheld, so g2 is unsealed): averin reports the
+    // FRONTIER form (the frontier check runs before the count check), never a record_count issue, and the
+    // latest verified checkpoint's signed seq and count are still reported.
+    let tail = rebuild(
+        arr(&full, "keys"),
+        arr(&full, "records"),
+        vec![arr(&full, "checkpoints")[0].clone()],
+    );
+    let r = verify_bundle_with(&tail, &opts);
+    assert!(!r.ok);
+    assert_eq!(r.checkpoints_verified, r.checkpoints_total);
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("uncommitted or omitted session")),
+        "{:?}",
+        r.issues
+    );
+    assert!(
+        !r.issues.iter().any(|i| i.contains("record_count")),
+        "{:?}",
+        r.issues
+    );
+    assert_eq!(
+        (r.latest_checkpoint_seq, r.latest_checkpoint_record_count),
+        (Some(0), Some(1))
+    );
+
+    // No verified checkpoint: nothing is reported.
+    let none = rebuild(arr(&full, "keys"), arr(&full, "records"), vec![]);
+    let r = verify_bundle_with(&none, &opts);
+    assert_eq!(
+        (r.latest_checkpoint_seq, r.latest_checkpoint_record_count),
+        (None, None)
+    );
+}

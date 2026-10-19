@@ -562,6 +562,7 @@ Key fields:
 | `records_total`, `records_proven` | int | |
 | `dag_ok`, `dag_heads`, `collapsed_duplicates` | bool/int | DAG validity, head count, deduped retries (#8). |
 | `checkpoints_total`, `checkpoints_verified`, `chain_ok` | int/bool | |
+| `latest_checkpoint_seq`, `latest_checkpoint_record_count` | int/null | `checkpoint_seq` and signed `record_count` of the highest-seq checkpoint whose seal verified; `null` when none verified. A progress signal for a consumer watching an unsealed tail grow (the report's issue for a tail is the frontier form, which carries no count). Read it only with `checkpoints_verified == checkpoints_total` and no chain issue beyond the latest-checkpoint coverage ones. Never an input to any verdict. |
 | `checkpoints_anchored` | int | Checkpoints whose anchor **verified** under a pinned TSA (`tsa_keys` / `tsa_spki_b64`) on a verified checkpoint. `0` whenever no TSA trust is pinned. (Changed: it used to count every checkpoint carrying an `anchor` field, verified or not.) |
 | `checkpoints_anchors_attached` | int | Checkpoints that merely **carry** an `anchor` field. Unverified: anyone can attach one, so never read it as timestamp evidence. |
 | `key_rotations_total`, `key_rotations_verified`, `key_rotations_chain_trusted` | int | Signed recording-key rotation statements in `bundle.key_rotations`, how many verified, and how many keys are trusted only because a verified `scheduled` statement links them to a pinned key that is neither revoked nor compromised. A statement that does not verify is also an `issues` entry. |
