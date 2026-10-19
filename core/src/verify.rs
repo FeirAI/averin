@@ -6448,7 +6448,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     .and_then(|v| v.as_int())
                     .and_then(|n| u64::try_from(n).ok()),
             ) {
-                if latest_checkpoint.map_or(true, |(best, _)| seq > best) {
+                if latest_checkpoint.is_none_or(|(best, _)| seq > best) {
                     latest_checkpoint = Some((seq, n));
                     latest_checkpoint_frontier = cp_frontier.clone();
                 }
