@@ -30,12 +30,21 @@ func rssBytes(t *testing.T) int64 {
 	return resident * int64(os.Getpagesize())
 }
 
-// TestWholeBundleVerifyDoesNotRetainArenaMemory: glibc keeps one malloc arena per OS thread and never
-// returns freed pages, so a whole-history verification on N distinct cgo threads used to leave N peaks
-// resident (soak: RSS doubling per hour). The fix trims the C heap after each full-bundle verification.
+// TestWholeBundleVerifyDoesNotRetainArenaMemory: glibc keeps freed pages below each arena's top resident
+// until malloc_trim is called. Arenas are capped and shared between threads, and the top of an arena is
+// trimmed automatically, so a whole-history verification on several cgo threads can still leave the
+// freed middle of the heap resident (soak: RSS doubling per hour). The fix calls malloc_trim after each
+// full-bundle verification. The test is vacuous when the arena count is already capped by the environment,
+// so it skips then.
 func TestWholeBundleVerifyDoesNotRetainArenaMemory(t *testing.T) {
 	if runtime.GOOS != "linux" || !core.HeapTrimSupported() {
 		t.Skip("malloc_trim exists only on linux/glibc; nothing to assert on this platform")
+	}
+	if v := os.Getenv("MALLOC_ARENA_MAX"); v != "" {
+		t.Skipf("MALLOC_ARENA_MAX=%s is set: the arena cap makes this RSS test vacuous; unset it to run", v)
+	}
+	if v := os.Getenv("GLIBC_TUNABLES"); strings.Contains(v, "glibc.malloc.arena_max") {
+		t.Skipf("GLIBC_TUNABLES=%s sets glibc.malloc.arena_max: the arena cap makes this RSS test vacuous; unset it to run", v)
 	}
 	s := New(testCore(t), store.NewMem(), "k0").WithAuth(auth.NewOpenStore())
 	h := s.Routes()

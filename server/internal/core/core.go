@@ -12,8 +12,9 @@ package core
 #include <malloc.h>
 #endif
 // averin_release_heap hands free pages in every malloc arena back to the kernel. A whole-bundle
-// verification allocates O(history) through the system allocator on whatever OS thread cgo runs it on;
-// without this, glibc keeps that peak resident in that thread's arena for the life of the process.
+// verification allocates O(history) through the system allocator on whatever OS thread cgo runs it on.
+// glibc caps the number of arenas and shares them between threads, and trims the top of an arena
+// automatically, but it keeps freed pages below an arena's top resident until malloc_trim is called.
 // A no-op where glibc is not the C library.
 static void averin_release_heap(void) {
 #if defined(__GLIBC__)

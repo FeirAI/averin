@@ -67,8 +67,9 @@ What it does not do:
   month by month; cutting finer than a month is not built.
 - **Peak memory of a whole-history build is O(history)**, including for a project over the limit: the whole history
   is loaded before the size check answers 413. The in-memory store holds everything regardless.
-- **The C heap is trimmed after each whole-bundle verification, on glibc only.** Without it glibc keeps each OS
-  thread's malloc arena at the peak of one verification. On a non-glibc libc nothing is returned, and the
+- **The C heap is trimmed after each whole-bundle verification, on glibc only.** Without it glibc keeps freed
+  pages below each malloc arena's top resident until malloc_trim is called (arenas are capped and shared, and the
+  top is trimmed automatically). On a non-glibc libc nothing is returned, and the
   transient peak while a verification runs is still O(history).
 
 **Deferred:** a **cursor-streaming export** (constant memory, byte-identical framing) and **checkpoint
