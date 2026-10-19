@@ -732,6 +732,10 @@
     "checkpoint-cut-skips-page-ordinal-check": {
       "tier": "fast",
       "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "surface-arena-trim-after-bundle-verify-removed": {
+      "tier": "full",
+      "claim": "cgo-bundle-verify-heap-trim"
     }
   },
   "claims": [
@@ -2687,6 +2691,36 @@
         "incremental-read-total-outside-snapshot"
       ],
       "does_not_establish": "That the records served are authentic: the read verifies nothing, so what a reader holds afterwards is a read frontier bound to a signed checkpoint that it can compare on the next read, not a verified one. That a reader detects an in-place rewrite below its frontier: that is the reader's rolling re-read, not this endpoint. That the snapshot is consistent across pages: each page is its own snapshot, so a reader must check the continuity fields (the checkpoint at its frontier seq, the latest seq, record counts and total) on every page. That the Postgres read uses the ordinal index in every plan: the Postgres cost test counts rows, and runs only in the Postgres CI job."
+    },
+    {
+      "$comment": "legacy register: project-record-quota",
+      "id": "cgo-bundle-verify-heap-trim",
+      "statement": "After each full-bundle verification through cgo (Core.VerifyBundle and Core.VerifyBundleWith, which VerifyBundleWithAuthority and VerifyBundleWithRoles call), the server asks glibc to return freed C-heap pages to the OS with malloc_trim(0), once per verification and after the bundle copy and the Rust result are freed; on a build whose C library is not glibc the call is a no-op. A server test seals 1000 generic records over 12 sessions with 10 checkpoints, verifies the resulting bundle once on each of 8 distinct locked OS threads and requires resident memory to grow by less than 32 MB (without the trim the same test grows about 50 MB); it skips with a message where the trim is not supported.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/core/core.go",
+        "server/internal/api/arena_trim_internal_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && CGO_LDFLAGS=-ldl go test -count=1 ./internal/api -run TestWholeBundleVerifyDoesNotRetainArenaMemory",
+      "covers": [
+        {
+          "path": "server/internal/core/core.go",
+          "symbol": "VerifyBundle",
+          "sha256": "544bc238815348fb5572104318f505ad1f52e9219cfd88c5b2c0f80e2696aa2c"
+        },
+        {
+          "path": "server/internal/core/core.go",
+          "symbol": "VerifyBundleWith",
+          "sha256": "25340a1b151d5d015267ff18ae1e2e96c5acad24571823e2a20d45105c159d5e"
+        }
+      ],
+      "mutants": [
+        "surface-arena-trim-after-bundle-verify-removed"
+      ],
+      "does_not_establish": "That memory is bounded: only the C-heap arenas touched by whole-bundle verification are trimmed, on glibc. Other allocators (musl, jemalloc, a different libc) are not covered, and on them nothing is returned. The cost of the verification itself (CPU, and the transient O(bundle) peak while it runs) and any Go-heap growth are unchanged. It does not address history growth: whole-history exports and verifications still grow with the project and are still capped at the single-bundle limit (a separate design). The test measures resident memory of one process on a 0.9 MB bundle with a 32 MB tolerance, so it detects retention of about one verification peak per thread, not small leaks, and it calls only VerifyBundleWith; the trim in VerifyBundle (no options) is covered by the mutant only because that mutant removes both. The trim is not run on the early return for a bundle with a NUL byte, which allocates nothing in C."
     }
   ]
 }

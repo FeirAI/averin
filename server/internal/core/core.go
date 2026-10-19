@@ -8,6 +8,26 @@ package core
 #cgo LDFLAGS: ${SRCDIR}/../../../target/debug/libaverin_decision_core.a
 #include <averin_core.h>
 #include <stdlib.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+// averin_release_heap hands free pages in every malloc arena back to the kernel. A whole-bundle
+// verification allocates O(history) through the system allocator on whatever OS thread cgo runs it on.
+// glibc caps the number of arenas and shares them between threads, and trims the top of an arena
+// automatically, but it keeps freed pages below an arena's top resident until malloc_trim is called.
+// A no-op where glibc is not the C library.
+static void averin_release_heap(void) {
+#if defined(__GLIBC__)
+    malloc_trim(0);
+#endif
+}
+static int averin_heap_trim_supported(void) {
+#if defined(__GLIBC__)
+    return 1;
+#else
+    return 0;
+#endif
+}
 */
 import "C"
 
@@ -174,12 +194,19 @@ func nulRejectReport(at int) string {
 	return string(b)
 }
 
+// HeapTrimSupported reports whether this build returns freed C heap to the OS after each whole-bundle
+// verification (glibc only; elsewhere the trim is a no-op).
+func HeapTrimSupported() bool { return C.averin_heap_trim_supported() == 1 }
+
 // VerifyBundle verifies an export bundle and returns the JSON report.
 func (c *Core) VerifyBundle(bundleJSON string) string {
 	if i := strings.IndexByte(bundleJSON, 0); i >= 0 {
 		return nulRejectReport(i)
 	}
 	cb := C.CString(bundleJSON)
+	// Registered first so it runs last (defers are LIFO), after every free below, including the result
+	// free inside goStrFree. Once per whole-bundle verification, not per record.
+	defer C.averin_release_heap()
 	defer C.free(unsafe.Pointer(cb))
 	return goStrFree(C.averin_verify_bundle_json(cb))
 }
@@ -200,6 +227,7 @@ func (c *Core) VerifyBundleWith(bundleJSON, optsJSON string) string {
 	}
 	cb := C.CString(bundleJSON)
 	co := C.CString(optsJSON)
+	defer C.averin_release_heap() // runs last, after the frees below; see VerifyBundle
 	defer C.free(unsafe.Pointer(cb))
 	defer C.free(unsafe.Pointer(co))
 	return goStrFree(C.averin_verify_bundle_with(cb, co))
