@@ -417,6 +417,11 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
 		if err := insertDisclosures(ctx, tx, projectID, rec.Disclosures); err != nil {
 			return Record{}, false, err
 		}
+		// Keep the session frontier in the same transaction, and only for a row this statement created
+		// (a replay or collapse above returned before reaching here and leaves the heads untouched).
+		if err := updateSessionHeads(ctx, tx, projectID, rec.SessionID, rec.ContentHash, parents); err != nil {
+			return Record{}, false, err
+		}
 		return rec, true, nil
 	case errors.Is(err, pgx.ErrNoRows):
 		// No row returned => a conflict on idempotency_key or content_hash. Fall through to collapse.
@@ -677,10 +682,63 @@ func selectByContentHash(ctx context.Context, tx pgx.Tx, projectID, hash string)
 	return rec, true, nil
 }
 
+// updateSessionHeads maintains session_heads (migration 0009) for a record that was just inserted:
+// its parents stop being heads of the session and it becomes one. A parent that lives in another
+// session is not in this session's heads, so deleting it is a no-op, which is the per-session
+// definition. Both statements are keyed lookups on the table's primary key, so the cost does not depend
+// on the session's history. The caller holds the project write transaction, so no two writers of one
+// project interleave here.
+//
+// One case differs from the full-scan definition: a record that names a parent that was NOT yet in the
+// store when it was inserted (a dangling reference), if that parent is inserted later into the same
+// session, is added here as a head although a record already names it. The seal path never produces
+// that (a parent is a current head or a record already stored), and the verifier rejects a record whose
+// parent is missing, so it is outside valid operation; checking for it would cost a GIN probe on every
+// seal whose plan the planner can get wrong, which is the failure this table removes.
+func updateSessionHeads(ctx context.Context, tx pgx.Tx, projectID, sessionID, contentHash string, parents []string) error {
+	if len(parents) > 0 {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM session_heads
+			WHERE project_id = $1 AND session_id = $2 AND content_hash = ANY($3::text[])
+		`, projectID, sessionID, parents); err != nil {
+			return fmt.Errorf("store: retire session heads: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO session_heads (project_id, session_id, content_hash) VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING
+	`, projectID, sessionID, contentHash); err != nil {
+		return fmt.Errorf("store: add session head: %w", err)
+	}
+	return nil
+}
+
 // Heads returns the head content_hashes for a session: records whose content_hash is not referenced
 // as a causal parent by any record in the SAME session. De-duplicated and byte-sorted ascending,
 // never nil. Heads are derived here (not trusted from the client) — this is the frontier authority.
+// They are read from session_heads (migration 0009), which PutRecord maintains in the record's own
+// transaction, so the cost does not grow with the session's history. headsFull is the definition.
 func (p *Postgres) Heads(projectID, sessionID string) ([]string, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
+		SELECT content_hash
+		FROM session_heads
+		WHERE project_id = $1 AND session_id = $2
+		ORDER BY content_hash ASC
+	`, projectID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("store: heads: %w", err)
+	}
+	return collectHashes(rows)
+}
+
+// headsFull derives a session's heads by scanning the whole session: the definition session_heads must
+// equal. It costs one GIN probe per record of the session, so it is for tests and audits only, never a
+// hot path.
+func (p *Postgres) headsFull(projectID, sessionID string) ([]string, error) {
 	if err := p.checkProject(projectID); err != nil {
 		return nil, err
 	}
@@ -697,7 +755,7 @@ func (p *Postgres) Heads(projectID, sessionID string) ([]string, error) {
 		ORDER BY r.content_hash ASC
 	`, projectID, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("store: heads: %w", err)
+		return nil, fmt.Errorf("store: heads (full scan): %w", err)
 	}
 	return collectHashes(rows)
 }

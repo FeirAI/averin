@@ -54,6 +54,7 @@ func TestBrokerSeqRecoveryOldRuntimeCredentialCutoff(t *testing.T) {
 		fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s,%s", schema, oldRole, newRole),
 		fmt.Sprintf("GRANT SELECT,INSERT ON %s.project_write_guard,%s.broker_seq,%s.broker_seq_void,%s.records,%s.broker_seq_recovery_fence,%s.broker_seq_recovery_result TO %s,%s", schema, schema, schema, schema, schema, schema, oldRole, newRole),
 		fmt.Sprintf("GRANT UPDATE ON %s.project_write_guard TO %s,%s", schema, oldRole, newRole),
+		fmt.Sprintf("GRANT SELECT,INSERT,DELETE ON %s.session_heads TO %s,%s", schema, oldRole, newRole),
 	}
 	for _, sql := range create {
 		if _, err := admin.Exec(ctx, sql); err != nil {

@@ -179,6 +179,20 @@ existing record's plaintext `otel_attrs` **cannot be retroactively scrubbed**. S
 best-effort pattern/keyword matching, not a guarantee that every possible secret shape is caught;
 treat the raw OTel attribute bridge as a lower-trust ingest path (Level-2 observation).
 
+## A seal reads the session frontier from a table (Postgres) or by scanning (in-memory)
+
+Postgres keeps each session's heads in `session_heads` (migration 0009), updated in the same
+transaction as the record insert, so a seal's frontier read does not grow with the session's history.
+The in-memory (dev) store derives session heads by scanning the session on every seal, so it slows
+linearly with history and is not for production. `ProjectHeads` still reads the whole project (the
+checkpoint cut's first cut and fallback only). `session_heads` is derived state, not evidence: a
+writer that inserts into `records` without going through `PutRecord` leaves it stale, and it can be
+rebuilt from `records` with the backfill statement in the migration.
+A record that names a parent not yet in the store, when that parent is later inserted into the same
+session, leaves the parent listed as a head although a record names it (the full scan would not list
+it). The seal path never produces that and the verifier rejects a missing parent; the migration's
+backfill is the full definition.
+
 ## Project writes wait on a database guard
 
 Postgres serializes each project's authoritative writes with a persisted guard
