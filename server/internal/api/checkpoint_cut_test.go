@@ -44,6 +44,11 @@ func (r *rowSpy) WithProjectWrite(ctx context.Context, p string, fn func(store.S
 		return fn(&rowSpy{Store: b, rows: r.rows, tamper: r.tamper})
 	})
 }
+func (r *rowSpy) WithProjectRead(ctx context.Context, p string, fn func(store.Store) error) error {
+	return r.Store.WithProjectRead(ctx, p, func(b store.Store) error {
+		return fn(&rowSpy{Store: b, rows: r.rows, tamper: r.tamper})
+	})
+}
 func (r *rowSpy) AllRecords(p string) ([]store.Record, error) {
 	v, err := r.Store.AllRecords(p)
 	r.rows.add(len(v))

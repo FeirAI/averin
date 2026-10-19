@@ -4109,6 +4109,14 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "project query param is required")
 		return
 	}
+	if ip, incremental, perr := parseIncrementalRead(r.URL.Query()); incremental {
+		if perr != nil {
+			writeErr(w, http.StatusBadRequest, perr.Error())
+			return
+		}
+		s.handleIncrementalRead(w, r, projectID, ip)
+		return
+	}
 	limitStr := r.URL.Query().Get("limit")
 	limit := 100
 	if limitStr != "" {
