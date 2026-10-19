@@ -1,0 +1,13 @@
+diff --git a/core/src/refusal.rs b/core/src/refusal.rs
+index 7586c0b..5b76fe6 100644
+--- a/core/src/refusal.rs
++++ b/core/src/refusal.rs
+@@ -152,7 +152,7 @@ pub fn check_shape(rec: &CanonValue) -> Result<Counted, String> {
+         if !g
+             .get(k)
+             .and_then(|v| v.as_str())
+-            .is_some_and(is_canonical_time)
++            .is_some()
+         {
+             return Err(format!(
+                 "extensions.gateway_refusal.{k} must be a canonical UTC timestamp"

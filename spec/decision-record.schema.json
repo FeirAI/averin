@@ -33,15 +33,15 @@
     "received_ts": { "$ref": "#/$defs/ts" },
     "anchored_ts": { "$ref": "#/$defs/ts" },
 
-    "event_type": { "enum": ["llm_call","tool_call","decision","approval_gate","handoff","spawn_child","incomplete","credential_grant"] },
-    "record_kind": { "enum": ["budget-exhausted","chargeback-posted"], "description": "OPTIONAL typed evidence kind, a sibling of event_type (does NOT replace it). Lets first-class verify/export distinguish & filter spend-governance evidence (leria seals) without parsing extensions. Signed top-level field (covered by content_hash/sig)." },
+    "event_type": { "enum": ["llm_call","tool_call","decision","approval_gate","handoff","spawn_child","incomplete","credential_grant","gateway_refusal"] },
+    "record_kind": { "enum": ["budget-exhausted","chargeback-posted","gateway-refusal"], "description": "OPTIONAL typed evidence kind, a sibling of event_type (does NOT replace it). Lets first-class verify/export distinguish & filter spend-governance evidence (leria seals) and gateway refusals without parsing extensions. Signed top-level field (covered by content_hash/sig). gateway-refusal is RESERVED for POST /v2/refusals (event_type gateway_refusal, observed_via gateway, status refused, extensions.gateway_refusal); the generic ingest path rejects it." },
     "action": { "type": "string" },
-    "observed_via": { "enum": ["proxy","sdk","otel","broker"] },
+    "observed_via": { "enum": ["proxy","sdk","otel","broker","gateway"] },
     "input_commit": { "$ref": "#/$defs/commit" },
     "output_commit": { "$ref": "#/$defs/commit" },
     "rationale_commit": { "$ref": "#/$defs/commit" },
     "credential_commit": { "$ref": "#/$defs/commit" },
-    "status": { "enum": ["ok","error","blocked","pending_approval","incomplete"] },
+    "status": { "enum": ["ok","error","blocked","pending_approval","incomplete","refused"] },
     "tokens": {
       "type": "object", "additionalProperties": false,
       "properties": { "in": { "type": "integer" }, "out": { "type": "integer" } }
@@ -111,9 +111,25 @@
     },
 
     "framework": { "type": "string" },
-    "extensions": { "type": "object" }
+    "extensions": { "type": "object", "properties": { "gateway_refusal": { "$ref": "#/$defs/gateway_refusal" } } }
   },
   "$defs": {
+    "gateway_refusal": {
+      "description": "extensions.gateway_refusal of a record_kind gateway-refusal record (feir-ops#1). Closed: params, URL, free-text reason and token material are never carried. Vocabularies are vectors/refusal-classes.v1.json. A non-summary record carries reason_class and entry_point; a summary record (summary true) carries by_class and no reason_class, and attempts equals the sum of by_class.",
+      "type": "object", "additionalProperties": false,
+      "required": ["v","attempts","first_at","last_at"],
+      "properties": {
+        "v": { "const": 1 },
+        "reason_class": { "enum": ["not_granted","policy_deny","kill_fence","rate_limit","spend_cap","cross_tenant","token_unusable","llm_channel_only","model_unpriced","modifier_unpriced","provider_disabled","capability_undeclared","approval_unavailable","decision_unavailable"] },
+        "entry_point": { "enum": ["mcp","execute","llm","approval_resume"] },
+        "credential": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" },
+        "attempts": { "type": "integer", "minimum": 1, "maximum": 1000000000 },
+        "first_at": { "type": "string" },
+        "last_at": { "type": "string" },
+        "summary": { "type": "boolean" },
+        "by_class": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1, "maximum": 1000000000 } }
+      }
+    },
     "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "ed25519": { "type": "string", "pattern": "^ed25519:[A-Za-z0-9_-]{86}$", "description": "64-byte signature, base64url no-pad = 86 chars; RCP also length-checks the decoded bytes" },
     "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$", "description": "RFC3339 UTC, fixed millisecond precision. Regex is shape-only; the core MUST additionally validate the calendar date/time semantically (month 1-12, day-of-month, etc.). TSA-supplied anchor times of differing precision are preserved in the anchor block, not coerced into a signed record field." },

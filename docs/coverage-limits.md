@@ -30,6 +30,7 @@ they're unchanged — not that the bytes describe what truly happened in the wor
 | OTel / OpenInference | whatever the team instruments | whatever they don't |
 | SDK `record()` | tool calls, rationale, authority block | anything the developer doesn't wrap; trusts caller honesty |
 | Credential broker (`observed_via: broker`) | grant/use/intent/outcome of broker-mediated credential actions, gateway-enforced authority | any action taken outside the broker's mediation |
+| Gateway refusals (`observed_via: gateway`) | an attempt the gateway refused, as reported by the gateway: agent, action, reason class, entry point, a count and a time range. Level 1 and Level 2 only: vultrino reported it and averin sealed it unchanged; averin never saw the attempt itself | an attempt with no authenticated agent, a refusal the gateway could not report (a receipt gap), a short window lost in a gateway crash, and anything the gateway never saw. The count is a floor, and Level 3 is not claimed |
 
 **The hard truth:** none of these sees an action the agent takes *outside* them — e.g. a direct DB
 call the SDK didn't wrap (threat #13). That is a Level-3 gap, closed only by the credential broker
