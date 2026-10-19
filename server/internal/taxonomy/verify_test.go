@@ -125,3 +125,71 @@ func TestVerifyErrorNeverEchoesKeyMaterial(t *testing.T) {
 		t.Fatalf("error echoes a public key: %v", err)
 	}
 }
+
+// rawVariants returns tampered raw bytes a Go json.Unmarshal+re-marshal would normalize away but the
+// Rust RCP parser (the real verifier) rejects.
+func TestVerifyRefusesWhatTheRcpParserRefuses(t *testing.T) {
+	k := testKey('t')
+	c, js, digest := signed(t, k, 8)
+	evil := `"single_operation_actions":[{"action":"evil.drop","resource_id":"r"}],`
+	cases := map[string]string{
+		"evil-first duplicate key": strings.Replace(js, `{`, `{`+evil, 1),
+		"duplicate kind":           strings.Replace(js, `{`, `{"kind":"operation_taxonomy",`, 1),
+		"trailing bracket":         js + "]",
+		"trailing brace":           js + "}",
+		"trailing value":           js + ` {}`,
+		"lone surrogate":           strings.Replace(js, `"r"`, `"\ud800"`, 1),
+		"float":                    strings.Replace(js, `"version":8`, `"version":8.0`, 1),
+	}
+	for name, art := range cases {
+		if art == js {
+			t.Fatalf("%s: test did not alter the artifact", name)
+		}
+		if err := taxonomy.Verify(c, []byte(art), []string{pubOf(k)}, digest, 8); err == nil {
+			t.Errorf("%s: tampered artifact accepted", name)
+		}
+	}
+	if err := taxonomy.Verify(c, append([]byte(js), 0), []string{pubOf(k)}, digest, 8); err == nil {
+		t.Error("NUL-suffixed artifact accepted")
+	}
+	if err := taxonomy.Verify(c, []byte(strings.Replace(js, `"r"`, "\"\xff\"", 1)), []string{pubOf(k)}, digest, 8); err == nil {
+		t.Error("invalid UTF-8 accepted")
+	}
+}
+
+func TestVerifyRefusesMalformedStructure(t *testing.T) {
+	k := testKey('t')
+	c, js, _ := signed(t, k, 8)
+	mut := func(f func(m map[string]any)) []byte {
+		var m map[string]any
+		_ = json.Unmarshal([]byte(js), &m)
+		f(m)
+		b, _ := json.Marshal(m)
+		return b
+	}
+	cases := map[string]func(m map[string]any){
+		"entry not object":     func(m map[string]any) { m["single_operation_actions"] = []any{"x"} },
+		"entry missing action": func(m map[string]any) { m["single_operation_actions"] = []any{map[string]any{"resource_id": "r"}} },
+		"escalating bad": func(m map[string]any) {
+			m["escalating_actions"] = []any{map[string]any{"action": 1, "resource_id": "r"}}
+		},
+		"effective_from str":  func(m map[string]any) { m["effective_from"] = "0" },
+		"effective_until nil": func(m map[string]any) { delete(m, "effective_until") },
+	}
+	for name, f := range cases {
+		b := mut(f)
+		// Re-sign-free: pins are irrelevant, the structural check must trip before or regardless of them.
+		var mm map[string]any
+		_ = json.Unmarshal(b, &mm)
+		delete(mm, "sig")
+		bb, _ := json.Marshal(mm)
+		d, err := c.RcpEvidenceHash(string(bb))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		err = taxonomy.Verify(c, b, []string{pubOf(k)}, d, 8)
+		if err == nil || !strings.Contains(err.Error(), "structure") {
+			t.Errorf("%s: want a structure error, got %v", name, err)
+		}
+	}
+}

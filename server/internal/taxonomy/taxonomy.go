@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -104,13 +105,23 @@ func Verify(h Hasher, artifact []byte, pubkeys []string, wantDigest string, want
 	if len(pubkeys) == 0 {
 		return fmt.Errorf("no issuer public key pinned")
 	}
+	// The raw bytes go through the RCP parser FIRST, exactly as the runtime verifier parses them: it rejects
+	// duplicate keys (after NFC), lone surrogates, floats and trailing data, all of which Go's encoding/json
+	// would silently normalize (last duplicate wins, U+FFFD, no error on a trailing ']'). A NUL would be
+	// truncated by the C string boundary, so it is refused here.
+	if bytes.IndexByte(artifact, 0) >= 0 {
+		return fmt.Errorf("artifact contains a NUL byte")
+	}
+	if _, err := h.RcpEvidenceHash(string(artifact)); err != nil {
+		return fmt.Errorf("artifact is not valid RCP JSON: %w", err)
+	}
 	dec := json.NewDecoder(bytes.NewReader(artifact))
 	dec.UseNumber()
 	var body map[string]any
 	if err := dec.Decode(&body); err != nil {
 		return fmt.Errorf("artifact is not a JSON object: %w", err)
 	}
-	if dec.More() {
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
 		return fmt.Errorf("artifact has trailing data")
 	}
 	if k, _ := body["kind"].(string); k != "operation_taxonomy" {
@@ -131,6 +142,9 @@ func Verify(h Hasher, artifact []byte, pubkeys []string, wantDigest string, want
 	}
 	if gotVersion != wantVersion {
 		return fmt.Errorf("version pin mismatch: artifact has %d, pin is %d", gotVersion, wantVersion)
+	}
+	if err := checkStructure(body); err != nil {
+		return err
 	}
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
@@ -172,4 +186,54 @@ func Verify(h Hasher, artifact []byte, pubkeys []string, wantDigest string, want
 		}
 	}
 	return fmt.Errorf("signature does not verify under any pinned issuer key")
+}
+
+// checkStructure mirrors the verifier's validate_taxonomy/tax_pairs: single_operation_actions must be a
+// list of objects with string resource_id and action; escalating_actions, when present and not null, the
+// same; effective_from and effective_until must be integers. Anything else would make the runtime verifier
+// treat the taxonomy as untrusted, so the offline check must not report OK for it.
+func checkStructure(body map[string]any) error {
+	if err := checkPairs(body, "single_operation_actions", false); err != nil {
+		return err
+	}
+	if err := checkPairs(body, "escalating_actions", true); err != nil {
+		return err
+	}
+	for _, k := range []string{"effective_from", "effective_until"} {
+		n, ok := body[k].(json.Number)
+		if !ok {
+			return fmt.Errorf("artifact structure: %s is not an integer", k)
+		}
+		if _, err := n.Int64(); err != nil {
+			return fmt.Errorf("artifact structure: %s is not an integer", k)
+		}
+	}
+	return nil
+}
+
+func checkPairs(body map[string]any, key string, optional bool) error {
+	v, present := body[key]
+	if !present || v == nil {
+		if optional {
+			return nil
+		}
+		return fmt.Errorf("artifact structure: %s is missing", key)
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return fmt.Errorf("artifact structure: %s is not a list", key)
+	}
+	for _, e := range arr {
+		m, ok := e.(map[string]any)
+		if !ok {
+			return fmt.Errorf("artifact structure: %s has a non-object entry", key)
+		}
+		if _, ok := m["resource_id"].(string); !ok {
+			return fmt.Errorf("artifact structure: %s entry lacks a string resource_id", key)
+		}
+		if _, ok := m["action"].(string); !ok {
+			return fmt.Errorf("artifact structure: %s entry lacks a string action", key)
+		}
+	}
+	return nil
 }
