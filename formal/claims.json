@@ -1910,6 +1910,78 @@
         "formal-fast"
       ],
       "evidence_run": "38980642612"
+    },
+    {
+      "id": "checkpoint-cut-incremental-equals-full",
+      "claim": "The server cuts a checkpoint from the latest checkpoint plus the records after it, and the body equals the one the full computation over the whole project would produce: sequence number and previous hash, record count (the base count plus the records after it), frontier (the base frontier minus the parents of the new records, plus the new records no new record names) and the grant-transparency head and per-broker head (the prior cumulative root folded over the grants after it, chained to the prior head). It refuses to sign when the new grants do not carry exactly the next broker_seq values, when the allocated maximum differs, or when the store's record count differs from the base count plus the records after it, and it takes the full computation when there is no usable base. One incremental cut in 100, and every cut after a mismatch until restart, also computes the full body with the same timestamp and refuses to sign unless the two are identical. Not that every unshadowed cut equals the full computation (the equality is argued in a code comment and checked on random histories; a divergence on an unshadowed cut is signed, because checkpoints are append-only, and is caught by the next shadowed cut or by the verifier), that the latest stored checkpoint is intact (it is trusted as the base), that the full computation is cheap (it is O(history), used for the first cut and as the definition), or that a very large frontier costs nothing (every checkpoint carries it).",
+      "class": "tested-implementation",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "records are insert-only and numbered in insertion order under the project write transaction",
+        "a record never names a later record as a parent",
+        "broker_seq allocation is MAX+1, idempotent per grant id, and a void fills only an unrecorded seq"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/checkpoint_cut.go",
+          "symbol": "cutBodyIncremental"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut.go",
+          "symbol": "checkpointBodyChecked"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut.go",
+          "symbol": "checkGaplessGrantLogAfter"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "cutBodyFull"
+        },
+        {
+          "file": "server/internal/broker/transparency.go",
+          "symbol": "BrokerGrantHeadFrom"
+        },
+        {
+          "file": "server/internal/store/store.go",
+          "symbol": "ProjectHeadsSince"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/checkpoint_cut_test.go",
+          "symbol": "TestCheckpointCutDifferential"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_test.go",
+          "symbol": "TestCheckpointCutCostIsConstant"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_test.go",
+          "symbol": "TestCheckpointCutRefusesAGapInTheNewGrants"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_test.go",
+          "symbol": "TestCheckpointCutShadowRefusesAMismatch"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_test.go",
+          "symbol": "TestCheckpointCutShadowCadence"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_pg_test.go",
+          "symbol": "TestCheckpointCutCostIsConstantPostgres"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_pg_test.go",
+          "symbol": "TestCheckpointCutDifferentialPostgres"
+        }
+      ],
+      "gates": [
+        "server"
+      ]
     }
   ]
 }
