@@ -10,11 +10,13 @@
 package taxonomy
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Entry is a resource-bound operation the taxonomy classifies: a (resource_id, action) pair.
@@ -90,4 +92,84 @@ func signTaxonomy(digest string, sk ed25519.PrivateKey) string {
 	pre = append(pre, tag...)
 	pre = append(pre, digest...)
 	return "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(sk, pre))
+}
+
+// Verify checks a signed taxonomy artifact against pins: the RCP-canonical digest of the body (minus sig)
+// must equal the pinned digest, the body version must equal the pinned version, and sig must be a valid
+// averin.taxonomy.v1 Ed25519 signature over that digest by one of the pinned issuer keys (the form
+// "ed25519pub:" + base64url-no-pad). It is the offline counterpart of the verifier's taxonomy check, which
+// downgrades any mismatch to a quiet "untrusted"; here every mismatch is an error. Errors name the failed
+// pin but never echo key material. Time windows are not judged (the verifier judges them per use).
+func Verify(h Hasher, artifact []byte, pubkeys []string, wantDigest string, wantVersion int64) error {
+	if len(pubkeys) == 0 {
+		return fmt.Errorf("no issuer public key pinned")
+	}
+	dec := json.NewDecoder(bytes.NewReader(artifact))
+	dec.UseNumber()
+	var body map[string]any
+	if err := dec.Decode(&body); err != nil {
+		return fmt.Errorf("artifact is not a JSON object: %w", err)
+	}
+	if dec.More() {
+		return fmt.Errorf("artifact has trailing data")
+	}
+	if k, _ := body["kind"].(string); k != "operation_taxonomy" {
+		return fmt.Errorf("artifact kind is not operation_taxonomy")
+	}
+	sigStr, _ := body["sig"].(string)
+	if sigStr == "" {
+		return fmt.Errorf("artifact is unsigned (no sig)")
+	}
+	delete(body, "sig")
+	vn, ok := body["version"].(json.Number)
+	if !ok {
+		return fmt.Errorf("artifact has no integer version")
+	}
+	gotVersion, err := vn.Int64()
+	if err != nil {
+		return fmt.Errorf("artifact version is not an integer")
+	}
+	if gotVersion != wantVersion {
+		return fmt.Errorf("version pin mismatch: artifact has %d, pin is %d", gotVersion, wantVersion)
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("re-marshal body: %w", err)
+	}
+	digest, err := h.RcpEvidenceHash(string(bodyJSON))
+	if err != nil {
+		return fmt.Errorf("taxonomy digest: %w", err)
+	}
+	if digest != wantDigest {
+		return fmt.Errorf("digest pin mismatch: artifact digests to %s, pin is %s", digest, wantDigest)
+	}
+	const sigPrefix = "ed25519:"
+	if !strings.HasPrefix(sigStr, sigPrefix) {
+		return fmt.Errorf("sig is not ed25519")
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(sigStr, sigPrefix))
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return fmt.Errorf("sig is malformed")
+	}
+	const tag = "averin.taxonomy.v1"
+	pre := make([]byte, 0, 4+len(tag)+len(digest))
+	var lp [4]byte
+	binary.BigEndian.PutUint32(lp[:], uint32(len(tag)))
+	pre = append(pre, lp[:]...)
+	pre = append(pre, tag...)
+	pre = append(pre, digest...)
+	for _, pk := range pubkeys {
+		raw, ok := strings.CutPrefix(pk, "ed25519pub:")
+		if !ok {
+			continue
+		}
+		kb, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil || len(kb) != ed25519.PublicKeySize {
+			continue
+		}
+		if ed25519.Verify(ed25519.PublicKey(kb), pre, sig) {
+			return nil
+		}
+	}
+	return fmt.Errorf("signature does not verify under any pinned issuer key")
 }
