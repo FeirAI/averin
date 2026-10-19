@@ -1,0 +1,19 @@
+diff --git a/server/internal/core/core.go b/server/internal/core/core.go
+--- a/server/internal/core/core.go
++++ b/server/internal/core/core.go
+@@ -205,7 +205,6 @@
+ 	cb := C.CString(bundleJSON)
+ 	// Registered first so it runs last (defers are LIFO), after every free below, including the result
+ 	// free inside goStrFree. Once per whole-bundle verification, not per record.
+-	defer C.averin_release_heap()
+ 	defer C.free(unsafe.Pointer(cb))
+ 	return goStrFree(C.averin_verify_bundle_json(cb))
+ }
+@@ -226,7 +225,6 @@
+ 	}
+ 	cb := C.CString(bundleJSON)
+ 	co := C.CString(optsJSON)
+-	defer C.averin_release_heap() // runs last, after the frees below; see VerifyBundle
+ 	defer C.free(unsafe.Pointer(cb))
+ 	defer C.free(unsafe.Pointer(co))
+ 	return goStrFree(C.averin_verify_bundle_with(cb, co))
