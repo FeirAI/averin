@@ -8,7 +8,7 @@ compromise and the detection of removed sessions rely on ([SECURITY.md](SECURITY
 ## Default: off
 
 With nothing configured no checkpoint is anchored and those protections are off. Turning them on sends one
-HTTPS request per checkpoint to the TSA you choose, carrying only the SHA-256 of the checkpoint hash, never
+request per checkpoint to the TSA URL you choose (the FreeTSA preset is https; a plain `http` `AVERIN_TSA_URL` is accepted unless `AVERIN_TSA_AUTH_HEADER` is set), carrying only the SHA-256 of the checkpoint hash, never
 any record content. Whether that outbound call is acceptable on your infrastructure is your decision.
 
 ## Turning it on
@@ -41,7 +41,7 @@ openssl x509 -in signer.pem -pubkey -noout | openssl pkey -pubin -outform DER | 
 
 ## What the verifier accepts
 
-The native verifier (built with the `rfc3161` feature, which the CLI and the server's cgo library carry) accepts a
+The native verifier (built with the `rfc3161` feature, which is not a default feature: `make core`, the server Dockerfile and CI pass `--features rfc3161`, while a plain `cargo build` of the CLI or the staticlib leaves it out and reports an RFC 3161 anchor as `Unsupported`) accepts a
 `SignedData` whose single `SignerInfo` signs with:
 
 | Signature | Digest |

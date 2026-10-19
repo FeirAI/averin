@@ -12,7 +12,7 @@ boundary between "averin ships this" and "your deployment provides this."
 | 2. HSM/TPM sender-key (B12) | raw ed25519 keys + PoP binding (theft-fails-PoP test) | HSM/TPM/KMS + agent secure element | **Needs a `Signer` interface + hardware** |
 | 3. Multi-instance project writes (D6) | persisted project guard, bound transactions, authenticated capability-project binding, tenant and resource scoped nonce claims, a bounded sequence-recovery fence, and a two-process failure matrix with a trace monitor run on every pull request (`multiwriter` job) | a content store shared by the replicas, the per-replica ingest budget, and an optional object-storage witness | **Database write path exercised under two-process faults; replicas still gated on the shared content store and ingest budget** |
 | 4. TEE/remote-attestation enforcement (D7) | signed `deployment_attestation` claim | TEE hardware + attestation service + quote-verify lib | **Assertion today; hardware-root design** |
-| 5. git remote + push | clean tree, `.gitignore` hardened | remote URL + push credentials | **Repo push-ready; operator action** |
+| 5. git remote + push | GitHub remote configured, `.gitignore` hardened | nothing further | **Done** |
 | 6. Durable consume-before-act ledger (R5) | project Store claims and receipt share one transaction; nonce and JTI claims are scoped by project and resource (migration `0006`); `pgledger` sweeps; one use of a capability across two processes is part of the failure matrix | shared Postgres | **Done for the Postgres store** |
 
 ---
@@ -29,9 +29,9 @@ short-lived signed tokens; static keys with `not_after` are the shipped model.
 **Production design.**
 - **Scoped + expiring tokens.** Replace the static token set with short-lived tokens (JWT/PASETO) carrying
   `{project, role, exp}`. averin validates the signature + `exp` + audience instead of a string-set lookup.
-- **RBAC.** Gate routes by role: `reader` (`/v2/export`, `/v2/verify`, `/v2/dag`), `writer` (`/v2/records`,
-  `/v2/grants`, `/v2/use*`), `admin` (`/v2/checkpoints`). The middleware already binds the request to the
-  named `project`; add a per-route role requirement.
+- **RBAC.** Already enforced (see Current state): `read` for every GET/HEAD, `write` for the evidence-adding
+  POST routes listed in `api/auth_roles.go`, `admin` for everything else, including `/v2/checkpoints` and
+  `/v2/revoke`. What remains is carrying the role in IdP-issued short-lived tokens.
 - **SSO/SAML/OIDC.** An external IdP issues the tokens; averin is a resource server that validates them
   (verify the IdP's JWT signature + claims). No password handling in averin.
 
@@ -164,7 +164,7 @@ expected binary measurement.
 
 ## 5. git remote + push
 
-**Current state.** Local-only: **no remote configured**, branch `main`, working tree clean. `.gitignore`
+**Current state.** Done: the repository has a GitHub remote (`FeirAI/averin`), and `main` is its default branch. `.gitignore`
 already excludes build artifacts (`target/`, `node_modules`, `dist`, `*.test`) and secrets (`.env`, `.env.*`,
 `*.pem`, `*.key`, with a deliberate `!spec/**/*.key` exception for the deterministic, non-secret test vectors).
 The one gap — now closed in this change — was `.claude/` (AI coding-assistant harness state: scheduled-task locks,

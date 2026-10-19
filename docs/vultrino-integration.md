@@ -1,13 +1,15 @@
 # Integrating averin with vultrino — the enforcement plane meets the evidence plane
 
-> **Design note, not an implementation.** This document specifies how
-> [vultrino](https://github.com/) (a credential proxy for AI agents) and averin (a
+> **Historical design note, not an implementation.** This document specifies how
+> vultrino (a credential proxy for AI agents) and averin (a
 > tamper-evident flight recorder for AI agents) compose into one system, and
 > states honestly what that composition proves cryptographically versus what stays
-> in the trusted computing base. No code in either repo changes as a result of this
-> note; it is the map a future wiring commit follows. The bar is **accuracy** —
-> every file/line and API name below resolves against the current trees of both
-> projects (averin `1b2ddc2`, vultrino `1d814bc`).
+> in the trusted computing base. It was written before vultrino gained its optional
+> averin seal client (default off, in the vultrino repository), so its plan and
+> wiring sections describe a design, not the current state of either repo. The
+> file/line references were checked against averin `1b2ddc2` and vultrino `1d814bc`
+> and have since moved: treat them as pointers to the named functions, not to
+> current line numbers.
 
 ## 1. The thesis: two planes, one accountable action
 
@@ -70,9 +72,9 @@ proving it did, in order, under this grant."
 | **`execute_gated` decision**, pre-side-effect (`src/server/mod.rs:267`) | **use-intent** — D5 phase 1, sealed *before* the resource acts, consumes the capability | `POST /v2/use-intent` |
 | **`run_action` consume** at the point of no return (`:456-482`) | **consume-before-act** receipt (R5); for one-phase flows, the single `use` receipt | `POST /v2/use` *(one-phase)* |
 | **`plugin.execute` outcome** + `RunError` tag (committed/terminal/retryable) | **use-outcome** — D5 phase 2, completes the intent with the real result | `POST /v2/use-outcome` |
-| **Action Approval** decision by a human (`ApprovalStatus::{Pending,Approved,Denied,Expired}`, `src/approval/mod.rs`) | **authority evidence** — `human_signed` `evidence_sig` over the v2 preimage, verified under a pinned approver key | authority block on the grant/use record |
+| **Action Approval** decision by a human (`ApprovalStatus::{Pending,Approved,Denied,Expired}`, `src/approval/mod.rs`) | **authority evidence** — `human_signed` `evidence_sig` over the body-bound v3 authority subject (the v2 preimage is refused for new elevated ingest by default), verified under a pinned approver key | authority block on the grant/use record |
 | **Policy Engine** verdict (`PolicyDecision::{Allow,Deny,Prompt}`, `src/policy`) | **`policy_engine_signed` authority** + outcome **taxonomy** (D4) + `side_effect_closure` (T6) | authority/taxonomy block on the record |
-| **RequesterInfo** (`principal_kind`/`principal_id`/`role`) | **caller-declared identity** on the record; the authority gradient (`caller_declared → verified`) | `caller` fields on every record |
+| **RequesterInfo** (`principal_kind`/`principal_id`/`role`) | **caller-declared identity** on the record; the authority gradient (`caller_declared → verified`) | `agent_id` and the `authority` block on the record (a record has no `caller` field) |
 | **Audit Log** view (the TODO) | tamper-evident **DAG + checkpoint + RFC 3161 anchor + offline verifier** | `GET /v2/dag`, `/v2/verify`, `/v2/export` |
 | **Credential proxy / isolation** (agent never sees the secret) | `gateway_enforced` authority; optionally the **Native/STS introspection-transcript** mode (ADR 0005 §M3) to shrink the resource TCB | — |
 | **MCP tool surface** (`http_request`, `check_approval`, …) | averin **MCP server** (`record_decision`, `get_session_trace`, `verify_record`; `server/internal/mcp/mcp.go`) | — |
@@ -165,8 +167,10 @@ A vultrino Action Approval is a human (or policy) sign-off recorded in
 `ApprovalRequest` with a single-decision capability token. In averin terms an approval
 is **authority evidence**: when the approval is granted, vultrino emits an
 `evidence_sig` of kind `human_signed` (or `policy_engine_signed` for a
-`PolicyDecision::Prompt` auto-decision) over averin's v2 authority preimage, which
-binds `project_id` for tenant isolation (`3669782`).
+`PolicyDecision::Prompt` auto-decision) over averin's body-bound v3 authority subject
+(`../spec/authority-subject-v1.md`). The older v2 preimage, which
+binds `project_id` for tenant isolation (`3669782`) but not the record body, is refused for new
+elevated ingest by default (see `dev/INTEGRATION.md`).
 
 This places vultrino approvals on averin's **authority gradient**:
 

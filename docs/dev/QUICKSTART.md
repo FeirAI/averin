@@ -27,7 +27,8 @@ first, then the Go binary.
 
 ```bash
 # Rust integrity core -> target/debug/libaverin_decision_core.a (the cgo link target).
-cargo build -p averin-decision-core
+# --features rfc3161 is what `make core` uses; without it the linked verifier cannot verify RFC 3161 anchors.
+cargo build -p averin-decision-core --features rfc3161
 
 # Go server (cgo links the staticlib built above).
 cd server && go build -o averin-server ./cmd/averin-server
@@ -37,7 +38,7 @@ The `Makefile` wraps this so the staticlib is never stale (a real footgun — ed
 running `go test` would link an **old** trust root):
 
 ```bash
-make core          # = cargo build -p averin-decision-core
+make core          # = cargo build -p averin-decision-core --features rfc3161
 make check-staticlib   # fails if the .a is older than core/ source
 ```
 

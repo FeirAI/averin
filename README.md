@@ -62,7 +62,7 @@ Three honest trust levels (used verbatim in product copy):
 | `sdk/python`, `sdk/typescript` | Client SDKs |
 | `spec/` | **schema v2, RCP v1, golden vectors, adversarial fixtures** |
 | `deploy/` | Docker Compose source recipes; not validated for the source-only alpha |
-| `docs/` | coverage limits, deployment readiness, vultrino integration, ADRs (0001–0006) |
+| `docs/` | coverage limits, deployment readiness, vultrino integration, ADRs (0001–0008) |
 | `formal/` | **Formal verification**: Lean 4 proofs of the seal, TLA+ models of the server protocols, Kani bounded proofs of the core, and a Rust↔Lean refinement gate ([`formal/README.md`](formal/README.md)) |
 
 ## Status
@@ -100,7 +100,7 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle spec/fixtures/bu
 Every claim is bounded by [`docs/coverage-limits.md`](docs/coverage-limits.md) (Level 1 / 2 / 3).
 
 **Phase 2 in progress** (enforcement + production-readiness, each commit adversarially reviewed):
-- ☑ **Authority verification** — `evidence_sig` checked under pinned authority keys (#4 *declared → verified*), record_id-bound so an evidence triple can't be replayed.
+- ☑ **Authority verification**: `evidence_sig` checked under pinned authority keys (#4 *declared → verified*). Current v3 proofs bind the project and the record's semantic body; an older v2 evidence triple (project- and record_id-bound only) still verifies but is reported as the weaker `legacy_unbound`, not `verified`.
 - ☑ **Project API-key auth** (`auth`), **OTel/OpenInference ingest** (`/v2/otel/traces`), **content-addressed blob store** (`content`), **append-only checkpoint witness + RFC 3161 TSA client** (`witness`) — four packages built and wired into the server.
 - ☑ **Production Postgres store** — append-only at the database (REVOKE UPDATE/DELETE/TRUNCATE, verified under a least-privilege role), idempotency + content-hash collapse + DAG-derived frontier in SQL; auto-migrates. Docker image build and deployment are not validated for this source-only alpha. Validated against real Postgres 16.
 - ☑ **Content commitments + selective-disclosure export** (#6) — low-entropy `input`/`output`/`rationale` are hiding-committed at ingest (plaintext → content store, never the signed body); a `selective_disclosure` export reveals `(value, nonce)` the offline verifier checks against each record's commitment. Disclosure secrets are written atomically with the record.
