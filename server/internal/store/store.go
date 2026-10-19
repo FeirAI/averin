@@ -1081,32 +1081,52 @@ const HeadsPageSize = 1000
 // the trust in base (a checkpoint's frontier is signed, but the checkpoint cut that consumes this must still
 // prove equality with the full computation; see history-scaling PR2).
 func ProjectHeadsSince(s Store, projectID string, base []string, after int64) ([]string, error) {
-	var hashes []string
-	referenced := map[string]struct{}{}
+	var f FrontierFold
 	for {
 		page, err := s.RecordsAfter(projectID, after, HeadsPageSize)
 		if err != nil {
 			return nil, err
 		}
 		for _, r := range page {
-			hashes = append(hashes, r.ContentHash)
-			for _, p := range r.Parents {
-				referenced[p] = struct{}{}
-			}
+			f.Add(r)
 		}
 		after += int64(len(page))
 		if len(page) < HeadsPageSize {
 			break
 		}
 	}
+	return f.Heads(base), nil
+}
+
+// FrontierFold accumulates the records after a checkpoint so the new frontier can be derived from the
+// checkpoint's: Heads(base) = (base minus parents(D)) union (hashes(D) minus parents(D)). Add each record of D
+// once, in any order, then call Heads.
+type FrontierFold struct {
+	hashes     []string
+	referenced map[string]struct{}
+}
+
+// Add folds one record of D.
+func (f *FrontierFold) Add(r Record) {
+	if f.referenced == nil {
+		f.referenced = map[string]struct{}{}
+	}
+	f.hashes = append(f.hashes, r.ContentHash)
+	for _, p := range r.Parents {
+		f.referenced[p] = struct{}{}
+	}
+}
+
+// Heads returns the byte-sorted, de-duplicated, never-nil frontier given the base frontier.
+func (f *FrontierFold) Heads(base []string) []string {
 	var heads []string
 	for _, h := range base {
-		if _, ref := referenced[h]; !ref {
+		if _, ref := f.referenced[h]; !ref {
 			heads = append(heads, h)
 		}
 	}
-	for _, h := range hashes {
-		if _, ref := referenced[h]; !ref {
+	for _, h := range f.hashes {
+		if _, ref := f.referenced[h]; !ref {
 			heads = append(heads, h)
 		}
 	}
@@ -1114,5 +1134,5 @@ func ProjectHeadsSince(s Store, projectID string, base []string, after int64) ([
 	if out == nil {
 		out = []string{}
 	}
-	return out, nil
+	return out
 }

@@ -229,6 +229,9 @@ type Server struct {
 	mRecordsSealed       *metrics.Counter
 	mRecordsSealFailed   *metrics.Counter
 	mCheckpointsSealed   *metrics.Counter
+	mCutShadowChecks     *metrics.Counter
+	mCutShadowMismatch   *metrics.Counter
+	cut                  checkpointCutState
 	mWitnessFailures     *metrics.Counter
 	mAnchorFailures      *metrics.Counter
 	mAuthorityDowngrades *metrics.Counter
@@ -271,6 +274,10 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 			"Total record seal attempts that failed at the Rust core."),
 		mCheckpointsSealed: reg.Counter("averin_checkpoints_sealed_total",
 			"Total checkpoints successfully sealed."),
+		mCutShadowChecks: reg.Counter("averin_checkpoint_shadow_checks_total",
+			"Total incremental checkpoint cuts also computed in full and compared (1 in 100 by default)."),
+		mCutShadowMismatch: reg.Counter("averin_checkpoint_shadow_mismatch_total",
+			"Total incremental checkpoint cuts that differed from the full computation. Each one REFUSED to sign; alert on any non-zero value."),
 		mWitnessFailures: reg.Counter("averin_witness_append_failures_total",
 			"Total checkpoint witness-append failures (checkpoint stored un-witnessed, backfillable)."),
 		mAnchorFailures: reg.Counter("averin_checkpoint_anchor_failures_total",
@@ -3858,8 +3865,9 @@ func (s *Server) priorFedHeadRoot(st store.Store, projectID, brokerID string) (s
 	return broker.EmptyGrantHeadRoot(), nil
 }
 
-// backfillable. A deterministic checkpoint_id keeps the body reproducible for a given seq.
-func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Checkpoint, error) {
+// cutBodyFull is the definition of the checkpoint body: it reads the whole project (frontier, count, grant log,
+// checkpoint chain). The incremental cut must equal it.
+func (s *Server) cutBodyFull(st store.Store, projectID, created string) (map[string]any, error) {
 	heads, headsErr := st.ProjectHeads(projectID)
 	count, countErr := st.RecordCount(projectID)
 	grantRecs, recErr := st.GrantRecords(projectID)
@@ -3877,15 +3885,8 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Che
 	// at the prior head) would anchor a broken/forked checkpoint, so a read failure must abort, not degrade.
 	for _, e := range []error{headsErr, countErr, recErr, maxAllocErr, seqErr, prevErr} {
 		if e != nil {
-			return store.Checkpoint{}, fmt.Errorf("checkpoint: read project snapshot: %w", e)
+			return nil, fmt.Errorf("checkpoint: read project snapshot: %w", e)
 		}
-	}
-	if heads == nil {
-		heads = []string{}
-	}
-	var prevVal any
-	if hasPrev {
-		prevVal = prev
 	}
 	// D6 (ADR 0004 / MF2): anchor the grant-transparency head into the signed, fork-detected checkpoint.
 	// The cumulative_root folds every recorded grant's (broker_seq, content_hash) in seq order, chained
@@ -3893,35 +3894,22 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Che
 	// verifier's re-derivation.
 	gl, err := grantLog(grantRecs)
 	if err != nil {
-		return store.Checkpoint{}, err
+		return nil, err
 	}
 	// FAIL CLOSED on a broker_seq gap (ADR 0004 D6): checkpoints are append-only, so a head signed over a
 	// recorded set that is not exactly [1..N] — or while an allocated seq above N has no recorded grant — would
 	// anchor a PERMANENT "not a gapless [1..N] prefix" verifier failure. Refuse to sign instead; the gap closes
 	// when the reserved grant is retried (its deterministic grant_id reclaims the seq) or the orphan is released.
 	if err := checkGaplessGrantLog(gl, maxAlloc); err != nil {
-		return store.Checkpoint{}, fmt.Errorf("checkpoint refused: %w", err)
+		return nil, fmt.Errorf("checkpoint refused: %w", err)
 	}
 	prior, err := s.priorGrantHeadRoot(st, projectID)
 	if err != nil {
-		return store.Checkpoint{}, err
+		return nil, err
 	}
 	grantHead := broker.BrokerGrantHead(gl, prior)
 
-	body := map[string]any{
-		"schema_version":       "2",
-		"canon_version":        "rcp-1",
-		"domain":               "flightrecorder.checkpoint.v2",
-		"checkpoint_id":        fmt.Sprintf("cp-%s-%d", projectID, seq), // deterministic per seq
-		"project_id":           projectID,
-		"checkpoint_seq":       seq,
-		"prev_checkpoint_hash": prevVal,
-		"frontier":             heads,
-		"record_count":         count,
-		"broker_grant_head":    grantHead,
-		"created_ts":           ts(s.now()),
-		"key":                  s.keyBlock(),
-	}
+	body := s.checkpointBody(projectID, seq, prev, hasPrev, heads, count, grantHead, created)
 	// M4 (ADR 0005): when this broker has a federation id, ALSO emit the per-broker_id `broker_grant_heads` MAP.
 	// A single configured broker_id owns the project's whole gapless [1..N] log, so its partition == the flat
 	// `gl`. The legacy single `broker_grant_head` above stays (the verifier IGNORES it once federation is active
@@ -3929,12 +3917,26 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Che
 	if s.brokerID != "" {
 		priorFed, ferr := s.priorFedHeadRoot(st, projectID, s.brokerID)
 		if ferr != nil {
-			return store.Checkpoint{}, ferr
+			return nil, ferr
 		}
 		body["broker_grant_heads"] = broker.BrokerGrantHeads(
 			map[string][]broker.GrantSeqHash{s.brokerID: gl},
 			map[string]string{s.brokerID: priorFed},
 		)
+	}
+	return body, nil
+}
+
+// createCheckpointTx: see checkpoint_cut.go.
+// backfillable. A deterministic checkpoint_id keeps the body reproducible for a given seq.
+//
+// The body is cut incrementally from the latest checkpoint when it can be (cutBodyIncremental, with the
+// argument that it equals the full computation) and by the full computation otherwise. Every
+// shadowEvery-th incremental cut ALSO computes the full body and refuses to sign when the two differ.
+func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Checkpoint, error) {
+	body, err := s.checkpointBodyChecked(st, projectID)
+	if err != nil {
+		return store.Checkpoint{}, err
 	}
 	bodyJSON, _ := json.Marshal(body)
 	sealed, err := s.core.SealCheckpoint(string(bodyJSON))
