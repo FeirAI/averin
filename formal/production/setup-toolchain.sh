@@ -55,7 +55,7 @@ ln -sfn "$DIR/sources/charon" "$DIR/sources/aeneas/charon"
 # Aeneas (OCaml 5.3.0, dependencies as in its README).
 export OPAMROOT="$DIR/opam-root"
 [ -d "$OPAMROOT" ] || opam init --bare --disable-sandboxing -n
-opam switch list 2>/dev/null | grep -q 5.3.0 || opam switch create 5.3.0 -y
+grep -q 5.3.0 < <(opam switch list 2>/dev/null) || opam switch create 5.3.0 -y
 eval "$(opam env --switch 5.3.0 --set-switch)"
 # Exact versions of the packages Aeneas' README lists, as installed for the committed extraction
 # (plans/preflight/PROVENANCE.md; ocamlformat is not used by the build).
@@ -79,7 +79,7 @@ fetch "https://github.com/leanprover/lean4/releases/download/v4.31.0/$LEAN_ASSET
 rm -rf "$DIR/lean-4.31.0" && mkdir -p "$DIR/lean-4.31.0"
 tar --use-compress-program=unzstd -xf "$DIR/sources/$LEAN_ASSET.tar.zst" -C "$DIR/lean-4.31.0" --strip-components=1
 LEAN_BIN="$DIR/lean-4.31.0/bin"
-"$LEAN_BIN/lean" --version | grep -q "version 4.31.0," || { echo "unexpected Lean version" >&2; exit 1; }
+grep -q "version 4.31.0," < <("$LEAN_BIN/lean" --version) || { echo "unexpected Lean version" >&2; exit 1; }
 
 cat >"$DIR/with-aeneas.sh" <<EOF
 #!/usr/bin/env bash

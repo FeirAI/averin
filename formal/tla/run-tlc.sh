@@ -145,7 +145,7 @@ verify_pin() { # config expected
 check() { # spec config expected: pass | <invariant or temporal property that must be violated>
   # TLC_ONLY=ProjectTx.tla runs only the configurations of that spec (used by the kit register).
   if [ -n "${TLC_ONLY:-}" ] && [ "$1" != "$TLC_ONLY" ]; then return 0; fi
-  if [ -n "${TLC_CFG_RE:-}" ] && ! echo "${2%.cfg}" | grep -qxE "$TLC_CFG_RE"; then return 0; fi
+  if [ -n "${TLC_CFG_RE:-}" ] && ! grep -qxE "$TLC_CFG_RE" <<<"${2%.cfg}"; then return 0; fi
   checked=$((checked + 1))
   local stem="${2%.cfg}"
   seen_cfgs="${seen_cfgs}${stem} "
@@ -162,18 +162,18 @@ check() { # spec config expected: pass | <invariant or temporal property that mu
     -config "$2" "$1" 2>&1 || true)"
   # A state/action CONSTRAINT makes TLC's liveness checking unsound; the models bound themselves in
   # their actions instead, and any such warning (or a CONSTRAINT line) fails the run.
-  if echo "$out" | grep -qi "constraints during liveness checking is dangerous" \
+  if grep -qi "constraints during liveness checking is dangerous" <<<"$out" \
      || grep -qE '^\s*(CONSTRAINTS?|ACTION_CONSTRAINTS?)\b' "$2"; then
     echo "$out" | tail -30; echo "FAIL: $2 uses a state/action constraint" >&2; exit 1
   fi
   if [ "$3" = pass ]; then
-    echo "$out" | grep -q "No error has been found" || { echo "$out" | tail -30; echo "FAIL: $2 expected to pass" >&2; exit 1; }
+    grep -q "No error has been found" <<<"$out" || { echo "$out" | tail -30; echo "FAIL: $2 expected to pass" >&2; exit 1; }
   else
     # TLC names a violated invariant; for liveness it reports "Temporal properties were violated", so
     # a liveness config must declare exactly the one expected property.
-    if echo "$out" | grep -qE "Invariant $3 is violated"; then :
+    if grep -qE "Invariant $3 is violated" <<<"$out"; then :
     elif [ "$(grep -E '^PROPERTIES' "$2")" = "PROPERTIES $3" ] \
-      && echo "$out" | grep -qE "Temporal propert(y $3 was|ies were) violated"; then :
+      && grep -qE "Temporal propert(y $3 was|ies were) violated" <<<"$out"; then :
     else echo "$out" | tail -30; echo "FAIL: $2 expected a $3 violation" >&2; exit 1
     fi
   fi

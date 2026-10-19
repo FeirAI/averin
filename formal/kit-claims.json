@@ -1456,7 +1456,7 @@
         {
           "path": "formal/tla/run-tlc.sh",
           "symbol": "*",
-          "sha256": "a956d41aab620026f8bd678d6a0936334b369b7c1eaa7b1e40be3a8dd3b67704"
+          "sha256": "a686d3d06f14ce4cf92c28818247f1adaa5e0f1f2114469f2f32e73a2d64647b"
         },
         {
           "path": "formal/tla/ProjectTx_safe.cfg",
