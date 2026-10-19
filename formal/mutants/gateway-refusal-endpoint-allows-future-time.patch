@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/refusals.go b/server/internal/api/refusals.go
+index 0d92c77..ee87f3c 100644
+--- a/server/internal/api/refusals.go
++++ b/server/internal/api/refusals.go
+@@ -121,7 +121,7 @@ func validateRefusal(rr *refusalRequest, now time.Time) error {
+ 	if first.After(last) {
+ 		return errors.New("first_at must not be after last_at")
+ 	}
+-	if last.After(now.Add(refusalClockSkew)) {
++	if last.After(now.Add(refusalClockSkew * 100000)) {
+ 		return errors.New("last_at is in the future beyond the allowed clock skew")
+ 	}
+ 	rr.FirstAt, rr.LastAt = ts(first), ts(last)

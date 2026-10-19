@@ -1,0 +1,41 @@
+{
+  "$comment": "TEST-ONLY KEYS. Seeds are sha256(label) of the public labels below; anyone can recompute them. They sign only the committed test vectors. Never pin one in a deployment (feir-os verify-posture PS-TEST-KEY-PINNED). Production signatures are a separate release step (FEI-36).",
+  "keys": [
+    {
+      "role": "record",
+      "label": "averin-TEST-ONLY-record-v1",
+      "public_key": "ed25519pub:Lce63vKVsUkMZhHnR2xQu-ebV5Tkjg0j50Up6ZCgA-8"
+    },
+    {
+      "role": "resource",
+      "label": "averin-TEST-ONLY-resource-v1",
+      "public_key": "ed25519pub:Nnfkth54bGL6mWNCFh2O5t8nj4N7ZdKTjGhgykGGpuE"
+    },
+    {
+      "role": "broker",
+      "label": "averin-TEST-ONLY-broker-v1",
+      "public_key": "ed25519pub:rc3pv4_vnswgu2Ho0iLWWmVqD6Bf4k4TFne81tHnA40"
+    },
+    {
+      "role": "attestation",
+      "label": "averin-TEST-ONLY-attestation-v1",
+      "public_key": "ed25519pub:pEivJoIL29egW8kmKWxPl-acHD433z3wBL2xCjmUkiU"
+    },
+    {
+      "role": "taxonomy",
+      "label": "averin-TEST-ONLY-taxonomy-v1",
+      "public_key": "ed25519pub:Rr-j1BxJJNRYAgnbfOO_5zb_cOJiK1TlmigfkOkOyf0"
+    },
+    {
+      "role": "tsa",
+      "label": "averin-TEST-ONLY-tsa-v1",
+      "public_key": "ed25519pub:03tzj0xB_XO5OaN6vfR0jT5bSXNJ6aMtC-R9lgjDeBQ"
+    },
+    {
+      "role": "agent",
+      "label": "averin-TEST-ONLY-agent-v1",
+      "public_key": "ed25519pub:rGeJTmPTcpfUdcWoAJA0xtFmqT4O7FpIpxLycHGFMGA"
+    }
+  ],
+  "test_only": true
+}

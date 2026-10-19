@@ -1,0 +1,12 @@
+diff --git a/server/internal/api/refusals.go b/server/internal/api/refusals.go
+index 0d92c77..6dab71b 100644
+--- a/server/internal/api/refusals.go
++++ b/server/internal/api/refusals.go
+@@ -81,7 +81,6 @@ func decodeRefusalRequest(body []byte) (refusalRequest, error) {
+ 		return rr, err
+ 	}
+ 	dec := json.NewDecoder(bytes.NewReader(body))
+-	dec.DisallowUnknownFields()
+ 	if err := dec.Decode(&rr); err != nil {
+ 		return rr, err
+ 	}

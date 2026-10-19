@@ -97,7 +97,11 @@ type Server struct {
 	revocationValidity time.Duration
 	revocationCap      int
 	revocationExportV2 bool // plan 009: export averin.revocation.list.v2 and accept prospective revokes
-	denyLog            bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
+	// feir-ops#1: per-instance salt for refusal record ids (see handleRefusals).
+	refusalSaltOnce sync.Once
+	refusalSaltVal  string
+	refusalSaltErr  error
+	denyLog         bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
 	// inflate stored records without bound (the prerequisite for default-on). nil = unbounded (prior behavior).
 	denialBudget *denialBudget
@@ -969,6 +973,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v2/revoke", s.handleRevoke)                 // M5: mark a grant_id revoked (export carries a signed revocation_list)
 	mux.HandleFunc("POST /v2/broker-seq/void", s.handleBrokerSeqRecovery)
 	mux.HandleFunc("GET /v2/broker-seq/void", s.handleBrokerSeqPreflight)
+	mux.HandleFunc("POST /v2/refusals", s.handleRefusals) // feir-ops#1: seal a gateway refusal record
 	mux.HandleFunc("POST /v2/use", s.handleUse)
 	mux.HandleFunc("POST /v2/use-intent", s.handleUseIntent)
 	mux.HandleFunc("POST /v2/use-outcome", s.handleUseOutcome)
@@ -1306,12 +1311,13 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 const denialIdemPrefix = "denial:"
 
 // reservedIdemMsg is the 400 every caller-facing entry point returns for a reserved idempotency_key prefix.
-const reservedIdemMsg = `idempotency_key prefixes "denial:" and "grant-void:" are reserved for the broker (denied-grant log, grant_void tombstones)`
+const reservedIdemMsg = `idempotency_key prefixes "denial:", "grant-void:" and "refusal:" are reserved for the broker and gateway-refusal endpoints (denied-grant log, grant_void tombstones, refusal records)`
 
 // reservedIdem also covers grantVoidIdemPrefix: a record pre-seeded under grant-void:<seq> would make the operator's
 // tombstone for that seq collapse onto it (and never fill the seq).
 func reservedIdem(idem string) bool {
-	return strings.HasPrefix(idem, denialIdemPrefix) || strings.HasPrefix(idem, grantVoidIdemPrefix)
+	return strings.HasPrefix(idem, denialIdemPrefix) || strings.HasPrefix(idem, grantVoidIdemPrefix) ||
+		strings.HasPrefix(idem, refusalIdemPrefix)
 }
 
 // rejectOpaqueIdentity checks IDs before lookup, deduplication or authentication. RCP normalizes
@@ -1429,7 +1435,7 @@ var uuidV5Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[8
 // ADR 0005 §7 reserves, and the lowercase UUIDv5 shape of deterministic grant/introspection ids. Server-assigned
 // ids (newUUID) are v4, so a record with no caller record_id is never affected.
 func reservedRecordID(rid string) bool {
-	for _, p := range []string{"use-", "outcome-", "denial-", "introspection-", "revocation-"} {
+	for _, p := range []string{"use-", "outcome-", "denial-", "introspection-", "revocation-", refusalRecordIDPrefix} {
 		if strings.HasPrefix(rid, p) {
 			return true
 		}
@@ -1498,6 +1504,19 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	if stringField(rec, "event_type") == "credential_grant_denied" {
 		return fmt.Errorf("event_type \"credential_grant_denied\" is reserved for the broker denied-grant log")
 	}
+	// feir-ops#1: the gateway-refusal markers are reserved for POST /v2/refusals for the same reason as the B11
+	// marker above: a refusal is sealed by the server key like any record, so the verifier cannot tell a
+	// server-built one from a generic-forged one. The verifier counts on record_kind, so reserving every marker
+	// here keeps the blocked-attempts count from being inflated through the generic path.
+	if stringField(rec, "event_type") == "gateway_refusal" {
+		return fmt.Errorf("event_type \"gateway_refusal\" is reserved for the gateway refusal endpoint (POST /v2/refusals)")
+	}
+	if stringField(rec, "record_kind") == "gateway-refusal" {
+		return fmt.Errorf("record_kind \"gateway-refusal\" is reserved for the gateway refusal endpoint (POST /v2/refusals)")
+	}
+	if stringField(rec, "observed_via") == "gateway" {
+		return fmt.Errorf("observed_via \"gateway\" is reserved for the gateway refusal endpoint (POST /v2/refusals)")
+	}
 	// record_kind is OPTIONAL but its value-set is CLOSED (schema enum). The Rust closed-key gate only
 	// admits the KEY (so a record carrying it verifies), not the value — so enforce the enum here at
 	// ingest, else an off-enum kind would seal AND verify yet be invisible to / mis-classified by a
@@ -1517,6 +1536,9 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	if ext, ok := rec["extensions"].(map[string]any); ok {
 		if _, reserved := ext["broker"]; reserved {
 			return fmt.Errorf("extensions.broker is reserved for the broker/resource endpoints and must not be set on a generic record")
+		}
+		if _, reserved := ext["gateway_refusal"]; reserved {
+			return fmt.Errorf("extensions.gateway_refusal is reserved for the gateway refusal endpoint and must not be set on a generic record")
 		}
 		if _, reserved := ext["broker_denial"]; reserved {
 			return fmt.Errorf("extensions.broker_denial is reserved for the broker denied-grant log and must not be set on a generic record")
@@ -4105,6 +4127,13 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 // explicitly Phase 2, spec §3). A deployment MUST put averin behind its own auth (or run it single-
 // tenant) until the authz layer lands — any caller who can reach this endpoint can read any
 // project's data. Documented in docs/coverage-limits.md.
+// listFilterBatch and listFilterScanCap bound a record_kind-filtered list: it scans the newest records in
+// batches and stops at the cap, reporting truncated=true, so a filter can never become an unbounded history scan.
+const (
+	listFilterBatch   = 500
+	listFilterScanCap = 50000
+)
+
 // handleListRecords returns a tenant's sealed records newest-first with truncation honesty.
 func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
@@ -4143,19 +4172,67 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = n
 	}
+	// feir-ops#1: optional record_kind include and exclude_record_kind filters. A caller that wants the main
+	// feed without a refusal storm (or only the refusals) filters here, so the filtered page is the newest
+	// `limit` MATCHING records rather than a post-filtered slice of the newest `limit` records. Unknown values
+	// are a 400, as on /v2/export.
+	kindIn := r.URL.Query().Get("record_kind")
+	kindOut := r.URL.Query().Get("exclude_record_kind")
+	for name, v := range map[string]string{"record_kind": kindIn, "exclude_record_kind": kindOut} {
+		if v != "" && !validRecordKind(v) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown %s %q", name, v))
+			return
+		}
+	}
 	// Page IN THE STORE (SQL LIMIT/OFFSET on Postgres) rather than loading the whole project history into RAM
 	// and slicing — a large tenant no longer materializes every record per list call. RecordsPage returns
 	// newest-first; RecordCount is a cheap indexed count for the truncation-honesty total.
 	var total int
 	var page []store.Record
+	filtered := kindIn != "" || kindOut != ""
+	filteredTruncated := false
 	err := s.st.WithProjectRead(r.Context(), projectID, func(st store.Store) error {
 		var e error
 		total, e = st.RecordCount(projectID)
 		if e != nil {
 			return e
 		}
-		page, e = st.RecordsPage(projectID, limit, offset)
-		return e
+		if !filtered {
+			page, e = st.RecordsPage(projectID, limit, offset)
+			return e
+		}
+		// Scan newest-first in fixed batches until offset+limit matches are held or the scan budget is spent.
+		// total is the whole-history count (unfiltered); truncated tells the caller whether more may exist.
+		matched, scanned := 0, 0
+		for scanned < listFilterScanCap {
+			batch, e := st.RecordsPage(projectID, listFilterBatch, scanned)
+			if e != nil {
+				return e
+			}
+			for _, rec := range batch {
+				scanned++
+				var k struct {
+					RecordKind string `json:"record_kind"`
+				}
+				_ = json.Unmarshal([]byte(rec.JSON), &k)
+				if (kindIn != "" && k.RecordKind != kindIn) || (kindOut != "" && k.RecordKind == kindOut) {
+					continue
+				}
+				matched++
+				if matched > offset {
+					page = append(page, rec)
+					if len(page) == limit {
+						filteredTruncated = true // possibly more; refined below
+						return nil
+					}
+				}
+			}
+			if len(batch) < listFilterBatch {
+				return nil
+			}
+		}
+		filteredTruncated = true // scan budget spent: the answer may be incomplete
+		return nil
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -4165,10 +4242,14 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 	for i, rec := range page {
 		out[i] = json.RawMessage(rec.JSON) // already newest-first
 	}
+	truncated := offset+len(page) < total
+	if filtered {
+		truncated = filteredTruncated
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"records":   out,
 		"total":     total,
-		"truncated": offset+len(page) < total,
+		"truncated": truncated,
 	})
 }
 
@@ -4354,7 +4435,7 @@ func (s *Server) selfVerifyOptsFor(project string) string {
 // without parsing `extensions`.
 func validRecordKind(k string) bool {
 	switch k {
-	case "budget-exhausted", "chargeback-posted":
+	case "budget-exhausted", "chargeback-posted", "gateway-refusal":
 		return true
 	default:
 		return false
@@ -4377,7 +4458,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// caller's typo cannot masquerade as "no matching evidence". Works in proof_only AND full_evidence.
 	recordKind := r.URL.Query().Get("record_kind")
 	if recordKind != "" && !validRecordKind(recordKind) {
-		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown record_kind %q (allowed: budget-exhausted, chargeback-posted)", recordKind))
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown record_kind %q (allowed: budget-exhausted, chargeback-posted, gateway-refusal)", recordKind))
 		return
 	}
 	bundle, snapshotDisclosures, err := s.buildBundleView(r.Context(), projectID, true, r.URL.Query().Get("month"))
