@@ -292,6 +292,13 @@ CLI tool that mints a **signed operation taxonomy** artifact (D4). Flags (`flag`
 | `-out` | stdout | Write the signed taxonomy JSON here. |
 | `-single` | — | A `single_operation` entry `resource_id=action` (repeatable). |
 | `-escalating` | — | An escalating entry `resource_id=action` (repeatable). |
+| `-verify` | off | Verify mode: no key is used and nothing is signed. Checks `-file` against `-pubkey`, `-digest` and `-version` and exits 0 only when the RCP digest, the version and the `averin.taxonomy.v1` signature all match; any mismatch (or an unsigned, malformed or tampered artifact; the raw bytes are parsed as the runtime verifier parses them, so a duplicate key, trailing data, a lone surrogate or a malformed action list is refused) exits 1. Prints `taxonomy verify: OK (version, digest)`, never key material. The verifier's own check downgrades the same mismatch to a quiet `taxonomy_status: untrusted`; this mode makes it an error. It does not judge the effective window. |
+| `-file` | none | With `-verify`: the signed taxonomy artifact. |
+| `-pubkey` | none | With `-verify`: the pinned issuer key `ed25519pub:...` (a comma list is accepted). |
+| `-digest` | none | With `-verify`: the pinned `taxonomy_digest` (`sha256:...`). |
+
+Build note: the tool is cgo and links the Rust staticlib, so build `cargo build -p averin-decision-core` first. On a
+glibc older than 2.34 add `CGO_LDFLAGS='-ldl -lm'`.
 
 ---
 
