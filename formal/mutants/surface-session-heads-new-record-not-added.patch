@@ -1,0 +1,17 @@
+diff --git a/server/internal/store/postgres.go b/server/internal/store/postgres.go
+index 5924c90..dda1c0e 100644
+--- a/server/internal/store/postgres.go
++++ b/server/internal/store/postgres.go
+@@ -704,12 +704,6 @@ func updateSessionHeads(ctx context.Context, tx pgx.Tx, projectID, sessionID, co
+ 			return fmt.Errorf("store: retire session heads: %w", err)
+ 		}
+ 	}
+-	if _, err := tx.Exec(ctx, `
+-		INSERT INTO session_heads (project_id, session_id, content_hash) VALUES ($1, $2, $3)
+-		ON CONFLICT DO NOTHING
+-	`, projectID, sessionID, contentHash); err != nil {
+-		return fmt.Errorf("store: add session head: %w", err)
+-	}
+ 	return nil
+ }
+ 

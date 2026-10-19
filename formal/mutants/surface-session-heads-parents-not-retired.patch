@@ -1,0 +1,19 @@
+diff --git a/server/internal/store/postgres.go b/server/internal/store/postgres.go
+index 5924c90..5974975 100644
+--- a/server/internal/store/postgres.go
++++ b/server/internal/store/postgres.go
+@@ -696,14 +696,6 @@ func selectByContentHash(ctx context.Context, tx pgx.Tx, projectID, hash string)
+ // parent is missing, so it is outside valid operation; checking for it would cost a GIN probe on every
+ // seal whose plan the planner can get wrong, which is the failure this table removes.
+ func updateSessionHeads(ctx context.Context, tx pgx.Tx, projectID, sessionID, contentHash string, parents []string) error {
+-	if len(parents) > 0 {
+-		if _, err := tx.Exec(ctx, `
+-			DELETE FROM session_heads
+-			WHERE project_id = $1 AND session_id = $2 AND content_hash = ANY($3::text[])
+-		`, projectID, sessionID, parents); err != nil {
+-			return fmt.Errorf("store: retire session heads: %w", err)
+-		}
+-	}
+ 	if _, err := tx.Exec(ctx, `
+ 		INSERT INTO session_heads (project_id, session_id, content_hash) VALUES ($1, $2, $3)
+ 		ON CONFLICT DO NOTHING

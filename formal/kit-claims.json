@@ -832,6 +832,22 @@
     "gateway-refusal-kind-filter-ignored-on-incremental-read": {
       "tier": "full",
       "claim": "gateway-refusal-endpoint-closed"
+    },
+    "surface-session-heads-parents-not-retired": {
+      "tier": "fast",
+      "claim": "session-heads-incremental-equals-full"
+    },
+    "surface-session-heads-new-record-not-added": {
+      "tier": "fast",
+      "claim": "session-heads-incremental-equals-full"
+    },
+    "surface-session-heads-updated-on-replay": {
+      "tier": "fast",
+      "claim": "session-heads-incremental-equals-full"
+    },
+    "surface-session-heads-read-ignores-session": {
+      "tier": "fast",
+      "claim": "session-heads-incremental-equals-full"
     }
   },
   "claims": [
@@ -3077,6 +3093,48 @@
         "incremental-read-total-outside-snapshot"
       ],
       "does_not_establish": "That the records served are authentic: the read verifies nothing, so what a reader holds afterwards is a read frontier bound to a signed checkpoint that it can compare on the next read, not a verified one. That a reader detects an in-place rewrite below its frontier: that is the reader's rolling re-read, not this endpoint. That the snapshot is consistent across pages: each page is its own snapshot, so a reader must check the continuity fields (the checkpoint at its frontier seq, the latest seq, record counts and total) on every page. That the Postgres read uses the ordinal index in every plan: the Postgres cost test counts rows, and runs only in the Postgres CI job."
+    },
+    {
+      "id": "session-heads-incremental-equals-full",
+      "$comment": "legacy register: session-heads-incremental-equals-full",
+      "statement": "On Postgres, Heads(project, session) reads the session_heads table and returns exactly what the full scan (every record of the session that no record of the same project and session lists in parents, byte-sorted, never nil) returns, after every PutRecord of a random history: forks, merges, server-forced parents from another session, duplicate parents, several sessions and projects, idempotent replays, content-hash collapses and a replay carrying a different parent list. PutRecord changes session_heads only when it inserted a new row, in the transaction of that insert: it removes the new record's parents from the session's heads and adds the record, and a rolled-back transaction leaves the table as it was. Migration 0009 backfills the table from existing records (random DAG with cross-session, duplicate and dangling parents) to the same set, and the runtime-role check requires SELECT, INSERT and DELETE on it. The read costs one index lookup on (project, session) however long the session is.",
+      "method": "property",
+      "artifacts": [
+        "server/internal/store/postgres.go",
+        "server/internal/store/session_heads_test.go",
+        "server/internal/pgschema/session_heads_test.go",
+        "server/migrations/0009_session_heads.sql"
+      ],
+      "gates": [
+        "store-postgres",
+        "formal-fast"
+      ],
+      "detector": "cd server && go test -count=1 -p 2 ./internal/store ./internal/pgschema -run 'SessionHeads'",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "updateSessionHeads",
+          "sha256": "b6426ff250bb17a0124fb320dbdeca854c068ad7b5c9f7b51f52d95ba675865a"
+        },
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "Postgres.Heads",
+          "sha256": "148d84ca58acd9cb305456c8e37e748f8b31fbc8b0d3be0433e6f6631ebc6f81"
+        },
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "Postgres.PutRecord",
+          "sha256": "345027a7b222d3b5e2f129067fd7f745c1e094668a64eea245b87ad8c6aed07a"
+        }
+      ],
+      "mutants": [
+        "surface-session-heads-parents-not-retired",
+        "surface-session-heads-new-record-not-added",
+        "surface-session-heads-updated-on-replay",
+        "surface-session-heads-read-ignores-session"
+      ],
+      "does_not_establish": "Not that the table equals the full scan on every history: it is checked on seeded random histories and one migration fixture, not proved. A record that names a parent that is not yet in the store, when that parent is later inserted into the same session, is left listed as a head by the table although the full scan would not list it; the seal path does not produce that and the verifier rejects a missing parent. A writer that inserts into records without PutRecord (a test, an operator's SQL) leaves the table stale. Not the in-memory store, which scans the session on every seal. Not ProjectHeads, which still reads the whole project. Not that the planner uses the primary key index at any size or statistics: the soak measurement is recorded in the pull request, not asserted by a test. The seal-latency test (AVERIN_SEAL_LATENCY=1) is a manual measurement and is not part of this detector. Without AVERIN_TEST_DATABASE_URL the Postgres tests skip, so a local run without a database proves nothing about this claim."
     }
   ]
 }

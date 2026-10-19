@@ -146,6 +146,17 @@ func newTracedTestStore(t *testing.T) (*Postgres, *sqlTrace, func()) {
 		t.Fatalf("apply migration 0008: %v", err)
 	}
 
+	// 0009: the incrementally maintained session frontier.
+	migration9, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0009_session_heads.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0009: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration9)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0009: %v", err)
+	}
+
 	p := &Postgres{pool: pool}
 	cleanup := func() {
 		dctx, dcancel := context.WithTimeout(context.Background(), 10*time.Second)

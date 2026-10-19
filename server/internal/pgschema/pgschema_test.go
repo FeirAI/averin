@@ -689,6 +689,7 @@ func TestTenantNonceRuntimeReadinessRequiresLeastPrivilege(t *testing.T) {
 		"GRANT SELECT ON schema_migrations,legacy_consume_exclusions,nonce_ledger_cutover TO " + role,
 		"GRANT SELECT,INSERT,DELETE ON consumed_nonces,consumed_jtis TO " + role,
 		"GRANT SELECT,INSERT ON records,broker_seq TO " + role,
+		"GRANT SELECT,INSERT,DELETE ON session_heads TO " + role,
 		"GRANT SELECT,INSERT,UPDATE ON project_write_guard TO " + role,
 		"GRANT SELECT,INSERT ON authorization_receipts,revocation_events TO " + role,
 	} {
@@ -731,6 +732,7 @@ func TestTenantNonceRuntimeReadinessRequiresLeastPrivilege(t *testing.T) {
 			"; GRANT SELECT ON schema_migrations,legacy_consume_exclusions,nonce_ledger_cutover TO " + role +
 			"; GRANT SELECT,INSERT,DELETE ON consumed_nonces,consumed_jtis TO " + role +
 			"; GRANT SELECT,INSERT ON records,broker_seq TO " + role +
+			"; GRANT SELECT,INSERT,DELETE ON session_heads TO " + role +
 			"; GRANT SELECT,INSERT,UPDATE ON project_write_guard TO " + role +
 			"; GRANT SELECT,INSERT ON authorization_receipts,revocation_events TO " + role, "append-only table"},
 		{"GRANT UPDATE ON revocation_events TO " + group + "; GRANT " + group + " TO " + role, "REVOKE " + group + " FROM " + role, "UPDATE on append-only table revocation_events"},

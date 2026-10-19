@@ -50,3 +50,9 @@ var TemporalRevocation string
 //
 //go:embed 0008_record_ordinal.sql
 var RecordOrdinal string
+
+// SessionHeads creates session_heads, the incrementally maintained per-session frontier Heads() reads,
+// and backfills it from records (schema version 9, availability fix).
+//
+//go:embed 0009_session_heads.sql
+var SessionHeads string

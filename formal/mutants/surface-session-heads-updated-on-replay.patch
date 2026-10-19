@@ -1,0 +1,14 @@
+diff --git a/server/internal/store/postgres.go b/server/internal/store/postgres.go
+index 5924c90..4639840 100644
+--- a/server/internal/store/postgres.go
++++ b/server/internal/store/postgres.go
+@@ -374,6 +374,9 @@ func (p *Postgres) PutRecord(projectID, idemKey string, rec Record) (Record, boo
+ 			return Record{}, false, err
+ 		}
+ 		if ok {
++			if err := updateSessionHeads(ctx, tx, projectID, rec.SessionID, rec.ContentHash, parents); err != nil {
++				return Record{}, false, err
++			}
+ 			return existing, false, nil
+ 		}
+ 	}

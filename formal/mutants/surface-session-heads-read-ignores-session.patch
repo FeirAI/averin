@@ -1,0 +1,13 @@
+diff --git a/server/internal/store/postgres.go b/server/internal/store/postgres.go
+index 5924c90..e8c366b 100644
+--- a/server/internal/store/postgres.go
++++ b/server/internal/store/postgres.go
+@@ -726,7 +726,7 @@ func (p *Postgres) Heads(projectID, sessionID string) ([]string, error) {
+ 	rows, err := p.queries().Query(ctx, `
+ 		SELECT content_hash
+ 		FROM session_heads
+-		WHERE project_id = $1 AND session_id = $2
++		WHERE project_id = $1 AND session_id <> $2
+ 		ORDER BY content_hash ASC
+ 	`, projectID, sessionID)
+ 	if err != nil {
