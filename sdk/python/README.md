@@ -20,10 +20,10 @@ The SDK never reimplements the crypto — it submits records and the server seal
 Rust integrity core. Integer-only money/token fields are enforced at build time.
 
 **Authentication:** pass `api_key="..."` to `Client` to send a project token as an
-`Authorization: Bearer` header. The client posts to `/v2/records` without the `?project=` query
-parameter that the server's project-key check reads, so a server with `AVERIN_API_KEYS` set
-(required unless `AVERIN_DEV_MODE=1`) answers `401` even with a valid token. Supply a `transport`
-that adds `?project=<project_id>` to the URL, or use a development-mode server with no keys.
+`Authorization: Bearer` header. The client posts to `/v2/records?project=<project_id>` (URL-encoded,
+equal to the record's `project_id`), which is where the server's project-key check reads the project,
+so a server with `AVERIN_API_KEYS` set (required unless `AVERIN_DEV_MODE=1`) accepts a token that has
+the write role for that project and answers `401` otherwise. A custom `transport` receives that URL.
 
 For an externally approved v3 record, first assign `record_id`, `span_id`, and `agent_ts`, and
 provide precomputed hiding commitments for any content. Call
