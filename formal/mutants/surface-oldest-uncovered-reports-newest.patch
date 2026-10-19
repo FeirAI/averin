@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index e8699d2..2c364fe 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -1578,7 +1578,7 @@ fn oldest_uncovered_received_ts(
+             Some(t) if is_canonical_ts(&t) => t,
+             _ => "1970-01-01T00:00:00.000Z".to_string(),
+         })
+-        .min()
++        .max()
+ }
+ 
+ /// Verify selective-disclosure entries against the per-record hiding commitments embedded in the
