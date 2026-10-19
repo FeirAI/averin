@@ -338,6 +338,19 @@ func TestIncrementalReadRefusesOrdinalGap(t *testing.T) {
 		h.plain()
 	}
 	checkGapRefused(t, cutServer(t, gapReadStore{st, 5}, "").Routes())
+	// The last record missing leaves every page contiguous, so only the short-page clause (a short page must end at
+	// the total) sees it: the page that ends at 9 of 10, and the empty page at after=9, are refused; a full page
+	// that does not reach the end is served, and an empty page at the total is not a gap.
+	last := cutServer(t, gapReadStore{st, 10}, "").Routes()
+	for _, c := range []struct {
+		after int64
+		limit int
+		want  int
+	}{{0, 100, 500}, {6, 100, 500}, {9, 3, 500}, {6, 3, 200}, {0, 3, 200}} {
+		if code, _ := irGet(t, last, irQuery(c.after, c.limit)); code != c.want {
+			t.Errorf("last record missing, after=%d limit=%d: want %d, got %d", c.after, c.limit, c.want, code)
+		}
+	}
 	// Without a gap the same requests are all served, and an empty page past the total (a reader ahead of the
 	// store) is not a gap.
 	r := cutServer(t, st, "").Routes()
