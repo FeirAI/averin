@@ -1,0 +1,13 @@
+diff --git a/core/src/refusal.rs b/core/src/refusal.rs
+index 7586c0b..8fbfefc 100644
+--- a/core/src/refusal.rs
++++ b/core/src/refusal.rs
+@@ -116,7 +116,7 @@ pub fn check_shape(rec: &CanonValue) -> Result<Counted, String> {
+     if !action_ok {
+         return Err("a gateway refusal action must be a plain identifier or *".into());
+     }
+-    if rec.get("authority").is_some() {
++    if rec.get("authority").is_some() && false {
+         return Err("a gateway refusal carries no authority block".into());
+     }
+     let ext = rec

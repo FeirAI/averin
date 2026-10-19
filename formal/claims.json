@@ -2014,6 +2014,246 @@
       "gates": [
         "server"
       ]
+    },
+    {
+      "id": "gateway-refusal-reserved-at-ingest",
+      "claim": "The generic ingest path rejects every gateway refusal marker (event_type gateway_refusal, record_kind gateway-refusal, observed_via gateway, extensions.gateway_refusal, record_id prefix refusal-, idempotency_key prefix refusal:) with a 400, and an ordinary record still ingests. Not that POST /v2/refusals authenticates its caller beyond the write role (any project writer can submit a refusal), nor that a refusal reflects a real refusal: averin seals what the gateway reports.",
+      "class": "tested-implementation",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "the server signing key signs a forged refusal exactly like a real one, so the reservation at ingest is the only defence"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "validateGenericRecordItem"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "reservedRecordID"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/refusals_test.go",
+          "symbol": "TestGatewayRefusalReservedAtIngest"
+        },
+        {
+          "file": "formal/mutants/gateway-refusal-ingest-record-kind-not-reserved.patch",
+          "symbol": "gateway-refusal-unreserved"
+        }
+      ],
+      "gates": [
+        "server"
+      ]
+    },
+    {
+      "id": "gateway-refusal-endpoint-closed",
+      "claim": "POST /v2/refusals builds the record from a closed body: an unknown field, an unknown class or entry point, a zero attempts count, a future last_at, an unsafe agent id and an inconsistent summary are a 400 that seals nothing; an unsafe action name is stored as invalid_name; a replay returns the same record; GET /v2/records filters by record_kind and exclude_record_kind. Not rate limiting of submissions, nor Postgres parity of the filtered page.",
+      "class": "tested-implementation",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "the in-memory store backs these tests"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/refusals.go",
+          "symbol": "validateRefusal"
+        },
+        {
+          "file": "server/internal/api/refusals.go",
+          "symbol": "handleRefusals"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "handleListRecords"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/refusals_test.go",
+          "symbol": "TestRefusalRequestIsClosed"
+        },
+        {
+          "file": "server/internal/api/refusals_test.go",
+          "symbol": "TestListRecordsKindFilter"
+        },
+        {
+          "file": "formal/mutants/gateway-refusal-endpoint-accepts-unknown-fields.patch",
+          "symbol": "DisallowUnknownFields"
+        }
+      ],
+      "gates": [
+        "server"
+      ]
+    },
+    {
+      "id": "gateway-refusal-counted-when-proven",
+      "claim": "The verifier counts gateway refusals (gateway_refusals, gateway_refusal_attempts, gateway_refusals_by_class) only for integrity-proven records with a valid shape, and counts a verbatim replayed record once. Not that the gateway reported every refusal: the count is a floor, Level 1 and Level 2 only, never Level 3.",
+      "class": "tested-implementation",
+      "targets": [
+        "native Rust"
+      ],
+      "assumptions": [
+        "records are integrity-proven under the keys the caller pinned, or the bundle's own keys when none are pinned"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "verify_bundle_with"
+        },
+        {
+          "file": "core/src/refusal.rs",
+          "symbol": "check_shape"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/gateway_refusal.rs",
+          "symbol": "counts_integrity_proven_refusals_with_attempts_and_classes"
+        },
+        {
+          "file": "core/tests/gateway_refusal.rs",
+          "symbol": "unproven_refusals_are_not_counted"
+        },
+        {
+          "file": "core/tests/gateway_refusal.rs",
+          "symbol": "a_replayed_refusal_is_counted_once"
+        }
+      ],
+      "gates": [
+        "core"
+      ]
+    },
+    {
+      "id": "gateway-refusal-shape-fail-closed",
+      "claim": "A record with record_kind gateway-refusal whose shape is invalid (unknown class, entry point or key, zero attempts, divergent event_type, an authority block, broker evidence, an inconsistent summary, no extension) is a hard verification issue and is never counted. Not that a well-formed refusal is true.",
+      "class": "tested-implementation",
+      "targets": [
+        "native Rust"
+      ],
+      "assumptions": [
+        "the closed vocabulary equals vectors/refusal-classes.v1.json"
+      ],
+      "sources": [
+        {
+          "file": "core/src/refusal.rs",
+          "symbol": "check_shape"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/gateway_refusal.rs",
+          "symbol": "malformed_refusals_are_hard_issues_and_never_counted"
+        },
+        {
+          "file": "core/tests/gateway_refusal.rs",
+          "symbol": "vocabulary_matches_the_spec_file"
+        }
+      ],
+      "gates": [
+        "core"
+      ]
+    },
+    {
+      "id": "gateway-refusal-never-widens-surface",
+      "claim": "A real-producer capstone history with gateway refusals of ungranted actions stays attested complete over the brokered surface with the side-effect closure closed; the refusals are counted and add no resource, action pair or manifest entry. The committed fixture is signed by test-only keys (spec/test-keys.json). Not that any production taxonomy or manifest is signed: that is the separate FEI-36 release step.",
+      "class": "tested-implementation",
+      "targets": [
+        "native Rust",
+        "Go server"
+      ],
+      "assumptions": [
+        "test-only keys derived from public labels sign the fixture"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "touched_pairs"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/gateway_refusal.rs",
+          "symbol": "vector_expectations_are_the_intended_ones"
+        },
+        {
+          "file": "server/internal/api/refusals_capstone_test.go",
+          "symbol": "TestCapstoneWithRefusalsStaysClosed"
+        }
+      ],
+      "gates": [
+        "core",
+        "server"
+      ]
+    },
+    {
+      "id": "legacy-history-unchanged",
+      "claim": "A generic record with event_type gateway_refusal and no record_kind is neither counted nor shape-checked; its bundle verifies with the same issues and proven count as the same bundle with an ordinary event_type. The verifier keys on record_kind. Not a quantification over every existing history.",
+      "class": "tested-implementation",
+      "targets": [
+        "native Rust"
+      ],
+      "assumptions": [
+        "an older averin could seal a generic record with that event_type"
+      ],
+      "sources": [
+        {
+          "file": "core/src/refusal.rs",
+          "symbol": "is_refusal"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/gateway_refusal.rs",
+          "symbol": "legacy_event_type_only_record_keeps_its_verdict"
+        }
+      ],
+      "gates": [
+        "core"
+      ]
+    },
+    {
+      "id": "cross-impl-refusal-vector",
+      "claim": "The native verifier, the cgo FFI and the WASM verifier produce the same refusal fields for the four committed rows (refusals, legacy event_type only, unknown class, capstone with refusals). Not agreement on inputs outside those rows.",
+      "class": "tested-implementation",
+      "targets": [
+        "native Rust",
+        "Go cgo",
+        "WASM"
+      ],
+      "assumptions": [
+        "the vectors are signed by test-only keys"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify.rs",
+          "symbol": "report_to_canon"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/gateway_refusal.rs",
+          "symbol": "committed_vector_file_replays"
+        },
+        {
+          "file": "server/internal/core/refusal_vectors_test.go",
+          "symbol": "TestGatewayRefusalVectorsCgo"
+        },
+        {
+          "file": "verifier/test/gateway-refusal.test.js",
+          "symbol": "WASM replays the gateway refusal vectors"
+        }
+      ],
+      "gates": [
+        "core",
+        "server",
+        "verifier"
+      ]
     }
   ]
 }

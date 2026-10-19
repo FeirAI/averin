@@ -288,6 +288,15 @@ pub struct VerifyReport {
     /// request that was refused AND recorded as evidence, opt-in producer side). NOT a grant (never folded
     /// into `grant_total`/`grant_accountability`); a generic BrokerRole::None record.
     pub denied_grants: usize,
+    /// feir-ops#1: sealed gateway refusal records (`record_kind = gateway-refusal`), counted only when the
+    /// record is integrity-proven and its shape is valid, deduped by content_hash. A refusal is NOT a grant,
+    /// a use or an authority claim: it never enters the coverage closure or any other count.
+    pub gateway_refusals: usize,
+    /// Sum of `attempts` over the counted refusal records (coalesced repeats). A floor: an unauthenticated
+    /// attempt is not recorded and a refusal the producer could not seal is a gap.
+    pub gateway_refusal_attempts: u64,
+    /// `gateway_refusal_attempts` by reason class (closed vocabulary), classes with a zero count omitted.
+    pub gateway_refusals_by_class: BTreeMap<String, u64>,
     /// Tier-B use↔grant join (ADR 0003 step 5, R3). Violations are evaluated over the COMMITTED set (records
     /// committed by ANY verified checkpoint), positive claims over the CLOSED set (committed by a verified,
     /// ANCHORED checkpoint) — so deleting the unsigned `anchor` can only weaken the verdict. `uses_total` =
@@ -1761,6 +1770,26 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("grant_total".into(), count(r.grant_total)),
         ("grant_verified".into(), count(r.grant_verified)),
         ("denied_grants".into(), count(r.denied_grants)),
+        ("gateway_refusals".into(), count(r.gateway_refusals)),
+        (
+            "gateway_refusal_attempts".into(),
+            CanonValue::Int(i64::try_from(r.gateway_refusal_attempts).unwrap_or(i64::MAX)),
+        ),
+        (
+            "gateway_refusals_by_class".into(),
+            CanonValue::object(
+                r.gateway_refusals_by_class
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            CanonValue::Int(i64::try_from(*v).unwrap_or(i64::MAX)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap(),
+        ),
         ("uses_total".into(), count(r.uses_total)),
         ("uses_matched".into(), count(r.uses_matched)),
         (
@@ -2608,6 +2637,9 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         grant_total: 0,
         grant_verified: 0,
         denied_grants: 0,
+        gateway_refusals: 0,
+        gateway_refusal_attempts: 0,
+        gateway_refusals_by_class: BTreeMap::new(),
         uses_total: 0,
         uses_matched: 0,
         uses_action_unverified: 0,
@@ -6592,6 +6624,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut denied_grants = 0usize;
     let mut seen_grants: BTreeSet<&str> = BTreeSet::new();
     let mut seen_denials: BTreeSet<&str> = BTreeSet::new();
+    let mut gateway_refusals = 0usize;
+    let mut gateway_refusal_attempts = 0u64;
+    let mut gateway_refusals_by_class: BTreeMap<String, u64> = BTreeMap::new();
+    let mut seen_refusals: BTreeSet<&str> = BTreeSet::new();
     // F8 (always-on, anchoring-independent): grant_id -> content_hash over the VERIFIED broker grants, so a
     // second distinct content_hash under one grant_id (broker equivocation) is flagged whether or not the
     // grant is anchored/closed. Tracked in THIS (un-gated) counting pass, not the closed-gated accounting
@@ -6600,6 +6636,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut grant_content_seen: BTreeMap<String, String> = BTreeMap::new();
     let mut grant_equivocations: BTreeSet<String> = BTreeSet::new();
     let grant_issues_before = issues.len();
+    // A malformed refusal is a hard issue but carries no grant or use evidence, so it must not read as a
+    // grant contradiction: its issues join `issues` only after the grant window closes.
+    let mut refusal_issues: Vec<String> = Vec::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if s(rec, "event_type").as_deref() == Some("credential_grant")
@@ -6678,9 +6717,32 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         {
             denied_grants += 1;
         }
+        // feir-ops#1: gateway refusals, keyed on record_kind (never event_type alone, so a legacy generic
+        // record with that event_type keeps its verdict). The shape guard fails closed as a hard issue; the
+        // count covers only integrity-proven, shape-valid records, deduped by content_hash.
+        if crate::refusal::is_refusal(rec) && seen_refusals.insert(rt.content_hash.as_str()) {
+            match crate::refusal::check_shape(rec) {
+                Err(why) => refusal_issues.push(format!(
+                    "gateway refusal {} ({}): {why} (fail-closed)",
+                    rt.index, rt.record_id
+                )),
+                Ok(c) => {
+                    if rt.trust == TrustLevel::IntegrityProven {
+                        gateway_refusals += 1;
+                        gateway_refusal_attempts =
+                            gateway_refusal_attempts.saturating_add(c.attempts);
+                        for (class, n) in c.by_class {
+                            let e = gateway_refusals_by_class.entry(class).or_insert(0);
+                            *e = e.saturating_add(n);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let grant_contradiction = issues.len() > grant_issues_before;
+    issues.extend(refusal_issues);
     // ---- Tier-B (ADR 0003 step 5): use↔grant join (R3) ----
     // CLOSED = a record's content_hash is transitively committed by a verified, ANCHORED checkpoint (the union of
     // the anchored committed sets). COMMITTED = transitively committed by ANY verified (signed, key-honored)
@@ -8340,6 +8402,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         segment: segment_report,
         grant_total,
         denied_grants,
+        gateway_refusals,
+        gateway_refusal_attempts,
+        gateway_refusals_by_class,
         grant_verified,
         uses_total,
         uses_matched,

@@ -9,6 +9,8 @@ the test data the verifiers are checked against.
 | `schema-v2.md`, `rcp-v1.md` | Prose specifications for the record schema and the checkpoint protocol. |
 | `fixtures/` | Example bundles used by the Rust, Go, and JavaScript test suites. |
 | `golden-vectors/` | Canonicalization and signature vectors that every verifier implementation must reproduce byte for byte. |
+| `../vectors/refusal-classes.v1.json` | Closed vocabularies (14 reason classes, 4 entry points) of the gateway refusal record (`record_kind` `gateway-refusal`). core, the server and a test pin their copies to this file; vultrino and feir-os vendor it under the vectors lock. |
+| `test-keys.json` | **TEST-ONLY** public keys behind the new vectors (`fixtures/capstone-with-refusals-v3.json`, `fixtures/gateway-refusal-vectors.json`, `verifier/samples/refusals*.json`). Seed = sha256 of a public label, so anyone can recompute them. Never pin one in a deployment. |
 
 ## Test material only
 

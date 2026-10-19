@@ -1,0 +1,14 @@
+diff --git a/server/internal/api/refusals.go b/server/internal/api/refusals.go
+index 0d92c77..a921206 100644
+--- a/server/internal/api/refusals.go
++++ b/server/internal/api/refusals.go
+@@ -165,9 +165,6 @@ func validateRefusal(rr *refusalRequest, now time.Time) error {
+ 	if rr.Action == "" {
+ 		return errors.New("action is required")
+ 	}
+-	if !refusalName.MatchString(rr.Action) {
+-		rr.Action = invalidNameLiteral
+-	}
+ 	return nil
+ }
+ 
