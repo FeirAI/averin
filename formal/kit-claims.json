@@ -644,6 +644,34 @@
     "surface-chain-ignores-requested-claim": {
       "tier": "full",
       "claim": "month-segment-verifier"
+    },
+    "checkpoint-cut-frontier-keeps-parents-of-new-records": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-root-folded-from-seed": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-skips-gapless-check-on-new-grants": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-base-count-off-by-one": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-seq-not-advanced": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-shadow-mismatch-still-signs": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-shadow-never-runs": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
     }
   },
   "claims": [
@@ -2448,6 +2476,80 @@
       ],
       "does_not_establish": "That the Postgres store returns the same range as the in-memory store in every case: the month tests here run against the in-memory store, and the Postgres month test covers one project in CI, not concurrent replicas. That a month's disclosures are limited to its own records: no test exports a disclosing mode for a month. That the size limit equals the verifier's: the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test. That a month stays under the limit as a project grows: a month over 256 MiB is refused, not split. The revocation and attestation behaviour of a month is checked only where the tests configure them (anchored months verify clean; the self-view reports the unanchored revocation list exactly as a whole-history export does). That a month's record range is right when the wall clock stepped back or two replicas committed out of start-time order on Postgres: the range is a position in (inserted_at, ctid) order and such a case makes the month fail to verify rather than verify a wrong set; a project whose checkpoint months go backwards gets no month plan (409). The Postgres month test runs only in the Postgres CI job.",
       "evidence_run": "38718313766"
+    },
+    {
+      "id": "checkpoint-cut-incremental-equals-full",
+      "statement": "The checkpoint cut reads the latest checkpoint and the records after it (not the whole history) and produces the same body as the full computation over the whole project: the same sequence number and previous hash, the record count as the base count plus the records after it, the frontier as the base frontier minus the parents of the new records plus the new records no new record names, and the grant-transparency head (and the per-broker head of a federated broker) as the prior head's cumulative root folded over the grants after it, chained to the prior head; it refuses to sign unless the new grants carry exactly the next broker_seq values and the allocated maximum matches, and refuses when the store's record count differs from the base count plus the records after it; it takes the full computation when there is no usable base. Every 100th incremental cut (every cut once a mismatch has been seen) also computes the full body with the same timestamp and refuses to sign, with an alert and a counter, unless the two are identical. The rows a cut reads are the same at 1, 3 and 12 months of history.",
+      "method": "property",
+      "artifacts": [
+        "server/internal/api/checkpoint_cut.go",
+        "server/internal/api/checkpoint_cut_test.go",
+        "server/internal/api/checkpoint_cut_pg_test.go",
+        "server/internal/api/export_test.go",
+        "server/internal/broker/transparency.go",
+        "server/internal/store/store.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestCheckpointCut'",
+      "covers": [
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "cutBodyIncremental",
+          "sha256": "cd97e5d39ae1b3ec4cdbf84d9415e5f8bee2c191377290ec0e07512b98109bad"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "parseCutBase",
+          "sha256": "7f518ca499ca6682d85a516e069a02d9ac51c9cfea2d6d1fd24386a99961ff5d"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "checkGaplessGrantLogAfter",
+          "sha256": "298894e662e372ea757a09be9f4b5cb0b90c517227f2374860134dc1a3d7fbea"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "checkpointBody",
+          "sha256": "8393783210293015ddb4171b328b7796fa0c5bc5e985cdd42ee61adaff827829"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "checkpointBodyChecked",
+          "sha256": "7d5f687df3db655ce4c0d87518dc78917d404e39dcc150cd43fefb7fb7f07ebc"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "cutBodyFull",
+          "sha256": "7920c8fcaf6f0af62acdce8531d9ff9bcb5ca41840f958a737595f8792d1b5f9"
+        },
+        {
+          "path": "server/internal/broker/transparency.go",
+          "symbol": "GrantHeadRootFrom",
+          "sha256": "769a068df078dd983950cfd64e3bd3b0921491d1a8101df1c5c672b403de332c"
+        },
+        {
+          "path": "server/internal/broker/transparency.go",
+          "symbol": "BrokerGrantHeadFrom",
+          "sha256": "faafb237688dee8f7211f8059428b3d39a179e2b0b73a4a1f565341574e8cc87"
+        },
+        {
+          "path": "server/internal/store/store.go",
+          "symbol": "FrontierFold.Heads",
+          "sha256": "466272d24f9d29315f898f906226e61b0aff911351f5a3ecd08c0ff4cbdbcd0f"
+        }
+      ],
+      "mutants": [
+        "checkpoint-cut-frontier-keeps-parents-of-new-records",
+        "checkpoint-cut-root-folded-from-seed",
+        "checkpoint-cut-skips-gapless-check-on-new-grants",
+        "checkpoint-cut-base-count-off-by-one",
+        "checkpoint-cut-seq-not-advanced",
+        "checkpoint-cut-shadow-mismatch-still-signs",
+        "checkpoint-cut-shadow-never-runs"
+      ],
+      "does_not_establish": "That the incremental cut equals the full computation on every history: the equality is argued in the code comment and checked on random histories (sessions, forced older parents, grants, voids, idempotent retries, idle cuts) and by the shadow check on one cut in 100, so a divergence on an unshadowed cut is signed (a checkpoint is append-only) and is caught at the next shadowed cut or by the verifier. That a corrupted or tampered latest checkpoint is detected on an unshadowed cut: the base is trusted as signed. That the Postgres ordinal and record count are right under concurrent writers (the store tests cover that). That the cost is constant for the frontier: a project with a very large frontier still carries it in every checkpoint. That the full computation, used for the first cut and as the definition, is cheap: it is O(history). The Postgres variants of the differential and cost tests run only in the Postgres CI job."
     }
   ]
 }

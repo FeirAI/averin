@@ -1,0 +1,13 @@
+diff --git a/server/internal/broker/transparency.go b/server/internal/broker/transparency.go
+index fd3c41d..037fe01 100644
+--- a/server/internal/broker/transparency.go
++++ b/server/internal/broker/transparency.go
+@@ -115,7 +115,7 @@ func GrantHeadRootFrom(priorRoot string, grants []GrantSeqHash) (string, error)
+ 	if err != nil || len(acc) != sha256.Size {
+ 		return "", fmt.Errorf("grant head root %q is not sha256:<64 hex>", priorRoot)
+ 	}
+-	return foldGrantHeadRoot(acc, grants), nil
++	return foldGrantHeadRoot(grantHeadSeed(), grants), nil
+ }
+ 
+ // BrokerGrantHeadFrom is BrokerGrantHead for the incremental cut: the grants after the prior head (seq

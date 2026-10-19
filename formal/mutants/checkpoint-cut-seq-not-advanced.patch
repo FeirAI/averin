@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+index 7e58ce2..919a19e 100644
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -198,7 +198,7 @@ func (s *Server) cutBodyIncremental(st store.Store, projectID, created string) (
+ 	if err != nil {
+ 		return nil, false, fmt.Errorf("checkpoint: %w", err)
+ 	}
+-	body = s.checkpointBody(projectID, base.seq+1, base.hash, true, fold.Heads(base.frontier), int(count), grantHead, created)
++	body = s.checkpointBody(projectID, base.seq, base.hash, true, fold.Heads(base.frontier), int(count), grantHead, created)
+ 	if base.federated {
+ 		entry, ferr := broker.BrokerGrantHeadFrom(base.fedRoot, base.fedMax, gl)
+ 		if ferr != nil {

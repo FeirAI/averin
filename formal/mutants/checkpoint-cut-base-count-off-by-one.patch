@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+index 7e58ce2..d159bf4 100644
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -159,7 +159,7 @@ func (s *Server) cutBodyIncremental(st store.Store, projectID, created string) (
+ 	// D: the records after L, paged. Only the frontier fold and the grant members are kept.
+ 	var fold store.FrontierFold
+ 	var gl []broker.GrantSeqHash
+-	after := base.count
++	after := base.count - 1
+ 	for {
+ 		page, perr := st.RecordsAfter(projectID, after, store.HeadsPageSize)
+ 		if perr != nil {

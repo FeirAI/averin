@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+index 7e58ce2..46fbed0 100644
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -191,7 +191,7 @@ func (s *Server) cutBodyIncremental(st store.Store, projectID, created string) (
+ 		return nil, false, fmt.Errorf("checkpoint: read project snapshot: %w", err)
+ 	}
+ 	sort.Slice(gl, func(i, j int) bool { return gl[i].Seq < gl[j].Seq })
+-	if err := checkGaplessGrantLogAfter(gl, base.maxSeq, maxAlloc); err != nil {
++	if err := checkGaplessGrantLogAfter(gl, base.maxSeq, maxAlloc); false && err != nil {
+ 		return nil, false, fmt.Errorf("checkpoint refused: %w", err)
+ 	}
+ 	grantHead, err := broker.BrokerGrantHeadFrom(base.root, base.maxSeq, gl)
