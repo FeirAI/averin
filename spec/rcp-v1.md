@@ -10,7 +10,15 @@ vectors in `/spec/golden-vectors/` are the byte-for-byte contract every implemen
 
 RCP v1 is a *constrained superset of JCS (RFC 8785)*: it adopts JCS serialization and adds
 rules JCS leaves open (exact integer range, NFC, post-NFC duplicate-key rejection,
-unknown-field rejection, algorithm-prefixed digests, explicit domain separation).
+a closed top-level record key set, algorithm-prefixed digests, explicit domain separation).
+
+> **Unknown fields: what averin enforces.** averin's verifier enforces a closed set of
+> TOP-LEVEL record keys (an unknown top-level key, or a missing required one, fails the record).
+> It does not allow-list nested objects (`authority`, `key`, `content`, `tokens`, the
+> `*_commit` blocks) or checkpoint members: the JSON Schemas declare `additionalProperties: false`
+> for them, but the schemas are advisory and the core does not run them. A nested member the
+> verifier does not recognise is still bound by `content_hash` (for a checkpoint, by
+> `checkpoint_hash`), so it cannot be altered after sealing; it is just not rejected on sight.
 
 > **Authority of this profile over the JSON Schema.** The JSON Schemas in `/spec/*.schema.json`
 > document *structure*; they CANNOT express RCP rules and MUST NOT be treated as sufficient
@@ -74,6 +82,24 @@ A canonical body is a JSON object restricted to these value kinds:
   use lowercase `\u00xx`. **Every other code point is emitted literally as UTF-8** (no
   `\uXXXX` for non-ASCII, no forward-slash escaping).
 
+### 4.1 Input grammar and limits (averin behaviour)
+
+These are the limits of averin's parser and verifier, stated so an independent implementation can
+match them or knowingly differ:
+
+* JSON insignificant whitespace (space, tab, LF, CR) is tolerated around tokens on input; it is
+  never emitted (§2). Any data after the top-level value is a parse error.
+* A raw control byte (below U+0020) inside a string is a parse error, as is any backslash escape
+  that JSON does not define.
+* Nesting of more than 256 levels of arrays and objects is a parse error.
+* A bundle larger than 256 MiB (268435456 bytes) is refused before parsing, with a failing report.
+* Ed25519 verification is strict (`verify_strict`): a signature whose scalar is not canonical, or
+  whose public key or `R` component is small-order, is rejected. A public key that does not decode
+  to a curve point is rejected when loaded.
+* base64url decoding (§8) rejects padding, characters outside the URL-safe alphabet, a length
+  that is 1 modulo 4, and non-zero trailing bits, so a byte string has exactly one accepted
+  encoding.
+
 ## 5. Duplicate keys (checked after NFC)
 
 * Within any single object, duplicate member keys are **invalid** and MUST cause a parse error.
@@ -96,6 +122,13 @@ A canonical body is a JSON object restricted to these value kinds:
   requires those fields to already be sorted ascending by byte order and de-duplicated** before
   canonicalization; a set field that is unsorted or contains duplicates is a schema violation
   (the producer must normalize it). RCP itself applies no reordering — it only serializes.
+* **averin today.** The rule above binds producers, and averin's recorder meets it: the server
+  discards any caller-supplied `causal_prev_hashes` and seals the sorted, de-duplicated union of the
+  session's current heads (plus any parent the server itself forces, such as the intent a use outcome
+  must link to), and checkpoint frontiers are sorted and de-duplicated when they are built.
+  averin's verifier does not currently reject an unsorted or duplicated set. It treats a record's
+  parents as a set (duplicates collapsed) and compares the latest checkpoint's `frontier` with the
+  DAG heads as sets. A stricter independent verifier MAY reject such input.
 
 ## 8. Algorithm agility
 
@@ -104,6 +137,9 @@ A canonical body is a JSON object restricted to these value kinds:
   64 bytes>`. Ed25519 public keys: `ed25519pub:<base64url-no-pad, exactly 32 bytes>`.
 * Verifiers select the primitive from the prefix and MUST reject malformed length/encoding;
   unknown prefix ⇒ explicit "unsupported algorithm" failure (never a silent pass).
+  averin's verifier reports a missing or unknown signature or key prefix as a bad-prefix error
+  (`missing/incorrect algorithm prefix`), not under a separate "unsupported algorithm" name. It
+  is still a failure and never a pass.
 
 ## 9. Domain separation & the hash/sign preimages
 
@@ -160,6 +196,19 @@ there is no encoding ambiguity. Disclosure reveals `(value_bytes, nonce)`; the v
 recomputes and matches. Hashes are for integrity, never secrecy — sensitive content is
 additionally protected by encryption + access control.
 
+**Disclosure wire form (averin).** A bundle MAY carry a top-level `disclosures` array (absent or
+`null` means none). Each entry is `{record_id, field, value_b64, nonce_hex}`:
+
+* `field` is one of the closed `field_domain` values (`input`, `output`, `rationale`, `credential`);
+* `value_b64` is the disclosed `value_bytes`, base64url without padding (§8 decoding rules);
+* `nonce_hex` is the 32-byte nonce as exactly 64 lowercase hex characters.
+
+The verifier decodes `value_b64` to octets and feeds them to the commitment unchanged. No NFC
+normalization is applied to disclosed octets; NFC applies only when the recorder derives
+`value_bytes` from an inline string. The record named by `record_id` must carry a
+`<field>_commit.commitment` to match against. A second entry for the same `(record_id, field)`
+pair is rejected, and a revealed value that does not match its commitment fails the bundle.
+
 ### 9.4 Checkpoint `checkpoint_hash` / `sig`
 
 A checkpoint body carries its own `schema_version: "2"`, `canon_version: "rcp-1"`, and
@@ -190,7 +239,11 @@ checkpoint, keyed by `content_hash` (duplicates by content_hash collapse to one 
 1. **Records:** recompute each `content_hash`; verify `sig` against the key valid for its
    `key_epoch`; collapse duplicate `content_hash`es.
 2. **DAG:** every `causal_prev_hash` MUST resolve to a present record; the graph MUST be
-   acyclic. A missing parent ⇒ *omission detected*.
+   acyclic. A missing parent ⇒ *omission detected*. (Segment mode: a bundle that carries a `segment`
+   member, a month of history with a base checkpoint, does not reject a parent that is absent from
+   its records. A parent that is a member of the base checkpoint's frontier resolves to that base;
+   any other absent parent is counted as an earlier-month reference and reported, and for a
+   segment with a base the report then lists record completeness as not evaluated.)
 3. **Checkpoint chain:** in `checkpoint_seq` order, recompute each `checkpoint_hash`; verify
    `sig`; verify `prev_checkpoint_hash` continuity and that `checkpoint_seq` increases by
    exactly 1 with no gaps; verify `record_count` is non-decreasing.
@@ -201,7 +254,7 @@ checkpoint, keyed by `content_hash` (duplicates by content_hash collapse to one 
 5. **Anchor (threats #3, #1):** for each checkpoint, verify its external-anchor token binds the
    `checkpoint_hash` and extract the anchor time `T`; `T` MUST be non-decreasing with
    `checkpoint_seq`. A backdated record cannot precede an anchor that already committed a
-   frontier without it.
+   frontier without it. The exact anchor inputs and averin's semantics are in §10.1.1.
 6. **Fork detection (threat #2) — and its honest limit:** two checkpoints from the same project
    with the same `checkpoint_seq` but different `checkpoint_hash`, or two sharing the same
    `prev_checkpoint_hash`, signed by the same key, are a **fork**. This is detectable **only if
@@ -209,6 +262,51 @@ checkpoint, keyed by `content_hash` (duplicates by content_hash collapse to one 
    (which is append-only and outside vendor control). A verifier given only one internally
    consistent chain CANNOT detect that a *parallel* chain was suppressed. This is the stated
    limit of single-key self-host (threat #15); the witness/anchor is what closes it, partially.
+
+#### 10.1.1 Anchor schemes and semantics (averin verifier)
+
+An anchor block carries `scheme` and `token_b64` (base64url without padding, §8, for both schemes).
+Two schemes exist.
+
+* **`rfc3161`.** `token_b64` is a DER RFC 3161 TimeStampToken. It is checked against a DER
+  `SubjectPublicKeyInfo` of the TSA that the auditor pinned out of band. The token's
+  `messageImprint` MUST be SHA-256 over the ASCII text of the prefixed checkpoint hash, that is
+  the 71 bytes `sha256:<64 lowercase hex>`, and NOT over the raw 32-byte digest. The anchor time
+  `T` is the token's `genTime` truncated to whole seconds and written
+  `YYYY-MM-DDThh:mm:ss.000Z`. The anchor block's own `anchored_ts` is not used for this scheme.
+  Token verification is compiled in only with the `rfc3161` build feature; a build without it
+  reports every `rfc3161` anchor as unsupported, which is a failure, never a pass.
+* **`test-anchor`.** `token_b64` is a 64-byte Ed25519 signature by a TSA key pinned out of band,
+  over `LP("averin.anchor.v1") ‖ LP(checkpoint_hash) ‖ LP(anchored_ts)` (`LP` as in §9, with
+  `checkpoint_hash` the prefixed string and `anchored_ts` the block's own string). `T` is the
+  block's `anchored_ts`. The producer also writes a `tsa_key_id` member; the verifier does not
+  read it and simply tries each pinned TSA key. In code this scheme is described as a hermetic
+  scheme for fixtures and development, and averin's recorder produces only `rfc3161` anchors.
+  The verifier does not refuse `test-anchor` in any mode: whenever an Ed25519 TSA key is pinned,
+  a valid `test-anchor` is accepted like any other anchor. An auditor therefore must not pin a
+  test TSA key in a real audit.
+* Any other `scheme` value fails.
+
+Semantics as implemented:
+
+* Anchors are optional. A checkpoint with no anchor, or a bundle verified with no TSA key pinned,
+  is not a verification failure: the anchor is simply not verified (the report counts anchors
+  attached separately from anchors verified), and everything that needs a verified anchor (the
+  §10.2 anchored-before rule, anchored-time freshness checks) is unavailable, so trust is lower.
+* Anchors are verified only when TSA keys are pinned (Ed25519 keys for `test-anchor`, SPKIs for
+  `rfc3161`), and only on a checkpoint whose own hash and signature verified. An anchor that is
+  present but fails to verify under the pinned TSA trust is reported as an issue and fails the
+  verdict; it is not silently ignored.
+* Only verified anchors are compared for time order. Their times MUST be canonical
+  `YYYY-MM-DDThh:mm:ss.mmmZ` UTC timestamps (a non-canonical time is a failure), and a decrease
+  across increasing `checkpoint_seq` is reported as backdating. Checkpoints without a verified
+  anchor are skipped, so partial anchoring cannot cause a false ordering failure.
+* An anchor on a later checkpoint also dates what that checkpoint commits: every record in the
+  causal closure of its `frontier`, and every earlier checkpoint reachable through the
+  `prev_checkpoint_hash` chain.
+* A pinned Ed25519 TSA key that the auditor marks `compromised` or `revoked` never has its anchors
+  honored; a `rotated` key's anchors are honored only for times at or before the rotation. (Pinned
+  RFC 3161 SPKIs carry no such lifecycle.)
 
 ### 10.2 Key-epoch & compromise semantics (enforceable form)
 
@@ -226,14 +324,62 @@ anchored key-status statement). Verifier rule that is actually enforceable from 
 Without `status_changed_at` + an anchor predating it, a compromised-key record MUST be reported
 untrusted — never silently passed.
 
+**averin today.** The producer requirements above stand. averin's verifier does not read
+`key_valid_from`, `key_valid_until`, `key_attestation_ref` or `rotation_prev_key_sig`, so a record
+signed outside its stated validity window is not rejected on that basis, and `status_changed_at` is
+not checked against any attestation. What it does:
+
+* The status, and its time, come from the bundle's `keys[]` entry (`key_status`,
+  `status_changed_at`) and, when the auditor pins signing keys, from the pinned key list. Under
+  pinning the bundle's own `status_changed_at` is ignored, so a bundle cannot future-date a
+  compromise.
+* The effective status is the worst of the record's `key.key_status`, the bundle entry's and the
+  pin's, ranked `active` < `retired` < `revoked` < `compromised` < anything else.
+* `retired` is treated like `active`. A missing or unrecognised status counts as `unknown`, the
+  worst rank, and the record is reported untrusted. (A `keys[]` entry that omits `key_status`
+  defaults to `active`; a record whose own `key` block omits it counts as `unknown`.)
+* Rotation is verified through separate signed `key_rotations` statements, which extend a pinned
+  key set, not through `rotation_prev_key_sig`.
+
+### 10.3 Bundle layout and trust roots (averin verifier)
+
+averin's verifier reads these members of the top-level bundle object: `project_id`, `keys`,
+`records`, `checkpoints`, `disclosures` (§9.3), `key_rotations` and `segment`, plus optional
+members for higher-level claims (`revocation_list`, `revocation_merkle_root`, `revocation_proofs`,
+`deployment_attestation`, `coverage_manifest`). Each `keys[]` entry is read for `signing_key_id`,
+`key_epoch`, `public_key`, `key_status` and `status_changed_at`. Pinned trust roots and policy
+(signing keys, TSA keys, authority keys, claim requests) are not bundle members: the verifier takes
+them as a separate options object beside the bundle. The field-level definition of the bundle is the
+implementation (`core/src/verify.rs`); it is not yet specified in this document.
+
+**Trust model.** With no externally pinned signing keys, the verifier trusts the bundle's own
+`keys[]`. The report then says `keys_externally_pinned=false`, and the headline is `CONSISTENT`
+(the requested claim holds only under the bundle's own, unpinned keys) rather than `PASS`. An outside verifier that wants independence from the bundle's producer MUST
+pin keys (and TSA keys) obtained out of band.
+
 ---
 
-## 11. What the golden vectors pin
+## 11. Golden vectors
 
-For each vector in `/spec/golden-vectors/`: the input body (pretty JSON), the exact canonical
-bytes (hex), the `content_hash`, a fixed Ed25519 keypair (test seed), and the resulting `sig`.
-Vectors include: key ordering incl. supplementary-plane chars, NFC edge cases (incl. a
-post-NFC duplicate-key *rejection* case), integer boundaries (i64 min/max, and an out-of-range
-*rejection* case), `null` vs absent, unpaired-surrogate *rejection*, nested `extensions`, a full
-Decision Record, and a checkpoint chain with frontier. CI fails on any byte divergence across
-the Rust lib, the WASM build, and the CLI.
+`/spec/golden-vectors/` holds these files, which the Rust test suites (and, for the broker
+preimages, the Go server tests) read:
+
+* `canon.json`: seven canonicalization cases (key ordering including a supplementary-plane
+  character, integer boundaries, `null` versus absent, string escaping, NFC, nested `extensions`),
+  each with the input, its hex, the canonical bytes and their hex.
+* `record-basic.json`: a Decision Record body, its canonical bytes and its `content_hash` (§9.1).
+* `record-sealed.json`: a sealed record (a full Decision Record with `sig`).
+* `sign-vectors.json`: a fixed Ed25519 test seed, the record body, `content_hash`, `sig` and a
+  hiding commitment (§9.2, §9.3).
+* `authority-subject-v3.json`, `authority-sdk-v3.json`: the authority subject digest and preimage
+  (see `authority-subject-v1.md`).
+* `broker-preimages.json`: broker-side preimages and roots (grant PoP v2, use PoP, cosignature,
+  delegation, introspection, federation, revocation, grant-log head); see `grant-pop-v2.md`.
+* `revocation-v2.json`: revocation leaf, state and tree cases.
+
+The vectors are positive cases. The rejection cases (out-of-range integer, duplicate key including
+post-NFC duplicates, unpaired surrogate, non-canonical integer spellings) and the checkpoint-chain
+cases (frontier omission, forks, a broken `prev_checkpoint_hash` link) are exercised in the Rust
+test suites under `core/tests/` and in the unit tests of `core/src/`, not shipped as vectors. A
+conforming implementation MUST reproduce the vectors byte for byte; the rejection rules of §1 to
+§5 apply whether or not a vector exists for them.
