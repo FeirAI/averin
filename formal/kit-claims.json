@@ -677,6 +677,10 @@
       "tier": "full",
       "claim": "checkpoint-cut-incremental-equals-full"
     },
+    "checkpoint-cut-over-budget-full-body-not-compared": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
     "checkpoint-cut-shadow-ignores-backoff": {
       "tier": "full",
       "claim": "checkpoint-cut-incremental-equals-full"
@@ -2536,7 +2540,7 @@
         {
           "path": "server/internal/api/checkpoint_cut.go",
           "symbol": "checkpointBodyChecked",
-          "sha256": "08b5452f472fb7749bcbf67d424d66d04961224963add4135f82dca7a620af62"
+          "sha256": "81cdd54177dd574996f83c896a13cd782f4b78d475b2579ea12fcb0da1bf9dfd"
         },
         {
           "path": "server/internal/api/server.go",
@@ -2586,6 +2590,7 @@
         "checkpoint-cut-shadow-global-counter",
         "checkpoint-cut-shadow-skips-first-cut",
         "checkpoint-cut-shadow-cannot-run-refuses",
+        "checkpoint-cut-over-budget-full-body-not-compared",
         "checkpoint-cut-shadow-ignores-backoff",
         "checkpoint-cut-skips-page-ordinal-check"
       ],
