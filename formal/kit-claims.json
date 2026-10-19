@@ -2505,7 +2505,7 @@
         {
           "path": "server/internal/api/segments.go",
           "symbol": "segmentRecords",
-          "sha256": "5a64b6a5b0e834dcfd7619a3e3da054e00f85e03f3a795829a6f93d116108d88"
+          "sha256": "6f055ceb67460e43502946877873d4d411cc5238d1a7704772aa336a3fc49581"
         },
         {
           "path": "server/internal/api/segments.go",

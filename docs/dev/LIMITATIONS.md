@@ -40,14 +40,22 @@ What it does not do:
   and reports the hashes (`earlier_parent_ref_hashes`); `averin-verify chain` over every month catches the swap. A
   month with no such parents is exact. A signed per-checkpoint delta commitment would close this for a single
   month; it is not built.
-- **A month's record range is read by position.** On Postgres the order is `(inserted_at, ctid)` and the checkpoint
-  `record_count` is a position in it. Two things can break it: a wall clock stepped back, and two server replicas
-  whose transactions commit in the opposite order to their start times (`inserted_at` is the transaction start). A
-  checkpoint cut between such records makes that month and the next unverifiable. Both fail closed (the months do
-  not verify), they never verify a wrong set. A monotonic per-project insertion sequence would remove it and needs
-  a schema change; it is not built. Separately, the server refuses to plan months (409) for a project whose
-  checkpoint `created_ts` months go backwards, for example after a clock step at a month boundary. The month
-  export is covered on real Postgres in CI.
+- **A month's record range is read by position, and the position is a per-project insertion ordinal only from
+  schema version 8.** Each Postgres record carries `records.ord`, 1, 2, 3, ... per project in insertion order
+  (migration 0008), assigned while the writer holds the project's write-guard row lock, so two replicas cannot
+  commit in an order that differs from their ordinals and a wall clock step cannot reorder them. A checkpoint's
+  `record_count` is a position in that order, a month's range and "the records after checkpoint N" are index
+  range reads, and the record count and the newest record are one index entry each, whatever the history. Records
+  that were stored before the migration were numbered by it in `(inserted_at, ctid)` order, the order they had
+  been read in until then and the one every earlier checkpoint was cut against, so for those rows the old hazard
+  stays: a wall clock stepped back, or two replicas whose transactions committed in the opposite order to their
+  start times, before the migration can still leave a checkpoint cut between such records, which makes that month
+  and the next unverifiable. That fails closed (the months do not verify), it never verifies a wrong set. The
+  heads (frontier) query still reads the whole project: the ordinal gives `ProjectHeadsSince`, which computes
+  the frontier from a base frontier and the records after it, but the checkpoint cut does not use it yet.
+  Separately, the server refuses to plan months (409) for a project whose checkpoint `created_ts` months go
+  backwards, for example after a clock step at a month boundary. The month export is covered on real Postgres
+  in CI. The in-memory store numbers records by their position in its insertion-ordered list.
 - **A use or outcome whose grant or intent is in an earlier month** is listed (`unresolved_cross_month`), never
   matched, so a month with one reports `authorized` as insufficient. `averin-verify chain` checks that the named record
   exists in an earlier month, refuses a record two months both carry, and then verifies the concatenated history as

@@ -226,11 +226,23 @@ type Store interface {
 	// suppression), so implementations filter LOOSELY (superset) and let grantLog tighten. Never nil.
 	GrantRecords(projectID string) ([]Record, error)
 	RecordCount(projectID string) (int, error)
+	// RecordsAfter returns up to limit records with insertion ordinal greater than after, oldest first. The
+	// ordinal is the 1-based position in the project's insertion order (the position a checkpoint's
+	// record_count refers to), so RecordsAfter(p, c, n) is "the records after a checkpoint that counted c".
+	// It reads only the rows it returns (Postgres: an index range). after<=0 starts at the first record;
+	// limit<=0 returns an empty slice. Never nil.
+	RecordsAfter(projectID string, after int64, limit int) ([]Record, error)
 
 	PutCheckpoint(projectID string, cp Checkpoint) error
 	Checkpoints(projectID string) ([]Checkpoint, error)
 	NextCheckpointSeq(projectID string) (int64, error)
 	LatestCheckpointHash(projectID string) (string, bool, error)
+	// LatestCheckpoint returns the highest-seq checkpoint, ok=false when the project has none.
+	LatestCheckpoint(projectID string) (Checkpoint, bool, error)
+	// CheckpointsRange returns the checkpoints with fromSeq <= seq <= toSeq (inclusive), seq ascending, never nil.
+	CheckpointsRange(projectID string, fromSeq, toSeq int64) ([]Checkpoint, error)
+	// AnchorsRange returns seq -> token for fromSeq <= seq <= toSeq (inclusive), never nil.
+	AnchorsRange(projectID string, fromSeq, toSeq int64) (map[int64]string, error)
 
 	// AllocateBrokerSeq returns the grant-transparency sequence number for a grant (ADR 0004 D6 / MF2):
 	// strictly increasing and gapless per project [1..N], IDEMPOTENT on grantID (a retry of the same
@@ -762,6 +774,31 @@ func (m *Mem) RecordCount(projectID string) (int, error) {
 	return len(m.proj(projectID).byHash), nil
 }
 
+// RecordsAfter: Mem holds records in insertion order, so the ordinal of recs[i] is i+1 and the records after
+// ordinal n are recs[n:]. Postgres stores the same number in records.ord.
+func (m *Mem) RecordsAfter(projectID string, after int64, limit int) ([]Record, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return []Record{}, nil
+	}
+	if after < 0 {
+		after = 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	recs := m.proj(projectID).records
+	if after >= int64(len(recs)) {
+		return []Record{}, nil
+	}
+	end := after + int64(limit)
+	if end > int64(len(recs)) || end < after {
+		end = int64(len(recs))
+	}
+	return append([]Record{}, recs[after:end]...), nil
+}
+
 func (m *Mem) PutCheckpoint(projectID string, cp Checkpoint) error {
 	unlock, err := m.mutation(projectID)
 	if err != nil {
@@ -782,6 +819,49 @@ func (m *Mem) Checkpoints(projectID string) ([]Checkpoint, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]Checkpoint(nil), m.proj(projectID).checks...), nil
+}
+
+func (m *Mem) LatestCheckpoint(projectID string) (Checkpoint, bool, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return Checkpoint{}, false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.proj(projectID).checks
+	if len(c) == 0 {
+		return Checkpoint{}, false, nil
+	}
+	return c[len(c)-1], true, nil
+}
+
+func (m *Mem) CheckpointsRange(projectID string, fromSeq, toSeq int64) ([]Checkpoint, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []Checkpoint{}
+	for _, cp := range m.proj(projectID).checks {
+		if cp.Seq >= fromSeq && cp.Seq <= toSeq {
+			out = append(out, cp)
+		}
+	}
+	return out, nil
+}
+
+func (m *Mem) AnchorsRange(projectID string, fromSeq, toSeq int64) (map[int64]string, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[int64]string{}
+	for seq, tok := range m.proj(projectID).anchors {
+		if seq >= fromSeq && seq <= toSeq {
+			out[seq] = tok
+		}
+	}
+	return out, nil
 }
 
 func (m *Mem) NextCheckpointSeq(projectID string) (int64, error) {
@@ -987,4 +1067,52 @@ func sortedUnique(in []string) []string {
 		}
 	}
 	return out
+}
+
+// HeadsPageSize bounds each RecordsAfter read made by ProjectHeadsSince.
+const HeadsPageSize = 1000
+
+// ProjectHeadsSince returns the project's heads (the checkpoint frontier) given the heads `base` of the first
+// `after` records, in work proportional to the records after them instead of the whole history: for D the
+// records with ordinal > after, heads = (base minus parents(D)) union (hashes(D) minus parents(D)). It is
+// correct because a record never names a later one as a parent (parents are server-derived from earlier
+// heads), so an older record stays a head exactly when no record in D names it. byte-sorted, de-duplicated,
+// never nil, equal to ProjectHeads when base is ProjectHeads of the first `after` records. The caller owns
+// the trust in base (a checkpoint's frontier is signed, but the checkpoint cut that consumes this must still
+// prove equality with the full computation; see history-scaling PR2).
+func ProjectHeadsSince(s Store, projectID string, base []string, after int64) ([]string, error) {
+	var hashes []string
+	referenced := map[string]struct{}{}
+	for {
+		page, err := s.RecordsAfter(projectID, after, HeadsPageSize)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range page {
+			hashes = append(hashes, r.ContentHash)
+			for _, p := range r.Parents {
+				referenced[p] = struct{}{}
+			}
+		}
+		after += int64(len(page))
+		if len(page) < HeadsPageSize {
+			break
+		}
+	}
+	var heads []string
+	for _, h := range base {
+		if _, ref := referenced[h]; !ref {
+			heads = append(heads, h)
+		}
+	}
+	for _, h := range hashes {
+		if _, ref := referenced[h]; !ref {
+			heads = append(heads, h)
+		}
+	}
+	out := sortedUnique(heads)
+	if out == nil {
+		out = []string{}
+	}
+	return out, nil
 }

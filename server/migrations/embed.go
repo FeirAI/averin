@@ -44,3 +44,9 @@ var TenantNonceLedger string
 //
 //go:embed 0007_temporal_revocation.sql
 var TemporalRevocation string
+
+// RecordOrdinal adds records.ord, the gapless per-project insertion ordinal, backfills it in the
+// order the store has read records until now, and indexes it (schema version 8, history-scaling PR1).
+//
+//go:embed 0008_record_ordinal.sql
+var RecordOrdinal string

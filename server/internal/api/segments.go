@@ -115,27 +115,20 @@ func segmentBlock(p segmentPlan) map[string]any {
 	return b
 }
 
-// segmentRecords reads the plan's record range inside the caller's snapshot, oldest first, without loading
-// the rest of the history: RecordsPage pages newest-first, so the range is (total - To) from the newest.
+// segmentRecords reads the plan's record range inside the caller's snapshot, oldest first, by insertion
+// ordinal: the n records after ordinal From, one index range read whose cost is the month's size and does not
+// depend on how much history lies after it.
 func segmentRecords(st store.Store, projectID string, p segmentPlan) ([]store.Record, error) {
-	total, err := st.RecordCount(projectID)
-	if err != nil {
-		return nil, err
-	}
 	n := int(p.To - p.From)
-	off := total - int(p.To)
-	if n < 0 || off < 0 {
-		return nil, fmt.Errorf("segment %s: checkpoint record counts exceed the %d stored records", p.Month, total)
+	if n < 0 {
+		return nil, fmt.Errorf("segment %s: checkpoint record counts run backwards (%d to %d)", p.Month, p.From, p.To)
 	}
-	page, err := st.RecordsPage(projectID, n, off)
+	page, err := st.RecordsAfter(projectID, p.From, n)
 	if err != nil {
 		return nil, err
 	}
 	if len(page) != n {
 		return nil, fmt.Errorf("segment %s: expected %d records, store returned %d", p.Month, n, len(page))
-	}
-	for i, j := 0, len(page)-1; i < j; i, j = i+1, j-1 {
-		page[i], page[j] = page[j], page[i]
 	}
 	return page, nil
 }
