@@ -2815,6 +2815,11 @@
           "path": "core/src/verify.rs",
           "symbol": "oldest_uncovered_received_ts",
           "sha256": "82645d7d059caf27a76aef936b6853371da5457573ca56e0f09f2b706e1a38d1"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "verify_bundle_with",
+          "sha256": "a8868465a7c3325f0236e35d4430d428177281020be77a2f225cfebf06c272eb"
         }
       ],
       "mutants": [
