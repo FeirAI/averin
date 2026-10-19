@@ -1,0 +1,15 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 47b03da..28c60b2 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4148,10 +4148,6 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
+ 		}
+ 		// The incremental read is a contiguous, ordinal-checked page of every record; a kind filter would
+ 		// break that contiguity (and its continuity checks), so the two are refused together, never ignored.
+-		if r.URL.Query().Get("record_kind") != "" || r.URL.Query().Get("exclude_record_kind") != "" {
+-			writeErr(w, http.StatusBadRequest, "record_kind and exclude_record_kind cannot be combined with an incremental read")
+-			return
+-		}
+ 		s.handleIncrementalRead(w, r, projectID, ip)
+ 		return
+ 	}
