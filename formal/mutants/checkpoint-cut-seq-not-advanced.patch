@@ -1,0 +1,12 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -199,7 +199,7 @@
+ 	if err != nil {
+ 		return nil, false, fmt.Errorf("checkpoint: %w", err)
+ 	}
+-	body = s.checkpointBody(projectID, base.seq+1, base.hash, true, fold.Heads(base.frontier), int(count), grantHead, created)
++	body = s.checkpointBody(projectID, base.seq, base.hash, true, fold.Heads(base.frontier), int(count), grantHead, created)
+ 	if base.federated {
+ 		entry, ferr := broker.BrokerGrantHeadFrom(base.fedRoot, base.fedMax, gl)
+ 		if ferr != nil {

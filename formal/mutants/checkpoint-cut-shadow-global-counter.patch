@@ -1,0 +1,12 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -259,7 +259,7 @@
+ 	if every < 1 {
+ 		every = DefaultCheckpointShadowEvery
+ 	}
+-	seq, _ := body["checkpoint_seq"].(int64)
++	seq := s.cut.incremental.Load()
+ 	_, verified := s.cut.verified.Load(projectID)
+ 	if verified && !s.cut.latched.Load() && seq%every != 0 {
+ 		return body, nil

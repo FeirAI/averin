@@ -180,6 +180,29 @@ Whether or not the fail-closed toggle is on, a **failed** elevation increments
 `averin_authority_downgrades_total` and emits a rate-limited `WARNING` naming the claimed source and
 the pinned-key id — so a govder/averin key misalignment is visible in both metrics and logs.
 
+### Checkpoint cut shadow check (no setting)
+
+Checkpoints are cut incrementally (see LIMITATIONS, "Checkpoint cut is incremental, with a sampled shadow check").
+The cut of checkpoint seq 100, 200, ... of each project, and the first incremental cut of each project after the
+process starts, are also computed in full and refused if they differ. There is no environment variable
+to turn this off. Alert on `averin_checkpoint_shadow_mismatch_total > 0`: a mismatch refuses that checkpoint
+(`POST /v2/checkpoints` returns 500, "the incremental cut disagrees with the full computation"), logs a line
+starting `ALERT`, and makes every later cut a checked cut until the process restarts. The refused seq is retried as
+the same seq and checked again, so a restart does not let it through.
+`averin_checkpoint_shadow_checks_total` counts the checks that ran.
+
+A shadow that cannot run does not refuse the checkpoint: if the full computation fails to read, hits the
+statement timeout or runs out of the shadow's own time budget before it has produced a body, the incremental body (which passed its own count and
+contiguity guards) is signed, `averin_checkpoint_shadow_failed_total` is incremented, a line starting `ALERT` is
+logged, and that project's next shadow attempt waits for a backoff (10 minutes, doubling per consecutive failure
+up to 64 times that, reset when a shadow runs). A full body that was computed but came back over budget is still compared: a mismatch refuses, a match is
+signed and counted as failed (late) with the same backoff. The shadow's budget is 5 s by default and covers the
+WHOLE shadow: on Postgres the statement timeout is re-issued with the time that remains before every statement,
+so a checked cut never holds the project write guard for much longer than the budget (the ceiling is 20 s, below
+the 30 s statement timeout). Neither value has an environment variable; they are the `WithCheckpointShadowBudget`
+(ceiling 20 s) and `WithCheckpointShadowBackoff` options on the server. Alert on any non-zero rate of
+`averin_checkpoint_shadow_failed_total`: it means the shadow has stopped being effective for that history size.
+
 ### Credential broker (Level 3 Tier-A — `POST /v2/grants`)
 
 | Variable | Default | Required | Behavior |

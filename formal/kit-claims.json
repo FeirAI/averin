@@ -645,6 +645,54 @@
       "tier": "full",
       "claim": "month-segment-verifier"
     },
+    "checkpoint-cut-frontier-keeps-parents-of-new-records": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-root-folded-from-seed": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-skips-gapless-check-on-new-grants": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-base-count-off-by-one": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-seq-not-advanced": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-shadow-mismatch-still-signs": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-shadow-never-runs": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-shadow-cannot-run-refuses": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-over-budget-full-body-not-compared": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-shadow-ignores-backoff": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "checkpoint-cut-skips-page-ordinal-check": {
+      "tier": "fast",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "surface-arena-trim-after-bundle-verify-removed": {
+      "tier": "full",
+      "claim": "cgo-bundle-verify-heap-trim"
+    },
     "gateway-refusal-ingest-record-kind-not-reserved": {
       "tier": "fast",
       "claim": "gateway-refusal-reserved-at-ingest"
@@ -720,10 +768,6 @@
     "gateway-refusal-report-omits-attempts": {
       "tier": "fast",
       "claim": "cross-impl-refusal-vector"
-    },
-    "surface-arena-trim-after-bundle-verify-removed": {
-      "tier": "full",
-      "claim": "cgo-bundle-verify-heap-trim"
     }
   },
   "claims": [
@@ -2505,7 +2549,7 @@
         {
           "path": "server/internal/api/segments.go",
           "symbol": "segmentRecords",
-          "sha256": "6f055ceb67460e43502946877873d4d411cc5238d1a7704772aa336a3fc49581"
+          "sha256": "259718c15fc292d5e156d5ac828e80fe1f1b77379e4962dd336daab5b8ae359f"
         },
         {
           "path": "server/internal/api/segments.go",
@@ -2528,6 +2572,135 @@
       ],
       "does_not_establish": "That the Postgres store returns the same range as the in-memory store in every case: the month tests here run against the in-memory store, and the Postgres month test covers one project in CI, not concurrent replicas. That a month's disclosures are limited to its own records: no test exports a disclosing mode for a month. That the size limit equals the verifier's: the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test. That a month stays under the limit as a project grows: a month over 256 MiB is refused, not split. The revocation and attestation behaviour of a month is checked only where the tests configure them (anchored months verify clean; the self-view reports the unanchored revocation list exactly as a whole-history export does). That a month's record range is right when the wall clock stepped back or two replicas committed out of start-time order on Postgres: the range is a position in (inserted_at, ctid) order and such a case makes the month fail to verify rather than verify a wrong set; a project whose checkpoint months go backwards gets no month plan (409). The Postgres month test runs only in the Postgres CI job.",
       "evidence_run": "38718313766"
+    },
+    {
+      "id": "checkpoint-cut-incremental-equals-full",
+      "$comment": "legacy register: checkpoint-cut-incremental-equals-full",
+      "statement": "The checkpoint cut reads the latest checkpoint and the records after it (not the whole history) and produces the same body as the full computation over the whole project: the same sequence number and previous hash, the record count as the base count plus the records after it, the frontier as the base frontier minus the parents of the new records plus the new records no new record names, and the grant-transparency head (and the per-broker head of a federated broker) as the prior head's cumulative root folded over the grants after it, chained to the prior head; it refuses to sign unless the new grants carry exactly the next broker_seq values and the allocated maximum matches, and refuses when the store's record count differs from the base count plus the records after it or when a page of the records after the base does not hold exactly the next ordinals in order; it takes the full computation when there is no usable base. A cut also computes the full body with the same timestamp and refuses to sign, with an alert and a counter, unless the two are identical, when the checkpoint being cut has a sequence number that is a multiple of 100 (chosen per project, so a rotation of projects cannot dodge it, and a refused sequence number is shadow-checked again after a restart), when it is the project's first incremental cut since the process started, and for every cut once a mismatch has been seen. A shadow that cannot run (the full computation errors, hits the statement timeout or runs out of its own time budget before producing a body) does not refuse: the incremental body is signed, a failed counter moves, an alert is logged and the project's next shadow waits for a backoff; a full body that was computed but came back over budget is still compared, a mismatch refuses and a match is signed and counted as late. The grant log counts a record as a grant or void tombstone only by exact-case keys and string values, as the verifier does; a record with a differently cased key or a value of another type is neither counted nor an error, in the full and the incremental cut alike. The rows a cut reads are the same at 1, 3 and 12 months of history.",
+      "method": "property",
+      "artifacts": [
+        "server/internal/api/checkpoint_cut.go",
+        "server/internal/api/checkpoint_cut_test.go",
+        "server/internal/api/checkpoint_cut_pg_test.go",
+        "server/internal/api/export_test.go",
+        "server/internal/broker/transparency.go",
+        "server/internal/store/store.go",
+        "server/internal/api/checkpoint_cut_exact_test.go",
+        "server/internal/api/checkpoint_cut_shadow_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestCheckpointCut'",
+      "covers": [
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "cutBodyIncremental",
+          "sha256": "3f7d0cf52c375e815c46eeafda577747547af178c7b2d82da840b43188a79578"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "parseCutBase",
+          "sha256": "7f518ca499ca6682d85a516e069a02d9ac51c9cfea2d6d1fd24386a99961ff5d"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "checkGaplessGrantLogAfter",
+          "sha256": "298894e662e372ea757a09be9f4b5cb0b90c517227f2374860134dc1a3d7fbea"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "checkpointBody",
+          "sha256": "8393783210293015ddb4171b328b7796fa0c5bc5e985cdd42ee61adaff827829"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "checkpointBodyChecked",
+          "sha256": "81cdd54177dd574996f83c896a13cd782f4b78d475b2579ea12fcb0da1bf9dfd"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "cutBodyFull",
+          "sha256": "93c462e56ac58108bd635b1c60964f9c9e86f5da59fb504112f1d48bffe37253"
+        },
+        {
+          "path": "server/internal/broker/transparency.go",
+          "symbol": "GrantHeadRootFrom",
+          "sha256": "769a068df078dd983950cfd64e3bd3b0921491d1a8101df1c5c672b403de332c"
+        },
+        {
+          "path": "server/internal/broker/transparency.go",
+          "symbol": "BrokerGrantHeadFrom",
+          "sha256": "faafb237688dee8f7211f8059428b3d39a179e2b0b73a4a1f565341574e8cc87"
+        },
+        {
+          "path": "server/internal/store/store.go",
+          "symbol": "FrontierFold.Heads",
+          "sha256": "466272d24f9d29315f898f906226e61b0aff911351f5a3ecd08c0ff4cbdbcd0f"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "grantLog",
+          "sha256": "747e0bdb94459c9c422eb54db1917b4918857ca4c59815ac6079141ce6c72f42"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "jsonPath",
+          "sha256": "5829b452756b7bfd00ff955ece6041776d06fe7f77ec68a4a3f40e9d789d65e9"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "decodeJSONNumbers",
+          "sha256": "49400ea2c5642b5d9aa855ed83ac9f65398f7644f0b889747a1fe39aa8ff5bfa"
+        }
+      ],
+      "mutants": [
+        "checkpoint-cut-frontier-keeps-parents-of-new-records",
+        "checkpoint-cut-root-folded-from-seed",
+        "checkpoint-cut-skips-gapless-check-on-new-grants",
+        "checkpoint-cut-base-count-off-by-one",
+        "checkpoint-cut-seq-not-advanced",
+        "checkpoint-cut-shadow-mismatch-still-signs",
+        "checkpoint-cut-shadow-never-runs",
+        "checkpoint-cut-grantlog-case-insensitive",
+        "checkpoint-cut-shadow-global-counter",
+        "checkpoint-cut-shadow-skips-first-cut",
+        "checkpoint-cut-shadow-cannot-run-refuses",
+        "checkpoint-cut-over-budget-full-body-not-compared",
+        "checkpoint-cut-shadow-ignores-backoff",
+        "checkpoint-cut-skips-page-ordinal-check"
+      ],
+      "does_not_establish": "That the incremental cut equals the full computation on every history: the equality is argued in the code comment and checked on random histories (sessions, forced older parents, grants, voids, idempotent retries, idle cuts) and by the shadow check on the cuts of sequence number a multiple of 100 and on the first cut of each project after a start, so a divergence on any other cut is signed (a checkpoint is append-only) and is caught at the next shadowed cut of that project or by the verifier. That a corrupted or tampered latest checkpoint is detected on an unshadowed cut: the base is trusted as signed. That a refusal is remembered: it is not stored, it recurs because the refused sequence number is retried and shadow-checked again; a cut that was signed before the next shadowed one stays signed. That the Postgres ordinal and record count are right under concurrent writers (the store tests cover that). That the cost is constant for the frontier: a project with a very large frontier still carries it in every checkpoint. That the shadow keeps running as history grows: the full computation is O(history) and stops fitting its budget, the failed counter shows it, and from then on only the differential tests and the per-cut count and contiguity guards hold the equality. That the full computation, used for the first cut and as the definition, is cheap: it is O(history). The Postgres variants of the differential and cost tests run only in the Postgres CI job."
+    },
+    {
+      "$comment": "legacy register: project-record-quota",
+      "id": "cgo-bundle-verify-heap-trim",
+      "statement": "After each full-bundle verification through cgo (Core.VerifyBundle and Core.VerifyBundleWith, which VerifyBundleWithAuthority and VerifyBundleWithRoles call), the server asks glibc to return freed C-heap pages to the OS with malloc_trim(0), once per verification and after the bundle copy and the Rust result are freed; on a build whose C library is not glibc the call is a no-op. A server test seals 1000 generic records over 12 sessions with 10 checkpoints, verifies the resulting bundle once on each of 8 distinct locked OS threads and requires resident memory to grow by less than 32 MB (without the trim the same test grows about 50 MB); it skips with a message where the trim is not supported.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/core/core.go",
+        "server/internal/api/arena_trim_internal_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && CGO_LDFLAGS=-ldl go test -count=1 ./internal/api -run TestWholeBundleVerifyDoesNotRetainArenaMemory",
+      "covers": [
+        {
+          "path": "server/internal/core/core.go",
+          "symbol": "VerifyBundle",
+          "sha256": "544bc238815348fb5572104318f505ad1f52e9219cfd88c5b2c0f80e2696aa2c"
+        },
+        {
+          "path": "server/internal/core/core.go",
+          "symbol": "VerifyBundleWith",
+          "sha256": "25340a1b151d5d015267ff18ae1e2e96c5acad24571823e2a20d45105c159d5e"
+        }
+      ],
+      "mutants": [
+        "surface-arena-trim-after-bundle-verify-removed"
+      ],
+      "does_not_establish": "That memory is bounded: only the C-heap arenas touched by whole-bundle verification are trimmed, on glibc. Other allocators (musl, jemalloc, a different libc) are not covered, and on them nothing is returned. The cost of the verification itself (CPU, and the transient O(bundle) peak while it runs) and any Go-heap growth are unchanged. It does not address history growth: whole-history exports and verifications still grow with the project and are still capped at the single-bundle limit (a separate design). The test measures resident memory of one process on a 0.9 MB bundle with a 32 MB tolerance, so it detects retention of about one verification peak per thread, not small leaks, and it calls only VerifyBundleWith; the trim in VerifyBundle (no options) is covered by the mutant only because that mutant removes both. The trim is not run on the early return for a bundle with a NUL byte, which allocates nothing in C."
     },
     {
       "id": "gateway-refusal-reserved-at-ingest",
@@ -2752,36 +2925,6 @@
         "gateway-refusal-report-omits-attempts"
       ],
       "does_not_establish": "That the three targets agree on inputs outside the four rows. The detector runs the native replay only; the cgo and WASM replays run in the server and verifier jobs, and the expectations in the file come from the native verifier and are pinned to literals in the same test file. The vectors are signed by test-only keys."
-    },
-    {
-      "$comment": "legacy register: project-record-quota",
-      "id": "cgo-bundle-verify-heap-trim",
-      "statement": "After each full-bundle verification through cgo (Core.VerifyBundle and Core.VerifyBundleWith, which VerifyBundleWithAuthority and VerifyBundleWithRoles call), the server asks glibc to return freed C-heap pages to the OS with malloc_trim(0), once per verification and after the bundle copy and the Rust result are freed; on a build whose C library is not glibc the call is a no-op. A server test seals 1000 generic records over 12 sessions with 10 checkpoints, verifies the resulting bundle once on each of 8 distinct locked OS threads and requires resident memory to grow by less than 32 MB (without the trim the same test grows about 50 MB); it skips with a message where the trim is not supported.",
-      "method": "test",
-      "artifacts": [
-        "server/internal/core/core.go",
-        "server/internal/api/arena_trim_internal_test.go"
-      ],
-      "gates": [
-        "server"
-      ],
-      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && CGO_LDFLAGS=-ldl go test -count=1 ./internal/api -run TestWholeBundleVerifyDoesNotRetainArenaMemory",
-      "covers": [
-        {
-          "path": "server/internal/core/core.go",
-          "symbol": "VerifyBundle",
-          "sha256": "544bc238815348fb5572104318f505ad1f52e9219cfd88c5b2c0f80e2696aa2c"
-        },
-        {
-          "path": "server/internal/core/core.go",
-          "symbol": "VerifyBundleWith",
-          "sha256": "25340a1b151d5d015267ff18ae1e2e96c5acad24571823e2a20d45105c159d5e"
-        }
-      ],
-      "mutants": [
-        "surface-arena-trim-after-bundle-verify-removed"
-      ],
-      "does_not_establish": "That memory is bounded: only the C-heap arenas touched by whole-bundle verification are trimmed, on glibc. Other allocators (musl, jemalloc, a different libc) are not covered, and on them nothing is returned. The cost of the verification itself (CPU, and the transient O(bundle) peak while it runs) and any Go-heap growth are unchanged. It does not address history growth: whole-history exports and verifications still grow with the project and are still capped at the single-bundle limit (a separate design). The test measures resident memory of one process on a 0.9 MB bundle with a 32 MB tolerance, so it detects retention of about one verification peak per thread, not small leaks, and it calls only VerifyBundleWith; the trim in VerifyBundle (no options) is covered by the mutant only because that mutant removes both. The trim is not run on the early return for a bundle with a NUL byte, which allocates nothing in C."
     }
   ]
 }

@@ -24,6 +24,9 @@ type Record struct {
 	ContentHash string // sha256:...
 	SessionID   string
 	Parents     []string // causal_prev_hashes
+	// Ord is the record's insertion ordinal (1-based), filled in only by RecordsAfter; 0 everywhere else.
+	// RecordsAfter callers that fold a page must pass it to CheckPageOrdinals.
+	Ord int64
 	// Disclosures are the secrets that open this record's committed low-entropy fields. They are
 	// persisted ATOMICALLY with the record (and only when the record is freshly created), so a
 	// committed field can never end up in a sealed record with no way to disclose it. Empty for
@@ -63,6 +66,25 @@ var ErrTransactionAborted = errors.New("store: transaction definitely rolled bac
 // (record_id, field), so a second record under an existing id would poison verification forever and lose its
 // opening secret. Nothing is persisted on this error (it is NOT commit-ambiguous). An exact idempotent replay
 // (same idempotency key, or byte-identical content) still collapses onto the stored row as before.
+// ErrBudgetExceeded is wrapped by WithBudget when the work did not finish inside its budget.
+var ErrBudgetExceeded = errors.New("store: time budget exceeded")
+
+// ErrOrdinalGap is wrapped by CheckPageOrdinals.
+var ErrOrdinalGap = errors.New("store: record ordinals are not contiguous")
+
+// CheckPageOrdinals verifies that a RecordsAfter(after, ...) page holds exactly the ordinals after+1 ..
+// after+len(page), in order. A record deleted from the middle of a page range makes the page shorter than
+// its ordinal span: a caller that advances by len(page) would read the next page one row early and fold a row
+// twice, so every paged fold refuses on the first page that fails this check.
+func CheckPageOrdinals(page []Record, after int64) error {
+	for i, r := range page {
+		if want := after + int64(i) + 1; r.Ord != want {
+			return fmt.Errorf("%w: expected ordinal %d at position %d after ordinal %d, store returned %d (a record is missing or the store is not insert-only)", ErrOrdinalGap, want, i, after, r.Ord)
+		}
+	}
+	return nil
+}
+
 var ErrRecordIDConflict = errors.New("store: record_id already used by a different record in this project")
 
 // ErrBrokerSeqVoided is returned by AllocateBrokerSeq for a grant_id whose reserved broker_seq an operator VOIDED
@@ -152,6 +174,12 @@ type Store interface {
 	// connection. Returning an error rolls the transaction back. A successful
 	// callback is not success until commit has been acknowledged.
 	WithProjectWrite(ctx context.Context, projectID string, fn func(Store) error) error
+	// WithBudget runs fn on the same project transaction (the receiver must be bound to one) under a time
+	// budget d. It returns an error wrapping ErrBudgetExceeded when fn ran out of budget: on Postgres a statement
+	// that exceeds d is cancelled (the transaction stays usable, fn's partial work is rolled back to a savepoint),
+	// and a fn that finished but took longer than d overall is reported the same way; on Mem only the second
+	// applies. Any other error from fn is returned unchanged. Intended for reads whose result may be dropped.
+	WithBudget(d time.Duration, fn func(Store) error) error
 	// WithProjectRead gives fn one repeatable-read snapshot of project state.
 	// It is intended for exports; it never takes the writer guard.
 	WithProjectRead(ctx context.Context, projectID string, fn func(Store) error) error
@@ -751,14 +779,17 @@ func (m *Mem) GrantRecords(projectID string) ([]Record, error) {
 	defer m.mu.Unlock()
 	out := []Record{}
 	for _, r := range m.proj(projectID).records {
-		var parsed struct {
-			Extensions struct {
-				Broker struct {
-					Kind string `json:"kind"`
-				} `json:"broker"`
-			} `json:"extensions"`
+		// Exact-case and type-strict, the same predicate as the Postgres query (`#>>` on the exact path yields the
+		// text of a string only) and the verifier. A parse failure is conservatively INCLUDED.
+		var parsed any
+		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil {
+			out = append(out, r)
+			continue
 		}
-		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil || parsed.Extensions.Broker.Kind == "grant" || parsed.Extensions.Broker.Kind == "grant_void" {
+		top, _ := parsed.(map[string]any)
+		ext, _ := top["extensions"].(map[string]any)
+		bro, _ := ext["broker"].(map[string]any)
+		if kind, _ := bro["kind"].(string); kind == "grant" || kind == "grant_void" {
 			out = append(out, r)
 		}
 	}
@@ -796,7 +827,23 @@ func (m *Mem) RecordsAfter(projectID string, after int64, limit int) ([]Record, 
 	if end > int64(len(recs)) || end < after {
 		end = int64(len(recs))
 	}
-	return append([]Record{}, recs[after:end]...), nil
+	out := append([]Record{}, recs[after:end]...)
+	for i := range out {
+		out[i].Ord = after + int64(i) + 1
+	}
+	return out, nil
+}
+
+// WithBudget: Mem cannot interrupt fn, so it only reports a fn that finished late.
+func (m *Mem) WithBudget(d time.Duration, fn func(Store) error) error {
+	start := time.Now()
+	if err := fn(m); err != nil {
+		return err
+	}
+	if time.Since(start) > d {
+		return fmt.Errorf("%w (took %s, budget %s)", ErrBudgetExceeded, time.Since(start).Round(time.Millisecond), d)
+	}
+	return nil
 }
 
 func (m *Mem) PutCheckpoint(projectID string, cp Checkpoint) error {
@@ -1081,32 +1128,55 @@ const HeadsPageSize = 1000
 // the trust in base (a checkpoint's frontier is signed, but the checkpoint cut that consumes this must still
 // prove equality with the full computation; see history-scaling PR2).
 func ProjectHeadsSince(s Store, projectID string, base []string, after int64) ([]string, error) {
-	var hashes []string
-	referenced := map[string]struct{}{}
+	var f FrontierFold
 	for {
 		page, err := s.RecordsAfter(projectID, after, HeadsPageSize)
 		if err != nil {
 			return nil, err
 		}
+		if err := CheckPageOrdinals(page, after); err != nil {
+			return nil, err
+		}
 		for _, r := range page {
-			hashes = append(hashes, r.ContentHash)
-			for _, p := range r.Parents {
-				referenced[p] = struct{}{}
-			}
+			f.Add(r)
 		}
 		after += int64(len(page))
 		if len(page) < HeadsPageSize {
 			break
 		}
 	}
+	return f.Heads(base), nil
+}
+
+// FrontierFold accumulates the records after a checkpoint so the new frontier can be derived from the
+// checkpoint's: Heads(base) = (base minus parents(D)) union (hashes(D) minus parents(D)). Add each record of D
+// once, in any order, then call Heads.
+type FrontierFold struct {
+	hashes     []string
+	referenced map[string]struct{}
+}
+
+// Add folds one record of D.
+func (f *FrontierFold) Add(r Record) {
+	if f.referenced == nil {
+		f.referenced = map[string]struct{}{}
+	}
+	f.hashes = append(f.hashes, r.ContentHash)
+	for _, p := range r.Parents {
+		f.referenced[p] = struct{}{}
+	}
+}
+
+// Heads returns the byte-sorted, de-duplicated, never-nil frontier given the base frontier.
+func (f *FrontierFold) Heads(base []string) []string {
 	var heads []string
 	for _, h := range base {
-		if _, ref := referenced[h]; !ref {
+		if _, ref := f.referenced[h]; !ref {
 			heads = append(heads, h)
 		}
 	}
-	for _, h := range hashes {
-		if _, ref := referenced[h]; !ref {
+	for _, h := range f.hashes {
+		if _, ref := f.referenced[h]; !ref {
 			heads = append(heads, h)
 		}
 	}
@@ -1114,5 +1184,5 @@ func ProjectHeadsSince(s Store, projectID string, base []string, after int64) ([
 	if out == nil {
 		out = []string{}
 	}
-	return out, nil
+	return out
 }

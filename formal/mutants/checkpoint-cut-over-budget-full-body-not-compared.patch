@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+index d2df461..38ce151 100644
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -370,7 +370,7 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
+ 	}
+ 	// A full body that WAS computed is always compared, even when it came back late (ErrBudgetExceeded with a
+ 	// body): a late answer is still an answer, and the incremental body is never signed unseen when one exists.
+-	late := ferr != nil && full != nil && errors.Is(ferr, store.ErrBudgetExceeded)
++	late := false
+ 	if ferr != nil && !late {
+ 		// The shadow produced no body (a read error, a statement timeout, its own budget). It is a check, not part
+ 		// of the definition: sign the incremental body, which passed its own count and contiguity guards, and make

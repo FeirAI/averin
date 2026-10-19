@@ -1,0 +1,14 @@
+diff --git a/server/internal/store/store.go b/server/internal/store/store.go
+--- a/server/internal/store/store.go
++++ b/server/internal/store/store.go
+@@ -1124,9 +1124,7 @@
+ func (f *FrontierFold) Heads(base []string) []string {
+ 	var heads []string
+ 	for _, h := range base {
+-		if _, ref := f.referenced[h]; !ref {
+-			heads = append(heads, h)
+-		}
++		heads = append(heads, h)
+ 	}
+ 	for _, h := range f.hashes {
+ 		if _, ref := f.referenced[h]; !ref {

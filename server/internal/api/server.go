@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -233,6 +234,10 @@ type Server struct {
 	mRecordsSealed       *metrics.Counter
 	mRecordsSealFailed   *metrics.Counter
 	mCheckpointsSealed   *metrics.Counter
+	mCutShadowChecks     *metrics.Counter
+	mCutShadowMismatch   *metrics.Counter
+	mCutShadowFailed     *metrics.Counter
+	cut                  checkpointCutState
 	mWitnessFailures     *metrics.Counter
 	mAnchorFailures      *metrics.Counter
 	mAuthorityDowngrades *metrics.Counter
@@ -275,6 +280,12 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 			"Total record seal attempts that failed at the Rust core."),
 		mCheckpointsSealed: reg.Counter("averin_checkpoints_sealed_total",
 			"Total checkpoints successfully sealed."),
+		mCutShadowChecks: reg.Counter("averin_checkpoint_shadow_checks_total",
+			"Total incremental checkpoint cuts also computed in full and compared (1 in 100 by default)."),
+		mCutShadowMismatch: reg.Counter("averin_checkpoint_shadow_mismatch_total",
+			"Total incremental checkpoint cuts that differed from the full computation. Each one REFUSED to sign; alert on any non-zero value."),
+		mCutShadowFailed: reg.Counter("averin_checkpoint_shadow_failed_total",
+			"Total shadow checks that could not run (full computation errored or exceeded its time budget). The cut was signed from the incremental body without the check; a rising value means the shadow is no longer effective for that history size."),
 		mWitnessFailures: reg.Counter("averin_witness_append_failures_total",
 			"Total checkpoint witness-append failures (checkpoint stored un-witnessed, backfillable)."),
 		mAnchorFailures: reg.Counter("averin_checkpoint_anchor_failures_total",
@@ -3754,29 +3765,37 @@ func stringSlicesEqual(a, b []string) bool {
 func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 	var log []broker.GrantSeqHash
 	for _, r := range records {
-		var parsed struct {
-			Authority struct {
-				EnforcementPoint string `json:"enforcement_point"`
-			} `json:"authority"`
-			Extensions struct {
-				Broker struct {
-					Kind          string `json:"kind"`
-					GrantEvidence struct {
-						BrokerSeq int64 `json:"broker_seq"`
-					} `json:"grant_evidence"`
-					VoidEvidence struct {
-						BrokerSeq int64 `json:"broker_seq"`
-					} `json:"void_evidence"`
-				} `json:"broker"`
-			} `json:"extensions"`
-		}
-		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil {
+		// Exact-case, type-strict navigation, as the verifier's classify_role is (serde_json Value, as_str): a
+		// key spelled differently (Broker, KIND) or a value of the wrong type is NOT a member and is not an error.
+		// encoding/json struct decoding would match keys case-insensitively and fail on a type mismatch, which made
+		// a generic record carrying extensions.Broker either wedge every later cut or be folded as a grant the
+		// verifier does not count. Only a record that is not JSON at all is an error.
+		root, err := decodeJSONNumbers(r.JSON)
+		if err != nil {
 			return nil, fmt.Errorf("grant log: parse record %s: %w", r.ContentHash, err)
 		}
+		bro, _ := jsonPath(root, "extensions", "broker").(map[string]any)
+		evSeq := func(key string) int64 {
+			n, ok := jsonPath(bro, key, "broker_seq").(json.Number)
+			if !ok {
+				return 0
+			}
+			v, err := n.Int64()
+			if err != nil || v < 1 {
+				return 0
+			}
+			return v
+		}
+		kind, _ := bro["kind"].(string)
+		ep, _ := jsonPath(root, "authority", "enforcement_point").(string)
+		parsed := struct {
+			kind, ep    string
+			grant, void int64
+		}{kind, ep, evSeq("grant_evidence"), evSeq("void_evidence")}
 		// A grant_void tombstone (POST /v2/broker-seq/void) fills its seq in the log EXACTLY as a grant would — the
 		// verifier's committed_broker_log folds it identically — so an operator-voided reservation closes the gap.
-		if parsed.Extensions.Broker.Kind == "grant_void" && parsed.Authority.EnforcementPoint == "credential_broker" {
-			if seq := parsed.Extensions.Broker.VoidEvidence.BrokerSeq; seq >= 1 {
+		if parsed.kind == "grant_void" && parsed.ep == "credential_broker" {
+			if seq := parsed.void; seq >= 1 {
 				log = append(log, broker.GrantSeqHash{Seq: seq, ContentHash: r.ContentHash})
 			}
 			continue
@@ -3789,7 +3808,7 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 		// it (that would BE suppression). Per-grant trust (evidence_sig under a pinned broker key) is a
 		// separate axis (grant_verified), independent of transparency-log membership. Generic ingest
 		// cannot set these markers (reserved above), so only /v2/grants produces them.
-		if parsed.Extensions.Broker.Kind != "grant" || parsed.Authority.EnforcementPoint != "credential_broker" {
+		if parsed.kind != "grant" || parsed.ep != "credential_broker" {
 			continue
 		}
 		// STRICT D6: the head folds only grants that CARRY a broker_seq>=1, and the producer ALWAYS assigns
@@ -3801,13 +3820,39 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 		// D6 checkpoint; folding it here without a seq would instead corrupt the [1..N] prefix. The
 		// demonstrator is built fresh and has none. We skip-not-fold so we never put a seq<1 entry in the
 		// log; the verifier's seq-less guard — not this fold — is what rejects the un-backfilled bundle.
-		if parsed.Extensions.Broker.GrantEvidence.BrokerSeq < 1 {
+		if parsed.grant < 1 {
 			continue
 		}
-		log = append(log, broker.GrantSeqHash{Seq: parsed.Extensions.Broker.GrantEvidence.BrokerSeq, ContentHash: r.ContentHash})
+		log = append(log, broker.GrantSeqHash{Seq: parsed.grant, ContentHash: r.ContentHash})
 	}
 	sort.Slice(log, func(i, j int) bool { return log[i].Seq < log[j].Seq })
 	return log, nil
+}
+
+// decodeJSONNumbers decodes one JSON value keeping numbers exact (json.Number); trailing data is an error.
+func decodeJSONNumbers(js string) (any, error) {
+	dec := json.NewDecoder(strings.NewReader(js))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("trailing data after the JSON value")
+	}
+	return v, nil
+}
+
+// jsonPath walks exact-case object keys; any non-object step or missing key yields nil.
+func jsonPath(v any, keys ...string) any {
+	for _, k := range keys {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil
+		}
+		v = m[k]
+	}
+	return v
 }
 
 // checkGaplessGrantLog reports an error unless the seq-sorted grant log is exactly [1..N] AND the store's
@@ -3880,8 +3925,9 @@ func (s *Server) priorFedHeadRoot(st store.Store, projectID, brokerID string) (s
 	return broker.EmptyGrantHeadRoot(), nil
 }
 
-// backfillable. A deterministic checkpoint_id keeps the body reproducible for a given seq.
-func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Checkpoint, error) {
+// cutBodyFull is the definition of the checkpoint body: it reads the whole project (frontier, count, grant log,
+// checkpoint chain). The incremental cut must equal it.
+func (s *Server) cutBodyFull(st store.Store, projectID, created string) (map[string]any, error) {
 	heads, headsErr := st.ProjectHeads(projectID)
 	count, countErr := st.RecordCount(projectID)
 	grantRecs, recErr := st.GrantRecords(projectID)
@@ -3899,15 +3945,8 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Che
 	// at the prior head) would anchor a broken/forked checkpoint, so a read failure must abort, not degrade.
 	for _, e := range []error{headsErr, countErr, recErr, maxAllocErr, seqErr, prevErr} {
 		if e != nil {
-			return store.Checkpoint{}, fmt.Errorf("checkpoint: read project snapshot: %w", e)
+			return nil, fmt.Errorf("checkpoint: read project snapshot: %w", e)
 		}
-	}
-	if heads == nil {
-		heads = []string{}
-	}
-	var prevVal any
-	if hasPrev {
-		prevVal = prev
 	}
 	// D6 (ADR 0004 / MF2): anchor the grant-transparency head into the signed, fork-detected checkpoint.
 	// The cumulative_root folds every recorded grant's (broker_seq, content_hash) in seq order, chained
@@ -3915,35 +3954,22 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Che
 	// verifier's re-derivation.
 	gl, err := grantLog(grantRecs)
 	if err != nil {
-		return store.Checkpoint{}, err
+		return nil, err
 	}
 	// FAIL CLOSED on a broker_seq gap (ADR 0004 D6): checkpoints are append-only, so a head signed over a
 	// recorded set that is not exactly [1..N] — or while an allocated seq above N has no recorded grant — would
 	// anchor a PERMANENT "not a gapless [1..N] prefix" verifier failure. Refuse to sign instead; the gap closes
 	// when the reserved grant is retried (its deterministic grant_id reclaims the seq) or the orphan is released.
 	if err := checkGaplessGrantLog(gl, maxAlloc); err != nil {
-		return store.Checkpoint{}, fmt.Errorf("checkpoint refused: %w", err)
+		return nil, &cutRefusedError{err}
 	}
 	prior, err := s.priorGrantHeadRoot(st, projectID)
 	if err != nil {
-		return store.Checkpoint{}, err
+		return nil, err
 	}
 	grantHead := broker.BrokerGrantHead(gl, prior)
 
-	body := map[string]any{
-		"schema_version":       "2",
-		"canon_version":        "rcp-1",
-		"domain":               "flightrecorder.checkpoint.v2",
-		"checkpoint_id":        fmt.Sprintf("cp-%s-%d", projectID, seq), // deterministic per seq
-		"project_id":           projectID,
-		"checkpoint_seq":       seq,
-		"prev_checkpoint_hash": prevVal,
-		"frontier":             heads,
-		"record_count":         count,
-		"broker_grant_head":    grantHead,
-		"created_ts":           ts(s.now()),
-		"key":                  s.keyBlock(),
-	}
+	body := s.checkpointBody(projectID, seq, prev, hasPrev, heads, count, grantHead, created)
 	// M4 (ADR 0005): when this broker has a federation id, ALSO emit the per-broker_id `broker_grant_heads` MAP.
 	// A single configured broker_id owns the project's whole gapless [1..N] log, so its partition == the flat
 	// `gl`. The legacy single `broker_grant_head` above stays (the verifier IGNORES it once federation is active
@@ -3951,12 +3977,26 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Che
 	if s.brokerID != "" {
 		priorFed, ferr := s.priorFedHeadRoot(st, projectID, s.brokerID)
 		if ferr != nil {
-			return store.Checkpoint{}, ferr
+			return nil, ferr
 		}
 		body["broker_grant_heads"] = broker.BrokerGrantHeads(
 			map[string][]broker.GrantSeqHash{s.brokerID: gl},
 			map[string]string{s.brokerID: priorFed},
 		)
+	}
+	return body, nil
+}
+
+// createCheckpointTx: see checkpoint_cut.go.
+// backfillable. A deterministic checkpoint_id keeps the body reproducible for a given seq.
+//
+// The body is cut incrementally from the latest checkpoint when it can be (cutBodyIncremental, with the
+// argument that it equals the full computation) and by the full computation otherwise. Every
+// shadowEvery-th incremental cut ALSO computes the full body and refuses to sign when the two differ.
+func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Checkpoint, error) {
+	body, err := s.checkpointBodyChecked(st, projectID)
+	if err != nil {
+		return store.Checkpoint{}, err
 	}
 	bodyJSON, _ := json.Marshal(body)
 	sealed, err := s.core.SealCheckpoint(string(bodyJSON))
