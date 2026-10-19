@@ -16672,6 +16672,25 @@ fn oldest_uncovered_after_a_rollback_is_the_oldest_record_the_kept_checkpoint_mi
 }
 
 #[test]
+fn oldest_uncovered_uses_only_the_latest_checkpoint_when_its_frontier_is_behind_an_earlier_one() {
+    let recs = [
+        ("a0", "s", None, "2026-06-15T10:00:00.000Z"),
+        ("a1", "s", Some(0), "2026-06-15T10:01:00.000Z"),
+        ("a2", "s", Some(1), "2026-06-15T10:02:00.000Z"),
+        ("a3", "s", Some(2), "2026-06-15T10:03:00.000Z"),
+    ];
+    // cp0 covers up to a2 (3 records); the latest, cp1, has a frontier BEHIND it (a0) with the count unchanged
+    let r = progress_report(&progress_bundle(&recs, &[(2, 3, 0), (0, 3, 1)]));
+    assert_eq!(r.latest_checkpoint_seq, Some(1), "{:?}", r.issues);
+    assert_eq!(
+        r.oldest_uncovered_received_at.as_deref(),
+        Some("2026-06-15T10:01:00.000Z"),
+        "the earlier checkpoint's frontier must not count as covered: {:?}",
+        r.issues
+    );
+}
+
+#[test]
 fn oldest_uncovered_without_a_checkpoint_is_the_oldest_record_and_null_when_all_covered() {
     let recs = [
         ("a0", "s", None, "2026-06-15T10:00:00.000Z"),

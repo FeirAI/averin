@@ -732,6 +732,10 @@
     "surface-oldest-uncovered-ignores-checkpoint": {
       "tier": "fast",
       "claim": "oldest-uncovered-received-at"
+    },
+    "surface-oldest-uncovered-unions-frontiers": {
+      "tier": "full",
+      "claim": "oldest-uncovered-received-at"
     }
   },
   "claims": [
@@ -2794,7 +2798,7 @@
     {
       "$comment": "legacy register: seal-and-closure-model",
       "id": "oldest-uncovered-received-at",
-      "statement": "The verifier reports oldest_uncovered_received_at: the earliest received_ts among the records that are not in the causal closure (the verifier's own committed set) of the frontier of the latest verified checkpoint; with no verified checkpoint, the earliest received_ts of all records; null when every record is covered. Tests on real verifier output check a young tail (the first record the tail adds), a checkpoint that omits a live session while another session grows (the omitted session's oldest record, not the growing tail), a bundle served with only an earlier checkpoint (rollback), no checkpoint yet, and all records covered. The field is display-only and feeds no verdict.",
+      "statement": "The verifier reports oldest_uncovered_received_at: the earliest received_ts among the records that are not in the causal closure (the verifier's own committed set) of the frontier of the latest verified checkpoint; with no verified checkpoint, the earliest received_ts of all records; null when every record is covered. Tests on real verifier output check a young tail (the first record the tail adds), a checkpoint that omits a live session while another session grows (the omitted session's oldest record, not the growing tail), a bundle served with only an earlier checkpoint (rollback), a latest checkpoint whose frontier is behind an earlier one (only the latest counts), no checkpoint yet, and all records covered. The field is display-only and feeds no verdict.",
       "method": "test",
       "artifacts": [
         "core/src/verify.rs",
@@ -2815,7 +2819,8 @@
       ],
       "mutants": [
         "surface-oldest-uncovered-reports-newest",
-        "surface-oldest-uncovered-ignores-checkpoint"
+        "surface-oldest-uncovered-ignores-checkpoint",
+        "surface-oldest-uncovered-unions-frontiers"
       ],
       "does_not_establish": "That the timestamp is true: received_ts is the recorder's own clock reading, signed with the record, so a recorder that stamps old times can make a tail look old and one that stamps future times can make it look young; a consumer must treat the age as a display bound, not evidence. It does not say a checkpoint is correct or that an old uncovered record is an attack: a stalled checkpointer, an omitted session and a rollback all look the same here. A record with no canonical received_ts reports the epoch. Nothing here changes any verdict."
     }

@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index a4f305d..89a1617 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -8447,7 +8447,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+         oldest_uncovered_received_ts(
+             records,
+             &d.by_hash,
+-            latest_checkpoint.map(|_| latest_checkpoint_frontier.as_slice()),
++            latest_checkpoint.map(|_| verified_frontiers.as_slice()),
+         )
+     });
+     let mut report = VerifyReport {
