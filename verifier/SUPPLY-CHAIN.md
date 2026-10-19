@@ -1,9 +1,9 @@
 # Verifier supply chain — pinning the trust root
 
-The browser verifier is three files: `index.html`, `averin.js`, and `averin_decision_core.wasm`. The **`.wasm`
+The browser verifier is five files: `index.html`, the JavaScript modules it loads (`averin.js`, `claim-verdict.js` and `revocation-view.js`), and `averin_decision_core.wasm`. The **`.wasm`
 is the entire trust root** — it is the Rust integrity core that decides whether a bundle verifies. If an
 attacker can serve you a *different* `.wasm`, it can report `ok:true` over a forged, tampered, or over-claimed
-bundle. That is a fail-open one level above every check the core makes. `index.html` and `averin.js` are small
+bundle. That is a fail-open one level above every check the core makes. `index.html` and the three JavaScript modules are small
 enough to read in full; the `.wasm` is not, so it is pinned by digest instead.
 
 ## Source-only checkout
