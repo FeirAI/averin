@@ -1913,7 +1913,7 @@
     },
     {
       "id": "checkpoint-cut-incremental-equals-full",
-      "claim": "The server cuts a checkpoint from the latest checkpoint plus the records after it, and the body equals the one the full computation over the whole project would produce: sequence number and previous hash, record count (the base count plus the records after it), frontier (the base frontier minus the parents of the new records, plus the new records no new record names) and the grant-transparency head and per-broker head (the prior cumulative root folded over the grants after it, chained to the prior head). It refuses to sign when the new grants do not carry exactly the next broker_seq values, when the allocated maximum differs, or when the store's record count differs from the base count plus the records after it, and it takes the full computation when there is no usable base. One incremental cut in 100, and every cut after a mismatch until restart, also computes the full body with the same timestamp and refuses to sign unless the two are identical. Not that every unshadowed cut equals the full computation (the equality is argued in a code comment and checked on random histories; a divergence on an unshadowed cut is signed, because checkpoints are append-only, and is caught by the next shadowed cut or by the verifier), that the latest stored checkpoint is intact (it is trusted as the base), that the full computation is cheap (it is O(history), used for the first cut and as the definition), or that a very large frontier costs nothing (every checkpoint carries it).",
+      "claim": "The server cuts a checkpoint from the latest checkpoint plus the records after it, and the body equals the one the full computation over the whole project would produce: sequence number and previous hash, record count (the base count plus the records after it), frontier (the base frontier minus the parents of the new records, plus the new records no new record names) and the grant-transparency head and per-broker head (the prior cumulative root folded over the grants after it, chained to the prior head). It refuses to sign when the new grants do not carry exactly the next broker_seq values, when the allocated maximum differs, or when the store's record count differs from the base count plus the records after it, and it takes the full computation when there is no usable base. The cut whose checkpoint sequence number is a multiple of 100 (per project), the first incremental cut of a project after a process start, and every cut after a mismatch until restart, also compute the full body with the same timestamp and refuse to sign unless the two are identical; a refused sequence number is retried and shadow-checked again, so a restart does not let it through. The grant log counts a record as a grant only by exact-case keys and string values, as the verifier does. Not that every unshadowed cut equals the full computation (the equality is argued in a code comment and checked on random histories; a divergence on an unshadowed cut is signed, because checkpoints are append-only, and is caught by the next shadowed cut of that project or by the verifier), that the latest stored checkpoint is intact (it is trusted as the base), that the full computation is cheap (it is O(history), used for the first cut and as the definition), or that a very large frontier costs nothing (every checkpoint carries it).",
       "class": "tested-implementation",
       "targets": [
         "Go server"
@@ -1977,6 +1977,22 @@
         {
           "file": "server/internal/api/checkpoint_cut_pg_test.go",
           "symbol": "TestCheckpointCutDifferentialPostgres"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_exact_test.go",
+          "symbol": "TestCheckpointCutShadowIsPerProject"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_exact_test.go",
+          "symbol": "TestCheckpointCutRefusalSurvivesRestart"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_exact_test.go",
+          "symbol": "TestCheckpointCutExactCaseWedgePostgres"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_exact_test.go",
+          "symbol": "TestCheckpointCutExactCasePoisonPostgres"
         }
       ],
       "gates": [

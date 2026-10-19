@@ -2480,7 +2480,7 @@
     {
       "id": "checkpoint-cut-incremental-equals-full",
       "$comment": "legacy register: checkpoint-cut-incremental-equals-full",
-      "statement": "The checkpoint cut reads the latest checkpoint and the records after it (not the whole history) and produces the same body as the full computation over the whole project: the same sequence number and previous hash, the record count as the base count plus the records after it, the frontier as the base frontier minus the parents of the new records plus the new records no new record names, and the grant-transparency head (and the per-broker head of a federated broker) as the prior head's cumulative root folded over the grants after it, chained to the prior head; it refuses to sign unless the new grants carry exactly the next broker_seq values and the allocated maximum matches, and refuses when the store's record count differs from the base count plus the records after it; it takes the full computation when there is no usable base. Every 100th incremental cut (every cut once a mismatch has been seen) also computes the full body with the same timestamp and refuses to sign, with an alert and a counter, unless the two are identical. The rows a cut reads are the same at 1, 3 and 12 months of history.",
+      "statement": "The checkpoint cut reads the latest checkpoint and the records after it (not the whole history) and produces the same body as the full computation over the whole project: the same sequence number and previous hash, the record count as the base count plus the records after it, the frontier as the base frontier minus the parents of the new records plus the new records no new record names, and the grant-transparency head (and the per-broker head of a federated broker) as the prior head's cumulative root folded over the grants after it, chained to the prior head; it refuses to sign unless the new grants carry exactly the next broker_seq values and the allocated maximum matches, and refuses when the store's record count differs from the base count plus the records after it; it takes the full computation when there is no usable base. A cut also computes the full body with the same timestamp and refuses to sign, with an alert and a counter, unless the two are identical, when the checkpoint being cut has a sequence number that is a multiple of 100 (chosen per project, so a rotation of projects cannot dodge it, and a refused sequence number is shadow-checked again after a restart), when it is the project's first incremental cut since the process started, and for every cut once a mismatch has been seen. The grant log counts a record as a grant or void tombstone only by exact-case keys and string values, as the verifier does; a record with a differently cased key or a value of another type is neither counted nor an error, in the full and the incremental cut alike. The rows a cut reads are the same at 1, 3 and 12 months of history.",
       "method": "property",
       "artifacts": [
         "server/internal/api/checkpoint_cut.go",
@@ -2488,7 +2488,8 @@
         "server/internal/api/checkpoint_cut_pg_test.go",
         "server/internal/api/export_test.go",
         "server/internal/broker/transparency.go",
-        "server/internal/store/store.go"
+        "server/internal/store/store.go",
+        "server/internal/api/checkpoint_cut_exact_test.go"
       ],
       "gates": [
         "server"
@@ -2518,7 +2519,7 @@
         {
           "path": "server/internal/api/checkpoint_cut.go",
           "symbol": "checkpointBodyChecked",
-          "sha256": "7d5f687df3db655ce4c0d87518dc78917d404e39dcc150cd43fefb7fb7f07ebc"
+          "sha256": "1aa7fefa73daf5a8ee88b6d7944aac5ebb7d3ec1e1f9ed328ed8cbe8ad256a40"
         },
         {
           "path": "server/internal/api/server.go",
@@ -2539,6 +2540,21 @@
           "path": "server/internal/store/store.go",
           "symbol": "FrontierFold.Heads",
           "sha256": "466272d24f9d29315f898f906226e61b0aff911351f5a3ecd08c0ff4cbdbcd0f"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "grantLog",
+          "sha256": "747e0bdb94459c9c422eb54db1917b4918857ca4c59815ac6079141ce6c72f42"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "jsonPath",
+          "sha256": "5829b452756b7bfd00ff955ece6041776d06fe7f77ec68a4a3f40e9d789d65e9"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "decodeJSONNumbers",
+          "sha256": "49400ea2c5642b5d9aa855ed83ac9f65398f7644f0b889747a1fe39aa8ff5bfa"
         }
       ],
       "mutants": [
@@ -2548,9 +2564,12 @@
         "checkpoint-cut-base-count-off-by-one",
         "checkpoint-cut-seq-not-advanced",
         "checkpoint-cut-shadow-mismatch-still-signs",
-        "checkpoint-cut-shadow-never-runs"
+        "checkpoint-cut-shadow-never-runs",
+        "checkpoint-cut-grantlog-case-insensitive",
+        "checkpoint-cut-shadow-global-counter",
+        "checkpoint-cut-shadow-skips-first-cut"
       ],
-      "does_not_establish": "That the incremental cut equals the full computation on every history: the equality is argued in the code comment and checked on random histories (sessions, forced older parents, grants, voids, idempotent retries, idle cuts) and by the shadow check on one cut in 100, so a divergence on an unshadowed cut is signed (a checkpoint is append-only) and is caught at the next shadowed cut or by the verifier. That a corrupted or tampered latest checkpoint is detected on an unshadowed cut: the base is trusted as signed. That the Postgres ordinal and record count are right under concurrent writers (the store tests cover that). That the cost is constant for the frontier: a project with a very large frontier still carries it in every checkpoint. That the full computation, used for the first cut and as the definition, is cheap: it is O(history). The Postgres variants of the differential and cost tests run only in the Postgres CI job."
+      "does_not_establish": "That the incremental cut equals the full computation on every history: the equality is argued in the code comment and checked on random histories (sessions, forced older parents, grants, voids, idempotent retries, idle cuts) and by the shadow check on the cuts of sequence number a multiple of 100 and on the first cut of each project after a start, so a divergence on any other cut is signed (a checkpoint is append-only) and is caught at the next shadowed cut of that project or by the verifier. That a corrupted or tampered latest checkpoint is detected on an unshadowed cut: the base is trusted as signed. That a refusal is remembered: it is not stored, it recurs because the refused sequence number is retried and shadow-checked again; a cut that was signed before the next shadowed one stays signed. That the Postgres ordinal and record count are right under concurrent writers (the store tests cover that). That the cost is constant for the frontier: a project with a very large frontier still carries it in every checkpoint. That the full computation, used for the first cut and as the definition, is cheap: it is O(history). The Postgres variants of the differential and cost tests run only in the Postgres CI job."
     }
   ]
 }

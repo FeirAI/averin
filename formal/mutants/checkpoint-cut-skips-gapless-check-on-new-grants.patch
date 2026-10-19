@@ -1,8 +1,7 @@
 diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
-index 7e58ce2..46fbed0 100644
 --- a/server/internal/api/checkpoint_cut.go
 +++ b/server/internal/api/checkpoint_cut.go
-@@ -191,7 +191,7 @@ func (s *Server) cutBodyIncremental(st store.Store, projectID, created string) (
+@@ -192,7 +192,7 @@
  		return nil, false, fmt.Errorf("checkpoint: read project snapshot: %w", err)
  	}
  	sort.Slice(gl, func(i, j int) bool { return gl[i].Seq < gl[j].Seq })

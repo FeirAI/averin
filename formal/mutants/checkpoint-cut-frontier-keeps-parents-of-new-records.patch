@@ -1,8 +1,7 @@
 diff --git a/server/internal/store/store.go b/server/internal/store/store.go
-index 6ddaec2..2265282 100644
 --- a/server/internal/store/store.go
 +++ b/server/internal/store/store.go
-@@ -1121,9 +1121,7 @@ func (f *FrontierFold) Add(r Record) {
+@@ -1124,9 +1124,7 @@
  func (f *FrontierFold) Heads(base []string) []string {
  	var heads []string
  	for _, h := range base {

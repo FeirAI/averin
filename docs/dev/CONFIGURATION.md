@@ -183,10 +183,12 @@ the pinned-key id — so a govder/averin key misalignment is visible in both met
 ### Checkpoint cut shadow check (no setting)
 
 Checkpoints are cut incrementally (see LIMITATIONS, "Checkpoint cut is incremental, with a sampled shadow check").
-One incremental cut in 100 is also computed in full and refused if it differs. There is no environment variable
+The cut of checkpoint seq 100, 200, ... of each project, and the first incremental cut of each project after the
+process starts, are also computed in full and refused if they differ. There is no environment variable
 to turn this off. Alert on `averin_checkpoint_shadow_mismatch_total > 0`: a mismatch refuses that checkpoint
 (`POST /v2/checkpoints` returns 500, "the incremental cut disagrees with the full computation"), logs a line
-starting `ALERT`, and makes every later cut a checked cut until the process restarts.
+starting `ALERT`, and makes every later cut a checked cut until the process restarts. The refused seq is retried as
+the same seq and checked again, so a restart does not let it through.
 `averin_checkpoint_shadow_checks_total` counts the checks that ran.
 
 ### Credential broker (Level 3 Tier-A — `POST /v2/grants`)

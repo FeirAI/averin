@@ -1,8 +1,7 @@
 diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
-index 7e58ce2..919a19e 100644
 --- a/server/internal/api/checkpoint_cut.go
 +++ b/server/internal/api/checkpoint_cut.go
-@@ -198,7 +198,7 @@ func (s *Server) cutBodyIncremental(st store.Store, projectID, created string) (
+@@ -199,7 +199,7 @@
  	if err != nil {
  		return nil, false, fmt.Errorf("checkpoint: %w", err)
  	}

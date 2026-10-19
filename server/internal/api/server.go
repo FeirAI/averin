@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -3739,29 +3740,37 @@ func stringSlicesEqual(a, b []string) bool {
 func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 	var log []broker.GrantSeqHash
 	for _, r := range records {
-		var parsed struct {
-			Authority struct {
-				EnforcementPoint string `json:"enforcement_point"`
-			} `json:"authority"`
-			Extensions struct {
-				Broker struct {
-					Kind          string `json:"kind"`
-					GrantEvidence struct {
-						BrokerSeq int64 `json:"broker_seq"`
-					} `json:"grant_evidence"`
-					VoidEvidence struct {
-						BrokerSeq int64 `json:"broker_seq"`
-					} `json:"void_evidence"`
-				} `json:"broker"`
-			} `json:"extensions"`
-		}
-		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil {
+		// Exact-case, type-strict navigation, as the verifier's classify_role is (serde_json Value, as_str): a
+		// key spelled differently (Broker, KIND) or a value of the wrong type is NOT a member and is not an error.
+		// encoding/json struct decoding would match keys case-insensitively and fail on a type mismatch, which made
+		// a generic record carrying extensions.Broker either wedge every later cut or be folded as a grant the
+		// verifier does not count. Only a record that is not JSON at all is an error.
+		root, err := decodeJSONNumbers(r.JSON)
+		if err != nil {
 			return nil, fmt.Errorf("grant log: parse record %s: %w", r.ContentHash, err)
 		}
+		bro, _ := jsonPath(root, "extensions", "broker").(map[string]any)
+		evSeq := func(key string) int64 {
+			n, ok := jsonPath(bro, key, "broker_seq").(json.Number)
+			if !ok {
+				return 0
+			}
+			v, err := n.Int64()
+			if err != nil || v < 1 {
+				return 0
+			}
+			return v
+		}
+		kind, _ := bro["kind"].(string)
+		ep, _ := jsonPath(root, "authority", "enforcement_point").(string)
+		parsed := struct {
+			kind, ep    string
+			grant, void int64
+		}{kind, ep, evSeq("grant_evidence"), evSeq("void_evidence")}
 		// A grant_void tombstone (POST /v2/broker-seq/void) fills its seq in the log EXACTLY as a grant would — the
 		// verifier's committed_broker_log folds it identically — so an operator-voided reservation closes the gap.
-		if parsed.Extensions.Broker.Kind == "grant_void" && parsed.Authority.EnforcementPoint == "credential_broker" {
-			if seq := parsed.Extensions.Broker.VoidEvidence.BrokerSeq; seq >= 1 {
+		if parsed.kind == "grant_void" && parsed.ep == "credential_broker" {
+			if seq := parsed.void; seq >= 1 {
 				log = append(log, broker.GrantSeqHash{Seq: seq, ContentHash: r.ContentHash})
 			}
 			continue
@@ -3774,7 +3783,7 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 		// it (that would BE suppression). Per-grant trust (evidence_sig under a pinned broker key) is a
 		// separate axis (grant_verified), independent of transparency-log membership. Generic ingest
 		// cannot set these markers (reserved above), so only /v2/grants produces them.
-		if parsed.Extensions.Broker.Kind != "grant" || parsed.Authority.EnforcementPoint != "credential_broker" {
+		if parsed.kind != "grant" || parsed.ep != "credential_broker" {
 			continue
 		}
 		// STRICT D6: the head folds only grants that CARRY a broker_seq>=1, and the producer ALWAYS assigns
@@ -3786,13 +3795,39 @@ func grantLog(records []store.Record) ([]broker.GrantSeqHash, error) {
 		// D6 checkpoint; folding it here without a seq would instead corrupt the [1..N] prefix. The
 		// demonstrator is built fresh and has none. We skip-not-fold so we never put a seq<1 entry in the
 		// log; the verifier's seq-less guard — not this fold — is what rejects the un-backfilled bundle.
-		if parsed.Extensions.Broker.GrantEvidence.BrokerSeq < 1 {
+		if parsed.grant < 1 {
 			continue
 		}
-		log = append(log, broker.GrantSeqHash{Seq: parsed.Extensions.Broker.GrantEvidence.BrokerSeq, ContentHash: r.ContentHash})
+		log = append(log, broker.GrantSeqHash{Seq: parsed.grant, ContentHash: r.ContentHash})
 	}
 	sort.Slice(log, func(i, j int) bool { return log[i].Seq < log[j].Seq })
 	return log, nil
+}
+
+// decodeJSONNumbers decodes one JSON value keeping numbers exact (json.Number); trailing data is an error.
+func decodeJSONNumbers(js string) (any, error) {
+	dec := json.NewDecoder(strings.NewReader(js))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("trailing data after the JSON value")
+	}
+	return v, nil
+}
+
+// jsonPath walks exact-case object keys; any non-object step or missing key yields nil.
+func jsonPath(v any, keys ...string) any {
+	for _, k := range keys {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil
+		}
+		v = m[k]
+	}
+	return v
 }
 
 // checkGaplessGrantLog reports an error unless the seq-sorted grant log is exactly [1..N] AND the store's

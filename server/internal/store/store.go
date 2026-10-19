@@ -751,14 +751,17 @@ func (m *Mem) GrantRecords(projectID string) ([]Record, error) {
 	defer m.mu.Unlock()
 	out := []Record{}
 	for _, r := range m.proj(projectID).records {
-		var parsed struct {
-			Extensions struct {
-				Broker struct {
-					Kind string `json:"kind"`
-				} `json:"broker"`
-			} `json:"extensions"`
+		// Exact-case and type-strict, the same predicate as the Postgres query (`#>>` on the exact path yields the
+		// text of a string only) and the verifier. A parse failure is conservatively INCLUDED.
+		var parsed any
+		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil {
+			out = append(out, r)
+			continue
 		}
-		if err := json.Unmarshal([]byte(r.JSON), &parsed); err != nil || parsed.Extensions.Broker.Kind == "grant" || parsed.Extensions.Broker.Kind == "grant_void" {
+		top, _ := parsed.(map[string]any)
+		ext, _ := top["extensions"].(map[string]any)
+		bro, _ := ext["broker"].(map[string]any)
+		if kind, _ := bro["kind"].(string); kind == "grant" || kind == "grant_void" {
 			out = append(out, r)
 		}
 	}

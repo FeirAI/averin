@@ -1,8 +1,7 @@
 diff --git a/server/internal/broker/transparency.go b/server/internal/broker/transparency.go
-index fd3c41d..037fe01 100644
 --- a/server/internal/broker/transparency.go
 +++ b/server/internal/broker/transparency.go
-@@ -115,7 +115,7 @@ func GrantHeadRootFrom(priorRoot string, grants []GrantSeqHash) (string, error)
+@@ -115,7 +115,7 @@
  	if err != nil || len(acc) != sha256.Size {
  		return "", fmt.Errorf("grant head root %q is not sha256:<64 hex>", priorRoot)
  	}

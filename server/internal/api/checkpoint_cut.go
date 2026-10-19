@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"sync"
 	"sync/atomic"
 
 	"github.com/feirai/averin/server/internal/broker"
@@ -18,9 +19,9 @@ const DefaultCheckpointShadowEvery = 100
 
 // checkpointCutState is the per-server bookkeeping of the shadow check.
 type checkpointCutState struct {
-	cuts        atomic.Int64 // incremental cuts so far; the shadow check runs when cuts % every == 0
 	every       int64        // 0 means DefaultCheckpointShadowEvery
 	latched     atomic.Bool  // set by a mismatch: every later cut is shadow-checked until restart
+	verified    sync.Map     // project -> struct{}: its first incremental cut since process start passed a shadow check
 	incremental atomic.Int64 // cuts taken incrementally (observable in tests)
 	full        atomic.Int64 // cuts taken by the full computation (no usable base, or a guard disagreed)
 }
@@ -235,9 +236,14 @@ func (s *Server) checkpointBody(projectID string, seq int64, prev string, hasPre
 }
 
 // checkpointBodyChecked returns the body to sign: the incremental cut when it applies, else the full
-// computation. Every n-th incremental cut (and every one after a mismatch has latched) also computes the full
-// body with the same created_ts and REFUSES to sign unless the two are byte-identical: an incremental cut that
-// disagrees with the definition must never reach a signature, because checkpoints are append-only.
+// computation. The full body is also computed with the same created_ts, and signing is REFUSED unless the two are
+// byte-identical, when (a) the checkpoint being cut has seq % every == 0 (chosen per project from the checkpoint
+// itself, so no project can be skipped by a rotation of cuts, and a refused seq is retried as the same seq and
+// shadowed again, also after a restart, so a refusal needs no stored state to stay a refusal), (b) it is the
+// first incremental cut of the project since this process started and has not yet passed a shadow check (a base
+// altered while the process was down, and a first cut after migration), or (c) a mismatch has latched. An
+// incremental cut that disagrees with the definition must never reach a signature, because checkpoints are
+// append-only.
 func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[string]any, error) {
 	created := ts(s.now())
 	body, inc, err := s.cutBodyIncremental(st, projectID, created)
@@ -253,7 +259,9 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
 	if every < 1 {
 		every = DefaultCheckpointShadowEvery
 	}
-	if n := s.cut.cuts.Add(1); !s.cut.latched.Load() && n%every != 0 {
+	seq, _ := body["checkpoint_seq"].(int64)
+	_, verified := s.cut.verified.Load(projectID)
+	if verified && !s.cut.latched.Load() && seq%every != 0 {
 		return body, nil
 	}
 	s.mCutShadowChecks.Inc()
@@ -269,6 +277,7 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
 		log.Printf("ALERT: checkpoint cut for project %s REFUSED: the incremental cut differs from the full computation in %s; every later cut is now shadow-checked", projectID, differingFields(body, full))
 		return nil, fmt.Errorf("checkpoint refused: the incremental cut disagrees with the full computation")
 	}
+	s.cut.verified.Store(projectID, struct{}{})
 	return full, nil
 }
 

@@ -103,12 +103,21 @@ What this does not give:
 - **The incremental cut trusts the latest stored checkpoint** as the base. It is signed, but the cut does not
   re-verify the signature or the chain below it. A latest checkpoint that was corrupted in the store (not by the
   signing key) is carried forward by every unshadowed cut.
-- **The check against the full computation is sampled.** One incremental cut in 100 (`averin_checkpoint_shadow_checks_total`)
-  also computes the full body and refuses to sign unless it is byte-identical. A divergence on an unshadowed
-  cut is signed, because checkpoints are append-only; the next shadowed cut, or the offline verifier, finds it.
-  After one mismatch (`averin_checkpoint_shadow_mismatch_total`, a log line starting `ALERT`) every cut is checked
-  until the process restarts. The shadow computation is O(history) and runs inside the project write
-  transaction, so one cut in 100 takes as long as every cut did before.
+- **The check against the full computation is sampled, per project.** The cut of checkpoint seq 100, 200, ... of a
+  project also computes the full body and refuses to sign unless it is byte-identical
+  (`averin_checkpoint_shadow_checks_total`); the sample is chosen from the checkpoint being cut, so it does not
+  depend on how cuts of different projects interleave. The first incremental cut of each project after the process
+  starts is also checked once, which covers a base changed while the process was down and the first cut after an
+  upgrade. A divergence on any other cut is signed, because checkpoints are append-only; the next shadowed cut of
+  that project, or the offline verifier, finds it. A refusal is not stored: it recurs because the refused seq is
+  cut again as the same seq and checked again, also after a restart. After one mismatch
+  (`averin_checkpoint_shadow_mismatch_total`, a log line starting `ALERT`) every cut is checked until the process
+  restarts. The shadow computation is O(history) and runs inside the project write transaction, so a checked cut
+  takes as long as every cut did before.
+- **Grant membership is exact-case.** Both cuts count a record as a grant or void tombstone only when
+  `extensions.broker.kind` and `authority.enforcement_point` are strings under exactly those keys, as the offline
+  verifier does; a record with a differently cased key or a value of another type is not counted and does not fail
+  the cut.
 - A cut refuses (as the full computation does) when the new grants do not carry exactly the next `broker_seq`
   values, and when the store's record count is not the base count plus the records after it.
 - `ProjectHeads` (the full anti-join) is unchanged and still O(history); only the cut stopped using it.

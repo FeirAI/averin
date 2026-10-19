@@ -173,8 +173,27 @@ func (h *cutHistory) step() {
 	case r < 9:
 		h.grant(true)
 	default:
-		h.plain()
+		h.variant()
 	}
+}
+
+// variant writes a record the generic ingest accepts (it reserves only the exact-case extensions.broker) whose
+// keys or value types differ from a grant's: case-variant keys and type mismatches. Neither cut may count it as a
+// grant or fail on it, exactly as the verifier's classify_role does not.
+func (h *cutHistory) variant() {
+	variants := []string{
+		`{"authority":{"enforcement_point":"credential_broker"},"extensions":{"Broker":{"kind":"grant","grant_evidence":{"broker_seq":9}}}}`,
+		`{"authority":{"enforcement_point":"credential_broker"},"extensions":{"broker":{"Kind":"grant","grant_evidence":{"broker_seq":9}}}}`,
+		`{"authority":{"enforcement_point":"credential_broker"},"extensions":{"broker":{"KIND":"grant_void","void_evidence":{"broker_seq":9}}}}`,
+		`{"authority":{"enforcement_point":"credential_broker"},"extensions":{"BROKER":{"kind":"grant_void","void_evidence":{"broker_seq":9}}}}`,
+		`{"extensions":{"Broker":1}}`,
+		`{"extensions":{"broker":"x"}}`,
+		`{"extensions":{"broker":{"kind":5}}}`,
+		`{"extensions":{"broker":{"kind":["grant"]}}}`,
+		`{"extensions":[]}`,
+	}
+	session := fmt.Sprintf("s%d", h.rng.Intn(5))
+	h.put(session, fmt.Sprintf("i%d", h.n+1), variants[h.rng.Intn(len(variants))], append([]string(nil), h.heads[session]...))
 }
 
 func cutServer(t *testing.T, st store.Store, brokerID string) *api.Server {
@@ -292,6 +311,12 @@ func runCostScale(t *testing.T, mk func(*testing.T) (store.Store, func(int)), pe
 		if _, err := cutOnce(t, s, spy, "p"); err != nil { // the base checkpoint (full: no checkpoint yet)
 			t.Fatal(err)
 		}
+		// The first incremental cut of a project after process start is also shadow-checked (O(history), once), so
+		// take that one before measuring the steady state.
+		h.plain()
+		if _, err := cutOnce(t, s, spy, "p"); err != nil {
+			t.Fatal(err)
+		}
 		for j := 0; j < newRecords; j++ {
 			h.plain()
 		}
@@ -306,7 +331,7 @@ func runCostScale(t *testing.T, mk func(*testing.T) (store.Store, func(int)), pe
 			Count int `json:"record_count"`
 		}
 		_ = json.Unmarshal([]byte(cp.JSON), &body)
-		if want := hist + newRecords; body.Count != want {
+		if want := hist + newRecords + 1; body.Count != want {
 			t.Fatalf("%d months: record_count %d, want %d", months, body.Count, want)
 		}
 		t.Logf("%d months (%d records): rows read by the cut = %d", months, hist, rows)
@@ -336,6 +361,10 @@ func TestCheckpointCutRefusesAGapInTheNewGrants(t *testing.T) {
 	if _, err := cutOnce(t, s, st, "p"); err != nil {
 		t.Fatal(err)
 	}
+	h.plain() // consume the first-cut-after-start shadow check, so the refusal below is the incremental cut's own
+	if _, err := cutOnce(t, s, st, "p"); err != nil {
+		t.Fatal(err)
+	}
 	// A reservation with no record (commit-ambiguous grant): MaxBrokerSeq 3, recorded 2.
 	if _, _, err := st.AllocateBrokerSeq("p", "reserved-only"); err != nil {
 		t.Fatal(err)
@@ -350,6 +379,10 @@ func TestCheckpointCutRefusesAGapInTheNewGrants(t *testing.T) {
 	h2 := newCutHistory(t, st2, "p", 3)
 	h2.grant(false)
 	h2.grant(false)
+	if _, err := cutOnce(t, s2, st2, "p"); err != nil {
+		t.Fatal(err)
+	}
+	h2.plain() // consume the first-cut-after-start shadow check, so the refusal below is the incremental cut's own
 	if _, err := cutOnce(t, s2, st2, "p"); err != nil {
 		t.Fatal(err)
 	}
@@ -395,8 +428,8 @@ func TestCheckpointCutShadowRefusesAMismatch(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "disagrees with the full computation") {
 		t.Fatalf("the shadow-checked cut must refuse a mismatching incremental body, got %v", err)
 	}
-	if _, _, checks, mism := s.CutStatsForTest(); checks != 1 || mism != 1 {
-		t.Fatalf("shadow checks %d mismatches %d, want 1 and 1", checks, mism)
+	if _, _, checks, mism := s.CutStatsForTest(); checks != 2 || mism != 1 {
+		t.Fatalf("shadow checks %d mismatches %d, want 2 (the first cut after start, and seq 100) and 1", checks, mism)
 	}
 	// Latched: the very next cut (cut 101, not a multiple of 100) is shadow-checked too and refused.
 	if _, err := cutOnce(t, s, spy, "p"); err == nil {
@@ -409,8 +442,8 @@ func TestCheckpointCutShadowRefusesAMismatch(t *testing.T) {
 	}
 }
 
-// TestCheckpointCutShadowCadence: with the default period, exactly one in 100 incremental cuts is also computed in
-// full.
+// TestCheckpointCutShadowCadence: with the default period, the first incremental cut after start and every cut whose
+// checkpoint seq is a multiple of 100 are also computed in full.
 func TestCheckpointCutShadowCadence(t *testing.T) {
 	st := store.NewMem()
 	s := api.New(mustCore(t), st, "k0").WithAuth(auth.NewOpenStore())
@@ -425,7 +458,7 @@ func TestCheckpointCutShadowCadence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if inc, full, checks, mism := s.CutStatsForTest(); inc != 250 || full != 1 || checks != 2 || mism != 0 {
-		t.Fatalf("incremental %d full %d shadow checks %d mismatches %d; want 250, 1, 2, 0", inc, full, checks, mism)
+	if inc, full, checks, mism := s.CutStatsForTest(); inc != 250 || full != 1 || checks != 3 || mism != 0 {
+		t.Fatalf("incremental %d full %d shadow checks %d mismatches %d; want 250, 1, 3 (the first cut after start, seq 100 and seq 200), 0", inc, full, checks, mism)
 	}
 }
