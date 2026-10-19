@@ -46,7 +46,7 @@ Server:
 | `GET /v2/export?project=<id>&month=YYYY-MM` | One month's bundle (all the usual `mode` and `record_kind` options apply). `404` if no checkpoint was created in that month, `400` for a malformed month. |
 | `GET /v2/verify?project=<id>&month=YYYY-MM` | The server's self-view of one month. |
 
-A month export reads only that month's records from the store (`RecordsPage`), so its memory is bounded by the
+A month export reads only that month's records from the store (`RecordsAfter`, an ordinal range read), so its memory is bounded by the
 month, not by the history. A month whose records alone exceed 256 MiB is refused (413): no verifier would
 accept it. Checkpoint more often and the cut moves with the checkpoints, but the month label does not split.
 

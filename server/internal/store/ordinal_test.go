@@ -282,9 +282,10 @@ func planRows(t *testing.T, p *Postgres, q tracedSQL) int64 {
 // a sort on the unindexed inserted_at) the count and the newest-record read examined every row.
 func TestPostgresPerPassWorkIsConstantInHistory(t *testing.T) {
 	const newRecords = 50
-	const perMonth = 600 // test-sized stand-in for the soak's rate; only the ratio between sizes matters
+	const monthSize = 200 // the oldest segment read by the month step
+	const perMonth = 600  // test-sized stand-in for the soak's rate; only the ratio between sizes matters
 	months := []int{1, 3, 12}
-	type pass struct{ count, newest, after, heads int64 }
+	type pass struct{ count, newest, after, heads, month int64 }
 	got := map[int]pass{}
 	for _, m := range months {
 		p, tr, done := newTracedTestStore(t)
@@ -306,7 +307,7 @@ func TestPostgresPerPassWorkIsConstantInHistory(t *testing.T) {
 
 		var c int
 		var newest []Record
-		var after []Record
+		var after, mrecs []Record
 		var heads []string
 		var res pass
 		for _, step := range []struct {
@@ -332,6 +333,14 @@ func TestPostgresPerPassWorkIsConstantInHistory(t *testing.T) {
 					t.Fatalf("RecordsAfter = %d, %v; want %d", len(after), err, newRecords)
 				}
 			}},
+			{"month", &res.month, func() {
+				// The oldest month (what segmentRecords reads): ordinals 1..monthSize, however much follows. Sized below the
+				// 1-month table so the planner has an index range to choose at every history size.
+				var err error
+				if mrecs, err = p.RecordsAfter("scale", 0, monthSize); err != nil || len(mrecs) != monthSize {
+					t.Fatalf("month RecordsAfter = %d, %v; want %d", len(mrecs), err, monthSize)
+				}
+			}},
 			{"heads", &res.heads, func() {
 				var err error
 				if heads, err = ProjectHeadsSince(p, "scale", baseFrontier, int64(hist)); err != nil || len(heads) != 1 || heads[0] != fmt.Sprintf("sha256:%d", total) {
@@ -350,14 +359,14 @@ func TestPostgresPerPassWorkIsConstantInHistory(t *testing.T) {
 		got[m] = res
 		done()
 	}
-	t.Logf("rows examined per pass (count/newest/after/heads): 1mo=%+v 3mo=%+v 12mo=%+v", got[1], got[3], got[12])
+	t.Logf("rows examined per pass (count/newest/after/heads/month): 1mo=%+v 3mo=%+v 12mo=%+v", got[1], got[3], got[12])
 	for _, m := range months[1:] {
 		if got[m] != got[1] {
 			t.Fatalf("work grew with history: 1 month %+v, %d months %+v", got[1], m, got[m])
 		}
 	}
 	// Absolute bound: a count and a newest read each touch one index entry; the range read touches its 50.
-	if g := got[1]; g.count > 2 || g.newest > 2 || g.after > newRecords+2 || g.heads > newRecords+2 {
+	if g := got[1]; g.count > 2 || g.newest > 2 || g.after > newRecords+2 || g.heads > newRecords+2 || g.month > monthSize+2 {
 		t.Fatalf("a pass examined more rows than the index reads need: %+v", g)
 	}
 }
