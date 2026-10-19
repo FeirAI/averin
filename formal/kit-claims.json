@@ -644,6 +644,10 @@
     "surface-chain-ignores-requested-claim": {
       "tier": "full",
       "claim": "month-segment-verifier"
+    },
+    "surface-arena-trim-after-bundle-verify-removed": {
+      "tier": "full",
+      "claim": "cgo-bundle-verify-heap-trim"
     }
   },
   "claims": [
@@ -2448,6 +2452,35 @@
       ],
       "does_not_establish": "That the Postgres store returns the same range as the in-memory store in every case: the month tests here run against the in-memory store, and the Postgres month test covers one project in CI, not concurrent replicas. That a month's disclosures are limited to its own records: no test exports a disclosing mode for a month. That the size limit equals the verifier's: the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test. That a month stays under the limit as a project grows: a month over 256 MiB is refused, not split. The revocation and attestation behaviour of a month is checked only where the tests configure them (anchored months verify clean; the self-view reports the unanchored revocation list exactly as a whole-history export does). That a month's record range is right when the wall clock stepped back or two replicas committed out of start-time order on Postgres: the range is a position in (inserted_at, ctid) order and such a case makes the month fail to verify rather than verify a wrong set; a project whose checkpoint months go backwards gets no month plan (409). The Postgres month test runs only in the Postgres CI job.",
       "evidence_run": "38718313766"
+    },
+    {
+      "id": "cgo-bundle-verify-heap-trim",
+      "statement": "After each full-bundle verification through cgo (Core.VerifyBundle and Core.VerifyBundleWith, which VerifyBundleWithAuthority and VerifyBundleWithRoles call), the server asks glibc to return freed C-heap pages to the OS with malloc_trim(0), once per verification and after the bundle copy and the Rust result are freed; on a build whose C library is not glibc the call is a no-op. A server test seals 1000 generic records over 12 sessions with 10 checkpoints, verifies the resulting bundle once on each of 8 distinct locked OS threads and requires resident memory to grow by less than 32 MB (without the trim the same test grows about 50 MB); it skips with a message where the trim is not supported.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/core/core.go",
+        "server/internal/api/arena_trim_internal_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && CGO_LDFLAGS=-ldl go test -count=1 ./internal/api -run TestWholeBundleVerifyDoesNotRetainArenaMemory",
+      "covers": [
+        {
+          "path": "server/internal/core/core.go",
+          "symbol": "VerifyBundle",
+          "sha256": "544bc238815348fb5572104318f505ad1f52e9219cfd88c5b2c0f80e2696aa2c"
+        },
+        {
+          "path": "server/internal/core/core.go",
+          "symbol": "VerifyBundleWith",
+          "sha256": "25340a1b151d5d015267ff18ae1e2e96c5acad24571823e2a20d45105c159d5e"
+        }
+      ],
+      "mutants": [
+        "surface-arena-trim-after-bundle-verify-removed"
+      ],
+      "does_not_establish": "That memory is bounded: only the C-heap arenas touched by whole-bundle verification are trimmed, on glibc. Other allocators (musl, jemalloc, a different libc) are not covered, and on them nothing is returned. The cost of the verification itself (CPU, and the transient O(bundle) peak while it runs) and any Go-heap growth are unchanged. It does not address history growth: whole-history exports and verifications still grow with the project and are still capped at the single-bundle limit (a separate design). The test measures resident memory of one process on a 0.9 MB bundle with a 32 MB tolerance, so it detects retention of about one verification peak per thread, not small leaks, and it calls only VerifyBundleWith; the trim in VerifyBundle (no options) is covered by the mutant only because that mutant removes both. The trim is not run on the early return for a bundle with a NUL byte, which allocates nothing in C."
     }
   ]
 }
