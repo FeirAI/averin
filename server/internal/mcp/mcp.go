@@ -159,7 +159,7 @@ func (s *Server) callTool(req Request) *Response {
 		if r := arg("rationale"); r != "" {
 			body["rationale"] = r // top level: the server commits it instead of signing it in the clear
 		}
-		out, err := s.post("/v2/records", body)
+		out, err := s.post("/v2/records?project="+url.QueryEscape(arg("project_id")), body)
 		return s.toolResult(req.ID, out, err)
 	case "get_session_trace":
 		// escape every argument so a crafted project_id/session_id cannot smuggle extra query params.

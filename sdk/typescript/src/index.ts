@@ -251,7 +251,10 @@ export class Client {
     };
     if (this.opts.apiKey) headers["Authorization"] = `Bearer ${this.opts.apiKey}`;
     const transport = this.opts.transport ?? fetchTransport;
-    const resp = await transport(`${this.baseUrl}/v2/records`, headers, stringify(payload));
+    // A keyed server scopes auth by ?project=; it must equal the body's project_id (the server rejects a mismatch).
+    const project = typeof recordBody.project_id === "string" && recordBody.project_id !== "" ? recordBody.project_id : this.projectId;
+    const url = `${this.baseUrl}/v2/records?project=${encodeURIComponent(project)}`;
+    const resp = await transport(url, headers, stringify(payload));
     let parsed: { results?: Array<{ record?: Record<string, unknown> }>; error?: unknown };
     try {
       parsed = JSON.parse(resp);

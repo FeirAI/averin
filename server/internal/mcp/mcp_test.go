@@ -38,9 +38,10 @@ func TestInitializeAndToolsList(t *testing.T) {
 }
 
 func TestRecordDecisionToolCallsAverin(t *testing.T) {
-	var gotPath, gotBody string
+	var gotPath, gotBody, gotQuery string
 	averin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
 		b := make([]byte, r.ContentLength)
 		r.Body.Read(b)
 		gotBody = string(b)
@@ -56,6 +57,9 @@ func TestRecordDecisionToolCallsAverin(t *testing.T) {
 	}
 	if gotPath != "/v2/records" {
 		t.Fatalf("expected POST /v2/records, got %s", gotPath)
+	}
+	if gotQuery != "project=p1" {
+		t.Fatalf("expected ?project=p1 so a keyed server can scope the token, got %q", gotQuery)
 	}
 	if !strings.Contains(gotBody, `"action":"db.write"`) || !strings.Contains(gotBody, `"rationale":"why"`) {
 		t.Fatalf("body missing fields: %s", gotBody)
@@ -100,5 +104,22 @@ func TestTokenIsSentAsBearer(t *testing.T) {
 	New(averin.URL).Handle(req(t, "tools/call", call))
 	if len(auths) != 2 || auths[0] != "Bearer tok-1" || auths[1] != "" {
 		t.Fatalf("authorization headers = %q", auths)
+	}
+}
+
+// TestRecordDecisionEscapesProjectQuery: a project id that needs encoding is escaped, and decodes back to the
+// body's project_id (the server requires the two to match).
+func TestRecordDecisionEscapesProjectQuery(t *testing.T) {
+	var gotRaw, gotProject string
+	averin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRaw = r.URL.RawQuery
+		gotProject = r.URL.Query().Get("project")
+		w.Write([]byte(`{"results":[{"created":true,"record":{"content_hash":"sha256:abc"}}]}`))
+	}))
+	defer averin.Close()
+	New(averin.URL).WithToken("t").Handle(req(t, "tools/call",
+		`{"name":"record_decision","arguments":{"project_id":"team a/1&x=2","session_id":"s1","action":"x"}}`))
+	if gotRaw != "project=team+a%2F1%26x%3D2" || gotProject != "team a/1&x=2" {
+		t.Fatalf("raw query %q decoded project %q", gotRaw, gotProject)
 	}
 }

@@ -75,7 +75,7 @@ test("client submits with idempotency key and returns the record", async () => {
   const c = new Client("http://localhost:8080/", "p1", { transport });
   const out = await c.record("s1", "db.query", { idempotencyKey: "fixed", rationale: "why" });
 
-  expect(captured.url).toBe("http://localhost:8080/v2/records");
+  expect(captured.url).toBe("http://localhost:8080/v2/records?project=p1");
   expect(captured.headers["Idempotency-Key"]).toBe("fixed");
   expect(captured.body.idempotency_key).toBe("fixed");
   expect(captured.body.rationale).toBe("why");
@@ -140,4 +140,17 @@ test("auto idempotency keys are unique", async () => {
   await c.record("s1", "a");
   await c.record("s1", "a");
   expect(keys.size).toBe(2);
+});
+
+test("project query is URL-encoded and the Authorization header is kept", async () => {
+  let captured: any = {};
+  const transport = async (url: string, headers: Record<string, string>, body: string) => {
+    captured = { url, headers, body: JSON.parse(body) };
+    return JSON.stringify({ results: [{ record: {} }] });
+  };
+  const c = new Client("http://x", "team a/1", { transport, apiKey: "k1" });
+  await c.record("s1", "act");
+  expect(captured.url).toBe("http://x/v2/records?project=team%20a%2F1");
+  expect(captured.body.project_id).toBe("team a/1");
+  expect(captured.headers["Authorization"]).toBe("Bearer k1");
 });

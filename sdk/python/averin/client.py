@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Any, Callable, Optional
@@ -122,7 +123,12 @@ class Client:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         body = json.dumps(payload).encode("utf-8")
-        resp = self._transport(f"{self.base_url}/v2/records", headers, body)
+        # A keyed server scopes auth by ?project=; it must equal the body's project_id (the server rejects a mismatch).
+        project = payload.get("project_id")
+        if not isinstance(project, str) or not project:
+            project = self.project_id
+        url = f"{self.base_url}/v2/records?project={urllib.parse.quote(project, safe='')}"
+        resp = self._transport(url, headers, body)
         parsed = json.loads(resp)
         results = parsed.get("results", [])
         return results[0]["record"] if results else parsed
