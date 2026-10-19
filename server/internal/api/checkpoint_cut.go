@@ -93,6 +93,9 @@ func checkGaplessGrantLogAfter(gl []broker.GrantSeqHash, priorMax, maxAllocated 
 		}
 	}
 	for i, g := range gl {
+		if g.Seq >= 1 && g.Seq <= priorMax { // that seq is already folded into the latest checkpoint's head
+			return fmt.Errorf("broker_seq %d is held by two recorded entries (one already folded into the latest checkpoint, and %s) — duplicate seq", g.Seq, g.ContentHash)
+		}
 		if want := priorMax + int64(i) + 1; g.Seq != want {
 			return fmt.Errorf("recorded grant broker_seq set is not a gapless [1..N] prefix (position %d holds seq %d)", priorMax+int64(i)+1, g.Seq)
 		}
