@@ -1254,10 +1254,20 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			if v := s.checkAuthority(probe); v.failedElevation {
 				s.ingestMu.Lock() // onFailedElevation's log throttle is guarded by ingestMu
 				s.mAuthorityDowngrades.Inc()
-				err := s.onFailedElevation(v.claimed, v.keyID)
+				// Decide EXACTLY as normalizeAuthority does: a v3 claim is rejected whatever the strict flag
+				// (never a downgrade, spec/authority-subject-v1.md); a v2 claim is rejected only under the strict
+				// flag (onFailedElevation returns nil when it is off and ingestOne then downgrades and seals).
+				var err error
+				if authorityV3Claim(probe) {
+					err = fmt.Errorf("%w: v3 proof failed or authority key is not pinned", errAuthorityRejected)
+				} else {
+					err = s.onFailedElevation(v.claimed, v.keyID)
+				}
 				s.ingestMu.Unlock()
-				writeErr(w, http.StatusInternalServerError, err.Error())
-				return
+				if err != nil {
+					writeErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
 			}
 		}
 		// F14: the seal RCP-canonicalizes the record and HARD-rejects floats, out-of-range integers, and
