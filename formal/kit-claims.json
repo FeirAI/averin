@@ -684,6 +684,10 @@
     "checkpoint-cut-skips-page-ordinal-check": {
       "tier": "fast",
       "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "surface-arena-trim-after-bundle-verify-removed": {
+      "tier": "full",
+      "claim": "cgo-bundle-verify-heap-trim"
     }
   },
   "claims": [
@@ -2586,6 +2590,36 @@
         "checkpoint-cut-skips-page-ordinal-check"
       ],
       "does_not_establish": "That the incremental cut equals the full computation on every history: the equality is argued in the code comment and checked on random histories (sessions, forced older parents, grants, voids, idempotent retries, idle cuts) and by the shadow check on the cuts of sequence number a multiple of 100 and on the first cut of each project after a start, so a divergence on any other cut is signed (a checkpoint is append-only) and is caught at the next shadowed cut of that project or by the verifier. That a corrupted or tampered latest checkpoint is detected on an unshadowed cut: the base is trusted as signed. That a refusal is remembered: it is not stored, it recurs because the refused sequence number is retried and shadow-checked again; a cut that was signed before the next shadowed one stays signed. That the Postgres ordinal and record count are right under concurrent writers (the store tests cover that). That the cost is constant for the frontier: a project with a very large frontier still carries it in every checkpoint. That the shadow keeps running as history grows: the full computation is O(history) and stops fitting its budget, the failed counter shows it, and from then on only the differential tests and the per-cut count and contiguity guards hold the equality. That the full computation, used for the first cut and as the definition, is cheap: it is O(history). The Postgres variants of the differential and cost tests run only in the Postgres CI job."
+    },
+    {
+      "$comment": "legacy register: project-record-quota",
+      "id": "cgo-bundle-verify-heap-trim",
+      "statement": "After each full-bundle verification through cgo (Core.VerifyBundle and Core.VerifyBundleWith, which VerifyBundleWithAuthority and VerifyBundleWithRoles call), the server asks glibc to return freed C-heap pages to the OS with malloc_trim(0), once per verification and after the bundle copy and the Rust result are freed; on a build whose C library is not glibc the call is a no-op. A server test seals 1000 generic records over 12 sessions with 10 checkpoints, verifies the resulting bundle once on each of 8 distinct locked OS threads and requires resident memory to grow by less than 32 MB (without the trim the same test grows about 50 MB); it skips with a message where the trim is not supported.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/core/core.go",
+        "server/internal/api/arena_trim_internal_test.go"
+      ],
+      "gates": [
+        "server"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && CGO_LDFLAGS=-ldl go test -count=1 ./internal/api -run TestWholeBundleVerifyDoesNotRetainArenaMemory",
+      "covers": [
+        {
+          "path": "server/internal/core/core.go",
+          "symbol": "VerifyBundle",
+          "sha256": "544bc238815348fb5572104318f505ad1f52e9219cfd88c5b2c0f80e2696aa2c"
+        },
+        {
+          "path": "server/internal/core/core.go",
+          "symbol": "VerifyBundleWith",
+          "sha256": "25340a1b151d5d015267ff18ae1e2e96c5acad24571823e2a20d45105c159d5e"
+        }
+      ],
+      "mutants": [
+        "surface-arena-trim-after-bundle-verify-removed"
+      ],
+      "does_not_establish": "That memory is bounded: only the C-heap arenas touched by whole-bundle verification are trimmed, on glibc. Other allocators (musl, jemalloc, a different libc) are not covered, and on them nothing is returned. The cost of the verification itself (CPU, and the transient O(bundle) peak while it runs) and any Go-heap growth are unchanged. It does not address history growth: whole-history exports and verifications still grow with the project and are still capped at the single-bundle limit (a separate design). The test measures resident memory of one process on a 0.9 MB bundle with a 32 MB tolerance, so it detects retention of about one verification peak per thread, not small leaks, and it calls only VerifyBundleWith; the trim in VerifyBundle (no options) is covered by the mutant only because that mutant removes both. The trim is not run on the early return for a bundle with a NUL byte, which allocates nothing in C."
     }
   ]
 }
