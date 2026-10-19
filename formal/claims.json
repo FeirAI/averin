@@ -2329,6 +2329,50 @@
         "server",
         "verifier"
       ]
+    },
+    {
+      "id": "session-heads-incremental-equals-full",
+      "claim": "On Postgres a seal reads the session's heads from the session_heads table, which PutRecord keeps in the record insert's own transaction (the new record's parents removed, the record added, only when a new row was inserted), instead of scanning the session; the table equals the full-scan definition after every insert of seeded random histories (forks, merges, forced and cross-session parents, duplicates, replays, collapses, many sessions) and after the migration backfill, and the read is one index lookup however long the session is. Not that it equals the full scan on every history (a record naming a parent not yet stored, whose parent arrives later, differs; the seal path does not produce it), not the in-memory store (it scans the session), not ProjectHeads, and not that a writer bypassing PutRecord keeps the table current.",
+      "class": "tested-implementation",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "a project's writers are serialized by the project write guard",
+        "records are written only through Store.PutRecord"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "updateSessionHeads"
+        },
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "headsFull"
+        },
+        {
+          "file": "server/migrations/0009_session_heads.sql",
+          "symbol": "session_heads"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/store/session_heads_test.go",
+          "symbol": "TestPostgresSessionHeadsEquivalentToFullScan"
+        },
+        {
+          "file": "server/internal/store/session_heads_test.go",
+          "symbol": "TestPostgresSessionHeadsAtomicWithInsert"
+        },
+        {
+          "file": "server/internal/pgschema/session_heads_test.go",
+          "symbol": "TestSessionHeadsBackfillFromV8"
+        }
+      ],
+      "gates": [
+        "store-postgres",
+        "formal-fast"
+      ]
     }
   ]
 }
