@@ -1,14 +1,12 @@
 diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
 --- a/server/internal/api/checkpoint_cut.go
 +++ b/server/internal/api/checkpoint_cut.go
-@@ -90,7 +90,9 @@ func (s *Server) shadowWaiting(projectID string) bool {
- 	s.cut.mu.Lock()
- 	defer s.cut.mu.Unlock()
- 	r, ok := s.cut.retry[projectID]
--	return ok && s.now().Before(r.notBefore)
-+	_ = ok
-+	_ = r
-+	return false
- }
- 
- // shadowFailed records a shadow that could not run and schedules the next attempt after a backoff.
+@@ -350,7 +350,7 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
+ 	if verified && !s.cut.latched.Load() && seq%every != 0 {
+ 		return body, nil
+ 	}
+-	if s.shadowWaiting(projectID) {
++	if false && s.shadowWaiting(projectID) {
+ 		return body, nil // the last shadow of this project could not run: wait out its backoff, then try again
+ 	}
+ 	s.mCutShadowChecks.Inc()
