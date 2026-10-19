@@ -28,6 +28,8 @@ export AVERIN_PROXY_INBOUND_TOKEN=$(openssl rand -hex 24)   # shared secret; age
 export AVERIN_DB_SUPERUSER_PASSWORD=$(openssl rand -hex 24) # Postgres bootstrap superuser (first boot only)
 export AVERIN_DB_OWNER_PASSWORD=$(openssl rand -hex 24)     # averin_owner: migration identity, owns the schema
 export AVERIN_DB_RUNTIME_PASSWORD=$(openssl rand -hex 24)   # averin_app: the server's least-privilege identity
+export AVERIN_PROXY_AVERIN_TOKEN=$(openssl rand -hex 24)    # token the proxy records with; needs write or admin for AVERIN_PROJECT_ID (compose default: default)
+export AVERIN_API_KEYS="default:${AVERIN_PROXY_AVERIN_TOKEN}" # server project keys (this legacy form makes admin tokens); compose and the server refuse to start without them
 docker compose -f deploy/docker-compose.yml up --build
 ```
 
@@ -114,16 +116,20 @@ port binding, authenticated-recording or end-to-end result is established by the
 inclusion here; a source checkout alone does not supply the browser's WASM binary.
 
 ```bash
+# TOKEN: a key for proj-001 from AVERIN_API_KEYS. Recording needs the write role, the
+# checkpoint needs admin, the reads need read. Without a token these requests are refused
+# unless the server runs with AVERIN_DEV_MODE=1 and no AVERIN_API_KEYS.
 # 1) record a decision
-curl -s localhost:8080/v2/records -H 'content-type: application/json' \
+curl -s 'localhost:8080/v2/records?project=proj-001' -H 'content-type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"idempotency_key":"demo-1","project_id":"proj-001","session_id":"run-1","action":"db.query","event_type":"tool_call"}'
 
 # 2) checkpoint, then verify offline
-curl -s -X POST 'localhost:8080/v2/checkpoints?project=proj-001'
-curl -s 'localhost:8080/v2/verify?project=proj-001'      # -> {"ok":true,...}
+curl -s -X POST 'localhost:8080/v2/checkpoints?project=proj-001' -H "Authorization: Bearer $TOKEN"
+curl -s 'localhost:8080/v2/verify?project=proj-001' -H "Authorization: Bearer $TOKEN"      # -> {"ok":true,...}
 
 # 3) export an evidence bundle and verify it with NO server, in the browser:
-curl -s 'localhost:8080/v2/export?project=proj-001&mode=proof_only' > bundle.json
+curl -s 'localhost:8080/v2/export?project=proj-001&mode=proof_only' -H "Authorization: Bearer $TOKEN" > bundle.json
 #    open http://localhost:8088/verifier/ and drop bundle.json in — or use the CLI:
 cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 ```
@@ -139,10 +145,10 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 | `AVERIN_RESOURCE_ID` | server | (none) | the resource's audience id; required when `AVERIN_RESOURCE_SEED` is set. |
 | `AVERIN_COSIG_APPROVER_KEYS` | server | (none) | comma-separated ed25519 pubkeys (base64url, optional `ed25519pub:` prefix). Enables the **online M-of-N cosig flow** (`POST /v2/grants/prepare` + `/v2/grants/finalize`, ADR-0005 M6). Requires the broker. The verifier re-pins these as `cosig_approver_keys` (role-disjoint). |
 | `AVERIN_COSIG_THRESHOLD` | server | = #approvers | M, the cosig threshold (1 ≤ M ≤ #approvers). |
-| `AVERIN_BROKER_SEQ_VOID_MIN_AGE` | server | `1h` | Safety age before `POST /v2/broker-seq/void` may fill a reserved, never-recorded `broker_seq` with a signed `grant_void` tombstone (floor `20m`). **Upgrade:** a project whose checkpoints are refused over a broker_seq gap after deploying this build is unwedged this way — see [operator verification](../docs/operator-verification.md#unwedging-a-refused-checkpoint-grant_void-tombstones-d6). |
+| `AVERIN_BROKER_SEQ_VOID_MIN_AGE` | server | not read | No longer read by the server; there is no age setting. `POST /v2/broker-seq/void` may fill a reserved, never-recorded `broker_seq` with a signed `grant_void` tombstone behind a durable database fence, and it accepts only a separate project-scoped `AVERIN_RECOVERY_KEYS` credential (an `AVERIN_API_KEYS` token cannot call it). A project whose checkpoints are refused over a broker_seq gap can be recovered this way after the required deployment cutoff: see [operator verification](../docs/operator-verification.md#recovering-an-abandoned-broker-sequence). |
 | `AVERIN_BROKER_ID` | server | (none) | M4 federation identity. Grants are tagged with this `broker_id` and checkpoints carry a per-broker_id `broker_grant_heads` map — verify with `federated_broker_keys[<id>]`. Requires the broker. Unset = single-broker. |
 | `AVERIN_REVOCATION_SEED` | server | (none) | 64 hex chars. Enables M5 revocation (`POST /v2/revoke`); exports carry a signed `revocation_list`. MUST be role-separated from the signing/broker/resource/attestation/cosig keys. Unset = off. |
-| `AVERIN_DATABASE_URL` | server | compose: `averin_app` | Postgres DSN for the database-backed store and ledger, as a least-privilege runtime role distinct from the table owner. The server refuses to start as the table owner, as a superuser or against an empty database: initialize with `averin-migrate --init` under the owner/migration credential and grant the runtime role first (compose does both, see "Database roles"; `docs/dev/CONFIGURATION.md`). Production durability/isolation are not established. Unset = in-memory (dev, NOT durable). |
+| `AVERIN_DATABASE_URL` | server | compose: `averin_app` | Postgres DSN for the database-backed store and ledger, as a least-privilege runtime role distinct from the table owner. The server refuses to start as the table owner, as a superuser or against an empty database: initialize with `averin-migrate --init` under the owner/migration credential and grant the runtime role first (compose does both, see "Database roles"; `docs/dev/CONFIGURATION.md`). Production durability/isolation are not established. Unset = the server refuses to start unless `AVERIN_DEV_MODE=1`, which allows an in-memory store (dev, NOT durable). |
 | `AVERIN_DB_SUPERUSER_PASSWORD` / `AVERIN_DB_OWNER_PASSWORD` / `AVERIN_DB_RUNTIME_PASSWORD` | db, migrate, grants, server | **required** (compose sets `:?`) | passwords of the Postgres bootstrap superuser, `averin_owner` and `averin_app` (URL-safe) |
 | `AVERIN_MIGRATION_DATABASE_URL` | migrate | compose: `averin_owner` | the migration credential `averin-migrate` uses; never given to the server |
 | `AVERIN_API_KEYS` | server | **required** (compose sets `:?`) | `proj-a:tok1,tok2;proj-b:tok3` (admin tokens, no expiry) or a JSON array of scoped keys `[{"project","token" or "token_sha256","role":"read\|write\|admin","not_after"}]`. **Unset = the server refuses to start** unless `AVERIN_DEV_MODE=1` (local development only, then the API is open). |
@@ -154,7 +160,7 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 | `AVERIN_UPSTREAM` | proxy | `https://api.openai.com` | upstream LLM |
 | `AVERIN_PROJECT_ID` | proxy | `default` | project the proxy records under |
 | `AVERIN_PROXY_INBOUND_TOKEN` | proxy | **required** (compose sets `:?`) | shared secret inbound callers must present (`X-Averin-Proxy-Token` / `Bearer`). **Unset = OPEN RELAY + evidence-injection surface — bind to loopback or behind your own auth.** |
-| `AVERIN_PROXY_AVERIN_TOKEN` | proxy | (none) | the averin API token the proxy sends (`X-Api-Key`) so records aren't silently 401'd when the averin server has `AVERIN_API_KEYS` auth on. A recording failure is logged (the LLM call is then NOT in the trail). |
+| `AVERIN_PROXY_AVERIN_TOKEN` | proxy | (none); **required** by compose (`:?`) | the averin API token the proxy sends (`X-Api-Key`) so records aren't silently 401'd when the averin server has `AVERIN_API_KEYS` auth on. A recording failure is logged (the LLM call is then NOT in the trail). |
 
 ### Online grant flows (ADR-0005 M6 Cosig / M2 Delegation / M3 Native)
 
@@ -197,4 +203,7 @@ building a Merkle revocation root or a cross-broker cert.
 ## Experimental rails (off the critical path)
 
 - **MCP server** (`averin-mcp`): exposes `record_decision`, `get_session_trace`, `verify_record`,
-  `request_export` over stdio. `AVERIN_SERVER_URL=http://localhost:8080 averin-mcp`.
+  `request_export` over stdio. `AVERIN_SERVER_URL=http://localhost:8080 AVERIN_API_TOKEN=<token> averin-mcp`.
+  A server with `AVERIN_API_KEYS` set (required unless `AVERIN_DEV_MODE=1`) refuses requests without
+  the token (sent as a Bearer token). `record_decision` posts without the `?project=` query parameter,
+  so such a server refuses it even with a valid token; it works only against a server with no keys.
