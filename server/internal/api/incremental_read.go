@@ -127,8 +127,8 @@ func (s *Server) handleIncrementalRead(w http.ResponseWriter, r *http.Request, p
 	// would repeat one record and hide another under a 200. The page must be exactly after+1..after+len, and
 	// a page that stops short of the total must end at it. An empty page past the total is a reader that is
 	// ahead of the store (a truncation it reads from total), not a gap.
-	if gap, ok := ordinalGap(p.after, page, total, p.limit); !ok {
-		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("record ordinal gap at %d", gap))
+	if err := ordinalGap(p.after, page, total, p.limit); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	out := make([]json.RawMessage, len(page))
@@ -152,22 +152,20 @@ func (s *Server) handleIncrementalRead(w http.ResponseWriter, r *http.Request, p
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// ordinalGap reports whether the page is contiguous from after+1 and, when it is short or empty, reaches the
-// total; when not, it returns the first ordinal that is missing.
-func ordinalGap(after int64, page []store.Record, total, limit int) (int64, bool) {
-	for i, rec := range page {
-		if rec.Ord != after+int64(i)+1 {
-			return after + int64(i) + 1, false
-		}
+// ordinalGap returns nil when the page is exactly the ordinals after+1..after+len (the shared store check, the same
+// one every paged fold uses) and, when the page is short (len < limit), when it also ends at the total: a short
+// page is the last page, so it must reach the largest ordinal. A full page needs no end check, because the next
+// page's own contiguity check starts from its end. An empty page at or past the total is a reader that is ahead of
+// the store, not a gap; an empty page below the total is a missing ordinal.
+func ordinalGap(after int64, page []store.Record, total, limit int) error {
+	if err := store.CheckPageOrdinals(page, after); err != nil {
+		return fmt.Errorf("record ordinal gap: %w", err)
 	}
-	end := after + int64(len(page))
-	if len(page) < limit {
-		if len(page) == 0 && after >= int64(total) {
-			return 0, true
-		}
-		if end != int64(total) {
-			return end + 1, false
-		}
+	if len(page) >= limit || (len(page) == 0 && after >= int64(total)) {
+		return nil
 	}
-	return 0, true
+	if end := after + int64(len(page)); end != int64(total) {
+		return fmt.Errorf("record ordinal gap: the page ends at ordinal %d but the store holds %d records (a record is missing)", end, total)
+	}
+	return nil
 }

@@ -348,55 +348,88 @@ func TestIncrementalReadRefusesOrdinalGap(t *testing.T) {
 	}
 }
 
-// interleaving runs hook once, from inside the read transaction, right after RecordsAfter returns.
+// interleaving runs hook once, from inside the read transaction, right after the store method named by at
+// ("RecordCount", "RecordsAfter" or "LatestCheckpoint") returns. Hooking after each read in turn puts the writes
+// before, between and after every read the handler makes, so a read that escapes the transaction (or is made
+// after a write that the snapshot must not show) is seen at the position where it differs.
 type interleaving struct {
 	store.Store
+	at   string
 	once *sync.Once
 	hook func()
 }
 
+func (s interleaving) rebind(b store.Store) interleaving {
+	return interleaving{Store: b, at: s.at, once: s.once, hook: s.hook}
+}
 func (s interleaving) WithProjectRead(ctx context.Context, p string, fn func(store.Store) error) error {
-	return s.Store.WithProjectRead(ctx, p, func(b store.Store) error { return fn(interleaving{Store: b, once: s.once, hook: s.hook}) })
+	return s.Store.WithProjectRead(ctx, p, func(b store.Store) error { return fn(s.rebind(b)) })
+}
+func (s interleaving) fire(name string) {
+	if name == s.at {
+		s.once.Do(s.hook)
+	}
+}
+func (s interleaving) RecordCount(p string) (int, error) {
+	v, err := s.Store.RecordCount(p)
+	s.fire("RecordCount")
+	return v, err
 }
 func (s interleaving) RecordsAfter(p string, a int64, l int) ([]store.Record, error) {
 	v, err := s.Store.RecordsAfter(p, a, l)
-	s.once.Do(s.hook)
+	s.fire("RecordsAfter")
 	return v, err
 }
+func (s interleaving) LatestCheckpoint(p string) (store.Checkpoint, bool, error) {
+	v, ok, err := s.Store.LatestCheckpoint(p)
+	s.fire("LatestCheckpoint")
+	return v, ok, err
+}
 
-// checkSnapshotUnderCut: while the read is in flight (after its page is read), 30 records are written and a
-// checkpoint is cut on the outer store. The response must still be one snapshot: the latest checkpoint is the
-// pre-write one, covers no more than the total, and the total is exactly the records served.
-func checkSnapshotUnderCut(t *testing.T, st store.Store) {
+// checkSnapshotUnderCut: after each read the handler makes in turn (the total, the page, the latest checkpoint),
+// 30 records are written and a checkpoint is cut on the outer store. The response must still be one snapshot of
+// the state before the writes: total 40, the 40 records, and the pre-write checkpoint (seq and count). The hook
+// must have fired at every position (a wrapper that never runs would prove nothing).
+func checkSnapshotUnderCut(t *testing.T, mk func(t *testing.T) store.Store) {
 	t.Helper()
-	h := newCutHistory(t, st, "p", 11)
-	plain := cutServer(t, st, "")
-	for i := 0; i < 40; i++ {
-		h.plain()
-	}
-	cp0, err := cutOnce(t, plain, st, "p")
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrapped := interleaving{Store: st, once: &sync.Once{}}
-	wrapped.hook = func() {
-		for i := 0; i < 30; i++ {
-			h.plain()
-		}
-		if _, err := cutOnce(t, plain, st, "p"); err != nil {
-			t.Error(err)
-		}
-	}
-	code, got := irGet(t, cutServer(t, wrapped, "").Routes(), irQuery(0, 1000))
-	if code != http.StatusOK {
-		t.Fatalf("code %d", code)
-	}
-	if got.Latest == nil || got.Latest.Seq != cp0.Seq || got.Latest.RecordCount > got.Total || got.Total != int64(len(got.Records)) {
-		t.Fatalf("fields from different snapshots: total=%d records=%d latest=%+v (pre-write seq %d)", got.Total, len(got.Records), got.Latest, cp0.Seq)
+	for _, at := range []string{"RecordCount", "RecordsAfter", "LatestCheckpoint"} {
+		t.Run("write after "+at, func(t *testing.T) {
+			st := mk(t)
+			h := newCutHistory(t, st, "p", 11)
+			plain := cutServer(t, st, "")
+			for i := 0; i < 40; i++ {
+				h.plain()
+			}
+			cp0, err := cutOnce(t, plain, st, "p")
+			if err != nil {
+				t.Fatal(err)
+			}
+			fired := false
+			wrapped := interleaving{Store: st, at: at, once: &sync.Once{}}
+			wrapped.hook = func() {
+				fired = true
+				for i := 0; i < 30; i++ {
+					h.plain()
+				}
+				if _, err := cutOnce(t, plain, st, "p"); err != nil {
+					t.Error(err)
+				}
+			}
+			code, got := irGet(t, cutServer(t, wrapped, "").Routes(), irQuery(0, 1000))
+			if code != http.StatusOK {
+				t.Fatalf("code %d", code)
+			}
+			if !fired {
+				t.Fatal("the interleaved write never ran: the test proved nothing")
+			}
+			if got.Total != 40 || len(got.Records) != 40 || got.Latest == nil || got.Latest.Seq != cp0.Seq || got.Latest.RecordCount != 40 {
+				t.Fatalf("fields from different snapshots: total=%d records=%d latest=%+v (pre-write checkpoint seq %d, 40 records)", got.Total, len(got.Records), got.Latest, cp0.Seq)
+			}
+		})
 	}
 }
 
 // TestIncrementalReadSnapshotHoldsUnderConcurrentCut: total, page and checkpoints come from one snapshot.
 func TestIncrementalReadSnapshotHoldsUnderConcurrentCut(t *testing.T) {
-	checkSnapshotUnderCut(t, store.NewMem())
+	checkSnapshotUnderCut(t, func(*testing.T) store.Store { return store.NewMem() })
 }
