@@ -275,7 +275,9 @@ Two schemes exist.
   `T` is the token's `genTime` truncated to whole seconds and written
   `YYYY-MM-DDThh:mm:ss.000Z`. The anchor block's own `anchored_ts` is not used for this scheme.
   Token verification is compiled in only with the `rfc3161` build feature; a build without it
-  reports every `rfc3161` anchor as unsupported, which is a failure, never a pass.
+  reports every `rfc3161` anchor as unsupported, which is a failure, never a pass. averin's server
+  and the `averin-verify` CLI are built with this feature; the browser (WASM) verifier is built
+  without it, so it cannot verify an `rfc3161` anchor.
 * **`test-anchor`.** `token_b64` is a 64-byte Ed25519 signature by a TSA key pinned out of band,
   over `LP("averin.anchor.v1") ‖ LP(checkpoint_hash) ‖ LP(anchored_ts)` (`LP` as in §9, with
   `checkpoint_hash` the prefixed string and `anchored_ts` the block's own string). `T` is the
