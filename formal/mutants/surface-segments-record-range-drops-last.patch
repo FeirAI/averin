@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/segments.go b/server/internal/api/segments.go
+index c57203d..eca2b35 100644
+--- a/server/internal/api/segments.go
++++ b/server/internal/api/segments.go
+@@ -122,7 +122,7 @@ func segmentRecords(st store.Store, projectID string, p segmentPlan) ([]store.Re
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	n := int(p.To - p.From)
++	n := int(p.To-p.From) - 1
+ 	off := total - int(p.To)
+ 	if n < 0 || off < 0 {
+ 		return nil, fmt.Errorf("segment %s: checkpoint record counts exceed the %d stored records", p.Month, total)

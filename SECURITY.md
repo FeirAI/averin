@@ -22,7 +22,7 @@ There is no bug bounty.
 
 - A documented limit that does not hold the way the documents say it does.
 - Any way to bypass a guard, including the production-secrets gate that is
-  enabled by setting `AVERIN_REQUIRE_PROD_SECRETS` to `1` or `true`, or any
+  on by default and turned off only by `AVERIN_DEV_MODE=1`, or any
   way a globally-known development value is accepted while that gate is on.
 - Unexpected impact from a behaviour that is documented as a non-goal.
 
@@ -33,7 +33,7 @@ Reports that solely restate a limit already documented in
 `docs/dev/SECURITY.md`, with no new impact. The development signing seed in
 `spec/golden-vectors/sign-vectors.json` is public by construction; a report that it is usable as a
 key is expected, a report that it is accepted while the production-secrets
-gate is on is not.
+gate is on (the default) is not.
 
 Do not run denial-of-service or load tests against instances you do not
 operate. Availability weaknesses found without such testing are welcome.

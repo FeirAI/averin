@@ -1,0 +1,12 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4157,7 +4157,7 @@
+ 		}
+ 	}
+ 	if len(authKeys) > 0 {
+-		opts["authority_keys"] = authKeys
++		_ = authKeys
+ 	}
+ 	if s.brokerID != "" {
+ 		opts["federated_broker_keys"] = map[string]any{s.brokerID: []string{s.core.PubKey()}}

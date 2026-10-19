@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 28e434f..44d65b1 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -6724,7 +6724,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+                     rt.index, rt.record_id
+                 )),
+                 Ok(c) => {
+-                    if rt.trust == TrustLevel::IntegrityProven {
++                    if true {
+                         gateway_refusals += 1;
+                         gateway_refusal_attempts =
+                             gateway_refusal_attempts.saturating_add(c.attempts);

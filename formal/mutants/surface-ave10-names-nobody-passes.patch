@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 8c74d67..76b531e 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -2569,7 +2569,7 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> GovderEvidence {
+                 body.and_then(|b| s(b, "status")).as_deref(),
+                 Some("approved") | Some("denied")
+             );
+-        if decided && !carries_approver {
++        if false && decided && !carries_approver {
+             return GovderEvidence::NamesNoApprover;
+         }
+         return GovderEvidence::Bound;

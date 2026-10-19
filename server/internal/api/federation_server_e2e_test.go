@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -19,7 +20,7 @@ func TestFederationServerEmitsPerBrokerHeadsEndToEnd(t *testing.T) {
 	c, _ := core.New(seed)
 	rc, _ := core.New(resourceSeed)
 	tsa := testTSAKey()
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).
 		WithBrokerID("broker-X").
 		WithResource(rc, "orders-db").
@@ -64,7 +65,7 @@ func TestUnconfiguredServerStaysSingleBroker(t *testing.T) {
 	c, _ := core.New(seed)
 	rc, _ := core.New(resourceSeed)
 	tsa := testTSAKey()
-	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 	ak := grantAgentKey()
 	grantID, capb := mkGrant(t, h, ak, "idem-grant")
 	if code, r := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", capb, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusCreated {

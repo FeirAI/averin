@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 43340b9..4e9fd89 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -1500,7 +1500,7 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
+ 	if stringField(rec, "event_type") == "gateway_refusal" {
+ 		return fmt.Errorf("event_type \"gateway_refusal\" is reserved for the gateway refusal endpoint (POST /v2/refusals)")
+ 	}
+-	if stringField(rec, "record_kind") == "gateway-refusal" {
++	if stringField(rec, "record_kind") == "gateway-refusal-unreserved" {
+ 		return fmt.Errorf("record_kind \"gateway-refusal\" is reserved for the gateway refusal endpoint (POST /v2/refusals)")
+ 	}
+ 	if stringField(rec, "observed_via") == "gateway" {

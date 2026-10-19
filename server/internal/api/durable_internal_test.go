@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -120,7 +121,7 @@ func TestDurableRevocationSurvivesRestart(t *testing.T) {
 
 	// "Boot 1": revoke through the same project Store that will be reopened.
 	st1 := connectProjectStore(t, dsn)
-	s1 := New(testCore(t), st1, "k0").WithRevocation(rev)
+	s1 := New(testCore(t), st1, "k0").WithAuth(auth.NewOpenStore()).WithRevocation(rev)
 	body, _ := json.Marshal(map[string]any{"project_id": "p1", "grant_id": "g-revoked-1", "reason": "compromised"})
 	req := httptest.NewRequest("POST", "/v2/revoke?project=p1", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -135,7 +136,7 @@ func TestDurableRevocationSurvivesRestart(t *testing.T) {
 	// "Restart": a fresh Server, a fresh pgdurable.Store reconnecting to the SAME durable state.
 	st1.Close()
 	st2 := connectProjectStore(t, dsn)
-	s2 := New(testCore(t), st2, "k0").WithRevocation(rev)
+	s2 := New(testCore(t), st2, "k0").WithAuth(auth.NewOpenStore()).WithRevocation(rev)
 	if yes, err := st2.IsRevoked("p1", "g-revoked-1"); err != nil || !yes {
 		t.Fatalf("revocation did not survive restart: %v, %v", yes, err)
 	}
@@ -161,7 +162,7 @@ func TestDurableRevocationFailsClosedWhenPostgresUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := connectProjectStore(t, dsn)
-	s := New(testCore(t), st, "k0").WithRevocation(rev)
+	s := New(testCore(t), st, "k0").WithAuth(auth.NewOpenStore()).WithRevocation(rev)
 	st.Close() // the authoritative Store is unavailable
 
 	body, _ := json.Marshal(map[string]any{"project_id": "p1", "grant_id": "g-should-not-take", "reason": "test"})
@@ -219,7 +220,7 @@ func TestDurablePendingTwoPhaseGrantSurvivesRestart(t *testing.T) {
 	approvers := []ed25519.PublicKey{a1.Public().(ed25519.PublicKey), a2.Public().(ed25519.PublicKey)}
 
 	newServer := func(st store.Store) *Server {
-		return New(testCore(t), st, "k0").WithBroker(brokerKey).WithCosigPolicy(2, approvers)
+		return New(testCore(t), st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerKey).WithCosigPolicy(2, approvers)
 	}
 	st1 := connectProjectStore(t, dsn)
 
@@ -304,7 +305,7 @@ func TestDurablePendingGrantFailsClosedWhenPostgresUnavailable(t *testing.T) {
 	brokerKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{5}, ed25519.SeedSize))
 	agentKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{6}, ed25519.SeedSize))
 	st := connectProjectStore(t, dsn)
-	s := New(testCore(t), st, "k0").WithBroker(brokerKey)
+	s := New(testCore(t), st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerKey)
 	st.Close() // authoritative Store unavailable
 
 	preq := httptest.NewRequest("POST", "/v2/grants/prepare", bytes.NewReader([]byte(grantChallengeBody("idem-unavailable-1", "read:orders", agentKey))))

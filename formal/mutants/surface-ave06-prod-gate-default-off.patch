@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-server/config.go b/server/cmd/averin-server/config.go
+index 339005a..6488f3d 100644
+--- a/server/cmd/averin-server/config.go
++++ b/server/cmd/averin-server/config.go
+@@ -30,7 +30,7 @@ func devModeFromEnv(raw string) (bool, error) { return boolFromEnv("AVERIN_DEV_M
+ // on. Explicit 0: off, but only inside dev mode, so a stray 0 cannot turn the gate off in production.
+ func requireProdSecretsFromEnv(raw string, devMode bool) (bool, error) {
+ 	if strings.TrimSpace(raw) == "" {
+-		return !devMode, nil
++		return false, nil
+ 	}
+ 	v, err := boolFromEnv("AVERIN_REQUIRE_PROD_SECRETS", raw)
+ 	if err != nil {

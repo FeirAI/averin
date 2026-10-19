@@ -1,10 +1,15 @@
 package api_test
 
 import (
+	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/feirai/averin/server/internal/api"
@@ -51,6 +56,9 @@ func TestPosture_KeyedDeploymentReportsItsGuardsAndRefusesAnonymous(t *testing.T
 			t.Errorf("%s = %v, want %v", k, b[k], want)
 		}
 	}
+	if b["dev_mode"] != false {
+		t.Errorf("dev_mode = %v, want false for a process started without AVERIN_DEV_MODE", b["dev_mode"])
+	}
 	build := b["build"].(map[string]any)
 	if build["go_version"] != runtime.Version() || build["core_rustc"] != "rustc 1.99.0 (test)" {
 		t.Errorf("build = %v", build)
@@ -76,10 +84,175 @@ func TestPosture_OpenDeploymentReportsNoKeysAndNoGuards(t *testing.T) {
 	}
 }
 
+// AVE-06: a process started in dev mode says so, and a handler nobody wired a posture into claims no dev
+// mode either (the verifier then fails the missing guards, not a silent absence).
+func TestPosture_ReportsDevMode(t *testing.T) {
+	h := newServer(t).WithPosture(api.Posture{DevMode: true}).WithAuth(auth.NewOpenStore()).Routes()
+	_, b := postureReq(h, "p1", "")
+	if b["dev_mode"] != true {
+		t.Fatalf("dev_mode = %v, want true", b["dev_mode"])
+	}
+	_, b = postureReq(newServer(t).WithAuth(auth.NewOpenStore()).Routes(), "p1", "")
+	if b["dev_mode"] != false {
+		t.Fatalf("an unwired posture reports dev_mode = %v, want false", b["dev_mode"])
+	}
+}
+
 func TestPosture_ReportsTheAuthorityPinSwitches(t *testing.T) {
 	h := newServer(t).WithRequirePinnedAuthority(false).WithRequireBodyBoundAuthority(true).Routes()
 	_, b := postureReq(h, "p1", "")
 	if b["require_pinned_authority"] != false || b["require_body_bound_authority"] != true {
 		t.Fatalf("pin switches = %v / %v", b["require_pinned_authority"], b["require_body_bound_authority"])
+	}
+}
+
+// FEI-40: a keyed deployment reports a keyed fingerprint of every API key it accepts, per
+// relationship "averin-api-key", so the verifier can check the key each calling plane sends is one
+// averin accepts. The expected values are computed here independently (HMAC-SHA256 keyed by the
+// token over the fixed label), and the report never contains a token.
+func TestPosture_ReportsFingerprintsOfEveryAcceptedAPIKeyAndNeverTheKey(t *testing.T) {
+	fp := func(secret string) string {
+		m := hmac.New(sha256.New, []byte(secret))
+		m.Write([]byte("feir-secret-alignment/v1:averin-api-key"))
+		return hex.EncodeToString(m.Sum(nil)[:16])
+	}
+	h := newServer(t).
+		WithAuth(auth.NewMapStore(map[string][]string{"p1": {"tok-one", "tok-two"}, "p2": {"tok-three", "tok-one"}})).
+		Routes()
+	req := httptest.NewRequest(http.MethodGet, "/v2/posture?project=p1", nil)
+	req.Header.Set("Authorization", "Bearer tok-one")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("keyed: %d", rec.Code)
+	}
+	var b struct {
+		SecretFingerprints map[string][]string `json:"secret_fingerprints"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil {
+		t.Fatal(err)
+	}
+	got := b.SecretFingerprints["averin-api-key"]
+	want := map[string]bool{fp("tok-one"): true, fp("tok-two"): true, fp("tok-three"): true}
+	if len(got) != len(want) {
+		t.Fatalf("fingerprints = %v, want the %d distinct accepted keys", got, len(want))
+	}
+	for _, g := range got {
+		if !want[g] {
+			t.Errorf("unexpected fingerprint %s", g)
+		}
+	}
+	for _, tok := range []string{"tok-one", "tok-two", "tok-three"} {
+		if strings.Contains(rec.Body.String(), tok) {
+			t.Fatalf("the posture report must never carry an API key (%q found)", tok)
+		}
+	}
+}
+
+// An open or unkeyed deployment accepts no key by value: it reports no fingerprint (an empty object,
+// not a fingerprint of nothing), which the verifier reads as "nothing to compare".
+func TestPosture_OpenDeploymentReportsNoFingerprints(t *testing.T) {
+	for name, h := range map[string]http.Handler{
+		"no auth store": newServer(t).Routes(),
+		"explicit open": newServer(t).WithAuth(auth.NewOpenStore()).Routes(),
+	} {
+		_, b := postureReq(h, "p1", "")
+		sf, ok := b["secret_fingerprints"].(map[string]any)
+		if !ok || len(sf) != 0 {
+			t.Errorf("%s: secret_fingerprints = %v, want an empty object", name, b["secret_fingerprints"])
+		}
+	}
+}
+
+// FEI-40 relationship D: averin reports every pinned authority key (public verifying keys, so as they
+// are) with the project each is pinned for ("" = the global default) and the source it vouches for,
+// so the verifier can compare them with the keys govder derives from its authority seed. A server
+// with no pin reports an empty list, never null.
+func TestPosture_ReportsEveryPinnedAuthorityKey(t *testing.T) {
+	pubOf := func(seedByte byte) ed25519.PublicKey {
+		seed := make([]byte, ed25519.SeedSize)
+		for i := range seed {
+			seed[i] = seedByte
+		}
+		return ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	}
+	global, scoped := pubOf(0x11), pubOf(0x22)
+	h := newServer(t).
+		WithPolicyEngineKey("policy_engine_signed", global).
+		WithProjectAuthorityKey("acme", "human_signed", scoped).
+		Routes()
+	_, b := postureReq(h, "p1", "")
+	pins, ok := b["authority_pins"].([]any)
+	if !ok || len(pins) != 2 {
+		t.Fatalf("authority_pins = %v, want two pins", b["authority_pins"])
+	}
+	want := []map[string]string{
+		{"project": "", "source": "policy_engine_signed", "pubkey": hex.EncodeToString(global)},
+		{"project": "acme", "source": "human_signed", "pubkey": hex.EncodeToString(scoped)},
+	}
+	// sorted by project then source: "" first
+	for i, w := range want {
+		g := pins[i].(map[string]any)
+		for k, v := range w {
+			if g[k] != v {
+				t.Errorf("pin %d %s = %v, want %v", i, k, g[k], v)
+			}
+		}
+	}
+	_, empty := postureReq(newServer(t).Routes(), "p1", "")
+	if l, ok := empty["authority_pins"].([]any); !ok || len(l) != 0 {
+		t.Errorf("unpinned server authority_pins = %v, want an empty list", empty["authority_pins"])
+	}
+}
+
+// The region label, the schema version and whether the runtime role was verified at startup are
+// reported as given; a server nobody wired a posture into claims none of them.
+func TestPosture_ReportsRegionSchemaVersionAndRuntimeRole(t *testing.T) {
+	h := newServer(t).WithPosture(api.Posture{Region: "eu-central-1", SchemaVersion: 7, RuntimeRoleVerified: true}).Routes()
+	_, b := postureReq(h, "p1", "")
+	if b["region"] != "eu-central-1" || b["schema_version"] != float64(7) || b["runtime_role_verified"] != true {
+		t.Fatalf("posture = %v", b)
+	}
+	_, z := postureReq(newServer(t).Routes(), "p1", "")
+	if z["region"] != "" || z["schema_version"] != float64(0) || z["runtime_role_verified"] != false {
+		t.Fatalf("a server with no posture claims region/schema/role: %v", z)
+	}
+}
+
+func TestParseRegion(t *testing.T) {
+	for _, c := range []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false}, {"  ", "", false}, {"eu-central-1", "eu-central-1", false}, {" eu-west-1 ", "eu-west-1", false},
+		{"EU-west-1", "", true}, {"1eu", "", true}, {"-eu", "", true}, {"eu west", "", true}, {"eu_west", "", true},
+		{strings.Repeat("a", api.MaxRegionLen), strings.Repeat("a", api.MaxRegionLen), false},
+		{strings.Repeat("a", api.MaxRegionLen+1), "", true},
+	} {
+		got, err := api.ParseRegion(c.in)
+		if (err != nil) != c.wantErr || got != c.want {
+			t.Errorf("ParseRegion(%q) = %q, %v; want %q, err=%v", c.in, got, err, c.want, c.wantErr)
+		}
+	}
+}
+
+// Approver binding (AVE-10) is reported with its cutover, so a deploy-time verifier sees an explicit
+// AVERIN_REQUIRE_APPROVER_BINDING=0 and a far-future AVERIN_APPROVER_BINDING_SINCE.
+func TestPosture_ReportsApproverBinding(t *testing.T) {
+	_, b := postureReq(newServer(t).WithRequireApproverBinding(true, "").Routes(), "p1", "")
+	if b["require_approver_binding"] != true {
+		t.Fatalf("require_approver_binding = %v, want true", b["require_approver_binding"])
+	}
+	if v, ok := b["approver_binding_since"]; !ok || v != nil {
+		t.Fatalf("approver_binding_since = %v (present=%v), want null", v, ok)
+	}
+	_, b = postureReq(newServer(t).WithRequireApproverBinding(true, "2026-10-01T00:00:00.000Z").Routes(), "p1", "")
+	if b["approver_binding_since"] != "2026-10-01T00:00:00.000Z" {
+		t.Fatalf("approver_binding_since = %v", b["approver_binding_since"])
+	}
+	_, b = postureReq(newServer(t).WithRequireApproverBinding(false, "").Routes(), "p1", "")
+	if b["require_approver_binding"] != false {
+		t.Fatalf("require_approver_binding = %v, want false", b["require_approver_binding"])
 	}
 }

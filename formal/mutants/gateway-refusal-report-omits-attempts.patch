@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 28e434f..b960f36 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -1773,7 +1773,7 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
+         ("gateway_refusals".into(), count(r.gateway_refusals)),
+         (
+             "gateway_refusal_attempts".into(),
+-            CanonValue::Int(i64::try_from(r.gateway_refusal_attempts).unwrap_or(i64::MAX)),
++            CanonValue::Int(0),
+         ),
+         (
+             "gateway_refusals_by_class".into(),

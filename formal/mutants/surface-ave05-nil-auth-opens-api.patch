@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 1fe4434..a0aeb95 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -941,7 +941,7 @@ func (s *Server) Routes() http.Handler {
+ 	case s.auth == nil:
+ 		// FAIL CLOSED (AVE-05): no token configured and no explicit dev-open store (WithAuth(auth.NewOpenStore()))
+ 		// refuses every /v2 request. Only the cluster probes above stay reachable.
+-		guarded.Handle("/v2/", auth.DenyAll(handler))
++		guarded.Handle("/v2/", handler)
+ 	case auth.IsOpen(s.auth):
+ 		guarded.Handle("/v2/", handler)
+ 	default:

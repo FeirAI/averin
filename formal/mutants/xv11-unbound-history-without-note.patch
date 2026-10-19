@@ -1,15 +1,13 @@
 diff --git a/core/src/verify.rs b/core/src/verify.rs
-index a8e7979..2044b3d 100644
+index 54d5250..f3e4af4 100644
 --- a/core/src/verify.rs
 +++ b/core/src/verify.rs
-@@ -5474,9 +5474,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
-         {
-             match govder_evidence_rederivable(rec) {
-                 GovderEvidence::Bound => {}
--                GovderEvidence::ApproverUnbound => notes.push(format!(
--                    "record {i}: the govder record names its approver(s) but its signed evidence predates approver binding, so decided_by and the sign-off set are not committed by authority.evidence_hash"
--                )),
-+                GovderEvidence::ApproverUnbound => {}
-                 GovderEvidence::Mismatch => {
-                     semantic_record_conflict = true;
+@@ -5526,7 +5526,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                      let msg = format!(
+                         "record {i}: the govder record names its approver(s) but its signed evidence predates approver binding, so decided_by and the sign-off set are not committed by authority.evidence_hash"
+                     );
+-                    notes.push(msg.clone());
++                    let _ = msg.clone();
+                     if approver_binding_required(opts, rec) {
+                         semantic_record_conflict = true;
+                         issues.push(format!(

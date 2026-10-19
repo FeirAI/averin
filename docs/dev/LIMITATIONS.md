@@ -5,34 +5,76 @@ bugs; each names the constraint, why it holds, and (where relevant) the deferred
 would lift it. See [`../coverage-limits.md`](../coverage-limits.md) for the trust-model coverage
 limits and [SECURITY.md](SECURITY.md) for what averin deliberately does not do.
 
-## Export / verify build the whole project bundle in memory
+## Export / verify of a whole history are bounded; long histories go by month
 
-`GET /v2/export` and `GET /v2/verify` build the bundle by reading the project's **entire** record and
-checkpoint history into memory (`buildBundle` → `store.AllRecords` + `store.Checkpoints`), materializing
-every sealed record as a `json.RawMessage`, then serializing the whole bundle in one response. The
-offline verifier re-derives the DAG, frontier, and checkpoint chain over the **closed set**, so the
-bundle is intentionally whole-history — records cannot be pruned without breaking causal-parent /
-frontier resolution.
+`GET /v2/export` and `GET /v2/verify` without `month` still build the project's **entire** record and
+checkpoint history in memory (`buildBundleView` reads `store.AllRecords` + `store.Checkpoints` in one repeatable-read
+snapshot, materializing every sealed record as a `json.RawMessage`) and serialize it in one response. The
+offline verifier re-derives the DAG, frontier and checkpoint chain over that closed set, and **refuses any file
+over 256 MiB** (CLI, browser and `/v2/verify` alike).
 
-Consequences and the bounds that contain them:
+What contains this:
 
-- **Peak memory ≈ O(project history).** A very large project's export/verify holds its full sealed
-  history in RAM for the duration of the build. Size the process (or shard tenants) accordingly.
-- **Concurrency cap.** Concurrent export/verify builds are bounded by a semaphore
-  (`maxConcurrentBundleReads`, currently **4**). A request that would exceed the cap gets a retryable
-  `503` rather than piling on memory pressure.
-- **Write-timeout exemption.** The server's global 60s `WriteTimeout` (Slowloris / slow-body defense
-  for every other route) would hard-kill a large-but-legitimate export mid-write. Export/verify
-  therefore run under a **per-handler write deadline** (`bundleWriteTimeout`, currently **10m**) set via
-  `http.ResponseController`; every other route keeps the finite `WriteTimeout`.
-- **Not retroactive.** These bounds only shape *how* the current whole-history bundle is served.
+- **Month segments** ([SEGMENTS.md](SEGMENTS.md)). `GET /v2/export?month=YYYY-MM` and
+  `GET /v2/verify?month=YYYY-MM` serve one month, chained to the previous month's last checkpoint, reading only that
+  month's records from the store. `averin-verify chain` checks all the months. A month export and a month check are bounded by
+  the month. The chain's cross-month verdict is not: it needs the concatenation in memory and under the 256 MiB
+  cap, and over the cap it is INSUFFICIENT.
+- **A refusal, not an unverifiable file.** A whole-history build whose records exceed 256 MiB fails with `413` and a
+  pointer to `/v2/segments`; a single month that does is refused with its own `413`.
+- **Concurrency cap.** Concurrent export/verify builds are bounded by a semaphore (`maxConcurrentBundleReads`,
+  currently **4**). A request over the cap gets a retryable `503`.
+- **Write-timeout exemption.** The global 60s `WriteTimeout` would kill a large-but-legitimate export mid-write, so
+  export/verify run under a per-handler deadline (`bundleWriteTimeout`, **10m**).
 
-**Deferred:** a **cursor-streaming export** — open the JSON envelope, stream sealed records from a
-store cursor with an `http.Flusher`, and close it — would make export memory **constant** (independent
-of history size) and remove the need for both the concurrency cap and the extended deadline. It
-requires a paged/cursor store method and an incremental bundle writer that emits **byte-identical**
-bytes to today's build (the offline verifier re-derives over the whole set, so the framing must not
-change). That is a design item, not yet built.
+What it does not do:
+
+- **A month cannot evaluate the grant-log transparency chain or the federation heads.** They chain every grant
+  since the project began, so a month that starts after a base reports `broker_trust: assumed` and the capstone
+  claims stay unsatisfied for it (`segment.not_evaluated`). Only the first month, a whole-history bundle and
+  `averin-verify chain` (which rebuilds the whole history) evaluate them, so a project whose whole history is past the
+  256 MiB limit has no single check of its whole grant log.
+- **A month with parents before its base cannot show its record set is complete.** When `earlier_parent_refs` is
+  above 0, a record dropped from the month can be replaced by an earlier month's record without changing the
+  record count, the heads or any signature. The month then lists `record_completeness` in `segment.not_evaluated`
+  and reports the hashes (`earlier_parent_ref_hashes`); `averin-verify chain` over every month catches the swap. A
+  month with no such parents is exact. A signed per-checkpoint delta commitment would close this for a single
+  month; it is not built.
+- **A month's record range is read by position.** On Postgres the order is `(inserted_at, ctid)` and the checkpoint
+  `record_count` is a position in it. Two things can break it: a wall clock stepped back, and two server replicas
+  whose transactions commit in the opposite order to their start times (`inserted_at` is the transaction start). A
+  checkpoint cut between such records makes that month and the next unverifiable. Both fail closed (the months do
+  not verify), they never verify a wrong set. A monotonic per-project insertion sequence would remove it and needs
+  a schema change; it is not built. Separately, the server refuses to plan months (409) for a project whose
+  checkpoint `created_ts` months go backwards, for example after a clock step at a month boundary. The month
+  export is covered on real Postgres in CI.
+- **A use or outcome whose grant or intent is in an earlier month** is listed (`unresolved_cross_month`), never
+  matched, so a month with one reports `authorized` as insufficient. `averin-verify chain` checks that the named record
+  exists in an earlier month, refuses a record two months both carry, and then verifies the concatenated history as
+  one bundle, so the match, scope, expiry, key binding and single use are decided there, as in a whole-history export.
+  That needs the whole history in memory and under the 256 MiB verifier cap; over it the chain word is capped at
+  INSUFFICIENT and says the cross-month rules were not run (so a history over the cap never gets PASS from the chain,
+  and a cross-month double use in it is not reported as FAIL; carrying that state month by month is not built; accepted as a written limit and tracked in
+  FeirAI/feir-ops#9). The
+  concatenation carries the latest month's `revocation_list` and `deployment_attestation` (a server re-issues them for
+  every month; `averin-verify split` copies them into the last month) and every month's disclosures.
+- **A month with a base never passes alone.** Its headline is capped at INSUFFICIENT (exit 1) in the CLI, the browser
+  verifier and the web app, because one month cannot close the rules that span months (a second use of a single-use
+  grant, a replayed nonce or ledger commitment, a use of a grant no month holds, a revocation across months;
+  `segment.not_evaluated` lists `cross_month_uses`). The same cap applies to a month with parents before its base
+  (record completeness) and to an unpinned base. Only the first month, which has no base, can pass alone.
+- **A month is bounded by its own size.** A project that records more than 256 MiB in a month cannot be verified
+  month by month; cutting finer than a month is not built.
+- **Peak memory of a whole-history build is O(history)**, including for a project over the limit: the whole history
+  is loaded before the size check answers 413. The in-memory store holds everything regardless.
+- **The C heap is trimmed after each whole-bundle verification, on glibc only.** Without it glibc keeps freed
+  pages below each malloc arena's top resident until malloc_trim is called (arenas are capped and shared, and the
+  top is trimmed automatically). On a non-glibc libc nothing is returned, and the
+  transient peak while a verification runs is still O(history).
+
+**Deferred:** a **cursor-streaming export** (constant memory, byte-identical framing) and **checkpoint
+accumulators** that would let a bundle start from a pinned checkpoint and prove earlier parents by membership
+(removing the two month-boundary gaps above) are not built. The segment design needs neither.
 
 ## App list endpoint pages in the store (not in RAM)
 
@@ -129,38 +171,35 @@ concurrent writers are not exercised. Until those are done, keep the
 single-writer-per-project deployment policy even though frontier and checkpoint
 writes serialize across replicas.
 
-## Storage growth is unbounded and append-only (monitoring is a hard deploy requirement)
+## Storage only grows, and the cap is by record count (a deploy requirement is still monitoring)
 
-The record store is **append-only by design** (the migration `REVOKE`s UPDATE/DELETE/TRUNCATE) and the
-app API is **Phase-1** — it has no per-project authentication/authorization or storage quota of its own
-(see [SECURITY.md](SECURITY.md) and `docs/coverage-limits.md`). Every accepted ingest therefore grows
-the database **permanently**; nothing in averin caps total per-project record count or bytes, and
-records cannot be deleted (that is the integrity invariant). **Two operator controls are HARD deploy
-requirements, not options:**
+The record store is **append-only by design** (the migration `REVOKE`s UPDATE/DELETE/TRUNCATE), so every
+accepted ingest grows the database **permanently** and records cannot be deleted (that is the integrity
+invariant). averin bounds the growth with admission control, all configured by environment variable (see
+[CONFIGURATION.md](CONFIGURATION.md)):
 
-- **A reverse-proxy / API-gateway rate limit in front of averin** is the PRIMARY control against a
-  leaked token (or an unauthenticated dev-posture deploy) driving unbounded billable, append-only
-  growth. averin ships an **opt-in** in-process backstop (`WithIngestBudget`, a coarse per-project +
-  global token bucket that answers `429` on `POST /v2/*` ingest — see
-  [CONFIGURATION.md](CONFIGURATION.md)); it is **defense-in-depth**, not a substitute for the gateway
-  limit, and is **off by default** (so no existing deployment is throttled).
-- **Database-growth monitoring + capacity alerting.** Because storage only ever grows, operators MUST
-  monitor DB size / per-project record counts and alert well before exhaustion. There is no in-store
-  eviction to fall back on.
+- `AVERIN_PROJECT_MAX_RECORDS` caps stored records per project, enforced inside the project write
+  transaction (exact across replicas); a write past the cap is `507` and stores nothing.
+- `AVERIN_INGEST_BUDGET` is a per-project and global rate limit (`429`); `AVERIN_DENIED_GRANT_LOG` is
+  always paired with its own budget.
 
-**Deferred:** a first-class configurable per-project record/byte quota (a `429`/`507` at ingest) and
-per-project authz are Phase-2 items.
+What remains:
 
-## Usage metering is best-effort and volatile (bounded revenue loss)
-
-The billing meter's base counter is **in-memory** (`meter.Mem`); the Stripe reporter forwards billable
-events best-effort over a bounded async queue. This bounds metering accuracy — see
-[CONFIGURATION.md](CONFIGURATION.md) *Metering loss bounds* for the exact failure modes (restart
-re-grants the free tier; a full queue or a non-2xx/transport delivery failure drops the event with no
-retry) and the `/metrics` counters that make the loss observable
-(`averin_meter_queue_drops_total`, `averin_meter_post_failures_total`). **Deferred:** a durable
-per-project counter (a Postgres table beside the store, surviving restart) plus **idempotent, retried**
-Stripe delivery (meter-event ids) would close the loss; it is documented, not built.
+- **The cap counts records, not bytes.** The storage bound is the cap times the per-record body limit.
+  There is no per-project byte quota.
+- **Both controls are off until configured**; set them. A reverse-proxy or gateway rate limit stays the
+  primary control against a leaked token, because the in-process limiter's per-project state is bounded
+  and a flood of distinct project ids falls back to the global bucket.
+- **Monitor database size and `averin_quota_rejections_total`.** There is no in-store eviction, and a
+  project at its cap refuses all new evidence (fail closed) until the operator raises the cap.
+- **Pending two-phase grants are briefly uncounted.** `POST /v2/grants/prepare` (a write-role route) stores
+  a pending row without a record, so the cap does not count it. On Postgres the sweeper removes rows older
+  than the 15-minute pending TTL plus a 1-minute grace, so a flood of distinct keys is uncounted for roughly
+  16 to 21 minutes before it is swept. The in-memory dev store has no sweep. Bound a burst with the ingest
+  budget and the reverse-proxy limit.
+- **Counting cost.** With the cap on, each write transaction counts the project's stored records, which is
+  linear in the project size, so ingest slows as a project nears a large cap. Keep the cap modest.
+- A batch `POST /v2/records` is item by item, so the items that fit before the cap stay stored.
 
 ## Consume-ledger retention is a correctness parameter
 
@@ -294,3 +333,46 @@ which each one matters.
   and exit codes (no key: CONSISTENT, exit 2), so the same rule applies: read its RESULT line, as
   a usage error also exits 2. A PASS there means the signature verified under the key given on
   the command line; the CLI cannot tell whether that key is the right one to trust.
+
+## Gateway refusal records are a reported floor
+
+`POST /v2/refusals` seals what the gateway reports (feir-ops#1). The verifier counts integrity-proven
+refusal records (`gateway_refusals`, `gateway_refusal_attempts`); it cannot know about an attempt that was
+never reported.
+
+- **Level 1 and Level 2 only.** A refusal record proves the report was sealed unchanged and is in the
+  checked history. It does not prove the gateway reported every refusal, and a gateway that suppressed a
+  report before sealing is undetectable. Level 3 is not claimed for refusals.
+- **Any project writer can submit one.** The route needs the `write` role, and a deployment that shares one
+  averin token across planes lets any holder add a refusal record. The generic ingest path rejects every
+  refusal marker, but it cannot tell two writers apart. A gateway-only key needs a producer-labelled
+  `AVERIN_API_KEYS` entry.
+- **The count is a floor.** An attempt with no authenticated agent is not recorded, and a producer crash can
+  lose its pending window. A producer may coalesce repeats into one record with an `attempts` count, or merge
+  a storm into a per-class summary; whether and how a given producer does so is that producer's behaviour
+  (vultrino's is not shipped yet), and averin only counts what is sealed. The count is a lower bound, never
+  an exact total of refusals.
+- **A prior submission can suppress a refusal.** A replay is keyed on the caller's `idempotency_key`
+  (stored as `refusal:<key>`), not on the record id, whose salt does not hide it from a caller who can
+  predict the gateway's key. A project writer who posts that key first through `/v2/refusals` makes the
+  gateway's real refusal return `200 created:false` and never be sealed, and a replay whose fields differ
+  from the stored record is not rejected, only answered with the stored id. Compare the returned
+  `record_id` and `created` flag with what you sent, and give each producer keys a peer writer cannot
+  predict (random per record, not a counter or a hash of public fields).
+- **Names are stored verbatim.** An agent-chosen tool or credential name that matches
+  `[A-Za-z0-9._:-]{1,128}` is written into a permanent signed record that no purge can erase. A
+  token-shaped string (an `sk-` key, a `vut_` token) fits that pattern, so an agent that has seen a secret can
+  push it into the record by naming an unknown tool after it. The producer must redact or refuse names that
+  look like secrets before calling the endpoint; averin does not.
+- **A filtered record list is a bounded scan.** `GET /v2/records?record_kind=` and `exclude_record_kind=`
+  page the store newest-first and decode every record, up to 50000 per request, inside a read transaction.
+  On a large project with few matching records each call pays that scan, and past 50000 records it reports
+  `truncated: true` with an incomplete answer. `total` stays the unfiltered record count. The Postgres path
+  of this scan has no test yet.
+- **Volume is the producer's to bound.** Each record is a normal record, and `attempts` is capped at 10^9 per
+  record, but nothing in averin limits how many refusal records a writer submits; the per-month 256 MiB
+  segment cap still applies. Use `AVERIN_INGEST_BUDGET` and the producer's own budget.
+- **No taxonomy or manifest entry.** A refusal never touches the operation taxonomy, the coverage manifest or
+  the deployment attestation. Signing a new Solo taxonomy version (FEI-36) is a separate release step with the
+  owner's key; the vectors committed with this kind are signed by TEST-ONLY keys listed in
+  `spec/test-keys.json`, which no deployment may pin.

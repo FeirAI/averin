@@ -18,9 +18,10 @@
 use crate::anchor::verify_anchor_keyed;
 use crate::authority::{verify_authority_with_key, AuthorityTrust};
 use crate::canon::CanonValue;
-use crate::checkpoint::{validate_chain, verify_checkpoint_sealed};
+use crate::checkpoint::verify_checkpoint_sealed;
 use crate::dag;
 use crate::record::{validate_record_shape, verify_content_hash, verify_sealed};
+use crate::segment::{validate_segment_chain, SegmentBase};
 use crate::sign::decode_pubkey;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod headline;
 mod temporal;
 mod verdict;
-pub use headline::{claim_verdict, ClaimVerdict};
+pub use headline::{claim_verdict, month_claim_verdict, segment_residual, ClaimVerdict};
 pub use temporal::{
     canonical_ts_millis, revocation_entry_v2, revocation_entry_v2_preimage, revocation_key_v2,
     revocation_key_v2_preimage, revocation_leaves_v2, revocation_merkle_root_v2,
@@ -283,6 +284,9 @@ pub struct VerifyReport {
     /// in the clear, which no retention purge can erase. Zero on a bundle sealed after the server began
     /// committing that text. A count for the reader, never a verdict input.
     pub cleartext_content_records: usize,
+    /// AVE-01: present only when the bundle is a month segment (`bundle.segment`). What the segment covers, its
+    /// link to the previous month and what it did not evaluate. `None` for every whole-history bundle.
+    pub segment: Option<SegmentReport>,
     /// Credential-broker grants (`event_type=credential_grant`) and how many verified to
     /// `gateway_enforced` under a pinned authority key (Level 3 Tier-A grant accountability).
     pub grant_total: usize,
@@ -291,6 +295,15 @@ pub struct VerifyReport {
     /// request that was refused AND recorded as evidence, opt-in producer side). NOT a grant (never folded
     /// into `grant_total`/`grant_accountability`); a generic BrokerRole::None record.
     pub denied_grants: usize,
+    /// feir-ops#1: sealed gateway refusal records (`record_kind = gateway-refusal`), counted only when the
+    /// record is integrity-proven and its shape is valid, deduped by content_hash. A refusal is NOT a grant,
+    /// a use or an authority claim: it never enters the coverage closure or any other count.
+    pub gateway_refusals: usize,
+    /// Sum of `attempts` over the counted refusal records (coalesced repeats). A floor: an unauthenticated
+    /// attempt is not recorded and a refusal the producer could not seal is a gap.
+    pub gateway_refusal_attempts: u64,
+    /// `gateway_refusal_attempts` by reason class (closed vocabulary), classes with a zero count omitted.
+    pub gateway_refusals_by_class: BTreeMap<String, u64>,
     /// Tier-B use↔grant join (ADR 0003 step 5, R3). Violations are evaluated over the COMMITTED set (records
     /// committed by ANY verified checkpoint), positive claims over the CLOSED set (committed by a verified,
     /// ANCHORED checkpoint) — so deleting the unsigned `anchor` can only weaken the verdict. `uses_total` =
@@ -721,6 +734,231 @@ pub struct VerifyOptions {
     /// set: every OTHER role (resource/taxonomy/attestation/tsa/cosig/revocation/generic-authority) must be
     /// disjoint from that union (a FATAL config error otherwise); distinct brokers MAY share a key.
     pub federated_broker_keys: BTreeMap<String, Vec<VerifyingKey>>,
+    /// AVE-01: the base checkpoint hash the auditor expects a month segment to start from (the previous month's
+    /// `segment.head_checkpoint_hash`, or `"genesis"` for the first month). Never read from the bundle. `Some`
+    /// makes the link a checked fact (`segment.link = "base_pinned"`); a bundle that is not a segment, or one
+    /// that starts from a different base, then fails.
+    pub segment_base_pin: Option<String>,
+    /// AVE-10: when true, a govder record that names its approver(s) but whose signed evidence does not
+    /// commit them (a signer that predates approver binding, or one that leaves the members out) is an
+    /// `issues` failure instead of a note, so the verdict fails. Chosen by the caller, never read from the
+    /// bundle. Default false: historical bundles keep verifying with the note.
+    pub require_approver_binding: bool,
+    /// AVE-10 cutover: when `Some` (a canonical `YYYY-MM-DDTHH:MM:SS.mmmZ` instant) and
+    /// `require_approver_binding` is true, only records whose `received_ts` is at or after it must be
+    /// bound; earlier records stay history with the note. A record with no canonical `received_ts` is
+    /// treated as after the cutover (fail closed).
+    pub approver_binding_since: Option<String>,
+}
+
+/// AVE-01: a month segment's verdict-side facts (see [`evaluate_segment`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentReport {
+    pub month: String,
+    pub base_seq: Option<i64>,
+    pub base_checkpoint_hash: Option<String>,
+    /// The latest checkpoint the segment carries: the next month's base.
+    pub head_seq: i64,
+    pub head_checkpoint_hash: Option<String>,
+    /// Records through the head: the base checkpoint's count plus the records carried.
+    pub head_record_count: i64,
+    /// `genesis` (first month, no base), `base_pinned` (the base hash equals the caller's pin) or
+    /// `base_unpinned` (the base is internally consistent but nobody pinned it).
+    pub link: &'static str,
+    /// The base checkpoint carries a verified trusted timestamp.
+    pub base_anchored: bool,
+    /// Parents that name records older than the base and are not in its frontier. A single month cannot resolve
+    /// them; `averin-verify chain` does.
+    pub earlier_parent_refs: usize,
+    /// The hashes behind `earlier_parent_refs`, sorted. When any exist the month's record set is only bounded
+    /// by the chain, so `record_completeness` is listed in `not_evaluated`.
+    pub earlier_parent_ref_hashes: Vec<String>,
+    /// `(kind, record_id, reference)` of each use (naming a grant) or use_outcome (naming an intent) whose
+    /// counterpart is not in this segment. Never counted as matched or as a violation here; the chain resolves them.
+    pub unresolved_cross_month: Vec<(String, String, String)>,
+    /// Checks a month cannot make on its own, reported as not performed rather than as passed. A month with a base
+    /// always lists `cross_month_uses` (uniqueness and revocation across months).
+    pub not_evaluated: Vec<String>,
+}
+
+/// What `evaluate_segment` extracts from `bundle.segment` and the carried base checkpoint.
+struct SegmentEval {
+    present: bool,
+    month: String,
+    base: Option<SegmentBaseInfo>,
+}
+
+struct SegmentBaseInfo {
+    seq: i64,
+    hash: String,
+    record_count: i64,
+    frontier: BTreeSet<String>,
+}
+
+pub const SEGMENT_FORMAT: &str = "averin.segment.v1";
+
+/// The two checks a month segment cannot make: grant-log transparency chains every grant since the project began,
+/// and federation heads do the same per broker. A segment reports them `assumed`/absent.
+const SEGMENT_NOT_EVALUATED: [&str; 2] = ["broker_grant_log", "federation_heads"];
+
+/// The checks a month cannot make, for `SegmentReport::not_evaluated`. A first month (no base) evaluates all of
+/// them. A month with parents before its base cannot show its record set is complete: a record dropped from it
+/// can be replaced by an earlier month's record without changing the count, the heads or any signature.
+fn segment_not_evaluated(has_base: bool, has_earlier_parents: bool) -> Vec<String> {
+    if !has_base {
+        return Vec::new();
+    }
+    let mut v: Vec<String> = SEGMENT_NOT_EVALUATED
+        .iter()
+        .map(|x| x.to_string())
+        .collect();
+    if has_earlier_parents {
+        v.push("record_completeness".to_string());
+    }
+    // A month with a base cannot close the rules that span months: a second use of a single-use grant, a replayed
+    // PoP nonce or ledger commitment, a use of a grant no month holds, a revocation that lands on a grant an earlier
+    // month issued. Only the chain, on the concatenated history, can.
+    v.push("cross_month_uses".to_string());
+    v
+}
+
+fn is_month(m: &str) -> bool {
+    let b = m.as_bytes();
+    b.len() == 7
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && matches!(&b[5..], [b'0', b'1'..=b'9'] | [b'1', b'0'..=b'2'])
+}
+
+/// Read and check `bundle.segment` (AVE-01). A bundle without one is a whole-history bundle and is untouched.
+/// With one: the format is pinned, `month` is `YYYY-MM`, the base is either absent (first month) or
+/// the carried checkpoint with that seq and hash, whose `record_count` and frontier become the base context.
+/// The base's own signature, key and anchor are checked with every other checkpoint, so nothing here trusts it.
+fn evaluate_segment(
+    bundle: &CanonValue,
+    checkpoints: &[CanonValue],
+    opts: &VerifyOptions,
+    issues: &mut Vec<String>,
+) -> SegmentEval {
+    let none = |present| SegmentEval {
+        present,
+        month: String::new(),
+        base: None,
+    };
+    let Some(seg) = bundle.get("segment") else {
+        if opts.segment_base_pin.is_some() {
+            issues.push(
+                "segment: a base pin was supplied but the bundle is not a month segment".into(),
+            );
+        }
+        return none(false);
+    };
+    if seg.as_object().is_none() {
+        issues.push("segment: not an object".into());
+        return none(true);
+    }
+    if s(seg, "format").as_deref() != Some(SEGMENT_FORMAT) {
+        issues.push(format!("segment: format is not {SEGMENT_FORMAT}"));
+        return none(true);
+    }
+    let month = match s(seg, "month") {
+        Some(m) if is_month(&m) => m,
+        _ => {
+            issues.push("segment: month is not YYYY-MM".into());
+            return none(true);
+        }
+    };
+    let base_seq = seg.get("base_seq");
+    let base_hash = seg.get("base_checkpoint_hash");
+    let base_count = seg.get("base_record_count").and_then(|v| v.as_int());
+    let base = match (base_seq, base_hash) {
+        (Some(CanonValue::Null), Some(CanonValue::Null)) if base_count == Some(0) => None,
+        (Some(sq), Some(h)) => {
+            let (Some(seq), Some(hash), Some(count)) = (sq.as_int(), h.as_str(), base_count) else {
+                issues.push(
+                    "segment: base_seq, base_checkpoint_hash and base_record_count are malformed"
+                        .into(),
+                );
+                return SegmentEval {
+                    present: true,
+                    month,
+                    base: None,
+                };
+            };
+            let carried = checkpoints.iter().find(|cp| {
+                cp.get("checkpoint_seq").and_then(|v| v.as_int()) == Some(seq)
+                    && s(cp, "checkpoint_hash").as_deref() == Some(hash)
+            });
+            let Some(cp) = carried else {
+                issues.push(format!(
+                    "segment: base checkpoint {seq} ({hash}) is not carried in the bundle"
+                ));
+                return SegmentEval {
+                    present: true,
+                    month,
+                    base: None,
+                };
+            };
+            if cp.get("record_count").and_then(|v| v.as_int()) != Some(count) {
+                issues.push("segment: base_record_count does not match the base checkpoint".into());
+            }
+            let frontier: BTreeSet<String> = cp
+                .get("frontier")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|h| h.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(SegmentBaseInfo {
+                seq,
+                hash: hash.to_string(),
+                record_count: count,
+                frontier,
+            })
+        }
+        _ => {
+            issues.push(
+                "segment: base_seq, base_checkpoint_hash and base_record_count are inconsistent"
+                    .into(),
+            );
+            return none(true);
+        }
+    };
+    if let Some(pin) = &opts.segment_base_pin {
+        let actual = base.as_ref().map_or("genesis", |b| b.hash.as_str());
+        if pin != actual {
+            issues.push(format!("segment: base is {actual}, expected {pin}"));
+        }
+    }
+    // Month membership is the recorder's signed `created_ts`: every checkpoint after the base falls in `month`
+    // and the base falls before it. Without this the label would name nothing.
+    for cp in checkpoints {
+        let is_base = base
+            .as_ref()
+            .is_some_and(|b| cp.get("checkpoint_seq").and_then(|v| v.as_int()) == Some(b.seq));
+        match s(cp, "created_ts").filter(|t| is_canonical_ts(t)) {
+            Some(t) => {
+                let m = &t[..7];
+                if is_base && m >= month.as_str() {
+                    issues.push(format!(
+                        "segment: base checkpoint is dated {m}, not before {month}"
+                    ));
+                } else if !is_base && m != month {
+                    issues.push(format!(
+                        "segment: checkpoint dated {m} is outside segment month {month}"
+                    ));
+                }
+            }
+            None => issues.push("segment: a checkpoint has no canonical created_ts".into()),
+        }
+    }
+    SegmentEval {
+        present: true,
+        month,
+        base,
+    }
 }
 
 struct KeyEntry {
@@ -1495,7 +1733,7 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
             .unwrap()
         })
         .collect();
-    CanonValue::object(vec![
+    let mut members: Vec<(String, CanonValue)> = vec![
         ("ok".into(), CanonValue::Bool(r.ok)),
         ("claims_version".into(), CanonValue::string("2")),
         ("claims".into(), r.claims.to_canon()),
@@ -1549,6 +1787,26 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("grant_total".into(), count(r.grant_total)),
         ("grant_verified".into(), count(r.grant_verified)),
         ("denied_grants".into(), count(r.denied_grants)),
+        ("gateway_refusals".into(), count(r.gateway_refusals)),
+        (
+            "gateway_refusal_attempts".into(),
+            CanonValue::Int(i64::try_from(r.gateway_refusal_attempts).unwrap_or(i64::MAX)),
+        ),
+        (
+            "gateway_refusals_by_class".into(),
+            CanonValue::object(
+                r.gateway_refusals_by_class
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            CanonValue::Int(i64::try_from(*v).unwrap_or(i64::MAX)),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap(),
+        ),
         ("uses_total".into(), count(r.uses_total)),
         ("uses_matched".into(), count(r.uses_matched)),
         (
@@ -1754,6 +2012,57 @@ pub fn report_to_canon(r: &VerifyReport) -> CanonValue {
         ("issues".into(), str_array(&r.issues)),
         ("first_broken_link".into(), opt_str(&r.first_broken_link)),
         ("record_trust".into(), CanonValue::Array(records)),
+    ];
+    // Only a month segment carries this section, so every whole-history report keeps its bytes.
+    if let Some(sg) = &r.segment {
+        members.push(("segment".into(), segment_to_canon(sg)));
+    }
+    CanonValue::object(members).unwrap()
+}
+
+fn segment_to_canon(sg: &SegmentReport) -> CanonValue {
+    let int_or_null = |v: Option<i64>| v.map_or(CanonValue::Null, CanonValue::Int);
+    CanonValue::object(vec![
+        ("format".into(), CanonValue::string(SEGMENT_FORMAT)),
+        ("month".into(), CanonValue::string(sg.month.clone())),
+        ("base_seq".into(), int_or_null(sg.base_seq)),
+        (
+            "base_checkpoint_hash".into(),
+            opt_str(&sg.base_checkpoint_hash),
+        ),
+        ("head_seq".into(), CanonValue::Int(sg.head_seq)),
+        (
+            "head_checkpoint_hash".into(),
+            opt_str(&sg.head_checkpoint_hash),
+        ),
+        (
+            "head_record_count".into(),
+            CanonValue::Int(sg.head_record_count),
+        ),
+        ("link".into(), CanonValue::string(sg.link)),
+        ("base_anchored".into(), CanonValue::Bool(sg.base_anchored)),
+        ("earlier_parent_refs".into(), count(sg.earlier_parent_refs)),
+        (
+            "earlier_parent_ref_hashes".into(),
+            str_array(&sg.earlier_parent_ref_hashes),
+        ),
+        (
+            "unresolved_cross_month".into(),
+            CanonValue::Array(
+                sg.unresolved_cross_month
+                    .iter()
+                    .map(|(kind, record_id, reference)| {
+                        CanonValue::object(vec![
+                            ("kind".into(), CanonValue::string(kind.clone())),
+                            ("record_id".into(), CanonValue::string(record_id.clone())),
+                            ("ref".into(), CanonValue::string(reference.clone())),
+                        ])
+                        .unwrap()
+                    })
+                    .collect(),
+            ),
+        ),
+        ("not_evaluated".into(), str_array(&sg.not_evaluated)),
     ])
     .unwrap()
 }
@@ -2017,7 +2326,29 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
             Ok(m) => m,
             Err(e) => return error_report(&e),
         };
+    // AVE-10: opt-in strict approver binding, with an optional canonical cutover instant. A wrong type is an
+    // error (fail closed: a typo must not silently leave the policy off).
+    let require_approver_binding = match opts_val.get("require_approver_binding") {
+        None | Some(CanonValue::Null) => false,
+        Some(CanonValue::Bool(b)) => *b,
+        Some(_) => return error_report("require_approver_binding must be a boolean"),
+    };
+    let approver_binding_since =
+        match opts_val.get("approver_binding_since") {
+            None | Some(CanonValue::Null) => None,
+            Some(v) => match v.as_str() {
+                Some(t) if is_canonical_ts(t) => Some(t.to_string()),
+                _ => return error_report(
+                    "approver_binding_since must be a canonical timestamp YYYY-MM-DDTHH:MM:SS.mmmZ",
+                ),
+            },
+        };
+    if approver_binding_since.is_some() && !require_approver_binding {
+        return error_report("approver_binding_since needs require_approver_binding: true");
+    }
     let opts = VerifyOptions {
+        require_approver_binding,
+        approver_binding_since,
         claim_policy: match ClaimPolicy::parse(&opts_val) {
             Ok(p) => p,
             Err(e) => return error_report(&e),
@@ -2041,6 +2372,17 @@ pub fn verify_bundle_with_json(bundle_text: &str, opts_text: &str) -> String {
         cosig_approver_keys,
         revocation_keys,
         trusted_keys: signing,
+        segment_base_pin: match opts_val.get("segment_base_checkpoint_hash") {
+            None | Some(CanonValue::Null) => None,
+            Some(v) => match v.as_str() {
+                Some(h) if h == "genesis" || crate::hashx::parse_sha256(h).is_some() => {
+                    Some(h.to_string())
+                }
+                _ => return error_report(
+                    "segment_base_checkpoint_hash must be \"genesis\" or a sha256: checkpoint hash",
+                ),
+            },
+        },
     };
     report_json_with_digest(&verify_bundle_with(&bundle, &opts), bundle_text.as_bytes())
 }
@@ -2310,9 +2652,13 @@ fn fatal_config_report(project_id: Option<String>, msg: &str) -> VerifyReport {
         key_rotations_verified: 0,
         key_rotations_chain_trusted: 0,
         cleartext_content_records: 0,
+        segment: None,
         grant_total: 0,
         grant_verified: 0,
         denied_grants: 0,
+        gateway_refusals: 0,
+        gateway_refusal_attempts: 0,
+        gateway_refusals_by_class: BTreeMap::new(),
         uses_total: 0,
         uses_matched: 0,
         uses_action_unverified: 0,
@@ -2399,15 +2745,46 @@ fn evidence_rederivable(rec: &CanonValue, payload_key: &str) -> bool {
     crate::hashx::sha256_prefixed(payload.serialize().as_bytes()) == signed
 }
 
+/// The brokered half of the `authorized` claim: every use matched and PoP re-verified, no violation or pending
+/// intent, a validated taxonomy, and no use or outcome whose counterpart sits in an earlier month. A month with
+/// such a cross-month reference cannot decide `authorized` alone: whole-history verification would count an
+/// outcome no closed intent consumed as a violation, and a month cannot see that.
+fn brokered_use_is_valid(report: &VerifyReport, no_cross_month_unresolved: bool) -> bool {
+    report.uses_total > 0
+        && no_cross_month_unresolved
+        && report.uses_matched == report.uses_total
+        && report.uses_pop_reverified == report.uses_matched
+        && report.unmatched_violation == 0
+        && report.unmatched_pending == 0
+        && report.taxonomy_status == "validated"
+        && report.uses_action_unverified == 0
+}
+
 /// Read a string field from a record's canonical evidence payload at `extensions.broker.<payload_key>`
 /// (ADR 0003 — the verifier reads match inputs ONLY from the proven payload).
-fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
+pub(crate) fn ev_str(rec: &CanonValue, payload_key: &str, field: &str) -> Option<String> {
     rec.get("extensions")
         .and_then(|e| e.get("broker"))
         .and_then(|b| b.get(payload_key))
         .and_then(|p| p.get(field))
         .and_then(|v| v.as_str())
         .map(String::from)
+}
+
+/// AVE-10: whether an unbound approval in `rec` must fail verification under `opts`. With the policy off it
+/// never does. With it on and no cutover it always does. With a cutover it does unless the record's
+/// `received_ts` is a canonical instant strictly before the cutover (an unreadable `received_ts` counts as
+/// after it).
+fn approver_binding_required(opts: &VerifyOptions, rec: &CanonValue) -> bool {
+    if !opts.require_approver_binding {
+        return false;
+    }
+    match (&opts.approver_binding_since, s(rec, "received_ts")) {
+        (Some(since), Some(received)) if is_canonical_ts(&received) => {
+            received.as_str() >= since.as_str()
+        }
+        _ => true,
+    }
 }
 
 /// How a govder record's signed evidence relates to what the verifier re-derives from its own fields.
@@ -2418,6 +2795,9 @@ enum GovderEvidence {
     /// A record that names an approver (decided_by / sign_offs) whose signed evidence is the
     /// historical field set: valid history, but its approver identity is not bound by the evidence.
     ApproverUnbound,
+    /// A decided (approved or denied) govder approval whose body names no approver at all: no
+    /// non-empty decided_by and no sign-offs, so there is nobody for the evidence to bind.
+    NamesNoApprover,
     /// The signed evidence_hash matches neither spelling (or a required field is missing).
     Mismatch,
 }
@@ -2557,6 +2937,16 @@ fn govder_evidence_rederivable(rec: &CanonValue) -> GovderEvidence {
     };
     let carries_approver = pairs.len() != legacy_pairs.len();
     if hash_of(pairs).as_deref() == Some(signed) {
+        // AVE-10: a decided approval that names nobody is not an approval to bind. Expired and
+        // escalation records are exempt (they carry no decider by design).
+        let decided = gov.get("type").and_then(|v| v.as_str()) == Some("approval")
+            && matches!(
+                body.and_then(|b| s(b, "status")).as_deref(),
+                Some("approved") | Some("denied")
+            );
+        if decided && !carries_approver {
+            return GovderEvidence::NamesNoApprover;
+        }
         return GovderEvidence::Bound;
     }
     // A record sealed before XV-11 carries decided_by / sign_offs in its body but its signed
@@ -5501,6 +5891,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let key_entries = arr(bundle, "keys", &empty, &mut issues);
     let records = arr(bundle, "records", &empty, &mut issues);
     let checkpoints = arr(bundle, "checkpoints", &empty, &mut issues);
+    // AVE-01: a month segment states a base checkpoint and a month. Read once, before the DAG and chain checks that
+    // need the base; a whole-history bundle has no `segment` and every later branch on it is a no-op.
+    let segment = evaluate_segment(bundle, checkpoints, opts, &mut issues);
     if bundle.as_object().is_none() {
         issues.push("bundle is not a JSON object".into());
     }
@@ -5738,9 +6131,30 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         {
             match govder_evidence_rederivable(rec) {
                 GovderEvidence::Bound => {}
-                GovderEvidence::ApproverUnbound => notes.push(format!(
-                    "record {i}: the govder record names its approver(s) but its signed evidence predates approver binding, so decided_by and the sign-off set are not committed by authority.evidence_hash"
-                )),
+                GovderEvidence::ApproverUnbound => {
+                    let msg = format!(
+                        "record {i}: the govder record names its approver(s) but its signed evidence predates approver binding, so decided_by and the sign-off set are not committed by authority.evidence_hash"
+                    );
+                    notes.push(msg.clone());
+                    if approver_binding_required(opts, rec) {
+                        semantic_record_conflict = true;
+                        issues.push(format!(
+                            "record {i}: approver binding is required and this approval does not commit who approved: decided_by and the sign-off set are not covered by the signed evidence"
+                        ));
+                    }
+                }
+                GovderEvidence::NamesNoApprover => {
+                    let msg = format!(
+                        "record {i}: the govder approval names no approver (no decided_by and no sign-offs), so there is no approver for the signed evidence to bind"
+                    );
+                    notes.push(msg.clone());
+                    if approver_binding_required(opts, rec) {
+                        semantic_record_conflict = true;
+                        issues.push(format!(
+                            "record {i}: approver binding is required and this approval names no approver: decided_by and the sign-off set are absent"
+                        ));
+                    }
+                }
                 GovderEvidence::Mismatch => {
                     semantic_record_conflict = true;
                     let msg = format!(
@@ -5795,13 +6209,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let cleartext_content_records = count_cleartext_content(records);
 
     // ---- 3. DAG ----
-    let (dag_ok, dag_heads, collapsed_duplicates, dag_opt) = match dag::build(records) {
-        Ok(d) => (true, d.heads.len(), d.collapsed_duplicates, Some(d)),
-        Err(e) => {
-            issues.push(format!("DAG invalid: {e}"));
-            (false, 0, 0, None)
-        }
-    };
+    let (dag_ok, dag_heads, collapsed_duplicates, dag_opt) =
+        match dag::build_from(records, segment.base.as_ref().map(|b| &b.frontier)) {
+            Ok(d) => (true, d.heads.len(), d.collapsed_duplicates, Some(d)),
+            Err(e) => {
+                issues.push(format!("DAG invalid: {e}"));
+                (false, 0, 0, None)
+            }
+        };
 
     // ---- 4. checkpoints + anchors ----
     let mut checkpoints_verified = 0usize;
@@ -6089,7 +6504,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut chain_ok = true;
     match &dag_opt {
         Some(d) if !checkpoints.is_empty() => {
-            if let Err(e) = validate_chain(checkpoints, d) {
+            let base = segment.base.as_ref().map(|b| SegmentBase {
+                seq: b.seq,
+                hash: &b.hash,
+                record_count: b.record_count,
+            });
+            if let Err(e) = validate_segment_chain(checkpoints, d, base.as_ref()) {
                 chain_ok = false;
                 issues.push(format!("checkpoint chain: {e}"));
             }
@@ -6234,6 +6654,10 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut denied_grants = 0usize;
     let mut seen_grants: BTreeSet<&str> = BTreeSet::new();
     let mut seen_denials: BTreeSet<&str> = BTreeSet::new();
+    let mut gateway_refusals = 0usize;
+    let mut gateway_refusal_attempts = 0u64;
+    let mut gateway_refusals_by_class: BTreeMap<String, u64> = BTreeMap::new();
+    let mut seen_refusals: BTreeSet<&str> = BTreeSet::new();
     // F8 (always-on, anchoring-independent): grant_id -> content_hash over the VERIFIED broker grants, so a
     // second distinct content_hash under one grant_id (broker equivocation) is flagged whether or not the
     // grant is anchored/closed. Tracked in THIS (un-gated) counting pass, not the closed-gated accounting
@@ -6242,6 +6666,9 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut grant_content_seen: BTreeMap<String, String> = BTreeMap::new();
     let mut grant_equivocations: BTreeSet<String> = BTreeSet::new();
     let grant_issues_before = issues.len();
+    // A malformed refusal is a hard issue but carries no grant or use evidence, so it must not read as a
+    // grant contradiction: its issues join `issues` only after the grant window closes.
+    let mut refusal_issues: Vec<String> = Vec::new();
     for rt in &record_trust {
         let rec = &records[rt.index];
         if s(rec, "event_type").as_deref() == Some("credential_grant")
@@ -6320,9 +6747,32 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         {
             denied_grants += 1;
         }
+        // feir-ops#1: gateway refusals, keyed on record_kind (never event_type alone, so a legacy generic
+        // record with that event_type keeps its verdict). The shape guard fails closed as a hard issue; the
+        // count covers only integrity-proven, shape-valid records, deduped by content_hash.
+        if crate::refusal::is_refusal(rec) && seen_refusals.insert(rt.content_hash.as_str()) {
+            match crate::refusal::check_shape(rec) {
+                Err(why) => refusal_issues.push(format!(
+                    "gateway refusal {} ({}): {why} (fail-closed)",
+                    rt.index, rt.record_id
+                )),
+                Ok(c) => {
+                    if rt.trust == TrustLevel::IntegrityProven {
+                        gateway_refusals += 1;
+                        gateway_refusal_attempts =
+                            gateway_refusal_attempts.saturating_add(c.attempts);
+                        for (class, n) in c.by_class {
+                            let e = gateway_refusals_by_class.entry(class).or_insert(0);
+                            *e = e.saturating_add(n);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let grant_contradiction = issues.len() > grant_issues_before;
+    issues.extend(refusal_issues);
     // ---- Tier-B (ADR 0003 step 5): use↔grant join (R3) ----
     // CLOSED = a record's content_hash is transitively committed by a verified, ANCHORED checkpoint (the union of
     // the anchored committed sets). COMMITTED = transitively committed by ANY verified (signed, key-honored)
@@ -6366,6 +6816,19 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     // Index closed, fully-verified grants by grant_id, reading match fields ONLY from the proven
     // grant_evidence (R1). See `GrantInfo`.
     let mut grants_by_id: BTreeMap<String, GrantInfo> = BTreeMap::new();
+    // AVE-01: in a segment that starts after a base checkpoint, a use or outcome may name a grant or intent sealed in
+    // an earlier month. No record in this bundle carries that id, so the join cannot be made here: it is
+    // listed as unresolved (never matched, never a violation) and `averin-verify chain` resolves it against
+    // the earlier months. A reference to a record that IS in the bundle but failed to index stays a violation.
+    let segment_record_ids: BTreeSet<&str> = if segment.base.is_some() {
+        records
+            .iter()
+            .filter_map(|r| r.get("record_id").and_then(|v| v.as_str()))
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut segment_unresolved: BTreeSet<(String, String, String)> = BTreeSet::new();
     // A required credential disclosure applies to every accepted committed broker grant,
     // including an unused grant. Counting only disclosures the exporter chose to provide would
     // let one opened grant mask a second grant's missing descriptor.
@@ -7151,6 +7614,18 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
             // a CLOSED use needs a CLOSED grant (unchanged R3 semantics); a committed-only use may pair with a
             // committed-only grant, but can then only end as pending.
             Some(g) if g.closed || !use_closed => g,
+            None if segment.base.is_some() && !segment_record_ids.contains(gid.as_str()) => {
+                // The grant is in an earlier month, so the rest of the use predicate waits for the chain. A grant
+                // the signed revocation_list this month carries names as revoked is blocked here all the same
+                // (M5): a signed revocation is monotone, and it does not depend on where the grant was issued.
+                if revocation.revoked.contains(&gid) {
+                    revoked_uses_blocked += 1;
+                    revoked_membership_found = true;
+                    violation(&mut issues, format!("use of grant '{gid}' which a signed revocation_list ({}) marks REVOKED — blocked (M5)", revocation.status));
+                }
+                segment_unresolved.insert(("use".into(), rt.record_id.clone(), gid.clone()));
+                continue;
+            }
             _ => {
                 unmatched_violation += 1;
                 violation(&mut issues, format!("no matching {} grant '{gid}' — action without a credential (Tier-B violation)", if use_closed { "closed" } else { "committed" }));
@@ -7270,6 +7745,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut legacy_orphans = 0usize;
     for o in &outcomes {
         if !consumed_outcomes.contains(&o.record_id) {
+            if segment.base.is_some() && !segment_record_ids.contains(o.intent_ref.as_str()) {
+                segment_unresolved.insert((
+                    "use_outcome".into(),
+                    o.record_id.clone(),
+                    o.intent_ref.clone(),
+                ));
+                continue;
+            }
             unmatched_violation += 1;
             legacy_orphans += 1;
             if !hist_consumed_outcomes.contains(&o.record_id) {
@@ -7721,6 +8204,11 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     let mut per_broker_trust: Vec<(String, String)> = Vec::new();
     let broker_issues_before = issues.len();
     let broker_trust = match dag_opt.as_ref() {
+        // AVE-01: grant-log transparency (D6) and federation heads chain every grant since the project began. A
+        // month that starts after a base checkpoint cannot re-derive them, so it reports `assumed` (never a
+        // verified sequence) and the capstone claims stay unsatisfied; the first month and whole-history
+        // bundles evaluate them as always.
+        Some(_) if segment.base.is_some() => "assumed".to_string(),
         Some(d) => {
             let full_committed = committed_set(records, &d.by_hash, &d.heads);
             // ACTIVATION (spec §M4): a committed, INTEGRITY-PROVEN Broker grant carrying a non-empty signed
@@ -7883,6 +8371,41 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         && relevant_roles
             .iter()
             .all(|rt| rt.authority == AuthorityTrust::Verified);
+    let segment_report = segment.present.then(|| {
+        let head = checkpoints
+            .iter()
+            .max_by_key(|cp| cp.get("checkpoint_seq").and_then(|v| v.as_int()));
+        SegmentReport {
+            month: segment.month.clone(),
+            base_seq: segment.base.as_ref().map(|b| b.seq),
+            base_checkpoint_hash: segment.base.as_ref().map(|b| b.hash.clone()),
+            head_seq: latest_cp_seq,
+            head_checkpoint_hash: head.and_then(|cp| s(cp, "checkpoint_hash")),
+            head_record_count: head
+                .and_then(|cp| cp.get("record_count").and_then(|v| v.as_int()))
+                .unwrap_or(0),
+            link: match &segment.base {
+                None => "genesis",
+                Some(b) if opts.segment_base_pin.as_deref() == Some(b.hash.as_str()) => {
+                    "base_pinned"
+                }
+                Some(_) => "base_unpinned",
+            },
+            base_anchored: segment
+                .base
+                .as_ref()
+                .is_some_and(|b| anchored.iter().any(|(seq, _, _)| *seq == b.seq)),
+            earlier_parent_refs: dag_opt.as_ref().map_or(0, |d| d.earlier_refs.len()),
+            unresolved_cross_month: segment_unresolved.iter().cloned().collect(),
+            earlier_parent_ref_hashes: dag_opt
+                .as_ref()
+                .map_or_else(Vec::new, |d| d.earlier_refs.iter().cloned().collect()),
+            not_evaluated: segment_not_evaluated(
+                segment.base.is_some(),
+                dag_opt.as_ref().is_some_and(|d| !d.earlier_refs.is_empty()),
+            ),
+        }
+    });
     let mut report = VerifyReport {
         ok,
         claims: ClaimResults::fatal(),
@@ -7908,8 +8431,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         key_rotations_verified: rotation_eval.verified,
         key_rotations_chain_trusted: rotation_eval.chain_trusted.len(),
         cleartext_content_records,
+        segment: segment_report,
         grant_total,
         denied_grants,
+        gateway_refusals,
+        gateway_refusal_attempts,
+        gateway_refusals_by_class,
         grant_verified,
         uses_total,
         uses_matched,
@@ -7991,13 +8518,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         && report.grant_total > 0
         && report.grant_verified == report.grant_total
         && body_bound_role_evidence;
-    let brokered_use_valid = report.uses_total > 0
-        && report.uses_matched == report.uses_total
-        && report.uses_pop_reverified == report.uses_matched
-        && report.unmatched_violation == 0
-        && report.unmatched_pending == 0
-        && report.taxonomy_status == "validated"
-        && report.uses_action_unverified == 0;
+    let brokered_use_valid = brokered_use_is_valid(&report, segment_unresolved.is_empty());
     let introspected_use_valid = report.native_credential_present
         && report.introspection_status == "attested"
         && report.introspection_transcripts_total > 0

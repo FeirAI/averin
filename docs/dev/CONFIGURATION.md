@@ -40,10 +40,13 @@ The ingestion + app API. Started with `./averin-server`.
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
 | `AVERIN_DATABASE_URL` | unset ⇒ **in-memory** | No (but see note) | Postgres DSN for a separate, least-privilege runtime role. Existing databases must first use the explicit maintenance cutover below; ordinary startup refuses an older schema. Connection failure, a missing nonce cutover marker, or a newer schema is fatal. Unset ⇒ in-memory store (NOT durable; logs a WARNING). The project transaction owns consume-before-act claims and the signed use receipt. |
+| `AVERIN_REGION` | unset ⇒ not declared | No | The cell's region label (lower-case letters, digits and hyphens, starting with a letter, at most 64 bytes, for example `eu-central-1`). averin does not interpret it; `GET /v2/posture` reports it as `region` so the deploy-time verifier can require every plane of a cell to name the same region. An invalid value is a **startup error**. |
 | `AVERIN_CONTENT_DIR` | unset ⇒ in-memory | No | Filesystem directory for the durable content store (the raw low-entropy `input`/`output`/`rationale` values committed at ingest, revealed on selective disclosure). Blobs are stored **AES-256-GCM encrypted at rest**, under a per-tenant subdirectory (`<dir>/tenant-<hash>/sha256-<hex>`); the per-tenant key is derived from `AVERIN_CONTENT_MASTER_KEY` via HMAC, with tenant+plaintext-digest as GCM additional-authenticated-data. Encryption is **at-rest only** — a disclosing export still ships the plaintext value, so offline verification is unchanged. A bad/uncreatable dir is fatal. Unset ⇒ in-memory (disclosures don't survive a restart; logs a WARNING). |
 | `AVERIN_CONTENT_MASTER_KEY` (or `_FILE`) | — | **Yes** when `AVERIN_CONTENT_DIR` is set | 64 hex chars = 32-byte master key from which each tenant's content-encryption key is derived. **Missing/invalid with the dir set ⇒ fatal** (`log.Fatal`) — the content store never runs unencrypted. The `_FILE` form reads the value from a mounted secret file (setting both the inline and `_FILE` form is fatal). No effect when the content store is in-memory. |
 | `AVERIN_RAW_RETENTION_DAYS` | `30` | No | Retention window for the encrypted raw payloads: a daily purge deletes blobs older than N days (by file mtime). Must be a positive integer (else fatal). Re-committing identical content refreshes its mtime, restarting the window. Purging removes only the raw opening material — the sealed record keeps its hiding commitment, so a post-purge export reports `raw_content_available:false` while the proofs stay verifiable. Only applies when `AVERIN_CONTENT_DIR` is set. |
 | `AVERIN_WITNESS_DIR` | unset ⇒ no witness | No | Filesystem directory for a customer-controlled append-only checkpoint witness (`<dir>/<project>/checkpoint-<seq>.json`). Best-effort: a witness write failure is a warning, not fatal. Defends omission/rewrite (threats #1/#15). |
+| `AVERIN_TSA_PRESET` | unset ⇒ no anchoring | No | `freetsa` stamps at https://freetsa.org/tsr (free, no service level) and logs the signing key to pin. An unknown name is fatal; setting it together with `AVERIN_TSA_URL` is fatal. See [TIMESTAMPS.md](TIMESTAMPS.md). |
+| `AVERIN_TSA_AUTH_HEADER` | unset ⇒ none sent | No | The `Authorization` header value a paid TSA needs (for example `Basic ...`), sent with every stamp request to `AVERIN_TSA_URL` or the preset. Start-up is refused when it is set with a URL that is not https. |
 | `AVERIN_TSA_URL` | unset ⇒ no anchoring | No | URL of a third-party RFC 3161 timestamp authority. When set, sealed checkpoints are anchored with an RFC 3161 token (attached at export), defending backdating (threat #3). The verifier must pin this TSA's cert out-of-band (`tsa_keys` in `opts.json`) to trust the anchor. |
 | `AVERIN_ATTESTATION_SEED` (or `_FILE`) | unset ⇒ no deployment attestation | Yes | 64 hex chars = role-separated Ed25519 issuer seed. When set, exports carry a signed `deployment_attestation` bound to the latest checkpoint. This alone does not make `/v2/verify` attested; the verifier roots below must also be independently pinned. |
 | `AVERIN_VERIFY_ATTESTATION_PUBKEY` | unset ⇒ D7 unevaluated | No | Comma-separated `ed25519pub:` issuer keys pinned out of band by the operator/auditor. Must be configured together with `AVERIN_VERIFY_TSA_SPKI_B64`; partial configuration is fatal. |
@@ -83,6 +86,24 @@ The runner reads the stored version (an existing **unstamped** DB reads as `0`) 
 **To add a migration:** bump `CurrentSchemaVersion` and append one ordered DDL step in
 `server/internal/pgschema` — it is a version stamp, not a framework.
 
+**Hook mode (`averin-migrate --hook`), for a pre-upgrade Job or any automation.** One idempotent
+invocation with the migration credential: an **empty** database is initialized, a database **at the
+current version is left unchanged** (a rerun, a retried Job and a concurrent run all print `noop`), an
+**older** database (or an unstamped legacy schema) is advanced **only** when `--old-runtime` and
+`--new-runtime` are given together, through the same validated cutover barrier as the manual command,
+and a database **newer** than the binary is refused. Without the roles an older database is left
+untouched, the command prints `cutover_required` and exits **3**, so a Job can surface "a maintenance
+window is needed" distinctly from a failure. Every state change runs under the same advisory-lock
+transaction as server startup, so concurrent runs serialize: exactly one reports `initialized` or
+`cutover`, the others report `noop`. On success, and for `cutover_required`, it prints one JSON line on stdout (`plane`, `action`,
+`schema_before`, `schema_after`, `schema_current`); a refusal or failure (a database newer than the binary, an unreachable database) prints a message on stderr and no JSON line, so read the exit status, not stdout, to tell failure from success; exit status 0 success, 1 refused or failed,
+2 usage or configuration, 3 cutover required. It does not grant the runtime role anything: run the
+grants step after it, then verify the runtime credential with `averin-migrate --check-runtime`
+(reads `AVERIN_DATABASE_URL`, the runtime DSN; runs the same check the server runs at startup, so an
+owning, superuser or over-privileged runtime role fails the Job instead of the first pod; prints
+`{"action":"runtime_checked","ok":...}` and exits 1 when it refuses). `--hook` cannot take the
+rollback path: **downgrades are not supported**, as above.
+
 For a fresh empty database, run `cd server && AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate --init`, then grant a distinct runtime role its application privileges and set `AVERIN_DATABASE_URL` to that role's DSN. For an existing database, stop old servers/workers and producers, drain sessions and prepared transactions, revoke/rotate every old runtime identity, and run `cd server && AVERIN_MIGRATION_DATABASE_URL='<migration DSN>' go run ./cmd/averin-migrate --old-runtime old_role[,other_old_role] --new-runtime new_role`. The command verifies each named old identity is `NOLOGIN`, has no live sessions or prepared transactions, and has no effective write privilege on Averin tables (including inherited grants); it applies pending migrations (v6 nonce ledger, v7 temporal revocation) and stamps them in one transaction. The operator must supply a complete retired-identity inventory and distribute the new secret only to new binaries; a database role cannot identify a binary version. The new runtime must be non-owner, non-superuser, and unable to inherit ownership. A later migration needs a fresh barrier for its own version; the v6 marker is not a reusable authorization, and the command re-validates the barrier for v7 even on a database already cut over to v6. An advancing cutover also refuses while the new runtime role has any session or the database has any prepared transaction: start new runtimes only after it commits. It further refuses while any other client backend is connected to the database (the migration identity must be a superuser or have the privileges of `pg_read_all_stats`, `GRANT pg_read_all_stats TO <migration role>`, or the advancing cutover refuses: without it PostgreSQL hides other roles' sessions from `pg_stat_activity`, and a session whose type is hidden counts as a client), and while any LOGIN, non-superuser role other than the migration identity, the new runtime and the table owner has effective `INSERT`/`UPDATE`/`DELETE` on a schema table directly, by inheritance or through a `SET ROLE`-reachable membership (a LOGIN member of a retired role is otherwise not named by `--old-runtime`). `averin-migrate --timeout <duration>` (or `AVERIN_MIGRATE_TIMEOUT`) sets the run's deadline, default `90s`; raise it for large histories. Server readiness (`CheckRuntime`) refuses a runtime role that owns any schema table or holds a mutation privilege on an append-only table, at table or column level, directly, inherited or through any role it can `SET ROLE` to (see [the runbook](../operator-verification.md#required-deployment-cutoff) for the exact list). See [the operator cutover runbook](../operator-verification.md#required-deployment-cutoff).
 
 Migration `0006` keeps unknown-owner old nonce/JTI rows as immutable global exclusions. Scoped `(authenticated project, configured resource, nonce)` claims are checked against these exclusions within the receipt transaction; JTI claims remain global. Ordinary sweep never removes legacy exclusions. The explicit `--purge-legacy` maintenance command requires the same retired-role barrier and waits for the DB-time v6 cutoff plus the 24-hour retention floor. This floor must exceed the maximum accepted capability TTL (one hour) plus the worst old/new application-to-DB clock disagreement; the accepted issuance skew is 30 seconds. The finite hold assumes clocks remain within that bound, not arbitrary clock jumps. New online uses reject malformed or overlong capability lifetimes before claiming; this does not alter historical offline bytes. Increasing TTL, skew, accepted credential modes, or clock-disagreement bounds requires a new retention review.
@@ -98,7 +119,8 @@ and logs a `WARNING`; new duplicates are still rejected by the application.
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_API_KEYS` | unset ⇒ **no ordinary API auth** | No | Project-scoped API keys in the form `proj-a:tok1,tok2;proj-b:tok3`. When set, ordinary `/v2/*` routes are gated; `/healthz` stays open. If set but parses to **zero** keys ⇒ **fatal**. Unset ⇒ ordinary API routes are **UNAUTHENTICATED** (dev/single-tenant; logs a WARNING). The recovery route always has separate auth. See [SECURITY.md](SECURITY.md). |
+| `AVERIN_DEV_MODE` | unset (off) | No | `1`/`true` selects local development: with no `AVERIN_API_KEYS` the API is **open** (warned), the in-memory store and the dev signing seed are allowed, and `AVERIN_REQUIRE_PROD_SECRETS`, `AVERIN_REQUIRE_BODY_BOUND_AUTHORITY` and `AVERIN_REQUIRE_APPROVER_BINDING` default **off**. It is the only way to turn the production gate off. Any other value is fatal. Never set it in production. |
+| `AVERIN_API_KEYS` | **required** (unset ⇒ refuses to start, unless `AVERIN_DEV_MODE=1`) | Yes | Project API keys, in one of two forms. **Legacy** `proj-a:tok1,tok2;proj-b:tok3`: every token is an `admin` token with no expiry. **JSON** (value starts with `[`): `[{"project":"p","token":"<secret>","role":"read","not_after":"2027-01-01T00:00:00Z"}]`. `role` is required and is `read`, `write` or `admin` (see [API.md](API.md) for the routes each allows). Roles are ordered `admin` > `write` > `read`, so `write` includes everything `read` can do, including `GET /v2/export` with its full evidence: a write-only plane token can still read the project's evidence. Give `token_sha256` (64 hex chars) instead of `token` to keep the secret out of the config. `not_after` is optional (RFC 3339; a token is invalid at and after it, so omitting it means it never expires). Unknown fields, an unknown role, a bad date, a duplicate project+token and an empty array are fatal; error messages never echo a token. Rotate by adding the new token, moving clients, then removing the old one (or let `not_after` retire it). Without keys, and outside dev mode, the server does not start; a server built without an auth store refuses every `/v2/*` request. The recovery route always has separate auth. See [SECURITY.md](SECURITY.md). |
 | `AVERIN_RECOVERY_KEYS` | unset ⇒ recovery denied | No | JSON array of `{ "project_id": "p1", "actor_id": "operator-1", "token": "<secret>" }` objects. Grants only `broker_seq:recover` for the named project, not ordinary write access. Actor ID is a stable non-secret identity of 1–128 printable non-whitespace ASCII bytes, signed byte-exact into recovery evidence. Absent or `[]` denies even in dev-open mode. Invalid entries, duplicate tokens, or a token shared with an ordinary API key fail startup; token values are never logged. For rotation, temporarily configure two distinct tokens with the same actor ID, then remove the old token. |
 
 ### Authority elevation (external authority keys, T7)
@@ -127,7 +149,8 @@ kill/approval/policy evidence rejected (or, under the explicit fail-open opt-out
 | `AVERIN_DELEGATE_SIGNED_PUBKEY` | unset | No | Pins one **global** key for the `delegate_signed` source (govder's delegate-agent approval records). This is the third value `govder-derive-pubkeys` prints. Bad value ⇒ fatal. |
 | `AVERIN_AUTHORITY_KEYS` | unset | No | General `[project:]source=pubkey,...` list (sources: `policy_engine_signed`, `human_signed`, `delegate_signed`). Without a `project:` prefix the key is the global default for that source; with one it is pinned for that project only. A malformed entry, an unknown source, an empty project, or a duplicate `(project, source)` is fatal. Pinning the **same** `(project, source)` twice across any of these forms is a fatal config error. |
 | `AVERIN_REQUIRE_PINNED_AUTHORITY` | **`1` (on)** | No | **Fail-closed authority posture (the default).** A record that CLAIMS an elevated source (`policy_engine_signed`/`human_signed`/`delegate_signed`) whose `evidence_sig` fails to verify under the key pinned for its `(project, source)` — or whose source is **unpinned for that project** — is **REJECTED** with a retryable `500` instead of silently sealed downgraded to the forgeable `caller_declared`. `0`/`false` is the **explicit fail-OPEN opt-out** (restores the Phase-1 silent downgrade + a rate-limited WARNING + the `averin_authority_downgrades_total` counter) and logs a loud WARNING naming what that means; any other value is **fatal** (a typo must not select a security posture). Ordinary `caller_declared` traffic is never affected either way. |
-| `AVERIN_REQUIRE_BODY_BOUND_AUTHORITY` | `0` (reader-first rollout) | No | When `1`/`true`, new generic ingest rejects elevated external authority claims without a complete v3 subject proof. Historical v2 exports remain readable as `legacy_unbound`. Local broker/resource builders always emit v3. Set this after external Govder and approval producers have moved to v3; unknown values are fatal. |
+| `AVERIN_REQUIRE_BODY_BOUND_AUTHORITY` | **`1` (on)**, off in dev mode | No | New generic ingest rejects elevated external authority claims without a complete v3 subject proof. Historical v2 exports remain readable as `legacy_unbound`. Local broker/resource builders always emit v3, and govder emits only v3. An explicit `0`/`false` is the migration opt-out for an old producer and logs a WARNING; feir-os sets `1` explicitly. Unknown values are fatal. |
+| `AVERIN_REQUIRE_APPROVER_BINDING` | **`1` (on)**, off in dev mode | No | The server's own `/v2/verify` treats a govder approval whose signed evidence leaves out who approved (`decided_by` and the sign-off set) as a verification failure, not a note. The server pins the project's authority keys (the ones ingest elevates under) in that verification, so a govder record is read as verified and the policy can fire; with no authority key pinned the record is unverifiable and the policy has nothing to check. Export reuses the verdict only for its completeness wording and does not refuse on it. `AVERIN_APPROVER_BINDING_SINCE` (canonical `YYYY-MM-DDTHH:MM:SS.mmmZ`) keeps records received before it as history with a note, for a deployment that holds approvals sealed before approver binding. The offline CLI applies the same rule by default (`--allow-unbound-approvers` accepts history), but only for a record its `opts.json` pins the authority key for (`authority_keys`); without that key the record is unverifiable and no note or count is printed. opts.json can set `require_approver_binding` and `approver_binding_since`. |
 | `AVERIN_SEAL_SHAPE` | `enforce` | No | `enforce` makes the core refuse to seal a record body that `verify_sealed` would reject on top-level shape (unknown or missing key), `domain` or `canon_version`, so every record averin seals in this mode passes those verifier checks (records stored before this change are not re-checked). It also makes the core refuse to seal a checkpoint body that `verify_checkpoint_sealed` would reject on `domain` or `canon_version` (checkpoints stored before that change are not re-checked; the chain checks of the bundle verifier still run only at verify time). `shadow` seals such a body anyway and counts it in `averin_seal_shape_violations_total` (records and checkpoints share the count); it is a rollback switch only, because every verifier rejects the records and checkpoints it writes, and the server logs a warning at startup. Values other than `enforce` or `shadow` are fatal. In `enforce` mode the generic `/v2/records` path also refuses an unknown top-level key with a `400` before anything is sealed (the key list is a Go mirror of the core's, pinned by a parity test); in `shadow` mode that early refusal is off. Applies to the signing core and the resource core. Does not check nested object shape. |
 
 Every pinned authority key must be role-separated (it is rejected if it equals the server signing
@@ -197,63 +220,34 @@ sweeper and its own readiness probe, not a separate request-time claim path.
 | `AVERIN_REVOCATION_SEED` (or `_FILE`) | unset ⇒ revocation off | No | 64-hex (32-byte) Ed25519 seed for the revocation issuer. Bad value ⇒ fatal. **Must differ from the signing/broker/resource seeds** (role separation) ⇒ fatal otherwise. When set, `POST /v2/revoke` marks a `grant_id` revoked and every `/v2/export` carries a signed, time-bounded `revocation_list`. The revoked set (and, when the M6/M2 online two-phase grant flow is used, the pending prepare→finalize mint state) is **durable Postgres-backed** if `AVERIN_DATABASE_URL` is set — a revoke or an in-flight cosig/delegation approval survives a pod restart or `SIGTERM` — else in-memory only (a revoke issued or a mint prepared just before restart is forgotten). |
 | `AVERIN_REVOCATION_EXPORT_FORMAT` | `v1` | No | Plan 009. `v1` exports the legacy total-only `revocation_list` and refuses prospective revocations. `v2` exports `averin.revocation.list.v2` (per-grant mode and cutoff plus the signed database snapshot) and lets `POST /v2/revoke` accept `"mode":"prospective"`. Requires `AVERIN_REVOCATION_SEED`. Pre-plan-009 verifiers reject v2 lists, so switch only after upgrading every relying verifier (reader-first). Any other value is fatal. |
 
-### Metering (Stripe)
-
-| Variable | Default | Required | Behavior |
-|----------|---------|----------|----------|
-| `STRIPE_API_KEY` | unset ⇒ local counting only | No | When set, usage (records ingested, exports issued) is reported to Stripe. Unset ⇒ usage is counted locally only (visible via `GET /v2/usage`). |
-
-**Metering loss bounds (best-effort, volatile — read before relying on it for revenue).** The base
-usage counter is **in-memory** (`meter.Mem`) and the Stripe reporter is best-effort. The exact,
-deliberate loss modes:
-
-- **Restart re-grants the free tier.** The counter is not durable, so on a process restart every
-  project's `records` count resets to 0 and the first `FreeTierRecords` (1000) records are billed as
-  free **again**. Under-billing is bounded by `free_tier × restarts`.
-- **Queue-full drops.** Billable events are forwarded over a bounded async queue; under a Stripe
-  outage/overload the queue fills and further events are **dropped, not retried**. Surfaced on
-  `GET /metrics` as **`averin_meter_queue_drops_total`** (a growing value ⇒ silently lost revenue).
-- **Delivery-failure drops.** A meter-event POST that gets a transport error or a **non-2xx** (most
-  often an unmapped `project → stripe_customer_id` — averin maps `project` verbatim onto
-  `stripe_customer_id`) is logged and **dropped, not retried**. Surfaced on `GET /metrics` as
-  **`averin_meter_post_failures_total`**. Map every project to a real Stripe customer id out-of-band
-  and **alert on both counters**.
-
-**Deferred (documented, not built):** a durable per-project counter (a Postgres table beside the store,
-surviving restart) + **idempotent, retried** Stripe delivery (meter-event ids) would close all three
-losses. Until then treat metering as advisory and reconcile against Stripe.
-
 ### Operational hardening (prod secret gate, egress scrubbing, graceful shutdown)
 
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
-| `AVERIN_REQUIRE_PROD_SECRETS` | `0` (off) | No | **Fail-closed prod gate.** When on (`1`/`true`), refuses to start unless `AVERIN_API_KEYS` is set (else the app API would be UNAUTHENTICATED), `AVERIN_DATABASE_URL` is set (else the store would be volatile in-memory, reopening a `/v2/use` replay window), and `AVERIN_SIGNING_SEED` is **not** the well-known committed dev seed (a globally-known, forgeable integrity root). Any of the three missing/failing is fatal (`log.Fatal`, names each missing one). Mirrors govder's `GOVDER_REQUIRE_AUTHORITY_SEED` and leria's `LERIA_REQUIRE_PROD_SECRETS`. Off preserves the fail-open Phase-1 default (each condition individually just logs a WARNING). |
+| `AVERIN_REQUIRE_PROD_SECRETS` | **`1` (on)**, off in dev mode | No | **Fail-closed prod gate, on by default.** Refuses to start unless `AVERIN_API_KEYS` is set (else the app API would be refused or open), `AVERIN_DATABASE_URL` is set (else the store would be volatile in-memory, reopening a `/v2/use` replay window), and `AVERIN_SIGNING_SEED` is **not** the well-known committed dev seed (a globally-known, forgeable integrity root). Any of the three missing/failing is fatal (`log.Fatal`, names each missing one). The gate is turned off only by `AVERIN_DEV_MODE=1` (then `AVERIN_REQUIRE_PROD_SECRETS=0` is also accepted); `AVERIN_REQUIRE_PROD_SECRETS=0` outside dev mode is refused at startup. Mirrors govder's `GOVDER_REQUIRE_AUTHORITY_SEED` and leria's `LERIA_REQUIRE_PROD_SECRETS`. feir-os sets `1` explicitly. |
 | `AVERIN_SECRET_PATTERNS` | unset ⇒ built-in patterns only | No | JSON string array of extra RE2 regexes, atomically appended to the built-in credential-scrubbing rules (`server/internal/scrub`) that redact provider API keys, PEM private keys, JWTs, `Bearer`/`Basic` auth, generic `key: value` secrets, and high-entropy hex from captured I/O before it is stored or hashed. Each match is replaced with `[REDACTED:configured]`. **A malformed pattern (bad regex) is fatal at startup** — a typo must not silently create a secret-capture gap. Scrubbing is defense-in-depth (RE2 is linear-time / no ReDoS, but cannot catch every secret shape); the primary protection is that self-hosted data never leaves customer infra. |
-| `AVERIN_SHUTDOWN_TIMEOUT` | `25s` | No | Graceful-drain deadline on SIGINT/SIGTERM: `http.Server.Shutdown` lets in-flight requests (and, with `AVERIN_DATABASE_URL` set, the cross-request prepare→finalize window) finish before exit, then flushes the async Stripe meter queue and closes the store pool — all within this deadline. An unparseable or non-positive value logs a warning and keeps the default. **Must stay under the orchestrator's stop grace** (the shipped Kubernetes manifest sets `terminationGracePeriod=30s`; for docker-compose set `stop_grace_period >=` this) or the process is SIGKILLed mid-drain. `averin-proxy` reads the same variable with a different default (`60s`, below — it streams long completions and needs more room to drain). |
+| `AVERIN_SHUTDOWN_TIMEOUT` | `25s` | No | Graceful-drain deadline on SIGINT/SIGTERM: `http.Server.Shutdown` lets in-flight requests (and, with `AVERIN_DATABASE_URL` set, the cross-request prepare→finalize window) finish before exit, then closes the store pool, all within this deadline. An unparseable or non-positive value logs a warning and keeps the default. **Must stay under the orchestrator's stop grace** (the shipped Kubernetes manifest sets `terminationGracePeriod=30s`; for docker-compose set `stop_grace_period >=` this) or the process is SIGKILLed mid-drain. `averin-proxy` reads the same variable with a different default (`60s`, below, it streams long completions and needs more room to drain). |
 
-### Deployment hard requirements (rate limit + storage growth)
+### Storage and rate controls (quota, ingest limiter, denied-grant log)
 
-The app API is **Phase-1**: no per-project authz or storage quota of its own, and the record store is
-**append-only** (nothing can be deleted). Two operator controls are therefore **hard requirements**, not
-options (see [LIMITATIONS.md](LIMITATIONS.md) *Storage growth is unbounded*):
+The record store is append-only (nothing can be deleted), so growth is bounded by admission control:
 
-- **Put a reverse-proxy / API-gateway rate limit in front of averin.** This is the PRIMARY defense
-  against a leaked token (or an unauthenticated dev-posture deploy) driving unbounded billable,
-  append-only DB growth. As an **opt-in** in-process backstop the server library exposes
-  `WithIngestBudget(IngestBudget{...})` — a coarse per-project + global token bucket that answers `429`
-  on state-mutating `POST /v2/*` ingest (GET reads pass through). It is **off by default** (so no
-  existing deployment is throttled) and is **defense-in-depth**, never a substitute for the gateway
-  limit. Not yet exposed as an `averin-server` env var — wire it via an embedder (like `WithDeniedGrantLog`).
-- **Monitor database growth and alert on capacity.** Storage only ever grows; there is no in-store
-  eviction. Watch DB size / per-project record counts and alert well before exhaustion.
+| Variable | Default | Required | Behavior |
+|----------|---------|----------|----------|
+| `AVERIN_PROJECT_MAX_RECORDS` | unset (no cap) | No | Per-project cap on stored records of every kind (evidence, grants, receipts, denials). The count is read inside the project write transaction, so the cap is exact even with several replicas; a write that would pass it is refused with `507` and stores nothing, an idempotent replay still succeeds, reads are unaffected. A batch `POST /v2/records` is processed item by item, so the items that fit stay stored. Counted in `averin_quota_rejections_total`. `GET /v2/usage?project=` shows the count and the cap. The cap is on record **count**, not bytes: the bound is the cap times the per-record body limit. A negative or non-numeric value is fatal. |
+| `AVERIN_INGEST_BUDGET` | unset (off) | No | Coarse token-bucket rate limit on state-mutating `POST /v2/*`: `1` turns it on with the defaults, or a JSON object `{"per_project_per_sec":50,"per_project_burst":200,"global_per_sec":500,"global_burst":2000,"max_projects":4096}` (omitted fields take those defaults). A saturated bucket answers `429` with `Retry-After`; reads pass. Unknown fields and negative values are fatal. |
+| `AVERIN_DENIED_GRANT_LOG` | `0` (off) | No | `1` seals a tamper-evident record for every policy-refused grant request. It always runs with a rate budget so a varying-scope probe cannot inflate storage. |
+| `AVERIN_DENIED_GRANT_BUDGET` | defaults | No | The denial-seal budget: `1`/unset for the defaults, or a JSON object with the same fields as `AVERIN_INGEST_BUDGET` (defaults 5/s and 50 per project, 50/s and 500 global). Setting it without `AVERIN_DENIED_GRANT_LOG` is fatal. |
+
+Still operator work: a reverse-proxy or gateway rate limit in front of averin remains the primary control
+against a leaked token, and database size and the quota rejection counter should be monitored. See
+[LIMITATIONS.md](LIMITATIONS.md).
 
 > Note on options not exposed as env vars in the binary: the server library
 > (`server/internal/api`) also supports `WithAttestation` (deployment-attestation export) and
 > `WithCoverageManifest` (the operator-declared `side_effect_closure`, required for the
-> `attested_complete_over_brokered_surface` capstone), `WithDeniedGrantLog` (B11), and the two rate
-> backstops `WithIngestBudget` (coarse per-project ingest `429`, above) and `WithDeniedGrantBudget`
-> (bounds best-effort B11 denial seals). These are wired by embedders / the e2e harness, not by a
-> `averin-server` env var in the current `main.go`.
+> `attested_complete_over_brokered_surface` capstone). These are wired by embedders / the e2e
+> harness, not by an `averin-server` env var in the current `main.go`.
 
 ---
 
@@ -280,6 +274,7 @@ Experimental MCP server over stdio, exposing averin to agents as tools.
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
 | `AVERIN_SERVER_URL` | `http://localhost:8080` | No | The averin server the MCP tools call. |
+| `AVERIN_API_TOKEN` | unset | Outside dev mode | Sent as a Bearer token on every call. A server outside `AVERIN_DEV_MODE=1` refuses requests without one; the token needs the `write` role for `record_decision`. |
 
 ---
 
@@ -297,6 +292,13 @@ CLI tool that mints a **signed operation taxonomy** artifact (D4). Flags (`flag`
 | `-out` | stdout | Write the signed taxonomy JSON here. |
 | `-single` | — | A `single_operation` entry `resource_id=action` (repeatable). |
 | `-escalating` | — | An escalating entry `resource_id=action` (repeatable). |
+| `-verify` | off | Verify mode: no key is used and nothing is signed. Checks `-file` against `-pubkey`, `-digest` and `-version` and exits 0 only when the RCP digest, the version and the `averin.taxonomy.v1` signature all match; any mismatch (or an unsigned, malformed or tampered artifact; the raw bytes are parsed as the runtime verifier parses them, so a duplicate key, trailing data, a lone surrogate or a malformed action list is refused) exits 1. Prints `taxonomy verify: OK (version, digest)`, never key material. The verifier's own check downgrades the same mismatch to a quiet `taxonomy_status: untrusted`; this mode makes it an error. It does not judge the effective window. |
+| `-file` | none | With `-verify`: the signed taxonomy artifact. |
+| `-pubkey` | none | With `-verify`: the pinned issuer key `ed25519pub:...` (a comma list is accepted). |
+| `-digest` | none | With `-verify`: the pinned `taxonomy_digest` (`sha256:...`). |
+
+Build note: the tool is cgo and links the Rust staticlib, so build `cargo build -p averin-decision-core` first. On a
+glibc older than 2.34 add `CGO_LDFLAGS='-ldl -lm'`.
 
 ---
 
@@ -305,9 +307,15 @@ CLI tool that mints a **signed operation taxonomy** artifact (D4). Flags (`flag`
 Not env-configured; arguments only:
 
 ```
-averin-verify bundle <bundle.json> [opts.json]    # full offline verification
+averin-verify bundle <bundle.json> [opts.json] [--allow-unbound-approvers]    # full offline verification
 averin-verify record <record.json> [ed25519pub:<key>]   # single record (CONSISTENT, or PASS with the signer's key)
 ```
+
+`bundle` fails a govder approval whose signed evidence does not commit who approved (an issue, so FAIL),
+prints the reason and a count of such approvals under the issues, and exits 1. `--allow-unbound-approvers`
+accepts approvals sealed before approver binding as history (they are still counted and noted). `opts.json` may set
+`require_approver_binding` (boolean) and `approver_binding_since` (a canonical timestamp: records received before
+it stay history), which then override the flag.
 
 With `opts.json`, the role-disjoint authority key sets are pinned (authentic verification + the
 mode gates). The `opts.json` keys are documented in [`../operator-verification.md`](../operator-verification.md):
@@ -340,6 +348,8 @@ printed `PASS (integrity only)` and exited `0`.
 |----------|---------|---------|
 | `AVERIN_DB_PASSWORD` | `averin` | Postgres password (and folded into the server's `AVERIN_DATABASE_URL`). |
 | `AVERIN_SIGNING_SEED` | **none — required** | Server signing seed. Compose uses `${AVERIN_SIGNING_SEED:?...}`, so `docker compose up` refuses to start without it; generate a fresh one with `openssl rand -hex 32`. |
+| `AVERIN_API_KEYS` | **none, required** | The server's project API keys (compose uses `${AVERIN_API_KEYS:?...}`); the server refuses to start without them. |
+| `AVERIN_PROXY_AVERIN_TOKEN` | **none, required** | The write (or admin) token for `AVERIN_PROJECT_ID` that the proxy records with. Must be one of the tokens in `AVERIN_API_KEYS`. |
 | `AVERIN_PROXY_INBOUND_TOKEN` | **none — required** | Inbound auth token for `averin-proxy`. Compose uses `${AVERIN_PROXY_INBOUND_TOKEN:?...}`, so the stack refuses to start without it (without it the proxy would be an open relay); generate one with `openssl rand -hex 24`. |
 | `AVERIN_UPSTREAM` | `https://api.openai.com` | Overrides the proxy's upstream LLM base URL. |
 | `AVERIN_PROJECT_ID` | `default` | Overrides the project the proxied calls are recorded under. |

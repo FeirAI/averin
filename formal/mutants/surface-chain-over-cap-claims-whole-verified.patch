@@ -1,0 +1,13 @@
+diff --git a/core/src/bin/averin_verify.rs b/core/src/bin/averin_verify.rs
+index 210428c..781f557 100644
+--- a/core/src/bin/averin_verify.rs
++++ b/core/src/bin/averin_verify.rs
+@@ -529,7 +529,7 @@ fn chain_notes(
+     let mut v = vec![
+         "        Each month verified and links to the previous head; the first month starts at genesis; no record is carried by two months.".to_string(),
+     ];
+-    if whole_verified {
++    if whole_verified || over_cap {
+         v.push("        The verdict is the whole history's: the months, concatenated, were verified as one bundle (grant-log transparency and federation heads included when the months carry them). The latest month's revocation_list and deployment_attestation, when it carries them, are part of it.".to_string());
+         if word == ClaimVerdict::Insufficient {
+             v.push(format!("        the history does not satisfy the requested claim {requested_claim}; the concatenated history is the same as a whole-history export would be."));

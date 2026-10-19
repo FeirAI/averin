@@ -2,9 +2,12 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -109,12 +112,11 @@ func TestSecretEnvOrFile_Fatal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.scenario, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-test.run=TestSecretEnvOrFile_Fatal")
-			cmd.Env = append(os.Environ(), "AVERIN_TEST_FATAL_CASE="+tc.scenario)
-			cmd.Env = append(cmd.Env, tc.env...)
-			out, err := cmd.CombinedOutput()
-			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
-				t.Fatalf("scenario %q: expected non-zero exit from log.Fatal, got %v\n%s", tc.scenario, err, out)
+			env := append(os.Environ(), "AVERIN_TEST_FATAL_CASE="+tc.scenario)
+			env = append(env, tc.env...)
+			out := startServerExpectRefusal(t, os.Args[0], []string{"-test.run=TestSecretEnvOrFile_Fatal"}, env)
+			if !strings.Contains(out, name) {
+				t.Fatalf("the log.Fatal message must name %s, so this is the reader's refusal and not another failure\n%s", name, out)
 			}
 		})
 	}
@@ -155,6 +157,7 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 			// broker seed file-mounted == inline revocation seed → R2 fatal.
 			name: "broker-via-file",
 			env: []string{
+				"AVERIN_DEV_MODE=1",
 				"AVERIN_SIGNING_SEED=" + seedSigning,
 				"AVERIN_BROKER_ISSUING_SEED_FILE=" + sharedFile,
 				"AVERIN_REVOCATION_SEED=" + seedShared,
@@ -164,6 +167,7 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 			// resource seed file-mounted == inline revocation seed → R2 fatal (broker enabled separately).
 			name: "resource-via-file",
 			env: []string{
+				"AVERIN_DEV_MODE=1",
 				"AVERIN_SIGNING_SEED=" + seedSigning,
 				"AVERIN_BROKER_ISSUING_SEED=" + seedBroker,
 				"AVERIN_RESOURCE_SEED_FILE=" + sharedFile,
@@ -174,14 +178,9 @@ func TestRevocationR2Disjoint_UnderFileMountedSeeds(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(bin)
 			// Minimal env: avoid inheriting any real seeds; bind nowhere (it fatals before listening).
-			cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...)
-			out, err := cmd.CombinedOutput()
-			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
-				t.Fatalf("%s: expected the R2 guard to fatal (non-zero exit), got err=%v\noutput:\n%s", tc.name, err, out)
-			}
-			if !strings.Contains(string(out), "R2 role separation") {
+			out := startServerExpectRefusal(t, bin, nil, append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...))
+			if !strings.Contains(out, "R2 role separation") {
 				t.Fatalf("%s: exited non-zero but not via the R2 guard; output:\n%s", tc.name, out)
 			}
 		})
@@ -211,13 +210,8 @@ func TestRequireProdSecrets_FailsClosed(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(bin)
-			cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...)
-			out, err := cmd.CombinedOutput()
-			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
-				t.Fatalf("%s: expected fail-closed exit, got %v\n%s", tc.name, err, out)
-			}
-			if !strings.Contains(string(out), "AVERIN_REQUIRE_PROD_SECRETS") {
+			out := startServerExpectRefusal(t, bin, nil, append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...))
+			if !strings.Contains(out, "AVERIN_REQUIRE_PROD_SECRETS") {
 				t.Fatalf("%s: exited non-zero but not via the gate:\n%s", tc.name, out)
 			}
 		})
@@ -259,25 +253,22 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-ldflags", "-X main.coreRustc=rustc-test-stamp", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Skipf("could not build averin-server (cgo toolchain?): %v\n%s", err, out)
 	}
-	run := func(t *testing.T, seed string) map[string]any {
+	run := func(t *testing.T, seed string, extraEnv ...string) map[string]any {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
 		addr := l.Addr().String()
 		_ = l.Close()
-		cmd := exec.Command(bin)
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=" + addr,
-			"AVERIN_SIGNING_SEED=" + seed, "AVERIN_API_KEYS=proj:tok"}
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+		env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=" + addr,
+			"AVERIN_DEV_MODE=1", "AVERIN_SIGNING_SEED=" + seed, "AVERIN_API_KEYS=proj:tok"}
+		env = append(env, extraEnv...)
+		startServerProc(t, bin, env)
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
 			req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/v2/posture?project=proj", nil)
 			req.Header.Set("Authorization", "Bearer tok")
-			if resp, err := http.DefaultClient.Do(req); err == nil {
+			if resp, err := serverClient.Do(req); err == nil {
 				defer resp.Body.Close()
 				if resp.StatusCode != http.StatusOK {
 					t.Fatalf("posture: status %d", resp.StatusCode)
@@ -293,16 +284,67 @@ func TestPosture_LiveProcessReportsItsStartupGuards(t *testing.T) {
 		t.Fatal("averin-server never answered /v2/posture")
 		return nil
 	}
-	b := run(t, strings.Repeat("a1", 32))
+	b := run(t, strings.Repeat("a1", 32), "AVERIN_REGION= eu-central-1 ")
+	if b["region"] != "eu-central-1" || b["schema_version"] != float64(0) || b["runtime_role_verified"] != false {
+		t.Fatalf("region, schema version and runtime-role fields: %v", b)
+	}
+	if b["dev_mode"] != true {
+		t.Fatalf("this process was started with AVERIN_DEV_MODE=1 and must report dev_mode=true: %v", b)
+	}
+	// Dev mode turns approver binding off by default; the live process must report what it runs with.
+	if v, ok := b["require_approver_binding"]; !ok || v != false {
+		t.Fatalf("dev mode defaults approver binding off and must report require_approver_binding=false: %v", b)
+	}
+	if v, ok := b["approver_binding_since"]; !ok || v != nil {
+		t.Fatalf("no cutover set, so approver_binding_since must be present and null: %v", b)
+	}
 	if b["api_keys_configured"] != true || b["signing_seed_is_dev"] != false || b["durable_store"] != false || b["require_prod_secrets"] != false {
 		t.Fatalf("fresh seed, keyed, in-memory: %v", b)
+	}
+	// FEI-40: the live process reports the keyed fingerprint of the API key it accepts, never the key.
+	mac := hmac.New(sha256.New, []byte("tok"))
+	mac.Write([]byte("feir-secret-alignment/v1:averin-api-key"))
+	wantFP := hex.EncodeToString(mac.Sum(nil)[:16])
+	if sf, _ := b["secret_fingerprints"].(map[string]any); sf == nil || fmt.Sprint(sf["averin-api-key"]) != "["+wantFP+"]" {
+		t.Fatalf("live process must report the fingerprint of AVERIN_API_KEYS' token (%s): %v", wantFP, b["secret_fingerprints"])
+	}
+	if raw, _ := json.Marshal(b); strings.Contains(string(raw), `"tok"`) {
+		t.Fatalf("the live report carries the API key: %s", raw)
 	}
 	build := b["build"].(map[string]any)
 	if build["core_rustc"] != "rustc-test-stamp" || build["go_version"] == "" {
 		t.Fatalf("build stamps did not reach the report: %v", build)
 	}
+	b = run(t, strings.Repeat("a1", 32), "AVERIN_REQUIRE_APPROVER_BINDING=1", "AVERIN_APPROVER_BINDING_SINCE=2026-10-01T00:00:00.000Z")
+	if b["require_approver_binding"] != true || b["approver_binding_since"] != "2026-10-01T00:00:00.000Z" {
+		t.Fatalf("explicit approver binding and cutover must be reported: %v", b)
+	}
 	b = run(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
 	if b["signing_seed_is_dev"] != true {
 		t.Fatalf("the dev seed must be reported: %v", b)
+	}
+	if b["region"] != "" {
+		t.Fatalf("an undeclared region must be reported empty: %v", b)
+	}
+}
+
+// An invalid AVERIN_REGION stops startup instead of being reported as a region nobody meant.
+func TestRegion_InvalidValueRefusesStart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the cgo binary; skipped under -short")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "averin-server-region")
+	// This test binary already links the cgo staticlib, so a failing build is a real failure here,
+	// not a reason to skip (a skip would be a green result for a test that never ran).
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("could not build averin-server: %v\n%s", err, out)
+	}
+	// A server that wrongly ignores AVERIN_REGION starts and listens; the helper bounds the wait,
+	// kills it, and fails the test instead of leaving it running.
+	out := startServerExpectRefusal(t, bin, nil, []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "AVERIN_ADDR=127.0.0.1:0",
+		"AVERIN_DEV_MODE=1", "AVERIN_SIGNING_SEED=" + strings.Repeat("a1", 32), "AVERIN_REGION=EU West"})
+	if !strings.Contains(out, "AVERIN_REGION") {
+		t.Fatalf("the refusal must name AVERIN_REGION\n%s", out)
 	}
 }

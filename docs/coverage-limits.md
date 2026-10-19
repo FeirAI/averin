@@ -30,6 +30,7 @@ they're unchanged — not that the bytes describe what truly happened in the wor
 | OTel / OpenInference | whatever the team instruments | whatever they don't |
 | SDK `record()` | tool calls, rationale, authority block | anything the developer doesn't wrap; trusts caller honesty |
 | Credential broker (`observed_via: broker`) | grant/use/intent/outcome of broker-mediated credential actions, gateway-enforced authority | any action taken outside the broker's mediation |
+| Gateway refusals (`observed_via: gateway`) | an attempt the gateway refused, as reported by the gateway: agent, action, reason class, entry point, a count and a time range. Level 1 and Level 2 only: vultrino reported it and averin sealed it unchanged; averin never saw the attempt itself | an attempt with no authenticated agent, a refusal the gateway could not report (a receipt gap), a short window lost in a gateway crash, and anything the gateway never saw. The count is a floor, and Level 3 is not claimed |
 
 **The hard truth:** none of these sees an action the agent takes *outside* them — e.g. a direct DB
 call the SDK didn't wrap (threat #13). That is a Level-3 gap, closed only by the credential broker
@@ -50,15 +51,14 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   anchored* session detectable, and out-of-band key/TSA pinning lets a third party refuse the
   customer's self-asserted keys. But **suppressing a parallel chain that was never anchored is not
   detectable from a single bundle** — that needs the witness store, and ultimately Level 3.
-- **No full per-project authz yet (Phase-1 limit).** The app API (`/v2/sessions`, `/v2/dag`,
-  `/v2/verify`, `/v2/export`) supports **optional project-scoped API keys** (`AVERIN_API_KEYS`) —
-  when configured, every `/v2/*` route requires a valid token for the target project (fails closed:
-  unknown project / empty token ⇒ deny) — but it is **unauthenticated by default**, and even when
-  configured this only answers "is this token valid for this project?"; full RBAC/SSO/SAML/scoped-
-  and-expiring tokens is explicitly Phase 2 (spec §3). With no keys configured, any caller who can
-  reach the API can read any project's data. Deploy averin behind your own auth (or single-tenant,
-  or with `AVERIN_API_KEYS` set) until the full authz layer lands. (This does not affect the
-  cryptographic guarantees — offline verification needs no server trust.)
+- **API authz is per project with three roles, and no SSO.** The app API requires a token valid for the
+  target project (`AVERIN_API_KEYS`; the server refuses to start without keys unless the explicit
+  `AVERIN_DEV_MODE=1` is set). Tokens carry a role (`read`, `write`, `admin`) and an optional expiry, and
+  fail closed (unknown project, empty, expired or under-privileged token is denied). It still answers only
+  "may this token do this class of thing in this project?": there is no SSO/SAML/OIDC, and a holder of a
+  `write` token can add caller-declared evidence to its project. In dev mode with no keys, any caller who
+  can reach the API can read any project's data. (This does not affect the cryptographic guarantees:
+  offline verification needs no server trust.)
 - **Uninstrumented actions (#13).** See above — a Level-2 limit by construction.
 - **Authority is *declared* by default.** `authority.source: caller_declared` is forgeable. Only
   `policy_engine_signed` / `human_signed` / `delegate_signed` (with `evidence_sig` from the authority
@@ -83,14 +83,14 @@ CLI/WASM/FFI). Out-of-band key and TSA pinning gate authenticity (#4 partial).
   *after deployment* must verify the newest version first and fall back to older versions under an
   explicitly downgraded/legacy status — never a silent hard cutover that drops historical verification.
 - **RFC 3161 wire format.** The DER/CMS `TimeStampToken` parser + verifier is implemented for the
-  ECDSA P-256/SHA-256 and P-384/SHA-512 TSA profiles and
+  ECDSA P-256/SHA-256, ECDSA P-384/SHA-512, RSA PKCS#1 v1.5 and RSASSA-PSS (SHA-256/384/512, keys of at least 2048 bits) TSA profiles and
   feature-gated (`rfc3161`); it ships in the native verify CLI (built with the feature in CI) and is
   exercised end to end by the hermetic `test-anchor`/mini-TSA suite. It is **intentionally native-only**:
   the in-browser WASM verifier is built `--no-default-features` to stay lean and RNG-free (the P-256
   curve-arithmetic stack the RFC 3161 path needs transitively pulls `getrandom`, which has no
   `wasm32-unknown-unknown` backend), so a WASM verifier reports an `rfc3161` anchor as `Unsupported`
   — **never a silent pass** — and production-anchored bundles are verified by the native/CLI verifier.
-  The remaining open item is the production Go anchoring round-trip against a real third-party TSA.
+  It is tested against responses recorded from FreeTSA, DigiCert and Sectigo (2026-10-15); no CI job stamps at a live authority, and anchoring is off unless an operator turns it on ([TIMESTAMPS.md](dev/TIMESTAMPS.md)).
 - **Best-effort secret scrubbing.** The proxy, SDK, and OTel ingestion paths run captured I/O through
   regex-based credential/PII redaction (`server/internal/scrub`) before anything is stored or hashed;
   the OTel path additionally drops attributes whose key names a credential (authorization / api key /

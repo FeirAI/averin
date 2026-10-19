@@ -8,14 +8,25 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 
 ## Authentication
 
-- When `AVERIN_API_KEYS` is **unset**, ordinary `/v2/*` routes are unauthenticated. Dev /
-  single-tenant only. The recovery route always requires `AVERIN_RECOVERY_KEYS`.
-- When `AVERIN_API_KEYS` is set, ordinary `/v2/*` routes are gated by project-scoped API-key middleware;
-  `/healthz` stays open. Credentials are read from `Authorization: Bearer <token>` (scheme is
-  case-insensitive) **or** `X-Api-Key: <token>`; the project comes from the `?project=` query
-  parameter. A token not valid for that project gets a generic `401` (`{"error":"unauthorized"}`,
-  with `WWW-Authenticate: Bearer realm="averin"`). The check is constant-time and fails closed.
+- Every `/v2/*` route needs a token. A server with **no token configured refuses every `/v2/*` request**
+  (`401`), and `averin-server` refuses to start without `AVERIN_API_KEYS` unless `AVERIN_DEV_MODE=1`
+  selects the explicit, warned-about open store (local development only). `/healthz`, `/readyz` and
+  `/metrics` stay outside the gate.
+- Credentials are read from `Authorization: Bearer <token>` (scheme is case-insensitive) **or**
+  `X-Api-Key: <token>`; the project comes from the `?project=` query parameter. An unknown, wrong-project
+  or **expired** token gets a generic `401` (`{"error":"unauthorized"}`, with
+  `WWW-Authenticate: Bearer realm="averin"`). The check is constant-time and fails closed.
+- **Roles.** A token has a role: `read` (every `GET`), `write` (read, plus the evidence-adding `POST`s:
+  `/v2/records`, `/v2/grants`, `/v2/grants/prepare`, `/v2/grants/finalize`, `/v2/introspection`,
+  `/v2/use`, `/v2/use-intent`, `/v2/use-outcome`, `/v2/otel/traces`) or `admin` (everything, including
+  `POST /v2/revoke` and `POST /v2/checkpoints`). Any other method or path, and any route added later, needs
+  `admin` until it is classified. A valid token whose role is too low gets a generic `403`
+  (`{"error":"forbidden"}`). Tokens written in the legacy `proj:token` form are `admin` with no expiry.
 - With auth on, a body `project_id` that does not match the authorized `?project=` is `403`.
+- **Quota.** With `AVERIN_PROJECT_MAX_RECORDS` set, a write that would take the project past the cap is
+  refused with `507` (`{"error":"project record quota exceeded"}`) and stores nothing; an idempotent
+  replay of a stored record still succeeds. With `AVERIN_INGEST_BUDGET` set, `POST /v2/*` past the
+  per-project or global rate is `429` with `Retry-After`.
 
 ## Routes
 
@@ -26,15 +37,17 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | POST | `/v2/otel/traces` | Ingest OTel/OpenInference spans, mapped to records. | always |
 | POST | `/v2/checkpoints` | Seal the current frontier into the checkpoint chain. | always |
 | GET | `/v2/verify` | Server-side verification report for a project. | always |
-| GET | `/v2/export` | Export a verifiable bundle (proof / disclosure). | always |
+| GET | `/v2/export` | Export a verifiable bundle (proof / disclosure), whole history or one month. | always |
+| GET | `/v2/segments` | List the project's month segments (AVE-01). | always |
 | GET | `/v2/dag` | A session's sealed records (trace-waterfall view). | always |
 | GET | `/v2/sessions` | List a project's session ids. | always |
-| GET | `/v2/usage` | Usage / billable counts for a project. | always |
+| GET | `/v2/usage` | Stored record count and the configured record quota for a project. | always |
 | GET | `/v2/posture` | Read-only startup-guard report for the deploy-time verifier. | always |
 | POST | `/v2/grants` | Credential broker: issue a `gateway_enforced` grant (Tier-A). | `AVERIN_BROKER_ISSUING_SEED` |
 | POST | `/v2/grants/prepare` | Two-phase grant, phase 1 (mint + reveal). | broker (+ cosig) |
 | POST | `/v2/grants/finalize` | Two-phase grant, phase 2 (attach approver sigs + commit). | broker (+ cosig) |
 | POST | `/v2/introspection` | Native/STS: record a resource introspection transcript. | resource gateway |
+| POST | `/v2/refusals` | Seal one gateway refusal record (`record_kind` `gateway-refusal`). Role `write`. | always |
 | POST | `/v2/use` | Resource gateway: one-phase use receipt (Tier-B). | `AVERIN_RESOURCE_SEED` |
 | POST | `/v2/use-intent` | Two-phase use, phase 1 (before the side effect). | resource gateway |
 | POST | `/v2/use-outcome` | Two-phase use, phase 2 (after the side effect). | resource gateway |
@@ -102,13 +115,56 @@ on it).
   ids) — reserved for the broker/resource endpoints.
 - `event_type == "credential_grant_denied"` — reserved for the broker denied-grant log.
 - `extensions.broker` and `extensions.broker_denial` — reserved for the broker/resource lifecycle.
-- `record_kind` (optional) must be one of `budget-exhausted`, `chargeback-posted`.
+- `record_kind` (optional) must be one of `budget-exhausted`, `chargeback-posted`. The third kind,
+  `gateway-refusal`, is reserved for `POST /v2/refusals`.
+- `event_type == "gateway_refusal"`, `record_kind == "gateway-refusal"`, `observed_via == "gateway"`,
+  `extensions.gateway_refusal`, a `record_id` with the prefix `refusal-` and an `idempotency_key` with the
+  prefix `refusal:` are reserved for the gateway refusal endpoint. A refusal is signed by the server key like
+  any record, so the verifier cannot tell a server-built one from a forged one by its signature; reserving
+  every marker at ingest is the only defence against inflating a blocked-attempts count.
 
 **No NUL in identifiers (every route).** A `project_id`, `idempotency_key`, `record_id` (and the
 `/v2/revoke` `grant_id`) containing U+0000 (for example an escaped `\u0000` in the JSON body), a `?project=`
 query parameter containing `%00`, or an `Idempotency-Key` header containing NUL is a `400`. The server
 derives deterministic ids and keys by joining these values with a NUL separator, so a NUL inside one would
 let two different `(project_id, idempotency_key)` pairs derive the same grant, use or outcome id.
+
+---
+
+## POST `/v2/refusals`
+
+Seals one gateway refusal record: the gateway refused an agent's attempt and reports it. Role `write`. The
+server builds the record itself from a closed set of fields (the B11 denied-grant pattern), so a caller
+cannot choose the record id, a free-text reason, params or a URL. It is chained into the `session_id` the
+caller names (vultrino uses its `[averin]` session), checkpointed and anchored like any record.
+A replay is keyed on `idempotency_key`: a key already stored returns that record with `created: false`
+whatever the other fields say, so use keys that a peer writer cannot predict (see LIMITATIONS).
+
+Body (an unknown field is a `400`):
+
+| Field | Meaning |
+|---|---|
+| `project_id`, `session_id`, `idempotency_key` | Required. The key may also come in the `Idempotency-Key` header. A replay returns the same record with `200` and `created: false`. |
+| `agent_id` | Required, `[A-Za-z0-9._:-]{1,128}`. |
+| `action` | The refused action. A name outside that pattern is stored as the literal `invalid_name`. `*` only on a summary. A name inside the pattern is stored verbatim in a permanent record, including a string shaped like a secret: the caller must not pass one. |
+| `entry_point` | `mcp`, `execute`, `llm` or `approval_resume` (required unless `summary`). |
+| `reason_class` | One of the 14 classes in `vectors/refusal-classes.v1.json` (required unless `summary`). Never free text. |
+| `credential` | Optional resolved alias, same name rule, stored verbatim (never pass a secret value). |
+| `attempts` | 1 to 10^9: the number of coalesced refusals this record stands for. |
+| `first_at`, `last_at` | RFC3339, `first_at <= last_at <= now + 5 minutes`. |
+| `summary`, `by_class` | A summary merges refusals a producer could not seal one by one: `by_class` counts per class, no `reason_class`, and `attempts` equals the sum. |
+
+The sealed record has `event_type` `gateway_refusal`, `record_kind` `gateway-refusal`, `observed_via`
+`gateway`, `status` `refused`, **no** `authority` and **no** `extensions.broker`. It is never a grant or a
+use, so it cannot enter the coverage closure, the deployment attestation or the operation taxonomy: no
+taxonomy rotation is needed to record a refusal. The verifier counts it as `gateway_refusals` (see the
+report fields). Response `201 {"record_id","created":true}`.
+
+`GET /v2/records` also takes `record_kind=<kind>` (only that kind) and `exclude_record_kind=<kind>`; the page
+is the newest `limit` matching records. The scan is bounded: it reads and decodes up to 50000 records
+newest-first inside a read transaction, so a filtered call costs a scan even when few records match.
+`truncated` is `true` when the bound stops it or the page is full. `total` is the unfiltered record count of
+the project, not the number of matches. The scan over Postgres is untested.
 
 ---
 
@@ -149,9 +205,11 @@ original grant if it can still finish or run the bounded operator
 
 ---
 
-## GET `/v2/verify?project=<id>`
+## GET `/v2/verify?project=<id>[&month=YYYY-MM]`
 
-Returns the **server's self-view** verification report (built from the project's full bundle,
+Returns the **server's self-view** verification report (built from the project's full bundle, or, with `month`, from
+that month's [segment](SEGMENTS.md); `404` if no checkpoint was created in that month, `400` for a malformed
+month, `413` when the whole history or the month exceeds the 256 MiB single-bundle limit,
 self-pinning only the roles meaningful without an externally-held TSA key — broker/federation,
 resource, revocation, cosig; **not** attestation, which needs a pinned TSA). For an authoritative,
 independent verdict, export and verify offline with your own pinned keys.
@@ -160,12 +218,24 @@ independent verdict, export and verify offline with your own pinned keys.
 
 ---
 
+## GET `/v2/segments?project=<id>`
+
+Lists the project's month segments, oldest first: `{project_id, format: "averin.segment.v1", segments: [{month,
+records, first_seq, last_seq, head_hash, base_seq, base_hash, records_before}]}`. `base_seq` and `base_hash` are
+`null` for the first month. Reads checkpoints only. See [SEGMENTS.md](SEGMENTS.md).
+
+---
+
 ## GET `/v2/export?project=<id>`
 
-Returns a verifiable [bundle](#bundle-object) for offline verification.
+Returns a verifiable [bundle](#bundle-object) for offline verification. A whole-history export larger than the
+256 MiB the verifier accepts is refused with `413` and a pointer to the month segments.
 
 Query parameters:
 
+- `month` (optional, `YYYY-MM`) - export that month's [segment](SEGMENTS.md) instead of the whole history: the
+  base checkpoint, the month's checkpoints and records, and a `segment` block. `404` if no checkpoint was created
+  in that month, `400` for a malformed month, `413` if the month alone exceeds the limit.
 - `mode` (default `proof_only`) — one of `proof_only`, `selective_disclosure`, `full_evidence`.
   Disclosing modes attach a `disclosures` array (`{record_id, field, value_b64, nonce_hex}`) so an
   offline verifier can open each committed field against its record's commitment. A field whose raw
@@ -184,8 +254,7 @@ A session's sealed records, in causal/display order, for the trace-waterfall vie
 
 **Response `200`:** `{ "records": [ /* sealed records */ ] }`. Both query params required (`400`).
 
-> Phase-1 authz limit: with `AVERIN_API_KEYS` unset, any caller who can reach this endpoint can read
-> any project's data. Run single-tenant or behind your own auth until you configure project keys.
+> Reads need a token valid for the project (any role). Only the explicit dev mode serves this unauthenticated.
 
 ---
 
@@ -195,7 +264,8 @@ A session's sealed records, in causal/display order, for the trace-waterfall vie
 
 ## GET `/v2/usage?project=<id>`
 
-`{ "usage": {...}, "free_tier": <n>, "billable_records": <n>, "billable_exports": <n> }`.
+`{ "records": <n>, "quota_records": <n> }`: the project's stored record count, read from the store (it
+survives restarts), and the configured cap (`0` = none). A store read error is `500`, never a zero.
 
 ---
 
@@ -203,12 +273,24 @@ A session's sealed records, in causal/display order, for the trace-waterfall vie
 
 A read-only report of the guards this process was started with, for the posture verifier in feir-os
 (`deploy/vps/deploy.sh verify-posture`). It is under the same project API-key auth as every other `/v2` route:
-on a keyed deployment it needs the project's bearer. Booleans and build identifiers only, never a key, a seed or
+on a keyed deployment it needs the project's bearer. Booleans, one integer (`schema_version`), a short region label and build identifiers only, never a key, a seed or
 a DSN: `schema`, `plane`, `build` (`go_version`, `vcs_revision`, `vcs_modified`, `core_rustc` when the build
 stamped it with `-ldflags "-X main.coreRustc=..."`), `require_prod_secrets`, `api_keys_configured` (false when the
 app API is unauthenticated), `durable_store` (Postgres wired), `signing_seed_is_dev`, `require_pinned_authority`,
-`require_body_bound_authority`. It says what was configured, not that the database is reachable. On an
-unauthenticated deployment it answers anyone and reports `api_keys_configured: false`.
+`require_body_bound_authority`, `region` (`AVERIN_REGION`, empty when not declared), `schema_version` (the Postgres schema version this binary understands, 0 with in-memory storage), `runtime_role_verified` (true when startup verified the Postgres credential is a least-privilege runtime role), `dev_mode` (true only for a process started with `AVERIN_DEV_MODE=1`; the feir-os posture verifier fails it), `require_approver_binding` (whether the server's own verify requires a govder approval to name who approved), `approver_binding_since` (the canonical cutover string, or `null` when none is set; a far-future cutover turns the requirement off as surely as `require_approver_binding=false`, so the verifier reads both), and `secret_fingerprints` (an object; on a keyed deployment `averin-api-key` is a
+list with one keyed fingerprint per distinct API key averin accepts across all projects: the first 16 bytes of
+HMAC-SHA256 keyed by the token over `feir-secret-alignment/v1:averin-api-key`, vectors in
+`vectors/secret-fingerprint.v1.json`; empty on an open deployment). feir-os's verifier checks that the key
+govder, vultrino and the broker send is on that list, so a wrong key fails the launch instead of surfacing as
+401s later. A fingerprint is not the key, but someone who holds it can test guesses for a weak key offline,
+which is why the report sits behind a project key. The list is one set across all projects, so a key
+holder can read the fingerprints of other projects' keys, and the verifier cannot tell that a key was sent for
+the wrong project; fine for a single-project host, to be split per project before a shared multi-tenant
+deployment. `authority_pins` (a list, empty when nothing is pinned) names every pinned authority verifying key as
+`{project, source, pubkey}`: `project` is empty for the global default pin, `pubkey` is the hex public key (public,
+so reported as it is). feir-os's verifier compares it with the keys govder derives from its authority seed. It
+says what was configured, not that the database is
+reachable. On an unauthenticated deployment it answers anyone and reports `api_keys_configured: false`.
 
 ---
 
@@ -516,7 +598,8 @@ Other allowed keys: `anchored_ts`, `record_kind`, `input_commit`, `output_commit
 
 - `observed_via`: `proxy`, `sdk`, `otel`, `broker` (Level-2 honesty — what each path captures;
   `broker` is stamped by the server on every grant / use receipt / intent / outcome record).
-- `record_kind` (optional): `budget-exhausted`, `chargeback-posted`.
+- `record_kind` (optional): `budget-exhausted`, `chargeback-posted`, `gateway-refusal`.
+- `observed_via` also admits `gateway` on a gateway refusal record only (reserved, see above).
 - `authority.source`: `caller_declared` (the forgeable default), `policy_engine_signed`,
   `human_signed`, `delegate_signed`, `gateway_enforced` (the broker's own source). An evidence triple
   verifying under the key pinned for the record's `(project_id, source)` elevates from
@@ -537,7 +620,9 @@ hashes), `record_count`, `created_ts`, `broker_grant_head` (the grant-transparen
 and an optional `anchor` (an RFC 3161 token, attached at export). The chain enforces: first seq is
 `0` with null prev; no seq gaps; no two distinct checkpoints sharing a seq or a prev (fork, threat
 #2); record_count non-decreasing; every frontier head present in the bundle (omission, threat #1);
-the latest frontier equals the actual DAG heads.
+the latest frontier equals the actual DAG heads. A [month segment](SEGMENTS.md) starts the chain at its
+carried base checkpoint instead of seq `0`, and the latest `record_count` equals the base's count plus the
+records carried.
 
 ## Bundle object
 
@@ -545,7 +630,9 @@ the latest frontier equals the actual DAG heads.
 public_key, key_status}]`: the current key first, then each retired key with `status_changed_at`),
 `key_rotations` (signed rotation statements, only after a rotation; see [KEY-ROTATION.md](KEY-ROTATION.md)), `records[]`, `checkpoints[]`, `mode`, `gap_report`, and (when
 configured/applicable) `coverage_manifest`, `revocation_list`, `deployment_attestation`,
-`disclosures`, `filtered_records` + `record_kind_filter`.
+`disclosures`, `filtered_records` + `record_kind_filter`. A month export also carries `segment`
+(`{format: "averin.segment.v1", month, base_seq, base_checkpoint_hash, base_record_count}`, see
+[SEGMENTS.md](SEGMENTS.md)) and its `checkpoints[]` starts with the base checkpoint.
 
 ## Verification report
 
@@ -567,6 +654,10 @@ Key fields:
 | `checkpoints_anchors_attached` | int | Checkpoints that merely **carry** an `anchor` field. Unverified: anyone can attach one, so never read it as timestamp evidence. |
 | `key_rotations_total`, `key_rotations_verified`, `key_rotations_chain_trusted` | int | Signed recording-key rotation statements in `bundle.key_rotations`, how many verified, and how many keys are trusted only because a verified `scheduled` statement links them to a pinned key that is neither revoked nor compromised. A statement that does not verify is also an `issues` entry. |
 | `cleartext_content_records` | int | Records whose signed body carries `extensions.content_preview`: prompt or answer text in the clear that no retention purge can erase (sealed before the server began committing it). A count for the reader, not an input to any verdict. |
+| `segment` | object | Only on a month segment: `month`, `base_seq`, `base_checkpoint_hash`, `head_seq`, `head_checkpoint_hash`, `head_record_count`, `link` (`genesis` / `base_pinned` / `base_unpinned`), `base_anchored`, `earlier_parent_refs`, `unresolved_cross_month` (uses and outcomes whose grant or intent is in an earlier month) and `not_evaluated` (the grant-log chain and federation heads; `record_completeness` when the month has parents before its base; `cross_month_uses` for every month with a base, which caps its headline at INSUFFICIENT). Absent on a whole-history report. |
+| `gateway_refusals` | int | Sealed gateway refusal records (`record_kind` `gateway-refusal`), counted only when the record is integrity-proven and its shape is valid, deduplicated by `content_hash`. Keyed on `record_kind`, never on `event_type` alone, so a history that predates the kind keeps its verdict. Always present (zero when none). |
+| `gateway_refusal_attempts` | int | Sum of `attempts` over the counted refusal records. A floor: an attempt without an authenticated agent is not recorded, a refusal the producer could not seal is a receipt gap, and a producer crash can lose a short window. |
+| `gateway_refusals_by_class` | object | `gateway_refusal_attempts` by reason class (closed vocabulary). A malformed refusal (unknown class or entry point, authority or broker evidence carried, an unknown key, a divergent `event_type`, attempts not equal to the sum of `by_class`) is a hard `issues` entry and is not counted. |
 | `grant_accountability` | string | `not_applicable` / `incomplete` / `complete` (Tier-A). |
 | `broker_trust` | string | `assumed` / `sequence_verified`. |
 | `uses_matched`, `uses_pop_reverified`, `unmatched_violation`, `unmatched_pending`, `grants_unused` | int | Tier-B join. |

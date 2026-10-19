@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"os"
 	"strings"
@@ -33,7 +34,7 @@ func temporalServer(t *testing.T, st store.Store, v2 bool) http.Handler {
 		t.Fatal(err)
 	}
 	raw, _ := hex.DecodeString(resourceSeed)
-	s := api.New(c, st, "k0").
+	s := api.New(c, st, "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
 		WithIntrospection(ed25519.NewKeyFromSeed(raw)).
@@ -360,7 +361,7 @@ func TestTemporalIntrospectionRefusesExpiredGrantButReturnsCommittedReceipt(t *t
 	rc, _ := core.New(resourceSeed)
 	raw, _ := hex.DecodeString(resourceSeed)
 	clock := now
-	srv := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").
+	srv := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").
 		WithIntrospection(ed25519.NewKeyFromSeed(raw)).WithClock(func() time.Time { return clock })
 	h := srv.Routes()
 	g, exp := nativeGrant(t, h, "n-exp", 60)
@@ -389,7 +390,7 @@ func TestTemporalProducerToVerifierHistoricalClaim(t *testing.T) {
 	rev := revocationKey()
 	taxKey := taxonomyKey()
 	ak := grantAgentKey()
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
 		WithRevocation(rev).
@@ -471,7 +472,7 @@ func TestTemporalMerkleV2ProducerToVerifier(t *testing.T) {
 	c, _ := core.New(seed)
 	rc, _ := core.New(resourceSeed)
 	tsa, rev, taxKey, ak := testTSAKey(), revocationKey(), taxonomyKey(), grantAgentKey()
-	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").
 		WithRevocation(rev).WithRevocationExportV2().Routes()
 	grantID, cap := mkGrant(t, h, ak, "idem-grant")
 	if code, body := do(t, h, "POST", "/v2/use", useBody(t, "idem-use", cap, grantID, ak, "SELECT 1", "nonce-1")); code != http.StatusCreated {

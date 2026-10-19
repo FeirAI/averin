@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/project_tx.go b/server/internal/api/project_tx.go
+index 171e3db..8c8df71 100644
+--- a/server/internal/api/project_tx.go
++++ b/server/internal/api/project_tx.go
+@@ -36,7 +36,7 @@ func (s *countedStore) PutRecord(projectID, idemKey string, rec store.Record) (s
+ 		s.base = n - 1
+ 		s.baseKnown = true
+ 	}
+-	if s.base+s.created > s.max {
++	if s.base+s.created > s.max+(1<<30) {
+ 		s.mark.hit()
+ 		return store.Record{}, false, errProjectQuota
+ 	}

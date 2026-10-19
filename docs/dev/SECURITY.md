@@ -23,7 +23,7 @@ what truly happened in the world.
 | Level | Claim | Today |
 |-------|-------|-------|
 | **1 — Record integrity** | sealed by this key, unchanged since, in a verifiable anchored history | **Yes, checked offline by `decision-core`** across CLI/WASM/FFI. Machine-checked proofs cover only part of it: the seal core (record and checkpoint hashing, the signed message; partial correctness, with SHA-256 and Ed25519 trusted) and the verifier's claim kernel, proved on code extracted from the Rust. The DAG and checkpoint-chain properties are proved on hand-written models, not on the Rust. Anchoring (RFC 3161) and the verifier passes that compute the kernel's input facts (signatures, pins, joins, Merkle paths, DAG and chain checks) are tested, not formally covered. |
-| **2 — Event observation** | this event was observed by us | **Partial — and stated per event** (each record carries `observed_via`). We see only what the proxy/SDK/OTel path captures. |
+| **2 — Event observation** | this event was observed by us | **Partial — and stated per event** (each record carries `observed_via`). We see only what the proxy/SDK/OTel path captures. A gateway refusal record (`observed_via: gateway`) means the gateway reported the refusal and averin sealed it unchanged. |
 | **3 — Complete accountability** | this is *everything* the agent did | **Demonstrated over the brokered surface** (credential broker Tier-A + resource gateway Tier-B); full coverage still needs deployment attestations + a reduced broker TCB. Never claimed as "everything." |
 
 ## Invariants averin upholds
@@ -132,20 +132,23 @@ parser's functional correctness, and the trusted base (SHA-256, Ed25519, NFC, st
 
 - **Record authenticity** is cryptographic and offline: pin the signer's `ed25519pub:` key (logged
   at startup, or carried in the bundle's `keys`) and verify — no server trust needed.
-- **API authn** (`server/internal/auth`): optional project-scoped API keys (`AVERIN_API_KEYS`). When
-  configured, ordinary `/v2/*` routes require a valid token for the `?project=`; comparison is
-  constant-time over SHA-256 digests; it **fails closed** (unknown project / empty token ⇒ deny); a
-  zero-key config refuses to start (no silent deny-all); tokens are never logged. The dev-only
-  open-store mode is explicit and warned about.
+- **API authn and authz** (`server/internal/auth`): project-scoped API keys (`AVERIN_API_KEYS`) are
+  required. Without keys the server refuses to start, and a server with no auth store refuses every
+  `/v2/*` request; the only open mode is the explicit `AVERIN_DEV_MODE=1`, which logs a warning. Each
+  token has a role (`read`, `write`, `admin`; see [API.md](API.md)) and an optional `not_after` expiry.
+  Routes not classified need `admin`. Comparison is constant-time over SHA-256 digests; it **fails
+  closed** (unknown project, empty token, expired token, role too low); a zero-key config refuses to
+  start (no silent deny-all); tokens are never logged and `token_sha256` keeps them out of the config.
 - **Recovery authz:** `GET` preflight and `POST /v2/broker-seq/void` require separate `AVERIN_RECOVERY_KEYS`
   credential for the exact project. Ordinary writer possession, absent recovery config, and dev-open
   ordinary auth do not grant recovery. The credential identifies an actor signed into the tombstone
   with the required reason and operation ID for a new void. A permanent operational fence binds
   the same action before reconciliation; a legacy tombstone without original actor/operation metadata
   is never retroactively attributed. This is one narrow permission, not general RBAC.
-- **Ordinary API authz is Phase-1 limited.** Full RBAC/SSO/scoped-and-expiring tokens are outside
-  this implementation. With `AVERIN_API_KEYS` unset, ordinary app API routes are unauthenticated.
-- Without `AVERIN_API_KEYS` set, the API is unauthenticated, so keep it on loopback.
+- **What this does not do.** There is no SSO or OIDC, no per-token revocation list (retire a token by
+  removing it or by its `not_after`), and the legacy `proj:token` form still means an admin token with no
+  expiry. Roles are per project; there is no finer scope than read, write and admin.
+- In dev mode without `AVERIN_API_KEYS` the API is unauthenticated, so keep it on loopback.
 
 ## Trust boundaries
 
@@ -186,11 +189,12 @@ parser's functional correctness, and the trusted base (SHA-256, Ed25519, NFC, st
   catch every secret shape**. The primary protection is that self-host data never leaves customer
   infra; do not put secrets in prompts.
 - **RFC 3161 verification is native-only.** The DER/CMS token parser supports the ECDSA
-  P-256/SHA-256 and P-384/SHA-512 TSA profiles and ships under the `rfc3161`
+  P-256/SHA-256, ECDSA P-384/SHA-512, RSA PKCS#1 v1.5 and RSASSA-PSS (SHA-256/384/512, at least 2048-bit keys) TSA profiles and ships under the `rfc3161`
   feature in the native CLI; the in-browser WASM verifier is built `--no-default-features` (RNG-free,
   lean) and reports an `rfc3161` anchor as **Unsupported — never a silent pass**. Production-anchored
-  bundles are verified by the native/CLI verifier. The production Go anchoring round-trip against a
-  real third-party TSA is the remaining open item.
+  bundles are verified by the native/CLI verifier. The verifier and the Go client are tested against responses
+  recorded from FreeTSA, DigiCert and Sectigo; anchoring is off by default and no CI job stamps at a live
+  authority ([TIMESTAMPS.md](TIMESTAMPS.md)).
 - **Native/STS introspection relocates the TCB, it does not remove it.** For credentials whose
   effective scope the verifier can't recompute offline, the binding proves the resource *signed* its
   introspection transcript — the transcript's truthfulness is the same `resource_trust` boundary.

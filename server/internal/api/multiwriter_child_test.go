@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/feirai/averin/server/internal/api"
+	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/store"
@@ -164,7 +165,7 @@ func TestMultiWriterChildProcess(t *testing.T) {
 	if point := os.Getenv("AVERIN_MW_POINT"); point != "" {
 		projectStore = &mwStore{Store: st, f: mwFault{Point: point, Key: os.Getenv("AVERIN_MW_KEY"), Marker: os.Getenv("AVERIN_MW_MARKER"), Release: os.Getenv("AVERIN_MW_RELEASE")}}
 	}
-	srv := api.New(recordingCore, projectStore, "k0").WithContent(fs).WithBroker(brokerIssuingKey()).
+	srv := api.New(recordingCore, projectStore, "k0").WithAuth(auth.NewOpenStore()).WithContent(fs).WithBroker(brokerIssuingKey()).
 		WithCosigPolicy(1, []ed25519.PublicKey{approver.Public().(ed25519.PublicKey)}).
 		WithResource(resourceCore, "orders-db").WithRevocation(revocationKey()).WithRevocationExportV2().
 		WithBrokerSeqVoidMinAge(0).WithRecoveryAuth(testRecoveryStore())

@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"sync"
@@ -33,7 +34,7 @@ func newCosigBrokerServer(t *testing.T, threshold int, approvers []ed25519.Publi
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
-	return api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithCosigPolicy(threshold, approvers).Routes()
+	return api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithCosigPolicy(threshold, approvers).Routes()
 }
 
 // TestSinglePhaseGrantRejectedUnderCosigPolicy: a pinned cosig policy must not be bypassable by issuing via the
@@ -53,7 +54,7 @@ func TestSinglePhaseGrantRejectedUnderCosigPolicy(t *testing.T) {
 		t.Fatalf("rejection should explain the cosig policy: %s", resp)
 	}
 	// CONTROL: a server WITHOUT a cosig policy still accepts single-phase issuance.
-	hNoCosig := api.New(mustCore(t), store.NewMem(), "k0").WithBroker(brokerIssuingKey()).Routes()
+	hNoCosig := api.New(mustCore(t), store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).Routes()
 	if code, r := do(t, hNoCosig, "POST", "/v2/grants", grantBody("idem-ok", "read:orders", ak, ak)); code != http.StatusCreated {
 		t.Fatalf("single-phase issuance without a cosig policy must work (got %d): %s", code, r)
 	}
@@ -109,7 +110,7 @@ func TestNativeGrantRejectedUnderCosigPolicy(t *testing.T) {
 	}
 	// CONTROL: without a cosig policy (threshold 0, the default) native issuance still works —
 	// the guard is >0-gated so a no-cosig deployment is unaffected.
-	hNoCosig := api.New(mustCore(t), store.NewMem(), "k0").WithBroker(brokerIssuingKey()).Routes()
+	hNoCosig := api.New(mustCore(t), store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).Routes()
 	if code, r := do(t, hNoCosig, "POST", "/v2/grants", nativeGrantBody("native-no-cosig")); code != http.StatusCreated {
 		t.Fatalf("native issuance without a cosig policy must work (got %d): %s", code, r)
 	}

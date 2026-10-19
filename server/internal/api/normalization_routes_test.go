@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -29,7 +30,7 @@ func TestGrantAndUseRejectNonNFCAliasesBeforePoPAndDedup(t *testing.T) {
 	c, _ := core.New(seed)
 	rc, _ := core.New(resourceSeed)
 	st := store.NewMem()
-	h := api.New(c, st, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	h := api.New(c, st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 	ak := grantAgentKey()
 	badGrant := grantBody("e\u0301", "read:orders", ak, ak)
 	if code, resp := do(t, h, "POST", "/v2/grants", badGrant); code != http.StatusBadRequest || !strings.Contains(resp, "NFC") {
@@ -59,7 +60,7 @@ func TestNonNFCPrepareCannotCreatePendingGrant(t *testing.T) {
 	c, _ := core.New(seed)
 	st := store.NewMem()
 	ap := seedKey(40)
-	h := api.New(c, st, "k0").WithBroker(brokerIssuingKey()).WithCosigPolicy(1, []ed25519.PublicKey{ap.Public().(ed25519.PublicKey)}).Routes()
+	h := api.New(c, st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithCosigPolicy(1, []ed25519.PublicKey{ap.Public().(ed25519.PublicKey)}).Routes()
 	ak := grantAgentKey()
 	bad := grantBody("e\u0301", "read:orders", ak, ak)
 	if code, resp := do(t, h, "POST", "/v2/grants/prepare", bad); code != http.StatusBadRequest || !strings.Contains(resp, "NFC") {
@@ -92,7 +93,7 @@ func TestNativeCredentialRefRejectsNonNFCAliasBeforeTranscript(t *testing.T) {
 	rc, _ := core.New(resourceSeed)
 	rawSeed, _ := hex.DecodeString(resourceSeed)
 	st := store.NewMem()
-	h := api.New(c, st, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithIntrospection(ed25519.NewKeyFromSeed(rawSeed)).Routes()
+	h := api.New(c, st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithIntrospection(ed25519.NewKeyFromSeed(rawSeed)).Routes()
 	grant := map[string]any{
 		"idempotency_key": "native-1", "project_id": "p1", "session_id": "s1", "agent_id": "agent-x",
 		"action": "db.query:orders-ro", "resource": "orders-db", "scope": "read:orders",
@@ -131,7 +132,7 @@ func TestNativeCredentialRefRejectsNonNFCAliasBeforeTranscript(t *testing.T) {
 func TestPostNFCDuplicateKeysFailBeforeSeal(t *testing.T) {
 	c, _ := core.New(seed)
 	st := store.NewMem()
-	h := api.New(c, st, "k0").Routes()
+	h := api.New(c, st, "k0").WithAuth(auth.NewOpenStore()).Routes()
 	body := `{"idempotency_key":"k","project_id":"p1","session_id":"s1","content":{"e\u0301":1,"é":2}}`
 	if code, resp := do(t, h, "POST", "/v2/records", body); code != http.StatusBadRequest {
 		t.Fatalf("post-NFC duplicate key sealed (%d): %s", code, resp)
@@ -142,7 +143,7 @@ func TestPostNFCDuplicateKeysFailBeforeSeal(t *testing.T) {
 func TestGrantDelegationChainRejectsNonNFCBeforeSeal(t *testing.T) {
 	c, _ := core.New(seed)
 	st := store.NewMem()
-	h := api.New(c, st, "k0").WithBroker(brokerIssuingKey()).Routes()
+	h := api.New(c, st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).Routes()
 	ak := grantAgentKey()
 	var gr map[string]any
 	if err := json.Unmarshal([]byte(grantBody("delegation-1", "read:orders", ak, ak)), &gr); err != nil {
@@ -187,7 +188,7 @@ func TestConfiguredOpaqueIDsRejectNonNFC(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := core.New(seed)
-			s := api.New(c, store.NewMem(), "k0")
+			s := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore())
 			defer func() {
 				if got := recover(); got == nil || !strings.Contains(fmt.Sprint(got), "NFC") {
 					t.Fatalf("non-NFC configured ID must fail at setup with NFC error, got %v", got)

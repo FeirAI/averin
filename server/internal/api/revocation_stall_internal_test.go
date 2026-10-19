@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"github.com/feirai/averin/server/internal/auth"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ func TestInFlightRevokeSnapshotAndCommitVisibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := store.NewMem()
-	s := New(testCore(t), st, "k0").WithRevocation(rev)
+	s := New(testCore(t), st, "k0").WithAuth(auth.NewOpenStore()).WithRevocation(rev)
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

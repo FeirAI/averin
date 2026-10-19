@@ -3,6 +3,7 @@ package api_test
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"os"
 	"strings"
@@ -35,7 +36,7 @@ func TestCapstoneAttestedCompleteEndToEnd(t *testing.T) {
 	// Fix time so a committed cross-target corpus has a stable validity window;
 	// randomized span IDs and hiding nonces still make each run's bytes distinct.
 	fixedNow := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
-	h := api.New(c, store.NewMem().WithClock(fixedNow), "k0").
+	h := api.New(c, store.NewMem().WithClock(fixedNow), "k0").WithAuth(auth.NewOpenStore()).
 		WithClock(fixedNow).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
@@ -118,7 +119,7 @@ func TestCapstoneWithRevocationConfigured(t *testing.T) {
 	ak := grantAgentKey()
 
 	manifest := `{"side_effect_closure":[{"resource_id":"orders-db","action":"db.query:orders-ro","may_touch":[]}]}`
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
 		WithAttestation(att).
@@ -181,7 +182,7 @@ func TestCapstoneOverBoundedReuseEndToEnd(t *testing.T) {
 	ak := grantAgentKey()
 
 	manifest := `{"side_effect_closure":[{"resource_id":"orders-db","action":"db.query:orders-ro","may_touch":[]}]}`
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
 		WithAttestation(att).

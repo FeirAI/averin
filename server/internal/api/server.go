@@ -30,7 +30,6 @@ import (
 	"github.com/feirai/averin/server/internal/content"
 	"github.com/feirai/averin/server/internal/core"
 	"github.com/feirai/averin/server/internal/keylineage"
-	"github.com/feirai/averin/server/internal/meter"
 	"github.com/feirai/averin/server/internal/metrics"
 	"github.com/feirai/averin/server/internal/otel"
 	"github.com/feirai/averin/server/internal/resourceshim"
@@ -70,9 +69,8 @@ type Sealer interface {
 type Server struct {
 	core      Sealer
 	st        store.Store
-	content   content.Store // raw low-entropy values (committed at ingest, revealed on disclosure)
-	meter     meter.Meter
-	auth      auth.KeyStore      // nil = no per-project auth (dev/single-tenant)
+	content   content.Store      // raw low-entropy values (committed at ingest, revealed on disclosure)
+	auth      auth.KeyStore      // nil = every /v2 request refused; auth.NewOpenStore() = explicit dev-open
 	recovery  auth.RecoveryStore // nil = deny all broker_seq:recover actions
 	witness   witness.Witness    // nil = no external witness configured
 	tsa       witness.TSA        // nil = no external timestamp anchoring configured
@@ -98,7 +96,11 @@ type Server struct {
 	revocationValidity time.Duration
 	revocationCap      int
 	revocationExportV2 bool // plan 009: export averin.revocation.list.v2 and accept prospective revokes
-	denyLog            bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
+	// feir-ops#1: per-instance salt for refusal record ids (see handleRefusals).
+	refusalSaltOnce sync.Once
+	refusalSaltVal  string
+	refusalSaltErr  error
+	denyLog         bool // B11: seal a denied-grant record on a POLICY denial (opt-in, off by default)
 	// #47: optional rate limit on best-effort B11 denial seals so a varying-scope/PoP-brute-force sweep cannot
 	// inflate stored records without bound (the prerequisite for default-on). nil = unbounded (prior behavior).
 	denialBudget *denialBudget
@@ -106,7 +108,9 @@ type Server struct {
 	// leaked token (or an unauthenticated default deploy) cannot drive unbounded billable, append-only DB growth.
 	// Reuses the denial_budget.go two-level bucket. nil = unlimited (the prior behavior — this is opt-in
 	// defense-in-depth; a reverse-proxy/gateway limit remains the PRIMARY, HARD control, see CONFIGURATION.md).
-	ingestBudget *denialBudget
+	projectQuota   int // max stored records per project; 0 = unlimited (WithProjectQuota)
+	mQuotaRejected *metrics.Counter
+	ingestBudget   *denialBudget
 	// T7 (ADR 0002 / coverage-limits #4): pinned EXTERNAL authority verifying keys, keyed by
 	// (project, source). When a generic record carries a matching source plus an authority evidence_sig
 	// that verifies under the key pinned for THAT (project, source), it is stamped with that elevated
@@ -195,6 +199,11 @@ type Server struct {
 	requirePinnedAuthority bool
 	// Explicit rollout gate: require v3 for newly ingested external elevation.
 	requireBodyBoundAuthority bool
+	// AVE-10: the verifier policy the server's own /v2/verify (and the verdict its export reuses for the completeness wording)
+	// applies to approvals that do not commit who approved. It only fires for a record the verifier reads as Verified or
+	// legacy-unbound, which needs the project's authority keys pinned (selfVerifyOptsFor does that).
+	requireApproverBinding bool
+	approverBindingSince   string
 
 	// posture is the startup guard state GET /v2/posture reports (posture.go).
 	posture Posture
@@ -249,7 +258,6 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		core:          core,
 		st:            st,
 		content:       content.NewMemStore(), // in-memory by default; WithContent for a durable store
-		meter:         meter.NewMem(),
 		signingKeyID:  signingKeyID,
 		keyValidFrom:  "2026-01-01T00:00:00.000Z",
 		now:           time.Now,
@@ -344,24 +352,6 @@ func (s *Server) WithSealShapeViolations(fn func() int64) *Server {
 	s.metrics.CounterFunc("averin_seal_shape_violations_total",
 		"Total records and checkpoints sealed in shadow mode that the verifier rejects on shape, domain or canon_version (always 0 in enforce mode).",
 		fn)
-	return s
-}
-
-// WithMeter swaps in a usage meter (e.g. a Stripe reporter). Returns the server for chaining. When m
-// is a *meter.StripeReporter, its best-effort async-queue drop count is also exposed on GET /metrics
-// (a nonzero, growing rate means billable events — and thus revenue — are being silently lost).
-func (s *Server) WithMeter(m meter.Meter) *Server {
-	s.meter = m
-	if sr, ok := m.(*meter.StripeReporter); ok {
-		s.metrics.CounterFunc("averin_meter_queue_drops_total",
-			"Total usage-metering events dropped from the async reporter queue under back-pressure.",
-			sr.Dropped)
-		// averin#15: a delivery failure (transport error or non-2xx, most often an unmapped
-		// project→stripe_customer_id) is not retried, so a growing count is silent under-billing.
-		s.metrics.CounterFunc("averin_meter_post_failures_total",
-			"Total usage-metering events whose Stripe delivery failed (transport error or non-2xx response); not retried.",
-			sr.PostFailures)
-	}
 	return s
 }
 
@@ -460,6 +450,16 @@ func (s *Server) WithBrokerID(brokerID string) *Server {
 // posture needs.
 func (s *Server) WithDeniedGrantLog() *Server {
 	s.denyLog = true
+	return s
+}
+
+// WithRequireApproverBinding (AVE-10) makes the server's own verify treat a govder approval whose
+// signed evidence does not commit who approved as a verification failure. since, when non-empty, is a canonical
+// YYYY-MM-DDTHH:MM:SS.mmmZ cutover: records received before it stay history (with a note). Off by default in the
+// library; averin-server turns it on unless AVERIN_DEV_MODE=1.
+func (s *Server) WithRequireApproverBinding(on bool, since string) *Server {
+	s.requireApproverBinding = on
+	s.approverBindingSince = since
 	return s
 }
 
@@ -962,6 +962,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v2/revoke", s.handleRevoke)                 // M5: mark a grant_id revoked (export carries a signed revocation_list)
 	mux.HandleFunc("POST /v2/broker-seq/void", s.handleBrokerSeqRecovery)
 	mux.HandleFunc("GET /v2/broker-seq/void", s.handleBrokerSeqPreflight)
+	mux.HandleFunc("POST /v2/refusals", s.handleRefusals) // feir-ops#1: seal a gateway refusal record
 	mux.HandleFunc("POST /v2/use", s.handleUse)
 	mux.HandleFunc("POST /v2/use-intent", s.handleUseIntent)
 	mux.HandleFunc("POST /v2/use-outcome", s.handleUseOutcome)
@@ -971,6 +972,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v2/dag", s.handleDAG)
 	mux.HandleFunc("GET /v2/verify", s.handleVerify)
 	mux.HandleFunc("GET /v2/export", s.handleExport)
+	mux.HandleFunc("GET /v2/segments", s.handleSegments)
 	mux.HandleFunc("GET /v2/usage", s.handleUsage)
 	mux.HandleFunc("GET /v2/posture", s.handlePosture) // read-only startup-guard report for the deploy verifier
 
@@ -978,8 +980,11 @@ func (s *Server) Routes() http.Handler {
 	// AFTER auth — an unauthenticated request is 401, not 429 — and applies in the dev/no-auth path too). Unset
 	// (the default) leaves the routes unlimited, exactly as before.
 	var handler http.Handler = mux
+	if s.projectQuota > 0 {
+		handler = s.quotaGuard(handler)
+	}
 	if s.ingestBudget != nil {
-		handler = s.rateLimitIngest(mux)
+		handler = s.rateLimitIngest(handler)
 	}
 	guarded := http.NewServeMux()
 	guarded.HandleFunc("GET /healthz", healthz)
@@ -990,10 +995,15 @@ func (s *Server) Routes() http.Handler {
 	// credential access to other writer routes.
 	guarded.Handle("POST /v2/broker-seq/void", auth.RecoveryMiddleware(s.recovery)(handler))
 	guarded.Handle("GET /v2/broker-seq/void", auth.RecoveryMiddleware(s.recovery)(handler))
-	if s.auth == nil || auth.IsOpen(s.auth) {
+	switch {
+	case s.auth == nil:
+		// FAIL CLOSED (AVE-05): no token configured and no explicit dev-open store (WithAuth(auth.NewOpenStore()))
+		// refuses every /v2 request. Only the cluster probes above stay reachable.
+		guarded.Handle("/v2/", auth.DenyAll(handler))
+	case auth.IsOpen(s.auth):
 		guarded.Handle("/v2/", handler)
-	} else {
-		guarded.Handle("/v2/", auth.Middleware(s.auth, "project")(handler))
+	default:
+		guarded.Handle("/v2/", auth.MiddlewareRoles(s.auth, "project", requiredRole)(handler))
 	}
 	return s.rejectIdentityParams(guarded)
 }
@@ -1290,12 +1300,13 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 const denialIdemPrefix = "denial:"
 
 // reservedIdemMsg is the 400 every caller-facing entry point returns for a reserved idempotency_key prefix.
-const reservedIdemMsg = `idempotency_key prefixes "denial:" and "grant-void:" are reserved for the broker (denied-grant log, grant_void tombstones)`
+const reservedIdemMsg = `idempotency_key prefixes "denial:", "grant-void:" and "refusal:" are reserved for the broker and gateway-refusal endpoints (denied-grant log, grant_void tombstones, refusal records)`
 
 // reservedIdem also covers grantVoidIdemPrefix: a record pre-seeded under grant-void:<seq> would make the operator's
 // tombstone for that seq collapse onto it (and never fill the seq).
 func reservedIdem(idem string) bool {
-	return strings.HasPrefix(idem, denialIdemPrefix) || strings.HasPrefix(idem, grantVoidIdemPrefix)
+	return strings.HasPrefix(idem, denialIdemPrefix) || strings.HasPrefix(idem, grantVoidIdemPrefix) ||
+		strings.HasPrefix(idem, refusalIdemPrefix)
 }
 
 // rejectOpaqueIdentity checks IDs before lookup, deduplication or authentication. RCP normalizes
@@ -1413,7 +1424,7 @@ var uuidV5Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[8
 // ADR 0005 §7 reserves, and the lowercase UUIDv5 shape of deterministic grant/introspection ids. Server-assigned
 // ids (newUUID) are v4, so a record with no caller record_id is never affected.
 func reservedRecordID(rid string) bool {
-	for _, p := range []string{"use-", "outcome-", "denial-", "introspection-", "revocation-"} {
+	for _, p := range []string{"use-", "outcome-", "denial-", "introspection-", "revocation-", refusalRecordIDPrefix} {
 		if strings.HasPrefix(rid, p) {
 			return true
 		}
@@ -1482,6 +1493,19 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	if stringField(rec, "event_type") == "credential_grant_denied" {
 		return fmt.Errorf("event_type \"credential_grant_denied\" is reserved for the broker denied-grant log")
 	}
+	// feir-ops#1: the gateway-refusal markers are reserved for POST /v2/refusals for the same reason as the B11
+	// marker above: a refusal is sealed by the server key like any record, so the verifier cannot tell a
+	// server-built one from a generic-forged one. The verifier counts on record_kind, so reserving every marker
+	// here keeps the blocked-attempts count from being inflated through the generic path.
+	if stringField(rec, "event_type") == "gateway_refusal" {
+		return fmt.Errorf("event_type \"gateway_refusal\" is reserved for the gateway refusal endpoint (POST /v2/refusals)")
+	}
+	if stringField(rec, "record_kind") == "gateway-refusal" {
+		return fmt.Errorf("record_kind \"gateway-refusal\" is reserved for the gateway refusal endpoint (POST /v2/refusals)")
+	}
+	if stringField(rec, "observed_via") == "gateway" {
+		return fmt.Errorf("observed_via \"gateway\" is reserved for the gateway refusal endpoint (POST /v2/refusals)")
+	}
 	// record_kind is OPTIONAL but its value-set is CLOSED (schema enum). The Rust closed-key gate only
 	// admits the KEY (so a record carrying it verifies), not the value — so enforce the enum here at
 	// ingest, else an off-enum kind would seal AND verify yet be invisible to / mis-classified by a
@@ -1501,6 +1525,9 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 	if ext, ok := rec["extensions"].(map[string]any); ok {
 		if _, reserved := ext["broker"]; reserved {
 			return fmt.Errorf("extensions.broker is reserved for the broker/resource endpoints and must not be set on a generic record")
+		}
+		if _, reserved := ext["gateway_refusal"]; reserved {
+			return fmt.Errorf("extensions.gateway_refusal is reserved for the gateway refusal endpoint and must not be set on a generic record")
 		}
 		if _, reserved := ext["broker_denial"]; reserved {
 			return fmt.Errorf("extensions.broker_denial is reserved for the broker denied-grant log and must not be set on a generic record")
@@ -4032,16 +4059,26 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
+// handleUsage reports the project's durable stored record count and the configured record quota
+// (0 = none). The count is read from the store, so it survives restarts, unlike the removed in-memory meter.
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
-	u := s.meter.Usage(projectID)
-	billRecords, billExports := meter.Billable(u)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"usage":            u,
-		"free_tier":        meter.FreeTierRecords,
-		"billable_records": billRecords,
-		"billable_exports": billExports,
+	if projectID == "" {
+		writeErr(w, http.StatusBadRequest, "project query param is required")
+		return
+	}
+	var n int
+	err := s.st.WithProjectRead(r.Context(), projectID, func(st store.Store) error {
+		var e error
+		n, e = st.RecordCount(projectID)
+		return e
 	})
+	if err != nil {
+		// FAIL CLOSED: a store read error is a 500, never a zero that reads as "empty project".
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"records": n, "quota_records": s.projectQuota})
 }
 
 // handleDAG returns a session's sealed records (the causal DAG) for the trace-waterfall view.
@@ -4050,6 +4087,13 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 // explicitly Phase 2, spec §3). A deployment MUST put averin behind its own auth (or run it single-
 // tenant) until the authz layer lands — any caller who can reach this endpoint can read any
 // project's data. Documented in docs/coverage-limits.md.
+// listFilterBatch and listFilterScanCap bound a record_kind-filtered list: it scans the newest records in
+// batches and stops at the cap, reporting truncated=true, so a filter can never become an unbounded history scan.
+const (
+	listFilterBatch   = 500
+	listFilterScanCap = 50000
+)
+
 // handleListRecords returns a tenant's sealed records newest-first with truncation honesty.
 func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
@@ -4080,19 +4124,67 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = n
 	}
+	// feir-ops#1: optional record_kind include and exclude_record_kind filters. A caller that wants the main
+	// feed without a refusal storm (or only the refusals) filters here, so the filtered page is the newest
+	// `limit` MATCHING records rather than a post-filtered slice of the newest `limit` records. Unknown values
+	// are a 400, as on /v2/export.
+	kindIn := r.URL.Query().Get("record_kind")
+	kindOut := r.URL.Query().Get("exclude_record_kind")
+	for name, v := range map[string]string{"record_kind": kindIn, "exclude_record_kind": kindOut} {
+		if v != "" && !validRecordKind(v) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown %s %q", name, v))
+			return
+		}
+	}
 	// Page IN THE STORE (SQL LIMIT/OFFSET on Postgres) rather than loading the whole project history into RAM
 	// and slicing — a large tenant no longer materializes every record per list call. RecordsPage returns
 	// newest-first; RecordCount is a cheap indexed count for the truncation-honesty total.
 	var total int
 	var page []store.Record
+	filtered := kindIn != "" || kindOut != ""
+	filteredTruncated := false
 	err := s.st.WithProjectRead(r.Context(), projectID, func(st store.Store) error {
 		var e error
 		total, e = st.RecordCount(projectID)
 		if e != nil {
 			return e
 		}
-		page, e = st.RecordsPage(projectID, limit, offset)
-		return e
+		if !filtered {
+			page, e = st.RecordsPage(projectID, limit, offset)
+			return e
+		}
+		// Scan newest-first in fixed batches until offset+limit matches are held or the scan budget is spent.
+		// total is the whole-history count (unfiltered); truncated tells the caller whether more may exist.
+		matched, scanned := 0, 0
+		for scanned < listFilterScanCap {
+			batch, e := st.RecordsPage(projectID, listFilterBatch, scanned)
+			if e != nil {
+				return e
+			}
+			for _, rec := range batch {
+				scanned++
+				var k struct {
+					RecordKind string `json:"record_kind"`
+				}
+				_ = json.Unmarshal([]byte(rec.JSON), &k)
+				if (kindIn != "" && k.RecordKind != kindIn) || (kindOut != "" && k.RecordKind == kindOut) {
+					continue
+				}
+				matched++
+				if matched > offset {
+					page = append(page, rec)
+					if len(page) == limit {
+						filteredTruncated = true // possibly more; refined below
+						return nil
+					}
+				}
+			}
+			if len(batch) < listFilterBatch {
+				return nil
+			}
+		}
+		filteredTruncated = true // scan budget spent: the answer may be incomplete
+		return nil
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -4102,10 +4194,14 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 	for i, rec := range page {
 		out[i] = json.RawMessage(rec.JSON) // already newest-first
 	}
+	truncated := offset+len(page) < total
+	if filtered {
+		truncated = filteredTruncated
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"records":   out,
 		"total":     total,
-		"truncated": offset+len(page) < total,
+		"truncated": truncated,
 	})
 }
 
@@ -4138,12 +4234,17 @@ func (s *Server) handleDAG(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	setBundleWriteDeadline(w)
 	projectID := r.URL.Query().Get("project")
+	month := r.URL.Query().Get("month")
 	// The work is coalesced before taking a bundle slot. A Telegram/browser refresh storm for one project
 	// therefore consumes one build slot, not one slot per waiting HTTP request.
-	report, err := s.verifyProject(r.Context(), projectID)
+	report, err := s.verifyProject(r.Context(), projectID, month)
 	if err != nil {
 		if errors.Is(err, errVerifyOverloaded) {
 			writeErr(w, http.StatusServiceUnavailable, "too many concurrent verification requests; retry shortly")
+			return
+		}
+		if errors.Is(err, errBadMonth) || errors.Is(err, errNoSuchMonth) || errors.Is(err, errBundleTooBig) || errors.Is(err, errMonthTooBig) {
+			writeBundleErr(w, err)
 			return
 		}
 		// A disconnected client cannot receive an error response. The shared verification is intentionally
@@ -4162,16 +4263,21 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 // project and the trust-root options, so requests from different tenants (or with different verifier
 // configuration) can never share a result. The result is shared only while the work is in flight; errors and
 // integrity-failure reports are never retained as a reassuring answer for a later request.
-func (s *Server) verifyProject(ctx context.Context, projectID string) (string, error) {
-	verifyOpts := s.selfVerifyOpts()
-	key := verificationKey(projectID, verifyOpts)
+func (s *Server) verifyProject(ctx context.Context, projectID, month string) (string, error) {
+	verifyOpts := s.selfVerifyOptsFor(projectID)
+	flightProject := projectID
+	if month != "" {
+		// A month and the whole history are different results; they must never share a flight.
+		flightProject += "\x00" + month
+	}
+	key := verificationKey(flightProject, verifyOpts)
 	return s.verifyFlights.run(ctx, key, func() (string, error) {
 		// Unlike acquireBundleSlot, this worker has no ResponseWriter. It waits for capacity so a burst of
 		// unrelated exports cannot cause a duplicate verification or make the first request fail spuriously.
 		s.bundleSem <- struct{}{}
 		defer func() { <-s.bundleSem }()
 
-		bundle, err := s.buildBundle(projectID, false)
+		bundle, _, err := s.buildBundleView(ctx, projectID, false, month)
 		if err != nil {
 			return "", err
 		}
@@ -4198,11 +4304,39 @@ func verificationKey(projectID, verifyOpts string) string {
 // public out-of-band roots via WithExternalVerificationRoots: an attestation issuer and an RFC 3161 TSA SPKI.
 // This keeps the default self-view from self-pinning a producer key while allowing the product view to surface a
 // real auditor-pinned D7 verdict when the deployment has actually configured the full trust path.
-func (s *Server) selfVerifyOpts() string {
+func (s *Server) selfVerifyOpts() string { return s.selfVerifyOptsFor("") }
+
+// selfVerifyOptsFor is selfVerifyOpts for one project. It additionally pins that project's generic authority
+// keys (the same keys ingest elevates under, project pin first then the global default per source) as
+// authority_keys. Without them a govder-signed record is Unverifiable in the server's own view, so the
+// approver-binding policy (which only inspects Verified and legacy-unbound records) would never fire there.
+func (s *Server) selfVerifyOptsFor(project string) string {
 	enc := func(pub ed25519.PublicKey) string {
 		return "ed25519pub:" + base64.RawURLEncoding.EncodeToString(pub)
 	}
 	opts := map[string]any{}
+	if s.requireApproverBinding {
+		opts["require_approver_binding"] = true
+		if s.approverBindingSince != "" {
+			opts["approver_binding_since"] = s.approverBindingSince
+		}
+	}
+	var authKeys []string
+	for _, src := range []string{"policy_engine_signed", "human_signed", "delegate_signed"} {
+		if k, ok := s.authorityKeyFor(project, src); ok {
+			e := enc(k)
+			dup := false
+			for _, x := range authKeys {
+				dup = dup || x == e
+			}
+			if !dup {
+				authKeys = append(authKeys, e)
+			}
+		}
+	}
+	if len(authKeys) > 0 {
+		opts["authority_keys"] = authKeys
+	}
 	if s.brokerID != "" {
 		opts["federated_broker_keys"] = map[string]any{s.brokerID: []string{s.core.PubKey()}}
 	} else {
@@ -4253,7 +4387,7 @@ func (s *Server) selfVerifyOpts() string {
 // without parsing `extensions`.
 func validRecordKind(k string) bool {
 	switch k {
-	case "budget-exhausted", "chargeback-posted":
+	case "budget-exhausted", "chargeback-posted", "gateway-refusal":
 		return true
 	default:
 		return false
@@ -4276,15 +4410,14 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// caller's typo cannot masquerade as "no matching evidence". Works in proof_only AND full_evidence.
 	recordKind := r.URL.Query().Get("record_kind")
 	if recordKind != "" && !validRecordKind(recordKind) {
-		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown record_kind %q (allowed: budget-exhausted, chargeback-posted)", recordKind))
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown record_kind %q (allowed: budget-exhausted, chargeback-posted, gateway-refusal)", recordKind))
 		return
 	}
-	bundle, snapshotDisclosures, err := s.buildBundleWithSnapshot(r.Context(), projectID, true)
+	bundle, snapshotDisclosures, err := s.buildBundleView(r.Context(), projectID, true, r.URL.Query().Get("month"))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeBundleErr(w, err)
 		return
 	}
-	s.meter.ExportIssued(projectID) // billable per export
 	var obj map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(bundle), &obj)
 	obj["mode"], _ = jsonRaw(mode)
@@ -4312,7 +4445,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// verifier used by /v2/verify and change the line only when the complete capstone is
 	// actually present.  The wording retains the two load-bearing bounds: brokered surface
 	// (not every action an agent might take) and assumed-truthful resource reporting.
-	verificationReport := s.core.VerifyBundleWith(bundle, s.selfVerifyOpts())
+	verificationReport := s.core.VerifyBundleWith(bundle, s.selfVerifyOptsFor(projectID))
 	gaps := []string{completenessGapLine(verificationReport)}
 	if mode == "selective_disclosure" || mode == "full_evidence" {
 		disclosures, err := s.buildDisclosures(r.Context(), projectID, snapshotDisclosures)
@@ -4476,6 +4609,14 @@ func (s *Server) buildBundle(projectID string, _ bool) (string, error) {
 }
 
 func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, includeDisclosures bool) (string, []store.DisclosureSecret, error) {
+	return s.buildBundleView(ctx, projectID, includeDisclosures, "")
+}
+
+// buildBundleView builds the whole-history bundle (month == "") or the month segment for `month` (AVE-01):
+// the same snapshot, keys, revocation list and attestation, over only that month's records and checkpoints
+// plus the base checkpoint, with the `segment` block. A whole-history build that would exceed the verifier's
+// size cap fails with errBundleTooBig instead of producing a file no verifier accepts.
+func (s *Server) buildBundleView(ctx context.Context, projectID string, includeDisclosures bool, month string) (string, []store.DisclosureSecret, error) {
 	// One repeatable-read snapshot prevents an export from combining a new
 	// checkpoint with an older record set, or a fresh revocation list with a
 	// different anchor/record cutoff. The complete uncheckpointed tail remains.
@@ -4486,6 +4627,7 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 	var boundary time.Time
 	var watermark int64
 	var secrets []store.DisclosureSecret
+	var plan *segmentPlan
 	err := s.st.WithProjectRead(ctx, projectID, func(st store.Store) error {
 		var err error
 		// Plan 009: the boundary time and authorization high watermark are captured inside this
@@ -4500,8 +4642,30 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 		if anchors, err = st.Anchors(projectID); err != nil {
 			return err
 		}
-		if recs, err = st.AllRecords(projectID); err != nil {
-			return err
+		if month == "" {
+			if recs, err = st.AllRecords(projectID); err != nil {
+				return err
+			}
+		} else {
+			plans, perr := planSegments(checks)
+			if perr != nil {
+				return perr
+			}
+			p, perr := findSegment(plans, month)
+			if perr != nil {
+				return perr
+			}
+			plan = &p
+			if recs, err = segmentRecords(st, projectID, p); err != nil {
+				return err
+			}
+			// The bundle carries the base checkpoint (when there is one) and the month's own checkpoints; the
+			// revocation window and the attestation below are derived from the latest of these.
+			checks = checks[:0:0]
+			if p.Base != nil {
+				checks = append(checks, *p.Base)
+			}
+			checks = append(checks, p.Own...)
 		}
 		if s.revocationKey != nil {
 			revocationEvents, err = st.RevocationEvents(projectID)
@@ -4516,6 +4680,32 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 	})
 	if err != nil {
 		return "", nil, err
+	}
+	size := 0
+	for _, r := range recs {
+		size += len(r.JSON)
+	}
+	if size > maxSingleBundleBytes {
+		if month != "" {
+			return "", nil, errMonthTooBig
+		}
+		return "", nil, errBundleTooBig
+	}
+	if month != "" && includeDisclosures {
+		// A month discloses only the openings of its own records.
+		inMonth := make(map[string]struct{}, len(recs))
+		for _, r := range recs {
+			if id := recordIDOf(r.JSON); id != "" {
+				inMonth[id] = struct{}{}
+			}
+		}
+		kept := secrets[:0:0]
+		for _, d := range secrets {
+			if _, ok := inMonth[d.RecordID]; ok {
+				kept = append(kept, d)
+			}
+		}
+		secrets = kept
 	}
 	records := make([]json.RawMessage, len(recs))
 	for i, r := range recs {
@@ -4541,6 +4731,9 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 		"keys":           s.bundleKeys(),
 		"records":        records,
 		"checkpoints":    checkpoints,
+	}
+	if plan != nil {
+		bundle["segment"] = segmentBlock(*plan)
 	}
 	s.addKeyRotations(bundle)
 	// T6/D8: emit the operator-declared coverage_manifest verbatim. Its digest is bound into the
@@ -4586,7 +4779,18 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 		}
 	}
 	out, err := json.Marshal(bundle)
-	return string(out), secrets, err
+	if err != nil {
+		return "", nil, err
+	}
+	// The cap the verifier enforces is on the serialized bundle, which also holds the checkpoints, keys,
+	// revocation list and attestation the records-only pre-check above does not count.
+	if len(out) > maxSingleBundleBytes {
+		if month != "" {
+			return "", nil, errMonthTooBig
+		}
+		return "", nil, errBundleTooBig
+	}
+	return string(out), secrets, nil
 }
 
 // attachAnchor adds an `anchor` block to a sealed checkpoint JSON. The anchor is excluded from the
@@ -4637,6 +4841,15 @@ func setDefault(m map[string]any, k, val string) {
 func jsonRaw(v any) (json.RawMessage, error) {
 	b, err := json.Marshal(v)
 	return json.RawMessage(b), err
+}
+
+// recordIDOf returns the record_id of a sealed record's JSON ("" when absent or unparseable).
+func recordIDOf(sealed string) string {
+	var m struct {
+		RecordID string `json:"record_id"`
+	}
+	_ = json.Unmarshal([]byte(sealed), &m)
+	return m.RecordID
 }
 
 func recordMeta(sealed string) (contentHash string, parents []string, session string) {

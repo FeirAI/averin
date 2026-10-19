@@ -1,0 +1,17 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 28e434f..3e4b963 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -8251,6 +8251,12 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+             ));
+             resource_ids.insert(r);
+         }
++        if crate::refusal::is_refusal(rec) {
++            touched_pairs.insert((
++                "gateway".to_string(),
++                s(rec, "action").unwrap_or_default(),
++            ));
++        }
+         if let Some(r) = ev_str(rec, "use_evidence", "resource_id") {
+             touched_pairs.insert((
+                 r.clone(),

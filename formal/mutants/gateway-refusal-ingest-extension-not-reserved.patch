@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 43340b9..3df43e1 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -1526,7 +1526,7 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
+ 		if _, reserved := ext["broker"]; reserved {
+ 			return fmt.Errorf("extensions.broker is reserved for the broker/resource endpoints and must not be set on a generic record")
+ 		}
+-		if _, reserved := ext["gateway_refusal"]; reserved {
++		if _, reserved := ext["gateway_refusal_unreserved"]; reserved {
+ 			return fmt.Errorf("extensions.gateway_refusal is reserved for the gateway refusal endpoint and must not be set on a generic record")
+ 		}
+ 		if _, reserved := ext["broker_denial"]; reserved {

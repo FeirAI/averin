@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -36,7 +37,7 @@ func newAttestingServer(t *testing.T) (http.Handler, *core.Core, *core.Core, ed2
 		t.Fatalf("resource core: %v", err)
 	}
 	att := attestationKey()
-	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithAttestation(att).Routes()
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithAttestation(att).Routes()
 	return h, c, rc, att
 }
 
@@ -50,7 +51,7 @@ func TestAttestationBindsRevocationDigestStripDetectedEndToEnd(t *testing.T) {
 	att := attestationKey()
 	rev := revocationKey()
 	tsa := testTSAKey()
-	h := api.New(c, store.NewMem(), "k0").
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).
 		WithResource(rc, "orders-db").
 		WithAttestation(att).

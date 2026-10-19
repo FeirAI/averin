@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -43,7 +44,7 @@ func TestUseLedgerOutageIsNotADeny(t *testing.T) {
 		t.Fatal(err)
 	}
 	armed := false
-	h := api.New(c, ledgerOutageStore{Store: store.NewMem(), armed: &armed}, "k0").
+	h := api.New(c, ledgerOutageStore{Store: store.NewMem(), armed: &armed}, "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 	ak := grantAgentKey()
 	grantID, capability := mkGrant(t, h, ak, "idem-grant")
@@ -100,7 +101,7 @@ func TestUseLedgerInvariantIs500(t *testing.T) {
 		t.Fatal(err)
 	}
 	armed := false
-	h := api.New(c, ledgerInvariantStore{Store: store.NewMem(), armed: &armed}, "k0").
+	h := api.New(c, ledgerInvariantStore{Store: store.NewMem(), armed: &armed}, "k0").WithAuth(auth.NewOpenStore()).
 		WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 	ak := grantAgentKey()
 	grantID, capability := mkGrant(t, h, ak, "idem-grant")

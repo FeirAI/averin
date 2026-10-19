@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ func denyLogServer(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
-	return api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithDeniedGrantLog().Routes()
+	return api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithDeniedGrantLog().Routes()
 }
 
 func signedDenialBody(ak ed25519.PrivateKey, idem, session, action, resource, scope string, ttl int, pub string) string {
@@ -339,7 +340,7 @@ func TestDenialRecoversFromPreSeededReservedKey(t *testing.T) {
 		t.Fatalf("core: %v", err)
 	}
 	ss := &squatStore{Store: store.NewMem()}
-	h := api.New(c, ss, "k0").WithBroker(brokerIssuingKey()).WithDeniedGrantLog().Routes()
+	h := api.New(c, ss, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithDeniedGrantLog().Routes()
 	ak := grantAgentKey()
 	if code, r := do(t, h, "POST", "/v2/grants", grantBody("idem-deny", "iam:reset", ak, ak)); code != http.StatusBadRequest {
 		t.Fatalf("forbidden scope should be 400, got %d: %s", code, r)
@@ -386,7 +387,7 @@ func TestDenialIdIsServerSecret(t *testing.T) {
 		if err != nil {
 			t.Fatalf("core: %v", err)
 		}
-		return api.New(c, store.NewMem(), "k0").WithBroker(brokerKey).WithDeniedGrantLog().Routes()
+		return api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerKey).WithDeniedGrantLog().Routes()
 	}
 	ak := grantAgentKey()
 	bk2Seed := make([]byte, ed25519.SeedSize)

@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 901813c..b6e1a94 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4662,7 +4662,7 @@ func (s *Server) buildBundleView(ctx context.Context, projectID string, includeD
+ 	}
+ 	// The cap the verifier enforces is on the serialized bundle, which also holds the checkpoints, keys,
+ 	// revocation list and attestation the records-only pre-check above does not count.
+-	if len(out) > maxSingleBundleBytes {
++	if false && len(out) > maxSingleBundleBytes {
+ 		if month != "" {
+ 			return "", nil, errMonthTooBig
+ 		}

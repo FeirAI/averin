@@ -16579,3 +16579,128 @@ fn write_tail_sequence_fixture() {
     }
     std::fs::write(out, format!("[{}]\n", reports.join(",\n"))).unwrap();
 }
+
+// ---- AVE-01: a month that cannot see an outcome's intent must not decide `authorized` ----
+
+/// A two-month history: June holds a filler grant (`grant-0`), July holds the claim-ready grant and PoP use plus an
+/// orphan `use_outcome` whose `intent_ref` names the June record id. Returns (whole bundle, month 1, month 2, opts).
+fn cross_month_orphan_outcome() -> (CanonValue, CanonValue, CanonValue, VerifyOptions) {
+    let (claim_bundle, mut opts) = claim_ready_bundle();
+    let rec = signing_key_from_seed(&[0u8; 32]);
+    let res = signing_key_from_seed(&[3u8; 32]);
+    let tsa = test_tsa_key(&[200u8; 32]);
+    let recs = claim_bundle.get("records").unwrap().as_array().unwrap();
+    let (grant, use_rec) = (recs[0].clone(), recs[1].clone());
+    let filler = seal_grant(
+        &rec,
+        &rec,
+        "grant-0",
+        &grant_evidence(
+            "grant-0",
+            ACTION,
+            RESOURCE,
+            "single_operation",
+            CNF,
+            ISSUED,
+            EXP,
+        ),
+    );
+    let outcome = body_bind_role_record(
+        &seal_outcome(
+            &rec,
+            &res,
+            "outcome-orphan",
+            &[content_hash_of(&use_rec)],
+            "grant-0",
+            "grant-0",
+            GID,
+        ),
+        &res,
+        &rec,
+    );
+    let key_block =
+        CanonValue::parse(r#"{"signing_key_id":"k0","key_epoch":0,"key_status":"active"}"#)
+            .unwrap();
+    let mut front1 = vec![content_hash_of(&filler), content_hash_of(&outcome)];
+    front1.sort();
+    let mut cps: Vec<CanonValue> = Vec::new();
+    for (i, (front, count, ts)) in [
+        (vec![content_hash_of(&filler)], 1i64, "2026-06-28"),
+        (front1, 4, "2026-07-28"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let prev = cps.last().map(checkpoint_hash);
+        let body = checkpoint_body(
+            &format!("cp{i}"),
+            "proj-001",
+            i as i64,
+            prev.as_deref(),
+            front,
+            *count,
+            &format!("{ts}T12:00:00.000Z"),
+            key_block.clone(),
+        )
+        .unwrap();
+        let cp = seal_checkpoint(&body, &rec).unwrap();
+        let anchor = make_test_anchor(
+            &checkpoint_hash(&cp),
+            &format!("{ts}T12:00:01.000Z"),
+            &tsa,
+            "tsa-1",
+        );
+        cps.push(attach_anchor(&cp, anchor));
+    }
+    let whole = tier_b_bundle(
+        &rec.verifying_key(),
+        vec![filler, grant, use_rec, outcome],
+        cps,
+    );
+    let months = averin_decision_core::segment::split_bundle(&whole).expect("split");
+    opts.segment_base_pin = None;
+    (whole, months[0].1.clone(), months[1].1.clone(), opts)
+}
+
+#[test]
+fn a_month_with_an_unresolved_cross_month_outcome_does_not_decide_authorized() {
+    let (whole, m1, m2, mut opts) = cross_month_orphan_outcome();
+    // the whole history counts the orphan outcome as a violation and refutes the claim
+    let w = verify_bundle_with(&whole, &opts);
+    assert_eq!(
+        w.claims().authorized,
+        ClaimDecision::Refuted,
+        "{:?}",
+        w.issues
+    );
+    // month one alone is clean; month two pinned to its head cannot decide the claim
+    let h1 = verify_bundle_with(&m1, &opts);
+    assert!(h1.ok, "{:?}", h1.issues);
+    let head = m1
+        .get("checkpoints")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .get("checkpoint_hash")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    opts.segment_base_pin = Some(head);
+    let r = verify_bundle_with(&m2, &opts);
+    assert!(r.ok, "{:?}", r.issues);
+    assert_eq!(
+        (r.uses_total, r.uses_matched),
+        (1, 1),
+        "the in-month use still matches"
+    );
+    let sg = r.segment.clone().expect("segment");
+    assert_eq!(sg.unresolved_cross_month.len(), 1);
+    assert_eq!(
+        r.claims().authorized,
+        ClaimDecision::Insufficient,
+        "an outcome whose intent is in an earlier month must not let the month satisfy authorized"
+    );
+}

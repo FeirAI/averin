@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,7 +42,7 @@ func popTestServerWithStore(t *testing.T, clock func() time.Time) (http.Handler,
 		t.Fatal(err)
 	}
 	st := store.NewMem()
-	return api.New(c, st, "k0").WithBroker(brokerIssuingKey()).WithClock(clock).Routes(), st
+	return api.New(c, st, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithClock(clock).Routes(), st
 }
 
 func mutateGrantBody(t *testing.T, body, field string, value any) string {
@@ -354,7 +355,7 @@ func TestUsePreflightRejectsUnverifiedRequestsBeforeContentWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	contentStore := &countingContentStore{Store: content.NewMemStore()}
-	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(contentStore).Routes()
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(contentStore).Routes()
 	ak := grantAgentKey()
 	grantID, capability := mkGrant(t, h, ak, "idem-preflight-grant")
 	baseline := contentStore.puts
@@ -406,7 +407,7 @@ func TestUsePreflightPreservesExpiredCommittedExactRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	contentStore := &countingContentStore{Store: content.NewMemStore()}
-	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(contentStore).WithClock(func() time.Time { return now }).Routes()
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(contentStore).WithClock(func() time.Time { return now }).Routes()
 	ak := grantAgentKey()
 	code, grantResponse := do(t, h, "POST", "/v2/grants", grantBodyAt("idem-use-expiry-grant", "read:orders", ak, ak, now))
 	if code != http.StatusCreated {
@@ -474,7 +475,7 @@ func TestUseCommittedRetryBindsBoundedSequenceWithoutContentWrite(t *testing.T) 
 		t.Fatal(err)
 	}
 	contentStore := &countingContentStore{Store: content.NewMemStore()}
-	h := api.New(c, store.NewMem(), "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(contentStore).Routes()
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").WithContent(contentStore).Routes()
 	ak := grantAgentKey()
 	code, grantResponse := do(t, h, "POST", "/v2/grants", boundedGrantBody("idem-sequence-grant", 2, ak))
 	if code != http.StatusCreated {

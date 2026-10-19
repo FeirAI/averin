@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/feirai/averin/server/internal/auth"
 	"net/http"
 	"testing"
 
@@ -60,44 +61,28 @@ func (f *failReadStore) SessionRecords(p, s string) ([]store.Record, error) {
 	return f.Store.SessionRecords(p, s)
 }
 
-func billableExports(t *testing.T, h http.Handler) int {
-	t.Helper()
-	_, r := do(t, h, "GET", "/v2/usage?project=p1", "")
-	var u struct {
-		BillableExports int `json:"billable_exports"`
-	}
-	if err := json.Unmarshal([]byte(r), &u); err != nil {
-		t.Fatalf("decode usage: %v\n%s", err, r)
-	}
-	return u.BillableExports
-}
-
 // TestExportVerifyFailClosedOnStoreReadError (averin#3): a transient AllRecords/Checkpoints read error inside
-// buildBundle must abort /v2/export and /v2/verify with 500 — NOT build an empty bundle. Because handleExport
-// meters ExportIssued only AFTER buildBundle succeeds, the failed export must never bill (empty-billing closes).
+// buildBundle must abort /v2/export and /v2/verify with 500 — NOT build an empty bundle.
 func TestExportVerifyFailClosedOnStoreReadError(t *testing.T) {
 	c, err := core.New(seed)
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
 	fs := &failReadStore{Store: store.NewMem()}
-	h := api.New(c, fs, "k0").Routes()
+	h := api.New(c, fs, "k0").WithAuth(auth.NewOpenStore()).Routes()
 
 	postRecord(t, h, `{"idempotency_key":"e1","project_id":"p1","session_id":"s1","action":"a"}`)
 	if code, r := do(t, h, "POST", "/v2/checkpoints?project=p1", ""); code != http.StatusCreated {
 		t.Fatalf("checkpoint: %d %s", code, r)
 	}
 
-	// AllRecords error -> export/verify 500, and the failed export must NOT have metered a (zero-record) export.
+	// AllRecords error -> export/verify 500.
 	fs.failAll = true
 	if code, r := do(t, h, "GET", "/v2/export?project=p1", ""); code != http.StatusInternalServerError {
 		t.Fatalf("export must 500 on an AllRecords error, got %d: %s", code, r)
 	}
 	if code, r := do(t, h, "GET", "/v2/verify?project=p1", ""); code != http.StatusInternalServerError {
 		t.Fatalf("verify must 500 on an AllRecords error, got %d: %s", code, r)
-	}
-	if b := billableExports(t, h); b != 0 {
-		t.Fatalf("a failed export must NOT bill; billable_exports=%d", b)
 	}
 
 	// Checkpoints error -> export 500 too.
@@ -107,13 +92,10 @@ func TestExportVerifyFailClosedOnStoreReadError(t *testing.T) {
 		t.Fatalf("export must 500 on a Checkpoints error, got %d: %s", code, r)
 	}
 
-	// Recovered: export succeeds and NOW bills exactly once.
+	// Recovered: export succeeds.
 	fs.failCheckpoints = false
 	if code, r := do(t, h, "GET", "/v2/export?project=p1", ""); code != http.StatusOK {
 		t.Fatalf("export must succeed once the store recovers, got %d: %s", code, r)
-	}
-	if b := billableExports(t, h); b != 1 {
-		t.Fatalf("a successful export must bill exactly once; billable_exports=%d", b)
 	}
 }
 
@@ -125,7 +107,7 @@ func TestSessionsDAGFailClosedOnStoreReadError(t *testing.T) {
 		t.Fatalf("core: %v", err)
 	}
 	fs := &failReadStore{Store: store.NewMem()}
-	h := api.New(c, fs, "k0").Routes()
+	h := api.New(c, fs, "k0").WithAuth(auth.NewOpenStore()).Routes()
 	postRecord(t, h, `{"idempotency_key":"s1r","project_id":"p1","session_id":"s1","action":"a"}`)
 
 	fs.failSessions = true
@@ -154,7 +136,7 @@ func TestUseOutcomeFailsClosedOnSessionRecordsError(t *testing.T) {
 		t.Fatalf("resource core: %v", err)
 	}
 	fs := &failReadStore{Store: store.NewMem()}
-	h := api.New(c, fs, "k0").WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
+	h := api.New(c, fs, "k0").WithAuth(auth.NewOpenStore()).WithBroker(brokerIssuingKey()).WithResource(rc, "orders-db").Routes()
 
 	ob, _ := json.Marshal(map[string]any{
 		"idempotency_key": "idem-outcome", "project_id": "p1", "session_id": "s1",
@@ -183,7 +165,7 @@ func TestIngestBudgetThrottles(t *testing.T) {
 	}
 	// Tiny per-project burst so the third rapid POST saturates; a generous global ceiling so per-project is the
 	// limiter under test.
-	h := api.New(c, store.NewMem(), "k0").WithIngestBudget(api.IngestBudget{
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithIngestBudget(api.IngestBudget{
 		PerProjectPerSec: 1, PerProjectBurst: 2, GlobalPerSec: 1000, GlobalBurst: 1000,
 	}).Routes()
 

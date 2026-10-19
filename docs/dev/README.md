@@ -28,6 +28,8 @@ composes with sibling planes.
 | [TESTING.md](TESTING.md) | Running the tests + the offline-verifier conformance vectors; a contributing note. |
 | [../../formal/README.md](../../formal/README.md) | **Formal verification**: what is machine-proved (Lean seal/canon/DAG/chain theorems, TLA+ server models, Kani harnesses), the trust boundary, and the open gaps. |
 | [KEY-ROTATION.md](KEY-ROTATION.md) | Runbook for rotating averin's recording key (scheduled and compromise) and what the verifier does with the signed rotation statements. |
+| [SEGMENTS.md](SEGMENTS.md) | Checking a long history one month at a time: the segment format, the `month` export and verify routes, `averin-verify split` and `chain`, and what a month does not check. |
+| [TIMESTAMPS.md](TIMESTAMPS.md) | Trusted timestamps: off by default, the FreeTSA preset, paid authorities, pinning the TSA key, the accepted ECDSA and RSA profiles, and what is tested against real authorities. |
 | [LIMITATIONS.md](LIMITATIONS.md) | Shipped-behavior bounds: the in-memory export/verify size bound (+ concurrency cap and write-timeout exemption), the paged list read, the filtered checkpoint grant-head read, OTel scrub scope, and consume-ledger retention. |
 
 ## The claim, precisely

@@ -1,0 +1,17 @@
+diff --git a/server/internal/pgschema/hook.go b/server/internal/pgschema/hook.go
+index 190650a..571f422 100644
+--- a/server/internal/pgschema/hook.go
++++ b/server/internal/pgschema/hook.go
+@@ -107,10 +107,8 @@ func Hook(ctx context.Context, dsn string, oldRoles []string, newRole string) (H
+ 			return res, err
+ 		}
+ 		res.After = CurrentSchemaVersion
+-		res.Action = HookNoop
+-		if initialized {
+-			res.Action = HookInitialized
+-		}
++		res.Action = HookInitialized
++		_ = initialized
+ 		return res, nil
+ 	case st.Stored == CurrentSchemaVersion:
+ 		res.Action = HookNoop
