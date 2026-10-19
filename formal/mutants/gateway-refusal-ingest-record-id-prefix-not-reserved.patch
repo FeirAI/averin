@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 43340b9..36f1c3e 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -1424,7 +1424,7 @@ var uuidV5Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[8
+ // ADR 0005 §7 reserves, and the lowercase UUIDv5 shape of deterministic grant/introspection ids. Server-assigned
+ // ids (newUUID) are v4, so a record with no caller record_id is never affected.
+ func reservedRecordID(rid string) bool {
+-	for _, p := range []string{"use-", "outcome-", "denial-", "introspection-", "revocation-", refusalRecordIDPrefix} {
++	for _, p := range []string{"use-", "outcome-", "denial-", "introspection-", "revocation-"} {
+ 		if strings.HasPrefix(rid, p) {
+ 			return true
+ 		}

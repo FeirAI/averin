@@ -316,6 +316,13 @@ fn verify_bundle_cmd(path: &str, opts_path: Option<&String>, allow_unbound: bool
             gi("transitive_grants")
         );
     }
+    if gi("gateway_refusals") > 0 {
+        println!(
+            "  gateway refusals:     {} record(s), {} blocked attempt(s) (gateway-reported, sealed unchanged; a floor, not a full count)",
+            gi("gateway_refusals"),
+            gi("gateway_refusal_attempts")
+        );
+    }
     if gi("revoked_uses_blocked") > 0 || gi("revoked_grants_matched") > 0 {
         println!(
             "  revocation blocks:    {} use(s) blocked, {} grant(s) matched on the list",

@@ -1,0 +1,14 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 43340b9..eaa2f47 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -1305,8 +1305,7 @@ const reservedIdemMsg = `idempotency_key prefixes "denial:", "grant-void:" and "
+ // reservedIdem also covers grantVoidIdemPrefix: a record pre-seeded under grant-void:<seq> would make the operator's
+ // tombstone for that seq collapse onto it (and never fill the seq).
+ func reservedIdem(idem string) bool {
+-	return strings.HasPrefix(idem, denialIdemPrefix) || strings.HasPrefix(idem, grantVoidIdemPrefix) ||
+-		strings.HasPrefix(idem, refusalIdemPrefix)
++	return strings.HasPrefix(idem, denialIdemPrefix) || strings.HasPrefix(idem, grantVoidIdemPrefix)
+ }
+ 
+ // rejectOpaqueIdentity checks IDs before lookup, deduplication or authentication. RCP normalizes

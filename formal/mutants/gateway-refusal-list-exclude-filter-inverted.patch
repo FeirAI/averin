@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 43340b9..859133d 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4167,7 +4167,7 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
+ 					RecordKind string `json:"record_kind"`
+ 				}
+ 				_ = json.Unmarshal([]byte(rec.JSON), &k)
+-				if (kindIn != "" && k.RecordKind != kindIn) || (kindOut != "" && k.RecordKind == kindOut) {
++				if (kindIn != "" && k.RecordKind != kindIn) || (kindOut != "" && k.RecordKind != kindOut) {
+ 					continue
+ 				}
+ 				matched++

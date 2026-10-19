@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 7cd4d46..d6a1bd5 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -6722,7 +6722,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+         // count covers only integrity-proven, shape-valid records, deduped by content_hash.
+         if crate::refusal::is_refusal(rec) && seen_refusals.insert(rt.content_hash.as_str()) {
+             match crate::refusal::check_shape(rec) {
+-                Err(why) => refusal_issues.push(format!(
++                Err(why) => issues.push(format!(
+                     "gateway refusal {} ({}): {why} (fail-closed)",
+                     rt.index, rt.record_id
+                 )),

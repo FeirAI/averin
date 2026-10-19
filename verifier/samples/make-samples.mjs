@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Regenerates verifier/samples/{valid,demo-keys,tampered}.json from spec/fixtures/bundle-valid.json.
+// Regenerates verifier/samples/{valid,demo-keys,tampered,refusals,refusals-keys}.json from spec/fixtures/bundle-valid.json.
 // Bun, no dependencies. Run with: bun verifier/samples/make-samples.mjs
 //
 // Why these three files:
@@ -67,7 +67,16 @@ function main() {
   const tampered = bundleText.replace(TAMPER_FROM, TAMPER_TO);
   writeFileSync(join(HERE, "tampered.json"), tampered);
 
-  console.log("wrote valid.json, demo-keys.json, tampered.json in", HERE);
+  // refusals.json + refusals-keys.json: the "refusals_basic" row of spec/fixtures/gateway-refusal-vectors.json
+  // (two gateway refusal records, 4 blocked attempts). Signed by the TEST-ONLY record key
+  // (seed = sha256("averin-TEST-ONLY-record-v1"), listed in spec/test-keys.json): a demo, not a deployment.
+  const vectors = JSON.parse(readFileSync(join(ROOT, "spec", "fixtures", "gateway-refusal-vectors.json"), "utf8"));
+  const row = vectors.find((r) => r.name === "refusals_basic");
+  if (!row) throw new Error("gateway-refusal-vectors.json has no refusals_basic row");
+  writeFileSync(join(HERE, "refusals.json"), row.bundle_json + "\n");
+  writeFileSync(join(HERE, "refusals-keys.json"), JSON.stringify(JSON.parse(row.opts_json), null, 2) + "\n");
+
+  console.log("wrote valid.json, demo-keys.json, tampered.json, refusals.json, refusals-keys.json in", HERE);
 }
 
 main();

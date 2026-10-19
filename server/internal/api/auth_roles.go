@@ -13,6 +13,7 @@ var writeRoutes = map[string]bool{
 	"/v2/grants/prepare":  true,
 	"/v2/grants/finalize": true,
 	"/v2/introspection":   true,
+	"/v2/refusals":        true,
 	"/v2/use":             true,
 	"/v2/use-intent":      true,
 	"/v2/use-outcome":     true,

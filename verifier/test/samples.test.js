@@ -46,3 +46,14 @@ test("tampered.json is also detected as NOT ok when the demo keys are pinned", a
   const report = v.verifyBundleWith(bundle, opts);
   expect(report.ok).toBe(false);
 });
+
+test("refusals.json + refusals-keys.json (TEST keys) verify ok and count the blocked attempts", async () => {
+  const v = await averin();
+  const bundle = readFileSync(join(SAMPLES, "refusals.json"), "utf8");
+  const opts = JSON.parse(readFileSync(join(SAMPLES, "refusals-keys.json"), "utf8"));
+  const report = v.verifyBundleWith(bundle, opts);
+  expect(report.ok).toBe(true);
+  expect(report.keys_externally_pinned).toBe(true);
+  expect(report.gateway_refusals).toBe(2);
+  expect(report.gateway_refusal_attempts).toBe(4);
+});

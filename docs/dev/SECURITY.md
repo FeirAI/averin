@@ -23,7 +23,7 @@ what truly happened in the world.
 | Level | Claim | Today |
 |-------|-------|-------|
 | **1 — Record integrity** | sealed by this key, unchanged since, in a verifiable anchored history | **Yes, checked offline by `decision-core`** across CLI/WASM/FFI. Machine-checked proofs cover only part of it: the seal core (record and checkpoint hashing, the signed message; partial correctness, with SHA-256 and Ed25519 trusted) and the verifier's claim kernel, proved on code extracted from the Rust. The DAG and checkpoint-chain properties are proved on hand-written models, not on the Rust. Anchoring (RFC 3161) and the verifier passes that compute the kernel's input facts (signatures, pins, joins, Merkle paths, DAG and chain checks) are tested, not formally covered. |
-| **2 — Event observation** | this event was observed by us | **Partial — and stated per event** (each record carries `observed_via`). We see only what the proxy/SDK/OTel path captures. |
+| **2 — Event observation** | this event was observed by us | **Partial — and stated per event** (each record carries `observed_via`). We see only what the proxy/SDK/OTel path captures. A gateway refusal record (`observed_via: gateway`) means the gateway reported the refusal and averin sealed it unchanged. |
 | **3 — Complete accountability** | this is *everything* the agent did | **Demonstrated over the brokered surface** (credential broker Tier-A + resource gateway Tier-B); full coverage still needs deployment attestations + a reduced broker TCB. Never claimed as "everything." |
 
 ## Invariants averin upholds
