@@ -130,6 +130,10 @@ func segmentRecords(st store.Store, projectID string, p segmentPlan) ([]store.Re
 	if len(page) != n {
 		return nil, fmt.Errorf("segment %s: expected %d records, store returned %d", p.Month, n, len(page))
 	}
+	// A deleted record inside the range would pull in the next one: the month must be exactly ordinals From+1..To.
+	if err := store.CheckPageOrdinals(page, p.From); err != nil {
+		return nil, fmt.Errorf("segment %s: %w", p.Month, err)
+	}
 	return page, nil
 }
 

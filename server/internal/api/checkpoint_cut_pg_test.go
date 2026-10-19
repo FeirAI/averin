@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/feirai/averin/server/internal/store"
@@ -66,6 +67,39 @@ func TestIncrementalReadRefusesOrdinalGapPostgres(t *testing.T) {
 
 // TestIncrementalReadSnapshotHoldsUnderConcurrentCutPostgres: the same interleaving on the repeatable-read store.
 func TestIncrementalReadSnapshotHoldsUnderConcurrentCutPostgres(t *testing.T) {
-	pg, _ := newVoidTestPostgres(t)
-	checkSnapshotUnderCut(t, pg)
+	checkSnapshotUnderCut(t, func(t *testing.T) store.Store {
+		pg, _ := newVoidTestPostgres(t)
+		return pg
+	})
+}
+
+// TestCheckpointCutRefusesADeletedRecordPostgres: the probe from the PR3 review. Checkpoint at 10, ordinals 11..1110,
+// then the owner role deletes ordinal 500 (inside the first HeadsPageSize page): the page is one row short, the cut
+// used to read the next page one row early and sign record_count 1110 over 1109 rows, folding 1001 twice. It must
+// refuse, and cut again once the history is whole.
+func TestCheckpointCutRefusesADeletedRecordPostgres(t *testing.T) {
+	pg, admin := newVoidTestPostgres(t)
+	s := cutServer(t, pg, "")
+	h := newCutHistory(t, pg, "p", 4)
+	for i := 0; i < 10; i++ {
+		h.plain()
+	}
+	if _, err := cutOnce(t, s, pg, "p"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(context.Background(), `
+		INSERT INTO records (project_id, idempotency_key, content_hash, session_id, parents, json, inserted_at, ord)
+		SELECT 'p', 'bulk'||g, 'sha256:q-'||lpad(g::text, 6, '0'), 's'||(g % 5),
+		       CASE WHEN g=11 THEN '{}'::text[] ELSE ARRAY['sha256:q-'||lpad((g-1)::text, 6, '0')] END,
+		       '{"extensions":{}}', now(), g
+		FROM generate_series(11, 1110) g`); err != nil {
+		t.Fatal(err)
+	}
+	if tag, err := admin.Exec(context.Background(), `DELETE FROM records WHERE project_id='p' AND ord=500`); err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("owner delete of ord 500: %v %v", tag, err)
+	}
+	cp, err := cutOnce(t, s, pg, "p")
+	if err == nil || !strings.Contains(err.Error(), "ordinals are not contiguous") {
+		t.Fatalf("a deleted record in a non-last page must refuse the cut, got %+v %v", cp, err)
+	}
 }

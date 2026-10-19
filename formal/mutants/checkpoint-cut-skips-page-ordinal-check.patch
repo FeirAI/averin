@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -245,9 +245,6 @@ func (s *Server) cutBodyIncremental(st store.Store, projectID, created string) (
+ 		if perr != nil {
+ 			return nil, false, fmt.Errorf("checkpoint: read project snapshot: %w", perr)
+ 		}
+-		if oerr := store.CheckPageOrdinals(page, after); oerr != nil {
+-			return nil, false, fmt.Errorf("checkpoint refused: %w", oerr)
+-		}
+ 		for _, r := range page {
+ 			fold.Add(r)
+ 		}

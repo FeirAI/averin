@@ -113,13 +113,26 @@ What this does not give:
   cut again as the same seq and checked again, also after a restart. After one mismatch
   (`averin_checkpoint_shadow_mismatch_total`, a log line starting `ALERT`) every cut is checked until the process
   restarts. The shadow computation is O(history) and runs inside the project write transaction, so a checked cut
-  takes as long as every cut did before.
+  takes as long as every cut did before, up to the shadow's own time budget (5 s by default, at most 20 s).
+- **The shadow stops being effective as history grows.** A shadow that cannot run (the full computation errors,
+  hits the statement timeout, or exceeds that budget) does not refuse: the incremental body is signed,
+  `averin_checkpoint_shadow_failed_total` is incremented, an `ALERT` line is logged, and that project's next
+  shadow waits for a backoff (not the next cut). A mismatch still refuses. Once the full computation no longer
+  fits its budget the counter rises on every attempt and the sampled check is effectively off for that project.
+  What still holds the equality then is the differential tests (incremental equals full on random histories,
+  in memory and on Postgres) and the guards every cut applies itself: the record count must equal the base count
+  plus the records after it, every page of those records must hold exactly the next ordinals, and the new grants
+  must carry exactly the next `broker_seq` values.
 - **Grant membership is exact-case.** Both cuts count a record as a grant or void tombstone only when
   `extensions.broker.kind` and `authority.enforcement_point` are strings under exactly those keys, as the offline
   verifier does; a record with a differently cased key or a value of another type is not counted and does not fail
   the cut.
 - A cut refuses (as the full computation does) when the new grants do not carry exactly the next `broker_seq`
-  values, and when the store's record count is not the base count plus the records after it.
+  values, when the store's record count is not the base count plus the records after it, and when a page of the
+  records after the base does not hold exactly the next ordinals in order (a record deleted from the middle of
+  the range, which would otherwise shift the next page by one row). The same page check guards the head fold
+  `ProjectHeadsSince` and the month-segment record read. A delete needs a database role that can delete from
+  `records`; the application role cannot.
 - `ProjectHeads` (the full anti-join) is unchanged and still O(history); only the cut stopped using it.
 
 ## Checkpoint grant-head read is filtered, not indexed

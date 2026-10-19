@@ -1,8 +1,8 @@
 diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
 --- a/server/internal/api/checkpoint_cut.go
 +++ b/server/internal/api/checkpoint_cut.go
-@@ -271,7 +271,7 @@
- 	}
+@@ -380,7 +380,7 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
+ 	s.shadowRan(projectID)
  	a, _ := json.Marshal(body)
  	b, _ := json.Marshal(full)
 -	if !bytes.Equal(a, b) {
