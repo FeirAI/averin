@@ -1,0 +1,23 @@
+diff --git a/server/internal/store/postgres.go b/server/internal/store/postgres.go
+index e2f52b2..162d31d 100644
+--- a/server/internal/store/postgres.go
++++ b/server/internal/store/postgres.go
+@@ -906,8 +906,6 @@ func intentRecordSQL() string {
+ 		  AND json::jsonb ->> 'record_id' = $3::text
+ 		  AND session_id = $2
+ 		  AND jsonb_typeof(json::jsonb -> 'record_id') = 'string'
+-		  AND jsonb_typeof(json::jsonb -> 'extensions' -> 'broker' -> 'kind') = 'string'
+-		  AND json::jsonb -> 'extensions' -> 'broker' ->> 'kind' <> ''
+ 		ORDER BY ord ASC
+ 		LIMIT 1`
+ }
+@@ -972,9 +970,6 @@ func (p *Postgres) IntentRecord(projectID, sessionID, recordID string) (Record,
+ 	if err != nil {
+ 		return Record{}, false, fmt.Errorf("store: intent record: %w", err)
+ 	}
+-	if pr, ok := probeUse(r.JSON); !ok || pr.RecordID != recordID {
+-		return Record{}, false, nil
+-	}
+ 	return r, true, nil
+ }
+ 

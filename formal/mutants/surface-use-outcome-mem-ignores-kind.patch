@@ -1,0 +1,13 @@
+diff --git a/server/internal/store/store.go b/server/internal/store/store.go
+index ba9d231..b439e05 100644
+--- a/server/internal/store/store.go
++++ b/server/internal/store/store.go
+@@ -786,7 +786,7 @@ func (m *Mem) UseOutcomeFor(projectID, sessionID, intentRef string) (string, boo
+ 		if r.SessionID != sessionID {
+ 			continue
+ 		}
+-		if p, ok := probeUse(r.JSON); ok && p.Extensions.Broker.Kind == "use_outcome" && p.Extensions.Broker.UseOutcome.IntentRef == intentRef {
++		if p, ok := probeUse(r.JSON); ok && p.Extensions.Broker.UseOutcome.IntentRef == intentRef {
+ 			return p.RecordID, true, nil
+ 		}
+ 	}

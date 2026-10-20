@@ -1,0 +1,13 @@
+diff --git a/server/internal/store/postgres.go b/server/internal/store/postgres.go
+index e2f52b2..acbc8ce 100644
+--- a/server/internal/store/postgres.go
++++ b/server/internal/store/postgres.go
+@@ -940,7 +940,7 @@ func useOutcomeForSQL() string {
+ 		  AND coalesce(jsonb_typeof(json::jsonb -> 'extensions' -> 'broker' -> 'use_outcome' -> 'intent_ref'), 'null') IN ('string', 'null')
+ 		  AND md5(coalesce(json::jsonb -> 'extensions' -> 'broker' -> 'use_outcome' ->> 'intent_ref', '')) = md5($3::text)
+ 		  AND coalesce(json::jsonb -> 'extensions' -> 'broker' -> 'use_outcome' ->> 'intent_ref', '') = $3::text
+-		ORDER BY ord ASC
++		ORDER BY ord DESC
+ 		LIMIT 1`
+ }
+ 

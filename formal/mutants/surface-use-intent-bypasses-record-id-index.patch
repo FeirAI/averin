@@ -1,0 +1,12 @@
+diff --git a/server/internal/store/postgres.go b/server/internal/store/postgres.go
+index e2f52b2..c6d6a81 100644
+--- a/server/internal/store/postgres.go
++++ b/server/internal/store/postgres.go
+@@ -902,7 +902,6 @@ func intentRecordSQL() string {
+ 		SELECT json, content_hash, session_id, parents
+ 		FROM records
+ 		WHERE project_id = $1
+-		  AND md5(json::jsonb ->> 'record_id') = md5($3::text)
+ 		  AND json::jsonb ->> 'record_id' = $3::text
+ 		  AND session_id = $2
+ 		  AND jsonb_typeof(json::jsonb -> 'record_id') = 'string'
