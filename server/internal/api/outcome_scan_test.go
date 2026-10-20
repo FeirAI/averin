@@ -35,10 +35,11 @@ func (c *sessionScanCounter) WithProjectWrite(ctx context.Context, projectID str
 	})
 }
 
-// TestUseOutcomeScansSessionOnce (review, low): resolving the intent an outcome completes and checking that no other
-// outcome already completes it used to be TWO full session scans per /v2/use-outcome, both under ingestMu. One pass
-// answers both; the exactly-one-outcome rule still holds (a second outcome for the intent is a 409).
-func TestUseOutcomeScansSessionOnce(t *testing.T) {
+// TestUseOutcomeDoesNotScanSession: resolving the intent an outcome completes and checking that no other outcome
+// already completes it used to read the whole session per /v2/use-outcome (O(history), the measured soak drift).
+// Both are indexed lookups now: no session read at all; the exactly-one-outcome rule still holds (a second outcome
+// for the intent is a 409).
+func TestUseOutcomeDoesNotScanSession(t *testing.T) {
 	c, _ := core.New(seed)
 	rc, _ := core.New(resourceSeed)
 	sc := &sessionScanCounter{Store: store.NewMem()}
@@ -63,8 +64,8 @@ func TestUseOutcomeScansSessionOnce(t *testing.T) {
 	if code, r := outcome("idem-outcome", "ok"); code != http.StatusCreated {
 		t.Fatalf("use-outcome (%d): %s", code, r)
 	}
-	if sc.scans != 1 {
-		t.Fatalf("/v2/use-outcome read the whole session %d times; want 1", sc.scans)
+	if sc.scans != 0 {
+		t.Fatalf("/v2/use-outcome read the whole session %d times; want 0 (indexed lookups)", sc.scans)
 	}
 	if code, r := outcome("idem-outcome-2", "failed"); code != http.StatusConflict {
 		t.Fatalf("a second outcome for the same intent must 409 (got %d): %s", code, r)

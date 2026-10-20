@@ -848,6 +848,26 @@
     "surface-session-heads-read-ignores-session": {
       "tier": "fast",
       "claim": "session-heads-incremental-equals-full"
+    },
+    "surface-use-outcome-ignores-session": {
+      "tier": "fast",
+      "claim": "use-outcome-lookup-equals-scan"
+    },
+    "surface-use-intent-skips-broker-kind": {
+      "tier": "fast",
+      "claim": "use-outcome-lookup-equals-scan"
+    },
+    "surface-use-outcome-takes-last": {
+      "tier": "fast",
+      "claim": "use-outcome-lookup-equals-scan"
+    },
+    "surface-use-intent-bypasses-record-id-index": {
+      "tier": "fast",
+      "claim": "use-outcome-lookup-equals-scan"
+    },
+    "surface-use-outcome-mem-ignores-kind": {
+      "tier": "fast",
+      "claim": "use-outcome-lookup-equals-scan"
     }
   },
   "claims": [
@@ -3135,6 +3155,77 @@
         "surface-session-heads-read-ignores-session"
       ],
       "does_not_establish": "Not that the table equals the full scan on every history: it is checked on seeded random histories and one migration fixture, not proved. A record that names a parent that is not yet in the store, when that parent is later inserted into the same session, is left listed as a head by the table although the full scan would not list it; the seal path does not produce that and the verifier rejects a missing parent. A writer that inserts into records without PutRecord (a test, an operator's SQL) leaves the table stale. Not the in-memory store, which scans the session on every seal. Not ProjectHeads, which still reads the whole project. Not that the planner uses the primary key index at any size or statistics: the soak measurement is recorded in the pull request, not asserted by a test. The seal-latency test (AVERIN_SEAL_LATENCY=1) is a manual measurement and is not part of this detector. Without AVERIN_TEST_DATABASE_URL the Postgres tests skip, so a local run without a database proves nothing about this claim."
+    },
+    {
+      "id": "use-outcome-lookup-equals-scan",
+      "$comment": "legacy register: use-outcome-lookup-equals-scan",
+      "statement": "The use-outcome lookups return exactly what the whole-session scan they replaced returned. Store.IntentRecord(project, session, recordID) finds the record of that session whose record_id is recordID and which carries a non-empty extensions.broker.kind, and Store.UseOutcomeFor(project, session, intentRef) returns the record_id of the first use_outcome record, in insertion order, of that session whose extensions.broker.use_outcome.intent_ref is intentRef. On Postgres and on the in-memory store, over seeded random histories in several sessions and projects (intents, outcomes, several outcomes for one intent, generic records carrying a use_outcome block or no broker kind, empty kind, a grant carrying a use_outcome block, records of the wrong JSON type or without a record_id, a 6000-byte intent_ref, idempotent replays, an intent_ref naming an intent of another session or project), api.intentAndOutcome's two lookups equal the scan for every record_id and intent_ref of the history and for absent, empty and unusual ones, in every session. A record_id reused in another session of the project is refused (ErrRecordIDConflict), so an intent cannot exist twice across sessions. On Postgres the intent lookup is answered through records_project_record_id_uniq and the outcome lookup through records_use_outcome_intent_idx (asserted from EXPLAIN on a 6000-row session), migration 0010 builds that index over existing rows (stamped v9 to v10 through the cutover, index valid and partial, lookups correct, a 6000-byte intent_ref still insertable), and a read error from either lookup propagates instead of reading as not found.",
+      "method": "property",
+      "artifacts": [
+        "server/internal/store/postgres.go",
+        "server/internal/store/store.go",
+        "server/internal/store/use_outcome_equiv_test.go",
+        "server/internal/store/use_outcome_index_test.go",
+        "server/internal/pgschema/use_outcome_index_test.go",
+        "server/internal/api/intent_outcome_equiv_test.go",
+        "server/migrations/0010_use_outcome_intent_index.sql"
+      ],
+      "gates": [
+        "store-postgres",
+        "formal-fast"
+      ],
+      "detector": "cd server && go test -count=1 -p 2 ./internal/store ./internal/pgschema -run 'UseLookup|UseOutcome'",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "Postgres.IntentRecord",
+          "sha256": "cbbe1c3be28b81e2a5063851cc15339c0064ca4f365116993c67cfbd06e60617"
+        },
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "Postgres.UseOutcomeFor",
+          "sha256": "78dc1f24d9ed58aa2cb53634c9242ae5f72528cb71b0fa06428ed55c4d90bc40"
+        },
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "intentRecordSQL",
+          "sha256": "582cd2c111a462810e8b319b0998b744fb89bb8901329a5205383b477885ede7"
+        },
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "intentRecordEmptyIDSQL",
+          "sha256": "32eee8daf67cffe4c096cab1eb7a4b47d86cd307f445d9e04d211e67b6668064"
+        },
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "useOutcomeForSQL",
+          "sha256": "fa30b459e10c28d4d2780ca4c2dd13f9ba77d8b65d2b68cd389a8ef1c41b0c57"
+        },
+        {
+          "path": "server/internal/store/store.go",
+          "symbol": "Mem.IntentRecord",
+          "sha256": "5f7b2147401ae1ff86f6366c1408af8dea34bddb26ec120b51a9a42ea9d3f921"
+        },
+        {
+          "path": "server/internal/store/store.go",
+          "symbol": "Mem.UseOutcomeFor",
+          "sha256": "87fd93332981e6793ac929ef32f6f3b6f06762047806fe3cf7c14b24d9e07056"
+        },
+        {
+          "path": "server/internal/store/store.go",
+          "symbol": "probeUse",
+          "sha256": "a8649dddae56162999ebb75bc000cd0f9292e9036a80de6d143843053604dab3"
+        }
+      ],
+      "mutants": [
+        "surface-use-outcome-ignores-session",
+        "surface-use-intent-skips-broker-kind",
+        "surface-use-outcome-takes-last",
+        "surface-use-intent-bypasses-record-id-index",
+        "surface-use-outcome-mem-ignores-kind"
+      ],
+      "does_not_establish": "Not that the lookup equals the scan on every history: it is checked on seeded random histories, not proved. The Postgres lookups read exact JSON key names while the scan's Go decoder also accepts keys that differ only in letter case, so on a record with such keys the lookup is stricter (a sealed record never has them, and a generic record cannot set extensions.broker). With a historical non-unique record_id index the first row satisfying the scan's conditions is returned, which the tests do not exercise. An empty intent_record_id is answered from the session, not from the index (the API rejects it). Not the in-memory store's cost, which still scans the session. Not that the planner uses the indexes at any statistics or size beyond the 6000-row plan test; the latency numbers (AVERIN_INTENT_LATENCY=1) are a manual measurement recorded in the pull request, not part of this detector. Not the seal path, the rest of /v2/use-outcome or the exactly-once rule beyond the lookups it reads. Without AVERIN_TEST_DATABASE_URL the Postgres tests skip, so a local run without a database proves nothing about this claim. The api-level copy of the equivalence test (intentAndOutcomeScan) runs in the store-postgres job, not in this detector."
     }
   ]
 }

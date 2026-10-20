@@ -1,0 +1,13 @@
+diff --git a/server/internal/store/postgres.go b/server/internal/store/postgres.go
+index e2f52b2..0dc6a78 100644
+--- a/server/internal/store/postgres.go
++++ b/server/internal/store/postgres.go
+@@ -933,7 +933,7 @@ func useOutcomeForSQL() string {
+ 		SELECT coalesce(json::jsonb ->> 'record_id', '')
+ 		FROM records
+ 		WHERE project_id = $1
+-		  AND session_id = $2
++		  AND (session_id = $2 OR TRUE)
+ 		  AND json::jsonb -> 'extensions' -> 'broker' ->> 'kind' = 'use_outcome'
+ 		  AND coalesce(jsonb_typeof(json::jsonb -> 'record_id'), 'null') IN ('string', 'null')
+ 		  AND coalesce(jsonb_typeof(json::jsonb -> 'extensions' -> 'broker' -> 'use_outcome'), 'null') IN ('object', 'null')

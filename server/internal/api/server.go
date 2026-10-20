@@ -2918,48 +2918,33 @@ func storedOutcomeMatchesRequest(recordJSON, intentRef, status string) bool {
 	return uo.IntentRef == intentRef && uo.Status == status
 }
 
-// intentAndOutcome resolves, in ONE pass over the session's records, (a) the broker/resource record whose record_id
-// is intentRef (the use_intent an outcome completes) and (b) the record_id of a use_outcome that already completes
-// intentRef, read from the SIGNED use_outcome payload the verifier pairs on (not the unsigned extensions.broker
-// sibling). /v2/use-outcome scans once inside the project transaction, so two replicas cannot both
-// complete the same intent. A read error propagates (fail closed → retryable 500).
+// intentAndOutcome resolves (a) the broker/resource record whose record_id is intentRef (the use_intent an outcome
+// completes) and (b) the record_id of a use_outcome that already completes intentRef, read from the use_outcome
+// payload's extensions.broker.use_outcome.intent_ref. Both are INDEXED lookups (store.IntentRecord by
+// (project, record_id), store.UseOutcomeFor by (project, session, intent_ref); migration 0010), so the cost of a
+// call does not grow with the session's history. It used to read and decode the whole session, which made every
+// metered call slower than the last (vultrino keeps one session per tenant). /v2/use-outcome calls it inside the
+// project transaction, so two replicas cannot both complete the same intent. A read error propagates (fail
+// closed -> retryable 500).
 //
-// A matching record must be a real broker/resource record (it carries extensions.broker.kind). A generic record can
+// A matching intent must be a real broker/resource record (it carries extensions.broker.kind). A generic record can
 // never set extensions.broker (reserved), so a pre-seeded generic record with a matching record_id is NOT treated as
-// the intent — the gateway validation (PoP, consume-before-act) is never skipped on a spoofed record. (Reserved
-// record_id prefixes also block the pre-seed.)
+// the intent: the gateway validation (PoP, consume-before-act) is never skipped on a spoofed record. (Reserved
+// record_id prefixes also block the pre-seed.) intentAndOutcomeScan (test file) is the scan this must equal.
 func (s *Server) intentAndOutcome(st store.Store, projectID, sessionID, intentRef string) (intentJSON string, intentFound bool, outcomeID string, outcomeFound bool, err error) {
-	recs, err := st.SessionRecords(projectID, sessionID)
+	rec, intentFound, err := st.IntentRecord(projectID, sessionID, intentRef)
 	if err != nil {
-		// FAIL CLOSED (averin#14): a SessionRecords read error is NOT "intent not found" — propagate it so the
-		// caller answers a retryable 500, not a 400 that makes the client abandon the outcome (breaking the
-		// intent→outcome pairing and leaving a permanent intent_without_outcome).
+		// FAIL CLOSED (averin#14): a read error is NOT "intent not found": propagate it so the caller answers a
+		// retryable 500, not a 400 that makes the client abandon the outcome (breaking the intent->outcome pairing
+		// and leaving a permanent intent_without_outcome).
 		return "", false, "", false, err
 	}
-	for _, rec := range recs {
-		var probe struct {
-			RecordID   string `json:"record_id"`
-			Extensions struct {
-				Broker struct {
-					Kind       string `json:"kind"`
-					UseOutcome struct {
-						IntentRef string `json:"intent_ref"`
-					} `json:"use_outcome"`
-				} `json:"broker"`
-			} `json:"extensions"`
-		}
-		if json.Unmarshal([]byte(rec.JSON), &probe) != nil || probe.Extensions.Broker.Kind == "" {
-			continue
-		}
-		if !intentFound && probe.RecordID == intentRef {
-			intentJSON, intentFound = rec.JSON, true
-		}
-		if !outcomeFound && probe.Extensions.Broker.Kind == "use_outcome" && probe.Extensions.Broker.UseOutcome.IntentRef == intentRef {
-			outcomeID, outcomeFound = probe.RecordID, true
-		}
-		if intentFound && outcomeFound {
-			break
-		}
+	if intentFound {
+		intentJSON = rec.JSON
+	}
+	outcomeID, outcomeFound, err = st.UseOutcomeFor(projectID, sessionID, intentRef)
+	if err != nil {
+		return "", false, "", false, err
 	}
 	return intentJSON, intentFound, outcomeID, outcomeFound, nil
 }

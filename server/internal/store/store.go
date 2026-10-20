@@ -241,6 +241,15 @@ type Store interface {
 	NextDisplaySeq(projectID, sessionID string) (int64, error)
 	Sessions(projectID string) ([]string, error)
 	SessionRecords(projectID, sessionID string) ([]Record, error)
+	// IntentRecord returns the broker/resource record of the session whose record_id is recordID: the use_intent a
+	// use-outcome completes. A match must be in sessionID and carry extensions.broker.kind (a generic record can never
+	// set extensions.broker, so a pre-seeded generic record with that record_id is not the intent). Postgres answers
+	// from the (project, record_id) index; Mem scans. A read error is returned, never "not found" (fail closed).
+	IntentRecord(projectID, sessionID, recordID string) (rec Record, found bool, err error)
+	// UseOutcomeFor returns the record_id of the first (insertion order) use_outcome record of the session whose
+	// extensions.broker.use_outcome.intent_ref is intentRef, i.e. the outcome that already completes that intent.
+	// Postgres answers from records_use_outcome_intent_idx (migration 0010); Mem scans. A read error is returned.
+	UseOutcomeFor(projectID, sessionID, intentRef string) (recordID string, found bool, err error)
 	AllRecords(projectID string) ([]Record, error)
 	// RecordsPage returns up to `limit` records NEWEST-FIRST, skipping the newest `offset`, WITHOUT loading
 	// the whole project history into memory (Postgres pages in SQL). It backs the paged app list endpoint so
@@ -723,6 +732,65 @@ func (m *Mem) SessionRecords(projectID, sessionID string) ([]Record, error) {
 		}
 	}
 	return out, nil
+}
+
+// useProbe is the part of a record the use-outcome lookups read. Mem decodes it per record, which is the
+// semantics the Postgres queries must reproduce (the scan api.intentAndOutcome used before migration 0010).
+type useProbe struct {
+	RecordID   string `json:"record_id"`
+	Extensions struct {
+		Broker struct {
+			Kind       string `json:"kind"`
+			UseOutcome struct {
+				IntentRef string `json:"intent_ref"`
+			} `json:"use_outcome"`
+		} `json:"broker"`
+	} `json:"extensions"`
+}
+
+// probeUse decodes a record for the use-outcome lookups. A record that does not decode, or carries no
+// extensions.broker.kind, is never an intent or an outcome.
+func probeUse(recordJSON string) (useProbe, bool) {
+	var p useProbe
+	if json.Unmarshal([]byte(recordJSON), &p) != nil || p.Extensions.Broker.Kind == "" {
+		return useProbe{}, false
+	}
+	return p, true
+}
+
+func (m *Mem) IntentRecord(projectID, sessionID, recordID string) (Record, bool, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return Record{}, false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.proj(projectID).records {
+		if r.SessionID != sessionID {
+			continue
+		}
+		if p, ok := probeUse(r.JSON); ok && p.RecordID == recordID {
+			r.Parents = append([]string(nil), r.Parents...)
+			return r, true, nil
+		}
+	}
+	return Record{}, false, nil
+}
+
+func (m *Mem) UseOutcomeFor(projectID, sessionID, intentRef string) (string, bool, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return "", false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.proj(projectID).records {
+		if r.SessionID != sessionID {
+			continue
+		}
+		if p, ok := probeUse(r.JSON); ok && p.Extensions.Broker.Kind == "use_outcome" && p.Extensions.Broker.UseOutcome.IntentRef == intentRef {
+			return p.RecordID, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func (m *Mem) AllRecords(projectID string) ([]Record, error) {

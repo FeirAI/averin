@@ -2373,6 +2373,54 @@
         "store-postgres",
         "formal-fast"
       ]
+    },
+    {
+      "id": "use-outcome-lookup-equals-scan",
+      "claim": "On Postgres and in the in-memory store, a use-outcome finds the intent it completes (Store.IntentRecord) and any outcome already completing it (Store.UseOutcomeFor) with lookups that equal the whole-session scan they replaced on seeded random histories (several sessions and projects, outcomes repeated for one intent, spoofed and kind-less generic records, wrongly typed fields, replays); on Postgres they are answered through records_project_record_id_uniq and the new records_use_outcome_intent_idx (migration 0010, schema version 10) instead of reading the session, so the cost of a metered call does not grow with the session's history, and a read error propagates. Not that they equal the scan on every history (JSON key names are matched exactly, where the scan's decoder is case-insensitive, so the lookup is at most stricter), not the in-memory store's cost (it scans), and not the planner's choice beyond the asserted plans.",
+      "class": "tested-implementation",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "record_id is unique per project (PutRecord and records_project_record_id_uniq)",
+        "records are written only through Store.PutRecord, which assigns the insertion ordinal"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "IntentRecord"
+        },
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "UseOutcomeFor"
+        },
+        {
+          "file": "server/migrations/0010_use_outcome_intent_index.sql",
+          "symbol": "records_use_outcome_intent_idx"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/store/use_outcome_equiv_test.go",
+          "symbol": "TestUseLookupEqualsScanPostgres"
+        },
+        {
+          "file": "server/internal/store/use_outcome_equiv_test.go",
+          "symbol": "TestUseLookupEqualsScanMem"
+        },
+        {
+          "file": "server/internal/store/use_outcome_index_test.go",
+          "symbol": "TestUseOutcomeLookupsUseTheirIndexes"
+        },
+        {
+          "file": "server/internal/pgschema/use_outcome_index_test.go",
+          "symbol": "TestUseOutcomeIndexMigrationFromV9"
+        }
+      ],
+      "gates": [
+        "store-postgres",
+        "formal-fast"
+      ]
     }
   ]
 }

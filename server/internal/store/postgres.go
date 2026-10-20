@@ -893,6 +893,111 @@ func (p *Postgres) SessionRecords(projectID, sessionID string) ([]Record, error)
 	return collectRecords(rows)
 }
 
+// The use-outcome lookup statements. Functions rather than constants so each statement is a drift-locked
+// symbol of its formal claim, and so a test can EXPLAIN exactly what runs.
+
+// intentRecordSQL: ($1 project, $2 session, $3 record_id). Uses records_project_record_id_uniq (0002).
+func intentRecordSQL() string {
+	return `
+		SELECT json, content_hash, session_id, parents
+		FROM records
+		WHERE project_id = $1
+		  AND md5(json::jsonb ->> 'record_id') = md5($3::text)
+		  AND json::jsonb ->> 'record_id' = $3::text
+		  AND session_id = $2
+		  AND jsonb_typeof(json::jsonb -> 'record_id') = 'string'
+		  AND jsonb_typeof(json::jsonb -> 'extensions' -> 'broker' -> 'kind') = 'string'
+		  AND json::jsonb -> 'extensions' -> 'broker' ->> 'kind' <> ''
+		ORDER BY ord ASC
+		LIMIT 1`
+}
+
+// intentRecordEmptyIDSQL: ($1 project, $2 session); the empty record_id, unreachable through the API.
+func intentRecordEmptyIDSQL() string {
+	return `
+		SELECT json, content_hash, session_id, parents
+		FROM records
+		WHERE project_id = $1 AND session_id = $2
+		  AND coalesce(jsonb_typeof(json::jsonb -> 'record_id'), 'null') IN ('string', 'null')
+		  AND coalesce(json::jsonb ->> 'record_id', '') = ''
+		  AND jsonb_typeof(json::jsonb -> 'extensions' -> 'broker' -> 'kind') = 'string'
+		  AND json::jsonb -> 'extensions' -> 'broker' ->> 'kind' <> ''
+		ORDER BY ord ASC
+		LIMIT 1`
+}
+
+// useOutcomeForSQL: ($1 project, $2 session, $3 intent_ref). Uses records_use_outcome_intent_idx (0010); the
+// predicate lines must stay verbatim equal to the index's WHERE clause.
+func useOutcomeForSQL() string {
+	return `
+		SELECT coalesce(json::jsonb ->> 'record_id', '')
+		FROM records
+		WHERE project_id = $1
+		  AND session_id = $2
+		  AND json::jsonb -> 'extensions' -> 'broker' ->> 'kind' = 'use_outcome'
+		  AND coalesce(jsonb_typeof(json::jsonb -> 'record_id'), 'null') IN ('string', 'null')
+		  AND coalesce(jsonb_typeof(json::jsonb -> 'extensions' -> 'broker' -> 'use_outcome'), 'null') IN ('object', 'null')
+		  AND coalesce(jsonb_typeof(json::jsonb -> 'extensions' -> 'broker' -> 'use_outcome' -> 'intent_ref'), 'null') IN ('string', 'null')
+		  AND md5(coalesce(json::jsonb -> 'extensions' -> 'broker' -> 'use_outcome' ->> 'intent_ref', '')) = md5($3::text)
+		  AND coalesce(json::jsonb -> 'extensions' -> 'broker' -> 'use_outcome' ->> 'intent_ref', '') = $3::text
+		ORDER BY ord ASC
+		LIMIT 1`
+}
+
+// IntentRecord finds the broker record the use-outcome completes by (project, record_id), through
+// records_project_record_id_uniq (0002): one index descent whatever the session's history. The query repeats that
+// index's expression verbatim, then asks for exactly what the old session scan required: same session, record_id
+// and extensions.broker.kind JSON strings, kind non-empty; the lowest ord wins (the scan returned the first match
+// in insertion order, and only a historical duplicate record_id, which the unique index otherwise forbids, can make
+// that matter). The row is then decoded with the scan's own probe, so a record the scan would have skipped
+// (a field of the wrong JSON type) is not accepted either.
+func (p *Postgres) IntentRecord(projectID, sessionID, recordID string) (Record, bool, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return Record{}, false, err
+	}
+	var r Record
+	var err error
+	if recordID == "" {
+		// A sealed broker record always has a record_id, and the API rejects an empty intent_record_id, so this is
+		// unreachable in operation. The scan decoded an absent or null record_id as "" and so matched it; the
+		// record_id index cannot answer that, so the empty id is answered from the session (a scan, but only
+		// for an input no request can produce) to stay identical to the definition.
+		err = p.queries().QueryRow(p.callContext(), intentRecordEmptyIDSQL(), projectID, sessionID).Scan(&r.JSON, &r.ContentHash, &r.SessionID, &r.Parents)
+	} else {
+		err = p.queries().QueryRow(p.callContext(), intentRecordSQL(), projectID, sessionID, recordID).Scan(&r.JSON, &r.ContentHash, &r.SessionID, &r.Parents)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Record{}, false, nil
+	}
+	if err != nil {
+		return Record{}, false, fmt.Errorf("store: intent record: %w", err)
+	}
+	if pr, ok := probeUse(r.JSON); !ok || pr.RecordID != recordID {
+		return Record{}, false, nil
+	}
+	return r, true, nil
+}
+
+// UseOutcomeFor returns the record_id of the first use_outcome record of the session that completes intentRef,
+// from records_use_outcome_intent_idx (0010). The WHERE clause repeats the index predicate verbatim (so the
+// planner can use the partial index) and keys on (project, session, md5(intent_ref)); the full value is rechecked,
+// and ord order makes LIMIT 1 the first row in insertion order, as the scan was. An absent or null record_id or
+// intent_ref is "" as the scan's decoder read it.
+func (p *Postgres) UseOutcomeFor(projectID, sessionID, intentRef string) (string, bool, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return "", false, err
+	}
+	var id string
+	err := p.queries().QueryRow(p.callContext(), useOutcomeForSQL(), projectID, sessionID, intentRef).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: use outcome for intent: %w", err)
+	}
+	return id, true, nil
+}
+
 // AllRecords returns every record in the project, in insertion order. Never nil.
 func (p *Postgres) AllRecords(projectID string) ([]Record, error) {
 	if err := p.checkProject(projectID); err != nil {

@@ -193,6 +193,23 @@ session, leaves the parent listed as a head although a record names it (the full
 it). The seal path never produces that and the verifier rejects a missing parent; the migration's
 backfill is the full definition.
 
+## A use-outcome finds its intent and prior outcome by index (Postgres) or by scanning (in-memory)
+
+`/v2/use-outcome` resolves the `use_intent` it completes with `Store.IntentRecord` (Postgres: the
+`(project_id, record_id)` index of migration 0002) and any outcome already completing it with
+`Store.UseOutcomeFor` (Postgres: `records_use_outcome_intent_idx`, migration 0010), so its cost does not
+grow with the session's history. The in-memory (dev) store answers both by scanning the session. Both
+lookups reproduce what the former whole-session scan accepted: same session, `extensions.broker.kind`
+non-empty for an intent, kind `use_outcome` for an outcome, the first match in insertion order (the
+per-project ordinal `records.ord`). Two differences from the scan, both outside operation: (1) the
+Postgres lookups read the stored JSON with exact key names, while the scan's Go decoder also accepts
+keys that differ only in letter case (`Record_ID`); a sealed record never has such keys, and a generic
+record cannot set `extensions.broker`, so the lookups are at most stricter. (2) An empty
+`intent_record_id` (the API rejects it) is answered from the session by the intent lookup, since an
+absent `record_id` reads as the empty string. If a database holds a historical duplicate `record_id`
+(migration 0002 then built a non-unique index), the lookup still takes the first row in insertion order
+that satisfies the scan's conditions.
+
 ## Project writes wait on a database guard
 
 Postgres serializes each project's authoritative writes with a persisted guard
