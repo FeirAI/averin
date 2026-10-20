@@ -2388,11 +2388,11 @@
       "sources": [
         {
           "file": "server/internal/store/postgres.go",
-          "symbol": "Postgres.IntentRecord"
+          "symbol": "IntentRecord"
         },
         {
           "file": "server/internal/store/postgres.go",
-          "symbol": "Postgres.UseOutcomeFor"
+          "symbol": "UseOutcomeFor"
         },
         {
           "file": "server/migrations/0010_use_outcome_intent_index.sql",
