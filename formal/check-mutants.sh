@@ -225,7 +225,11 @@ if [ "$use_kani" = 1 ]; then
   # scoped run must not re-run every harness of the suite).
   baseline_harnesses=()
   for patch in formal/mutants/*.patch; do
-    case "$(basename "$patch")" in lean-*|tla-*|seal-skips-*|surface-*|multiwriter-*|posture-*|xv11-*) continue ;; esac  # Lean, TLA+, seal-shape, verdict-surface, multi-writer (Go, needs Postgres), posture (Go) and approver-evidence (own detector) mutants belong to the kit register
+    # This suite owns exactly the numbered legacy mutants (m<NN>-*). Every other patch in formal/mutants
+    # (Lean, TLA+, seal-shape, verdict-surface, multi-writer, posture, approver-evidence, checkpoint-cut,
+    # gateway, incremental-read, ...) belongs to the kit register and its own detector. A prefix deny-list
+    # missed new kit families and reported them as survivors here (nightly 2026-10-20).
+    case "$(basename "$patch")" in m[0-9]*-*) ;; *) continue ;; esac
     name="$(basename "$patch" .patch)"
     if [ "${MUTANTS_ONLY+x}" = x ]; then
       selected=0
@@ -250,7 +254,7 @@ echo "   ok"
 survivors=0
 executed=0
 for patch in formal/mutants/*.patch; do
-  case "$(basename "$patch")" in lean-*|tla-*|seal-skips-*|surface-*|multiwriter-*|posture-*|xv11-*) continue ;; esac  # Lean, TLA+, seal-shape, verdict-surface, multi-writer (Go, needs Postgres), posture (Go) and approver-evidence (own detector) mutants belong to the kit register
+  case "$(basename "$patch")" in m[0-9]*-*) ;; *) continue ;; esac  # only the numbered legacy mutants; see the baseline loop above
   name="$(basename "$patch" .patch)"
   if [ "${MUTANTS_ONLY+x}" = x ]; then
     selected=0
