@@ -56,3 +56,9 @@ var RecordOrdinal string
 //
 //go:embed 0009_session_heads.sql
 var SessionHeads string
+
+// UseOutcomeIntentIndex creates records_use_outcome_intent_idx, the partial expression index behind the
+// use-outcome "prior outcome for this intent" lookup (schema version 10, availability fix).
+//
+//go:embed 0010_use_outcome_intent_index.sql
+var UseOutcomeIntentIndex string

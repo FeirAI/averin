@@ -76,7 +76,7 @@ func TestTemporalRevocationCutoverFromV6(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Migrate(ctx, scoped); err == nil || !strings.Contains(err.Error(), "maintenance cutover to v9") {
+	if err := Migrate(ctx, scoped); err == nil || !strings.Contains(err.Error(), "maintenance cutover to v10") {
 		t.Fatalf("ordinary startup advanced a v6 schema without a barrier: %v", err)
 	}
 	if maxVersion(t, admin) != 6 {

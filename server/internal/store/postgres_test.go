@@ -157,6 +157,17 @@ func newTracedTestStore(t *testing.T) (*Postgres, *sqlTrace, func()) {
 		t.Fatalf("apply migration 0009: %v", err)
 	}
 
+	// 0010: the use-outcome intent index.
+	migration10, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0010_use_outcome_intent_index.sql"))
+	if err != nil {
+		pool.Close()
+		t.Fatalf("read migration 0010: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration10)); err != nil {
+		pool.Close()
+		t.Fatalf("apply migration 0010: %v", err)
+	}
+
 	p := &Postgres{pool: pool}
 	cleanup := func() {
 		dctx, dcancel := context.WithTimeout(context.Background(), 10*time.Second)

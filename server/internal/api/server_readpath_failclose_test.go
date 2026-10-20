@@ -61,6 +61,20 @@ func (f *failReadStore) SessionRecords(p, s string) ([]store.Record, error) {
 	return f.Store.SessionRecords(p, s)
 }
 
+func (f *failReadStore) IntentRecord(p, s, id string) (store.Record, bool, error) {
+	if f.failSessionRecords {
+		return store.Record{}, false, errors.New("injected IntentRecord failure")
+	}
+	return f.Store.IntentRecord(p, s, id)
+}
+
+func (f *failReadStore) UseOutcomeFor(p, s, ref string) (string, bool, error) {
+	if f.failSessionRecords {
+		return "", false, errors.New("injected UseOutcomeFor failure")
+	}
+	return f.Store.UseOutcomeFor(p, s, ref)
+}
+
 // TestExportVerifyFailClosedOnStoreReadError (averin#3): a transient AllRecords/Checkpoints read error inside
 // buildBundle must abort /v2/export and /v2/verify with 500 — NOT build an empty bundle.
 func TestExportVerifyFailClosedOnStoreReadError(t *testing.T) {
