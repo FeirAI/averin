@@ -32,11 +32,15 @@ Pin only the sets you want to enforce; an omitted set leaves that mode `unevalua
   // broker/authority keys (ADR 0002); must be disjoint from every other role.
   "signing_keys": ["ed25519pub:<record-signing-key>"],
 
-  // Tier-A grant accountability (ADR 0002/0003): the credential broker's recording key(s).
+  // Tier-A grant accountability (ADR 0002/0003): the credential broker's recording key(s). On a single
+  // self-hosted averin server this is the server's own signing key (the public key of AVERIN_SIGNING_SEED),
+  // NOT the key of AVERIN_BROKER_ISSUING_SEED, which signs the minted capabilities; pinning the issuing
+  // key here makes every grant fail to verify.
   "broker_authority_keys": ["ed25519pub:<broker-recording-key>"],
 
-  // Tier-B use receipts (ADR 0003 R2): the resource gateway's recording key(s). Also the M3
-  // native introspection-transcript signer (averin.resource.introspection.v1).
+  // Tier-B use receipts (ADR 0003 R2): the resource gateway's recording key(s), on a self-hosted server
+  // the public key of AVERIN_RESOURCE_SEED. Also the M3 native introspection-transcript signer
+  // (averin.resource.introspection.v1). Without it, use receipts are reported as Tier-B violations.
   "resource_authority_keys": ["ed25519pub:<resource-recording-key>"],
 
   // D3/D7 time anchoring: the TSA key(s) (or "tsa_spki_b64" for an RFC 3161 TSA's DER SPKI; ECDSA and RSA
