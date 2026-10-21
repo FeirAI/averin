@@ -3311,6 +3311,11 @@
           "path": "server/internal/content/content.go",
           "symbol": "NewBoundedMemStore",
           "sha256": "1d1d5788e6112f62e090292cdaff9b795dc2dfa5138a5040d85759bc7c2e932c"
+        },
+        {
+          "path": "server/cmd/averin-server/main.go",
+          "symbol": "main",
+          "sha256": "d5a2f279ff2e636ab0d184e7a98b7a83ec92c36f328972ccf1ebb9c18fd0f1e9"
         }
       ],
       "mutants": [
