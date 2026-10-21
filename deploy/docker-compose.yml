@@ -90,6 +90,14 @@ services:
       # REQUIRED, the server refuses every request, and refuses to start, without keys. Legacy form
       # `proj:token` makes admin tokens; the JSON form scopes tokens (read, write, admin) with an expiry.
       AVERIN_API_KEYS: ${AVERIN_API_KEYS:?set AVERIN_API_KEYS, e.g. export AVERIN_API_KEYS=default:$(openssl rand -hex 24)}
+      # REQUIRED with a database: the durable content store for the raw values behind selective disclosure,
+      # encrypted at rest under a master key. Without it the server refuses to start (the values would be
+      # memory-only and lost on restart while the records stay). Keep the key with your other secrets; losing
+      # it makes the stored content unreadable.
+      AVERIN_CONTENT_DIR: /data/content
+      AVERIN_CONTENT_MASTER_KEY: ${AVERIN_CONTENT_MASTER_KEY:?set a 32-byte content master key, e.g. export AVERIN_CONTENT_MASTER_KEY=$(openssl rand -hex 32)}
+    volumes:
+      - averin-content:/data/content
     # loopback only; expose via your own authenticated reverse proxy.
     ports:
       - "127.0.0.1:8080:8080"
@@ -131,6 +139,7 @@ services:
 
 volumes:
   averin-pgdata:
+  averin-content:
 
 secrets:
   averin_db_superuser_password:

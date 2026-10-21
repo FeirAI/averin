@@ -29,6 +29,7 @@ export AVERIN_DB_SUPERUSER_PASSWORD=$(openssl rand -hex 24) # Postgres bootstrap
 export AVERIN_DB_OWNER_PASSWORD=$(openssl rand -hex 24)     # averin_owner: migration identity, owns the schema
 export AVERIN_DB_RUNTIME_PASSWORD=$(openssl rand -hex 24)   # averin_app: the server's least-privilege identity
 export AVERIN_PROXY_AVERIN_TOKEN=$(openssl rand -hex 24)    # token the proxy records with; needs write or admin for AVERIN_PROJECT_ID (compose default: default)
+export AVERIN_CONTENT_MASTER_KEY=$(openssl rand -hex 32)    # 32-byte key that encrypts the durable content store at rest; keep it, losing it makes stored content unreadable
 export AVERIN_API_KEYS="default:${AVERIN_PROXY_AVERIN_TOKEN}" # server project keys (this legacy form makes admin tokens); compose and the server refuse to start without them
 docker compose -f deploy/docker-compose.yml up --build
 ```
@@ -155,7 +156,9 @@ cargo run -p averin-decision-core --bin averin-verify -- bundle bundle.json
 | `AVERIN_DEV_MODE` | server | unset | `1` selects local development: no keys needed (open API), in-memory store and the dev signing seed allowed, the production gate and strict approver binding default off. Never set it in production. |
 | `AVERIN_TSA_PRESET` | server | (none) | `freetsa` = one-setting anchoring at FreeTSA (free, no service level); see `docs/dev/TIMESTAMPS.md`. Anchoring is off unless this or `AVERIN_TSA_URL` is set. |
 | `AVERIN_TSA_URL` | server | (none) | RFC 3161 TSA URL — anchors every checkpoint (threat #3 backdating). The verifier pins the TSA out-of-band (`tsa_keys`/`tsa_spki_b64`). |
-| `AVERIN_CONTENT_DIR` / `AVERIN_WITNESS_DIR` | server | (none) | durable content-store / append-only checkpoint-witness directories. |
+| `AVERIN_CONTENT_DIR` | server | **required with a database** (compose: `/data/content` on the `averin-content` volume) | durable content-store directory for the raw values behind selective disclosure. With `AVERIN_DATABASE_URL` set and `AVERIN_DEV_MODE` off, the server refuses to start without it. |
+| `AVERIN_CONTENT_MASTER_KEY` | server | **required with a database** (compose sets `:?`) | 64 hex chars (32 bytes); encrypts the content store at rest. Required whenever `AVERIN_CONTENT_DIR` is set. |
+| `AVERIN_WITNESS_DIR` | server | (none) | durable append-only checkpoint-witness directory. |
 | `AVERIN_PROJECT_MAX_RECORDS` / `AVERIN_INGEST_BUDGET` | server | off | per-project stored-record cap (writes past it get `507`) and the ingest rate limiter (`429`); see `docs/dev/CONFIGURATION.md` |
 | `AVERIN_UPSTREAM` | proxy | `https://api.openai.com` | upstream LLM |
 | `AVERIN_PROJECT_ID` | proxy | `default` | project the proxy records under |
