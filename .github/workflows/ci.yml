@@ -357,6 +357,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Install-only, retried once: a transient TLS failure fetching the Lean release (2026-10-21).
+      - id: lean_install_a
+        uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
+        continue-on-error: true
+        with:
+          lake-package-directory: formal/lean
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: false
+          use-github-cache: false
+      - name: back off before retrying the Lean toolchain install
+        if: steps.lean_install_a.outcome == 'failure'
+        run: sleep 30
+      - name: retry the Lean toolchain install (install only)
+        if: steps.lean_install_a.outcome == 'failure'
+        uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
+        with:
+          lake-package-directory: formal/lean
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: false
+          use-github-cache: false
       - uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
         with:
           lake-package-directory: formal/lean
@@ -396,6 +422,32 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Install-only, retried once: a transient TLS failure fetching the Lean release (2026-10-21).
+      - id: lean_install_b
+        uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
+        continue-on-error: true
+        with:
+          lake-package-directory: formal/lean
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: false
+          use-github-cache: false
+      - name: back off before retrying the Lean toolchain install
+        if: steps.lean_install_b.outcome == 'failure'
+        run: sleep 30
+      - name: retry the Lean toolchain install (install only)
+        if: steps.lean_install_b.outcome == 'failure'
+        uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
+        with:
+          lake-package-directory: formal/lean
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: false
+          use-github-cache: false
       - uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
         with:
           lake-package-directory: formal/lean
@@ -1035,6 +1087,32 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # Install-only, retried once: a transient TLS failure fetching the Lean release (2026-10-21).
+      - id: lean_install_c
+        uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
+        continue-on-error: true
+        with:
+          lake-package-directory: formal/lean
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: false
+          use-github-cache: false
+      - name: back off before retrying the Lean toolchain install
+        if: steps.lean_install_c.outcome == 'failure'
+        run: sleep 30
+      - name: retry the Lean toolchain install (install only)
+        if: steps.lean_install_c.outcome == 'failure'
+        uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
+        with:
+          lake-package-directory: formal/lean
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: false
+          use-github-cache: false
       - uses: leanprover/lean-action@f061402b660e0c34644504b324e830f2991d4865 # v1.6.1
         with:
           lake-package-directory: formal/lean
