@@ -19,6 +19,8 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"runtime"
+	rtmetrics "runtime/metrics"
 	"sort"
 	"strconv"
 	"strings"
@@ -262,7 +264,7 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 	return &Server{
 		core:          core,
 		st:            st,
-		content:       content.NewMemStore(), // in-memory by default; WithContent for a durable store
+		content:       content.NewDevMemStore(0), // volatile and byte-capped by default; WithContent for a durable store
 		signingKeyID:  signingKeyID,
 		keyValidFrom:  "2026-01-01T00:00:00.000Z",
 		now:           time.Now,
@@ -383,6 +385,50 @@ func (s *Server) WithReadiness(name string, p Pinger) *Server {
 // scrape (e.g. a pgx pool's live connection counts via PoolStat).
 func (s *Server) WithGauge(name, help string, fn func() float64) *Server {
 	s.metrics.GaugeFunc(name, help, fn)
+	return s
+}
+
+// WithMemoryGauges registers the content-store and Go runtime memory gauges on GET /metrics, each read fresh
+// on every scrape: averin_content_store_durable (1 for a filesystem store, 0 for the volatile in-memory one),
+// averin_content_store_entries and averin_content_store_bytes (in-memory store only: a filesystem store would
+// need a directory walk, so it reports none), and the Go runtime's heap in use, live heap bytes, heap objects
+// and goroutine count.
+func (s *Server) WithMemoryGauges() *Server {
+	s.WithGauge("averin_content_store_durable", "1 when the content store is durable (filesystem), 0 when it is the volatile in-memory store.",
+		func() float64 {
+			if _, mem := s.content.(content.Statser); mem {
+				return 0
+			}
+			return 1
+		})
+	stat := func() (content.Stats, bool) {
+		if st, ok := s.content.(content.Statser); ok {
+			return st.Stats(), true
+		}
+		return content.Stats{}, false
+	}
+	s.metrics.GaugeFunc("averin_content_store_entries", "Blobs held by the in-memory content store (absent for a filesystem store).",
+		func() float64 { st, _ := stat(); return float64(st.Entries) })
+	s.metrics.GaugeFunc("averin_content_store_bytes", "Bytes held by the in-memory content store (absent for a filesystem store).",
+		func() float64 { st, _ := stat(); return float64(st.Bytes) })
+	rt := func(name string) float64 {
+		sample := []rtmetrics.Sample{{Name: name}}
+		rtmetrics.Read(sample)
+		if sample[0].Value.Kind() != rtmetrics.KindUint64 {
+			return 0
+		}
+		return float64(sample[0].Value.Uint64())
+	}
+	s.WithGauge("averin_go_heap_inuse_bytes", "Go heap bytes in use (live objects plus unused space in in-use spans).",
+		func() float64 {
+			return rt("/memory/classes/heap/objects:bytes") + rt("/memory/classes/heap/unused:bytes")
+		})
+	s.WithGauge("averin_go_heap_alloc_bytes", "Go heap bytes occupied by allocated objects (live plus not-yet-swept).",
+		func() float64 { return rt("/memory/classes/heap/objects:bytes") })
+	s.WithGauge("averin_go_heap_objects", "Go heap objects currently allocated.",
+		func() float64 { return rt("/gc/heap/objects:objects") })
+	s.WithGauge("averin_go_goroutines", "Goroutines currently running.",
+		func() float64 { return float64(runtime.NumGoroutine()) })
 	return s
 }
 
@@ -4661,6 +4707,26 @@ func (s *Server) buildBundleWithSnapshot(ctx context.Context, projectID string, 
 	return s.buildBundleView(ctx, projectID, includeDisclosures, "")
 }
 
+// wholeBundleSizeLowerBound is a conservative LOWER bound on the serialized size of the whole-history bundle
+// for a project with the given stored-JSON totals, so refusing when it exceeds the cap can never refuse a
+// bundle the exact check below would accept. The bundle is json.Marshal of an object holding the project id,
+// the records array and the checkpoints array (one comma between elements) plus fixed members; each stored
+// JSON appears at least at its stored length (the core's canonical JSON is already compact, and marshaling
+// can only add bytes: HTML escapes, an attached anchor, a revocation list, an attestation, key rotations).
+// It deliberately counts only what is certainly present: the fixed skeleton uses the shortest value (2 bytes)
+// for the keys member.
+func wholeBundleSizeLowerBound(projectID string, p store.BundleSizeParts) int64 {
+	const skeleton = `{"bundle_version":"1","checkpoints":[],"keys":[],"project_id":"","records":[]}`
+	n := int64(len(skeleton)) + int64(len(projectID)) + p.RecordBytes + p.CheckpointBytes
+	if p.Records > 1 {
+		n += p.Records - 1
+	}
+	if p.Checkpoints > 1 {
+		n += p.Checkpoints - 1
+	}
+	return n
+}
+
 // buildBundleView builds the whole-history bundle (month == "") or the month segment for `month` (AVE-01):
 // the same snapshot, keys, revocation list and attestation, over only that month's records and checkpoints
 // plus the base checkpoint, with the `segment` block. A whole-history build that would exceed the verifier's
@@ -4679,6 +4745,18 @@ func (s *Server) buildBundleView(ctx context.Context, projectID string, includeD
 	var plan *segmentPlan
 	err := s.st.WithProjectRead(ctx, projectID, func(st store.Store) error {
 		var err error
+		// Size before load: a whole-history bundle whose stored JSON alone already exceeds the cap is refused
+		// from SQL aggregates, before a single record is materialized (the same errBundleTooBig the exact
+		// checks below return). Under the cap nothing changes: load and check exactly as before.
+		if month == "" {
+			parts, perr := st.BundleSizeParts(projectID)
+			if perr != nil {
+				return perr
+			}
+			if wholeBundleSizeLowerBound(projectID, parts) > int64(maxSingleBundleBytes) {
+				return errBundleTooBig
+			}
+		}
 		// Plan 009: the boundary time and authorization high watermark are captured inside this
 		// same repeatable-read snapshot as the records and revocation events, first, and signed
 		// as captured (no later wall clock substitutes for the boundary).

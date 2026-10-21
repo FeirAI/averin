@@ -34,6 +34,15 @@ type Record struct {
 	Disclosures []DisclosureSecret
 }
 
+// BundleSizeParts are the stored-JSON byte totals and counts behind a whole-history bundle (see
+// Store.BundleSizeParts). Bytes are UTF-8 octets, matching len() of the Go string.
+type BundleSizeParts struct {
+	RecordBytes     int64
+	Records         int64
+	CheckpointBytes int64
+	Checkpoints     int64
+}
+
 // Checkpoint is a sealed (and possibly anchored) checkpoint.
 type Checkpoint struct {
 	JSON           string
@@ -251,6 +260,10 @@ type Store interface {
 	// Postgres answers from records_use_outcome_intent_idx (migration 0010); Mem scans. A read error is returned.
 	UseOutcomeFor(projectID, sessionID, intentRef string) (recordID string, found bool, err error)
 	AllRecords(projectID string) ([]Record, error)
+	// BundleSizeParts reports, WITHOUT loading the records, the byte lengths of the stored record and checkpoint
+	// JSON a whole-history bundle would carry (Postgres answers with one aggregate query over octet_length). The
+	// export/verify size check uses it to refuse an over-cap history before materializing it.
+	BundleSizeParts(projectID string) (BundleSizeParts, error)
 	// RecordsPage returns up to `limit` records NEWEST-FIRST, skipping the newest `offset`, WITHOUT loading
 	// the whole project history into memory (Postgres pages in SQL). It backs the paged app list endpoint so
 	// a large tenant is not fully materialized per list call. limit<=0 returns an empty page; offset<0 == 0.
@@ -800,6 +813,25 @@ func (m *Mem) AllRecords(projectID string) ([]Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]Record(nil), m.proj(projectID).records...), nil
+}
+
+// BundleSizeParts sums the stored record and checkpoint JSON lengths.
+func (m *Mem) BundleSizeParts(projectID string) (BundleSizeParts, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return BundleSizeParts{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.proj(projectID)
+	var out BundleSizeParts
+	for _, r := range p.records {
+		out.RecordBytes += int64(len(r.JSON))
+	}
+	for _, c := range p.checks {
+		out.CheckpointBytes += int64(len(c.JSON))
+	}
+	out.Records, out.Checkpoints = int64(len(p.records)), int64(len(p.checks))
+	return out, nil
 }
 
 // RecordsPage returns up to `limit` records newest-first, skipping the newest `offset`. The Mem store holds

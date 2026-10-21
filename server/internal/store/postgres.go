@@ -1016,6 +1016,26 @@ func (p *Postgres) AllRecords(projectID string) ([]Record, error) {
 	return collectRecords(rows)
 }
 
+// BundleSizeParts sums the stored record and checkpoint JSON byte lengths in SQL, loading no row.
+func (p *Postgres) BundleSizeParts(projectID string) (BundleSizeParts, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return BundleSizeParts{}, err
+	}
+	ctx := p.callContext()
+	var out BundleSizeParts
+	err := p.queries().QueryRow(ctx, `
+		SELECT
+		  (SELECT COALESCE(sum(octet_length(json)), 0)::bigint FROM records WHERE project_id = $1),
+		  (SELECT count(*)::bigint FROM records WHERE project_id = $1),
+		  (SELECT COALESCE(sum(octet_length(json)), 0)::bigint FROM checkpoints WHERE project_id = $1),
+		  (SELECT count(*)::bigint FROM checkpoints WHERE project_id = $1)
+	`, projectID).Scan(&out.RecordBytes, &out.Records, &out.CheckpointBytes, &out.Checkpoints)
+	if err != nil {
+		return BundleSizeParts{}, fmt.Errorf("store: bundle size parts: %w", err)
+	}
+	return out, nil
+}
+
 // RecordsPage returns up to `limit` records NEWEST-FIRST, skipping the newest `offset`, via SQL LIMIT/OFFSET
 // so a large tenant's list call never materializes the whole history in RAM. Ordering mirrors AllRecords'
 // ord (the per-project insertion ordinal) but DESC, so the newest record is first and a limit-1 read touches
