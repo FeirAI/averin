@@ -1,0 +1,13 @@
+diff --git a/server/internal/store/postgres.go b/server/internal/store/postgres.go
+index bf66ac7..18de81e 100644
+--- a/server/internal/store/postgres.go
++++ b/server/internal/store/postgres.go
+@@ -1025,7 +1025,7 @@ func (p *Postgres) BundleSizeParts(projectID string) (BundleSizeParts, error) {
+ 	var out BundleSizeParts
+ 	err := p.queries().QueryRow(ctx, `
+ 		SELECT
+-		  (SELECT COALESCE(sum(octet_length(json)), 0)::bigint FROM records WHERE project_id = $1),
++		  (SELECT COALESCE(sum(length(json)), 0)::bigint FROM records WHERE project_id = $1),
+ 		  (SELECT count(*)::bigint FROM records WHERE project_id = $1),
+ 		  (SELECT COALESCE(sum(octet_length(json)), 0)::bigint FROM checkpoints WHERE project_id = $1),
+ 		  (SELECT count(*)::bigint FROM checkpoints WHERE project_id = $1)

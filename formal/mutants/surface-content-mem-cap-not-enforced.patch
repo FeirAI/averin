@@ -1,0 +1,13 @@
+diff --git a/server/internal/content/content.go b/server/internal/content/content.go
+index cae0a7c..493f888 100644
+--- a/server/internal/content/content.go
++++ b/server/internal/content/content.go
+@@ -224,7 +224,7 @@ func (m *MemStore) put(digest string, data []byte) (evicted int, evictedBytes in
+ 	m.blobs[digest] = cp
+ 	m.order = append(m.order, digest)
+ 	m.bytes += int64(len(cp))
+-	for m.maxBytes > 0 && m.bytes > m.maxBytes && m.head < len(m.order) {
++	for m.maxBytes < 0 && m.bytes > m.maxBytes && m.head < len(m.order) {
+ 		old := m.order[m.head]
+ 		m.order[m.head] = ""
+ 		m.head++

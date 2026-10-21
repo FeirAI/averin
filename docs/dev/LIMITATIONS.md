@@ -22,6 +22,13 @@ What contains this:
   cap, and over the cap it is INSUFFICIENT.
 - **A refusal, not an unverifiable file.** A whole-history build whose records exceed 256 MiB fails with `413` and a
   pointer to `/v2/segments`; a single month that does is refused with its own `413`.
+- **Size check before load (whole history).** Before anything is loaded, the server sums the stored record and
+  checkpoint JSON lengths in SQL (`Store.BundleSizeParts`; Postgres `octet_length`, no row is read into memory) and adds
+  the bundle's fixed skeleton. When that estimate alone is over 256 MiB it answers the same `413` without loading the
+  history. The estimate is a lower bound of the serialized bundle, so it never refuses a history that would have been
+  served; a history whose estimate is under the cap is loaded and checked exactly as before, which means a history
+  just over the cap can still be loaded in full before it is refused. The SQL sum reads every row of the project,
+  though it keeps none. Month requests are not prechecked.
 - **Concurrency cap.** Concurrent export/verify builds are bounded by a semaphore (`maxConcurrentBundleReads`,
   currently **4**). A request over the cap gets a retryable `503`.
 - **Write-timeout exemption.** The global 60s `WriteTimeout` would kill a large-but-legitimate export mid-write, so
@@ -84,6 +91,28 @@ What it does not do:
 **Deferred:** a **cursor-streaming export** (constant memory, byte-identical framing) and **checkpoint
 accumulators** that would let a bundle start from a pinned checkpoint and prove earlier parents by membership
 (removing the two month-boundary gaps above) are not built. The segment design needs neither.
+
+## Durable records need a durable content store; the dev store is capped
+
+The raw `input`/`output`/`rationale` values behind selective disclosure (and each grant's credential descriptor and
+each use's parameters) go to the content store, not into the records. With the in-memory content store they are
+lost on every restart while the records stay durable in Postgres, so disclosures silently stop working.
+
+- **Startup refusal.** With `AVERIN_DATABASE_URL` set, `AVERIN_CONTENT_DIR` unset and `AVERIN_DEV_MODE` off,
+  averin-server refuses to start and names `AVERIN_CONTENT_DIR`. Set `AVERIN_CONTENT_DIR` and
+  `AVERIN_CONTENT_MASTER_KEY` on every such deployment before upgrading. A deployment with no database is unaffected
+  here (the production gate already refuses it outside dev mode).
+- **Dev mode keeps the in-memory store, capped.** Past `AVERIN_CONTENT_MEM_MAX_BYTES` (default 64 MiB) the oldest
+  blobs are evicted first and a WARNING is logged (at most one line per 10 seconds). Evicted values can no longer be
+  disclosed, and a blob larger than the whole cap is not retained. The cap counts blob bytes, not the map and
+  bookkeeping around them. Tests and library users who build the server without setting a store also get this capped
+  store.
+- **What is not covered.** The guard checks that the variable is set, not that the directory is healthy or backed
+  up. The content directory is per replica, and a replica that does not hold a record's content cannot disclose it.
+- **Memory gauges on `/metrics`.** `averin_content_store_durable` (1 for a filesystem store, 0 for the in-memory one),
+  `averin_content_store_entries` and `averin_content_store_bytes` (the in-memory store only; a filesystem store would
+  need a directory walk, so it reports 0 for both), and `averin_go_heap_inuse_bytes`, `averin_go_heap_alloc_bytes`,
+  `averin_go_heap_objects` and `averin_go_goroutines`.
 
 ## App list endpoint pages in the store (not in RAM)
 

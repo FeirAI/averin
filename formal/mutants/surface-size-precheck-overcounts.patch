@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index b088b7d..0979f6a 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4719,7 +4719,7 @@ func wholeBundleSizeLowerBound(projectID string, p store.BundleSizeParts) int64
+ 	const skeleton = `{"bundle_version":"1","checkpoints":[],"keys":[],"project_id":"","records":[]}`
+ 	n := int64(len(skeleton)) + int64(len(projectID)) + p.RecordBytes + p.CheckpointBytes
+ 	if p.Records > 1 {
+-		n += p.Records - 1
++		n += p.Records + 1
+ 	}
+ 	if p.Checkpoints > 1 {
+ 		n += p.Checkpoints - 1

@@ -2421,6 +2421,88 @@
         "store-postgres",
         "formal-fast"
       ]
+    },
+    {
+      "id": "durable-records-need-durable-content",
+      "claim": "averin-server refuses to start when AVERIN_DATABASE_URL is set (durable records), AVERIN_CONTENT_DIR is unset and AVERIN_DEV_MODE is off, with a message naming AVERIN_CONTENT_DIR and why, because the raw values behind selective disclosure would be held in memory only and lost on every restart while their records stay. With a content dir, with dev mode, or with no database the guard does not refuse. In dev mode the in-memory content store is bounded: past its byte cap (64 MiB by default, AVERIN_CONTENT_MEM_MAX_BYTES) it evicts the oldest blobs first, never holds more than the cap, and logs a warning when it evicts. Not that disclosures of evicted content still work (they do not), not the durable stores' own bounds, and not that the guard is the only way to lose content.",
+      "class": "tested-implementation",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "the server is started through cmd/averin-server"
+      ],
+      "sources": [
+        {
+          "file": "server/cmd/averin-server/config.go",
+          "symbol": "contentDirRefusal"
+        },
+        {
+          "file": "server/internal/content/content.go",
+          "symbol": "NewBoundedMemStore"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/cmd/averin-server/contentdir_test.go",
+          "symbol": "TestContentDirRefusal"
+        },
+        {
+          "file": "server/cmd/averin-server/contentdir_test.go",
+          "symbol": "TestDefaults_RefuseDurableRecordsWithVolatileContent"
+        },
+        {
+          "file": "server/internal/content/memcap_test.go",
+          "symbol": "TestBoundedMemStoreEvictsOldestFirstPastTheCap"
+        },
+        {
+          "file": "server/internal/content/memcap_test.go",
+          "symbol": "TestBoundedMemStoreNeverExceedsTheCapUnderChurn"
+        }
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ]
+    },
+    {
+      "id": "whole-bundle-size-precheck",
+      "claim": "A whole-history export or verify whose stored record and checkpoint JSON, with the bundle's fixed overhead, already exceeds the single-bundle limit is refused with the same 413 and body as before, from SQL aggregates (Postgres octet_length sums), before any record or checkpoint is loaded. The estimate is a lower bound of the serialized bundle on random histories, so a bundle the exact check would serve is never refused; an estimate within the limit falls through to the exact load-and-check, so the boundary is unchanged. Not month segments (they are checked on their own records), and not that the estimate is tight.",
+      "class": "tested-implementation",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "records are written only through Store.PutRecord and checkpoints through Store.PutCheckpoint"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "wholeBundleSizeLowerBound"
+        },
+        {
+          "file": "server/internal/store/postgres.go",
+          "symbol": "BundleSizeParts"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/export_precheck_internal_test.go",
+          "symbol": "TestExportPrecheckRefusesOverCapWithoutLoading"
+        },
+        {
+          "file": "server/internal/api/export_precheck_internal_test.go",
+          "symbol": "TestExportPrecheckEstimateIsALowerBound"
+        },
+        {
+          "file": "server/internal/store/bundle_size_test.go",
+          "symbol": "TestBundleSizePartsPostgres"
+        }
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ]
     }
   ]
 }
