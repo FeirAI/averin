@@ -21,10 +21,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -123,32 +125,121 @@ func verify(digest string, data []byte) error {
 
 // ---- in-memory implementation ----
 
-// MemStore is an in-memory content store for tests and single-node dev. It is safe for concurrent
-// use.
-type MemStore struct {
-	mu    sync.RWMutex
-	blobs map[string][]byte // digest -> bytes
+// DefaultMemMaxBytes is the byte cap the server gives its in-memory content store (64 MiB). The in-memory
+// store is development-only (volatile), so it is bounded: past the cap the oldest blobs are evicted.
+const DefaultMemMaxBytes int64 = 64 << 20
+
+// Stats is a point-in-time size reading of a content store.
+type Stats struct {
+	Entries int
+	Bytes   int64
 }
 
-// NewMemStore returns an empty in-memory content store.
+// Statser is implemented by stores that can report their size cheaply (the in-memory store; the
+// filesystem stores would need a directory walk, so they do not).
+type Statser interface {
+	Stats() Stats
+}
+
+// MemStore is an in-memory content store for tests and single-node dev. It is safe for concurrent
+// use. NewMemStore is unbounded (tests); NewBoundedMemStore evicts oldest-first past a byte cap.
+type MemStore struct {
+	mu       sync.RWMutex
+	blobs    map[string][]byte // digest -> bytes
+	order    []string          // digests in insertion order; order[head:] are live (evicted ones are skipped)
+	head     int
+	bytes    int64
+	maxBytes int64 // 0 = unbounded
+	onEvict  func(evicted int, evictedBytes int64)
+}
+
+// NewMemStore returns an empty, unbounded in-memory content store.
 func NewMemStore() *MemStore {
 	return &MemStore{blobs: map[string][]byte{}}
+}
+
+// NewBoundedMemStore returns an in-memory store holding at most maxBytes of blob bytes: a Put that would
+// exceed the cap evicts the oldest blobs first (a blob larger than the whole cap is not retained). onEvict,
+// when non-nil, is called (outside the store lock) with the number of blobs and bytes a Put dropped.
+// maxBytes <= 0 means unbounded.
+func NewBoundedMemStore(maxBytes int64, onEvict func(evicted int, evictedBytes int64)) *MemStore {
+	m := NewMemStore()
+	if maxBytes > 0 {
+		m.maxBytes = maxBytes
+	}
+	m.onEvict = onEvict
+	return m
+}
+
+// NewDevMemStore is the server's volatile in-memory store: bounded at maxBytes (DefaultMemMaxBytes when
+// maxBytes <= 0), oldest-first eviction, and a WARN when it evicts (rate limited to one line per 10
+// seconds, counting what the suppressed evictions dropped).
+func NewDevMemStore(maxBytes int64) *MemStore {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMemMaxBytes
+	}
+	var lastLog atomic.Int64 // unix nanoseconds of the last WARN
+	var pendingBlobs, pendingBytes atomic.Int64
+	return NewBoundedMemStore(maxBytes, func(evicted int, evictedBytes int64) {
+		pendingBlobs.Add(int64(evicted))
+		pendingBytes.Add(evictedBytes)
+		now := time.Now().UnixNano()
+		last := lastLog.Load()
+		if now-last < int64(10*time.Second) || !lastLog.CompareAndSwap(last, now) {
+			return
+		}
+		log.Printf("WARNING: the in-memory content store hit its %d-byte cap and evicted %d blob(s) (%d bytes) since the last warning, oldest first; the evicted raw values can no longer be disclosed. Set AVERIN_CONTENT_DIR for a durable store.",
+			maxBytes, pendingBlobs.Swap(0), pendingBytes.Swap(0))
+	})
+}
+
+// Stats reports the number of stored blobs and their total bytes.
+func (m *MemStore) Stats() Stats {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return Stats{Entries: len(m.blobs), Bytes: m.bytes}
 }
 
 // Put stores data and returns its address. Idempotent: re-storing identical bytes is a no-op that
 // returns the same address.
 func (m *MemStore) Put(_ context.Context, data []byte) (Address, error) {
 	digest := Digest(data)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.blobs[digest]; !ok {
-		// Copy so a caller mutating its slice after Put cannot mutate stored content (which would
-		// silently break the content-address invariant).
-		cp := make([]byte, len(data))
-		copy(cp, data)
-		m.blobs[digest] = cp
+	evicted, evictedBytes := m.put(digest, data)
+	if evicted > 0 && m.onEvict != nil {
+		m.onEvict(evicted, evictedBytes)
 	}
 	return addressFor(digest, len(data)), nil
+}
+
+func (m *MemStore) put(digest string, data []byte) (evicted int, evictedBytes int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.blobs[digest]; ok {
+		return 0, 0
+	}
+	// Copy so a caller mutating its slice after Put cannot mutate stored content (which would
+	// silently break the content-address invariant).
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	m.blobs[digest] = cp
+	m.order = append(m.order, digest)
+	m.bytes += int64(len(cp))
+	for m.maxBytes > 0 && m.bytes > m.maxBytes && m.head < len(m.order) {
+		old := m.order[m.head]
+		m.order[m.head] = ""
+		m.head++
+		if b, ok := m.blobs[old]; ok {
+			m.bytes -= int64(len(b))
+			evictedBytes += int64(len(b))
+			evicted++
+			delete(m.blobs, old)
+		}
+	}
+	if m.head > 1024 && m.head > len(m.order)/2 {
+		m.order = append([]string(nil), m.order[m.head:]...)
+		m.head = 0
+	}
+	return evicted, evictedBytes
 }
 
 // Get returns the bytes for digest, verifying integrity before handing them back.

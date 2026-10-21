@@ -868,6 +868,52 @@
     "surface-use-outcome-mem-ignores-kind": {
       "tier": "fast",
       "claim": "use-outcome-lookup-equals-scan"
+    },
+    "surface-content-dir-refusal-ignores-dev-mode": {
+      "tier": "fast",
+      "claim": "durable-records-need-durable-content"
+    },
+    "surface-content-dir-refusal-ignores-content-dir": {
+      "tier": "fast",
+      "claim": "durable-records-need-durable-content"
+    },
+    "surface-content-dir-refusal-skips-database-check": {
+      "tier": "fast",
+      "claim": "durable-records-need-durable-content"
+    },
+    "surface-content-dir-refusal-not-called": {
+      "tier": "full",
+      "claim": "durable-records-need-durable-content"
+    },
+    "surface-content-mem-cap-not-enforced": {
+      "tier": "fast",
+      "claim": "durable-records-need-durable-content",
+      "detector": "cd server && go test -count=1 ./internal/content -run 'TestBoundedMemStore|TestUnboundedMemStore'",
+      "detector_kind": "go"
+    },
+    "surface-size-precheck-skipped": {
+      "tier": "fast",
+      "claim": "whole-bundle-size-precheck"
+    },
+    "surface-size-precheck-overcounts": {
+      "tier": "full",
+      "claim": "whole-bundle-size-precheck"
+    },
+    "surface-size-precheck-refuses-at-the-cap": {
+      "tier": "full",
+      "claim": "whole-bundle-size-precheck"
+    },
+    "surface-bundle-parts-ignores-checkpoints": {
+      "tier": "fast",
+      "claim": "whole-bundle-size-precheck",
+      "detector": "cd server && go test -count=1 ./internal/store -run 'TestBundleSizeParts'",
+      "detector_kind": "go"
+    },
+    "surface-bundle-parts-postgres-counts-characters": {
+      "tier": "full",
+      "claim": "whole-bundle-size-precheck",
+      "detector": "cd server && go test -count=1 ./internal/store -run 'TestBundleSizeParts'",
+      "detector_kind": "go"
     }
   },
   "claims": [
@@ -1844,7 +1890,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "196dd807ce3357c655bd401f07f7e8e5cc5945ca7403c399ceb721eeb3fda51d"
+          "sha256": "d5a2f279ff2e636ab0d184e7a98b7a83ec92c36f328972ccf1ebb9c18fd0f1e9"
         },
         {
           "path": "server/internal/api/posture.go",
@@ -2659,7 +2705,7 @@
         {
           "path": "server/internal/api/server.go",
           "symbol": "buildBundleView",
-          "sha256": "3c7513c3f6d8455c7c5f5e1ee7e1e6dff56cfbc5f53361d7d157fcb56659ec8e"
+          "sha256": "6f779bfd52abc9a1b8b77e0068f8eacbfa5044faa16c49c7282b2036c5feb52f"
         }
       ],
       "mutants": [
@@ -3226,6 +3272,109 @@
         "surface-use-outcome-mem-ignores-kind"
       ],
       "does_not_establish": "Not that the lookup equals the scan on every history: it is checked on seeded random histories, not proved. The Postgres lookups read exact JSON key names while the scan's Go decoder also accepts keys that differ only in letter case, so on a record with such keys the lookup is stricter (a sealed record never has them, and a generic record cannot set extensions.broker). With a historical non-unique record_id index the first row satisfying the scan's conditions is returned, which the tests do not exercise. An empty intent_record_id is answered from the session, not from the index (the API rejects it). Not the in-memory store's cost, which still scans the session. Not that the planner uses the indexes at any statistics or size beyond the 6000-row plan test; the latency numbers (AVERIN_INTENT_LATENCY=1) are a manual measurement recorded in the pull request, not part of this detector. Not the seal path, the rest of /v2/use-outcome or the exactly-once rule beyond the lookups it reads. Without AVERIN_TEST_DATABASE_URL the Postgres tests skip, so a local run without a database proves nothing about this claim. The api-level copy of the equivalence test (intentAndOutcomeScan) runs in the store-postgres job, not in this detector."
+    },
+    {
+      "id": "durable-records-need-durable-content",
+      "$comment": "legacy register: durable-records-need-durable-content",
+      "statement": "averin-server refuses to start when records are durable (AVERIN_DATABASE_URL set), AVERIN_CONTENT_DIR is unset and AVERIN_DEV_MODE is off, with a message naming AVERIN_CONTENT_DIR and the reason (disclosure content would be volatile while the records are durable): the pure guard returns an error for exactly that combination and nil with a content dir, in dev mode or with no database (a blank DSN is no database), and the real binary exits with that message before it contacts the database. In dev mode the in-memory content store is bounded: a Put past the byte cap evicts the oldest blobs first so the store never holds more than the cap (a blob larger than the cap is not retained), re-putting identical bytes does not change the size, and the eviction callback reports what was dropped; the cap setting must be a positive integer.",
+      "method": "test",
+      "artifacts": [
+        "server/cmd/averin-server/config.go",
+        "server/cmd/averin-server/main.go",
+        "server/internal/content/content.go",
+        "server/cmd/averin-server/contentdir_test.go",
+        "server/internal/content/memcap_test.go"
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./cmd/averin-server -run 'TestContentDirRefusal|TestContentMemMaxBytes|TestDefaults_RefuseDurableRecordsWithVolatileContent' && go test -count=1 ./internal/content -run 'TestBoundedMemStore|TestUnboundedMemStore'",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/cmd/averin-server/config.go",
+          "symbol": "contentDirRefusal",
+          "sha256": "4649976601c3250337cff127847b0842b41a920d785cdfabede0c93580e4eae4"
+        },
+        {
+          "path": "server/cmd/averin-server/config.go",
+          "symbol": "contentMemMaxBytesFromEnv",
+          "sha256": "2b337b8453de13071b28ec4d73b458eed00def45cc539810902384667d559117"
+        },
+        {
+          "path": "server/internal/content/content.go",
+          "symbol": "MemStore.put",
+          "sha256": "d474ff93e33ef77f971f4b96fc8e531655dd85d4d6abca0968e3c08e1b4b870c"
+        },
+        {
+          "path": "server/internal/content/content.go",
+          "symbol": "NewBoundedMemStore",
+          "sha256": "1d1d5788e6112f62e090292cdaff9b795dc2dfa5138a5040d85759bc7c2e932c"
+        },
+        {
+          "path": "server/cmd/averin-server/main.go",
+          "symbol": "main",
+          "sha256": "d5a2f279ff2e636ab0d184e7a98b7a83ec92c36f328972ccf1ebb9c18fd0f1e9"
+        }
+      ],
+      "mutants": [
+        "surface-content-dir-refusal-ignores-dev-mode",
+        "surface-content-dir-refusal-ignores-content-dir",
+        "surface-content-dir-refusal-skips-database-check",
+        "surface-content-dir-refusal-not-called",
+        "surface-content-mem-cap-not-enforced"
+      ],
+      "does_not_establish": "That disclosures keep working: content evicted from the dev store, or never written because a blob exceeds the cap, can no longer be disclosed, and dev mode keeps the volatile store by design. That a durable content directory is itself healthy, writable, backed up or encrypted with a good key: the guard checks only that the variable is set. That the guard sees a database configured any other way than AVERIN_DATABASE_URL, or a directory that is set but empty of the master key (that is the separate AVERIN_CONTENT_MASTER_KEY refusal). The eviction warning is rate limited to one line per 10 seconds and its text is not asserted. Memory use of the dev store beyond the stored bytes (map and bookkeeping overhead) is not capped. The binary-level test builds and runs averin-server once; it does not cover every other startup refusal that can fire first."
+    },
+    {
+      "id": "whole-bundle-size-precheck",
+      "$comment": "legacy register: whole-bundle-size-precheck",
+      "statement": "A whole-history export or verify whose estimate (the stored record JSON bytes plus the stored checkpoint JSON bytes, one comma between elements and the fixed bundle skeleton with the project id) is over the single-bundle limit is answered 413 with errBundleTooBig, the same body as the exact check, without loading any record or checkpoint (a counting store wrapper sees no AllRecords or Checkpoints call). An estimate at or under the limit falls through to the load and the exact serialized-size check, so a bundle exactly at the limit is served and one byte over is refused as before. On random histories (record sizes, sessions, checkpoint cadence, anchors) the estimate is never larger than the real serialized bundle. Store.BundleSizeParts sums octets (multibyte text counts its bytes) identically in the in-memory and Postgres stores and is all zeros for an empty project. Month segments are not prechecked.",
+      "method": "property",
+      "artifacts": [
+        "server/internal/api/server.go",
+        "server/internal/store/store.go",
+        "server/internal/store/postgres.go",
+        "server/internal/api/export_precheck_internal_test.go",
+        "server/internal/store/bundle_size_test.go"
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestExportPrecheck|TestWholeBundleSizeLowerBound|TestOverTheCap' && go test -count=1 ./internal/store -run 'TestBundleSizeParts'",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "wholeBundleSizeLowerBound",
+          "sha256": "180c0872c7333c5690aca7665bf497aa6d07a7d48c0e14ef32ff8859d5cc9b0f"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "buildBundleView",
+          "sha256": "6f779bfd52abc9a1b8b77e0068f8eacbfa5044faa16c49c7282b2036c5feb52f"
+        },
+        {
+          "path": "server/internal/store/store.go",
+          "symbol": "Mem.BundleSizeParts",
+          "sha256": "904247487ec1dd842fa91fc2e8c925dd20b9371de0b176ce8cb30e5fca5169ac"
+        },
+        {
+          "path": "server/internal/store/postgres.go",
+          "symbol": "Postgres.BundleSizeParts",
+          "sha256": "abdf24cb0c7fccf3eae3b5533796814a6525f3dab5dc76463e58e6b84f106220"
+        }
+      ],
+      "mutants": [
+        "surface-size-precheck-skipped",
+        "surface-size-precheck-overcounts",
+        "surface-size-precheck-refuses-at-the-cap",
+        "surface-bundle-parts-ignores-checkpoints",
+        "surface-bundle-parts-postgres-counts-characters"
+      ],
+      "does_not_establish": "That the estimate is tight: a history just over the limit whose estimate is under it still loads in full before being refused, so the memory spike is avoided only for histories clearly over the limit. That the estimate is a lower bound when a stored record or checkpoint JSON contains insignificant whitespace (marshaling compacts it); the core's canonical JSON is compact, and the test histories are server-sealed. The random-history lower-bound check is 25 seeded histories on the in-memory store, not a proof. That the SQL aggregate is cheap on a very large table: it reads every row of the project, though it loads none into memory. Month export and verify, the other whole-history readers, and the verifier's own limit (the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test). The Postgres sum test runs only where AVERIN_TEST_DATABASE_URL is set."
     }
   ]
 }

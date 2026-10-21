@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-server/config.go b/server/cmd/averin-server/config.go
+index 8872f31..4b59616 100644
+--- a/server/cmd/averin-server/config.go
++++ b/server/cmd/averin-server/config.go
+@@ -31,7 +31,7 @@ func devModeFromEnv(raw string) (bool, error) { return boolFromEnv("AVERIN_DEV_M
+ // would live only in memory: lost on every restart while the records stay, and (before the dev cap) growing
+ // without bound. Outside dev mode that combination is refused; dev mode keeps the in-memory store (capped).
+ func contentDirRefusal(devMode bool, databaseURL, contentDir string) error {
+-	if devMode || strings.TrimSpace(databaseURL) == "" || contentDir != "" {
++	if devMode || strings.TrimSpace(databaseURL) == "" {
+ 		return nil
+ 	}
+ 	return fmt.Errorf("AVERIN_DATABASE_URL is set (records are durable) but AVERIN_CONTENT_DIR is not: the raw input/output/rationale values behind selective disclosure would be held in memory only, lost on every restart while their records remain, so disclosures would silently stop working. Set AVERIN_CONTENT_DIR (and AVERIN_CONTENT_MASTER_KEY) to a durable directory, or set AVERIN_DEV_MODE=1 for development (which keeps a volatile, size-capped in-memory store)")

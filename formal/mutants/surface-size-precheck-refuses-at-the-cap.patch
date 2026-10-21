@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index b088b7d..5a9bd81 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4753,7 +4753,7 @@ func (s *Server) buildBundleView(ctx context.Context, projectID string, includeD
+ 			if perr != nil {
+ 				return perr
+ 			}
+-			if wholeBundleSizeLowerBound(projectID, parts) > int64(maxSingleBundleBytes) {
++			if wholeBundleSizeLowerBound(projectID, parts) >= int64(maxSingleBundleBytes) {
+ 				return errBundleTooBig
+ 			}
+ 		}

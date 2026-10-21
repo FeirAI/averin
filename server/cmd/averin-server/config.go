@@ -26,6 +26,31 @@ func boolFromEnv(name, raw string) (bool, error) {
 // store and the dev seed.
 func devModeFromEnv(raw string) (bool, error) { return boolFromEnv("AVERIN_DEV_MODE", raw) }
 
+// contentDirRefusal is the startup guard for durable records with volatile disclosure content. When records are
+// durable (AVERIN_DATABASE_URL set) but AVERIN_CONTENT_DIR is unset, the raw values behind selective disclosure
+// would live only in memory: lost on every restart while the records stay, and (before the dev cap) growing
+// without bound. Outside dev mode that combination is refused; dev mode keeps the in-memory store (capped).
+func contentDirRefusal(devMode bool, databaseURL, contentDir string) error {
+	if devMode || strings.TrimSpace(databaseURL) == "" || contentDir != "" {
+		return nil
+	}
+	return fmt.Errorf("AVERIN_DATABASE_URL is set (records are durable) but AVERIN_CONTENT_DIR is not: the raw input/output/rationale values behind selective disclosure would be held in memory only, lost on every restart while their records remain, so disclosures would silently stop working. Set AVERIN_CONTENT_DIR (and AVERIN_CONTENT_MASTER_KEY) to a durable directory, or set AVERIN_DEV_MODE=1 for development (which keeps a volatile, size-capped in-memory store)")
+}
+
+// contentMemMaxBytesFromEnv parses AVERIN_CONTENT_MEM_MAX_BYTES, the byte cap of the dev in-memory content store.
+// Empty is the default (content.DefaultMemMaxBytes, returned as 0 for "use the default"); it must be positive.
+func contentMemMaxBytesFromEnv(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("AVERIN_CONTENT_MEM_MAX_BYTES must be a positive integer (got %q)", raw)
+	}
+	return n, nil
+}
+
 // requireProdSecretsFromEnv decides the production gate (AVE-06). Unset: on, unless dev mode. Explicit 1:
 // on. Explicit 0: off, but only inside dev mode, so a stray 0 cannot turn the gate off in production.
 func requireProdSecretsFromEnv(raw string, devMode bool) (bool, error) {

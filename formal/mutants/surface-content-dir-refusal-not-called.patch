@@ -1,0 +1,13 @@
+diff --git a/server/cmd/averin-server/main.go b/server/cmd/averin-server/main.go
+index a09a7c0..d7206a7 100644
+--- a/server/cmd/averin-server/main.go
++++ b/server/cmd/averin-server/main.go
+@@ -97,7 +97,7 @@ func main() {
+ 		}
+ 	}
+ 
+-	if err := contentDirRefusal(devMode, os.Getenv("AVERIN_DATABASE_URL"), os.Getenv("AVERIN_CONTENT_DIR")); err != nil {
++	if err := contentDirRefusal(devMode, os.Getenv("AVERIN_DATABASE_URL"), os.Getenv("AVERIN_CONTENT_DIR")); err != nil && false {
+ 		log.Fatal(err)
+ 	}
+ 

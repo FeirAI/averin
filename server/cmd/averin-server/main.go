@@ -97,6 +97,10 @@ func main() {
 		}
 	}
 
+	if err := contentDirRefusal(devMode, os.Getenv("AVERIN_DATABASE_URL"), os.Getenv("AVERIN_CONTENT_DIR")); err != nil {
+		log.Fatal(err)
+	}
+
 	c, err := core.New(seed)
 	if err != nil {
 		log.Fatalf("signing key: %v", err)
@@ -185,6 +189,8 @@ func main() {
 		srv.WithGauge("averin_store_pool_max_conns", "Store Postgres pool: configured max connections.",
 			func() float64 { return float64(pg.PoolStat().MaxConns) })
 	}
+	// Content-store and Go runtime memory gauges (read live, so they follow the content store chosen below).
+	srv.WithMemoryGauges()
 	// API keys (AVE-05): AVERIN_API_KEYS is either the legacy "proj-a:tok1,tok2;proj-b:tok3" (admin, no
 	// expiry) or a JSON array of scoped keys {project, token|token_sha256, role, not_after}. With no keys
 	// the API refuses every /v2 request unless AVERIN_DEV_MODE=1 selects the explicit open store.
@@ -374,7 +380,15 @@ func main() {
 		srv.WithContent(cs)
 		log.Printf("tenant-encrypted content store -> %s (raw retention: %d days)", dir, retentionDays)
 	} else {
-		log.Printf("WARNING: no AVERIN_CONTENT_DIR set — committed raw values are in-memory (not durable)")
+		memCap, capErr := contentMemMaxBytesFromEnv(os.Getenv("AVERIN_CONTENT_MEM_MAX_BYTES"))
+		if capErr != nil {
+			log.Fatal(capErr)
+		}
+		if memCap <= 0 {
+			memCap = content.DefaultMemMaxBytes
+		}
+		srv.WithContent(content.NewDevMemStore(memCap))
+		log.Printf("WARNING: no AVERIN_CONTENT_DIR set (development mode): committed raw values are in-memory (not durable, lost on restart), capped at %d bytes with oldest-first eviction", memCap)
 	}
 	// customer witness for sealed checkpoints (append-only).
 	if dir := os.Getenv("AVERIN_WITNESS_DIR"); dir != "" {

@@ -1,0 +1,13 @@
+diff --git a/server/internal/store/store.go b/server/internal/store/store.go
+index cfc3eff..54e4822 100644
+--- a/server/internal/store/store.go
++++ b/server/internal/store/store.go
+@@ -828,7 +828,7 @@ func (m *Mem) BundleSizeParts(projectID string) (BundleSizeParts, error) {
+ 		out.RecordBytes += int64(len(r.JSON))
+ 	}
+ 	for _, c := range p.checks {
+-		out.CheckpointBytes += int64(len(c.JSON))
++		_ = c
+ 	}
+ 	out.Records, out.Checkpoints = int64(len(p.records)), int64(len(p.checks))
+ 	return out, nil
