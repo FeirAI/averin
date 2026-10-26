@@ -162,3 +162,21 @@ func TestCheckpointCutShadowMinIntervalBackoffStillHolds(t *testing.T) {
 		t.Fatalf("the backoff must still suppress attempts: checks %d, want 1", r.checks())
 	}
 }
+
+// Safety side of the rate limit: under continuous cutting every project still gets a scheduled shadow about once an
+// hour. Two verified projects are cut in rotation, one cut per minute each, for 180 minutes. Each project shadows on its
+// first cut, then on the first due cut (seq % 3 == 0) at least an hour after its last attempt: seq 63 and seq 123. The
+// timer must not be reset by a skipped due cut, and must be kept per project, not for the whole server.
+func TestCheckpointCutShadowMinIntervalEachProjectStillShadowsHourly(t *testing.T) {
+	r := newMinRig(t, defIval, "p", "q")
+	r.cuts("p", 1)
+	r.cuts("q", 1)
+	for i := 0; i < 180; i++ {
+		r.now = r.now.Add(time.Minute)
+		r.cuts("p", 1)
+		r.cuts("q", 1)
+	}
+	if got := r.checks(); got != 6 {
+		t.Fatalf("scheduled shadows under continuous cutting: checks %d, want 6 (2 first cuts + 2 per project hourly)", got)
+	}
+}

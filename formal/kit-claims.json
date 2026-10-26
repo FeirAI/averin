@@ -821,6 +821,14 @@
       "tier": "full",
       "claim": "checkpoint-cut-incremental-equals-full"
     },
+    "surface-shadow-min-interval-timer-reset-on-skip": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "surface-shadow-min-interval-server-wide-timer": {
+      "tier": "full",
+      "claim": "checkpoint-cut-incremental-equals-full"
+    },
     "surface-shadow-min-interval-not-enforced": {
       "tier": "full",
       "claim": "checkpoint-cut-incremental-equals-full"
@@ -3059,6 +3067,26 @@
           "sha256": "1857d2bd19ffee127f85facdb506dd712b498c14ea90083d1b0e0d6e63c03699"
         },
         {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "shadowTooSoon",
+          "sha256": "9fd3f6d3a1cffce9e1ea9461183cf97dd89e7a03b9dc79a0e5ea57be450d64bc"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "shadowAttempted",
+          "sha256": "29ab21c7729d3954ba6b7e3313d69d0ada8fc3a978793a4ec4d7ad13608f3934"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "shadowMinInterval",
+          "sha256": "3fe40626f6c3d01fa3b057748747152d9a53430882a795745c3c49c90c3a5eb5"
+        },
+        {
+          "path": "server/internal/api/checkpoint_cut.go",
+          "symbol": "WithCheckpointShadowMinInterval",
+          "sha256": "ce2e59efe91cb3703eb25264663534206c9cb59037ebd0e02060ba29a67b693f"
+        },
+        {
           "path": "server/internal/api/server.go",
           "symbol": "cutBodyFull",
           "sha256": "93c462e56ac58108bd635b1c60964f9c9e86f5da59fb504112f1d48bffe37253"
@@ -3109,7 +3137,9 @@
         "checkpoint-cut-over-budget-full-body-not-compared",
         "checkpoint-cut-shadow-ignores-backoff",
         "checkpoint-cut-skips-page-ordinal-check",
-        "surface-shadow-min-interval-not-enforced"
+        "surface-shadow-min-interval-not-enforced",
+        "surface-shadow-min-interval-timer-reset-on-skip",
+        "surface-shadow-min-interval-server-wide-timer"
       ],
       "does_not_establish": "That the incremental cut equals the full computation on every history: the equality is argued in the code comment and checked on random histories (sessions, forced older parents, grants, voids, idempotent retries, idle cuts) and by the shadow check on the cuts of sequence number a multiple of 100 that fall at least an hour after the project's last shadow attempt (so at most one scheduled shadow per hour per project, which is weaker than every 100th cut: an incorrect incremental cut can stay signed for up to an hour of cuts before a scheduled shadow looks) and on the first cut of each project after a start, so a divergence on any other cut is signed (a checkpoint is append-only) and is caught at the next shadowed cut of that project or by the verifier. That a corrupted or tampered latest checkpoint is detected on an unshadowed cut: the base is trusted as signed. That a refusal is remembered: it is not stored, it recurs because the refused sequence number is retried and shadow-checked again; a cut that was signed before the next shadowed one stays signed. That the Postgres ordinal and record count are right under concurrent writers (the store tests cover that). That the cost is constant for the frontier: a project with a very large frontier still carries it in every checkpoint. That the shadow keeps running as history grows: the full computation is O(history) and stops fitting its budget, the failed counter shows it, and from then on only the differential tests and the per-cut count and contiguity guards hold the equality. That the full computation, used for the first cut and as the definition, is cheap: it is O(history). The Postgres variants of the differential and cost tests run only in the Postgres CI job."
     },
