@@ -73,138 +73,196 @@ func cut(t *testing.T, h http.Handler) {
 	}
 }
 
+// unanchored lists EVERY checkpoint seq with no anchor (not only the tail).
 func unanchored(t *testing.T, st store.Store) []int64 {
 	t.Helper()
-	u, err := st.UnanchoredCheckpointSeqs("p1", 1000)
+	cps, err := st.Checkpoints("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchors, err := st.Anchors("p1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	seqs := []int64{}
-	for _, x := range u {
-		seqs = append(seqs, x.Seq)
+	for _, c := range cps {
+		if _, ok := anchors[c.Seq]; !ok {
+			seqs = append(seqs, c.Seq)
+		}
 	}
 	return seqs
 }
 
 func eqSeqs(a []int64, b ...int64) bool { return fmt.Sprint(a) == fmt.Sprint(b) }
 
-func TestBackAnchorFailedThenSuccessfulCut(t *testing.T) {
-	tsa := &switchTSA{}
-	h, st := newBackAnchorServer(t, tsa)
-	tsa.set(true)
-	cut(t, h) // seq 0 fails
-	if got := unanchored(t, st); !eqSeqs(got, 0) {
-		t.Fatalf("after failed cut unanchored = %v; want [0]", got)
-	}
-	tsa.set(false)
-	cut(t, h) // seq 1 anchors, then sweeps seq 0
-	if got := unanchored(t, st); len(got) != 0 {
-		t.Fatalf("seq 0 should be back-anchored by the next successful cut; unanchored = %v", got)
-	}
-	_, metrics := do(t, h, "GET", "/metrics", "")
-	if !strings.Contains(metrics, "averin_checkpoint_backanchored_total 1") {
-		t.Fatalf("backanchored counter missing/wrong:\n%s", metrics)
-	}
+type backfillResp struct {
+	BackAnchored int  `json:"back_anchored"`
+	Remaining    int  `json:"remaining_unanchored"`
+	Stopped      bool `json:"stopped_on_error"`
 }
 
-func TestBackAnchorAtMostKOldestFirst(t *testing.T) {
-	tsa := &switchTSA{}
-	h, st := newBackAnchorServer(t, tsa)
-	tsa.set(true)
-	for i := 0; i < 6; i++ {
-		cut(t, h) // seqs 0..5 un-anchored
-	}
-	tsa.set(false)
-	cut(t, h) // seq 6 anchors; sweep stamps 0,1,2 only
-	if got := unanchored(t, st); !eqSeqs(got, 3, 4, 5) {
-		t.Fatalf("after one cut unanchored = %v; want [3 4 5] (K=3, oldest first)", got)
-	}
-	before := tsa.callCount()
-	cut(t, h) // seq 7 + 3,4,5
-	if got := unanchored(t, st); len(got) != 0 {
-		t.Fatalf("unanchored = %v; want none", got)
-	}
-	if n := tsa.callCount() - before; n != 4 {
-		t.Fatalf("stamps in the second cut = %d; want 4 (own + K=3)", n)
-	}
-}
-
-func TestBackAnchorNoSweepWhenNewAnchorFailed(t *testing.T) {
-	tsa := &switchTSA{}
-	h, st := newBackAnchorServer(t, tsa)
-	tsa.set(true)
-	cut(t, h)
-	before := tsa.callCount()
-	cut(t, h)
-	if n := tsa.callCount() - before; n != 1 {
-		t.Fatalf("a cut whose own stamp failed made %d TSA calls; want exactly 1 (no sweep)", n)
-	}
-	if got := unanchored(t, st); !eqSeqs(got, 0, 1) {
-		t.Fatalf("unanchored = %v; want [0 1]", got)
-	}
-}
-
-func TestBackAnchorSweepStopsAtFirstFailure(t *testing.T) {
-	tsa := &switchTSA{}
-	h, st := newBackAnchorServer(t, tsa)
-	tsa.set(true)
-	for i := 0; i < 4; i++ {
-		cut(t, h) // 0..3
-	}
-	tsa.allowOnly(2) // seq 4 anchors, seq 0 back-anchors, then seq 1 fails
-	before := tsa.callCount()
-	cut(t, h)
-	if n := tsa.callCount() - before; n != 3 {
-		t.Fatalf("TSA calls = %d; want 3 (own, seq 0, seq 1 fails, stop)", n)
-	}
-	if got := unanchored(t, st); !eqSeqs(got, 1, 2, 3) {
-		t.Fatalf("unanchored = %v; want [1 2 3]", got)
-	}
-	_, metrics := do(t, h, "GET", "/metrics", "")
-	if !strings.Contains(metrics, "averin_checkpoint_backanchor_failures_total 1") {
-		t.Fatalf("failure counter missing:\n%s", metrics)
-	}
-}
-
-func TestBackfillEndpointBoundAndResponse(t *testing.T) {
-	tsa := &switchTSA{}
-	h, st := newBackAnchorServer(t, tsa)
-	tsa.set(true)
-	for i := 0; i < 105; i++ {
-		cut(t, h)
-	}
-	tsa.set(false)
+func backfill(t *testing.T, h http.Handler) backfillResp {
+	t.Helper()
 	code, resp := do(t, h, "POST", "/v2/anchors/backfill?project=p1", "")
 	if code != http.StatusOK {
 		t.Fatalf("backfill: %d %s", code, resp)
 	}
-	var out struct {
-		BackAnchored int  `json:"back_anchored"`
-		Remaining    int  `json:"remaining_unanchored"`
-		Stopped      bool `json:"stopped_on_error"`
-	}
+	var out backfillResp
 	if err := json.Unmarshal([]byte(resp), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.BackAnchored != 100 || out.Remaining != 5 || out.Stopped {
-		t.Fatalf("response = %+v; want 100 back-anchored, 5 remaining, not stopped", out)
-	}
-	if got := unanchored(t, st); !eqSeqs(got, 100, 101, 102, 103, 104) {
-		t.Fatalf("unanchored = %v", got)
-	}
-	// A failing TSA: stops at the first failure and says so.
+	return out
+}
+
+// There is NO automatic retry: a successful cut stamps only itself, so a checkpoint that missed its
+// stamp stays un-anchored (it is a gap below the newest anchor, which is committed by the chain).
+func TestNoAutomaticBackAnchorOnCut(t *testing.T) {
+	tsa := &switchTSA{}
+	h, st := newBackAnchorServer(t, tsa)
 	tsa.set(true)
-	_, resp = do(t, h, "POST", "/v2/anchors/backfill?project=p1", "")
-	json.Unmarshal([]byte(resp), &out)
-	if out.BackAnchored != 0 || out.Remaining != 5 || !out.Stopped {
-		t.Fatalf("failing-TSA response = %+v", out)
+	cut(t, h) // seq 0 fails
+	tsa.set(false)
+	before := tsa.callCount()
+	cut(t, h) // seq 1 anchors
+	if n := tsa.callCount() - before; n != 1 {
+		t.Fatalf("a successful cut made %d TSA calls; want exactly 1 (no sweep)", n)
+	}
+	if got := unanchored(t, st); !eqSeqs(got, 0) {
+		t.Fatalf("seq 0 should stay un-anchored; unanchored seqs = %v", got)
+	}
+}
+
+// Only the un-anchored TAIL (above the newest anchored seq) is back-anchored: a gap below the newest
+// anchor is left alone, because stamping it now would make anchor times decrease with seq.
+func TestBackfillStampsOnlyTheTail(t *testing.T) {
+	tsa := &switchTSA{}
+	h, st := newBackAnchorServer(t, tsa)
+	tsa.set(true)
+	cut(t, h) // seq 0 fails (gap)
+	tsa.set(false)
+	cut(t, h) // seq 1 anchored
+	tsa.set(true)
+	cut(t, h) // seq 2 fails (tail)
+	cut(t, h) // seq 3 fails (tail)
+	tsa.set(false)
+	out := backfill(t, h)
+	if out.BackAnchored != 2 || out.Remaining != 0 || out.Stopped {
+		t.Fatalf("response = %+v; want 2 back-anchored (seqs 2, 3), 0 remaining, not stopped", out)
+	}
+	if got := unanchored(t, st); !eqSeqs(got, 0) {
+		t.Fatalf("the mid-chain gap (seq 0) must stay un-anchored; unanchored seqs = %v", got)
+	}
+	_, metrics := do(t, h, "GET", "/metrics", "")
+	if !strings.Contains(metrics, "averin_checkpoint_backanchored_total 2") {
+		t.Fatalf("backanchored counter missing/wrong:\n%s", metrics)
+	}
+}
+
+func TestBackfillBoundOldestFirst(t *testing.T) {
+	tsa := &switchTSA{}
+	h, st := newBackAnchorServer(t, tsa)
+	tsa.set(true)
+	for i := 0; i < 15; i++ {
+		cut(t, h)
 	}
 	tsa.set(false)
-	_, resp = do(t, h, "POST", "/v2/anchors/backfill?project=p1", "")
-	json.Unmarshal([]byte(resp), &out)
+	out := backfill(t, h)
+	if out.BackAnchored != 10 || out.Remaining != 5 || out.Stopped {
+		t.Fatalf("response = %+v; want 10 back-anchored, 5 remaining, not stopped", out)
+	}
+	// oldest first: the first ten are stamped, so the newest anchored seq is 9 and the tail is 10..14.
+	if got := unanchored(t, st); !eqSeqs(got, 10, 11, 12, 13, 14) {
+		t.Fatalf("unanchored tail = %v", got)
+	}
+	out = backfill(t, h)
 	if out.BackAnchored != 5 || out.Remaining != 0 || out.Stopped {
 		t.Fatalf("final response = %+v", out)
 	}
+}
+
+func TestBackfillStopsAtFirstFailure(t *testing.T) {
+	tsa := &switchTSA{}
+	h, st := newBackAnchorServer(t, tsa)
+	tsa.set(true)
+	for i := 0; i < 3; i++ {
+		cut(t, h)
+	}
+	before := tsa.callCount()
+	out := backfill(t, h) // failing TSA: one attempt, stop
+	if out.BackAnchored != 0 || out.Remaining != 3 || !out.Stopped || tsa.callCount()-before != 1 {
+		t.Fatalf("failing-TSA response = %+v calls=%d", out, tsa.callCount()-before)
+	}
+	tsa.allowOnly(1) // seq 0 stamps, seq 1 fails, stop
+	before = tsa.callCount()
+	out = backfill(t, h)
+	if out.BackAnchored != 1 || out.Remaining != 2 || !out.Stopped || tsa.callCount()-before != 2 {
+		t.Fatalf("partial response = %+v calls=%d", out, tsa.callCount()-before)
+	}
+	if got := unanchored(t, st); !eqSeqs(got, 1, 2) {
+		t.Fatalf("unanchored = %v; want [1 2]", got)
+	}
+	_, metrics := do(t, h, "GET", "/metrics", "")
+	if !strings.Contains(metrics, "averin_checkpoint_backanchor_failures_total 2") {
+		t.Fatalf("failure counter missing:\n%s", metrics)
+	}
+}
+
+// blockTSA blocks every stamp until released, to hold a backfill in flight.
+type blockTSA struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockTSA) Stamp(ctx context.Context, imprint []byte) ([]byte, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return witness.StubTSA{}.Stamp(ctx, imprint)
+}
+
+func TestBackfillSingleFlight(t *testing.T) {
+	tsa := &switchTSA{}
+	c, err := core.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := &blockTSA{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	var cur witness.TSA = tsa
+	sw := &swapTSA{cur: &cur}
+	h := api.New(c, store.NewMem(), "k0").WithAuth(auth.NewOpenStore()).WithTSA(sw).Routes()
+	tsa.set(true)
+	cut(t, h)
+	cut(t, h)
+	sw.set(bt)
+	done := make(chan int, 1)
+	go func() { code, _ := do(t, h, "POST", "/v2/anchors/backfill?project=p1", ""); done <- code }()
+	<-bt.entered
+	if code, resp := do(t, h, "POST", "/v2/anchors/backfill?project=p1", ""); code != http.StatusConflict || !strings.Contains(resp, "already running") {
+		t.Fatalf("concurrent backfill = %d %s; want 409 already running", code, resp)
+	}
+	close(bt.release)
+	if code := <-done; code != http.StatusOK {
+		t.Fatalf("first backfill = %d", code)
+	}
+	if code, _ := do(t, h, "POST", "/v2/anchors/backfill?project=p1", ""); code != http.StatusOK {
+		t.Fatalf("backfill after the first finished = %d; want 200", code)
+	}
+}
+
+// swapTSA lets a test switch the TSA behind a running server.
+type swapTSA struct {
+	mu  sync.Mutex
+	cur *witness.TSA
+}
+
+func (w *swapTSA) set(t witness.TSA) { w.mu.Lock(); *w.cur = t; w.mu.Unlock() }
+func (w *swapTSA) Stamp(ctx context.Context, imprint []byte) ([]byte, error) {
+	w.mu.Lock()
+	t := *w.cur
+	w.mu.Unlock()
+	return t.Stamp(ctx, imprint)
 }
 
 func TestBackfillEndpointNoTSA(t *testing.T) {
@@ -269,7 +327,7 @@ func lateAnchorBundle(t *testing.T, bundleJSON string, tsa ed25519.PrivateKey, t
 // anchored on time, so a bundle carrying such a late anchor is flagged "anchor time decreased ... (backdating)"
 // and fails integrity, even though every checkpoint is then anchored. This test pins that current behaviour so
 // the interaction is visible and cannot change silently; relaxing the gate is a verifier/spec decision.
-func TestLateBackAnchorTripsBackdatingGateToday(t *testing.T) {
+func TestMidChainLateBackAnchorTripsBackdatingGateToday(t *testing.T) {
 	h, _ := newBackAnchorServer(t, nil)
 	do(t, h, "POST", "/v2/records", `{"idempotency_key":"a1","project_id":"p1","session_id":"s1","action":"a"}`)
 	cut(t, h)
@@ -303,17 +361,45 @@ func TestLateBackAnchorTripsBackdatingGateToday(t *testing.T) {
 	}
 }
 
-// End to end through the server: an export after back-anchoring carries an anchor block on every
-// checkpoint, and the bundle still verifies structurally.
-func TestExportAfterBackAnchoringAnchorsEveryCheckpoint(t *testing.T) {
+// An anchor added LATE to the un-anchored TAIL keeps anchor times non-decreasing with seq, so the
+// bundle verifies with every checkpoint anchored: this is the only back-anchor the server performs.
+func TestLateTailBackAnchorVerifies(t *testing.T) {
+	h, _ := newBackAnchorServer(t, nil)
+	do(t, h, "POST", "/v2/records", `{"idempotency_key":"a1","project_id":"p1","session_id":"s1","action":"a"}`)
+	cut(t, h)
+	cut(t, h)
+	cut(t, h)
+	_, exp := do(t, h, "GET", "/v2/export?project=p1", "")
+	c, _ := core.New(seed)
+	tsa := testTSAKey()
+	opts := fmt.Sprintf(`{"tsa_keys":[%q]}`, tsaPubEncoded(tsa))
+	late := lateAnchorBundle(t, exp, tsa, func(i int, created string) string {
+		if i == 2 { // the tail checkpoint, stamped long after its created_ts
+			return "2099-01-01T00:00:00.000Z"
+		}
+		return created
+	})
+	rep := c.VerifyBundleWith(late, opts)
+	if !strings.Contains(rep, `"ok":true`) || !strings.Contains(rep, `"checkpoints_anchored":3`) {
+		t.Fatalf("a late tail back-anchor must verify with 3 of 3 anchored: %s", rep)
+	}
+}
+
+// Structural only: the server's StubTSA tokens are never trusted by the self-verify, so no anchor is
+// COUNTED here (checkpoints_anchored is 0). This checks the export carries an anchor block per
+// back-anchored checkpoint; the verification outcome with trusted anchors is TestLateTailBackAnchorVerifies.
+func TestExportAfterBackfillCarriesAnchorBlocks(t *testing.T) {
 	tsa := &switchTSA{}
 	h, _ := newBackAnchorServer(t, tsa)
 	do(t, h, "POST", "/v2/records", `{"idempotency_key":"a1","project_id":"p1","session_id":"s1","action":"a"}`)
 	tsa.set(true)
 	cut(t, h)
 	cut(t, h)
-	tsa.set(false)
 	cut(t, h)
+	tsa.set(false)
+	if out := backfill(t, h); out.BackAnchored != 3 || out.Remaining != 0 {
+		t.Fatalf("backfill = %+v", out)
+	}
 	_, exp := do(t, h, "GET", "/v2/export?project=p1&mode=proof_only", "")
 	var bundle struct {
 		Checkpoints []map[string]json.RawMessage `json:"checkpoints"`
@@ -326,7 +412,8 @@ func TestExportAfterBackAnchoringAnchorsEveryCheckpoint(t *testing.T) {
 			t.Fatalf("checkpoint %d has no anchor block after back-anchoring", i)
 		}
 	}
-	if _, report := do(t, h, "GET", "/v2/verify?project=p1", ""); !strings.Contains(report, `"ok":true`) {
-		t.Fatalf("export after back-anchoring should verify: %s", report)
+	_, report := do(t, h, "GET", "/v2/verify?project=p1", "")
+	if !strings.Contains(report, `"checkpoints_anchored":0`) || !strings.Contains(report, `"checkpoints_anchors_attached":3`) {
+		t.Fatalf("expected structural-only anchors (0 counted, 3 attached): %s", report)
 	}
 }

@@ -384,10 +384,10 @@ func TestPostgresAnchors(t *testing.T) {
 	exerciseAnchors(t, p)
 }
 
-func TestPostgresUnanchoredCheckpointSeqs(t *testing.T) {
+func TestPostgresUnanchoredTailCheckpoints(t *testing.T) {
 	p, done := newTestStore(t)
 	defer done()
-	exerciseUnanchored(t, p)
+	exerciseUnanchoredTail(t, p)
 }
 
 func TestPostgresBrokerSeq(t *testing.T) {

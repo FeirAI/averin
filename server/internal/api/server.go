@@ -243,6 +243,7 @@ type Server struct {
 	mWitnessFailures     *metrics.Counter
 	mAnchorFailures      *metrics.Counter
 	mBackAnchored        *metrics.Counter
+	backfillBusy         sync.Map // project -> struct{}: one operator backfill per project at a time
 	mBackAnchorFailures  *metrics.Counter
 	mAuthorityDowngrades *metrics.Counter
 	mDenialBudgetDrops   *metrics.Counter
@@ -295,9 +296,9 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		mAnchorFailures: reg.Counter("averin_checkpoint_anchor_failures_total",
 			"Total TSA anchor failures (checkpoint stored un-anchored, backfillable)."),
 		mBackAnchored: reg.Counter("averin_checkpoint_backanchored_total",
-			"Total older un-anchored checkpoints stamped later by the automatic sweep after a successful cut, or by POST /v2/anchors/backfill."),
+			"Total un-anchored tail checkpoints stamped later by POST /v2/anchors/backfill."),
 		mBackAnchorFailures: reg.Counter("averin_checkpoint_backanchor_failures_total",
-			"Total back-anchor sweeps that stopped on an error (the TSA stamp or the store failed). Alert on a non-zero rate: older checkpoints stay un-anchored."),
+			"Total back-anchor sweeps (POST /v2/anchors/backfill) that stopped on an error (the TSA stamp or the store failed). Alert on a non-zero rate: the checkpoint stays un-anchored."),
 		mAuthorityDowngrades: reg.Counter("averin_authority_downgrades_total",
 			"Total records whose caller-claimed elevated authority source (policy_engine_signed/human_signed/"+
 				"delegate_signed) was forced back to caller_declared — an unpinned source or a key-misalignment "+
@@ -4102,11 +4103,6 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 			// Also LOG: an un-anchored checkpoint has no third-party timestamp (threat #3 backdating window)
 			// until back-anchored; surface it beyond the (often-unwatched) HTTP warning.
 			log.Printf("WARNING: checkpoint %s (project %s) stored UN-ANCHORED — TSA stamp failed, back-anchor needed: %v", cp.CheckpointHash, projectID, err)
-		} else {
-			// The TSA is up: spend a bounded effort stamping older un-anchored checkpoints (oldest first).
-			// Never on a failed stamp (the TSA is down; a sweep would only add 10 s timeouts to this cut).
-			// Runs outside the project write lock; only each PutAnchor write takes it.
-			s.backAnchorSweep(ctx, projectID, backAnchorPerCut)
 		}
 	}
 
@@ -4117,17 +4113,24 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	return sealed, warn, nil
 }
 
-// Bounds for the back-anchor sweep: per successful cut (automatic) and per operator backfill call.
+// Bounds for the operator back-anchor sweep. The un-anchored TAIL (checkpoints newer than the newest
+// anchored one) is normally 1 to 2 checkpoints, so a small bound suffices. The wall-clock budget keeps a
+// call inside the HTTP server's 60 s WriteTimeout at realistic TSA latency (each stamp has a 10 s timeout,
+// so a call can run at most budget + 10 s).
 const (
-	backAnchorPerCut      = 3
-	backAnchorBackfillMax = 100
+	backAnchorBackfillMax = 10
 	backAnchorCountCap    = 10000 // remaining_unanchored is counted up to this many
+	backAnchorBudget      = 40 * time.Second
 )
 
-// backAnchorSweep stamps up to max of the project's older un-anchored checkpoints, oldest first, via
-// anchorCheckpoint, and STOPS at the first failure. It returns how many were stamped and whether it
-// stopped on an error. A PutAnchor that finds the anchor already present (a concurrent sweep) is not
-// an error (PutAnchor is idempotent). Called outside the project write lock.
+// backAnchorSweep stamps up to max of the project's un-anchored TAIL checkpoints (seq above the newest
+// anchored one), oldest first, via anchorCheckpoint, and STOPS at the first failure or when the
+// wall-clock budget is spent. Only the tail is stamped on purpose: a back-anchor on a checkpoint that has a
+// newer anchored checkpoint would make the verified anchor times decrease with seq, which the offline
+// verifier's backdating gate (threat #3) rejects, and a mid-chain gap is already committed by the next
+// anchor through prev_checkpoint_hash. Stamps are sequential, so tail anchor times are non-decreasing.
+// It returns how many were stamped and whether it stopped on an error. A PutAnchor that finds the anchor
+// already present is not an error (PutAnchor is idempotent). Called outside the project write lock.
 func (s *Server) backAnchorSweep(ctx context.Context, projectID string, max int) (done int, stoppedOnError bool) {
 	if s.tsa == nil || max <= 0 {
 		return 0, false
@@ -4135,7 +4138,7 @@ func (s *Server) backAnchorSweep(ctx context.Context, projectID string, max int)
 	var pending []store.UnanchoredCheckpoint
 	err := s.st.WithProjectRead(ctx, projectID, func(st store.Store) error {
 		var e error
-		pending, e = st.UnanchoredCheckpointSeqs(projectID, max)
+		pending, e = st.UnanchoredTailCheckpoints(projectID, max)
 		return e
 	})
 	if err != nil {
@@ -4143,10 +4146,14 @@ func (s *Server) backAnchorSweep(ctx context.Context, projectID string, max int)
 		log.Printf("ALERT: back-anchor sweep (project %s) could not list un-anchored checkpoints: %v", projectID, err)
 		return 0, true
 	}
+	start := time.Now()
 	for _, u := range pending {
+		if time.Since(start) >= backAnchorBudget {
+			return done, false // partial result; the caller reports what remains
+		}
 		if err := s.anchorCheckpoint(ctx, projectID, u.Seq, u.CheckpointHash); err != nil {
 			s.mBackAnchorFailures.Inc()
-			log.Printf("ALERT: back-anchor sweep (project %s) stopped at checkpoint seq %d (%s): %v; older checkpoints stay UN-ANCHORED", projectID, u.Seq, u.CheckpointHash, err)
+			log.Printf("ALERT: back-anchor sweep (project %s) stopped at checkpoint seq %d (%s): %v; it stays UN-ANCHORED", projectID, u.Seq, u.CheckpointHash, err)
 			return done, true
 		}
 		done++
@@ -4156,9 +4163,9 @@ func (s *Server) backAnchorSweep(ctx context.Context, projectID string, max int)
 	return done, false
 }
 
-// handleAnchorsBackfill is the operator path for a quiet system (no new cuts, so no automatic sweep):
-// it runs the same sweep with the larger bound. Same auth as POST /v2/checkpoints (an unclassified
-// route is admin-only). 409 when no TSA is configured.
+// handleAnchorsBackfill is the operator path to stamp the un-anchored tail of a project's checkpoints
+// (see backAnchorSweep). There is no automatic retry. Same auth as POST /v2/checkpoints (an unclassified
+// route is admin-only). 409 when no TSA is configured, or when a backfill of the project is already running.
 func (s *Server) handleAnchorsBackfill(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
 	if projectID == "" {
@@ -4169,11 +4176,16 @@ func (s *Server) handleAnchorsBackfill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "no TSA configured (set AVERIN_TSA_PRESET or AVERIN_TSA_URL): nothing to back-anchor with")
 		return
 	}
+	if _, busy := s.backfillBusy.LoadOrStore(projectID, struct{}{}); busy {
+		writeErr(w, http.StatusConflict, "a backfill of this project is already running")
+		return
+	}
+	defer s.backfillBusy.Delete(projectID)
 	done, stopped := s.backAnchorSweep(r.Context(), projectID, backAnchorBackfillMax)
 	var rest []store.UnanchoredCheckpoint
 	err := s.st.WithProjectRead(r.Context(), projectID, func(st store.Store) error {
 		var e error
-		rest, e = st.UnanchoredCheckpointSeqs(projectID, backAnchorCountCap)
+		rest, e = st.UnanchoredTailCheckpoints(projectID, backAnchorCountCap)
 		return e
 	})
 	if err != nil {
