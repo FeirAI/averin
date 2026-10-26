@@ -139,8 +139,9 @@ What this does not give:
 - **The check against the full computation is sampled, per project, and rate-limited.** The cut of checkpoint seq
   100, 200, ... of a project also computes the full body, but only if the project's last shadow attempt (whatever its
   outcome) is at least one hour old (`DefaultCheckpointShadowMinInterval`), so the scheduled cadence is
-  max(every 100th cut, once per hour per project). This is weaker than a plain 1-in-100 sample: at a high cut rate an
-  incorrect incremental cut can stay signed for up to an hour of cuts before the next scheduled shadow looks. The
+  max(every 100th cut, once per hour per project). This is weaker than a plain 1-in-100 sample: an incorrect
+  incremental cut can stay signed for at least an hour of cuts: until the first cut whose seq is a multiple of 100
+  after the hour has passed, and longer while a backoff after a shadow that could not run is in force. The
   limit exists because the shadow runs under the project write lock; at 1-in-100 and a cut every 3 s it ran every
   ~5 minutes and each run stalled writes for up to its budget. The first cut after a start and every cut after a
   mismatch are not rate-limited. The remaining stall: one shadow per hour per project, and the first cut after

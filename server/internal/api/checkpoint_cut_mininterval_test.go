@@ -180,3 +180,20 @@ func TestCheckpointCutShadowMinIntervalEachProjectStillShadowsHourly(t *testing.
 		t.Fatalf("scheduled shadows under continuous cutting: checks %d, want 6 (2 first cuts + 2 per project hourly)", got)
 	}
 }
+
+// An unverified project (its first shadow could not run) is NOT rate-limited: after the 10 min backoff the next cut
+// retries the shadow, at the default min interval, long before an hour has passed.
+func TestCheckpointCutShadowMinIntervalUnverifiedIsExempt(t *testing.T) {
+	r := newMinRig(t, defIval, "p")
+	r.spy.failFull = errors.New("boom")
+	r.cuts("p", 1) // seq 1: the first incremental cut, shadow attempted and fails: still unverified
+	if r.checks() != 1 || r.s.ShadowFailedForTest() != 1 {
+		t.Fatalf("checks %d failed %d, want 1 and 1", r.checks(), r.s.ShadowFailedForTest())
+	}
+	r.spy.failFull = nil
+	r.now = r.now.Add(11 * time.Minute) // past the backoff, far inside the min interval
+	r.cuts("p", 1)                      // seq 2: not a due seq, but the project is unverified
+	if r.checks() != 2 {
+		t.Fatalf("an unverified project must retry after the backoff, not after the min interval: checks %d, want 2", r.checks())
+	}
+}

@@ -4032,8 +4032,9 @@ func (s *Server) cutBodyFull(st store.Store, projectID, created string) (map[str
 // backfillable. A deterministic checkpoint_id keeps the body reproducible for a given seq.
 //
 // The body is cut incrementally from the latest checkpoint when it can be (cutBodyIncremental, with the
-// argument that it equals the full computation) and by the full computation otherwise. Every
-// shadowEvery-th incremental cut ALSO computes the full body and refuses to sign when the two differ.
+// argument that it equals the full computation) and by the full computation otherwise. Some incremental cuts
+// ALSO compute the full body and refuse to sign when the two differ: which ones (sampled, per project, at most
+// one scheduled shadow per hour) is defined in checkpointBodyChecked (checkpoint_cut.go).
 func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Checkpoint, error) {
 	body, err := s.checkpointBodyChecked(st, projectID)
 	if err != nil {
