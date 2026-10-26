@@ -13,6 +13,7 @@ version = 2
 yanked = "deny"
 ignore = [
   { id = "RUSTSEC-2023-0071", reason = "Marvin timing attack on RSA private-key operations (decrypt, sign). averin uses the rsa crate only to VERIFY RSA timestamp-authority signatures with a public key (core/src/rfc3161.rs verify_rsa); no private key is ever loaded, so there is nothing to recover. Tests that sign with RSA run in dev builds only. Revisit if a patched rsa ships or the verify path changes." },
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 timing variability in operations meant to be constant-time. It is reached only through elliptic-curve 0.13 from ecdsa 0.16 / p256 0.13 / p384 0.13, under the optional rfc3161 feature, and shipped code uses them only to VERIFY RFC 3161 timestamp-authority signatures (core/src/rfc3161.rs verify_ecdsa_p256, verify_ecdsa_p384): the TSA public key, the signature and the signed message are all public, so timing reveals nothing secret. P-256/P-384 signing exists only under cfg(test) or the test-tsa feature (CI tests). No 0.13-line release depends on a fixed crypto-bigint (>= 0.7.6). Lead decision 2026-10-26: migrate to the RustCrypto 0.14 line after release 1 and remove this entry; revisit by 2027-01-31 at the latest, or at once if the verify path changes." },
 ]
 
 [licenses]
