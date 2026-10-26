@@ -126,8 +126,14 @@ jobs:
       # Bound each attempt and retry instead of waiting out the job limit.
       - name: install 32-bit linker (multilib)
         run: |
+          APT="-o Acquire::Retries=5 -o Acquire::http::Timeout=60"
           for attempt in 1 2 3; do
-            sudo timeout 300 apt-get update && sudo timeout 600 apt-get install -y gcc-multilib && exit 0
+            # The runner's default mirror (azure.archive.ubuntu.com) can stall on one large file; from the
+            # second attempt use the canonical archive instead (this step's runner only, not global).
+            if [ "$attempt" -gt 1 ]; then
+              sudo sed -i 's|^URIs:.*|URIs: http://archive.ubuntu.com/ubuntu|' /etc/apt/sources.list.d/ubuntu.sources
+            fi
+            sudo timeout 300 apt-get update $APT && sudo timeout 600 apt-get install -y $APT gcc-multilib && exit 0
             echo "apt attempt $attempt failed or timed out; retrying" >&2
             sleep 20
           done
@@ -655,8 +661,18 @@ jobs:
           key: averin-aeneas-${{ runner.os }}-${{ steps.pins.outputs.key }}-${{ hashFiles('formal/production/setup-toolchain.sh') }}
       - name: system packages for opam (bounded, retried; see core-32bit)
         run: |
+          # opam only Recommends ocaml (apt-cache depends opam, noble); setup-toolchain.sh builds its own OCaml
+          # 5.3.0, so the 81 MB system ocaml 4.14 (the download that kept hanging) is skipped. The
+          # recommends opam/the build still use are named explicitly: git, rsync, m4, ca-certificates.
+          APT="-o Acquire::Retries=5 -o Acquire::http::Timeout=60"
           for attempt in 1 2 3; do
-            sudo timeout 300 apt-get update && sudo timeout 900 apt-get install -y opam libgmp-dev pkg-config zstd && exit 0
+            # From the second attempt use the canonical archive instead of the azure mirror (this step's
+            # runner only, not global).
+            if [ "$attempt" -gt 1 ]; then
+              sudo sed -i 's|^URIs:.*|URIs: http://archive.ubuntu.com/ubuntu|' /etc/apt/sources.list.d/ubuntu.sources
+            fi
+            sudo timeout 300 apt-get update $APT && sudo timeout 900 apt-get install -y $APT --no-install-recommends \
+              opam libgmp-dev pkg-config zstd git rsync m4 ca-certificates && exit 0
             echo "apt attempt $attempt failed or timed out; retrying" >&2
             sleep 20
           done
