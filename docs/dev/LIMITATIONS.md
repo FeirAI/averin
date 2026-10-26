@@ -458,6 +458,23 @@ which each one matters.
   a usage error also exits 2. A PASS there means the signature verified under the key given on
   the command line; the CLI cannot tell whether that key is the right one to trust.
 
+## A back-anchor conflicts with the verifier's backdating gate
+
+Checkpoints that missed their TSA stamp are retried (3 older ones after each successful cut, or up to 100 per
+`POST /v2/anchors/backfill`). The retry is real, but:
+
+- **The verifier rejects most back-anchors today.** Its backdating gate (threat #3) requires verified anchor
+  times to be non-decreasing with checkpoint seq. A back-anchor's genTime is later than the anchor of any newer
+  checkpoint that was stamped on time, so such a bundle reports `anchor time decreased across checkpoints ...`
+  and `ok: false`, while `checkpoints_anchored` equals `checkpoints_total`. `TestLateBackAnchorTripsBackdatingGateToday`
+  pins this. Relaxing the gate (a stamp on a newer checkpoint already commits the older ones through
+  `prev_checkpoint_hash`) is a verifier and spec decision that is not made here.
+- **A back-anchor proves existence by its genTime, not by `created_ts`.**
+- **No retry on a quiet system by itself.** The automatic sweep runs only inside a successful cut, and an
+  outage longer than the 3-per-cut budget needs the endpoint.
+- **Concurrent sweeps may stamp the same checkpoint twice;** the second insert is a no-op, so the cost is one
+  wasted stamp.
+
 ## Gateway refusal records are a reported floor
 
 `POST /v2/refusals` seals what the gateway reports (feir-ops#1). The verifier counts integrity-proven

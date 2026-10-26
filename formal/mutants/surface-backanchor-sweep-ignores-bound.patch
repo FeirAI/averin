@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 08c94f2..c621626 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4106,7 +4106,7 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
+ 			// The TSA is up: spend a bounded effort stamping older un-anchored checkpoints (oldest first).
+ 			// Never on a failed stamp (the TSA is down; a sweep would only add 10 s timeouts to this cut).
+ 			// Runs outside the project write lock; only each PutAnchor write takes it.
+-			s.backAnchorSweep(ctx, projectID, backAnchorPerCut)
++			s.backAnchorSweep(ctx, projectID, backAnchorBackfillMax)
+ 		}
+ 	}
+ 

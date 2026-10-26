@@ -2503,6 +2503,45 @@
         "server",
         "formal-fast"
       ]
+    },
+    {
+      "id": "back-anchoring-bounded-after-successful-stamp",
+      "claim": "After a checkpoint cut whose own TSA stamp succeeded, the Go server stamps at most 3 older un-anchored checkpoints of the project, oldest first, stopping at the first failure; a cut whose own stamp failed makes no further TSA call; the admin-only POST /v2/anchors/backfill runs the same sweep with a bound of 100. Not that a back-anchored bundle passes the offline verifier today (the backdating gate flags a back-anchor stamped later than a newer checkpoint's anchor, a test pins that), and not that an outage on a quiet system ends without an operator call.",
+      "class": "tested-implementation",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "anchors are written only through Store.PutAnchor, which is insert-only"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "backAnchorSweep"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "handleAnchorsBackfill"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/back_anchor_test.go",
+          "symbol": "TestBackAnchorAtMostKOldestFirst"
+        },
+        {
+          "file": "server/internal/api/back_anchor_test.go",
+          "symbol": "TestBackAnchorNoSweepWhenNewAnchorFailed"
+        },
+        {
+          "file": "server/internal/api/back_anchor_test.go",
+          "symbol": "TestBackfillEndpointBoundAndResponse"
+        }
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ]
     }
   ]
 }

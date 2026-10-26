@@ -20,7 +20,32 @@ any record content. Whether that outbound call is acceptable on your infrastruct
 | `AVERIN_TSA_AUTH_HEADER=<value>` | The `Authorization` header a paid authority needs (for example `Basic ...`). Read from the environment and sent as is. Start-up is refused unless the TSA URL is https, so the credential never travels in clear text. |
 
 An unknown preset name is fatal at start-up. Anchoring is best-effort: a TSA outage stores the checkpoint
-un-anchored and is reported, it never stops the chain; a checkpoint can be back-anchored later.
+un-anchored and is reported, it never stops the chain.
+
+### Back-anchoring a checkpoint that missed its stamp
+
+Two paths stamp an older un-anchored checkpoint later, both through the same code as the first stamp
+(the imprint is the SHA-256 of the `checkpoint_hash` string, 10 s timeout each, stored with the insert-only
+`PutAnchor`):
+
+- **Automatic, per cut.** After a new checkpoint's own stamp succeeds, the server stamps up to 3 older
+  un-anchored checkpoints of the same project, oldest first, and stops at the first failure. If the new
+  checkpoint's own stamp failed, it makes no sweep. This runs only while new cuts happen: a quiet system
+  retries nothing by itself.
+- **Operator, on demand.** `POST /v2/anchors/backfill?project=<id>` (admin, like `POST /v2/checkpoints`) runs
+  the same sweep with a bound of 100 and stops at the first failure. It returns
+  `{"back_anchored": n, "remaining_unanchored": m, "stopped_on_error": bool}` (`remaining_unanchored` is
+  counted up to 10000), or `409` when no TSA is configured. Call it again until `remaining_unanchored` is 0.
+
+Counters: `averin_checkpoint_backanchored_total` and `averin_checkpoint_backanchor_failures_total`. Each
+back-anchor logs one line; a sweep that stops on an error logs an `ALERT:` line.
+
+A back-anchor's genTime is later than the checkpoint's `created_ts`, so it proves the checkpoint existed by
+that later time, not by `created_ts`. (The chain already bounds it: a stamp on a newer checkpoint commits every
+older checkpoint it chains to.) **Known conflict with the offline verifier:** the backdating gate requires
+verified anchor times to be non-decreasing with checkpoint seq. A back-anchor stamped after a newer checkpoint
+was anchored therefore makes the bundle fail with `anchor time decreased across checkpoints ...`, although
+every checkpoint then counts as anchored. A test pins this behaviour; see `LIMITATIONS.md`.
 
 FreeTSA is a free service with no uptime guarantee and no service level. For anything you need to rely on, use a
 paid authority through `AVERIN_TSA_URL`.

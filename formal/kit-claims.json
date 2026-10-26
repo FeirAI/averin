@@ -926,6 +926,18 @@
       "claim": "whole-bundle-size-precheck",
       "detector": "cd server && go test -count=1 ./internal/store -run 'TestBundleSizeParts'",
       "detector_kind": "go"
+    },
+    "surface-backanchor-sweep-never-runs": {
+      "tier": "fast",
+      "claim": "back-anchoring-bounded-after-successful-stamp"
+    },
+    "surface-backanchor-sweep-ignores-bound": {
+      "tier": "full",
+      "claim": "back-anchoring-bounded-after-successful-stamp"
+    },
+    "surface-backanchor-sweep-after-failed-stamp": {
+      "tier": "full",
+      "claim": "back-anchoring-bounded-after-successful-stamp"
     }
   },
   "claims": [
@@ -2299,7 +2311,7 @@
         {
           "path": "server/internal/api/server.go",
           "symbol": "Routes",
-          "sha256": "83f182481c5448d222964baffefeb9e4fbfdc54f06785b010d6270b734edd8ae"
+          "sha256": "08f8b10312a9f5d83f29a6f4f3373234051426e0048915f4035f14b8616692db"
         }
       ],
       "mutants": [
@@ -3411,6 +3423,46 @@
         "surface-bundle-parts-postgres-counts-characters"
       ],
       "does_not_establish": "That the estimate is tight: a history just over the limit whose estimate is under it still loads in full before being refused, so the memory spike is avoided only for histories clearly over the limit. That the estimate is a lower bound when a stored record or checkpoint JSON contains insignificant whitespace (marshaling compacts it); the core's canonical JSON is compact, and the test histories are server-sealed. The random-history lower-bound check is 25 seeded histories on the in-memory store, not a proof. That the SQL aggregate is cheap on a very large table: it reads every row of the project, though it loads none into memory. Month export and verify, the other whole-history readers, and the verifier's own limit (the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test). The Postgres sum test runs only where AVERIN_TEST_DATABASE_URL is set."
+    },
+    {
+      "id": "back-anchoring-bounded-after-successful-stamp",
+      "$comment": "legacy register: back-anchoring-bounded-after-successful-stamp",
+      "statement": "After a checkpoint cut whose own TSA stamp succeeded, the server stamps at most 3 older un-anchored checkpoints of the same project, oldest first, and stops at the first failure; a cut whose own stamp failed makes no further TSA call. POST /v2/anchors/backfill runs the same sweep with a bound of 100, is admin-only, and answers 409 when no TSA is configured. UnanchoredCheckpointSeqs returns the same oldest-first, bounded answer in the in-memory and Postgres stores.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/server.go",
+        "server/internal/api/back_anchor_test.go",
+        "server/internal/store/store_test.go"
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestBackAnchor|TestBackfill' && go test -count=1 ./internal/store -run 'TestMemUnanchoredCheckpointSeqs'",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "Server.createCheckpoint",
+          "sha256": "38ae4f5627135d7be5dc91c468d9d713d13bc331f360a12f168df2860e4daa46"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "Server.backAnchorSweep",
+          "sha256": "d8e3ca496882326b1fa368c4e868d86cd5d9d71cde0144032602a6698366d8b5"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "Server.handleAnchorsBackfill",
+          "sha256": "dca9458a7b23b4b08bdaa59d0cc5e8f49e9e50a393e10594d0ea77fb3168606a"
+        }
+      ],
+      "mutants": [
+        "surface-backanchor-sweep-never-runs",
+        "surface-backanchor-sweep-ignores-bound",
+        "surface-backanchor-sweep-after-failed-stamp"
+      ],
+      "does_not_establish": "That a back-anchored bundle passes the offline verifier: the backdating gate (anchor times non-decreasing with seq) flags a back-anchor whose genTime is later than a newer checkpoint's anchor, and a test pins that behaviour. That a TSA outage ever ends: the sweep runs only while new cuts succeed, and the endpoint only when an operator calls it. That the Postgres query agrees with Mem on a CI run: that test runs only where AVERIN_TEST_DATABASE_URL is set. That concurrent sweeps never stamp the same checkpoint twice (the second PutAnchor is a no-op)."
     }
   ]
 }

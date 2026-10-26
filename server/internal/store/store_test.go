@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -107,6 +109,56 @@ func exerciseAnchors(t *testing.T, s Store) {
 	if a, err := s.Anchors("other"); err != nil || len(a) != 0 {
 		t.Fatalf("project isolation: other anchors = %v err=%v; want empty", a, err)
 	}
+}
+
+// exerciseUnanchored pins UnanchoredCheckpointSeqs: oldest first, bounded, anchored seqs excluded,
+// project-isolated, non-nil. Shared by Mem and Postgres so the two agree.
+func exerciseUnanchored(t *testing.T, s Store) {
+	t.Helper()
+	if u, err := s.UnanchoredCheckpointSeqs("p", 5); err != nil || u == nil || len(u) != 0 {
+		t.Fatalf("empty = %v (nil=%v) err=%v; want non-nil empty", u, u == nil, err)
+	}
+	for i := int64(0); i < 5; i++ {
+		h := fmt.Sprintf("sha256:cp%d", i)
+		if err := s.PutCheckpoint("p", Checkpoint{JSON: fmt.Sprintf(`{"checkpoint_seq":%d}`, i), CheckpointHash: h, Seq: i}); err != nil {
+			t.Fatalf("put checkpoint %d: %v", i, err)
+		}
+	}
+	if err := s.PutCheckpoint("other", Checkpoint{JSON: `{}`, CheckpointHash: "sha256:o0", Seq: 0}); err != nil {
+		t.Fatal(err)
+	}
+	for _, seq := range []int64{0, 2} {
+		if err := s.PutAnchor("p", seq, "tok"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.UnanchoredCheckpointSeqs("p", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []UnanchoredCheckpoint{{1, "sha256:cp1"}, {3, "sha256:cp3"}, {4, "sha256:cp4"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unanchored = %v; want %v", got, want)
+	}
+	if got, _ := s.UnanchoredCheckpointSeqs("p", 2); !reflect.DeepEqual(got, want[:2]) {
+		t.Fatalf("limit 2 = %v; want %v", got, want[:2])
+	}
+	if got, err := s.UnanchoredCheckpointSeqs("p", 0); err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("limit 0 = %v err=%v; want non-nil empty", got, err)
+	}
+	if got, _ := s.UnanchoredCheckpointSeqs("other", 10); len(got) != 1 || got[0].Seq != 0 {
+		t.Fatalf("project isolation: %v", got)
+	}
+	if err := s.PutAnchor("p", 1, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.UnanchoredCheckpointSeqs("p", 10); !reflect.DeepEqual(got, want[1:]) {
+		t.Fatalf("after anchoring seq 1 = %v; want %v", got, want[1:])
+	}
+}
+
+func TestMemUnanchoredCheckpointSeqs(t *testing.T) {
+	exerciseUnanchored(t, NewMem())
 }
 
 func TestMemAnchors(t *testing.T) {
