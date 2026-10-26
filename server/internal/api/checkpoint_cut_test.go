@@ -431,7 +431,7 @@ func TestCheckpointCutRefusesAGapInTheNewGrants(t *testing.T) {
 func TestCheckpointCutShadowRefusesAMismatch(t *testing.T) {
 	st := store.NewMem()
 	spy := newRowSpy(st)
-	s := api.New(mustCore(t), spy, "k0").WithAuth(auth.NewOpenStore()).WithCheckpointShadowEvery(100)
+	s := api.New(mustCore(t), spy, "k0").WithAuth(auth.NewOpenStore()).WithCheckpointShadowEvery(100).WithCheckpointShadowMinInterval(0)
 	h := newCutHistory(t, st, "p", 5)
 	for i := 0; i < 5; i++ {
 		h.plain()
@@ -474,23 +474,36 @@ func TestCheckpointCutShadowRefusesAMismatch(t *testing.T) {
 	}
 }
 
-// TestCheckpointCutShadowCadence: with the default period, the first incremental cut after start and every cut whose
-// checkpoint seq is a multiple of 100 are also computed in full.
+// TestCheckpointCutShadowCadence: the first incremental cut after start is always computed in full. A cut whose
+// checkpoint seq is a multiple of 100 is too, but only when the project's last shadow attempt is at least the min
+// interval old. With the interval off (0) that is every such cut; with the default (1 h) and 250 cuts inside one
+// hour, only the first-cut shadow runs.
 func TestCheckpointCutShadowCadence(t *testing.T) {
-	st := store.NewMem()
-	s := api.New(mustCore(t), st, "k0").WithAuth(auth.NewOpenStore())
-	h := newCutHistory(t, st, "p", 9)
-	h.plain()
-	if _, err := cutOnce(t, s, st, "p"); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 250; i++ {
-		h.plain()
-		if _, err := cutOnce(t, s, st, "p"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if inc, full, checks, mism := s.CutStatsForTest(); inc != 250 || full != 1 || checks != 3 || mism != 0 {
-		t.Fatalf("incremental %d full %d shadow checks %d mismatches %d; want 250, 1, 3 (the first cut after start, seq 100 and seq 200), 0", inc, full, checks, mism)
+	for _, tc := range []struct {
+		name   string
+		ival   time.Duration
+		checks int64
+	}{{"interval off", 0, 3}, {"default interval", -1, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := store.NewMem()
+			s := api.New(mustCore(t), st, "k0").WithAuth(auth.NewOpenStore())
+			if tc.ival >= 0 {
+				s.WithCheckpointShadowMinInterval(tc.ival)
+			}
+			h := newCutHistory(t, st, "p", 9)
+			h.plain()
+			if _, err := cutOnce(t, s, st, "p"); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 250; i++ {
+				h.plain()
+				if _, err := cutOnce(t, s, st, "p"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if inc, full, checks, mism := s.CutStatsForTest(); inc != 250 || full != 1 || checks != tc.checks || mism != 0 {
+				t.Fatalf("incremental %d full %d shadow checks %d mismatches %d; want 250, 1, %d, 0", inc, full, checks, mism, tc.checks)
+			}
+		})
 	}
 }

@@ -283,7 +283,7 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		mCheckpointsSealed: reg.Counter("averin_checkpoints_sealed_total",
 			"Total checkpoints successfully sealed."),
 		mCutShadowChecks: reg.Counter("averin_checkpoint_shadow_checks_total",
-			"Total incremental checkpoint cuts also computed in full and compared (1 in 100 by default)."),
+			"Total incremental checkpoint cuts also computed in full and compared (the first cut of a project after a start, then at most one per hour per project on every 100th cut, and every cut after a mismatch)."),
 		mCutShadowMismatch: reg.Counter("averin_checkpoint_shadow_mismatch_total",
 			"Total incremental checkpoint cuts that differed from the full computation. Each one REFUSED to sign; alert on any non-zero value."),
 		mCutShadowFailed: reg.Counter("averin_checkpoint_shadow_failed_total",
@@ -4032,8 +4032,9 @@ func (s *Server) cutBodyFull(st store.Store, projectID, created string) (map[str
 // backfillable. A deterministic checkpoint_id keeps the body reproducible for a given seq.
 //
 // The body is cut incrementally from the latest checkpoint when it can be (cutBodyIncremental, with the
-// argument that it equals the full computation) and by the full computation otherwise. Every
-// shadowEvery-th incremental cut ALSO computes the full body and refuses to sign when the two differ.
+// argument that it equals the full computation) and by the full computation otherwise. Some incremental cuts
+// ALSO compute the full body and refuse to sign when the two differ: which ones (sampled, per project, at most
+// one scheduled shadow per hour) is defined in checkpointBodyChecked (checkpoint_cut.go).
 func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Checkpoint, error) {
 	body, err := s.checkpointBodyChecked(st, projectID)
 	if err != nil {

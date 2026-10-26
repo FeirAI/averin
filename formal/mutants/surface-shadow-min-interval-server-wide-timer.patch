@@ -1,0 +1,22 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+index 689be4d..96389d0 100644
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -128,7 +128,7 @@ func (s *Server) shadowTooSoon(projectID string) bool {
+ 	}
+ 	s.cut.mu.Lock()
+ 	defer s.cut.mu.Unlock()
+-	t, ok := s.cut.lastTry[projectID]
++	t, ok := s.cut.lastTry[""]
+ 	return ok && s.now().Sub(t) < ival
+ }
+ 
+@@ -139,7 +139,7 @@ func (s *Server) shadowAttempted(projectID string) {
+ 	if s.cut.lastTry == nil {
+ 		s.cut.lastTry = map[string]time.Time{}
+ 	}
+-	s.cut.lastTry[projectID] = s.now()
++	s.cut.lastTry[""] = s.now()
+ }
+ 
+ // shadowWaiting reports whether the project's next shadow attempt is still inside its backoff.
