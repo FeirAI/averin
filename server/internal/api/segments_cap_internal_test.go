@@ -145,3 +145,42 @@ func TestOverTheCapIsRefusedBeforeTheBundleIsBuilt(t *testing.T) {
 		t.Fatalf("test premise: under the cap this project must fail while building the bundle: %v", err)
 	}
 }
+
+// The records-only check in buildBundleView is the one that refuses an over-cap MONTH before the bundle is
+// assembled (the whole-history pre-check does not cover a month, and the serialized-size check at the end would
+// return the same error only after the whole bundle is built and marshaled). Observable as error precedence: the
+// coverage manifest below is not valid JSON, so marshaling the bundle fails; with the check in place the over-cap
+// month is refused as errMonthTooBig first, and once the cap is lifted the same month does hit that marshal
+// error (proving the build step is really reached without the records check).
+func TestOverTheCapMonthIsRefusedBeforeTheBundleIsMarshaled(t *testing.T) {
+	now := time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	s := New(testCore(t), store.NewMem().WithClock(clock), "k0").WithAuth(auth.NewOpenStore()).WithClock(clock)
+	h := s.Routes()
+	do := func(path string) int {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(`{"idempotency_key":"k1","project_id":"p1","session_id":"s1","record_id":"r1"}`)))
+		return rec.Code
+	}
+	if c := do("/v2/records"); c != http.StatusCreated {
+		t.Fatalf("record: %d", c)
+	}
+	if c := do("/v2/checkpoints?project=p1"); c != http.StatusCreated {
+		t.Fatalf("checkpoint: %d", c)
+	}
+	if _, _, err := s.buildBundleView(context.Background(), "p1", false, "2026-06"); err != nil {
+		t.Fatalf("test premise: the month must build under the cap: %v", err)
+	}
+	s.coverageManifest = "{"
+
+	old := maxSingleBundleBytes
+	defer func() { maxSingleBundleBytes = old }()
+	maxSingleBundleBytes = 10
+	if _, _, err := s.buildBundleView(context.Background(), "p1", false, "2026-06"); !errors.Is(err, errMonthTooBig) {
+		t.Fatalf("an over-cap month must be refused by the records check before the bundle is marshaled: %v", err)
+	}
+	maxSingleBundleBytes = old
+	if _, _, err := s.buildBundleView(context.Background(), "p1", false, "2026-06"); err == nil || errors.Is(err, errMonthTooBig) {
+		t.Fatalf("test premise: under the cap this month must fail while marshaling the bundle: %v", err)
+	}
+}
