@@ -36,7 +36,7 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | POST | `/v2/records` | Ingest one record or a batch array. | always |
 | POST | `/v2/otel/traces` | Ingest OTel/OpenInference spans, mapped to records. | always |
 | POST | `/v2/checkpoints` | Seal the current frontier into the checkpoint chain. | always |
-| POST | `/v2/anchors/backfill` | Stamp older un-anchored checkpoints at the TSA (admin). | always |
+| POST | `/v2/anchors/backfill` | Stamp the un-anchored tail at the TSA (admin). | always |
 | GET | `/v2/records` | List records newest first, or (with `after` and `order=asc`) read oldest first from an ordinal. | always |
 | GET | `/v2/verify` | Server-side verification report for a project. | always |
 | GET | `/v2/export` | Export a verifiable bundle (proof / disclosure), whole history or one month. | always |
@@ -211,14 +211,16 @@ original grant if it can still finish or run the bounded operator
 
 ## POST `/v2/anchors/backfill?project=<id>`
 
-Admin only (the same auth as `POST /v2/checkpoints`). Stamps the project's un-anchored checkpoints at the
-configured TSA, oldest first, at most 100 per call, stopping at the first failure. It is the operator path on a
-quiet system, where no new cut triggers the automatic sweep (3 older checkpoints per successful cut).
+Admin only (the same auth as `POST /v2/checkpoints`). Stamps the project's un-anchored **tail** (checkpoints
+with a seq above the newest anchored one) at the configured TSA, oldest first, at most 10 per call, within a
+40 s budget, stopping at the first failure. There is no automatic retry. Checkpoints below the newest anchor are
+not stamped (see TIMESTAMPS.md for why).
 
 **Response `200`:** `{"back_anchored": n, "remaining_unanchored": m, "stopped_on_error": false}`
-(`remaining_unanchored` is counted up to 10000). `409` when no TSA is configured, `400` without `?project=`.
+(`remaining_unanchored` counts the tail, up to 10000). `409` when no TSA is configured or a backfill of the
+project is already running, `400` without `?project=`.
 The back-anchor's genTime is later than the checkpoint's `created_ts`; see
-[TIMESTAMPS.md](TIMESTAMPS.md#back-anchoring-a-checkpoint-that-missed-its-stamp) for the verifier conflict.
+[TIMESTAMPS.md](TIMESTAMPS.md#back-anchoring-a-checkpoint-that-missed-its-stamp).
 
 ---
 

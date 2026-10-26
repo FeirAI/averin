@@ -24,28 +24,35 @@ un-anchored and is reported, it never stops the chain.
 
 ### Back-anchoring a checkpoint that missed its stamp
 
-Two paths stamp an older un-anchored checkpoint later, both through the same code as the first stamp
-(the imprint is the SHA-256 of the `checkpoint_hash` string, 10 s timeout each, stored with the insert-only
-`PutAnchor`):
+There is **no automatic retry**: a successful cut stamps only itself. The one back-anchoring path is the
+operator endpoint, which uses the same code as the first stamp (the imprint is the SHA-256 of the
+`checkpoint_hash` string, 10 s timeout each, stored with the insert-only `PutAnchor`):
 
-- **Automatic, per cut.** After a new checkpoint's own stamp succeeds, the server stamps up to 3 older
-  un-anchored checkpoints of the same project, oldest first, and stops at the first failure. If the new
-  checkpoint's own stamp failed, it makes no sweep. This runs only while new cuts happen: a quiet system
-  retries nothing by itself.
-- **Operator, on demand.** `POST /v2/anchors/backfill?project=<id>` (admin, like `POST /v2/checkpoints`) runs
-  the same sweep with a bound of 100 and stops at the first failure. It returns
-  `{"back_anchored": n, "remaining_unanchored": m, "stopped_on_error": bool}` (`remaining_unanchored` is
-  counted up to 10000), or `409` when no TSA is configured. Call it again until `remaining_unanchored` is 0.
+- `POST /v2/anchors/backfill?project=<id>` (admin, like `POST /v2/checkpoints`) stamps the project's
+  un-anchored **tail**, that is the un-anchored checkpoints with a seq above the newest anchored one, oldest
+  first. It stops at the first failure, after at most 10 stamps, or when a 40 s wall-clock budget is spent
+  (so a call stays inside the server's 60 s write timeout). It returns
+  `{"back_anchored": n, "remaining_unanchored": m, "stopped_on_error": bool}` (`remaining_unanchored` counts
+  the tail only, up to 10000); call it again while `remaining_unanchored` is above 0 and
+  `stopped_on_error` is false. It answers `409` when no TSA is configured, or when a backfill of the same
+  project is already running.
+- A checkpoint **below** the newest anchored one (a mid-chain gap) is not stamped. It is already committed:
+  the next anchored checkpoint's `prev_checkpoint_hash` chains to it, so that anchor dates it. It still counts
+  as un-anchored in `checkpoints_anchored`.
+
+Why only the tail: the offline verifier's backdating gate requires verified anchor times to be non-decreasing
+with checkpoint seq. A stamp made now on a checkpoint that already has a newer anchored checkpoint would have a
+genTime later than that newer anchor, so the bundle would fail (`anchor time decreased across checkpoints ...`)
+unless the two genTimes fall in the same second (an RFC 3161 genTime has 1 s granularity), which depends on TSA
+latency. A tail stamp cannot decrease the order, and it is the only stamp that adds trust.
+One residual race: a new cut's own stamp running while a backfill stamps the previous checkpoint can reorder the
+two anchor times, so run the backfill on a quiet project.
 
 Counters: `averin_checkpoint_backanchored_total` and `averin_checkpoint_backanchor_failures_total`. Each
 back-anchor logs one line; a sweep that stops on an error logs an `ALERT:` line.
 
 A back-anchor's genTime is later than the checkpoint's `created_ts`, so it proves the checkpoint existed by
-that later time, not by `created_ts`. (The chain already bounds it: a stamp on a newer checkpoint commits every
-older checkpoint it chains to.) **Known conflict with the offline verifier:** the backdating gate requires
-verified anchor times to be non-decreasing with checkpoint seq. A back-anchor stamped after a newer checkpoint
-was anchored therefore makes the bundle fail with `anchor time decreased across checkpoints ...`, although
-every checkpoint then counts as anchored. A test pins this behaviour; see `LIMITATIONS.md`.
+that later time, not by `created_ts`.
 
 FreeTSA is a free service with no uptime guarantee and no service level. For anything you need to rely on, use a
 paid authority through `AVERIN_TSA_URL`.

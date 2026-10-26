@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index e38aee1..9f52ec7 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4132,7 +4132,7 @@ const (
+ // It returns how many were stamped and whether it stopped on an error. A PutAnchor that finds the anchor
+ // already present is not an error (PutAnchor is idempotent). Called outside the project write lock.
+ func (s *Server) backAnchorSweep(ctx context.Context, projectID string, max int) (done int, stoppedOnError bool) {
+-	if s.tsa == nil || max <= 0 {
++	if true || s.tsa == nil || max <= 0 {
+ 		return 0, false
+ 	}
+ 	var pending []store.UnanchoredCheckpoint

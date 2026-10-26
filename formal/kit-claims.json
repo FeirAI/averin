@@ -935,7 +935,7 @@
       "tier": "full",
       "claim": "back-anchoring-bounded-after-successful-stamp"
     },
-    "surface-backanchor-sweep-after-failed-stamp": {
+    "surface-backanchor-sweep-stamps-gaps": {
       "tier": "full",
       "claim": "back-anchoring-bounded-after-successful-stamp"
     }
@@ -3427,7 +3427,7 @@
     {
       "id": "back-anchoring-bounded-after-successful-stamp",
       "$comment": "legacy register: back-anchoring-bounded-after-successful-stamp",
-      "statement": "After a checkpoint cut whose own TSA stamp succeeded, the server stamps at most 3 older un-anchored checkpoints of the same project, oldest first, and stops at the first failure; a cut whose own stamp failed makes no further TSA call. POST /v2/anchors/backfill runs the same sweep with a bound of 100, is admin-only, and answers 409 when no TSA is configured. UnanchoredCheckpointSeqs returns the same oldest-first, bounded answer in the in-memory and Postgres stores.",
+      "statement": "The only back-anchoring the server performs is POST /v2/anchors/backfill (admin-only, 409 when no TSA is configured or a backfill of the project is already running): it stamps the project's un-anchored TAIL (checkpoints with a seq above the newest anchored one), oldest first, at most 10 per call, within a 40 s wall-clock budget, and stops at the first failure; a checkpoint below the newest anchor is never stamped (a late stamp there would make verified anchor times decrease with seq, which the offline backdating gate rejects). A successful cut stamps only itself. UnanchoredTailCheckpoints returns the same oldest-first, bounded tail in the in-memory and Postgres stores.",
       "method": "test",
       "artifacts": [
         "server/internal/api/server.go",
@@ -3438,31 +3438,26 @@
         "server",
         "formal-fast"
       ],
-      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestBackAnchor|TestBackfill' && go test -count=1 ./internal/store -run 'TestMemUnanchoredCheckpointSeqs'",
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestNoAutomaticBackAnchor|TestBackfill|TestLateTail|TestMidChain' && go test -count=1 ./internal/store -run 'TestMemUnanchoredTailCheckpoints'",
       "detector_kind": "go",
       "covers": [
         {
           "path": "server/internal/api/server.go",
-          "symbol": "Server.createCheckpoint",
-          "sha256": "38ae4f5627135d7be5dc91c468d9d713d13bc331f360a12f168df2860e4daa46"
-        },
-        {
-          "path": "server/internal/api/server.go",
           "symbol": "Server.backAnchorSweep",
-          "sha256": "d8e3ca496882326b1fa368c4e868d86cd5d9d71cde0144032602a6698366d8b5"
+          "sha256": "61165dd3467a0d4b587a84f90ff424dc5e7ecc121f8499202c257c57dd00b582"
         },
         {
           "path": "server/internal/api/server.go",
           "symbol": "Server.handleAnchorsBackfill",
-          "sha256": "dca9458a7b23b4b08bdaa59d0cc5e8f49e9e50a393e10594d0ea77fb3168606a"
+          "sha256": "9502650fda828b7e25784c9b20e60df369a409994e48cc488be6cf5892ab40e1"
         }
       ],
       "mutants": [
         "surface-backanchor-sweep-never-runs",
         "surface-backanchor-sweep-ignores-bound",
-        "surface-backanchor-sweep-after-failed-stamp"
+        "surface-backanchor-sweep-stamps-gaps"
       ],
-      "does_not_establish": "That a back-anchored bundle passes the offline verifier: the backdating gate (anchor times non-decreasing with seq) flags a back-anchor whose genTime is later than a newer checkpoint's anchor, and a test pins that behaviour. That a TSA outage ever ends: the sweep runs only while new cuts succeed, and the endpoint only when an operator calls it. That the Postgres query agrees with Mem on a CI run: that test runs only where AVERIN_TEST_DATABASE_URL is set. That concurrent sweeps never stamp the same checkpoint twice (the second PutAnchor is a no-op)."
+      "does_not_establish": "That a back-anchor never trips the backdating gate under concurrency: a cut's own stamp racing an operator backfill of the previous checkpoint can still stamp them out of seq order, and the 40 s budget is checked between stamps (a call can run one 10 s stamp past it). That a gap below the newest anchor is ever anchored (it is committed by the next anchor through prev_checkpoint_hash, and is not counted as anchored). That a TSA outage ends without an operator call: there is no automatic retry. That the Postgres query agrees with Mem on a CI run: that test runs only where AVERIN_TEST_DATABASE_URL is set."
     }
   ]
 }
