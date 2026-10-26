@@ -1,0 +1,21 @@
+name: diag-apt
+on:
+  push:
+    branches: [ci/apt-opam-robust]
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - run: |
+          cat /etc/apt/sources.list.d/ubuntu.sources || true
+          timeout 300 sudo apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout=60 | tail -3
+          apt-cache depends opam
+          echo ---- recommends-only check
+          apt-get install -s --no-install-recommends opam libgmp-dev pkg-config zstd | grep '^Inst' | awk '{print $2}' | tr '\n' ' '
+          echo; echo ---- with recommends
+          apt-get install -s opam libgmp-dev pkg-config zstd | grep '^Inst' | awk '{print $2}' | tr '\n' ' '
+          echo; echo ---- tools present
+          for t in curl git make gcc patch unzip rsync bwrap tar zstd; do printf '%s: ' $t; command -v $t || echo MISSING; done
