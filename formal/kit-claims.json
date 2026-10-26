@@ -3450,6 +3450,11 @@
           "path": "server/internal/api/server.go",
           "symbol": "Server.handleAnchorsBackfill",
           "sha256": "9502650fda828b7e25784c9b20e60df369a409994e48cc488be6cf5892ab40e1"
+        },
+        {
+          "path": "server/internal/store/store.go",
+          "symbol": "Mem.UnanchoredTailCheckpoints",
+          "sha256": "ba20c88c01800376fbf2cb9ffa4c07847f90dee1fb2e2e139fdf9d44f05b2ed3"
         }
       ],
       "mutants": [
