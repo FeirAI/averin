@@ -15,9 +15,19 @@ import (
 	"github.com/feirai/averin/server/internal/store"
 )
 
-// DefaultCheckpointShadowEvery is how often (1 in N incremental cuts) the full computation is also run and
-// compared. A mismatch refuses to sign.
+// DefaultCheckpointShadowEvery is how often (1 in N incremental cuts) the full computation is scheduled to also
+// run and be compared. A mismatch refuses to sign. A scheduled shadow only runs when the project's last shadow
+// attempt is at least DefaultCheckpointShadowMinInterval old, so the effective cadence of the scheduled check is
+// max(every 100th cut, once per hour per project). The first incremental cut after a start and every cut after
+// a mismatch are not rate-limited.
 const DefaultCheckpointShadowEvery = 100
+
+// DefaultCheckpointShadowMinInterval is the least time between two shadow attempts of one project on the
+// scheduled path (a verified project, nothing latched). The shadow is O(history) and runs under the project write
+// lock, so at a high cut rate "every 100th cut" came due every few minutes and each run stalled the project for up
+// to the shadow budget. This WEAKENS what the scheduled shadow covers: between two attempts an incorrect
+// incremental cut is caught only by the per-cut count and contiguity guards, not by the full comparison.
+const DefaultCheckpointShadowMinInterval = time.Hour
 
 // The shadow's own time budget and the backoff after a shadow that could not run (lead decision, history
 // scaling PR2): the full computation is O(history) and stops completing as history grows, so it must neither
@@ -39,8 +49,11 @@ type checkpointCutState struct {
 
 	budget  time.Duration // 0 means DefaultCheckpointShadowBudget
 	backoff time.Duration // 0 means DefaultCheckpointShadowBackoff
+	minIval time.Duration // minimum time between scheduled shadow attempts; only tightened below the default via the builder
+	minSet  bool          // minIval was set explicitly (0 then means no rate limit)
 	mu      sync.Mutex
 	retry   map[string]shadowRetry // project -> when its next shadow attempt may run
+	lastTry map[string]time.Time   // project -> start of its last shadow attempt, whatever the outcome
 }
 
 // shadowRetry is the backoff state of one project after a shadow that could not run.
@@ -83,6 +96,50 @@ func (s *Server) WithCheckpointShadowBackoff(d time.Duration) *Server {
 	}
 	s.cut.backoff = d
 	return s
+}
+
+// WithCheckpointShadowMinInterval sets the least time between two scheduled shadow attempts of one project
+// (default DefaultCheckpointShadowMinInterval, 1 h). d < 0 is treated as 0, which disables the rate limit (the
+// strictest setting); d above the default is clamped to it, so the knob can only tighten the check.
+func (s *Server) WithCheckpointShadowMinInterval(d time.Duration) *Server {
+	if d < 0 {
+		d = 0
+	}
+	if d > DefaultCheckpointShadowMinInterval {
+		d = DefaultCheckpointShadowMinInterval
+	}
+	s.cut.minIval = d
+	s.cut.minSet = true
+	return s
+}
+
+func (s *Server) shadowMinInterval() time.Duration {
+	if !s.cut.minSet {
+		return DefaultCheckpointShadowMinInterval
+	}
+	return s.cut.minIval
+}
+
+// shadowTooSoon reports whether the project's last shadow attempt is younger than the minimum interval.
+func (s *Server) shadowTooSoon(projectID string) bool {
+	ival := s.shadowMinInterval()
+	if ival <= 0 {
+		return false
+	}
+	s.cut.mu.Lock()
+	defer s.cut.mu.Unlock()
+	t, ok := s.cut.lastTry[projectID]
+	return ok && s.now().Sub(t) < ival
+}
+
+// shadowAttempted records the start of a shadow attempt (any outcome).
+func (s *Server) shadowAttempted(projectID string) {
+	s.cut.mu.Lock()
+	defer s.cut.mu.Unlock()
+	if s.cut.lastTry == nil {
+		s.cut.lastTry = map[string]time.Time{}
+	}
+	s.cut.lastTry[projectID] = s.now()
 }
 
 // shadowWaiting reports whether the project's next shadow attempt is still inside its backoff.
@@ -321,7 +378,10 @@ func (s *Server) checkpointBody(projectID string, seq int64, prev string, hasPre
 // computation. The full body is also computed with the same created_ts, and signing is REFUSED unless the two are
 // byte-identical, when (a) the checkpoint being cut has seq % every == 0 (chosen per project from the checkpoint
 // itself, so no project can be skipped by a rotation of cuts, and a refused seq is retried as the same seq and
-// shadowed again, also after a restart, so a refusal needs no stored state to stay a refusal), (b) it is the
+// shadowed again, also after a restart, so a refusal needs no stored state to stay a refusal; this scheduled
+// shadow is additionally rate-limited to one attempt per project per DefaultCheckpointShadowMinInterval, so its
+// cadence is max(every 100th cut, once per hour per project) and a due cut inside that hour is signed
+// incrementally without a shadow), (b) it is the
 // first incremental cut of the project since this process started and has not yet passed a shadow check (a base
 // altered while the process was down, and a first cut after migration), or (c) a mismatch has latched. An
 // incremental cut that disagrees with the definition must never reach a signature, because checkpoints are
@@ -351,9 +411,13 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
 	if verified && !s.cut.latched.Load() && seq%every != 0 {
 		return body, nil
 	}
+	if verified && !s.cut.latched.Load() && s.shadowTooSoon(projectID) {
+		return body, nil // scheduled shadow, but the project's last attempt is inside the minimum interval
+	}
 	if s.shadowWaiting(projectID) {
 		return body, nil // the last shadow of this project could not run: wait out its backoff, then try again
 	}
+	s.shadowAttempted(projectID)
 	s.mCutShadowChecks.Inc()
 	var full map[string]any
 	ferr := st.WithBudget(s.shadowBudget(), func(b store.Store) error {

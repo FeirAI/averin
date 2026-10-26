@@ -26,7 +26,7 @@ func newShadowRig(t *testing.T, budget time.Duration) *shadowRig {
 	spy := newRowSpy(st)
 	r := &shadowRig{t: t, st: st, spy: spy, now: time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)}
 	r.s = api.New(mustCore(t), spy, "k0").WithAuth(auth.NewOpenStore()).
-		WithCheckpointShadowEvery(1).WithCheckpointShadowBudget(budget).WithCheckpointShadowBackoff(10 * time.Minute).
+		WithCheckpointShadowEvery(1).WithCheckpointShadowMinInterval(0).WithCheckpointShadowBudget(budget).WithCheckpointShadowBackoff(10 * time.Minute).
 		WithClock(func() time.Time { return r.now })
 	r.h = newCutHistory(t, st, "p", 3)
 	r.h.plain()

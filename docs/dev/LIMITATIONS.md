@@ -136,8 +136,15 @@ What this does not give:
 - **The incremental cut trusts the latest stored checkpoint** as the base. It is signed, but the cut does not
   re-verify the signature or the chain below it. A latest checkpoint that was corrupted in the store (not by the
   signing key) is carried forward by every unshadowed cut.
-- **The check against the full computation is sampled, per project.** The cut of checkpoint seq 100, 200, ... of a
-  project also computes the full body and refuses to sign unless it is byte-identical
+- **The check against the full computation is sampled, per project, and rate-limited.** The cut of checkpoint seq
+  100, 200, ... of a project also computes the full body, but only if the project's last shadow attempt (whatever its
+  outcome) is at least one hour old (`DefaultCheckpointShadowMinInterval`), so the scheduled cadence is
+  max(every 100th cut, once per hour per project). This is weaker than a plain 1-in-100 sample: at a high cut rate an
+  incorrect incremental cut can stay signed for up to an hour of cuts before the next scheduled shadow looks. The
+  limit exists because the shadow runs under the project write lock; at 1-in-100 and a cut every 3 s it ran every
+  ~5 minutes and each run stalled writes for up to its budget. The first cut after a start and every cut after a
+  mismatch are not rate-limited. The remaining stall: one shadow per hour per project, and the first cut after
+  every start, can each still hold the project write lock for up to the 5 s budget. A checked cut refuses to sign unless the full body is byte-identical
   (`averin_checkpoint_shadow_checks_total`); the sample is chosen from the checkpoint being cut, so it does not
   depend on how cuts of different projects interleave. The first incremental cut of each project after the process
   starts is also checked once, which covers a base changed while the process was down and the first cut after an

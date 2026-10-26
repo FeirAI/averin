@@ -32,7 +32,7 @@ func bogusBase(project string) func(store.Checkpoint) store.Checkpoint {
 func TestCheckpointCutShadowIsPerProject(t *testing.T) {
 	st := store.NewMem()
 	spy := newRowSpy(st)
-	s := api.New(mustCore(t), spy, "k0").WithAuth(auth.NewOpenStore())
+	s := api.New(mustCore(t), spy, "k0").WithAuth(auth.NewOpenStore()).WithCheckpointShadowMinInterval(0)
 	ha := newCutHistory(t, st, "A", 1)
 	hb := newCutHistory(t, st, "B", 2)
 	ha.plain()
@@ -85,7 +85,7 @@ func TestCheckpointCutShadowIsPerProject(t *testing.T) {
 func TestCheckpointCutRefusalSurvivesRestart(t *testing.T) {
 	st := store.NewMem()
 	spy := newRowSpy(st)
-	s := api.New(mustCore(t), spy, "k0").WithAuth(auth.NewOpenStore())
+	s := api.New(mustCore(t), spy, "k0").WithAuth(auth.NewOpenStore()).WithCheckpointShadowMinInterval(0)
 	h := newCutHistory(t, st, "A", 5)
 	h.plain()
 	if _, err := cutOnce(t, s, spy, "A"); err != nil {

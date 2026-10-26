@@ -283,7 +283,7 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		mCheckpointsSealed: reg.Counter("averin_checkpoints_sealed_total",
 			"Total checkpoints successfully sealed."),
 		mCutShadowChecks: reg.Counter("averin_checkpoint_shadow_checks_total",
-			"Total incremental checkpoint cuts also computed in full and compared (1 in 100 by default)."),
+			"Total incremental checkpoint cuts also computed in full and compared (the first cut of a project after a start, then at most one per hour per project on every 100th cut, and every cut after a mismatch)."),
 		mCutShadowMismatch: reg.Counter("averin_checkpoint_shadow_mismatch_total",
 			"Total incremental checkpoint cuts that differed from the full computation. Each one REFUSED to sign; alert on any non-zero value."),
 		mCutShadowFailed: reg.Counter("averin_checkpoint_shadow_failed_total",
