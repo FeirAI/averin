@@ -170,6 +170,9 @@ func TestCheckpointCutShadowBudgetIsClamped(t *testing.T) {
 	if got := s.ShadowBudgetForTest(); got != api.MaxCheckpointShadowBudget {
 		t.Fatalf("effective budget %s after asking for 60s, want the ceiling %s", got, api.MaxCheckpointShadowBudget)
 	}
+	if api.DefaultCheckpointShadowBudget != time.Second {
+		t.Fatalf("default shadow budget %s, want 1s (a longer default stalls project writes for that long per attempt)", api.DefaultCheckpointShadowBudget)
+	}
 	if got := api.New(mustCore(t), store.NewMem(), "k0").ShadowBudgetForTest(); got != api.DefaultCheckpointShadowBudget {
 		t.Fatalf("default effective budget %s, want %s", got, api.DefaultCheckpointShadowBudget)
 	}

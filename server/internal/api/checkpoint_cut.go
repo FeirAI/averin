@@ -32,8 +32,15 @@ const DefaultCheckpointShadowMinInterval = time.Hour
 // The shadow's own time budget and the backoff after a shadow that could not run (lead decision, history
 // scaling PR2): the full computation is O(history) and stops completing as history grows, so it must neither
 // hold the project write guard for the whole statement timeout nor be retried on every cut.
+//
+// The default budget is 1 s (it was 5 s). Release-1 soak evidence: at about 0.5 calls/s the full computation
+// stopped fitting 5 s reliably from about 5 h of history, and near that boundary a success (which resets the
+// backoff) alternated with failures, so attempts stayed about hourly and EACH was a 3.5 to 5 s stall of the
+// project's writes. With 1 s one attempt holds the write lock for about 1 s at most. The trade: the cross-check
+// covers less history (an estimate scaled from that measurement: it stops fitting after roughly an hour of
+// history at 0.5 calls/s, later at lighter load); the differential tests stay the primary assurance.
 const (
-	DefaultCheckpointShadowBudget  = 5 * time.Second
+	DefaultCheckpointShadowBudget  = 1 * time.Second
 	MaxCheckpointShadowBudget      = 20 * time.Second // below the 30 s statement timeout, which it must never reach
 	DefaultCheckpointShadowBackoff = 10 * time.Minute
 	maxShadowBackoffDoublings      = 6 // the wait doubles per consecutive failure up to 64 times the base
@@ -73,7 +80,7 @@ func (s *Server) WithCheckpointShadowEvery(n int) *Server {
 	return s
 }
 
-// WithCheckpointShadowBudget sets the time budget of one shadow computation (default 5 s, at most 20 s, at
+// WithCheckpointShadowBudget sets the time budget of one shadow computation (default 1 s, at most 20 s, at
 // least 1 ms): a shadow that cannot finish inside it does not hold the project write guard any longer and counts
 // as "could not run", not as a mismatch.
 func (s *Server) WithCheckpointShadowBudget(d time.Duration) *Server {
