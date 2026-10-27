@@ -154,12 +154,20 @@ What this does not give:
   cut again as the same seq and checked again, also after a restart. After one mismatch
   (`averin_checkpoint_shadow_mismatch_total`, a log line starting `ALERT`) every cut is checked until the process
   restarts. The shadow computation is O(history) and runs inside the project write transaction, so a checked cut
-  takes as long as every cut did before, up to the shadow's own time budget (5 s by default, at most 20 s).
+  takes as long as every cut did before, up to the shadow's own time budget (1 s by default, at most 20 s): each scheduled shadow attempt can hold the
+  project write lock for up to about 1 s (a little more if the last statement overruns).
 - **The shadow stops being effective as history grows.** A shadow that cannot run (the full computation errors,
   hits the statement timeout, or runs out of that budget before producing a body) does not refuse: the incremental body is signed,
   `averin_checkpoint_shadow_failed_total` is incremented, an `ALERT` line is logged, and that project's next
   shadow waits for a backoff (not the next cut). A mismatch still refuses, and so does one found in a full body that came back over budget (a computed body is always compared; a match is signed and counted as late). The budget covers the whole shadow, not each statement. Once the full computation no longer
   fits its budget the counter rises on every attempt and the sampled check is effectively off for that project.
+  The default budget was lowered from 5 s to 1 s after the release-1 soak (about 0.5 calls/s, fresh history): the
+  full computation stopped fitting 5 s reliably from about 5 h of history, and near that boundary a success
+  (which resets the backoff) alternated with failures, so attempts stayed about hourly and each one was a 3.5 to
+  5 s write stall (metered calls of 3.3 to 5.1 s). The cost of the shorter budget is less coverage: as an
+  estimate scaled from that measurement (about 5 s at about 5 h on the soak host), the cross-check stops fitting
+  after roughly an hour of history at 0.5 calls/s, and later at lighter load. It was already ineffective beyond a
+  few hours. The differential tests are the primary assurance of the equality, not the shadow.
   What still holds the equality then is the differential tests (incremental equals full on random histories,
   in memory and on Postgres) and the guards every cut applies itself: the record count must equal the base count
   plus the records after it, every page of those records must hold exactly the next ordinals, and the new grants

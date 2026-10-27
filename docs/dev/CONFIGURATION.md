@@ -203,10 +203,12 @@ statement timeout or runs out of the shadow's own time budget before it has prod
 contiguity guards) is signed, `averin_checkpoint_shadow_failed_total` is incremented, a line starting `ALERT` is
 logged, and that project's next shadow attempt waits for a backoff (10 minutes, doubling per consecutive failure
 up to 64 times that, reset when a shadow runs). A full body that was computed but came back over budget is still compared: a mismatch refuses, a match is
-signed and counted as failed (late) with the same backoff. The shadow's budget is 5 s by default and covers the
+signed and counted as failed (late) with the same backoff. The shadow's budget is 1 s by default (lowered from 5 s: see LIMITATIONS) and covers the
 WHOLE shadow: on Postgres the statement timeout is re-issued with the time that remains before every statement,
 so a checked cut never holds the project write guard for much longer than the budget (the ceiling is 20 s, below
-the 30 s statement timeout). Neither value has an environment variable; they are the `WithCheckpointShadowBudget`
+the 30 s statement timeout); each shadow attempt can hold the project write lock for up to about 1 s at the default. At 0.5 calls/s the full computation
+stops fitting 1 s after roughly an hour of history (an estimate scaled from the soak: about 5 s at about 5 h), after which the failed counter rises and only
+the differential tests and the per-cut guards hold the equality. Neither value has an environment variable; they are the `WithCheckpointShadowBudget`
 (ceiling 20 s) and `WithCheckpointShadowBackoff` options on the server. Alert on any non-zero rate of
 `averin_checkpoint_shadow_failed_total`: it means the shadow has stopped being effective for that history size.
 
