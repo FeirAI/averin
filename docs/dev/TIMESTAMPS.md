@@ -20,7 +20,39 @@ any record content. Whether that outbound call is acceptable on your infrastruct
 | `AVERIN_TSA_AUTH_HEADER=<value>` | The `Authorization` header a paid authority needs (for example `Basic ...`). Read from the environment and sent as is. Start-up is refused unless the TSA URL is https, so the credential never travels in clear text. |
 
 An unknown preset name is fatal at start-up. Anchoring is best-effort: a TSA outage stores the checkpoint
-un-anchored and is reported, it never stops the chain; a checkpoint can be back-anchored later.
+un-anchored and is reported, it never stops the chain.
+
+### Back-anchoring a checkpoint that missed its stamp
+
+There is **no automatic retry**: a successful cut stamps only itself. The one back-anchoring path is the
+operator endpoint, which uses the same code as the first stamp (the imprint is the SHA-256 of the
+`checkpoint_hash` string, 10 s timeout each, stored with the insert-only `PutAnchor`):
+
+- `POST /v2/anchors/backfill?project=<id>` (admin, like `POST /v2/checkpoints`) stamps the project's
+  un-anchored **tail**, that is the un-anchored checkpoints with a seq above the newest anchored one, oldest
+  first. It stops at the first failure, after at most 10 stamps, or when a 40 s wall-clock budget is spent
+  (so a call stays inside the server's 60 s write timeout). It returns
+  `{"back_anchored": n, "remaining_unanchored": m, "stopped_on_error": bool}` (`remaining_unanchored` counts
+  the tail only, up to 10000); call it again while `remaining_unanchored` is above 0 and
+  `stopped_on_error` is false. It answers `409` when no TSA is configured, or when a backfill of the same
+  project is already running.
+- A checkpoint **below** the newest anchored one (a mid-chain gap) is not stamped. It is already committed:
+  the next anchored checkpoint's `prev_checkpoint_hash` chains to it, so that anchor dates it. It still counts
+  as un-anchored in `checkpoints_anchored`.
+
+Why only the tail: the offline verifier's backdating gate requires verified anchor times to be non-decreasing
+with checkpoint seq. A stamp made now on a checkpoint that already has a newer anchored checkpoint would have a
+genTime later than that newer anchor, so the bundle would fail (`anchor time decreased across checkpoints ...`)
+unless the two genTimes fall in the same second (an RFC 3161 genTime has 1 s granularity), which depends on TSA
+latency. A tail stamp cannot decrease the order, and it is the only stamp that adds trust.
+One residual race: a new cut's own stamp running while a backfill stamps the previous checkpoint can reorder the
+two anchor times, so run the backfill on a quiet project.
+
+Counters: `averin_checkpoint_backanchored_total` and `averin_checkpoint_backanchor_failures_total`. Each
+back-anchor logs one line; a sweep that stops on an error logs an `ALERT:` line.
+
+A back-anchor's genTime is later than the checkpoint's `created_ts`, so it proves the checkpoint existed by
+that later time, not by `created_ts`.
 
 FreeTSA is a free service with no uptime guarantee and no service level. For anything you need to rely on, use a
 paid authority through `AVERIN_TSA_URL`.

@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -107,6 +109,67 @@ func exerciseAnchors(t *testing.T, s Store) {
 	if a, err := s.Anchors("other"); err != nil || len(a) != 0 {
 		t.Fatalf("project isolation: other anchors = %v err=%v; want empty", a, err)
 	}
+}
+
+// exerciseUnanchoredTail pins UnanchoredTailCheckpoints: only checkpoints above the newest anchored seq,
+// oldest first, bounded, project-isolated, non-nil. Shared by Mem and Postgres so the two agree.
+func exerciseUnanchoredTail(t *testing.T, s Store) {
+	t.Helper()
+	if u, err := s.UnanchoredTailCheckpoints("p", 5); err != nil || u == nil || len(u) != 0 {
+		t.Fatalf("empty = %v (nil=%v) err=%v; want non-nil empty", u, u == nil, err)
+	}
+	for i := int64(0); i < 5; i++ {
+		h := fmt.Sprintf("sha256:cp%d", i)
+		if err := s.PutCheckpoint("p", Checkpoint{JSON: fmt.Sprintf(`{"checkpoint_seq":%d}`, i), CheckpointHash: h, Seq: i}); err != nil {
+			t.Fatalf("put checkpoint %d: %v", i, err)
+		}
+	}
+	if err := s.PutCheckpoint("other", Checkpoint{JSON: `{}`, CheckpointHash: "sha256:o0", Seq: 0}); err != nil {
+		t.Fatal(err)
+	}
+	// no anchor at all: every checkpoint is the tail
+	if got, _ := s.UnanchoredTailCheckpoints("p", 10); len(got) != 5 || got[0].Seq != 0 {
+		t.Fatalf("no anchors: %v; want all 5, oldest first", got)
+	}
+	for _, seq := range []int64{0, 2} {
+		if err := s.PutAnchor("p", seq, "tok"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.UnanchoredTailCheckpoints("p", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// seq 1 is a gap below the newest anchor (2): excluded.
+	want := []UnanchoredCheckpoint{{3, "sha256:cp3"}, {4, "sha256:cp4"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tail = %v; want %v", got, want)
+	}
+	if got, _ := s.UnanchoredTailCheckpoints("p", 1); !reflect.DeepEqual(got, want[:1]) {
+		t.Fatalf("limit 1 = %v; want %v", got, want[:1])
+	}
+	if got, err := s.UnanchoredTailCheckpoints("p", 0); err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("limit 0 = %v err=%v; want non-nil empty", got, err)
+	}
+	if got, _ := s.UnanchoredTailCheckpoints("other", 10); len(got) != 1 || got[0].Seq != 0 {
+		t.Fatalf("project isolation: %v", got)
+	}
+	if err := s.PutAnchor("p", 3, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.UnanchoredTailCheckpoints("p", 10); !reflect.DeepEqual(got, want[1:]) {
+		t.Fatalf("after anchoring seq 3 = %v; want %v", got, want[1:])
+	}
+	if err := s.PutAnchor("p", 4, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.UnanchoredTailCheckpoints("p", 10); len(got) != 0 {
+		t.Fatalf("fully anchored tail = %v; want none", got)
+	}
+}
+
+func TestMemUnanchoredTailCheckpoints(t *testing.T) {
+	exerciseUnanchoredTail(t, NewMem())
 }
 
 func TestMemAnchors(t *testing.T) {

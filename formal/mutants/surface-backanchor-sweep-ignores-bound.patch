@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index e38aee1..81693c7 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4138,7 +4138,7 @@ func (s *Server) backAnchorSweep(ctx context.Context, projectID string, max int)
+ 	var pending []store.UnanchoredCheckpoint
+ 	err := s.st.WithProjectRead(ctx, projectID, func(st store.Store) error {
+ 		var e error
+-		pending, e = st.UnanchoredTailCheckpoints(projectID, max)
++		pending, e = st.UnanchoredTailCheckpoints(projectID, 1<<20)
+ 		return e
+ 	})
+ 	if err != nil {

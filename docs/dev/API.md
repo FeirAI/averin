@@ -36,6 +36,7 @@ literals are decoded with `json.Number` (no float round-trip — RCP forbids flo
 | POST | `/v2/records` | Ingest one record or a batch array. | always |
 | POST | `/v2/otel/traces` | Ingest OTel/OpenInference spans, mapped to records. | always |
 | POST | `/v2/checkpoints` | Seal the current frontier into the checkpoint chain. | always |
+| POST | `/v2/anchors/backfill` | Stamp the un-anchored tail at the TSA (admin). | always |
 | GET | `/v2/records` | List records newest first, or (with `after` and `order=asc`) read oldest first from an ordinal. | always |
 | GET | `/v2/verify` | Server-side verification report for a project. | always |
 | GET | `/v2/export` | Export a verifiable bundle (proof / disclosure), whole history or one month. | always |
@@ -205,6 +206,21 @@ when a grant's commit was ambiguous (or its seq release failed) and its client n
 [`GET /v2/broker-seq/void`](#get-v2broker-seqvoidprojectidbroker_seqn), then retry the
 original grant if it can still finish or run the bounded operator
 [`POST /v2/broker-seq/void`](#post-v2broker-seqvoidprojectid) action.
+
+---
+
+## POST `/v2/anchors/backfill?project=<id>`
+
+Admin only (the same auth as `POST /v2/checkpoints`). Stamps the project's un-anchored **tail** (checkpoints
+with a seq above the newest anchored one) at the configured TSA, oldest first, at most 10 per call, within a
+40 s budget, stopping at the first failure. There is no automatic retry. Checkpoints below the newest anchor are
+not stamped (see TIMESTAMPS.md for why).
+
+**Response `200`:** `{"back_anchored": n, "remaining_unanchored": m, "stopped_on_error": false}`
+(`remaining_unanchored` counts the tail, up to 10000). `409` when no TSA is configured or a backfill of the
+project is already running, `400` without `?project=`.
+The back-anchor's genTime is later than the checkpoint's `created_ts`; see
+[TIMESTAMPS.md](TIMESTAMPS.md#back-anchoring-a-checkpoint-that-missed-its-stamp).
 
 ---
 

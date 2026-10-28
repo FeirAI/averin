@@ -1,0 +1,13 @@
+diff --git a/server/internal/store/store.go b/server/internal/store/store.go
+index 9228fe0..f4031d5 100644
+--- a/server/internal/store/store.go
++++ b/server/internal/store/store.go
+@@ -1209,7 +1209,7 @@ func (m *Mem) UnanchoredTailCheckpoints(projectID string, limit int) ([]Unanchor
+ 		if len(out) >= limit {
+ 			break
+ 		}
+-		if _, ok := p.anchors[c.Seq]; !ok && c.Seq > maxAnchored {
++		if _, ok := p.anchors[c.Seq]; !ok && c.Seq > maxAnchored-1000 {
+ 			out = append(out, UnanchoredCheckpoint{Seq: c.Seq, CheckpointHash: c.CheckpointHash})
+ 		}
+ 	}

@@ -1474,6 +1474,44 @@ func (p *Postgres) Anchors(projectID string) (map[int64]string, error) {
 	return out, nil
 }
 
+// UnanchoredTailCheckpoints returns up to limit checkpoints with no anchor and a seq above the newest
+// anchored one, lowest seq first. Both lookups use the (project_id, seq) primary keys: the max is an
+// index probe on anchors, the scan a bounded index range on checkpoints.
+func (p *Postgres) UnanchoredTailCheckpoints(projectID string, limit int) ([]UnanchoredCheckpoint, error) {
+	if err := p.checkProject(projectID); err != nil {
+		return nil, err
+	}
+	out := []UnanchoredCheckpoint{}
+	if limit <= 0 {
+		return out, nil
+	}
+	ctx := p.callContext()
+	rows, err := p.queries().Query(ctx, `
+		SELECT c.seq, c.checkpoint_hash
+		FROM checkpoints c
+		WHERE c.project_id = $1
+		  AND c.seq > COALESCE((SELECT MAX(a.seq) FROM anchors a WHERE a.project_id = $1), -1)
+		  AND NOT EXISTS (SELECT 1 FROM anchors a WHERE a.project_id = c.project_id AND a.seq = c.seq)
+		ORDER BY c.seq
+		LIMIT $2
+	`, projectID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: unanchored checkpoints: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var u UnanchoredCheckpoint
+		if err := rows.Scan(&u.Seq, &u.CheckpointHash); err != nil {
+			return nil, fmt.Errorf("store: scan unanchored checkpoint: %w", err)
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate unanchored checkpoints: %w", err)
+	}
+	return out, nil
+}
+
 // Disclosures returns every disclosure secret for the project, ordered by insertion. Never nil.
 func (p *Postgres) Disclosures(projectID string) ([]DisclosureSecret, error) {
 	if err := p.checkProject(projectID); err != nil {

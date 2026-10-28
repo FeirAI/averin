@@ -369,6 +369,18 @@ type Store interface {
 	// Anchors returns seq -> token_b64 for the project, so the export can join each checkpoint with
 	// its anchor. Never nil.
 	Anchors(projectID string) (map[int64]string, error)
+	// UnanchoredTailCheckpoints returns up to limit of the project's checkpoints that have no anchor AND
+	// a seq above the newest anchored checkpoint's (the un-anchored tail; with no anchor at all, every
+	// checkpoint), oldest (lowest seq) first, each with its checkpoint_hash. Gaps below the newest anchor
+	// are excluded on purpose (a late stamp there would trip the verifier's backdating gate).
+	// limit <= 0 returns none. Never nil.
+	UnanchoredTailCheckpoints(projectID string, limit int) ([]UnanchoredCheckpoint, error)
+}
+
+// UnanchoredCheckpoint names a stored checkpoint that has no anchor yet (a back-anchor candidate).
+type UnanchoredCheckpoint struct {
+	Seq            int64
+	CheckpointHash string
 }
 
 // Mem is an in-memory Store for tests and single-node dev.
@@ -1176,6 +1188,32 @@ func (m *Mem) Anchors(projectID string) (map[int64]string, error) {
 	for k, v := range src {
 		out[k] = v
 	}
+	return out, nil
+}
+
+func (m *Mem) UnanchoredTailCheckpoints(projectID string, limit int) ([]UnanchoredCheckpoint, error) {
+	if err := m.checkProject(projectID); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.proj(projectID)
+	out := []UnanchoredCheckpoint{}
+	maxAnchored := int64(-1)
+	for seq := range p.anchors {
+		if seq > maxAnchored {
+			maxAnchored = seq
+		}
+	}
+	for _, c := range p.checks {
+		if len(out) >= limit {
+			break
+		}
+		if _, ok := p.anchors[c.Seq]; !ok && c.Seq > maxAnchored {
+			out = append(out, UnanchoredCheckpoint{Seq: c.Seq, CheckpointHash: c.CheckpointHash})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out, nil
 }
 

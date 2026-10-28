@@ -2503,6 +2503,45 @@
         "server",
         "formal-fast"
       ]
+    },
+    {
+      "id": "back-anchoring-bounded-after-successful-stamp",
+      "claim": "The Go server's only back-anchoring is the admin-only POST /v2/anchors/backfill, which stamps the project's un-anchored tail (seq above the newest anchored checkpoint), oldest first, at most 10 per call, stopping at the first failure; a checkpoint below the newest anchor is never stamped, and a successful cut stamps only itself. Not that a TSA outage ends without an operator call (there is no automatic retry), and not that a back-anchor cannot trip the offline backdating gate when it races a newer cut's own stamp.",
+      "class": "tested-implementation",
+      "targets": [
+        "Go server"
+      ],
+      "assumptions": [
+        "anchors are written only through Store.PutAnchor, which is insert-only"
+      ],
+      "sources": [
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "backAnchorSweep"
+        },
+        {
+          "file": "server/internal/api/server.go",
+          "symbol": "handleAnchorsBackfill"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "server/internal/api/back_anchor_test.go",
+          "symbol": "TestNoAutomaticBackAnchorOnCut"
+        },
+        {
+          "file": "server/internal/api/back_anchor_test.go",
+          "symbol": "TestBackfillStampsOnlyTheTail"
+        },
+        {
+          "file": "server/internal/api/back_anchor_test.go",
+          "symbol": "TestBackfillBoundOldestFirst"
+        }
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ]
     }
   ]
 }

@@ -473,6 +473,26 @@ which each one matters.
   a usage error also exits 2. A PASS there means the signature verified under the key given on
   the command line; the CLI cannot tell whether that key is the right one to trust.
 
+## Back-anchoring is tail-only, operator-driven and not automatic
+
+A checkpoint that missed its TSA stamp is not retried by itself. `POST /v2/anchors/backfill` stamps only the
+un-anchored tail (checkpoints newer than the newest anchored one); see
+[TIMESTAMPS.md](TIMESTAMPS.md#back-anchoring-a-checkpoint-that-missed-its-stamp).
+
+- **A gap below the newest anchor stays un-anchored.** The offline verifier's backdating gate (threat #3)
+  requires verified anchor times to be non-decreasing with checkpoint seq, and a late stamp on such a gap would
+  have a genTime later than the newer anchor, so the bundle would fail integrity unless both genTimes fall in
+  the same second (1 s granularity, so latency decides). The gap is committed by the next anchor through
+  `prev_checkpoint_hash`, but `checkpoints_anchored` stays below `checkpoints_total`, so a run with such a gap
+  does not pass a readiness or accept-proof gate that requires equality. Counting a checkpoint committed by a
+  later anchor as anchored is a spec decision that is not made here.
+- **A back-anchor proves existence by its genTime, not by `created_ts`.**
+- **No retry on its own.** Nothing calls the endpoint for you; an outage that ends before the next cut leaves
+  a tail that only an operator call anchors.
+- **A race with a new cut can reorder anchor times.** If a cut's own stamp runs while a backfill stamps the
+  previous checkpoint, the two times can land out of order and trip the gate. Run the backfill on a quiet project.
+- **One backfill per project at a time** (a second concurrent call gets 409).
+
 ## Gateway refusal records are a reported floor
 
 `POST /v2/refusals` seals what the gateway reports (feir-ops#1). The verifier counts integrity-proven

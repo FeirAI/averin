@@ -926,6 +926,18 @@
       "claim": "whole-bundle-size-precheck",
       "detector": "cd server && go test -count=1 ./internal/store -run 'TestBundleSizeParts'",
       "detector_kind": "go"
+    },
+    "surface-backanchor-sweep-never-runs": {
+      "tier": "fast",
+      "claim": "back-anchoring-bounded-after-successful-stamp"
+    },
+    "surface-backanchor-sweep-ignores-bound": {
+      "tier": "full",
+      "claim": "back-anchoring-bounded-after-successful-stamp"
+    },
+    "surface-backanchor-sweep-stamps-gaps": {
+      "tier": "full",
+      "claim": "back-anchoring-bounded-after-successful-stamp"
     }
   },
   "claims": [
@@ -2299,7 +2311,7 @@
         {
           "path": "server/internal/api/server.go",
           "symbol": "Routes",
-          "sha256": "83f182481c5448d222964baffefeb9e4fbfdc54f06785b010d6270b734edd8ae"
+          "sha256": "08f8b10312a9f5d83f29a6f4f3373234051426e0048915f4035f14b8616692db"
         }
       ],
       "mutants": [
@@ -3411,6 +3423,46 @@
         "surface-bundle-parts-postgres-counts-characters"
       ],
       "does_not_establish": "That the estimate is tight: a history just over the limit whose estimate is under it still loads in full before being refused, so the memory spike is avoided only for histories clearly over the limit. That the estimate is a lower bound when a stored record or checkpoint JSON contains insignificant whitespace (marshaling compacts it); the core's canonical JSON is compact, and the test histories are server-sealed. The random-history lower-bound check is 25 seeded histories on the in-memory store, not a proof. That the SQL aggregate is cheap on a very large table: it reads every row of the project, though it loads none into memory. Month export and verify, the other whole-history readers, and the verifier's own limit (the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test). The Postgres sum test runs only where AVERIN_TEST_DATABASE_URL is set."
+    },
+    {
+      "id": "back-anchoring-bounded-after-successful-stamp",
+      "$comment": "legacy register: back-anchoring-bounded-after-successful-stamp",
+      "statement": "The only back-anchoring the server performs is POST /v2/anchors/backfill (admin-only, 409 when no TSA is configured or a backfill of the project is already running): it stamps the project's un-anchored TAIL (checkpoints with a seq above the newest anchored one), oldest first, at most 10 per call, within a 40 s wall-clock budget, and stops at the first failure; a checkpoint below the newest anchor is never stamped (a late stamp there would make verified anchor times decrease with seq, which the offline backdating gate rejects). A successful cut stamps only itself. UnanchoredTailCheckpoints returns the same oldest-first, bounded tail in the in-memory and Postgres stores.",
+      "method": "test",
+      "artifacts": [
+        "server/internal/api/server.go",
+        "server/internal/api/back_anchor_test.go",
+        "server/internal/store/store_test.go"
+      ],
+      "gates": [
+        "server",
+        "formal-fast"
+      ],
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestNoAutomaticBackAnchor|TestBackfill|TestLateTail|TestMidChain' && go test -count=1 ./internal/store -run 'TestMemUnanchoredTailCheckpoints'",
+      "detector_kind": "go",
+      "covers": [
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "Server.backAnchorSweep",
+          "sha256": "61165dd3467a0d4b587a84f90ff424dc5e7ecc121f8499202c257c57dd00b582"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "Server.handleAnchorsBackfill",
+          "sha256": "9502650fda828b7e25784c9b20e60df369a409994e48cc488be6cf5892ab40e1"
+        },
+        {
+          "path": "server/internal/store/store.go",
+          "symbol": "Mem.UnanchoredTailCheckpoints",
+          "sha256": "ba20c88c01800376fbf2cb9ffa4c07847f90dee1fb2e2e139fdf9d44f05b2ed3"
+        }
+      ],
+      "mutants": [
+        "surface-backanchor-sweep-never-runs",
+        "surface-backanchor-sweep-ignores-bound",
+        "surface-backanchor-sweep-stamps-gaps"
+      ],
+      "does_not_establish": "That a back-anchor never trips the backdating gate under concurrency: a cut's own stamp racing an operator backfill of the previous checkpoint can still stamp them out of seq order, and the 40 s budget is checked between stamps (a call can run one 10 s stamp past it). That a gap below the newest anchor is ever anchored (it is committed by the next anchor through prev_checkpoint_hash, and is not counted as anchored). That a TSA outage ends without an operator call: there is no automatic retry. That the Postgres query agrees with Mem on a CI run: that test runs only where AVERIN_TEST_DATABASE_URL is set."
     }
   ]
 }
