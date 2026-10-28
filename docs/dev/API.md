@@ -236,7 +236,7 @@ records, first_seq, last_seq, head_hash, base_seq, base_hash, records_before}]}`
 
 Returns a verifiable [bundle](#bundle-object) for offline verification. A whole-history export larger than the
 256 MiB the verifier accepts is refused with `413` and a pointer to the month segments. At most 4 bundle
-builds run at once; a request past that is refused with a retryable `503`.
+builds run at once; a request past that is refused with a retryable `503`. `/v2/export` and `/v2/verify` also run under a 10 minute write deadline (`bundleWriteTimeout`); a request that is still building or writing when it passes is cut, not refused with a size message. On one measured host a whole-history export of about 110 MiB took 521 s to build, so the deadline can be reached below the 256 MiB cap (see [LIMITATIONS.md](LIMITATIONS.md)).
 
 Query parameters:
 

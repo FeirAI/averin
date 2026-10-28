@@ -33,6 +33,13 @@ What contains this:
   currently **4**). A request over the cap gets a retryable `503`.
 - **Write-timeout exemption.** The global 60s `WriteTimeout` would kill a large-but-legitimate export mid-write, so
   export/verify run under a per-handler deadline (`bundleWriteTimeout`, **10m**).
+  The deadline is a bound on the whole request, not only on size. When it passes, the response is cut (the client sees
+  a dropped connection, HTTP 000), not refused with a status or a size message. Measured 2026-10-28 on one soak host
+  at 0.5 metered calls/s with a fresh history: a 28.5 MiB `proof_only` export plus verify took 86 s; 41.7 MiB took 177 s;
+  a 110.6 MiB export took averin 521 s to build (first byte) and `averin-verify` 687 s to verify (PASS, integrity). The
+  8 h end-of-run export of the same harness was cut at 610 s. The cost per MiB grows with the size, so on that host the
+  whole-history export reaches the deadline at about 110 to 130 MiB (about 9 h of history at 0.5 calls/s, later at
+  lighter load), well below the 256 MiB cap. Other hardware was not measured (feir-ops#26).
 
 What it does not do:
 
