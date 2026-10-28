@@ -1950,7 +1950,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "d5a2f279ff2e636ab0d184e7a98b7a83ec92c36f328972ccf1ebb9c18fd0f1e9"
+          "sha256": "618e907df4980bca77936e496514d5f87def6aad5039ae0e6a4f3189f8168219"
         },
         {
           "path": "server/internal/api/posture.go",
@@ -3399,7 +3399,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "d5a2f279ff2e636ab0d184e7a98b7a83ec92c36f328972ccf1ebb9c18fd0f1e9"
+          "sha256": "618e907df4980bca77936e496514d5f87def6aad5039ae0e6a4f3189f8168219"
         }
       ],
       "mutants": [
