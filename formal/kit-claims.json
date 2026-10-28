@@ -926,6 +926,18 @@
       "claim": "whole-bundle-size-precheck",
       "detector": "cd server && go test -count=1 ./internal/store -run 'TestBundleSizeParts'",
       "detector_kind": "go"
+    },
+    "surface-d6-cursor-skips-containment": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier"
+    },
+    "surface-d6-append-without-strict-seq": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier"
+    },
+    "surface-anchor-dp-max-not-min": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier"
     }
   },
   "claims": [
@@ -1104,7 +1116,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a8868465a7c3325f0236e35d4430d428177281020be77a2f225cfebf06c272eb"
+          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
         }
       ],
       "mutants": [
@@ -1139,7 +1151,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a8868465a7c3325f0236e35d4430d428177281020be77a2f225cfebf06c272eb"
+          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
         }
       ],
       "mutants": [
@@ -1178,7 +1190,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a8868465a7c3325f0236e35d4430d428177281020be77a2f225cfebf06c272eb"
+          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
         }
       ],
       "mutants": [
@@ -1861,7 +1873,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a8868465a7c3325f0236e35d4430d428177281020be77a2f225cfebf06c272eb"
+          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
         }
       ],
       "mutants": [
@@ -2648,7 +2660,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a8868465a7c3325f0236e35d4430d428177281020be77a2f225cfebf06c272eb"
+          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
         }
       ],
       "mutants": [
@@ -2831,7 +2843,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a8868465a7c3325f0236e35d4430d428177281020be77a2f225cfebf06c272eb"
+          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
         }
       ],
       "mutants": [
@@ -2862,7 +2874,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a8868465a7c3325f0236e35d4430d428177281020be77a2f225cfebf06c272eb"
+          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
         }
       ],
       "mutants": [
@@ -2894,7 +2906,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a8868465a7c3325f0236e35d4430d428177281020be77a2f225cfebf06c272eb"
+          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
         }
       ],
       "mutants": [
@@ -3010,7 +3022,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "a8868465a7c3325f0236e35d4430d428177281020be77a2f225cfebf06c272eb"
+          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
         }
       ],
       "mutants": [
@@ -3411,6 +3423,44 @@
         "surface-bundle-parts-postgres-counts-characters"
       ],
       "does_not_establish": "That the estimate is tight: a history just over the limit whose estimate is under it still loads in full before being refused, so the memory spike is avoided only for histories clearly over the limit. That the estimate is a lower bound when a stored record or checkpoint JSON contains insignificant whitespace (marshaling compacts it); the core's canonical JSON is compact, and the test histories are server-sealed. The random-history lower-bound check is 25 seeded histories on the in-memory store, not a proof. That the SQL aggregate is cheap on a very large table: it reads every row of the project, though it loads none into memory. Month export and verify, the other whole-history readers, and the verifier's own limit (the Go constant mirrors core MAX_BUNDLE_BYTES by comment, not by a test). The Postgres sum test runs only where AVERIN_TEST_DATABASE_URL is set."
+    },
+    {
+      "id": "verifier-incremental-d6-log-equals-per-frontier",
+      "statement": "The verifier's incremental grant-log index (core/src/verify/committed.rs) gives the same per-checkpoint committed grant log, count, gaplessness, head root and earliest-anchor times as the per-frontier code it replaces (committed_set, committed_broker_log). Tests compare them on seeded random histories (multi-parent merges, duplicate content hashes, unknown and non-head frontier members, seq gaps, duplicates, zero and negative seqs, voids, several brokers) at the index level and at the level of compute_broker_trust and compute_federation_trust (same trust string, same issues, with the index forced off as the reference), include two federation adversarial cases (a headless checkpoint that commits a grant, a head map that lacks a broker the frontier commits), and assert that a 3,000 record honest growing history builds the index and never resets the cursor.",
+      "method": "differential-vectors",
+      "artifacts": [
+        "core/src/verify/committed.rs",
+        "core/src/verify.rs",
+        "docs/dev/LIMITATIONS.md"
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ],
+      "detector": "cargo test -p averin-decision-core --lib verify::committed",
+      "covers": [
+        {
+          "path": "core/src/verify/committed.rs",
+          "symbol": "advance",
+          "sha256": "79f1cdea085d9a73f02f2d24747ed02f8393fce1ccbf913d7d0bf414bf8ccc38"
+        },
+        {
+          "path": "core/src/verify/committed.rs",
+          "symbol": "min_anchor_times",
+          "sha256": "c1968a2e472262fd974458b8d82bed0754d3ca0bfcdaeb6849193bafd75b9f79"
+        },
+        {
+          "path": "core/src/verify/committed.rs",
+          "symbol": "walk",
+          "sha256": "a3d8bd16a257c942004f2aa80400b10ee5298856e6347cd215188376520a9ab4"
+        }
+      ],
+      "mutants": [
+        "surface-d6-cursor-skips-containment",
+        "surface-d6-append-without-strict-seq",
+        "surface-anchor-dp-max-not-min"
+      ],
+      "does_not_establish": "That the verifier is fast on every input: only histories in which each checkpoint commits the previous one are shown to avoid the full recompute, and a crafted bundle can still take the per-frontier time. The tests count slow-path entries on one honest synthetic history; they do not time anything. Equality is checked on random histories, not proved. It says nothing about the export side of the server."
     }
   ]
 }

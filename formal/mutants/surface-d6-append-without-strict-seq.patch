@@ -1,0 +1,13 @@
+diff --git a/core/src/verify/committed.rs b/core/src/verify/committed.rs
+index 7f928d5..93adde6 100644
+--- a/core/src/verify/committed.rs
++++ b/core/src/verify/committed.rs
+@@ -253,7 +253,7 @@ impl<'a, 'd> LogCursor<'a, 'd> {
+         if !add.is_empty() {
+             add.sort_unstable();
+             // everything before `p` stays in place, so its accumulators and gap status stay valid.
+-            let p = self.log.partition_point(|e| *e < add[0]);
++            let p = self.log.len();
+             let mut tail = self.log.split_off(p);
+             tail.extend(add);
+             tail.sort_unstable();

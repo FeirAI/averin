@@ -40,17 +40,21 @@ What contains this:
   8 h end-of-run export of the same harness was cut at 610 s. The cost per MiB grows with the size, so on that host the
   whole-history export reaches the deadline at about 110 to 130 MiB (about 9 h of history at 0.5 calls/s, later at
   lighter load), well below the 256 MiB cap. Other hardware was not measured (feir-ops#26).
-  Most of that time was the offline verifier's grant-log check (ADR 0004 D6), which rebuilt every checkpoint's grant
-  log from the whole history, so the work grew with checkpoints times records. The verifier now derives each
+  Most of the verifier's time was its grant-log check (ADR 0004 D6), which rebuilt every checkpoint's grant
+  log from the whole history, so the work grew with checkpoints times records. Only `averin-verify` was profiled; that
+  the same check dominates the export's 521 s (the self-verify before the first byte) is inferred from the code, not
+  measured. The verifier now derives each
   checkpoint's log from the previous checkpoint's when it can show the new checkpoint commits the previous one, and
   recomputes in full otherwise; every checkpoint is still checked against its own frontier and the report is
   byte-identical. Measured after the change (2026-10-28, same host and build profile, user CPU of `averin-verify`
   alone on prefixes of the soak export, not an end-to-end export): 5,000 records 13.1 s before and 4.7 s after;
   10,000 records 46.2 s and 8.6 s; 19,999 records 232.4 s and 18.8 s; the full 42,749 records 1,270.8 s and 49.5 s (loaded host, so the ratios matter more than the absolute times). The time
-  per doubling is now 1.8x to 2.2x instead of 3.5x to 5x. The end-to-end export time, the 504-style answer past the
-  deadline and a configurable deadline are not part of this change and were not measured. The linear behavior holds
-  for histories in which each checkpoint commits the previous one (every history averin itself produces); a crafted
-  bundle whose checkpoints do not extend each other can still cost the old quadratic time, bounded by the 256 MiB cap.
+  per doubling is now 1.8x to 2.4x instead of 3.5x to 5x (the last step, 19,999 to 42,749 records, took 2.63x for 2.14x the size). The end-to-end export time, the 504-style answer past the
+  deadline and a configurable deadline are not part of this change and were not measured. The linear behavior was measured only on histories in which each checkpoint commits the previous one (every history
+  averin itself produces). A crafted bundle whose checkpoints do not extend each other can still cost the old quadratic
+  time, and one whose checkpoints do extend each other can still cost more than linear time in ways that were not
+  measured (for example frontiers that list many already-committed records); all of it is bounded by the 256 MiB cap.
+  Tests count the slow-path entries on an honest history but do not time the verifier.
 
 What it does not do:
 

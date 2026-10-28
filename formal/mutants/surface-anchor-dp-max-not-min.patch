@@ -1,0 +1,13 @@
+diff --git a/core/src/verify/committed.rs b/core/src/verify/committed.rs
+index 7f928d5..d739738 100644
+--- a/core/src/verify/committed.rs
++++ b/core/src/verify/committed.rs
+@@ -313,7 +313,7 @@ impl DagIndex {
+         for x in (0..self.parents.len()).rev() {
+             if let Some(t) = min_ts[x] {
+                 for &p in &self.parents[x] {
+-                    if min_ts[p].is_none_or(|cur| t < cur) {
++                    if min_ts[p].is_none_or(|cur| t > cur) {
+                         min_ts[p] = Some(t);
+                     }
+                 }
