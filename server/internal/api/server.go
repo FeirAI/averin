@@ -239,6 +239,7 @@ type Server struct {
 	mCutShadowChecks     *metrics.Counter
 	mCutShadowMismatch   *metrics.Counter
 	mCutShadowFailed     *metrics.Counter
+	mCutShadowRaced      *metrics.Counter
 	cut                  checkpointCutState
 	mWitnessFailures     *metrics.Counter
 	mAnchorFailures      *metrics.Counter
@@ -261,7 +262,7 @@ type readinessTarget struct {
 
 func New(core Sealer, st store.Store, signingKeyID string) *Server {
 	reg := metrics.NewRegistry()
-	return &Server{
+	s := &Server{
 		core:          core,
 		st:            st,
 		content:       content.NewDevMemStore(0), // volatile and byte-capped by default; WithContent for a durable store
@@ -300,7 +301,13 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 			"Total best-effort B11 denied-grant seals dropped by the per-project/global denial budget."),
 		mUseOutcome: reg.CounterVec("averin_use_requests_total",
 			"Total POST /v2/use (and /v2/use-intent) requests by capability-authorization outcome.", "outcome"),
+		mCutShadowRaced: reg.Counter("averin_checkpoint_shadow_raced_total",
+			"Total shadowed checkpoint cuts abandoned because the project's latest checkpoint changed while the shadow ran (another writer process cut a checkpoint). Nothing was signed; the cut returned an error."),
 	}
+	reg.GaugeFunc("averin_checkpoint_shadow_last_duration_seconds",
+		"Duration of the most recent checkpoint shadow computation (full computation on a read snapshot, any project in this process; 0 before the first). Compare with the shadow budget: a value near it means the shadow is about to stop fitting.",
+		func() float64 { return float64(s.cut.lastShadowNanos.Load()) / 1e9 })
+	return s
 }
 
 // keyBlock is the `key` block stamped on every record and checkpoint: the current recording key and its epoch.
@@ -4035,12 +4042,43 @@ func (s *Server) cutBodyFull(st store.Store, projectID, created string) (map[str
 // argument that it equals the full computation) and by the full computation otherwise. Some incremental cuts
 // ALSO compute the full body and refuse to sign when the two differ: which ones (sampled, per project, at most
 // one scheduled shadow per hour) is defined in checkpointBodyChecked (checkpoint_cut.go).
-func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Checkpoint, error) {
-	body, err := s.checkpointBodyChecked(st, projectID)
-	if err != nil {
-		return store.Checkpoint{}, err
+func (s *Server) createCheckpointTx(st store.Store, projectID string, pre *shadowResult) (store.Checkpoint, error) {
+	var bodyJSON []byte
+	if pre == nil {
+		body, err := s.checkpointBodyChecked(st, projectID)
+		if err != nil {
+			return store.Checkpoint{}, err
+		}
+		bodyJSON, _ = json.Marshal(body)
+	} else {
+		// Phase 3 of a shadowed cut: the O(1) base check carries the safety. Nothing is signed unless the latest
+		// checkpoint is still the base the compared body was cut from (a moved base signs nothing).
+		l, has, err := st.LatestCheckpoint(projectID)
+		if err != nil {
+			return store.Checkpoint{}, fmt.Errorf("checkpoint: read project snapshot: %w", err)
+		}
+		next, err := st.NextCheckpointSeq(projectID)
+		if err != nil {
+			return store.Checkpoint{}, fmt.Errorf("checkpoint: read project snapshot: %w", err)
+		}
+		if !has || l.Seq != pre.baseSeq || l.CheckpointHash != pre.baseHash || next != pre.baseSeq+1 {
+			s.mCutShadowRaced.Inc()
+			return store.Checkpoint{}, errShadowRaced
+		}
+		// Defense in depth (records are append-only, so these cannot shrink): refuse rather than sign.
+		cnt, err := st.RecordCount(projectID)
+		if err != nil {
+			return store.Checkpoint{}, fmt.Errorf("checkpoint: read project snapshot: %w", err)
+		}
+		maxSeq, err := st.MaxBrokerSeq(projectID)
+		if err != nil {
+			return store.Checkpoint{}, fmt.Errorf("checkpoint: read project snapshot: %w", err)
+		}
+		if int64(cnt) < pre.count || maxSeq < pre.maxSeq {
+			return store.Checkpoint{}, errors.New("checkpoint refused: the project's history shrank since the shadow snapshot")
+		}
+		bodyJSON = pre.bodyJSON // the exact bytes that were compared; never recomputed
 	}
-	bodyJSON, _ := json.Marshal(body)
 	sealed, err := s.core.SealCheckpoint(string(bodyJSON))
 	if err != nil {
 		return store.Checkpoint{}, err
@@ -4061,13 +4099,47 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string) (store.Che
 	return store.Checkpoint{JSON: sealed, CheckpointHash: cp.CheckpointHash, Seq: cp.Seq}, nil
 }
 
-func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string, error, error) {
+// cutCheckpoint produces and stores one checkpoint, in up to three phases (see checkpointBodyChecked and
+// shadowOffLock). An unshadowed cut is one write transaction. A shadowed cut is: (1) the write transaction that
+// cuts incrementally and decides a shadow is due, rolled back; (2) the comparison on a read snapshot outside the
+// write lock; (3) a second write transaction that checks the base is unchanged and signs the compared bytes. The
+// per-project cut gate is held throughout, so writes never wait on it but other cuts of the project do.
+func (s *Server) cutCheckpoint(ctx context.Context, projectID string) (store.Checkpoint, error) {
+	release, err := s.acquireCutGate(ctx, projectID)
+	if err != nil {
+		return store.Checkpoint{}, err
+	}
+	defer release()
 	var cp store.Checkpoint
-	err := s.withProjectWrite(ctx, projectID, func(st store.Store) error {
+	err = s.withProjectWrite(ctx, projectID, func(st store.Store) error {
 		var e error
-		cp, e = s.createCheckpointTx(st, projectID)
+		cp, e = s.createCheckpointTx(st, projectID, nil)
 		return e
 	})
+	var due *errShadowDue
+	if !errors.As(err, &due) {
+		return cp, err
+	}
+	res, err := s.shadowOffLock(ctx, projectID, due)
+	if err != nil {
+		return store.Checkpoint{}, err
+	}
+	err = s.withProjectWrite(ctx, projectID, func(st store.Store) error {
+		var e error
+		cp, e = s.createCheckpointTx(st, projectID, &res)
+		return e
+	})
+	if errors.Is(err, errShadowRaced) {
+		// The compared base is not the one this process now extends: the next cut must be shadowed again (the
+		// first-cut rule), not signed unchecked on the strength of a comparison against a base another writer
+		// has since replaced.
+		s.cut.verified.Delete(projectID)
+	}
+	return cp, err
+}
+
+func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string, error, error) {
+	cp, err := s.cutCheckpoint(ctx, projectID)
 	if err != nil {
 		return "", nil, err
 	}

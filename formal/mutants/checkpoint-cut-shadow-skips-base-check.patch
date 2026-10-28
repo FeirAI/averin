@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 43e390e..b54d179 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4061,7 +4061,7 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string, pre *shado
+ 		if err != nil {
+ 			return store.Checkpoint{}, fmt.Errorf("checkpoint: read project snapshot: %w", err)
+ 		}
+-		if !has || l.Seq != pre.baseSeq || l.CheckpointHash != pre.baseHash || next != pre.baseSeq+1 {
++		if false && (!has || l.Seq != pre.baseSeq || l.CheckpointHash != pre.baseHash || next != pre.baseSeq+1) {
+ 			s.mCutShadowRaced.Inc()
+ 			return store.Checkpoint{}, errShadowRaced
+ 		}

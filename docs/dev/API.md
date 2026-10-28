@@ -199,6 +199,15 @@ chain, and best-effort appends it to the configured witness. Empty JSON body.
 `"warning"` if the checkpoint stored but witnessing is pending. Requires `?project=` (`400`
 otherwise).
 
+A cut that runs the shadow check (the first incremental cut of a project after a start, every cut after a mismatch,
+and the scheduled one; see [LIMITATIONS](LIMITATIONS.md)) seals the state at a snapshot taken after the request
+arrived. It covers every record committed before the request, and records committed while the shadow ran go into the
+next checkpoint, so a verify run right after such a cut can report the newest records as not yet checkpointed when
+writes are concurrent. Such a cut can take up to the shadow budget (20 s by default), plus any wait for another cut
+of the same project in the same process. If another writer process cuts a checkpoint of the project in the
+meantime, the response is `500` (`checkpoint cut abandoned: ... nothing was signed, retry the cut`); nothing was
+stored, and retrying the cut is safe.
+
 A checkpoint is **refused** (`500`, `checkpoint refused: ...`) while the project's grant log is not a
 gapless `[1..N]` prefix: a `broker_seq` is reserved but no grant (or tombstone) records it. This happens
 when a grant's commit was ambiguous (or its seq release failed) and its client never retried. Inspect the reservation with the authenticated

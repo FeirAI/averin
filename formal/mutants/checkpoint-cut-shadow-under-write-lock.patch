@@ -1,0 +1,20 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+index f1b908a..641e1a7 100644
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -440,8 +440,13 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
+ 	// runs the comparison on a read snapshot outside the write lock (shadowOffLock), then signs under the lock
+ 	// again (createCheckpointTx with the precomputed result). The base L this decision was made against is carried
+ 	// along so phase 3 can refuse if it moved.
+-	prev, _ := body["prev_checkpoint_hash"].(string)
+-	return nil, &errShadowDue{seq: seq - 1, hash: prev}
++	signed, cerr := s.compareShadow(st, projectID, created, body)
++	if cerr != nil {
++		return nil, cerr
++	}
++	var inLock map[string]any
++	_ = json.Unmarshal(signed, &inLock)
++	return inLock, nil
+ }
+ 
+ // errShadowDue is returned by checkpointBodyChecked (phase 1, inside the write transaction) when the incremental

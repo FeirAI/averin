@@ -1,0 +1,21 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+index f1b908a..8dda837 100644
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -485,6 +485,7 @@ func (s *Server) shadowOffLock(ctx context.Context, projectID string, due *errSh
+ 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.shadowBudget()+5*time.Second)
+ 	defer cancel()
+ 	var res shadowResult
++	createdEarly := ts(s.now())
+ 	err := s.st.WithProjectRead(sctx, projectID, func(snap store.Store) error {
+ 		// The first statement of the snapshot: on PostgreSQL it fixes the snapshot. If the latest checkpoint is not
+ 		// the base phase 1 decided on, another writer cut in between: abandon, counters untouched.
+@@ -497,7 +498,7 @@ func (s *Server) shadowOffLock(ctx context.Context, projectID string, due *errSh
+ 			return errShadowRaced
+ 		}
+ 		// created_ts is taken AFTER the snapshot's first read, so it is not earlier than any commit in S.
+-		created := ts(s.now())
++		created := createdEarly
+ 		body, ok, e := s.cutBodyIncremental(snap, projectID, created)
+ 		if e != nil {
+ 			return e // the incremental cut's own refusal at S: no shadow is counted, as before
