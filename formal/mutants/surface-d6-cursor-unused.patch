@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 8d6b561..30b07b1 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -4275,7 +4275,7 @@ fn compute_broker_trust(
+     // genuine same-seq divergence is a real fork already flagged by validate_chain.
+     heads.dedup_by(|a, b| a.0 == b.0 && a.2 == b.2 && a.3 == b.3);
+ 
+-    let mut cursor = log_index.as_ref().map(committed::LogCursor::new);
++    let mut cursor = log_index.as_ref().filter(|_| false).map(committed::LogCursor::new);
+     let mut prev_root = empty_root;
+     for (cseq, _, head, frontier) in heads {
+         let (n_i, gapless, root_i) = match cursor.as_mut() {

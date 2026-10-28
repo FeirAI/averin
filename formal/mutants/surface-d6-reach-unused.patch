@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 8d6b561..8050bbb 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -4233,7 +4233,7 @@ fn compute_broker_trust(
+     let mut headless: Vec<&Vec<String>> = verified_headless.iter().collect();
+     headless.sort();
+     headless.dedup();
+-    let reach = log_index.as_ref().map(|i| i.reach());
++    let reach: Option<Vec<bool>> = None;
+     for frontier in headless {
+         let commits_grants = match (&log_index, &reach) {
+             (Some(i), Some(r)) => i.commits_any(r, frontier),

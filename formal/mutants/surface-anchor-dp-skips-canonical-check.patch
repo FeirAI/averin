@@ -1,0 +1,14 @@
+diff --git a/core/src/verify/committed.rs b/core/src/verify/committed.rs
+index 35c21cf..0784a11 100644
+--- a/core/src/verify/committed.rs
++++ b/core/src/verify/committed.rs
+@@ -355,9 +355,6 @@ impl DagIndex {
+     ) -> Vec<Option<&'a str>> {
+         let mut min_ts: Vec<Option<&'a str>> = vec![None; self.parents.len()];
+         for (ts, frontier) in anchors {
+-            if !is_canonical(ts) {
+-                continue;
+-            }
+             for f in frontier {
+                 if let Some(&n) = self.node_of.get(f) {
+                     if min_ts[n].is_none_or(|cur| ts < cur) {

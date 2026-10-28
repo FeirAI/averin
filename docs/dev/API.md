@@ -229,7 +229,8 @@ their out-of-band roots, `AVERIN_VERIFY_ATTESTATION_PUBKEY` with `AVERIN_VERIFY_
 independent verdict, export and verify offline with your own pinned keys.
 
 **Response `200`:** the [verification report](#verification-report) JSON. When verification is
-overloaded the request is refused with a retryable `503`.
+overloaded the request is refused with a retryable `503`. A caller that has waited `AVERIN_EXPORT_TIMEOUT` for the
+build gets `504` (the shared build keeps running for other waiters).
 
 ---
 
@@ -245,7 +246,7 @@ records, first_seq, last_seq, head_hash, base_seq, base_hash, records_before}]}`
 
 Returns a verifiable [bundle](#bundle-object) for offline verification. A whole-history export larger than the
 256 MiB the verifier accepts is refused with `413` and a pointer to the month segments. At most 4 bundle
-builds run at once; a request past that is refused with a retryable `503`. `/v2/export` and `/v2/verify` also run under a 10 minute write deadline (`bundleWriteTimeout`); a request that is still building or writing when it passes is cut, not refused with a size message. On one measured host a whole-history export of about 110 MiB took 521 s to build, so the deadline can be reached below the 256 MiB cap (see [LIMITATIONS.md](LIMITATIONS.md)).
+builds run at once; a request past that is refused with a retryable `503`. `/v2/export` and `/v2/verify` also run under a build deadline, `AVERIN_EXPORT_TIMEOUT` (default 10 minutes, range 1 to 60 minutes; see [CONFIGURATION.md](CONFIGURATION.md)). A build still running at the deadline is refused with `504` and `{"error":"export did not finish within <duration> (AVERIN_EXPORT_TIMEOUT); export by month: GET /v2/segments, GET /v2/export?month=YYYY-MM"}` (`verify` in place of `export` on `/v2/verify`) before any body byte. Once the body has started, a write that passes its own deadline is still cut. On one measured host a whole-history export of about 110 MiB took 521 s to build before the verifier change described in [LIMITATIONS.md](LIMITATIONS.md), so the deadline can be reached below the 256 MiB cap.
 
 Query parameters:
 

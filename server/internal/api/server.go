@@ -219,6 +219,11 @@ type Server struct {
 	// off the server's finite WriteTimeout (per-handler deadline) so a large-but-legitimate export is not
 	// hard-killed mid-write. Buffered to maxConcurrentBundleReads; a saturated cap yields 503.
 	bundleSem chan struct{}
+	// bundleDeadline bounds one whole-history export/verify build (AVERIN_EXPORT_TIMEOUT). A build past it answers
+	// 504 before the first body byte. Zero means the default (bundleWriteTimeout).
+	bundleDeadline time.Duration
+	// mBundleDeadline counts builds that passed the deadline, by route (export | verify).
+	mBundleDeadline *metrics.CounterVec
 	// verifyFlights coalesces concurrent self-verifications for the same project and trust-root configuration.
 	// It deliberately has no completed-result cache: writes can land at any time, so a later request must build
 	// and verify fresh project state. A flight's work continues independently if one HTTP caller disconnects;
@@ -299,6 +304,8 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 				"(evidence_sig failed to verify under the pinned key)."),
 		mDenialBudgetDrops: reg.Counter("averin_denial_budget_drops_total",
 			"Total best-effort B11 denied-grant seals dropped by the per-project/global denial budget."),
+		mBundleDeadline: reg.CounterVec("averin_bundle_deadline_exceeded_total",
+			"Total whole-project export/verify builds that did not finish within AVERIN_EXPORT_TIMEOUT and were answered 504 before the first body byte.", "route"),
 		mUseOutcome: reg.CounterVec("averin_use_requests_total",
 			"Total POST /v2/use (and /v2/use-intent) requests by capability-authorization outcome.", "outcome"),
 		mCutShadowRaced: reg.Counter("averin_checkpoint_shadow_raced_total",
@@ -436,6 +443,16 @@ func (s *Server) WithMemoryGauges() *Server {
 		func() float64 { return rt("/gc/heap/objects:objects") })
 	s.WithGauge("averin_go_goroutines", "Goroutines currently running.",
 		func() float64 { return float64(runtime.NumGoroutine()) })
+	return s
+}
+
+// WithBundleDeadline sets the build deadline for GET /v2/export and GET /v2/verify (AVERIN_EXPORT_TIMEOUT). A
+// non-positive value keeps the default. The operator-facing range check is ParseExportTimeout; this setter takes
+// any positive value so tests can use a short one.
+func (s *Server) WithBundleDeadline(d time.Duration) *Server {
+	if d > 0 {
+		s.bundleDeadline = d
+	}
 	return s
 }
 
@@ -4400,13 +4417,20 @@ func (s *Server) handleDAG(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
-	setBundleWriteDeadline(w)
+	s.setBundleWriteDeadline(w)
 	projectID := r.URL.Query().Get("project")
 	month := r.URL.Query().Get("month")
 	// The work is coalesced before taking a bundle slot. A Telegram/browser refresh storm for one project
-	// therefore consumes one build slot, not one slot per waiting HTTP request.
-	report, err := s.verifyProject(r.Context(), projectID, month)
+	// therefore consumes one build slot, not one slot per waiting HTTP request. This caller waits at most the
+	// build deadline; the shared flight keeps running for any other waiter.
+	wctx, wcancel := context.WithTimeout(r.Context(), s.bundleDeadlineOrDefault())
+	defer wcancel()
+	report, err := s.verifyProject(wctx, projectID, month)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && r.Context().Err() == nil && wctx.Err() != nil {
+			s.writeBundleDeadline(w, "verify")
+			return
+		}
 		if errors.Is(err, errVerifyOverloaded) {
 			writeErr(w, http.StatusServiceUnavailable, "too many concurrent verification requests; retry shortly")
 			return
@@ -4445,7 +4469,11 @@ func (s *Server) verifyProject(ctx context.Context, projectID, month string) (st
 		s.bundleSem <- struct{}{}
 		defer func() { <-s.bundleSem }()
 
-		bundle, _, err := s.buildBundleView(ctx, projectID, false, month)
+		// The flight is shared, so it must not die with the leader's request or its waiting deadline; it has its
+		// own bound instead (the build deadline).
+		fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), s.bundleDeadlineOrDefault())
+		defer fcancel()
+		bundle, _, err := s.buildBundleView(fctx, projectID, false, month)
 		if err != nil {
 			return "", err
 		}
@@ -4567,7 +4595,6 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	defer release()
 	projectID := r.URL.Query().Get("project")
 	mode := r.URL.Query().Get("mode")
 	if mode == "" {
@@ -4578,13 +4605,100 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// caller's typo cannot masquerade as "no matching evidence". Works in proof_only AND full_evidence.
 	recordKind := r.URL.Query().Get("record_kind")
 	if recordKind != "" && !validRecordKind(recordKind) {
+		release()
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown record_kind %q (allowed: budget-exhausted, chargeback-posted, gateway-refusal)", recordKind))
 		return
 	}
-	bundle, snapshotDisclosures, err := s.buildBundleView(r.Context(), projectID, true, r.URL.Query().Get("month"))
-	if err != nil {
-		writeBundleErr(w, err)
+	month := r.URL.Query().Get("month")
+
+	// The build runs in a worker. While the handler still waits for the result, the handler releases the slot
+	// after it has written the body (as before). Once the handler gives up (deadline), the WORKER owns the slot
+	// and releases it only when the build really ends, so an abandoned build still counts against
+	// maxConcurrentBundleReads (the cap holds after a 504). The handler answers 504 BEFORE any body byte; a Rust
+	// verification already running cannot be interrupted, so it finishes and its result is dropped.
+	T := s.bundleDeadlineOrDefault()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	type result struct {
+		out      []byte
+		err      error
+		internal bool
+	}
+	var (
+		mu        sync.Mutex
+		finished  bool
+		abandoned bool
+	)
+	done := make(chan result, 1)
+	finish := func(res result) {
+		mu.Lock()
+		finished = true
+		gaveUp := abandoned
+		mu.Unlock()
+		done <- res
+		if gaveUp {
+			release()
+		}
+	}
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("ERROR: export worker panic: %v", rec)
+				finish(result{err: errors.New("export failed"), internal: true})
+			}
+		}()
+		out, err, internal := s.buildExport(ctx, projectID, mode, recordKind, month)
+		finish(result{out, err, internal})
+	}()
+	timer := time.NewTimer(T)
+	defer timer.Stop()
+	var res result
+	select {
+	case res = <-done:
+	case <-timer.C:
+		mu.Lock()
+		if !finished {
+			abandoned = true
+			mu.Unlock()
+			cancel()
+			s.writeBundleDeadline(w, "export")
+			return
+		}
+		mu.Unlock()
+		res = <-done
+	case <-r.Context().Done():
+		// client gone: the worker sees the cancelled context; hand it the slot.
+		mu.Lock()
+		if !finished {
+			abandoned = true
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+		res = <-done
+	}
+	defer release()
+	if res.err != nil {
+		if res.internal {
+			writeErr(w, http.StatusInternalServerError, res.err.Error())
+		} else {
+			writeBundleErr(w, res.err)
+		}
 		return
+	}
+	// The build is done; give the body its own full write window.
+	s.setBundleWriteDeadline(w)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(res.out)
+}
+
+// buildExport builds the export body. The error return is a bundle error (mapped by writeBundleErr) unless
+// internal is true, in which case it is reported as a 500 with its message.
+func (s *Server) buildExport(ctx context.Context, projectID, mode, recordKind, month string) (out []byte, err error, internal bool) {
+	buildStart := time.Now()
+	bundle, snapshotDisclosures, err := s.buildBundleView(ctx, projectID, true, month)
+	if err != nil {
+		return nil, err, false
 	}
 	var obj map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(bundle), &obj)
@@ -4613,13 +4727,14 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// verifier used by /v2/verify and change the line only when the complete capstone is
 	// actually present.  The wording retains the two load-bearing bounds: brokered surface
 	// (not every action an agent might take) and assumed-truthful resource reporting.
+	verifyStart := time.Now()
 	verificationReport := s.core.VerifyBundleWith(bundle, s.selfVerifyOptsFor(projectID))
+	verifyMs := time.Since(verifyStart).Milliseconds()
 	gaps := []string{completenessGapLine(verificationReport)}
 	if mode == "selective_disclosure" || mode == "full_evidence" {
-		disclosures, err := s.buildDisclosures(r.Context(), projectID, snapshotDisclosures)
+		disclosures, err := s.buildDisclosures(ctx, projectID, snapshotDisclosures)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
+			return nil, err, true
 		}
 		// When a record_kind filter is active, restrict disclosures to the matching records so a typed
 		// board view (full_evidence + record_kind) does not over-disclose unrelated evidence's raw fields.
@@ -4646,9 +4761,12 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		"gaps":                  gaps,
 		"raw_content_available": rawAvailable,
 	})
-	out, _ := json.Marshal(obj)
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(out)
+	out, _ = json.Marshal(obj)
+	if month == "" {
+		// One line per whole-history build: timings and size only, no project content.
+		log.Printf("export: whole-history build_ms=%d verify_ms=%d bytes=%d", time.Since(buildStart).Milliseconds()-verifyMs, verifyMs, len(out))
+	}
+	return out, nil, false
 }
 
 const completenessNotClaimed = "Level-2 observation scope is per-record; Level-3 completeness not claimed"
@@ -4745,8 +4863,9 @@ const maxConcurrentBundleReads = 4
 const bundleWriteTimeout = 10 * time.Minute
 
 // acquireBundleSlot admits a whole-project bundle build (export/verify) under maxConcurrentBundleReads and
-// lifts the finite WriteTimeout for this response (via a per-handler deadline). Returns ok=false — having
-// already written a 503 — when the cap is saturated. The caller MUST defer release() when ok.
+// lifts the finite WriteTimeout for this response (via a per-handler deadline). Returns ok=false, having
+// already written a 503, when the cap is saturated. The caller MUST call release() exactly once when ok; the
+// export handler hands it to its worker so the slot is held until the build really ends.
 func (s *Server) acquireBundleSlot(w http.ResponseWriter) (release func(), ok bool) {
 	select {
 	case s.bundleSem <- struct{}{}:
@@ -4754,19 +4873,60 @@ func (s *Server) acquireBundleSlot(w http.ResponseWriter) (release func(), ok bo
 		writeErr(w, http.StatusServiceUnavailable, "too many concurrent export/verify requests; retry shortly")
 		return nil, false
 	}
-	setBundleWriteDeadline(w)
+	s.setBundleWriteDeadline(w)
 	return func() { <-s.bundleSem }, true
 }
 
-// setBundleWriteDeadline lifts the server's finite WriteTimeout for a verify/export response. Verify work may
-// be performed by a background coalesced flight, but the eventual waiter still needs the same long response
-// deadline that the pre-coalescing handler had.
-func setBundleWriteDeadline(w http.ResponseWriter) {
+// bundleDeadlineOrDefault is the effective build deadline T.
+func (s *Server) bundleDeadlineOrDefault() time.Duration {
+	if s.bundleDeadline > 0 {
+		return s.bundleDeadline
+	}
+	return bundleWriteTimeout
+}
+
+// setBundleWriteDeadline lifts the server's finite WriteTimeout for a verify/export response. It is set to the
+// build deadline plus bundleWriteSlack so the 504 can still be written when the build timer fires, and is set
+// again to a full window once a result exists so a large body is not cut by time already spent building.
+func (s *Server) setBundleWriteDeadline(w http.ResponseWriter) {
 	// http.ResponseController plumbs the deadline to the underlying conn; the error (e.g. httptest recorders
 	// that do not support deadlines) is best-effort and safely ignored.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(bundleWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.bundleDeadlineOrDefault() + bundleWriteSlack)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		log.Printf("WARNING: could not extend write deadline for a bundle response: %v", err)
 	}
+}
+
+// bundleWriteSlack is added to the build deadline for the response write deadline.
+const bundleWriteSlack = 30 * time.Second
+
+// writeBundleDeadline answers a build that passed the deadline. The body is generic by design: the duration and
+// the month hint only, no path and no store error.
+func (s *Server) writeBundleDeadline(w http.ResponseWriter, route string) {
+	s.mBundleDeadline.WithLabelValue(route).Inc()
+	writeErr(w, http.StatusGatewayTimeout, fmt.Sprintf("%s did not finish within %s (AVERIN_EXPORT_TIMEOUT); export by month: GET /v2/segments, GET /v2/export?month=YYYY-MM", route, s.bundleDeadlineOrDefault()))
+}
+
+// Bounds for AVERIN_EXPORT_TIMEOUT.
+const (
+	MinExportTimeout = time.Minute
+	MaxExportTimeout = time.Hour
+)
+
+// ParseExportTimeout parses AVERIN_EXPORT_TIMEOUT. Empty gives the default (10m). A value that is not a Go
+// duration or lies outside [1m, 60m] is an error; the caller must stop startup, never fall back silently.
+func ParseExportTimeout(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return bundleWriteTimeout, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("AVERIN_EXPORT_TIMEOUT must be a Go duration between %s and %s (e.g. 15m): %w", MinExportTimeout, MaxExportTimeout, err)
+	}
+	if d < MinExportTimeout || d > MaxExportTimeout {
+		return 0, fmt.Errorf("AVERIN_EXPORT_TIMEOUT %s is outside the allowed range %s to %s", d, MinExportTimeout, MaxExportTimeout)
+	}
+	return d, nil
 }
 
 // buildBundle assembles the export/verify bundle: published key, all sealed records, and the full

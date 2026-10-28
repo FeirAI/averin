@@ -1,0 +1,13 @@
+diff --git a/core/src/verify/committed.rs b/core/src/verify/committed.rs
+index 7f928d5..356ee19 100644
+--- a/core/src/verify/committed.rs
++++ b/core/src/verify/committed.rs
+@@ -237,7 +237,7 @@ impl<'a, 'd> LogCursor<'a, 'd> {
+         let g = self.gen;
+         // containment: every known member of the previous frontier was reached, so C_prev is a subset of
+         // closure(F) and the fresh nodes are exactly closure(F) minus C_prev.
+-        if !self.prev_front.iter().all(|&m| self.hit[m] == g) {
++        if false && !self.prev_front.iter().all(|&m| self.hit[m] == g) {
+             self.reset();
+             fresh = self.walk(&front);
+         }

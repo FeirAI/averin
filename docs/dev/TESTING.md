@@ -36,6 +36,32 @@ make test-server          # builds native Rust with rfc3161, then Go vet + test
 make test-verifier        # = (cd verifier && bun test)
 ```
 
+### Verifier performance and golden comparison
+
+The D6 grant-log check derives each checkpoint's log incrementally (`core/src/verify/committed.rs`). Its tests are
+differential: `cargo test -p averin-decision-core --lib committed` compares every answer (log count, gapless flag,
+`cumulative_root`, "commits any grant", anchor times) with the old per-frontier code on seeded random histories, and
+`tests/adversarial.rs` (`d6_cursor_*`) covers the reset, merge and duplicate-seq paths end to end.
+Because a silent revert of the speed-up would leave every verdict unchanged, per-thread counters
+(`verify::slow_path_probe`) record how many frontiers, headless checks and `anchored_before` lookups were answered by
+the old per-frontier code and how many by the cursor; the honest-history tests assert zero fallbacks and one cursor
+advance per head. These counters prove the fast path ran; they do not time anything. The federation indexes are
+built one broker at a time, so peak extra memory does not grow with the number of brokers.
+
+The server side of the export deadline (`AVERIN_EXPORT_TIMEOUT`) is tested in
+`server/internal/api/export_deadline_internal_test.go` with a store wrapper that delays the whole-history load:
+504 before any byte, the concurrency slot held until the abandoned build ends, the same for `/v2/verify`, and the
+duration parser table. No time-to-first-byte measurement at 10k to 80k records was made.
+
+To compare two builds on a real export, cut a prefix at a checkpoint boundary (`records[:cp.record_count]`,
+`checkpoints[:k+1]`, same `keys`) and run the ignored harness on each build, then compare and time the output:
+
+```bash
+AVERIN_PERF_BUNDLE=b.json AVERIN_PERF_OPTS=opts.json AVERIN_PERF_OUT=report.json \
+  cargo test -p averin-decision-core --test perf_report_dump -- --ignored
+sha256sum report.json      # must be identical across builds
+```
+
 ### Real-Postgres API, store, ledger and durable-state tests
 
 Several API race, durability, store-parity, append-only and consume-before-act-ledger tests
