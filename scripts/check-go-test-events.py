@@ -68,6 +68,8 @@ REQUIRED = (
     f"{API_PACKAGE}:TestProjectTransactionProcessCuts",
     f"{API_PACKAGE}:TestProjectTransactionsProcessRestartBoundaries",
     f"{API_PACKAGE}:TestExportSnapshotNotTornPostgres",
+    f"{API_PACKAGE}:TestCheckpointCutShadowOffLockWritesContinuePostgres",
+    f"{API_PACKAGE}:TestCheckpointCutShadowOffLockRacedByAnotherWriterPostgres",
     f"{API_PACKAGE}:TestTemporalProducerToVerifierHistoricalClaim",
     f"{API_PACKAGE}:TestV3AuthorityBindsFinalSemanticRecordAcrossRecorderReseal",
     f"{API_PACKAGE}:TestV3SDKPreparedFixtureSealsWithoutSemanticRewrite",

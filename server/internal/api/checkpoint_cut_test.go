@@ -27,6 +27,27 @@ type rowSpy struct {
 	failFull error
 	slowFull time.Duration
 	dropOrd  int64
+	// pause, when set, blocks the first full computation (ProjectHeads is called only by it during a cut) until the
+	// test releases it, so the test can act while a shadow is in flight.
+	pause *pauseHook
+}
+
+// pauseHook parks one caller: entered closes when it arrives, and release lets it go.
+type pauseHook struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newPauseHook() *pauseHook {
+	return &pauseHook{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (p *pauseHook) fire() {
+	p.once.Do(func() {
+		close(p.entered)
+		<-p.release
+	})
 }
 
 type rowCount struct {
@@ -59,7 +80,7 @@ func (r *rowSpy) WithBudget(d time.Duration, fn func(store.Store) error) error {
 	return r.Store.WithBudget(d, func(b store.Store) error { return fn(r.bind(b)) })
 }
 func (r *rowSpy) bind(b store.Store) *rowSpy {
-	return &rowSpy{Store: b, rows: r.rows, tamper: r.tamper, failFull: r.failFull, slowFull: r.slowFull, dropOrd: r.dropOrd}
+	return &rowSpy{Store: b, rows: r.rows, tamper: r.tamper, failFull: r.failFull, slowFull: r.slowFull, dropOrd: r.dropOrd, pause: r.pause}
 }
 func (r *rowSpy) AllRecords(p string) ([]store.Record, error) {
 	v, err := r.Store.AllRecords(p)
@@ -108,6 +129,9 @@ func (r *rowSpy) CheckpointsRange(p string, a, b int64) ([]store.Checkpoint, err
 
 // ProjectHeads is the full anti-join: it examines every record of the project, whatever it returns.
 func (r *rowSpy) ProjectHeads(p string) ([]string, error) {
+	if r.pause != nil {
+		r.pause.fire()
+	}
 	if r.slowFull > 0 {
 		time.Sleep(r.slowFull)
 	}
@@ -239,13 +263,8 @@ func cutServer(t *testing.T, st store.Store, brokerID string) *api.Server {
 
 func cutOnce(t *testing.T, s *api.Server, st store.Store, project string) (store.Checkpoint, error) {
 	t.Helper()
-	var cp store.Checkpoint
-	err := st.WithProjectWrite(context.Background(), project, func(b store.Store) error {
-		var e error
-		cp, e = s.CreateCheckpointTxForTest(b, project)
-		return e
-	})
-	return cp, err
+	_ = st // every caller passes the server's own store; the cut runs through it
+	return s.CutCheckpointForTest(context.Background(), project)
 }
 
 func bodiesEqual(t *testing.T, inc, full map[string]any, where string) {

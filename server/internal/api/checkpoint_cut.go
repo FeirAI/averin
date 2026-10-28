@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,24 +24,26 @@ import (
 const DefaultCheckpointShadowEvery = 100
 
 // DefaultCheckpointShadowMinInterval is the least time between two shadow attempts of one project on the
-// scheduled path (a verified project, nothing latched). The shadow is O(history) and runs under the project write
-// lock, so at a high cut rate "every 100th cut" came due every few minutes and each run stalled the project for up
-// to the shadow budget. This WEAKENS what the scheduled shadow covers: between two attempts an incorrect
-// incremental cut is caught only by the per-cut count and contiguity guards, not by the full comparison.
+// scheduled path (a verified project, nothing latched). The shadow is O(history). It runs on a read snapshot
+// outside the project write lock (it no longer stalls writes), but it still costs database CPU, a pool connection
+// and memory for up to the shadow budget, so at a high cut rate "every 100th cut" would come due every few minutes
+// and each run would load the database. This WEAKENS what the scheduled shadow covers: between two attempts an
+// incorrect incremental cut is caught only by the per-cut count and contiguity guards, not by the full comparison.
 const DefaultCheckpointShadowMinInterval = time.Hour
 
 // The shadow's own time budget and the backoff after a shadow that could not run (lead decision, history
 // scaling PR2): the full computation is O(history) and stops completing as history grows, so it must neither
 // hold the project write guard for the whole statement timeout nor be retried on every cut.
 //
-// The default budget is 1 s (it was 5 s). Release-1 soak evidence: at about 0.5 calls/s the full computation
-// stopped fitting 5 s reliably from about 5 h of history, and near that boundary a success (which resets the
-// backoff) alternated with failures, so attempts stayed about hourly and EACH was a 3.5 to 5 s stall of the
-// project's writes. With 1 s one attempt holds the write lock for about 1 s at most. The trade: the cross-check
-// covers less history (an estimate scaled from that measurement: it stops fitting after roughly an hour of
-// history at 0.5 calls/s, later at lighter load); the differential tests stay the primary assurance.
+// The default budget is 20 s (it was 1 s, and 5 s before that). While the shadow ran under the project write
+// lock the budget was the write stall, so it was cut to 1 s. The shadow now runs on a read snapshot outside that
+// lock, so the budget bounds only the delay of one cut response, one pool connection, one snapshot and database CPU,
+// and a larger budget keeps the comparison running on longer histories. Release-1 soak evidence (about 0.5
+// calls/s): the full computation stopped fitting 5 s reliably from about 5 h of history, a slope of about 1 s per
+// hour of history, so 20 s is an estimate of about 20 h before it stops fitting (not measured); a cheaper full
+// computation is a separate follow-up. The differential tests stay the primary assurance.
 const (
-	DefaultCheckpointShadowBudget  = 1 * time.Second
+	DefaultCheckpointShadowBudget  = 20 * time.Second
 	MaxCheckpointShadowBudget      = 20 * time.Second // below the 30 s statement timeout, which it must never reach
 	DefaultCheckpointShadowBackoff = 10 * time.Minute
 	maxShadowBackoffDoublings      = 6 // the wait doubles per consecutive failure up to 64 times the base
@@ -61,6 +64,9 @@ type checkpointCutState struct {
 	mu      sync.Mutex
 	retry   map[string]shadowRetry // project -> when its next shadow attempt may run
 	lastTry map[string]time.Time   // project -> start of its last shadow attempt, whatever the outcome
+	gates   map[string]*cutGate    // project -> its cut gate while a cut holds or awaits it (guarded by mu)
+
+	lastShadowNanos atomic.Int64 // duration of the most recent shadow computation of any project
 }
 
 // shadowRetry is the backoff state of one project after a shadow that could not run.
@@ -80,8 +86,8 @@ func (s *Server) WithCheckpointShadowEvery(n int) *Server {
 	return s
 }
 
-// WithCheckpointShadowBudget sets the time budget of one shadow computation (default 1 s, at most 20 s, at
-// least 1 ms): a shadow that cannot finish inside it does not hold the project write guard any longer and counts
+// WithCheckpointShadowBudget sets the time budget of one shadow computation (default 20 s, at most 20 s, at
+// least 1 ms): a shadow that cannot finish inside it stops holding its snapshot and pool connection and counts
 // as "could not run", not as a mismatch.
 func (s *Server) WithCheckpointShadowBudget(d time.Duration) *Server {
 	if d < time.Millisecond {
@@ -255,8 +261,10 @@ func checkGaplessGrantLogAfter(gl []broker.GrantSeqHash, priorMax, maxAllocated 
 // cutBodyFull. It reads O(|D|) rows, D being the records after L, plus a handful of one-row reads, whatever the
 // history.
 //
-// WHY IT EQUALS THE FULL COMPUTATION (cutBodyFull), field by field. Everything is read in one project write
-// transaction (the project guard is held), and L is the checkpoint the previous such transaction signed.
+// WHY IT EQUALS THE FULL COMPUTATION (cutBodyFull), field by field. Everything is read in ONE consistent state: a
+// project write transaction (the project guard is held), or the repeatable-read snapshot of a shadowed cut, which
+// is a prefix of the guard-serialized write sequence (every write commits under the guard). L is the latest
+// checkpoint of that state.
 //
 //  1. seq and prev. Seqs are assigned from NextCheckpointSeq (the checkpoint count) under the guard into an
 //     insert-only table keyed (project, seq), so they are 0..n-1 and the next seq is L.seq+1; the previous hash
@@ -381,8 +389,10 @@ func (s *Server) checkpointBody(projectID string, seq int64, prev string, hasPre
 	}
 }
 
-// checkpointBodyChecked returns the body to sign: the incremental cut when it applies, else the full
-// computation. The full body is also computed with the same created_ts, and signing is REFUSED unless the two are
+// checkpointBodyChecked is phase 1 of a cut, run inside the project write transaction. It returns the body to
+// sign: the incremental cut when it applies and no shadow is due, else the full computation. When a shadow is due
+// it returns *errShadowDue instead and the caller rolls back and runs the comparison off the lock (shadowOffLock),
+// then signs the compared bytes under the lock after a base check. In a shadowed cut the full body is also computed with the same created_ts, and signing is REFUSED unless the two are
 // byte-identical, when (a) the checkpoint being cut has seq % every == 0 (chosen per project from the checkpoint
 // itself, so no project can be skipped by a rotation of cuts, and a refused seq is retried as the same seq and
 // shadowed again, also after a restart, so a refusal needs no stored state to stay a refusal; this scheduled
@@ -395,7 +405,9 @@ func (s *Server) checkpointBody(projectID string, seq int64, prev string, hasPre
 // append-only. A shadow that CANNOT RUN (a read error, a statement timeout, its own time budget) is not a
 // disagreement: the incremental body is signed, averin_checkpoint_shadow_failed_total is counted, an ALERT is
 // logged and the project's next shadow waits for a backoff. A full body that was computed but came back over
-// budget is still compared: a mismatch refuses, a match is signed and counted as late. The shadow therefore
+// budget is still compared: a mismatch refuses, a match is signed and counted as late. A shadowed checkpoint
+// covers the records committed when its snapshot was taken (records committed during the shadow go into the next
+// checkpoint). The shadow therefore
 // stops being effective once the full computation no longer fits its budget; the counter shows it, and the differential tests plus the per-cut
 // count and contiguity guards are what still hold the equality.
 func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[string]any, error) {
@@ -424,14 +436,110 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
 	if s.shadowWaiting(projectID) {
 		return body, nil // the last shadow of this project could not run: wait out its backoff, then try again
 	}
+	// A shadow is due. It does NOT run here: this is the project write transaction. The caller rolls it back and
+	// runs the comparison on a read snapshot outside the write lock (shadowOffLock), then signs under the lock
+	// again (createCheckpointTx with the precomputed result). The base L this decision was made against is carried
+	// along so phase 3 can refuse if it moved.
+	prev, _ := body["prev_checkpoint_hash"].(string)
+	return nil, &errShadowDue{seq: seq - 1, hash: prev}
+}
+
+// errShadowDue is returned by checkpointBodyChecked (phase 1, inside the write transaction) when the incremental
+// cut applies and a shadow is due: the transaction rolls back having written nothing, and the shadow runs off the
+// lock. seq and hash identify the latest checkpoint L the decision was made against.
+type errShadowDue struct {
+	seq  int64
+	hash string
+}
+
+func (e *errShadowDue) Error() string {
+	return "checkpoint cut: shadow check due (it runs outside the project write transaction)"
+}
+
+// errShadowRaced means the latest checkpoint of the project moved while the shadow ran (another writer process
+// cut in between). Nothing was signed.
+var errShadowRaced = errors.New("checkpoint cut abandoned: the project's latest checkpoint changed while its shadow check ran (another writer cut a checkpoint); nothing was signed, retry the cut")
+
+// shadowResult is the outcome of a completed phase 2: the exact bytes to sign (the compared body) and what the
+// snapshot covered, for the phase 3 checks.
+type shadowResult struct {
+	bodyJSON []byte
+	baseSeq  int64
+	baseHash string
+	count    int64 // RecordCount at the snapshot
+	maxSeq   int64 // MaxBrokerSeq at the snapshot
+}
+
+// shadowOffLock is phase 2 of a shadowed cut. It computes the incremental and the full body on ONE
+// repeatable-read snapshot S of the project, with the same created_ts, without the project write lock, and
+// compares them byte for byte. It returns the bytes to sign: the compared body (or, when the full computation
+// could not run, the incremental body, as before). A mismatch returns the refusal here, so no lock is taken and
+// nothing is sealed. It runs detached from the caller's cancellation (bounded by budget + 5 s) so a client that
+// hangs up is not counted as a failed shadow.
+//
+// Both bodies are deterministic functions of S: records and checkpoints are append-only and every write commits
+// under the project guard, so S is a prefix of the guard-serialized write sequence, a state a locked cut could
+// have seen. The checkpoint signed from this result covers exactly S (records committed after S go into the next
+// checkpoint).
+func (s *Server) shadowOffLock(ctx context.Context, projectID string, due *errShadowDue) (shadowResult, error) {
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.shadowBudget()+5*time.Second)
+	defer cancel()
+	var res shadowResult
+	err := s.st.WithProjectRead(sctx, projectID, func(snap store.Store) error {
+		// The first statement of the snapshot: on PostgreSQL it fixes the snapshot. If the latest checkpoint is not
+		// the base phase 1 decided on, another writer cut in between: abandon, counters untouched.
+		l, has, e := snap.LatestCheckpoint(projectID)
+		if e != nil {
+			return fmt.Errorf("checkpoint: read project snapshot: %w", e)
+		}
+		if !has || l.Seq != due.seq || l.CheckpointHash != due.hash {
+			s.mCutShadowRaced.Inc()
+			return errShadowRaced
+		}
+		// created_ts is taken AFTER the snapshot's first read, so it is not earlier than any commit in S.
+		created := ts(s.now())
+		body, ok, e := s.cutBodyIncremental(snap, projectID, created)
+		if e != nil {
+			return e // the incremental cut's own refusal at S: no shadow is counted, as before
+		}
+		if !ok {
+			return errors.New("checkpoint refused: the incremental cut no longer applies on the shadow snapshot")
+		}
+		cnt, e := snap.RecordCount(projectID)
+		if e != nil {
+			return fmt.Errorf("checkpoint: read project snapshot: %w", e)
+		}
+		maxSeq, e := snap.MaxBrokerSeq(projectID)
+		if e != nil {
+			return fmt.Errorf("checkpoint: read project snapshot: %w", e)
+		}
+		signed, e := s.compareShadow(snap, projectID, created, body)
+		if e != nil {
+			return e
+		}
+		res = shadowResult{bodyJSON: signed, baseSeq: due.seq, baseHash: due.hash, count: int64(cnt), maxSeq: maxSeq}
+		return nil
+	})
+	if err != nil {
+		return shadowResult{}, err
+	}
+	return res, nil
+}
+
+// compareShadow runs the full computation for the snapshot store st under the shadow budget and compares it with
+// the incremental body. It returns the JSON to sign, or a refusal on a mismatch. The classification, counters,
+// latch and ALERT texts are unchanged from the in-lock shadow.
+func (s *Server) compareShadow(st store.Store, projectID, created string, body map[string]any) ([]byte, error) {
 	s.shadowAttempted(projectID)
 	s.mCutShadowChecks.Inc()
+	began := time.Now()
 	var full map[string]any
 	ferr := st.WithBudget(s.shadowBudget(), func(b store.Store) error {
 		var e error
 		full, e = s.cutBodyFull(b, projectID, created)
 		return e
 	})
+	s.cut.lastShadowNanos.Store(int64(time.Since(began)))
 	var refusal *cutRefusedError
 	if errors.As(ferr, &refusal) { // the definition itself refuses where the incremental cut would sign: a disagreement
 		s.cut.latched.Store(true)
@@ -450,7 +558,8 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
 		s.mCutShadowFailed.Inc()
 		wait := s.shadowFailed(projectID)
 		log.Printf("ALERT: checkpoint cut for project %s signed WITHOUT its shadow check: the full computation could not run (%v); next shadow attempt in %s", projectID, ferr, wait)
-		return body, nil
+		out, _ := json.Marshal(body)
+		return out, nil
 	}
 	a, _ := json.Marshal(body)
 	b, _ := json.Marshal(full)
@@ -469,7 +578,52 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
 		s.shadowRan(projectID)
 	}
 	s.cut.verified.Store(projectID, struct{}{})
-	return full, nil
+	return b, nil
+}
+
+// cutGate is the per-project cut gate: a one-slot, context-cancellable, reference-counted semaphore. It is held
+// across all phases of every cut of the project in this process (liveness, not safety): two cuts of one project
+// never run two O(history) shadows at once and a same-process cut cannot move the base during a shadow. Writers
+// never take it, and the lock order is always gate, then project write guard.
+type cutGate struct {
+	slot chan struct{}
+	refs int
+}
+
+// acquireCutGate waits for the project's cut gate (or ctx) and returns its release.
+func (s *Server) acquireCutGate(ctx context.Context, projectID string) (func(), error) {
+	s.cut.mu.Lock()
+	if s.cut.gates == nil {
+		s.cut.gates = map[string]*cutGate{}
+	}
+	g := s.cut.gates[projectID]
+	if g == nil {
+		g = &cutGate{slot: make(chan struct{}, 1)}
+		s.cut.gates[projectID] = g
+	}
+	g.refs++
+	s.cut.mu.Unlock()
+	drop := func() {
+		s.cut.mu.Lock()
+		g.refs--
+		if g.refs == 0 {
+			delete(s.cut.gates, projectID)
+		}
+		s.cut.mu.Unlock()
+	}
+	select {
+	case g.slot <- struct{}{}:
+		return func() { <-g.slot; drop() }, nil
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
+	}
+}
+
+func (s *Server) cutGateCount() int {
+	s.cut.mu.Lock()
+	defer s.cut.mu.Unlock()
+	return len(s.cut.gates)
 }
 
 func (s *Server) shadowBudget() time.Duration {

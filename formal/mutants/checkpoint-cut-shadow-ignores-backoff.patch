@@ -1,8 +1,8 @@
 diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
-index 689be4d..38b26b2 100644
+index f1b908a..56f07d3 100644
 --- a/server/internal/api/checkpoint_cut.go
 +++ b/server/internal/api/checkpoint_cut.go
-@@ -414,7 +414,7 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
+@@ -433,7 +433,7 @@ func (s *Server) checkpointBodyChecked(st store.Store, projectID string) (map[st
  	if verified && !s.cut.latched.Load() && s.shadowTooSoon(projectID) {
  		return body, nil // scheduled shadow, but the project's last attempt is inside the minimum interval
  	}
@@ -10,4 +10,4 @@ index 689be4d..38b26b2 100644
 +	if false && s.shadowWaiting(projectID) {
  		return body, nil // the last shadow of this project could not run: wait out its backoff, then try again
  	}
- 	s.shadowAttempted(projectID)
+ 	// A shadow is due. It does NOT run here: this is the project write transaction. The caller rolls it back and

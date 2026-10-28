@@ -190,7 +190,8 @@ type Store interface {
 	// applies. Any other error from fn is returned unchanged. Intended for reads whose result may be dropped.
 	WithBudget(d time.Duration, fn func(Store) error) error
 	// WithProjectRead gives fn one repeatable-read snapshot of project state.
-	// It is intended for exports; it never takes the writer guard.
+	// It is intended for exports and the checkpoint shadow check (which compares two bodies on one snapshot outside
+	// the write lock); it never takes the writer guard.
 	WithProjectRead(ctx context.Context, projectID string, fn func(Store) error) error
 	PendingGrant(projectID, idemKey string) (PendingGrant, bool, error)
 	PutPendingGrant(projectID, idemKey string, row PendingGrant) (PendingGrant, bool, error)
