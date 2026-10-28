@@ -92,7 +92,7 @@
     "toolchain": "rustc (nightly-2026-09-17 for extraction, 1.92.0 for production builds), Charon 6258597, Aeneas 557f7a1 and its Lean standard library, Lean 4.31.0 and mathlib"
   },
   "sources": {
-    "core/Cargo.toml": "287577cf10572389029f4905af4638f3bf73081feb717488dd2d39f1d7303134",
+    "core/Cargo.toml": "b9096498e29d79e01e850c8f5523855e649f512080493d2ed22c3894e32d0580",
     "core/src/canon.rs": "717822b3628f20deb923ddfaba17f2499cf0775420b664f7b408e35d5caf483d",
     "core/src/hashx.rs": "3193a42763c19e681181c07bbb8e7ab6f37d0d27dd0bc6124d8f7067b7d043c7",
     "core/src/record.rs": "fda53c56da857632e8be5edecef08440a578f25a0c332e201f0406ea3ad2f6f3",

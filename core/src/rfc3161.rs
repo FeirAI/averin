@@ -969,4 +969,312 @@ mod tests {
             Err(Rfc3161Error::UnsupportedSigAlg)
         );
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // ECDSA known-answer tests (KATs). They use only hex constants and averin's own private verifiers,
+    // no p256/p384/ecdsa API, so they run unchanged on any RustCrypto line. Keys are the RFC 6979
+    // Appendix A.2.5 / A.2.6 private keys. The signatures are RFC 6979 deterministic signatures,
+    // copied verbatim from the published RFC 6979 A.2.5 / A.2.6 vectors (P-256/SHA-256 and
+    // P-384/SHA-384, "sample" and "test"). The NEG_S forms are (r, n - s). For P-256 the RFC sample s
+    // is high-S, so n - s is the low-S form; for P-384 the sample s is low-S and n - s is high-S.
+    // Either way both S forms are exercised on both curves. The P-256 profile hash is SHA-256, the P-384 profile hash is SHA-512; the
+    // CONFUSED signatures are valid under SHA-512 (P-256) and SHA-384 (P-384) and must be rejected.
+    const P256_N: &str = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
+    const P256_PUB: &str = "60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299";
+    const P256_SAMPLE: (&str, &str) = (
+        "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716",
+        "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
+    );
+    const P256_SAMPLE_NEG_S: (&str, &str) = (
+        "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716",
+        "0834e36ad29a83bf2bc9385e491d6099c8fdf9d1ed67aa7ea5f51f93782857a9",
+    );
+    const P256_TEST: (&str, &str) = (
+        "f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d38367",
+        "019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083",
+    );
+    const P256_CONFUSED: (&str, &str) = (
+        "8496a60b5e9b47c825488827e0495b0e3fa109ec4568fd3f8d1097678eb97f00",
+        "2362ab1adbe2b8adf9cb9edab740ea6049c028114f2460f96554f61fae3302fe",
+    );
+    const P384_N: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973";
+    const P384_PUB: &str = "ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc138015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe7344fd2533264720";
+    const P384_SAMPLE: (&str, &str) = ("ed0959d5880ab2d869ae7f6c2915c6d60f96507f9cb3e047c0046861da4a799cfe30f35cc900056d7c99cd7882433709", "512c8cceee3890a84058ce1e22dbc2198f42323ce8aca9135329f03c068e5112dc7cc3ef3446defceb01a45c2667fdd5");
+    const P384_SAMPLE_NEG_S: (&str, &str) = ("ed0959d5880ab2d869ae7f6c2915c6d60f96507f9cb3e047c0046861da4a799cfe30f35cc900056d7c99cd7882433709", "aed3733111c76f57bfa731e1dd243de670bdcdc3175356ec74395d45eda8dccc7b9d49c31469c87e01ea750ea65d2b9e");
+    const P384_TEST: (&str, &str) = ("a0d5d090c9980faf3c2ce57b7ae951d31977dd11c775d314af55f76c676447d06fb6495cd21b4b6e340fc236584fb277", "976984e59b4c77b0e8e4460dca3d9f20e07b9bb1f63beefaf576f6b2e8b224634a2092cd3792e0159ad9cee37659c736");
+    const P384_CONFUSED: (&str, &str) = ("94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe46", "99ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8");
+
+    const P256_ALG: &[u8] = &[
+        0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x08, 0x2A, 0x86,
+        0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07,
+    ];
+    const P384_ALG: &[u8] = &[
+        0x30, 0x10, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x05, 0x2B, 0x81,
+        0x04, 0x00, 0x22,
+    ];
+
+    fn unhex(s: &str) -> Vec<u8> {
+        assert!(s.len().is_multiple_of(2));
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = vec![tag];
+        if body.len() < 128 {
+            v.push(body.len() as u8);
+        } else {
+            v.push(0x81);
+            v.push(body.len() as u8);
+        }
+        v.extend_from_slice(body);
+        v
+    }
+
+    /// Minimal DER INTEGER for a non-negative big-endian value.
+    fn int_min(v: &[u8]) -> Vec<u8> {
+        let mut i = 0;
+        while i + 1 < v.len() && v[i] == 0 {
+            i += 1;
+        }
+        let mut b = v[i..].to_vec();
+        if b[0] & 0x80 != 0 {
+            b.insert(0, 0);
+        }
+        tlv(0x02, &b)
+    }
+
+    fn seq_of(parts: &[Vec<u8>]) -> Vec<u8> {
+        tlv(0x30, &parts.concat())
+    }
+
+    fn sig_der(r: &[u8], s: &[u8]) -> Vec<u8> {
+        seq_of(&[int_min(r), int_min(s)])
+    }
+
+    fn spki_of(alg: &[u8], unused: u8, point: &[u8]) -> Vec<u8> {
+        let mut bits = vec![unused];
+        bits.extend_from_slice(point);
+        seq_of(&[alg.to_vec(), tlv(0x03, &bits)])
+    }
+
+    fn uncompressed(pub_hex: &str) -> Vec<u8> {
+        let mut p = vec![0x04];
+        p.extend(unhex(pub_hex));
+        p
+    }
+
+    fn compressed(pub_hex: &str) -> Vec<u8> {
+        let xy = unhex(pub_hex);
+        let l = xy.len() / 2;
+        let mut p = vec![if xy[xy.len() - 1] & 1 == 1 {
+            0x03
+        } else {
+            0x02
+        }];
+        p.extend_from_slice(&xy[..l]);
+        p
+    }
+
+    type VerifyFn = fn(&[u8], &[u8], &[u8]) -> Result<(), Rfc3161Error>;
+
+    struct Curve {
+        verify: VerifyFn,
+        other: VerifyFn,
+        alg: &'static [u8],
+        other_alg: &'static [u8],
+        n: &'static str,
+        pubk: &'static str,
+        sample: (&'static str, &'static str),
+        test: (&'static str, &'static str),
+        neg_s: (&'static str, &'static str),
+        confused: (&'static str, &'static str),
+        scalar_len: usize,
+    }
+
+    fn curves() -> [Curve; 2] {
+        [
+            Curve {
+                verify: verify_ecdsa_p256,
+                other: verify_ecdsa_p384,
+                alg: P256_ALG,
+                other_alg: P384_ALG,
+                n: P256_N,
+                pubk: P256_PUB,
+                sample: P256_SAMPLE,
+                test: P256_TEST,
+                neg_s: P256_SAMPLE_NEG_S,
+                confused: P256_CONFUSED,
+                scalar_len: 32,
+            },
+            Curve {
+                verify: verify_ecdsa_p384,
+                other: verify_ecdsa_p256,
+                alg: P384_ALG,
+                other_alg: P256_ALG,
+                n: P384_N,
+                pubk: P384_PUB,
+                sample: P384_SAMPLE,
+                test: P384_TEST,
+                neg_s: P384_SAMPLE_NEG_S,
+                confused: P384_CONFUSED,
+                scalar_len: 48,
+            },
+        ]
+    }
+
+    fn pair(p: (&str, &str)) -> (Vec<u8>, Vec<u8>) {
+        (unhex(p.0), unhex(p.1))
+    }
+
+    #[test]
+    fn ecdsa_kat_accepts() {
+        for c in curves() {
+            let spki = spki_of(c.alg, 0, &uncompressed(c.pubk));
+            // K1, K2, K3: sample, test, and the (r, n - s) form (accepted, as before the migration).
+            for (m, p) in [
+                (&b"sample"[..], c.sample),
+                (&b"test"[..], c.test),
+                (&b"sample"[..], c.neg_s),
+            ] {
+                let (r, s) = pair(p);
+                assert_eq!((c.verify)(&spki, m, &sig_der(&r, &s)), Ok(()));
+            }
+            // K4: compressed SEC1 point.
+            let spki_c = spki_of(c.alg, 0, &compressed(c.pubk));
+            let (r, s) = pair(c.sample);
+            assert_eq!((c.verify)(&spki_c, b"sample", &sig_der(&r, &s)), Ok(()));
+        }
+    }
+
+    #[test]
+    fn ecdsa_kat_rejects_bad_signatures() {
+        let bad = Err(Rfc3161Error::SignatureInvalid);
+        for c in curves() {
+            let spki = spki_of(c.alg, 0, &uncompressed(c.pubk));
+            let v = |m: &[u8], sig: &[u8]| (c.verify)(&spki, m, sig);
+            let (r, s) = pair(c.sample);
+            let good = sig_der(&r, &s);
+            let l = c.scalar_len;
+            let n = unhex(c.n);
+
+            assert_eq!(v(b"sample", &good), Ok(())); // control
+            assert_eq!(v(b"test", &good), bad); // K5 wrong message
+            let (cr, cs) = pair(c.confused);
+            assert_eq!(v(b"sample", &sig_der(&cr, &cs)), bad); // K6 digest confusion
+            assert_eq!(v(b"sample", &sig_der(&s, &r)), bad); // K7 swapped
+            let zero = vec![0u8; l];
+            assert_eq!(v(b"sample", &sig_der(&zero, &s)), bad); // K8 r = 0
+            assert_eq!(v(b"sample", &sig_der(&r, &zero)), bad); // K8 s = 0
+            assert_eq!(v(b"sample", &sig_der(&n, &s)), bad); // K9 r = n
+            assert_eq!(v(b"sample", &sig_der(&r, &n)), bad); // K9 s = n
+
+            // K10: superfluous leading zero in an INTEGER.
+            let mut r_pad = vec![0u8];
+            r_pad.extend_from_slice(&int_min(&r)[2..]);
+            let padded = seq_of(&[tlv(0x02, &r_pad), int_min(&s)]);
+            assert_eq!(v(b"sample", &padded), bad);
+            // K11: negative INTEGER (the real r has its top bit set; no 0x00 guard byte, so a
+            // lenient parser would read it as the valid unsigned r and accept).
+            let neg = seq_of(&[tlv(0x02, &r), int_min(&s)]);
+            assert_eq!(v(b"sample", &neg), bad);
+            // K12: long-form SEQUENCE length where the short form is required.
+            let body = good[2..].to_vec();
+            let mut longform = vec![0x30, 0x81, body.len() as u8];
+            longform.extend_from_slice(&body);
+            assert_eq!(v(b"sample", &longform), bad);
+            // K13: trailing byte after the SEQUENCE.
+            let mut trail = good.clone();
+            trail.push(0x00);
+            assert_eq!(v(b"sample", &trail), bad);
+            // K14: wrong outer tag (SET).
+            let mut set = good.clone();
+            set[0] = 0x31;
+            assert_eq!(v(b"sample", &set), bad);
+            // K15: raw r || s (P1363) instead of DER.
+            let mut p1363 = r.clone();
+            p1363.extend_from_slice(&s);
+            assert_eq!(v(b"sample", &p1363), bad);
+            // K16: empty, one byte, 1000 bytes of garbage (no panic).
+            assert_eq!(v(b"sample", &[]), bad);
+            assert_eq!(v(b"sample", &[0x30]), bad);
+            assert_eq!(v(b"sample", &[0xA5; 1000]), bad);
+            // K17: over-long (l + 1 byte) non-zero scalar.
+            let mut long_s = vec![0x01];
+            long_s.extend_from_slice(&s);
+            assert_eq!(
+                v(b"sample", &seq_of(&[int_min(&r), tlv(0x02, &long_s)])),
+                bad
+            );
+            // K18: zero-length INTEGER.
+            assert_eq!(v(b"sample", &seq_of(&[tlv(0x02, &[]), int_min(&s)])), bad);
+            // Truncated signature.
+            assert_eq!(v(b"sample", &good[..good.len() - 1]), bad);
+        }
+    }
+
+    #[test]
+    fn ecdsa_kat_rejects_bad_keys() {
+        for c in curves() {
+            let (r, s) = pair(c.sample);
+            let sig = sig_der(&r, &s);
+            let good_pt = uncompressed(c.pubk);
+            let unsupported = Err(Rfc3161Error::UnsupportedSigAlg);
+            // K19: the other curve's key with this curve's verifier, and the reverse.
+            let other_pt = {
+                let o = curves();
+                let oc = if c.scalar_len == 32 { &o[1] } else { &o[0] };
+                uncompressed(oc.pubk)
+            };
+            assert_eq!(
+                (c.verify)(&spki_of(c.other_alg, 0, &other_pt), b"sample", &sig),
+                unsupported
+            );
+            // This curve's key under the other curve's verifier.
+            assert_eq!(
+                (c.other)(&spki_of(c.alg, 0, &good_pt), b"sample", &sig),
+                unsupported
+            );
+            // K20: identity point.
+            assert_eq!(
+                (c.verify)(&spki_of(c.alg, 0, &[0x00]), b"sample", &sig),
+                unsupported
+            );
+            // K21: off-curve point (last byte of Y changed).
+            let mut off = good_pt.clone();
+            *off.last_mut().unwrap() ^= 0x01;
+            assert_eq!(
+                (c.verify)(&spki_of(c.alg, 0, &off), b"sample", &sig),
+                unsupported
+            );
+            // K22: BIT STRING with a non-zero unused-bits count.
+            assert_eq!(
+                (c.verify)(&spki_of(c.alg, 1, &good_pt), b"sample", &sig),
+                unsupported
+            );
+            // K23: hybrid point tags.
+            for tag in [0x06u8, 0x07] {
+                let mut hy = good_pt.clone();
+                hy[0] = tag;
+                assert_eq!(
+                    (c.verify)(&spki_of(c.alg, 0, &hy), b"sample", &sig),
+                    unsupported
+                );
+            }
+            // Wrong-length point.
+            let short = &good_pt[..good_pt.len() - 1];
+            assert_eq!(
+                (c.verify)(&spki_of(c.alg, 0, short), b"sample", &sig),
+                unsupported
+            );
+            // K24: truncated SPKI is a DER error.
+            let spki = spki_of(c.alg, 0, &good_pt);
+            assert!(matches!(
+                (c.verify)(&spki[..spki.len() - 3], b"sample", &sig),
+                Err(Rfc3161Error::Der(_))
+            ));
+        }
+    }
 }
