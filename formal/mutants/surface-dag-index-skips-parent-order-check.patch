@@ -1,0 +1,13 @@
+diff --git a/core/src/verify/committed.rs b/core/src/verify/committed.rs
+index 35c21cf..1ed5348 100644
+--- a/core/src/verify/committed.rs
++++ b/core/src/verify/committed.rs
+@@ -98,7 +98,7 @@ impl DagIndex {
+                         // `topo_order` must list parents first; the reach and anchor DPs rely on it. A
+                         // violation (not produced by `dag::build`) refuses the index so the per-frontier
+                         // code runs instead.
+-                        if pn >= i {
++                        if false {
+                             return None;
+                         }
+                         list.push(pn);

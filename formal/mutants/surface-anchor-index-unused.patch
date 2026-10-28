@@ -1,0 +1,14 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 8d6b561..53cf404 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -6656,7 +6656,8 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+     // committed set per anchored checkpoint: O(N), not O(anchors x N) in time and memory).
+     let anchor_dag_index = dag_opt
+         .as_ref()
+-        .and_then(|d| committed::DagIndex::build(records, &d.by_hash, &d.topo_order));
++        .and_then(|d| committed::DagIndex::build(records, &d.by_hash, &d.topo_order))
++        .filter(|_| false);
+     let anchor_min_ts: Vec<Option<&str>> = match &anchor_dag_index {
+         Some(ix) => ix.min_anchor_times(
+             anchored

@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 8d6b561..a9c0813 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -6683,7 +6683,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
+                 .get(n)
+                 .copied()
+                 .flatten()
+-                .is_some_and(|ts| ts <= changed_at),
++                .is_some_and(|ts| ts < changed_at),
+             // a hash that is no DAG node (not expected: every record's hash is one): the per-checkpoint walk.
+             None => {
+                 committed::bump(&committed::ANCHOR_FALLBACKS);

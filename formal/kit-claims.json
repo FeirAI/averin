@@ -938,6 +938,42 @@
     "surface-anchor-dp-max-not-min": {
       "tier": "fast",
       "claim": "verifier-incremental-d6-log-equals-per-frontier"
+    },
+    "surface-d6-log-index-unused": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier"
+    },
+    "surface-d6-cursor-unused": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier"
+    },
+    "surface-d6-reach-unused": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier"
+    },
+    "surface-federation-partition-unused": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier"
+    },
+    "surface-anchor-dp-skips-canonical-check": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier"
+    },
+    "surface-dag-index-skips-parent-order-check": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier"
+    },
+    "surface-anchor-index-unused": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier",
+      "detector": "cd core && cargo test -q --test adversarial compromised_key_anchored_exactly_at_compromise_time_stays_trusted",
+      "detector_kind": "cargo"
+    },
+    "surface-anchored-before-boundary-exclusive": {
+      "tier": "fast",
+      "claim": "verifier-incremental-d6-log-equals-per-frontier",
+      "detector": "cd core && cargo test -q --test adversarial compromised_key_anchored_exactly_at_compromise_time_stays_trusted",
+      "detector_kind": "cargo"
     }
   },
   "claims": [
@@ -1116,7 +1152,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
+          "sha256": "b9c26b8f6110786c0bf6eb9f28b4b63f4fec776f065d6ec7f5aeeb7104d59bd0"
         }
       ],
       "mutants": [
@@ -1151,7 +1187,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
+          "sha256": "b9c26b8f6110786c0bf6eb9f28b4b63f4fec776f065d6ec7f5aeeb7104d59bd0"
         }
       ],
       "mutants": [
@@ -1190,7 +1226,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
+          "sha256": "b9c26b8f6110786c0bf6eb9f28b4b63f4fec776f065d6ec7f5aeeb7104d59bd0"
         }
       ],
       "mutants": [
@@ -1873,7 +1909,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
+          "sha256": "b9c26b8f6110786c0bf6eb9f28b4b63f4fec776f065d6ec7f5aeeb7104d59bd0"
         }
       ],
       "mutants": [
@@ -2660,7 +2696,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
+          "sha256": "b9c26b8f6110786c0bf6eb9f28b4b63f4fec776f065d6ec7f5aeeb7104d59bd0"
         }
       ],
       "mutants": [
@@ -2843,7 +2879,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
+          "sha256": "b9c26b8f6110786c0bf6eb9f28b4b63f4fec776f065d6ec7f5aeeb7104d59bd0"
         }
       ],
       "mutants": [
@@ -2874,7 +2910,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
+          "sha256": "b9c26b8f6110786c0bf6eb9f28b4b63f4fec776f065d6ec7f5aeeb7104d59bd0"
         }
       ],
       "mutants": [
@@ -2906,7 +2942,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
+          "sha256": "b9c26b8f6110786c0bf6eb9f28b4b63f4fec776f065d6ec7f5aeeb7104d59bd0"
         }
       ],
       "mutants": [
@@ -3022,7 +3058,7 @@
         {
           "path": "core/src/verify.rs",
           "symbol": "verify_bundle_with",
-          "sha256": "ca8fe7eb323ed0cbb5691be9cb331ae9154513d32b22afad12e1d44d7fcc905c"
+          "sha256": "b9c26b8f6110786c0bf6eb9f28b4b63f4fec776f065d6ec7f5aeeb7104d59bd0"
         }
       ],
       "mutants": [
@@ -3427,7 +3463,7 @@
     {
       "$comment": "legacy register: verifier-incremental-d6-log-equals-per-frontier",
       "id": "verifier-incremental-d6-log-equals-per-frontier",
-      "statement": "The verifier's incremental grant-log index (core/src/verify/committed.rs) gives the same per-checkpoint committed grant log, count, gaplessness, head root and earliest-anchor times as the per-frontier code it replaces (committed_set, committed_broker_log). Tests compare them on seeded random histories (multi-parent merges, duplicate content hashes, unknown and non-head frontier members, seq gaps, duplicates, zero and negative seqs, voids, several brokers) at the index level and at the level of compute_broker_trust and compute_federation_trust (same trust string, same issues, with the index forced off as the reference), include two federation adversarial cases (a headless checkpoint that commits a grant, a head map that lacks a broker the frontier commits), and assert that a 3,000 record honest growing history builds the index and never resets the cursor.",
+      "statement": "The verifier's incremental grant-log index (core/src/verify/committed.rs) gives the same per-checkpoint committed grant log, count, gaplessness, head root and earliest-anchor times as the per-frontier code it replaces (committed_set, committed_broker_log). Tests compare them on seeded random histories (multi-parent merges, duplicate content hashes, unknown and non-head frontier members, seq gaps, duplicates, zero and negative seqs, voids, several brokers) at the index level and at the level of compute_broker_trust and compute_federation_trust (same trust string, same issues, with the index forced off as the reference), include two federation adversarial cases (a headless checkpoint that commits a grant, a head map that lacks a broker the frontier commits), and assert that a 3,000 record honest growing history builds the index, never resets the cursor, uses the cursor for every head and never takes the per-frontier code. Further tests check that the headless D6 and M4 checks answer through the index, that 300 brokers give the same verdict as the old code, and that a topo order listing a child before its parent refuses the index. Two more tests, in the adversarial suite, check that a key compromised exactly at the anchor time stays trusted and that anchored_before is answered by the anchor index.",
       "method": "differential-vectors",
       "artifacts": [
         "core/src/verify/committed.rs",
@@ -3443,7 +3479,7 @@
         {
           "path": "core/src/verify/committed.rs",
           "symbol": "advance",
-          "sha256": "79f1cdea085d9a73f02f2d24747ed02f8393fce1ccbf913d7d0bf414bf8ccc38"
+          "sha256": "d712ae1090f424b86a0571379b0848f28c8f26fbb0a7a4097aa05d341e7f77f9"
         },
         {
           "path": "core/src/verify/committed.rs",
@@ -3459,7 +3495,15 @@
       "mutants": [
         "surface-d6-cursor-skips-containment",
         "surface-d6-append-without-strict-seq",
-        "surface-anchor-dp-max-not-min"
+        "surface-anchor-dp-max-not-min",
+        "surface-d6-log-index-unused",
+        "surface-d6-cursor-unused",
+        "surface-d6-reach-unused",
+        "surface-federation-partition-unused",
+        "surface-anchor-dp-skips-canonical-check",
+        "surface-dag-index-skips-parent-order-check",
+        "surface-anchor-index-unused",
+        "surface-anchored-before-boundary-exclusive"
       ],
       "does_not_establish": "That the verifier is fast on every input: only histories in which each checkpoint commits the previous one are shown to avoid the full recompute, and a crafted bundle can still take the per-frontier time. The tests count slow-path entries on one honest synthetic history; they do not time anything. Equality is checked on random histories, not proved. It says nothing about the export side of the server."
     }

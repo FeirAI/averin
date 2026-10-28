@@ -1,0 +1,14 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 8d6b561..b485ba7 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -4143,7 +4143,8 @@ fn compute_broker_trust(
+     let dag_index = committed::DagIndex::build(records, by_hash, topo_order);
+     let log_index = dag_index
+         .as_ref()
+-        .and_then(|d| committed::LogIndex::build(d, record_trust, records, None));
++        .and_then(|d| committed::LogIndex::build(d, record_trust, records, None))
++        .filter(|_| false);
+     // the tuple-classified single-broker (D6) grant log committed by an arbitrary checkpoint frontier.
+     let log_for =
+         |frontier: &[String]| committed_broker_log(record_trust, records, by_hash, frontier, None);

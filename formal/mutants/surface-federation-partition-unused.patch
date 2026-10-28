@@ -1,0 +1,13 @@
+diff --git a/core/src/verify.rs b/core/src/verify.rs
+index 8d6b561..924dc52 100644
+--- a/core/src/verify.rs
++++ b/core/src/verify.rs
+@@ -4560,7 +4560,7 @@ fn compute_federation_trust(
+         // memory is O(N + entries) however many brokers there are. An unbuildable index uses the old code.
+         let part = dag_index
+             .as_ref()
+-            .and_then(|d| committed::LogIndex::build(d, record_trust, records, Some(b)))
++            .and_then(|d| committed::LogIndex::build(d, record_trust, records, Some(b)).filter(|_| false))
+             .map(|i| {
+                 let r = i.reach();
+                 (i, r)
