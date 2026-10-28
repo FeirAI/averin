@@ -974,9 +974,10 @@ mod tests {
     // ECDSA known-answer tests (KATs). They use only hex constants and averin's own private verifiers,
     // no p256/p384/ecdsa API, so they run unchanged on any RustCrypto line. Keys are the RFC 6979
     // Appendix A.2.5 / A.2.6 private keys. The signatures are RFC 6979 deterministic signatures,
-    // generated with an independent stdlib-only Python implementation (cross-checked against the RFC
-    // 6979 published r values for P-256/SHA-256 "sample" and P-384/SHA-384 "sample"). The high-S forms
-    // are (r, n - s). The P-256 profile hash is SHA-256, the P-384 profile hash is SHA-512; the
+    // copied verbatim from the published RFC 6979 A.2.5 / A.2.6 vectors (P-256/SHA-256 and
+    // P-384/SHA-384, "sample" and "test"). The NEG_S forms are (r, n - s). For P-256 the RFC sample s
+    // is high-S, so n - s is the low-S form; for P-384 the sample s is low-S and n - s is high-S.
+    // Either way both S forms are exercised on both curves. The P-256 profile hash is SHA-256, the P-384 profile hash is SHA-512; the
     // CONFUSED signatures are valid under SHA-512 (P-256) and SHA-384 (P-384) and must be rejected.
     const P256_N: &str = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
     const P256_PUB: &str = "60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299";
@@ -984,7 +985,7 @@ mod tests {
         "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716",
         "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
     );
-    const P256_SAMPLE_HIGH_S: (&str, &str) = (
+    const P256_SAMPLE_NEG_S: (&str, &str) = (
         "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716",
         "0834e36ad29a83bf2bc9385e491d6099c8fdf9d1ed67aa7ea5f51f93782857a9",
     );
@@ -999,7 +1000,7 @@ mod tests {
     const P384_N: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973";
     const P384_PUB: &str = "ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc138015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe7344fd2533264720";
     const P384_SAMPLE: (&str, &str) = ("ed0959d5880ab2d869ae7f6c2915c6d60f96507f9cb3e047c0046861da4a799cfe30f35cc900056d7c99cd7882433709", "512c8cceee3890a84058ce1e22dbc2198f42323ce8aca9135329f03c068e5112dc7cc3ef3446defceb01a45c2667fdd5");
-    const P384_SAMPLE_HIGH_S: (&str, &str) = ("ed0959d5880ab2d869ae7f6c2915c6d60f96507f9cb3e047c0046861da4a799cfe30f35cc900056d7c99cd7882433709", "aed3733111c76f57bfa731e1dd243de670bdcdc3175356ec74395d45eda8dccc7b9d49c31469c87e01ea750ea65d2b9e");
+    const P384_SAMPLE_NEG_S: (&str, &str) = ("ed0959d5880ab2d869ae7f6c2915c6d60f96507f9cb3e047c0046861da4a799cfe30f35cc900056d7c99cd7882433709", "aed3733111c76f57bfa731e1dd243de670bdcdc3175356ec74395d45eda8dccc7b9d49c31469c87e01ea750ea65d2b9e");
     const P384_TEST: (&str, &str) = ("a0d5d090c9980faf3c2ce57b7ae951d31977dd11c775d314af55f76c676447d06fb6495cd21b4b6e340fc236584fb277", "976984e59b4c77b0e8e4460dca3d9f20e07b9bb1f63beefaf576f6b2e8b224634a2092cd3792e0159ad9cee37659c736");
     const P384_CONFUSED: (&str, &str) = ("94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe46", "99ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8");
 
@@ -1013,7 +1014,7 @@ mod tests {
     ];
 
     fn unhex(s: &str) -> Vec<u8> {
-        assert!(s.len() & 1 == 0);
+        assert!(s.len().is_multiple_of(2));
         (0..s.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
@@ -1088,7 +1089,7 @@ mod tests {
         pubk: &'static str,
         sample: (&'static str, &'static str),
         test: (&'static str, &'static str),
-        high_s: (&'static str, &'static str),
+        neg_s: (&'static str, &'static str),
         confused: (&'static str, &'static str),
         scalar_len: usize,
     }
@@ -1104,7 +1105,7 @@ mod tests {
                 pubk: P256_PUB,
                 sample: P256_SAMPLE,
                 test: P256_TEST,
-                high_s: P256_SAMPLE_HIGH_S,
+                neg_s: P256_SAMPLE_NEG_S,
                 confused: P256_CONFUSED,
                 scalar_len: 32,
             },
@@ -1117,7 +1118,7 @@ mod tests {
                 pubk: P384_PUB,
                 sample: P384_SAMPLE,
                 test: P384_TEST,
-                high_s: P384_SAMPLE_HIGH_S,
+                neg_s: P384_SAMPLE_NEG_S,
                 confused: P384_CONFUSED,
                 scalar_len: 48,
             },
@@ -1132,11 +1133,11 @@ mod tests {
     fn ecdsa_kat_accepts() {
         for c in curves() {
             let spki = spki_of(c.alg, 0, &uncompressed(c.pubk));
-            // K1, K2, K3: sample, test, and the high-S form (accepted, as before the migration).
+            // K1, K2, K3: sample, test, and the (r, n - s) form (accepted, as before the migration).
             for (m, p) in [
                 (&b"sample"[..], c.sample),
                 (&b"test"[..], c.test),
-                (&b"sample"[..], c.high_s),
+                (&b"sample"[..], c.neg_s),
             ] {
                 let (r, s) = pair(p);
                 assert_eq!((c.verify)(&spki, m, &sig_der(&r, &s)), Ok(()));
@@ -1158,9 +1159,6 @@ mod tests {
             let good = sig_der(&r, &s);
             let l = c.scalar_len;
             let n = unhex(c.n);
-            let mut n_minus_1 = n.clone();
-            *n_minus_1.last_mut().unwrap() -= 1;
-            assert!(n_minus_1[0] & 0x80 != 0);
 
             assert_eq!(v(b"sample", &good), Ok(())); // control
             assert_eq!(v(b"test", &good), bad); // K5 wrong message
@@ -1178,8 +1176,9 @@ mod tests {
             r_pad.extend_from_slice(&int_min(&r)[2..]);
             let padded = seq_of(&[tlv(0x02, &r_pad), int_min(&s)]);
             assert_eq!(v(b"sample", &padded), bad);
-            // K11: negative INTEGER (n - 1 has its top bit set; no 0x00 guard byte).
-            let neg = seq_of(&[tlv(0x02, &n_minus_1), int_min(&s)]);
+            // K11: negative INTEGER (the real r has its top bit set; no 0x00 guard byte, so a
+            // lenient parser would read it as the valid unsigned r and accept).
+            let neg = seq_of(&[tlv(0x02, &r), int_min(&s)]);
             assert_eq!(v(b"sample", &neg), bad);
             // K12: long-form SEQUENCE length where the short form is required.
             let body = good[2..].to_vec();
