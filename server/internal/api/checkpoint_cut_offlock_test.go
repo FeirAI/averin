@@ -41,6 +41,27 @@ func waitCut(t *testing.T, c <-chan cutResult) cutResult {
 	}
 }
 
+// armPause makes a pause hook that is released when the test ends, pass or fail, so a failing assertion never leaves
+// a cut parked in the hook (and the test binary hanging until go test's own timeout).
+func armPause(t *testing.T) *pauseHook {
+	p := newPauseHook()
+	t.Cleanup(p.let)
+	return p
+}
+
+// cutWithin runs a cut of the project on s and fails the test if it has not returned within d.
+func cutWithin(t *testing.T, s *api.Server, ctx context.Context, d time.Duration) cutResult {
+	t.Helper()
+	c := startCut(s, ctx, "p")
+	select {
+	case r := <-c:
+		return r
+	case <-time.After(d):
+		t.Fatalf("a cut did not return within %s", d)
+		return cutResult{}
+	}
+}
+
 func waitPaused(t *testing.T, p *pauseHook) {
 	t.Helper()
 	select {
@@ -96,7 +117,7 @@ func runOffLockWritesContinue(t *testing.T, r *shadowRig) {
 	r.h.plain()
 	exp, full, _ := bothBodies(t, r.s, r.st, "p") // the body of seq 1 at the lock state before the cut, same fixed clock
 	bodiesEqual(t, exp, full, "before the cut")
-	r.spy.pause = newPauseHook()
+	r.spy.pause = armPause(t)
 	res := startCut(r.s, context.Background(), "p")
 	waitPaused(t, r.spy.pause)
 	before, _ := r.st.RecordCount("p")
@@ -104,7 +125,7 @@ func runOffLockWritesContinue(t *testing.T, r *shadowRig) {
 	if got := latestSeq(t, r.st, "p"); got != 0 {
 		t.Fatalf("a checkpoint was stored before the comparison finished: latest seq %d, want 0", got)
 	}
-	close(r.spy.pause.release)
+	r.spy.pause.let()
 	out := waitCut(t, res)
 	if out.err != nil || out.cp.Seq != 1 {
 		t.Fatalf("cut: seq %d err %v, want seq 1", out.cp.Seq, out.err)
@@ -143,11 +164,11 @@ func TestCheckpointCutShadowOffLockMismatchRefusesWhileWritesContinue(t *testing
 	r := newShadowRig(t, 5*time.Second)
 	r.h.plain()
 	r.spy.tamper = bogusBase("p")
-	r.spy.pause = newPauseHook()
+	r.spy.pause = armPause(t)
 	res := startCut(r.s, context.Background(), "p")
 	waitPaused(t, r.spy.pause)
 	writeWhilePaused(t, r.h, 10)
-	close(r.spy.pause.release)
+	r.spy.pause.let()
 	out := waitCut(t, res)
 	if out.err == nil || !strings.Contains(out.err.Error(), "disagrees with the full computation") {
 		t.Fatalf("want a refusal, got %v", out.err)
@@ -170,17 +191,19 @@ func TestCheckpointCutShadowOffLockMismatchRefusesWhileWritesContinue(t *testing
 // store) cuts the seq while this shadow runs. This cut signs nothing, and the chain keeps one checkpoint per seq.
 func TestCheckpointCutShadowOffLockRacedByAnotherWriter(t *testing.T) {
 	r := newShadowRig(t, 5*time.Second)
+	r.s.WithCheckpointShadowEvery(1 << 30) // only the first-cut rule can make a later cut shadowed
 	r.h.plain()
-	r.spy.pause = newPauseHook()
+	r.spy.pause = armPause(t)
 	res := startCut(r.s, context.Background(), "p")
 	waitPaused(t, r.spy.pause)
 	other := api.New(mustCore(t), r.st, "k0").WithAuth(auth.NewOpenStore()).WithCheckpointShadowEvery(1 << 30).
 		WithClock(func() time.Time { return r.now })
-	ocp, err := other.CutCheckpointForTest(context.Background(), "p")
-	if err != nil || ocp.Seq != 1 {
-		t.Fatalf("other writer cut: seq %d err %v", ocp.Seq, err)
+	o := cutWithin(t, other, context.Background(), 5*time.Second)
+	ocp := o.cp
+	if o.err != nil || ocp.Seq != 1 {
+		t.Fatalf("other writer cut: seq %d err %v", ocp.Seq, o.err)
 	}
-	close(r.spy.pause.release)
+	r.spy.pause.let()
 	out := waitCut(t, res)
 	if !api.IsShadowRacedForTest(out.err) {
 		t.Fatalf("want the raced refusal, got %v", out.err)
@@ -195,6 +218,14 @@ func TestCheckpointCutShadowOffLockRacedByAnotherWriter(t *testing.T) {
 	if r.s.ShadowRacedForTest() != 1 {
 		t.Fatalf("raced counter %d, want 1", r.s.ShadowRacedForTest())
 	}
+	// The matching comparison was against a base another writer replaced: it must not count as this project's
+	// first-cut check, so the next cut is shadowed again.
+	if _, err := r.cut(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, checks, _ := r.s.CutStatsForTest(); checks != 2 {
+		t.Fatalf("checks %d after the next cut, want 2 (the raced cut must not mark the project verified)", checks)
+	}
 }
 
 // TestCheckpointCutShadowOffLockSameProcessCutsWait: a second cut of the same project in this process waits on
@@ -203,7 +234,7 @@ func TestCheckpointCutShadowOffLockRacedByAnotherWriter(t *testing.T) {
 func TestCheckpointCutShadowOffLockSameProcessCutsWait(t *testing.T) {
 	r := newShadowRig(t, 5*time.Second)
 	r.h.plain()
-	r.spy.pause = newPauseHook()
+	r.spy.pause = armPause(t)
 	a := startCut(r.s, context.Background(), "p")
 	waitPaused(t, r.spy.pause)
 	b := startCut(r.s, context.Background(), "p")
@@ -215,7 +246,7 @@ func TestCheckpointCutShadowOffLockSameProcessCutsWait(t *testing.T) {
 	if got := latestSeq(t, r.st, "p"); got != 0 {
 		t.Fatalf("latest seq %d while the first shadow runs, want 0", got)
 	}
-	close(r.spy.pause.release)
+	r.spy.pause.let()
 	ra, rb := waitCut(t, a), waitCut(t, b)
 	if ra.err != nil || rb.err != nil || ra.cp.Seq != 1 || rb.cp.Seq != 2 {
 		t.Fatalf("cuts: %d/%v and %d/%v, want seqs 1 and 2", ra.cp.Seq, ra.err, rb.cp.Seq, rb.err)
@@ -230,15 +261,15 @@ func TestCheckpointCutShadowOffLockSameProcessCutsWait(t *testing.T) {
 func TestCheckpointCutShadowOffLockGateWaitIsCancellable(t *testing.T) {
 	r := newShadowRig(t, 5*time.Second)
 	r.h.plain()
-	r.spy.pause = newPauseHook()
+	r.spy.pause = armPause(t)
 	a := startCut(r.s, context.Background(), "p")
 	waitPaused(t, r.spy.pause)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if _, err := r.s.CutCheckpointForTest(ctx, "p"); err == nil {
+	if p := cutWithin(t, r.s, ctx, 5*time.Second); p.err == nil {
 		t.Fatal("a cut waiting on the gate must fail with its context")
 	}
-	close(r.spy.pause.release)
+	r.spy.pause.let()
 	if out := waitCut(t, a); out.err != nil {
 		t.Fatal(out.err)
 	}
@@ -250,14 +281,25 @@ func TestCheckpointCutShadowOffLockGateWaitIsCancellable(t *testing.T) {
 // TestCheckpointCutShadowOffLockClientCancel: a client that hangs up mid-shadow does not turn the shadow into a
 // failed one (it runs detached), and the cut stores nothing.
 func TestCheckpointCutShadowOffLockClientCancel(t *testing.T) {
-	r := newShadowRig(t, 5*time.Second)
+	runOffLockClientCancel(t, newShadowRig(t, 5*time.Second))
+}
+
+// TestCheckpointCutShadowOffLockClientCancelPostgres: the same on the real store. On Mem the read snapshot and
+// WithBudget never look at the context, so only Postgres proves the shadow's context is detached from the client's
+// (a hang-up must not turn the shadow into a failed one). Skips without AVERIN_TEST_DATABASE_URL.
+func TestCheckpointCutShadowOffLockClientCancelPostgres(t *testing.T) {
+	pg, _ := newVoidTestPostgres(t)
+	runOffLockClientCancel(t, newShadowRigOn(t, pg, 5*time.Second))
+}
+
+func runOffLockClientCancel(t *testing.T, r *shadowRig) {
 	r.h.plain()
-	r.spy.pause = newPauseHook()
+	r.spy.pause = armPause(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	res := startCut(r.s, ctx, "p")
 	waitPaused(t, r.spy.pause)
 	cancel()
-	close(r.spy.pause.release)
+	r.spy.pause.let()
 	out := waitCut(t, res)
 	if out.err == nil {
 		t.Fatal("a cancelled cut must return an error")
@@ -345,20 +387,48 @@ func TestCheckpointCutShadowOffLockRacedByAnotherWriterPostgres(t *testing.T) {
 	pg, _ := newVoidTestPostgres(t)
 	r := newShadowRigOn(t, pg, 5*time.Second)
 	r.h.plain()
-	r.spy.pause = newPauseHook()
+	r.spy.pause = armPause(t)
 	res := startCut(r.s, context.Background(), "p")
 	waitPaused(t, r.spy.pause)
 	other := api.New(mustCore(t), pg, "k0").WithAuth(auth.NewOpenStore()).WithCheckpointShadowEvery(1 << 30).
 		WithClock(func() time.Time { return r.now })
-	if cp, err := other.CutCheckpointForTest(context.Background(), "p"); err != nil || cp.Seq != 1 {
-		t.Fatalf("other writer cut: seq %d err %v", cp.Seq, err)
+	if o := cutWithin(t, other, context.Background(), 5*time.Second); o.err != nil || o.cp.Seq != 1 {
+		t.Fatalf("other writer cut: seq %d err %v", o.cp.Seq, o.err)
 	}
-	close(r.spy.pause.release)
+	r.spy.pause.let()
 	if out := waitCut(t, res); !api.IsShadowRacedForTest(out.err) {
 		t.Fatalf("want the raced refusal, got %v", out.err)
 	}
 	cps, err := pg.Checkpoints("p")
 	if err != nil || len(cps) != 2 {
 		t.Fatalf("%d checkpoints, err %v, want 2", len(cps), err)
+	}
+}
+
+// TestCheckpointCutShadowOffLockCreatedTsAfterSnapshotRead: created_ts of a shadowed checkpoint is taken after the
+// snapshot's first read, so it is not earlier than any commit in the snapshot. The hook moves the clock forward as
+// the snapshot reads the latest checkpoint (a commit landing just before the snapshot); the signed created_ts must
+// carry that later time.
+func TestCheckpointCutShadowOffLockCreatedTsAfterSnapshotRead(t *testing.T) {
+	r := newShadowRig(t, 5*time.Second)
+	r.h.plain()
+	var once sync.Once
+	r.spy.onSnapLatest = func() { once.Do(func() { r.now = r.now.Add(time.Hour) }) }
+	cp, err := r.s.CutCheckpointForTest(context.Background(), "p")
+	if err != nil || cp.Seq != 1 {
+		t.Fatalf("cut: seq %d err %v", cp.Seq, err)
+	}
+	var body struct {
+		Created string `json:"created_ts"`
+	}
+	if err := json.Unmarshal([]byte(cp.JSON), &body); err != nil {
+		t.Fatal(err)
+	}
+	got, err := time.Parse(time.RFC3339Nano, body.Created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := r.now; got.Before(want) {
+		t.Fatalf("created_ts %s is earlier than the clock at the snapshot's first read (%s)", got, want)
 	}
 }

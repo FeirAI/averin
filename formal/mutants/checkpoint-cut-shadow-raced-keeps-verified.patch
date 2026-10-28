@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index e069d73..aba3a4f 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4129,7 +4129,7 @@ func (s *Server) cutCheckpoint(ctx context.Context, projectID string) (store.Che
+ 		cp, e = s.createCheckpointTx(st, projectID, &res)
+ 		return e
+ 	})
+-	if errors.Is(err, errShadowRaced) {
++	if false && errors.Is(err, errShadowRaced) {
+ 		// The compared base is not the one this process now extends: the next cut must be shadowed again (the
+ 		// first-cut rule), not signed unchecked on the strength of a comparison against a base another writer
+ 		// has since replaced.

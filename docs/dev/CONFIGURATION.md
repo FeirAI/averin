@@ -205,7 +205,7 @@ logged, and that project's next shadow attempt waits for a backoff (10 minutes, 
 up to 64 times that, reset when a shadow runs). A full body that was computed but came back over budget is still compared: a mismatch refuses, a match is
 signed and counted as failed (late) with the same backoff. The shadow's budget is 20 s by default (it was 1 s, and 5 s before that: see LIMITATIONS) and covers the
 WHOLE shadow: on Postgres the statement timeout is re-issued with the time that remains before every statement
-(the ceiling is 20 s, below the 30 s statement timeout). The shadow runs on a repeatable-read snapshot OUTSIDE the project write lock: writes to the
+(the ceiling is 20 s, below the 30 s default statement timeout). This `SET LOCAL` applies inside the shadow only and replaces the connection's statement timeout there, so a `statement_timeout` in the DSN lower than the budget (for example 5 s) does not limit the shadow: it can run for the full budget. The shadow runs on a repeatable-read snapshot OUTSIDE the project write lock: writes to the
 project do not wait for it, but it still uses database CPU, memory and one pool connection for up to the budget, and the cut's HTTP response is delayed by the same time.
 Cuts of the same project in one process wait for each other (a per-project gate); writes do not. If another writer process cuts a checkpoint of the project
 while the shadow runs, this cut returns an error and signs nothing (`averin_checkpoint_shadow_raced_total`). The shadowed checkpoint covers the records

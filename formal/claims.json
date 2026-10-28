@@ -2040,6 +2040,22 @@
         },
         {
           "file": "server/internal/api/checkpoint_cut_offlock_test.go",
+          "symbol": "TestCheckpointCutShadowOffLockGateWaitIsCancellable"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_offlock_test.go",
+          "symbol": "TestCheckpointCutShadowOffLockClientCancel"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_offlock_test.go",
+          "symbol": "TestCheckpointCutShadowOffLockClientCancelPostgres"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_offlock_test.go",
+          "symbol": "TestCheckpointCutShadowOffLockCreatedTsAfterSnapshotRead"
+        },
+        {
+          "file": "server/internal/api/checkpoint_cut_offlock_test.go",
           "symbol": "TestCheckpointCutShadowOffLockWritesContinuePostgres"
         }
       ],

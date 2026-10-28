@@ -4129,6 +4129,12 @@ func (s *Server) cutCheckpoint(ctx context.Context, projectID string) (store.Che
 		cp, e = s.createCheckpointTx(st, projectID, &res)
 		return e
 	})
+	if errors.Is(err, errShadowRaced) {
+		// The compared base is not the one this process now extends: the next cut must be shadowed again (the
+		// first-cut rule), not signed unchecked on the strength of a comparison against a base another writer
+		// has since replaced.
+		s.cut.verified.Delete(projectID)
+	}
 	return cp, err
 }
 
