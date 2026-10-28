@@ -2503,6 +2503,45 @@
         "server",
         "formal-fast"
       ]
+    },
+    {
+      "id": "verifier-incremental-d6-log-equals-per-frontier",
+      "claim": "The verifier's incremental grant-log index gives the same per-checkpoint committed grant log, count, gaplessness, head root and earliest anchor times as the per-frontier code it replaces, on seeded random histories, at the index level and at the level of compute_broker_trust and compute_federation_trust (same trust string and issues). Two federation adversarial cases (a headless checkpoint that commits a grant, a head map that lacks a committed broker) are suppression, and a 3,000 record honest growing history builds the index and never resets the cursor. Not that the verifier is fast on every input (a crafted bundle can still take the per-frontier time) and not a timing test.",
+      "class": "differential",
+      "targets": [
+        "Rust verifier"
+      ],
+      "assumptions": [
+        "the per-frontier functions committed_set and committed_broker_log remain the definition"
+      ],
+      "sources": [
+        {
+          "file": "core/src/verify/committed.rs",
+          "symbol": "min_anchor_times"
+        },
+        {
+          "file": "core/src/verify/committed.rs",
+          "symbol": "LogCursor"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/src/verify/committed.rs",
+          "symbol": "cursor_matches_the_per_frontier_code"
+        },
+        {
+          "file": "core/src/verify/committed.rs",
+          "symbol": "compute_trust_matches_the_per_frontier_code_on_random_histories"
+        },
+        {
+          "file": "core/src/verify/committed.rs",
+          "symbol": "honest_growing_history_never_takes_a_slow_path"
+        }
+      ],
+      "gates": [
+        "core",
+        "formal-fast"
+      ]
     }
   ]
 }
