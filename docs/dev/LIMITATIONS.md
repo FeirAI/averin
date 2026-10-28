@@ -47,7 +47,7 @@ What contains this:
   byte-identical. Measured after the change (2026-10-28, same host and build profile, user CPU of `averin-verify`
   alone on prefixes of the soak export, not an end-to-end export): 5,000 records 13.1 s before and 4.7 s after;
   10,000 records 46.2 s and 8.6 s; 19,999 records 232.4 s and 18.8 s; the full 42,749 records 1,270.8 s and 49.5 s (loaded host, so the ratios matter more than the absolute times). The time
-  per doubling is now about 2.2x instead of 3.5x to 5x. The end-to-end export time, the 504-style answer past the
+  per doubling is now 1.8x to 2.2x instead of 3.5x to 5x. The end-to-end export time, the 504-style answer past the
   deadline and a configurable deadline are not part of this change and were not measured. The linear behavior holds
   for histories in which each checkpoint commits the previous one (every history averin itself produces); a crafted
   bundle whose checkpoints do not extend each other can still cost the old quadratic time, bounded by the 256 MiB cap.
