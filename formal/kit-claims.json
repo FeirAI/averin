@@ -3487,6 +3487,26 @@
           "sha256": "c1968a2e472262fd974458b8d82bed0754d3ca0bfcdaeb6849193bafd75b9f79"
         },
         {
+          "path": "core/src/verify.rs",
+          "symbol": "compute_broker_trust",
+          "sha256": "17b7835b9a27e6ea0d460a2e7e5054da0ae84e0c4d6190a12fa76ff084613b7e"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "compute_federation_trust",
+          "sha256": "d74a1950282dadd3c9af28b0b96c111121e260bb6502d62bd6407daba0d91a3b"
+        },
+        {
+          "path": "core/src/verify.rs",
+          "symbol": "verify_bundle_with",
+          "sha256": "b9c26b8f6110786c0bf6eb9f28b4b63f4fec776f065d6ec7f5aeeb7104d59bd0"
+        },
+        {
+          "path": "core/src/verify/committed.rs",
+          "symbol": "build_inner",
+          "sha256": "95aa713d8c3f72fa6b498f15be83dd78850f91b605117e023f7d91916394d737"
+        },
+        {
           "path": "core/src/verify/committed.rs",
           "symbol": "walk",
           "sha256": "a3d8bd16a257c942004f2aa80400b10ee5298856e6347cd215188376520a9ab4"
