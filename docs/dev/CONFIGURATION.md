@@ -246,6 +246,7 @@ sweeper and its own readiness probe, not a separate request-time claim path.
 | Variable | Default | Required | Behavior |
 |----------|---------|----------|----------|
 | `AVERIN_LEDGER_RETENTION` | `720h` (30 days) | No | TTL for new Postgres nonce/JTI claims only. The hourly sweep never deletes unknown-owner legacy exclusions. This correctness floor must exceed the maximum accepted capability lifetime (one hour); below 24h or malformed is fatal. Legacy deletion is a separate, DB-time-gated maintenance operation. |
+| `AVERIN_EXPORT_TIMEOUT` | `10m` | No | Build deadline for one `GET /v2/export` or `GET /v2/verify` (a Go duration). A build past it is answered `504` before any body byte; the abandoned export build keeps its concurrency slot until it ends. Accepted range 1m to 60m; empty means the default, and anything else (unparsable, below 1m, above 60m) is fatal at startup. The response write deadline is this value plus 30s. The effective value is logged at startup. |
 
 ### Revocation authority (`POST /v2/revoke`)
 

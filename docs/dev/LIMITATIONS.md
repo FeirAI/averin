@@ -32,9 +32,17 @@ What contains this:
 - **Concurrency cap.** Concurrent export/verify builds are bounded by a semaphore (`maxConcurrentBundleReads`,
   currently **4**). A request over the cap gets a retryable `503`.
 - **Write-timeout exemption.** The global 60s `WriteTimeout` would kill a large-but-legitimate export mid-write, so
-  export/verify run under a per-handler deadline (`bundleWriteTimeout`, **10m**).
-  The deadline is a bound on the whole request, not only on size. When it passes, the response is cut (the client sees
-  a dropped connection, HTTP 000), not refused with a status or a size message. Measured 2026-10-28 on one soak host
+  export/verify run under a per-handler build deadline, `AVERIN_EXPORT_TIMEOUT` (default **10m**, accepted range 1m to
+  60m; a value outside it, or not a Go duration, stops startup). A build (load, self-verify, disclosures, marshal for
+  export; load and verify for a verify waiter) that has not finished by the deadline is answered `504` with a generic
+  body (the duration and a pointer to the month segments) before any body byte, and is counted in
+  `averin_bundle_deadline_exceeded_total{route}`. The abandoned export build is not stopped if it is already inside
+  the Rust verifier: it runs on and keeps its concurrency slot until it ends, so a retry meanwhile can get `503`.
+  Once the body has started, a write that passes its own deadline (the same duration plus 30s, reset when the build
+  finishes) is still cut, because the status can no longer change; that only reaches a client that reads more slowly
+  than the body size over that duration. The other ceilings are unchanged and unmeasured at 256 MiB: the 45s project
+  read session, the 30s store statement timeout, and any limit in a caller or proxy in front of averin. Before the
+  `504` existed, a build past 10 minutes ended as a cut connection (HTTP 000). Measured 2026-10-28 on one soak host
   at 0.5 metered calls/s with a fresh history: a 28.5 MiB `proof_only` export plus verify took 86 s; 41.7 MiB took 177 s;
   a 110.6 MiB export took averin 521 s to build (first byte) and `averin-verify` 687 s to verify (PASS, integrity). The
   8 h end-of-run export of the same harness was cut at 610 s. The cost per MiB grows with the size, so on that host the
@@ -49,8 +57,7 @@ What contains this:
   byte-identical. Measured after the change (2026-10-28, same host and build profile, user CPU of `averin-verify`
   alone on prefixes of the soak export, not an end-to-end export): 5,000 records 13.1 s before and 4.7 s after;
   10,000 records 46.2 s and 8.6 s; 19,999 records 232.4 s and 18.8 s; the full 42,749 records 1,270.8 s and 49.5 s (loaded host, so the ratios matter more than the absolute times). The time
-  per doubling is now 1.8x to 2.4x instead of 3.5x to 5x (the last step, 19,999 to 42,749 records, took 2.63x for 2.14x the size). The end-to-end export time, the 504-style answer past the
-  deadline and a configurable deadline are not part of this change and were not measured. The linear behavior was measured only on histories in which each checkpoint commits the previous one (every history
+  per doubling is now 1.8x to 2.4x instead of 3.5x to 5x (the last step, 19,999 to 42,749 records, took 2.63x for 2.14x the size). The end-to-end export time (time to first byte of `/v2/export`) was not measured after the change, and the new deadline and `504` are covered by unit tests with a slowed store, not by a timing run at these sizes. The linear behavior was measured only on histories in which each checkpoint commits the previous one (every history
   averin itself produces). A crafted bundle whose checkpoints do not extend each other can still cost the old quadratic
   time, and one whose checkpoints do extend each other can still cost more than linear time in ways that were not
   measured (for example frontiers that list many already-committed records); all of it is bounded by the 256 MiB cap.

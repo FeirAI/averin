@@ -289,6 +289,14 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 	srv.WithRequirePinnedAuthority(requirePinned)
+	// AVERIN_EXPORT_TIMEOUT bounds one whole-history export/verify build (default 10m, range 1m to 60m). An invalid
+	// value stops startup (fail closed), never a silent default.
+	exportTimeout, terr := api.ParseExportTimeout(os.Getenv("AVERIN_EXPORT_TIMEOUT"))
+	if terr != nil {
+		log.Fatalf("%v", terr)
+	}
+	srv.WithBundleDeadline(exportTimeout)
+	log.Printf("export/verify build deadline %s (AVERIN_EXPORT_TIMEOUT)", exportTimeout)
 	// Reader-first rollout: enable after every external authority producer has
 	// moved to v3. This never changes the classification of immutable v2 history.
 	bodyBound, err := requireBodyBoundFromEnv(os.Getenv("AVERIN_REQUIRE_BODY_BOUND_AUTHORITY"), devMode)
