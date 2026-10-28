@@ -46,7 +46,7 @@ fn s<'a>(v: &'a CanonValue, k: &str) -> &'a str {
 }
 
 fn unhex(h: &str) -> Vec<u8> {
-    assert!(h.len() % 2 == 0, "odd hex length");
+    assert!(h.len().is_multiple_of(2), "odd hex length");
     (0..h.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&h[i..i + 2], 16).expect("hex"))

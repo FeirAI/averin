@@ -19,7 +19,7 @@ fn vectors() -> CanonValue {
 }
 
 fn unhex(s: &str) -> Vec<u8> {
-    assert!(s.len() % 2 == 0, "even hex");
+    assert!(s.len().is_multiple_of(2), "even hex");
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
@@ -68,7 +68,7 @@ fn a_nonce_that_is_not_32_bytes_is_refused() {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
         assert!(!strict, "{id}: listed as rejected but is a valid nonce");
-        let decoded = if hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let decoded = if hex.len().is_multiple_of(2) && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             unhex(hex)
         } else {
             Vec::new()
