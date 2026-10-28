@@ -1013,7 +1013,7 @@ mod tests {
     ];
 
     fn unhex(s: &str) -> Vec<u8> {
-        assert!(s.len() % 2 == 0);
+        assert!(s.len() & 1 == 0);
         (0..s.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
@@ -1077,9 +1077,11 @@ mod tests {
         p
     }
 
+    type VerifyFn = fn(&[u8], &[u8], &[u8]) -> Result<(), Rfc3161Error>;
+
     struct Curve {
-        verify: fn(&[u8], &[u8], &[u8]) -> Result<(), Rfc3161Error>,
-        other: fn(&[u8], &[u8], &[u8]) -> Result<(), Rfc3161Error>,
+        verify: VerifyFn,
+        other: VerifyFn,
         alg: &'static [u8],
         other_alg: &'static [u8],
         n: &'static str,
