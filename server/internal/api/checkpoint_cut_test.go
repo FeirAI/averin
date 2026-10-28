@@ -27,6 +27,35 @@ type rowSpy struct {
 	failFull error
 	slowFull time.Duration
 	dropOrd  int64
+	// pause, when set, blocks the first full computation (ProjectHeads is called only by it during a cut) until the
+	// test releases it, so the test can act while a shadow is in flight.
+	pause *pauseHook
+	// onSnapLatest, when set, runs after a LatestCheckpoint read made on a read snapshot (WithProjectRead), the
+	// first read of an off-lock shadow. snap marks the bound copy handed to such a snapshot.
+	onSnapLatest func()
+	snap         bool
+}
+
+// pauseHook parks one caller: entered closes when it arrives, and release lets it go.
+type pauseHook struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	relOnce sync.Once
+}
+
+// let releases the parked caller; it is safe to call more than once and after the test has failed.
+func (p *pauseHook) let() { p.relOnce.Do(func() { close(p.release) }) }
+
+func newPauseHook() *pauseHook {
+	return &pauseHook{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (p *pauseHook) fire() {
+	p.once.Do(func() {
+		close(p.entered)
+		<-p.release
+	})
 }
 
 type rowCount struct {
@@ -52,14 +81,16 @@ func (r *rowSpy) WithProjectWrite(ctx context.Context, p string, fn func(store.S
 }
 func (r *rowSpy) WithProjectRead(ctx context.Context, p string, fn func(store.Store) error) error {
 	return r.Store.WithProjectRead(ctx, p, func(b store.Store) error {
-		return fn(r.bind(b))
+		c := r.bind(b)
+		c.snap = true
+		return fn(c)
 	})
 }
 func (r *rowSpy) WithBudget(d time.Duration, fn func(store.Store) error) error {
 	return r.Store.WithBudget(d, func(b store.Store) error { return fn(r.bind(b)) })
 }
 func (r *rowSpy) bind(b store.Store) *rowSpy {
-	return &rowSpy{Store: b, rows: r.rows, tamper: r.tamper, failFull: r.failFull, slowFull: r.slowFull, dropOrd: r.dropOrd}
+	return &rowSpy{Store: b, rows: r.rows, tamper: r.tamper, failFull: r.failFull, slowFull: r.slowFull, dropOrd: r.dropOrd, pause: r.pause, onSnapLatest: r.onSnapLatest}
 }
 func (r *rowSpy) AllRecords(p string) ([]store.Record, error) {
 	v, err := r.Store.AllRecords(p)
@@ -108,6 +139,9 @@ func (r *rowSpy) CheckpointsRange(p string, a, b int64) ([]store.Checkpoint, err
 
 // ProjectHeads is the full anti-join: it examines every record of the project, whatever it returns.
 func (r *rowSpy) ProjectHeads(p string) ([]string, error) {
+	if r.pause != nil {
+		r.pause.fire()
+	}
 	if r.slowFull > 0 {
 		time.Sleep(r.slowFull)
 	}
@@ -127,6 +161,9 @@ func (r *rowSpy) LatestCheckpoint(p string) (store.Checkpoint, bool, error) {
 		if r.tamper != nil {
 			cp = r.tamper(cp)
 		}
+	}
+	if r.snap && r.onSnapLatest != nil {
+		r.onSnapLatest()
 	}
 	return cp, ok, err
 }
@@ -239,13 +276,8 @@ func cutServer(t *testing.T, st store.Store, brokerID string) *api.Server {
 
 func cutOnce(t *testing.T, s *api.Server, st store.Store, project string) (store.Checkpoint, error) {
 	t.Helper()
-	var cp store.Checkpoint
-	err := st.WithProjectWrite(context.Background(), project, func(b store.Store) error {
-		var e error
-		cp, e = s.CreateCheckpointTxForTest(b, project)
-		return e
-	})
-	return cp, err
+	_ = st // every caller passes the server's own store; the cut runs through it
+	return s.CutCheckpointForTest(context.Background(), project)
 }
 
 func bodiesEqual(t *testing.T, inc, full map[string]any, where string) {

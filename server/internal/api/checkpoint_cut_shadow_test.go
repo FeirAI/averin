@@ -22,7 +22,10 @@ type shadowRig struct {
 }
 
 func newShadowRig(t *testing.T, budget time.Duration) *shadowRig {
-	st := store.NewMem()
+	return newShadowRigOn(t, store.NewMem(), budget)
+}
+
+func newShadowRigOn(t *testing.T, st store.Store, budget time.Duration) *shadowRig {
 	spy := newRowSpy(st)
 	r := &shadowRig{t: t, st: st, spy: spy, now: time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)}
 	r.s = api.New(mustCore(t), spy, "k0").WithAuth(auth.NewOpenStore()).
@@ -170,8 +173,8 @@ func TestCheckpointCutShadowBudgetIsClamped(t *testing.T) {
 	if got := s.ShadowBudgetForTest(); got != api.MaxCheckpointShadowBudget {
 		t.Fatalf("effective budget %s after asking for 60s, want the ceiling %s", got, api.MaxCheckpointShadowBudget)
 	}
-	if api.DefaultCheckpointShadowBudget != time.Second {
-		t.Fatalf("default shadow budget %s, want 1s (a longer default stalls project writes for that long per attempt)", api.DefaultCheckpointShadowBudget)
+	if api.DefaultCheckpointShadowBudget != 20*time.Second {
+		t.Fatalf("default shadow budget %s, want 20s (the shadow runs outside the write lock, so the budget bounds one cut response and one pool connection, not a write stall)", api.DefaultCheckpointShadowBudget)
 	}
 	if got := api.New(mustCore(t), store.NewMem(), "k0").ShadowBudgetForTest(); got != api.DefaultCheckpointShadowBudget {
 		t.Fatalf("default effective budget %s, want %s", got, api.DefaultCheckpointShadowBudget)

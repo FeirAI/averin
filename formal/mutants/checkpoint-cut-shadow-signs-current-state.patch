@@ -1,0 +1,17 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 43e390e..e757505 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4077,7 +4077,11 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string, pre *shado
+ 		if int64(cnt) < pre.count || maxSeq < pre.maxSeq {
+ 			return store.Checkpoint{}, errors.New("checkpoint refused: the project's history shrank since the shadow snapshot")
+ 		}
+-		bodyJSON = pre.bodyJSON // the exact bytes that were compared; never recomputed
++		now, _, ierr := s.cutBodyIncremental(st, projectID, ts(s.now()))
++		if ierr != nil {
++			return store.Checkpoint{}, ierr
++		}
++		bodyJSON, _ = json.Marshal(now)
+ 	}
+ 	sealed, err := s.core.SealCheckpoint(string(bodyJSON))
+ 	if err != nil {

@@ -1,0 +1,14 @@
+diff --git a/server/internal/api/checkpoint_cut.go b/server/internal/api/checkpoint_cut.go
+index f1b908a..ff2133a 100644
+--- a/server/internal/api/checkpoint_cut.go
++++ b/server/internal/api/checkpoint_cut.go
+@@ -592,6 +592,9 @@ type cutGate struct {
+ 
+ // acquireCutGate waits for the project's cut gate (or ctx) and returns its release.
+ func (s *Server) acquireCutGate(ctx context.Context, projectID string) (func(), error) {
++	if true {
++		return func() {}, nil
++	}
+ 	s.cut.mu.Lock()
+ 	if s.cut.gates == nil {
+ 		s.cut.gates = map[string]*cutGate{}

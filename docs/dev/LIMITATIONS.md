@@ -171,10 +171,9 @@ What this does not give:
   max(every 100th cut, once per hour per project). This is weaker than a plain 1-in-100 sample: an incorrect
   incremental cut can stay signed for at least an hour of cuts: until the first cut whose seq is a multiple of 100
   after the hour has passed, and longer while a backoff after a shadow that could not run is in force. The
-  limit exists because the shadow runs under the project write lock; at 1-in-100 and a cut every 3 s it ran every
-  ~5 minutes and each run stalled writes for up to its budget. The first cut after a start and every cut after a
-  mismatch are not rate-limited. The remaining stall: one shadow per hour per project, and the first cut after
-  every start, can each still hold the project write lock for up to the 5 s budget. A checked cut refuses to sign unless the full body is byte-identical
+  limit exists because the shadow is O(history) and costs database CPU, memory and a pool connection; at 1-in-100 and a cut every 3 s it would run every
+  ~5 minutes. (It used to run under the project write lock and stall writes for up to its budget; it no longer does, see below.) The first cut after a start and every cut after a
+  mismatch are not rate-limited. A checked cut refuses to sign unless the full body is byte-identical
   (`averin_checkpoint_shadow_checks_total`); the sample is chosen from the checkpoint being cut, so it does not
   depend on how cuts of different projects interleave. The first incremental cut of each project after the process
   starts is also checked once, which covers a base changed while the process was down and the first cut after an
@@ -182,21 +181,24 @@ What this does not give:
   that project, or the offline verifier, finds it. A refusal is not stored: it recurs because the refused seq is
   cut again as the same seq and checked again, also after a restart. After one mismatch
   (`averin_checkpoint_shadow_mismatch_total`, a log line starting `ALERT`) every cut is checked until the process
-  restarts. The shadow computation is O(history) and runs inside the project write transaction, so a checked cut
-  takes as long as every cut did before, up to the shadow's own time budget (1 s by default, at most 20 s): each scheduled shadow attempt can hold the
-  project write lock for up to about 1 s (a little more if the last statement overruns).
+  restarts. The shadow computation is O(history). A checked cut runs in three steps: the write lock is held only for the incremental cut and the decision (as for every cut);
+  the full and incremental bodies are then computed and compared on one repeatable-read snapshot OUTSIDE the write lock; the lock is taken again for a constant-time check that the
+  latest checkpoint is unchanged, and the exact bytes that were compared are signed. The shadow holds no write lock, so writes to the project do not wait for it; they can still wait for a pool connection when concurrent shadows fill the pool (see below). A mismatch returns before any lock or
+  signature, so a divergent checkpoint of a checked cut is never stored, witnessed or anchored. The costs: the shadow still uses database CPU, memory and one pool connection for up to its budget
+  (20 s by default, at most 20 s), and a checked cut's HTTP response takes up to that long; other cuts of the same project in the same process wait for it (writes do not). There is no process-wide limit on
+  concurrent shadows of different projects (after a restart every project's first cut is checked at once, and while the mismatch latch is set every cut of every project is shadowed, each holding a pool connection and database CPU for up to its budget). The pool's default size is small (the larger of 4 and the CPU count), so such shadows can occupy it and writes then wait for a connection. A checked checkpoint covers the records committed when its snapshot was taken: records committed during the shadow go into the next checkpoint
+  (it still covers everything committed before the cut request arrived). If another writer process cuts a checkpoint of the project while the shadow runs, this cut returns an error and signs nothing
+  (`averin_checkpoint_shadow_raced_total`); the supported setup is one writer per project. When that happens after the comparison matched, the project's first-cut check is not counted as done, so its next cut is shadowed again. The rate limit, the backoff and the latch are unchanged. Unshadowed cuts are signed unchecked, as before.
 - **The shadow stops being effective as history grows.** A shadow that cannot run (the full computation errors,
   hits the statement timeout, or runs out of that budget before producing a body) does not refuse: the incremental body is signed,
   `averin_checkpoint_shadow_failed_total` is incremented, an `ALERT` line is logged, and that project's next
   shadow waits for a backoff (not the next cut). A mismatch still refuses, and so does one found in a full body that came back over budget (a computed body is always compared; a match is signed and counted as late). The budget covers the whole shadow, not each statement. Once the full computation no longer
   fits its budget the counter rises on every attempt and the sampled check is effectively off for that project.
-  The default budget was lowered from 5 s to 1 s after the release-1 soak (about 0.5 calls/s, fresh history): the
-  full computation stopped fitting 5 s reliably from about 5 h of history, and near that boundary a success
-  (which resets the backoff) alternated with failures, so attempts stayed about hourly and each one was a 3.5 to
-  5 s write stall (metered calls of 3.3 to 5.1 s). The cost of the shorter budget is less coverage: as an
-  estimate scaled from that measurement (about 5 s at about 5 h on the soak host), the cross-check stops fitting
-  after roughly an hour of history at 0.5 calls/s, and later at lighter load. It was already ineffective beyond a
-  few hours. The differential tests are the primary assurance of the equality, not the shadow.
+  The default budget was lowered from 5 s to 1 s after the release-1 soak (about 0.5 calls/s, fresh history), because the
+  full computation stopped fitting 5 s reliably from about 5 h of history and each attempt was a 3.5 to 5 s write stall (metered calls of 3.3 to 5.1 s).
+  The shadow no longer runs under the write lock, so the default is now 20 s (the ceiling). As an estimate scaled from that measurement (about 1 s of full computation per hour of
+  history at 0.5 calls/s, not measured), the cross-check then stops fitting after roughly 20 h of history, and later at lighter load; making the full computation cheaper is a separate follow-up.
+  The differential tests are the primary assurance of the equality, not the shadow.
   What still holds the equality then is the differential tests (incremental equals full on random histories,
   in memory and on Postgres) and the guards every cut applies itself: the record count must equal the base count
   plus the records after it, every page of those records must hold exactly the next ordinals, and the new grants
