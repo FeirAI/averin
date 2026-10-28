@@ -4098,6 +4098,34 @@ fn check_grant_voids(
     valid
 }
 
+/// Per-thread counters of how the D6/M4/anchor checks were answered, for tests that must prove the incremental
+/// path really ran. Not part of the supported API.
+#[doc(hidden)]
+pub mod slow_path_probe {
+    use super::committed::*;
+    /// `(index fallbacks, cursor resets, per-frontier fallbacks, cursor advances, anchor fallbacks)`.
+    pub fn counts() -> (usize, usize, usize, usize, usize) {
+        (
+            INDEX_FALLBACKS.with(|c| c.get()),
+            CURSOR_RESETS.with(|c| c.get()),
+            FRONTIER_FALLBACKS.with(|c| c.get()),
+            CURSOR_ADVANCES.with(|c| c.get()),
+            ANCHOR_FALLBACKS.with(|c| c.get()),
+        )
+    }
+    pub fn reset() {
+        for c in [
+            &INDEX_FALLBACKS,
+            &CURSOR_RESETS,
+            &FRONTIER_FALLBACKS,
+            &CURSOR_ADVANCES,
+            &ANCHOR_FALLBACKS,
+        ] {
+            c.with(|x| x.set(0));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compute_broker_trust(
     cp_heads: &[(i64, bool, GrantHead, Vec<String>)],
@@ -4209,7 +4237,10 @@ fn compute_broker_trust(
     for frontier in headless {
         let commits_grants = match (&log_index, &reach) {
             (Some(i), Some(r)) => i.commits_any(r, frontier),
-            _ => !log_for(frontier).is_empty(),
+            _ => {
+                committed::bump(&committed::FRONTIER_FALLBACKS);
+                !log_for(frontier).is_empty()
+            }
         };
         if commits_grants {
             issues.push("a verified checkpoint commits D6 grants but carries no (well-formed) broker_grant_head — grants bound without a transparency head (suppression, D6)".into());
@@ -4253,6 +4284,7 @@ fn compute_broker_trust(
                 (st.n, st.gapless, st.root)
             }
             None => {
+                committed::bump(&committed::FRONTIER_FALLBACKS);
                 let log_i = log_for(frontier);
                 let gapless = log_i
                     .iter()
@@ -4452,36 +4484,27 @@ fn compute_federation_trust(
         }
     }
 
-    // Per-broker incremental index (a broker whose index cannot be built uses the per-frontier code below).
-    let partitions: BTreeMap<&String, Option<(committed::LogIndex, Vec<bool>)>> = brokers
-        .iter()
-        .map(|b| {
-            let built = dag_index
-                .as_ref()
-                .and_then(|d| committed::LogIndex::build(d, record_trust, records, Some(b)))
-                .map(|i| {
-                    let r = i.reach();
-                    (i, r)
-                });
-            (b, built)
-        })
-        .collect();
-    // does this frontier commit at least one of broker `b`'s log entries?
-    let commits_log = |frontier: &[String], b: &String| -> bool {
-        match partitions.get(b) {
-            Some(Some((i, r))) => i.commits_any(r, frontier),
-            _ => !log_for(frontier, b).is_empty(),
-        }
-    };
-
     // A verified checkpoint carrying NO (well-formed) broker_grant_heads map whose frontier commits a broker's
     // grants binds them without a head — suppression for that broker. Dedup identical frontiers first.
     let mut headless: Vec<&Vec<String>> = verified_fed_headless.iter().collect();
     headless.sort();
     headless.dedup();
     for frontier in headless {
+        // One walk per distinct headless frontier finds every broker whose log it commits (no per-broker
+        // index is held, so memory stays O(N) however many brokers there are). Without a DAG index the old
+        // per-broker code runs.
+        let committing: Option<BTreeSet<String>> = dag_index
+            .as_ref()
+            .and_then(|d| committed::brokers_committed_by(d, record_trust, records, frontier));
         for b in &brokers {
-            if commits_log(frontier, b) {
+            let hit = match &committing {
+                Some(set) => set.contains(b.as_str()),
+                None => {
+                    committed::bump(&committed::FRONTIER_FALLBACKS);
+                    !log_for(frontier, b).is_empty()
+                }
+            };
+            if hit {
                 issues.push(format!(
                     "broker '{b}': a verified checkpoint commits its grants but carries no broker_grant_heads map — bound without a transparency head (suppression, M4)"
                 ));
@@ -4533,6 +4556,24 @@ fn compute_federation_trust(
     // whose map lacks its head binds them without a head (suppression).
     let empty_root = grant_head_root(&[]);
     for b in &brokers {
+        // This broker's index and reach exist only for this iteration (dropped at its end), so peak extra
+        // memory is O(N + entries) however many brokers there are. An unbuildable index uses the old code.
+        let part = dag_index
+            .as_ref()
+            .and_then(|d| committed::LogIndex::build(d, record_trust, records, Some(b)))
+            .map(|i| {
+                let r = i.reach();
+                (i, r)
+            });
+        let commits_log = |frontier: &[String]| -> bool {
+            match &part {
+                Some((i, r)) => i.commits_any(r, frontier),
+                None => {
+                    committed::bump(&committed::FRONTIER_FALLBACKS);
+                    !log_for(frontier, b).is_empty()
+                }
+            }
+        };
         if !check_duplicate_seqs(&log_for(dag_heads, b), &format!("broker '{b}': "), issues) {
             suppressed.insert(b.clone());
         }
@@ -4541,7 +4582,7 @@ fn compute_federation_trust(
             match map.get(b) {
                 Some(h) => entries.push((*cseq, h, frontier)),
                 None => {
-                    if commits_log(frontier, b) {
+                    if commits_log(frontier) {
                         issues.push(format!("broker '{b}' checkpoint seq {cseq}: commits its grants but its broker_grant_heads has no head for it — bound without a head (suppression, M4)"));
                         suppressed.insert(b.clone());
                     }
@@ -4550,10 +4591,7 @@ fn compute_federation_trust(
         }
         entries.sort_by_key(|(seq, _, _)| *seq);
         entries.dedup_by(|a, c| a.0 == c.0 && a.1 == c.1 && a.2 == c.2);
-        let mut cursor = partitions
-            .get(b)
-            .and_then(|o| o.as_ref())
-            .map(|(i, _)| committed::LogCursor::new(i));
+        let mut cursor = part.as_ref().map(|(i, _)| committed::LogCursor::new(i));
         let mut prev_root = empty_root.clone();
         for (cseq, head, frontier) in entries {
             let (n_i, gapless, root_i) = match cursor.as_mut() {
@@ -4562,6 +4600,7 @@ fn compute_federation_trust(
                     (st.n, st.gapless, st.root)
                 }
                 None => {
+                    committed::bump(&committed::FRONTIER_FALLBACKS);
                     let log_i = log_for(frontier, b);
                     let gapless = log_i
                         .iter()
@@ -6646,11 +6685,14 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                 .flatten()
                 .is_some_and(|ts| ts <= changed_at),
             // a hash that is no DAG node (not expected: every record's hash is one): the per-checkpoint walk.
-            None => anchored.iter().any(|(_, ts, frontier)| {
-                is_canonical_ts(ts)
-                    && ts.as_str() <= changed_at
-                    && committed_set(records, &d.by_hash, frontier).contains(content_hash)
-            }),
+            None => {
+                committed::bump(&committed::ANCHOR_FALLBACKS);
+                anchored.iter().any(|(_, ts, frontier)| {
+                    is_canonical_ts(ts)
+                        && ts.as_str() <= changed_at
+                        && committed_set(records, &d.by_hash, frontier).contains(content_hash)
+                })
+            }
         }
     };
 

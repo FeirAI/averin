@@ -1044,6 +1044,34 @@ fn compromised_key_anchored_before_compromise_stays_trusted() {
 }
 
 #[test]
+fn compromised_key_anchored_exactly_at_compromise_time_stays_trusted() {
+    // The boundary is inclusive: a record committed in a checkpoint anchored AT the compromise instant still
+    // predates (does not postdate) the compromise. Also guards the anchor index: the lookup must be answered by
+    // it, never by the per-checkpoint fallback walk.
+    let (b, tsa_vk) = compromised_bundle("2026-06-15T10:02:00.000Z");
+    averin_decision_core::verify::slow_path_probe::reset();
+    let r = verify_bundle_with(
+        &b,
+        &VerifyOptions {
+            trusted_keys: Some(vec![pinned_compromised("2026-06-15T10:02:00.000Z")]),
+            trusted_tsa_keys: vec![tsa_vk],
+            ..Default::default()
+        },
+    );
+    assert!(
+        r.ok,
+        "equal-boundary anchor should pass; issues: {:?}",
+        r.issues
+    );
+    assert_eq!(r.records_proven, 3);
+    let (_, _, _, _, anchor_fallbacks) = averin_decision_core::verify::slow_path_probe::counts();
+    assert_eq!(
+        anchor_fallbacks, 0,
+        "anchored_before used the per-checkpoint walk"
+    );
+}
+
+#[test]
 fn compromised_key_not_anchored_before_compromise_is_untrusted() {
     // Same setup, but the auditor's authoritative compromise time (10:01) is BEFORE the anchor
     // (10:02) — so no record is anchored before the compromise; all downgrade to Untrusted.

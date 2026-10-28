@@ -32,13 +32,27 @@ pub(super) struct DagIndex {
     parents: Vec<Vec<usize>>,
 }
 
-// Test-only switches and counters. `FORCE_SLOW` makes every index unbuildable so the old per-frontier code
-// runs; the counters let a test prove that an honest history never takes either slow path.
+// `FORCE_SLOW` (test builds only) makes every index unbuildable so the old per-frontier code runs. The counters
+// are per thread and always compiled: they let a test prove that an honest history never takes a slow path and
+// that the fast path really ran (a refactor that silently stops using the index leaves every verdict unchanged,
+// so only these counters can catch it). They are read through `verify::slow_path_probe`.
 #[cfg(test)]
 thread_local! {
     pub(super) static FORCE_SLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+thread_local! {
     pub(super) static INDEX_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static CURSOR_RESETS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Checkpoint frontiers (or headless / reach questions) answered by the old per-frontier code.
+    pub(super) static FRONTIER_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Frontiers answered by `LogCursor::advance`.
+    pub(super) static CURSOR_ADVANCES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// `anchored_before` lookups answered by the per-checkpoint walk instead of the anchor index.
+    pub(super) static ANCHOR_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn bump(c: &'static std::thread::LocalKey<std::cell::Cell<usize>>) {
+    c.with(|x| x.set(x.get().saturating_add(1)));
 }
 
 impl DagIndex {
@@ -50,13 +64,12 @@ impl DagIndex {
     ) -> Option<DagIndex> {
         #[cfg(test)]
         if FORCE_SLOW.with(|f| f.get()) {
-            INDEX_FALLBACKS.with(|c| c.set(c.get() + 1));
+            bump(&INDEX_FALLBACKS);
             return None;
         }
         let built = Self::build_inner(records, by_hash, topo_order);
-        #[cfg(test)]
         if built.is_none() {
-            INDEX_FALLBACKS.with(|c| c.set(c.get() + 1));
+            bump(&INDEX_FALLBACKS);
         }
         built
     }
@@ -76,12 +89,18 @@ impl DagIndex {
             return None;
         }
         let mut parents: Vec<Vec<usize>> = Vec::with_capacity(topo_order.len());
-        for h in topo_order {
+        for (i, h) in topo_order.iter().enumerate() {
             let mut list = Vec::new();
             let rec = records.get(*by_hash.get(h)?)?;
             if let Some(arr) = rec.get("causal_prev_hashes").and_then(|v| v.as_array()) {
                 for p in arr {
                     if let Some(&pn) = p.as_str().and_then(|name| node_of.get(name)) {
+                        // `topo_order` must list parents first; the reach and anchor DPs rely on it. A
+                        // violation (not produced by `dag::build`) refuses the index so the per-frontier
+                        // code runs instead.
+                        if pn >= i {
+                            return None;
+                        }
                         list.push(pn);
                     }
                 }
@@ -90,6 +109,43 @@ impl DagIndex {
         }
         Some(DagIndex { node_of, parents })
     }
+}
+
+/// The brokers whose log (partition `Some(id)`) is committed by `frontier` at least once: the single-walk form
+/// of "`committed_broker_log(frontier, Some(id))` is non-empty" for every broker at once. `None` when a log
+/// entry's hash is not a DAG node (the caller then uses the per-broker old code).
+pub(super) fn brokers_committed_by(
+    dag: &DagIndex,
+    record_trust: &[RecordTrust],
+    records: &[CanonValue],
+    frontier: &[String],
+) -> Option<std::collections::BTreeSet<String>> {
+    let mut seen = vec![false; dag.parents.len()];
+    let mut stack: Vec<usize> = frontier
+        .iter()
+        .filter_map(|f| dag.node_of.get(f).copied())
+        .collect();
+    while let Some(x) = stack.pop() {
+        if !seen[x] {
+            seen[x] = true;
+            stack.extend(dag.parents[x].iter().copied());
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    for rt in record_trust {
+        let Some(key) = log_payload_key(&rt.broker_role) else {
+            continue;
+        };
+        let rec = records.get(rt.index)?;
+        let node = *dag.node_of.get(&rt.content_hash)?;
+        if !seen[node] || ev_int(rec, key, "broker_seq").filter(|s| *s >= 1).is_none() {
+            continue;
+        }
+        if let Some(b) = ev_str(rec, key, "broker_id").filter(|b| !b.is_empty()) {
+            out.insert(b);
+        }
+    }
+    Some(out)
 }
 
 /// The log entries of one partition (`None` = all brokers, `Some(id)` = one federation partition).
@@ -218,8 +274,7 @@ impl<'a, 'd> LogCursor<'a, 'd> {
     }
 
     fn reset(&mut self) {
-        #[cfg(test)]
-        CURSOR_RESETS.with(|c| c.set(c.get() + 1));
+        bump(&CURSOR_RESETS);
         self.in_prev.iter_mut().for_each(|b| *b = false);
         self.prev_front.clear();
         self.log.clear();
@@ -229,6 +284,7 @@ impl<'a, 'd> LogCursor<'a, 'd> {
 
     /// The `(count, gapless, root)` of `committed_broker_log(frontier)` for this partition.
     pub(super) fn advance(&mut self, frontier: &[String], rts: &[RecordTrust]) -> LogState {
+        bump(&CURSOR_ADVANCES);
         let front: Vec<usize> = frontier
             .iter()
             .filter_map(|f| self.idx.dag.node_of.get(f).copied())
@@ -533,6 +589,10 @@ mod tests {
             "2026-06-15T10:00:01.000Z",
             "2026-06-15T10:00:02.000Z",
             "not-a-timestamp",
+            // non-canonical stamps that sort BEFORE every canonical one: without the canonical guard one of
+            // these would become the minimum and make an anchor look earlier than it provably is.
+            "2026-06-15T09:00:00Z",
+            "2025-06-15T10:00:00.000",
         ];
         let mut rng = Rng(0x1234_5678_9abc_def1);
         for case_no in 0..800 {
@@ -830,8 +890,14 @@ mod tests {
             prior = root;
             cps.push((k as i64, k == n / 10, m, f));
         }
-        INDEX_FALLBACKS.with(|c| c.set(0));
-        CURSOR_RESETS.with(|c| c.set(0));
+        for c in [
+            &INDEX_FALLBACKS,
+            &CURSOR_RESETS,
+            &FRONTIER_FALLBACKS,
+            &CURSOR_ADVANCES,
+        ] {
+            c.with(|x| x.set(0));
+        }
         let out = run_fed(&case, &cps, &[]);
         assert_eq!(out.1, "sequence_verified", "{:?}", out.6);
         // the single-broker D6 path on the same history
@@ -863,5 +929,105 @@ mod tests {
             0,
             "cursor reset on an honest growing history"
         );
+        // the fast path really ran: one cursor advance per head, in the federation run and in the D6 run, and
+        // no frontier was answered by the old per-frontier code (guards against a silent revert of the speed-up).
+        assert_eq!(
+            CURSOR_ADVANCES.with(|c| c.get()),
+            2 * (n / 10),
+            "cursor not used for every head"
+        );
+        assert_eq!(
+            FRONTIER_FALLBACKS.with(|c| c.get()),
+            0,
+            "a frontier took the per-frontier code on an honest history"
+        );
+    }
+
+    #[test]
+    fn headless_checks_use_the_index_not_the_per_frontier_walk() {
+        // a headless frontier that commits grants, in D6 and in federation: the issue is raised through the
+        // reach DP / single-walk broker set, never through the per-frontier code.
+        let case = case_from(&[("broker", "a", 1, &[]), ("broker", "b", 1, &[0])]);
+        let headless = vec![vec![hash_of(1)]];
+        for c in [&FRONTIER_FALLBACKS, &CURSOR_ADVANCES] {
+            c.with(|x| x.set(0));
+        }
+        let out = run_fed(&case, &[], &headless);
+        assert!(
+            out.6
+                .iter()
+                .any(|i| i.contains("broker 'a': a verified checkpoint commits")),
+            "{:?}",
+            out.6
+        );
+        assert!(
+            out.6
+                .iter()
+                .any(|i| i.contains("broker 'b': a verified checkpoint commits")),
+            "{:?}",
+            out.6
+        );
+        let mut issues = Vec::new();
+        let d6: Vec<(i64, bool, GrantHead, Vec<String>)> = Vec::new();
+        let _ = compute_broker_trust(
+            &d6,
+            &headless,
+            false,
+            &case.rts,
+            &case.records,
+            &case.dag.by_hash,
+            &case.dag.topo_order,
+            &case.dag.heads,
+            0,
+            &mut issues,
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("carries no (well-formed)")),
+            "{issues:?}"
+        );
+        assert_eq!(
+            FRONTIER_FALLBACKS.with(|c| c.get()),
+            0,
+            "headless check took the per-frontier code"
+        );
+    }
+
+    #[test]
+    fn many_brokers_do_not_hold_per_broker_indexes() {
+        // 300 brokers, one grant each, one checkpoint: the verdict is unchanged by the lazy per-broker build.
+        let n = 300;
+        let parts: Vec<(&str, String, i64, Vec<usize>)> = (0..n)
+            .map(|i| {
+                (
+                    "broker",
+                    format!("b{i}"),
+                    1,
+                    if i == 0 { vec![] } else { vec![i - 1] },
+                )
+            })
+            .collect();
+        let refs: Vec<(&str, &str, i64, &[usize])> = parts
+            .iter()
+            .map(|(r, b, s, p)| (*r, b.as_str(), *s, p.as_slice()))
+            .collect();
+        let case = case_from(&refs);
+        let fast = run_fed(&case, &[], &[vec![hash_of(n - 1)]]);
+        FORCE_SLOW.with(|f| f.set(true));
+        let slow = run_fed(&case, &[], &[vec![hash_of(n - 1)]]);
+        FORCE_SLOW.with(|f| f.set(false));
+        assert_eq!(fast, slow);
+    }
+
+    #[test]
+    fn a_child_listed_before_its_parent_refuses_the_index() {
+        // topo_order that lists a child before its parent must not build the index (the reach and anchor DPs
+        // read parents first), so the per-frontier code runs instead.
+        let case = case_from(&[("broker", "a", 1, &[]), ("broker", "a", 2, &[0])]);
+        let mut topo = case.dag.topo_order.clone();
+        topo.reverse();
+        assert!(DagIndex::build(&case.records, &case.dag.by_hash, &case.dag.topo_order).is_some());
+        assert!(DagIndex::build(&case.records, &case.dag.by_hash, &topo).is_none());
     }
 }
