@@ -3794,6 +3794,7 @@ fn ev_int(rec: &CanonValue, payload_key: &str, field: &str) -> Option<i64> {
 
 /// A checkpoint's `broker_grant_head` (ADR 0004 D6 / MF2), parsed fail-closed.
 #[derive(PartialEq)]
+#[cfg_attr(test, derive(Clone))]
 struct GrantHead {
     max_seq: i64,
     prior_head_hash: String,

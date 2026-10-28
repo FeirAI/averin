@@ -32,9 +32,36 @@ pub(super) struct DagIndex {
     parents: Vec<Vec<usize>>,
 }
 
+// Test-only switches and counters. `FORCE_SLOW` makes every index unbuildable so the old per-frontier code
+// runs; the counters let a test prove that an honest history never takes either slow path.
+#[cfg(test)]
+thread_local! {
+    pub(super) static FORCE_SLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static INDEX_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static CURSOR_RESETS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl DagIndex {
     /// `None` when `topo_order` is not a bijection onto `by_hash`. The caller then uses the old code.
     pub(super) fn build(
+        records: &[CanonValue],
+        by_hash: &BTreeMap<String, usize>,
+        topo_order: &[String],
+    ) -> Option<DagIndex> {
+        #[cfg(test)]
+        if FORCE_SLOW.with(|f| f.get()) {
+            INDEX_FALLBACKS.with(|c| c.set(c.get() + 1));
+            return None;
+        }
+        let built = Self::build_inner(records, by_hash, topo_order);
+        #[cfg(test)]
+        if built.is_none() {
+            INDEX_FALLBACKS.with(|c| c.set(c.get() + 1));
+        }
+        built
+    }
+
+    fn build_inner(
         records: &[CanonValue],
         by_hash: &BTreeMap<String, usize>,
         topo_order: &[String],
@@ -191,6 +218,8 @@ impl<'a, 'd> LogCursor<'a, 'd> {
     }
 
     fn reset(&mut self) {
+        #[cfg(test)]
+        CURSOR_RESETS.with(|c| c.set(c.get() + 1));
         self.in_prev.iter_mut().for_each(|b| *b = false);
         self.prev_front.clear();
         self.log.clear();
@@ -275,7 +304,7 @@ impl DagIndex {
             }
             for f in frontier {
                 if let Some(&n) = self.node_of.get(f) {
-                    if min_ts[n].map_or(true, |cur| ts < cur) {
+                    if min_ts[n].is_none_or(|cur| ts < cur) {
                         min_ts[n] = Some(ts);
                     }
                 }
@@ -284,7 +313,7 @@ impl DagIndex {
         for x in (0..self.parents.len()).rev() {
             if let Some(t) = min_ts[x] {
                 for &p in &self.parents[x] {
-                    if min_ts[p].map_or(true, |cur| t < cur) {
+                    if min_ts[p].is_none_or(|cur| t < cur) {
                         min_ts[p] = Some(t);
                     }
                 }
@@ -542,5 +571,305 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- compute_*-level differentials and slow-path guards ----
+
+    use super::super::{compute_broker_trust, compute_federation_trust, GrantHead};
+
+    fn case_from(parts: &[(&str, &str, i64, &[usize])]) -> Case {
+        // (role, broker_id, broker_seq, parent indexes), in topological order
+        let mut json = Vec::new();
+        let mut roles = Vec::new();
+        for (i, (role, bid, seq, ps)) in parts.iter().enumerate() {
+            let plist: Vec<String> = ps.iter().map(|p| format!("\"{}\"", hash_of(*p))).collect();
+            json.push(format!(
+                "{{\"content_hash\":\"{}\",\"extensions\":{{\"broker\":{{\"grant_evidence\":{{\"broker_seq\":{seq},\"broker_id\":\"{bid}\",\"grant_id\":\"g{i}\"}}}}}},\"causal_prev_hashes\":[{}]}}",
+                hash_of(i),
+                plist.join(",")
+            ));
+            roles.push(*role);
+        }
+        let records: Vec<CanonValue> = json.iter().map(|j| CanonValue::parse(j).unwrap()).collect();
+        let rts: Vec<RecordTrust> = records
+            .iter()
+            .enumerate()
+            .map(|(idx, r)| RecordTrust {
+                index: idx,
+                record_id: format!("r{idx}"),
+                content_hash: r.get("content_hash").unwrap().as_str().unwrap().to_string(),
+                integrity_ok: true,
+                signature_ok: true,
+                key_status: "active".into(),
+                observed_via: "broker".into(),
+                trust: TrustLevel::IntegrityProven,
+                authority: AuthorityTrust::None,
+                broker_role: roles[idx].to_string(),
+                notes: Vec::new(),
+            })
+            .collect();
+        let dag = dag::build(&records).expect("DAG");
+        Case { records, rts, dag }
+    }
+
+    type FedOut = (
+        String,
+        String,
+        usize,
+        usize,
+        usize,
+        Vec<(String, String)>,
+        Vec<String>,
+    );
+
+    fn run_fed(
+        case: &Case,
+        cps: &[(i64, bool, BTreeMap<String, GrantHead>, Vec<String>)],
+        headless: &[Vec<String>],
+    ) -> FedOut {
+        let mut issues = Vec::new();
+        let ev = compute_federation_trust(
+            cps,
+            headless,
+            false,
+            &case.rts,
+            &case.records,
+            &case.dag.by_hash,
+            &case.dag.topo_order,
+            &case.dag.heads,
+            cps.iter().map(|c| c.0).max().unwrap_or(0),
+            &mut issues,
+        );
+        (
+            ev.broker_trust,
+            ev.status,
+            ev.brokers_total,
+            ev.brokers_seq_verified,
+            ev.cross_broker_suppression,
+            ev.per_broker,
+            issues,
+        )
+    }
+
+    fn run_both_fed(
+        case: &Case,
+        cps: &[(i64, bool, BTreeMap<String, GrantHead>, Vec<String>)],
+        headless: &[Vec<String>],
+    ) -> FedOut {
+        FORCE_SLOW.with(|f| f.set(true));
+        let slow = run_fed(case, cps, headless);
+        FORCE_SLOW.with(|f| f.set(false));
+        let fast = run_fed(case, cps, headless);
+        assert_eq!(
+            fast, slow,
+            "indexed and per-frontier federation results differ"
+        );
+        fast
+    }
+
+    #[test]
+    fn federation_headless_checkpoint_that_commits_a_grant_is_suppression() {
+        // a verified headless checkpoint commits broker a's grant: M4 suppression, indexed branch must see it.
+        let case = case_from(&[("broker", "a", 1, &[]), ("broker", "b", 1, &[0])]);
+        let heads: BTreeMap<String, GrantHead> = BTreeMap::new();
+        let front = vec![hash_of(0)];
+        let latest = (1, false, heads, case.dag.heads.clone());
+        let out = run_both_fed(&case, &[latest], &[front]);
+        assert!(
+            out.6.iter().any(|i| i.contains("broker 'a': a verified checkpoint commits its grants but carries no broker_grant_heads map")),
+            "{:?}",
+            out.6
+        );
+        assert_eq!(out.1, "suppression");
+    }
+
+    #[test]
+    fn federation_map_missing_a_broker_the_frontier_commits_is_suppression() {
+        let case = case_from(&[("broker", "a", 1, &[]), ("broker", "b", 1, &[0])]);
+        let full = case.dag.heads.clone();
+        let log_a = committed_broker_log(
+            &case.rts,
+            &case.records,
+            &case.dag.by_hash,
+            &full,
+            Some("a"),
+        );
+        let mut m = BTreeMap::new();
+        m.insert(
+            "a".to_string(),
+            GrantHead {
+                max_seq: log_a.len() as i64,
+                prior_head_hash: grant_head_root(&[]),
+                cumulative_root: grant_head_root(&log_a),
+            },
+        );
+        // an earlier checkpoint (seq 1) commits b's grant but its map has no head for b; the latest carries both
+        let early = (1, false, m.clone(), full.clone());
+        let out = run_both_fed(&case, &[early], &[]);
+        assert!(
+            out.6.iter().any(|i| i.contains("broker 'b' checkpoint seq 1: commits its grants but its broker_grant_heads has no head for it")),
+            "{:?}",
+            out.6
+        );
+    }
+
+    #[test]
+    fn compute_trust_matches_the_per_frontier_code_on_random_histories() {
+        let mut rng = Rng(0x0bad_5eed_1234_5678);
+        let mut suppressed_seen = 0usize;
+        let mut clean_seen = 0usize;
+        for case_no in 0..600 {
+            let case = make_case(&mut rng);
+            let mut prev: Vec<String> = Vec::new();
+            let mut cps = Vec::new();
+            let mut headless = Vec::new();
+            let mut chain: BTreeMap<String, String> = BTreeMap::new();
+            for seq in 1..=(1 + rng.below(5)) as i64 {
+                let f = make_frontier(&mut rng, &case, &prev);
+                let mut m = BTreeMap::new();
+                for b in ["a", "b", "c"] {
+                    if rng.below(5) == 0 {
+                        continue; // dropped head
+                    }
+                    let log = committed_broker_log(
+                        &case.rts,
+                        &case.records,
+                        &case.dag.by_hash,
+                        &f,
+                        Some(b),
+                    );
+                    let honest = rng.below(3) != 0;
+                    let prior = chain
+                        .get(b)
+                        .cloned()
+                        .unwrap_or_else(|| grant_head_root(&[]));
+                    let root = grant_head_root(&log);
+                    chain.insert(b.to_string(), root.clone());
+                    m.insert(
+                        b.to_string(),
+                        GrantHead {
+                            max_seq: log.len() as i64 + if honest { 0 } else { 1 },
+                            prior_head_hash: prior,
+                            cumulative_root: root,
+                        },
+                    );
+                }
+                if rng.below(4) == 0 {
+                    headless.push(f.clone());
+                } else {
+                    cps.push((seq, rng.below(2) == 0, m, f.clone()));
+                }
+                prev = f;
+            }
+            let out = run_both_fed(&case, &cps, &headless);
+            if out.1 == "suppression" {
+                suppressed_seen += 1;
+            } else {
+                clean_seen += 1;
+            }
+            // broker-trust (D6), same comparison
+            let cp_heads: Vec<(i64, bool, GrantHead, Vec<String>)> = cps
+                .iter()
+                .filter_map(|(s, a, m, f)| m.get("a").map(|h| (*s, *a, h.clone(), f.clone())))
+                .collect();
+            let run_broker = || {
+                let mut issues = Vec::new();
+                let t = compute_broker_trust(
+                    &cp_heads,
+                    &headless,
+                    false,
+                    &case.rts,
+                    &case.records,
+                    &case.dag.by_hash,
+                    &case.dag.topo_order,
+                    &case.dag.heads,
+                    cps.iter().map(|c| c.0).max().unwrap_or(0),
+                    &mut issues,
+                );
+                (t, issues)
+            };
+            FORCE_SLOW.with(|f| f.set(true));
+            let slow = run_broker();
+            FORCE_SLOW.with(|f| f.set(false));
+            assert_eq!(run_broker(), slow, "case {case_no}: broker trust differs");
+        }
+        assert!(
+            suppressed_seen > 50 && clean_seen > 0,
+            "{suppressed_seen} {clean_seen}"
+        );
+    }
+
+    #[test]
+    fn honest_growing_history_never_takes_a_slow_path() {
+        // a long linear history, one grant per record, a checkpoint every 10 records, each frontier extending
+        // the previous one: the index must build and the cursor must never reset.
+        let n = 3000;
+        let parts: Vec<(&str, &str, i64, Vec<usize>)> = (0..n)
+            .map(|i| {
+                (
+                    "broker",
+                    "a",
+                    i as i64 + 1,
+                    if i == 0 { vec![] } else { vec![i - 1] },
+                )
+            })
+            .collect();
+        let refs: Vec<(&str, &str, i64, &[usize])> = parts
+            .iter()
+            .map(|(r, b, s, p)| (*r, *b, *s, p.as_slice()))
+            .collect();
+        let case = case_from(&refs);
+        let mut cps = Vec::new();
+        let mut prior = grant_head_root(&[]);
+        for k in 1..=(n / 10) {
+            let f = vec![hash_of(k * 10 - 1)];
+            let log =
+                committed_broker_log(&case.rts, &case.records, &case.dag.by_hash, &f, Some("a"));
+            let root = grant_head_root(&log);
+            let mut m = BTreeMap::new();
+            m.insert(
+                "a".to_string(),
+                GrantHead {
+                    max_seq: log.len() as i64,
+                    prior_head_hash: prior.clone(),
+                    cumulative_root: root.clone(),
+                },
+            );
+            prior = root;
+            cps.push((k as i64, k == n / 10, m, f));
+        }
+        INDEX_FALLBACKS.with(|c| c.set(0));
+        CURSOR_RESETS.with(|c| c.set(0));
+        let out = run_fed(&case, &cps, &[]);
+        assert_eq!(out.1, "sequence_verified", "{:?}", out.6);
+        // the single-broker D6 path on the same history
+        let d6: Vec<(i64, bool, GrantHead, Vec<String>)> = cps
+            .iter()
+            .map(|(s, a, m, f)| (*s, *a, m["a"].clone(), f.clone()))
+            .collect();
+        let mut issues = Vec::new();
+        let t = compute_broker_trust(
+            &d6,
+            &[],
+            false,
+            &case.rts,
+            &case.records,
+            &case.dag.by_hash,
+            &case.dag.topo_order,
+            &case.dag.heads,
+            (n / 10) as i64,
+            &mut issues,
+        );
+        assert_eq!(t, "sequence_verified", "{issues:?}");
+        assert_eq!(
+            INDEX_FALLBACKS.with(|c| c.get()),
+            0,
+            "index fell back to the per-frontier code"
+        );
+        assert_eq!(
+            CURSOR_RESETS.with(|c| c.get()),
+            0,
+            "cursor reset on an honest growing history"
+        );
     }
 }
