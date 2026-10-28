@@ -26,6 +26,7 @@ use crate::sign::decode_pubkey;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod committed;
 mod headline;
 mod temporal;
 mod verdict;
@@ -4104,10 +4105,16 @@ fn compute_broker_trust(
     record_trust: &[RecordTrust],
     records: &[CanonValue],
     by_hash: &BTreeMap<String, usize>,
+    topo_order: &[String],
     dag_heads: &[String],
     latest_cp_seq: i64,
     issues: &mut Vec<String>,
 ) -> String {
+    // The incremental index (None => the per-frontier code below runs unchanged for every checkpoint).
+    let dag_index = committed::DagIndex::build(records, by_hash, topo_order);
+    let log_index = dag_index
+        .as_ref()
+        .and_then(|d| committed::LogIndex::build(d, record_trust, records, None));
     // the tuple-classified single-broker (D6) grant log committed by an arbitrary checkpoint frontier.
     let log_for =
         |frontier: &[String]| committed_broker_log(record_trust, records, by_hash, frontier, None);
@@ -4197,8 +4204,13 @@ fn compute_broker_trust(
     let mut headless: Vec<&Vec<String>> = verified_headless.iter().collect();
     headless.sort();
     headless.dedup();
+    let reach = log_index.as_ref().map(|i| i.reach());
     for frontier in headless {
-        if !log_for(frontier).is_empty() {
+        let commits_grants = match (&log_index, &reach) {
+            (Some(i), Some(r)) => i.commits_any(r, frontier),
+            _ => !log_for(frontier).is_empty(),
+        };
+        if commits_grants {
             issues.push("a verified checkpoint commits D6 grants but carries no (well-formed) broker_grant_head — grants bound without a transparency head (suppression, D6)".into());
             ok = false;
         }
@@ -4231,15 +4243,24 @@ fn compute_broker_trust(
     // genuine same-seq divergence is a real fork already flagged by validate_chain.
     heads.dedup_by(|a, b| a.0 == b.0 && a.2 == b.2 && a.3 == b.3);
 
+    let mut cursor = log_index.as_ref().map(committed::LogCursor::new);
     let mut prev_root = empty_root;
     for (cseq, _, head, frontier) in heads {
-        let log_i = log_for(frontier);
-        let n_i = log_i.len() as i64;
-        if !log_i
-            .iter()
-            .enumerate()
-            .all(|(i, (seq, _))| *seq == i as i64 + 1)
-        {
+        let (n_i, gapless, root_i) = match cursor.as_mut() {
+            Some(c) => {
+                let st = c.advance(frontier, record_trust);
+                (st.n, st.gapless, st.root)
+            }
+            None => {
+                let log_i = log_for(frontier);
+                let gapless = log_i
+                    .iter()
+                    .enumerate()
+                    .all(|(i, (seq, _))| *seq == i as i64 + 1);
+                (log_i.len() as i64, gapless, grant_head_root(&log_i))
+            }
+        };
+        if !gapless {
             issues.push(format!("checkpoint seq {cseq}: committed grant broker_seq set is not a gapless [1..N] prefix — suppression/renumber (D6)"));
             ok = false;
         }
@@ -4247,7 +4268,7 @@ fn compute_broker_trust(
             issues.push(format!("checkpoint seq {cseq}: broker_grant_head.max_seq {} != its committed grant count {n_i} — omission/inflation (D6)", head.max_seq));
             ok = false;
         }
-        if grant_head_root(&log_i) != head.cumulative_root {
+        if root_i != head.cumulative_root {
             issues.push(format!("checkpoint seq {cseq}: broker_grant_head.cumulative_root does not re-derive from its committed grant log — suppression (D6)"));
             ok = false;
         }
@@ -4323,6 +4344,7 @@ fn compute_federation_trust(
     record_trust: &[RecordTrust],
     records: &[CanonValue],
     by_hash: &BTreeMap<String, usize>,
+    topo_order: &[String],
     dag_heads: &[String],
     latest_cp_seq: i64,
     issues: &mut Vec<String>,
@@ -4338,6 +4360,7 @@ fn compute_federation_trust(
 
     let full_committed = committed_set(records, by_hash, dag_heads);
     let mut suppressed: BTreeSet<String> = BTreeSet::new();
+    let dag_index = committed::DagIndex::build(records, by_hash, topo_order);
 
     if malformed_fed_head {
         issues.push("a verified checkpoint carries a present-but-malformed broker_grant_heads map — tampered/garbled federation head (suppression, M4)".into());
@@ -4428,6 +4451,28 @@ fn compute_federation_trust(
         }
     }
 
+    // Per-broker incremental index (a broker whose index cannot be built uses the per-frontier code below).
+    let partitions: BTreeMap<&String, Option<(committed::LogIndex, Vec<bool>)>> = brokers
+        .iter()
+        .map(|b| {
+            let built = dag_index
+                .as_ref()
+                .and_then(|d| committed::LogIndex::build(d, record_trust, records, Some(b)))
+                .map(|i| {
+                    let r = i.reach();
+                    (i, r)
+                });
+            (b, built)
+        })
+        .collect();
+    // does this frontier commit at least one of broker `b`'s log entries?
+    let commits_log = |frontier: &[String], b: &String| -> bool {
+        match partitions.get(b) {
+            Some(Some((i, r))) => i.commits_any(r, frontier),
+            _ => !log_for(frontier, b).is_empty(),
+        }
+    };
+
     // A verified checkpoint carrying NO (well-formed) broker_grant_heads map whose frontier commits a broker's
     // grants binds them without a head — suppression for that broker. Dedup identical frontiers first.
     let mut headless: Vec<&Vec<String>> = verified_fed_headless.iter().collect();
@@ -4435,7 +4480,7 @@ fn compute_federation_trust(
     headless.dedup();
     for frontier in headless {
         for b in &brokers {
-            if !log_for(frontier, b).is_empty() {
+            if commits_log(frontier, b) {
                 issues.push(format!(
                     "broker '{b}': a verified checkpoint commits its grants but carries no broker_grant_heads map — bound without a transparency head (suppression, M4)"
                 ));
@@ -4495,7 +4540,7 @@ fn compute_federation_trust(
             match map.get(b) {
                 Some(h) => entries.push((*cseq, h, frontier)),
                 None => {
-                    if !log_for(frontier, b).is_empty() {
+                    if commits_log(frontier, b) {
                         issues.push(format!("broker '{b}' checkpoint seq {cseq}: commits its grants but its broker_grant_heads has no head for it — bound without a head (suppression, M4)"));
                         suppressed.insert(b.clone());
                     }
@@ -4504,15 +4549,27 @@ fn compute_federation_trust(
         }
         entries.sort_by_key(|(seq, _, _)| *seq);
         entries.dedup_by(|a, c| a.0 == c.0 && a.1 == c.1 && a.2 == c.2);
+        let mut cursor = partitions
+            .get(b)
+            .and_then(|o| o.as_ref())
+            .map(|(i, _)| committed::LogCursor::new(i));
         let mut prev_root = empty_root.clone();
         for (cseq, head, frontier) in entries {
-            let log_i = log_for(frontier, b);
-            let n_i = log_i.len() as i64;
-            if !log_i
-                .iter()
-                .enumerate()
-                .all(|(i, (seq, _))| *seq == i as i64 + 1)
-            {
+            let (n_i, gapless, root_i) = match cursor.as_mut() {
+                Some(c) => {
+                    let st = c.advance(frontier, record_trust);
+                    (st.n, st.gapless, st.root)
+                }
+                None => {
+                    let log_i = log_for(frontier, b);
+                    let gapless = log_i
+                        .iter()
+                        .enumerate()
+                        .all(|(i, (seq, _))| *seq == i as i64 + 1);
+                    (log_i.len() as i64, gapless, grant_head_root(&log_i))
+                }
+            };
+            if !gapless {
                 issues.push(format!("broker '{b}' checkpoint seq {cseq}: committed grant broker_seq set is not a gapless [1..N] prefix — suppression/renumber (M4)"));
                 suppressed.insert(b.clone());
             }
@@ -4520,7 +4577,7 @@ fn compute_federation_trust(
                 issues.push(format!("broker '{b}' checkpoint seq {cseq}: head max_seq {} != its committed grant count {n_i} — omission/inflation (M4)", head.max_seq));
                 suppressed.insert(b.clone());
             }
-            if grant_head_root(&log_i) != head.cumulative_root {
+            if root_i != head.cumulative_root {
                 issues.push(format!("broker '{b}' checkpoint seq {cseq}: head cumulative_root does not re-derive from its committed grant log — suppression (M4)"));
                 suppressed.insert(b.clone());
             }
@@ -6555,13 +6612,18 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     }
 
     // ---- 5. finalize per-record trust (pass 2) ----
-    // Precompute the committed set ONCE per anchored checkpoint (not per record×checkpoint) to
-    // avoid quadratic blowup on large bundles.
-    let anchored_committed: Vec<(String, BTreeSet<String>)> = match dag_opt.as_ref() {
-        Some(d) => anchored
-            .iter()
-            .map(|(_, ts, frontier)| (ts.clone(), committed_set(records, &d.by_hash, frontier)))
-            .collect(),
+    // Earliest canonical anchor time that commits each record (one index and one backward pass, instead of one
+    // committed set per anchored checkpoint: O(N), not O(anchors x N) in time and memory).
+    let anchor_dag_index = dag_opt
+        .as_ref()
+        .and_then(|d| committed::DagIndex::build(records, &d.by_hash, &d.topo_order));
+    let anchor_min_ts: Vec<Option<&str>> = match &anchor_dag_index {
+        Some(ix) => ix.min_anchor_times(
+            anchored
+                .iter()
+                .map(|(_, ts, f)| (ts.as_str(), f.as_slice())),
+            is_canonical_ts,
+        ),
         None => Vec::new(),
     };
     let anchored_before = |content_hash: &str, changed_at: &str| -> bool {
@@ -6570,9 +6632,25 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
         if !is_canonical_ts(changed_at) {
             return false;
         }
-        anchored_committed.iter().any(|(ts, committed)| {
-            is_canonical_ts(ts) && ts.as_str() <= changed_at && committed.contains(content_hash)
-        })
+        let Some(d) = dag_opt.as_ref() else {
+            return false;
+        };
+        match anchor_dag_index
+            .as_ref()
+            .and_then(|ix| ix.node(content_hash))
+        {
+            Some(n) => anchor_min_ts
+                .get(n)
+                .copied()
+                .flatten()
+                .is_some_and(|ts| ts <= changed_at),
+            // a hash that is no DAG node (not expected: every record's hash is one): the per-checkpoint walk.
+            None => anchored.iter().any(|(_, ts, frontier)| {
+                is_canonical_ts(ts)
+                    && ts.as_str() <= changed_at
+                    && committed_set(records, &d.by_hash, frontier).contains(content_hash)
+            }),
+        }
     };
 
     let mut record_trust = Vec::with_capacity(pending.len());
@@ -6832,10 +6910,18 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
     //     unchanged — closure is never inherited from an unanchored peer.
     // Replacing an exporter watermark with this cryptographic boundary closes the watermark-specific
     // suppression path (MUST-FIX 2); never-committed use suppression remains an accepted residual.
-    let closed: BTreeSet<&str> = anchored_committed
-        .iter()
-        .flat_map(|(_, set)| set.iter().map(String::as_str))
-        .collect();
+    // the union of the anchored checkpoints' committed sets is the committed set of the union of their frontiers.
+    let closed_set: BTreeSet<String> = match dag_opt.as_ref() {
+        Some(d) => {
+            let all: Vec<String> = anchored
+                .iter()
+                .flat_map(|(_, _, f)| f.iter().cloned())
+                .collect();
+            committed_set(records, &d.by_hash, &all)
+        }
+        None => BTreeSet::new(),
+    };
+    let closed: BTreeSet<&str> = closed_set.iter().map(String::as_str).collect();
     // The COMMITTED extension applies once the auditor pins a Tier-B authority (broker, per-broker, or resource
     // keys) — i.e. asks for Tier-B evaluation at all. With NONE pinned no grant/use can ever validate, so every
     // committed receipt would read "not validatable" and fail the default, pin-nothing integrity flow (the web
@@ -8267,6 +8353,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     &record_trust,
                     records,
                     &d.by_hash,
+                    &d.topo_order,
                     &d.heads,
                     latest_cp_seq,
                     &mut issues,
@@ -8285,6 +8372,7 @@ pub fn verify_bundle_with(bundle: &CanonValue, opts: &VerifyOptions) -> VerifyRe
                     &record_trust,
                     records,
                     &d.by_hash,
+                    &d.topo_order,
                     &d.heads,
                     latest_cp_seq,
                     &mut issues,

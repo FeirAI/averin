@@ -36,6 +36,22 @@ make test-server          # builds native Rust with rfc3161, then Go vet + test
 make test-verifier        # = (cd verifier && bun test)
 ```
 
+### Verifier performance and golden comparison
+
+The D6 grant-log check derives each checkpoint's log incrementally (`core/src/verify/committed.rs`). Its tests are
+differential: `cargo test -p averin-decision-core --lib committed` compares every answer (log count, gapless flag,
+`cumulative_root`, "commits any grant", anchor times) with the old per-frontier code on seeded random histories, and
+`tests/adversarial.rs` (`d6_cursor_*`) covers the reset, merge and duplicate-seq paths end to end.
+
+To compare two builds on a real export, cut a prefix at a checkpoint boundary (`records[:cp.record_count]`,
+`checkpoints[:k+1]`, same `keys`) and run the ignored harness on each build, then compare and time the output:
+
+```bash
+AVERIN_PERF_BUNDLE=b.json AVERIN_PERF_OPTS=opts.json AVERIN_PERF_OUT=report.json \
+  cargo test -p averin-decision-core --test perf_report_dump -- --ignored
+sha256sum report.json      # must be identical across builds
+```
+
 ### Real-Postgres API, store, ledger and durable-state tests
 
 Several API race, durability, store-parity, append-only and consume-before-act-ledger tests

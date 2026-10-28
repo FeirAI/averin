@@ -16939,3 +16939,285 @@ fn a_month_with_an_unresolved_cross_month_outcome_does_not_decide_authorized() {
         "an outcome whose intent is in an earlier month must not let the month satisfy authorized"
     );
 }
+
+// ---- D6 incremental grant-log cursor (wave1 export perf): paths other than "each checkpoint extends the last" ----
+// These bundles take the verifier's reset and merge paths. Their issues must be exactly the ones the
+// per-frontier re-derivation (the code before the cursor) reported.
+
+fn d6_two_session_grants(rec: &SigningKey, seqs: [i64; 3]) -> (Vec<CanonValue>, Vec<String>) {
+    // g1 and g3 chain in session s1, g2 is the head of session s2.
+    let ev = |n: usize, seq: i64| grant_evidence_d6(&format!("grant-{n}"), seq);
+    let g1 = seal_grant_at(
+        rec,
+        rec,
+        "grant-1",
+        &ev(1, seqs[0]),
+        &[],
+        "s1",
+        "2026-06-15T10:00:00.000Z",
+    );
+    let h1 = content_hash_of(&g1);
+    let g2 = seal_grant_at(
+        rec,
+        rec,
+        "grant-2",
+        &ev(2, seqs[1]),
+        &[],
+        "s2",
+        "2026-06-15T10:00:01.000Z",
+    );
+    let g3 = seal_grant_at(
+        rec,
+        rec,
+        "grant-3",
+        &ev(3, seqs[2]),
+        std::slice::from_ref(&h1),
+        "s1",
+        "2026-06-15T10:00:02.000Z",
+    );
+    let hs = vec![h1, content_hash_of(&g2), content_hash_of(&g3)];
+    (vec![g1, g2, g3], hs)
+}
+
+fn d6_verify(
+    rec: &SigningKey,
+    tsa: &SigningKey,
+    records: Vec<CanonValue>,
+    cps: Vec<CanonValue>,
+) -> averin_decision_core::verify::VerifyReport {
+    let res = signing_key_from_seed(&[3u8; 32]);
+    verify_bundle_with(
+        &tier_b_bundle(&rec.verifying_key(), records, cps),
+        &pinned_roles(
+            rec.verifying_key(),
+            res.verifying_key(),
+            tsa.verifying_key(),
+        ),
+    )
+}
+
+#[test]
+fn d6_cursor_honest_growth_with_two_sessions_verifies() {
+    // cp0 commits {g1, g2}; cp1 commits {g3, g2} (g3 chains on g1): the previous closure is contained, so the
+    // incremental path runs and the whole history is sequence_verified.
+    let (rec, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let (recs, hs) = d6_two_session_grants(&rec, [1, 2, 3]);
+    let (h1, h2, h3) = (hs[0].clone(), hs[1].clone(), hs[2].clone());
+    let mut f0 = vec![h1.clone(), h2.clone()];
+    f0.sort();
+    let mut f1 = vec![h3.clone(), h2.clone()];
+    f1.sort();
+    let cp0 = checkpoint_seqd(
+        &rec,
+        "cp0",
+        0,
+        None,
+        &f0,
+        2,
+        Some(grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &h1), (2, &h2)]))),
+        Some(&tsa),
+    );
+    let cp0h = checkpoint_hash(&cp0);
+    let cp1 = checkpoint_seqd(
+        &rec,
+        "cp1",
+        1,
+        Some(&cp0h),
+        &f1,
+        3,
+        Some(grant_head_cv(
+            3,
+            &ghr(&[(1, &h1), (2, &h2)]),
+            &ghr(&[(1, &h1), (2, &h2), (3, &h3)]),
+        )),
+        Some(&tsa),
+    );
+    let r = d6_verify(&rec, &tsa, recs, vec![cp0, cp1]);
+    assert!(r.ok, "issues: {:?}", r.issues);
+    assert_eq!(r.broker_trust, "sequence_verified");
+}
+
+#[test]
+fn d6_cursor_reset_when_a_later_frontier_drops_a_session_head() {
+    // cp0 commits {g1, g2}; cp1's frontier is {g3} only: it no longer contains g2, so the previous closure is
+    // NOT a subset. The log must be recomputed ([1, 3]: a gap), never extended from cp0's log.
+    let (rec, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let (recs, hs) = d6_two_session_grants(&rec, [1, 2, 3]);
+    let (h1, h2, h3) = (hs[0].clone(), hs[1].clone(), hs[2].clone());
+    let mut f0 = vec![h1.clone(), h2.clone()];
+    f0.sort();
+    let cp0 = checkpoint_seqd(
+        &rec,
+        "cp0",
+        0,
+        None,
+        &f0,
+        2,
+        Some(grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &h1), (2, &h2)]))),
+        Some(&tsa),
+    );
+    let cp0h = checkpoint_hash(&cp0);
+    // a head that claims the extended log [1,2,3] over a frontier that only commits [1,3]
+    let cp1 = checkpoint_seqd(
+        &rec,
+        "cp1",
+        1,
+        Some(&cp0h),
+        std::slice::from_ref(&h3),
+        3,
+        Some(grant_head_cv(
+            3,
+            &ghr(&[(1, &h1), (2, &h2)]),
+            &ghr(&[(1, &h1), (2, &h2), (3, &h3)]),
+        )),
+        Some(&tsa),
+    );
+    let r = d6_verify(&rec, &tsa, recs, vec![cp0, cp1]);
+    assert!(!r.ok);
+    assert!(
+        r.issues.iter().any(
+            |i| i.contains("checkpoint seq 1: committed grant broker_seq set is not a gapless")
+        ),
+        "issues: {:?}",
+        r.issues
+    );
+    assert!(
+        r.issues.iter().any(|i| i.contains(
+            "checkpoint seq 1: broker_grant_head.max_seq 3 != its committed grant count 2"
+        )),
+        "issues: {:?}",
+        r.issues
+    );
+    assert!(
+        r.issues.iter().any(|i| i
+            .contains("checkpoint seq 1: broker_grant_head.cumulative_root does not re-derive")),
+        "issues: {:?}",
+        r.issues
+    );
+    assert!(
+        !r.issues.iter().any(|i| i.contains("checkpoint seq 0")),
+        "issues: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn d6_cursor_merges_a_lower_seq_that_arrives_in_a_later_checkpoint() {
+    // g1 has seq 1 and g3 has seq 3 (session s1); g2 (seq 2, session s2) only joins at cp1. cp0's log is [1, 3]
+    // (a gap: a hard violation at seq 0), cp1's is [1, 2, 3] and must be re-derived with seq 2 merged BETWEEN them.
+    let (rec, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let (recs, hs) = d6_two_session_grants(&rec, [1, 2, 3]);
+    let (h1, h2, h3) = (hs[0].clone(), hs[1].clone(), hs[2].clone());
+    let cp0 = checkpoint_seqd(
+        &rec,
+        "cp0",
+        0,
+        None,
+        std::slice::from_ref(&h3),
+        2,
+        Some(grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &h1), (3, &h3)]))),
+        Some(&tsa),
+    );
+    let cp0h = checkpoint_hash(&cp0);
+    let mut f1 = vec![h3.clone(), h2.clone()];
+    f1.sort();
+    let cp1 = checkpoint_seqd(
+        &rec,
+        "cp1",
+        1,
+        Some(&cp0h),
+        &f1,
+        3,
+        Some(grant_head_cv(
+            3,
+            &ghr(&[(1, &h1), (3, &h3)]),
+            &ghr(&[(1, &h1), (2, &h2), (3, &h3)]),
+        )),
+        Some(&tsa),
+    );
+    let r = d6_verify(&rec, &tsa, recs, vec![cp0, cp1]);
+    assert!(!r.ok);
+    let gap_issues: Vec<&String> = r
+        .issues
+        .iter()
+        .filter(|i| i.contains("not a gapless"))
+        .collect();
+    assert_eq!(gap_issues.len(), 1, "issues: {:?}", r.issues);
+    assert!(
+        gap_issues[0].contains("checkpoint seq 0"),
+        "issues: {:?}",
+        r.issues
+    );
+    assert!(
+        !r.issues.iter().any(|i| i.contains("checkpoint seq 1")),
+        "cp1's head is correct for [1,2,3]: {:?}",
+        r.issues
+    );
+}
+
+#[test]
+fn d6_cursor_duplicate_seq_at_the_append_boundary_is_reported() {
+    // g2 and g3 both claim seq 2. cp0 commits {g1, g2}; cp1 commits {g3, g2}: the new entry's seq equals the
+    // last seq of the previous log, so it is not a pure append. The duplicate must still be reported.
+    let (rec, tsa) = (
+        signing_key_from_seed(&[0u8; 32]),
+        test_tsa_key(&[200u8; 32]),
+    );
+    let (recs, hs) = d6_two_session_grants(&rec, [1, 2, 2]);
+    let (h1, h2, h3) = (hs[0].clone(), hs[1].clone(), hs[2].clone());
+    let mut f0 = vec![h1.clone(), h2.clone()];
+    f0.sort();
+    let mut f1 = vec![h3.clone(), h2.clone()];
+    f1.sort();
+    let cp0 = checkpoint_seqd(
+        &rec,
+        "cp0",
+        0,
+        None,
+        &f0,
+        2,
+        Some(grant_head_cv(2, &ghr(&[]), &ghr(&[(1, &h1), (2, &h2)]))),
+        Some(&tsa),
+    );
+    let cp0h = checkpoint_hash(&cp0);
+    // the head claims the log (1, h1) (2, h2) (2, h3)
+    let cp1 = checkpoint_seqd(
+        &rec,
+        "cp1",
+        1,
+        Some(&cp0h),
+        &f1,
+        3,
+        Some(grant_head_cv(
+            3,
+            &ghr(&[(1, &h1), (2, &h2)]),
+            &ghr(&[(1, &h1), (2, &h2), (2, &h3)]),
+        )),
+        Some(&tsa),
+    );
+    let r = d6_verify(&rec, &tsa, recs, vec![cp0, cp1]);
+    assert!(!r.ok);
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.contains("broker_seq 2 is claimed by more than one committed record")),
+        "issues: {:?}",
+        r.issues
+    );
+    assert!(
+        r.issues.iter().any(
+            |i| i.contains("checkpoint seq 1: committed grant broker_seq set is not a gapless")
+        ),
+        "issues: {:?}",
+        r.issues
+    );
+}
