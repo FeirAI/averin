@@ -575,7 +575,7 @@ mod tests {
 
     // ---- compute_*-level differentials and slow-path guards ----
 
-    use super::super::{compute_broker_trust, compute_federation_trust, GrantHead};
+    use super::super::{compute_broker_trust, compute_federation_trust, FedHeadCp, GrantHead};
 
     fn case_from(parts: &[(&str, &str, i64, &[usize])]) -> Case {
         // (role, broker_id, broker_seq, parent indexes), in topological order
@@ -622,11 +622,7 @@ mod tests {
         Vec<String>,
     );
 
-    fn run_fed(
-        case: &Case,
-        cps: &[(i64, bool, BTreeMap<String, GrantHead>, Vec<String>)],
-        headless: &[Vec<String>],
-    ) -> FedOut {
+    fn run_fed(case: &Case, cps: &[FedHeadCp], headless: &[Vec<String>]) -> FedOut {
         let mut issues = Vec::new();
         let ev = compute_federation_trust(
             cps,
@@ -651,11 +647,7 @@ mod tests {
         )
     }
 
-    fn run_both_fed(
-        case: &Case,
-        cps: &[(i64, bool, BTreeMap<String, GrantHead>, Vec<String>)],
-        headless: &[Vec<String>],
-    ) -> FedOut {
+    fn run_both_fed(case: &Case, cps: &[FedHeadCp], headless: &[Vec<String>]) -> FedOut {
         FORCE_SLOW.with(|f| f.set(true));
         let slow = run_fed(case, cps, headless);
         FORCE_SLOW.with(|f| f.set(false));
