@@ -38,8 +38,8 @@ What contains this:
   body (the duration and a pointer to the month segments) before any body byte, and is counted in
   `averin_bundle_deadline_exceeded_total{route}`. The abandoned export build is not stopped if it is already inside
   the Rust verifier: it runs on and keeps its concurrency slot until it ends, so a retry meanwhile can get `503`.
-  Once the body has started, a write that passes its own deadline (the same duration plus 30s, reset when the build
-  finishes) is still cut, because the status can no longer change; that only reaches a client that reads more slowly
+  Once the body has started, a write that passes its own deadline (the same duration plus 30s; on `/v2/export` it is reset when the build
+  finishes, on `/v2/verify` it is set once at handler start and never reset) is still cut, because the status can no longer change; that only reaches a client that reads more slowly
   than the body size over that duration. The other ceilings are unchanged and unmeasured at 256 MiB: the 45s project
   read session, the 30s store statement timeout, and any limit in a caller or proxy in front of averin. Before the
   `504` existed, a build past 10 minutes ended as a cut connection (HTTP 000). Measured 2026-10-28 on one soak host
