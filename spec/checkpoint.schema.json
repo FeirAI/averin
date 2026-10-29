@@ -23,14 +23,13 @@
       "description": "de-duplicated AND byte-sorted head content-hashes (RCP §10); schema cannot assert sortedness" },
     "record_count": { "type": "integer", "minimum": 0 },
     "broker_grant_head": {
-      "type": "object", "additionalProperties": false,
-      "description": "OPTIONAL grant-transparency head (ADR 0004 D6/MF2): the cumulative_root over the broker's grant log [1..max_seq] folded in broker_seq order, chained to the previous checkpoint's cumulative_root. Inside the signed/anchored checkpoint so the broker cannot equivocate on the grant log. Absent on pre-D6 checkpoints.",
-      "required": ["max_seq", "prior_head_hash", "cumulative_root"],
-      "properties": {
-        "max_seq": { "type": "integer", "minimum": 0, "description": "highest broker_seq committed by this checkpoint (0 = no grants)" },
-        "prior_head_hash": { "$ref": "#/$defs/sha256", "description": "previous checkpoint's cumulative_root (empty-log root for the first)" },
-        "cumulative_root": { "$ref": "#/$defs/sha256", "description": "sha256 hash-chain over (broker_seq, grant content_hash) in seq order" }
-      }
+      "$ref": "#/$defs/grant_head",
+      "description": "OPTIONAL grant-transparency head (ADR 0004 D6/MF2): the cumulative_root over the broker's grant log [1..max_seq] folded in broker_seq order, chained to the previous checkpoint's cumulative_root. Inside the signed/anchored checkpoint so the broker cannot equivocate on the grant log. Absent on pre-D6 checkpoints."
+    },
+    "broker_grant_heads": {
+      "type": "object",
+      "description": "OPTIONAL federated grant-transparency heads (ADR 0005, M4): a map from broker_id to that broker's grant head, inside the signed checkpoint. Member names are broker ids, so the map is open by key; each value is closed to the grant head members. Absent on checkpoints cut without a federation id.",
+      "additionalProperties": { "$ref": "#/$defs/grant_head" }
     },
     "created_ts": { "$ref": "#/$defs/ts" },
 
@@ -51,20 +50,30 @@
     },
 
     "anchor": {
-      "type": "object", "additionalProperties": false,
-      "description": "added AFTER signing; excluded from checkpoint_hash/sig preimage",
+      "type": "object", "additionalProperties": true,
+      "description": "added AFTER signing; excluded from checkpoint_hash/sig preimage. Open by design: the block is outside every signed byte and the verifier reads only the members its scheme needs, so a closed member list would add no integrity. The members listed are the ones averin writes.",
       "required": ["scheme"],
       "properties": {
         "scheme": { "enum": ["rfc3161", "test-anchor"] },
         "token_b64": { "type": "string", "description": "DER TimeStampToken (RFC3161) or test-anchor token, base64" },
         "anchored_ts": { "type": "string", "description": "anchor time as reported by the TSA; precision may exceed ms — preserved verbatim" },
         "tsa_url": { "type": "string" },
+        "tsa_key_id": { "type": "string", "description": "test-anchor scheme: id of the TSA key that signed the token" },
         "witness_uri": { "type": "string" },
         "witness_object_version": { "type": "string" }
       }
     }
   },
   "$defs": {
+    "grant_head": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_seq", "prior_head_hash", "cumulative_root"],
+      "properties": {
+        "max_seq": { "type": "integer", "minimum": 0, "description": "highest broker_seq committed by this checkpoint (0 = no grants)" },
+        "prior_head_hash": { "$ref": "#/$defs/sha256", "description": "previous checkpoint's cumulative_root (empty-log root for the first)" },
+        "cumulative_root": { "$ref": "#/$defs/sha256", "description": "sha256 hash-chain over (broker_seq, grant content_hash) in seq order" }
+      }
+    },
     "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "ed25519": { "type": "string", "pattern": "^ed25519:[A-Za-z0-9_-]{86}$" },
     "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$" }

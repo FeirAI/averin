@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,9 @@ func prepareFedGrantEvidence(t *testing.T, brokerID, grantID string, seq int64) 
 // shared-root model their evidence is also signed by `c` via nativeGrantRecord.)
 func fedCheckpointBundle(t *testing.T, c *core.Core, tsa ed25519.PrivateKey, recs []string, hashes []string, recordCount int, heads map[string]any) string {
 	t.Helper()
+	// The frontier is a byte-sorted set (RCP §10); the seal refuses anything else.
+	hashes = append([]string(nil), hashes...)
+	sort.Strings(hashes)
 	cpBody := map[string]any{
 		"schema_version": "2", "canon_version": "rcp-1", "domain": "flightrecorder.checkpoint.v2",
 		"checkpoint_id": "cp-proj-001-0", "project_id": "proj-001", "checkpoint_seq": 0,

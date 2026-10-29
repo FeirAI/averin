@@ -89,8 +89,8 @@ func TestOpaqueIdentityRejectsNonNFCBeforeIngest(t *testing.T) {
 	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "NFC") {
 		t.Fatalf("non-NFC idempotency header accepted (%d): %s", res.Code, res.Body.String())
 	}
-	rec, _ := postRecord(t, h, `{"idempotency_key":"é","project_id":"p","session_id":"s","record_id":"ré","content":{"note":"e\u0301"}}`)
-	if got := rec["content"].(map[string]any)["note"]; got != "é" {
+	rec, _ := postRecord(t, h, `{"idempotency_key":"é","project_id":"p","session_id":"s","record_id":"ré","extensions":{"note":"e\u0301"}}`)
+	if got := rec["extensions"].(map[string]any)["note"]; got != "é" {
 		t.Fatalf("structured text was not NFC-normalized at seal: %v", got)
 	}
 }
@@ -153,7 +153,7 @@ func TestV3AuthorityRejectsNonNFCIdentityBeforeLookupOrSeal(t *testing.T) {
 
 func TestMalformedUTF8JSONIsRejectedBeforeDecode(t *testing.T) {
 	h := newSrv(t)
-	body := `{"idempotency_key":"k","project_id":"p","session_id":"s","content":{"note":"` + string([]byte{0xff}) + `"}}`
+	body := `{"idempotency_key":"k","project_id":"p","session_id":"s","extensions":{"note":"` + string([]byte{0xff}) + `"}}`
 	if code, resp := do(t, h, "POST", "/v2/records", body); code != http.StatusBadRequest || !strings.Contains(resp, "UTF-8") {
 		t.Fatalf("invalid UTF-8 was accepted (%d): %s", code, resp)
 	}
@@ -170,8 +170,8 @@ func TestUnpairedSurrogateInOpaqueIDIsRejectedBeforeDecode(t *testing.T) {
 			t.Fatalf("unpaired surrogate accepted (%d): %s", code, resp)
 		}
 	}
-	postRecord(t, h, `{"idempotency_key":"pair","project_id":"p","session_id":"s","content":{"note":"\uD83D\uDE00"}}`)
-	postRecord(t, h, `{"idempotency_key":"literal","project_id":"p","session_id":"s","content":{"note":"\\uD800"}}`)
+	postRecord(t, h, `{"idempotency_key":"pair","project_id":"p","session_id":"s","extensions":{"note":"\uD83D\uDE00"}}`)
+	postRecord(t, h, `{"idempotency_key":"literal","project_id":"p","session_id":"s","extensions":{"note":"\\uD800"}}`)
 }
 
 func TestIngestSealCheckpointVerifyExport(t *testing.T) {

@@ -24,9 +24,9 @@ body becomes bytes. Field reference (grouped as in spec §6):
   **set**: MUST be **de-duplicated and sorted ascending by byte order** before canonicalization
   (RCP §7) so equivalent parent sets hash identically. A record with `[]` is a run root.
   averin's recorder always seals the set that way (the server replaces any caller-supplied parents
-  with the sorted, de-duplicated union of the session's current heads), but averin's verifier does
-  not currently reject an unsorted or duplicated set: it treats parents as a set, with duplicates
-  collapsed. A stricter independent verifier may reject such input (see RCP §7).
+  with the sorted, de-duplicated union of the session's current heads), and averin's verifier
+  rejects an unsorted or duplicated set: the record is untrusted (see RCP §7). Seal and verify run
+  the same shape check, so the server cannot seal a record the verifier rejects.
 - `display_seq`: server-assigned **UI-only ordering — NOT a trust primitive**.
 
 ## Time (three clocks; agent clock untrusted — threat #11)
@@ -88,8 +88,12 @@ body becomes bytes. Field reference (grouped as in spec §6):
   transitively commits the record's `content_hash`; otherwise the verifier reports it
   **untrusted** (never a silent pass).
   **averin today:** the producer requirements for the block stay. averin's verifier does not read
-  `key_valid_from`, `key_valid_until`, `key_attestation_ref` or `rotation_prev_key_sig`, so a record
-  signed outside its stated window is not rejected on that basis. Status and its time come from the
+  `key_valid_from`, `key_valid_until`, `key_attestation_ref` or `rotation_prev_key_sig` (it only
+  rejects a member outside this list), so a record signed outside its stated window is not rejected
+  on that basis. averin writes `key_valid_from` as a fixed placeholder (`2026-01-01`) for every key
+  and epoch and never writes the other three, so the window carries no validity meaning there; the
+  record's own key signs these fields, so a check would add no integrity without an auditor-pinned
+  window, which is not implemented. Status and its time come from the
   bundle's `keys[]` entry or the auditor's pinned key list (under pinning the bundle's own time is
   ignored); rotation is verified through separate `key_rotations` statements. The effective status is
   the worst of record, bundle and pin; `retired` counts like `active`; a missing or unknown
@@ -107,7 +111,11 @@ gaps), `prev_checkpoint_hash` (`sha256:…|null`; null only at seq 0 — chains 
 `frontier` (de-duplicated, byte-sorted set of current head `content_hash`es — RCP §10),
 `record_count` (cumulative distinct records, non-decreasing), `created_ts`, `checkpoint_hash`,
 `sig`, a `key` block, optional grant-transparency heads, and a post-sign `anchor` `{scheme, token_b64,
-anchored_ts, tsa_url, witness_uri, witness_object_version}`. Machine schema: `checkpoint.schema.json`.
+anchored_ts, tsa_url, tsa_key_id, witness_uri, witness_object_version}`. Machine schema: `checkpoint.schema.json`.
+averin's verifier rejects a checkpoint with a member outside this list (top level, `key`, and the
+grant-head objects), and one whose `frontier` is not strictly ascending by bytes. The `anchor` block
+is the one open object: it is added after signing and is outside `checkpoint_hash` and `sig`, so the
+verifier reads only the members its scheme needs and ignores the rest.
 The deterministic frontier computation and the offline verification algorithm (omission/fork/backdate
 detection) are specified in RCP §10.
 
@@ -124,9 +132,3 @@ detection) are specified in RCP §10.
   the two forms.
 - `anchor` contents per scheme (`rfc3161`, `test-anchor`), including what each scheme signs and which
   time is used, are specified in RCP §10.1.1.
-
-**Known schema mismatches (not corrected here).** `checkpoint.schema.json` declares `anchor` with
-`additionalProperties: false` and no `tsa_key_id`, yet the `test-anchor` scheme emits a `tsa_key_id`
-member. It also declares `broker_grant_head` but not `broker_grant_heads`, which federated checkpoints
-carry. The schemas are advisory (see the note on the authority of the profile over the schema at the top of `rcp-v1.md`), and
-averin's verifier does not run them.

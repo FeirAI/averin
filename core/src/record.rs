@@ -14,13 +14,30 @@ pub enum RecordError {
     NotObject,
     MissingField(&'static str),
     FieldNotString(&'static str),
-    DomainMismatch { expected: String, found: String },
-    CanonVersionMismatch { expected: String, found: String },
+    DomainMismatch {
+        expected: String,
+        found: String,
+    },
+    CanonVersionMismatch {
+        expected: String,
+        found: String,
+    },
     TooLong,
-    ContentHashMismatch { expected: String, computed: String },
+    ContentHashMismatch {
+        expected: String,
+        computed: String,
+    },
     SignatureInvalid(String),
     UnknownField(String),
     DuplicateKey,
+    /// A member outside the closed member set of a nested object (schema `additionalProperties:false`).
+    UnknownMember {
+        object: String,
+        key: String,
+    },
+    /// A set field (`causal_prev_hashes`, checkpoint `frontier`) that is not strictly ascending by
+    /// UTF-8 byte order (RCP §7: unsorted or duplicated is a schema violation).
+    NonCanonicalSet(&'static str),
 }
 
 impl std::fmt::Display for RecordError {
@@ -54,6 +71,18 @@ impl std::fmt::Display for RecordError {
             }
             RecordError::DuplicateKey => {
                 write!(f, "duplicate object key after NFC normalization")
+            }
+            RecordError::UnknownMember { object, key } => {
+                write!(
+                    f,
+                    "unknown member '{key}' in {object} (closed member set; only 'extensions' holds custom keys)"
+                )
+            }
+            RecordError::NonCanonicalSet(field) => {
+                write!(
+                    f,
+                    "'{field}' is not a canonical set: members must be sorted ascending by byte order with no duplicates (RCP §7)"
+                )
             }
         }
     }
@@ -105,6 +134,114 @@ pub const ALLOWED_TOP_KEYS: &[&str] = &[
     "extensions",
 ];
 
+// Closed member sets of the nested objects (decision-record.schema.json, `additionalProperties:false`).
+// Each list equals the schema `properties` key set; core/tests/canonical_shape.rs pins that. Only
+// `extensions` is open. The Go ingest mirror (server/internal/core/topkeys.go) is pinned against these.
+
+/// Members of `authority`.
+pub const ALLOWED_AUTHORITY_KEYS: &[&str] = &[
+    "source",
+    "enforcement_point",
+    "decision_basis",
+    "policy_hash",
+    "policy_snapshot_ref",
+    "grant_id",
+    "grant_type",
+    "authorizing_principal",
+    "delegation_chain",
+    "evidence_hash",
+    "evidence_sig",
+    "proof_version",
+    "subject_projection",
+    "subject_digest",
+    "evaluated_at",
+    "expires_at",
+    "nonce",
+];
+
+/// Members of `authority.policy_snapshot_ref`.
+pub const ALLOWED_POLICY_SNAPSHOT_REF_KEYS: &[&str] = &["uri", "digest", "object_version"];
+
+/// Members of a record's `key` block.
+pub const ALLOWED_KEY_BLOCK_KEYS: &[&str] = &[
+    "signing_key_id",
+    "key_epoch",
+    "key_valid_from",
+    "key_valid_until",
+    "key_status",
+    "status_changed_at",
+    "key_attestation_ref",
+    "rotation_prev_key_sig",
+];
+
+/// Members of `content`.
+pub const ALLOWED_CONTENT_KEYS: &[&str] = &[
+    "uri",
+    "digest",
+    "length",
+    "content_type",
+    "enc_key_id",
+    "object_version",
+];
+
+/// Members of `tokens`.
+pub const ALLOWED_TOKENS_KEYS: &[&str] = &["in", "out"];
+
+/// Members of a commitment object.
+pub const ALLOWED_COMMIT_KEYS: &[&str] = &["alg", "commitment", "low_entropy"];
+
+/// The top-level fields that hold a commitment object.
+pub const COMMIT_FIELDS: &[&str] = &[
+    "input_commit",
+    "output_commit",
+    "rationale_commit",
+    "credential_commit",
+];
+
+/// Reject any member of `value` outside `allowed`, when `value` is an object. A non-object is left to
+/// its own type checks (it hides no member).
+pub(crate) fn check_closed_members(
+    value: Option<&CanonValue>,
+    object: &str,
+    allowed: &[&str],
+) -> Result<(), RecordError> {
+    if let Some(members) = value.and_then(|v| v.as_object()) {
+        for (k, _) in members {
+            if !allowed.contains(&k.as_str()) {
+                return Err(RecordError::UnknownMember {
+                    object: object.to_string(),
+                    key: k.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A set field must be strictly ascending by UTF-8 byte order (sorted, no duplicates). Applies only
+/// when `value` is an array whose members are all strings; other shapes keep their existing errors.
+pub(crate) fn check_canonical_set(
+    value: Option<&CanonValue>,
+    field: &'static str,
+) -> Result<(), RecordError> {
+    let Some(items) = value.and_then(|v| v.as_array()) else {
+        return Ok(());
+    };
+    let mut prev: Option<&str> = None;
+    for item in items {
+        let Some(cur) = item.as_str() else {
+            return Ok(());
+        };
+        if let Some(p) = prev {
+            if p.as_bytes() >= cur.as_bytes() {
+                return Err(RecordError::NonCanonicalSet(field));
+            }
+        }
+        prev = Some(cur);
+    }
+    Ok(())
+}
+
 /// Required top-level keys (schema v2). Absent ⇒ invalid.
 pub const REQUIRED_TOP_KEYS: &[&str] = &[
     "schema_version",
@@ -130,9 +267,12 @@ pub const REQUIRED_TOP_KEYS: &[&str] = &[
     "key",
 ];
 
-/// Enforce the schema-v2 top-level shape: object, no unknown top-level keys (RCP §6), all
-/// required keys present. (Nested `additionalProperties:false` is validated by the JSON Schema in
-/// `/spec`; deeper structural checks land with the bundle verifier.)
+/// Enforce the schema-v2 record shape: object, no unknown top-level keys (RCP §6), all required keys
+/// present, then the closed member sets of the nested objects (`authority`, `authority.policy_snapshot_ref`,
+/// `key`, `content`, `tokens` and the four commitment objects; `extensions` stays open), then
+/// `causal_prev_hashes` as a canonical set (sorted ascending by bytes, no duplicates, RCP §7). Value
+/// types and required members inside nested objects are not checked here. Seal and verify both run this
+/// function, so a record the server seals cannot fail it at verify time.
 pub fn validate_record_shape(record: &CanonValue) -> Result<(), RecordError> {
     let members = record.as_object().ok_or(RecordError::NotObject)?;
     for (k, _) in members {
@@ -145,6 +285,20 @@ pub fn validate_record_shape(record: &CanonValue) -> Result<(), RecordError> {
             return Err(RecordError::MissingField(req));
         }
     }
+    let authority = record.get("authority");
+    check_closed_members(authority, "authority", ALLOWED_AUTHORITY_KEYS)?;
+    check_closed_members(
+        authority.and_then(|a| a.get("policy_snapshot_ref")),
+        "authority.policy_snapshot_ref",
+        ALLOWED_POLICY_SNAPSHOT_REF_KEYS,
+    )?;
+    check_closed_members(record.get("key"), "key", ALLOWED_KEY_BLOCK_KEYS)?;
+    check_closed_members(record.get("content"), "content", ALLOWED_CONTENT_KEYS)?;
+    check_closed_members(record.get("tokens"), "tokens", ALLOWED_TOKENS_KEYS)?;
+    for f in COMMIT_FIELDS {
+        check_closed_members(record.get(f), f, ALLOWED_COMMIT_KEYS)?;
+    }
+    check_canonical_set(record.get("causal_prev_hashes"), "causal_prev_hashes")?;
     Ok(())
 }
 

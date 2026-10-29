@@ -5,7 +5,10 @@
 use crate::canon::CanonValue;
 use crate::dag::Dag;
 use crate::hashx::{parse_sha256, sha256_prefixed};
-use crate::record::{body_preimage, PreimageFault, RecordError, SealShapeMode};
+use crate::record::{
+    body_preimage, check_canonical_set, check_closed_members, PreimageFault, RecordError,
+    SealShapeMode,
+};
 use crate::sign::{self, CHECKPOINT_SIG_TAG};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
@@ -15,6 +18,7 @@ pub const CHECKPOINT_CANON_VERSION: &str = "rcp-1";
 #[derive(Debug, PartialEq)]
 pub enum CheckpointError {
     Hash(RecordError),
+    Shape(RecordError),
     DomainMismatch(String),
     MissingField(&'static str),
     FieldType(&'static str),
@@ -64,6 +68,7 @@ impl std::fmt::Display for CheckpointError {
         use CheckpointError::*;
         match self {
             Hash(e) => write!(f, "checkpoint hash: {e}"),
+            Shape(e) => write!(f, "checkpoint shape: {e}"),
             DomainMismatch(d) => write!(f, "checkpoint domain mismatch: {d}"),
             MissingField(k) => write!(f, "checkpoint missing field '{k}'"),
             FieldType(k) => write!(f, "checkpoint field '{k}' has wrong type"),
@@ -176,10 +181,76 @@ pub fn checkpoint_body(
     .map_err(|e| CheckpointError::Hash(RecordError::SignatureInvalid(e.to_string())))
 }
 
+// Closed member sets of a checkpoint (checkpoint.schema.json, `additionalProperties:false`).
+// `anchor` is in the list but its own members stay open: it is added after signing, outside
+// `checkpoint_hash` and `sig` (RCP §9.4). core/tests/canonical_shape.rs pins each list to the schema.
+
+/// Top-level checkpoint members.
+pub const ALLOWED_CHECKPOINT_KEYS: &[&str] = &[
+    "schema_version",
+    "canon_version",
+    "domain",
+    "checkpoint_id",
+    "project_id",
+    "checkpoint_seq",
+    "prev_checkpoint_hash",
+    "frontier",
+    "record_count",
+    "broker_grant_head",
+    "broker_grant_heads",
+    "created_ts",
+    "checkpoint_hash",
+    "sig",
+    "key",
+    "anchor",
+];
+
+/// Members of a checkpoint's `key` block (no `rotation_prev_key_sig`, unlike a record's).
+pub const ALLOWED_CHECKPOINT_KEY_BLOCK_KEYS: &[&str] = &[
+    "signing_key_id",
+    "key_epoch",
+    "key_valid_from",
+    "key_valid_until",
+    "key_status",
+    "status_changed_at",
+    "key_attestation_ref",
+];
+
+/// Members of a grant head (`broker_grant_head` and each `broker_grant_heads` value).
+pub const ALLOWED_GRANT_HEAD_KEYS: &[&str] = &["max_seq", "prior_head_hash", "cumulative_root"];
+
+/// The checkpoint shape rules shared by seal and verify: closed member sets (top level, `key`,
+/// `broker_grant_head`, each `broker_grant_heads` value; `anchor` stays open) and a canonical
+/// `frontier` (sorted ascending by bytes, no duplicates, RCP §10).
+pub fn validate_checkpoint_shape(cp: &CanonValue) -> Result<(), RecordError> {
+    check_closed_members(Some(cp), "checkpoint", ALLOWED_CHECKPOINT_KEYS)?;
+    check_closed_members(
+        cp.get("key"),
+        "checkpoint key",
+        ALLOWED_CHECKPOINT_KEY_BLOCK_KEYS,
+    )?;
+    check_closed_members(
+        cp.get("broker_grant_head"),
+        "broker_grant_head",
+        ALLOWED_GRANT_HEAD_KEYS,
+    )?;
+    if let Some(heads) = cp.get("broker_grant_heads").and_then(|h| h.as_object()) {
+        for (_, head) in heads {
+            check_closed_members(
+                Some(head),
+                "broker_grant_heads entry",
+                ALLOWED_GRANT_HEAD_KEYS,
+            )?;
+        }
+    }
+    check_canonical_set(cp.get("frontier"), "frontier")
+}
+
 /// The `domain` and `canon_version` pins of [`verify_checkpoint_sealed`], applied to an already
 /// sealed checkpoint (the checkpoint half of SB-29). The same two comparisons as in
 /// `verify_checkpoint_sealed`; core/tests/seal_shape.rs (`checkpoint_*`) holds them in step.
 fn check_sealed_checkpoint_pins(sealed: &CanonValue) -> Result<(), RecordError> {
+    validate_checkpoint_shape(sealed)?;
     let domain = sealed
         .get("domain")
         .ok_or(RecordError::MissingField("domain"))?
@@ -219,8 +290,8 @@ fn seal_checkpoint_unchecked(
 /// Seal a checkpoint body: compute `checkpoint_hash` and sign it (RCP §9.4). `anchor` is added
 /// later by the anchoring job and is excluded from the preimage.
 ///
-/// Rejects every body that [`verify_checkpoint_sealed`] would reject on `domain` or `canon_version`,
-/// so `seal_checkpoint(b)` being `Ok` implies `verify_checkpoint_sealed` accepts the result under the
+/// Rejects every body that [`verify_checkpoint_sealed`] would reject on `domain`, `canon_version` or
+/// shape ([`validate_checkpoint_shape`]), so `seal_checkpoint(b)` being `Ok` implies `verify_checkpoint_sealed` accepts the result under the
 /// matching key. It checks nothing that [`validate_chain`] checks (sequence, previous hash, frontier,
 /// record count).
 pub fn seal_checkpoint(cp_body: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
@@ -277,6 +348,7 @@ pub fn verify_checkpoint_sealed(cp: &CanonValue, vk: &VerifyingKey) -> Result<()
             found: cv.to_string(),
         }));
     }
+    validate_checkpoint_shape(cp).map_err(CheckpointError::Shape)?;
     let stored = str_field(cp, "checkpoint_hash")?.to_string();
     let computed = compute_checkpoint_hash(cp).map_err(CheckpointError::Hash)?;
     if stored != computed {
