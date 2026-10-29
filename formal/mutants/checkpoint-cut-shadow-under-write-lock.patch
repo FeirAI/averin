@@ -8,7 +8,7 @@ index f1b908a..641e1a7 100644
  	// along so phase 3 can refuse if it moved.
 -	prev, _ := body["prev_checkpoint_hash"].(string)
 -	return nil, &errShadowDue{seq: seq - 1, hash: prev}
-+	signed, cerr := s.compareShadow(st, projectID, created, body)
++	signed, _, cerr := s.compareShadow(st, projectID, created, body)
 +	if cerr != nil {
 +		return nil, cerr
 +	}

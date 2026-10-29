@@ -165,6 +165,7 @@ func TestCheckpointCutShadowOffLockWritesContinue(t *testing.T) {
 // TestCheckpointCutShadowOffLockMismatchRefusesWhileWritesContinue: a tampered base is refused after the
 // off-lock comparison, nothing is stored, and the next cut is shadowed (latched).
 func TestCheckpointCutShadowOffLockMismatchRefusesWhileWritesContinue(t *testing.T) {
+	logs := captureLog(t)
 	r := newShadowRig(t, 5*time.Second)
 	r.h.plain()
 	r.spy.tamper = bogusBase("p")
@@ -176,6 +177,9 @@ func TestCheckpointCutShadowOffLockMismatchRefusesWhileWritesContinue(t *testing
 	out := waitCut(t, res)
 	if out.err == nil || !strings.Contains(out.err.Error(), "disagrees with the full computation") {
 		t.Fatalf("want a refusal, got %v", out.err)
+	}
+	if strings.Contains(logs(), "WARNING: checkpoint cut for project") {
+		t.Fatalf("a mismatch refusal must not log the not-signed WARNING:\n%s", logs())
 	}
 	if got := latestSeq(t, r.st, "p"); got != 0 {
 		t.Fatalf("a divergent checkpoint was stored: latest seq %d", got)
@@ -448,7 +452,7 @@ func TestCheckpointCutShadowOffLockSignStepIsBounded(t *testing.T) {
 	}
 	text := logs()
 	alert := strings.Index(text, "ALERT: checkpoint cut for project p signed WITHOUT its shadow check")
-	warn := strings.Index(text, "WARNING: checkpoint cut for project p failed at the signing step after its shadow check")
+	warn := strings.Index(text, "WARNING: checkpoint cut for project p failed after its shadow check, before it was signed")
 	if alert < 0 || warn < alert {
 		t.Fatalf("want the could-not-run ALERT and then the signing WARNING, got:\n%s", text)
 	}
@@ -628,5 +632,28 @@ func TestCheckpointCutShadowOffLockCreatedTsAfterSnapshotRead(t *testing.T) {
 	}
 	if want := r.now; got.Before(want) {
 		t.Fatalf("created_ts %s is earlier than the clock at the snapshot's first read (%s)", got, want)
+	}
+}
+
+// TestCheckpointCutShadowOffLockSnapshotCommitFailsAfterCouldNotRun: the full computation cannot run, then the
+// read snapshot's commit fails. The cut fails, nothing is stored, and the WARNING line carries the could-not-run
+// note (the earlier ALERT said the cut was to be signed without its check).
+func TestCheckpointCutShadowOffLockSnapshotCommitFailsAfterCouldNotRun(t *testing.T) {
+	logs := captureLog(t)
+	r := newShadowRig(t, 5*time.Second)
+	r.h.plain()
+	r.spy.failFull = errors.New("read project snapshot: connection reset")
+	r.spy.afterSnapErr = errors.New("commit read snapshot: connection reset")
+	out := cutWithin(t, r.s, context.Background(), 5*time.Second)
+	if out.err == nil || !strings.Contains(out.err.Error(), "commit read snapshot") {
+		t.Fatalf("want the snapshot commit failure, got %v", out.err)
+	}
+	if got := latestSeq(t, r.st, "p"); got != 0 {
+		t.Fatalf("a checkpoint was stored by a cut whose snapshot commit failed: latest seq %d", got)
+	}
+	text := logs()
+	warn := strings.Index(text, "WARNING: checkpoint cut for project p failed after its shadow check, before it was signed")
+	if warn < 0 || !strings.Contains(text[warn:], "(the earlier ALERT said this cut was signed WITHOUT its shadow check)") {
+		t.Fatalf("want the WARNING with the could-not-run note, got:\n%s", text)
 	}
 }

@@ -648,7 +648,8 @@ func (s *Server) cutSignTimeout() time.Duration {
 	return s.cut.signTimeout
 }
 
-// logCutNotSigned logs that a cut failed at the signing step after its shadow check. Phase 3 runs detached from the
+// logCutNotSigned logs that a cut failed after its shadow check and before it was signed (at the read snapshot's
+// commit in phase 2, or at the signing step in phase 3). Phase 3 runs detached from the
 // caller, so the HTTP error often reaches nobody. The line starts with WARNING, not ALERT: an ALERT line counts a
 // shadow attempt and this is not one. unchecked says the earlier "signed WITHOUT its shadow check" ALERT was for
 // this cut; its counter and backoff are recorded before signing and are not undone.
@@ -657,7 +658,7 @@ func (s *Server) logCutNotSigned(projectID string, unchecked bool, err error) {
 	if unchecked {
 		note = " (the earlier ALERT said this cut was signed WITHOUT its shadow check)"
 	}
-	log.Printf("WARNING: checkpoint cut for project %s failed at the signing step after its shadow check%s; nothing was signed unless the error reports an unknown commit outcome: %v", projectID, note, err)
+	log.Printf("WARNING: checkpoint cut for project %s failed after its shadow check, before it was signed%s; nothing was signed unless the error reports an unknown commit outcome: %v", projectID, note, err)
 }
 
 func (s *Server) shadowBudget() time.Duration {

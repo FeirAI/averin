@@ -212,7 +212,7 @@ stored, and retrying the cut is safe.
 - a wait for any earlier cut of the same project in this process (cuts of one project run one at a time);
 - the cut under the project write lock: normally milliseconds; it can wait for the lock (up to 10 s for a lock held
   by another server process); a cut with no usable base (the first checkpoint of a project) runs the full computation
-  there; at most 45 s;
+  there; on PostgreSQL at most 45 s, plus up to 10 s for its commit when the cut is not shadowed;
 - for a shadowed cut, the comparison (at most the shadow budget plus 5 s, 25 s by default) and the signing step (at
   most 15 s, normally milliseconds, plus up to 10 s for its database commit);
 - when configured, the witness append (at most 10 s) and the TSA stamp (at most 10 s, plus storing the token).
@@ -223,8 +223,10 @@ With the defaults the worst case of a shadowed cut already reaches the server's 
 before 60 s.
 
 A client that hangs up while the cut waits for an earlier cut, or before the locked step has decided, stops the cut
-and nothing is stored. Once the shadow comparison has started the cut runs on without the client: the compared body
-is signed and stored and, best effort as always, witnessed and anchored, unless the signing step fails (a line
+and nothing is stored. Once the shadow comparison has started the cut runs on without the client and completes as it would
+with the client connected: the compared body (or, if the shadow could not run, the incremental body) is signed and
+stored and, best effort as always, witnessed and anchored, unless the comparison refuses, the cut is raced, or the
+signing step fails (for a failure after the shadow check a line
 starting `WARNING` is logged then, and nothing was signed unless the commit outcome is unknown). A retry cuts the
 next sequence number, which is safe.
 
