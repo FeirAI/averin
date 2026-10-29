@@ -46,7 +46,7 @@ func TestBatchIsAtomicOnUnknownNestedMember(t *testing.T) {
 	}
 }
 
-func TestRecordsAcceptEveryAllowedNestedMemberAndOpenExtensions(t *testing.T) {
+func TestRecordsAcceptAllowedNestedMembersAndOpenExtensions(t *testing.T) {
 	h := newServer(t).Routes()
 	body := `{"idempotency_key":"ok-1","project_id":"p1","session_id":"s1","action":"db.read",` +
 		`"authority":{"source":"caller_declared","enforcement_point":"e","decision_basis":"b","policy_hash":"h","policy_snapshot_ref":{"uri":"u","digest":"d","object_version":"v"},` +

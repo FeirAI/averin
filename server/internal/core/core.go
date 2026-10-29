@@ -72,13 +72,15 @@ type Core struct {
 	pubKey  string
 	// shadow seals a record body even when verify_sealed would reject its shape, domain or
 	// canon_version, and a checkpoint body even when verify_checkpoint_sealed would reject its domain
-	// or canon_version (AVERIN_SEAL_SHAPE=shadow). Default false: such a body is refused.
+	// or canon_version (AVERIN_SEAL_SHAPE=shadow). Default false: such a body is refused. Shape means the
+	// closed member sets (top-level and nested) and a canonical causal_prev_hashes or frontier.
 	shadow bool
 }
 
 // SealShapeMode says what SealRecord does with a body that verify_sealed would reject on top-level
-// shape, domain or canon_version, and what SealCheckpoint does with a body that
-// verify_checkpoint_sealed would reject on domain or canon_version.
+// shape (top-level and nested closed member sets, canonical causal_prev_hashes), domain or canon_version, and
+// what SealCheckpoint does with a body that verify_checkpoint_sealed would reject on shape (closed member sets,
+// canonical frontier), domain or canon_version.
 type SealShapeMode string
 
 const (
@@ -146,8 +148,8 @@ func (c *Core) RcpEvidenceHash(payloadJSON string) (string, error) {
 }
 
 // SealRecord seals a Decision Record body, returning the sealed JSON. In the default enforce mode it
-// returns an error for a body that verify_sealed would reject on top-level shape, domain or
-// canon_version (SB-29).
+// returns an error for a body that verify_sealed would reject on shape (top-level and nested closed
+// member sets, canonical causal_prev_hashes), domain or canon_version (SB-29).
 func (c *Core) SealRecord(bodyJSON string) (string, error) {
 	cb := C.CString(bodyJSON)
 	cs := C.CString(c.seedHex)
@@ -165,7 +167,8 @@ func (c *Core) SealRecord(bodyJSON string) (string, error) {
 }
 
 // SealCheckpoint seals a checkpoint body. In the default enforce mode it returns an error for a body
-// that verify_checkpoint_sealed would reject on domain or canon_version (the checkpoint half of SB-29).
+// that verify_checkpoint_sealed would reject on shape (closed member sets, canonical frontier), domain or
+// canon_version (the checkpoint half of SB-29).
 func (c *Core) SealCheckpoint(bodyJSON string) (string, error) {
 	cb := C.CString(bodyJSON)
 	cs := C.CString(c.seedHex)

@@ -290,6 +290,29 @@ fn a_leading_non_string_member_does_not_hide_a_disorder() {
 }
 
 #[test]
+fn a_non_string_member_is_a_violation_on_its_own() {
+    let lo = format!("sha256:a{}", "0".repeat(63));
+    let cases = [
+        CanonValue::Array(vec![CanonValue::string(lo.clone()), CanonValue::Int(5)]),
+        CanonValue::Array(vec![CanonValue::Int(5)]),
+    ];
+    for arr in cases {
+        let mut b = body(0, "s", &[]);
+        set(&mut b, "causal_prev_hashes", arr.clone());
+        assert_eq!(
+            validate_record_shape(&hostile_seal(&b)),
+            Err(RecordError::NonCanonicalSet("causal_prev_hashes"))
+        );
+        let mut m = cp_members(&[], 2);
+        set(&mut m, "frontier", arr);
+        assert_eq!(
+            validate_checkpoint_shape(&hostile_cp(&m)),
+            Err(RecordError::NonCanonicalSet("frontier"))
+        );
+    }
+}
+
+#[test]
 fn r1_duplicate_parents_are_rejected() {
     let a = format!("sha256:a{}", "0".repeat(63));
     assert_eq!(

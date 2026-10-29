@@ -451,9 +451,11 @@ fn with_field(obj: &CanonValue, key: &str, value: CanonValue) -> CanonValue {
     CanonValue::Object(members)
 }
 
-/// What [`seal_with_mode`] does with a body that [`verify_sealed`] would reject on shape,
-/// domain or canon_version (and [`crate::checkpoint::seal_checkpoint_with_mode`] with a checkpoint
-/// body that `verify_checkpoint_sealed` would reject on domain or canon_version).
+/// What [`seal_with_mode`] does with a body that [`verify_sealed`] would reject on shape
+/// (top-level and nested closed member sets, canonical `causal_prev_hashes`), domain or canon_version
+/// (and [`crate::checkpoint::seal_checkpoint_with_mode`] with a checkpoint body that
+/// `verify_checkpoint_sealed` would reject on shape (top-level and nested closed member sets,
+/// canonical `frontier`), domain or canon_version).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SealShapeMode {
     /// Return the error and seal nothing (the default; what [`seal`] does).
@@ -511,9 +513,9 @@ fn seal_unchecked(record: &CanonValue, sk: &SigningKey) -> Result<CanonValue, Re
 /// and overwritten.
 ///
 /// Rejects every body that [`verify_sealed`] would reject on shape (unknown or missing top-level
-/// key), `domain` or `canon_version`, so `seal(b)` being `Ok` implies `verify_sealed` accepts the
-/// result under the matching key. It does not check nested object shape (neither does
-/// [`validate_record_shape`]).
+/// key, an unknown nested member, a non-canonical `causal_prev_hashes`), `domain` or
+/// `canon_version`, so `seal(b)` being `Ok` implies `verify_sealed` accepts the result under the
+/// matching key.
 pub fn seal(record: &CanonValue, sk: &SigningKey) -> Result<CanonValue, RecordError> {
     seal_with_mode(record, sk, SealShapeMode::Enforce)
 }

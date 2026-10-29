@@ -106,8 +106,9 @@ func main() {
 		log.Fatalf("signing key: %v", err)
 	}
 	// AVERIN_SEAL_SHAPE=enforce|shadow (default enforce): seal refuses a record body that verify_sealed
-	// would reject on top-level shape, domain or canon_version, and a checkpoint body that
-	// verify_checkpoint_sealed would reject on domain or canon_version. shadow seals it anyway and counts
+	// would reject on shape (top-level and nested closed member sets, canonical causal_prev_hashes), domain
+	// or canon_version, and a checkpoint body that verify_checkpoint_sealed would reject on shape, domain or
+	// canon_version. shadow seals it anyway and counts
 	// it (averin_seal_shape_violations_total); it is a rollback switch only, the records and checkpoints
 	// it writes fail every verifier.
 	sealShape, err := core.ParseSealShapeMode(os.Getenv("AVERIN_SEAL_SHAPE"))

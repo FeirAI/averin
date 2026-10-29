@@ -253,7 +253,8 @@ pub extern "C" fn averin_seal_shape_violations() -> u64 {
 
 /// Seal a checkpoint body (UTF-8 JSON) with an Ed25519 signing key. Returns the sealed checkpoint
 /// JSON (checkpoint_hash + sig set), or `{"error":"..."}`. Refuses a body that
-/// `verify_checkpoint_sealed` would reject on domain or canon_version.
+/// `verify_checkpoint_sealed` would reject on shape (top-level and nested closed member sets,
+/// canonical `frontier`), domain or canon_version.
 ///
 /// # Safety
 /// `body` and `seed_hex` must be valid null-terminated C strings.

@@ -18,7 +18,7 @@ test("WASM replays the canonical-set and closed-member vectors", async () => {
     expect(r.ok, row.name).toBe(row.expected_ok);
     expect(r.records_proven, row.name).toBe(row.expected_records_proven);
     expect(r.checkpoints_verified, row.name).toBe(row.expected_checkpoints_verified);
-    const text = JSON.stringify(r.issues) + JSON.stringify(r.records);
+    const text = JSON.stringify(r.issues) + JSON.stringify(r.record_trust);
     expect(text.includes(row.expected_reason), row.name).toBe(true);
   }
   const names = rows.map((r) => r.name);
