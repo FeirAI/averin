@@ -293,7 +293,7 @@ func New(core Sealer, st store.Store, signingKeyID string) *Server {
 		mCutShadowMismatch: reg.Counter("averin_checkpoint_shadow_mismatch_total",
 			"Total incremental checkpoint cuts that differed from the full computation. Each one REFUSED to sign; alert on any non-zero value."),
 		mCutShadowFailed: reg.Counter("averin_checkpoint_shadow_failed_total",
-			"Total shadow checks that could not run (full computation errored or exceeded its time budget). The cut was signed from the incremental body without the check; a rising value means the shadow is no longer effective for that history size."),
+			"Total shadow checks that could not run (full computation errored or exceeded its time budget). The cut then signs the incremental body without the check (a WARNING line follows if that signing step fails); a rising value means the shadow is no longer effective for that history size."),
 		mWitnessFailures: reg.Counter("averin_witness_append_failures_total",
 			"Total checkpoint witness-append failures (checkpoint stored un-witnessed, backfillable)."),
 		mAnchorFailures: reg.Counter("averin_checkpoint_anchor_failures_total",
@@ -3699,11 +3699,6 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-// createCheckpoint seals the current frontier and stores it, then best-effort appends it to the
-// witness. Returns (sealed, witnessWarning, fatalErr). Serialized so concurrent calls cannot read
-// the same NextCheckpointSeq and fork the chain. Store-before-witness with a monotonic seq means a
-// witness failure does NOT re-seal the same seq on retry (seq has already advanced) — so it can
-// never wedge checkpointing; the un-witnessed checkpoint is reported via the warning and is
 // storedGrantFields reads the response metadata (exp unix-seconds, scope_class) from a STORED grant
 // record's signed grant_evidence, so an idempotent retry returns the ORIGINAL grant's expiry/scope_class
 // (matching the reconstructed original capability) rather than fresh, request-time values.
@@ -4121,6 +4116,10 @@ func (s *Server) createCheckpointTx(st store.Store, projectID string, pre *shado
 // cuts incrementally and decides a shadow is due, rolled back; (2) the comparison on a read snapshot outside the
 // write lock; (3) a second write transaction that checks the base is unchanged and signs the compared bytes. The
 // per-project cut gate is held throughout, so writes never wait on it but other cuts of the project do.
+//
+// The gate wait and phase 1 stay on the caller's context: a client that is gone before the decision costs nothing.
+// Phase 2 and phase 3 do not follow the caller's cancellation (phase 2 is bounded by the shadow budget + 5 s, phase 3
+// by checkpointSignTimeout), so a client that hangs up once the comparison has started does not discard it.
 func (s *Server) cutCheckpoint(ctx context.Context, projectID string) (store.Checkpoint, error) {
 	release, err := s.acquireCutGate(ctx, projectID)
 	if err != nil {
@@ -4139,9 +4138,18 @@ func (s *Server) cutCheckpoint(ctx context.Context, projectID string) (store.Che
 	}
 	res, err := s.shadowOffLock(ctx, projectID, due)
 	if err != nil {
+		if res.unchecked {
+			s.logCutNotSigned(projectID, true, err)
+		}
 		return store.Checkpoint{}, err
 	}
-	err = s.withProjectWrite(ctx, projectID, func(st store.Store) error {
+	// Phase 3 runs detached from the caller and with its own bound. It still runs the unchanged O(1) base check
+	// first and signs only the compared bytes (res.bodyJSON), so the caller's context never contributed to safety,
+	// only to giving up. Without this a client that hangs up after a matched comparison signs nothing, and on a
+	// latched project every cut is shadowed, so such a client would never get a checkpoint.
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cutSignTimeout())
+	defer cancel()
+	err = s.withProjectWrite(pctx, projectID, func(st store.Store) error {
 		var e error
 		cp, e = s.createCheckpointTx(st, projectID, &res)
 		return e
@@ -4152,9 +4160,17 @@ func (s *Server) cutCheckpoint(ctx context.Context, projectID string) (store.Che
 		// has since replaced.
 		s.cut.verified.Delete(projectID)
 	}
+	if err != nil {
+		s.logCutNotSigned(projectID, res.unchecked, err)
+	}
 	return cp, err
 }
 
+// createCheckpoint cuts and stores one checkpoint (see cutCheckpoint), then makes a best-effort witness append and
+// TSA anchor. Both of those run detached from the caller's cancellation, each with its own 10 s bound, so a client
+// that hangs up after the cut is stored still gets its checkpoint witnessed and anchored. It returns the sealed
+// checkpoint, a warning (the checkpoint is stored but not witnessed or anchored) and a fatal error (nothing was
+// stored, or the commit outcome is unknown).
 func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string, error, error) {
 	cp, err := s.cutCheckpoint(ctx, projectID)
 	if err != nil {
@@ -4163,10 +4179,12 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	sealed := cp.JSON
 	s.mCheckpointsSealed.Inc()
 	var warns []string
+	// The checkpoint is stored: witness and anchor it whether or not the caller is still there.
+	post := context.WithoutCancel(ctx)
 	// best-effort witness append (bounded so a hung witness can't block); a failure leaves the
 	// checkpoint stored-but-un-witnessed (reported, backfillable) rather than wedging the chain.
 	if s.witness != nil {
-		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		wctx, cancel := context.WithTimeout(post, 10*time.Second)
 		if err := s.witness.Append(wctx, projectID, []byte(sealed)); err != nil {
 			warns = append(warns, fmt.Sprintf("witness append failed (backfill needed): %v", err))
 			s.mWitnessFailures.Inc()
@@ -4178,7 +4196,7 @@ func (s *Server) createCheckpoint(ctx context.Context, projectID string) (string
 	}
 
 	if s.tsa != nil {
-		if err := s.anchorCheckpoint(ctx, projectID, cp.Seq, cp.CheckpointHash); err != nil {
+		if err := s.anchorCheckpoint(post, projectID, cp.Seq, cp.CheckpointHash); err != nil {
 			warns = append(warns, fmt.Sprintf("checkpoint stored un-anchored (TSA failed, backfillable): %v", err))
 			s.mAnchorFailures.Inc()
 			// Also LOG: an un-anchored checkpoint has no third-party timestamp (threat #3 backdating window)

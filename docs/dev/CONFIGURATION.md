@@ -203,10 +203,10 @@ statement timeout or runs out of the shadow's own time budget before it has prod
 contiguity guards) is signed, `averin_checkpoint_shadow_failed_total` is incremented, a line starting `ALERT` is
 logged, and that project's next shadow attempt waits for a backoff (10 minutes, doubling per consecutive failure
 up to 64 times that, reset when a shadow runs). A full body that was computed but came back over budget is still compared: a mismatch refuses, a match is
-signed and counted as failed (late) with the same backoff. The shadow's budget is 20 s by default (it was 1 s, and 5 s before that: see LIMITATIONS) and covers the
+signed and counted as failed (late) with the same backoff. The counter, the `ALERT` and the backoff are recorded before the checkpoint is signed; if the signing step then fails, nothing is signed (unless the commit outcome is unknown) and a line starting `WARNING` says so. The shadow's budget is 20 s by default (it was 1 s, and 5 s before that: see LIMITATIONS) and covers the
 WHOLE shadow: on Postgres the statement timeout is re-issued with the time that remains before every statement
 (the ceiling is 20 s, below the 30 s default statement timeout). This `SET LOCAL` applies inside the shadow only and replaces the connection's statement timeout there, so a `statement_timeout` in the DSN lower than the budget (for example 5 s) does not limit the shadow: it can run for the full budget. The shadow runs on a repeatable-read snapshot OUTSIDE the project write lock: writes to the
-project do not wait for it, but it still uses database CPU, memory and one pool connection for up to the budget, and the cut's HTTP response is delayed by the same time.
+project do not wait for it, but it still uses database CPU, memory and one pool connection for up to the budget, and the cut's HTTP response is delayed by up to the budget plus 5 s, plus the signing step (at most 15 s, plus up to 10 s for its database commit; [API](API.md) gives the full bound).
 Cuts of the same project in one process wait for each other (a per-project gate); writes do not. If another writer process cuts a checkpoint of the project
 while the shadow runs, this cut returns an error and signs nothing (`averin_checkpoint_shadow_raced_total`). The shadowed checkpoint covers the records
 committed when the snapshot was taken; records committed during the shadow go into the next checkpoint.

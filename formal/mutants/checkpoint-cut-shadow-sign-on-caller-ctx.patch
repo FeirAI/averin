@@ -1,0 +1,14 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 150431b..baa4a19 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4149,7 +4149,8 @@ func (s *Server) cutCheckpoint(ctx context.Context, projectID string) (store.Che
+ 	// latched project every cut is shadowed, so such a client would never get a checkpoint.
+ 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cutSignTimeout())
+ 	defer cancel()
+-	err = s.withProjectWrite(pctx, projectID, func(st store.Store) error {
++	_ = pctx
++	err = s.withProjectWrite(ctx, projectID, func(st store.Store) error {
+ 		var e error
+ 		cp, e = s.createCheckpointTx(st, projectID, &res)
+ 		return e

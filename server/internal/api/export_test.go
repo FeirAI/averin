@@ -55,3 +55,18 @@ func (s *Server) ShadowFailedForTest() int64 { return s.mCutShadowFailed.Value()
 
 // ShadowBudgetForTest reports the effective shadow budget (after clamping and defaulting).
 func (s *Server) ShadowBudgetForTest() time.Duration { return s.shadowBudget() }
+
+// CreateCheckpointForTest runs the whole checkpoint creation (the cut, then the best-effort witness append and TSA
+// anchor) and returns the sealed checkpoint, the warning and the fatal error.
+func (s *Server) CreateCheckpointForTest(ctx context.Context, projectID string) (string, error, error) {
+	return s.createCheckpoint(ctx, projectID)
+}
+
+// WithCutSignTimeoutForTest shortens the bound of the signing step (phase 3) of a shadowed cut.
+func (s *Server) WithCutSignTimeoutForTest(d time.Duration) *Server {
+	s.cut.signTimeout = d
+	return s
+}
+
+// CutSignTimeoutForTest reports the effective bound of the signing step.
+func (s *Server) CutSignTimeoutForTest() time.Duration { return s.cutSignTimeout() }
