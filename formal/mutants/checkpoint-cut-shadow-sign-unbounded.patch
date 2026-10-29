@@ -1,0 +1,13 @@
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index 150431b..b58c60b 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -4147,7 +4147,7 @@ func (s *Server) cutCheckpoint(ctx context.Context, projectID string) (store.Che
+ 	// first and signs only the compared bytes (res.bodyJSON), so the caller's context never contributed to safety,
+ 	// only to giving up. Without this a client that hangs up after a matched comparison signs nothing, and on a
+ 	// latched project every cut is shadowed, so such a client would never get a checkpoint.
+-	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cutSignTimeout())
++	pctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+ 	defer cancel()
+ 	err = s.withProjectWrite(pctx, projectID, func(st store.Store) error {
+ 		var e error
