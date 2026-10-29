@@ -286,6 +286,57 @@ func TestCheckpointCutShadowOffLockGateWaitIsCancellable(t *testing.T) {
 	}
 }
 
+// TestCheckpointCutClientGoneWhileWaitingForWriteLockStoresNothing: a client that hangs up while phase 1 waits for
+// the project write lock (held elsewhere) stops the cut: an error, nothing stored and no shadow check run.
+func TestCheckpointCutClientGoneWhileWaitingForWriteLockStoresNothing(t *testing.T) {
+	r := newShadowRig(t, 5*time.Second)
+	r.h.plain()
+	before := latestSeq(t, r.st, "p")
+	held := make(chan struct{})
+	free := make(chan struct{})
+	holderDone := make(chan struct{})
+	go func() {
+		defer close(holderDone)
+		_ = r.st.WithProjectWrite(context.Background(), "p", func(store.Store) error {
+			close(held)
+			<-free
+			return nil
+		})
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-free:
+		default:
+			close(free)
+		}
+		<-holderDone
+	})
+	<-held
+	ctx, cancel := context.WithCancel(context.Background())
+	res := startCut(r.s, ctx, "p")
+	time.Sleep(200 * time.Millisecond) // the cut is now past the gate and queued on the write lock
+	cancel()
+	var out cutResult
+	select {
+	case out = <-res:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a cut whose client hung up while it waited for the write lock did not stop")
+	}
+	if out.err == nil {
+		t.Fatal("a cut whose client hung up before the locked step must fail")
+	}
+	close(free)
+	if got := latestSeq(t, r.st, "p"); got != before {
+		t.Fatalf("a checkpoint was stored for a client that had gone: latest seq %d, want %d", got, before)
+	}
+	if _, _, checks, _ := r.s.CutStatsForTest(); checks != 0 {
+		t.Fatalf("checks %d, want 0", checks)
+	}
+	if r.s.CutGateCountForTest() != 0 {
+		t.Fatal("cut gate leaked")
+	}
+}
+
 // TestCheckpointCutShadowOffLockClientCancel: a client that hangs up mid-shadow neither turns the shadow into a
 // failed one (it runs detached) nor discards the matched comparison: the signing step does not follow the caller's
 // cancellation, so the cut stores the compared body.
@@ -452,7 +503,7 @@ func TestCheckpointCutShadowOffLockSignStepIsBounded(t *testing.T) {
 	}
 	text := logs()
 	alert := strings.Index(text, "ALERT: checkpoint cut for project p signed WITHOUT its shadow check")
-	warn := strings.Index(text, "WARNING: checkpoint cut for project p failed after its shadow check, before it was signed")
+	warn := strings.Index(text, "WARNING: checkpoint cut for project p failed after its shadow check")
 	if alert < 0 || warn < alert {
 		t.Fatalf("want the could-not-run ALERT and then the signing WARNING, got:\n%s", text)
 	}
@@ -652,7 +703,7 @@ func TestCheckpointCutShadowOffLockSnapshotCommitFailsAfterCouldNotRun(t *testin
 		t.Fatalf("a checkpoint was stored by a cut whose snapshot commit failed: latest seq %d", got)
 	}
 	text := logs()
-	warn := strings.Index(text, "WARNING: checkpoint cut for project p failed after its shadow check, before it was signed")
+	warn := strings.Index(text, "WARNING: checkpoint cut for project p failed after its shadow check")
 	if warn < 0 || !strings.Contains(text[warn:], "(the earlier ALERT said this cut was signed WITHOUT its shadow check)") {
 		t.Fatalf("want the WARNING with the could-not-run note, got:\n%s", text)
 	}

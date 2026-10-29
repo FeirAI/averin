@@ -215,7 +215,7 @@ stored, and retrying the cut is safe.
   there; on PostgreSQL at most 45 s, plus up to 10 s for its commit when the cut is not shadowed;
 - for a shadowed cut, the comparison (at most the shadow budget plus 5 s, 25 s by default) and the signing step (at
   most 15 s, normally milliseconds, plus up to 10 s for its database commit);
-- when configured, the witness append (at most 10 s) and the TSA stamp (at most 10 s, plus storing the token).
+- when configured, the witness append (given a 10 s deadline; the file witness checks it only before it starts writing) and the TSA stamp (at most 10 s, plus storing the token).
 
 With the defaults the worst case of a shadowed cut already reaches the server's 60 s HTTP write timeout
 (25 + 15 + 10 + 10 s) before any wait or commit is added, so it can exceed it; the client then gets no response
@@ -226,8 +226,9 @@ A client that hangs up while the cut waits for an earlier cut, or before the loc
 and nothing is stored. Once the shadow comparison has started the cut runs on without the client and completes as it would
 with the client connected: the compared body (or, if the shadow could not run, the incremental body) is signed and
 stored and, best effort as always, witnessed and anchored, unless the comparison refuses, the cut is raced, or the
-signing step fails (for a failure after the shadow check a line
-starting `WARNING` is logged then, and nothing was signed unless the commit outcome is unknown). A retry cuts the
+signing step fails. If the signing step fails, a line starting `WARNING` is logged, and nothing was stored unless
+the commit outcome is unknown. A failure at the read snapshot's commit, before the signing step, logs that `WARNING`
+only when the shadow could not run; after a comparison that ran, that error is returned to the caller and not logged. A retry cuts the
 next sequence number, which is safe.
 
 A checkpoint is **refused** (`500`, `checkpoint refused: ...`) while the project's grant log is not a
