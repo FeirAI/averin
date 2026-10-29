@@ -218,8 +218,8 @@ pub(crate) fn check_closed_members(
     Ok(())
 }
 
-/// A set field must be strictly ascending by UTF-8 byte order (sorted, no duplicates). Applies only
-/// when `value` is an array whose members are all strings; other shapes keep their existing errors.
+/// A set field must be strictly ascending by UTF-8 byte order (sorted, no duplicates), and every member
+/// must be a string. Applies only when `value` is an array; a non-array keeps its own existing error.
 pub(crate) fn check_canonical_set(
     value: Option<&CanonValue>,
     field: &'static str,
@@ -230,7 +230,7 @@ pub(crate) fn check_canonical_set(
     let mut prev: Option<&str> = None;
     for item in items {
         let Some(cur) = item.as_str() else {
-            return Ok(());
+            return Err(RecordError::NonCanonicalSet(field));
         };
         if let Some(p) = prev {
             if p.as_bytes() >= cur.as_bytes() {
@@ -272,7 +272,7 @@ pub const REQUIRED_TOP_KEYS: &[&str] = &[
 /// `key`, `content`, `tokens` and the four commitment objects; `extensions` stays open), then
 /// `causal_prev_hashes` as a canonical set (sorted ascending by bytes, no duplicates, RCP §7). Value
 /// types and required members inside nested objects are not checked here. Seal and verify both run this
-/// function, so a record the server seals cannot fail it at verify time.
+/// function, so in the default enforce mode a sealed record cannot fail it (`AVERIN_SEAL_SHAPE=shadow` skips it).
 pub fn validate_record_shape(record: &CanonValue) -> Result<(), RecordError> {
     let members = record.as_object().ok_or(RecordError::NotObject)?;
     for (k, _) in members {

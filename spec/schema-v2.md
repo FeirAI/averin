@@ -26,7 +26,8 @@ body becomes bytes. Field reference (grouped as in spec §6):
   averin's recorder always seals the set that way (the server replaces any caller-supplied parents
   with the sorted, de-duplicated union of the session's current heads), and averin's verifier
   rejects an unsorted or duplicated set: the record is untrusted (see RCP §7). Seal and verify run
-  the same shape check, so the server cannot seal a record the verifier rejects.
+  the same shape check, so in the default enforce mode the server cannot seal a record the verifier
+  rejects (`AVERIN_SEAL_SHAPE=shadow` is the rollback exception).
 - `display_seq`: server-assigned **UI-only ordering — NOT a trust primitive**.
 
 ## Time (three clocks; agent clock untrusted — threat #11)

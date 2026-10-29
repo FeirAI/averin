@@ -134,8 +134,8 @@ match them or knowingly differ:
   must link to), and checkpoint frontiers are sorted and de-duplicated when they are built.
   averin's verifier rejects an unsorted or duplicated set: a record whose `causal_prev_hashes`, or a
   checkpoint whose `frontier`, is not strictly ascending by UTF-8 byte order is a schema violation
-  and fails (the record is untrusted, the checkpoint does not verify). Only string members are
-  ordered; a malformed hash or a non-array keeps its own error. The DAG builder still collapses
+  and fails (the record is untrusted, the checkpoint does not verify). A non-string member is a violation
+  too; a malformed hash string or a non-array keeps its own error. The DAG builder still collapses
   duplicate parents, and the latest checkpoint's `frontier` is still compared with the DAG heads as
   sets, as defence in depth for inputs that reach those steps.
 

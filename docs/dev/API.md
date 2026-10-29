@@ -624,7 +624,8 @@ The signed Decision Record. Closed top-level key set (`ALLOWED_TOP_KEYS` in `cor
 unknown top-level keys are **rejected** (only `extensions` may hold arbitrary keys). The nested
 objects `authority`, `authority.policy_snapshot_ref`, `key`, `content`, `tokens` and the four
 `*_commit` blocks are closed to the members their JSON Schema lists, and the verifier rejects a
-record with any other member (the `/v2/records` ingest returns a `400` naming it first). Value types
+record with any other member (in the default enforce mode the `/v2/records` ingest returns a `400`
+naming an unknown member of `authority`, `content`, `tokens` or a `*_commit` block first; it does not check `key`, which the server overwrites). Value types
 and required members inside those objects are not checked. `causal_prev_hashes` must be sorted
 ascending by bytes without duplicates; the server always seals it that way.
 

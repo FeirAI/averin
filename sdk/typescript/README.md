@@ -10,7 +10,7 @@ idempotency key outside the signed subject. The server checks the proof against 
 seals; the SDK does not sign an opaque digest.
 
 An `authority` object is passed through unchanged and may carry only the members the record schema lists; the
-server answers `400` for any other member. Put custom fields in `extensions`.
+server answers `400` for any other member in the default enforce mode. Put custom fields in `extensions`.
 
 `new Client(baseUrl, projectId, { apiKey })` sends the key as an `Authorization: Bearer` header and
 posts to `/v2/records?project=<projectId>` (URL-encoded, equal to the record's `project_id`), which is

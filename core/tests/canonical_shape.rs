@@ -267,6 +267,29 @@ fn r1_byte_order_is_the_order() {
 }
 
 #[test]
+fn a_leading_non_string_member_does_not_hide_a_disorder() {
+    let hi = format!("sha256:b{}", "0".repeat(63));
+    let lo = format!("sha256:a{}", "0".repeat(63));
+    let mixed = CanonValue::Array(vec![
+        CanonValue::Int(5),
+        CanonValue::string(hi.clone()),
+        CanonValue::string(lo.clone()),
+    ]);
+    let mut b = body(0, "s", &[]);
+    set(&mut b, "causal_prev_hashes", mixed.clone());
+    assert_eq!(
+        validate_record_shape(&hostile_seal(&b)),
+        Err(RecordError::NonCanonicalSet("causal_prev_hashes"))
+    );
+    let mut m = cp_members(&[], 2);
+    set(&mut m, "frontier", mixed);
+    assert_eq!(
+        validate_checkpoint_shape(&hostile_cp(&m)),
+        Err(RecordError::NonCanonicalSet("frontier"))
+    );
+}
+
+#[test]
 fn r1_duplicate_parents_are_rejected() {
     let a = format!("sha256:a{}", "0".repeat(63));
     assert_eq!(
@@ -644,10 +667,25 @@ fn checkpoint_positives_broker_heads_and_open_anchor() {
     });
     let r = verify_bundle(&b);
     assert_eq!(r.checkpoints_verified, 1, "{}", notes_and_issues(&r));
-    // every key-block and checkpoint member admitted
-    for k in ALLOWED_CHECKPOINT_KEY_BLOCK_KEYS {
-        assert!(!k.is_empty());
+    // every allowed top-level and key-block member admitted together (names only are checked)
+    let mut m = cp_members(&[hash(&rec_with_parents(&[]))], 1);
+    for k in ALLOWED_CHECKPOINT_KEYS {
+        if !m.iter().any(|(n, _)| n == k) {
+            set(&mut m, k, CanonValue::Null);
+        }
     }
+    set(
+        &mut m,
+        "key",
+        CanonValue::object(
+            ALLOWED_CHECKPOINT_KEY_BLOCK_KEYS
+                .iter()
+                .map(|k| (k.to_string(), CanonValue::Null))
+                .collect(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(validate_checkpoint_shape(&hostile_cp(&m)), Ok(()));
     // anchor: open. tsa_key_id and an unknown extra member are admitted
     let tsa = test_tsa_key(&[7u8; 32]);
     let cp = cp_members(
@@ -796,14 +834,14 @@ fn a_segment_whose_carried_base_checkpoint_has_an_unsorted_frontier_fails() {
         "{}",
         notes_and_issues(&bad_whole)
     );
-    if let Ok(segs) = split_bundle(&build(true)) {
-        for (m, s) in segs {
-            let r = verify_bundle_with(&s, &pinned());
-            assert!(
-                !r.ok,
-                "segment {m} carrying a non-canonical checkpoint must fail"
-            );
-        }
+    let segs = split_bundle(&build(true)).expect("split of the non-canonical history");
+    assert!(!segs.is_empty());
+    for (m, s) in segs {
+        let r = verify_bundle_with(&s, &pinned());
+        assert!(
+            !r.ok,
+            "segment {m} carrying a non-canonical checkpoint must fail"
+        );
     }
 }
 
@@ -1037,6 +1075,10 @@ fn vector_rows() -> Vec<(String, CanonValue)> {
         }),
     );
     add(
+        "r5_broker_grant_head_unknown_member",
+        heads_bundle(|m| set(m, "broker_grant_head", parse(r#"{"max_seq":1,"bogus":1}"#))),
+    );
+    add(
         "r5_broker_grant_heads_two_brokers_ok",
         heads_bundle(|m| {
             set(
@@ -1083,6 +1125,9 @@ fn intended(name: &str) -> (bool, i64, i64, &'static str) {
             0,
             "unknown member 'zzz' in broker_grant_heads entry",
         ),
+        "r5_broker_grant_head_unknown_member" => {
+            (false, 2, 0, "unknown member 'bogus' in broker_grant_head")
+        }
         n if n.starts_with("r3_unknown_member_in_") => (false, 2, 1, "unknown member 'bogus'"),
         other => panic!("no intended outcome for {other}"),
     }

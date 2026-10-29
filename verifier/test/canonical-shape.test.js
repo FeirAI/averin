@@ -10,7 +10,7 @@ const root = join(import.meta.dir, "..", "..");
 
 test("WASM replays the canonical-set and closed-member vectors", async () => {
   const rows = JSON.parse(readFileSync(join(root, "spec/fixtures/canonical-shape-vectors.json"), "utf8"));
-  expect(rows.length).toBe(20);
+  expect(rows.length).toBe(21);
   const wasm = new Uint8Array(readFileSync(join(root, "target/wasm32-unknown-unknown/release/averin_decision_core.wasm")));
   const verifier = await initAverin(wasm);
   for (const row of rows) {

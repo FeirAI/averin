@@ -28,8 +28,8 @@ func TestCanonicalShapeVectorsCgo(t *testing.T) {
 	if err := json.Unmarshal(data, &rows); err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 20 {
-		t.Fatalf("expected 20 rows, got %d", len(rows))
+	if len(rows) != 21 {
+		t.Fatalf("expected 21 rows, got %d", len(rows))
 	}
 	c, err := New(seed)
 	if err != nil {

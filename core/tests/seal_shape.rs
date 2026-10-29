@@ -146,7 +146,10 @@ fn every_single_defect_keeps_the_implication() {
         }
     }
     // Not vacuous: unknown keys, dropped required keys and wrong domains must really be refused.
-    assert!(rejected >= 31, "only {rejected} defect bodies were refused");
+    assert_eq!(
+        rejected, 42,
+        "{rejected} defect bodies were refused, expected exactly 42"
+    );
 }
 
 #[test]
@@ -453,7 +456,10 @@ fn checkpoint_every_single_defect_keeps_the_implication() {
         }
     }
     // Not vacuous: the four wrong domains, two wrong canon_versions, two non-strings and two drops.
-    assert!(rejected >= 17, "only {rejected} defect bodies were refused");
+    assert_eq!(
+        rejected, 17,
+        "{rejected} defect bodies were refused, expected exactly 17"
+    );
 }
 
 #[test]
