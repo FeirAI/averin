@@ -1,8 +1,11 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +14,7 @@ import (
 	"github.com/feirai/averin/server/internal/api"
 	"github.com/feirai/averin/server/internal/auth"
 	"github.com/feirai/averin/server/internal/store"
+	"github.com/feirai/averin/server/internal/witness"
 )
 
 // These tests cover the off-lock shadow: a due shadow runs on a read snapshot outside the project write lock and
@@ -278,8 +282,9 @@ func TestCheckpointCutShadowOffLockGateWaitIsCancellable(t *testing.T) {
 	}
 }
 
-// TestCheckpointCutShadowOffLockClientCancel: a client that hangs up mid-shadow does not turn the shadow into a
-// failed one (it runs detached), and the cut stores nothing.
+// TestCheckpointCutShadowOffLockClientCancel: a client that hangs up mid-shadow neither turns the shadow into a
+// failed one (it runs detached) nor discards the matched comparison: the signing step does not follow the caller's
+// cancellation, so the cut stores the compared body.
 func TestCheckpointCutShadowOffLockClientCancel(t *testing.T) {
 	runOffLockClientCancel(t, newShadowRig(t, 5*time.Second))
 }
@@ -294,24 +299,217 @@ func TestCheckpointCutShadowOffLockClientCancelPostgres(t *testing.T) {
 
 func runOffLockClientCancel(t *testing.T, r *shadowRig) {
 	r.h.plain()
+	exp, _, _ := bothBodies(t, r.s, r.st, "p") // the body of seq 1 at the lock state before the cut, same fixed clock
 	r.spy.pause = armPause(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	res := startCut(r.s, ctx, "p")
 	waitPaused(t, r.spy.pause)
-	cancel()
+	cancel() // the client hangs up after the comparison has started
 	r.spy.pause.let()
 	out := waitCut(t, res)
-	if out.err == nil {
-		t.Fatal("a cancelled cut must return an error")
+	if out.err != nil || out.cp.Seq != 1 {
+		t.Fatalf("a cut whose client hung up mid-shadow: seq %d err %v, want seq 1 stored", out.cp.Seq, out.err)
 	}
-	if got := latestSeq(t, r.st, "p"); got != 0 {
-		t.Fatalf("a checkpoint was stored by a cancelled cut: latest seq %d", got)
+	if got := latestSeq(t, r.st, "p"); got != 1 {
+		t.Fatalf("no checkpoint was stored after the client hung up: latest seq %d, want 1", got)
+	}
+	sameBody(t, out.cp.JSON, exp) // exactly the compared body
+	if _, _, checks, mism := r.s.CutStatsForTest(); checks != 1 || mism != 0 {
+		t.Fatalf("checks %d mismatches %d, want 1 and 0", checks, mism)
 	}
 	if r.s.ShadowFailedForTest() != 0 {
 		t.Fatalf("a client hang-up counted as a failed shadow: %d", r.s.ShadowFailedForTest())
 	}
 	if r.s.CutGateCountForTest() != 0 {
 		t.Fatal("cut gate leaked")
+	}
+}
+
+// captureLog routes the standard logger to a mutex-guarded buffer until the test ends. The api package runs no
+// test in parallel, so the global writer is safe to swap.
+func captureLog(t *testing.T) func() string {
+	t.Helper()
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	oldWriter, oldFlags, oldPrefix := log.Writer(), log.Flags(), log.Prefix()
+	log.SetOutput(lockedWriter{&mu, &buf})
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+		log.SetPrefix(oldPrefix)
+	})
+	return func() string { mu.Lock(); defer mu.Unlock(); return buf.String() }
+}
+
+type lockedWriter struct {
+	mu  *sync.Mutex
+	buf *bytes.Buffer
+}
+
+func (w lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+// TestCheckpointCutShadowOffLockClientCancelWitnessedAndAnchored: a client that hangs up mid-shadow still gets the
+// stored checkpoint witnessed and anchored (the witness append and the TSA stamp are detached from the caller too).
+func TestCheckpointCutShadowOffLockClientCancelWitnessedAndAnchored(t *testing.T) {
+	r := newShadowRig(t, 5*time.Second)
+	w := witness.NewMemWitness()
+	r.s.WithWitness(w).WithTSA(witness.StubTSA{})
+	r.h.plain()
+	r.spy.pause = armPause(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	type created struct {
+		sealed      string
+		warn, fatal error
+	}
+	done := make(chan created, 1)
+	go func() {
+		sealed, warn, fatal := r.s.CreateCheckpointForTest(ctx, "p")
+		done <- created{sealed, warn, fatal}
+	}()
+	waitPaused(t, r.spy.pause)
+	cancel()
+	r.spy.pause.let()
+	var out created
+	select {
+	case out = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("checkpoint creation did not finish")
+	}
+	if out.fatal != nil || out.warn != nil {
+		t.Fatalf("create after a hang-up: warn %v fatal %v, want neither", out.warn, out.fatal)
+	}
+	got, err := w.List(context.Background(), "p")
+	if err != nil || len(got) != 1 || string(got[0]) != out.sealed {
+		t.Fatalf("witness holds %d entries (err %v), want exactly the new checkpoint", len(got), err)
+	}
+	anchors, err := r.st.Anchors("p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := anchors[1]; !ok {
+		t.Fatalf("seq 1 was not anchored after the hang-up: anchors %v", anchors)
+	}
+}
+
+// TestCheckpointCutShadowOffLockSignStepIsBounded: the signing step has its own bound. With the full computation
+// unable to run (the could-not-run path) and the project write lock held elsewhere, phase 3 gives up after the
+// bound, nothing is stored, the shadow's counter is not undone, and a WARNING line follows the earlier ALERT.
+func TestCheckpointCutShadowOffLockSignStepIsBounded(t *testing.T) {
+	if got := api.New(mustCore(t), store.NewMem(), "k0").CutSignTimeoutForTest(); got != 15*time.Second {
+		t.Fatalf("default signing bound %s, want 15s (docs/dev/API.md states it)", got)
+	}
+	logs := captureLog(t)
+	r := newShadowRig(t, 5*time.Second)
+	r.s.WithCutSignTimeoutForTest(200 * time.Millisecond)
+	r.spy.failFull = errors.New("read project snapshot: connection reset")
+	r.h.plain()
+	r.spy.pause = armPause(t)
+	res := startCut(r.s, context.Background(), "p")
+	waitPaused(t, r.spy.pause)
+	held, unblock := make(chan struct{}), make(chan struct{})
+	holderDone := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(unblock) }) }
+	t.Cleanup(func() { release(); <-holderDone })
+	go func() {
+		defer close(holderDone)
+		_ = r.st.WithProjectWrite(context.Background(), "p", func(store.Store) error {
+			close(held)
+			<-unblock
+			return errors.New("test: lock released")
+		})
+	}()
+	<-held
+	r.spy.pause.let()
+	var out cutResult
+	select {
+	case out = <-res:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the signing step did not give up within its bound")
+	}
+	if !errors.Is(out.err, context.DeadlineExceeded) {
+		t.Fatalf("want the signing step's deadline, got %v", out.err)
+	}
+	release()
+	if got := latestSeq(t, r.st, "p"); got != 0 {
+		t.Fatalf("a checkpoint was stored by a cut whose signing step timed out: latest seq %d", got)
+	}
+	if r.s.CutGateCountForTest() != 0 {
+		t.Fatal("cut gate leaked")
+	}
+	if r.s.ShadowFailedForTest() != 1 {
+		t.Fatalf("failed counter %d, want 1 (recorded before signing, not undone)", r.s.ShadowFailedForTest())
+	}
+	text := logs()
+	alert := strings.Index(text, "ALERT: checkpoint cut for project p signed WITHOUT its shadow check")
+	warn := strings.Index(text, "WARNING: checkpoint cut for project p failed at the signing step after its shadow check")
+	if alert < 0 || warn < alert {
+		t.Fatalf("want the could-not-run ALERT and then the signing WARNING, got:\n%s", text)
+	}
+	if !strings.Contains(text[warn:], "(the earlier ALERT said this cut was signed WITHOUT its shadow check)") {
+		t.Fatalf("the WARNING lacks the could-not-run note:\n%s", text)
+	}
+	if strings.Count(text, "ALERT:") != 1 {
+		t.Fatalf("the signing failure must not log a second ALERT:\n%s", text)
+	}
+	// Inside the backoff the next cut is signed unshadowed.
+	r.spy.failFull = nil
+	cp, err := r.cut()
+	if err != nil || cp.Seq != 1 {
+		t.Fatalf("next cut: seq %d err %v, want seq 1", cp.Seq, err)
+	}
+	if _, _, checks, _ := r.s.CutStatsForTest(); checks != 1 {
+		t.Fatalf("checks %d after the next cut, want 1 (backoff, unshadowed)", checks)
+	}
+}
+
+// TestCheckpointCutShadowOffLockRacedBeforeSnapshot: another writer cuts between phase 1 and the snapshot. The
+// snapshot's first read sees a base that is not the one phase 1 decided on, so the cut is abandoned before the full
+// computation runs: the raced counter moves and no shadow check is counted.
+func TestCheckpointCutShadowOffLockRacedBeforeSnapshot(t *testing.T) {
+	r := newShadowRig(t, 5*time.Second)
+	r.s.WithCheckpointShadowEvery(1 << 30) // only the first-cut rule can make a later cut shadowed
+	r.h.plain()
+	other := api.New(mustCore(t), r.st, "k0").WithAuth(auth.NewOpenStore()).WithCheckpointShadowEvery(1 << 30).
+		WithClock(func() time.Time { return r.now })
+	var once sync.Once
+	var otherErr error
+	var otherSeq int64
+	r.spy.beforeSnap = func() {
+		once.Do(func() {
+			cp, err := other.CutCheckpointForTest(context.Background(), "p")
+			otherSeq, otherErr = cp.Seq, err
+		})
+	}
+	out := cutWithin(t, r.s, context.Background(), 5*time.Second)
+	if otherErr != nil || otherSeq != 1 {
+		t.Fatalf("other writer cut: seq %d err %v", otherSeq, otherErr)
+	}
+	if !api.IsShadowRacedForTest(out.err) {
+		t.Fatalf("want the raced refusal, got %v", out.err)
+	}
+	if _, _, checks, mism := r.s.CutStatsForTest(); checks != 0 || mism != 0 {
+		t.Fatalf("checks %d mismatches %d, want 0 and 0 (the full computation must not run on a moved base)", checks, mism)
+	}
+	if r.s.ShadowRacedForTest() != 1 || r.s.ShadowFailedForTest() != 0 {
+		t.Fatalf("raced %d failed %d, want 1 and 0", r.s.ShadowRacedForTest(), r.s.ShadowFailedForTest())
+	}
+	cps, err := r.st.Checkpoints("p")
+	if err != nil || len(cps) != 2 || cps[1].Seq != 1 {
+		t.Fatalf("%d checkpoints, err %v, want seq 0 and the other writer's seq 1", len(cps), err)
+	}
+	cp, err := r.cut() // never verified: shadowed again, on the new base
+	if err != nil || cp.Seq != 2 {
+		t.Fatalf("next cut: seq %d err %v, want seq 2", cp.Seq, err)
+	}
+	if _, _, checks, _ := r.s.CutStatsForTest(); checks != 1 {
+		t.Fatalf("checks %d after the next cut, want 1", checks)
 	}
 }
 

@@ -34,6 +34,9 @@ type rowSpy struct {
 	// first read of an off-lock shadow. snap marks the bound copy handed to such a snapshot.
 	onSnapLatest func()
 	snap         bool
+	// beforeSnap, when set, runs in WithProjectRead BEFORE the underlying store opens its snapshot (the Mem
+	// snapshot is copied at entry), so a test can move the base between phase 1 and the snapshot.
+	beforeSnap func()
 }
 
 // pauseHook parks one caller: entered closes when it arrives, and release lets it go.
@@ -80,6 +83,9 @@ func (r *rowSpy) WithProjectWrite(ctx context.Context, p string, fn func(store.S
 	})
 }
 func (r *rowSpy) WithProjectRead(ctx context.Context, p string, fn func(store.Store) error) error {
+	if r.beforeSnap != nil {
+		r.beforeSnap()
+	}
 	return r.Store.WithProjectRead(ctx, p, func(b store.Store) error {
 		c := r.bind(b)
 		c.snap = true
@@ -90,7 +96,7 @@ func (r *rowSpy) WithBudget(d time.Duration, fn func(store.Store) error) error {
 	return r.Store.WithBudget(d, func(b store.Store) error { return fn(r.bind(b)) })
 }
 func (r *rowSpy) bind(b store.Store) *rowSpy {
-	return &rowSpy{Store: b, rows: r.rows, tamper: r.tamper, failFull: r.failFull, slowFull: r.slowFull, dropOrd: r.dropOrd, pause: r.pause, onSnapLatest: r.onSnapLatest}
+	return &rowSpy{Store: b, rows: r.rows, tamper: r.tamper, failFull: r.failFull, slowFull: r.slowFull, dropOrd: r.dropOrd, pause: r.pause, onSnapLatest: r.onSnapLatest, beforeSnap: r.beforeSnap}
 }
 func (r *rowSpy) AllRecords(p string) ([]store.Record, error) {
 	v, err := r.Store.AllRecords(p)

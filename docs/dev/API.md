@@ -203,10 +203,30 @@ A cut that runs the shadow check (the first incremental cut of a project after a
 and the scheduled one; see [LIMITATIONS](LIMITATIONS.md)) seals the state at a snapshot taken after the request
 arrived. It covers every record committed before the request, and records committed while the shadow ran go into the
 next checkpoint, so a verify run right after such a cut can report the newest records as not yet checkpointed when
-writes are concurrent. Such a cut can take up to the shadow budget (20 s by default), plus any wait for another cut
-of the same project in the same process. If another writer process cuts a checkpoint of the project in the
+writes are concurrent. If another writer process cuts a checkpoint of the project in the
 meantime, the response is `500` (`checkpoint cut abandoned: ... nothing was signed, retry the cut`); nothing was
 stored, and retrying the cut is safe.
+
+**Latency bound of a cut.** The time to a response is the sum of the steps that apply:
+
+- a wait for any earlier cut of the same project in this process (cuts of one project run one at a time);
+- the cut under the project write lock: normally milliseconds; it can wait for the lock (up to 10 s for a lock held
+  by another server process); a cut with no usable base (the first checkpoint of a project) runs the full computation
+  there; at most 45 s;
+- for a shadowed cut, the comparison (at most the shadow budget plus 5 s, 25 s by default) and the signing step (at
+  most 15 s, normally milliseconds, plus up to 10 s for its database commit);
+- when configured, the witness append (at most 10 s) and the TSA stamp (at most 10 s, plus storing the token).
+
+With the defaults the worst case of a shadowed cut already reaches the server's 60 s HTTP write timeout
+(25 + 15 + 10 + 10 s) before any wait or commit is added, so it can exceed it; the client then gets no response
+(the connection is closed) although the cut may complete. A client that needs the response should not time out
+before 60 s.
+
+A client that hangs up while the cut waits for an earlier cut, or before the locked step has decided, stops the cut
+and nothing is stored. Once the shadow comparison has started the cut runs on without the client: the compared body
+is signed and stored and, best effort as always, witnessed and anchored, unless the signing step fails (a line
+starting `WARNING` is logged then, and nothing was signed unless the commit outcome is unknown). A retry cuts the
+next sequence number, which is safe.
 
 A checkpoint is **refused** (`500`, `checkpoint refused: ...`) while the project's grant log is not a
 gapless `[1..N]` prefix: a `broker_seq` is reserved but no grant (or tombstone) records it. This happens

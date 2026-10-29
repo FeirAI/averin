@@ -25,7 +25,7 @@ const DefaultCheckpointShadowEvery = 100
 
 // DefaultCheckpointShadowMinInterval is the least time between two shadow attempts of one project on the
 // scheduled path (a verified project, nothing latched). The shadow is O(history). It runs on a read snapshot
-// outside the project write lock (it no longer stalls writes), but it still costs database CPU, a pool connection
+// outside the project write lock (it no longer holds the project write lock), but it still costs database CPU, a pool connection
 // and memory for up to the shadow budget, so at a high cut rate "every 100th cut" would come due every few minutes
 // and each run would load the database. This WEAKENS what the scheduled shadow covers: between two attempts an
 // incorrect incremental cut is caught only by the per-cut count and contiguity guards, not by the full comparison.
@@ -49,6 +49,12 @@ const (
 	maxShadowBackoffDoublings      = 6 // the wait doubles per consecutive failure up to 64 times the base
 )
 
+// checkpointSignTimeout bounds phase 3 of a shadowed cut (base check, then seal and store), which runs detached from
+// the caller's cancellation. It is O(1) work, so it is normally milliseconds; its legitimate waits are the in-process
+// write slot, a pool connection and the guard row, whose own wait is bounded by a 10 s lock_timeout. 15 s lets that
+// lock wait fail with its own clear error first. The commit keeps its own 10 s bound on top.
+const checkpointSignTimeout = 15 * time.Second
+
 // checkpointCutState is the per-server bookkeeping of the shadow check.
 type checkpointCutState struct {
 	every       int64        // 0 means DefaultCheckpointShadowEvery
@@ -57,14 +63,15 @@ type checkpointCutState struct {
 	incremental atomic.Int64 // cuts taken incrementally (observable in tests)
 	full        atomic.Int64 // cuts taken by the full computation (no usable base, or a guard disagreed)
 
-	budget  time.Duration // 0 means DefaultCheckpointShadowBudget
-	backoff time.Duration // 0 means DefaultCheckpointShadowBackoff
-	minIval time.Duration // minimum time between scheduled shadow attempts; only tightened below the default via the builder
-	minSet  bool          // minIval was set explicitly (0 then means no rate limit)
-	mu      sync.Mutex
-	retry   map[string]shadowRetry // project -> when its next shadow attempt may run
-	lastTry map[string]time.Time   // project -> start of its last shadow attempt, whatever the outcome
-	gates   map[string]*cutGate    // project -> its cut gate while a cut holds or awaits it (guarded by mu)
+	budget      time.Duration // 0 means DefaultCheckpointShadowBudget
+	signTimeout time.Duration // 0 means checkpointSignTimeout; tests only shorten it
+	backoff     time.Duration // 0 means DefaultCheckpointShadowBackoff
+	minIval     time.Duration // minimum time between scheduled shadow attempts; only tightened below the default via the builder
+	minSet      bool          // minIval was set explicitly (0 then means no rate limit)
+	mu          sync.Mutex
+	retry       map[string]shadowRetry // project -> when its next shadow attempt may run
+	lastTry     map[string]time.Time   // project -> start of its last shadow attempt, whatever the outcome
+	gates       map[string]*cutGate    // project -> its cut gate while a cut holds or awaits it (guarded by mu)
 
 	lastShadowNanos atomic.Int64 // duration of the most recent shadow computation of any project
 }
@@ -468,6 +475,11 @@ type shadowResult struct {
 	baseHash string
 	count    int64 // RecordCount at the snapshot
 	maxSeq   int64 // MaxBrokerSeq at the snapshot
+	// unchecked is true when the full computation could not run and the incremental body is to be signed without its
+	// check (the "signed WITHOUT its shadow check" ALERT has been logged). On an error return it is true only when
+	// that happened before the failure, so a later failure can say its earlier ALERT claimed a signature that did
+	// not follow.
+	unchecked bool
 }
 
 // shadowOffLock is phase 2 of a shadowed cut. It computes the incremental and the full body on ONE
@@ -475,7 +487,8 @@ type shadowResult struct {
 // compares them byte for byte. It returns the bytes to sign: the compared body (or, when the full computation
 // could not run, the incremental body, as before). A mismatch returns the refusal here, so no lock is taken and
 // nothing is sealed. It runs detached from the caller's cancellation (bounded by budget + 5 s) so a client that
-// hangs up is not counted as a failed shadow.
+// hangs up is not counted as a failed shadow. On an error, shadowResult.unchecked is true only if the full
+// computation could not run (its ALERT was logged) and the snapshot's commit then failed.
 //
 // Both bodies are deterministic functions of S: records and checkpoints are append-only and every write commits
 // under the project guard, so S is a prefix of the guard-serialized write sequence, a state a locked cut could
@@ -513,23 +526,24 @@ func (s *Server) shadowOffLock(ctx context.Context, projectID string, due *errSh
 		if e != nil {
 			return fmt.Errorf("checkpoint: read project snapshot: %w", e)
 		}
-		signed, e := s.compareShadow(snap, projectID, created, body)
+		signed, unchecked, e := s.compareShadow(snap, projectID, created, body)
 		if e != nil {
 			return e
 		}
-		res = shadowResult{bodyJSON: signed, baseSeq: due.seq, baseHash: due.hash, count: int64(cnt), maxSeq: maxSeq}
+		res = shadowResult{bodyJSON: signed, baseSeq: due.seq, baseHash: due.hash, count: int64(cnt), maxSeq: maxSeq, unchecked: unchecked}
 		return nil
 	})
 	if err != nil {
-		return shadowResult{}, err
+		return shadowResult{unchecked: res.unchecked}, err
 	}
 	return res, nil
 }
 
 // compareShadow runs the full computation for the snapshot store st under the shadow budget and compares it with
-// the incremental body. It returns the JSON to sign, or a refusal on a mismatch. The classification, counters,
-// latch and ALERT texts are unchanged from the in-lock shadow.
-func (s *Server) compareShadow(st store.Store, projectID, created string, body map[string]any) ([]byte, error) {
+// the incremental body. It returns the JSON to sign, or a refusal on a mismatch. unchecked is true only on the
+// could-not-run path (the incremental body is returned without its check). The classification, counters, latch and
+// ALERT texts are unchanged from the in-lock shadow.
+func (s *Server) compareShadow(st store.Store, projectID, created string, body map[string]any) (signed []byte, unchecked bool, err error) {
 	s.shadowAttempted(projectID)
 	s.mCutShadowChecks.Inc()
 	began := time.Now()
@@ -545,7 +559,7 @@ func (s *Server) compareShadow(st store.Store, projectID, created string, body m
 		s.cut.latched.Store(true)
 		s.mCutShadowMismatch.Inc()
 		log.Printf("ALERT: checkpoint cut for project %s REFUSED: the full computation refuses (%v) where the incremental cut would sign; every later cut is now shadow-checked", projectID, ferr)
-		return nil, fmt.Errorf("checkpoint refused: the incremental cut disagrees with the full computation: %w", ferr)
+		return nil, false, fmt.Errorf("checkpoint refused: the incremental cut disagrees with the full computation: %w", ferr)
 	}
 	// A full body that WAS computed is always compared, even when it came back late (ErrBudgetExceeded with a
 	// body): a late answer is still an answer, and the incremental body is never signed unseen when one exists.
@@ -559,7 +573,7 @@ func (s *Server) compareShadow(st store.Store, projectID, created string, body m
 		wait := s.shadowFailed(projectID)
 		log.Printf("ALERT: checkpoint cut for project %s signed WITHOUT its shadow check: the full computation could not run (%v); next shadow attempt in %s", projectID, ferr, wait)
 		out, _ := json.Marshal(body)
-		return out, nil
+		return out, true, nil
 	}
 	a, _ := json.Marshal(body)
 	b, _ := json.Marshal(full)
@@ -567,7 +581,7 @@ func (s *Server) compareShadow(st store.Store, projectID, created string, body m
 		s.cut.latched.Store(true) // every later cut is shadow-checked until restart
 		s.mCutShadowMismatch.Inc()
 		log.Printf("ALERT: checkpoint cut for project %s REFUSED: the incremental cut differs from the full computation in %s; every later cut is now shadow-checked", projectID, differingFields(body, full))
-		return nil, fmt.Errorf("checkpoint refused: the incremental cut disagrees with the full computation")
+		return nil, false, fmt.Errorf("checkpoint refused: the incremental cut disagrees with the full computation")
 	}
 	if late {
 		// The bodies agree, but the full computation no longer fits its budget: count it and back off.
@@ -578,7 +592,7 @@ func (s *Server) compareShadow(st store.Store, projectID, created string, body m
 		s.shadowRan(projectID)
 	}
 	s.cut.verified.Store(projectID, struct{}{})
-	return b, nil
+	return b, false, nil
 }
 
 // cutGate is the per-project cut gate: a one-slot, context-cancellable, reference-counted semaphore. It is held
@@ -624,6 +638,26 @@ func (s *Server) cutGateCount() int {
 	s.cut.mu.Lock()
 	defer s.cut.mu.Unlock()
 	return len(s.cut.gates)
+}
+
+// cutSignTimeout is the bound of phase 3 of a shadowed cut.
+func (s *Server) cutSignTimeout() time.Duration {
+	if s.cut.signTimeout <= 0 {
+		return checkpointSignTimeout
+	}
+	return s.cut.signTimeout
+}
+
+// logCutNotSigned logs that a cut failed at the signing step after its shadow check. Phase 3 runs detached from the
+// caller, so the HTTP error often reaches nobody. The line starts with WARNING, not ALERT: an ALERT line counts a
+// shadow attempt and this is not one. unchecked says the earlier "signed WITHOUT its shadow check" ALERT was for
+// this cut; its counter and backoff are recorded before signing and are not undone.
+func (s *Server) logCutNotSigned(projectID string, unchecked bool, err error) {
+	note := ""
+	if unchecked {
+		note = " (the earlier ALERT said this cut was signed WITHOUT its shadow check)"
+	}
+	log.Printf("WARNING: checkpoint cut for project %s failed at the signing step after its shadow check%s; nothing was signed unless the error reports an unknown commit outcome: %v", projectID, note, err)
 }
 
 func (s *Server) shadowBudget() time.Duration {
