@@ -78,7 +78,7 @@ structure canon.Parser where
   i : Std.Usize
 
 /-- [averin_decision_core::record::PreimageFault]
-    Source: 'core/src/record.rs', lines 162:0-170:1 -/
+    Source: 'core/src/record.rs', lines 316:0-324:1 -/
 @[discriminant isize]
 inductive record.PreimageFault where
 | NotObject : record.PreimageFault
