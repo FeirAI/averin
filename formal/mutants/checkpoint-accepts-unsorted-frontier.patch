@@ -1,0 +1,15 @@
+Mutant: verify_checkpoint_sealed no longer checks that the frontier is a canonical set (an unsorted or duplicated frontier verifies).
+
+diff --git a/core/src/checkpoint.rs b/core/src/checkpoint.rs
+index 28a886d..8d89569 100644
+--- a/core/src/checkpoint.rs
++++ b/core/src/checkpoint.rs
+@@ -243,7 +243,7 @@ pub fn validate_checkpoint_shape(cp: &CanonValue) -> Result<(), RecordError> {
+             )?;
+         }
+     }
+-    check_canonical_set(cp.get("frontier"), "frontier")
++    Ok(())
+ }
+ 
+ /// The `domain` and `canon_version` pins of [`verify_checkpoint_sealed`], applied to an already

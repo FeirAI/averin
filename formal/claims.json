@@ -991,7 +991,7 @@
     },
     {
       "id": "seal-implies-verify-shape",
-      "claim": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin (SB-29), and checkpoint::seal_checkpoint returns Ok only for a body whose sealed form passes verify_checkpoint_sealed's domain pin and canon_version pin, checked by deterministic property tests and, for the Go server producers that the server test suite reaches (records and checkpoints), by running the real cgo seal in enforce mode across that suite. Not a proof; does not cover nested object shape, unknown checkpoint keys, the checkpoint chain checks of validate_chain, hash or signature validity, or AVERIN_SEAL_SHAPE=shadow, which seals unverifiable records and checkpoints on purpose as a rollback switch.",
+      "claim": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's shape check (the top-level and nested member sets and a canonical causal_prev_hashes), domain pin and canon_version pin (SB-29), and checkpoint::seal_checkpoint returns Ok only for a body whose sealed form passes verify_checkpoint_sealed's shape check (canonical frontier and the checkpoint member sets), domain pin and canon_version pin, checked by deterministic property tests and, for the Go server producers that the server test suite reaches (records and checkpoints), by running the real cgo seal in enforce mode across that suite. Not a proof; does not cover value types or required members inside nested objects, the open extensions object and checkpoint anchor block, the checkpoint chain checks of validate_chain, hash or signature validity, or AVERIN_SEAL_SHAPE=shadow, which seals unverifiable records and checkpoints on purpose as a rollback switch.",
       "class": "property-test",
       "targets": [
         "native Rust",
@@ -1017,6 +1017,10 @@
         {
           "file": "core/src/checkpoint.rs",
           "symbol": "pub fn seal_checkpoint_with_mode"
+        },
+        {
+          "file": "core/src/checkpoint.rs",
+          "symbol": "pub fn validate_checkpoint_shape"
         }
       ],
       "proofs": [
@@ -1047,6 +1051,10 @@
         {
           "file": "formal/mutants/seal-skips-checkpoint-domain-pin.patch",
           "symbol": "check_sealed_checkpoint_pins"
+        },
+        {
+          "file": "formal/mutants/seal-skips-checkpoint-shape.patch",
+          "symbol": "validate_checkpoint_shape"
         }
       ],
       "gates": [
@@ -2600,6 +2608,70 @@
       ],
       "gates": [
         "core",
+        "formal-fast"
+      ]
+    },
+    {
+      "id": "verifier-canonical-sets-closed-members",
+      "claim": "The verifier rejects a record whose causal_prev_hashes is not strictly ascending by bytes or that carries a member outside the closed schema sets of authority, authority.policy_snapshot_ref, key, content, tokens or a *_commit block, and a checkpoint whose frontier is not strictly ascending by bytes or that carries a member outside the closed sets of its top level, key, broker_grant_head or a broker_grant_heads entry. extensions and the checkpoint anchor block stay open. Checked by adversarial tests built with the public hash and sign primitives, a test that each Rust member list equals the properties set of its JSON Schema object, and cross-implementation vectors replayed natively, in WASM and through cgo. Not a proof; does not cover value types or required members inside the checked objects, the key validity window (never read), or history sealed before the rule existed other than by verifying it.",
+      "class": "property-test",
+      "targets": [
+        "native Rust",
+        "WASM",
+        "Go cgo (same source)"
+      ],
+      "assumptions": [
+        "the finite list of cases builds the violation classes that matter",
+        "the schema files are the intended member sets"
+      ],
+      "sources": [
+        {
+          "file": "core/src/record.rs",
+          "symbol": "pub fn validate_record_shape"
+        },
+        {
+          "file": "core/src/checkpoint.rs",
+          "symbol": "pub fn validate_checkpoint_shape"
+        },
+        {
+          "file": "core/src/checkpoint.rs",
+          "symbol": "pub fn verify_checkpoint_sealed"
+        }
+      ],
+      "proofs": [
+        {
+          "file": "core/tests/canonical_shape.rs",
+          "symbol": "fn every_list_equals_its_schema_member_set"
+        },
+        {
+          "file": "core/tests/canonical_shape.rs",
+          "symbol": "fn r1_in_a_bundle_the_record_is_untrusted_and_the_verdict_fails"
+        },
+        {
+          "file": "core/tests/canonical_shape.rs",
+          "symbol": "fn r2_in_a_bundle_the_checkpoint_is_not_verified"
+        },
+        {
+          "file": "verifier/test/canonical-shape.test.js",
+          "symbol": "WASM replays the canonical-set and closed-member vectors"
+        },
+        {
+          "file": "server/internal/core/canonical_shape_vectors_test.go",
+          "symbol": "TestCanonicalShapeVectorsCgo"
+        },
+        {
+          "file": "formal/mutants/verify-accepts-unsorted-parents.patch",
+          "symbol": "causal_prev_hashes"
+        },
+        {
+          "file": "formal/mutants/checkpoint-accepts-unsorted-frontier.patch",
+          "symbol": "frontier"
+        }
+      ],
+      "gates": [
+        "core",
+        "verifier",
+        "server",
         "formal-fast"
       ]
     }

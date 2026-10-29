@@ -1,0 +1,14 @@
+Mutant: verify_sealed no longer closes the authority member set (an unknown authority member verifies).
+
+diff --git a/core/src/record.rs b/core/src/record.rs
+index aed4f6f..3550822 100644
+--- a/core/src/record.rs
++++ b/core/src/record.rs
+@@ -286,7 +286,6 @@ pub fn validate_record_shape(record: &CanonValue) -> Result<(), RecordError> {
+         }
+     }
+     let authority = record.get("authority");
+-    check_closed_members(authority, "authority", ALLOWED_AUTHORITY_KEYS)?;
+     check_closed_members(
+         authority.and_then(|a| a.get("policy_snapshot_ref")),
+         "authority.policy_snapshot_ref",

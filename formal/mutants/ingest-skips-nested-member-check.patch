@@ -1,0 +1,15 @@
+Mutant: the generic ingest no longer refuses an unknown member inside a nested object (it is accepted at ingest and refused only at seal, after earlier batch items are stored).
+
+diff --git a/server/internal/api/server.go b/server/internal/api/server.go
+index bdef4f0..cadf49c 100644
+--- a/server/internal/api/server.go
++++ b/server/internal/api/server.go
+@@ -1553,7 +1553,7 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
+ 		// feir-ops#16: the nested objects are closed too (authority, authority.policy_snapshot_ref, content,
+ 		// tokens and the commitment objects). Seal and verify refuse an unknown member; refusing it here keeps a
+ 		// batch all-or-nothing and gives the caller a 400 instead of a seal error.
+-		if bad := core.UnknownNestedMember(rec); bad != "" {
++		if bad := core.UnknownNestedMember(nil); bad != "" {
+ 			return fmt.Errorf("unknown member %q: a record's nested objects carry only their closed schema members (use extensions for custom fields)", bad)
+ 		}
+ 	}
