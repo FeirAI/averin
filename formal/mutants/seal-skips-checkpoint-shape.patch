@@ -1,0 +1,14 @@
+Mutant: seal_checkpoint no longer runs the checkpoint shape check (a checkpoint with an unsorted frontier or an unknown member is sealed).
+
+diff --git a/core/src/checkpoint.rs b/core/src/checkpoint.rs
+index 28a886d..7646a79 100644
+--- a/core/src/checkpoint.rs
++++ b/core/src/checkpoint.rs
+@@ -250,7 +250,6 @@ pub fn validate_checkpoint_shape(cp: &CanonValue) -> Result<(), RecordError> {
+ /// sealed checkpoint (the checkpoint half of SB-29). The same two comparisons as in
+ /// `verify_checkpoint_sealed`; core/tests/seal_shape.rs (`checkpoint_*`) holds them in step.
+ fn check_sealed_checkpoint_pins(sealed: &CanonValue) -> Result<(), RecordError> {
+-    validate_checkpoint_shape(sealed)?;
+     let domain = sealed
+         .get("domain")
+         .ok_or(RecordError::MissingField("domain"))?

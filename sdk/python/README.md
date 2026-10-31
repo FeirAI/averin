@@ -16,6 +16,10 @@ fr.record(
 )
 ```
 
+An `authority` dict is passed through unchanged and may carry only the members the record schema lists
+(`source`, `enforcement_point`, `decision_basis`, ..., `nonce`); in the default enforce mode the server answers `400` for any other member.
+Put custom fields in `extensions`.
+
 The SDK never reimplements the crypto — it submits records and the server seals them through the
 Rust integrity core. Integer-only money/token fields are enforced at build time.
 

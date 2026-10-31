@@ -1471,6 +1471,10 @@ func (s *Server) rejectIdentityParams(h http.Handler) http.Handler {
 //     sub-key reaches the seal verbatim, so canon-check authority minus a map's `source`.
 //   - everything else (project_id/session_id, extensions, parent_span_id, arbitrary caller fields like
 //     "cost"): reaches the seal verbatim — canon-check it.
+//
+// A caller-supplied nested member outside the closed schema sets (authority, authority.policy_snapshot_ref,
+// content, tokens, *_commit) also reaches the seal verbatim, where the core refuses it (feir-ops#16);
+// validateGenericRecordItem refuses it first, with a 400, via core.UnknownNestedMember.
 func canonProbe(probe map[string]any) map[string]any {
 	out := make(map[string]any, len(probe))
 	for k, v := range probe {
@@ -1545,6 +1549,12 @@ func (s *Server) validateGenericRecordItem(rec map[string]any) error {
 				continue
 			}
 			return fmt.Errorf("unknown top-level field %q: a record carries only the closed schema key set (use extensions for custom fields)", k)
+		}
+		// feir-ops#16: the nested objects are closed too (authority, authority.policy_snapshot_ref, content,
+		// tokens and the commitment objects). Seal and verify refuse an unknown member; refusing it here keeps a
+		// batch all-or-nothing and gives the caller a 400 instead of a seal error.
+		if bad := core.UnknownNestedMember(rec); bad != "" {
+			return fmt.Errorf("unknown member %q: a record's nested objects carry only their closed schema members (use extensions for custom fields)", bad)
 		}
 	}
 	if err := liftContentPreview(rec); err != nil {

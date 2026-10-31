@@ -1,0 +1,14 @@
+Mutant: verify_sealed no longer checks that causal_prev_hashes is a canonical set (an unsorted or duplicated parent list verifies).
+
+diff --git a/core/src/record.rs b/core/src/record.rs
+index aed4f6f..5ebf8d3 100644
+--- a/core/src/record.rs
++++ b/core/src/record.rs
+@@ -298,7 +298,6 @@ pub fn validate_record_shape(record: &CanonValue) -> Result<(), RecordError> {
+     for f in COMMIT_FIELDS {
+         check_closed_members(record.get(f), f, ALLOWED_COMMIT_KEYS)?;
+     }
+-    check_canonical_set(record.get("causal_prev_hashes"), "causal_prev_hashes")?;
+     Ok(())
+ }
+ 

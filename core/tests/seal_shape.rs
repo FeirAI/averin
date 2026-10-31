@@ -37,6 +37,8 @@ enum Defect {
     DropDomain,
     ContentHashPresent,
     AddAllowedKey(&'static str),
+    /// Set `key` to the value parsed from the JSON text (nested member and set-order defects).
+    Raw(&'static str, &'static str),
 }
 
 fn apply(members: &mut Vec<(String, CanonValue)>, d: &Defect) {
@@ -56,6 +58,7 @@ fn apply(members: &mut Vec<(String, CanonValue)>, d: &Defect) {
         Defect::DropDomain => members.retain(|(n, _)| n != "domain"),
         Defect::ContentHashPresent => set(members, "content_hash", CanonValue::string("sha256:00")),
         Defect::AddAllowedKey(k) => set(members, k, CanonValue::Null),
+        Defect::Raw(k, json) => set(members, k, CanonValue::parse(json).unwrap()),
     }
 }
 
@@ -72,6 +75,25 @@ fn all_defects() -> Vec<Defect> {
         Defect::DomainNotString,
         Defect::DropDomain,
         Defect::ContentHashPresent,
+        // Nested unknown members and non-canonical parent sets (closed member sets, RCP §7).
+        Defect::Raw("causal_prev_hashes", r#"["sha256:b","sha256:a"]"#),
+        Defect::Raw("causal_prev_hashes", r#"["sha256:a","sha256:a"]"#),
+        Defect::Raw("authority", r#"{"source":"x","bogus":1}"#),
+        Defect::Raw(
+            "authority",
+            r#"{"policy_snapshot_ref":{"uri":"u","bogus":1}}"#,
+        ),
+        Defect::Raw("key", r#"{"signing_key_id":"k","bogus":1}"#),
+        Defect::Raw("content", r#"{"uri":"u","bogus":1}"#),
+        Defect::Raw("tokens", r#"{"in":1,"out":2,"total":3}"#),
+        Defect::Raw("input_commit", r#"{"alg":"a","bogus":1}"#),
+        Defect::Raw("output_commit", r#"{"alg":"a","bogus":1}"#),
+        Defect::Raw("rationale_commit", r#"{"alg":"a","bogus":1}"#),
+        Defect::Raw("credential_commit", r#"{"alg":"a","bogus":1}"#),
+        // Conforming nested values: sealed, and every verifier accepts them.
+        Defect::Raw("causal_prev_hashes", r#"["sha256:9","sha256:a"]"#),
+        Defect::Raw("authority", r#"{"source":"x","nonce":"n"}"#),
+        Defect::Raw("extensions", r#"{"anything":{"goes":[1,2]}}"#),
     ];
     v.extend(REQUIRED_TOP_KEYS.iter().map(|k| Defect::DropKey(k)));
     v.extend(ALLOWED_TOP_KEYS.iter().map(|k| Defect::AddAllowedKey(k)));
@@ -124,7 +146,10 @@ fn every_single_defect_keeps_the_implication() {
         }
     }
     // Not vacuous: unknown keys, dropped required keys and wrong domains must really be refused.
-    assert!(rejected >= 20, "only {rejected} defect bodies were refused");
+    assert_eq!(
+        rejected, 42,
+        "{rejected} defect bodies were refused, expected exactly 42"
+    );
 }
 
 #[test]
@@ -135,6 +160,8 @@ fn named_defects_are_refused() {
         Defect::DropKey("record_id"),
         Defect::Domain("flightrecorder.record.v1"),
         Defect::CanonVersion("rcp-2"),
+        Defect::Raw("causal_prev_hashes", r#"["sha256:b","sha256:a"]"#),
+        Defect::Raw("tokens", r#"{"in":1,"bogus":1}"#),
     ] {
         assert!(
             seal(&body_with(std::slice::from_ref(&d)), &sk).is_err(),
@@ -313,6 +340,8 @@ enum CpDefect {
     AnchorPresent,
     ExtraKey(&'static str),
     DropKey(&'static str),
+    /// Set `key` to the value parsed from the JSON text.
+    Raw(&'static str, &'static str),
 }
 
 fn cp_apply(members: &mut Vec<(String, CanonValue)>, d: &CpDefect) {
@@ -335,6 +364,7 @@ fn cp_apply(members: &mut Vec<(String, CanonValue)>, d: &CpDefect) {
         CpDefect::AnchorPresent => set(members, "anchor", CanonValue::string("x")),
         CpDefect::ExtraKey(k) => set(members, k, CanonValue::string("x")),
         CpDefect::DropKey(k) => members.retain(|(n, _)| n != k),
+        CpDefect::Raw(k, json) => set(members, k, CanonValue::parse(json).unwrap()),
     }
 }
 
@@ -355,6 +385,23 @@ fn cp_all_defects() -> Vec<CpDefect> {
         CpDefect::AnchorPresent,
         CpDefect::ExtraKey("broker_grant_head"),
         CpDefect::ExtraKey("ui_status"),
+        // Checkpoint shape: canonical frontier and closed member sets (RCP §10; anchor stays open).
+        CpDefect::Raw("frontier", r#"["sha256:b","sha256:a"]"#),
+        CpDefect::Raw("frontier", r#"["sha256:a","sha256:a"]"#),
+        CpDefect::Raw("key", r#"{"signing_key_id":"k","bogus":1}"#),
+        CpDefect::Raw(
+            "key",
+            r#"{"signing_key_id":"k","rotation_prev_key_sig":"x"}"#,
+        ),
+        CpDefect::Raw("broker_grant_head", r#"{"max_seq":1,"bogus":1}"#),
+        CpDefect::Raw("broker_grant_heads", r#"{"b1":{"max_seq":1,"bogus":1}}"#),
+        // Conforming: sealed, and the verifier accepts them.
+        CpDefect::Raw("frontier", r#"["sha256:9","sha256:a"]"#),
+        CpDefect::Raw("broker_grant_heads", r#"{"b1":{"max_seq":1},"b2":{}}"#),
+        CpDefect::Raw(
+            "anchor",
+            r#"{"scheme":"test-anchor","tsa_key_id":"t","extra":1}"#,
+        ),
     ];
     v.extend(CHECKPOINT_BODY_KEYS.iter().map(|k| CpDefect::DropKey(k)));
     v
@@ -409,7 +456,10 @@ fn checkpoint_every_single_defect_keeps_the_implication() {
         }
     }
     // Not vacuous: the four wrong domains, two wrong canon_versions, two non-strings and two drops.
-    assert!(rejected >= 10, "only {rejected} defect bodies were refused");
+    assert_eq!(
+        rejected, 17,
+        "{rejected} defect bodies were refused, expected exactly 17"
+    );
 }
 
 #[test]
@@ -419,6 +469,8 @@ fn checkpoint_named_defects_are_refused() {
         CpDefect::Domain("flightrecorder.record.v2"),
         CpDefect::Domain("flightrecorder.checkpoint.v1"),
         CpDefect::CanonVersion("rcp-2"),
+        CpDefect::Raw("frontier", r#"["sha256:b","sha256:a"]"#),
+        CpDefect::Raw("key", r#"{"signing_key_id":"k","bogus":1}"#),
     ] {
         assert!(
             seal_checkpoint(&checkpoint_with(std::slice::from_ref(&d)), &sk).is_err(),

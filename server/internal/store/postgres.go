@@ -768,16 +768,22 @@ func (p *Postgres) ProjectHeads(projectID string) ([]string, error) {
 		return nil, err
 	}
 	ctx := p.callContext()
+	// The frontier is a byte-sorted set (RCP §10) and the seal refuses an unsorted one, so the order must not
+	// depend on the database's default collation (an ICU numeric collation would put sha256:9.. before
+	// sha256:10..). COLLATE "C" is byte order. The DISTINCT sits in a subquery because ORDER BY on a
+	// DISTINCT select must name a select-list expression.
 	rows, err := p.queries().Query(ctx, `
-		SELECT DISTINCT r.content_hash
-		FROM records r
-		WHERE r.project_id = $1
-		  AND NOT EXISTS (
-			SELECT 1 FROM records c
-			WHERE c.project_id = $1
-			  AND c.parents @> ARRAY[r.content_hash]
-		  )
-		ORDER BY r.content_hash ASC
+		SELECT h FROM (
+			SELECT DISTINCT r.content_hash AS h
+			FROM records r
+			WHERE r.project_id = $1
+			  AND NOT EXISTS (
+				SELECT 1 FROM records c
+				WHERE c.project_id = $1
+				  AND c.parents @> ARRAY[r.content_hash]
+			  )
+		) heads
+		ORDER BY h COLLATE "C" ASC
 	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("store: project heads: %w", err)

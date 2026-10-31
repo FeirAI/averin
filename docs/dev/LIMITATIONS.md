@@ -461,16 +461,28 @@ The claims registers (`docs/dev/FORMAL.md`, `formal/README.md`) state each claim
 These are the cross-cutting residuals accepted at the phase 2 close-out, with the condition under
 which each one matters.
 
-- **Seal shape is top-level only.** `record::seal` refuses a body that `verify_sealed` would reject
-  on top-level shape, `domain` or `canon_version`, and `checkpoint::seal_checkpoint` refuses a body
-  that `verify_checkpoint_sealed` would reject on `domain` or `canon_version`. Unknown keys inside
-  nested objects are not checked by either, and a checkpoint's chain fields (sequence, previous
-  hash, frontier, record count) are checked only when a bundle is verified. Records and
-  checkpoints stored before these checks shipped are not re-checked.
-- **The generic records path mirrors the core key list.** In `enforce` mode `/v2/records` refuses
-  an unknown top-level key before sealing, from a Go copy of the core's key list held equal by a
-  parity test. If the copy lags the core, the parity test fails; at runtime the seal still refuses
-  the key, so the failure mode is the old partial batch commit, not an unverifiable seal.
+- **Seal and verify share one shape check, with limits.** `record::seal` refuses a body that
+  `verify_sealed` would reject on shape, `domain` or `canon_version`, and
+  `checkpoint::seal_checkpoint` refuses a body that `verify_checkpoint_sealed` would reject on the
+  same grounds. Shape means the closed member sets (top level and the nested objects the JSON
+  Schemas close) and the canonical set rules (`causal_prev_hashes`, checkpoint `frontier`: sorted
+  ascending by bytes, no duplicates). Not checked: member value types and required members inside
+  nested objects; `extensions`, which is open by design; and the checkpoint `anchor` block, which is
+  added after signing and stays open. The validity-window members of the `key` block are never
+  read (averin writes `key_valid_from` as a fixed placeholder). A checkpoint's chain fields
+  (sequence, previous hash, record count, frontier against the DAG) are checked only when a bundle
+  is verified. Records and checkpoints stored before these checks shipped are checked by them only
+  at verify time: a stored record that carries an unknown nested member fails verification
+  permanently, because the store is append-only. Run the verifier over an export of existing
+  history before upgrading a deployment that took caller-supplied nested members.
+- **The generic records path mirrors the core key lists.** In `enforce` mode `/v2/records` refuses
+  an unknown top-level key, or an unknown member in `authority`, `authority.policy_snapshot_ref`,
+  `content`, `tokens` or a `*_commit` block, before sealing, from Go copies of the core's lists held
+  equal by parity tests. If a copy lags the core, the parity test fails; at runtime the seal still
+  refuses the member, so the failure mode is the old partial batch commit, not an unverifiable seal.
+- **The WASM verifier lags until it is repinned.** The browser verifier embedded in feir-os enforces
+  these rules only after its `averin_decision_core.wasm` is rebuilt and repinned; until then it
+  accepts input the native verifier rejects.
 - **`AVERIN_SEAL_SHAPE=shadow`** seals records and checkpoints that every verifier rejects, on
   purpose, as a rollback switch. `averin_seal_shape_violations_total` counts them.
 - **Kani mutants run nightly only.** The kit's Kani mutants (m2 to m4, m9 to m12) run in

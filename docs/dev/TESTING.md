@@ -116,6 +116,17 @@ The same Rust core is compiled to three targets; the suites that keep them hones
   wasm-bindgen, the *same C ABI* as the cgo staticlib) and runs the trust-root tests
   (NUL-truncation, supply-chain pin, accountability). See `verifier/SUPPLY-CHAIN.md`.
 
+- **Canonical sets and closed member sets (feir-ops#16).** `core/tests/canonical_shape.rs` builds
+  bundles the way a hostile key holder would (hash and sign with the public primitives) and checks
+  every rule at three levels: the per-object error variant, the bundle verdict with keys pinned and
+  unpinned, and the shared vectors in `spec/fixtures/canonical-shape-vectors.json`
+  (`AVERIN_WRITE_CANONICAL_SHAPE_VECTORS=<path> cargo test -p averin-decision-core --test
+  canonical_shape` rewrites them). The WASM (`verifier/test/canonical-shape.test.js`) and cgo
+  (`server/internal/core/canonical_shape_vectors_test.go`) targets replay the same rows. Another test
+  there pins each Rust member list to the `properties` set of its JSON Schema object.
+  `core/tests/seal_shape.rs` runs the same rules on the seal side, and the Go api suite covers the
+  `400` at ingest, batch atomicity, and a multi-parent record sealed with a forced parent.
+
 The toolchain is pinned in `rust-toolchain.toml` (rustc **1.92.0** + the `wasm32` / `i686` targets +
 `rustfmt`/`clippy`) precisely so the published WASM digest and the cgo staticlib are byte-for-byte
 reproducible — bump the pin deliberately and regenerate the verifier's pinned digest in the same

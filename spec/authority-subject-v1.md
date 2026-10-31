@@ -14,8 +14,10 @@ four are recorder-owned receipt, display, causal, and signing-key envelope.
 `anchored_ts`, if supplied, is semantic and stays bound. Unknown top-level
 members fail the verifier's closed top-level key set; new admitted fields and every nested
 `extensions` member are bound unless this versioned policy is reviewed. Unknown members inside
-`authority` are not rejected by the verifier (it does not allow-list nested objects), but any
-member other than `evidence_sig` and `subject_digest` is bound into the digest.
+`authority` and `authority.policy_snapshot_ref` are rejected: the verifier enforces the record
+schema's closed member sets (the rcp-v1 "Unknown fields" note), and in enforce mode `/v2/records`
+answers 400. Every allowed member other than `evidence_sig` and `subject_digest` is bound into the
+digest. Custom data belongs in `extensions`.
 
 Before approval, the producer fixes the project, record, session, agent, span,
 and parent-span identities; agent timestamp; schema/domain/canonical versions;

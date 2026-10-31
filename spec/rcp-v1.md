@@ -14,11 +14,17 @@ a closed top-level record key set, algorithm-prefixed digests, explicit domain s
 
 > **Unknown fields: what averin enforces.** averin's verifier enforces a closed set of
 > TOP-LEVEL record keys (an unknown top-level key, or a missing required one, fails the record).
-> It does not allow-list nested objects (`authority`, `key`, `content`, `tokens`, the
-> `*_commit` blocks) or checkpoint members: the JSON Schemas declare `additionalProperties: false`
-> for them, but the schemas are advisory and the core does not run them. A nested member the
-> verifier does not recognise is still bound by `content_hash` (for a checkpoint, by
-> `checkpoint_hash`), so it cannot be altered after sealing; it is just not rejected on sight.
+> It also enforces the member sets the JSON Schemas close with `additionalProperties: false`, for
+> exactly these objects: a record's `authority`, `authority.policy_snapshot_ref`, `key`, `content`,
+> `tokens` and the four `*_commit` blocks, and a checkpoint's top level, `key`, `broker_grant_head`
+> and each `broker_grant_heads` value. Each list equals the schema's `properties` set (a test pins
+> that), and the rule applies only when the value is an object. A record that breaks it is
+> untrusted; a checkpoint that breaks it does not verify. Not checked: member value types and
+> required members inside these objects (a missing required member is not rejected here). Two
+> places stay open on purpose: `extensions`, RCP's one object for custom keys, and the checkpoint
+> `anchor` block, which is added after signing and sits outside `checkpoint_hash` and `sig`, so a
+> closed list there would add no integrity. A history sealed before this rule existed is checked
+> by it only when it is verified. The schemas remain advisory for everything else (see below).
 
 > **Authority of this profile over the JSON Schema.** The JSON Schemas in `/spec/*.schema.json`
 > document *structure*; they CANNOT express RCP rules and MUST NOT be treated as sufficient
@@ -126,9 +132,12 @@ match them or knowingly differ:
   discards any caller-supplied `causal_prev_hashes` and seals the sorted, de-duplicated union of the
   session's current heads (plus any parent the server itself forces, such as the intent a use outcome
   must link to), and checkpoint frontiers are sorted and de-duplicated when they are built.
-  averin's verifier does not currently reject an unsorted or duplicated set. It treats a record's
-  parents as a set (duplicates collapsed) and compares the latest checkpoint's `frontier` with the
-  DAG heads as sets. A stricter independent verifier MAY reject such input.
+  averin's verifier rejects an unsorted or duplicated set: a record whose `causal_prev_hashes`, or a
+  checkpoint whose `frontier`, is not strictly ascending by UTF-8 byte order is a schema violation
+  and fails (the record is untrusted, the checkpoint does not verify). A non-string member is a violation
+  too; a malformed hash string or a non-array keeps its own error. The DAG builder still collapses
+  duplicate parents, and the latest checkpoint's `frontier` is still compared with the DAG heads as
+  sets, as defence in depth for inputs that reach those steps.
 
 ## 8. Algorithm agility
 
@@ -327,9 +336,14 @@ Without `status_changed_at` + an anchor predating it, a compromised-key record M
 untrusted — never silently passed.
 
 **averin today.** The producer requirements above stand. averin's verifier does not read
-`key_valid_from`, `key_valid_until`, `key_attestation_ref` or `rotation_prev_key_sig`, so a record
-signed outside its stated validity window is not rejected on that basis, and `status_changed_at` is
-not checked against any attestation. What it does:
+`key_valid_from`, `key_valid_until`, `key_attestation_ref` or `rotation_prev_key_sig` (it only checks
+that the `key` block carries no member outside the schema's list), so a record signed outside its
+stated validity window is not rejected on that basis, and `status_changed_at` is not checked against
+any attestation. averin's recorder writes `key_valid_from` as one fixed placeholder (`2026-01-01`)
+for every key and epoch, and never writes `key_valid_until`, `key_attestation_ref` or
+`rotation_prev_key_sig`, so the window carries no validity meaning there. The record's own key signs
+these fields, so a key holder can write any window: a check against them would add no integrity
+unless an auditor pins the window out of band, which is not implemented. What it does:
 
 * The status, and its time, come from the bundle's `keys[]` entry (`key_status`,
   `status_changed_at`) and, when the auditor pins signing keys, from the pinned key list. Under

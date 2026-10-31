@@ -72,7 +72,7 @@ or the `Idempotency-Key` header. The caller may also supply any of the allowed t
 (see [Record object](#record-object)); server-controlled fields are overwritten.
 
 Batch semantics: the **whole batch** is validated up front (decodability, project binding,
-idempotency, reserved-field checks, and an RCP-canonicalization dry-run). A malformed item (including, in the default `AVERIN_SEAL_SHAPE=enforce` mode, an unknown top-level key; only `extensions` may hold custom fields) rejects
+idempotency, reserved-field checks, and an RCP-canonicalization dry-run). A malformed item (including, in the default `AVERIN_SEAL_SHAPE=enforce` mode, an unknown top-level key or an unknown member inside `authority`, `authority.policy_snapshot_ref`, `content`, `tokens` or a `*_commit` block; only `extensions` may hold custom fields) rejects
 the entire batch with a deterministic `400` before any item is sealed. The pinned-authority decision
 (`AVERIN_REQUIRE_PINNED_AUTHORITY`, below) and `record_id` uniqueness are also dry-run up front: an
 item whose authority elevation would be rejected fails the whole batch with the documented `500`, and a
@@ -621,7 +621,13 @@ assumes database transactions resolve and authorized recovery is eventually sche
 ## Record object (schema v2)
 
 The signed Decision Record. Closed top-level key set (`ALLOWED_TOP_KEYS` in `core/src/record.rs`);
-unknown top-level keys are **rejected** — only `extensions` may hold arbitrary keys.
+unknown top-level keys are **rejected** (only `extensions` may hold arbitrary keys). The nested
+objects `authority`, `authority.policy_snapshot_ref`, `key`, `content`, `tokens` and the four
+`*_commit` blocks are closed to the members their JSON Schema lists, and the verifier rejects a
+record with any other member (in the default enforce mode the `/v2/records` ingest returns a `400`
+naming an unknown member of `authority`, `content`, `tokens` or a `*_commit` block first; it does not check `key`, which the server overwrites). Value types
+and required members inside those objects are not checked. `causal_prev_hashes` must be sorted
+ascending by bytes without duplicates; the server always seals it that way.
 
 Required keys (`REQUIRED_TOP_KEYS`): `schema_version`, `canon_version`, `domain`, `record_id`,
 `project_id`, `agent_id`, `agent_version`, `session_id`, `span_id`, `parent_span_id`,
@@ -641,6 +647,8 @@ Other allowed keys: `anchored_ts`, `record_kind`, `input_commit`, `output_commit
 - `content_hash`: `sha256:<hex>` over `SHA-256( LP(domain) ‖ LP(canon_version) ‖ RCP-serialize(body \ {content_hash, sig}) )`.
 - `sig`: `ed25519:<base64url-no-pad>` over the domain-tagged content hash (tag `averin.record.sig.v1`).
 - `key`: `{signing_key_id, key_epoch, key_valid_from, key_status}`. `key_epoch` is `AVERIN_SIGNING_KEY_EPOCH`.
+  `key_valid_from` is a fixed placeholder (`2026-01-01T00:00:00.000Z`) for every key and epoch; the verifier
+  does not read it, and averin never writes `key_valid_until`, `key_attestation_ref` or `rotation_prev_key_sig`.
 - `input_commit` / `output_commit` / `rationale_commit`:
   `{alg: "sha256", commitment: "sha256:<hex>", low_entropy: bool}` — a hiding commitment; the raw
   value lives in the content store (encrypted at rest) and is revealed only via a disclosing export.

@@ -1,0 +1,14 @@
+Mutant: verify_checkpoint_sealed no longer closes the checkpoint top-level member set (an unknown checkpoint member verifies).
+
+diff --git a/core/src/checkpoint.rs b/core/src/checkpoint.rs
+index 28a886d..6d2d3b5 100644
+--- a/core/src/checkpoint.rs
++++ b/core/src/checkpoint.rs
+@@ -223,7 +223,6 @@ pub const ALLOWED_GRANT_HEAD_KEYS: &[&str] = &["max_seq", "prior_head_hash", "cu
+ /// `broker_grant_head`, each `broker_grant_heads` value; `anchor` stays open) and a canonical
+ /// `frontier` (sorted ascending by bytes, no duplicates, RCP §10).
+ pub fn validate_checkpoint_shape(cp: &CanonValue) -> Result<(), RecordError> {
+-    check_closed_members(Some(cp), "checkpoint", ALLOWED_CHECKPOINT_KEYS)?;
+     check_closed_members(
+         cp.get("key"),
+         "checkpoint key",

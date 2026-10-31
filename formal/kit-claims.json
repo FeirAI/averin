@@ -998,6 +998,32 @@
     "checkpoint-cut-shadow-raced-keeps-verified": {
       "tier": "full",
       "claim": "checkpoint-cut-incremental-equals-full"
+    },
+    "verify-accepts-unsorted-parents": {
+      "tier": "fast",
+      "claim": "verifier-canonical-sets-closed-members"
+    },
+    "verify-accepts-unknown-authority-member": {
+      "tier": "fast",
+      "claim": "verifier-canonical-sets-closed-members"
+    },
+    "checkpoint-accepts-unsorted-frontier": {
+      "tier": "fast",
+      "claim": "verifier-canonical-sets-closed-members"
+    },
+    "checkpoint-accepts-unknown-member": {
+      "tier": "full",
+      "claim": "verifier-canonical-sets-closed-members"
+    },
+    "ingest-skips-nested-member-check": {
+      "tier": "full",
+      "claim": "verifier-canonical-sets-closed-members",
+      "detector": "ln -sfn \"$CARGO_TARGET_DIR\" target && cargo build -p averin-decision-core --features rfc3161 && cd server && go test -count=1 ./internal/api -run 'TestRecordsRefuseUnknownNestedMemberWith400|TestBatchIsAtomicOnUnknownNestedMember'",
+      "detector_kind": "custom"
+    },
+    "seal-skips-checkpoint-shape": {
+      "tier": "full",
+      "claim": "checkpoint-seal-implies-verify-pins"
     }
   },
   "claims": [
@@ -1645,7 +1671,7 @@
     {
       "id": "seal-implies-verify-shape",
       "$comment": "legacy register: seal-implies-verify-shape",
-      "statement": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's top-level shape check, domain pin and canon_version pin, so a record that every verifier rejects on those grounds cannot be sealed through record::seal (SB-29). Held as a deterministic property test over every single defect (unknown key, each dropped required key, wrong or non-string or missing domain, wrong canon_version) plus 600 seeded random defect combinations on the golden record body, and a scan that the only public seal entry points in core/src are the checked ones, and, on the Go side, by running the whole server test suite through the real cgo seal in enforce mode and failing the run if any producer kind is refused or no longer reached.",
+      "statement": "record::seal returns Ok only for a body whose sealed form passes verify_sealed's shape check (the top-level and nested member sets, and canonical causal_prev_hashes), domain pin and canon_version pin, so a record that every verifier rejects on those grounds cannot be sealed through record::seal (SB-29). Held as a deterministic property test over every single defect (unknown key, each dropped required key, an unknown member in each nested object, unsorted or duplicated parents, wrong or non-string or missing domain, wrong canon_version) plus 600 seeded random defect combinations on the golden record body, and a scan that the only public seal entry points in core/src are the checked ones, and, on the Go side, by running the whole server test suite through the real cgo seal in enforce mode and failing the run if any producer kind is refused or no longer reached.",
       "method": "property",
       "artifacts": [
         "core/tests/seal_shape.rs",
@@ -1677,7 +1703,7 @@
         {
           "path": "core/src/record.rs",
           "symbol": "validate_record_shape",
-          "sha256": "28f0d30f2aea440d163fd6cedbbd4cc71e69e3277c93de07e8ccf52e529e8c44"
+          "sha256": "3797d935ca0e661a2dcf4e8eed7d19eb1cb3a43f54d1d9db0bdd414cc7800be4"
         },
         {
           "path": "core/src/record.rs",
@@ -1693,6 +1719,16 @@
           "path": "core/src/record.rs",
           "symbol": "seal_unchecked",
           "sha256": "da9ab9bad2f05155ff64a76c60f8a4ac2e7e57cb4ec53651395934fbc2ab2325"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "check_canonical_set",
+          "sha256": "ba54fe5054b8859dfea6a26cbb2d15fe27ab20ae7a93f5eb8539b6159f6efee6"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "check_closed_members",
+          "sha256": "18bc8f829f07c771aa0948fcfa20328f1e79034f3d454467ae85a806cb7737ef"
         }
       ],
       "mutants": [
@@ -1700,13 +1736,12 @@
         "seal-skips-domain-pin",
         "seal-skips-check-via-public-unchecked"
       ],
-      "evidence_run": "37865103811",
-      "does_not_establish": "Nothing about nested object shape (validate_record_shape checks top-level keys only; the JSON Schema covers the rest), content_hash or signature validity of a body, or any record sealed before this change. Not a proof: the generator is deterministic and finite, so a defect class it does not build is untested. The Go conformance covers only the producers the existing server tests reach, and a body type no test builds is checked only by the seal refusing it at runtime. AVERIN_SEAL_SHAPE=shadow deliberately seals records no verifier accepts (rollback switch). The public entry point guard is a textual scan of core/src for public functions named seal*: a bypass under another name, or one built in another crate from the public hash and sign primitives (as a hostile key holder can), is not caught. Checkpoints are the separate claim checkpoint-seal-implies-verify-pins."
+      "does_not_establish": "Nothing about value types or required members inside nested objects (validate_record_shape checks member names only), the open extensions object, content_hash or signature validity of a body, or any record sealed before this change. Not a proof: the generator is deterministic and finite, so a defect class it does not build is untested. The Go conformance covers only the producers the existing server tests reach, and a body type no test builds is checked only by the seal refusing it at runtime. AVERIN_SEAL_SHAPE=shadow deliberately seals records no verifier accepts (rollback switch). The public entry point guard is a textual scan of core/src for public functions named seal*: a bypass under another name, or one built in another crate from the public hash and sign primitives (as a hostile key holder can), is not caught. Checkpoints are the separate claim checkpoint-seal-implies-verify-pins."
     },
     {
       "id": "checkpoint-seal-implies-verify-pins",
       "$comment": "legacy register: seal-implies-verify-shape",
-      "statement": "checkpoint::seal_checkpoint returns Ok only for a body whose sealed form passes verify_checkpoint_sealed's domain pin and canon_version pin, so a checkpoint that every verifier rejects on those grounds cannot be sealed through seal_checkpoint (the checkpoint half of SB-29); seal_checkpoint is the enforce mode of seal_checkpoint_with_mode. Held as a deterministic property test over every single defect (wrong, non-string or missing domain or canon_version, a preset checkpoint_hash, sig or anchor, an extra or dropped key) plus 600 seeded random defect combinations on a golden checkpoint body, and, on the Go side, by observing every checkpoint the server test suite seals through the real cgo core in enforce mode and failing the run if any is refused or if either shape of the server's checkpoint producer (with and without broker_grant_heads) is no longer reached.",
+      "statement": "checkpoint::seal_checkpoint returns Ok only for a body whose sealed form passes verify_checkpoint_sealed's checkpoint shape check (a canonical frontier and the closed member sets of the checkpoint, its key, broker_grant_head and each broker_grant_heads entry), domain pin and canon_version pin, so a checkpoint that every verifier rejects on those grounds cannot be sealed through seal_checkpoint (the checkpoint half of SB-29); seal_checkpoint is the enforce mode of seal_checkpoint_with_mode. Held as a deterministic property test over every single defect (wrong, non-string or missing domain or canon_version, a preset checkpoint_hash, sig or anchor, an extra or dropped key, an unsorted or duplicated frontier, an unknown member in the key or a grant head) plus 600 seeded random defect combinations on a golden checkpoint body, and, on the Go side, by observing every checkpoint the server test suite seals through the real cgo core in enforce mode and failing the run if any is refused or if either shape of the server's checkpoint producer (with and without broker_grant_heads) is no longer reached.",
       "method": "property",
       "artifacts": [
         "core/tests/seal_shape.rs",
@@ -1739,21 +1774,51 @@
         {
           "path": "core/src/checkpoint.rs",
           "symbol": "check_sealed_checkpoint_pins",
-          "sha256": "9db6328528fb4ca00f0e840dfa498144ff0c5c957801a6b352e80a0bac97aeb2"
+          "sha256": "80f3b69af38fc637f50b4d91d3db3c441116fbe07bc2cb3b2dde7eb9bc7186e0"
         },
         {
           "path": "core/src/checkpoint.rs",
           "symbol": "verify_checkpoint_sealed",
-          "sha256": "72aced5030be43d47229810170510c9a64d4b54f1ce405b47cc20ae8859c3c46"
+          "sha256": "5129ba0bb9d33a33d10252471726f29bd24817a5577a32b243529da025ba986a"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "validate_checkpoint_shape",
+          "sha256": "02fbf015b0425b1b2136bcee3c3b52aa1e4fe96804133e94a3f7524cbcab56eb"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "check_canonical_set",
+          "sha256": "ba54fe5054b8859dfea6a26cbb2d15fe27ab20ae7a93f5eb8539b6159f6efee6"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "check_closed_members",
+          "sha256": "18bc8f829f07c771aa0948fcfa20328f1e79034f3d454467ae85a806cb7737ef"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "ALLOWED_CHECKPOINT_KEYS",
+          "sha256": "337de3744e6b76e857f32489ffb29f9f8e5f096038c0735fe1b29ae9f76f6c41"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "ALLOWED_CHECKPOINT_KEY_BLOCK_KEYS",
+          "sha256": "a2b1f0b8e5f96bf36f80408c9c056aabcc0ecbb12fb1b25698b4027ddfea401e"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "ALLOWED_GRANT_HEAD_KEYS",
+          "sha256": "a394675024b5011de4204596d9d753b312d4b7ec29cfe72d06127818c9c9a6c6"
         }
       ],
       "mutants": [
         "seal-skips-checkpoint-domain-pin",
         "seal-skips-checkpoint-canon-pin",
-        "seal-skips-checkpoint-enforce-default"
+        "seal-skips-checkpoint-enforce-default",
+        "seal-skips-checkpoint-shape"
       ],
-      "evidence_run": "37865103811",
-      "does_not_establish": "Nothing that validate_chain checks (sequence, previous hash, frontier, record count, forks), and no unknown-key check (verify_checkpoint_sealed has none). Not hash or signature validity of a body, and not any checkpoint sealed before this change: checkpoints are append-only, so an old malformed one stays. Not a proof: the generator is deterministic and finite. The two pins are written twice (check_sealed_checkpoint_pins and verify_checkpoint_sealed) and are held in step only by this test. The Go conformance covers the one server producer (createCheckpointTx) and the test producers the api suite reaches. AVERIN_SEAL_SHAPE=shadow deliberately seals checkpoints that no verifier accepts (rollback switch)."
+      "does_not_establish": "Nothing that validate_chain checks (sequence, previous hash, frontier against the DAG, record count, forks), and nothing about the anchor block, which is open by design (it is added after signing and sits outside checkpoint_hash and sig). Not value types or required members inside the checked objects. Not hash or signature validity of a body, and not any checkpoint sealed before this change: checkpoints are append-only, so an old malformed one stays. Not a proof: the generator is deterministic and finite. The shape check is one shared function, but the two pins are written twice (check_sealed_checkpoint_pins and verify_checkpoint_sealed) and are held in step only by this test. The Go conformance covers the one server producer (createCheckpointTx) and the test producers the api suite reaches. AVERIN_SEAL_SHAPE=shadow deliberately seals checkpoints that no verifier accepts (rollback switch)."
     },
     {
       "id": "cli-headline-equals-claim-verdict",
@@ -1974,7 +2039,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "618e907df4980bca77936e496514d5f87def6aad5039ae0e6a4f3189f8168219"
+          "sha256": "02ba18faf1439baf36a2ae10c8257002ac14f164046fd5ac114b3cedbea6c729"
         },
         {
           "path": "server/internal/api/posture.go",
@@ -2820,7 +2885,7 @@
         {
           "path": "server/internal/api/server.go",
           "symbol": "validateGenericRecordItem",
-          "sha256": "483303d4a805082d8a0780c7a7e85f00add1aa91cc6b240ec07ebf2dc2120c8e"
+          "sha256": "f0bc057cf1e1c72979613d715c4b085ef0de351b0f13408c3e20650810adc25c"
         },
         {
           "path": "server/internal/api/server.go",
@@ -3456,7 +3521,7 @@
         {
           "path": "server/cmd/averin-server/main.go",
           "symbol": "main",
-          "sha256": "618e907df4980bca77936e496514d5f87def6aad5039ae0e6a4f3189f8168219"
+          "sha256": "02ba18faf1439baf36a2ae10c8257002ac14f164046fd5ac114b3cedbea6c729"
         }
       ],
       "mutants": [
@@ -3583,6 +3648,121 @@
         "surface-anchored-before-boundary-exclusive"
       ],
       "does_not_establish": "That the verifier is fast on every input: only histories in which each checkpoint commits the previous one are shown to avoid the full recompute, and a crafted bundle can still take the per-frontier time. The tests count slow-path entries on one honest synthetic history; they do not time anything. Equality is checked on random histories, not proved. It says nothing about the export side of the server."
+    },
+    {
+      "$comment": "legacy register: verifier-canonical-sets-closed-members",
+      "id": "verifier-canonical-sets-closed-members",
+      "statement": "The verifier rejects a record whose causal_prev_hashes has a non-string member or is not strictly ascending by bytes, or that carries a member outside the closed schema sets of authority, authority.policy_snapshot_ref, key, content, tokens or a *_commit block (the record is untrusted), and a checkpoint whose frontier has a non-string member or is not strictly ascending by bytes, or that carries a member outside the closed sets of its top level, key, broker_grant_head or a broker_grant_heads entry (the checkpoint does not verify). extensions and the checkpoint anchor stay open. Each Rust member list equals the properties set of its JSON Schema object (a test pins that), and the same rows give the same verdict natively, in the WASM verifier and through the cgo core.",
+      "method": "property",
+      "artifacts": [
+        "core/tests/canonical_shape.rs",
+        "spec/fixtures/canonical-shape-vectors.json",
+        "verifier/test/canonical-shape.test.js",
+        "server/internal/core/canonical_shape_vectors_test.go"
+      ],
+      "gates": [
+        "core",
+        "verifier",
+        "server",
+        "formal-fast"
+      ],
+      "detector": "cargo test -p averin-decision-core --test canonical_shape",
+      "detector_kind": "cargo",
+      "covers": [
+        {
+          "path": "core/src/record.rs",
+          "symbol": "validate_record_shape",
+          "sha256": "3797d935ca0e661a2dcf4e8eed7d19eb1cb3a43f54d1d9db0bdd414cc7800be4"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "validate_checkpoint_shape",
+          "sha256": "02fbf015b0425b1b2136bcee3c3b52aa1e4fe96804133e94a3f7524cbcab56eb"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "verify_checkpoint_sealed",
+          "sha256": "5129ba0bb9d33a33d10252471726f29bd24817a5577a32b243529da025ba986a"
+        },
+        {
+          "path": "server/internal/api/server.go",
+          "symbol": "validateGenericRecordItem",
+          "sha256": "f0bc057cf1e1c72979613d715c4b085ef0de351b0f13408c3e20650810adc25c"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "check_canonical_set",
+          "sha256": "ba54fe5054b8859dfea6a26cbb2d15fe27ab20ae7a93f5eb8539b6159f6efee6"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "check_closed_members",
+          "sha256": "18bc8f829f07c771aa0948fcfa20328f1e79034f3d454467ae85a806cb7737ef"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "ALLOWED_AUTHORITY_KEYS",
+          "sha256": "6f044b20ac37cf8cc4cbd29d0da3b7bf994b2df3aa95d569d6114b862c89a572"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "ALLOWED_POLICY_SNAPSHOT_REF_KEYS",
+          "sha256": "a5fa26084acbb5ddf6c0f8b0221800a3b2ae0bae8e1e61c105cc13e3bcfa83be"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "ALLOWED_KEY_BLOCK_KEYS",
+          "sha256": "ac80c2aac5569865064e220a29b3dde8cafc87dd6dee7c1f3b8e8e9e0df5a0e5"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "ALLOWED_CONTENT_KEYS",
+          "sha256": "417e2582af28753caa9e0e9d5f73d6fc181f4511d36a7cdb9b75d0ec4f0a1561"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "ALLOWED_TOKENS_KEYS",
+          "sha256": "f03937dbb51f757f57a087c73e2cd841a728bd28d6e405cca29392fb33a60175"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "ALLOWED_COMMIT_KEYS",
+          "sha256": "f701ba46ec9eba073f4e76c47351364f0f6f06e1519d2942b1d5557e836b117e"
+        },
+        {
+          "path": "core/src/record.rs",
+          "symbol": "COMMIT_FIELDS",
+          "sha256": "e03cf638a1d0ecb9296af3616045bc9b3a43c6410550e157c4f9a45a7ea7accd"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "ALLOWED_CHECKPOINT_KEYS",
+          "sha256": "337de3744e6b76e857f32489ffb29f9f8e5f096038c0735fe1b29ae9f76f6c41"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "ALLOWED_CHECKPOINT_KEY_BLOCK_KEYS",
+          "sha256": "a2b1f0b8e5f96bf36f80408c9c056aabcc0ecbb12fb1b25698b4027ddfea401e"
+        },
+        {
+          "path": "core/src/checkpoint.rs",
+          "symbol": "ALLOWED_GRANT_HEAD_KEYS",
+          "sha256": "a394675024b5011de4204596d9d753b312d4b7ec29cfe72d06127818c9c9a6c6"
+        },
+        {
+          "path": "server/internal/core/topkeys.go",
+          "symbol": "UnknownNestedMember",
+          "sha256": "3e3e5934f99046caf7c38e84053443025cbb30094879d0034e30bd3d288af889"
+        }
+      ],
+      "mutants": [
+        "verify-accepts-unsorted-parents",
+        "verify-accepts-unknown-authority-member",
+        "checkpoint-accepts-unsorted-frontier",
+        "checkpoint-accepts-unknown-member",
+        "ingest-skips-nested-member-check"
+      ],
+      "does_not_establish": "Value types or required members inside the checked objects (only member names are checked), the contents of extensions and of the checkpoint anchor block (open by design), the key validity window (key_valid_from and the rest are never read), or any history sealed before the rule existed other than by verifying it. Not a proof: the cases are a finite list, and the member lists are held to the schemas by a test, not by construction. The Go ingest 400 (server mirror of the lists) is a convenience for batch atomicity; seal and verify still refuse if the mirror lags. The browser verifier embedded in feir-os enforces the rules only after its WASM is rebuilt and repinned."
     }
   ]
 }

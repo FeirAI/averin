@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -537,6 +539,29 @@ func TestPostgresHeadsAndProjectHeads(t *testing.T) {
 	// Empty session/project return non-nil empty slices.
 	if h, err := p.Heads("proj", "nope"); err != nil || h == nil || len(h) != 0 {
 		t.Fatalf("empty heads = %v (nil=%v), err=%v; want non-nil empty", h, h == nil, err)
+	}
+}
+
+// TestPostgresProjectHeadsIsByteSorted: the checkpoint frontier must be in byte order whatever the database's
+// default collation is (the seal refuses a frontier that is not strictly ascending by bytes). The hashes
+// cross the digit-to-letter and upper/lower case boundaries, where a locale collation disagrees with bytes.
+func TestPostgresProjectHeadsIsByteSorted(t *testing.T) {
+	p, done := newTestStore(t)
+	defer done()
+	hashes := []string{"sha256:b1", "sha256:A2", "sha256:9f", "sha256:a0", "sha256:10", "sha256:Zz", "sha256:_x"}
+	for i, h := range hashes {
+		if _, _, err := p.PutRecord("proj", fmt.Sprintf("k%d", i), rec(h, fmt.Sprintf("s%d", i))); err != nil {
+			t.Fatalf("put %s: %v", h, err)
+		}
+	}
+	got, err := p.ProjectHeads("proj")
+	if err != nil {
+		t.Fatalf("project heads: %v", err)
+	}
+	want := append([]string(nil), hashes...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("project heads = %v, want byte order %v", got, want)
 	}
 }
 

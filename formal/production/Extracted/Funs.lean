@@ -2094,13 +2094,13 @@ def canon.parse_document
       | core.result.Result.Err _ => ok r
 
 /-- [averin_decision_core::checkpoint::CHECKPOINT_DOMAIN]
-    Source: 'core/src/checkpoint.rs', lines 12:0-12:67
+    Source: 'core/src/checkpoint.rs', lines 15:0-15:67
     Visibility: public -/
 @[global_simps, irreducible]
 def checkpoint.CHECKPOINT_DOMAIN : Str := toStr "flightrecorder.checkpoint.v2"
 
 /-- [averin_decision_core::checkpoint::CHECKPOINT_CANON_VERSION]
-    Source: 'core/src/checkpoint.rs', lines 13:0-13:51
+    Source: 'core/src/checkpoint.rs', lines 16:0-16:51
     Visibility: public -/
 @[global_simps, irreducible]
 def checkpoint.CHECKPOINT_CANON_VERSION : Str := toStr "rcp-1"
@@ -2209,7 +2209,7 @@ def hashx.lp_str_into
   hashx.lp_into out s1
 
 /-- [averin_decision_core::record::body_preimage]:
-    Source: 'core/src/record.rs', lines 209:0-232:1 -/
+    Source: 'core/src/record.rs', lines 363:0-386:1 -/
 def record.body_preimage
   (value : canon.CanonValue) (strip : Slice Str) :
   Result (core.result.Result (alloc.vec.Vec Std.U8) record.PreimageFault)
@@ -2283,7 +2283,7 @@ def record.body_preimage
         ok (core.result.Result.Err record.PreimageFault.DomainNotString)
 
 /-- [averin_decision_core::checkpoint::checkpoint_preimage]:
-    Source: 'core/src/checkpoint.rs', lines 135:0-137:1 -/
+    Source: 'core/src/checkpoint.rs', lines 140:0-142:1 -/
 def checkpoint.checkpoint_preimage
   (cp : canon.CanonValue) :
   Result (core.result.Result (alloc.vec.Vec Std.U8) record.PreimageFault)
@@ -2296,7 +2296,7 @@ def checkpoint.checkpoint_preimage
   record.body_preimage cp s
 
 /-- [averin_decision_core::checkpoint::checkpoint_hash]:
-    Source: 'core/src/checkpoint.rs', lines 122:0-124:1 -/
+    Source: 'core/src/checkpoint.rs', lines 127:0-129:1 -/
 def checkpoint.checkpoint_hash
   (cp : canon.CanonValue) :
   Result (core.result.Result String record.PreimageFault)
@@ -2324,7 +2324,7 @@ def record.RECORD_DOMAIN : Str := toStr "flightrecorder.record.v2"
 @[global_simps, irreducible] def record.CANON_VERSION : Str := toStr "rcp-1"
 
 /-- [averin_decision_core::record::body_hash]:
-    Source: 'core/src/record.rs', lines 195:0-197:1 -/
+    Source: 'core/src/record.rs', lines 349:0-351:1 -/
 def record.body_hash
   (value : canon.CanonValue) (strip : Slice Str) :
   Result (core.result.Result String record.PreimageFault)
@@ -2341,7 +2341,7 @@ def record.body_hash
       String (core.convert.FromSame record.PreimageFault) residual
 
 /-- [averin_decision_core::record::record_preimage]:
-    Source: 'core/src/record.rs', lines 256:0-258:1 -/
+    Source: 'core/src/record.rs', lines 410:0-412:1 -/
 def record.record_preimage
   (body : canon.CanonValue) :
   Result (core.result.Result (alloc.vec.Vec Std.U8) record.PreimageFault)
@@ -2352,7 +2352,7 @@ def record.record_preimage
   record.body_preimage body s
 
 /-- [averin_decision_core::record::record_hash]:
-    Source: 'core/src/record.rs', lines 244:0-246:1 -/
+    Source: 'core/src/record.rs', lines 398:0-400:1 -/
 def record.record_hash
   (body : canon.CanonValue) :
   Result (core.result.Result String record.PreimageFault)
