@@ -95,7 +95,7 @@
     "core/Cargo.toml": "b9096498e29d79e01e850c8f5523855e649f512080493d2ed22c3894e32d0580",
     "core/src/canon.rs": "717822b3628f20deb923ddfaba17f2499cf0775420b664f7b408e35d5caf483d",
     "core/src/hashx.rs": "3193a42763c19e681181c07bbb8e7ab6f37d0d27dd0bc6124d8f7067b7d043c7",
-    "core/src/record.rs": "9190a6c816db5e1eb066b18ce8b5102134069c241628ed8ab40ac54c4fc3d648",
+    "core/src/record.rs": "ada11c91ffb8757625d43d65d2ba43a894d4343739f3308c1ad27035b6beb061",
     "core/src/checkpoint.rs": "c654089b82c4a7a8d9c88a60a5e98ea5d4a418b1c63d4398adce52c5403cc7cf",
     "core/src/sign.rs": "cd3611f1ee9bfa13c9fa61353b6ea4412254bb539ae4a48ccfeb73babb3e80b3",
     "core/src/verify/verdict.rs": "414a3199247eeed15af8e920d626f42a43c3b50868bf110a6a989e20ae2d1e58",
